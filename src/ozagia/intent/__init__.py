@@ -162,7 +162,75 @@ def _may_change_files(tool: str, input: dict[str, Any]) -> tuple[bool, dict]:
     if tool != "shell":
         return False, {}
     cls = classify(str(input.get("command") or ""))
+    if cls["class"] == "compound":
+        return any(s["kind"] == "pytest" for s in cls["steps"]), cls
     return cls["class"] not in ("read", "grep", "git_read", "git_refs"), cls
+
+
+# pytest's short summary lines: `FAILED tests/x.py::test_y[p] - message`.
+_PYTEST_SUMMARY_RE = re.compile(
+    r"^(FAILED|ERROR) (\S+?\.py)::(\S+?)(\[[^\]]*\])?(?: - (.*))?$")
+
+
+def _is_pytest(cmd: list[str]) -> bool:
+    import os
+    base = os.path.basename(cmd[0])
+    if base in ("pytest", "py.test"):
+        return True
+    return (bool(re.match(r"^python(?:3(?:\.\d+)?)?$", base))
+            and cmd[1:3] == ["-m", "pytest"])
+
+
+def _is_git_diff(cmd: list[str]) -> bool:
+    import os
+    if os.path.basename(cmd[0]) != "git":
+        return False
+    rest = [a for a in cmd[1:] if not a.startswith("-")]
+    return bool(rest) and rest[0] in ("diff", "show")
+
+
+def failed_test_lines(memory: Any, output: str, wd: Any = None
+                      ) -> tuple[list[str], list[str]]:
+    """`[ozagia] failed|error test:<key>: <message>` lines from pytest's
+    short summary in `output`, for tests the graph knows, and their keys.
+    Paths are taken relative to `wd` (default: the root)."""
+    import os
+    from ozagia.intent.common import one_line, root_of
+    root = root_of(memory)
+    base = os.path.realpath(str(wd)) if wd else str(root)
+    lines: list[str] = []
+    keys: list[str] = []
+    for raw in output.splitlines():
+        m = _PYTEST_SUMMARY_RE.match(raw.strip())
+        if not m:
+            continue
+        rel = os.path.relpath(os.path.normpath(os.path.join(base, m.group(2))),
+                              root)
+        if rel.startswith(".."):
+            continue
+        name = m.group(3)
+        key = f"test:{rel}::{name}"
+        if memory.node_by_key(key) is None:
+            continue
+        if key not in keys:
+            keys.append(key)
+        word = "failed" if m.group(1) == "FAILED" else "error"
+        msg = f": {one_line(m.group(5))}" if m.group(5) else ""
+        lines.append(tag(f"{word} {key}{m.group(4) or ''}{msg}"))
+    return lines, keys
+
+
+def _cd_dir(inp: dict[str, Any]) -> Any:
+    """The directory a command starting `cd DIR &&` runs in, else its
+    workdir (best effort, for reading paths in its output)."""
+    import os
+    command = str(inp.get("command") or "")
+    wd = inp.get("workdir")
+    m = re.match(r"^\s*cd\s+(\S+)\s*&&", command)
+    if m and "$" not in m.group(1) and "~" not in m.group(1):
+        d = m.group(1).strip("'\"")
+        return d if os.path.isabs(d) or not wd else os.path.join(str(wd), d)
+    return wd
 
 
 def after(memory: Any, tool: str, input: dict[str, Any], output: Any, *,
@@ -176,14 +244,25 @@ def after(memory: Any, tool: str, input: dict[str, Any], output: Any, *,
     try:
         inp = input if isinstance(input, dict) else {}
         changes, cls = _may_change_files(tool, inp)
-        if (cls.get("class") == "git_read"
-                and cls.get("subcommand") in ("diff", "show")
-                and isinstance(output, str)):
+        heads: list[list[str]] = []
+        if cls.get("class") in ("complex", "compound") and isinstance(output, str):
+            from ozagia.intent.shell import command_heads
+            heads = command_heads(str(inp.get("command") or ""))
+        if isinstance(output, str) and (
+                (cls.get("class") == "git_read"
+                 and cls.get("subcommand") in ("diff", "show"))
+                or any(_is_git_diff(h) for h in heads)):
             touched = touched_keys(memory, output)
             if touched:
                 lines.append(tag("touched: " + ", ".join(touched)))
                 meta["keys"].extend(touched)
             meta["intent"] = "after_git_touched"
+        if heads and any(_is_pytest(h) for h in heads):
+            failed, fkeys = failed_test_lines(memory, output, _cd_dir(inp))
+            if failed:
+                lines.extend(failed)
+                meta["keys"].extend(k for k in fkeys if k not in meta["keys"])
+                meta["intent"] = "after_pytest_summary"
         if changes:
             meta["intent"] = "after_refresh"
             pending = memory.pending_changes()

@@ -215,7 +215,11 @@ def _rel(root: Path, path: str) -> str | None:
 
 
 def handle_grep(memory: Any, inp: dict[str, Any], *, base: Path | None = None,
-                ignore_case: bool = False) -> dict[str, Any]:
+                ignore_case: bool = False,
+                select: Any = None) -> dict[str, Any]:
+    """The `grep` tool. `select`, when given, is called with the matches as
+    (path, line, text) sorted by path and line and returns the ones to show
+    (a captured `grep ... | head -N` uses it)."""
     pattern = inp.get("pattern")
     if not isinstance(pattern, str) or pattern == "":
         raise IntentError("pattern is required")
@@ -236,6 +240,8 @@ def handle_grep(memory: Any, inp: dict[str, Any], *, base: Path | None = None,
     else:
         found = _py_grep(root, target.path, pattern, include=include,
                          literal=literal, ignore_case=ignore_case)
+    if select is not None:
+        found = list(select(sorted(found, key=lambda m: (m[0], m[1]))))
     by_file: dict[str, list[tuple[int, str]]] = {}
     for p, n, text in found:
         by_file.setdefault(p, []).append((n, text))

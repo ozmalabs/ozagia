@@ -135,7 +135,7 @@ def _verbosity(extra: list[str]) -> list[str]:
 
 def run_pytest(memory: Any, cls: dict[str, Any], inp: dict[str, Any],
                wd: Path) -> dict[str, Any]:
-    from ozagia.check import run_tests
+    from ozagia.check import OUTPUT_TAIL_LINES, run_tests
     root = root_of(memory)
     python = _python_for(cls, wd)
     if wd != root and cls.get("path_options"):
@@ -159,8 +159,15 @@ def run_pytest(memory: Any, cls: dict[str, Any], inp: dict[str, Any],
     if isinstance(remaining, (int, float)) and not isinstance(remaining, bool):
         timeout_s = max(MIN_TIMEOUT_S, min(timeout_s, float(remaining)))
     env = inp.get("_test_env")
+    if isinstance(cls.get("env"), dict) and cls["env"]:
+        if wd != root:
+            raise Unhandled("environment assignments with a workdir other "
+                            "than the root")
+        base_env = env if isinstance(env, dict) else dict(os.environ)
+        env = {**base_env, **cls["env"]}
     res = run_tests(root, selectors, python=python, timeout_s=timeout_s,
                     extra_args=_verbosity(list(cls["extra_args"])),
+                    tail_lines=int(cls.get("tail_lines") or OUTPUT_TAIL_LINES),
                     **({"env": env, "inherit": False}
                        if isinstance(env, dict) else {}))
     c = res["counts"]
@@ -205,7 +212,7 @@ def run_pytest(memory: Any, cls: dict[str, Any], inp: dict[str, Any],
                          f"{one_line(t['message'])}"))
         frames(t)
     return {"intent": "shell_pytest", "output": "\n".join(lines),
-            "keys": list(dict.fromkeys(keys))}
+            "keys": list(dict.fromkeys(keys)), "exit_code": res["exit_code"]}
 
 
 def handle_shell(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
@@ -218,10 +225,14 @@ def handle_shell(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
     kind = cls["class"]
     if kind == "git_refs":
         raise IntentError(refusal(command), intent="shell_refused")
-    if kind not in ("pytest", "read", "grep"):
-        raise Unhandled(cls.get("reason") or kind)
+    if kind not in ("pytest", "read", "grep", "compound"):
+        raise Unhandled(cls.get("compound_reason") or cls.get("reason")
+                        or kind)
     root = root_of(memory)
     wd = _workdir(root, inp.get("workdir"))
+    if kind == "compound":
+        from ozagia.intent.compound import run_compound
+        return run_compound(memory, cls, inp, wd)
     if kind == "pytest":
         return run_pytest(memory, cls, inp, wd)
     if kind == "read":

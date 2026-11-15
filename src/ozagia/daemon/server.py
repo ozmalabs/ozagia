@@ -120,11 +120,16 @@ def _expired(msg: dict[str, Any]) -> bool:
 
 
 def _lock_free(op: Any, tool: Any, inp: Any) -> bool:
-    """A captured pytest: it reads no graph state, so it skips the lock."""
+    """A captured pytest reads no graph state, so it skips the lock. So
+    does a compound command with a pytest step: it takes the lock itself
+    (`_lock`) for the steps that read the graph."""
     if op != "tool" or tool != "shell" or not isinstance(inp, dict):
         return False
     from ozagia.intent.shell import classify
-    return classify(str(inp.get("command") or ""))["class"] == "pytest"
+    cls = classify(str(inp.get("command") or ""))
+    if cls["class"] == "compound":
+        return any(s["kind"] == "pytest" for s in cls["steps"])
+    return cls["class"] == "pytest"
 
 
 class DaemonState:
@@ -190,8 +195,10 @@ class DaemonState:
                     inp["_test_env"] = dict(self.test_env)
             harness = str(msg.get("harness") or "opencode")
             session = msg.get("session")
-            lock = (contextlib.nullcontext() if _lock_free(op, tool, inp)
-                    else self.lock)
+            free = _lock_free(op, tool, inp)
+            if free and isinstance(inp, dict):
+                inp["_lock"] = self.lock
+            lock = contextlib.nullcontext() if free else self.lock
             with lock:
                 if _expired(msg):
                     if op == "tool":

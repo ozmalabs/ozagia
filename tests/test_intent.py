@@ -475,7 +475,8 @@ CLASSIFY = [
     ("grep -n foo a.py", "grep"),
     ("grep -rnF 'a.b(' .", "grep"),
     ("grep -rnE 'foo|bar' src", "grep"),
-    ("grep -rn 'foo\\|bar' .", "other"),
+    ("grep -rn 'foo\\|bar' .", "grep"),        # BRE alternation, converted
+    ("grep -rn 'a\\1' .", "other"),             # a back-reference has no equivalent
     ("grep foo", "other"),
     ("grep -rnw foo .", "other"),
     ("grep -rn foo --include=*.py .", "grep"),
@@ -505,11 +506,12 @@ CLASSIFY = [
     ("git add pkg", "other"),
     ("ls -la", "other"),
     ("find . -name '*.py'", "other"),
-    ("cd src && pytest", "complex"),
-    ("FOO=1 pytest", "complex"),
-    ("pytest | tail", "complex"),
+    ("cd src && pytest", "compound"),
+    ("FOO=1 pytest", "compound"),         # an env prefix on pytest is captured
+    ("FOO=1 cat a", "complex"),
+    ("pytest | tail", "compound"),
     ("pytest > out.txt", "complex"),
-    ("pytest; echo done", "complex"),
+    ("pytest; echo done", "compound"),
     ("echo $(git rev-parse HEAD)", "complex"),
     ("cat `ls`", "complex"),
     ("cat $FILE", "complex"),
@@ -609,7 +611,7 @@ def test_shell_grep_and_passthrough(mem, repo):
     assert str(repo / "tests") not in res["output"]
     res = _call(mem, "shell", command="grep -rni HELPER tests")
     assert "Line 4: def test_helper():" in res["output"]
-    for cmd in ("ls", "git status", "python -c 'print(1)'", "pytest | tail"):
+    for cmd in ("ls", "git status", "python -c 'print(1)'", "pwd && ls"):
         assert _call(mem, "shell", command=cmd)["handled"] is False, cmd
 
 
@@ -704,8 +706,8 @@ def test_pytest_with_an_output_filter_is_still_pytest(command, filt):
     assert got["class"] == "pytest" and got["output_filter"] == filt
 
 
-@pytest.mark.parametrize("command", ["pytest | grep x", "cat a | tail -3",
-                                     "pytest > out.txt", "pytest | tail -n 3 | head -1"])
+@pytest.mark.parametrize("command", ["pytest > out.txt", "pytest | wc -l",
+                                     "cat a | sort", "pytest &"])
 def test_other_pipelines_stay_complex(command):
     from ozagia.intent.shell import classify
     assert classify(command)["class"] == "complex"

@@ -419,8 +419,11 @@ def _kill_group(pgid: int, sig: int) -> None:
 def run_tests(root: str | Path, selectors: list[str], *,
               python: str | None = None, timeout_s: float = 300,
               env: dict | None = None, inherit: bool = True,
-              extra_args: Iterable[str] = ()) -> dict[str, Any]:
+              extra_args: Iterable[str] = (),
+              tail_lines: int = OUTPUT_TAIL_LINES) -> dict[str, Any]:
     """Run pytest on `selectors` in `root` and return the results as keys.
+
+    `output_tail` is the last `tail_lines` lines of pytest's output.
 
     The environment is this process's, updated with `env`; with
     `inherit=False` it is `env` alone (an empty one without it). Either way
@@ -492,7 +495,7 @@ def run_tests(root: str | Path, selectors: list[str], *,
         "counts": counts,
         "tests": parsed["tests"],
         "collection_errors": parsed["collection_errors"],
-        "output_tail": "\n".join(output.splitlines()[-OUTPUT_TAIL_LINES:]),
+        "output_tail": "\n".join(output.splitlines()[-max(int(tail_lines), 1):]),
         "command": cmd,
     }
     if status == "no_tests_collected":
