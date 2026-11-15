@@ -4,7 +4,7 @@ A rerun of the graph_intent arm on the 8 v2 tasks
 (`evaluation/agent_e2e/tasks_v2.json`), 2 repeats, on branch
 `v4/open-issues` at `969d0ba`. It ran on 16 Nov 2026 with OpenCode 2.3.0
 and the local `vllm/qwen3.8-27b` ($0), with a 900 s timeout per session.
-Raw output: `ocelot_agent_pilot_v4.{json,md}`. The v2 numbers are from
+Raw output: `ocelot_agent_pilot_v4_run.{json,md}`. The v2 numbers are from
 `ocelot_agent_pilot_v3_v2.json` (graph_intent arm, 3 repeats, `7f294ae`).
 
 | | v2 (`7f294ae`) | v4 (`969d0ba`) |
