@@ -13,9 +13,10 @@ and rebuilds. Node ids stay internal to one snapshot.
     repo:                            the Repo node
     <kind>:<part>::<part>...         any other kind (adapter nodes)
 
-`<rel>` is the repository-relative POSIX path. Paths and qualnames never
-contain `::`. Builder keys are tuples whose first item is the kind; `format_key`
-and `parse_key` convert between the two forms.
+`<rel>` is the repository-relative POSIX path; paths never contain `::`.
+A `sym:`/`test:` qualname may (a Rust `impl fmt::Display for X`), so those keys
+split only at the first `::`. Builder keys are tuples whose first item is the
+kind; `format_key` and `parse_key` convert between the two forms.
 """
 from __future__ import annotations
 
@@ -23,6 +24,8 @@ from __future__ import annotations
 _ALIASES = {"symbol": "sym"}
 _REVERSE = {v: k for k, v in _ALIASES.items()}
 SEP = "::"
+# Kinds whose last part (a qualname) may itself contain SEP: (path, qualname).
+_PATH_QUALNAME_KINDS = {"symbol", "test"}
 
 
 def format_key(key: tuple) -> str:
@@ -44,7 +47,11 @@ def parse_key(key: str) -> tuple:
     if not sep:
         raise ValueError(f"not a node key: {key!r}")
     kind = _REVERSE.get(prefix, prefix)
-    return (kind, *rest.split(SEP)) if rest else (kind,)
+    if not rest:
+        return (kind,)
+    if kind in _PATH_QUALNAME_KINDS:
+        return (kind, *rest.split(SEP, 1))
+    return (kind, *rest.split(SEP))
 
 
 def file_key(rel: str) -> str:
