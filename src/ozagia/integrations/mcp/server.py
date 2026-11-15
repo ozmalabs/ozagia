@@ -324,12 +324,20 @@ _TOOLS: list[dict[str, Any]] = [
         "description": (
             "Working-tree changes from `git status --porcelain`, with graph "
             "links for changed files. Use it to see what the current session "
-            "has touched, and whether the snapshot is stale."),
+            "has touched, whether the snapshot is stale, and whether "
+            "`dev_refresh` has files to reingest."),
         "inputSchema": _schema({
             "all": {"type": "boolean", "default": False,
                     "description": "Include generated/eval/corpus paths."},
             "limit": {"type": "integer", "default": 200},
         }),
+    },
+    {
+        "name": "dev_refresh",
+        "description": (
+            "Reingest files changed since the snapshot and return the graph "
+            "delta (node keys added, removed, changed; edges)."),
+        "inputSchema": _schema({}),
     },
     {
         "name": "dev_record",
@@ -650,6 +658,7 @@ class DevMemoryServer:
             "dev_neighbours": self._neighbours,
             "dev_stats": self._stats,
             "dev_changed": self._changed,
+            "dev_refresh": self._refresh,
             "dev_record": self._record,
             "dev_session_start": self._session_start,
             "dev_session_record": self._session_record,
@@ -818,6 +827,13 @@ class DevMemoryServer:
     def _changed(self, a: dict[str, Any]) -> Any:
         return self.mem.changed(include_all=a.get("all", False),
                                 limit=a.get("limit", 200))
+
+    def _refresh(self, _a: dict[str, Any]) -> Any:
+        try:
+            delta = self.mem.refresh()
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+        return {"ok": True, "delta": delta.to_dict()}
 
     def _lsp_status(self, _a: dict[str, Any]) -> Any:
         return self.mem.lsp_status()

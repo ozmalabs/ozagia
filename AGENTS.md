@@ -6,7 +6,7 @@ Instructions for coding agents (and people) changing this repository.
 
 - `src/ozagia/config.py`: target root, state dir (`.ozagia/`), project config (`.ozagia.toml`).
 - `src/ozagia/adapters.py`: per-project extensions (indexers, edit engines, MCP tools, graph queries).
-- `src/ozagia/core/`: the graph (`memory.py`), repo map, code search, symbol graph, architecture summary, sessions.
+- `src/ozagia/core/`: the graph (`memory.py`), node keys (`keys.py`), incremental reingest (`reingest.py`, `delta.py`), repo map, code search, symbol graph, architecture summary, sessions.
 - `src/ozagia/index/`: tree-sitter tag languages, SCIP import.
 - `src/ozagia/edit/`: edit transaction (`txn.py`), lossless text, Python/CST/JSON/Markdown edit adapters, dispatch.
 - `src/ozagia/lsp.py`: language-server bridge.
