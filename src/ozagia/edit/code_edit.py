@@ -46,7 +46,7 @@ from io import StringIO
 from pathlib import Path
 from typing import Any
 
-from scripts.ocelot_edit_txn import (
+from ozagia.edit.txn import (
     check_base,
     detect_newline,
     encode_text,
@@ -55,7 +55,7 @@ from scripts.ocelot_edit_txn import (
     sha256_bytes,
     write_source,
 )
-from scripts.ocelot_lossless import python_roundtrip
+from ozagia.edit.lossless import python_roundtrip
 
 MAX_SOURCE_BYTES = 2 * 1024 * 1024
 FORBIDDEN_SCRIPT_KEYS = ("diff", "patch", "unified_diff", "hunk")
@@ -1100,7 +1100,7 @@ def _apply_ops(source: str, ops: list[dict[str, Any]],
     # The canonical text is the lossless Python CST bridge
     # (`domains.py_cst_ingest` -> `CstNode`/`flat_text`). Applying edits to the
     # leaf structure preserves every comment/trivia leaf outside the spans.
-    from scripts.ocelot_lossless import LosslessText
+    from ozagia.edit.lossless import LosslessText
     doc = LosslessText.from_python(source)
     for start, end, text, _op in edits:
         doc.replace(start, end, normalize_newlines(text, newline))

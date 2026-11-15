@@ -26,17 +26,17 @@ Drivers:
 
 Arms:
   baseline    no Ocelot MCP server. Claude Code runs with --strict-mcp-config.
-  dev_memory  Ocelot dev-memory MCP server (scripts.ocelot_dev_memory_mcp)
+  dev_memory  Ocelot dev-memory MCP server (ozagia.integrations.mcp.server)
               registered through a config file written into the workdir.
 
 Live drivers refuse to run unless both `--live` and the environment variable
-OCELOT_AGENT_EVAL_LIVE=1 are set. A live run spends hosted-model tokens and
+OZAGIA_EVAL_LIVE=1 are set. A live run spends hosted-model tokens and
 needs explicit user approval.
 
 Usage:
 
-    .venv/bin/python -m scripts.ocelot_agent_eval validate
-    .venv/bin/python -m scripts.ocelot_agent_eval run --driver fake \\
+    .venv/bin/python -m ozagia.eval.agent validate
+    .venv/bin/python -m ozagia.eval.agent run --driver fake \\
         --arms baseline,dev_memory --out-json out.json --out-md out.md
 """
 from __future__ import annotations
@@ -54,16 +54,17 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any, Iterable
+from ozagia.config import STATE_DIRNAME, repo_root
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = repo_root()
 DEFAULT_TASKS = ROOT / "evaluation" / "agent_e2e" / "tasks.json"
-DEFAULT_RUN_ROOT = Path("/tmp/ocelot_agent_eval")
+DEFAULT_RUN_ROOT = Path("/tmp/ozagia_eval")
 ARMS = ("baseline", "dev_memory")
-LIVE_ENV = "OCELOT_AGENT_EVAL_LIVE"
-MCP_SERVER_NAME = "ocelot-dev-memory"
-MCP_MODULE = "scripts.ocelot_dev_memory_mcp"
-MCP_CONFIG_CLAUDE = ".ocelot_agent_eval_mcp.json"
-MCP_CONFIG_OPENCODE = ".ocelot_agent_eval_opencode.json"
+LIVE_ENV = "OZAGIA_EVAL_LIVE"
+MCP_SERVER_NAME = "ozagia"
+MCP_MODULE = "ozagia.integrations.mcp.server"
+MCP_CONFIG_CLAUDE = ".ozagia_eval_mcp.json"
+MCP_CONFIG_OPENCODE = ".ozagia_eval_opencode.json"
 TASK_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 LIVE_DRIVERS = ("claude", "opencode")
 LOCAL_DRIVERS = ("noop", "fake")
@@ -249,10 +250,14 @@ def apply_patch(workdir: Path, patch: Path, *, reverse: bool = False) -> dict[st
 
 
 def _snapshot(workdir: Path) -> dict[str, str | None]:
-    """Content digest of every modified, deleted or untracked file."""
+    """Content digest of every modified, deleted or untracked file.
+
+    ozagia's own state directory is never part of it, whether or not the
+    target repository ignores it."""
     proc = _git(["ls-files", "-z", "-m", "-d", "-o", "--exclude-standard"], workdir)
     snap: dict[str, str | None] = {}
-    for rel in sorted(p for p in proc.stdout.split("\0") if p):
+    for rel in sorted(p for p in proc.stdout.split("\0")
+                      if p and p.split("/", 1)[0] != STATE_DIRNAME):
         target = workdir / rel
         if target.is_file():
             snap[rel] = hashlib.sha256(target.read_bytes()).hexdigest()
@@ -534,11 +539,11 @@ OPENCODE_GIT_DENY = (
     "git worktree*",
 )
 DRIVERS["claude"]["model_flag"] = "--model"
-DRIVER_ENV = "OCELOT_AGENT_EVAL_DRIVER"
+DRIVER_ENV = "OZAGIA_EVAL_DRIVER"
 
 
 # OpenCode 2.3 Code Mode runs MCP tools inside its `execute` tool, as
-# `tools["ocelot-dev-memory"].dev_code_search(...)`. Each such call is one MCP call.
+# `tools["ozagia"].dev_code_search(...)`. Each such call is one MCP call.
 _MCP_CODE_CALL_RE = re.compile(r"""tools\[\s*["']""" + re.escape(MCP_SERVER_NAME)
                                + r"""["']\s*\]\s*\.\s*\w+\s*\(""")
 
@@ -783,7 +788,7 @@ def _require_live_env(name: str) -> None:
 def make_driver(name: str | None, *, live: bool = False,
                 max_budget_usd: float | None = None,
                 model: str | None = None) -> Any:
-    """Build a driver. `name` None means $OCELOT_AGENT_EVAL_DRIVER."""
+    """Build a driver. `name` None means $OZAGIA_EVAL_DRIVER."""
     name = name or os.environ.get(DRIVER_ENV) or ""
     if not name:
         raise HarnessError(
@@ -800,31 +805,35 @@ def make_driver(name: str | None, *, live: bool = False,
     raise HarnessError(f"unknown driver: {name}")
 
 
-def write_arm_config(workdir: Path, arm: str, python: str, log_dir: Path) -> list[Path]:
+def write_arm_config(workdir: Path, arm: str, tool_python: str,
+                     log_dir: Path) -> list[Path]:
     """Write the MCP registration for an arm into the workdir.
 
     baseline writes nothing. dev_memory writes one Claude Code file and one
     OpenCode file. Both start the same stdio server with a snapshot and a journal
     kept under log_dir, so the workdir stays clean. The files are untracked and
-    are written before the change snapshot, so they never count as agent edits."""
+    are written before the change snapshot, so they never count as agent edits.
+
+    The server runs with `tool_python`, the interpreter ozagia is installed in,
+    and acts on the workdir through OZAGIA_ROOT. The workdir is not put on
+    PYTHONPATH, so a task that breaks the target's code cannot break the tool."""
     if arm == "baseline":
         return []
     if arm != "dev_memory":
         raise HarnessError(f"unknown arm: {arm}")
     env = {
-        "PYTHONPATH": str(workdir),
-        "OCELOT_DEV_ROOT": str(workdir),
-        "OCELOT_DEV_DUMP": str(log_dir / "dev_graph.json"),
-        "OCELOT_DEV_JOURNAL": str(log_dir / "journal.jsonl"),
+        "OZAGIA_ROOT": str(workdir),
+        "OZAGIA_DUMP": str(log_dir / "dev_graph.json"),
+        "OZAGIA_JOURNAL": str(log_dir / "journal.jsonl"),
         # The snapshot is built by prepare_dev_memory before the driver starts,
         # so the server never builds it inside the timed agent session.
-        "OCELOT_DEV_AUTOBUILD": "0",
+        "OZAGIA_AUTOBUILD": "0",
     }
     log_dir.mkdir(parents=True, exist_ok=True)
     claude_doc = {"mcpServers": {MCP_SERVER_NAME: {
-        "command": python, "args": ["-m", MCP_MODULE], "env": env}}}
+        "command": tool_python, "args": ["-m", MCP_MODULE], "env": env}}}
     opencode_doc = {"$schema": "https://opencode.ai/config.json", "mcp": {
-        MCP_SERVER_NAME: {"type": "local", "command": [python, "-m", MCP_MODULE],
+        MCP_SERVER_NAME: {"type": "local", "command": [tool_python, "-m", MCP_MODULE],
                           "environment": env, "enabled": True}}}
     paths = [workdir / MCP_CONFIG_CLAUDE, workdir / MCP_CONFIG_OPENCODE]
     for path, doc in zip(paths, (claude_doc, opencode_doc)):
@@ -839,27 +848,30 @@ PREP_TIMEOUT_S = 900
 _PREP_CODE = (
     "import sys\n"
     "from pathlib import Path\n"
-    "from scripts.ocelot_dev_memory import build_index\n"
-    "from scripts.ocelot_repo_map import update_tag_cache\n"
+    "from ozagia.core.memory import build_index\n"
+    "from ozagia.core.repo_map import update_tag_cache\n"
     "work = Path(sys.argv[1])\n"
     "build_index(work, Path(sys.argv[2]))\n"
-    "update_tag_cache(work, cache_path=work / 'var' / 'ocelot_dev_tags.json')\n"
+    "update_tag_cache(work, cache_path=work / '.ozagia' / 'tags.json')\n"
 )
 
 
-def prepare_dev_memory(workdir: Path, python: str, log_dir: Path) -> dict[str, Any]:
+def prepare_dev_memory(workdir: Path, tool_python: str,
+                       log_dir: Path) -> dict[str, Any]:
     """Build the dev-memory snapshot and warm the tag cache, outside the timer.
 
-    Runs in a subprocess with the run's python and PYTHONPATH=workdir, so the
-    snapshot describes the broken worktree. The graph dump goes to log_dir and
-    the tag cache to workdir/var, which is gitignored and so not an agent edit.
+    Runs in a subprocess with `tool_python` (where ozagia is installed) and
+    OZAGIA_ROOT=workdir, so the snapshot describes the broken workdir. The
+    graph dump goes to log_dir and the tag cache to `<workdir>/.ozagia/`, which
+    `_snapshot` ignores, so it is not an agent edit.
     A failed prep is recorded in the run; the driver still runs and the check
     still decides, so a broken index shows up as a result, not a silent skip.
     """
     log_dir.mkdir(parents=True, exist_ok=True)
-    env = dict(os.environ, PYTHONPATH=str(workdir), PYTHONDONTWRITEBYTECODE="1",
+    env = dict(os.environ, OZAGIA_ROOT=str(workdir), PYTHONDONTWRITEBYTECODE="1",
                COLUMNS="250")
-    res = spawn_group([python, "-c", _PREP_CODE, str(workdir),
+    env.pop("PYTHONPATH", None)
+    res = spawn_group([tool_python, "-c", _PREP_CODE, str(workdir),
                        str(log_dir / "dev_graph.json")],
                       cwd=workdir, env=env, timeout_s=PREP_TIMEOUT_S)
     ok = res["returncode"] == 0 and not res["timed_out"]
@@ -877,7 +889,9 @@ def prepare_dev_memory(workdir: Path, python: str, log_dir: Path) -> dict[str, A
 def run_one(repo: str | Path, task: dict[str, Any], arm: str, repeat: int,
             driver: Any, base: str, *, tasks_dir: str | Path, python: str,
             run_root: Path, timeout_s: int, keep: bool,
-            isolation: str = "worktree") -> dict[str, Any]:
+            isolation: str = "worktree",
+            tool_python: str | None = None) -> dict[str, Any]:
+    tool_python = tool_python or sys.executable
     tid = task["id"]
     name = f"{tid}-{arm}-r{repeat}"
     log_dir = run_root / "logs" / name
@@ -894,9 +908,9 @@ def run_one(repo: str | Path, task: dict[str, Any], arm: str, repeat: int,
             record.update(success=False, error="break patch does not apply",
                           files_changed=[], localized=False, wall_s=0.0)
             return record
-        write_arm_config(workdir, arm, python, log_dir)
+        write_arm_config(workdir, arm, tool_python, log_dir)
         if arm == "dev_memory":
-            prep = prepare_dev_memory(workdir, python, log_dir)
+            prep = prepare_dev_memory(workdir, tool_python, log_dir)
             record.update(prep_s=prep["prep_s"], prep_ok=prep["prep_ok"],
                           prep_error=prep["prep_error"])
         before = _snapshot(workdir)
@@ -1164,7 +1178,7 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--python", default=None,
                         help="python for checks and the MCP server (default: this one)")
         sp.add_argument("--run-root", default=None,
-                        help="scratch root (default: a new dir under /tmp/ocelot_agent_eval)")
+                        help="scratch root (default: a new dir under /tmp/ozagia_eval)")
         sp.add_argument("--keep", action="store_true", help="keep worktrees")
         sp.add_argument("--out-json", default=None)
 
@@ -1185,7 +1199,7 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--timeout-s", type=int, default=900,
                    help="wall-clock limit per driver session")
     r.add_argument("--live", action="store_true",
-                   help="required, with OCELOT_AGENT_EVAL_LIVE=1, for claude and opencode")
+                   help="required, with OZAGIA_EVAL_LIVE=1, for claude and opencode")
     r.add_argument("--max-budget-usd", type=float, default=None,
                    help="claude only: passed as --max-budget-usd (per session)")
     r.add_argument("--max-total-usd", type=float, default=None,

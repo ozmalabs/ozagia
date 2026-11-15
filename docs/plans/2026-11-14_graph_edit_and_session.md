@@ -8,9 +8,9 @@ session `orient → plan_step → act → verify → diagnose → finish`.
 
 | Workstream | Landed | Evidence |
 |---|---|---|
-| A — Rust/Lua CST | `scripts/ocelot_cst_edit.py` | 20 passed, 1 skipped |
+| A — Rust/Lua CST | `src/ozagia/edit/cst.py` | 20 passed, 1 skipped |
 | B — Python hub IR | `scripts/ocelot_ir_edit.py` | 32 passed |
-| C — dev session | `scripts/ocelot_dev_session.py` + workflow JSON | 11 passed |
+| C — dev session | `src/ozagia/core/session.py` + workflow JSON | 11 passed |
 | Integration | dispatcher, MCP, CLI, docs | combined 99 passed |
 
 Remaining honest gap: install `tree_sitter` + `tree_sitter_rust`/`tree_sitter_lua`
@@ -43,7 +43,7 @@ land.
   byte-for-byte from the leaf structure; leaves outside an edit are
   byte-identical.
 - Preview by default (`apply=false`); apply writes atomically, backs up under
-  `var/ocelot_dev_edits/backups/`, and returns before/after SHA-256.
+  `.ozagia/edits/backups/`, and returns before/after SHA-256.
 - Scoped tests only (`.venv/bin/python -m pytest tests/test_<workstream>_migrated.py -q`).
   Do not run the full migrated suite.
 
@@ -71,13 +71,13 @@ Every adapter returns the same shape (all fields required):
 }
 ```
 
-Errors raise `scripts.ocelot_code_edit.CodeEditError` (or a subclass) with a
+Errors raise `ozagia.edit.code_edit.CodeEditError` (or a subclass) with a
 specific reason. Refusals are honest: no silent text-patch fallback.
 
 ## Workstream A — Rust/Lua CST edits
 
 **Owner files (only these):**
-- `scripts/ocelot_cst_edit.py`
+- `src/ozagia/edit/cst.py`
 - `tests/test_cst_edit_migrated.py`
 - `docs/features/CST_EDIT.md`
 
@@ -142,13 +142,13 @@ invalid IR reports an error; preview/apply/backup/stale/raw-diff refusals.
 ## Workstream C — Dev-session graph (LangGraph-like)
 
 **Owner files (only these):**
-- `scripts/ocelot_dev_session.py`
+- `src/ozagia/core/session.py`
 - `scripts/dev_session_workflow.json`
 - `tests/test_dev_session_migrated.py`
 - `docs/features/DEV_SESSION.md`
 
 **Model.** A session is a typed graph persisted under
-`var/ocelot_dev_sessions/<session_id>.json`:
+`.ozagia/sessions/<session_id>.json`:
 
 ```
 Session -has_task-> Task
@@ -189,10 +189,10 @@ blocked; persistence reload; unknown transition is honest; ids stable.
 
 ## Integration (central, after workstreams)
 
-1. `scripts/ocelot_edit.py` dispatches `.rs`/`.lua` to `ocelot_cst_edit` and
+1. `src/ozagia/edit/dispatch.py` dispatches `.rs`/`.lua` to `ocelot_cst_edit` and
    `.py` ops with `engine: "ir"` to `ocelot_ir_edit`; default `.py` stays CST.
-2. `scripts/ocelot_dev_memory_mcp.py` adds `dev_session_*` tools and a
-   `dev_cst`/`dev_session` view; `scripts/ocelot_dev_memory.py` gets the CLI.
+2. `src/ozagia/integrations/mcp/server.py` adds `dev_session_*` tools and a
+   `dev_cst`/`dev_session` view; `src/ozagia/core/memory.py` gets the CLI.
 3. Docs: `DEV_MEMORY_MCP.md` gets the three new sections and the format table.
 4. Rebuild the dev snapshot, restart the MCP server, run the combined scoped
    gate, record a verification and a decision in the journal.

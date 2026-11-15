@@ -3,7 +3,7 @@
 Status: harness shipped. The `opencode` driver has run live (the 14-session pilot in
 `evaluation/agent_e2e/pilot_opencode.md`). The `claude` driver is untested live.
 
-Code: `scripts/ocelot_agent_eval.py`. Tasks: `evaluation/agent_e2e/tasks.json`.
+Code: `src/ozagia/eval/agent.py`. Tasks: `evaluation/agent_e2e/tasks.json`.
 Tests: `tests/test_agent_eval_migrated.py`. Plan: `docs/features/DEV_TOOLING_V2_PLAN.md`, item V6.
 
 ## Why
@@ -57,7 +57,7 @@ agent make a failing test pass again?
    few lines. Generate the patch with `diff -u` (or `git diff`) against a clean copy,
    and check that the header paths are `a/...` and `b/...`.
 3. Add the entry to `tasks.json`, then run
-   `python -m scripts.ocelot_agent_eval validate --task-ids <id>`.
+   `python -m ozagia.eval.agent validate --task-ids <id>`.
 4. Run the fake driver on that task to confirm the pipeline end to end.
 
 ## Harness flow
@@ -106,7 +106,7 @@ step, is recorded as `driver_error`. Confirmed against opencode 2.3.0.
 
 `tool_calls` and `tools_by_name` count OpenCode's tool events. `mcp_calls` counts calls
 to the Ocelot server. OpenCode 2.3 runs MCP tools through Code Mode: the agent calls a
-single `execute` tool whose code calls `tools["ocelot-dev-memory"].<tool>(...)`, so
+single `execute` tool whose code calls `tools["ozagia"].<tool>(...)`, so
 `mcp_calls` counts those calls inside the code (and any tool named
 `ocelot-dev-memory*`). The report gives mean tool calls and mean MCP calls per arm.
 A dev_memory session that makes no MCP call is a session where the server was
@@ -115,7 +115,7 @@ available and unused.
 ### Selecting the backend
 
 `--driver` picks the backend. Without it, the harness reads
-`OCELOT_AGENT_EVAL_DRIVER`, so `OCELOT_AGENT_EVAL_DRIVER=opencode` switches every run
+`OZAGIA_EVAL_DRIVER`, so `OZAGIA_EVAL_DRIVER=opencode` switches every run
 in a shell. With neither, the CLI refuses. `--model` passes a model through
 (`-m provider/model` for opencode, `--model` for claude). Without `--model`, each CLI
 uses its own default. For opencode that is the `model` key of
@@ -136,7 +136,7 @@ driver stops the run.
   Both arms get `permission.bash` with `"*": "allow"` and `deny` for the ref-moving
   git commands (`git commit*`, `push*`, `stash*`, `branch*`, `checkout*`, `switch*`,
   `reset*`, `rebase*`, `merge*`, `tag*`, `worktree*`). The dev_memory arm also gets
-  the Ocelot MCP server, copied from the workdir's `.ocelot_agent_eval_opencode.json`.
+  the Ocelot MCP server, copied from the workdir's `.ozagia_eval_opencode.json`.
   The arms differ only in that server.
 - The user's global OpenCode config still loads (providers, the default model, any
   global MCP servers). The baseline is "the operator's OpenCode without Ocelot", not a
@@ -167,7 +167,7 @@ The `fake` and `noop` drivers ignore the arm. They do not start an MCP server.
 `claude` and `opencode` refuse to run unless **both** of these hold:
 
 - the command includes `--live`, and
-- the environment has `OCELOT_AGENT_EVAL_LIVE=1`.
+- the environment has `OZAGIA_EVAL_LIVE=1`.
 
 The refusal happens before any worktree is created. The CLI exits with status 2. The
 driver also checks the environment variable again when it runs.
@@ -215,7 +215,7 @@ a sandbox: the agent runs as the operator and can reach any path by absolute nam
 | arm | configuration |
 |---|---|
 | `baseline` | No Ocelot MCP server. Claude Code runs with `--strict-mcp-config`, which ignores the user's MCP servers. OpenCode gets the generated config without the Ocelot server; a user's global MCP servers can still load in both arms. |
-| `dev_memory` | The workdir gets `.ocelot_agent_eval_mcp.json` (Claude Code, passed with `--mcp-config`) and `.ocelot_agent_eval_opencode.json` (OpenCode, whose `mcp` block is copied into the generated `OPENCODE_CONFIG`). Both start `<python> -m scripts.ocelot_dev_memory_mcp` with `PYTHONPATH` and `OCELOT_DEV_ROOT` set to the workdir. The snapshot and journal go under the run's log directory. `OCELOT_DEV_AUTOBUILD=0`, because the harness builds the snapshot before the driver starts (see Prep). |
+| `dev_memory` | The workdir gets `.ozagia_eval_mcp.json` (Claude Code, passed with `--mcp-config`) and `.ozagia_eval_opencode.json` (OpenCode, whose `mcp` block is copied into the generated `OPENCODE_CONFIG`). Both start `<python> -m ozagia.integrations.mcp.server` with `PYTHONPATH` and `OZAGIA_ROOT` set to the workdir. The snapshot and journal go under the run's log directory. `OZAGIA_AUTOBUILD=0`, because the harness builds the snapshot before the driver starts (see Prep). |
 
 The two config files are untracked and are written before the snapshot. They are
 not counted as agent edits. The agent can still see them with `git status`.
@@ -224,7 +224,7 @@ not counted as agent edits. The agent can still see them with `git status`.
 
 Before the driver starts, the dev_memory arm builds the dev-memory graph snapshot
 (`build_index`, written to the run's log directory) and warms the tag cache
-(`update_tag_cache`, written to `<workdir>/var/ocelot_dev_tags.json`). Both run in a
+(`update_tag_cache`, written to `<workdir>/.ozagia/tags.json`). Both run in a
 subprocess with the run's Python and `PYTHONPATH=<workdir>`, so they describe the
 broken worktree. `var/` is gitignored, so the cache does not count as an agent edit.
 The change snapshot is taken after prep.
@@ -244,17 +244,17 @@ Validate the task set (no models, creates worktrees):
 
 ```
 PY=/applications/data/projects/ocelot/.venv/bin/python
-$PY -m scripts.ocelot_agent_eval validate --python $PY \
+$PY -m ozagia.eval.agent validate --python $PY \
     --out-json evaluation/agent_e2e/validation.json
 ```
 
 Local dry runs (no models):
 
 ```
-$PY -m scripts.ocelot_agent_eval run --driver fake --arms baseline,dev_memory \
+$PY -m ozagia.eval.agent run --driver fake --arms baseline,dev_memory \
     --python $PY --out-json evaluation/agent_e2e/dry_run_fake.json \
     --out-md evaluation/agent_e2e/dry_run_fake.md
-$PY -m scripts.ocelot_agent_eval run --driver noop --arms baseline \
+$PY -m ozagia.eval.agent run --driver noop --arms baseline \
     --python $PY --out-json evaluation/agent_e2e/dry_run_noop.json \
     --out-md evaluation/agent_e2e/dry_run_noop.md
 ```
@@ -266,13 +266,13 @@ and states the exact command, the number of sessions and the cost ceiling. The
 command only runs after approval:
 
 ```
-OCELOT_AGENT_EVAL_DRIVER=opencode OCELOT_AGENT_EVAL_LIVE=1 \
-  $PY -m scripts.ocelot_agent_eval run --live --arms baseline,dev_memory \
+OZAGIA_EVAL_DRIVER=opencode OZAGIA_EVAL_LIVE=1 \
+  $PY -m ozagia.eval.agent run --live --arms baseline,dev_memory \
     --repeats 1 --max-total-usd <USD ceiling> --timeout-s 900 --python $PY \
     [--model provider/model] --out-json <out>.json --out-md <out>.md
 ```
 
-For Claude Code, use `--driver claude` (or `OCELOT_AGENT_EVAL_DRIVER=claude`) and add
+For Claude Code, use `--driver claude` (or `OZAGIA_EVAL_DRIVER=claude`) and add
 `--max-budget-usd <USD per session>`.
 
 Size: sessions = tasks × arms × repeats. The shipped set has 7 tasks, so a pilot with

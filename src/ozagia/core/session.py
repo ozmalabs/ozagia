@@ -24,7 +24,7 @@ recorded graph. Python contains no hand-written state machine: change the JSON
 to change the workflow.
 
 Persistence is one JSON document per session at
-``var/ocelot_dev_sessions/<session_id>.json``, written atomically with a
+``.ozagia/sessions/<session_id>.json``, written atomically with a
 temporary file plus ``os.replace``. Only plain JSON values are stored, so a
 session can be reloaded, replayed and diffed.
 
@@ -53,10 +53,11 @@ import time
 from collections import Counter
 from pathlib import Path
 from typing import Any, Callable
+from ozagia.config import STATE_DIRNAME, repo_root
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = repo_root()
 DEFAULT_WORKFLOW = Path(__file__).with_name("dev_session_workflow.json")
-SESSIONS_DIR = Path("var") / "ocelot_dev_sessions"
+SESSIONS_DIR = Path(STATE_DIRNAME) / "sessions"
 
 SESSION_VERSION = 1
 WORKFLOW_VERSION = 1

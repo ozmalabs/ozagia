@@ -18,8 +18,8 @@ from pathlib import Path
 
 import pytest
 
-from scripts import ocelot_tag_languages as tag_languages
-from scripts.ocelot_tag_languages import (
+from ozagia.index import tag_languages as tag_languages
+from ozagia.index.tag_languages import (
     LANGUAGES,
     available_languages,
     backend_status,
@@ -314,7 +314,7 @@ def test_tag_dict_shape_and_determinism() -> None:
 
 def test_python_fast_path_matches_ocelot_repo_map() -> None:
     # Imported lazily: the registry must not depend on the repo map module.
-    from scripts.ocelot_repo_map import extract_tags as repo_map_tags
+    from ozagia.core.repo_map import extract_tags as repo_map_tags
 
     source = (
         "import helper\n"
@@ -413,9 +413,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _base_python_tags(source: str) -> list[dict]:
-    """Oracle: the pre-v2 ``_python_tags`` copied verbatim from f88fcfda.
+    """Oracle: the pre-v2 ``_python_tags`` copied verbatim from 8b0a154d.
 
-    ``git show f88fcfda:scripts/ocelot_tag_languages.py`` holds the original.
+    ``git show 8b0a154d:src/ozagia/index/tag_languages.py`` holds the original.
     Kept inline so the test does not depend on git history.
     """
     import ast
@@ -445,12 +445,12 @@ def _base_python_tags(source: str) -> list[dict]:
 
 
 REAL_PY_FILES = [
-    "scripts/ocelot_repo_map.py",
-    "scripts/ocelot_code_edit.py",
-    "substrate/seed_loader.py",
-    "domains/ts_ingest.py",
-    "tests/test_repo_map_migrated.py",
-    "scripts/ocelot_tag_languages.py",
+    "src/ozagia/core/repo_map.py",
+    "src/ozagia/edit/code_edit.py",
+    "src/ozagia/core/memory.py",
+    "src/ozagia/edit/cst.py",
+    "tests/test_repo_map.py",
+    "src/ozagia/index/tag_languages.py",
 ]
 
 

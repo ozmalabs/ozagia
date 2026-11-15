@@ -109,17 +109,17 @@
 
 | Task | Expected files | Notes |
 |---|---|---|
-| repo-map-three-tier-render | `scripts/ocelot_repo_map.py` | Three-tier render and token budget live in repo_map() in scripts/ocelot_repo_map.py. |
-| repo-map-tag-cache | `scripts/ocelot_repo_map.py`<br>`tests/test_repo_map_migrated.py` | update_tag_cache() implements the mtime/size fast path and sha256 fallback; test_incremental_cache asserts parsed/reused counts. |
-| repo-map-reference-pagerank | `scripts/ocelot_repo_map.py` | build_reference_graph(), _task_relevance(), and personalized_pagerank() are in scripts/ocelot_repo_map.py. |
-| dev-memory-mcp-repo-map | `scripts/ocelot_dev_memory_mcp.py`<br>`scripts/ocelot_dev_memory.py` | Tool declarations and dispatch are in scripts/ocelot_dev_memory_mcp.py; DevMemory.context/repo_map/impact are in scripts/ocelot_dev_memory.py. |
-| dev-context-pack | `scripts/ocelot_dev_memory.py`<br>`tests/test_dev_memory_migrated.py` | Context pack assembly is DevMemory.context(); tests/test_dev_memory_migrated.py covers anchors, snippets, and budget trimming. |
-| code-edit-op-list | `scripts/ocelot_code_edit.py`<br>`scripts/ocelot_edit.py`<br>`tests/test_code_edit_migrated.py` | scripts/ocelot_code_edit.py owns the semantic op list; scripts/ocelot_edit.py is the format-dispatching transaction entry point; test_code_edit_migrated.py is the gate. |
+| repo-map-three-tier-render | `src/ozagia/core/repo_map.py` | Three-tier render and token budget live in repo_map() in src/ozagia/core/repo_map.py. |
+| repo-map-tag-cache | `src/ozagia/core/repo_map.py`<br>`tests/test_repo_map_migrated.py` | update_tag_cache() implements the mtime/size fast path and sha256 fallback; test_incremental_cache asserts parsed/reused counts. |
+| repo-map-reference-pagerank | `src/ozagia/core/repo_map.py` | build_reference_graph(), _task_relevance(), and personalized_pagerank() are in src/ozagia/core/repo_map.py. |
+| dev-memory-mcp-repo-map | `src/ozagia/integrations/mcp/server.py`<br>`src/ozagia/core/memory.py` | Tool declarations and dispatch are in src/ozagia/integrations/mcp/server.py; DevMemory.context/repo_map/impact are in src/ozagia/core/memory.py. |
+| dev-context-pack | `src/ozagia/core/memory.py`<br>`tests/test_dev_memory_migrated.py` | Context pack assembly is DevMemory.context(); tests/test_dev_memory_migrated.py covers anchors, snippets, and budget trimming. |
+| code-edit-op-list | `src/ozagia/edit/code_edit.py`<br>`src/ozagia/edit/dispatch.py`<br>`tests/test_code_edit_migrated.py` | src/ozagia/edit/code_edit.py owns the semantic op list; src/ozagia/edit/dispatch.py is the format-dispatching transaction entry point; test_code_edit_migrated.py is the gate. |
 | ir-edit-render-python | `scripts/ocelot_ir_edit.py`<br>`domains/render_python.py`<br>`tests/test_ir_edit_migrated.py` | The IR adapter is scripts/ocelot_ir_edit.py, the render rules/walker are domains/render_python.py, and tests/test_ir_edit_migrated.py gates the splice. |
-| rust-cst-trivia | `domains/ts_ingest.py`<br>`scripts/ocelot_cst_edit.py`<br>`tests/test_cst_edit_migrated.py` | domains/ts_ingest.py builds the CstNode graph with optional trivia; scripts/ocelot_cst_edit.py edits it; test_cst_edit_migrated.py asserts losslessness. |
-| python-cst-lossless | `domains/py_cst_ingest.py`<br>`scripts/ocelot_lossless.py`<br>`tests/test_py_cst_ingest_migrated.py` | Python token/trivia ingest is domains/py_cst_ingest.py, its editing/render helper is scripts/ocelot_lossless.py, and the gate is tests/test_py_cst_ingest_migrated.py. |
-| markdown-section-edit | `scripts/ocelot_markdown_edit.py`<br>`tests/test_markdown_edit_migrated.py` | Section operations live in scripts/ocelot_markdown_edit.py and are covered by tests/test_markdown_edit_migrated.py. |
-| json-path-edit | `scripts/ocelot_json_edit.py`<br>`tests/test_json_edit_migrated.py` | Span-preserving JSON path operations live in scripts/ocelot_json_edit.py and are covered by tests/test_json_edit_migrated.py. |
+| rust-cst-trivia | `domains/ts_ingest.py`<br>`src/ozagia/edit/cst.py`<br>`tests/test_cst_edit_migrated.py` | domains/ts_ingest.py builds the CstNode graph with optional trivia; src/ozagia/edit/cst.py edits it; test_cst_edit_migrated.py asserts losslessness. |
+| python-cst-lossless | `domains/py_cst_ingest.py`<br>`src/ozagia/edit/lossless.py`<br>`tests/test_py_cst_ingest_migrated.py` | Python token/trivia ingest is domains/py_cst_ingest.py, its editing/render helper is src/ozagia/edit/lossless.py, and the gate is tests/test_py_cst_ingest_migrated.py. |
+| markdown-section-edit | `src/ozagia/edit/markdown.py`<br>`tests/test_markdown_edit_migrated.py` | Section operations live in src/ozagia/edit/markdown.py and are covered by tests/test_markdown_edit_migrated.py. |
+| json-path-edit | `src/ozagia/edit/json_edit.py`<br>`tests/test_json_edit_migrated.py` | Span-preserving JSON path operations live in src/ozagia/edit/json_edit.py and are covered by tests/test_json_edit_migrated.py. |
 | pyo3-one-line-handoffs | `runners/dsl/src/py.rs`<br>`runners/dsl/src/substrate.rs` | CLAUDE.md's binding rule names runners/dsl/src/py.rs as the handoff surface; the implementation calls live in runners/dsl/src/substrate.rs. |
 | term-variant-grammar | `runners/dsl/src/term.rs`<br>`runners/dsl/src/grammar.rs`<br>`runners/dsl/src/checker.rs` | Term variants are defined in term.rs and parsed/checked by grammar.rs and checker.rs. |
 | rule-fixpoint-rewrite | `runners/dsl/src/rewrite.rs`<br>`runners/dsl/src/graph_rules.rs` | The fixpoint loop is runners/dsl/src/rewrite.rs; rule matching/application is runners/dsl/src/graph_rules.rs. |
@@ -128,7 +128,7 @@
 | shape-decode-reading-collapse | `domains/reading_collapse.py`<br>`domains/trope_theme.py`<br>`tests/test_sd_gen_rearm_tie_parity_migrated.py` | domains/reading_collapse.py and domains/trope_theme.py cite seeds/shape_decode_loop.json in their docstrings; the sd re-arm parity gate covers the sd loop behavior. |
 | core-emotions-weighted-contribution | `domains/core_emotions_weight.py`<br>`substrate/boot_profiles.py`<br>`tests/test_core_emotions_migrated.py` | domains/core_emotions_weight.py is the shared quantization helper for seeds/core_emotions.json; substrate/boot_profiles.py lists core_emotions in the boot profile; test_core_emotions_migrated.py is the integer gate. |
 | conversation-action-goal-binding | `domains/conversation_action.py`<br>`tests/test_conversation_action_goal_binding.py` | domains/conversation_action.py translates comprehension into an ACT/ASK-BACK and mints the Goal; the named gate asserts the binding. |
-| dev-session-replay | `scripts/ocelot_dev_session.py`<br>`tests/test_dev_session_migrated.py` | scripts/ocelot_dev_session.py owns the replayable dev-session graph; tests/test_dev_session_migrated.py covers checkpoint/replay transitions. |
+| dev-session-replay | `src/ozagia/core/session.py`<br>`tests/test_dev_session_migrated.py` | src/ozagia/core/session.py owns the replayable dev-session graph; tests/test_dev_session_migrated.py covers checkpoint/replay transitions. |
 | frozen-core-boot-invariant | `substrate/boot_all.py`<br>`domains/frozen_core.py`<br>`tests/test_frozen_core_invariant.py` | substrate/boot_all.py enforces the frozen-seed refusal, domains/frozen_core.py defines the frozen set/closure, and tests/test_frozen_core_invariant.py is the gate. |
 
 ## Reading these numbers

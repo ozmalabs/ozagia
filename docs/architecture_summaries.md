@@ -2,13 +2,13 @@
 
 **Status:** v0, landed 2026-11-14. Dev tooling, not agent runtime.
 
-`scripts/ocelot_architecture.py` turns the repo map's file reference graph
+`src/ozagia/core/architecture.py` turns the repo map's file reference graph
 into a compact, deterministic architecture report: hubs, cycles, coupling,
 module boundaries, dead-code candidates and the test-to-source ratio. It is a
 reading aid for orientation and `dev_brief`, not a correctness oracle.
 
 The report is built entirely on
-`scripts/ocelot_repo_map.py`:
+`src/ozagia/core/repo_map.py`:
 
 - `update_tag_cache(root, cache_path=..., files=...)` supplies the
   content-hash incremental tags (Python AST; tree-sitter `tags.scm` for
@@ -22,11 +22,11 @@ index is dominated by tag extraction, exactly like the repo map.
 ## API
 
 ```python
-from scripts.ocelot_architecture import architecture_report
+from ozagia.core.architecture import architecture_report
 
 report = architecture_report(
     root=".",
-    cache_path=None,   # default: <root>/var/ocelot_dev_tags.json
+    cache_path=None,   # default: <root>/.ozagia/tags.json
     files=None,        # default: repo_map source roots; explicit list for a subset
     top=15,            # hubs / coupling / cycle members / markdown (1..200)
 )
@@ -178,7 +178,7 @@ The shared MCP/CLI files are intentionally not edited here.
 **MCP** — add `dev_architecture` alongside `dev_repo_map` / `dev_impact`:
 
 ```python
-from scripts.ocelot_architecture import architecture_report
+from ozagia.core.architecture import architecture_report
 
 def dev_architecture(top: int = 15) -> dict:
     report = architecture_report(ROOT, cache_path=DEFAULT_CACHE, top=top)
@@ -197,8 +197,8 @@ budget, return `markdown` by default and `summary` only on request.
 **CLI** — a verb mirroring the module:
 
 ```bash
-.venv/bin/python -m scripts.ocelot_dev_memory architecture --top 15
-.venv/bin/python -m scripts.ocelot_dev_memory architecture --json
+.venv/bin/python -m ozagia.core.memory architecture --top 15
+.venv/bin/python -m ozagia.core.memory architecture --json
 ```
 
 **`dev_brief`** — after the existing repo brief, add a compact architecture
@@ -219,7 +219,7 @@ it so it tracks the checkout.
 
 ## Files
 
-- `scripts/ocelot_architecture.py` — report API, PageRank, iterative Tarjan,
+- `src/ozagia/core/architecture.py` — report API, PageRank, iterative Tarjan,
   module/coupling/dead-code/ratio metrics, markdown renderer.
 - `tests/test_architecture_migrated.py` — synthetic-repo tests.
 - `docs/features/ARCHITECTURE_SUMMARIES.md` — this document.
@@ -267,9 +267,9 @@ by size; a no-cycle graph; and the empty-repository case.
 
 ## Source
 
-- `scripts/ocelot_repo_map.py` — tag cache, reference graph, PageRank, repo
+- `src/ozagia/core/repo_map.py` — tag cache, reference graph, PageRank, repo
   map and impact.
-- `scripts/ocelot_dev_memory.py` — snapshot/brief integration point.
+- `src/ozagia/core/memory.py` — snapshot/brief integration point.
 - `docs/features/DEV_MEMORY_MCP.md` — MCP/CLI surface conventions.
 - `docs/features/GRAPH_CODING_LANDSCAPE.md` — P3 architecture-summaries gap
   (ckg, Codebase-Memory, arbor).

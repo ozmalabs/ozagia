@@ -7,11 +7,11 @@ decides what a symbol means — it asks the language server that already knows.
 
 ## Why
 
-The tree-sitter repo map (`scripts/ocelot_repo_map.py`) is fast and broad, but
+The tree-sitter repo map (`src/ozagia/core/repo_map.py`) is fast and broad, but
 its edges are syntactic: same-named symbols, shadowing, imports and dynamic
 dispatch produce false or missing references. The P0 gap in
 [`GRAPH_CODING_LANDSCAPE.md`](GRAPH_CODING_LANDSCAPE.md) is compiler-accurate
-navigation and diagnostics. `scripts/ocelot_lsp.py` is that layer:
+navigation and diagnostics. `src/ozagia/lsp.py` is that layer:
 
 - definitions and references resolved by pyright, rust-analyzer or clangd;
 - push diagnostics after an edit, without running a build;
@@ -79,7 +79,7 @@ on `PATH` but exits during initialize; the query then fails and
 ## Public API
 
 ```python
-from scripts.ocelot_lsp import (
+from ozagia.lsp import (
     LSPClient,          # root, language, command=None, *, timeout, ...
     get_client,         # shared per (root, language, command)
     close_all,          # close every shared client
@@ -192,7 +192,7 @@ Files are ordered by reference count descending, then path; references by
 position. `include_declaration` defaults to false, so the definition is not
 counted unless the caller asks and the server honors it. `attempts`/`retried`
 show whether the cold-index retry ran. This is the symbol-level counterpart to
-the file-level `impact` in `scripts/ocelot_repo_map.py`; it never edits.
+the file-level `impact` in `src/ozagia/core/repo_map.py`; it never edits.
 
 ### Rename preview
 
@@ -201,7 +201,7 @@ the file-level `impact` in `scripts/ocelot_repo_map.py`; it never edits.
 **does not apply anything** and does not read back or write files. Resource
 operations (create/rename/delete file) are listed under `resource_operations`
 but are not executed. Applying a rename remains the job of the semantic edit
-transaction (`scripts/ocelot_code_edit.py`), which is currently Python-only
+transaction (`src/ozagia/edit/code_edit.py`), which is currently Python-only
 and file-scoped; cross-file/multi-language rename application is a future
 integration step.
 
@@ -247,7 +247,7 @@ The default suite proves:
 - absent-binary and unsupported-language failure dicts;
 - explicit idempotent close and `shutdown`/`exit`.
 
-Live smoke tests are gated by `OCELOT_LIVE_LSP=1` and skip when a server is
+Live smoke tests are gated by `OZAGIA_LIVE_LSP=1` and skip when a server is
 absent, cold or unable to answer; they are not part of the default gate. The
 fake server proves our protocol handling, not server-specific compatibility.
 
@@ -257,7 +257,7 @@ Verification in this tree on 2026-11-14:
 .venv/bin/python -m pytest tests/test_lsp_migrated.py -q
 14 passed, 2 skipped in 1.04s
 
-OCELOT_LIVE_LSP=1 .venv/bin/python -m pytest tests/test_lsp_migrated.py -q -rs
+OZAGIA_LIVE_LSP=1 .venv/bin/python -m pytest tests/test_lsp_migrated.py -q -rs
 15 passed, 1 skipped in 2.35s
 # live pyright definition passed; rust-analyzer skipped:
 # "Unknown binary 'rust-analyzer' in official toolchain"
@@ -266,7 +266,7 @@ OCELOT_LIVE_LSP=1 .venv/bin/python -m pytest tests/test_lsp_migrated.py -q -rs
 ## Integration notes (MCP / CLI, owner: central integrator)
 
 1. Import lazily and share clients:
-   `from scripts.ocelot_lsp import get_client, close_all, detect_language`.
+   `from ozagia.lsp import get_client, close_all, detect_language`.
    Key by root + language; let `get_client` reuse the server across calls.
    Do not create a client per request.
 2. Map tools:

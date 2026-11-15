@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.ocelot_scip_import import (
+from ozagia.index.scip import (
     ScipFormatError,
     ScipProtobufUnavailableError,
     load_scip,

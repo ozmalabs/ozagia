@@ -34,7 +34,8 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Iterable
 
-from scripts.ocelot_repo_map import build_reference_graph, update_tag_cache
+from ozagia.core.repo_map import build_reference_graph, update_tag_cache
+from ozagia.config import state_path
 
 DEFAULT_TOP = 15
 DEFAULT_DAMPING = 0.85
@@ -261,7 +262,7 @@ def _summary(root: Path, cache_path: Path | None,
     if cache_path is None:
         # Root-relative default: a report about a fixture should not read or
         # prune the canonical checkout's cache.
-        cache_path = root / "var" / "ocelot_dev_tags.json"
+        cache_path = state_path(root, "tags.json")
     paths = None
     if files is not None:
         if isinstance(files, (str, Path)):
@@ -529,7 +530,7 @@ def architecture_report(root: str | Path = ".", *,
     root:
         Repository root. The tag cache/graph are built relative to it.
     cache_path:
-        Tag-cache path. Defaults to ``<root>/var/ocelot_dev_tags.json``.
+        Tag-cache path. Defaults to ``<root>/.ozagia/tags.json``.
         Pass a dedicated path when analyzing a subset: the tag cache prunes
         entries outside the scanned ``files`` set.
     files:

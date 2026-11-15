@@ -23,7 +23,7 @@ DEV TOOLING, NOT AGENT RUNTIME. Read-only: nothing here edits code.
 
 CLI::
 
-    python -m scripts.ocelot_symbol_graph {callers,callees,impact,resolve} SYMBOL
+    python -m ozagia.core.symbol_graph {callers,callees,impact,resolve} SYMBOL
         [--depth N] [--root R] [--cache C] [--min-confidence X]
 """
 from __future__ import annotations
@@ -36,8 +36,9 @@ from collections import OrderedDict, defaultdict
 from pathlib import Path
 from typing import Any
 
-from scripts.ocelot_repo_map import (
+from ozagia.core.repo_map import (
     _GENERIC_IDENTS, ROOT, _graph_key, update_tag_cache)
+from ozagia.config import state_path
 
 # A name with more global definitions than this is too ambiguous to link.
 MAX_NAME_CANDIDATES = 5
@@ -418,14 +419,14 @@ def symbol_query(root: str | Path = ROOT, op: str = "callers", symbol: str = "",
     """Refresh the tag cache for ``root``, build (or reuse) the graph, run ``op``.
 
     ``op`` is one of ``callers``, ``callees``, ``impact`` or ``resolve``. The
-    default cache is ``<root>/var/ocelot_dev_tags.json``. Returns a JSON-safe
+    default cache is ``<root>/.ozagia/tags.json``. Returns a JSON-safe
     dict with ``ok``, the op result, graph ``stats`` and ``timings`` in seconds.
     """
     if op not in OPS:
         return {"ok": False, "error": f"unknown op: {op}"}
     root = Path(root).resolve()
     cache_file = (Path(cache_path) if cache_path is not None
-                  else root / "var" / "ocelot_dev_tags.json")
+                  else state_path(root, "tags.json"))
     t0 = time.perf_counter()
     cache, tag_stats = update_tag_cache(root, cache_path=cache_file)
     t1 = time.perf_counter()
@@ -449,7 +450,7 @@ def symbol_query(root: str | Path = ROOT, op: str = "callers", symbol: str = "",
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="python -m scripts.ocelot_symbol_graph",
+        prog="python -m ozagia.core.symbol_graph",
         description="Symbol-level callers, callees, impact and resolve.")
     parser.add_argument("op", choices=OPS)
     parser.add_argument("symbol", help='"path::qualname", a qualname, or a name')
@@ -457,7 +458,7 @@ def main(argv: list[str] | None = None) -> int:
                         help="hops (callers/callees 1, impact 3 by default)")
     parser.add_argument("--root", default=str(ROOT))
     parser.add_argument("--cache", default=None,
-                        help="tag cache path (default <root>/var/ocelot_dev_tags.json)")
+                        help="tag cache path (default <root>/.ozagia/tags.json)")
     parser.add_argument("--min-confidence", type=float, default=0.0)
     args = parser.parse_args(argv)
     result = symbol_query(args.root, args.op, args.symbol, depth=args.depth,

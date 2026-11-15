@@ -4,7 +4,7 @@ The default suite uses a tiny fake stdio language server (a subprocess with
 Content-Length framing). It proves our framing, request/notification routing
 and result normalization; it does not prove compatibility with pyright,
 rust-analyzer or clangd. Those are optional live smoke tests, gated behind
-`OCELOT_LIVE_LSP=1`, and skip when the server is absent, cold or unhappy.
+`OZAGIA_LIVE_LSP=1`, and skip when the server is absent, cold or unhappy.
 """
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.ocelot_lsp import (
+from ozagia.lsp import (
     LANGUAGE_SERVERS,
     LSPClient,
     ROOT,
@@ -356,7 +356,7 @@ def test_registry_and_language_detection() -> None:
 
 
 def test_shared_client_is_reused_and_closed(tmp_path: Path) -> None:
-    from scripts.ocelot_lsp import close_all, get_client
+    from ozagia.lsp import close_all, get_client
 
     root = tmp_path / "shared_repo"
     root.mkdir()
@@ -638,8 +638,8 @@ def test_close_is_explicit_and_idempotent(fake_lsp) -> None:
 # --------------------------------------------------------------------------- #
 # Optional live smoke tests. NOT part of the default gate.
 # --------------------------------------------------------------------------- #
-LIVE = os.environ.get("OCELOT_LIVE_LSP") == "1"
-LIVE_REASON = "set OCELOT_LIVE_LSP=1 to run live language-server smoke tests"
+LIVE = os.environ.get("OZAGIA_LIVE_LSP") == "1"
+LIVE_REASON = "set OZAGIA_LIVE_LSP=1 to run live language-server smoke tests"
 
 
 def _cargo_project(root: Path) -> None:

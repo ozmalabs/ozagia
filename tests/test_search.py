@@ -5,18 +5,16 @@ repo-map PageRank by reciprocal rank fusion. No embeddings, network, or model.
 """
 from __future__ import annotations
 
-import importlib.util
 import json
 import marshal
-import os
-import subprocess
 from pathlib import Path
 
-import pytest
 
-from scripts import ocelot_code_search as search_module
-from scripts import ocelot_repo_map as repo_map_module
-from scripts.ocelot_code_search import (
+from conftest import load_module_at
+
+from ozagia.core import search as search_module
+from ozagia.core import repo_map as repo_map_module
+from ozagia.core.search import (
     BM25_B,
     BM25_K1,
     GRAPH_WEIGHT,
@@ -258,28 +256,15 @@ def test_bm25_defaults_and_configuration(tmp_path: Path) -> None:
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-BASE_COMMIT = "a6df57f0d4b594564d993495d6d38a1b1be3170f"
+BASE_COMMIT = "f55666131236e2a85d92523a70e0296e0191030a"
 IDENTITY_QUERIES = ("alpha", "frobnicated retry", "needle", "widget compute",
                     "gamma beta")
 
 
 def _load_base_search(directory: Path):
     """code_search as it was at BASE_COMMIT, under its own module name."""
-    try:
-        source = subprocess.run(
-            ["git", "-C", str(REPO_ROOT), "show",
-             f"{BASE_COMMIT}:scripts/ocelot_code_search.py"],
-            capture_output=True, text=True, check=True).stdout
-    except (OSError, subprocess.CalledProcessError):
-        pytest.skip(f"base commit {BASE_COMMIT} is not available")
-    directory.mkdir(parents=True, exist_ok=True)
-    path = directory / "base_ocelot_code_search.py"
-    path.write_text(source, encoding="utf-8")
-    spec = importlib.util.spec_from_file_location("base_ocelot_code_search",
-                                                  path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return load_module_at(BASE_COMMIT, "src/ozagia/core/search.py", directory,
+                          "base_code_search")
 
 
 def _identity_fixture(root: Path) -> list[str]:
@@ -384,14 +369,14 @@ def test_parallel_tokenization_matches_serial(tmp_path: Path,
                                               monkeypatch) -> None:
     root = tmp_path / "repo"
     files = _identity_fixture(root)
-    monkeypatch.setenv("OCELOT_INDEX_WORKERS", "1")
+    monkeypatch.setenv("OZAGIA_INDEX_WORKERS", "1")
     serial_cache = root / "var" / "serial.json"
     serial = _run_queries(search_module, root, serial_cache, files)
     assert search_module.LAST_BUILD["parallel"] == 1
 
     monkeypatch.setattr(search_module, "SEARCH_PARALLEL_MIN_FILES", 1)
     monkeypatch.setattr(search_module, "SEARCH_PARALLEL_CHUNK", 4)
-    monkeypatch.setenv("OCELOT_INDEX_WORKERS", "2")
+    monkeypatch.setenv("OZAGIA_INDEX_WORKERS", "2")
     parallel_cache = root / "var" / "parallel.json"
     parallel = _run_queries(search_module, root, parallel_cache, files)
     assert search_module.LAST_BUILD["parallel"] == 2
@@ -407,7 +392,7 @@ def test_pool_failure_falls_back_to_serial_for_search(tmp_path: Path,
     files = _identity_fixture(root)
     serial = _run_queries(search_module, root, root / "var" / "s.json", files)
     monkeypatch.setattr(search_module, "SEARCH_PARALLEL_MIN_FILES", 1)
-    monkeypatch.setenv("OCELOT_INDEX_WORKERS", "2")
+    monkeypatch.setenv("OZAGIA_INDEX_WORKERS", "2")
 
     class BrokenPool:
         def __init__(self, *args, **kwargs):
@@ -424,7 +409,7 @@ def test_pool_failure_falls_back_to_serial_for_search(tmp_path: Path,
 def test_full_scan_prunes_side_rows_for_removed_files(tmp_path: Path,
                                                       monkeypatch) -> None:
     root = tmp_path / "repo"
-    files = _identity_fixture(root)
+    _identity_fixture(root)
     cache = root / "var" / "tags.json"
     monkeypatch.setattr(repo_map_module, "SOURCE_DIRS", (".",))
     search_module.code_search(root, "alpha", cache_path=cache)

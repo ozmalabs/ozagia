@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from scripts.ocelot_architecture import architecture_report
+from ozagia.core.architecture import architecture_report
 
 
 def _write(path: Path, text: str) -> None:

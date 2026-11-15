@@ -45,8 +45,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 from urllib.parse import unquote, urlparse
+from ozagia.config import repo_root
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = repo_root()
 DEFAULT_TIMEOUT = 20.0
 DEFAULT_INITIALIZE_TIMEOUT = 60.0
 DEFAULT_DIAGNOSTICS_TIMEOUT = 5.0

@@ -1,0 +1,68 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ozagia"
+version = "0.1.0.dev0"
+description = "Ozma advanced graph integration agent: a live code graph for LLM coding agents, as a library, tool integrations and a harness."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+authors = [{ name = "Matthew Parslow" }]
+keywords = ["llm", "coding-agent", "code-graph", "mcp", "opencode", "tree-sitter"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development",
+]
+# The core is standard library only. Parsers and language servers are extras.
+dependencies = []
+
+[project.optional-dependencies]
+treesitter = [
+    "tree-sitter>=0.25",
+    "tree-sitter-python>=0.25",
+    "tree-sitter-rust>=0.24",
+    "tree-sitter-lua>=0.5",
+    "tree-sitter-c>=0.24",
+    "tree-sitter-cpp>=0.23",
+    "tree-sitter-go>=0.25",
+    "tree-sitter-java>=0.23",
+    "tree-sitter-typescript>=0.23",
+]
+lsp = ["pyright>=1.1.400"]
+all = ["ozagia[treesitter,lsp]"]
+dev = ["ozagia[all]", "pytest>=8", "ruff>=0.6"]
+
+[project.scripts]
+ozagia-memory = "ozagia.core.memory:main"
+ozagia-mcp = "ozagia.integrations.mcp.server:main"
+ozagia-edit = "ozagia.edit.code_edit:main"
+ozagia-symbols = "ozagia.core.symbol_graph:main"
+ozagia-eval = "ozagia.eval.agent:main"
+ozagia-eval-retrieval = "ozagia.eval.retrieval:main"
+ozagia-bench = "ozagia.eval.bench:main"
+
+[project.urls]
+Repository = "https://github.com/ozmalabs/ozagia"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ozagia"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-p no:cacheprovider"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+ignore = ["E501", "E731"]
+# Fixtures with significant trailing whitespace.
+per-file-ignores = { "tests/test_markdown_edit.py" = ["W291"] }

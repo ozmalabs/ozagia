@@ -6,12 +6,11 @@ is only a rendered view; raw diff input is refused.
 from __future__ import annotations
 
 import ast
-import json
 from pathlib import Path
 
 import pytest
 
-from scripts.ocelot_code_edit import (
+from ozagia.edit.code_edit import (
     CodeEditError,
     _apply_ops,
     apply_edit_script,
@@ -19,7 +18,7 @@ from scripts.ocelot_code_edit import (
     sha256_text,
     symbol_table,
 )
-from scripts.ocelot_dev_memory import DevMemory, build_index
+from ozagia.core.memory import DevMemory, build_index
 
 
 def _fixture(root: Path) -> Path:
@@ -123,7 +122,7 @@ def test_raw_diff_refused(tmp_path: Path) -> None:
 
 
 def test_replace_symbol_and_delete(tmp_path: Path) -> None:
-    p = _fixture(tmp_path)
+    _fixture(tmp_path)
     r = apply_edit_script(tmp_path, {
         "file": "mod.py",
         "ops": [{"op": "replace_symbol", "symbol": "Widget.size",
@@ -223,7 +222,7 @@ def test_generic_delete_removes_decorator_with_definition(tmp_path: Path) -> Non
     # Both the decorator and the decorated function are gone.
     assert "-@deco" in r["diff_view"]
     assert "-def f():" in r["diff_view"]
-    from scripts.ocelot_code_edit import _apply_ops
+    from ozagia.edit.code_edit import _apply_ops
     new_source, _ = _apply_ops(p.read_text(), r["ops"])
     import ast
     ast.parse(new_source)
@@ -231,7 +230,7 @@ def test_generic_delete_removes_decorator_with_definition(tmp_path: Path) -> Non
 
 
 def test_rename_is_lexical_and_reported(tmp_path: Path) -> None:
-    p = _fixture(tmp_path)
+    _fixture(tmp_path)
     r = apply_edit_script(tmp_path, {
         "file": "mod.py",
         "ops": [{"op": "rename_symbol", "symbol": "add",

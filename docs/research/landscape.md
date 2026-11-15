@@ -39,19 +39,19 @@ layer, with the features we can actually adopt.
 
 | Capability | Where |
 |---|---|
-| Typed graph memory; typed edges; CoW branches | `runners/dsl/`, `scripts/ocelot_dev_memory.py` |
-| Repo snapshot: files, symbols, tests, seeds, rules, docs, git, failures | `scripts/ocelot_dev_memory.py` |
-| Lossless Python CST (token + trivia) | `domains/py_cst_ingest.py`, `scripts/ocelot_lossless.py` |
-| Lossless Rust/Lua `CstNode` (tree-sitter; now with trivia) | `domains/ts_ingest.py`, `scripts/ocelot_cst_edit.py` |
-| Semantic AST-node + symbol edit ops; diff only a view | `scripts/ocelot_code_edit.py` |
+| Typed graph memory; typed edges; CoW branches | `runners/dsl/`, `src/ozagia/core/memory.py` |
+| Repo snapshot: files, symbols, tests, seeds, rules, docs, git, failures | `src/ozagia/core/memory.py` |
+| Lossless Python CST (token + trivia) | `domains/py_cst_ingest.py`, `src/ozagia/edit/lossless.py` |
+| Lossless Rust/Lua `CstNode` (tree-sitter; now with trivia) | `domains/ts_ingest.py`, `src/ozagia/edit/cst.py` |
+| Semantic AST-node + symbol edit ops; diff only a view | `src/ozagia/edit/code_edit.py` |
 | Hub-IR-authored replacements rendered by graph rules | `scripts/ocelot_ir_edit.py`, `domains/render_python.py` |
-| Markdown section and JSON path edits | `scripts/ocelot_markdown_edit.py`, `scripts/ocelot_json_edit.py` |
-| Replayable dev-session graph (LangGraph-like) | `scripts/ocelot_dev_session.py` |
-| MCP tools, CLI, journal receipts | `scripts/ocelot_dev_memory_mcp.py` |
+| Markdown section and JSON path edits | `src/ozagia/edit/markdown.py`, `src/ozagia/edit/json_edit.py` |
+| Replayable dev-session graph (LangGraph-like) | `src/ozagia/core/session.py` |
+| MCP tools, CLI, journal receipts | `src/ozagia/integrations/mcp/server.py` |
 
 ## What was adopted from the landscape (landed 2026-11-14)
 
-1. **Tree-sitter tags + ranked repo map** — `scripts/ocelot_repo_map.py`.
+1. **Tree-sitter tags + ranked repo map** — `src/ozagia/core/repo_map.py`.
    - Python tags use the stdlib AST fast path; Rust/Lua use the grammar's own
      `queries/tags.scm`.
    - File graph `referencer -> definer`; personalized PageRank; task terms are
@@ -94,7 +94,7 @@ layer, with the features we can actually adopt.
 ## What to implement next, in priority order
 
 **P0 — LSP bridge (largest accuracy gain).**
-- `scripts/ocelot_lsp.py`: stdio JSON-RPC client for pyright/pylsp and
+- `src/ozagia/lsp.py`: stdio JSON-RPC client for pyright/pylsp and
   rust-analyzer; start one server per language, reuse across calls.
 - MCP tools: `dev_definition`, `dev_references`, `dev_diagnostics`,
   `dev_call_hierarchy`, `dev_rename` (preview/apply through the existing edit

@@ -33,17 +33,17 @@ Graph shape (all node/edge types are ordinary typed-graph data):
 Usage:
 
     # build (or refresh) the snapshot
-    .venv/bin/python -m scripts.ocelot_dev_memory build
+    .venv/bin/python -m ozagia.core.memory build
 
     # query
-    .venv/bin/python -m scripts.ocelot_dev_memory search "shape decode"
-    .venv/bin/python -m scripts.ocelot_dev_memory symbol compose_design_for_goal
-    .venv/bin/python -m scripts.ocelot_dev_memory tests seeds/shape_decode_loop.json
-    .venv/bin/python -m scripts.ocelot_dev_memory context "add a new seed rule"
-    .venv/bin/python -m scripts.ocelot_dev_memory record --kind decision \
+    .venv/bin/python -m ozagia.core.memory search "shape decode"
+    .venv/bin/python -m ozagia.core.memory symbol compose_design_for_goal
+    .venv/bin/python -m ozagia.core.memory tests seeds/shape_decode_loop.json
+    .venv/bin/python -m ozagia.core.memory context "add a new seed rule"
+    .venv/bin/python -m ozagia.core.memory record --kind decision \
         --task "..." --summary "..." --file domains/teach.py
 
-The same surface is exposed over MCP by `scripts/ocelot_dev_memory_mcp.py`.
+The same surface is exposed over MCP by `src/ozagia/integrations/mcp/server.py`.
 """
 from __future__ import annotations
 
@@ -55,15 +55,15 @@ import math
 import os
 import re
 import subprocess
-import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
+from ozagia.config import repo_root, state_path
 
-ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_DUMP = ROOT / "var" / "ocelot_dev_graph.json"
-DEFAULT_JOURNAL = ROOT / "var" / "ocelot_dev_journal.jsonl"
+ROOT = repo_root()
+DEFAULT_DUMP = state_path(ROOT, "graph.json")
+DEFAULT_JOURNAL = state_path(ROOT, "journal.jsonl")
 
 # Files larger than this are indexed by path/name only; their content is not
 # parsed. A repo map should stay fast and should never hang on a generated blob.
@@ -1044,7 +1044,7 @@ class DevMemory:
         if not self.dump.exists():
             raise FileNotFoundError(
                 f"no dev-memory snapshot at {self.dump}; run "
-                f"`python -m scripts.ocelot_dev_memory build` first")
+                f"`python -m ozagia.core.memory build` first")
         self.raw = json.loads(self.dump.read_text(encoding="utf-8"))
         self.nodes = {int(n["id"]): n for n in self.raw.get("nodes", [])}
         self.edges = self.raw.get("edges", [])
@@ -1429,10 +1429,10 @@ class DevMemory:
             if p.is_file():
                 text = _read_text(p, limit=1_000_000) or ""
                 if t.lower().endswith(".json"):
-                    from scripts.ocelot_json_edit import outline_json
+                    from ozagia.edit.json_edit import outline_json
                     out = outline_json(text)
                 else:
-                    from scripts.ocelot_markdown_edit import outline_markdown
+                    from ozagia.edit.markdown import outline_markdown
                     out = outline_markdown(text)
                 out["path"] = t
                 return {"ok": True, "target": t, **out}
@@ -2011,7 +2011,7 @@ class DevMemory:
                 f"WARNING: snapshot is stale (snapshot "
                 f"{(snapshot['snapshot_head'] or '?')[:12]} vs HEAD "
                 f"{(snapshot['head'] or '?')[:12]}); rebuild with "
-                f"`python -m scripts.ocelot_dev_memory build`")
+                f"`python -m ozagia.core.memory build`")
         lines.append(f"files: {repo.get('files', '?')}  symbols: {repo.get('symbols', '?')}  "
                      f"tests: {repo.get('tests', '?')}  seeds: {repo.get('seeds', '?')}")
         lines.append("")
@@ -2068,7 +2068,7 @@ class DevMemory:
         text = "\n".join(lines).strip() + "\n"
         out_path = None
         if write:
-            out_path = str(Path(self.dump).parent / "ocelot_dev_brief.md")
+            out_path = str(Path(self.dump).parent / "brief.md")
             Path(out_path).write_text(text, encoding="utf-8")
         return {"ok": True, "markdown": text, "path": out_path,
                 "repo": repo,
@@ -2190,7 +2190,7 @@ class DevMemory:
     def _tag_cache(self) -> Path:
         """The tag cache under the process root. Index tools pass this so a
         worktree does not write into the script checkout's `var/`."""
-        return Path(self.raw_repo_root).resolve() / "var" / "ocelot_dev_tags.json"
+        return state_path(self.raw_repo_root, "tags.json")
 
     def repo_map(self, task: str = "", *, budget_tokens: int = 1500,
                  focus_files: Iterable[str] | None = None,
@@ -2202,7 +2202,7 @@ class DevMemory:
         so a seed task surfaces the source files that mention it rather than
         only same-named symbols.
         """
-        from scripts.ocelot_repo_map import repo_map as _repo_map
+        from ozagia.core.repo_map import repo_map as _repo_map
         focus = list(focus_files or [])
         if not focus:
             for nid in self._anchor_nodes(task):
@@ -2255,7 +2255,7 @@ class DevMemory:
 
     def impact(self, file: str, *, depth: int = 2,
                scip_path: str | None = None) -> dict[str, Any]:
-        from scripts.ocelot_repo_map import impact as _impact
+        from ozagia.core.repo_map import impact as _impact
         return _impact(self.raw_repo_root, file=file, depth=depth,
                        cache_path=self._tag_cache(),
                        scip_path=self._scip_arg(scip_path))
@@ -2266,20 +2266,20 @@ class DevMemory:
                      precise: bool = False) -> dict[str, Any]:
         """Symbol callers, callees, impact or resolve over the tag cache.
 
-        Rows come from `scripts.ocelot_symbol_graph` and are syntactic (see
+        Rows come from `ozagia.core.symbol_graph` and are syntactic (see
         docs/features/SYMBOL_GRAPH.md). With `precise=True` and op `callers`
         or `impact`, the target's LSP references refine the depth-1 rows and
         list references the syntactic graph missed. Lines in the result are
         1-based.
         """
-        from scripts.ocelot_repo_map import update_tag_cache
-        from scripts.ocelot_symbol_graph import (
+        from ozagia.core.repo_map import update_tag_cache
+        from ozagia.core.symbol_graph import (
             DEFAULT_DEPTH, OPS, build_symbol_graph, callers, callees,
             resolve_symbol, symbol_impact)
         if op not in OPS:
             return {"ok": False, "error": f"unknown op: {op}"}
         root = Path(self.raw_repo_root).resolve()
-        cache_file = root / "var" / "ocelot_dev_tags.json"
+        cache_file = state_path(root, "tags.json")
         # The same steps as `symbol_query`, kept in one process so the target
         # definition is available for the LSP position without a second load
         # of the tag cache.
@@ -2327,7 +2327,7 @@ class DevMemory:
     def _refine_with_lsp(self, result: dict[str, Any], graph: dict[str, Any],
                          root: Path) -> None:
         """Mark depth-1 rows with LSP-confirmed references (in place)."""
-        from scripts.ocelot_lsp import detect_language, server_candidates
+        from ozagia.lsp import detect_language, server_candidates
         target = graph["nodes"][result["symbol"]]
         rel = target["file"]
         lang = detect_language(rel)
@@ -2405,7 +2405,7 @@ class DevMemory:
     # -- LSP bridge (compiler-accurate; lazy server) ---------------------- #
     def _lsp_client(self, file: str, language: str | None = None,
                     command: str | None = None):
-        from scripts.ocelot_lsp import detect_language, get_client
+        from ozagia.lsp import detect_language, get_client
         lang = language or detect_language(file)
         if not lang:
             return None, {"ok": False,
@@ -2413,7 +2413,7 @@ class DevMemory:
         return get_client(self.raw_repo_root, lang, command), None
 
     def lsp_status(self) -> dict[str, Any]:
-        from scripts.ocelot_lsp import available_servers
+        from ozagia.lsp import available_servers
         return available_servers(self.raw_repo_root)
 
     def lsp_definition(self, file: str, line: int, character: int,
@@ -2475,7 +2475,7 @@ class DevMemory:
                       budgets: str = "500,900,1500",
                       arms: str = "baseline,dev_context,dev_repo_map,both",
                       limit: int | None = None) -> dict[str, Any]:
-        from scripts.ocelot_repo_map_eval import DEFAULT_TASKS, evaluate
+        from ozagia.eval.retrieval import DEFAULT_TASKS, evaluate
         return evaluate(self.raw_repo_root,
                         tasks_path=tasks_path or DEFAULT_TASKS,
                         budgets=budgets, arms=arms, limit=limit,
@@ -2483,14 +2483,14 @@ class DevMemory:
 
     def code_search(self, query: str, *, limit: int = 20,
                     include_snippet: bool = True) -> dict[str, Any]:
-        from scripts.ocelot_code_search import code_search as _search
+        from ozagia.core.search import code_search as _search
         return _search(self.raw_repo_root, query, limit=limit,
                        cache_path=self._tag_cache(),
                        include_snippet=include_snippet)
 
     def scip(self, path: str, *, summary_only: bool = False) -> dict[str, Any]:
         """Import a SCIP JSON export (or a real .scip when bindings exist)."""
-        from scripts.ocelot_scip_import import (
+        from ozagia.index.scip import (
             load_scip, scip_file_summary, scip_import)
         root = Path(self.raw_repo_root).resolve()
         p = (root / path).resolve()
@@ -2506,7 +2506,7 @@ class DevMemory:
         return scip_import(p, root=root)
 
     def architecture(self, *, top: int = 15) -> dict[str, Any]:
-        from scripts.ocelot_architecture import architecture_report
+        from ozagia.core.architecture import architecture_report
         return architecture_report(self.raw_repo_root, top=top,
                                    cache_path=self._tag_cache())
 
@@ -2518,7 +2518,7 @@ class DevMemory:
         `delete_node`/`wrap_node` ops target. The AST overlay is semantic; the
         bytes live in the lossless CstNode/trivia structure.
         """
-        from scripts.ocelot_code_edit import ast_outline
+        from ozagia.edit.code_edit import ast_outline
         root = Path(self.raw_repo_root).resolve()
         p = (root / file).resolve()
         try:
@@ -2543,7 +2543,7 @@ class DevMemory:
         the LSP server's push diagnostics on the edited file and attaches them
         under `result["diagnostics"]`. The journal entry is written before that
         wait and records `"diagnostics": "requested"` or `"skipped"`."""
-        from scripts.ocelot_edit import apply_edit_script
+        from ozagia.edit.dispatch import apply_edit_script
         write = _strict_bool(script.get("apply", False), "apply")
         result = apply_edit_script(self.raw_repo_root, script, write=write)
         if result.get("applied"):
@@ -2576,7 +2576,7 @@ class DevMemory:
         recorded here and never raised, so they cannot fail the edit."""
         if not enabled:
             return {"skipped": "diagnostics=false"}
-        from scripts.ocelot_lsp import detect_language, server_candidates
+        from ozagia.lsp import detect_language, server_candidates
         try:
             lang = detect_language(file)
             if not lang:
@@ -2764,7 +2764,7 @@ def _cmd_query(args: argparse.Namespace, mem: DevMemory) -> int:
         except Exception as e:  # noqa: BLE001 - CLI reports honestly
             out = {"ok": False, "error": f"{type(e).__name__}: {e}"}
     elif cmd.startswith("session-"):
-        from scripts.ocelot_dev_session import (
+        from ozagia.core.session import (
             DevSession, list_sessions, load_session)
         try:
             if cmd == "session-start":
@@ -2858,8 +2858,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="indent JSON output")
     # The checkout the query tools act on. Same default as the MCP server.
     common.add_argument("--root", default=(
-        os.environ.get("OCELOT_DEV_ROOT") or str(ROOT)),
-        help="checkout the tools act on (default: OCELOT_DEV_ROOT or this repo)")
+        os.environ.get("OZAGIA_ROOT") or str(ROOT)),
+        help="checkout the tools act on (default: OZAGIA_ROOT or this repo)")
     # `build` has its own --root (the tree to index), so it does not get the
     # query-side option.
     build_common = argparse.ArgumentParser(add_help=False)
@@ -2929,7 +2929,7 @@ def main(argv: list[str] | None = None) -> int:
     br.add_argument("--task", default=None)
     br.add_argument("--budget-tokens", type=int, default=4000)
     br.add_argument("--write", action="store_true",
-                    help="write var/ocelot_dev_brief.md")
+                    help="write .ozagia/brief.md")
     br.set_defaults(func=_cmd_query, needs_mem=True)
 
     rm = sub.add_parser("repo-map",
@@ -3126,7 +3126,7 @@ def main(argv: list[str] | None = None) -> int:
         return args.func(args, mem)
     finally:
         try:
-            from scripts.ocelot_lsp import close_all
+            from ozagia.lsp import close_all
             close_all()
         except Exception:
             pass

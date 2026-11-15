@@ -36,7 +36,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Iterable
 
-from scripts.ocelot_repo_map import (
+from ozagia.core.repo_map import (
     LANGUAGES,
     MAX_FILE_BYTES,
     SKIP_PARTS,
@@ -44,6 +44,7 @@ from scripts.ocelot_repo_map import (
     graph_prior,
     update_tag_cache,
 )
+from ozagia.config import state_path
 
 # BM25 defaults; both are keyword arguments on code_search().
 BM25_K1 = 1.5
@@ -504,7 +505,7 @@ def code_search(root: str | Path, query: str, *, limit: int = 20,
         query: natural-language or identifier query; empty is not an error.
         limit: maximum file results to return (0 returns no results).
         cache_path: tag-cache path. ``None`` means
-            ``<root>/var/ocelot_dev_tags.json`` so a search in a fixture or a
+            ``<root>/.ozagia/tags.json`` so a search in a fixture or a
             second checkout cannot clobber the main tree's cache.
         files: optional repo-relative file subset to index.
         include_snippet: include ``line`` and ``snippet`` for each result.
@@ -546,7 +547,7 @@ def code_search(root: str | Path, query: str, *, limit: int = 20,
         return {"ok": False, "query": raw_query, "results": [], "n": 0,
                 "error": f"not a directory: {root}", **meta}
     if cache_path is None:
-        cache_path = root / "var" / "ocelot_dev_tags.json"
+        cache_path = state_path(root, "tags.json")
 
     cache, _stats = update_tag_cache(root, cache_path=Path(cache_path),
                                      files=files)

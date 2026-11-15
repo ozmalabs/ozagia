@@ -9,7 +9,7 @@ The API is deliberately uniform with ``ocelot_repo_map.extract_tags`` so the
 central integrator can swap the three-language table for this registry without
 changing the tag-cache or graph code:
 
-    from scripts.ocelot_tag_languages import LANGUAGES, extract_tags
+    from ozagia.index.tag_languages import LANGUAGES, extract_tags
     entry = LANGUAGES[".rs"]          # {language, module, tags_query, factory, backend}
     tags = extract_tags("x.rs", source)
 

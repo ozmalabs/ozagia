@@ -13,11 +13,11 @@ task file (``evaluation/repo_map/tasks.json`` for v1,
 Arms per (task, budget):
 
   baseline      first source files by sorted path, rendered as a plain listing
-  dev_context   scripts.ocelot_dev_memory.DevMemory.context(...)
-  dev_repo_map  scripts.ocelot_repo_map.repo_map(...)
+  dev_context   ozagia.core.memory.DevMemory.context(...)
+  dev_repo_map  ozagia.core.repo_map.repo_map(...)
   both          union of the dev_context and dev_repo_map file sets
   grep          lexical baseline: files ranked by distinct task terms they contain
-  code_search   scripts.ocelot_code_search.code_search(...) results with snippets
+  code_search   ozagia.core.search.code_search(...) results with snippets
 
 The two retrievers are executed once per (task, budget); ``both`` is their
 union and its elapsed time/token cost is the sum of the two components. The
@@ -31,9 +31,9 @@ content-tier hits.
 
 Usage:
 
-    .venv/bin/python -m scripts.ocelot_repo_map_eval \\
+    .venv/bin/python -m ozagia.eval.retrieval \\
         --tasks evaluation/repo_map/tasks_v2.json \\
-        --memory var/ocelot_dev_graph.json \\
+        --memory .ozagia/graph.json \\
         --out-json evaluation/repo_map/results_v2.json \\
         --out-md evaluation/repo_map/RESULTS_V2.md
 """
@@ -48,8 +48,9 @@ import time
 from collections import Counter
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
+from ozagia.config import repo_root, state_path
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = repo_root()
 DEFAULT_TASKS = ROOT / "evaluation" / "repo_map" / "tasks.json"
 DEFAULT_BUDGETS = (500, 900, 1500)
 ARMS = ("baseline", "dev_context", "dev_repo_map", "both", "grep",
@@ -61,7 +62,7 @@ ARM_DESCRIPTIONS = {
     "both": "Union of the dev_context and dev_repo_map file sets.",
     "grep": "Lexical baseline: files ranked by distinct task terms found in "
             "their text, then total occurrences, then path.",
-    "code_search": "scripts.ocelot_code_search.code_search results, rendered "
+    "code_search": "ozagia.core.search.code_search results, rendered "
                    "as path:line: snippet in result order, truncated to budget.",
 }
 STYLES = ("symptom", "identifier")
@@ -206,7 +207,7 @@ def load_tasks(path: str | Path, *, root: str | Path | None = None) -> list[dict
 
 def source_files(root: str | Path = ROOT) -> list[str]:
     """The same source-file universe the repo map indexes, globally sorted."""
-    from scripts.ocelot_repo_map import _source_files
+    from ozagia.core.repo_map import _source_files
     return sorted(set(_source_files(Path(root).resolve())))
 
 
@@ -424,7 +425,6 @@ def _score_files(expected: Iterable[str],
     expected_files = _unique(expected)
     selected_files = _unique(selected)
     selected_set = set(selected_files)
-    expected_set = set(expected_files)
     hits = [rel for rel in expected_files if rel in selected_set]
     misses = [rel for rel in expected_files if rel not in selected_set]
     expected_n = len(expected_files)
@@ -575,7 +575,7 @@ def _staleness_error(memory: Path, base: Path, staleness: dict[str, Any]) -> str
         f"stale=True (root_mismatch={staleness.get('root_mismatch')}, "
         f"snapshot_head={staleness.get('snapshot_head')}, "
         f"head={staleness.get('head')}). Rebuild it with "
-        f"`.venv/bin/python -m scripts.ocelot_dev_memory build --root {base} "
+        f"`.venv/bin/python -m ozagia.core.memory build --root {base} "
         f"--out {memory}`, or pass --allow-stale to evaluate the stale "
         "snapshot anyway.")
 
@@ -617,22 +617,22 @@ def evaluate(
     })
 
     cache = Path(cache_path) if cache_path is not None else (
-        base / "var" / "ocelot_repo_map_eval_tags.json")
+        state_path(base, "eval_tags.json"))
     memory = Path(memory_path) if memory_path is not None else (
-        base / "var" / "ocelot_dev_graph.json")
+        state_path(base, "graph.json"))
     needs_context = any(a in arm_list for a in ("dev_context", "both"))
     needs_map = any(a in arm_list for a in ("dev_repo_map", "both"))
 
     mem = None
     memory_staleness: dict[str, Any] | None = None
     if needs_context:
-        from scripts.ocelot_dev_memory import DevMemory
+        from ozagia.core.memory import DevMemory
         if not memory.is_file():
             raise RuntimeError(
                 f"no dev-memory snapshot at {memory}; run "
-                "`.venv/bin/python -m scripts.ocelot_dev_memory build`")
+                "`.venv/bin/python -m ozagia.core.memory build`")
         mem = DevMemory(dump=memory,
-                        journal=memory.with_name("ocelot_dev_journal.jsonl"),
+                        journal=memory.with_name("journal.jsonl"),
                         root=base)
         memory_staleness = mem.staleness()
         if memory_staleness["stale"] and not allow_stale:
@@ -640,11 +640,11 @@ def evaluate(
 
     repo_map_fn = None
     if needs_map:
-        from scripts.ocelot_repo_map import repo_map as repo_map_fn
+        from ozagia.core.repo_map import repo_map as repo_map_fn
 
     code_search_fn = None
     if "code_search" in arm_list:
-        from scripts.ocelot_code_search import code_search as code_search_fn
+        from ozagia.core.search import code_search as code_search_fn
 
     grep_orders: dict[str, list[str]] = {}
     grep_share = 0.0
@@ -920,7 +920,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cache", default=None,
                         help="repo-map tag cache path (default: <root>/var/ocelot_repo_map_eval_tags.json)")
     parser.add_argument("--memory", default=None,
-                        help="dev-memory snapshot path (default: <root>/var/ocelot_dev_graph.json)")
+                        help="dev-memory snapshot path (default: <root>/.ozagia/graph.json)")
     parser.add_argument("--allow-stale", action="store_true",
                         help="evaluate dev_context/both even when the dev-memory "
                              "snapshot is stale (the report records it)")

@@ -29,12 +29,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from scripts.ocelot_code_edit import (
+from ozagia.edit.code_edit import (
     CodeEditError,
     FORBIDDEN_SCRIPT_KEYS,
     MAX_SOURCE_BYTES,
 )
-from scripts.ocelot_edit_txn import (
+from ozagia.edit.txn import (
     check_base,
     encode_text,
     normalize_newlines,
@@ -42,7 +42,7 @@ from scripts.ocelot_edit_txn import (
     sha256_bytes,
     write_source,
 )
-from scripts.ocelot_lossless import LosslessText
+from ozagia.edit.lossless import LosslessText
 
 _NEWLINE_NAMES = {"\n": "lf", "\r\n": "crlf", "\r": "cr"}
 
@@ -358,7 +358,7 @@ def _apply_ops(source: str, ops: list[dict[str, Any]],
         if last_start is not None and end > last_start:
             raise CodeEditError("overlapping JSON edits in one script")
         last_start = start
-    from scripts.ocelot_lossless import LosslessText
+    from ozagia.edit.lossless import LosslessText
     doc = LosslessText.from_lines(source)
     for start, end, text, _op in edits:
         doc.replace(start, end, normalize_newlines(text, newline))

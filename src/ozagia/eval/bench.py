@@ -4,8 +4,8 @@ Measures, in one process, the cost of the repo-map tag cache, repo_map,
 code_search and impact. The first call of each query may build a memo; the
 second call shows the warm cost that the plan targets refer to.
 
-    .venv/bin/python -m scripts.ocelot_index_bench --root . --cold --workers 4
-    .venv/bin/python -m scripts.ocelot_index_bench --root .
+    .venv/bin/python -m ozagia.eval.bench --root . --cold --workers 4
+    .venv/bin/python -m ozagia.eval.bench --root .
 
 Output is one JSON object on stdout. ``--cold`` deletes the tag cache first,
 so the update step is a full cold index. Without it, the update reuses the
@@ -28,9 +28,9 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from scripts import ocelot_code_search as search_module
-from scripts.ocelot_code_search import code_search, search_side_cache_path
-from scripts.ocelot_repo_map import ROOT, impact, repo_map, update_tag_cache
+from ozagia.core import search as search_module
+from ozagia.core.search import code_search, search_side_cache_path
+from ozagia.core.repo_map import ROOT, impact, repo_map, update_tag_cache
 
 DEFAULT_CACHE = Path("/tmp/ocelot_index_bench/tags.json")
 REPO_MAP_TASKS = (
@@ -44,7 +44,7 @@ SEARCH_QUERIES = (
     "replace_body one-line def",
 )
 IMPACT_FILES = (
-    "scripts/ocelot_repo_map.py",
+    "src/ozagia/core/repo_map.py",
     "substrate/seed_loader.py",
 )
 REPO_MAP_BUDGET = 1500
@@ -62,7 +62,7 @@ TARGETS = {
 _CHILD = """
 import json, sys, time
 sys.path.insert(0, sys.argv[1])
-from scripts import ocelot_code_search as m
+from ozagia.core import search as m
 root, cache, query = sys.argv[2], sys.argv[3], sys.argv[4]
 start = time.perf_counter()
 result = m.code_search(root, query, cache_path=cache)
@@ -188,7 +188,7 @@ def run(root: Path, cache: Path, cold: bool) -> dict[str, Any]:
         "side_cache": str(side),
         "side_cache_bytes": side_bytes,
         "mode": "cold" if cold else "warm",
-        "workers_env": os.environ.get("OCELOT_INDEX_WORKERS"),
+        "workers_env": os.environ.get("OZAGIA_INDEX_WORKERS"),
         "cpu_count": os.cpu_count(),
         "update": update,
         "repo_map": repo_rows,
@@ -209,12 +209,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cold", action="store_true",
                         help="delete the tag cache before the first update")
     parser.add_argument("--workers", type=int, default=None,
-                        help="sets OCELOT_INDEX_WORKERS for this process")
+                        help="sets OZAGIA_INDEX_WORKERS for this process")
     parser.add_argument("--check", action="store_true",
                         help="exit 1 when any target is missed")
     args = parser.parse_args(argv)
     if args.workers is not None:
-        os.environ["OCELOT_INDEX_WORKERS"] = str(args.workers)
+        os.environ["OZAGIA_INDEX_WORKERS"] = str(args.workers)
     cache = Path(args.cache)
     cache.parent.mkdir(parents=True, exist_ok=True)
     report = run(Path(args.root).resolve(), cache, args.cold)

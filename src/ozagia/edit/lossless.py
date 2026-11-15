@@ -49,12 +49,11 @@ class LosslessText:
 
     @classmethod
     def from_python(cls, source: str) -> "LosslessText":
-        """The Python bridge to `domains.py_cst_ingest.python_cst_leaves` /
-        `ts_ingest`'s `CstNode` + `flat_text` contract: token leaves plus
-        explicit trivia leaves, in document order."""
-        from domains.py_cst_ingest import python_cst_leaves
+        """Token leaves plus explicit trivia leaves, in document order
+        (see `ozagia.edit.py_tokens`)."""
+        from ozagia.edit.py_tokens import python_token_leaves
         try:
-            records = python_cst_leaves(source)
+            records = python_token_leaves(source)
         except ValueError as e:
             raise LosslessError(str(e)) from e
         return cls([Leaf(r["kind"], r["text"]) for r in records], source)

@@ -19,8 +19,8 @@ from pathlib import Path
 
 import pytest
 
-from scripts import ocelot_symbol_graph as sg
-from scripts.ocelot_repo_map import update_tag_cache
+from ozagia.core import symbol_graph as sg
+from ozagia.core.repo_map import update_tag_cache
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -223,8 +223,8 @@ def _edges_under_seed(seed: str, root: Path, rels: list[str]) -> str:
         "import json, sys\n"
         "from pathlib import Path\n"
         "sys.path.insert(0, sys.argv[1])\n"
-        "from scripts.ocelot_repo_map import update_tag_cache\n"
-        "from scripts.ocelot_symbol_graph import build_symbol_graph\n"
+        "from ozagia.core.repo_map import update_tag_cache\n"
+        "from ozagia.core.symbol_graph import build_symbol_graph\n"
         "root = Path(sys.argv[2])\n"
         "cache, _ = update_tag_cache(root, cache_path=root / 'seed.json',\n"
         "                            files=json.loads(sys.argv[3]))\n"

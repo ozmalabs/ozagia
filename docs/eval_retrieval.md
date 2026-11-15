@@ -2,7 +2,7 @@
 
 **Status:** landed 2026-11-14 (Workstream B of
 [`ADVANCED_CODING_AGENT_PLAN.md`](ADVANCED_CODING_AGENT_PLAN.md)).
-**Files:** `scripts/ocelot_repo_map_eval.py`,
+**Files:** `src/ozagia/eval/retrieval.py`,
 `tests/test_repo_map_eval_migrated.py`,
 `evaluation/repo_map/tasks.json`, this document, and the generated
 [`evaluation/repo_map/RESULTS.md`](../../evaluation/repo_map/RESULTS.md).
@@ -22,7 +22,7 @@ as the historical record (its sections follow this one).
 
 **Files:** `evaluation/repo_map/tasks_v2.json` (30 tasks with evidence),
 `evaluation/repo_map/RESULTS_V2.md` and `results_v2.json` (the run below),
-`scripts/ocelot_repo_map_eval.py`, `tests/test_repo_map_eval_migrated.py`.
+`src/ozagia/eval/retrieval.py`, `tests/test_repo_map_eval_migrated.py`.
 
 ### Why v2 (findings V1 to V5)
 
@@ -98,8 +98,8 @@ dev_context 0.008 / 0.018 / 0.016, both 0.052 / 0.038 / 0.022.
 To reproduce, build a snapshot of the same checkout and run every arm:
 
 ```bash
-.venv/bin/python -m scripts.ocelot_dev_memory build --root . --out /tmp/dev_graph.json
-.venv/bin/python -m scripts.ocelot_repo_map_eval \
+.venv/bin/python -m ozagia.core.memory build --root . --out /tmp/dev_graph.json
+.venv/bin/python -m ozagia.eval.retrieval \
   --tasks evaluation/repo_map/tasks_v2.json \
   --arms baseline,dev_context,dev_repo_map,both,grep,code_search \
   --budgets 500,900,1500 --memory /tmp/dev_graph.json \
@@ -173,7 +173,7 @@ deliberately stale result, and the report records that it did.
 {
   "id": "repo-map-tag-cache",
   "task": "Make the repo-map tag cache reuse unchanged files and reparse only changed content using content hashes.",
-  "expected_files": ["scripts/ocelot_repo_map.py", "tests/test_repo_map_migrated.py"],
+  "expected_files": ["src/ozagia/core/repo_map.py", "tests/test_repo_map_migrated.py"],
   "notes": "How this ground truth was derived."
 }
 ```
@@ -184,7 +184,7 @@ Ground truth was **curated at authoring time from repository facts**, then
 frozen in the JSON:
 
 - module docstrings and primary implementations (for example
-  `scripts/ocelot_repo_map.py` for the three-tier render, tag cache, and
+  `src/ozagia/core/repo_map.py` for the three-tier render, tag cache, and
   PageRank);
 - literal `seeds/<id>.json` references found with targeted ripgrep over
   `scripts/`, `tools/`, `substrate/`, `tests/`, `domains/`, `runners/`, and
@@ -260,8 +260,8 @@ as statistical evidence.
 
 Prerequisites:
 
-- a dev-memory snapshot at `<root>/var/ocelot_dev_graph.json`
-  (`.venv/bin/python -m scripts.ocelot_dev_memory build`), needed by the
+- a dev-memory snapshot at `<root>/.ozagia/graph.json`
+  (`.venv/bin/python -m ozagia.core.memory build`), needed by the
   context and both arms;
 - a writable tag-cache path. The default is
   `<root>/var/ocelot_repo_map_eval_tags.json`.
@@ -269,7 +269,7 @@ Prerequisites:
 Run the full set:
 
 ```bash
-.venv/bin/python -m scripts.ocelot_repo_map_eval \
+.venv/bin/python -m ozagia.eval.retrieval \
   --tasks evaluation/repo_map/tasks.json \
   --json-out /tmp/opencode/repo_map_eval.json \
   --markdown-out evaluation/repo_map/RESULTS.md
@@ -294,7 +294,7 @@ If neither output path is given, the markdown report is printed. A quick
 run that needs no dev-memory snapshot:
 
 ```bash
-.venv/bin/python -m scripts.ocelot_repo_map_eval \
+.venv/bin/python -m ozagia.eval.retrieval \
   --tasks evaluation/repo_map/tasks.json --budgets 500 \
   --arms baseline,dev_repo_map --limit 5
 ```
@@ -381,7 +381,7 @@ files** (`ocelot_repo_map.py`, `ocelot_dev_memory*.py`, MCP docs, code map,
 requirements, or `.opencode/`). It exposes a plain Python API:
 
 ```python
-from scripts.ocelot_repo_map_eval import evaluate
+from ozagia.eval.retrieval import evaluate
 report = evaluate(root, tasks_path=..., budgets=[500, 900, 1500])
 report["aggregates"]
 report["deterministic_fingerprint"]

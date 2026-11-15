@@ -10,14 +10,14 @@ from pathlib import Path
 
 import pytest
 
-from scripts.ocelot_code_edit import CodeEditError
-from scripts.ocelot_markdown_edit import (
+from ozagia.edit.code_edit import CodeEditError
+from ozagia.edit.markdown import (
     apply_markdown_edit_script,
     headings,
     outline_markdown,
 )
-from scripts.ocelot_lossless import LosslessText
-from scripts.ocelot_dev_memory import DevMemory, build_index
+from ozagia.edit.lossless import LosslessText
+from ozagia.core.memory import DevMemory, build_index
 
 
 SOURCE = '''# Title
@@ -88,7 +88,7 @@ def test_insert_and_delete_section(tmp_path: Path) -> None:
     })
     assert "## Delta" in r["diff_view"]
     assert "-## Gamma" in r["diff_view"]
-    from scripts.ocelot_markdown_edit import _apply_ops
+    from ozagia.edit.markdown import _apply_ops
     new_source, _ = _apply_ops(SOURCE, r["ops"])
     assert "## Beta" in new_source
     assert "## Delta" in new_source
@@ -170,7 +170,7 @@ def test_crlf_section_replace_and_append_match_lf_result(tmp_path: Path) -> None
 
 def test_latin1_markdown_is_refused_with_utf8_message(tmp_path: Path) -> None:
     import pytest
-    from scripts.ocelot_code_edit import CodeEditError
+    from ozagia.edit.code_edit import CodeEditError
     (tmp_path / "doc.md").write_bytes(b"# T\n\xe9\n")
     with pytest.raises(CodeEditError, match="not valid UTF-8"):
         apply_markdown_edit_script(tmp_path, {"file": "doc.md", "ops": [

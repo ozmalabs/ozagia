@@ -2,7 +2,7 @@
 
 **Status:** v0, landed 2026-11-14. Dev tooling, not agent runtime.
 
-`scripts/ocelot_tag_languages.py` is a suffix-keyed registry of tree-sitter tag
+`src/ozagia/index/tag_languages.py` is a suffix-keyed registry of tree-sitter tag
 backends. It extends the repo map's Python/Rust/Lua tag extraction to
 TypeScript, TSX, JavaScript, Go, Java, C and C++ without changing the tag-cache
 or reference-graph code. Each backend uses the grammar package's own
@@ -48,7 +48,7 @@ there too.
 ## API
 
 ```python
-from scripts.ocelot_tag_languages import (
+from ozagia.index.tag_languages import (
     LANGUAGES,
     language_for,
     extract_tags,
@@ -152,9 +152,9 @@ The shared repo map is intentionally not edited here. The central integrator
 can merge the registry with a small delegation:
 
 ```python
-from scripts.ocelot_tag_languages import LANGUAGES as TAG_LANGUAGES
-from scripts.ocelot_tag_languages import backend_status, language_for
-from scripts.ocelot_tag_languages import extract_tags as tag_language_tags
+from ozagia.index.tag_languages import LANGUAGES as TAG_LANGUAGES
+from ozagia.index.tag_languages import backend_status, language_for
+from ozagia.index.tag_languages import extract_tags as tag_language_tags
 
 # Suffix membership for _source_files(); values are module names for
 # compatibility with the existing _grammar()/diagnostics code.
@@ -240,14 +240,14 @@ grammar import fails.
 
 ## Files
 
-- `scripts/ocelot_tag_languages.py` — registry, lazy backend loader, tag
+- `src/ozagia/index/tag_languages.py` — registry, lazy backend loader, tag
   extraction, availability/status diagnostics.
 - `tests/test_tag_languages_migrated.py` — per-grammar and registry tests.
 - `docs/features/TAG_LANGUAGES.md` — this document.
 
 ## Source
 
-- `scripts/ocelot_repo_map.py` — existing tag cache, reference graph and Python
+- `src/ozagia/core/repo_map.py` — existing tag cache, reference graph and Python
   AST fast path (not modified by this workstream).
 - `docs/features/ADVANCED_CODING_AGENT_PLAN.md` — Workstream D.
 - `docs/features/GRAPH_CODING_LANDSCAPE.md` — multi-language tags gap (P2).

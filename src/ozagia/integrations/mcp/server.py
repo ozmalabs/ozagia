@@ -7,17 +7,17 @@ answer structural questions and record decisions/verification receipts.
 
 It is deliberately stdlib-only (no `mcp` package dependency) and READ-ONLY over
 the graph, with one small append-only journal for decisions and verifications.
-The graph itself is built by `scripts/ocelot_dev_memory.py`.
+The graph itself is built by `src/ozagia/core/memory.py`.
 
 Run (stdio):
 
-    .venv/bin/python -m scripts.ocelot_dev_memory_mcp
+    .venv/bin/python -m ozagia.integrations.mcp.server
 
 Environment:
-    OCELOT_DEV_DUMP     snapshot path (default var/ocelot_dev_graph.json)
-    OCELOT_DEV_JOURNAL  journal path  (default var/ocelot_dev_journal.jsonl)
-    OCELOT_DEV_AUTOBUILD  "1" to build the snapshot on first start if absent
-    OCELOT_DEV_ROOT     checkout the tools act on (default: this script's repo)
+    OZAGIA_DUMP     snapshot path (default .ozagia/graph.json)
+    OZAGIA_JOURNAL  journal path  (default .ozagia/journal.jsonl)
+    OZAGIA_AUTOBUILD  "1" to build the snapshot on first start if absent
+    OZAGIA_ROOT     checkout the tools act on (default: this script's repo)
 """
 from __future__ import annotations
 
@@ -32,14 +32,14 @@ import traceback
 from pathlib import Path
 from typing import Any, Callable
 
-from scripts.ocelot_dev_memory import (
+from ozagia.core.memory import (
     DEFAULT_DUMP,
     DEFAULT_JOURNAL,
     DevMemory,
     build_index,
 )
 
-SERVER_NAME = "ocelot-dev-memory"
+SERVER_NAME = "ozagia"
 SERVER_VERSION = "0.1.0"
 SUPPORTED_PROTOCOL_VERSIONS = ("2024-11-05", "2025-03-26", "2025-06-18")
 PROTOCOL_VERSION = "2025-06-18"
@@ -100,7 +100,7 @@ _TOOLS: list[dict[str, Any]] = [
                      "description": "Optional task to append as a context pack."},
             "budget_tokens": {"type": "integer", "default": 4000},
             "write": {"type": "boolean", "default": False,
-                      "description": "Write var/ocelot_dev_brief.md too."},
+                      "description": "Write .ozagia/brief.md too."},
         }),
     },
     {
@@ -857,7 +857,7 @@ class DevMemoryServer:
                                              language=a.get("language"))
 
     def _session_start(self, a: dict[str, Any]) -> Any:
-        from scripts.ocelot_dev_session import DevSession
+        from ozagia.core.session import DevSession
         sess = DevSession.start(str(a["task"]),
                                 max_attempts=a.get("max_attempts", 3),
                                 root=self.mem.raw_repo_root)
@@ -865,7 +865,7 @@ class DevMemoryServer:
                 "next": sess.next_action()}
 
     def _session_record(self, a: dict[str, Any]) -> Any:
-        from scripts.ocelot_dev_session import load_session
+        from ozagia.core.session import load_session
         fields = a.get("fields") or {}
         if not isinstance(fields, dict):
             raise ValueError("fields must be an object")
@@ -875,26 +875,26 @@ class DevMemoryServer:
         return {"ok": True, "node": node, "next": sess.next_action()}
 
     def _session_state(self, a: dict[str, Any]) -> Any:
-        from scripts.ocelot_dev_session import load_session
+        from ozagia.core.session import load_session
         sess = load_session(str(a["session_id"]),
                             root=self.mem.raw_repo_root)
         return {"ok": True, "state": sess.state(),
                 "next": sess.next_action()}
 
     def _session_next(self, a: dict[str, Any]) -> Any:
-        from scripts.ocelot_dev_session import load_session
+        from ozagia.core.session import load_session
         sess = load_session(str(a["session_id"]),
                             root=self.mem.raw_repo_root)
         return {"ok": True, "next": sess.next_action()}
 
     def _session_finish(self, a: dict[str, Any]) -> Any:
-        from scripts.ocelot_dev_session import load_session
+        from ozagia.core.session import load_session
         sess = load_session(str(a["session_id"]),
                             root=self.mem.raw_repo_root)
         return {"ok": True, "state": sess.finish(str(a["outcome"]))}
 
     def _session_list(self, _a: dict[str, Any]) -> Any:
-        from scripts.ocelot_dev_session import list_sessions
+        from ozagia.core.session import list_sessions
         return {"ok": True,
                 "sessions": list_sessions(root=self.mem.raw_repo_root)}
 
@@ -1122,21 +1122,21 @@ def serve(server: DevMemoryServer) -> int:
 def _load_memory(args: argparse.Namespace) -> DevMemory:
     dump = Path(args.dump)
     if not dump.exists():
-        if args.autobuild or os.environ.get("OCELOT_DEV_AUTOBUILD") == "1":
+        if args.autobuild or os.environ.get("OZAGIA_AUTOBUILD") == "1":
             print(f"[{SERVER_NAME}] building {dump} ...", file=sys.stderr)
             build_index(args.root, dump, include_docs="features",
                         include_git=True, include_scripts=True)
         else:
             raise SystemExit(
                 f"no dev-memory snapshot at {dump}; run "
-                f"`python -m scripts.ocelot_dev_memory build` first "
+                f"`python -m ozagia.core.memory build` first "
                 f"(or pass --autobuild)")
     return DevMemory(dump, Path(args.journal), root=Path(args.root))
 
 
 def _close_lsp() -> None:
     try:
-        from scripts.ocelot_lsp import close_all
+        from ozagia.lsp import close_all
         close_all()
     except Exception:  # noqa: BLE001 - best effort during shutdown
         pass
@@ -1149,12 +1149,12 @@ def _on_sigterm(signum: int, frame: Any) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    p.add_argument("--dump", default=os.environ.get("OCELOT_DEV_DUMP",
+    p.add_argument("--dump", default=os.environ.get("OZAGIA_DUMP",
                                                     str(DEFAULT_DUMP)))
-    p.add_argument("--journal", default=os.environ.get("OCELOT_DEV_JOURNAL",
+    p.add_argument("--journal", default=os.environ.get("OZAGIA_JOURNAL",
                                                        str(DEFAULT_JOURNAL)))
     p.add_argument("--root", default=(
-        os.environ.get("OCELOT_DEV_ROOT")
+        os.environ.get("OZAGIA_ROOT")
         or str(Path(__file__).resolve().parent.parent)))
     p.add_argument("--autobuild", action="store_true")
     args = p.parse_args(argv)

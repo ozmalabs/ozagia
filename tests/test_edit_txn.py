@@ -1,6 +1,6 @@
 """test_edit_txn_migrated — the shared read/hash/write transaction.
 
-DEV TOOLING, NOT AGENT RUNTIME. These tests cover `scripts/ocelot_edit_txn.py`
+DEV TOOLING, NOT AGENT RUNTIME. These tests cover `src/ozagia/edit/txn.py`
 directly, plus the cross-adapter guarantees that do not belong to one format:
 newline detection, UTF-8/BOM/encoding refusal, the TOCTOU re-check before
 replace, unique backups, and the rule that no adapter keeps a private write
@@ -13,21 +13,20 @@ from pathlib import Path
 
 import pytest
 
-import scripts.ocelot_edit_txn as txn
-from scripts.ocelot_code_edit import CodeEditError, apply_edit_script
-from scripts.ocelot_edit_txn import (
+import ozagia.edit.txn as txn
+from ozagia.edit.code_edit import CodeEditError, apply_edit_script
+from ozagia.edit.txn import (
     detect_newline,
     normalize_newlines,
     read_source,
 )
 
-SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
+SCRIPTS = Path(__file__).resolve().parents[1] / "src" / "ozagia" / "edit"
 ADAPTERS = (
-    "ocelot_code_edit.py",
-    "ocelot_json_edit.py",
-    "ocelot_markdown_edit.py",
-    "ocelot_cst_edit.py",
-    "ocelot_ir_edit.py",
+    "code_edit.py",
+    "json_edit.py",
+    "markdown.py",
+    "cst.py",
 )
 BOM = b"\xef\xbb\xbf"
 PY_SRC = "import os\nx = 1\n"
@@ -141,7 +140,7 @@ def test_toctou_change_between_read_and_replace_is_refused(
         }, write=True)
     assert p.read_bytes() == b"concurrent = True\n"
     leftovers = [q.name for q in tmp_path.iterdir()
-                 if q.name.endswith(".ocelot_tmp")]
+                 if q.name.endswith(".ozagia_tmp")]
     assert leftovers == []
 
 
@@ -198,9 +197,9 @@ def test_bom_file_base_sha_covers_bom(tmp_path: Path) -> None:
 def test_adapters_write_only_through_the_txn_helper() -> None:
     for name in ADAPTERS:
         text = (SCRIPTS / name).read_text(encoding="utf-8")
-        assert "from scripts.ocelot_edit_txn import" in text, name
+        assert "from ozagia.edit.txn import" in text, name
         assert "os.replace(" not in text, name
-        assert ".ocelot_tmp" not in text, name
+        assert ".ozagia_tmp" not in text, name
         assert "shutil.copy2(" not in text, name
         assert "path.read_text(" not in text, name
         assert "path.read_bytes(" not in text, name

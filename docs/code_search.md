@@ -2,7 +2,7 @@
 
 **Status:** landed 2026-11-14 as Workstream F of
 [`ADVANCED_CODING_AGENT_PLAN.md`](ADVANCED_CODING_AGENT_PLAN.md).
-**Files:** `scripts/ocelot_code_search.py`,
+**Files:** `src/ozagia/core/search.py`,
 `tests/test_code_search_migrated.py`, this document.
 
 `ocelot_code_search` is the lexical half of hybrid code retrieval: BM25 over
@@ -14,7 +14,7 @@ new dependencies**. Semantic/embedding retrieval remains deferred; see
 ## API
 
 ```python
-from scripts.ocelot_code_search import code_search
+from ozagia.core.search import code_search
 
 result = code_search(
     root,
@@ -39,7 +39,7 @@ The first four keyword arguments are the integration surface; `k1`, `b`, and
     "query": "repo map pagerank",
     "results": [
         {
-            "path": "scripts/ocelot_dev_memory.py",
+            "path": "src/ozagia/core/memory.py",
             "score": 0.024415,       # fused RRF score
             "bm25": 13.03624,       # BM25 component
             "graph": 0.001474,      # PageRank component
@@ -65,7 +65,7 @@ The first four keyword arguments are the integration surface; `k1`, `b`, and
 - `line` and `snippet` are present only when `include_snippet=True` and a
   matching non-empty source line exists. `snippet` is one stripped line,
   bounded to 240 characters.
-- `cache_path=None` resolves to `<root>/var/ocelot_dev_tags.json`, so searching
+- `cache_path=None` resolves to `<root>/.ozagia/tags.json`, so searching
   a fixture or second checkout cannot clobber the main tree's tag cache.
   `files` is an optional list of repo-relative source files to index. Because
   `update_tag_cache` treats that list as the complete indexed set, use a
@@ -183,7 +183,7 @@ function.
 - **MCP:** expose `dev_code_search(query, limit=20, include_snippet=True)`
   returning the result dict. Keep `path`, `score`, `bm25`, `graph`, `symbols`,
   `line`, and `snippet`; agents need the snippet and the matched symbol, not
-  just a path. Pass the shared `var/ocelot_dev_tags.json` cache path or rely on
+  just a path. Pass the shared `.ozagia/tags.json` cache path or rely on
   the `<root>/var` default.
 - **CLI:** a `code-search QUERY` verb with `--limit`, `--no-snippet`, and
   `--json`; text mode can print `path:line  snippet` plus the per-component

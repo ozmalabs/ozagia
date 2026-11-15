@@ -17,8 +17,8 @@ from typing import Any
 
 import pytest
 
-from scripts.ocelot_dev_memory import DevMemory, build_index
-from scripts.ocelot_dev_memory_mcp import DevMemoryServer, serve
+from ozagia.core.memory import DevMemory, build_index
+from ozagia.integrations.mcp.server import DevMemoryServer, serve
 
 PING = b'{"jsonrpc":"2.0","id":5,"method":"ping"}\n'
 ADD_EDIT = {"file": "domains/foo.py",

@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from scripts.ocelot_json_edit import apply_json_edit_script, outline_json
-from scripts.ocelot_dev_memory import DevMemory, build_index
+from ozagia.edit.json_edit import apply_json_edit_script, outline_json
+from ozagia.core.memory import DevMemory, build_index
 
 
 SOURCE = '''{
@@ -91,7 +91,7 @@ def test_append_node_and_rule(tmp_path: Path) -> None:
     assert '"name": "demo_rule"' in r["diff_view"]
     # The result is valid JSON with three nodes and one rule.
     # Reconstruct from the preview by applying it to the fixture in memory.
-    from scripts.ocelot_json_edit import _apply_ops
+    from ozagia.edit.json_edit import _apply_ops
     new_source, _ = _apply_ops(SOURCE, r["ops"])
     obj = json.loads(new_source)
     assert len(obj["nodes"]) == 3
@@ -104,7 +104,7 @@ def test_delete_node(tmp_path: Path) -> None:
         "file": "seeds/demo.json",
         "ops": [{"op": "delete", "path": ["nodes", 1]}],
     })
-    from scripts.ocelot_json_edit import _apply_ops
+    from ozagia.edit.json_edit import _apply_ops
     new_source, _ = _apply_ops(SOURCE, r["ops"])
     obj = json.loads(new_source)
     assert [n["attrs"]["name"] for n in obj["nodes"]] == ["alpha"]
@@ -180,7 +180,7 @@ def test_bom_json_keeps_bom_and_edits(tmp_path: Path) -> None:
 
 
 def test_latin1_json_is_refused_with_utf8_message(tmp_path: Path) -> None:
-    from scripts.ocelot_code_edit import CodeEditError
+    from ozagia.edit.code_edit import CodeEditError
     (tmp_path / "demo.json").write_bytes(b'{"id": "\xe9"}\n')
     with pytest.raises(CodeEditError, match="not valid UTF-8"):
         apply_json_edit_script(tmp_path, {"file": "demo.json", "ops": [

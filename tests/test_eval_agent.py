@@ -1,4 +1,4 @@
-"""tests/test_agent_eval_migrated.py -- hermetic gates for scripts/ocelot_agent_eval.py.
+"""tests/test_agent_eval_migrated.py -- hermetic gates for src/ozagia/eval/agent.py.
 
 Every test runs against a tiny git repository built in tmp_path (git init and a commit
 with `-c user.name=t -c user.email=t@t`; no global git config is touched). No model is
@@ -13,8 +13,9 @@ from pathlib import Path
 
 import pytest
 
-from scripts import ocelot_agent_eval as ae
-from scripts.ocelot_agent_eval import (
+from ozagia.config import state_path
+from ozagia.eval import agent as ae
+from ozagia.eval.agent import (
     ARMS,
     LIVE_ENV,
     CommandDriver,
@@ -202,12 +203,12 @@ def test_dev_memory_arm_writes_mcp_config_into_workdir(tmp_path):
     assert {p.name for p in paths} == {ae.MCP_CONFIG_CLAUDE, ae.MCP_CONFIG_OPENCODE}
     claude = json.loads((tmp_path / ae.MCP_CONFIG_CLAUDE).read_text(encoding="utf-8"))
     server = claude["mcpServers"][ae.MCP_SERVER_NAME]
-    assert server["args"] == ["-m", "scripts.ocelot_dev_memory_mcp"]
-    assert server["env"]["OCELOT_DEV_ROOT"] == str(tmp_path)
+    assert server["args"] == ["-m", "ozagia.integrations.mcp.server"]
+    assert server["env"]["OZAGIA_ROOT"] == str(tmp_path)
     # The snapshot is prepared before the driver starts, so the server must not
     # rebuild it inside the timed session.
-    assert server["env"]["OCELOT_DEV_AUTOBUILD"] == "0"
-    assert server["env"]["OCELOT_DEV_DUMP"] == str(log / "dev_graph.json")
+    assert server["env"]["OZAGIA_AUTOBUILD"] == "0"
+    assert server["env"]["OZAGIA_DUMP"] == str(log / "dev_graph.json")
     opencode = json.loads((tmp_path / ae.MCP_CONFIG_OPENCODE).read_text(encoding="utf-8"))
     assert ae.MCP_SERVER_NAME in opencode["mcp"]
 
@@ -342,20 +343,6 @@ def test_select_tasks_rejects_unknown_ids(fixture):
         select_tasks([fixture["sign"]], ["nope"])
 
 
-def test_shipped_task_file_is_well_formed():
-    spec = load_tasks(ROOT / "evaluation" / "agent_e2e" / "tasks.json")
-    tasks = spec["tasks"]
-    assert 6 <= len(tasks) <= 8
-    assert len({t["id"] for t in tasks}) == len(tasks)
-    assert len({t["area"] for t in tasks}) >= 3
-    for task in tasks:
-        assert (ROOT / "evaluation" / "agent_e2e" / task["break_patch"]).is_file()
-        assert any("{workdir}" in a for a in task["check"]["argv"])
-        assert task["check"]["timeout_s"] <= 60
-        assert task["expected_files"]
-        assert "tests/" in " ".join(task["check"]["argv"])
-
-
 # ===================================================================================== #
 # report
 # ===================================================================================== #
@@ -412,7 +399,7 @@ def test_markdown_labels_every_arm_and_task_and_flags_live_drivers():
 # source audit (style of test_contrastive_verdict_no_python_decisions)
 # ===================================================================================== #
 def test_agent_eval_has_no_substrate_or_rule_engine_calls():
-    src = (ROOT / "scripts" / "ocelot_agent_eval.py").read_text(encoding="utf-8")
+    src = (ROOT / "src" / "ozagia" / "eval" / "agent.py").read_text(encoding="utf-8")
     for needle in ("substrate_rs", "from domains", "import domains", "graph_rewrite",
                    "gr._match", "gr._apply"):
         assert needle not in src, needle
@@ -556,12 +543,23 @@ def test_snapshot_ignores_gitignored_var_dir(tmp_path):
     base = _git(repo, "rev-parse", "HEAD")
     wd = ae.make_workdir(repo, base, tmp_path / "runs", "snap-1")
     (wd / "var").mkdir()
-    (wd / "var" / "ocelot_dev_tags.json").write_text("{}", encoding="utf-8")
-    assert "var/ocelot_dev_tags.json" not in ae._snapshot(wd)
+    (wd / "var" / "cache.json").write_text("{}", encoding="utf-8")
+    assert "var/cache.json" not in ae._snapshot(wd)
     ae.remove_workdir(repo, wd, tmp_path / "runs")
 
 
-def test_prep_failure_is_recorded_and_the_run_still_scored(fixture, tmp_path):
+def test_snapshot_ignores_the_state_dir_even_when_not_gitignored(tmp_path):
+    repo, base = _repo(tmp_path)
+    wd = ae.make_workdir(repo, base, tmp_path / "runs", "snap-2")
+    state_path(wd, "tags.json").parent.mkdir(parents=True)
+    state_path(wd, "tags.json").write_text("{}", encoding="utf-8")
+    assert not any(k.startswith(".ozagia/") for k in ae._snapshot(wd))
+    ae.remove_workdir(repo, wd, tmp_path / "runs")
+
+
+def test_prep_failure_is_recorded_and_the_run_still_scored(fixture, tmp_path,
+                                                          monkeypatch):
+    monkeypatch.setattr(ae, "_PREP_CODE", "raise SystemExit('index broke')")
     prep = ae.prepare_dev_memory(fixture["repo"], _python(), tmp_path / "log")
     assert prep["prep_ok"] is False
     assert prep["prep_error"]
@@ -759,14 +757,14 @@ def test_opencode_parser_counts_code_mode_mcp_calls():
     stream = "\n".join([
         tool("read"),
         tool("execute", 'return await tools.opencode.list_mcp_resources();'),
-        tool("execute", 'const a = await tools["ocelot-dev-memory"].dev_code_search({q: 1});\n'
-                        "return tools['ocelot-dev-memory'].dev_impact({});"),
-        tool("ocelot-dev-memory_dev_context"),
+        tool("execute", 'const a = await tools["ozagia"].dev_code_search({q: 1});\n'
+                        "return tools['ozagia'].dev_impact({});"),
+        tool("ozagia_dev_context"),
         json.dumps({"type": "step_finish", "part": {"cost": 0, "tokens": {"input": 1,
                                                                         "output": 1}}}),
     ])
     out = ae._parse_opencode_events(stream)
     assert out["tool_calls"] == 4
     assert out["mcp_calls"] == 3
-    assert out["tools_by_name"] == {"execute": 2, "ocelot-dev-memory_dev_context": 1,
+    assert out["tools_by_name"] == {"execute": 2, "ozagia_dev_context": 1,
                                     "read": 1}

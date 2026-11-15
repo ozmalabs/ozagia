@@ -6,7 +6,6 @@ render inside a token budget. The tag cache is content-hash incremental.
 """
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
 import subprocess
@@ -14,10 +13,11 @@ import sys
 import time
 from pathlib import Path
 
-import pytest
 
-from scripts import ocelot_repo_map as repo_map_module
-from scripts.ocelot_repo_map import (
+from conftest import load_module_at
+
+from ozagia.core import repo_map as repo_map_module
+from ozagia.core.repo_map import (
     clear_memos,
     extract_tags,
     impact,
@@ -260,7 +260,7 @@ def _write_graph_fixture(root: Path) -> None:
 _DETERMINISM_SCRIPT = """
 import json, sys
 sys.path.insert(0, sys.argv[1])
-from scripts.ocelot_repo_map import repo_map
+from ozagia.core.repo_map import repo_map
 root, cache, files = sys.argv[2], sys.argv[3], json.loads(sys.argv[4])
 result = repo_map(root, task="shared compute widget job", budget_tokens=800,
                   cache_path=cache, files=files)
@@ -302,26 +302,14 @@ def test_pagerank_ranks_sum_to_one_with_dangling_node() -> None:
         assert abs(sum(ranks.values()) - 1.0) < 1e-9
 
 
-BASE_COMMIT = "f88fcfda"
+BASE_COMMIT = "8b0a154d"
 
 
 def _load_base_module(tmp_path: Path):
     """The pre-W2-B repo_map module, read from git history and imported under
     another name. It is the reference for output identity (gate 1a)."""
-    try:
-        source = subprocess.run(
-            ["git", "-C", str(REPO_ROOT), "show",
-             f"{BASE_COMMIT}:scripts/ocelot_repo_map.py"],
-            capture_output=True, text=True, check=True).stdout
-    except (OSError, subprocess.CalledProcessError):
-        pytest.skip(f"base commit {BASE_COMMIT} is not available")
-    path = tmp_path / "base_ocelot_repo_map.py"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(source, encoding="utf-8")
-    spec = importlib.util.spec_from_file_location("base_ocelot_repo_map", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return load_module_at(BASE_COMMIT, "src/ozagia/core/repo_map.py", tmp_path,
+                          "base_repo_map")
 
 
 def _without_timing(payload: dict) -> dict:
@@ -403,14 +391,14 @@ def test_parallel_cold_index_matches_serial(tmp_path: Path,
     _write_graph_fixture(tmp_path)
     _fixture(tmp_path)
     files = sorted(p.name for p in tmp_path.glob("*.py"))
-    monkeypatch.setenv("OCELOT_INDEX_WORKERS", "1")
+    monkeypatch.setenv("OZAGIA_INDEX_WORKERS", "1")
     serial_path = tmp_path / "serial.json"
     _cache, serial = update_tag_cache(tmp_path, cache_path=serial_path,
                                       files=files)
     assert serial["parallel"] == 1
 
     monkeypatch.setattr(repo_map_module, "PARALLEL_MIN_FILES", 1)
-    monkeypatch.setenv("OCELOT_INDEX_WORKERS", "2")
+    monkeypatch.setenv("OZAGIA_INDEX_WORKERS", "2")
     parallel_path = tmp_path / "parallel.json"
     _cache, parallel = update_tag_cache(tmp_path, cache_path=parallel_path,
                                         files=files)
@@ -430,7 +418,7 @@ def test_pool_failure_falls_back_to_serial(tmp_path: Path,
     _fixture(tmp_path)
     files = sorted(p.name for p in tmp_path.glob("*.py"))
     monkeypatch.setattr(repo_map_module, "PARALLEL_MIN_FILES", 1)
-    monkeypatch.setenv("OCELOT_INDEX_WORKERS", "2")
+    monkeypatch.setenv("OZAGIA_INDEX_WORKERS", "2")
 
     class BrokenPool:
         def __init__(self, *args, **kwargs):
@@ -447,25 +435,13 @@ def test_pool_failure_falls_back_to_serial(tmp_path: Path,
     assert set(doc["files"]) == set(files)
 
 
-SEARCH_BASE_COMMIT = "a6df57f0d4b594564d993495d6d38a1b1be3170f"
+SEARCH_BASE_COMMIT = "f55666131236e2a85d92523a70e0296e0191030a"
 
 
 def _load_module_at(commit: str, rel_path: str, directory: Path,
                     module_name: str):
     """A module as it existed at `commit`, imported under `module_name`."""
-    try:
-        source = subprocess.run(
-            ["git", "-C", str(REPO_ROOT), "show", f"{commit}:{rel_path}"],
-            capture_output=True, text=True, check=True).stdout
-    except (OSError, subprocess.CalledProcessError):
-        pytest.skip(f"commit {commit} is not available")
-    directory.mkdir(parents=True, exist_ok=True)
-    path = directory / f"{module_name}.py"
-    path.write_text(source, encoding="utf-8")
-    spec = importlib.util.spec_from_file_location(module_name, path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return load_module_at(commit, rel_path, directory, module_name)
 
 
 def _write_walk_fixture(root: Path) -> None:
@@ -495,7 +471,7 @@ def _write_walk_fixture(root: Path) -> None:
 
 
 def test_source_files_matches_base_walk(tmp_path: Path, monkeypatch) -> None:
-    base = _load_module_at(SEARCH_BASE_COMMIT, "scripts/ocelot_repo_map.py",
+    base = _load_module_at(SEARCH_BASE_COMMIT, "src/ozagia/core/repo_map.py",
                            tmp_path / "base", "base_repo_map_a6")
     root = tmp_path / "repo"
     _write_walk_fixture(root)

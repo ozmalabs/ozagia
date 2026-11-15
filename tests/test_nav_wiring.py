@@ -25,10 +25,10 @@ from typing import Any
 
 import pytest
 
-from scripts.ocelot_dev_memory import (
+from ozagia.core.memory import (
     DevMemory, _name_utf16_col, _utf16_col, build_index)
-from scripts.ocelot_dev_memory_mcp import DevMemoryServer
-from scripts.ocelot_lsp import LANGUAGE_SERVERS, ServerSpec, close_all
+from ozagia.integrations.mcp.server import DevMemoryServer
+from ozagia.lsp import LANGUAGE_SERVERS, ServerSpec, close_all
 
 CALC = (
     "# café α: comment above the target\n"   # line 1
@@ -489,7 +489,7 @@ def test_mcp_symbol_resolve_and_impact_round_trip(repo: Path) -> None:
 # post-edit diagnostics: default, verdict, journal order
 # --------------------------------------------------------------------------- #
 def _fake_ready_server(monkeypatch: pytest.MonkeyPatch, diag_fn) -> None:
-    import scripts.ocelot_lsp as lsp
+    import ozagia.lsp as lsp
     monkeypatch.setattr(lsp, "detect_language", lambda file: "python")
     monkeypatch.setattr(lsp, "server_candidates",
                         lambda lang, root: [{"available": True,

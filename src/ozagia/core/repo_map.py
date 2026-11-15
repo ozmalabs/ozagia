@@ -27,8 +27,9 @@ import time
 from collections import OrderedDict, defaultdict, deque
 from pathlib import Path
 from typing import Any, Iterable
+from ozagia.config import repo_root, state_path
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = repo_root()
 CACHE_VERSION = 3
 # Process-local memos. The document memo keeps parsed tag caches keyed by
 # path and validated by (mtime_ns, size); the graph memo keeps reference
@@ -38,14 +39,14 @@ GRAPH_MEMO_SIZE = 4
 # Cold extraction runs in a process pool once this many files need parsing.
 PARALLEL_MIN_FILES = 64
 PARALLEL_CHUNK = 64
-INDEX_WORKERS_ENV = "OCELOT_INDEX_WORKERS"
+INDEX_WORKERS_ENV = "OZAGIA_INDEX_WORKERS"
 DEFAULT_INDEX_WORKERS = 4
 # A file whose mtime is within this window of the moment it was hashed may
 # change again without a visible size or mtime change at the same second
 # (racy-git rule). Such entries are re-hashed instead of trusted by mtime.
 RACY_NS = 2_000_000_000
-DEFAULT_CACHE = ROOT / "var" / "ocelot_dev_tags.json"
-from scripts.ocelot_tag_languages import (  # noqa: E402
+DEFAULT_CACHE = state_path(ROOT, "tags.json")
+from ozagia.index.tag_languages import (  # noqa: E402
     LANGUAGES as _TAG_LANGUAGES,
     extract_tags as _registry_extract_tags,
     extract_tags_status,
@@ -829,7 +830,7 @@ def _scip_edges(root: Path, scip_path: str | Path | None) -> list[dict[str, Any]
     if not scip_path:
         return []
     try:
-        from scripts.ocelot_scip_import import scip_import
+        from ozagia.index.scip import scip_import
         payload = scip_import(scip_path, root=root)
         return list(payload.get("edges") or [])
     except Exception:

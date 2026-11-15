@@ -26,14 +26,14 @@ The byte owner is the concrete syntax tree, not the semantic AST:
   including comments, blank lines, indentation, trailing spaces and line
   endings.
 
-`scripts/ocelot_cst_edit.py` consumes that graph. It is the same `CstNode`
+`src/ozagia/edit/cst.py` consumes that graph. It is the same `CstNode`
 contract `TableWalker.flat_text` in `ts_ingest` uses, not a second parser.
 
 ## Public API
 
 ```python
-from scripts.ocelot_cst_edit import (
-    CstEditError,          # subclass of scripts.ocelot_code_edit.CodeEditError
+from ozagia.edit.cst import (
+    CstEditError,          # subclass of ozagia.edit.code_edit.CodeEditError
     CstGraph,              # read-only view over CstNode attrs + child edges
     apply_cst_edit_script, # the transaction entry point
     cst_backend_status,    # honest tree-sitter availability report
@@ -191,7 +191,7 @@ Every successful result has the shared shape:
 ```
 
 On apply, the backup is written under
-`var/ocelot_dev_edits/backups/<timestamp>_<sha12>_<name>`; the new text goes to
+`.ozagia/edits/backups/<timestamp>_<sha12>_<name>`; the new text goes to
 a temporary file and is moved into place with `os.replace`. `graph_stale` is
 true only when the file changed.
 
@@ -228,20 +228,20 @@ true only when the file changed.
   owns the raw text.
 - `delete_node`'s blank-line cleanup is a small formatting heuristic, not a
   parse decision.
-- The adapter is wired into `scripts/ocelot_edit.py` (`.rs`/`.lua`) and the MCP
+- The adapter is wired into `src/ozagia/edit/dispatch.py` (`.rs`/`.lua`) and the MCP
   `dev_edit` tool; see `docs/features/GRAPH_EDIT_AND_SESSION_PLAN.md`.
 - Rust/Lua grammar versions are whatever `tree_sitter_rust` /
   `tree_sitter_lua` are installed. Node kind names in scripts should be read
   from the graph rather than guessed.
 
-## Integration notes for `scripts/ocelot_edit.py`
+## Integration notes for `src/ozagia/edit/dispatch.py`
 
 The dispatcher only needs the format branch; the transaction contract and the
 script shape are already aligned with the Python/Markdown/JSON adapters:
 
 ```python
 if suffix in (".rs", ".lua"):
-    from scripts.ocelot_cst_edit import apply_cst_edit_script
+    from ozagia.edit.cst import apply_cst_edit_script
     return apply_cst_edit_script(root, script, write=write)
 ```
 

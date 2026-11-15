@@ -6,12 +6,12 @@ tests, 3 upstream tag-query gaps, 1 synthetic-fallback control).
 
 | Workstream | Landed | Evidence |
 |---|---|---|
-| A — LSP bridge | `scripts/ocelot_lsp.py` | 14 passed, 2 skipped; live pyright 15 passed, 1 skipped |
-| B — repo-map eval | `scripts/ocelot_repo_map_eval.py` + `evaluation/repo_map/` | 7 passed; 21-task real run |
-| C — SCIP import | `scripts/ocelot_scip_import.py` | 8 passed |
-| D — multi-language tags | `scripts/ocelot_tag_languages.py` | 37 passed, 3 skipped |
-| E — architecture | `scripts/ocelot_architecture.py` | 14 passed |
-| F — lexical hybrid search | `scripts/ocelot_code_search.py` | 7 passed |
+| A — LSP bridge | `src/ozagia/lsp.py` | 14 passed, 2 skipped; live pyright 15 passed, 1 skipped |
+| B — repo-map eval | `src/ozagia/eval/retrieval.py` + `evaluation/repo_map/` | 7 passed; 21-task real run |
+| C — SCIP import | `src/ozagia/index/scip.py` | 8 passed |
+| D — multi-language tags | `src/ozagia/index/tag_languages.py` | 37 passed, 3 skipped |
+| E — architecture | `src/ozagia/core/architecture.py` | 14 passed |
+| F — lexical hybrid search | `src/ozagia/core/search.py` | 7 passed |
 | Integration | MCP/CLI/docs | combined 191 passed |
 
 Live LSP smoke: pyright definition, references, symbol impact, callers and
@@ -45,15 +45,15 @@ TypeScript/Go/Java/C/C++ are installed; `pyright` is in `.venv/bin`;
 - Preview by default; no silent writes.
 - Scoped tests only. `.venv/bin/python -m pytest tests/test_<x>_migrated.py -q`.
 - Do not edit shared integration files:
-  `scripts/ocelot_repo_map.py`, `scripts/ocelot_dev_memory.py`,
-  `scripts/ocelot_dev_memory_mcp.py`, `docs/features/DEV_MEMORY_MCP.md`,
+  `src/ozagia/core/repo_map.py`, `src/ozagia/core/memory.py`,
+  `src/ozagia/integrations/mcp/server.py`, `docs/features/DEV_MEMORY_MCP.md`,
   `docs/CODE_MAP.md`, `requirements-dev.txt`, `.opencode/`.
   The central integrator wires the modules.
 - Do not commit. Report exact tests, APIs, dependencies and limitations.
 
 ## Workstream A — LSP bridge + symbol impact
 
-**Owns:** `scripts/ocelot_lsp.py`, `tests/test_lsp_migrated.py`,
+**Owns:** `src/ozagia/lsp.py`, `tests/test_lsp_migrated.py`,
 `docs/features/LSP_BRIDGE.md`.
 
 **API:** `LSPClient(root, language, command=None)`, `definition`,
@@ -75,7 +75,7 @@ TypeScript/Go/Java/C/C++ are installed; `pyright` is in `.venv/bin`;
 
 ## Workstream B — repo-map evaluation
 
-**Owns:** `scripts/ocelot_repo_map_eval.py`,
+**Owns:** `src/ozagia/eval/retrieval.py`,
 `tests/test_repo_map_eval_migrated.py`, `docs/features/REPO_MAP_EVAL.md`,
 `evaluation/repo_map/tasks.json`.
 
@@ -90,7 +90,7 @@ TypeScript/Go/Java/C/C++ are installed; `pyright` is in `.venv/bin`;
 
 ## Workstream C — SCIP ingestion
 
-**Owns:** `scripts/ocelot_scip_import.py`,
+**Owns:** `src/ozagia/index/scip.py`,
 `tests/test_scip_import_migrated.py`, `docs/features/SCIP_IMPORT.md`.
 
 - Support a documented **SCIP JSON export** first (documents, occurrences,
@@ -103,7 +103,7 @@ TypeScript/Go/Java/C/C++ are installed; `pyright` is in `.venv/bin`;
 
 ## Workstream D — multi-language tags
 
-**Owns:** `scripts/ocelot_tag_languages.py`,
+**Owns:** `src/ozagia/index/tag_languages.py`,
 `tests/test_tag_languages_migrated.py`, `docs/features/TAG_LANGUAGES.md`.
 
 - Registry for Python/Rust/Lua/TypeScript/TSX/JavaScript/Go/Java/C/C++.
@@ -115,7 +115,7 @@ TypeScript/Go/Java/C/C++ are installed; `pyright` is in `.venv/bin`;
 
 ## Workstream E — architecture summaries
 
-**Owns:** `scripts/ocelot_architecture.py`,
+**Owns:** `src/ozagia/core/architecture.py`,
 `tests/test_architecture_migrated.py`,
 `docs/features/ARCHITECTURE_SUMMARIES.md`.
 
@@ -128,7 +128,7 @@ TypeScript/Go/Java/C/C++ are installed; `pyright` is in `.venv/bin`;
 
 ## Workstream F — lexical hybrid code search
 
-**Owns:** `scripts/ocelot_code_search.py`,
+**Owns:** `src/ozagia/core/search.py`,
 `tests/test_code_search_migrated.py`,
 `docs/features/CODE_SEARCH.md`.
 

@@ -12,8 +12,9 @@ from pathlib import Path
 
 import pytest
 
-from scripts.ocelot_dev_memory import DevMemory, build_index
-from scripts.ocelot_dev_memory_mcp import DevMemoryServer
+from ozagia.config import state_path
+from ozagia.core.memory import DevMemory, build_index
+from ozagia.integrations.mcp.server import DevMemoryServer
 
 
 def _write(p: Path, text: str) -> None:
@@ -215,7 +216,7 @@ def test_changed(tmp_path: Path) -> None:
 
 
 def test_cst_dispatch(tmp_path: Path) -> None:
-    from scripts.ocelot_edit import apply_edit_script
+    from ozagia.edit.dispatch import apply_edit_script
     source = "let x = 1;\n"
     (tmp_path / "lib.rs").write_text(source, encoding="utf-8")
     graph = {
@@ -244,31 +245,6 @@ def test_cst_dispatch(tmp_path: Path) -> None:
     assert r["lossless"]["roundtrip"] is True
 
 
-def test_ir_dispatch_and_journal(tmp_path: Path) -> None:
-    _fixture(tmp_path)
-    out = tmp_path / "var" / "dev_graph.json"
-    build_index(tmp_path, out, include_docs="none",
-                include_git=False, include_scripts=False)
-    mem = DevMemory(out, tmp_path / "var" / "journal.jsonl")
-    r = mem.edit({
-        "file": "domains/foo.py",
-        "apply": True,
-        "ops": [{
-            "op": "replace_expression_ir",
-            "target": "body[3].body[1].value",
-            "term": {"type": "Plus",
-                     "items": [{"type": "Var", "name": "a"},
-                               {"type": "Lit", "value": 1}]},
-        }],
-    }, task="ir add one")
-    assert r["ok"] is True and r["applied"] is True
-    assert r["engine"] == "hub_ir"
-    assert "return (a + 1)" in (tmp_path / "domains" / "foo.py").read_text()
-    entry = mem.journal_recent(1)[0]
-    assert entry["kind"] == "edit"
-    assert entry["task"] == "ir add one"
-
-
 def test_journal(tmp_path: Path) -> None:
     _fixture(tmp_path)
     out = tmp_path / "var" / "dev_graph.json"
@@ -293,7 +269,7 @@ def test_mcp_protocol(tmp_path: Path) -> None:
 
     init = server.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize",
                           "params": {}})
-    assert init["result"]["serverInfo"]["name"] == "ocelot-dev-memory"
+    assert init["result"]["serverInfo"]["name"] == "ozagia"
     assert "tools" in init["result"]["capabilities"]
 
     tools = server.handle({"jsonrpc": "2.0", "id": 2,
@@ -657,8 +633,8 @@ def _stamp(p: Path) -> tuple[int, int] | None:
 
 
 def test_index_tools_write_cache_under_process_root(tmp_path: Path) -> None:
-    from scripts.ocelot_dev_memory import ROOT
-    real_cache = ROOT / "var" / "ocelot_dev_tags.json"
+    from ozagia.core.memory import ROOT
+    real_cache = state_path(ROOT, "tags.json")
     before = _stamp(real_cache)
     _fixture(tmp_path)
     out = tmp_path / "var" / "dev_graph.json"
@@ -669,13 +645,13 @@ def test_index_tools_write_cache_under_process_root(tmp_path: Path) -> None:
     mem.impact("domains/bar.py")
     mem.code_search("helper")
     mem.architecture()
-    assert (tmp_path / "var" / "ocelot_dev_tags.json").is_file()
+    assert (state_path(tmp_path, "tags.json")).is_file()
     assert _stamp(real_cache) == before
 
 
 def test_cli_root_flag_selects_the_checkout_that_is_edited(
         tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    from scripts.ocelot_dev_memory import main as dev_memory_main
+    from ozagia.core.memory import main as dev_memory_main
     snap_root = tmp_path / "a"
     _fixture(snap_root)
     out = snap_root / "var" / "dev_graph.json"

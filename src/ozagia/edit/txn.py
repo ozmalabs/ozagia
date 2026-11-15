@@ -26,6 +26,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from ozagia.config import state_path
 
 _BOM = b"\xef\xbb\xbf"
 _CODING_RE = re.compile(r"^[ \t\f]*#.*?coding[:=][ \t]*([-\w.]+)")
@@ -159,7 +160,7 @@ def write_source(root: str | Path, src: SourceFile, new_text: str, *,
     Returns the backup path. Raises `error_cls` if the file changed on disk
     after it was read; the temp file is removed in that case.
     """
-    backup_dir = Path(root) / "var" / "ocelot_dev_edits" / "backups"
+    backup_dir = state_path(root, "edits", "backups")
     backup_dir.mkdir(parents=True, exist_ok=True)
     backup = None
     for _ in range(_BACKUP_ATTEMPTS):
@@ -180,7 +181,7 @@ def write_source(root: str | Path, src: SourceFile, new_text: str, *,
     data = encode_text(src, new_text)
     fd, tmp_name = tempfile.mkstemp(
         dir=str(src.path.parent), prefix=f".{src.path.name}.",
-        suffix=".ocelot_tmp")
+        suffix=".ozagia_tmp")
     tmp = Path(tmp_name)
     try:
         with os.fdopen(fd, "wb") as fh:

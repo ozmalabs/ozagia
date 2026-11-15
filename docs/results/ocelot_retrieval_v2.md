@@ -145,14 +145,14 @@ Each cell is `recall (recall_content)`.
 
 | Task | Style | Area | Expected files | Notes |
 |---|---|---|---|---|
-| repo-map-same-second-tag-cache | symptom | dev_tooling | `scripts/ocelot_repo_map.py` | Freshness check for cached tags and the racy-timestamp window. |
-| json-manifest-value-edit | symptom | dev_tooling | `scripts/ocelot_json_edit.py` | Span-preserving JSON value replacement. |
-| markdown-section-replace | symptom | dev_tooling | `scripts/ocelot_markdown_edit.py` | Section replacement operations on Markdown blocks. |
-| dev-context-budget-stop | identifier | dev_tooling | `scripts/ocelot_dev_memory.py` | Budget loop of the context pack. |
-| pagerank-tie-order | identifier | dev_tooling | `scripts/ocelot_repo_map.py` | Personalized PageRank over the candidate subgraph. |
-| code-search-matched-terms | identifier | dev_tooling | `scripts/ocelot_code_search.py` | BM25 plus PageRank fusion and result rendering. |
-| dev-session-replay | symptom | dev_tooling | `scripts/ocelot_dev_session.py` | Replayable dev-session state graph. |
-| symbol-graph-import-resolution | symptom | dev_tooling | `scripts/ocelot_symbol_graph.py` | Import-aware symbol resolution levels. |
+| repo-map-same-second-tag-cache | symptom | dev_tooling | `src/ozagia/core/repo_map.py` | Freshness check for cached tags and the racy-timestamp window. |
+| json-manifest-value-edit | symptom | dev_tooling | `src/ozagia/edit/json_edit.py` | Span-preserving JSON value replacement. |
+| markdown-section-replace | symptom | dev_tooling | `src/ozagia/edit/markdown.py` | Section replacement operations on Markdown blocks. |
+| dev-context-budget-stop | identifier | dev_tooling | `src/ozagia/core/memory.py` | Budget loop of the context pack. |
+| pagerank-tie-order | identifier | dev_tooling | `src/ozagia/core/repo_map.py` | Personalized PageRank over the candidate subgraph. |
+| code-search-matched-terms | identifier | dev_tooling | `src/ozagia/core/search.py` | BM25 plus PageRank fusion and result rendering. |
+| dev-session-replay | symptom | dev_tooling | `src/ozagia/core/session.py` | Replayable dev-session state graph. |
+| symbol-graph-import-resolution | symptom | dev_tooling | `src/ozagia/core/symbol_graph.py` | Import-aware symbol resolution levels. |
 | cow-branch-isolation | symptom | rust_engine | `runners/dsl/src/cow_paged_vec.rs` | Copy-on-write paged vector for snapshot forks. |
 | rule-run-stopping-point | symptom | rust_engine | `runners/dsl/src/rewrite.rs` | Fixed-point runner over rule passes. |
 | edge-refusal-reason | symptom | rust_engine | `runners/dsl/src/checker.rs` | Type-1 and Type-2 failure modes of the admissibility check. |
@@ -171,7 +171,7 @@ Each cell is `recall (recall_content)`.
 | reading-mints-quantum-rules | symptom | domains | `domains/reading_collapse.py` | Reading collapse onto the sd loop rules. |
 | term-variant-regeneration | symptom | worlds_or_tools | `tools/gen_term_variants.py`<br>`runners/dsl/src/term_variants.rs` | Generator and generated index for the TermNode enum. |
 | ts-trivia-leaves | symptom | domains | `domains/ts_ingest.py` | Lossless mode inserts trivia leaves for byte gaps. |
-| python-cst-lossless-leaves | symptom | domains | `domains/py_cst_ingest.py`<br>`scripts/ocelot_lossless.py` | Token and trivia leaves under every format. |
+| python-cst-lossless-leaves | symptom | domains | `domains/py_cst_ingest.py`<br>`src/ozagia/edit/lossless.py` | Token and trivia leaves under every format. |
 | persistence-node-ids | symptom | substrate | `substrate/persistence.py` | Graph save and load that preserves node ids. |
 | admissibility-check-no-bypass | symptom | substrate | `substrate/checker.py` | Consistency checker in front of every edge write. |
 | grid-game-frames-to-cells | symptom | worlds_or_tools | `worlds/arc.py` | Frame to substrate mutation adapter for the grid game. |

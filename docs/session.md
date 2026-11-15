@@ -56,7 +56,7 @@ the edit(s) and their verification.
 One file per session:
 
 ```text
-var/ocelot_dev_sessions/<session_id>.json
+.ozagia/sessions/<session_id>.json
 ```
 
 - Written atomically: `tempfile.mkstemp` in the same directory, `fsync`,
@@ -82,7 +82,7 @@ session) and never print. Errors raise `DevSessionError` with a specific
 reason.
 
 ```python
-from scripts.ocelot_dev_session import (
+from ozagia.core.session import (
     DevSession, DevSessionError, load_session, list_sessions, load_workflow,
 )
 
@@ -266,7 +266,7 @@ by workstream C. The integrator should add:
 | `dev_session_load` | `session_id` | `load_session(...).state()`. |
 | `dev_session_list` | — | `list_sessions()`. |
 
-Suggested CLI verbs in `scripts/ocelot_dev_memory.py`:
+Suggested CLI verbs in `src/ozagia/core/memory.py`:
 `session-start`, `session-record`, `session-state`, `session-next`,
 `session-finish`, `session-list`. The CLI is a thin JSON wrapper; no decision
 logic belongs there.
@@ -301,7 +301,7 @@ logic belongs there.
 
 ## Source
 
-- `scripts/ocelot_dev_session.py` — graph, persistence, facts, evaluator.
+- `src/ozagia/core/session.py` — graph, persistence, facts, evaluator.
 - `scripts/dev_session_workflow.json` — the declarative transition table.
 - `tests/test_dev_session_migrated.py` — scoped gate:
 

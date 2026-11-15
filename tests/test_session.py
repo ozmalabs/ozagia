@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.ocelot_dev_session import (
+from ozagia.core.session import (
     DevSession,
     DevSessionError,
     list_sessions,
@@ -26,7 +26,7 @@ def _start(tmp_path: Path, task: str = "demo task",
 
 
 def _session_path(tmp_path: Path, session: DevSession) -> Path:
-    return tmp_path / "var" / "ocelot_dev_sessions" / f"{session.session_id}.json"
+    return tmp_path / ".ozagia" / "sessions" / f"{session.session_id}.json"
 
 
 def _prepare_step(tmp_path: Path, *, steps: list[str] | None = None) -> DevSession:

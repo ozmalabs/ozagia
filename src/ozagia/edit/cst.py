@@ -1,13 +1,13 @@
-"""ocelot_cst_edit — graph-addressed structural edits for Rust/Lua source.
+"""Graph-addressed structural edits for Rust/Lua source.
 
-DEV TOOLING, NOT AGENT RUNTIME. This module is the Rust/Lua arm of the edit
-layer: it edits a file by naming **CST nodes** in the `CstNode` graph produced
-by `domains/ts_ingest.py`, not by accepting a text patch. The canonical record
+This module is the Rust/Lua arm of the edit layer: it edits a file by naming
+**CST nodes** in a lossless tree-sitter `CstNode` graph (see `_parse_graph`),
+not by accepting a text patch. The canonical record
 of a change is the semantic op list; `diff_view` is only a rendered view for
 humans. Raw `diff`/`patch` input is refused, exactly as in the Python, JSON and
 Markdown adapters.
 
-The graph contract is already in the substrate:
+The graph contract:
 
   * every CST node is a `CstNode` with `kind`, `field`, `child_index`, `named`;
   * leaves (nodes with no children) carry their exact source `text`;
@@ -25,7 +25,7 @@ every other leaf untouched (comments, blank lines, indentation, trailing
 spaces and line endings included).
 
 When tree-sitter and the Rust/Lua grammar are importable, the graph comes from
-`domains.ts_ingest.ingest_source`. Without them, the adapter also accepts a
+`_parse_graph`. Without them, the adapter also accepts a
 **synthetic** `CstNode`
 graph supplied by the caller in `script["cst_graph"]` (a nested text tree, a
 serialized node/edge graph, or a `CstGraph` instance). The tests use that path;
@@ -42,8 +42,8 @@ Ops (v0):
     replace_span          char/byte/line span, text
 
 Transaction: preview by default; `write=True` backs up under
-`var/ocelot_dev_edits/backups/`, writes atomically, and returns before/after
-SHA-256. Refusals raise `scripts.ocelot_code_edit.CodeEditError` (via
+`.ozagia/edits/backups/`, writes atomically, and returns before/after
+SHA-256. Refusals raise `ozagia.edit.code_edit.CodeEditError` (via
 `CstEditError`); there is no silent text-patch fallback.
 """
 from __future__ import annotations
@@ -55,12 +55,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-from scripts.ocelot_code_edit import (
+from ozagia.edit.code_edit import (
     FORBIDDEN_SCRIPT_KEYS,
     MAX_SOURCE_BYTES,
     CodeEditError,
 )
-from scripts.ocelot_edit_txn import (
+from ozagia.edit.txn import (
     check_base,
     encode_text,
     normalize_newlines,
@@ -68,11 +68,11 @@ from scripts.ocelot_edit_txn import (
     sha256_bytes,
     write_source,
 )
-from scripts.ocelot_lossless import Leaf, LosslessError, LosslessText
+from ozagia.edit.lossless import Leaf, LosslessError, LosslessText
 
 _NEWLINE_NAMES = {"\n": "lf", "\r\n": "crlf", "\r": "cr"}
 
-# Mirrors domains.ts_ingest._GRAMMARS. Kept here so this module can report an
+# Grammar modules by language. Kept here so this module can report an
 # honest backend status without importing tree_sitter at module import time.
 _GRAMMAR_MODULES = {
     "rust": "tree_sitter_rust",
@@ -144,10 +144,11 @@ class _Edit:
 class CstGraph:
     """A read-only `CstNode` graph rooted at one node.
 
-    The graph can be built from a live substrate (the `ts_ingest` path), from a
-    nested text tree (the synthetic/test path), or from a serialized
+    The graph can be built from tree-sitter (`_parse_graph`), from any graph
+    store with `node(id)` and `neighbours(id, "child")` (`from_substrate`), from
+    a nested text tree (the synthetic/test path), or from a serialized
     node/edge dict. Only the `child` edge is used; `child_index` orders
-    siblings, exactly as `TableWalker.children` does in `domains/ts_ingest.py`.
+    siblings.
     """
 
     def __init__(self, root: Any, nodes: dict[Any, dict[str, Any]],
@@ -518,18 +519,13 @@ def _backend_status(language: str) -> dict[str, Any]:
     except Exception as e:  # noqa: BLE001
         status["reason"] = f"{module} grammar is not importable: {e}"
         return status
-    try:
-        from substrate_rs import Substrate  # noqa: F401
-    except Exception as e:  # noqa: BLE001
-        status["reason"] = f"substrate_rs is not importable: {e}"
-        return status
     status["available"] = True
     return status
 
 
 def tree_sitter_available(language: str) -> bool:
-    """True when the real parse/ingest path (tree_sitter + grammar + substrate)
-    is importable for `language`. The synthetic CST path works regardless."""
+    """True when the real parse path (tree_sitter + grammar) is importable
+    for `language`. The synthetic CST path works regardless."""
     return bool(_backend_status(language).get("available"))
 
 
@@ -552,22 +548,66 @@ def _make_parser(language: str) -> tuple[Any | None, str]:
 
 
 def _parse_graph(source: str, language: str) -> CstGraph:
-    """Ingest `source` through `domains.ts_ingest.ingest_source`."""
-    try:
-        from substrate_rs import Substrate
-        from domains.ts_ingest import ingest_source
-    except Exception as e:  # noqa: BLE001
+    """Parse `source` with tree-sitter into a lossless `CstGraph`.
+
+    Every tree-sitter node (named and anonymous) becomes a node; explicit
+    `trivia` leaves cover the byte gaps between children, so the leaf texts
+    concatenate to the source byte for byte. The node attributes match
+    Ocelot's `domains.ts_ingest.ingest_source(..., include_trivia=True)`.
+    """
+    parser, reason = _make_parser(language)
+    if parser is None:
         raise CstEditError(
-            f"cannot import the tree-sitter ingestion path for {language}: {e}"
-        ) from e
+            f"cannot parse {language} with tree-sitter: {reason}")
+    source_bytes = source.encode("utf-8")
     try:
-        substrate = Substrate()
-        info = ingest_source(substrate, source, language,
-                             include_trivia=True)
+        tree = parser.parse(source_bytes)
     except Exception as e:  # noqa: BLE001
-        raise CstEditError(
-            f"tree-sitter ingestion failed for {language}: {e}") from e
-    return CstGraph.from_substrate(substrate, info["root"])
+        raise CstEditError(f"tree-sitter parse failed for {language}: {e}") from e
+    nodes: dict[int, dict[str, Any]] = {}
+    children: dict[int, list[int]] = {}
+
+    def add(kind: str, fld: str, child_index: int, named: bool,
+            text: str | None = None) -> int:
+        nid = len(nodes)
+        attrs: dict[str, Any] = {"kind": kind, "field": fld or "",
+                                 "child_index": child_index, "named": bool(named),
+                                 "origin": "tree_sitter", "language": language}
+        if text is not None:
+            attrs["text"] = text
+        nodes[nid] = attrs
+        children[nid] = []
+        return nid
+
+    def decode(a: int, b: int) -> str:
+        return source_bytes[a:b].decode("utf-8", errors="replace")
+
+    def walk(node: Any, fld: str, child_index: int, *, root: bool = False) -> int:
+        if node.child_count == 0:
+            return add(node.type, fld, child_index, node.is_named,
+                       node.text.decode("utf-8", errors="replace"))
+        nid = add(node.type, fld, child_index, node.is_named)
+        cursor = 0 if root else int(node.start_byte)
+        end = len(source_bytes) if root else int(node.end_byte)
+        parts: list[tuple[str, Any, str]] = []
+        for i, child in enumerate(node.children):
+            cstart = int(child.start_byte)
+            if cstart > cursor:
+                parts.append(("trivia", None, decode(cursor, cstart)))
+                cursor = cstart
+            parts.append(("child", child, node.field_name_for_child(i) or ""))
+            cursor = max(cursor, int(child.end_byte))
+        if end > cursor:
+            parts.append(("trivia", None, decode(cursor, end)))
+        for j, (kind, child, val) in enumerate(parts):
+            if kind == "trivia":
+                children[nid].append(add("trivia", "", j, False, val))
+            else:
+                children[nid].append(walk(child, val, j))
+        return nid
+
+    root = walk(tree.root_node, "", -1, root=True)
+    return CstGraph(root, nodes, children)
 
 
 def _reparse_status(source: str, language: str) -> dict[str, Any]:
@@ -928,7 +968,7 @@ def apply_cst_edit_script(root: str | Path, script: dict[str, Any], *,
     """Validate and optionally apply a graph-addressed Rust/Lua CST edit.
 
     `write=False` (default) is a pure preview. `write=True` backs up the
-    original under `var/ocelot_dev_edits/backups/`, writes atomically, and
+    original under `.ozagia/edits/backups/`, writes atomically, and
     reports the transaction. See the module docstring for the op list and the
     synthetic `cst_graph` key used when tree-sitter is absent.
     """

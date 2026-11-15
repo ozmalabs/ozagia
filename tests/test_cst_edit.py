@@ -12,8 +12,8 @@ from pathlib import Path
 
 import pytest
 
-from scripts.ocelot_code_edit import CodeEditError, sha256_text
-from scripts.ocelot_cst_edit import (
+from ozagia.edit.code_edit import CodeEditError, sha256_text
+from ozagia.edit.cst import (
     CstGraph,
     apply_cst_edit_script,
     cst_graph_from_nested,
@@ -219,15 +219,39 @@ def test_serialized_cst_graph_is_accepted(tmp_path: Path) -> None:
     assert path.read_bytes() == b"fn other() {}\n"
 
 
-def test_live_substrate_cst_graph_is_accepted(tmp_path: Path) -> None:
-    srs = pytest.importorskip("substrate_rs")
+class _GraphStore:
+    """A minimal graph store with the `node`/`neighbours` interface that
+    `CstGraph.from_substrate` reads (an external graph, such as Ocelot's)."""
+
+    def __init__(self) -> None:
+        self.nodes: dict[int, dict] = {}
+        self.edges: dict[int, list[int]] = {}
+
+    def add_node(self, typ: str, attrs: dict) -> int:
+        nid = len(self.nodes)
+        self.nodes[nid] = {"type": typ, "attrs": dict(attrs)}
+        self.edges[nid] = []
+        return nid
+
+    def add_edge_unchecked(self, src: int, typ: str, tgt: int) -> None:
+        assert typ == "child"
+        self.edges[src].append(tgt)
+
+    def node(self, nid: int) -> dict:
+        return self.nodes.get(nid)
+
+    def neighbours(self, nid: int, typ: str) -> list[int]:
+        return list(self.edges[nid]) if typ == "child" else []
+
+
+def test_external_graph_store_cst_graph_is_accepted(tmp_path: Path) -> None:
     source = "fn main() {}\n"
-    substrate = srs.Substrate()
+    substrate = _GraphStore()
     root = substrate.add_node("CstNode", {
         "kind": "source_file", "field": "", "child_index": -1,
         "named": True, "origin": "test",
     })
-    inner = getattr(substrate, "_inner", substrate)
+    inner = substrate
     leaves = [
         ("keyword", "fn "), ("identifier", "main"), ("parameters", "()"),
         ("whitespace", " "), ("punctuation", "{"), ("punctuation", "}"),
@@ -479,7 +503,7 @@ def test_apply_backs_up_and_stale_base_is_refused(tmp_path: Path) -> None:
     backup = Path(result["backup"])
     assert backup.is_file()
     assert backup.read_text(encoding="utf-8") == before
-    assert backup.parent == (tmp_path / "var" / "ocelot_dev_edits"
+    assert backup.parent == (tmp_path / ".ozagia" / "edits"
                              / "backups").resolve()
 
     with pytest.raises(CodeEditError, match="stale base"):
@@ -604,7 +628,7 @@ def test_crlf_rust_replace_node_matches_lf_result_and_stays_crlf(tmp_path: Path)
 
 def test_write_is_refused_when_reparse_is_unchecked(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import scripts.ocelot_cst_edit as cst_mod
+    import ozagia.edit.cst as cst_mod
     monkeypatch.setattr(cst_mod, "_reparse_status", lambda source, language: {
         "checked": False, "ok": None, "reason": "forced for test"})
     path = _fixture(tmp_path)

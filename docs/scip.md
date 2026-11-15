@@ -203,7 +203,7 @@ Name parsing is best-effort for nonstandard/malformed symbol strings;
 
 ## Public API
 
-Import from `scripts.ocelot_scip_import`. All functions are deterministic and
+Import from `ozagia.index.scip`. All functions are deterministic and
 do not print.
 
 ### `load_scip_json(path, *, root=None) -> dict`

@@ -7,23 +7,19 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-from scripts.ocelot_code_search import code_search
-from scripts.ocelot_dev_memory import build_index
-from scripts.ocelot_repo_map import SOURCE_DIRS
-from scripts.ocelot_repo_map_eval import (
+from ozagia.core.search import code_search
+from ozagia.core.memory import build_index
+from ozagia.eval.retrieval import (
     ARMS,
-    AREAS,
     CONTENT,
     LISTING,
     ROOT,
-    STYLES,
     _run_record,
     baseline_listing,
     code_search_listing,
@@ -35,7 +31,6 @@ from scripts.ocelot_repo_map_eval import (
     load_tasks,
     render_markdown,
     source_files,
-    task_set_summary,
 )
 
 TASKS_V2 = ROOT / "evaluation" / "repo_map" / "tasks_v2.json"
@@ -73,7 +68,7 @@ def _fixture(root: Path) -> Path:
         "def test_alpha_feature():\n"
         "    assert alpha_feature(1) == 2\n",
         encoding="utf-8")
-    build_index(root, root / "var" / "ocelot_dev_graph.json",
+    build_index(root, root / ".ozagia" / "graph.json",
                 include_docs="none", include_git=False)
     tasks = {
         "version": 1,
@@ -243,70 +238,6 @@ def test_leakage_flags_basename_stem_spaced_stem_and_directory() -> None:
                          ["runners/dsl/src/term.rs"])) == []
 
 
-def test_shipped_tasks_v2_meet_leakage_and_design_counts() -> None:
-    tasks = load_tasks(TASKS_V2, root=ROOT)
-    assert len(tasks) >= 30
-    summary = task_set_summary(tasks)
-    assert summary["tasks"] == len(tasks)
-
-    # No-leak rule, per task.
-    for task in tasks:
-        assert leakage(task) == [], task["id"]
-
-    # Area and style counts, per design 1.
-    dev = [t for t in tasks if t["area"] == "dev_tooling"]
-    assert len(dev) / len(tasks) <= 0.30
-    rust = [t for t in tasks if t["area"] == "rust_engine"]
-    assert len(rust) >= 5
-    symptom = [t for t in tasks if t["style"] == "symptom"]
-    assert len(symptom) >= 12
-    for task in tasks:
-        assert task["style"] in STYLES and task["area"] in AREAS, task["id"]
-    for task in rust:
-        assert all(p.startswith("runners/dsl/src/")
-                   for p in task["expected_files"]), task["id"]
-
-    for task in tasks:
-        expected = task["expected_files"]
-        assert 1 <= len(expected) <= 4, task["id"]
-        for rel in expected:
-            assert rel.split("/")[0] in {d.split("/")[0] for d in SOURCE_DIRS}
-            assert any(rel.startswith(d + "/") for d in SOURCE_DIRS), rel
-            assert (ROOT / rel).is_file(), rel
-
-        # Evidence: recorded commands, real matches, each expected file named.
-        evidence = task["evidence"]
-        assert evidence, task["id"]
-        for item in evidence:
-            assert item["command"].startswith("rg "), task["id"]
-            assert 1 <= len(item["matches"]) <= 5, task["id"]
-        for rel in expected:
-            assert any(m.split(":")[0] == rel
-                       for item in evidence for m in item["matches"]), (
-                task["id"], rel)
-
-        if task["style"] == "symptom":
-            text = task["task"]
-            assert not re.search(r"[A-Za-z0-9]_[A-Za-z0-9]", text), task["id"]
-            assert "(" not in text and "()" not in text, task["id"]
-            assert not re.search(r"\w\.\w", text), task["id"]
-            assert not re.search(r"\.(py|rs|json|md|lua|sh)\b", text), task["id"]
-        else:
-            # An identifier task names a function, class or value that is
-            # defined in an expected file: snake_case, CamelCase, or Eq.
-            names: set[str] = set()
-            for token in re.findall(r"[A-Za-z_][A-Za-z0-9_.]*", task["task"]):
-                for part in token.split("."):
-                    if ("_" in part or re.search(r"[a-z][A-Z]", part)
-                            or part == "Eq"):
-                        names.add(part)
-            assert names, task["id"]
-            bodies = "\n".join((ROOT / rel).read_text(encoding="utf-8",
-                                                      errors="replace")
-                               for rel in expected)
-            assert any(name in bodies for name in names), task["id"]
-
-
 def test_grep_arm_ranks_distinct_terms_then_occurrences_then_path(
         tmp_path: Path) -> None:
     contents = {
@@ -433,7 +364,7 @@ def test_report_fingerprint_is_identical_across_hash_seeds(
         env = {**os.environ, "PYTHONHASHSEED": seed,
                "PYTHONPATH": str(ROOT)}
         subprocess.run(
-            [sys.executable, "-m", "scripts.ocelot_repo_map_eval",
+            [sys.executable, "-m", "ozagia.eval.retrieval",
              "--root", str(tmp_path), "--tasks", str(tasks_path),
              "--arms", "baseline,grep,code_search", "--budgets", "500",
              "--cache", str(tmp_path / "var" / f"cache_{seed}.json"),

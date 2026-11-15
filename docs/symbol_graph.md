@@ -10,7 +10,7 @@ this function, what does it call, and what breaks transitively if it changes.
 It reads the tag cache that the repo map already maintains, so it adds no
 parser and no new dependency.
 
-## Tag schema v3 (`scripts/ocelot_tag_languages.py`)
+## Tag schema v3 (`src/ozagia/index/tag_languages.py`)
 
 `TAGS_SCHEMA_VERSION = 3`. The bump changes the extractor fingerprint, so every
 cached tag entry is re-extracted once. v2 to v3 changes one behaviour: a Python
@@ -40,7 +40,7 @@ rejected the BOM and the empty result was cached. Line numbers do not move.
   in its qualname. A function inside `mod` nests under the module. Java
   classes and methods nest.
 
-## Graph (`scripts/ocelot_symbol_graph.py`)
+## Graph (`src/ozagia/core/symbol_graph.py`)
 
 - Symbol id: `"<rel path>::<qualname>"`. Module-level code uses
   `"<rel path>::<module>"`.
@@ -79,10 +79,10 @@ per symbol within the hop bound, and report that path's hop count as `depth`.
 ## API
 
 ```python
-from scripts.ocelot_symbol_graph import (
+from ozagia.core.symbol_graph import (
     build_symbol_graph, resolve_symbol, callers, callees, symbol_impact, symbol_query)
 
-result = symbol_query(root, "impact", "scripts/ocelot_repo_map.py::update_tag_cache",
+result = symbol_query(root, "impact", "src/ozagia/core/repo_map.py::update_tag_cache",
                       depth=2, cache_path=None, min_confidence=0.0)
 ```
 
@@ -98,14 +98,14 @@ result = symbol_query(root, "impact", "scripts/ocelot_repo_map.py::update_tag_ca
 - `symbol_query(root, op, symbol, *, depth, cache_path, min_confidence)` runs
   `update_tag_cache` for `root`, builds or reuses the graph, and runs `op`
   (`callers`, `callees`, `impact` or `resolve`). The default cache is
-  `<root>/var/ocelot_dev_tags.json`. It returns `ok`, the op result, `stats`,
+  `<root>/.ozagia/tags.json`. It returns `ok`, the op result, `stats`,
   `tag_cache` counts, and `timings` (`update_seconds`, `build_seconds`,
   `query_seconds`).
 
 ## CLI
 
 ```
-python -m scripts.ocelot_symbol_graph {callers,callees,impact,resolve} SYMBOL \
+python -m ozagia.core.symbol_graph {callers,callees,impact,resolve} SYMBOL \
     [--depth N] [--root R] [--cache C] [--min-confidence X]
 ```
 

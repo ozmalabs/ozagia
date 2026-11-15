@@ -10,7 +10,7 @@ decisions and verification receipts.
 **Not agent runtime.** This is a separate dev tool. It never boots the agent,
 never mutates the agent substrate, and does not import the seed/rule runtime.
 The graph it serves is a snapshot of the checkout, built by
-`scripts/ocelot_dev_memory.py`.
+`src/ozagia/core/memory.py`.
 
 ## Why a graph instead of embeddings
 
@@ -31,10 +31,10 @@ file, a line range, or a node id.
 
 ```bash
 cd /applications/data/projects/ocelot
-.venv/bin/python -m scripts.ocelot_dev_memory build
+.venv/bin/python -m ozagia.core.memory build
 ```
 
-The default output is `var/ocelot_dev_graph.json` (gitignored). A full build
+The default output is `.ozagia/graph.json` (gitignored). A full build
 of the current tree (including `scripts/`) takes ~90 s and produces ~137k
 nodes / ~416k edges; `--no-scripts` roughly halves that. Options:
 
@@ -49,7 +49,7 @@ nodes / ~416k edges; `--no-scripts` roughly halves that. Options:
 
 Query commands (`search`, `context`, `edit`, `repo-map`, `symbol-callers`, and
 the rest) take `--root PATH` after the verb. It names the checkout the tools
-act on, and defaults to `OCELOT_DEV_ROOT` or this repo, as the MCP server does.
+act on, and defaults to `OZAGIA_ROOT` or this repo, as the MCP server does.
 `--dump` picks the snapshot. The two can differ: a snapshot records the root it
 was built from, but reads and writes go to `--root`. `build` keeps its own
 `--root`, which is the tree it indexes.
@@ -95,20 +95,20 @@ new test modules, renamed files). A build is deterministic apart from
 
 ```bash
 # What context should I read for this task?
-.venv/bin/python -m scripts.ocelot_dev_memory context \
+.venv/bin/python -m ozagia.core.memory context \
     "add a rule to gap awareness"
 
 # Structural questions
-.venv/bin/python -m scripts.ocelot_dev_memory search "shape decode"
-.venv/bin/python -m scripts.ocelot_dev_memory file domains/teach.py
-.venv/bin/python -m scripts.ocelot_dev_memory symbol teach
-.venv/bin/python -m scripts.ocelot_dev_memory seed shape_decode_loop
-.venv/bin/python -m scripts.ocelot_dev_memory rule note_reported_gap
-.venv/bin/python -m scripts.ocelot_dev_memory tests seeds/gap_awareness.json
-.venv/bin/python -m scripts.ocelot_dev_memory outline domains/teach.py
-.venv/bin/python -m scripts.ocelot_dev_memory brief --task "add a seed rule"
-.venv/bin/python -m scripts.ocelot_dev_memory changed
-.venv/bin/python -m scripts.ocelot_dev_memory stats
+.venv/bin/python -m ozagia.core.memory search "shape decode"
+.venv/bin/python -m ozagia.core.memory file domains/teach.py
+.venv/bin/python -m ozagia.core.memory symbol teach
+.venv/bin/python -m ozagia.core.memory seed shape_decode_loop
+.venv/bin/python -m ozagia.core.memory rule note_reported_gap
+.venv/bin/python -m ozagia.core.memory tests seeds/gap_awareness.json
+.venv/bin/python -m ozagia.core.memory outline domains/teach.py
+.venv/bin/python -m ozagia.core.memory brief --task "add a seed rule"
+.venv/bin/python -m ozagia.core.memory changed
+.venv/bin/python -m ozagia.core.memory stats
 ```
 
 `context` is the high-value command: it anchors on identifiers named in the
@@ -120,7 +120,7 @@ with citations, not a plan.
 Record what you tried:
 
 ```bash
-.venv/bin/python -m scripts.ocelot_dev_memory record \
+.venv/bin/python -m ozagia.core.memory record \
     --kind verification \
     --task "gap awareness rule" \
     --summary "pytest tests/test_gap_awareness_migrated.py -q" \
@@ -128,10 +128,10 @@ Record what you tried:
     --commandline "pytest tests/test_gap_awareness_migrated.py -q" \
     --exit-code 0
 
-.venv/bin/python -m scripts.ocelot_dev_memory recent -n 10
+.venv/bin/python -m ozagia.core.memory recent -n 10
 ```
 
-The journal is `var/ocelot_dev_journal.jsonl`, append-only and shared by every
+The journal is `.ozagia/journal.jsonl`, append-only and shared by every
 agent using the checkout. It is not a source of truth; it is a receipt log.
 
 ## Wire it into OpenCode (V2)
@@ -143,17 +143,17 @@ Add the server to the project's `opencode.jsonc` under `mcp.servers`:
   "$schema": "https://opencode.ai/config.json",
   "mcp": {
     "servers": {
-      "ocelot-dev-memory": {
+      "ozagia": {
         "type": "local",
         "command": [
           "/applications/data/projects/ocelot/.venv/bin/python",
           "-m",
-          "scripts.ocelot_dev_memory_mcp"
+          "ozagia.integrations.mcp.server"
         ],
         "cwd": "/applications/data/projects/ocelot",
         "environment": {
-          "OCELOT_DEV_DUMP": "/applications/data/projects/ocelot/var/ocelot_dev_graph.json",
-          "OCELOT_DEV_JOURNAL": "/applications/data/projects/ocelot/var/ocelot_dev_journal.jsonl"
+          "OZAGIA_DUMP": "/applications/data/projects/ocelot/.ozagia/graph.json",
+          "OZAGIA_JOURNAL": "/applications/data/projects/ocelot/.ozagia/journal.jsonl"
         }
       }
     }
@@ -171,14 +171,14 @@ shell command:
 
 ```bash
 opencode mcp add ocelot-dev-memory --cwd /applications/data/projects/ocelot -- \
-  /applications/data/projects/ocelot/.venv/bin/python -m scripts.ocelot_dev_memory_mcp
+  /applications/data/projects/ocelot/.venv/bin/python -m ozagia.integrations.mcp.server
 ```
 
 For this checkout there is already a gitignored project-local
 `.opencode/opencode.json` with that server configured, so the tools are
 available in the current OpenCode session after the config is read. In Code
 Mode they are called as
-`tools["ocelot-dev-memory"].dev_context(...)`. Editing the server source does
+`tools["ozagia"].dev_context(...)`. Editing the server source does
 not restart an already-connected process; save the config (or reconnect the
 server from `/mcps`) to pick up a code change.
 
@@ -193,13 +193,13 @@ Content-Length fallback for LSP-style clients).
 ```json
 {
   "mcpServers": {
-    "ocelot-dev-memory": {
+    "ozagia": {
       "command": "/applications/data/projects/ocelot/.venv/bin/python",
-      "args": ["-m", "scripts.ocelot_dev_memory_mcp"],
+      "args": ["-m", "ozagia.integrations.mcp.server"],
       "cwd": "/applications/data/projects/ocelot",
       "env": {
-        "OCELOT_DEV_DUMP": "/applications/data/projects/ocelot/var/ocelot_dev_graph.json",
-        "OCELOT_DEV_JOURNAL": "/applications/data/projects/ocelot/var/ocelot_dev_journal.jsonl"
+        "OZAGIA_DUMP": "/applications/data/projects/ocelot/.ozagia/graph.json",
+        "OZAGIA_JOURNAL": "/applications/data/projects/ocelot/.ozagia/journal.jsonl"
       }
     }
   }
@@ -352,11 +352,11 @@ See [`LSP_BRIDGE.md`](LSP_BRIDGE.md).
 
 `dev_symbol_callers`, `dev_symbol_callees`, `dev_symbol_graph_impact` and
 `dev_symbol_resolve` answer symbol questions from the tag cache, using
-`scripts/ocelot_symbol_graph.py` (design and limits in
-[`SYMBOL_GRAPH.md`](SYMBOL_GRAPH.md)). The cache is `var/ocelot_dev_tags.json`
+`src/ozagia/core/symbol_graph.py` (design and limits in
+[`SYMBOL_GRAPH.md`](SYMBOL_GRAPH.md)). The cache is `.ozagia/tags.json`
 in the process root and is refreshed on each call. Every index tool uses that
 cache: `dev_repo_map`, `dev_impact`, `dev_code_search`, `dev_architecture` and
-the `dev_symbol_*` tools all read `<process root>/var/ocelot_dev_tags.json`, not
+the `dev_symbol_*` tools all read `<process root>/.ozagia/tags.json`, not
 the cache of the checkout that holds the script. The graph is syntactic: each
 reference resolves locally, through a `from X import name` binding, or by a
 unique global name, and each edge carries a confidence. There is no type
@@ -406,7 +406,7 @@ are omitted):
 
 Precise mode is only as complete as the server's workspace index. On the Ocelot
 worktree (about 6,800 indexed files), pyright returned 2 references for
-`scripts/ocelot_repo_map.py::update_tag_cache` against 18 syntactic callers, so
+`src/ozagia/core/repo_map.py::update_tag_cache` against 18 syntactic callers, so
 16 rows came back `lsp_confirmed: false`. A later query in the same process
 returned the same 2, and a third timed out after 20 s. Read `false` as "the
 server did not confirm this", not "this is not a caller".
@@ -505,7 +505,7 @@ dev_session_record(sid, "verification",
 A failed verification yields `diagnose` until `max_attempts` is reached, then
 `blocked`. `dev_session_state` returns the graph and derived facts; `finish`
 closes it with an outcome. Sessions live at
-`var/ocelot_dev_sessions/<id>.json` and are written atomically. The CLI mirrors
+`.ozagia/sessions/<id>.json` and are written atomically. The CLI mirrors
 the tools: `session-start`, `session-record`, `session-state`, `session-next`,
 `session-finish`, `session-list`.
 
@@ -526,7 +526,7 @@ This is not a new code model. The substrate already has the pieces:
 | `domains/ast_to_term.py` | The semantic `AstNode` overlay. It now also carries `lineno`/`col_offset`/`end_lineno`/`end_col_offset` (additive), so a semantic target has a span. |
 | `domains/ast_term_rules.py` | AST→Term correspondence expressed as graph rules; not a Python emitter. |
 | `domains/render_python.py` + `prog_*` | Hub-IR renderer and `ProgEval`; the path for graph-only edits once the IR covers the construct. |
-| `scripts/ocelot_lossless.py` | The edit-side bridge: token/trivia or line leaves, `render()` concatenates them, `replace()` would edit a leaf range. Every adapter asserts the leaf structure round-trips the source before editing. |
+| `src/ozagia/edit/lossless.py` | The edit-side bridge: token/trivia or line leaves, `render()` concatenates them, `replace()` would edit a leaf range. Every adapter asserts the leaf structure round-trips the source before editing. |
 
 The point: **the CST owns every byte; the AST owns the addresses.** A leaf
 outside the edited span is returned untouched — comments, blank lines,
@@ -678,13 +678,13 @@ CLI:
 
 ```bash
 # preview: no write, returns changes + diff_view + before/after hashes
-.venv/bin/python -m scripts.ocelot_dev_memory ast domains/teach.py
-.venv/bin/python -m scripts.ocelot_dev_memory edit \
+.venv/bin/python -m ozagia.core.memory ast domains/teach.py
+.venv/bin/python -m ozagia.core.memory edit \
     --file domains/teach.py --script /tmp/edit.json
 
 # apply: atomic write, backup under var/ocelot_dev_edits/backups,
 # append an `edit` entry to the journal
-.venv/bin/python -m scripts.ocelot_dev_memory edit \
+.venv/bin/python -m ozagia.core.memory edit \
     --file domains/teach.py --script /tmp/edit.json --apply
 ```
 
@@ -698,7 +698,7 @@ Safety properties:
 - **Lossless gate.** The leaf structure must reconstruct the source exactly
   before the edit; leaves outside the edit are byte-identical after it.
 - **Atomic write + backup.** The original goes to
-  `var/ocelot_dev_edits/backups/<ts>_<sha>_<name>`; the new text is written to
+  `.ozagia/edits/backups/<ts>_<sha>_<name>`; the new text is written to
   a temp file and `os.replace`d.
 - **Path safety.** The resolved path must stay under the repo root.
 - **Recorded transaction.** The journal entry contains the op list, before/after
@@ -744,7 +744,7 @@ layer is honest: semantic targets in, lossless CST out, diff as a view.
   *Symbol graph and precise mode*.
 - **Symbol graph CLI verbs.** `symbol-callers`, `symbol-callees`,
   `symbol-graph-impact` and `symbol-resolve` run the syntactic graph. `python -m
-  scripts.ocelot_dev_memory symbol-impact` is the existing LSP call-impact verb,
+  ozagia.core.memory symbol-impact` is the existing LSP call-impact verb,
   not the symbol graph. The MCP tool is `dev_symbol_graph_impact`.
 - **No LLM in the server.** It is deterministic and offline. The LLM is the
   coding agent's business; this surface only gives it better input.
@@ -755,29 +755,29 @@ layer is honest: semantic targets in, lossless CST out, diff as a view.
 
 ## Source
 
-- `scripts/ocelot_dev_memory.py` — builder, query layer, CLI.
-- `scripts/ocelot_dev_memory_mcp.py` — stdlib MCP stdio server.
-- `scripts/ocelot_code_edit.py` — graph-addressed Python edit algebra
+- `src/ozagia/core/memory.py` — builder, query layer, CLI.
+- `src/ozagia/integrations/mcp/server.py` — stdlib MCP stdio server.
+- `src/ozagia/edit/code_edit.py` — graph-addressed Python edit algebra
   (symbol + generic AST node ops, preview/apply, parse gate, backup).
 - `scripts/ocelot_ir_edit.py` — hub-IR-authored Python replacements rendered
   by `domains/render_python`, spliced into the lossless CST.
-- `scripts/ocelot_cst_edit.py` — Rust/Lua `CstNode` subtree edits (tree-sitter
+- `src/ozagia/edit/cst.py` — Rust/Lua `CstNode` subtree edits (tree-sitter
   backend or a caller-supplied synthetic graph).
-- `scripts/ocelot_repo_map.py` — tree-sitter tags, reference graph, personalized
+- `src/ozagia/core/repo_map.py` — tree-sitter tags, reference graph, personalized
   PageRank, token-budgeted repo map, and impact queries.
-- `scripts/ocelot_repo_map_eval.py` + `evaluation/repo_map/` — the retrieval
+- `src/ozagia/eval/retrieval.py` + `evaluation/repo_map/` — the retrieval
   evaluation harness, explicit task set, and measured results.
-- `scripts/ocelot_architecture.py` — deterministic hubs/cycles/coupling/
+- `src/ozagia/core/architecture.py` — deterministic hubs/cycles/coupling/
   dead-code/test-ratio report over the same graph.
-- `scripts/ocelot_scip_import.py` — SCIP JSON normalization and repo-map edges.
-- `scripts/ocelot_code_search.py` — BM25 + graph-PageRank lexical search.
-- `scripts/ocelot_lsp.py` — stdio LSP client, server registry, diagnostics
+- `src/ozagia/index/scip.py` — SCIP JSON normalization and repo-map edges.
+- `src/ozagia/core/search.py` — BM25 + graph-PageRank lexical search.
+- `src/ozagia/lsp.py` — stdio LSP client, server registry, diagnostics
   cache, symbol impact and rename preview.
-- `scripts/ocelot_markdown_edit.py`, `scripts/ocelot_json_edit.py` — the
+- `src/ozagia/edit/markdown.py`, `src/ozagia/edit/json_edit.py` — the
   Markdown section and JSON path adapters.
-- `scripts/ocelot_edit.py` — format dispatcher.
-- `scripts/ocelot_lossless.py` — the leaf/trivia bridge shared by adapters.
-- `scripts/ocelot_dev_session.py` + `scripts/dev_session_workflow.json` — the
+- `src/ozagia/edit/dispatch.py` — format dispatcher.
+- `src/ozagia/edit/lossless.py` — the leaf/trivia bridge shared by adapters.
+- `src/ozagia/core/session.py` + `scripts/dev_session_workflow.json` — the
   replayable dev-session graph and its declarative transition table
   ([`DEV_SESSION.md`](DEV_SESSION.md)).
 - `domains/py_cst_ingest.py` — Python `CstNode`/trivia ingestion, the twin of
