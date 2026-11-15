@@ -147,7 +147,14 @@ def run_pytest(memory: Any, cls: dict[str, Any], inp: dict[str, Any],
     res = run_tests(root, selectors, python=python, timeout_s=timeout_s,
                     extra_args=_verbosity(list(cls["extra_args"])))
     c = res["counts"]
-    lines = [res.get("output_tail") or ""]
+    out = res.get("output_tail") or ""
+    filt = cls.get("output_filter")
+    if filt and filt[0] in ("tail", "head") and filt[1] >= 0:
+        rows = out.splitlines()
+        rows = rows[-filt[1]:] if filt[0] == "tail" and filt[1] else (
+            rows[:filt[1]] if filt[0] == "head" else [])
+        out = "\n".join(rows)
+    lines = [out]
     head = (f"pytest {res['status']}: exit {res['exit_code']}, "
             f"{res['seconds']} s, {c['passed']} passed, {c['failed']} failed, "
             f"{c['error']} error, {c['skipped']} skipped")

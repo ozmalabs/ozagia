@@ -21,6 +21,8 @@ Environment:
     OZAGIA_JOURNAL  journal path  (default .ozagia/journal.jsonl)
     OZAGIA_AUTOBUILD  "1" to build the snapshot on first start if absent
     OZAGIA_ROOT     checkout the tools act on (default: the current Git top level)
+    OZAGIA_SURFACE  "full" (default) or "graph" (the find/node/expand/impact/
+                    edit/create/check/note verbs); `--surface` overrides it
 """
 from __future__ import annotations
 
@@ -48,6 +50,9 @@ BRIEF_URI = "ozagia://brief"
 SERVER_VERSION = "0.1.0"
 SUPPORTED_PROTOCOL_VERSIONS = ("2024-11-05", "2025-03-26", "2025-06-18")
 PROTOCOL_VERSION = "2025-06-18"
+# Tool surfaces: "full" (the dev_* tools) or "graph" (the eight verbs of
+# `ozagia.integrations.mcp.graph_surface`). Adapter tools are in both.
+SURFACES = ("full", "graph")
 
 # JSON-RPC error codes.
 _E_PARSE = -32700
@@ -649,13 +654,28 @@ def _validate_args(schema: dict[str, Any], args: Any) -> dict[str, Any]:
 
 class DevMemoryServer:
     def __init__(self, memory: DevMemory | None, *, mode: str = "coding",
-                 workspace: str | Path | None = None):
+                 workspace: str | Path | None = None, surface: str = "full"):
         if mode not in {"coding", "research", "combined"}:
             raise ValueError("mode must be one of: coding, research, combined")
+        if surface not in SURFACES:
+            raise ValueError(f"unknown surface {surface!r}; known: {SURFACES}")
         self.mem = memory
         self.mode = mode
+        self.surface = surface
         default_workspace = memory.raw_repo_root if memory else repo_root()
         self.workspace = str(workspace or default_workspace)
+        if surface == "graph" and mode in {"coding", "combined"}:
+            if memory is None:
+                raise ValueError("the graph surface needs a dev-memory snapshot")
+            from ozagia.integrations.mcp.graph_surface import (
+                GRAPH_TOOLS, GraphSurface)
+            self._handlers = GraphSurface(memory).handlers()
+            self._tools = list(GRAPH_TOOLS)
+            self._schemas = {t["name"]: t["inputSchema"] for t in self._tools}
+            self._load_adapter_tools()
+            if mode == "combined":
+                self._load_research_tools()
+            return
         self._handlers: dict[str, Callable[[dict[str, Any]], Any]] = ({
             "dev_context": self._context,
             "dev_brief": self._brief,
@@ -789,7 +809,7 @@ class DevMemoryServer:
         for err in reg.errors:
             print(f"[{SERVER_NAME}] adapter error: {err}", file=sys.stderr)
         for name, (spec, handler) in reg.mcp_tools.items():
-            if name in _SCHEMAS:
+            if name in _SCHEMAS or name in self._schemas:
                 print(f"[{SERVER_NAME}] adapter tool {name!r} clashes with a "
                       f"built-in tool; ignored", file=sys.stderr)
                 continue
@@ -1295,7 +1315,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--mode", choices=("coding", "research", "combined"),
                    default=os.environ.get("OZAGIA_MODE", "coding"),
                    help="tool set to expose (default: OZAGIA_MODE or coding)")
+    p.add_argument("--surface", default=os.environ.get("OZAGIA_SURFACE", "full"),
+                   help="coding tool surface: full (default) or graph")
     args = p.parse_args(argv)
+    if args.surface not in SURFACES:
+        p.error(f"--surface/OZAGIA_SURFACE must be one of {', '.join(SURFACES)}, "
+                f"got {args.surface!r}")
     # Resolve defaults only after --root is known. The module-level memory
     # defaults are anchored to the importing process's cwd, which can differ
     # from an explicitly selected workspace. state_path also honors
@@ -1313,7 +1338,8 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError:
         pass  # not the main thread
     try:
-        return serve(DevMemoryServer(mem, mode=args.mode, workspace=args.root))
+        return serve(DevMemoryServer(mem, mode=args.mode, workspace=args.root,
+                                     surface=args.surface))
     finally:
         _close_lsp()
 

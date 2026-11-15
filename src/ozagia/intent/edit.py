@@ -128,13 +128,11 @@ def _edit_error(path: Path, res: dict[str, Any]) -> IntentError:
                  tag(f"in: {res.get('key')}")]
         return IntentError("\n".join(lines), keys=list(res.get("keys") or []))
     if "nearest" in res:
-        lines = [NOT_FOUND]
-        keys = []
-        for n in res["nearest"]:
-            lines.append(tag(f"nearest: L{n['line']} {n['key']}: "
-                             f"{one_line(n['text'])}"))
-            keys.append(n["key"])
-        return IntentError("\n".join(lines), keys=keys)
+        # OpenCode's built-in edit retries with whitespace- and
+        # indentation-tolerant matching; an exact miss goes to it, and `after`
+        # re-ingests whatever it wrote.
+        raise Unhandled("oldString has no exact match; the built-in edit "
+                        "tries its tolerant matchers")
     if res.get("matches"):
         try:
             text = split_lines(path.read_text(encoding="utf-8",

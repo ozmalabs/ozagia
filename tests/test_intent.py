@@ -376,10 +376,10 @@ def test_edit_errors(mem, repo):
     before = (repo / "pkg/mod.py").read_text()
     res = _call(mem, "edit", path="pkg/mod.py", oldString="def helpr(a):",
                 newString="x")
-    assert res["handled"] and res["is_error"]
-    lines = res["output"].split("\n")
-    assert lines[0] == "oldString not found in content"
-    assert lines[1].startswith("[ozagia] nearest: L5 sym:pkg/mod.py::helper: ")
+    # No exact match: the built-in edit (with its tolerant matchers) gets it.
+    assert res["handled"] is False
+    assert "no exact match" in res["reason"]
+    assert (repo / "pkg/mod.py").read_text() == before
 
     res = _call(mem, "edit", path="pkg/mod.py", oldString="return", newString="x")
     assert res["is_error"]
@@ -671,3 +671,38 @@ def test_after_exception_is_reported_not_raised(mem, monkeypatch):
     monkeypatch.setattr(mem, "pending_changes", boom)
     res = I.after(mem, "write", {}, "", harness="opencode", session=None)
     assert res["append"] == "" and "kaput" in res["meta"]["error"]
+
+
+
+@pytest.mark.parametrize("command,filt", [
+    ("python -m pytest tests/test_mod.py::test_helper -q 2>&1 | tail -20", ("tail", 20)),
+    ("pytest -q | head -5", ("head", 5)),
+    ("pytest tests 2>&1", ("all", 0)),
+])
+def test_pytest_with_an_output_filter_is_still_pytest(command, filt):
+    from ozagia.intent.shell import classify
+    got = classify(command)
+    assert got["class"] == "pytest" and got["output_filter"] == filt
+
+
+@pytest.mark.parametrize("command", ["pytest | grep x", "cat a | tail -3",
+                                     "pytest > out.txt", "pytest | tail -n 3 | head -1"])
+def test_other_pipelines_stay_complex(command):
+    from ozagia.intent.shell import classify
+    assert classify(command)["class"] == "complex"
+
+
+def test_pytest_tail_filter_applies_to_output(mem):
+    import sys
+    res = _call(mem, "shell",
+                command=f"{sys.executable} -m pytest tests/test_mod.py -q 2>&1 | tail -3")
+    assert res["handled"], res
+    head = res["output"].split("[ozagia] pytest")[0].rstrip("\n").splitlines()
+    assert len(head) <= 3
+    assert "[ozagia] pytest " in res["output"]
+
+
+def test_grep_case_sensitive_false_ignores_case(mem):
+    res = _call(mem, "grep", pattern="HELPER", caseSensitive=False)
+    assert res["handled"] and "Found" in res["output"]
+    assert "No files found" in _call(mem, "grep", pattern="HELPER")["output"]

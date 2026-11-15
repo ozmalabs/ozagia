@@ -1007,9 +1007,11 @@ def test_graph_intent_noop_run_aggregates_and_renders(fixture):
 def test_graph_stats_fields_read_counts():
     assert ae.graph_stats_fields(None) == {"plugin_loaded": None, "captured_calls": None,
                                            "fallbacks": None}
-    assert ae.graph_stats_fields({"hellos": 2, "handled": {"read": 3, "grep": 1},
-                                  "fallbacks": 1}) == {
-        "plugin_loaded": True, "captured_calls": 4, "fallbacks": 1}
+    # The daemon's shape: handled {"true": captured, "false": passed through}.
+    assert ae.graph_stats_fields({"hellos": 2, "handled": {"true": 3, "false": 4},
+                                  "fallbacks": 4}) == {
+        "plugin_loaded": True, "captured_calls": 3, "fallbacks": 4}
+    assert ae.graph_stats_fields({"hellos": 1, "handled": 2})["captured_calls"] == 2
     assert ae.graph_stats_fields({"hellos": 0, "by_handled": {"true": 5}})[
         "captured_calls"] == 5
 
@@ -1035,3 +1037,24 @@ def test_opencode_graph_intent_config_and_socket_env(tmp_path, monkeypatch):
     assert captured["env"]["OZAGIA_DAEMON_SOCK"] == "/tmp/x.sock"
     assert captured["env"]["OPENCODE_CONFIG"] == str(tmp_path / "log" / "opencode_config.json")
     assert captured["argv"][:3] == ["opencode", "run", "--standalone"]
+
+
+
+def test_daemon_gets_the_run_python_first_on_path(tmp_path, monkeypatch):
+    seen = {}
+
+    class Proc:
+        pid = 0
+        stdout = None
+
+    def fake_popen(argv, **kw):
+        seen["env"] = kw["env"]
+        raise OSError("stop here")
+
+    monkeypatch.setattr(ae.subprocess, "Popen", fake_popen)
+    out = ae.start_daemon(tmp_path, "/usr/bin/python3", tmp_path / "log",
+                          run_python=_python())
+    assert out["daemon_ok"] is False
+    first = Path(seen["env"]["PATH"].split(os.pathsep)[0])
+    assert first == tmp_path / "log" / "bin"
+    assert os.path.realpath(first / "python") == os.path.realpath(_python())

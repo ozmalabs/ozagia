@@ -278,3 +278,31 @@ def test_client_errors(tmp_path_factory):
         c.close()
     finally:
         silent.close()
+
+
+def test_edits_write_the_snapshot_once_on_exit(tmp_path):
+    root = tmp_path / "repo"
+    (root / "pkg").mkdir(parents=True)
+    (root / "pkg" / "__init__.py").write_text("")
+    (root / "pkg" / "mod.py").write_text(MOD)
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    dump = tmp_path / "graph.json"
+    sock = tmp_path / "w.sock"
+    proc = _start(root, sock, dump, tmp_path / "j.jsonl")
+    try:
+        before = dump.stat().st_mtime_ns
+        with DaemonClient(sock, timeout=10) as c:
+            res = c.tool("edit", {"path": "pkg/mod.py", "oldString": "return a + b",
+                                  "newString": "return b + a"})
+            assert res["handled"] and not res["is_error"], res
+            # The graph is updated in memory, but not yet written.
+            assert "~file:pkg/mod.py" in res["output"]
+            assert dump.stat().st_mtime_ns == before
+            c.shutdown()
+        proc.wait(timeout=20)
+    finally:
+        _stop(proc)
+    assert dump.stat().st_mtime_ns != before
+    graph = json.loads(dump.read_text())
+    helper = [n for n in graph["nodes"] if n.get("key") == "sym:pkg/mod.py::helper"]
+    assert helper and "b + a" in (root / "pkg" / "mod.py").read_text()
