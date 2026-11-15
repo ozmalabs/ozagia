@@ -12,12 +12,22 @@
 //     handled, not is_error -> return the daemon's output.
 //     handled, is_error     -> throw Error(output): a tool error for the model.
 //     handled false         -> run the original, send {op: "after"} with its
-//                              output, append the daemon's `append` text.
-//     daemon error/timeout  -> run the original and return its output as is;
+//                              output, append the daemon's `append` text
+//                              (also for `expired`: the daemon did nothing).
+//     daemon unreachable, error response, or (read/grep/glob) timeout
+//                           -> run the original and return its output as is;
 //                              a best-effort `after` with meta.fallback records it.
-//   A daemon failure never fails a tool call.
-// - The socket is opened lazily on the first call, so OpenCode never waits for
-//   the daemon at startup. `hello` is sent once, on the first connection.
+//     edit/write/shell sent, then failed or timed out
+//                           -> do not run the original (the daemon may still
+//                              run the request); throw an "outcome unknown"
+//                              error telling the model to re-read / check,
+//                              and send `after` with
+//                              meta.fallback = "unknown_outcome".
+// - One connection per request (open, send, read one response, close), so a
+//   slow call never queues others. Every request carries
+//   deadline_ms = Date.now() + its timeout; the daemon drops it unexecuted
+//   once that has passed. `hello` is sent once per process, on its own
+//   connection, before the first request.
 // - Timeouts: 30 s per request; a shell request gets the command's own
 //   timeout (input.timeout, ms; 300 s when unset) plus 30 s.
 // - setup never throws.
@@ -41,102 +51,67 @@ const NOTES = {
   shell: CONTEXT_NOTE,
 };
 
+// One connection per request: open, send one line, read one response line,
+// close. A slow call (a captured pytest) never queues other calls behind it.
 class DaemonClient {
   constructor(path, timeoutMs) {
     this.path = path;
     this.timeoutMs = timeoutMs;
-    this.sock = null;
-    this.connecting = null;
-    this.pending = new Map();
     this.nextId = 1;
-    this.buffer = "";
     this.helloSent = false;
     this.session = undefined;
   }
 
-  connect() {
-    if (this.sock) return Promise.resolve(this.sock);
-    if (this.connecting) return this.connecting;
-    this.connecting = new Promise((resolve, reject) => {
-      const s = net.createConnection({ path: this.path });
-      s.setEncoding("utf8");
-      s.unref(); // an idle connection never keeps OpenCode alive
-      s.once("connect", () => {
-        this.sock = s;
-        this.connecting = null;
-        if (!this.helloSent) {
-          this.helloSent = true;
-          this.send({ op: "hello", harness: HARNESS, plugin: PLUGIN_ID,
-                      version: PLUGIN_VERSION, session: this.session }, s);
-        }
-        resolve(s);
-      });
-      s.on("data", (chunk) => this.onData(chunk));
-      s.on("error", (err) => {
-        if (this.connecting) { this.connecting = null; reject(err); }
-        this.drop(s, err);
-      });
-      s.on("close", () => this.drop(s, new Error("daemon connection closed")));
-    });
-    return this.connecting;
+  // `hello` once per process, on its own short-lived connection; it is sent
+  // again only if the daemon could not be reached.
+  hello() {
+    if (this.helloSent) return;
+    this.helloSent = true;
+    this.request({ op: "hello", harness: HARNESS, plugin: PLUGIN_ID,
+                   version: PLUGIN_VERSION, session: this.session },
+                 this.timeoutMs, false, false)
+      .catch((err) => { if (!err.sent) this.helloSent = false; });
   }
 
-  drop(s, err) {
-    if (this.sock !== s && this.sock !== null) return; // an old socket closing late
-    this.sock = null;
-    for (const [, p] of this.pending) p.reject(err);
-    this.pending.clear();
-    this.buffer = "";
-  }
-
-  onData(chunk) {
-    this.buffer += chunk;
-    let nl;
-    while ((nl = this.buffer.indexOf("\n")) >= 0) {
-      const line = this.buffer.slice(0, nl);
-      this.buffer = this.buffer.slice(nl + 1);
-      let msg;
-      try { msg = JSON.parse(line); } catch { continue; }
-      const p = this.pending.get(msg && msg.id);
-      if (p) { this.pending.delete(msg.id); p.resolve(msg); }
-    }
-  }
-
-  // Write one request on an open socket; the response is matched by id.
-  send(msg, s, timeoutMs = this.timeoutMs, keepAlive = false) {
+  // Resolves with the response (ok: true); rejects with an Error whose
+  // `sent` is true when the request line had been written, so the daemon
+  // may have read it. `deadline_ms` tells the daemon when to stop caring.
+  // `keepAlive` holds the event loop open while a tool call waits.
+  request(msg, timeoutMs = this.timeoutMs, keepAlive = true, withHello = true) {
+    if (withHello) this.hello();
     const id = this.nextId++;
-    const done = new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(id);
-        reject(new Error(`daemon timeout after ${timeoutMs} ms`));
-      }, timeoutMs);
-      if (!keepAlive) timer.unref();
-      this.pending.set(id, {
-        resolve: (v) => { clearTimeout(timer); resolve(v); },
-        reject: (e) => { clearTimeout(timer); reject(e); },
+    const line = JSON.stringify({ ...msg, id, deadline_ms: Date.now() + timeoutMs }) + "\n";
+    return new Promise((resolve, reject) => {
+      let sent = false;
+      let done = false;
+      let buffer = "";
+      const s = net.createConnection({ path: this.path });
+      const finish = (err, res) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        s.destroy();
+        if (err) { err.sent = sent; reject(err); } else resolve(res);
+      };
+      const timer = setTimeout(
+        () => finish(new Error(`daemon timeout after ${timeoutMs} ms`)), timeoutMs);
+      if (!keepAlive) { timer.unref(); s.unref(); }
+      s.setEncoding("utf8");
+      s.once("connect", () => { sent = true; s.write(line); });
+      s.on("data", (chunk) => {
+        buffer += chunk;
+        const nl = buffer.indexOf("\n");
+        if (nl < 0) return;
+        let res;
+        try { res = JSON.parse(buffer.slice(0, nl)); }
+        catch { finish(new Error("daemon sent a bad response")); return; }
+        if (!res || res.id !== id) { finish(new Error("daemon response does not match")); return; }
+        if (!res.ok) { finish(new Error(`daemon error: ${res.error || "unknown"}`)); return; }
+        finish(null, res);
       });
+      s.on("error", (err) => finish(err));
+      s.on("close", () => finish(new Error("daemon connection closed")));
     });
-    s.write(JSON.stringify({ ...msg, id }) + "\n");
-    return done.then((res) => {
-      if (!res.ok) throw new Error(`daemon error: ${res.error || "unknown"}`);
-      return res;
-    });
-  }
-
-  // Connect if needed, then send; the timeout covers both. `keepAlive` holds
-  // the event loop open while a tool call waits for its answer.
-  async request(msg, timeoutMs = this.timeoutMs, keepAlive = true) {
-    let timer;
-    const limit = new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new Error(`daemon timeout after ${timeoutMs} ms`)), timeoutMs);
-      if (!keepAlive) timer.unref();
-    });
-    try {
-      return await Promise.race([
-        this.connect().then((s) => this.send(msg, s, timeoutMs, keepAlive)), limit]);
-    } finally {
-      clearTimeout(timer);
-    }
   }
 }
 
@@ -163,6 +138,17 @@ function timeoutFor(name, input, base) {
   return (Number.isFinite(t) && t > 0 ? t : SHELL_DEFAULT_TIMEOUT_MS) + base;
 }
 
+// Tools whose request, once sent, may have changed files or run commands.
+const MUTATING = new Set(["edit", "write", "shell"]);
+
+function unknownOutcome(name, why) {
+  const what = name === "shell"
+    ? "Check its effects (re-read the files it touches) before running it again."
+    : "Re-read the file before editing it again.";
+  return new Error(`ozagia: the graph daemon did not answer this ${name} call (${why}); `
+    + `it may or may not have been applied. ${what}`);
+}
+
 function wrap(client, name, tool, original) {
   return async function execute(input, c) {
     const session = c && c.sessionID;
@@ -174,12 +160,19 @@ function wrap(client, name, tool, original) {
       res = await client.request({ op: "tool", ...base }, timeoutFor(name, input, client.timeoutMs));
     } catch (err) {
       fallback = String((err && err.message) || err);
+      if (err && err.sent && MUTATING.has(name)) {
+        client.request({ op: "after", ...base, output: "",
+                         meta: { fallback: "unknown_outcome", error: fallback } },
+                       client.timeoutMs, false).catch(() => {});
+        throw unknownOutcome(name, fallback);
+      }
     }
     if (res && res.handled) {
       const out = typeof res.output === "string" ? res.output : asText(res.output);
       if (res.is_error) throw new Error(out);
       return textResult(out);
     }
+    // handled false (also `expired`: the daemon did nothing) -> the built-in.
     const output = asText(await original.call(tool, input, c));
     if (fallback !== null) {
       client.request({ op: "after", ...base, output, meta: { fallback } },

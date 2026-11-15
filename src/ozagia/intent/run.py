@@ -28,6 +28,14 @@ from ozagia.intent.common import (
 from ozagia.intent.shell import classify
 
 DEFAULT_TIMEOUT_S = 300
+# The shortest timeout a deadline clamps a captured pytest to (the native
+# loop's plain shell uses the same floor).
+MIN_TIMEOUT_S = 0.1
+
+
+def refusal(command: str) -> str:
+    """The tool error for a ref-moving git command (`git_refs`)."""
+    return f"Refused by ozagia: {one_line(command)} changes git refs"
 
 
 def _workdir(root: Path, wd: Any) -> Path:
@@ -144,8 +152,14 @@ def run_pytest(memory: Any, cls: dict[str, Any], inp: dict[str, Any],
         timeout_s = float(timeout) / 1000 if timeout else DEFAULT_TIMEOUT_S
     except (TypeError, ValueError):
         timeout_s = DEFAULT_TIMEOUT_S
+    remaining = inp.get("_deadline_s_remaining")
+    if isinstance(remaining, (int, float)) and not isinstance(remaining, bool):
+        timeout_s = max(MIN_TIMEOUT_S, min(timeout_s, float(remaining)))
+    env = inp.get("_test_env")
     res = run_tests(root, selectors, python=python, timeout_s=timeout_s,
-                    extra_args=_verbosity(list(cls["extra_args"])))
+                    extra_args=_verbosity(list(cls["extra_args"])),
+                    **({"env": env, "inherit": False}
+                       if isinstance(env, dict) else {}))
     c = res["counts"]
     out = res.get("output_tail") or ""
     filt = cls.get("output_filter")
@@ -200,8 +214,7 @@ def handle_shell(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
     cls = classify(command)
     kind = cls["class"]
     if kind == "git_refs":
-        raise IntentError(f"Refused by ozagia: {one_line(command)} changes "
-                          f"git refs", intent="shell_refused")
+        raise IntentError(refusal(command), intent="shell_refused")
     if kind not in ("pytest", "read", "grep"):
         raise Unhandled(cls.get("reason") or kind)
     root = root_of(memory)
@@ -232,4 +245,4 @@ def handle_shell(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
     return res
 
 
-__all__ = ["handle_shell", "run_pytest"]
+__all__ = ["handle_shell", "refusal", "run_pytest"]

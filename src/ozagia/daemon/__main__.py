@@ -1,10 +1,11 @@
 """Command line for the graph daemon.
 
     python -m ozagia.daemon serve --root <repo> [--dump <graph>]
-        [--journal <jsonl>] [--sock <path>] [--no-build]
+        [--journal <jsonl>] [--sock <path>] [--no-build] [--parent-pid PID]
     python -m ozagia.daemon ping|stats|shutdown [--root <repo> | --sock <path>]
 
-`serve` prints `ready <socket path>` once it accepts connections. The
+`serve` prints `ready <socket path>` once it accepts connections; with
+`--parent-pid` it exits when that process is gone. The
 client commands print the daemon's reply as JSON and exit 1 when no daemon
 answers.
 """
@@ -35,6 +36,8 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--sock", default=None)
     s.add_argument("--no-build", action="store_true",
                    help="fail instead of building a missing snapshot")
+    s.add_argument("--parent-pid", type=int, default=None,
+                   help="shut down when this process (the harness) is gone")
     for name in ("ping", "stats", "shutdown"):
         c = sub.add_parser(name)
         c.add_argument("--root", default=None)
@@ -49,7 +52,8 @@ def main(argv: list[str] | None = None) -> int:
         from ozagia.daemon.server import DaemonStartError, serve
         try:
             return serve(root, dump=args.dump, journal=args.journal,
-                         sock=args.sock, build_if_missing=not args.no_build)
+                         sock=args.sock, build_if_missing=not args.no_build,
+                         parent_pid=args.parent_pid)
         except (DaemonStartError, FileNotFoundError) as e:
             print(f"error: {e}", file=sys.stderr)
             return 2

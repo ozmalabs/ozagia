@@ -62,6 +62,12 @@ def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def in_git_dir(path: str | os.PathLike[str]) -> bool:
+    """`path` has a `.git` component at any depth: git's own metadata
+    (refs, HEAD, config), which no edit may write."""
+    return ".git" in Path(os.fspath(path)).parts
+
+
 @dataclass(frozen=True)
 class SourceFile:
     rel: str

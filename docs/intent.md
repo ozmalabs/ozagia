@@ -148,7 +148,7 @@ environment prefixes.
 | pytest | `pytest`, `py.test`, `python[3] -m pytest`, `<path>/python -m pytest` | `ozagia.check.run_tests` with the named interpreter (a pytest script's `#!` line), the selectors made root-relative, the other flags, `timeout`/1000 s (default 300). Refused flags (cache, `--pdb`, `--junitxml`, ...) and ambiguous options fall back. |
 | read | `cat F`, `head [-n N] F`, `tail [-n N\|+N] F`, `sed -n 'A[,B]p' F` | read of that range (no 2000-line cap) |
 | grep | `grep [-rRnHiFE] [--include G] PAT [PATH]`, `rg [-nHiF] [-g G] PAT [PATH]`, `git grep [-niFE] PAT [PATH]` | grep; `-i` is case-insensitive. A basic regex with `\ + ? \| { } ( )`, or GNU-only escapes, falls back. |
-| git_refs | `git commit\|push\|stash\|branch\|checkout\|switch\|reset\|rebase\|merge\|tag\|worktree\|cherry-pick\|revert\|am\|pull\|fetch\|...`, also inside a compound command | tool error `Refused by ozagia: <command> changes git refs`. Listing forms (`git branch`, `git tag -l`, `git stash list`, `git worktree list`) are read-only. |
+| git_refs | `git commit\|push\|stash\|branch\|checkout\|switch\|reset\|rebase\|merge\|tag\|worktree\|cherry-pick\|revert\|am\|pull\|fetch\|bisect\|...` (`intent.shell.GIT_REF_MOVING`, shared with the Claude Code hook and `eval.agent.OPENCODE_GIT_DENY`), also inside a compound or multi-line command, after `VAR=value` prefixes, as `/path/to/git`, through `git -c alias.<x>=<ref-moving>`, inside a backtick or `$(...)` substitution, and inside `sh\|bash\|zsh -c '<script>'` (classified once more; a script nested deeper is refused when it names `git` and then a ref-moving subcommand) | tool error `Refused by ozagia: <command> changes git refs`. Listing forms (`git branch`, `git tag -l`, `git stash list`, `git worktree list`, `git bisect log`) are read-only. |
 | git_read, other, complex | everything else | `handled: false` |
 
 pytest output is pytest's own output tail, then:
@@ -158,6 +158,22 @@ pytest output is pytest's own output tail, then:
 [ozagia] failed test:tests/test_mod.py::test_broken: assert 3 == 5
 [ozagia]   frame test:tests/test_mod.py::test_broken tests/test_mod.py:9
 ```
+
+A captured pytest runs with the timeout `input.timeout` (ms), else 300 s.
+The native loop sets the reserved fields `_deadline_s_remaining` (the
+timeout is clamped to it, at least 0.1 s) and `_test_env` (the environment
+replaces the inherited one); it also passes the plain shell's default
+timeout, `harness.tools.DEFAULT_SHELL_TIMEOUT_MS`, when the model gave none.
+The daemon sets `_test_env` to its own environment without `OZAGIA_*`,
+`PYTHONPATH` and `COLUMNS`, and drops any `_` field a client sends. Reserved
+fields never appear in an output.
+
+Edits and writes refuse paths inside ozagia's state directory and paths
+with a `.git` component (at any depth, also through a symlink). Once the
+file is written, a failure in the journal or the reingest is reported as an
+`[ozagia] warning: <error>` (or `[ozagia] graph update failed: ...`) line in
+a handled result; it never turns into `handled: false`, which would make
+the plugin apply the change a second time.
 
 ## after
 
@@ -174,15 +190,36 @@ current file.
 
 One process per repository. `socketserver.ThreadingUnixStreamServer`, a
 thread per connection, one lock around `tool` and `after` (`DevMemory` is
-not thread-safe). Requests are JSON lines, answered in order; a line over
-`MAX_MESSAGE_BYTES` gets an error and the connection is closed. The socket
+not thread-safe), except a captured pytest: it reads no graph state and
+runs without the lock, so edits and reads sent while tests run are answered
+at once. Requests are JSON lines, answered in order; a line over
+`MAX_MESSAGE_BYTES` gets an error and the connection is closed. A request
+with a `deadline_ms` that has passed when its turn comes is answered
+`expired` and not executed (`ozagia.daemon.protocol`). The socket
 is mode 0600; a stale socket file (no answer to `ping`) is replaced, a live
 daemon is an error (exit 2). `shutdown`, SIGTERM and SIGINT stop it and
-remove the socket. The journal (`<state dir>/daemon_journal.jsonl`) has one
-record per request: `ts, op, tool, intent, handled, is_error, ms, keys (≤20),
-reason, session, harness`. `stats` returns counts by op, tool, intent and
-handled, fallbacks, hellos and their sessions, mean and max ms and uptime.
+remove the socket; with `--parent-pid` it also exits within
+`PARENT_POLL_S` (2 s) of that process going away (the harnesses pass their
+own pid). The journal (`<state dir>/daemon_journal.jsonl`) has one
+record per request: `ts, op, tool, intent, handled, is_error, expired, ms,
+keys (≤20), reason, fallback, session, harness`. `stats` returns counts by
+op, tool, intent and handled; `passthrough` (not handled by design),
+`expired`, `after_expired`, `late` (handled after the deadline),
+`plugin_fallbacks` (`after` requests with `meta.fallback`),
+`unknown_outcomes`, `fallbacks` (= `plugin_fallbacks`: one per call the
+plugin could not get answered; `expired` and failed `tool` requests are the
+daemon's view of some of the same calls), errors, hellos and their sessions, mean and max ms and
+uptime.
 
 `ozagia.core.memory` takes its layout from `$OZAGIA_ROOT` when imported, so
 `serve` sets it to `--root` first. `DevMemory`'s own journal goes next to a
 `--dump`, else to the state dir.
+
+## Known limits
+
+- Handled calls bypass OpenCode's own permission prompts. The plugin
+  replaces the tools' `execute`, so an edit, write or captured pytest the
+  daemon handles never reaches OpenCode's permission check (`ask` rules).
+  `ozagia agent` and the eval run with the eval's policy (`bash` allow-all
+  except ref-moving git), so nothing is lost there; an interactive session
+  with `ask` rules does not get its prompts for handled calls.

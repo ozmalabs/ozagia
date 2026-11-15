@@ -6,7 +6,12 @@ runs nothing. Only simple commands are mapped. A command with an operator
 (`|`, `;`, `&&`, `||`, `&`, a redirect, parentheses), a command or variable
 substitution, an unquoted glob character, a newline or an environment
 assignment prefix is `complex` and runs as-is, except that a ref-moving git
-command anywhere in its operator-separated segments is still refused.
+command anywhere in it is still refused: in any operator- or
+newline-separated segment, after `VAR=value` prefixes, as `/path/to/git`,
+through `git -c alias.<x>=<ref-moving subcommand>`, inside a backtick or
+`$(...)` substitution, or inside `sh|bash|zsh -c '<script>'` (the script is
+classified once more; a script nested deeper is refused when it names `git`
+and then a ref-moving subcommand).
 
 Classes (`result["class"]`):
 
@@ -21,10 +26,12 @@ Classes (`result["class"]`):
                   [-g G] PAT [PATH], git grep [-niFE] PAT [PATH]. Fields:
                   `pattern`, `path` (None: the working directory), `include`,
                   `literal`, `ignore_case`, `recursive`, `tool`.
-    git_refs      a git command that moves refs (commit, push, stash, ...).
-                  Fields: `subcommand`. Listing forms (`git branch`, `git
-                  tag -l`, `git stash list`, `git worktree list`) are
-                  `git_read`.
+    git_refs      a git command that moves refs (`GIT_REF_MOVING`: commit,
+                  push, stash, bisect, ...). Fields: `subcommand` (the
+                  alias name for an alias, "git" for a deeply nested
+                  script). Listing forms (`git branch`, `git
+                  tag -l`, `git stash list`, `git worktree list`, `git
+                  bisect log`) are `git_read`.
     git_read      a read-only git command (diff, show, status, log, blame,
                   and the listing forms above). Fields: `subcommand`.
     complex       not a simple command (see above).
@@ -40,16 +47,22 @@ import re
 import shlex
 from typing import Any
 
+# The one list of ref-moving git subcommands: the intent layer refuses them,
+# the Claude Code hook imports it, and `eval.agent.OPENCODE_GIT_DENY` is
+# generated from it.
 GIT_REF_MOVING = frozenset({
     "commit", "push", "stash", "branch", "checkout", "switch", "reset",
     "rebase", "merge", "tag", "worktree", "cherry-pick", "revert", "am",
     "pull", "fetch", "update-ref", "symbolic-ref", "filter-branch",
-    "filter-repo", "replace", "notes",
+    "filter-repo", "replace", "notes", "bisect",
 })
 GIT_READ_ONLY = frozenset({"diff", "show", "status", "log", "blame"})
 # git global options that take a separate value.
 _GIT_VALUE_OPTS = frozenset({"-C", "-c", "--git-dir", "--work-tree",
-                             "--namespace", "--exec-path"})
+                             "--namespace", "--exec-path", "--super-prefix",
+                             "--config-env"})
+# Shells whose `-c '<script>'` is classified too (one level deep).
+_SHELLS = frozenset({"sh", "bash", "zsh"})
 
 _PYTHON_RE = re.compile(r"^python(?:3(?:\.\d+)?)?$")
 # A trailing `2>&1`, `| tail -N`, `| head -N` (or both) after a command: an
@@ -60,6 +73,8 @@ _OUTPUT_FILTER_RE = re.compile(
 _ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _SED_RE = re.compile(r"^(\d+)(?:,(\d+|\$))?p$")
 _OPERATOR_CHARS = set(";&|<>()")
+# Characters that split a command line into segments for the git check.
+_SEGMENT_CHARS = "();<>|&\n"
 # An unquoted glob in `--include=*.py` only expands if a file of that name
 # exists; it is taken literally.
 _GLOB_OPTION_WORDS = ("--include=", "--glob=")
@@ -155,23 +170,144 @@ def _scan(command: str) -> str | None:
 
 
 def _segments(command: str) -> list[list[str]] | None:
-    """The command split at shell operators, each segment tokenised."""
+    """The command split at shell operators and newlines, each segment
+    tokenised."""
     try:
-        lex = shlex.shlex(command, posix=True, punctuation_chars=True)
+        lex = shlex.shlex(command, posix=True, punctuation_chars=_SEGMENT_CHARS)
+        lex.whitespace = " \t\r"
         lex.whitespace_split = True
         tokens = list(lex)
     except ValueError:
         return None
     out: list[list[str]] = [[]]
     for tok in tokens:
-        if tok and set(tok) <= _OPERATOR_CHARS:
+        if tok and set(tok) <= set(_SEGMENT_CHARS):
             out.append([])
         else:
             out[-1].append(tok)
     return [seg for seg in out if seg]
 
 
+def _substitutions(command: str) -> list[str]:
+    """The bodies of the backtick and `$(...)` substitutions in `command`
+    (outside single quotes), outermost first."""
+    out: list[str] = []
+    quote = ""
+    i = 0
+    n = len(command)
+    while i < n:
+        c = command[i]
+        if quote == "'":
+            if c == "'":
+                quote = ""
+            i += 1
+            continue
+        if c == "\\":
+            i += 2
+            continue
+        if c == "'" and not quote:
+            quote = "'"
+        elif c == '"':
+            quote = "" if quote == '"' else '"'
+        elif c == "`":
+            end = command.find("`", i + 1)
+            end = n if end < 0 else end
+            out.append(command[i + 1:end])
+            i = end + 1
+            continue
+        elif c == "$" and command[i + 1:i + 2] == "(":
+            depth, j = 1, i + 2
+            while j < n and depth:
+                if command[j] == "(":
+                    depth += 1
+                elif command[j] == ")":
+                    depth -= 1
+                j += 1
+            out.append(command[i + 2:j - 1 if depth == 0 else j])
+            i = j
+            continue
+        i += 1
+    return out
+
+
+def _shell_script(args: list[str]) -> str | None:
+    """The script of `sh|bash|zsh [-opts] -c '<script>' ...`, or None."""
+    has_c = False
+    i = 0
+    while i < len(args) and args[i].startswith("-") and args[i] not in ("-", "--"):
+        if not args[i].startswith("--") and "c" in args[i][1:]:
+            has_c = True
+        i += 1
+    if has_c and i < len(args):
+        return args[i]
+    return None
+
+
+def _mentions_refs(text: str) -> bool:
+    """`text` names git and, after it, a ref-moving subcommand. The check
+    for scripts nested two levels deep, which are not parsed."""
+    words = re.findall(r"[\w.-]+", text)
+    if "git" not in words:
+        return False
+    return any(w in GIT_REF_MOVING for w in words[words.index("git") + 1:])
+
+
+def _refs_in(seg: list[str], *, nested: bool) -> str | None:
+    """The ref-moving git subcommand one operator-separated segment runs:
+    `[VAR=x ...] [/path/]git <sub>`, or a shell's `-c` script that
+    classifies as `git_refs` (one level deep; deeper scripts are refused
+    when they name git and a ref-moving subcommand). None otherwise."""
+    i = 0
+    while i < len(seg) and _ENV_ASSIGN_RE.match(seg[i]):
+        i += 1
+    seg = seg[i:]
+    if not seg:
+        return None
+    base = os.path.basename(seg[0])
+    if base == "git":
+        got = _git(seg)
+        return got["subcommand"] if got["class"] == "git_refs" else None
+    if base in _SHELLS:
+        script = _shell_script(seg[1:])
+        if script is None:
+            return None
+        if nested:
+            return "git" if _mentions_refs(script) else None
+        got = classify(script, _nested=True)
+        if got["class"] == "git_refs":
+            return got.get("subcommand")
+    return None
+
+
+def _alias_refs(tokens: list[str]) -> str | None:
+    """A `git -c alias.<x>=<value>` option whose value runs a ref-moving
+    subcommand (`commit ...`, or `!<shell>` that classifies as git_refs)."""
+    i = 1
+    while i < len(tokens) and tokens[i].startswith("-"):
+        opt = tokens[i]
+        value = None
+        if opt == "-c" and i + 1 < len(tokens):
+            value = tokens[i + 1]
+        elif opt.startswith("-c") and len(opt) > 2:
+            value = opt[2:]
+        if value is not None:
+            name, _, body = value.partition("=")
+            if name.lower().startswith("alias."):
+                body = body.strip()
+                if body.startswith("!"):
+                    if classify(body[1:], _nested=True)["class"] == "git_refs":
+                        return name
+                elif body.split()[:1] and body.split()[0] in GIT_REF_MOVING:
+                    return name
+        i += 2 if opt in _GIT_VALUE_OPTS else 1
+    return None
+
+
 def _git(tokens: list[str]) -> dict[str, Any]:
+    alias = _alias_refs(tokens)
+    if alias is not None:
+        return _result("git_refs", f"{alias} runs a ref-moving command",
+                       subcommand=alias)
     i = 1
     while i < len(tokens) and tokens[i].startswith("-"):
         opt = tokens[i]
@@ -202,6 +338,8 @@ def _git_listing(sub: str, rest: list[str]) -> bool:
         return bool(rest) and rest[0] in ("list", "show")
     if sub == "worktree":
         return bool(rest) and rest[0] == "list"
+    if sub == "bisect":
+        return bool(rest) and rest[0] in ("log", "view", "visualize")
     return False
 
 
@@ -395,7 +533,7 @@ def _grep(args: list[str], *, tool: str) -> dict[str, Any]:
 def _simple(tokens: list[str]) -> dict[str, Any]:
     cmd = tokens[0]
     base = os.path.basename(cmd)
-    if base == "git" and cmd == "git":
+    if base == "git":
         return _git(tokens)
     if base in ("pytest", "py.test"):
         return _pytest(tokens[1:], python=None, script=cmd)
@@ -423,17 +561,23 @@ def _strip_output_filter(command: str) -> tuple[str, tuple | None]:
     return m.group("cmd"), filt
 
 
-def classify(command: str, *, _filters: bool = True) -> dict[str, Any]:
+def classify(command: str, *, _filters: bool = True,
+             _nested: bool = False) -> dict[str, Any]:
     """The class of a shell command line (see the module docstring).
 
     A pytest command followed only by `2>&1` and/or `| tail -N` / `| head -N`
     is still `pytest`, with `output_filter` = ("tail"|"head", N) or
-    ("all", 0) applied to its output."""
+    ("all", 0) applied to its output.
+
+    Ref-moving git is `git_refs` wherever it runs: in any operator- or
+    newline-separated segment, after `VAR=value` prefixes, as `/path/git`,
+    through `git -c alias.<x>=<ref-moving>`, and (one level deep) inside a
+    backtick or `$(...)` substitution or a `sh|bash|zsh -c '<script>'`."""
     if not isinstance(command, str) or not command.strip():
         return _result("other", "empty command")
     inner, filt = _strip_output_filter(command) if _filters else (command, None)
     if filt is not None and inner.strip():
-        got = classify(inner, _filters=False)
+        got = classify(inner, _filters=False, _nested=_nested)
         if got["class"] == "pytest":
             return {**got, "output_filter": filt}
     segments = _segments(command)
@@ -442,13 +586,21 @@ def classify(command: str, *, _filters: bool = True) -> dict[str, Any]:
     why = _scan(command)
     if why is None and len(segments) != 1:
         why = "operator"
+    for seg in segments:
+        sub = _refs_in(seg, nested=_nested)
+        if sub is not None:
+            return _result("git_refs",
+                           f"compound command: {why}" if why else "",
+                           subcommand=sub)
+    for body in _substitutions(command):
+        if _nested:
+            hit = "git" if _mentions_refs(body) else None
+        else:
+            got = classify(body, _nested=True)
+            hit = got.get("subcommand") if got["class"] == "git_refs" else None
+        if hit is not None:
+            return _result("git_refs", "command substitution", subcommand=hit)
     if why is not None:
-        for seg in segments:
-            if seg and seg[0] == "git":
-                got = _git(seg)
-                if got["class"] == "git_refs":
-                    return _result("git_refs", f"compound command: {why}",
-                                   subcommand=got["subcommand"])
         return _result("complex", why)
     tokens = segments[0]
     if _ENV_ASSIGN_RE.match(tokens[0]):

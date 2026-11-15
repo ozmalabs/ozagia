@@ -328,6 +328,12 @@ def decision_of(proc):
     "echo ok\ngit rebase main",
     "(git tag v1)",
     "git worktree add ../w",
+    # review fix 10: forms the intent layer used to miss; one shared list
+    "git cherry-pick abc",
+    "git bisect start HEAD~3",
+    "echo `git stash`",
+    "bash -c 'git reset --hard'",
+    "git -c alias.c=commit c -m x",
 ])
 def test_pre_bash_ref_moving_git_denied(repo, command, sockdir):
     proc = run_hook(pre(repo, "Bash", {"command": command}), sock=sockdir / "missing.sock")
@@ -338,6 +344,8 @@ def test_pre_bash_ref_moving_git_denied(repo, command, sockdir):
 @pytest.mark.parametrize("command", [
     "git status", "git -C x diff HEAD", "git log --oneline -5", "npm test",
     "echo 'git commit'", "grep -rn commit src", "git show HEAD:src/a.py",
+    # listing forms, as in the intent layer
+    "git branch", "git tag -l", "git stash list", "git worktree list",
 ])
 def test_pre_bash_other_commands_allowed(repo, command, sockdir):
     proc = run_hook(pre(repo, "Bash", {"command": command}), sock=sockdir / "missing.sock")
@@ -504,3 +512,8 @@ def test_cli_install_uninstall(tmp_path):
                        capture_output=True, text=True, env=env, timeout=30)
     assert r.returncode == 0, r.stderr
     assert json.loads(path.read_text(encoding="utf-8")) == {}
+
+
+def test_hook_shares_the_intent_ref_moving_list():
+    from ozagia.intent.shell import GIT_REF_MOVING
+    assert hook.REF_MOVING_GIT is GIT_REF_MOVING

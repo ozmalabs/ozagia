@@ -6,7 +6,8 @@ paths are limited to about 100 bytes, so a longer default path is replaced by
 `<tmp dir>/ozagia-<sha256(root)[:16]>.sock`. Messages are
 UTF-8 JSON objects, one per line, in both directions. Each request carries an
 `id`; the response repeats it. A client may send several requests on one
-connection; responses come back in request order.
+connection; responses come back in request order. The OpenCode plugin opens
+one connection per tool call, so a slow call never queues others behind it.
 
 Requests (`op`):
 
@@ -39,6 +40,31 @@ Requests (`op`):
     {"id": 5, "op": "stats"}   -> {"id": 5, "ok": true, "stats": {...}}
     {"id": 6, "op": "shutdown"} -> {"id": 6, "ok": true}
 
+Deadlines. Every `tool` and `after` request may carry `"deadline_ms"`: an
+absolute Unix epoch time in milliseconds, after which the sender no longer
+waits for the answer (the plugin sends `Date.now() + its timeout`). The
+daemon checks it when the request's turn comes (after taking the graph
+lock, before the handler runs). An expired request does nothing:
+
+    tool  -> {"id": ..., "ok": true, "handled": false, "reason": "expired",
+              "expired": true, "meta": {...}}
+    after -> {"id": ..., "ok": true, "append": "", "expired": true,
+              "meta": {...}}
+
+A request that started before its deadline runs to the end; a handled
+answer that finished after it carries `"late": true`. A plugin that gave up
+on an `edit`, `write` or `shell` it had already sent cannot know whether it
+ran, so it does not run the built-in: it reports an "outcome unknown" tool
+error and sends `after` with `meta.fallback = "unknown_outcome"`.
+
+`after` may carry `"meta": {"fallback": "<why>"}`: the plugin ran the
+built-in (or gave up) because the daemon failed or timed out. The daemon
+counts these (`stats.plugin_fallbacks`).
+
+Reserved input fields. Keys of `input` that start with `_` are reserved for
+the daemon and in-process callers (`ozagia.intent` documents them); the
+daemon drops any a client sends.
+
 A handled `tool` response with `"is_error": true` is a tool error: the plugin
 reports `output` to the model as the tool's error (for OpenCode, by throwing
 an Error with that message), not as a successful result.
@@ -55,13 +81,17 @@ re-ingest files a shell command changed) and add context. A daemon error is
 `{"ok": false, "error": "..."}` (with `"id": null` when the request line was
 not a JSON object; a line longer than MAX_MESSAGE_BYTES gets that error and
 the connection is closed); the plugin then runs the built-in and reports
-a fallback. The plugin never fails a tool call because the daemon failed.
+a fallback. The plugin never fails a tool call because the daemon failed,
+except an `edit`, `write` or `shell` whose request was sent and then failed
+or timed out (outcome unknown, see Deadlines). A daemon that cannot be
+reached at all (connection refused) gets the built-in for every tool.
 
 Command line: `python -m ozagia.daemon serve --root <repo> [--dump <graph>]
-[--journal <jsonl>] [--sock <path>]` loads (or, if missing, builds) the
-snapshot, listens, and prints one line `ready <socket path>` on stdout when it
-accepts connections. It exits on `shutdown`, SIGTERM or SIGINT, and removes
-its socket.
+[--journal <jsonl>] [--sock <path>] [--parent-pid <pid>]` loads (or, if
+missing, builds) the snapshot, listens, and prints one line `ready <socket
+path>` on stdout when it accepts connections. It exits on `shutdown`,
+SIGTERM or SIGINT, or (with `--parent-pid`) within `PARENT_POLL_S` seconds
+of that process going away, and removes its socket.
 
 Tool names are the harness-neutral names below. A plugin maps its harness's
 names onto them (OpenCode 2.3: read, grep, glob, edit, write, patch, shell;

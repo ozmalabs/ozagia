@@ -2,15 +2,40 @@
 
 `serve(root)` loads the snapshot (building it when missing), listens on
 `protocol.socket_path(root)` and answers the protocol's JSON-line requests
-until `shutdown`, SIGTERM or SIGINT. Connections are served by threads; one
-global lock serialises `tool` and `after`, because `DevMemory` is not
-thread-safe. `ping`, `hello` and `stats` do not take that lock.
+until `shutdown`, SIGTERM or SIGINT, or, with `parent_pid`, until that
+process is gone (checked every `PARENT_POLL_S` seconds). Connections are
+served by threads; one global lock serialises `tool` and `after`, because
+`DevMemory` is not thread-safe. `ping`, `hello` and `stats` do not take that
+lock, and neither does a captured pytest (`shell` that classifies as
+`pytest`): it reads no graph state, so a long test run does not hold up the
+edits and reads sent meanwhile.
+
+A `tool` or `after` request whose `deadline_ms` (Unix epoch, ms) has passed
+when its turn comes (after the lock is taken, before the handler runs) is
+answered `expired` and not executed (see `ozagia.daemon.protocol`).
+
+Captured pytest runs with `test_env` (default: this process's environment
+without `OZAGIA_*`, `PYTHONPATH` and `COLUMNS`, the variables the harness
+adds for ozagia itself), passed to the intent layer as `_test_env`. Reserved
+`_` fields a client puts in `input` are dropped.
 
 Every request is journaled, one JSON object per line, to
 `<state dir>/daemon_journal.jsonl` (or `journal`):
 
-    {"ts", "op", "tool", "intent", "handled", "is_error", "ms", "keys" (at
-     most 20), "reason", "session", "harness"}
+    {"ts", "op", "tool", "intent", "handled", "is_error", "expired", "ms",
+     "keys" (at most 20), "reason", "fallback", "session", "harness"}
+
+`stats` counts (`DaemonState.stats`): `handled` {"true", "false"} over
+`tool` requests; `passthrough` (handled false by design, not expired);
+`expired` (`tool` requests dropped by their deadline; `after_expired` for
+`after`); `late` (handled, but finished after the deadline, so the plugin
+had likely given up); `plugin_fallbacks` (`after` requests carrying
+`meta.fallback`: the plugin ran the built-in, or gave up, because the
+daemon failed or timed out; `unknown_outcomes` of them carry
+"unknown_outcome"); `fallbacks` = `plugin_fallbacks`, once per call: every
+plugin fallback (daemon error, timeout, `ok: false`, unknown outcome) sends
+exactly one such `after`. `expired` and `tool_failures` are the daemon-side
+view of some of the same calls and are reported separately.
 
 The socket is created mode 0600. A socket file left at the path by a daemon
 that no longer answers `ping` is replaced; a live daemon or a non-socket
@@ -18,6 +43,7 @@ file at the path is an error.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import signal
@@ -35,6 +61,11 @@ JOURNAL_NAME = "daemon_journal.jsonl"
 # Keys kept per journal record.
 JOURNAL_KEYS = 20
 STALE_PING_TIMEOUT_S = 1.0
+# How often a daemon started with `parent_pid` checks that its parent lives.
+PARENT_POLL_S = 2.0
+# Variables the harness sets for ozagia's own processes, not for the agent's
+# test runs.
+_TOOL_ONLY_ENV = ("PYTHONPATH", "COLUMNS")
 # The longest path an AF_UNIX socket address holds on Linux.
 SUN_PATH_MAX = 107
 
@@ -73,13 +104,38 @@ def load_memory(root: Path, dump: str | Path | None, *,
     return DevMemory(dump_p, mem_journal, root=root)
 
 
+def captured_test_env(environ: dict[str, str] | None = None) -> dict[str, str]:
+    """The environment for captured pytest runs: `environ` (default this
+    process's) without `OZAGIA_*`, `PYTHONPATH` and `COLUMNS`."""
+    src = os.environ if environ is None else environ
+    return {k: v for k, v in src.items()
+            if not k.startswith("OZAGIA_") and k not in _TOOL_ONLY_ENV}
+
+
+def _expired(msg: dict[str, Any]) -> bool:
+    deadline = msg.get("deadline_ms")
+    if isinstance(deadline, bool) or not isinstance(deadline, (int, float)):
+        return False
+    return time.time() * 1000 > deadline
+
+
+def _lock_free(op: Any, tool: Any, inp: Any) -> bool:
+    """A captured pytest: it reads no graph state, so it skips the lock."""
+    if op != "tool" or tool != "shell" or not isinstance(inp, dict):
+        return False
+    from ozagia.intent.shell import classify
+    return classify(str(inp.get("command") or ""))["class"] == "pytest"
+
+
 class DaemonState:
     """What the request handlers share: the graph, the lock, the counters."""
 
-    def __init__(self, root: Path, memory: Any, journal: Path) -> None:
+    def __init__(self, root: Path, memory: Any, journal: Path, *,
+                 test_env: dict[str, str] | None = None) -> None:
         self.root = root
         self.memory = memory
         self.journal = journal
+        self.test_env = test_env
         self.lock = threading.Lock()          # serialises handle/after
         self._stats_lock = threading.Lock()
         self.started = time.time()
@@ -89,7 +145,13 @@ class DaemonState:
         self.handled = {"true": 0, "false": 0}
         self.errors = 0          # ok: false responses
         self.tool_errors = 0     # handled, is_error
-        self.fallbacks = 0       # tool requests not handled or failed
+        self.passthrough = 0     # tool: handled false by design
+        self.expired = 0         # tool: dropped by deadline_ms
+        self.after_expired = 0   # after: dropped by deadline_ms
+        self.late = 0            # tool: handled, finished after deadline_ms
+        self.plugin_fallbacks = 0  # after with meta.fallback
+        self.unknown_outcomes = 0  # ... whose fallback is "unknown_outcome"
+        self.tool_failures = 0   # tool: ok false
         self.hellos: list[dict[str, Any]] = []
         self.ms_total = 0.0
         self.ms_max = 0.0
@@ -121,9 +183,25 @@ class DaemonState:
             inp = msg.get("input")
             if inp is None:
                 inp = {}
+            if isinstance(inp, dict):
+                inp = {k: v for k, v in inp.items()
+                       if not str(k).startswith("_")}
+                if op == "tool" and self.test_env is not None:
+                    inp["_test_env"] = dict(self.test_env)
             harness = str(msg.get("harness") or "opencode")
             session = msg.get("session")
-            with self.lock:
+            lock = (contextlib.nullcontext() if _lock_free(op, tool, inp)
+                    else self.lock)
+            with lock:
+                if _expired(msg):
+                    if op == "tool":
+                        return {"ok": True, "handled": False,
+                                "reason": "expired", "expired": True,
+                                "meta": {"intent": f"{tool}_expired",
+                                         "keys": [], "ms": 0.0}}
+                    return {"ok": True, "append": "", "expired": True,
+                            "meta": {"intent": "after_expired", "keys": [],
+                                     "ms": 0.0}}
                 if op == "tool":
                     body = intent.handle(self.memory, tool, inp,
                                          harness=harness, session=session)
@@ -131,6 +209,8 @@ class DaemonState:
                     body = intent.after(self.memory, tool, inp,
                                         msg.get("output"), harness=harness,
                                         session=session)
+            if op == "tool" and body.get("handled") and _expired(msg):
+                body = {**body, "late": True}
             return {"ok": True, **body}
         return {"ok": False, "error": f"unknown op {op!r}"}
 
@@ -140,6 +220,9 @@ class DaemonState:
         meta = resp.get("meta") or {}
         tool = msg.get("tool") if op in ("tool", "after") else None
         handled = resp.get("handled") if op == "tool" else None
+        expired = bool(resp.get("expired"))
+        req_meta = msg.get("meta") if isinstance(msg.get("meta"), dict) else {}
+        fallback = req_meta.get("fallback") if op == "after" else None
         with self._stats_lock:
             self.by_op[op] = self.by_op.get(op, 0) + 1
             if tool:
@@ -153,8 +236,22 @@ class DaemonState:
                 self.errors += 1
             if resp.get("is_error"):
                 self.tool_errors += 1
-            if op == "tool" and (not resp.get("ok") or not handled):
-                self.fallbacks += 1
+            if op == "tool":
+                if not resp.get("ok"):
+                    self.tool_failures += 1
+                elif expired:
+                    self.expired += 1
+                elif not handled:
+                    self.passthrough += 1
+                elif resp.get("late"):
+                    self.late += 1
+            if op == "after":
+                if expired:
+                    self.after_expired += 1
+                if fallback:
+                    self.plugin_fallbacks += 1
+                    if fallback == "unknown_outcome":
+                        self.unknown_outcomes += 1
             if op in ("tool", "after"):
                 self.ms_total += ms
                 self.ms_count += 1
@@ -162,9 +259,10 @@ class DaemonState:
             rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "op": op,
                    "tool": tool, "intent": meta.get("intent"),
                    "handled": handled, "is_error": resp.get("is_error"),
-                   "ms": round(ms, 1),
+                   "expired": expired or None, "ms": round(ms, 1),
                    "keys": list(meta.get("keys") or [])[:JOURNAL_KEYS],
                    "reason": resp.get("reason") or resp.get("error"),
+                   "fallback": fallback,
                    "session": msg.get("session"),
                    "harness": msg.get("harness")}
             try:
@@ -182,7 +280,14 @@ class DaemonState:
                 "by_op": dict(self.by_op), "by_tool": dict(self.by_tool),
                 "by_intent": dict(self.by_intent),
                 "handled": dict(self.handled),
-                "fallbacks": self.fallbacks, "errors": self.errors,
+                "passthrough": self.passthrough,
+                "expired": self.expired,
+                "after_expired": self.after_expired,
+                "late": self.late,
+                "plugin_fallbacks": self.plugin_fallbacks,
+                "unknown_outcomes": self.unknown_outcomes,
+                "fallbacks": self.plugin_fallbacks,
+                "errors": self.errors,
                 "tool_errors": self.tool_errors,
                 "hellos": len(self.hellos),
                 "hello_sessions": [h.get("session") for h in self.hellos],
@@ -302,10 +407,33 @@ def _clear_stale(sock: Path) -> None:
     raise DaemonStartError(f"a daemon already answers on {sock}")
 
 
+def _parent_gone(parent_pid: int) -> bool:
+    if os.getppid() != parent_pid:
+        return True
+    try:
+        os.kill(parent_pid, 0)
+    except OSError:
+        return True
+    return False
+
+
+def _watch_parent(state: DaemonState, parent_pid: int,
+                  stop: threading.Event) -> None:
+    while not stop.wait(PARENT_POLL_S):
+        if _parent_gone(parent_pid):
+            print(f"parent {parent_pid} is gone; shutting down",
+                  file=sys.stderr, flush=True)
+            state.shutdown_later()
+            return
+
+
 def serve(root: str | Path, *, dump: str | Path | None = None,
           journal: str | Path | None = None, sock: str | Path | None = None,
-          build_if_missing: bool = True, ready_stream: Any = None) -> int:
-    """Run the daemon until shutdown; returns an exit code."""
+          build_if_missing: bool = True, ready_stream: Any = None,
+          parent_pid: int | None = None) -> int:
+    """Run the daemon until shutdown; returns an exit code. With
+    `parent_pid`, it also shuts down once that process is no longer its
+    parent or no longer exists."""
     root_p = Path(root).resolve()
     from ozagia.config import state_path
     sock_p = Path(sock) if sock else P.socket_path(root_p)
@@ -319,7 +447,7 @@ def serve(root: str | Path, *, dump: str | Path | None = None,
     # Rewriting the snapshot after every reingest costs ~1 s on a large repo;
     # the daemon keeps the graph in memory and writes it once on exit.
     memory.defer_writes = True
-    state = DaemonState(root_p, memory, journal_p)
+    state = DaemonState(root_p, memory, journal_p, test_env=captured_test_env())
     _clear_stale(sock_p)
     server = _Server(str(sock_p), state)
     state.server = server
@@ -333,10 +461,16 @@ def serve(root: str | Path, *, dump: str | Path | None = None,
         for sig in (signal.SIGTERM, signal.SIGINT):
             previous[sig] = signal.signal(sig, on_signal)
     out = ready_stream or sys.stdout
+    stop_watch = threading.Event()
+    if parent_pid:
+        threading.Thread(target=_watch_parent, name="ozagia-parent-watch",
+                         args=(state, int(parent_pid), stop_watch),
+                         daemon=True).start()
     try:
         print(f"ready {sock_p}", file=out, flush=True)
         server.serve_forever(poll_interval=0.2)
     finally:
+        stop_watch.set()
         server.server_close()
         if getattr(memory, "snapshot_dirty", False):
             try:
@@ -354,5 +488,5 @@ def serve(root: str | Path, *, dump: str | Path | None = None,
     return 0
 
 
-__all__ = ["DaemonStartError", "DaemonState", "JOURNAL_NAME", "load_memory",
-           "serve"]
+__all__ = ["DaemonStartError", "DaemonState", "JOURNAL_NAME", "PARENT_POLL_S",
+           "captured_test_env", "load_memory", "serve"]

@@ -1049,10 +1049,12 @@ def build_index(root: str | Path = ROOT, out: str | Path = DEFAULT_DUMP,
     unkeyed_before_adapters = b.unkeyed
     for indexer in registry(root).indexers:
         indexer(ctx)
+    from ozagia.core.reingest import stamps as _stamps
     adapter_info = {
         "files": adapter_files,
         "edges": _adapter_core_edges(b, edges_before_adapters),
         "unkeyed": b.unkeyed - unkeyed_before_adapters,
+        "stamps": _stamps(root, adapter_files),
     }
 
     # -- checkout head ------------------------------------------------------ #
@@ -1160,9 +1162,13 @@ def build_index(root: str | Path = ROOT, out: str | Path = DEFAULT_DUMP,
     else:
         b.nodes[repo]["attrs"]["tree_digest_error"] = digest_err or "unknown"
 
+    from ozagia.core.reingest import stamps as _stamps, unhandled_paths
+    other_stamps = _stamps(root, unhandled_paths(
+        root, ix.table, adapter_files, options, out))
     graph = b.to_dict()
     graph.update({"version": SNAPSHOT_VERSION, "build": options,
-                  "files": ix.table, "adapter": adapter_info})
+                  "files": ix.table, "adapter": adapter_info,
+                  "other_stamps": other_stamps})
     write_snapshot(out, graph)
     return {
         "out": str(out),
@@ -1339,6 +1345,9 @@ class DevMemory:
         self._build_opts: dict[str, Any] = dict(self.raw.get("build") or {})
         self._adapter_info: dict[str, Any] = dict(
             self.raw.get("adapter") or {"files": [], "edges": [], "unkeyed": 0})
+        # Stamps of changed paths reingest cannot take in, taken with the
+        # tree digest (see `ozagia.core.reingest`). None: an older snapshot.
+        self._other_stamps: dict[str, Any] | None = self.raw.get("other_stamps")
         # Stable node keys (see `ozagia.core.keys`).
         self._key_to_id: dict[str, int] = {}
         self._id_to_key: dict[int, str] = {}
@@ -1455,11 +1464,19 @@ class DevMemory:
         return reingest(self, pending_changes(self), write=write)
 
     def pending_changes(self, *, limit: int | None = None) -> list[str]:
-        """Indexed files whose content differs from the snapshot, and new
-        files git reports under the indexed dirs and docs."""
+        """Indexed and adapter-owned files whose content differs from the
+        snapshot, and new files git reports under the indexed dirs and docs."""
         from ozagia.core.reingest import pending_changes
         out = pending_changes(self)
         return out if limit is None else out[:int(limit)]
+
+    def unhandled_changes(self) -> list[str]:
+        """Changed tracked files reingest cannot take in (neither indexed
+        nor adapter-owned). While any is listed,
+        reingest keeps the snapshot's tree digest and `staleness()` reports
+        stale; a build clears them. See `ozagia.core.reingest`."""
+        from ozagia.core.reingest import unhandled_changes
+        return unhandled_changes(self)
 
     def snapshot_dict(self) -> dict[str, Any]:
         """The current graph in snapshot form (what `write_snapshot` writes)."""
@@ -1467,7 +1484,8 @@ class DevMemory:
                 "nodes": [self.nodes[i] for i in sorted(self.nodes)],
                 "edges": self.edges, "next_id": self._next_id,
                 "build": self._build_opts, "files": self._files_table or {},
-                "adapter": self._adapter_info}
+                "adapter": self._adapter_info,
+                "other_stamps": self._other_stamps or {}}
 
     def write_snapshot(self) -> float:
         """Rewrite the snapshot from the in-memory graph; returns seconds."""
@@ -2983,24 +3001,32 @@ class DevMemory:
             self.raw_repo_root, rel, old, new, replace_all=every,
             base_sha256=base_sha256, write=write, memory=self)
         if result.get("applied"):
+            # The file is written: a failure from here on is reported in
+            # `warning`, never raised, so a caller cannot take the edit for
+            # one that did not happen and apply it again.
             file_rel = str(result.get("file") or rel)
-            self._drop_cached(file_rel)
-            result["journaled"] = self.journal_append(
-                "span_edit",
-                task or f"span edit {file_rel}",
-                f"{len(result['matches'])} match(es) in "
-                f"{', '.join(result['keys'])}; "
-                f"{result['before']['lines']} -> {result['after']['lines']} "
-                f"lines; sha {result['new_sha256'][:12]}",
-                files=[file_rel],
-                keys=result.get("keys"),
-                old_string=old,
-                new_string=new,
-                replace_all=every,
-                base_sha256=result.get("base_sha256"),
-                new_sha256=result.get("new_sha256"),
-                backup=result.get("backup"),
-            )
+            try:
+                self._drop_cached(file_rel)
+                result["journaled"] = self.journal_append(
+                    "span_edit",
+                    task or f"span edit {file_rel}",
+                    f"{len(result['matches'])} match(es) in "
+                    f"{', '.join(result['keys'])}; "
+                    f"{result['before']['lines']} -> {result['after']['lines']} "
+                    f"lines; sha {result['new_sha256'][:12]}",
+                    files=[file_rel],
+                    keys=result.get("keys"),
+                    old_string=old,
+                    new_string=new,
+                    replace_all=every,
+                    base_sha256=result.get("base_sha256"),
+                    new_sha256=result.get("new_sha256"),
+                    backup=result.get("backup"),
+                )
+            except Exception as e:  # noqa: BLE001 - reported, not raised
+                result["journaled"] = None
+                result["warning"] = (f"journal not written: "
+                                     f"{type(e).__name__}: {e}")
         return result
 
     def _post_edit_diagnostics(self, file: str, *,

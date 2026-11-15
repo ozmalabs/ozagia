@@ -1000,17 +1000,20 @@ def test_graph_intent_noop_run_aggregates_and_renders(fixture):
     assert "mean_captured_calls" not in rows["baseline"]
     md = render_markdown(report)
     assert "## Graph daemon and plugin" in md
-    assert "| graph_intent | 1 | 0.0 | 0 | 1 | 0 |" in md
+    assert "| graph_intent | 1 | 0.0 |  | 0 | 1 | 0 |" in md
     assert not any((fixture["run_root"] / "work").glob("*"))
 
 
 def test_graph_stats_fields_read_counts():
     assert ae.graph_stats_fields(None) == {"plugin_loaded": None, "captured_calls": None,
-                                           "fallbacks": None}
-    # The daemon's shape: handled {"true": captured, "false": passed through}.
+                                           "passthrough_calls": None, "fallbacks": None}
+    # The daemon's shape: handled {"true": captured, "false": passthrough and
+    # expired}; fallbacks = plugin fallbacks + expired + failed (review fix 4).
     assert ae.graph_stats_fields({"hellos": 2, "handled": {"true": 3, "false": 4},
-                                  "fallbacks": 4}) == {
-        "plugin_loaded": True, "captured_calls": 3, "fallbacks": 4}
+                                  "passthrough": 3, "expired": 1,
+                                  "plugin_fallbacks": 2, "fallbacks": 3}) == {
+        "plugin_loaded": True, "captured_calls": 3, "passthrough_calls": 3,
+        "fallbacks": 3}
     assert ae.graph_stats_fields({"hellos": 1, "handled": 2})["captured_calls"] == 2
     assert ae.graph_stats_fields({"hellos": 0, "by_handled": {"true": 5}})[
         "captured_calls"] == 5

@@ -8,6 +8,7 @@ type, target key) multisets.
 from __future__ import annotations
 
 import json
+import os
 import random
 import subprocess
 from collections import Counter
@@ -663,3 +664,106 @@ def test_deleted_file_loses_adapter_edges(seed_repo) -> None:
     # The failure baseline still names the file.
     assert mem.nodes[mem.node_by_key("file:tests/test_a.py")]["attrs"]["indexed"] == 0
     _assert_equivalent(mem, root, root.parent / "fresh.json")
+
+
+# --------------------------------------------------------------------------- #
+# review fixes 2 and 3: adapter-owned files and the tree digest
+# --------------------------------------------------------------------------- #
+def test_changed_tracked_unindexed_file_keeps_the_snapshot_stale(repo) -> None:
+    root, dump = repo
+    mem = _mem(dump, root)
+    assert mem.staleness()["stale"] is False and mem.unhandled_changes() == []
+    (root / "notes.txt").write_text("changed, still not indexed\n")
+    p = root / "pkg" / "b.py"
+    p.write_text(p.read_text() + "\n# touched\n")
+    assert mem.pending_changes() == ["pkg/b.py"]
+    mem.reingest(["pkg/b.py"])
+    assert mem.pending_changes() == []
+    assert mem.unhandled_changes() == ["notes.txt"]
+    assert mem.staleness()["stale"] is True
+    # The snapshot on disk keeps reporting it, too.
+    assert _mem(dump, root).staleness()["stale"] is True
+    # Reverting the file clears it.
+    _git(root, "checkout", "--", "notes.txt")
+    mem.reingest(["pkg/b.py"])
+    assert mem.unhandled_changes() == []
+    assert mem.staleness()["stale"] is False
+
+
+def test_unindexed_file_dirty_at_build_does_not_block_the_digest(repo, tmp_path) -> None:
+    root, _ = repo
+    (root / "notes.txt").write_text("dirty before the build\n")
+    dump = tmp_path / "state2" / "graph.json"
+    _build(root, dump)
+    mem = _mem(dump, root)
+    assert mem.unhandled_changes() == []
+    p = root / "pkg" / "b.py"
+    p.write_text(p.read_text() + "\n# touched\n")
+    mem.reingest(["pkg/b.py"])
+    assert mem.staleness()["stale"] is False
+
+
+@pytest.fixture
+def git_seed_repo(tmp_path: Path, layout, seed_adapter) -> tuple[Path, Path]:
+    root = tmp_path / "repo"
+    _fixture(root, git=False)
+    _write(root / "seeds" / "base.json", json.dumps({
+        "id": "base", "version": "1", "nodes": [], "depends_on": []}))
+    _write(root / "seeds" / "demo.json", json.dumps({
+        "id": "demo", "version": "1", "depends_on": ["base"],
+        "nodes": [{"local_id": 1, "type": "Concept", "attrs": {"name": "widget"}}],
+        "rules": []}))
+    _git(root, "init", "-q")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "initial")
+    dump = tmp_path / "state" / "graph.json"
+    _build(root, dump)
+    return root, dump
+
+
+def test_out_of_band_seed_edit_is_pending_and_refresh_runs_the_adapter_pass(
+        git_seed_repo) -> None:
+    root, dump = git_seed_repo
+    mem = _mem(dump, root)
+    assert "seeds/demo.json" in mem._adapter_info["files"]
+    assert "seeds/demo.json" in mem._adapter_info["stamps"]
+    assert mem.pending_changes() == []
+    _write(root / "seeds" / "demo.json", json.dumps({
+        "id": "demo", "version": "2", "depends_on": ["base"],
+        "nodes": [{"local_id": 1, "type": "Concept", "attrs": {"name": "widget"}},
+                  {"local_id": 2, "type": "Concept", "attrs": {"name": "gadget"}}],
+        "rules": []}))
+    assert mem.pending_changes() == ["seeds/demo.json"]
+    delta = mem.refresh()
+    assert mem.last_reingest_timings["adapter_pass"] == 1.0
+    assert "seed_item:demo::Concept::gadget" in delta.added
+    assert mem.pending_changes() == []
+    assert mem.staleness()["stale"] is False
+    # Same content, new mtime: not pending (the stamp is refreshed).
+    p = root / "seeds" / "demo.json"
+    os.utime(p, ns=(p.stat().st_atime_ns, p.stat().st_mtime_ns + 10**9))
+    assert mem.pending_changes() == []
+    _assert_equivalent(mem, root, root.parent / "fresh.json")
+
+
+def test_snapshot_without_adapter_stamps_reports_git_listed_adapter_files(
+        git_seed_repo) -> None:
+    root, dump = git_seed_repo
+    mem = _mem(dump, root)
+    mem._adapter_info.pop("stamps")  # a snapshot built before stamps
+    (root / "seeds" / "base.json").write_text(json.dumps({
+        "id": "base", "version": "2", "nodes": [], "depends_on": []}))
+    assert mem.pending_changes() == ["seeds/base.json"]
+
+
+def test_graph_delta_merge_cancels_opposite_entries() -> None:
+    a = GraphDelta(files=["x"], added=["k1", "k3"], removed=["k2"], changed=["k4"],
+                   edges_added=[("a", "t", "b")])
+    b = GraphDelta(files=["y"], added=["k2"], removed=["k1", "k4"], changed=["k3"],
+                   edges_removed=[("a", "t", "b")])
+    m = a.merge(b)
+    assert m.added == ["k3"]                  # k1 added then removed: gone
+    assert m.removed == ["k4"]                # k2 removed then added: gone
+    assert m.changed == []                    # k4 changed+removed -> removed;
+    assert m.edges_added == [] and m.edges_removed == []   # k3 stays added
+    assert m.files == ["x", "y"]

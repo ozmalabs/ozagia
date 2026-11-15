@@ -16,7 +16,21 @@ Output has the shape of OpenCode's own tools. Source lines are the file's
 exact text after a `<n>: ` prefix; graph additions are separate lines that
 start with `[ozagia] `. A handler that raises anything other than a tool
 error returns `handled: False` with the error as `reason`, so the plugin
-falls back to the built-in. See `docs/intent.md` for every format.
+falls back to the built-in. The edit and write handlers never raise once
+the file is written: a later failure (journal, reingest) becomes an
+`[ozagia] warning: <error>` line in a handled result. See `docs/intent.md`
+for every format.
+
+Reserved input fields. Keys that start with `_` are set by the caller that
+runs the intent layer, never by the model (the daemon drops any it
+receives), and never appear in outputs:
+
+    _deadline_s_remaining   seconds left in the caller's run, measured when
+                            the input was built; a captured pytest's timeout
+                            is clamped to it (at least 0.1 s).
+    _test_env               the environment (dict) for a captured pytest. It
+                            replaces the inherited environment, so the tests
+                            see what the agent's own shell would.
 """
 from __future__ import annotations
 

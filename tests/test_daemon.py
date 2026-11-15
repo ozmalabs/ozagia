@@ -122,7 +122,9 @@ def test_ops_round_trip(daemon):
         assert stats["hellos"] >= 1 and "ses_1" in stats["hello_sessions"]
         assert stats["by_op"]["tool"] >= 2 and stats["by_tool"]["read"] >= 1
         assert stats["by_intent"]["read_file"] >= 1
-        assert stats["fallbacks"] >= 1 and stats["handled"]["false"] >= 1
+        # A design passthrough (patch) is not a fallback (review fix 4).
+        assert stats["passthrough"] >= 1 and stats["handled"]["false"] >= 1
+        assert stats["fallbacks"] == 0
         assert stats["uptime_s"] >= 0 and stats["max_ms"] >= stats["mean_ms"] > 0
 
 
@@ -201,7 +203,8 @@ def test_journal_records_every_request(daemon):
             daemon["journal"].read_text().splitlines()]
     rec = [r for r in recs if r.get("session") == "ses_j"][-1]
     assert set(rec) == {"ts", "op", "tool", "intent", "handled", "is_error",
-                        "ms", "keys", "reason", "session", "harness"}
+                        "expired", "ms", "keys", "reason", "fallback",
+                        "session", "harness"}
     assert rec["op"] == "tool" and rec["tool"] == "read"
     assert rec["intent"] == "read_file" and rec["handled"] is True
     assert "sym:pkg/mod.py::helper" in rec["keys"] and len(rec["keys"]) <= 20
@@ -306,3 +309,113 @@ def test_edits_write_the_snapshot_once_on_exit(tmp_path):
     graph = json.loads(dump.read_text())
     helper = [n for n in graph["nodes"] if n.get("key") == "sym:pkg/mod.py::helper"]
     assert helper and "b + a" in (root / "pkg" / "mod.py").read_text()
+
+
+# --------------------------------------------------------------------------- #
+# review fixes: deadlines, counters, reserved fields, parent watch
+# --------------------------------------------------------------------------- #
+def test_expired_request_is_not_executed(tmp_path):
+    root = tmp_path / "repo"
+    (root / "pkg").mkdir(parents=True)
+    (root / "pkg" / "mod.py").write_text(MOD)
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    sock = tmp_path / "x.sock"
+    proc = _start(root, sock, tmp_path / "graph.json", tmp_path / "j.jsonl")
+    try:
+        s = _raw(sock)
+        past = time.time() * 1000 - 1000
+        future = time.time() * 1000 + 60_000
+        edit = {"path": "pkg/mod.py", "oldString": "return a + b",
+                "newString": "return a - b"}
+        for i, msg in enumerate([
+                {"op": "tool", "tool": "edit", "input": edit, "deadline_ms": past},
+                {"op": "after", "tool": "write", "input": {}, "output": "",
+                 "deadline_ms": past},
+                {"op": "tool", "tool": "read", "input": {"path": "pkg/mod.py"},
+                 "deadline_ms": future},
+                {"op": "tool", "tool": "shell", "input": {"command": "ls"}},
+                {"op": "after", "tool": "shell", "input": {"command": "ls"},
+                 "output": "", "meta": {"fallback": "daemon timeout after 1 ms"}},
+                {"op": "after", "tool": "edit", "input": edit, "output": "",
+                 "meta": {"fallback": "unknown_outcome"}},
+                {"op": "stats"}], 1):
+            s.sendall((json.dumps({"id": i, **msg}) + "\n").encode())
+        got = _readlines(s, 7)
+        s.close()
+    finally:
+        _stop(proc)
+    assert got[0]["handled"] is False and got[0]["expired"] is True
+    assert got[0]["reason"] == "expired"
+    assert got[1] == {"id": 2, "ok": True, "append": "", "expired": True,
+                      "meta": got[1]["meta"]}
+    assert got[2]["handled"] is True and "expired" not in got[2]
+    assert "return a + b" in (root / "pkg" / "mod.py").read_text()
+    st = got[6]["stats"]
+    assert st["handled"] == {"true": 1, "false": 2}
+    assert st["expired"] == 1 and st["after_expired"] == 1
+    assert st["passthrough"] == 1          # ls
+    assert st["plugin_fallbacks"] == 2 and st["unknown_outcomes"] == 1
+    assert st["fallbacks"] == 2            # one per plugin fallback; expired is separate
+
+
+def test_reserved_input_fields_are_replaced_by_the_daemon(tmp_path, monkeypatch):
+    from ozagia import intent
+    from ozagia.daemon.server import DaemonState, captured_test_env
+    seen: list[dict] = []
+
+    def fake(memory, tool, inp, **kw):
+        seen.append(inp)
+        return {"handled": False, "reason": "x", "meta": {}}
+
+    monkeypatch.setattr(intent, "handle", fake)
+    st = DaemonState(tmp_path, None, tmp_path / "j.jsonl", test_env={"A": "1"})
+    st.dispatch({"op": "tool", "tool": "read",
+                 "input": {"path": "x", "_test_env": {"EVIL": "1"},
+                           "_deadline_s_remaining": 0}})
+    assert seen == [{"path": "x", "_test_env": {"A": "1"}}]
+    env = captured_test_env({"PATH": "/bin", "OZAGIA_ROOT": "/r", "COLUMNS": "250",
+                             "PYTHONPATH": "/src", "HOME": "/h"})
+    assert env == {"PATH": "/bin", "HOME": "/h"}
+
+
+_SPAWN_DAEMON = r"""
+import os, subprocess, sys, time
+root, sock = sys.argv[1], sys.argv[2]
+p = subprocess.Popen([sys.executable, "-m", "ozagia.daemon", "serve", "--root", root,
+                      "--sock", sock, "--parent-pid", str(os.getpid())],
+                     stdout=subprocess.PIPE, text=True, start_new_session=True)
+print(p.pid, p.stdout.readline().strip(), flush=True)
+time.sleep(600)
+"""
+
+
+def test_daemon_exits_when_its_parent_dies(tmp_path):
+    from ozagia.daemon.server import PARENT_POLL_S
+    root = tmp_path / "repo"
+    (root / "pkg").mkdir(parents=True)
+    (root / "pkg" / "mod.py").write_text(MOD)
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    sock = tmp_path / "p.sock"
+    parent = subprocess.Popen([sys.executable, "-c", _SPAWN_DAEMON, str(root), str(sock)],
+                              env=_env(), stdout=subprocess.PIPE, text=True)
+    try:
+        ready, _, _ = select.select([parent.stdout], [], [], READY_TIMEOUT_S)
+        pid_s, word, _path = parent.stdout.readline().split(" ", 2)
+        assert word == "ready"
+        pid = int(pid_s)
+        os.kill(pid, 0)
+        parent.kill()                       # a hard kill: no teardown runs
+        parent.wait(timeout=10)
+        deadline = time.monotonic() + PARENT_POLL_S * 5 + 5
+        alive = True
+        while alive and time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+                time.sleep(0.2)
+            except ProcessLookupError:
+                alive = False
+        assert not alive, "daemon outlived its parent"
+        assert not sock.exists()
+    finally:
+        if parent.poll() is None:
+            parent.kill()

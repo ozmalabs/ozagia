@@ -170,7 +170,13 @@ killed `NATIVE_GRACE_S` (30 s) later if it is still running. The driver reads th
 loop's `summary.json` (stdout, else `<log_dir>/native/summary.json`): `tokens_in`,
 `tokens_out`, `cost_usd` (only when the server reports a cost), `tool_calls`,
 `tools_by_name`, and for graph_intent `captured_calls` (calls the intent layer
-handled) and `fallbacks` (calls it left to the built-in). The run record also gets
+handled), `passthrough_calls` (calls it left to the built-in by design) and
+`fallbacks` (calls where the intent layer raised, so the built-in ran). The two
+modes apply the same ref-moving git refusal; a captured pytest in graph mode gets
+the plain shell's default timeout (120 s), is clamped to the run deadline, and
+runs with the agent shell's environment (no `PYTHONPATH`, no API key, no
+`OZAGIA_NATIVE_*`). Graph mode writes the snapshot once, at the end of the loop.
+The run record also gets
 `stopped` (`done`, `max_steps`, `timeout`, `error`) and `steps` (model turns). A
 loop that stops with `error`, or writes no summary, sets `driver_error`. The
 loop's `transcript.jsonl` and `summary.json` stay in `<log_dir>/native/`.
@@ -314,13 +320,14 @@ Run record fields for this arm:
 | field | meaning |
 |---|---|
 | `daemon_ok`, `daemon_error`, `daemon_ready_s` | daemon start, and seconds to its `ready` line |
-| `daemon_stats` | the daemon's `stats` response as is (counts by tool, intent and handled, fallbacks, hellos, latency) |
+| `daemon_stats` | the daemon's `stats` response as is (counts by tool, intent and handled, passthrough, expired, plugin fallbacks, fallbacks, hellos, latency) |
 | `daemon_stop_error` | `stats` could not be read at the end |
 | `plugin_loaded` | `stats.hellos > 0`: the plugin connected at least once. `None` without stats |
-| `captured_calls` | tool calls the daemon handled (`stats.handled`, a count or a per-tool map) |
-| `fallbacks` | `stats.fallbacks`: calls the plugin sent to the built-in because the daemon failed or timed out |
+| `captured_calls` | tool calls the daemon handled (`stats.handled.true`; a request that expired before it ran is never handled) |
+| `passthrough_calls` | `stats.passthrough`: tool calls the daemon left to the built-in by design (not mapped), not counting expired ones |
+| `fallbacks` | `stats.fallbacks` = `plugin_fallbacks`: the plugin's `after` reports with `meta.fallback` (daemon error, timeout, `ok: false`, or an edit/write/shell whose outcome is unknown), one per call. `daemon_stats` also has `expired` (requests dropped by their `deadline_ms`) and failed `tool` requests, the daemon's view of some of the same calls. |
 
-The per-arm summary adds `mean_captured_calls`, `total_fallbacks`,
+The per-arm summary adds `mean_captured_calls`, `mean_passthrough_calls`, `total_fallbacks`,
 `plugin_load_failures` (runs that started a daemon and have `plugin_loaded` not
 true, so `fake` and `noop` runs count, as they load no plugin; `native` runs start
 no daemon and do not count) and `daemon_failures`. The Markdown report has
@@ -333,11 +340,19 @@ be node keys such as `sym:<file>::<name>`; all: lines starting with `[ozagia]` a
 graph context). A call sends `tool`; a handled answer is returned as the tool's
 output, or thrown as the tool's error when `is_error` is set. An unhandled call
 runs the original, converts its result to text, sends `after` with that text, and
-appends the daemon's `append`. On a daemon error or timeout (30 s; a shell call
-gets its own `timeout` plus 30 s, 330 s by default) the original's output is
-returned unchanged and a best-effort `after` with `meta.fallback` records it. The
-socket is opened on the first call and `hello` is sent once on the first
-connection, so OpenCode never waits for the daemon at startup.
+appends the daemon's `append`. Every request carries `deadline_ms` (now plus its
+timeout: 30 s; a shell call gets its own `timeout` plus 30 s, 330 s by default);
+the daemon drops a request whose deadline has passed without running it. When the
+daemon cannot be reached, answers an error, or a read, grep or glob times out, the
+original's output is returned unchanged and a best-effort `after` with
+`meta.fallback` records it. When an `edit`, `write` or `shell` request was sent
+and then failed or timed out, the original does not run (the daemon might still
+run the request): the call fails with an "outcome unknown" error that tells the
+model to re-read the file or check the command's effects, and `after` records
+`meta.fallback = "unknown_outcome"`. Each request uses its own connection, so a
+long captured pytest never holds up other calls; `hello` is sent once per process
+on its own connection before the first request, so OpenCode never waits for the
+daemon at startup.
 
 Install and check by hand:
 

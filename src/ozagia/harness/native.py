@@ -27,6 +27,7 @@ prints `summary.json` on stdout. See docs/native_loop.md.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import socket
@@ -207,16 +208,37 @@ class _Executor:
         self.shell_env = shell_env
         self.deadline = deadline
         self.captured = 0
-        self.fallbacks = 0
+        self.passthrough = 0   # not handled by design
+        self.fallbacks = 0     # the intent layer raised: the built-in ran
 
     def _plain(self, name: str, args: dict[str, Any]) -> tuple[str, bool]:
         from ozagia.harness.tools import ToolError, run_tool
+        from ozagia.intent.run import refusal
+        from ozagia.intent.shell import classify
+        if name == "shell" and isinstance(args.get("command"), str):
+            # The same refusal as graph mode, so both arms keep the refs.
+            if classify(args["command"])["class"] == "git_refs":
+                return refusal(args["command"]), True
         try:
             return run_tool(self.workdir, name, args, env=self.shell_env,
                             max_timeout_s=self.deadline - time.monotonic()
                             ), False
         except ToolError as e:
             return str(e), True
+
+    def _intent_input(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
+        """`args` plus what the plain shell would apply: its default timeout,
+        the run's deadline and the agent's shell environment (the intent
+        layer's reserved fields; the transcript keeps `args`)."""
+        if name != "shell":
+            return args
+        from ozagia.harness.tools import DEFAULT_SHELL_TIMEOUT_MS
+        inp = dict(args)
+        if not inp.get("timeout"):
+            inp["timeout"] = DEFAULT_SHELL_TIMEOUT_MS
+        inp["_deadline_s_remaining"] = self.deadline - time.monotonic()
+        inp["_test_env"] = dict(self.shell_env)
+        return inp
 
     def call(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         rec: dict[str, Any] = {}
@@ -225,7 +247,8 @@ class _Executor:
             rec.update(output=out, is_error=err)
             return rec
         from ozagia import intent
-        res = intent.handle(self.memory, name, args, harness="native")
+        res = intent.handle(self.memory, name, self._intent_input(name, args),
+                            harness="native")
         meta = res.get("meta") or {}
         rec["intent"] = meta.get("intent")
         if res.get("handled"):
@@ -234,13 +257,17 @@ class _Executor:
                        is_error=bool(res.get("is_error")),
                        handled=True, fallback=False)
             return rec
-        self.fallbacks += 1
+        failed = bool(meta.get("error"))
+        if failed:
+            self.fallbacks += 1
+        else:
+            self.passthrough += 1
         out, err = self._plain(name, args)
         after = intent.after(self.memory, name, args, out, harness="native")
         append = after.get("append") or ""
         if append:
             out = out + "\n" + append
-        rec.update(output=out, is_error=err, handled=False, fallback=True,
+        rec.update(output=out, is_error=err, handled=False, fallback=failed,
                    reason=res.get("reason"),
                    after_intent=(after.get("meta") or {}).get("intent"))
         return rec
@@ -248,9 +275,12 @@ class _Executor:
 
 def _shell_env(api_key: str | None) -> dict[str, str]:
     """The agent's shell environment: this process's, without PYTHONPATH
-    (it points at ozagia, not the target) and without any variable that
-    holds the API key."""
-    env = dict(os.environ)
+    (it points at ozagia, not the target), without the eval's
+    `OZAGIA_NATIVE_*` settings (one names the key file) and without any
+    variable that holds the API key. Graph mode's captured pytest gets the
+    same environment."""
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith("OZAGIA_NATIVE_")}
     env.pop("PYTHONPATH", None)
     if api_key:
         for k in [k for k, v in env.items() if api_key in v]:
@@ -273,9 +303,27 @@ def _parse_args(raw: Any) -> tuple[dict[str, Any] | None, str | None]:
 
 
 def load_graph(workdir: Path, dump: str | Path | None) -> Any:
-    """`DevMemory` for `workdir` from `dump` (built there when missing)."""
+    """`DevMemory` for `workdir` from `dump` (built there when missing).
+    Reingests do not rewrite the snapshot (`defer_writes`); `run` writes it
+    once at the end."""
     from ozagia.daemon.server import load_memory
-    return load_memory(Path(workdir).resolve(), dump)
+    memory = load_memory(Path(workdir).resolve(), dump)
+    memory.defer_writes = True
+    return memory
+
+
+def _plain_http_warning(base_url: str) -> str | None:
+    """A warning for a base URL that sends the key unencrypted to another
+    host (`http://` to anything but loopback)."""
+    from urllib.parse import urlsplit
+    parts = urlsplit(base_url)
+    if parts.scheme != "http":
+        return None
+    host = (parts.hostname or "").lower()
+    if host == "localhost" or host.startswith("127.") or host in ("::1", "[::1]"):
+        return None
+    return (f"warning: {base_url} is plain http to a non-loopback host; the "
+            "API key and the conversation are sent unencrypted")
 
 
 # --------------------------------------------------------------------------- #
@@ -310,12 +358,19 @@ def run(workdir: str | Path, prompt: str, *, mode: str, base_url: str,
     summary: dict[str, Any] = {
         "exit_code": 0, "steps": 0, "tokens_in": 0, "tokens_out": 0,
         "cost_usd": None, "tool_calls": 0, "tools_by_name": {},
-        "captured_calls": None, "fallbacks": None, "stopped": None,
+        "captured_calls": None, "passthrough_calls": None, "fallbacks": None,
+        "stopped": None,
         "error": None, "final_text": "", "mode": mode, "model": model,
         "wall_s": 0.0, "log_dir": str(log)}
+    warn = _plain_http_warning(base_url)
+    if warn:
+        print(warn, file=sys.stderr, flush=True)
     try:
         if mode == "graph" and memory is None:
             memory = load_graph(workdir, dump)
+        elif mode == "graph":
+            with contextlib.suppress(AttributeError):  # a stand-in object
+                memory.defer_writes = True
     except Exception as e:  # noqa: BLE001 - reported in the summary
         summary.update(stopped="error", exit_code=1,
                        error=f"graph load failed: {type(e).__name__}: {e}")
@@ -428,7 +483,15 @@ def run(workdir: str | Path, prompt: str, *, mode: str, base_url: str,
     summary["tools_by_name"] = dict(sorted(by_name.items()))
     if mode == "graph":
         summary["captured_calls"] = ex.captured
+        summary["passthrough_calls"] = ex.passthrough
         summary["fallbacks"] = ex.fallbacks
+        if getattr(memory, "snapshot_dirty", False):
+            # Once, after the loop (the reingests only marked it dirty).
+            try:
+                summary["snapshot_write_s"] = round(memory.write_snapshot(), 3)
+                memory.snapshot_dirty = False
+            except OSError as e:
+                summary["snapshot_error"] = f"{type(e).__name__}: {e}"
     return _finish(summary, log, started, scrub)
 
 

@@ -77,6 +77,7 @@ from ozagia.edit.txn import (
     SourceFile,
     check_base,
     encode_text,
+    in_git_dir,
     normalize_newlines,
     read_source,
     sha256_bytes,
@@ -99,9 +100,13 @@ _JUDGED_DECORATORS = frozenset({"staticmethod", "classmethod"})
 
 def _read(root: str | Path, rel: str) -> SourceFile:
     rel = str(rel or "").strip()
+    if in_git_dir(rel):
+        raise CodeEditError(f"{rel} is inside .git; refused")
     suffix = PurePosixPath(rel).suffix.lower()
     src = read_source(root, rel, suffixes=(suffix,), max_bytes=MAX_SOURCE_BYTES,
                       error_cls=CodeEditError)
+    if in_git_dir(src.rel):
+        raise CodeEditError(f"{src.rel} is inside .git; refused")
     if b"\0" in src.raw[:BINARY_SNIFF_BYTES]:
         raise CodeEditError(f"{src.rel} is binary")
     return src

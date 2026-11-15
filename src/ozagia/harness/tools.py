@@ -26,7 +26,7 @@ error text. Outputs follow OpenCode's shapes, without any graph context:
     shell  combined stdout and stderr; the last MAX_SHELL_OUTPUT_CHARS kept
 
 File paths are absolute or relative to the workdir and must stay inside it
-(after resolving symlinks). The search itself (ripgrep, or a Python `re`
+(after resolving symlinks); edit and write refuse paths inside `.git`. The search itself (ripgrep, or a Python `re`
 walk when `rg` is missing) is the one `ozagia.intent.search` uses, so both
 modes of the native loop search the same files.
 """
@@ -259,8 +259,19 @@ def _glob_match(pattern: str, rel: str) -> bool:
 # --------------------------------------------------------------------------- #
 # edit and write
 # --------------------------------------------------------------------------- #
+def _writable(workdir: Path, path: Any) -> Path:
+    """`resolve`, refusing paths inside a `.git` directory (git's refs and
+    HEAD), at any depth."""
+    from ozagia.edit.txn import in_git_dir
+    target = resolve(workdir, path)
+    rel = target.relative_to(Path(os.path.realpath(workdir)))
+    if in_git_dir(rel):
+        raise ToolError(f"{path} is inside .git; refused")
+    return target
+
+
 def tool_edit(workdir: Path, inp: dict[str, Any], **_: Any) -> str:
-    target = resolve(workdir, inp.get("path"))
+    target = _writable(workdir, inp.get("path"))
     old, new = inp.get("oldString"), inp.get("newString")
     if not isinstance(old, str) or not isinstance(new, str):
         raise ToolError("oldString and newString are required strings")
@@ -287,7 +298,7 @@ def tool_edit(workdir: Path, inp: dict[str, Any], **_: Any) -> str:
 
 
 def tool_write(workdir: Path, inp: dict[str, Any], **_: Any) -> str:
-    target = resolve(workdir, inp.get("path"))
+    target = _writable(workdir, inp.get("path"))
     content = inp.get("content")
     if not isinstance(content, str):
         raise ToolError("content is required")

@@ -48,12 +48,26 @@ Not recomputed. Git history (`changes`, `head`) and the failure baseline
 (`has_failure`, `in_file`) are left as built; edges to removed nodes go
 away, and a failure in a reingested test file is linked again
 (`refers_to`). Repo `generated_at` keeps the build time. The Repo counts
-are updated. The Repo `tree_digest` is set to the current digest only when
-`pending_changes` finds no indexed file left to reingest, so `staleness()`
-reports `stale: False` once every changed file has been reingested (with
-HEAD unchanged). Changes to files neither indexed nor adapter-owned (the
-failure baseline, a new seed manifest) are not picked up by `refresh`; they
-need a build.
+are updated.
+
+Staleness. The Repo `tree_digest` is set to the current digest only when
+`pending_changes` finds nothing left to reingest and `unhandled_changes` is
+empty: every tracked path git reports as changed is one reingest handles
+(an indexed file or an adapter-owned file). Tracked paths of the other kind
+that were already changed when the digest was taken are stamped in the
+snapshot's `other_stamps`; only a change since then counts. So
+`staleness()` reports `stale: False` once every changed file has been
+reingested (with HEAD unchanged), and keeps reporting stale after a change
+to a tracked file reingest cannot take in (the failure baseline, a tracked
+file only a build reads) until a build. Untracked files a build does not
+index do not hold the digest back; a new, untracked file that only an
+adapter would read (a new seed manifest) still needs a build.
+
+Adapter-owned files that are not indexed (a seed manifest) are stamped
+(size, mtime_ns, sha256; the snapshot's `adapter.stamps`) at the build and
+after each adapter pass; `pending_changes` reports one that changed, so a
+`refresh` reingests it and runs the adapter pass. Snapshots without stamps
+(built before they existed) report such a file only when git lists it.
 
 Version 1 snapshots have no `files` table; reingest refuses them.
 """
@@ -565,6 +579,12 @@ def _adapter_files(mem: Any) -> set[str]:
     return set(mem._adapter_info.get("files") or ())
 
 
+def _adapter_known(mem: Any) -> set[str]:
+    """Adapter files, and stamped former ones (deleted before the last
+    adapter pass): changes to either are handled by an adapter pass."""
+    return _adapter_files(mem) | set(mem._adapter_info.get("stamps") or ())
+
+
 def _needs_adapter_pass(txn: _Txn, files: list[str]) -> bool:
     mem = txn.mem
     afiles = _adapter_files(mem)
@@ -680,7 +700,10 @@ def _adapter_pass(txn: _Txn, indexers: list[Any], opts: dict[str, Any]) -> None:
     for indexer in indexers:
         indexer(ctx)
     mem._adapter_info = {"files": new_files, "edges": builder.core_edges,
-                         "unkeyed": builder.unkeyed}
+                         "unkeyed": builder.unkeyed,
+                         "stamps": stamps(root, list(dict.fromkeys(
+                             [*new_files, *(f for f in old_files
+                                            if not (root / f).exists())])))}
     txn.adapter_core = {tuple(e) for e in builder.core_edges}
     txn.touched.update(old_files, new_files)
 
@@ -804,7 +827,9 @@ def reingest(mem: Any, paths: Iterable[str], *, write: bool = True) -> GraphDelt
     if txn.repo is not None:
         attrs = dict(mem.nodes[txn.repo]["attrs"])
         attrs.update(M.repo_counts(n["type"] for n in mem.nodes.values()))
-        if not pending_changes(mem):
+        status = _git_status(root)
+        if (not pending_changes(mem, status=status)
+                and not unhandled_changes(mem, status=status)):
             digest, err = M._tree_digest(root, dump=mem.dump)
             if digest is not None:
                 attrs.pop("tree_digest_error", None)
@@ -812,6 +837,9 @@ def reingest(mem: Any, paths: Iterable[str], *, write: bool = True) -> GraphDelt
             else:
                 attrs.pop("tree_digest", None)
                 attrs["tree_digest_error"] = err or "unknown"
+            mem._other_stamps = stamps(root, unhandled_paths(
+                root, mem._files_table, _adapter_known(mem), opts, mem.dump,
+                status=status))
             old = mem.nodes[txn.repo]["attrs"]
             digest_changed = (old.get("tree_digest") != attrs.get("tree_digest")
                               or old.get("tree_digest_error")
@@ -834,7 +862,9 @@ def reingest(mem: Any, paths: Iterable[str], *, write: bool = True) -> GraphDelt
     return delta
 
 
-def _git_status_paths(root: Path) -> list[str]:
+def _git_status(root: Path) -> list[tuple[str, str]]:
+    """(XY status code, path) for each path `git status` reports; a rename
+    gives both paths."""
     try:
         proc = subprocess.run(
             ["git", "-C", str(root), "status", "--porcelain", "-uall"],
@@ -843,22 +873,127 @@ def _git_status_paths(root: Path) -> list[str]:
         return []
     if proc.returncode != 0:
         return []
-    out: list[str] = []
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
     for line in (proc.stdout or "").splitlines():
         if len(line) < 4:
             continue
         for path in line[3:].strip().split(" -> "):
             path = path.strip().strip('"')
-            if path and path not in out:
-                out.append(path)
+            if path and path not in seen:
+                seen.add(path)
+                out.append((line[:2], path))
     return out
 
 
-def pending_changes(mem: Any) -> list[str]:
+def _git_status_paths(root: Path) -> list[str]:
+    return [path for _code, path in _git_status(root)]
+
+
+# --------------------------------------------------------------------------- #
+# stamps of files the `files` table does not cover
+# --------------------------------------------------------------------------- #
+def file_stamp(root: Path, rel: str) -> list[Any] | None:
+    """[size, mtime_ns, sha256] of `rel` (sha256 None above
+    MAX_PARSE_BYTES), or None when it is not a readable file."""
+    p = Path(root) / rel
+    try:
+        st = p.stat()
+        if not p.is_file():
+            return None
+        sha = (hashlib.sha256(p.read_bytes()).hexdigest()
+               if st.st_size <= M.MAX_PARSE_BYTES else None)
+    except OSError:
+        return None
+    return [st.st_size, st.st_mtime_ns, sha]
+
+
+def stamps(root: Path, rels: Iterable[str]) -> dict[str, list[Any] | None]:
+    return {rel: file_stamp(root, rel) for rel in rels}
+
+
+def _stamp_changed(root: Path, rel: str, stamp: Any) -> bool:
+    """`rel` differs from `stamp` (by size and mtime, then sha256). A
+    same-content stamp gets the new mtime, so the hash is skipped next time."""
+    p = Path(root) / rel
+    try:
+        st = p.stat()
+        exists = p.is_file()
+    except OSError:
+        exists = False
+    if not stamp:
+        return exists
+    if not exists:
+        return True
+    if [st.st_size, st.st_mtime_ns] == list(stamp[:2]):
+        return False
+    if stamp[2] is None or st.st_size > M.MAX_PARSE_BYTES:
+        return True
+    try:
+        now = hashlib.sha256(p.read_bytes()).hexdigest()
+    except OSError:
+        return True
+    if now != stamp[2]:
+        return True
+    stamp[0], stamp[1] = st.st_size, st.st_mtime_ns
+    return False
+
+
+def unhandled_paths(root: Path, table: dict[str, Any], adapter_files: Iterable[str],
+                    opts: dict[str, Any], dump: Any, *,
+                    status: list[tuple[str, str]] | None = None) -> list[str]:
+    """Tracked paths `git status` reports as changed (modified, deleted,
+    renamed, staged; not untracked) that no reingest handles: not indexed,
+    not adapter-owned, not a file a build would index, not in ozagia's own
+    directories. Untracked files a build would not index are left out: the
+    graph of a fresh build does not depend on them."""
+    excludes = M._digest_excludes(root, dump)
+    afiles = set(adapter_files)
+    out: list[str] = []
+    for code, rel in (status if status is not None else _git_status(root)):
+        if code in ("??", "!!") or rel in table or rel in afiles:
+            continue
+        if rel in excludes or rel.startswith(excludes):
+            continue
+        if _role(root, rel, opts):
+            continue  # indexed by path: pending_changes / reingest handle it
+        out.append(rel)
+    return out
+
+
+def unhandled_changes(mem: Any, *,
+                      status: list[tuple[str, str]] | None = None) -> list[str]:
+    """Changed tracked paths the graph cannot take in by reingest:
+    `unhandled_paths` that differ from their stamp in the snapshot
+    (`other_stamps`, taken when the tree digest was), and stamped paths that
+    are clean again. While any
+    is left, reingest keeps the old `tree_digest`, so `staleness()` reports
+    stale until a build."""
+    _require_table(mem)
+    root = Path(mem.raw_repo_root).resolve()
+    if status is None:
+        status = _git_status(root)
+    table = mem._files_table
+    afiles = _adapter_known(mem)
+    recorded = mem._other_stamps or {}
+    cur = unhandled_paths(root, table, afiles, mem._build_opts, mem.dump,
+                          status=status)
+    out = [rel for rel in cur
+           if rel not in recorded or _stamp_changed(root, rel, recorded[rel])]
+    now = set(cur)
+    out += [rel for rel in recorded
+            if rel not in now and rel not in table and rel not in afiles]
+    return out
+
+
+def pending_changes(mem: Any, *,
+                    status: list[tuple[str, str]] | None = None) -> list[str]:
     """Files a `refresh` would reingest: indexed files whose content differs
-    from the snapshot (by size and mtime, then sha256) or that are gone, and
-    files `git status` reports that a build would index but the snapshot
-    does not have."""
+    from the snapshot (by size and mtime, then sha256) or that are gone,
+    adapter-owned files whose content differs from their stamp (`adapter`
+    `stamps`, taken at the build and after each adapter pass) or that are
+    gone, and files `git status` reports that a build would index but the
+    snapshot does not have, or that are adapter-owned without a stamp."""
     _require_table(mem)
     root = Path(mem.raw_repo_root).resolve()
     table = mem._files_table
@@ -892,10 +1027,19 @@ def pending_changes(mem: Any) -> list[str]:
         else:
             # Same content: remember the new stamp to skip the hash next time.
             entry["size"], entry["mtime_ns"] = st.st_size, st.st_mtime_ns
+    afiles = _adapter_files(mem)
+    astamps = mem._adapter_info.get("stamps") or {}
+    for rel in sorted(afiles):
+        if rel in table or rel in out or rel not in astamps:
+            continue
+        if _stamp_changed(root, rel, astamps[rel]):
+            out.append(rel)
     opts = mem._build_opts
-    for rel in _git_status_paths(root):
+    for _code, rel in (status if status is not None else _git_status(root)):
         if rel in table or rel in out:
             continue
         if _role(root, rel, opts) and M._walked(root, rel):
+            out.append(rel)
+        elif rel in afiles and rel not in astamps:
             out.append(rel)
     return out

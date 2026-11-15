@@ -11,13 +11,17 @@ On enter:
    `build="auto"` builds it when missing; when present it asks
    `DevMemory.staleness()` and, if stale, runs `DevMemory.refresh()`. A
    snapshot `refresh` cannot update (version 1, built for another root) is
-   rebuilt. `refresh` does not recompute git history, so after a HEAD change
-   the report says `still_stale`; `build="always"` rebuilds. `build="never"`
+   rebuilt, and so is one that is still stale after a refresh that
+   reingested nothing or left `DevMemory.unhandled_changes()` (changed files
+   that are neither indexed nor adapter-owned). `refresh` does not recompute
+   git history, so after a HEAD change with files to reingest the report
+   says `still_stale`; `build="always"` rebuilds. `build="never"`
    fails when the snapshot is missing and never refreshes. This runs in a
    subprocess with `tool_python` and `OZAGIA_ROOT=root`, because
    `ozagia.core.memory` takes its layout from `$OZAGIA_ROOT` at import.
-2. The daemon starts (`python -m ozagia.daemon serve --no-build`, its own
-   process group) on a short socket path in the temp dir. A daemon that does
+2. The daemon starts (`python -m ozagia.daemon serve --no-build
+   --parent-pid <this pid>`, its own process group) on a short socket path
+   in the temp dir; it exits by itself if this process dies. A daemon that does
    not print `ready` within `eval.agent.DAEMON_READY_TIMEOUT_S` is killed and
    `SessionError` is raised.
 
@@ -87,11 +91,21 @@ else:
     else:
         delta = mem.refresh()
         after = mem.staleness()
-        out = {"action": "refreshed", "files": len(delta.files),
-               "added": len(delta.added), "removed": len(delta.removed),
-               "changed": len(delta.changed), "nodes": len(mem.nodes),
-               "edges": len(mem.edges), "still_stale": bool(after["stale"]),
-               "head_moved": bool(after["head"] and after["snapshot_head"] != after["head"])}
+        unhandled = mem.unhandled_changes() if after["stale"] else []
+        if after["stale"] and (not delta.files or unhandled):
+            # Nothing refresh could take in (or something it cannot): only a
+            # build makes the snapshot current.
+            out = built("stale, and refresh reingested nothing"
+                        if not delta.files else
+                        f"stale after refresh: {len(unhandled)} changed "
+                        f"file(s) refresh cannot take in")
+        else:
+            out = {"action": "refreshed", "files": len(delta.files),
+                   "added": len(delta.added), "removed": len(delta.removed),
+                   "changed": len(delta.changed), "nodes": len(mem.nodes),
+                   "edges": len(mem.edges), "still_stale": bool(after["stale"]),
+                   "head_moved": bool(after["head"]
+                                      and after["snapshot_head"] != after["head"])}
 out["seconds"] = round(time.monotonic() - t0, 3)
 out["dump"] = str(dump)
 print(json.dumps(out))
@@ -200,9 +214,10 @@ def prepare_snapshot(root: str | Path, dump: str | Path, *, build: str = "auto",
 
 def _daemon_argv(tool_python: str, root: Path, dump: Path, journal: Path,
                  sock: Path) -> list[str]:
+    # --parent-pid: the daemon exits if this process dies without teardown.
     return [tool_python, "-m", "ozagia.daemon", "serve", "--root", str(root),
             "--dump", str(dump), "--journal", str(journal), "--sock", str(sock),
-            "--no-build"]
+            "--no-build", "--parent-pid", str(os.getpid())]
 
 
 def start_daemon(root: Path, dump: Path, log_dir: Path, *, tool_python: str,
