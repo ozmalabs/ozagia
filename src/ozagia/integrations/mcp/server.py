@@ -21,6 +21,8 @@ Environment:
     OZAGIA_JOURNAL  journal path  (default .ozagia/journal.jsonl)
     OZAGIA_AUTOBUILD  "1" to build the snapshot on first start if absent
     OZAGIA_ROOT     checkout the tools act on (default: the current Git top level)
+    OZAGIA_SURFACE  "full" (default) or "graph" (the find/node/expand/impact/
+                    edit/create/check/note verbs); `--surface` overrides it
 """
 from __future__ import annotations
 
@@ -49,6 +51,9 @@ BRIEF_URI = "ozagia://brief"
 SERVER_VERSION = "0.1.0"
 SUPPORTED_PROTOCOL_VERSIONS = ("2024-11-05", "2025-03-26", "2025-06-18")
 PROTOCOL_VERSION = "2025-06-18"
+# Tool surfaces: "full" (the dev_* tools) or "graph" (the eight verbs of
+# `ozagia.integrations.mcp.graph_surface`). Adapter tools are in both.
+SURFACES = ("full", "graph")
 
 # JSON-RPC error codes.
 _E_PARSE = -32700
@@ -649,8 +654,19 @@ def _validate_args(schema: dict[str, Any], args: Any) -> dict[str, Any]:
 
 
 class DevMemoryServer:
-    def __init__(self, memory: DevMemory):
+    def __init__(self, memory: DevMemory, surface: str = "full"):
+        if surface not in SURFACES:
+            raise ValueError(f"unknown surface {surface!r}; known: {SURFACES}")
         self.mem = memory
+        self.surface = surface
+        if surface == "graph":
+            from ozagia.integrations.mcp.graph_surface import (
+                GRAPH_TOOLS, GraphSurface)
+            self._handlers = GraphSurface(memory).handlers()
+            self._tools = list(GRAPH_TOOLS)
+            self._schemas = {t["name"]: t["inputSchema"] for t in self._tools}
+            self._load_adapter_tools()
+            return
         self._handlers: dict[str, Callable[[dict[str, Any]], Any]] = {
             "dev_context": self._context,
             "dev_brief": self._brief,
@@ -710,7 +726,7 @@ class DevMemoryServer:
         for err in reg.errors:
             print(f"[{SERVER_NAME}] adapter error: {err}", file=sys.stderr)
         for name, (spec, handler) in reg.mcp_tools.items():
-            if name in _SCHEMAS:
+            if name in _SCHEMAS or name in self._schemas:
                 print(f"[{SERVER_NAME}] adapter tool {name!r} clashes with a "
                       f"built-in tool; ignored", file=sys.stderr)
                 continue
@@ -1214,7 +1230,12 @@ def main(argv: list[str] | None = None) -> int:
                                                        str(DEFAULT_JOURNAL)))
     p.add_argument("--root", default=str(repo_root()))
     p.add_argument("--autobuild", action="store_true")
+    p.add_argument("--surface", default=os.environ.get("OZAGIA_SURFACE", "full"),
+                   help="tool surface: full (default) or graph")
     args = p.parse_args(argv)
+    if args.surface not in SURFACES:
+        p.error(f"--surface/OZAGIA_SURFACE must be one of {', '.join(SURFACES)}, "
+                f"got {args.surface!r}")
     mem = _load_memory(args)
     # LSP servers are child processes: close them on normal exit, on exit via
     # an exception, and on SIGTERM.
@@ -1224,7 +1245,7 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError:
         pass  # not the main thread
     try:
-        return serve(DevMemoryServer(mem))
+        return serve(DevMemoryServer(mem, surface=args.surface))
     finally:
         _close_lsp()
 
