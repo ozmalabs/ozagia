@@ -51,7 +51,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any, Iterable
-from ozagia.config import STATE_DIRNAME, repo_root
+from ozagia.config import STATE_DIRNAME, config_path, repo_root
 
 ROOT = repo_root()
 DEFAULT_TASKS = ROOT / "evaluation" / "agent_e2e" / "tasks.json"
@@ -803,7 +803,7 @@ def make_driver(name: str | None, *, live: bool = False,
 
 
 def write_arm_config(workdir: Path, arm: str, tool_python: str,
-                     log_dir: Path) -> list[Path]:
+                     log_dir: Path, *, config: Path | None = None) -> list[Path]:
     """Write the MCP registration for an arm into the workdir.
 
     baseline writes nothing. dev_memory writes one Claude Code file and one
@@ -813,7 +813,9 @@ def write_arm_config(workdir: Path, arm: str, tool_python: str,
 
     The server runs with `tool_python`, the interpreter ozagia is installed in,
     and acts on the workdir through OZAGIA_ROOT. The workdir is not put on
-    PYTHONPATH, so a task that breaks the target's code cannot break the tool."""
+    PYTHONPATH, so a task that breaks the target's code cannot break the tool.
+    `config` is the source repository's project config (OZAGIA_CONFIG): the
+    workdir is at the task's base commit, which may predate the config."""
     if arm == "baseline":
         return []
     if arm != "dev_memory":
@@ -826,6 +828,8 @@ def write_arm_config(workdir: Path, arm: str, tool_python: str,
         # so the server never builds it inside the timed agent session.
         "OZAGIA_AUTOBUILD": "0",
     }
+    if config is not None:
+        env["OZAGIA_CONFIG"] = str(config)
     log_dir.mkdir(parents=True, exist_ok=True)
     claude_doc = {"mcpServers": {MCP_SERVER_NAME: {
         "command": tool_python, "args": ["-m", MCP_MODULE], "env": env}}}
@@ -854,7 +858,7 @@ _PREP_CODE = (
 
 
 def prepare_dev_memory(workdir: Path, tool_python: str,
-                       log_dir: Path) -> dict[str, Any]:
+                       log_dir: Path, *, config: Path | None = None) -> dict[str, Any]:
     """Build the dev-memory snapshot and warm the tag cache, outside the timer.
 
     Runs in a subprocess with `tool_python` (where ozagia is installed) and
@@ -868,6 +872,10 @@ def prepare_dev_memory(workdir: Path, tool_python: str,
     env = dict(os.environ, OZAGIA_ROOT=str(workdir), PYTHONDONTWRITEBYTECODE="1",
                COLUMNS="250")
     env.pop("PYTHONPATH", None)
+    if config is not None:
+        env["OZAGIA_CONFIG"] = str(config)
+    else:
+        env.pop("OZAGIA_CONFIG", None)
     res = spawn_group([tool_python, "-c", _PREP_CODE, str(workdir),
                        str(log_dir / "dev_graph.json")],
                       cwd=workdir, env=env, timeout_s=PREP_TIMEOUT_S)
@@ -889,6 +897,7 @@ def run_one(repo: str | Path, task: dict[str, Any], arm: str, repeat: int,
             isolation: str = "worktree",
             tool_python: str | None = None) -> dict[str, Any]:
     tool_python = tool_python or sys.executable
+    config = config_path(repo)
     tid = task["id"]
     name = f"{tid}-{arm}-r{repeat}"
     log_dir = run_root / "logs" / name
@@ -905,9 +914,9 @@ def run_one(repo: str | Path, task: dict[str, Any], arm: str, repeat: int,
             record.update(success=False, error="break patch does not apply",
                           files_changed=[], localized=False, wall_s=0.0)
             return record
-        write_arm_config(workdir, arm, tool_python, log_dir)
+        write_arm_config(workdir, arm, tool_python, log_dir, config=config)
         if arm == "dev_memory":
-            prep = prepare_dev_memory(workdir, tool_python, log_dir)
+            prep = prepare_dev_memory(workdir, tool_python, log_dir, config=config)
             record.update(prep_s=prep["prep_s"], prep_ok=prep["prep_ok"],
                           prep_error=prep["prep_error"])
         before = _snapshot(workdir)

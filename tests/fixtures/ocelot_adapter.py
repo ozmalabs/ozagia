@@ -1,9 +1,15 @@
-"""Ocelot adapter for ozagia: seed manifests and the `dev_graph_query` tool.
+"""Ocelot adapter for ozagia: seed manifests, the IR edit engine and the
+`dev_graph_query` tool.
 
 Loaded by ozagia through `.ozagia.toml` (`[adapters] modules =
 ["tools.ozagia_ocelot_adapter:register"]`). It imports only `ozagia` and the
-standard library; `scripts.graph_interrogate` is imported lazily, from this
-checkout, when `dev_graph_query` is called.
+standard library. `scripts.graph_interrogate` and `scripts.ocelot_ir_edit`
+(which need the Ocelot substrate) are imported lazily, from this checkout,
+when `dev_graph_query` is called or an IR edit is applied.
+
+The IR edit engine handles Python edit scripts with `engine: "ir"` or one of
+its ops (`replace_expression_ir`, `replace_body_ir`, `replace_function_ir`,
+`fallback_check`).
 
 The indexer adds, from `seeds/*.json`:
 
@@ -31,9 +37,26 @@ OCELOT_ROOT = Path(__file__).resolve().parents[1]
 _SEED_PATH_RE = re.compile(r"seeds/([A-Za-z0-9_.-]+)\.json")
 
 
+IR_OPS = ("replace_expression_ir", "replace_body_ir", "replace_function_ir",
+          "fallback_check")
+
+
 def register(registry: Any) -> None:
     registry.add_indexer(index_seeds)
     registry.add_mcp_tool(GRAPH_QUERY_TOOL, graph_query)
+    registry.add_edit_engine("ir", IR_OPS, apply_ir_edit)
+
+
+def _ocelot_on_path() -> None:
+    if str(OCELOT_ROOT) not in sys.path:
+        sys.path.insert(0, str(OCELOT_ROOT))
+
+
+def apply_ir_edit(root: Any, script: dict[str, Any], *, write: bool = False) -> Any:
+    """The `ir` edit engine: Ocelot's `scripts.ocelot_ir_edit`."""
+    _ocelot_on_path()
+    from scripts.ocelot_ir_edit import apply_ir_edit_script
+    return apply_ir_edit_script(root, script, write=write)
 
 
 # --------------------------------------------------------------------------- #
@@ -218,8 +241,7 @@ def graph_query(memory: Any, args: dict[str, Any]) -> Any:
         return {"ok": False, "error": "pass exactly one of term= or match="}
     gi = getattr(memory, "_ocelot_graph_interrogator", None)
     if gi is None:
-        if str(OCELOT_ROOT) not in sys.path:
-            sys.path.insert(0, str(OCELOT_ROOT))
+        _ocelot_on_path()
         from scripts.graph_interrogate import GraphInterrogator
         gi = GraphInterrogator.from_dump(str(memory.dump))
         memory._ocelot_graph_interrogator = gi

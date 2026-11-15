@@ -768,3 +768,24 @@ def test_opencode_parser_counts_code_mode_mcp_calls():
     assert out["mcp_calls"] == 3
     assert out["tools_by_name"] == {"execute": 2, "ozagia_dev_context": 1,
                                     "read": 1}
+
+
+def test_arm_config_and_prep_pass_the_source_repo_config(tmp_path, monkeypatch):
+    cfg = tmp_path / "src.toml"
+    cfg.write_text("[index]\nsource_dirs = ['pkg']\n", encoding="utf-8")
+    work = tmp_path / "work"
+    work.mkdir()
+    write_arm_config(work, "dev_memory", "/usr/bin/python3", tmp_path / "log", config=cfg)
+    doc = json.loads((work / ae.MCP_CONFIG_OPENCODE).read_text(encoding="utf-8"))
+    env = doc["mcp"][ae.MCP_SERVER_NAME]["environment"]
+    assert env["OZAGIA_CONFIG"] == str(cfg)
+    seen = {}
+
+    def fake_spawn(argv, *, cwd, env, timeout_s):
+        seen.update(env)
+        return {"returncode": 0, "stdout": "", "stderr": "", "timed_out": False,
+                "seconds": 0.0}
+
+    monkeypatch.setattr(ae, "spawn_group", fake_spawn)
+    ae.prepare_dev_memory(work, "/usr/bin/python3", tmp_path / "log2", config=cfg)
+    assert seen["OZAGIA_CONFIG"] == str(cfg) and seen["OZAGIA_ROOT"] == str(work)
