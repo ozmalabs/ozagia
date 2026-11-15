@@ -20,6 +20,8 @@ Drivers:
           Validates the harness, not any agent.
   claude  Claude Code CLI in print mode. LIVE ONLY, untested live.
   opencode  OpenCode CLI in `run` mode. LIVE ONLY.
+  native  ozagia's own agent loop (ozagia.harness.native) against an
+          OpenAI-compatible endpoint. LIVE ONLY. baseline and graph_intent.
 
 Arms:
   baseline    no ozagia MCP server. Claude Code runs with --strict-mcp-config.
@@ -28,7 +30,9 @@ Arms:
   graph_intent  no MCP server; the ozagia graph daemon runs for the session
               and the OpenCode plugin (ozagia.integrations.opencode) hands
               the agent's read/grep/glob/edit/write/shell calls to it.
-              opencode, fake and noop drivers only.
+              opencode, fake and noop drivers only. The native driver runs
+              the intent layer in its own process instead (no daemon, no
+              plugin).
 
 Live drivers refuse to run unless both `--live` and the environment variable
 OZAGIA_EVAL_LIVE=1 are set. A live run spends hosted-model tokens and
@@ -69,7 +73,7 @@ ARMS = ("baseline", "dev_memory", "graph_intent")
 GRAPH_ARM = "graph_intent"
 # Drivers the graph_intent arm runs with: the plugin is OpenCode's, and the
 # local drivers exercise the daemon lifecycle without a model.
-GRAPH_ARM_DRIVERS = ("opencode", "fake", "noop")
+GRAPH_ARM_DRIVERS = ("opencode", "native", "fake", "noop")
 DAEMON_READY_TIMEOUT_S = 120
 # Per request to the daemon from the harness (stats, shutdown); the plugin
 # uses the same 30 s.
@@ -80,7 +84,7 @@ MCP_MODULE = "ozagia.integrations.mcp.server"
 MCP_CONFIG_CLAUDE = ".ozagia_eval_mcp.json"
 MCP_CONFIG_OPENCODE = ".ozagia_eval_opencode.json"
 TASK_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
-LIVE_DRIVERS = ("claude", "opencode")
+LIVE_DRIVERS = ("claude", "opencode", "native")
 LOCAL_DRIVERS = ("noop", "fake")
 # A driver error that means no session can succeed; the run stops at once.
 _AUTH_ERROR_RE = re.compile(r"authenticat|not logged in|invalid api key|oauth",
@@ -774,6 +778,161 @@ class CommandDriver:
         return {"backend": self.name, "model": model or "cli default"}
 
 
+# --------------------------------------------------------------------------- #
+# native: ozagia's own agent loop (ozagia.harness.native)
+# --------------------------------------------------------------------------- #
+NATIVE_BASE_URL_ENV = "OZAGIA_NATIVE_BASE_URL"
+NATIVE_MODEL_ENV = "OZAGIA_NATIVE_MODEL"
+NATIVE_KEY_FILE_ENV = "OZAGIA_NATIVE_API_KEY_FILE"
+NATIVE_KEY_ENV_ENV = "OZAGIA_NATIVE_API_KEY_ENV"
+NATIVE_MODULE = "ozagia.harness.native"
+# The loop stops itself at the session timeout; its process group is killed
+# this much later if it has not exited.
+NATIVE_GRACE_S = 30
+# Arms per driver, where a driver cannot run every arm. The native loop has
+# no MCP client, so no dev_memory.
+DRIVER_ARMS: dict[str, tuple[str, ...]] = {"native": ("baseline", GRAPH_ARM)}
+NATIVE_MODES = {"baseline": "plain", GRAPH_ARM: "graph"}
+
+
+def _ozagia_src() -> Path:
+    """The directory this ozagia package is imported from, so the loop's
+    subprocess runs the same code as the harness."""
+    import ozagia
+    return Path(ozagia.__file__).resolve().parent.parent
+
+
+class NativeDriver:
+    """`python -m ozagia.harness.native run` against an OpenAI-compatible
+    endpoint. Built only through make_driver, which enforces approval.
+
+    baseline runs the loop's plain tools; graph_intent runs its graph mode
+    with the dump prep built. The loop calls the intent layer in process, so
+    run_one starts no daemon and installs no plugin (`uses_daemon = False`).
+    """
+
+    name = "native"
+    isolation = "clone"
+    uses_daemon = False
+    arms = DRIVER_ARMS["native"]
+
+    def __init__(self, *, model: str | None = None, base_url: str | None = None,
+                 api_key_file: str | None = None,
+                 api_key_env: str | None = None) -> None:
+        self.base_url = (base_url or os.environ.get(NATIVE_BASE_URL_ENV) or "").rstrip("/")
+        self.model = model or os.environ.get(NATIVE_MODEL_ENV) or None
+        self.api_key_file = api_key_file or os.environ.get(NATIVE_KEY_FILE_ENV) or None
+        self.api_key_env = api_key_env or os.environ.get(NATIVE_KEY_ENV_ENV) or None
+        self.python: str | None = None
+
+    def _check_config(self) -> None:
+        if not self.base_url:
+            raise HarnessError(f"native driver needs {NATIVE_BASE_URL_ENV}")
+        if not self.model:
+            raise HarnessError(f"native driver needs --model or {NATIVE_MODEL_ENV}")
+        if self.api_key_file and self.api_key_env:
+            raise HarnessError(f"set only one of {NATIVE_KEY_FILE_ENV} and "
+                               f"{NATIVE_KEY_ENV_ENV}")
+
+    def _key_args(self) -> list[str]:
+        if self.api_key_file:
+            return ["--api-key-file", self.api_key_file]
+        if self.api_key_env:
+            return ["--api-key-env", self.api_key_env]
+        return []
+
+    def argv(self, workdir: Path, prompt_file: Path, arm: str, timeout_s: int,
+             log_dir: Path) -> list[str]:
+        if arm not in NATIVE_MODES:
+            raise HarnessError(f"driver native cannot run arm {arm!r} "
+                               f"(arms: {', '.join(self.arms)})")
+        argv = [sys.executable, "-m", NATIVE_MODULE, "run",
+                "--workdir", str(workdir), "--prompt-file", str(prompt_file),
+                "--mode", NATIVE_MODES[arm], "--base-url", self.base_url,
+                "--model", str(self.model), "--log-dir", str(log_dir / "native"),
+                "--timeout", str(timeout_s), *self._key_args()]
+        if arm == GRAPH_ARM:
+            argv += ["--dump", str(log_dir / "dev_graph.json")]
+        return argv
+
+    def run(self, workdir: Path, prompt: str, arm: str, timeout_s: int,
+            log_dir: Path, *, patch_path: Path | None = None,
+            extra_env: dict[str, str] | None = None) -> dict[str, Any]:
+        _require_live_env(self.name)
+        self._check_config()
+        log_dir.mkdir(parents=True, exist_ok=True)
+        prompt_file = log_dir / "prompt.txt"
+        prompt_file.write_text(prompt, encoding="utf-8")
+        argv = self.argv(workdir, prompt_file, arm, timeout_s, log_dir)
+        env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1",
+                   OZAGIA_ROOT=str(workdir), PYTHONPATH=str(_ozagia_src()),
+                   **(extra_env or {}))
+        if self.python:
+            env["PATH"] = os.pathsep.join(
+                [str(python_shim(log_dir, self.python)), env.get("PATH", "")])
+        res = spawn_group(argv, cwd=workdir, env=env,
+                          timeout_s=timeout_s + NATIVE_GRACE_S)
+        out, err = res["stdout"], res["stderr"]
+        (log_dir / "driver.stdout.txt").write_text(out, encoding="utf-8")
+        (log_dir / "driver.stderr.txt").write_text(err, encoding="utf-8")
+        summary = _parse_native_summary(out, log_dir / "native" / "summary.json")
+        error = None
+        if summary is None:
+            error = ("native loop wrote no summary"
+                     + (f" (killed after {res['seconds']} s)" if res["timed_out"]
+                        else f" (exit {res['returncode']})")
+                     + (": " + _tail(err, 5) if err.strip() else ""))
+            summary = {}
+        elif summary.get("stopped") == "error":
+            error = str(summary.get("error") or "native loop error")
+        return _empty_result(
+            exit_code=res["returncode"], wall_s=res["seconds"],
+            timed_out=res["timed_out"] or summary.get("stopped") == "timeout",
+            tokens_in=summary.get("tokens_in"),
+            tokens_out=summary.get("tokens_out"),
+            cost_usd=summary.get("cost_usd"),
+            tool_calls=summary.get("tool_calls"), mcp_calls=0,
+            tools_by_name=summary.get("tools_by_name"),
+            driver_error=error,
+            transcript=str(summary.get("final_text") or ""),
+            captured_calls=summary.get("captured_calls"),
+            fallbacks=summary.get("fallbacks"),
+            stopped=summary.get("stopped"), steps=summary.get("steps"))
+
+    def preflight(self) -> None:
+        """The endpoint answers `GET {base_url}/models` and lists the model.
+        No completion is requested."""
+        self._check_config()
+        from ozagia.harness import native
+        try:
+            key = native.read_api_key(env_name=self.api_key_env,
+                                      file=self.api_key_file)
+            listed = native.list_models(self.base_url, key)
+        except (OSError, ValueError, native.ModelError) as exc:
+            raise HarnessError(f"native preflight failed: {exc}") from exc
+        if self.model not in listed:
+            raise HarnessError(
+                f"{self.base_url}/models does not list model {self.model!r}")
+
+    def describe(self) -> dict[str, Any]:
+        return {"backend": self.name, "model": self.model,
+                "base_url": self.base_url}
+
+
+def _parse_native_summary(stdout: str, path: Path) -> dict[str, Any] | None:
+    """The loop's summary: its stdout, else the summary.json it wrote."""
+    for text in (stdout, None):
+        try:
+            if text is None:
+                text = path.read_text(encoding="utf-8")
+            doc = json.loads(text)
+        except (OSError, ValueError):
+            continue
+        if isinstance(doc, dict) and "stopped" in doc:
+            return doc
+    return None
+
+
 def _opencode_default_model() -> str | None:
     """The `model` key of the user's opencode config, for the report only."""
     for name in ("opencode.json", "opencode.jsonc", "config.json"):
@@ -811,6 +970,8 @@ def make_driver(name: str | None, *, live: bool = False,
             raise LiveRunNotApproved(
                 f"driver {name!r} makes hosted-model calls and needs both --live "
                 f"and {LIVE_ENV}=1. Get user approval first.")
+        if name == "native":
+            return NativeDriver(model=model)
         return CommandDriver(name, max_budget_usd=max_budget_usd, model=model)
     raise HarnessError(f"unknown driver: {name}")
 
@@ -1148,6 +1309,9 @@ def run_one(repo: str | Path, task: dict[str, Any], arm: str, repeat: int,
                               "prep_ok": None, "prep_error": None,
                               "cleanup_warnings": cleanup}
     graph = arm == GRAPH_ARM
+    # A driver that runs the intent layer itself (native) needs no daemon
+    # and no plugin.
+    uses_daemon = graph and getattr(driver, "uses_daemon", True)
     if graph:
         record.update(daemon_ok=None, daemon_error=None, daemon_ready_s=None,
                       daemon_stats=None, daemon_stop_error=None,
@@ -1167,7 +1331,7 @@ def run_one(repo: str | Path, task: dict[str, Any], arm: str, repeat: int,
             record.update(prep_s=prep["prep_s"], prep_ok=prep["prep_ok"],
                           prep_error=prep["prep_error"])
         run_kwargs: dict[str, Any] = {}
-        if graph:
+        if uses_daemon:
             started = start_daemon(workdir, tool_python, log_dir, config=config,
                                    run_python=python)
             daemon = started["daemon"]
@@ -1179,11 +1343,14 @@ def run_one(repo: str | Path, task: dict[str, Any], arm: str, repeat: int,
             opencode_plugin.install(workdir)
             plugin_installed = True
             run_kwargs["extra_env"] = {ENV_SOCK: str(started["sock"])}
+        elif graph and config is not None:
+            # The loop's graph must use the layout prep built it with.
+            run_kwargs["extra_env"] = {"OZAGIA_CONFIG": str(config)}
         before = _snapshot(workdir)
         result = driver.run(workdir, task["prompt"], arm, timeout_s, log_dir,
                             patch_path=patch, **run_kwargs)
         after = _snapshot(workdir)
-        if graph:
+        if uses_daemon:
             if daemon is not None:
                 stopped = daemon.stop()
                 daemon = None
@@ -1191,6 +1358,11 @@ def run_one(repo: str | Path, task: dict[str, Any], arm: str, repeat: int,
                 record.update(graph_stats_fields(stopped["daemon_stats"]))
             opencode_plugin.uninstall(workdir)
             plugin_installed = False
+        elif graph:
+            record.update(captured_calls=result.get("captured_calls"),
+                          fallbacks=result.get("fallbacks"))
+        if "stopped" in result:
+            record.update(stopped=result["stopped"], steps=result.get("steps"))
         files_changed = changed_since(before, after)
         check = run_check(workdir, task["check"], python, log_dir / "check.log")
         expected = [f.replace("\\", "/") for f in task["expected_files"]]
@@ -1244,6 +1416,12 @@ def run_eval(repo: str | Path, tasks: list[dict[str, Any]], arms: Iterable[str],
         raise HarnessError(
             f"arm {GRAPH_ARM} needs one of the drivers {', '.join(GRAPH_ARM_DRIVERS)}: "
             f"its plugin is OpenCode's, and driver {driver.name!r} has none")
+    allowed = getattr(driver, "arms", None)
+    if allowed is not None and any(a not in allowed for a in arms):
+        raise HarnessError(
+            f"driver {driver.name!r} runs only the arms {', '.join(allowed)}"
+            + (" (the native loop has no MCP client)" if driver.name == "native"
+               else ""))
     python = python or sys.executable
     run_root = run_root or new_run_root()
     ordered_arms = [a for a in ARMS if a in arms]
@@ -1325,8 +1503,10 @@ def aggregate(runs: list[dict[str, Any]], arms: Iterable[str]) -> list[dict[str,
             rows[-1].update({
                 "mean_captured_calls": _mean((r.get("captured_calls") for r in mine), 1),
                 "total_fallbacks": sum(int(r.get("fallbacks") or 0) for r in mine),
+                # Only runs that started a daemon have a plugin to load.
                 "plugin_load_failures": sum(1 for r in mine
-                                            if r.get("plugin_loaded") is not True),
+                                            if r.get("daemon_ok") is not None
+                                            and r.get("plugin_loaded") is not True),
                 "daemon_failures": sum(1 for r in mine if r.get("daemon_ok") is False),
             })
     return rows
@@ -1453,7 +1633,9 @@ def _run_root(args: argparse.Namespace) -> Path:
 
 def default_arms(driver_name: str) -> list[str]:
     """Every arm the driver can run: graph_intent only for its drivers."""
-    return [a for a in ARMS if a != GRAPH_ARM or driver_name in GRAPH_ARM_DRIVERS]
+    allowed = DRIVER_ARMS.get(driver_name, ARMS)
+    return [a for a in ARMS if a in allowed
+            and (a != GRAPH_ARM or driver_name in GRAPH_ARM_DRIVERS)]
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
@@ -1503,7 +1685,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help=f"agent backend (default: ${DRIVER_ENV})")
     r.add_argument("--model", default=None,
                    help="backend model, e.g. vllm/qwen3.8-27b for opencode "
-                        "(default: the backend's own configured default)")
+                        "(default: the backend's own configured default; for "
+                        f"native: ${NATIVE_MODEL_ENV})")
     r.add_argument("--arms", default=None,
                    help=f"comma-separated subset of {','.join(ARMS)} (default: every "
                         f"arm the driver supports; {GRAPH_ARM} needs "
@@ -1512,7 +1695,8 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--timeout-s", type=int, default=900,
                    help="wall-clock limit per driver session")
     r.add_argument("--live", action="store_true",
-                   help="required, with OZAGIA_EVAL_LIVE=1, for claude and opencode")
+                   help="required, with OZAGIA_EVAL_LIVE=1, for claude, opencode "
+                        "and native")
     r.add_argument("--max-budget-usd", type=float, default=None,
                    help="claude only: passed as --max-budget-usd (per session)")
     r.add_argument("--max-total-usd", type=float, default=None,
