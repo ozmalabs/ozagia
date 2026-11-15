@@ -256,6 +256,9 @@ class Builder:
     # Nodes created without a key, and the counters behind their keys.
     unkeyed: int = 0
     _unkeyed_counts: dict[tuple[str, str], int] = field(default_factory=dict)
+    # While adapter indexers run: an `adapter_state.AttrLog` of the nodes
+    # whose attrs they asked for.
+    attr_log: Any = None
 
     def node(self, type_name: str, attrs: dict[str, Any] | None = None,
              *, key: tuple | None = None) -> int:
@@ -289,6 +292,8 @@ class Builder:
 
     def attrs(self, nid: int) -> dict[str, Any]:
         """The (mutable) attrs of node `nid`."""
+        if self.attr_log is not None:
+            self.attr_log.note(nid, self.nodes[nid]["attrs"])
         return self.nodes[nid]["attrs"]
 
     def to_dict(self) -> dict[str, Any]:
@@ -1031,10 +1036,13 @@ def build_index(root: str | Path = ROOT, out: str | Path = DEFAULT_DUMP,
     # -- adapter indexers --------------------------------------------------- #
     srel = state_rel(root)
     adapter_files: list[str] = []
+    adapter_unindexed: set[str] = set()
 
     def adapter_file_node(rel: str, *, indexed: bool = True) -> int:
         if rel not in adapter_files:
             adapter_files.append(rel)
+        if not indexed:
+            adapter_unindexed.add(rel)
         return file_node(rel, indexed=indexed)
 
     options = {"include_docs": include_docs, "include_git": include_git,
@@ -1047,14 +1055,27 @@ def build_index(root: str | Path = ROOT, out: str | Path = DEFAULT_DUMP,
         options=dict(options))
     edges_before_adapters = len(b.edges)
     unkeyed_before_adapters = b.unkeyed
-    for indexer in registry(root).indexers:
-        indexer(ctx)
+    from ozagia.core import adapter_state as AS
+    reg = registry(root)
+    b.attr_log = AS.AttrLog()
+    try:
+        for indexer in reg.indexers:
+            indexer(ctx)
+    finally:
+        log, b.attr_log = b.attr_log, None
     from ozagia.core.reingest import stamps as _stamps
     adapter_info = {
         "files": adapter_files,
         "edges": _adapter_core_edges(b, edges_before_adapters),
         "unkeyed": b.unkeyed - unkeyed_before_adapters,
         "stamps": _stamps(root, adapter_files),
+        "unindexed": sorted(adapter_unindexed),
+        "watch_stamps": _stamps(root, AS.watched_files(root, reg.watch_globs)),
+        "text_files": AS.text_files(
+            [*ix.sources, *ix.tests, *ix.docs],
+            AS.text_regexes(reg.indexer_inputs)),
+        "attrs": log.overlay(lambda nid: b.nodes[nid]["key"],
+                             lambda nid: b.nodes[nid]["attrs"]),
     }
 
     # -- checkout head ------------------------------------------------------ #
@@ -1239,7 +1260,8 @@ def _tree_digest(root: Path, *, dump: str | Path | None = None
     """(digest, error) for the working tree under `root`.
 
     The digest is sha256 over `git diff HEAD` (tracked content changes), a NUL,
-    and for each untracked file under SOURCE_DIRS (sorted by git): its path, a
+    and for each untracked file under SOURCE_DIRS or matching an adapter
+    indexer's `watch` glob (sorted by git): its path, a
     NUL, then its size and sha256 of its bytes. Untracked files larger than
     MAX_PARSE_BYTES contribute path, size and mtime_ns instead. Untracked files
     that cannot be read contribute path and "unreadable". Untracked files in
@@ -1252,9 +1274,11 @@ def _tree_digest(root: Path, *, dump: str | Path | None = None
             ["git", "-C", str(root), "diff", "HEAD", "--no-color",
              "--no-ext-diff"],
             capture_output=True, timeout=60, check=False)
+        from ozagia.adapters import registry
+        watch = [f":(glob){g}" for g in registry(root).watch_globs]
         untracked = subprocess.run(
             ["git", "-C", str(root), "ls-files", "-z", "--others",
-             "--exclude-standard", "--", *SOURCE_DIRS],
+             "--exclude-standard", "--", *SOURCE_DIRS, *watch],
             capture_output=True, timeout=60, check=False)
     except (OSError, subprocess.SubprocessError) as e:
         return None, str(e)

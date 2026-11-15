@@ -33,16 +33,25 @@ build: `indexed` is 0 only when history or failures are the only reason. So
 a deleted file that is still in the git history or the failure baseline
 keeps an unindexed File node; otherwise its File node goes.
 
-Adapters. What an adapter indexer derived from a file is unknown, and the
-Ocelot seed indexer takes seconds over all seeds. A reingest runs the
-adapter indexers again only when a reingested file is one an adapter node is
-`defined_in`, or one an adapter passed to `ctx.file_node`: then all adapter
-nodes and adapter edges are removed and the indexers run over the current
-sources, tests and docs (all read again). Otherwise adapters are skipped:
-adapter edges of nodes whose keys survive are kept, adapter edges of removed
-nodes go, and new nodes get none until a build or an adapter pass. Adapters
-may later declare per-file indexing so that a reingest can call them for
-the reingested files only.
+Adapters. An adapter pass removes all adapter nodes and adapter edges,
+puts back the parsed value of every attribute indexers wrote onto core
+nodes, and runs the indexers over the current sources, tests and docs (all
+read again); the Ocelot seed indexer takes about 5 s. A reingest runs it only
+when a reingested file is one the indexers depend on (see
+`ozagia.adapters.Registry.add_indexer`):
+
+- one an adapter node is `defined_in`, or one an adapter passed to
+  `ctx.file_node`;
+- one matching an indexer's `watch` glob;
+- for an indexer with `texts=None` (the default), any indexed file; with a
+  regex, a file whose distinct matches differ from those at the last pass,
+  or a matching file that now defines a node key it did not.
+
+Otherwise adapters are skipped: adapter edges of nodes whose keys survive are
+kept, adapter edges of removed nodes go, and the attributes indexers wrote
+onto core nodes (the snapshot's `adapter.attrs`, see
+`ozagia.core.adapter_state`) are put back on nodes whose parsed attributes
+were replaced. Under the declared inputs this is the graph a build makes.
 
 Not recomputed. Git history (`changes`, `head`) and the failure baseline
 (`has_failure`, `in_file`) are left as built; edges to removed nodes go
@@ -60,8 +69,8 @@ snapshot's `other_stamps`; only a change since then counts. So
 reingested (with HEAD unchanged), and keeps reporting stale after a change
 to a tracked file reingest cannot take in (the failure baseline, a tracked
 file only a build reads) until a build. Untracked files a build does not
-index do not hold the digest back; a new, untracked file that only an
-adapter would read (a new seed manifest) still needs a build.
+index do not hold the digest back. Files matching a `watch` glob count in
+the digest; a new, changed or deleted one is a pending change.
 
 Adapter-owned files that are not indexed (a seed manifest) are stamped
 (size, mtime_ns, sha256; the snapshot's `adapter.stamps`) at the build and
@@ -80,6 +89,7 @@ import time
 from pathlib import Path
 from typing import Any, Iterable
 
+from ozagia.core import adapter_state as AS
 from ozagia.core import memory as M
 from ozagia.core.delta import GraphDelta
 from ozagia.core.keys import file_key, format_key, key_file, test_key
@@ -155,6 +165,12 @@ class _Txn:
         self.reuse: dict[str, int] = {}
         self.touched: set[str] = set()
         self.watched: set[int] = set()
+        # Core nodes whose attrs were replaced by a fresh parse.
+        self.parsed: set[int] = set()
+        # Files of this reingest that were indexed (had `ctx`) before it,
+        # and those that now own a node key they did not before.
+        self.ctx_before: set[str] = set()
+        self.added_owned: set[str] = set()
         self.adapter_core = {tuple(e) for e in
                              mem._adapter_info.get("edges") or ()}
 
@@ -466,8 +482,10 @@ def _apply_fragment(txn: _Txn, rel: str,
         nid = mem.node_by_key(key)
         if nid is None:
             nid = txn.add_node(n["type"], n["attrs"], key)
+            txn.added_owned.add(rel)
         else:
             txn.set_attrs(nid, n["attrs"])
+        txn.parsed.add(nid)
         idmap[n["id"]] = nid
     test_order[rel] = [(str(n["attrs"].get("qualname", "")), idmap[n["id"]])
                        for n in b.nodes if _prefix(n["key"]) == "test"]
@@ -585,11 +603,31 @@ def _adapter_known(mem: Any) -> set[str]:
     return _adapter_files(mem) | set(mem._adapter_info.get("stamps") or ())
 
 
-def _needs_adapter_pass(txn: _Txn, files: list[str]) -> bool:
+def _inputs(reg: Any) -> list[Any]:
+    """One `IndexerInputs` per indexer (the default for an indexer added
+    to `registry.indexers` directly)."""
+    from ozagia.adapters import IndexerInputs
+    got = list(getattr(reg, "indexer_inputs", None) or [])
+    return got + [IndexerInputs()] * (len(reg.indexers) - len(got))
+
+
+def _needs_adapter_pass(txn: _Txn, files: list[str], inputs: list[Any]) -> bool:
+    """A reingested file is one the indexers depend on: one an adapter used
+    (`ctx.file_node`) or an adapter node is `defined_in`, one matching a
+    `watch` glob, or an indexed file whose text they read (`texts`: any
+    indexed file for None; for a regex, a file whose distinct matches
+    changed since the last pass, or a matching file that defines new
+    nodes)."""
     mem = txn.mem
     afiles = _adapter_files(mem)
+    globs = [g for i in inputs for g in i.watch]
+    regexes = AS.text_regexes(inputs)
+    any_text = AS.any_text(inputs)
+    text_old = mem._adapter_info.get("text_files") or {}
+    if not isinstance(text_old, dict):
+        text_old = {rel: None for rel in text_old}
     for rel in files:
-        if rel in afiles:
+        if rel in afiles or (globs and AS.matches(rel, globs)):
             return True
         fid = mem.node_by_key(file_key(rel))
         if fid is not None and any(
@@ -597,6 +635,16 @@ def _needs_adapter_pass(txn: _Txn, files: list[str]) -> bool:
                 and _prefix(txn.key(int(e["src"]))) not in _CORE
                 for e in mem._in.get(fid, ())):
             return True
+        entry = mem._files_table.get(rel)
+        now = bool(entry and entry.get("ctx"))
+        if any_text and (now or rel in txn.ctx_before):
+            return True
+        if regexes:
+            got = (AS.text_matches(M._read_text(txn.root / rel, limit=1_000_000)
+                                   or "", regexes) if now else [])
+            before = text_old.get(rel, [])
+            if got != before or (got and rel in txn.added_owned):
+                return True
     return False
 
 
@@ -608,6 +656,7 @@ class _AdapterBuilder:
         self.txn = txn
         self.mem = txn.mem
         self.core_edges: list[list[str]] = []
+        self.log = AS.AttrLog()
         self.unkeyed = 0
         self._counts: dict[tuple[str, str], int] = {}
 
@@ -633,6 +682,7 @@ class _AdapterBuilder:
         return self.mem.node_by_key(format_key(key))
 
     def attrs(self, nid: int) -> dict[str, Any]:
+        self.log.note(int(nid), self.mem.nodes[int(nid)]["attrs"])
         self.txn.watch(int(nid))
         return self.mem.nodes[int(nid)]["attrs"]
 
@@ -640,13 +690,18 @@ class _AdapterBuilder:
         return sum(1 for n in self.mem.nodes.values() if n["type"] == type_name)
 
 
-def _adapter_pass(txn: _Txn, indexers: list[Any], opts: dict[str, Any]) -> None:
-    """Remove every adapter node and edge and run the indexers again over
-    the current sources, tests and docs."""
+def _adapter_pass(txn: _Txn, indexers: list[Any], opts: dict[str, Any],
+                  inputs: list[Any] | None = None) -> None:
+    """Remove every adapter node and edge, undo the attribute overlay, and
+    run the indexers again over the current sources, tests and docs."""
     from ozagia.adapters import (IndexContext, IndexedDoc, IndexedSource,
                                  IndexedTests)
     mem, root = txn.mem, txn.root
     info = mem._adapter_info
+    inputs = inputs if inputs is not None else []
+    AS.strip(info.get("attrs") or {}, mem.node_by_key,
+             lambda nid: mem.nodes[nid]["attrs"], txn.set_attrs,
+             skip=txn.parsed)
     adapter_nodes = [nid for nid, k in mem._id_to_key.items()
                      if _prefix(k) not in _CORE]
     for nid in adapter_nodes:
@@ -685,10 +740,13 @@ def _adapter_pass(txn: _Txn, indexers: list[Any], opts: dict[str, Any]) -> None:
 
     builder = _AdapterBuilder(txn)
     new_files: list[str] = []
+    unindexed: set[str] = set()
 
     def file_node(rel: str, *, indexed: bool = True) -> int:
         if rel not in new_files:
             new_files.append(rel)
+        if not indexed:
+            unindexed.add(rel)
         return txn.ensure_file(rel, M._file_attrs(root, rel, indexed=indexed))
 
     srel = M.state_rel(root)
@@ -699,11 +757,19 @@ def _adapter_pass(txn: _Txn, indexers: list[Any], opts: dict[str, Any]) -> None:
         sources=sources, tests=tests, docs=docs, options=dict(opts))
     for indexer in indexers:
         indexer(ctx)
+    globs = [g for i in inputs for g in i.watch]
     mem._adapter_info = {"files": new_files, "edges": builder.core_edges,
                          "unkeyed": builder.unkeyed,
                          "stamps": stamps(root, list(dict.fromkeys(
                              [*new_files, *(f for f in old_files
-                                            if not (root / f).exists())])))}
+                                            if not (root / f).exists())]))),
+                         "unindexed": sorted(unindexed),
+                         "watch_stamps": stamps(root, AS.watched_files(root, globs)),
+                         "text_files": AS.text_files(
+                             [*sources, *tests, *docs], AS.text_regexes(inputs)),
+                         "attrs": builder.log.overlay(
+                             txn.key, lambda nid: (mem.nodes[nid]["attrs"]
+                                                   if nid in mem.nodes else None))}
     txn.adapter_core = {tuple(e) for e in builder.core_edges}
     txn.touched.update(old_files, new_files)
 
@@ -754,11 +820,15 @@ def _settle_file(txn: _Txn, rel: str,
     if walked:
         attrs = walked_attrs.get(rel)
     else:
-        attrs = M._file_attrs(txn.root, rel, indexed=core_ref or adapter)
+        # A build gives an adapter-only file the `indexed` its adapter
+        # passed to `ctx.file_node`.
+        own = adapter and rel not in set(mem._adapter_info.get("unindexed") or ())
+        attrs = M._file_attrs(txn.root, rel, indexed=core_ref or own)
     if fid is None:
         fid = txn.ensure_file(rel, attrs)
     if attrs is not None:
         txn.set_attrs(fid, attrs)
+        txn.parsed.add(fid)
 
 
 # --------------------------------------------------------------------------- #
@@ -790,6 +860,8 @@ def reingest(mem: Any, paths: Iterable[str], *, write: bool = True) -> GraphDelt
     timings["state"] = time.perf_counter() - tick
     tick = time.perf_counter()
     txn = _Txn(mem, st, root)
+    txn.ctx_before = {rel for rel in files
+                      if (mem._files_table.get(rel) or {}).get("ctx")}
     walked_attrs: dict[str, dict[str, Any]] = {}
     test_order: dict[str, list[tuple[str, int]]] = {}
     for rel in files:
@@ -804,10 +876,15 @@ def reingest(mem: Any, paths: Iterable[str], *, write: bool = True) -> GraphDelt
     timings["update"] = time.perf_counter() - tick
 
     tick = time.perf_counter()
-    indexers = registry(root).indexers
-    adapter_pass = bool(indexers) and _needs_adapter_pass(txn, files)
+    reg = registry(root)
+    indexers = reg.indexers
+    inputs = _inputs(reg)
+    adapter_pass = bool(indexers) and _needs_adapter_pass(txn, files, inputs)
     if adapter_pass:
-        _adapter_pass(txn, indexers, opts)
+        _adapter_pass(txn, indexers, opts, inputs)
+        # The pass recorded a new overlay from the parsed attrs; only attrs
+        # replaced from here on (File nodes settled below) are newer.
+        txn.parsed = set()
     timings["adapters"] = time.perf_counter() - tick
 
     tick = time.perf_counter()
@@ -816,6 +893,11 @@ def reingest(mem: Any, paths: Iterable[str], *, write: bool = True) -> GraphDelt
         for rel in sorted(txn.touched - settled):
             settled.add(rel)
             _settle_file(txn, rel, walked_attrs)
+    # Attributes adapters wrote onto core nodes whose parsed attrs were
+    # just replaced.
+    AS.reapply(mem._adapter_info.get("attrs") or {}, mem.node_by_key,
+               lambda nid: mem.nodes[nid]["attrs"], txn.set_attrs,
+               parsed=txn.parsed)
     txn.flush()
     for rel in files:
         mem._drop_cached(rel)
@@ -939,19 +1021,29 @@ def _stamp_changed(root: Path, rel: str, stamp: Any) -> bool:
     return False
 
 
+def _watch_globs(root: Path) -> list[str]:
+    from ozagia.adapters import registry
+    return registry(root).watch_globs
+
+
 def unhandled_paths(root: Path, table: dict[str, Any], adapter_files: Iterable[str],
                     opts: dict[str, Any], dump: Any, *,
-                    status: list[tuple[str, str]] | None = None) -> list[str]:
+                    status: list[tuple[str, str]] | None = None,
+                    watch: Iterable[str] | None = None) -> list[str]:
     """Tracked paths `git status` reports as changed (modified, deleted,
     renamed, staged; not untracked) that no reingest handles: not indexed,
-    not adapter-owned, not a file a build would index, not in ozagia's own
-    directories. Untracked files a build would not index are left out: the
-    graph of a fresh build does not depend on them."""
+    not adapter-owned, not matching an indexer's `watch` glob, not a file a
+    build would index, not in ozagia's own directories. Untracked files a
+    build would not index are left out: the graph of a fresh build does not
+    depend on them."""
     excludes = M._digest_excludes(root, dump)
     afiles = set(adapter_files)
+    globs = list(_watch_globs(root) if watch is None else watch)
     out: list[str] = []
     for code, rel in (status if status is not None else _git_status(root)):
         if code in ("??", "!!") or rel in table or rel in afiles:
+            continue
+        if globs and AS.matches(rel, globs):
             continue
         if rel in excludes or rel.startswith(excludes):
             continue
@@ -1034,6 +1126,19 @@ def pending_changes(mem: Any, *,
             continue
         if _stamp_changed(root, rel, astamps[rel]):
             out.append(rel)
+    wstamps = mem._adapter_info.get("watch_stamps")
+    if wstamps is not None:
+        # Files an indexer reads from disk (`watch`): new, changed or gone
+        # since the build or the last adapter pass.
+        current = AS.watched_files(root, _watch_globs(root))
+        for rel in current:
+            if rel in table or rel in out:
+                continue
+            if rel not in wstamps or _stamp_changed(root, rel, wstamps[rel]):
+                out.append(rel)
+        now = set(current)
+        out += [rel for rel in wstamps
+                if rel not in now and rel not in out and rel not in table]
     opts = mem._build_opts
     for _code, rel in (status if status is not None else _git_status(root)):
         if rel in table or rel in out:
