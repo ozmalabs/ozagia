@@ -262,6 +262,30 @@ _TOOLS: list[dict[str, Any]] = [
         }, ["file", "ops"]),
     },
     {
+        "name": "dev_span_edit",
+        "description": (
+            "Replace an exact text span in a file. The span is located in the "
+            "graph (the enclosing symbol/section/chunk key is returned), the "
+            "edit is refused if it breaks the file's parse, applied atomically "
+            "with a backup when apply=true, the graph is updated, and the "
+            "result lists the graph delta and broken references (missing "
+            "imported names, call arity mismatches). Preview by default."),
+        "inputSchema": _schema({
+            "file": {"type": "string", "description": "Repo-relative path."},
+            "old_string": {"type": "string",
+                           "description": "Exact text to replace; must be "
+                                          "unique unless replace_all=true."},
+            "new_string": {"type": "string",
+                           "description": "Replacement text."},
+            "replace_all": {"type": "boolean", "default": False},
+            "apply": {"type": "boolean", "default": False},
+            "base_sha256": {"type": "string",
+                            "description": "Optional optimistic-concurrency check."},
+            "task": {"type": "string",
+                     "description": "Optional journal task label."},
+        }, ["file", "old_string", "new_string"]),
+    },
+    {
         "name": "dev_tests",
         "description": (
             "Tests covering a file, symbol or seed. Use before changing a "
@@ -651,6 +675,7 @@ class DevMemoryServer:
             "dev_outline": self._outline,
             "dev_ast": self._ast,
             "dev_edit": self._edit,
+            "dev_span_edit": self._span_edit,
             "dev_tests": self._tests,
             "dev_seed": self._seed,
             "dev_rule": self._rule,
@@ -761,6 +786,14 @@ class DevMemoryServer:
             script["cst_graph"] = a["cst_graph"]
         return self.mem.edit(script, task=a.get("task"),
                              diagnostics=a.get("diagnostics", False))
+
+    def _span_edit(self, a: dict[str, Any]) -> Any:
+        return self.mem.span_edit(str(a["file"]), a["old_string"],
+                                  a["new_string"],
+                                  replace_all=a.get("replace_all", False),
+                                  base_sha256=a.get("base_sha256") or None,
+                                  apply=a.get("apply", False),
+                                  task=a.get("task"))
 
     def _symbol_callers(self, a: dict[str, Any]) -> Any:
         return self.mem.symbol_graph("callers", str(a["symbol"]),

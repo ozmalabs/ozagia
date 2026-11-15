@@ -2968,6 +2968,41 @@ class DevMemory:
                 file_rel, enabled=diagnostics)
         return result
 
+    def span_edit(self, rel: str, old: str, new: str, *,
+                  replace_all: Any = False, base_sha256: str | None = None,
+                  apply: Any = False, task: str | None = None) -> dict[str, Any]:
+        """Replace the exact text `old` by `new` in `rel` and journal it.
+
+        See `ozagia.edit.span_edit`: the result names the enclosing node keys,
+        the parse guard verdict and the broken references; an applied edit is
+        reingested (`graph_delta`). Preview unless `apply` is true."""
+        from ozagia.edit.span_edit import apply_span_edit
+        write = _strict_bool(apply, "apply")
+        every = _strict_bool(replace_all, "replace_all")
+        result = apply_span_edit(
+            self.raw_repo_root, rel, old, new, replace_all=every,
+            base_sha256=base_sha256, write=write, memory=self)
+        if result.get("applied"):
+            file_rel = str(result.get("file") or rel)
+            self._drop_cached(file_rel)
+            result["journaled"] = self.journal_append(
+                "span_edit",
+                task or f"span edit {file_rel}",
+                f"{len(result['matches'])} match(es) in "
+                f"{', '.join(result['keys'])}; "
+                f"{result['before']['lines']} -> {result['after']['lines']} "
+                f"lines; sha {result['new_sha256'][:12]}",
+                files=[file_rel],
+                keys=result.get("keys"),
+                old_string=old,
+                new_string=new,
+                replace_all=every,
+                base_sha256=result.get("base_sha256"),
+                new_sha256=result.get("new_sha256"),
+                backup=result.get("backup"),
+            )
+        return result
+
     def _post_edit_diagnostics(self, file: str, *,
                                enabled: bool) -> dict[str, Any]:
         """Push diagnostics for a just-written file, or why there are none.
