@@ -823,7 +823,11 @@ def reingest(mem: Any, paths: Iterable[str], *, write: bool = True) -> GraphDelt
     delta = txn.delta(files)
     timings["write"] = 0.0
     if write and (not delta.empty or digest_changed or files):
-        timings["write"] = mem.write_snapshot()
+        if getattr(mem, "defer_writes", False):
+            # A long-lived owner (the daemon) writes once, at the end.
+            mem.snapshot_dirty = True
+        else:
+            timings["write"] = mem.write_snapshot()
     delta.seconds = round(time.perf_counter() - t0, 4)
     timings["adapter_pass"] = 1.0 if adapter_pass else 0.0
     mem.last_reingest_timings = {k: round(v, 4) for k, v in timings.items()}

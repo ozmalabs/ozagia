@@ -227,6 +227,8 @@ def handle_grep(memory: Any, inp: dict[str, Any], *, base: Path | None = None,
         raise Unhandled(f"no such path: {path}")
     include = inp.get("include") or None
     literal = bool(inp.get("literal"))
+    # OpenCode 2.3 grep sends caseSensitive: false for a case-insensitive search.
+    ignore_case = ignore_case or inp.get("caseSensitive") is False
     rg = rg_binary()
     if rg:
         found = _rg_grep(rg, root, target.path, pattern, include=include,

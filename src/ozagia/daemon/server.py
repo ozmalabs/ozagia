@@ -316,6 +316,9 @@ def serve(root: str | Path, *, dump: str | Path | None = None,
     sock_p.parent.mkdir(parents=True, exist_ok=True)
     _clear_stale(sock_p)
     memory = load_memory(root_p, dump, build_if_missing=build_if_missing)
+    # Rewriting the snapshot after every reingest costs ~1 s on a large repo;
+    # the daemon keeps the graph in memory and writes it once on exit.
+    memory.defer_writes = True
     state = DaemonState(root_p, memory, journal_p)
     _clear_stale(sock_p)
     server = _Server(str(sock_p), state)
@@ -335,6 +338,12 @@ def serve(root: str | Path, *, dump: str | Path | None = None,
         server.serve_forever(poll_interval=0.2)
     finally:
         server.server_close()
+        if getattr(memory, "snapshot_dirty", False):
+            try:
+                memory.write_snapshot()
+                memory.snapshot_dirty = False
+            except OSError as e:
+                print(f"snapshot write failed: {e}", file=sys.stderr, flush=True)
         try:
             if os.stat(sock_p).st_ino == inode:
                 sock_p.unlink()

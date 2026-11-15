@@ -52,6 +52,11 @@ _GIT_VALUE_OPTS = frozenset({"-C", "-c", "--git-dir", "--work-tree",
                              "--namespace", "--exec-path"})
 
 _PYTHON_RE = re.compile(r"^python(?:3(?:\.\d+)?)?$")
+# A trailing `2>&1`, `| tail -N`, `| head -N` (or both) after a command: an
+# output filter, not a pipeline that changes what runs.
+_OUTPUT_FILTER_RE = re.compile(
+    r"^(?P<cmd>.*?)\s*(?P<redir>2>&1)?\s*"
+    r"(?:\|\s*(?P<tool>tail|head)\s+(?:-n\s*)?-?(?P<n>\d+))?\s*$")
 _ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _SED_RE = re.compile(r"^(\d+)(?:,(\d+|\$))?p$")
 _OPERATOR_CHARS = set(";&|<>()")
@@ -408,10 +413,29 @@ def _simple(tokens: list[str]) -> dict[str, Any]:
     return _result("other", f"{cmd} is not mapped")
 
 
-def classify(command: str) -> dict[str, Any]:
-    """The class of a shell command line (see the module docstring)."""
+def _strip_output_filter(command: str) -> tuple[str, tuple | None]:
+    """`command` without a trailing `2>&1 | tail -N` style filter, and the
+    filter as ("tail"|"head", N), or (command, None)."""
+    m = _OUTPUT_FILTER_RE.match(command)
+    if not m or not (m.group("redir") or m.group("tool")):
+        return command, None
+    filt = (m.group("tool"), int(m.group("n"))) if m.group("tool") else ("all", 0)
+    return m.group("cmd"), filt
+
+
+def classify(command: str, *, _filters: bool = True) -> dict[str, Any]:
+    """The class of a shell command line (see the module docstring).
+
+    A pytest command followed only by `2>&1` and/or `| tail -N` / `| head -N`
+    is still `pytest`, with `output_filter` = ("tail"|"head", N) or
+    ("all", 0) applied to its output."""
     if not isinstance(command, str) or not command.strip():
         return _result("other", "empty command")
+    inner, filt = _strip_output_filter(command) if _filters else (command, None)
+    if filt is not None and inner.strip():
+        got = classify(inner, _filters=False)
+        if got["class"] == "pytest":
+            return {**got, "output_filter": filt}
     segments = _segments(command)
     if segments is None:
         return _result("complex", "does not tokenise")
