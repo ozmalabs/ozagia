@@ -169,7 +169,8 @@ def run_pytest(memory: Any, cls: dict[str, Any], inp: dict[str, Any],
     preflight_stop(inp)
     res = run_tests(root, selectors, python=python, timeout_s=timeout_s,
                     extra_args=_verbosity(list(cls["extra_args"])),
-                    tail_lines=int(cls.get("tail_lines") or OUTPUT_TAIL_LINES),
+                    tail_lines=int(OUTPUT_TAIL_LINES if cls.get("tail_lines") is None
+                                   else cls["tail_lines"]),
                     **({"env": env, "inherit": False}
                        if isinstance(env, dict) else {}))
     c = res["counts"]

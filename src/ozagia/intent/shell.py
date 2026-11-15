@@ -62,7 +62,10 @@ _GIT_VALUE_OPTS = frozenset({"-C", "-c", "--git-dir", "--work-tree",
                              "--namespace", "--exec-path", "--super-prefix",
                              "--config-env"})
 # Shells whose `-c '<script>'` is classified too (one level deep).
-_SHELLS = frozenset({"sh", "bash", "zsh"})
+_SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "mksh", "ash", "fish",
+                     "csh", "tcsh"})
+# Commands whose `-c <script>` (or `--command <script>`) is a shell script.
+_SCRIPT_OPTION = frozenset({"su", "script", "flock", "runuser"})
 
 _PYTHON_RE = re.compile(r"^python(?:3(?:\.\d+)?)?$")
 # A trailing `2>&1`, `| tail -N`, `| head -N` (or both) after a command: an
@@ -171,7 +174,24 @@ def _scan(command: str) -> str | None:
 
 def _segments(command: str) -> list[list[str]] | None:
     """The command split at shell operators and newlines, each segment
-    tokenised."""
+    tokenised (`_lex`: quotes, escapes and `#` comments as bash reads them;
+    redirect targets left out). A command `_lex` cannot read (a heredoc)
+    is split with `shlex` instead, which also splits inside the heredoc."""
+    toks, _why = _lex(command)
+    if toks is not None:
+        out: list[list[str]] = [[]]
+        skip = False
+        for kind, _raw, val in toks:
+            if skip:
+                skip = False
+                continue
+            if kind == "word":
+                out[-1].append(val)
+            elif kind == "redir":
+                skip = True
+            else:
+                out.append([])
+        return [seg for seg in out if seg]
     try:
         lex = shlex.shlex(command, posix=True, punctuation_chars=_SEGMENT_CHARS)
         lex.whitespace = " \t\r"
@@ -243,6 +263,22 @@ def _shell_script(args: list[str]) -> str | None:
     return None
 
 
+def _option_script(args: list[str]) -> str | None:
+    """The `-c <script>` / `--command[=]<script>` of su, script, flock and
+    runuser, or None."""
+    for i, a in enumerate(args):
+        if a == "--command" and i + 1 < len(args):
+            return args[i + 1]
+        if a.startswith("--command="):
+            return a.split("=", 1)[1]
+        if a.startswith("-") and not a.startswith("--") and "c" in a[1:]:
+            rest = a[a.index("c", 1) + 1:]       # -c SCRIPT, -qc SCRIPT, -cSCRIPT
+            if rest:
+                return rest
+            return args[i + 1] if i + 1 < len(args) else None
+    return None
+
+
 def _mentions_refs(text: str) -> bool:
     """`text` names git and, after it, a ref-moving subcommand. The check
     for scripts nested two levels deep, which are not parsed."""
@@ -255,7 +291,7 @@ def _mentions_refs(text: str) -> bool:
 # Shell keywords and group openers that can start a segment before the
 # command they run (`{ git commit; }`, `! git push`, `then git push`).
 _KEYWORD_PREFIXES = frozenset({"{", "}", "!", "then", "do", "else", "elif",
-                               "if", "while", "until"})
+                               "if", "while", "until", "coproc"})
 # Commands that run their arguments as a command, with the options each
 # takes a separate value for. `None`: the wrapper's first operand (after its
 # options) is not the command (timeout's duration, chrt's priority).
@@ -285,6 +321,20 @@ _WRAPPERS: dict[str, tuple[frozenset[str], int]] = {
                          "--delimiter", "-E", "-e", "-s", "--max-chars",
                          "-a", "--arg-file"}), 0),
     "time": (frozenset({"-f", "--format", "-o", "--output"}), 0),
+    "watch": (frozenset({"-n", "--interval", "-d", "--differences", "-q",
+                         "--equexit"}), 0),
+    "flock": (frozenset({"-w", "--timeout", "-E", "--conflict-exit-code"}), 1),
+    "runuser": (frozenset({"-u", "--user", "-g", "--group", "-G",
+                           "--supp-group"}), 0),
+    "strace": (frozenset({"-e", "-o", "-p", "-s", "-u", "-E", "-P", "-I",
+                          "-a", "-O", "-S", "-X"}), 0),
+    "ltrace": (frozenset({"-e", "-o", "-p", "-s", "-u", "-n"}), 0),
+    "busybox": (frozenset(), 0),
+    "unbuffer": (frozenset(), 0),
+    "chronic": (frozenset(), 0),
+    "ifne": (frozenset(), 0),
+    "proxychains": (frozenset({"-f"}), 0),
+    "firejail": (frozenset(), 0),
 }
 _FIND_EXEC = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
 
@@ -304,6 +354,8 @@ def _unwrap(seg: list[str], depth: int = 0) -> list[list[str]]:
     if not seg:
         return []
     base = os.path.basename(seg[0])
+    if base == "function" and len(seg) > 2:
+        return [seg] + _unwrap(seg[2:], depth + 1)   # function NAME { ...
     if base == "eval":
         try:
             words = shlex.split(" ".join(seg[1:]))
@@ -341,8 +393,9 @@ def _unwrap(seg: list[str], depth: int = 0) -> list[list[str]]:
             except ValueError:
                 return [seg]
             return [seg] + _unwrap(words + seg[j + 2:], depth + 1)
-        if base == "env" and a.startswith(("-S", "--split-string=")):
-            raw = a[2:] if a.startswith("-S") else a.split("=", 1)[1]
+        m_s = re.match(r"^-[iv0]*S(.+)$", a) if base == "env" else None
+        if base == "env" and (a.startswith("--split-string=") or m_s):
+            raw = a.split("=", 1)[1] if a.startswith("--") else m_s.group(1)
             try:
                 words = shlex.split(raw)
             except ValueError:
@@ -355,6 +408,10 @@ def _unwrap(seg: list[str], depth: int = 0) -> list[list[str]]:
         name = a.split("=", 1)[0]
         if name in value_opts and "=" not in a:
             j += 2
+        elif (not a.startswith("--") and len(a) > 2
+              and f"-{a[-1]}" in value_opts
+              and not any(f"-{c}" in value_opts for c in a[1:-1])):
+            j += 2                     # -iu USER: a cluster ending in a value option
         else:
             j += 1
     j += operands
@@ -375,8 +432,9 @@ def _refs_in(seg: list[str], *, nested: bool) -> str | None:
             got = _git(cmd)
             if got["class"] == "git_refs":
                 return got["subcommand"]
-        elif base in _SHELLS:
-            script = _shell_script(cmd[1:])
+        elif base in _SHELLS or base in _SCRIPT_OPTION:
+            script = (_shell_script(cmd[1:]) if base in _SHELLS
+                      else _option_script(cmd[1:]))
             if script is None:
                 continue
             if nested:
@@ -580,7 +638,9 @@ def bre_to_ere(pattern: str) -> str | None:
             if i + 1 >= n:
                 return None
             d = pattern[i + 1]
-            if d in "|(){}+?":
+            if d == "{" and pattern[i + 2:i + 3] == ",":
+                out.append("{0")          # \{,n\}: ripgrep needs the 0
+            elif d in "|(){}+?":
                 out.append(d)             # \| \( \) \{ \} \+ \? are operators
             elif d in "wWsSbB":
                 out.append("\\" + d)
@@ -800,7 +860,9 @@ def classify(command: str, *, _filters: bool = True,
 GRAPH_STEPS = frozenset({"pytest", "read", "grep", "git_read"})
 _PLAIN_STEPS = frozenset({"cd", "echo", "pwd", "ls"})
 # git options a captured git step refuses: they write files or run programs.
-_GIT_STEP_REFUSED = ("--output", "--ext-diff", "--textconv", "--open-files-in-pager")
+_GIT_STEP_REFUSED = ("--output", "--ext-diff", "--textconv", "--open-files-in-pager",
+                     "--no-index", "--contents", "-O", "--orderfile",
+                     "--ignore-revs-file", "--exec", "--run")
 _SEQ_OPS = ("&&", "||", ";")
 
 
@@ -865,7 +927,7 @@ def _lex(command: str) -> tuple[list[tuple[str, str, str]] | None, str]:
             while i < n and command[i] != "\n":
                 i += 1
             continue
-        if c in "\n\r":
+        if c == "\n":
             end_word()
             toks.append(("op", ";", ""))
             i += 1
@@ -1131,20 +1193,25 @@ def plan_compound(command: str) -> tuple[dict[str, Any] | None, str]:
             if got is None:
                 return None, f"pipeline into {cmd[0][2]} is not mapped"
             filters.append(got)
-        stderr = None
-        stdout_null = False
-        for cmd_reds in reds:
-            for op, target in cmd_reds:
-                if op == "2>&" and target == "1":
-                    stderr = "merge"
-                elif op == "2>" and target == "/dev/null":
-                    stderr = "null"
-                elif op in (">", "1>") and target == "/dev/null":
-                    stdout_null = True
-                else:
-                    return None, f"redirect {op}{target} is not mapped"
+        # Where fd 1 and fd 2 of the step end up, applying the redirects
+        # in order as bash does: "out" (the pipeline / the output), "err"
+        # (the output, past any filter), "null".
+        fd1, fd2 = "out", "err"
+        for op, target in reds[0]:
+            if op in ("2>&", "2>&1") and target == "1":
+                fd2 = fd1
+            elif op == "2>" and target == "/dev/null":
+                fd2 = "null"
+            elif op in (">", "1>") and target == "/dev/null":
+                fd1 = "null"
+            elif op in ("&>", ">&") and target == "/dev/null":
+                fd1 = fd2 = "null"
+            else:
+                return None, f"redirect {op}{target} is not mapped"
         if any(cmd_reds for cmd_reds in reds[1:]):
             return None, "redirect inside a pipeline"
+        stderr = {"out": "merge", "null": "null", "err": None}[fd2]
+        stdout_null = fd1 == "null"
         steps.append({**step, "filters": filters, "stderr": stderr,
                       "stdout_null": stdout_null})
     if not any(s["kind"] in GRAPH_STEPS for s in steps):
@@ -1164,15 +1231,19 @@ def command_heads(command: str) -> list[list[str]]:
 
 def command_resources(command: str) -> list[str]:
     """The simple commands of a command line as permission resources: the
-    words of each command between operators, without redirections (what
-    OpenCode 2.3's shell tool asks permission for, approximately). Empty
-    when it cannot be lexed."""
+    words of each command between operators, without redirections, leaving
+    out `cd`, `chdir`, `pushd` and `popd` (what OpenCode 2.3's shell tool
+    asks permission for, approximately). Empty when it cannot be lexed."""
     toks, _why = _lex(command)
     if toks is None:
         return []
     out: list[str] = []
     cur: list[str] = []
     skip = False
+    def flush() -> None:
+        if cur and cur[0] not in ("cd", "chdir", "pushd", "popd"):
+            out.append(" ".join(cur))
+
     for kind, text, _val in toks:
         if skip:
             skip = False
@@ -1182,11 +1253,9 @@ def command_resources(command: str) -> list[str]:
         elif kind == "redir":
             skip = True
         else:
-            if cur:
-                out.append(" ".join(cur))
+            flush()
             cur = []
-    if cur:
-        out.append(" ".join(cur))
+    flush()
     return out
 
 

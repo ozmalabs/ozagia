@@ -171,6 +171,8 @@ class _Txn:
         # and those that now own a node key they did not before.
         self.ctx_before: set[str] = set()
         self.added_owned: set[str] = set()
+        # Owned node keys this reingest added or removed.
+        self.keys_changed: set[str] = set()
         self.adapter_core = {tuple(e) for e in
                              mem._adapter_info.get("edges") or ()}
 
@@ -430,8 +432,11 @@ def _apply_fragment(txn: _Txn, rel: str,
             if ref[0] != "imports":
                 txn.touched.add(str(ref[1]))
     old_owned = set(st.owned.get(rel, ()))
+    if (frag is None) == (rel in table):
+        txn.keys_changed.add(file_key(rel))   # an indexed file came or went
     if frag is None:
         for nid in old_owned:
+            txn.keys_changed.add(txn.key(nid) or "")
             txn.remove_node(nid)
         fid = mem.node_by_key(file_key(rel))
         if fid is not None and rel in table:
@@ -477,12 +482,14 @@ def _apply_fragment(txn: _Txn, rel: str,
             new_owned[key] = n
     for nid in old_owned:
         if txn.key(nid) not in new_owned:
+            txn.keys_changed.add(txn.key(nid) or "")
             txn.remove_node(nid)
     for key, n in new_owned.items():
         nid = mem.node_by_key(key)
         if nid is None:
             nid = txn.add_node(n["type"], n["attrs"], key)
             txn.added_owned.add(rel)
+            txn.keys_changed.add(key)
         else:
             txn.set_attrs(nid, n["attrs"])
         txn.parsed.add(nid)
@@ -614,10 +621,11 @@ def _inputs(reg: Any) -> list[Any]:
 def _needs_adapter_pass(txn: _Txn, files: list[str], inputs: list[Any]) -> bool:
     """A reingested file is one the indexers depend on: one an adapter used
     (`ctx.file_node`) or an adapter node is `defined_in`, one matching a
-    `watch` glob, or an indexed file whose text they read (`texts`: any
-    indexed file for None; for a regex, a file whose distinct matches
-    changed since the last pass, or a matching file that defines new
-    nodes)."""
+    `watch` glob, one whose File key or an added or removed node key an
+    indexer looked up (`builder.find`), or an indexed file whose text they
+    read (`texts`: any indexed file for None; for a regex, a file whose
+    distinct matches changed since the last pass, or a matching file that
+    defines new nodes)."""
     mem = txn.mem
     afiles = _adapter_files(mem)
     globs = [g for i in inputs for g in i.watch]
@@ -626,6 +634,9 @@ def _needs_adapter_pass(txn: _Txn, files: list[str], inputs: list[Any]) -> bool:
     text_old = mem._adapter_info.get("text_files") or {}
     if not isinstance(text_old, dict):
         text_old = {rel: None for rel in text_old}
+    looked_up = set(mem._adapter_info.get("looked_up") or ())
+    if looked_up & txn.keys_changed:
+        return True     # a node an indexer looked up appeared or went
     for rel in files:
         if rel in afiles or (globs and AS.matches(rel, globs)):
             return True
@@ -679,7 +690,9 @@ class _AdapterBuilder:
                 self.core_edges.append([sk, type_name, gk])
 
     def find(self, key: tuple) -> int | None:
-        return self.mem.node_by_key(format_key(key))
+        skey = format_key(key)
+        self.log.lookup(skey)
+        return self.mem.node_by_key(skey)
 
     def attrs(self, nid: int) -> dict[str, Any]:
         self.log.note(int(nid), self.mem.nodes[int(nid)]["attrs"])
@@ -769,7 +782,8 @@ def _adapter_pass(txn: _Txn, indexers: list[Any], opts: dict[str, Any],
                              [*sources, *tests, *docs], AS.text_regexes(inputs)),
                          "attrs": builder.log.overlay(
                              txn.key, lambda nid: (mem.nodes[nid]["attrs"]
-                                                   if nid in mem.nodes else None))}
+                                                   if nid in mem.nodes else None)),
+                         "looked_up": sorted(builder.log.looked_up)}
     txn.adapter_core = {tuple(e) for e in builder.core_edges}
     txn.touched.update(old_files, new_files)
 

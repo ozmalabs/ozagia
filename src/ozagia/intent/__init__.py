@@ -83,9 +83,9 @@ def permission_request(memory: Any, tool: str, inp: dict[str, Any]
     """The permission the harness's own tool would ask for this call, in
     OpenCode 2.3's terms: `{"action", "resources", "save"}`. read, edit,
     write: the path relative to the root (`read`, `edit`). grep, glob: the
-    pattern. shell: one resource per simple command (`shell`), and as
-    `save` each command's first word followed by ` *`. None when there is
-    nothing to ask (an unknown tool or input)."""
+    pattern. shell: one resource per simple command (`shell`, without
+    `cd`), and as `save` the same commands. None when there is nothing to
+    ask (an unknown tool or input)."""
     import os
     from ozagia.intent.common import root_of
     from ozagia.intent.shell import command_resources
@@ -113,9 +113,12 @@ def permission_request(memory: Any, tool: str, inp: dict[str, Any]
         command = inp.get("command")
         if not isinstance(command, str):
             return None
-        cmds = command_resources(command) or [command.strip()]
-        return {"action": "shell", "resources": cmds,
-                "save": [c.split(" ", 1)[0] + " *" for c in cmds]}
+        cmds = command_resources(command)
+        if not cmds and command.strip():
+            cmds = [command.strip()]
+        # `save` (what "always allow" stores) is the exact commands: never
+        # wider than what the user was shown.
+        return {"action": "shell", "resources": cmds, "save": list(cmds)}
     return None
 
 
@@ -141,18 +144,19 @@ def handle(memory: Any, tool: str, input: dict[str, Any], *,
         if not isinstance(input, dict):
             raise IntentError("tool input must be an object")
         if preflight and tool in MUTATING_TOOLS:
+            extra: dict[str, Any] | None = None
             try:
                 handler(memory, {**input, "_preflight": True})
-                stopped = True     # a handler that ignored the preflight
-            except Preflight:
-                stopped = True
-            if stopped:
-                meta["intent"] = f"{tool}_preflight"
-                meta["ms"] = _ms(t0)
-                return {"handled": False, "preflight": True,
-                        "reason": "permission required",
-                        "permission": permission_request(memory, tool, input),
-                        "meta": meta}
+            except Preflight as p:  # (a handler that returns also stops here)
+                extra = p.metadata
+            meta["intent"] = f"{tool}_preflight"
+            meta["ms"] = _ms(t0)
+            perm = permission_request(memory, tool, input)
+            if perm is not None and extra:
+                perm["metadata"] = extra
+            return {"handled": False, "preflight": True,
+                    "reason": "permission required", "permission": perm,
+                    "meta": meta}
         res = handler(memory, input)
         body = {"handled": True, "output": res["output"], "is_error": False,
                 "permission": permission_request(memory, tool, input)}

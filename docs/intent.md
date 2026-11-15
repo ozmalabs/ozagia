@@ -151,7 +151,7 @@ or environment prefixes. The classes are:
 | read | `cat F`, `head [-n N] F`, `tail [-n N\|+N] F`, `sed -n 'A[,B]p' F` | read of that range (no 2000-line cap) |
 | grep | `grep [-rRnHiFE] [--include G] PAT [PATH]`, `rg [-nHiF] [-g G] PAT [PATH]`, `git grep [-niFE] PAT [PATH]` | grep; `-i` is case-insensitive. A basic regex is converted to the Rust/Python dialect (`\|` `\(` `\{` become operators, `+ ? \| { } ( )` literals); one with back-references, `\<`, `\>` or POSIX classes falls back. |
 | compound | see below | the steps, in order |
-| git_refs | `git commit\|push\|stash\|branch\|checkout\|switch\|reset\|rebase\|merge\|tag\|worktree\|cherry-pick\|revert\|am\|pull\|fetch\|bisect\|...` (`intent.shell.GIT_REF_MOVING`, shared with the Claude Code hook and `eval.agent.OPENCODE_GIT_DENY`), anywhere in the command: in any segment, after `VAR=value` prefixes, shell keywords and group openers (`{ ! if then do else elif while until`), through wrapper commands (`env [-i] [-u N] [-S '...']`, `command`, `builtin`, `exec`, `nice`, `timeout`, `nohup`, `setsid`, `stdbuf`, `ionice`, `chrt`, `taskset`, `sudo`, `doas`, `time`, `xargs`, `eval`, `find -exec\|-execdir\|-ok\|-okdir`, repeated), as `/path/to/git`, through `git -c alias.<x>=<ref-moving>`, inside a backtick or `$(...)` substitution, and inside `sh\|bash\|zsh -c '<script>'` (classified once more; a script nested deeper is refused when it names `git` and then a ref-moving subcommand) | tool error `Refused by ozagia: <command> changes git refs`. Listing forms (`git branch`, `git tag -l`, `git stash list`, `git worktree list`, `git bisect log`) are read-only. |
+| git_refs | `git commit\|push\|stash\|branch\|checkout\|switch\|reset\|rebase\|merge\|tag\|worktree\|cherry-pick\|revert\|am\|pull\|fetch\|bisect\|...` (`intent.shell.GIT_REF_MOVING`, shared with the Claude Code hook and `eval.agent.OPENCODE_GIT_DENY`), anywhere in the command: in any segment, after `VAR=value` prefixes, shell keywords and group openers (`{ ! if then do else elif while until`), through wrapper commands (`env [-i] [-u N] [-S '...']`, `command`, `builtin`, `exec`, `nice`, `timeout`, `nohup`, `setsid`, `stdbuf`, `ionice`, `chrt`, `taskset`, `sudo`, `doas`, `time`, `xargs`, `watch`, `flock`, `runuser`, `strace`, `ltrace`, `busybox`, `unbuffer`, `eval`, `function NAME { ... }`, `coproc`, `find -exec\|-execdir\|-ok\|-okdir`, `su\|script\|flock -c '<script>'`, repeated, with clustered options such as `sudo -iu root`), as `/path/to/git`, through `git -c alias.<x>=<ref-moving>`, inside a backtick or `$(...)` substitution, and inside `sh\|bash\|zsh\|dash\|ksh\|fish\|... -c '<script>'` (classified once more; a script nested deeper is refused when it names `git` and then a ref-moving subcommand) | tool error `Refused by ozagia: <command> changes git refs`. Listing forms (`git branch`, `git tag -l`, `git stash list`, `git worktree list`, `git bisect log`) are read-only. |
 | git_read, other, complex | everything else | `handled: false` |
 
 A compound command (`shell.plan_compound`, run by `intent.compound`) is a
@@ -165,8 +165,10 @@ optional `2>&1`, `2>/dev/null` and `>/dev/null`. The steps are:
 - read-only git (`diff`, `show`, `status`, `log`, `blame` and the listing
   forms; `--no-pager` and `-C <dir inside the root>` allowed). It runs as an
   argv without a shell, with `GIT_OPTIONAL_LOCKS=0` and `GIT_PAGER=cat`.
-  `--output`, `--ext-diff`, `--textconv` and other global options make the
-  command fall back;
+  These options make the command fall back: options that write files or
+  run programs (`--output`, `--ext-diff`, `--textconv`), options that read
+  files git does not track (`--no-index`, `--contents`, `-O`,
+  `--ignore-revs-file`), and any other global option;
 - `echo` with literal words, `pwd`, `ls` (paths inside the root);
 - `cd DIR` before any other step, inside the root; later steps run there.
 
@@ -176,6 +178,12 @@ globs, `python -c`, and an unmapped command or filter. So does any problem
 found before the first step runs (a directory or file outside the root, a
 missing file, an interpreter not on PATH). A step that fails once running
 gives its error text and status 1.
+
+Redirects apply in order, as in bash. `2>&1 >/dev/null` sends stderr into
+the pipeline and drops stdout, and `>/dev/null 2>&1` drops both. Without
+`2>&1`, a git or `ls` step's stderr skips the filters and follows the
+step's output. A `\r` is part of a word, as in bash, so CRLF commands fall
+back.
 
 Statuses follow bash: `&&` and `||` short-circuit and `;` continues. A
 pipeline's status is that of its last command: 0 after a `head`/`tail`/
@@ -197,8 +205,9 @@ or grep step is filtered at the source:
 - grep: the matches are filtered as grep prints them (`path:n:text`) and
   shown in the grep format.
 
-A pytest step that pipes through a filter keeps up to 5000 lines of output
-(40 without one), so the filter sees what bash would show it. On the v2
+A pytest step that pipes through a filter keeps its whole output (up to
+`check.MAX_OUTPUT_LINES`), so the filter sees what bash would show it; one
+that does not keeps the last 40 lines. On the v2
 pilot's 1080 shell calls, 264 of the captured compound commands without
 pytest gave bash's exit status (all of them), and the 176 git/echo/ls ones
 gave bash's exact text; 12 of 12 sampled pytest compounds gave bash's
@@ -291,7 +300,14 @@ request the built-in would make, computed by the daemon
 | read | `read` | the path relative to the root |
 | edit, write | `edit` | the path relative to the root |
 | grep, glob | `grep`, `glob` | the pattern |
-| shell | `shell` | one per simple command |
+| shell | `shell` | one per simple command, without `cd`/`pushd`/`popd` |
+
+`save` (what "always allow" stores) is `["*"]` for read, grep, glob and
+edit, as the built-ins use. For shell it is the exact commands asked about,
+so a grant never covers more than the user saw. The built-in uses prefix
+patterns such as `git diff *`. An edit or write sends `metadata.files` with
+the unified diff of the change, as the built-in edit does, so the prompt
+shows it.
 
 When the call is a mutating one (edit, write or shell), the plugin works in
 three steps:
@@ -305,10 +321,11 @@ three steps:
 For read, grep and glob, the daemon answers first, and the output is shown
 only after the assert passes.
 
-A declined, corrected or blocked permission becomes the tool's error. Any
-other failure of `assert` hands the call to the built-in, which asks for
-itself, and the plugin sends `after` with `meta.fallback: "permission:
-..."`. A passthrough is asked once, by the built-in. A refusal (ref-moving
+A declined, corrected or blocked permission (`Permission.DeclinedError`,
+`CorrectedError`, `BlockedError`) becomes the tool's error. Any other
+failure of `assert`, or a preflight answer without a request, hands the
+call to the built-in, which asks for itself. The plugin then sends `after`
+with `meta.fallback: "permission: ..."`. A passthrough is asked once, by the built-in. A refusal (ref-moving
 git) or a tool error from preflight asks nothing, since it changes nothing.
 
 ## Known limits
@@ -323,7 +340,15 @@ git) or a tool error from preflight asks nothing, since it changes nothing.
   - a `read` deny on one file and a `bash` `cat *` deny refused the handled
     read and the captured `cat`;
   - a captured compound `grep ... && echo found` ran.
-- A captured pytest keeps the last 40 lines of its output, or up to 5000
-  when a compound step pipes it through a filter. A bare `pytest -v` with
-  more output shows less than bash would; the `[ozagia]` lines carry every
+- A captured pytest keeps the last 40 lines of its output (all of it when
+  a compound step pipes it through a filter). A bare `pytest -v` with more
+  output shows less than bash would; the `[ozagia]` lines carry every
   failure.
+- A permission can be asked twice. This happens when the file or directory
+  changes between the preflight and the real call (for example, an edit's
+  `oldString` no longer matches) and the real call becomes passthrough. The
+  built-in then asks again.
+- Git refusal covers the wrappers and keywords listed above. A command
+  hidden some other way (an alias defined in the user's git config, a
+  script file the command runs) is not seen. The eval's `OPENCODE_GIT_DENY`
+  permission rules match only plain `git <sub>*`.

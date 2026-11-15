@@ -8,6 +8,9 @@ wrote (see `ozagia.adapters.Registry.add_indexer`, `ozagia.core.reingest`).
                   build or the last adapter pass (`reingest.file_stamp`).
     text_files    {rel: matches}: the indexed files whose text a `texts`
                   regex matched then, and the distinct strings it matched.
+    looked_up     the core node keys (sym, test, doc, file) indexers looked
+                  up with `builder.find`, found or not: a reingest that adds
+                  or removes one runs the adapter pass.
     attrs         the overlay: {node key: {"set": {attr: value}, "del":
                   [attr], "orig": {attr: [present, value]}}} for every core
                   node (sym, test, doc, file) an indexer changed attributes
@@ -94,10 +97,16 @@ def text_files(items: Iterable[Any], regexes: list[Any]) -> dict[str, list[str]]
 
 class AttrLog:
     """Records the attributes of core nodes before an indexer first touches
-    them, to build the overlay afterwards."""
+    them, to build the overlay afterwards, and the core node keys indexers
+    looked up (`builder.find`, found or not)."""
 
     def __init__(self) -> None:
         self.before: dict[int, dict[str, Any]] = {}
+        self.looked_up: set[str] = set()
+
+    def lookup(self, key: str) -> None:
+        if _kind(key) in OVERLAY_KINDS:
+            self.looked_up.add(key)
 
     def note(self, nid: int, attrs: dict[str, Any]) -> None:
         if nid not in self.before:

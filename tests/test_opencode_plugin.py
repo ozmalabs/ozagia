@@ -63,7 +63,11 @@ const permission = cfg.permission === undefined ? undefined : {
       throw Object.assign(new Error("Permission denied: " + req.action),
                           { _tag: "Permission.BlockedError" });
     }
+    if (cfg.permission === "declined") {
+      throw Object.assign(new Error(""), { _tag: "Permission.DeclinedError" });
+    }
     if (cfg.permission === "broken") throw new Error("ParseError: Expected string");
+    if (cfg.permission === "transport") throw new Error("connection rejected by peer");
   },
 };
 await plugin.setup({ tool: { transform: (fn) => fn(reg), hook: () => {} },
@@ -751,3 +755,45 @@ def test_without_the_permission_api_there_is_no_preflight(tmp_path, daemon):
     assert out["results"][0]["result"]["output"] == "Edited"
     tools = [r for r in d.requests if r["op"] == "tool"]
     assert [t.get("preflight") for t in tools] == [None]
+
+
+@needs_node
+@pytest.mark.parametrize("kind,refused", [("declined", True), ("transport", False)])
+def test_only_permission_errors_count_as_refusals(tmp_path, daemon, kind, refused):
+    d = daemon(_preflighting)
+    out = _run(tmp_path, {"calls": [EDIT], "permission": kind, "settleMs": 200}, d.path)
+    if refused:
+        assert out["results"][0]["ok"] is False and out["calls"] == []
+    else:   # the permission API failed: the built-in runs and asks itself
+        assert out["results"][0]["ok"] is True
+        assert out["calls"] == [["edit", EDIT["input"]]]
+
+
+@needs_node
+def test_preflight_without_a_permission_request_goes_to_the_builtin(tmp_path, daemon):
+    def script(req):
+        if req["op"] == "tool" and req.get("preflight"):
+            return {"ok": True, "handled": False, "preflight": True,
+                    "reason": "permission required", "permission": None}
+        return _preflighting(req)
+
+    d = daemon(script)
+    out = _run(tmp_path, {"calls": [EDIT], "permission": "allow", "settleMs": 200},
+               d.path)
+    assert out["calls"] == [["edit", EDIT["input"]]]
+    assert [t.get("preflight") for t in d.requests if t["op"] == "tool"] == [True]
+
+
+@needs_node
+def test_permission_metadata_is_passed_to_assert(tmp_path, daemon):
+    meta = {"files": [{"file": "pkg/mod.py", "patch": "--- a\n+++ b\n"}]}
+
+    def script(req):
+        if req["op"] == "tool" and req.get("preflight"):
+            return {"ok": True, "handled": False, "preflight": True,
+                    "permission": {**EDIT_PERM, "metadata": meta}}
+        return _preflighting(req)
+
+    d = daemon(script)
+    out = _run(tmp_path, {"calls": [EDIT], "permission": "allow"}, d.path)
+    assert out["asserts"][0]["metadata"] == meta

@@ -18,8 +18,14 @@ def test_preflight_edit_changes_nothing_and_names_the_permission(mem, repo):
            "newString": "return a - b"}
     res = handle(mem, "edit", inp, preflight=True)
     assert res["preflight"] is True and res["handled"] is False
-    assert res["permission"] == {"action": "edit", "resources": ["pkg/mod.py"],
-                                 "save": ["*"]}
+    perm = res["permission"]
+    assert {k: perm[k] for k in ("action", "resources", "save")} == {
+        "action": "edit", "resources": ["pkg/mod.py"], "save": ["*"]}
+    # The prompt shows the change, as the built-in's does.
+    (f,) = perm["metadata"]["files"]
+    assert f["file"] == "pkg/mod.py" and f["status"] == "modified"
+    assert "-    return a + b" in f["patch"] and "+    return a - b" in f["patch"]
+    assert (f["additions"], f["deletions"]) == (1, 1)
     assert (repo / "pkg/mod.py").read_text() == before
     res = handle(mem, "edit", inp)
     assert res["handled"] and not res["is_error"]
@@ -39,6 +45,7 @@ def test_preflight_write_does_not_create_the_file(mem, repo):
     res = handle(mem, "write", {"path": "pkg/new.py", "content": "X = 1\n"},
                  preflight=True)
     assert res["preflight"] is True
+    assert res["permission"]["metadata"]["files"][0]["status"] == "added"
     assert not (repo / "pkg/new.py").exists()
     res = handle(mem, "edit", {"path": "pkg/new2.py", "oldString": "",
                                "newString": "X = 1\n"}, preflight=True)
@@ -81,9 +88,13 @@ def test_read_only_tools_ignore_preflight_and_carry_the_permission(mem):
 def test_permission_request_shapes(mem, repo):
     got = permission_request(mem, "shell", {
         "command": "cd pkg && python -m pytest -q 2>&1 | tail -3"})
+    # cd is not asked about (OpenCode skips it); `save` never widens what
+    # was shown into `python *`.
     assert got == {"action": "shell",
-                   "resources": ["cd pkg", "python -m pytest -q", "tail -3"],
-                   "save": ["cd *", "python *", "tail *"]}
+                   "resources": ["python -m pytest -q", "tail -3"],
+                   "save": ["python -m pytest -q", "tail -3"]}
+    got = permission_request(mem, "shell", {"command": "git diff HEAD"})
+    assert got["save"] == ["git diff HEAD"]
     got = permission_request(mem, "edit", {"filePath": str(repo / "pkg/mod.py")})
     assert got["resources"] == ["pkg/mod.py"]
     got = permission_request(mem, "read", {"path": "/etc/hostname"})

@@ -40,13 +40,32 @@ class Unhandled(Exception):
 class Preflight(Exception):
     """Raised by a handler whose input has `_preflight` set, at the point
     where it would first change something or run a command: the call
-    would be carried out (see `ozagia.intent.handle`)."""
+    would be carried out (see `ozagia.intent.handle`). `metadata` goes with
+    the permission request (an edit's diff)."""
+
+    def __init__(self, metadata: dict | None = None) -> None:
+        super().__init__("preflight")
+        self.metadata = metadata
 
 
-def preflight_stop(inp: dict) -> None:
+def preflight_stop(inp: dict, metadata: dict | None = None) -> None:
     """Stop here when `inp` is a preflight (see `Preflight`)."""
     if inp.get("_preflight"):
-        raise Preflight()
+        raise Preflight(metadata)
+
+
+def diff_metadata(rel: str, before: str | None, after: str) -> dict:
+    """OpenCode's permission metadata for a file change: `{"files": [{file,
+    patch, status, additions, deletions}]}` with a unified diff."""
+    import difflib
+    a = (before or "").splitlines(keepends=True)
+    b = after.splitlines(keepends=True)
+    lines = list(difflib.unified_diff(a, b, fromfile=rel, tofile=rel))
+    adds = sum(1 for x in lines if x.startswith("+") and not x.startswith("+++"))
+    dels = sum(1 for x in lines if x.startswith("-") and not x.startswith("---"))
+    return {"files": [{"file": rel, "patch": "".join(lines),
+                       "status": "added" if before is None else "modified",
+                       "additions": adds, "deletions": dels}]}
 
 
 def tag(text: str) -> str:

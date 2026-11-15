@@ -33,10 +33,15 @@ Extension points:
   - `texts`: which indexed source, test and doc texts (`ctx.sources`,
     `ctx.tests`, `ctx.docs`) the indexer's output depends on. `None` (the
     default): any, so a reingest of any indexed file runs the pass.
-    `False`: none. A regex (string or compiled): only texts it matches, so
-    the pass runs for a file that matched at the last pass or matches now.
-    An indexer that writes onto nodes it chooses without reading their
-    file's text (every Test, say) must leave `texts` as None.
+    `False`: none. A regex (string or compiled): the indexer depends on a
+    file only through the distinct strings the regex matches in it, and on
+    the set of nodes (`IndexedTests.tests`) of a file with a match. The
+    pass runs for a file whose distinct matches changed, or a matching file
+    that gained a node; moving a match within a file does not run it.
+  Core node keys an indexer looks up with `ctx.builder.find` are recorded:
+  a reingest that adds or removes one runs the pass. An indexer that
+  chooses nodes any other way (iterating every Test, `ctx.tests` of
+  unmatched files) must leave `texts` as None.
   Attributes an indexer sets on core nodes (`ctx.builder.attrs` on a
   Symbol, Test, Doc or File node) are recorded and survive a reingest that
   replaces the node's parsed attributes.

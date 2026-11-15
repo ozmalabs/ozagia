@@ -196,3 +196,39 @@ adapter, git, untracked seeds and seed mentions.
 `core/memory.py`, `core/reingest.py`, `adapters.py`, `cli.py` and other
 files. The branch is pushed. It merges into `main` once that work is
 committed, or now if the merge does not touch those files.
+
+## Review (semantic_reviewer, NEEDS_CHANGES) and fixes
+
+The review is at `/tmp/ozagia_review_v4/REVIEW.md`. Its findings and what
+was done about each:
+
+1. Shell `save` patterns were `<first word> *`, so "always allow" on
+   `git diff` stored `git *`. `save` is now the exact commands, and `cd`,
+   `pushd` and `popd` are not asked about.
+2. Captured git steps read files outside the root (`--no-index`,
+   `blame --contents`). Those options, `-O` and `--ignore-revs-file` now
+   fall back.
+3. A `VAR=x pytest` in a subdirectory gave a fake step error. It now falls
+   back before anything runs.
+4. With `texts=False`, the overlay went stale when a node was removed or
+   re-added. Core keys an indexer looks up with `builder.find` are now
+   recorded, and adding or removing one runs the pass. The docs state the
+   regex rule the code implements.
+5. Edit prompts had no diff. The preflight now sends `metadata.files` with
+   the unified diff.
+6. stderr was merged before `>/dev/null`. stdout and stderr are now
+   routed separately, in redirect order.
+7. `\r` was a separator. It is now part of a word.
+8. Wrapper gaps:
+   - added clustered options (`sudo -iu`, `env -iS...`), `function`,
+     `coproc`, `watch`, `flock`, `runuser`, `strace`, `su|script|flock -c`
+     and more shells;
+   - segments now come from the bash-like lexer, so a mid-word `#` no
+     longer hides a segment.
+9. Smaller items:
+   - `\{,n\}` now becomes `{0,n}`;
+   - a filtered pytest step keeps its whole output;
+   - a preflight answer without a permission goes to the built-in;
+   - `isRefusal` matches only the Permission error tags;
+   - the double prompt after a state change is documented;
+   - ignored watched files count in the digest.

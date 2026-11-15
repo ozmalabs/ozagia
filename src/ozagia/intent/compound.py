@@ -124,18 +124,15 @@ def _select(lines: list[str], filters: list[tuple]) -> tuple[list[int], int]:
     return idx, status
 
 
-# pytest output lines kept for a step whose output goes through a filter
-# other than a short tail.
-_FILTERED_PYTEST_LINES = 5000
-
-
 def _pytest_tail_lines(filters: list[tuple]) -> int | None:
+    """How much pytest output a step keeps: None (the default tail), a
+    number of last lines, or 0 for the whole output (`check.run_tests`)."""
     from ozagia.check import OUTPUT_TAIL_LINES
     if not filters:
         return None
     if len(filters) == 1 and filters[0][0] == "tail":
         return max(OUTPUT_TAIL_LINES, filters[0][1])
-    return _FILTERED_PYTEST_LINES
+    return 0
 
 
 def _split_tags(text: str) -> tuple[str, list[str]]:
@@ -197,18 +194,19 @@ def _git_env(base: dict[str, str] | None) -> dict[str, str]:
 
 
 def _subprocess(argv: list[str], *, cwd: Path, env: dict[str, str],
-                stderr: str | None, timeout: float) -> tuple[str, int]:
+                timeout: float) -> tuple[str, str, int]:
+    """(stdout, stderr, status) of `argv`, run without a shell."""
     try:
         proc = subprocess.run(
             argv, cwd=str(cwd), env=env, stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL if stderr == "null" else subprocess.STDOUT,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             timeout=max(timeout, 0.1), check=False)
     except subprocess.TimeoutExpired:
-        return f"{argv[0]}: timed out after {round(timeout, 1)} s", 124
+        return "", f"{argv[0]}: timed out after {round(timeout, 1)} s", 124
     except OSError as e:
-        return f"{argv[0]}: {e}", 127
-    return proc.stdout.decode("utf-8", errors="replace"), proc.returncode
+        return "", f"{argv[0]}: {e}", 127
+    return (proc.stdout.decode("utf-8", errors="replace"),
+            proc.stderr.decode("utf-8", errors="replace"), proc.returncode)
 
 
 def _prepare(memory: Any, step: dict[str, Any], inp: dict[str, Any],
@@ -232,11 +230,11 @@ def _prepare(memory: Any, step: dict[str, Any], inp: dict[str, Any],
             q = Path(p)
             _inside(root, q if q.is_absolute() else wd / q)
 
-        def run_ls(timeout: float) -> tuple[str, list[str], int, list[str]]:
-            text, code = _subprocess(step["argv"], cwd=wd,
-                                     env=dict(env or os.environ),
-                                     stderr=step["stderr"], timeout=timeout)
-            return text, [], code, []
+        def run_ls(timeout: float) -> tuple:
+            text, err, code = _subprocess(step["argv"], cwd=wd,
+                                          env=dict(env or os.environ),
+                                          timeout=timeout)
+            return text, [], code, [], err
         return _Step(step, run_ls)
     if kind == "git_read":
         from ozagia.intent.shell import git_step_dirs
@@ -248,9 +246,9 @@ def _prepare(memory: Any, step: dict[str, Any], inp: dict[str, Any],
             if not gwd.is_dir():
                 raise Unhandled(f"git -C {d}: not a directory")
 
-        def run_git(timeout: float) -> tuple[str, list[str], int, list[str]]:
-            text, code = _subprocess(step["argv"], cwd=wd, env=_git_env(env),
-                                     stderr=step["stderr"], timeout=timeout)
+        def run_git(timeout: float) -> tuple:
+            text, err, code = _subprocess(step["argv"], cwd=wd,
+                                          env=_git_env(env), timeout=timeout)
             tags: list[str] = []
             keys: list[str] = []
             if sub in ("diff", "show") and code == 0 and text:
@@ -258,7 +256,7 @@ def _prepare(memory: Any, step: dict[str, Any], inp: dict[str, Any],
                     keys = touched_keys(memory, text)
                 if keys:
                     tags.append(tag("touched: " + ", ".join(keys)))
-            return text, tags, code, keys
+            return text, tags, code, keys, err
         return _Step(step, run_git)
     if kind == "read":
         p = Path(cls["file"])
@@ -341,6 +339,9 @@ def _prepare(memory: Any, step: dict[str, Any], inp: dict[str, Any],
         _python_for(cls, wd)
         if wd != root and cls.get("path_options"):
             raise Unhandled("path options with a workdir other than the root")
+        if wd != root and cls.get("env"):
+            raise Unhandled("environment assignments with a workdir other "
+                            "than the root")
         for s in cls["selectors"]:
             part = s.partition("::")[0]
             q = Path(part)
@@ -352,7 +353,8 @@ def _prepare(memory: Any, step: dict[str, Any], inp: dict[str, Any],
             tail = _pytest_tail_lines(step["filters"])
             try:
                 res = run_pytest(memory, {**cls, "output_filter": None,
-                                          **({"tail_lines": tail} if tail else {})},
+                                          **({"tail_lines": tail}
+                                             if tail is not None else {})},
                                  sub, wd)
             except (Unhandled, IntentError) as e:
                 return f"pytest: {e}", [], 1, []
@@ -414,17 +416,29 @@ def run_compound(memory: Any, cls: dict[str, Any], inp: dict[str, Any],
             status = 124
             break
         try:
-            text, tags, code, step_keys = prep.run(left)
+            got = prep.run(left)
         except Exception as e:  # noqa: BLE001 - one step failed
-            text, tags, code, step_keys = (f"{step['argv'][0]}: "
-                                           f"{type(e).__name__}: {e}", [], 1, [])
+            got = ("", [], 1, [], f"{step['argv'][0]}: {type(e).__name__}: {e}")
+        text, tags, code, step_keys = got[:4]
+        err = got[4] if len(got) > 4 else ""
+        # fd 1 and fd 2 as the step's redirects left them (plan_compound):
+        # stderr merged into the pipeline, dropped, or past the filters.
         if step["stdout_null"]:
             text = ""
+        if step["stderr"] == "merge" and err:
+            text = (text + ("" if not text or text.endswith("\n") else "\n")
+                    + err)
+            err = ""
+        elif step["stderr"] == "null":
+            err = ""
         if step["filters"] and not step.get("_filters_inside"):
             text, code = _filtered(text, step["filters"])
         text = text.rstrip("\n")
         if text:
             chunks.append(text)
+        err = err.rstrip("\n")
+        if err:
+            chunks.append(err)
         chunks.extend(tags)
         for k in step_keys:
             if k not in keys:

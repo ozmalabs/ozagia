@@ -283,3 +283,39 @@ def test_overlay_round_trips_through_the_snapshot(tagged) -> None:
     p.write_text(p.read_text() + "\n# another\n")
     again.refresh()
     G._assert_equivalent(again, root, root.parent / "fresh.json")
+
+
+def test_removing_or_restoring_a_tagged_test_runs_the_pass(tagged) -> None:
+    root, dump = tagged
+    mem = _mem(dump, root)
+    p = root / "tests" / "test_a.py"
+    original = p.read_text()
+    p.write_text(original.replace("    def test_two(self):", "    def helper(self):"))
+    mem.refresh()
+    assert mem.last_reingest_timings["adapter_pass"] == 1.0
+    assert _attrs(mem, "file:tests/test_a.py")["tagged"] == 1
+    G._assert_equivalent(mem, root, root.parent / "fresh.json")
+    p.write_text(original.replace("def test_one():", "def not_a_test():"))
+    mem.refresh()
+    p.write_text(original)
+    mem.refresh()
+    assert _attrs(mem, "test:tests/test_a.py::test_one")["tag"] == "fast"
+    _settled(mem, root)
+    G._assert_equivalent(mem, root, root.parent / "fresh.json")
+
+
+def test_ignored_watched_file_counts_in_the_digest(seeded) -> None:
+    root, dump = seeded
+    (root / ".gitignore").write_text("seeds/local_*.json\n")
+    _git(root, "add", ".gitignore")
+    _git(root, "commit", "-q", "-m", "ignore")
+    G._build(root, dump)
+    mem = _mem(dump, root)
+    assert mem.staleness()["stale"] is False
+    _write(root / "seeds" / "local_x.json", _seed("local_x", [], ["q"]))
+    assert mem.pending_changes() == ["seeds/local_x.json"]
+    mem._staleness_memo = None
+    assert mem.staleness()["stale"] is True
+    mem.refresh()
+    _settled(mem, root)
+    G._assert_equivalent(mem, root, root.parent / "fresh.json")

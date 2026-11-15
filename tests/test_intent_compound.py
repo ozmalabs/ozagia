@@ -130,9 +130,11 @@ def test_bre_to_ere(bre, ere):
 # running
 # --------------------------------------------------------------------------- #
 def _bash(repo, command):
-    p = subprocess.run(["bash", "-c", command], cwd=repo, capture_output=True,
-                       text=True)
-    return p.returncode, (p.stdout + p.stderr).rstrip("\n")
+    """bash's status and its output as a terminal shows it (stdout and
+    stderr interleaved)."""
+    p = subprocess.run(["bash", "-c", command], cwd=repo, stdout=subprocess.PIPE,
+                       stderr=subprocess.STDOUT, text=True)
+    return p.returncode, p.stdout.rstrip("\n")
 
 
 def _status(out):
@@ -293,3 +295,69 @@ def test_after_maps_git_diff_in_a_passthrough_compound(mem, repo):
 def test_after_compound_without_pytest_skips_the_refresh(mem):
     res = after(mem, "shell", {"command": "git log -1; cat pkg/mod.py"}, "")
     assert res["meta"]["intent"] == "after_none"
+
+
+# --------------------------------------------------------------------------- #
+# review fixes (v4)
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("command,sub", [
+    ("sudo -iu root git push", "push"),
+    ("env -iS'git push'", "push"),
+    ("function f { git push; }; f", "push"),
+    ("coproc git push", "push"),
+    ("watch -n 5 git pull", "pull"),
+    ("flock /tmp/l git commit -m x", "commit"),
+    ("su -c 'git push' bob", "push"),
+    ("runuser -u bob -- git push", "push"),
+    ("script -qc 'git reset --hard' /dev/null", "reset"),
+    ("strace -f git commit", "commit"),
+    ("dash -c 'git push'", "push"),
+    ("echo a#b; git commit -m x", "commit"),
+])
+def test_more_wrapped_ref_moving_git_is_refused(command, sub):
+    got = classify(command)
+    assert got["class"] == "git_refs" and got["subcommand"] == sub, got
+
+
+@pytest.mark.parametrize("command,why", [
+    ("git diff --no-index /etc/hostname pkg/mod.py; echo done",
+     "git option --no-index is not mapped"),
+    ("git blame --contents /etc/hostname pkg/mod.py | head -2",
+     "git option --contents is not mapped"),
+    ("git diff -O/etc/order; echo", "git option -O/etc/order is not mapped"),
+])
+def test_git_steps_that_read_other_files_fall_back(command, why):
+    plan, got = plan_compound(command)
+    assert plan is None and got.startswith(why.rsplit(" is", 1)[0]), got
+
+
+def test_carriage_return_is_part_of_a_word():
+    assert classify("git status\r")["class"] != "compound"
+    assert classify("cat pkg/mod.py\r\n && echo x")["class"] != "compound"
+
+
+def test_bre_open_interval_gets_a_zero():
+    assert bre_to_ere(r"a\{,3\}") == "a{0,3}"
+
+
+@pytest.mark.parametrize("command", [
+    "git log nosuchref >/dev/null; echo after",
+    "git log nosuchref 2>&1 >/dev/null; echo after",
+    "git log nosuchref >/dev/null 2>&1; echo after",
+    "git log nosuchref 2>/dev/null; echo after",
+    "git log nosuchref | head -1; echo after",
+    "git log nosuchref 2>&1 | head -1; echo after",
+])
+def test_stdout_and_stderr_redirects_match_bash(mem, repo, command):
+    res = _call(mem, "shell", command=command)
+    assert res["handled"], res
+    code, text = _bash(repo, command)
+    assert _status(res["output"]) == code
+    assert _plain(res["output"]) == text
+
+
+def test_env_prefixed_pytest_outside_the_root_falls_back(mem, repo):
+    res = _call(mem, "shell", command=f"cd {repo}/tests && FOO=1 {sys.executable} "
+                                      "-m pytest test_mod.py -q; echo x")
+    assert res["handled"] is False
+    assert "environment assignments" in res["reason"]

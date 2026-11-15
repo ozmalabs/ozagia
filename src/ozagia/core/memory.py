@@ -288,6 +288,8 @@ class Builder:
 
     def find(self, key: tuple) -> int | None:
         """The node id created with `key`, or None."""
+        if self.attr_log is not None:
+            self.attr_log.lookup(format_key(key))
         return self._by_key.get(key)
 
     def attrs(self, nid: int) -> dict[str, Any]:
@@ -1076,6 +1078,7 @@ def build_index(root: str | Path = ROOT, out: str | Path = DEFAULT_DUMP,
             AS.text_regexes(reg.indexer_inputs)),
         "attrs": log.overlay(lambda nid: b.nodes[nid]["key"],
                              lambda nid: b.nodes[nid]["attrs"]),
+        "looked_up": sorted(log.looked_up),
     }
 
     # -- checkout head ------------------------------------------------------ #
@@ -1260,8 +1263,8 @@ def _tree_digest(root: Path, *, dump: str | Path | None = None
     """(digest, error) for the working tree under `root`.
 
     The digest is sha256 over `git diff HEAD` (tracked content changes), a NUL,
-    and for each untracked file under SOURCE_DIRS or matching an adapter
-    indexer's `watch` glob (sorted by git): its path, a
+    and for each untracked file under SOURCE_DIRS, or matching an adapter
+    indexer's `watch` glob (ignored or not), sorted: its path, a
     NUL, then its size and sha256 of its bytes. Untracked files larger than
     MAX_PARSE_BYTES contribute path, size and mtime_ns instead. Untracked files
     that cannot be read contribute path and "unreadable". Untracked files in
@@ -1278,8 +1281,20 @@ def _tree_digest(root: Path, *, dump: str | Path | None = None
         watch = [f":(glob){g}" for g in registry(root).watch_globs]
         untracked = subprocess.run(
             ["git", "-C", str(root), "ls-files", "-z", "--others",
-             "--exclude-standard", "--", *SOURCE_DIRS, *watch],
+             "--exclude-standard", "--", *SOURCE_DIRS],
             capture_output=True, timeout=60, check=False)
+        if watch and untracked.returncode == 0:
+            # Watched files count ignored or not: an indexer reads them from
+            # disk either way.
+            extra = subprocess.run(
+                ["git", "-C", str(root), "ls-files", "-z", "--others", "--",
+                 *watch], capture_output=True, timeout=60, check=False)
+            if extra.returncode != 0:
+                untracked = extra
+            else:
+                names = sorted(set(untracked.stdout.split(b"\0"))
+                               | set(extra.stdout.split(b"\0")))
+                untracked.stdout = b"\0".join(n for n in names if n)
     except (OSError, subprocess.SubprocessError) as e:
         return None, str(e)
     if diff.returncode != 0 or untracked.returncode != 0:

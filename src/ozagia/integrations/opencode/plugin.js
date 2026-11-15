@@ -176,10 +176,10 @@ function isRefusal(err) {
   const seen = new Set();
   for (let e = err; e && !seen.has(e); e = e.cause) {
     seen.add(e);
-    const text = [e._tag, e.name, e.message, String(e)].filter(Boolean).join(" ");
-    if (/Permission\.(Declined|Corrected|Blocked)Error|Permission denied|rejected/.test(text)) {
-      return true;
-    }
+    const tag = String(e._tag || e.name || "");
+    if (/^Permission\.(Declined|Corrected|Blocked)Error$/.test(tag)) return true;
+    // BlockedError's message when the error lost its tag on the way.
+    if (/^Permission denied: /.test(String(e.message || ""))) return true;
   }
   return false;
 }
@@ -191,6 +191,7 @@ async function ask(perm, req, c) {
     action: req.action,
     resources: req.resources,
     save: req.save || ["*"],
+    ...(req.metadata ? { metadata: req.metadata } : {}),
     source: { type: "tool", messageID: c && c.messageID, id: c && c.id },
   });
 }
@@ -220,7 +221,11 @@ function wrap(client, perm, name, tool, original) {
     // Ask for `req`; true when allowed, false when the permission API
     // failed (the built-in then runs and asks itself); throws a refusal.
     const allowed = async (req) => {
-      if (!perm || !req) return true;
+      if (!perm) return true;
+      if (!req) {   // nothing to ask with: the built-in asks for itself
+        fallback = "permission: no request";
+        return false;
+      }
       try { await ask(perm, req, c); return true; }
       catch (err) {
         if (isRefusal(err)) throw err;
