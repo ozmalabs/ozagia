@@ -57,6 +57,11 @@ In v2 the plugin and daemon had 0 fallbacks, 0 plugin-load failures and
 ## Not measured
 
 - Claude Code hooks (Claude Code was logged out).
-- The native loop (`--driver native`).
+- The native loop (`--driver native`) beyond one smoke run on
+  `admissible-moves-weight` (same model, after the pilot): baseline solved it
+  in 192 s with 28 tool calls, and graph_intent in 139 s with 18 calls
+  (13 captured, 5 passthrough, 0 fallbacks). Its token counts (982k and
+  549k in) add up the whole context resent on every turn, so they are not
+  comparable with OpenCode's.
 - Variance: 3 repeats per cell is too few for significance tests, and
   single 300–900 s outliers move the means a lot.
