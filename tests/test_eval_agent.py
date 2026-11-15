@@ -1007,9 +1007,11 @@ def test_graph_intent_noop_run_aggregates_and_renders(fixture):
 def test_graph_stats_fields_read_counts():
     assert ae.graph_stats_fields(None) == {"plugin_loaded": None, "captured_calls": None,
                                            "fallbacks": None}
-    assert ae.graph_stats_fields({"hellos": 2, "handled": {"read": 3, "grep": 1},
-                                  "fallbacks": 1}) == {
-        "plugin_loaded": True, "captured_calls": 4, "fallbacks": 1}
+    # The daemon's shape: handled {"true": captured, "false": passed through}.
+    assert ae.graph_stats_fields({"hellos": 2, "handled": {"true": 3, "false": 4},
+                                  "fallbacks": 4}) == {
+        "plugin_loaded": True, "captured_calls": 3, "fallbacks": 4}
+    assert ae.graph_stats_fields({"hellos": 1, "handled": 2})["captured_calls"] == 2
     assert ae.graph_stats_fields({"hellos": 0, "by_handled": {"true": 5}})[
         "captured_calls"] == 5
 

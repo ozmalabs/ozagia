@@ -1109,7 +1109,9 @@ def graph_stats_fields(stats: Any) -> dict[str, Any]:
     if not isinstance(stats, dict):
         return {"plugin_loaded": None, "captured_calls": None, "fallbacks": None}
     hellos = _count(stats.get("hellos"))
-    handled = _count(stats.get("handled"))
+    raw = stats.get("handled")
+    # The daemon reports {"true": n, "false": m}; only handled calls count.
+    handled = (_count(raw.get("true")) if isinstance(raw, dict) else _count(raw))
     if handled is None and isinstance(stats.get("by_handled"), dict):
         handled = _count(stats["by_handled"].get("true"))
     return {"plugin_loaded": None if hellos is None else hellos > 0,

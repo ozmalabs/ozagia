@@ -113,12 +113,12 @@ Edited /repo/pkg/mod.py (1 replacement)
 ```
 
 `DevMemory.span_edit(..., apply=True)` does the work (exact match, parse
-guard, transaction, reingest, broken references). Tool errors:
+guard, transaction, reingest, broken references). An `oldString` with no
+exact match is `handled: false`: OpenCode's built-in edit retries with
+whitespace- and indentation-tolerant matching, and `after` re-ingests what it
+wrote. Tool errors:
 
 ```
-oldString not found in content
-[ozagia] nearest: L5 sym:pkg/mod.py::helper: def helper(a, b=1):
-
 Found multiple matches for oldString. Provide more surrounding lines in oldString to identify the correct match.
 [ozagia] match: L7 sym:pkg/mod.py::helper: return a + b
 

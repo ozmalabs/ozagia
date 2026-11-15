@@ -376,10 +376,10 @@ def test_edit_errors(mem, repo):
     before = (repo / "pkg/mod.py").read_text()
     res = _call(mem, "edit", path="pkg/mod.py", oldString="def helpr(a):",
                 newString="x")
-    assert res["handled"] and res["is_error"]
-    lines = res["output"].split("\n")
-    assert lines[0] == "oldString not found in content"
-    assert lines[1].startswith("[ozagia] nearest: L5 sym:pkg/mod.py::helper: ")
+    # No exact match: the built-in edit (with its tolerant matchers) gets it.
+    assert res["handled"] is False
+    assert "no exact match" in res["reason"]
+    assert (repo / "pkg/mod.py").read_text() == before
 
     res = _call(mem, "edit", path="pkg/mod.py", oldString="return", newString="x")
     assert res["is_error"]
