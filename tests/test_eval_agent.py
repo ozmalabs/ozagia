@@ -1037,3 +1037,24 @@ def test_opencode_graph_intent_config_and_socket_env(tmp_path, monkeypatch):
     assert captured["env"]["OZAGIA_DAEMON_SOCK"] == "/tmp/x.sock"
     assert captured["env"]["OPENCODE_CONFIG"] == str(tmp_path / "log" / "opencode_config.json")
     assert captured["argv"][:3] == ["opencode", "run", "--standalone"]
+
+
+
+def test_daemon_gets_the_run_python_first_on_path(tmp_path, monkeypatch):
+    seen = {}
+
+    class Proc:
+        pid = 0
+        stdout = None
+
+    def fake_popen(argv, **kw):
+        seen["env"] = kw["env"]
+        raise OSError("stop here")
+
+    monkeypatch.setattr(ae.subprocess, "Popen", fake_popen)
+    out = ae.start_daemon(tmp_path, "/usr/bin/python3", tmp_path / "log",
+                          run_python=_python())
+    assert out["daemon_ok"] is False
+    first = Path(seen["env"]["PATH"].split(os.pathsep)[0])
+    assert first == tmp_path / "log" / "bin"
+    assert os.path.realpath(first / "python") == os.path.realpath(_python())

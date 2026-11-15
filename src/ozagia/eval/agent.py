@@ -696,17 +696,7 @@ class CommandDriver:
                              transcript=parsed.get("transcript", out))
 
     def _python_shim(self, log_dir: Path) -> Path:
-        """A bin dir under log_dir whose `python` and `python3` are the run's
-        interpreter. The interpreter's own dir is not enough: a resolved venv
-        python lives in a base install that may have no `python` name."""
-        shim = log_dir / "bin"
-        shim.mkdir(parents=True, exist_ok=True)
-        for name in ("python", "python3"):
-            link = shim / name
-            if link.is_symlink() or link.exists():
-                link.unlink()
-            link.symlink_to(self.python)
-        return shim
+        return python_shim(log_dir, self.python)
 
     def _opencode_config(self, arm: str, mcp: Path | None, log_dir: Path) -> Path:
         """The OPENCODE_CONFIG for one session, written under log_dir.
@@ -1012,8 +1002,26 @@ class GraphDaemon:
         return {"daemon_stats": stats, "daemon_stop_error": error}
 
 
+def python_shim(log_dir: Path, python: str) -> Path:
+    """A bin dir under log_dir whose `python` and `python3` are `python`.
+
+    The interpreter's own dir is not enough: a resolved venv python lives in
+    a base install that may have no `python` name. The agent's shell and the
+    graph daemon (which runs the agent's `python -m pytest`) both get it
+    first on PATH."""
+    shim = log_dir / "bin"
+    shim.mkdir(parents=True, exist_ok=True)
+    for name in ("python", "python3"):
+        link = shim / name
+        if link.is_symlink() or link.exists():
+            link.unlink()
+        link.symlink_to(python)
+    return shim
+
+
 def start_daemon(workdir: Path, tool_python: str, log_dir: Path, *,
-                 config: Path | None = None) -> dict[str, Any]:
+                 config: Path | None = None,
+                 run_python: str | None = None) -> dict[str, Any]:
     """Start the graph daemon and wait for its `ready` line.
 
     Returns {"daemon": GraphDaemon | None, "sock", "daemon_ok",
@@ -1024,6 +1032,10 @@ def start_daemon(workdir: Path, tool_python: str, log_dir: Path, *,
     sock = _daemon_sock_path()
     argv = daemon_command(tool_python, workdir, log_dir, sock)
     env = dict(_tool_env(workdir, config), PWD=str(Path(workdir).resolve()))
+    if run_python:
+        # `python` in the agent's commands is the run's interpreter.
+        env["PATH"] = os.pathsep.join(
+            [str(python_shim(log_dir, run_python)), env.get("PATH", "")])
     started = time.monotonic()
 
     def failed(error: str) -> dict[str, Any]:
@@ -1156,7 +1168,8 @@ def run_one(repo: str | Path, task: dict[str, Any], arm: str, repeat: int,
                           prep_error=prep["prep_error"])
         run_kwargs: dict[str, Any] = {}
         if graph:
-            started = start_daemon(workdir, tool_python, log_dir, config=config)
+            started = start_daemon(workdir, tool_python, log_dir, config=config,
+                                   run_python=python)
             daemon = started["daemon"]
             record.update(daemon_ok=started["daemon_ok"],
                           daemon_error=started["daemon_error"],
