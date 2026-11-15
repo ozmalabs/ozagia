@@ -216,11 +216,12 @@ a sandbox: the agent runs as the operator and can reach any path by absolute nam
 |---|---|
 | `baseline` | No Ocelot MCP server. Claude Code runs with `--strict-mcp-config`, which ignores the user's MCP servers. OpenCode gets the generated config without the Ocelot server; a user's global MCP servers can still load in both arms. |
 | `dev_memory` | The workdir gets `.ozagia_eval_mcp.json` (Claude Code, passed with `--mcp-config`) and `.ozagia_eval_opencode.json` (OpenCode, whose `mcp` block is copied into the generated `OPENCODE_CONFIG`). Both start `<python> -m ozagia.integrations.mcp.server` with `PYTHONPATH` and `OZAGIA_ROOT` set to the workdir. The snapshot and journal go under the run's log directory. `OZAGIA_AUTOBUILD=0`, because the harness builds the snapshot before the driver starts (see Prep). |
+| `graph_intent` | No MCP server. dev_memory's prep, then the graph daemon for the session and the ozagia OpenCode plugin in `<workdir>/.opencode/plugins/`, which hands the built-in file and shell tools to the daemon. `opencode`, `fake` and `noop` drivers only. See below. |
 
 The two config files are untracked and are written before the snapshot. They are
 not counted as agent edits. The agent can still see them with `git status`.
 
-### Prep (dev_memory only, outside the timer)
+### Prep (dev_memory and graph_intent, outside the timer)
 
 Before the driver starts, the dev_memory arm builds the dev-memory graph snapshot
 (`build_index`, written to the run's log directory) and warms the tag cache
@@ -237,6 +238,89 @@ session's wall time, so dev_memory sessions were timed unfairly.
 Prep is not a gate. If it fails, the run records `prep_ok: false` and `prep_error`,
 the driver still runs, and the check still decides. The report counts "prep failures"
 per arm, so a broken index shows up as a result and is not hidden.
+
+### graph_intent (graph daemon and the OpenCode plugin)
+
+The third arm keeps the agent's built-in tools and changes what they do. The
+OpenCode plugin (`src/ozagia/integrations/opencode/plugin.js`) replaces `read`,
+`grep`, `glob`, `edit`, `write` and `shell` and sends each call to the graph
+daemon (`python -m ozagia.daemon serve`, protocol in
+`src/ozagia/daemon/protocol.py`). The agent's tool list is the baseline's: no MCP
+server is registered, and the generated `OPENCODE_CONFIG` is the baseline's.
+
+Drivers: `opencode`, and `fake` and `noop` for testing the pipeline without a
+model. `claude` with this arm is refused before any workdir is made. Without
+`--arms`, the CLI runs every arm the driver supports.
+
+Per run, in order:
+
+1. The workdir and prep are the dev_memory arm's (`prepare_dev_memory`).
+2. The daemon starts in its own process group: `<tool python> -m ozagia.daemon
+   serve --root <workdir> --dump <log_dir>/dev_graph.json --journal
+   <log_dir>/daemon_journal.jsonl --sock <tmp>/ozagia-eval-<random>.sock`, with
+   `OZAGIA_ROOT` and `OZAGIA_CONFIG` as for prep. The harness waits up to
+   `DAEMON_READY_TIMEOUT_S` (120 s) for its `ready <socket>` line. Its stdout and
+   stderr go to `daemon.stdout.txt` and `daemon.stderr.txt` in the log dir. A daemon
+   that exits or is not ready in time is killed and recorded (`daemon_ok: false`,
+   `daemon_error`); the run goes on, and the plugin then falls back to the built-ins
+   on every call.
+3. The plugin is written to `<workdir>/.opencode/plugins/ozagia.js`, before the
+   "before" snapshot. `_snapshot` never lists that file (nor the state dir), so it
+   is not an agent edit even in a repository that does not ignore `.opencode/`.
+4. The driver runs with `OZAGIA_DAEMON_SOCK=<socket>`. The plugin does nothing
+   without that variable.
+5. After the "after" snapshot the harness sends `stats` and `shutdown`, kills the
+   daemon's process group if anything in it is still alive, removes the socket,
+   and removes the plugin file. The check then runs as for the other arms.
+
+Run record fields for this arm:
+
+| field | meaning |
+|---|---|
+| `daemon_ok`, `daemon_error`, `daemon_ready_s` | daemon start, and seconds to its `ready` line |
+| `daemon_stats` | the daemon's `stats` response as is (counts by tool, intent and handled, fallbacks, hellos, latency) |
+| `daemon_stop_error` | `stats` could not be read at the end |
+| `plugin_loaded` | `stats.hellos > 0`: the plugin connected at least once. `None` without stats |
+| `captured_calls` | tool calls the daemon handled (`stats.handled`, a count or a per-tool map) |
+| `fallbacks` | `stats.fallbacks`: calls the plugin sent to the built-in because the daemon failed or timed out |
+
+The per-arm summary adds `mean_captured_calls`, `total_fallbacks`,
+`plugin_load_failures` (runs with `plugin_loaded` not true, so `fake` and `noop`
+runs count, as they load no plugin) and `daemon_failures`. The Markdown report has
+a "Graph daemon and plugin" table for arms with these fields.
+
+Plugin behaviour, per replaced tool: the original `execute` is kept, the output
+schema becomes the edit tool's string schema (each built-in validates its result
+against its own schema), and the description gains one sentence (`read`: paths may
+be node keys such as `sym:<file>::<name>`; all: lines starting with `[ozagia]` are
+graph context). A call sends `tool`; a handled answer is returned as the tool's
+output, or thrown as the tool's error when `is_error` is set. An unhandled call
+runs the original, converts its result to text, sends `after` with that text, and
+appends the daemon's `append`. On a daemon error or timeout (30 s; a shell call
+gets its own `timeout` plus 30 s, 330 s by default) the original's output is
+returned unchanged and a best-effort `after` with `meta.fallback` records it. The
+socket is opened on the first call and `hello` is sent once on the first
+connection, so OpenCode never waits for the daemon at startup.
+
+Install and check by hand:
+
+```
+python -m ozagia.integrations.opencode install --workdir W
+python -m ozagia.integrations.opencode check --workdir W
+python -m ozagia.integrations.opencode uninstall --workdir W
+```
+
+`check` makes no model call. It runs `opencode plugin list` in W, which asks
+OpenCode's background service. The service imports a directory's plugins
+asynchronously after the first request for it: the first calls print "No plugins
+found", later ones a table `ID VERSION SOURCE` with one row per plugin file, whose
+ID is the module's `id` (`-` when the file did not import or has no plugin shape).
+`--standalone` printed "No plugins found" every time on 2.3.0, so `check` polls the
+background service until the plugin's row appears or the timeout passes. A row with
+ID `ozagia` proves the file imported with the right shape; it does not run `setup`.
+`check` also imports the plugin in Node and runs `setup` against a stub registry,
+checking that the six tools were replaced and took the string schema. OpenCode
+runs on Bun, so the Node test is a proxy.
 
 ## Running
 

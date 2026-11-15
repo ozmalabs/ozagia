@@ -25,6 +25,10 @@ Arms:
   baseline    no ozagia MCP server. Claude Code runs with --strict-mcp-config.
   dev_memory  ozagia MCP server (ozagia.integrations.mcp.server)
               registered through a config file written into the workdir.
+  graph_intent  no MCP server; the ozagia graph daemon runs for the session
+              and the OpenCode plugin (ozagia.integrations.opencode) hands
+              the agent's read/grep/glob/edit/write/shell calls to it.
+              opencode, fake and noop drivers only.
 
 Live drivers refuse to run unless both `--live` and the environment variable
 OZAGIA_EVAL_LIVE=1 are set. A live run spends hosted-model tokens and
@@ -45,18 +49,31 @@ import os
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
 from typing import Any, Iterable
 from ozagia.config import STATE_DIRNAME, config_path, repo_root
+from ozagia.daemon.protocol import ENV_SOCK
+from ozagia.integrations.opencode import install as opencode_plugin
 
 ROOT = repo_root()
 DEFAULT_TASKS = ROOT / "evaluation" / "agent_e2e" / "tasks.json"
 DEFAULT_RUN_ROOT = Path("/tmp/ozagia_eval")
-ARMS = ("baseline", "dev_memory")
+ARMS = ("baseline", "dev_memory", "graph_intent")
+GRAPH_ARM = "graph_intent"
+# Drivers the graph_intent arm runs with: the plugin is OpenCode's, and the
+# local drivers exercise the daemon lifecycle without a model.
+GRAPH_ARM_DRIVERS = ("opencode", "fake", "noop")
+DAEMON_READY_TIMEOUT_S = 120
+# Per request to the daemon from the harness (stats, shutdown); the plugin
+# uses the same 30 s.
+DAEMON_REQUEST_TIMEOUT_S = 30
 LIVE_ENV = "OZAGIA_EVAL_LIVE"
 MCP_SERVER_NAME = "ozagia"
 MCP_MODULE = "ozagia.integrations.mcp.server"
@@ -249,12 +266,13 @@ def apply_patch(workdir: Path, patch: Path, *, reverse: bool = False) -> dict[st
 def _snapshot(workdir: Path) -> dict[str, str | None]:
     """Content digest of every modified, deleted or untracked file.
 
-    ozagia's own state directory is never part of it, whether or not the
-    target repository ignores it."""
+    ozagia's own state directory and the harness-installed OpenCode plugin
+    are never part of it, whether or not the target repository ignores them."""
     proc = _git(["ls-files", "-z", "-m", "-d", "-o", "--exclude-standard"], workdir)
+    plugin = opencode_plugin.PLUGIN_REL.as_posix()
     snap: dict[str, str | None] = {}
     for rel in sorted(p for p in proc.stdout.split("\0")
-                      if p and p.split("/", 1)[0] != STATE_DIRNAME):
+                      if p and p.split("/", 1)[0] != STATE_DIRNAME and p != plugin):
         target = workdir / rel
         if target.is_file():
             snap[rel] = hashlib.sha256(target.read_bytes()).hexdigest()
@@ -441,7 +459,8 @@ class NoopDriver:
     name = "noop"
 
     def run(self, workdir: Path, prompt: str, arm: str, timeout_s: int,
-            log_dir: Path, *, patch_path: Path | None = None) -> dict[str, Any]:
+            log_dir: Path, *, patch_path: Path | None = None,
+            extra_env: dict[str, str] | None = None) -> dict[str, Any]:
         return _empty_result(exit_code=0)
 
 
@@ -450,7 +469,8 @@ class FakeDriver:
     name = "fake"
 
     def run(self, workdir: Path, prompt: str, arm: str, timeout_s: int,
-            log_dir: Path, *, patch_path: Path | None = None) -> dict[str, Any]:
+            log_dir: Path, *, patch_path: Path | None = None,
+            extra_env: dict[str, str] | None = None) -> dict[str, Any]:
         if patch_path is None:
             raise HarnessError("fake driver needs the task's break patch")
         started = time.monotonic()
@@ -517,11 +537,12 @@ DRIVERS: dict[str, dict[str, Any]] = {
         # eval sessions out of the user's session list.
         "argv": ["opencode", "run", "--standalone", "--format", "json", "--auto",
                  "--archived", "{prompt}"],
-        "arm_argv": {"baseline": [], "dev_memory": []},
-        # Both arms get a generated config (git denylist; MCP only for
+        "arm_argv": {"baseline": [], "dev_memory": [], "graph_intent": []},
+        # Every arm gets a generated config (git denylist; MCP only for
         # dev_memory). See CommandDriver._opencode_config.
         "arm_env": {"baseline": {"OPENCODE_CONFIG": "{driver_config}"},
-                    "dev_memory": {"OPENCODE_CONFIG": "{driver_config}"}},
+                    "dev_memory": {"OPENCODE_CONFIG": "{driver_config}"},
+                    "graph_intent": {"OPENCODE_CONFIG": "{driver_config}"}},
         "mcp_config_file": MCP_CONFIG_OPENCODE,
         "model_flag": "-m",
         "parse": lambda stdout: _parse_opencode_events(stdout),
@@ -643,10 +664,11 @@ class CommandDriver:
         return out
 
     def run(self, workdir: Path, prompt: str, arm: str, timeout_s: int,
-            log_dir: Path, *, patch_path: Path | None = None) -> dict[str, Any]:
+            log_dir: Path, *, patch_path: Path | None = None,
+            extra_env: dict[str, str] | None = None) -> dict[str, Any]:
         _require_live_env(self.name)
         mcp = workdir / self.spec["mcp_config_file"] if arm == "dev_memory" else None
-        env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+        env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", **(extra_env or {}))
         log_dir.mkdir(parents=True, exist_ok=True)
         if self.python:
             env["PATH"] = os.pathsep.join(
@@ -689,9 +711,10 @@ class CommandDriver:
     def _opencode_config(self, arm: str, mcp: Path | None, log_dir: Path) -> Path:
         """The OPENCODE_CONFIG for one session, written under log_dir.
 
-        Both arms deny the ref-moving git commands. Only dev_memory adds the
-        ozagia MCP server (copied from the arm config in the workdir), so the
-        arms differ only in that server.
+        Every arm denies the ref-moving git commands. Only dev_memory adds the
+        ozagia MCP server (copied from the arm config in the workdir).
+        graph_intent gets the baseline config: its tools come from the plugin
+        in the workdir, and the agent's tool list matches baseline.
         """
         doc: dict[str, Any] = {
             "$schema": "https://opencode.ai/config.json",
@@ -816,7 +839,7 @@ def write_arm_config(workdir: Path, arm: str, tool_python: str,
     PYTHONPATH, so a task that breaks the target's code cannot break the tool.
     `config` is the source repository's project config (OZAGIA_CONFIG): the
     workdir is at the task's base commit, which may predate the config."""
-    if arm == "baseline":
+    if arm in ("baseline", GRAPH_ARM):
         return []
     if arm != "dev_memory":
         raise HarnessError(f"unknown arm: {arm}")
@@ -857,6 +880,18 @@ _PREP_CODE = (
 )
 
 
+def _tool_env(workdir: Path, config: Path | None) -> dict[str, str]:
+    """Environment for ozagia subprocesses acting on `workdir` (prep, daemon)."""
+    env = dict(os.environ, OZAGIA_ROOT=str(workdir), PYTHONDONTWRITEBYTECODE="1",
+               COLUMNS="250")
+    env.pop("PYTHONPATH", None)
+    if config is not None:
+        env["OZAGIA_CONFIG"] = str(config)
+    else:
+        env.pop("OZAGIA_CONFIG", None)
+    return env
+
+
 def prepare_dev_memory(workdir: Path, tool_python: str,
                        log_dir: Path, *, config: Path | None = None) -> dict[str, Any]:
     """Build the dev-memory snapshot and warm the tag cache, outside the timer.
@@ -869,13 +904,7 @@ def prepare_dev_memory(workdir: Path, tool_python: str,
     still decides, so a broken index shows up as a result, not a silent skip.
     """
     log_dir.mkdir(parents=True, exist_ok=True)
-    env = dict(os.environ, OZAGIA_ROOT=str(workdir), PYTHONDONTWRITEBYTECODE="1",
-               COLUMNS="250")
-    env.pop("PYTHONPATH", None)
-    if config is not None:
-        env["OZAGIA_CONFIG"] = str(config)
-    else:
-        env.pop("OZAGIA_CONFIG", None)
+    env = _tool_env(workdir, config)
     res = spawn_group([tool_python, "-c", _PREP_CODE, str(workdir),
                        str(log_dir / "dev_graph.json")],
                       cwd=workdir, env=env, timeout_s=PREP_TIMEOUT_S)
@@ -889,6 +918,203 @@ def prepare_dev_memory(workdir: Path, tool_python: str,
     else:
         error = _tail(res["stderr"], 12) or f"exit {res['returncode']}"
     return {"prep_s": res["seconds"], "prep_ok": ok, "prep_error": error}
+
+
+# --------------------------------------------------------------------------- #
+# graph_intent: the graph daemon for one run
+# --------------------------------------------------------------------------- #
+def daemon_command(tool_python: str, workdir: Path, log_dir: Path,
+                   sock: Path) -> list[str]:
+    """The argv that starts the graph daemon for one run.
+
+    Module-level so tests can substitute a stub server; the stub must accept
+    connections on `sock`, print `ready <sock>` and answer stats and shutdown."""
+    return [tool_python, "-m", "ozagia.daemon", "serve", "--root", str(workdir),
+            "--dump", str(log_dir / "dev_graph.json"),
+            "--journal", str(log_dir / "daemon_journal.jsonl"), "--sock", str(sock)]
+
+
+def _daemon_sock_path() -> Path:
+    """A short socket path: Unix socket paths are limited to about 100 bytes."""
+    return Path(tempfile.gettempdir()) / f"ozagia-eval-{uuid.uuid4().hex[:12]}.sock"
+
+
+def _daemon_request(sock: Path, msg: dict[str, Any],
+                    timeout_s: float = DAEMON_REQUEST_TIMEOUT_S) -> dict[str, Any]:
+    """One request on a fresh connection; the response line, parsed."""
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+        conn.settimeout(timeout_s)
+        conn.connect(str(sock))
+        conn.sendall((json.dumps({"id": 1, **msg}) + "\n").encode("utf-8"))
+        with conn.makefile("rb") as fh:
+            line = fh.readline()
+    if not line:
+        raise HarnessError(f"daemon closed the connection on {msg.get('op')}")
+    doc = json.loads(line)
+    if not isinstance(doc, dict) or not doc.get("ok"):
+        raise HarnessError(f"daemon {msg.get('op')} failed: {doc}")
+    return doc
+
+
+def _kill_group(proc: subprocess.Popen) -> None:
+    """SIGTERM the process group, wait KILL_GRACE_S, then SIGKILL survivors."""
+    pgid = proc.pid
+    proc.poll()
+    if not _group_alive(pgid):
+        return
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    deadline = time.monotonic() + KILL_GRACE_S
+    while time.monotonic() < deadline:
+        proc.poll()
+        if not _group_alive(pgid):
+            return
+        time.sleep(0.05)
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
+        proc.wait(timeout=KILL_GRACE_S)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+class GraphDaemon:
+    """A started daemon process (its own process group) and its socket."""
+
+    def __init__(self, proc: subprocess.Popen, sock: Path,
+                 pump: threading.Thread) -> None:
+        self.proc = proc
+        self.sock = sock
+        self.pump = pump
+
+    def stop(self) -> dict[str, Any]:
+        """Ask for stats, shut it down, kill the group if it is still alive,
+        and remove the socket. Returns {"daemon_stats", "daemon_stop_error"}."""
+        stats: Any = None
+        error = None
+        try:
+            stats = _daemon_request(self.sock, {"op": "stats"}).get("stats")
+        except (OSError, ValueError, HarnessError) as exc:
+            error = f"stats failed: {exc}"
+        try:
+            _daemon_request(self.sock, {"op": "shutdown"})
+            self.proc.wait(timeout=KILL_GRACE_S)
+        except (OSError, ValueError, HarnessError, subprocess.TimeoutExpired):
+            pass
+        _kill_group(self.proc)
+        self.pump.join(timeout=KILL_GRACE_S)
+        if self.sock.is_socket():
+            self.sock.unlink()
+        return {"daemon_stats": stats, "daemon_stop_error": error}
+
+
+def start_daemon(workdir: Path, tool_python: str, log_dir: Path, *,
+                 config: Path | None = None) -> dict[str, Any]:
+    """Start the graph daemon and wait for its `ready` line.
+
+    Returns {"daemon": GraphDaemon | None, "sock", "daemon_ok",
+    "daemon_error", "daemon_ready_s"}. A daemon that fails to start is
+    killed and reported, not raised: the run goes on without it (the plugin
+    then falls back to the built-ins on every call)."""
+    log_dir.mkdir(parents=True, exist_ok=True)
+    sock = _daemon_sock_path()
+    argv = daemon_command(tool_python, workdir, log_dir, sock)
+    env = dict(_tool_env(workdir, config), PWD=str(Path(workdir).resolve()))
+    started = time.monotonic()
+
+    def failed(error: str) -> dict[str, Any]:
+        return {"daemon": None, "sock": sock, "daemon_ok": False,
+                "daemon_error": error,
+                "daemon_ready_s": round(time.monotonic() - started, 3)}
+
+    stderr_path = log_dir / "daemon.stderr.txt"
+    try:
+        with stderr_path.open("w", encoding="utf-8") as stderr:
+            proc = subprocess.Popen(argv, cwd=str(workdir), env=env,
+                                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                    stderr=stderr, text=True, encoding="utf-8",
+                                    errors="replace", start_new_session=True)
+    except OSError as exc:
+        return failed(f"daemon did not start: {exc}")
+    ready = threading.Event()
+    seen: dict[str, Any] = {}
+
+    def pump() -> None:
+        # Copies the daemon's stdout to the log for its whole life, so the
+        # pipe never fills; the first `ready <path>` line marks it ready.
+        with (log_dir / "daemon.stdout.txt").open("w", encoding="utf-8") as out:
+            for line in proc.stdout:
+                out.write(line)
+                out.flush()
+                if "ready" not in seen and line.startswith("ready "):
+                    seen["ready"] = line[len("ready "):].strip()
+                    ready.set()
+        seen["eof"] = True
+        ready.set()
+
+    thread = threading.Thread(target=pump, name="ozagia-daemon-stdout", daemon=True)
+    thread.start()
+    # Also watch the process: a daemon that exits leaving a child holding its
+    # stdout would otherwise never show EOF.
+    deadline = started + DAEMON_READY_TIMEOUT_S
+    while not ready.wait(0.05):
+        if proc.poll() is not None:
+            ready.wait(0.5)  # let the pump read a last `ready` line, if any
+            seen.setdefault("eof", True)
+            break
+        if time.monotonic() >= deadline:
+            break
+    daemon = GraphDaemon(proc, Path(seen["ready"]) if seen.get("ready") else sock, thread)
+    if seen.get("ready"):
+        return {"daemon": daemon, "sock": daemon.sock, "daemon_ok": True,
+                "daemon_error": None,
+                "daemon_ready_s": round(time.monotonic() - started, 3)}
+    if seen.get("eof"):
+        try:
+            code: Any = proc.wait(timeout=KILL_GRACE_S)
+        except subprocess.TimeoutExpired:
+            code = "still running"
+        error = (f"daemon exited before ready (exit {code}): "
+                 + _tail(stderr_path.read_text(encoding="utf-8", errors="replace"), 12))
+    else:
+        error = f"daemon not ready after {DAEMON_READY_TIMEOUT_S} s"
+    _kill_group(proc)
+    thread.join(timeout=KILL_GRACE_S)
+    if sock.is_socket():
+        sock.unlink()
+    return failed(error.strip())
+
+
+def _count(value: Any) -> int | None:
+    """A count from a stats field: an int, a list's length, or a dict's sum."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, list):
+        return len(value)
+    if isinstance(value, dict):
+        nums = [v for v in value.values() if isinstance(v, int) and not isinstance(v, bool)]
+        return sum(nums) if nums else 0
+    return None
+
+
+def graph_stats_fields(stats: Any) -> dict[str, Any]:
+    """Run-record fields from the daemon's `stats`: plugin_loaded
+    (hellos > 0), captured_calls (handled tool calls) and fallbacks."""
+    if not isinstance(stats, dict):
+        return {"plugin_loaded": None, "captured_calls": None, "fallbacks": None}
+    hellos = _count(stats.get("hellos"))
+    handled = _count(stats.get("handled"))
+    if handled is None and isinstance(stats.get("by_handled"), dict):
+        handled = _count(stats["by_handled"].get("true"))
+    return {"plugin_loaded": None if hellos is None else hellos > 0,
+            "captured_calls": handled,
+            "fallbacks": _count(stats.get("fallbacks"))}
 
 
 def run_one(repo: str | Path, task: dict[str, Any], arm: str, repeat: int,
@@ -907,6 +1133,13 @@ def run_one(repo: str | Path, task: dict[str, Any], arm: str, repeat: int,
                               "driver": driver.name, "prep_s": 0.0,
                               "prep_ok": None, "prep_error": None,
                               "cleanup_warnings": cleanup}
+    graph = arm == GRAPH_ARM
+    if graph:
+        record.update(daemon_ok=None, daemon_error=None, daemon_ready_s=None,
+                      daemon_stats=None, daemon_stop_error=None,
+                      plugin_loaded=None, captured_calls=None, fallbacks=None)
+    daemon: GraphDaemon | None = None
+    plugin_installed = False
     try:
         patch = Path(tasks_dir) / task["break_patch"]
         applied = apply_patch(workdir, patch)
@@ -915,14 +1148,34 @@ def run_one(repo: str | Path, task: dict[str, Any], arm: str, repeat: int,
                           files_changed=[], localized=False, wall_s=0.0)
             return record
         write_arm_config(workdir, arm, tool_python, log_dir, config=config)
-        if arm == "dev_memory":
+        if arm in ("dev_memory", GRAPH_ARM):
             prep = prepare_dev_memory(workdir, tool_python, log_dir, config=config)
             record.update(prep_s=prep["prep_s"], prep_ok=prep["prep_ok"],
                           prep_error=prep["prep_error"])
+        run_kwargs: dict[str, Any] = {}
+        if graph:
+            started = start_daemon(workdir, tool_python, log_dir, config=config)
+            daemon = started["daemon"]
+            record.update(daemon_ok=started["daemon_ok"],
+                          daemon_error=started["daemon_error"],
+                          daemon_ready_s=started["daemon_ready_s"])
+            # Installed before the "before" snapshot and removed after the
+            # "after" one; _snapshot also never lists it.
+            opencode_plugin.install(workdir)
+            plugin_installed = True
+            run_kwargs["extra_env"] = {ENV_SOCK: str(started["sock"])}
         before = _snapshot(workdir)
         result = driver.run(workdir, task["prompt"], arm, timeout_s, log_dir,
-                            patch_path=patch)
+                            patch_path=patch, **run_kwargs)
         after = _snapshot(workdir)
+        if graph:
+            if daemon is not None:
+                stopped = daemon.stop()
+                daemon = None
+                record.update(stopped)
+                record.update(graph_stats_fields(stopped["daemon_stats"]))
+            opencode_plugin.uninstall(workdir)
+            plugin_installed = False
         files_changed = changed_since(before, after)
         check = run_check(workdir, task["check"], python, log_dir / "check.log")
         expected = [f.replace("\\", "/") for f in task["expected_files"]]
@@ -948,6 +1201,10 @@ def run_one(repo: str | Path, task: dict[str, Any], arm: str, repeat: int,
         (log_dir / "transcript.txt").write_text(result["transcript"] or "", encoding="utf-8")
         return record
     finally:
+        if daemon is not None:
+            daemon.stop()
+        if plugin_installed:
+            opencode_plugin.uninstall(workdir)
         if not keep:
             cleanup.extend(remove_workdir(repo, workdir, run_root))
         else:
@@ -968,6 +1225,10 @@ def run_eval(repo: str | Path, tasks: list[dict[str, Any]], arms: Iterable[str],
         raise HarnessError(f"unknown arms: {', '.join(unknown)}")
     if repeats < 1:
         raise HarnessError("repeats must be at least 1")
+    if GRAPH_ARM in arms and driver.name not in GRAPH_ARM_DRIVERS:
+        raise HarnessError(
+            f"arm {GRAPH_ARM} needs one of the drivers {', '.join(GRAPH_ARM_DRIVERS)}: "
+            f"its plugin is OpenCode's, and driver {driver.name!r} has none")
     python = python or sys.executable
     run_root = run_root or new_run_root()
     ordered_arms = [a for a in ARMS if a in arms]
@@ -1045,6 +1306,14 @@ def aggregate(runs: list[dict[str, Any]], arms: Iterable[str]) -> list[dict[str,
             "localization_rate": round(sum(1 for r in mine if r.get("localized")) / n, 4)
             if n else None,
         })
+        if any("daemon_ok" in r for r in mine):
+            rows[-1].update({
+                "mean_captured_calls": _mean((r.get("captured_calls") for r in mine), 1),
+                "total_fallbacks": sum(int(r.get("fallbacks") or 0) for r in mine),
+                "plugin_load_failures": sum(1 for r in mine
+                                            if r.get("plugin_loaded") is not True),
+                "daemon_failures": sum(1 for r in mine if r.get("daemon_ok") is False),
+            })
     return rows
 
 
@@ -1101,8 +1370,23 @@ def render_markdown(report: dict[str, Any]) -> str:
     lines += ["", "Token, cost and tool columns are blank where the driver reports no "
               "value. MCP calls count calls to the ozagia MCP server. "
               "Prep (dev_memory snapshot and tag cache) runs before the driver timer; "
-              "mean prep s is 0 for baseline.",
-              "", "## Per task (paired)", ""]
+              "mean prep s is 0 for baseline."]
+    graph_rows = [row for row in report["summary"] if "mean_captured_calls" in row]
+    if graph_rows:
+        lines += ["", "## Graph daemon and plugin", "",
+                  "| arm | runs | mean captured calls | total fallbacks | "
+                  "plugin-load failures | daemon failures |",
+                  "|---|---|---|---|---|---|"]
+        for row in graph_rows:
+            lines.append("| " + " | ".join(_cell(v) for v in (
+                row["arm"], row["runs"], row["mean_captured_calls"],
+                row["total_fallbacks"], row["plugin_load_failures"],
+                row["daemon_failures"])) + " |")
+        lines += ["", "Captured calls are tool calls the daemon handled. A plugin-load "
+                  "failure is a run whose daemon recorded no `hello` (or gave no "
+                  "stats). Fallbacks are calls the plugin sent to the built-in "
+                  "because the daemon failed or timed out."]
+    lines += ["", "## Per task (paired)", ""]
     header = "| task | " + " | ".join(report["arms"]) + " |"
     lines += [header, "|---" * (len(report["arms"]) + 1) + "|"]
     for tid, row in report["per_task"].items():
@@ -1152,13 +1436,18 @@ def _run_root(args: argparse.Namespace) -> Path:
     return Path(args.run_root) if args.run_root else new_run_root()
 
 
+def default_arms(driver_name: str) -> list[str]:
+    """Every arm the driver can run: graph_intent only for its drivers."""
+    return [a for a in ARMS if a != GRAPH_ARM or driver_name in GRAPH_ARM_DRIVERS]
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     spec = load_tasks(args.tasks)
     base = args.base or spec["base"]
-    arms = _split(args.arms) or list(ARMS)
     tasks = select_tasks(spec["tasks"], _split(args.task_ids))
     driver = make_driver(args.driver, live=args.live,
                          max_budget_usd=args.max_budget_usd, model=args.model)
+    arms = _split(args.arms) or default_arms(driver.name)
     report = run_eval(args.repo, tasks, arms, driver, base,
                       tasks_dir=spec["dir"], repeats=args.repeats,
                       python=args.python, run_root=_run_root(args),
@@ -1200,7 +1489,10 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--model", default=None,
                    help="backend model, e.g. vllm/qwen3.8-27b for opencode "
                         "(default: the backend's own configured default)")
-    r.add_argument("--arms", default=",".join(ARMS))
+    r.add_argument("--arms", default=None,
+                   help=f"comma-separated subset of {','.join(ARMS)} (default: every "
+                        f"arm the driver supports; {GRAPH_ARM} needs "
+                        f"{'/'.join(GRAPH_ARM_DRIVERS)})")
     r.add_argument("--repeats", type=int, default=1)
     r.add_argument("--timeout-s", type=int, default=900,
                    help="wall-clock limit per driver session")

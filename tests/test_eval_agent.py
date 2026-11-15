@@ -159,7 +159,7 @@ def test_fake_driver_succeeds_and_noop_fails(fixture):
     fake = run_eval(fixture["repo"], tasks, ARMS, FakeDriver(), fixture["base"],
                     tasks_dir=fixture["tdir"], python=_python(),
                     run_root=fixture["run_root"])
-    assert [r["success"] for r in fake["runs"]] == [True, True]
+    assert [r["success"] for r in fake["runs"]] == [True] * len(ARMS)
     assert all(r["localized"] for r in fake["runs"])
     assert all(r["files_changed"] == ["pkg/mod.py"] for r in fake["runs"])
 
@@ -789,3 +789,249 @@ def test_arm_config_and_prep_pass_the_source_repo_config(tmp_path, monkeypatch):
     monkeypatch.setattr(ae, "spawn_group", fake_spawn)
     ae.prepare_dev_memory(work, "/usr/bin/python3", tmp_path / "log2", config=cfg)
     assert seen["OZAGIA_CONFIG"] == str(cfg) and seen["OZAGIA_ROOT"] == str(work)
+
+
+# ===================================================================================== #
+# graph_intent arm (W2-B): daemon lifecycle and plugin install, with a stub daemon
+# ===================================================================================== #
+# A stand-in for `python -m ozagia.daemon serve`: speaks the JSON-lines protocol
+# for hello/tool/after/stats/shutdown, prints `ready <sock>`, and starts a
+# sleeping child in its process group so the test can see the group killed.
+_STUB_DAEMON = r'''
+import json, os, socket, subprocess, sys, time
+sock_path, pidfile, mode = sys.argv[1], sys.argv[2], sys.argv[3]
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+with open(pidfile, "w") as fh:
+    fh.write(f"{os.getpid()} {child.pid}")
+if mode == "fail":
+    print("boom: cannot load snapshot", file=sys.stderr)
+    sys.exit(3)
+if mode == "noready":
+    time.sleep(600)
+stats = {"hellos": 0, "handled": 0, "fallbacks": 0, "by_tool": {}, "by_intent": {},
+         "mean_ms": 1.0, "max_ms": 2.0}
+srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+srv.bind(sock_path)
+srv.listen(4)
+print(f"ready {sock_path}", flush=True)
+while True:
+    conn, _ = srv.accept()
+    with conn, conn.makefile("rwb") as fh:
+        for line in fh:
+            req = json.loads(line)
+            op = req.get("op")
+            resp = {"id": req.get("id"), "ok": True}
+            if op == "hello":
+                stats["hellos"] += 1
+            elif op == "tool":
+                stats["handled"] += 1
+                stats["by_tool"][req["tool"]] = stats["by_tool"].get(req["tool"], 0) + 1
+                resp.update(handled=True, output="graph says hi", meta={"intent": "x"})
+            elif op == "after":
+                if (req.get("meta") or {}).get("fallback"):
+                    stats["fallbacks"] += 1
+                resp["append"] = ""
+            elif op == "stats":
+                resp["stats"] = stats
+            fh.write((json.dumps(resp) + "\n").encode())
+            fh.flush()
+            if op == "shutdown":
+                srv.close()
+                os.unlink(sock_path)
+                sys.exit(0)
+'''
+
+
+@pytest.fixture(scope="session")
+def stub_daemon_script(tmp_path_factory) -> Path:
+    path = tmp_path_factory.mktemp("stubd") / "stub_daemon.py"
+    path.write_text(_STUB_DAEMON, encoding="utf-8")
+    return path
+
+
+def _use_stub_daemon(monkeypatch, script: Path, pidfile: Path, mode: str = "ok") -> None:
+    def command(tool_python, workdir, log_dir, sock):
+        return [_python(), str(script), str(sock), str(pidfile), mode]
+    monkeypatch.setattr(ae, "daemon_command", command)
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_daemon(monkeypatch, stub_daemon_script, tmp_path_factory):
+    """Every test in this file that runs graph_intent gets the stub daemon."""
+    pidfile = tmp_path_factory.mktemp("stubpid") / "pids.txt"
+    _use_stub_daemon(monkeypatch, stub_daemon_script, pidfile)
+
+
+def _pids(pidfile: Path) -> list[int]:
+    return [int(x) for x in pidfile.read_text(encoding="utf-8").split()]
+
+
+class _PluginLikeFake(FakeDriver):
+    """Fake driver that acts like a loaded plugin: says hello and sends one tool
+    call to the daemon, then reverts the break."""
+
+    def __init__(self) -> None:
+        self.seen: dict = {}
+
+    def run(self, workdir, prompt, arm, timeout_s, log_dir, *, patch_path=None,
+            extra_env=None):
+        import socket as socketmod
+        plugin = workdir / ".opencode" / "plugins" / "ozagia.js"
+        self.seen.update(plugin_present=plugin.is_file(), env=dict(extra_env or {}))
+        sock = (extra_env or {}).get("OZAGIA_DAEMON_SOCK")
+        if sock and Path(sock).exists():
+            with socketmod.socket(socketmod.AF_UNIX) as conn:
+                conn.connect(sock)
+                fh = conn.makefile("rwb")
+                for i, msg in enumerate([{"op": "hello", "harness": "opencode"},
+                                         {"op": "tool", "tool": "read",
+                                          "input": {"path": "pkg/mod.py"}}]):
+                    fh.write((json.dumps({"id": i, **msg}) + "\n").encode())
+                    fh.flush()
+                    self.seen.setdefault("replies", []).append(json.loads(fh.readline()))
+        return super().run(workdir, prompt, arm, timeout_s, log_dir,
+                           patch_path=patch_path)
+
+
+def test_graph_intent_arm_runs_daemon_and_plugin_end_to_end(fixture, monkeypatch,
+                                                            stub_daemon_script, tmp_path):
+    pidfile = tmp_path / "pids.txt"
+    _use_stub_daemon(monkeypatch, stub_daemon_script, pidfile)
+    driver = _PluginLikeFake()
+    rec = ae.run_one(fixture["repo"], fixture["sign"], "graph_intent", 1, driver,
+                     fixture["base"], tasks_dir=fixture["tdir"], python=_python(),
+                     run_root=fixture["run_root"], timeout_s=60, keep=True)
+    assert rec["success"] is True
+    assert rec["daemon_ok"] is True and rec["daemon_error"] is None
+    assert isinstance(rec["daemon_ready_s"], float)
+    assert rec["daemon_stats"]["hellos"] == 1
+    assert rec["daemon_stats"]["by_tool"] == {"read": 1}
+    assert rec["plugin_loaded"] is True
+    assert rec["captured_calls"] == 1
+    assert rec["fallbacks"] == 0
+    assert rec["prep_ok"] is not None  # same prep as dev_memory
+    # The plugin was there during the run, is gone after it, and is not an edit.
+    assert driver.seen["plugin_present"] is True
+    assert driver.seen["replies"][1]["output"] == "graph says hi"
+    sock = Path(driver.seen["env"]["OZAGIA_DAEMON_SOCK"])
+    assert len(str(sock)) < 100
+    assert not sock.exists()
+    workdir = Path(rec["workdir"])
+    assert not (workdir / ".opencode" / "plugins" / "ozagia.js").exists()
+    assert rec["files_changed"] == ["pkg/mod.py"]
+    # No MCP config for this arm.
+    assert not (workdir / ae.MCP_CONFIG_OPENCODE).exists()
+    # The daemon and the child in its process group are gone.
+    for pid in _pids(pidfile):
+        assert _pid_gone(pid), pid
+    assert (Path(rec["log_dir"]) / "daemon.stdout.txt").read_text(
+        encoding="utf-8").startswith("ready ")
+    assert ae.remove_workdir(fixture["repo"], workdir, fixture["run_root"]) == []
+
+
+def test_snapshot_never_lists_the_installed_plugin(tmp_path):
+    repo, base = _repo(tmp_path)
+    wd = ae.make_workdir(repo, base, tmp_path / "runs", "snap-plugin")
+    from ozagia.integrations.opencode import install as oc
+    oc.install(wd)
+    assert ".opencode/plugins/ozagia.js" not in ae._snapshot(wd)
+    other = wd / ".opencode" / "plugins" / "agent.js"
+    other.write_text("x", encoding="utf-8")
+    assert ".opencode/plugins/agent.js" in ae._snapshot(wd)
+    ae.remove_workdir(repo, wd, tmp_path / "runs")
+
+
+def test_graph_intent_daemon_start_failure_is_recorded(fixture, monkeypatch,
+                                                       stub_daemon_script, tmp_path):
+    pidfile = tmp_path / "pids.txt"
+    _use_stub_daemon(monkeypatch, stub_daemon_script, pidfile, mode="fail")
+    driver = _PluginLikeFake()
+    rec = ae.run_one(fixture["repo"], fixture["sign"], "graph_intent", 1, driver,
+                     fixture["base"], tasks_dir=fixture["tdir"], python=_python(),
+                     run_root=fixture["run_root"], timeout_s=60, keep=False)
+    assert rec["daemon_ok"] is False
+    assert "exit 3" in rec["daemon_error"] and "boom" in rec["daemon_error"]
+    assert rec["daemon_stats"] is None and rec["plugin_loaded"] is None
+    assert rec["success"] is True  # the run went on
+    assert driver.seen["plugin_present"] is True
+    assert "OZAGIA_DAEMON_SOCK" in driver.seen["env"]
+    for pid in _pids(pidfile):
+        assert _pid_gone(pid), pid
+
+
+def test_graph_intent_daemon_that_never_gets_ready_is_killed(fixture, monkeypatch,
+                                                             stub_daemon_script, tmp_path):
+    pidfile = tmp_path / "pids.txt"
+    _use_stub_daemon(monkeypatch, stub_daemon_script, pidfile, mode="noready")
+    monkeypatch.setattr(ae, "DAEMON_READY_TIMEOUT_S", 1)
+    rec = ae.run_one(fixture["repo"], fixture["sign"], "graph_intent", 1, NoopDriver(),
+                     fixture["base"], tasks_dir=fixture["tdir"], python=_python(),
+                     run_root=fixture["run_root"], timeout_s=60, keep=False)
+    assert rec["daemon_ok"] is False
+    assert rec["daemon_error"] == "daemon not ready after 1 s"
+    assert rec["success"] is False
+    for pid in _pids(pidfile):
+        assert _pid_gone(pid), pid
+
+
+def test_graph_intent_with_claude_is_refused_before_any_worktree(fixture):
+    with pytest.raises(HarnessError, match="graph_intent needs one of the drivers"):
+        run_eval(fixture["repo"], [fixture["sign"]], ["baseline", "graph_intent"],
+                 CommandDriver("claude"), fixture["base"], tasks_dir=fixture["tdir"],
+                 python=_python(), run_root=fixture["run_root"])
+    assert len(_worktrees(fixture["repo"])) == 1
+    assert ae.default_arms("claude") == ["baseline", "dev_memory"]
+    assert ae.default_arms("opencode") == list(ARMS)
+
+
+def test_graph_intent_noop_run_aggregates_and_renders(fixture):
+    report = run_eval(fixture["repo"], [fixture["sign"]], ["baseline", "graph_intent"],
+                      NoopDriver(), fixture["base"], tasks_dir=fixture["tdir"],
+                      python=_python(), run_root=fixture["run_root"])
+    by_arm = {r["arm"]: r for r in report["runs"]}
+    assert by_arm["graph_intent"]["daemon_ok"] is True
+    assert by_arm["graph_intent"]["plugin_loaded"] is False  # noop never says hello
+    assert "daemon_ok" not in by_arm["baseline"]
+    rows = {r["arm"]: r for r in report["summary"]}
+    assert rows["graph_intent"]["mean_captured_calls"] == 0.0
+    assert rows["graph_intent"]["total_fallbacks"] == 0
+    assert rows["graph_intent"]["plugin_load_failures"] == 1
+    assert rows["graph_intent"]["daemon_failures"] == 0
+    assert "mean_captured_calls" not in rows["baseline"]
+    md = render_markdown(report)
+    assert "## Graph daemon and plugin" in md
+    assert "| graph_intent | 1 | 0.0 | 0 | 1 | 0 |" in md
+    assert not any((fixture["run_root"] / "work").glob("*"))
+
+
+def test_graph_stats_fields_read_counts():
+    assert ae.graph_stats_fields(None) == {"plugin_loaded": None, "captured_calls": None,
+                                           "fallbacks": None}
+    assert ae.graph_stats_fields({"hellos": 2, "handled": {"read": 3, "grep": 1},
+                                  "fallbacks": 1}) == {
+        "plugin_loaded": True, "captured_calls": 4, "fallbacks": 1}
+    assert ae.graph_stats_fields({"hellos": 0, "by_handled": {"true": 5}})[
+        "captured_calls"] == 5
+
+
+def test_opencode_graph_intent_config_and_socket_env(tmp_path, monkeypatch):
+    monkeypatch.setenv(LIVE_ENV, "1")
+    driver = make_driver("opencode", live=True)
+    cfg = json.loads(driver._opencode_config("graph_intent", None, tmp_path / "g")
+                     .read_text(encoding="utf-8"))
+    base = json.loads(driver._opencode_config("baseline", None, tmp_path / "b")
+                      .read_text(encoding="utf-8"))
+    assert cfg == base and "mcp" not in cfg
+    captured = {}
+
+    def fake_spawn(argv, *, cwd, env, timeout_s):
+        captured.update(argv=argv, env=env)
+        return {"returncode": 0, "stdout": "", "stderr": "", "timed_out": False,
+                "seconds": 0.0}
+
+    monkeypatch.setattr(ae, "spawn_group", fake_spawn)
+    driver.run(tmp_path, "fix it", "graph_intent", 5, tmp_path / "log",
+               extra_env={"OZAGIA_DAEMON_SOCK": "/tmp/x.sock"})
+    assert captured["env"]["OZAGIA_DAEMON_SOCK"] == "/tmp/x.sock"
+    assert captured["env"]["OPENCODE_CONFIG"] == str(tmp_path / "log" / "opencode_config.json")
+    assert captured["argv"][:3] == ["opencode", "run", "--standalone"]

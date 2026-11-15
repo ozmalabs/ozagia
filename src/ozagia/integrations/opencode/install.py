@@ -1,0 +1,190 @@
+"""Install the ozagia OpenCode plugin into a workdir and check that it loads.
+
+OpenCode 2.3 loads project plugins from `<project>/.opencode/plugins/*.js`
+(a path under `plugins` in OPENCODE_CONFIG did not load, verified). The
+plugin does nothing unless `OZAGIA_DAEMON_SOCK` is set in OpenCode's
+environment.
+
+`check_loads` uses two checks, neither of which calls a model:
+
+- `opencode plugin list`, run in the workdir. It asks OpenCode's background
+  service, which imports the project's plugins asynchronously after the first
+  request for a directory: the first calls print "No plugins found", later
+  ones a table `ID VERSION SOURCE` whose ID is the module's `id` (or `-` when
+  the file failed to import or has no plugin shape). With `--standalone` it
+  printed "No plugins found" every time (verified on 2.3.0), so the check
+  polls the background service until the plugin's row appears or `timeout`
+  runs out. A listed row proves the module imported with the right shape; it
+  does not run `setup`.
+- a self-test in Node: import the file, call `setup` with a stub `ctx` and a
+  stub tool registry, and check that the six tools were replaced and took the
+  edit tool's output schema. OpenCode itself runs on Bun, so this is a proxy.
+
+CLI: `python -m ozagia.integrations.opencode install|uninstall|check --workdir W`.
+"""
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+import tempfile
+import time
+from importlib import resources
+from pathlib import Path
+from typing import Any
+
+PLUGIN_ID = "ozagia"
+PLUGIN_REL = Path(".opencode") / "plugins" / "ozagia.js"
+REPLACED_TOOLS = ("read", "grep", "glob", "edit", "write", "shell")
+# Pause between `opencode plugin list` polls while the service loads plugins.
+LIST_POLL_S = 1.0
+
+_SELF_TEST = r"""
+const [path] = process.argv.slice(1);
+const out = { imported: false };
+try {
+  const mod = await import(new URL("file://" + path).href);
+  const plugin = mod.default;
+  out.imported = true;
+  out.id = plugin && plugin.id;
+  out.has_setup = !!plugin && typeof plugin.setup === "function";
+  const schema = { kind: "string-schema" };
+  const tools = {};
+  for (const name of ["read", "grep", "glob", "edit", "write", "shell", "patch"]) {
+    tools[name] = { name, description: name, output: name === "edit" ? schema : { kind: name },
+                    execute: async () => "" };
+  }
+  const original = Object.fromEntries(Object.entries(tools).map(([k, t]) => [k, t.execute]));
+  const reg = {
+    get: (name) => tools[name],
+    update: (name, fn) => { const r = fn(tools[name]); if (r) tools[name] = r; },
+  };
+  let transformed = false;
+  await plugin.setup({ tool: { transform: (fn) => { transformed = true; fn(reg); },
+                               hook: () => {} } });
+  out.transformed = transformed;
+  out.replaced = Object.keys(tools).filter((k) => tools[k].execute !== original[k]);
+  out.schema_swapped = ["read", "grep", "glob", "write", "shell"]
+    .every((k) => tools[k].output === schema);
+  out.patch_untouched = tools.patch.execute === original.patch;
+} catch (err) {
+  out.error = String((err && err.stack) || err);
+}
+process.stdout.write(JSON.stringify(out) + "\n");
+process.exit(0);
+"""
+
+
+def plugin_source() -> str:
+    """The packaged plugin.js."""
+    return (resources.files("ozagia.integrations.opencode")
+            .joinpath("plugin.js").read_text(encoding="utf-8"))
+
+
+def plugin_path(workdir: str | Path) -> Path:
+    return Path(workdir) / PLUGIN_REL
+
+
+def install(workdir: str | Path) -> Path:
+    """Write the plugin to `<workdir>/.opencode/plugins/ozagia.js`."""
+    path = plugin_path(workdir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(plugin_source(), encoding="utf-8")
+    return path
+
+
+def uninstall(workdir: str | Path) -> bool:
+    """Remove the plugin file, and its directories when they are left empty.
+    Returns whether a file was removed."""
+    path = plugin_path(workdir)
+    removed = False
+    if path.is_file():
+        path.unlink()
+        removed = True
+    for parent in (path.parent, path.parent.parent):
+        try:
+            parent.rmdir()
+        except OSError:
+            break
+    return removed
+
+
+def self_test(path: str | Path, *, timeout: float = 60,
+              node: str | None = None) -> dict[str, Any]:
+    """Import the plugin in Node and run `setup` against a stub registry."""
+    node = node or shutil.which("node")
+    if not node:
+        return {"ok": None, "error": "node not found"}
+    env = dict(os.environ, OZAGIA_DAEMON_SOCK="/nonexistent/ozagia-self-test.sock")
+    try:
+        # Node 20 reads a .js file outside an ESM package as CommonJS (Bun,
+        # which runs OpenCode, does not), so the test imports an .mjs copy.
+        with tempfile.TemporaryDirectory(prefix="ozagia-plugin-") as tmp:
+            copy = Path(tmp) / "plugin.mjs"
+            shutil.copyfile(path, copy)
+            proc = subprocess.run([node, "--input-type=module", "-e", _SELF_TEST, str(copy)],
+                                  capture_output=True, text=True, timeout=timeout,
+                                  stdin=subprocess.DEVNULL, env=env)
+        doc = json.loads(proc.stdout.strip().splitlines()[-1])
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError) as exc:
+        return {"ok": False, "error": f"self-test did not run: {exc}"}
+    doc["ok"] = bool(doc.get("imported") and doc.get("id") == PLUGIN_ID
+                     and doc.get("transformed") and doc.get("schema_swapped")
+                     and doc.get("patch_untouched")
+                     and sorted(doc.get("replaced") or []) == sorted(REPLACED_TOOLS))
+    return doc
+
+
+def _listed_row(output: str, path: Path) -> str | None:
+    """The ID column of the `opencode plugin list` row for `path`, if any."""
+    want = path.resolve()
+    for line in output.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) == 3 and parts[2].startswith("/"):
+            try:
+                if Path(parts[2].strip()).resolve() == want:
+                    return parts[0]
+            except OSError:
+                continue
+    return None
+
+
+def check_loads(workdir: str | Path, *, timeout: float = 60) -> dict[str, Any]:
+    """Does OpenCode see the installed plugin, and does its setup work?
+
+    Returns {ok, listed, output, attempts, row_id, self_test}. `listed` is true
+    when `opencode plugin list` shows the plugin file with id `ozagia`. `ok`
+    needs `listed` and a passing Node self-test (a missing Node is not held
+    against it)."""
+    workdir = Path(workdir).resolve()
+    path = plugin_path(workdir)
+    test = self_test(path, timeout=timeout) if path.is_file() else {
+        "ok": False, "error": f"plugin not installed: {path}"}
+    exe = shutil.which("opencode")
+    output, row_id, attempts = "", None, 0
+    if not path.is_file():
+        output = f"plugin not installed: {path}"
+    elif not exe:
+        output = "opencode not found on PATH"
+    else:
+        env = dict(os.environ, PWD=str(workdir))
+        deadline = time.monotonic() + timeout
+        while True:
+            attempts += 1
+            try:
+                proc = subprocess.run([exe, "plugin", "list"], cwd=str(workdir), env=env,
+                                      capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                                      timeout=max(1.0, deadline - time.monotonic()))
+                output = (proc.stdout + proc.stderr).strip()
+            except (OSError, subprocess.SubprocessError) as exc:
+                output = f"opencode plugin list failed: {exc}"
+                break
+            row_id = _listed_row(output, path)
+            if row_id is not None or time.monotonic() + LIST_POLL_S >= deadline:
+                break
+            time.sleep(LIST_POLL_S)
+    listed = row_id == PLUGIN_ID
+    return {"ok": bool(listed and test.get("ok") is not False), "listed": listed,
+            "row_id": row_id, "attempts": attempts, "output": output,
+            "self_test": test}
