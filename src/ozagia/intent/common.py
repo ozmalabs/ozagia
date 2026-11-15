@@ -37,6 +37,18 @@ class Unhandled(Exception):
     """Leave the call to the built-in (`handled: false`)."""
 
 
+class Preflight(Exception):
+    """Raised by a handler whose input has `_preflight` set, at the point
+    where it would first change something or run a command: the call
+    would be carried out (see `ozagia.intent.handle`)."""
+
+
+def preflight_stop(inp: dict) -> None:
+    """Stop here when `inp` is a preflight (see `Preflight`)."""
+    if inp.get("_preflight"):
+        raise Preflight()
+
+
 def tag(text: str) -> str:
     return TAG + text
 

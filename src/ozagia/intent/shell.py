@@ -1162,5 +1162,33 @@ def command_heads(command: str) -> list[list[str]]:
     return out
 
 
+def command_resources(command: str) -> list[str]:
+    """The simple commands of a command line as permission resources: the
+    words of each command between operators, without redirections (what
+    OpenCode 2.3's shell tool asks permission for, approximately). Empty
+    when it cannot be lexed."""
+    toks, _why = _lex(command)
+    if toks is None:
+        return []
+    out: list[str] = []
+    cur: list[str] = []
+    skip = False
+    for kind, text, _val in toks:
+        if skip:
+            skip = False
+            continue
+        if kind == "word":
+            cur.append(text)
+        elif kind == "redir":
+            skip = True
+        else:
+            if cur:
+                out.append(" ".join(cur))
+            cur = []
+    if cur:
+        out.append(" ".join(cur))
+    return out
+
+
 __all__ = ["GIT_READ_ONLY", "GIT_REF_MOVING", "GRAPH_STEPS", "classify",
-           "command_heads", "plan_compound"]
+           "command_heads", "command_resources", "plan_compound"]

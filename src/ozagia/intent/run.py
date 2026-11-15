@@ -21,6 +21,7 @@ from typing import Any
 from ozagia.intent.common import (
     IntentError,
     Unhandled,
+    preflight_stop,
     one_line,
     root_of,
     tag,
@@ -165,6 +166,7 @@ def run_pytest(memory: Any, cls: dict[str, Any], inp: dict[str, Any],
                             "than the root")
         base_env = env if isinstance(env, dict) else dict(os.environ)
         env = {**base_env, **cls["env"]}
+    preflight_stop(inp)
     res = run_tests(root, selectors, python=python, timeout_s=timeout_s,
                     extra_args=_verbosity(list(cls["extra_args"])),
                     tail_lines=int(cls.get("tail_lines") or OUTPUT_TAIL_LINES),
@@ -238,7 +240,9 @@ def handle_shell(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
     if kind == "read":
         p = Path(cls["file"])
         p = _inside(root, p if p.is_absolute() else wd / p)
-        return read_range(memory, p, cls["range"])
+        res = read_range(memory, p, cls["range"])
+        preflight_stop(inp)
+        return res
     base = wd
     if cls["path"] is not None:
         p = Path(cls["path"])
@@ -248,6 +252,7 @@ def handle_shell(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
         path = str(p)
     else:
         path = str(wd)
+    preflight_stop(inp)
     try:
         res = handle_grep(memory, {"pattern": cls["pattern"], "path": path,
                                    "include": cls["include"],

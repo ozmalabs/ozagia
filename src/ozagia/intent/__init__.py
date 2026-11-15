@@ -41,6 +41,7 @@ from typing import Any, Callable
 from ozagia.intent.common import (
     IntentError,
     Keyer,
+    Preflight,
     Unhandled,
     delta_keys,
     delta_lines,
@@ -72,10 +73,64 @@ def _ms(t0: float) -> float:
     return round((time.perf_counter() - t0) * 1000, 1)
 
 
+# Tools whose handled call changes files or runs commands: a preflight runs
+# their handler up to that point (see `handle`).
+MUTATING_TOOLS = frozenset({"edit", "write", "shell"})
+
+
+def permission_request(memory: Any, tool: str, inp: dict[str, Any]
+                       ) -> dict[str, Any] | None:
+    """The permission the harness's own tool would ask for this call, in
+    OpenCode 2.3's terms: `{"action", "resources", "save"}`. read, edit,
+    write: the path relative to the root (`read`, `edit`). grep, glob: the
+    pattern. shell: one resource per simple command (`shell`), and as
+    `save` each command's first word followed by ` *`. None when there is
+    nothing to ask (an unknown tool or input)."""
+    import os
+    from ozagia.intent.common import root_of
+    from ozagia.intent.shell import command_resources
+    if not isinstance(inp, dict):
+        return None
+    if tool in ("read", "edit", "write"):
+        path = inp.get("path", inp.get("filePath"))
+        if not isinstance(path, str) or not path:
+            return None
+        root = root_of(memory)
+        p = path if os.path.isabs(path) else os.path.join(str(root), path)
+        p = os.path.normpath(p)
+        rel = os.path.relpath(p, root)
+        res = p if rel.startswith("..") else (rel.replace(os.sep, "/") or ".")
+        if res == ".":
+            res = "."
+        return {"action": "read" if tool == "read" else "edit",
+                "resources": [res], "save": ["*"]}
+    if tool in ("grep", "glob"):
+        pattern = inp.get("pattern")
+        if not isinstance(pattern, str):
+            return None
+        return {"action": tool, "resources": [pattern], "save": ["*"]}
+    if tool == "shell":
+        command = inp.get("command")
+        if not isinstance(command, str):
+            return None
+        cmds = command_resources(command) or [command.strip()]
+        return {"action": "shell", "resources": cmds,
+                "save": [c.split(" ", 1)[0] + " *" for c in cmds]}
+    return None
+
+
 def handle(memory: Any, tool: str, input: dict[str, Any], *,
-           harness: str = "opencode", session: str | None = None
-           ) -> dict[str, Any]:
-    """Carry out one captured tool call (see the module docstring)."""
+           harness: str = "opencode", session: str | None = None,
+           preflight: bool = False) -> dict[str, Any]:
+    """Carry out one captured tool call (see the module docstring).
+
+    With `preflight`, a mutating tool's handler (edit, write, shell) runs
+    every check but stops before its first change. If it would carry the
+    call out, the answer is `{"handled": False, "preflight": True,
+    "permission": {...}}`: the caller asks for that permission and sends the
+    call again without `preflight`. A call that would be passthrough or a
+    tool error is answered as usual (it changes nothing). Other tools ignore
+    `preflight`; every handled answer carries `permission` (or None)."""
     t0 = time.perf_counter()
     meta: dict[str, Any] = {"intent": str(tool), "keys": []}
     body: dict[str, Any]
@@ -85,8 +140,22 @@ def handle(memory: Any, tool: str, input: dict[str, Any], *,
             raise Unhandled(f"{tool} is left to the built-in")
         if not isinstance(input, dict):
             raise IntentError("tool input must be an object")
+        if preflight and tool in MUTATING_TOOLS:
+            try:
+                handler(memory, {**input, "_preflight": True})
+                stopped = True     # a handler that ignored the preflight
+            except Preflight:
+                stopped = True
+            if stopped:
+                meta["intent"] = f"{tool}_preflight"
+                meta["ms"] = _ms(t0)
+                return {"handled": False, "preflight": True,
+                        "reason": "permission required",
+                        "permission": permission_request(memory, tool, input),
+                        "meta": meta}
         res = handler(memory, input)
-        body = {"handled": True, "output": res["output"], "is_error": False}
+        body = {"handled": True, "output": res["output"], "is_error": False,
+                "permission": permission_request(memory, tool, input)}
         meta.update(intent=res["intent"], keys=list(res.get("keys") or []))
     except IntentError as e:
         body = {"handled": True, "output": str(e), "is_error": True}
@@ -279,6 +348,7 @@ def after(memory: Any, tool: str, input: dict[str, Any], output: Any, *,
     return {"append": "\n".join(lines), "meta": meta}
 
 
-__all__ = ["HANDLERS", "MAX_REFRESH_FILES", "after", "classify", "handle",
+__all__ = ["HANDLERS", "MAX_REFRESH_FILES", "MUTATING_TOOLS", "Preflight",
+           "after", "classify", "handle", "permission_request",
            "handle_edit", "handle_glob", "handle_grep", "handle_read",
            "handle_shell", "handle_write", "touched_keys"]

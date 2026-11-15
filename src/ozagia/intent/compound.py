@@ -37,7 +37,14 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from ozagia.intent.common import IntentError, Unhandled, one_line, root_of, tag
+from ozagia.intent.common import (
+    IntentError,
+    Unhandled,
+    one_line,
+    preflight_stop,
+    root_of,
+    tag,
+)
 
 MAX_OUTPUT_CHARS = 30000
 _TAG = "[ozagia] "
@@ -387,6 +394,7 @@ def run_compound(memory: Any, cls: dict[str, Any], inp: dict[str, Any],
             continue
         prepared.append(_prepare(memory, step, inp, cur, lock))
 
+    preflight_stop(inp)
     t0 = time.monotonic()
     chunks: list[str] = []
     keys: list[str] = []

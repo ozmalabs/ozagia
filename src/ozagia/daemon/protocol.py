@@ -24,7 +24,21 @@ Requests (`op`):
           "meta": {...}}
       `meta` always has `intent` (a short name of what was done), `keys`
       (the node keys involved) and `ms` (handler time); `ozagia.intent`
-      documents the intents and output formats.
+      documents the intents and output formats. A handled answer also
+      carries `permission`: the request the harness's own tool would make
+      for this call (`{"action", "resources", "save"}`, see
+      `ozagia.intent.permission_request`), or null.
+
+    {"id": 2, "op": "tool", ..., "preflight": true}
+      For edit, write and shell: run every check but change nothing. If the
+      daemon would carry the call out:
+      -> {"id": 2, "ok": true, "handled": false, "preflight": true,
+          "reason": "permission required", "permission": {...}, "meta": {...}}
+      and the plugin asks the harness for `permission` before sending the
+      call again without `preflight`. A call that would be passthrough or
+      a tool error gets its usual answer (it changes nothing). Other tools
+      ignore `preflight`; the plugin asks for their `permission` after the
+      answer and before showing the output.
 
     {"id": 3, "op": "after", "harness": "opencode", "session": "...",
      "tool": "shell", "input": {...}, "output": "<the built-in's output>"}
@@ -32,10 +46,15 @@ Requests (`op`):
           "meta": {"intent": "...", "keys": [...], "ms": 1.2}}
 
     {"id": 4, "op": "hello", "harness": "opencode", "plugin": "ozagia",
-     "version": "0.1.0", "session": "..."}
+     "version": "0.1.0", "session": "...", "phase": "setup"|"session",
+     "tools": {"<name>": {"codemode": false}, ...}, "permission_assert": true}
       -> {"id": 4, "ok": true}
-      A plugin sends `hello` once when it loads. The daemon records it, so a
-      session whose plugin never loaded is visible (`stats.hellos`).
+      A plugin sends `hello` when it loads (`phase: "setup"`, no session)
+      and once for each new session (`phase: "session"`). The daemon
+      records it, so a session whose plugin never loaded is visible
+      (`stats.hellos`). `tools` reports the options of the tools it
+      replaced (`stats.codemode_tools` lists those not `codemode: false`)
+      and `permission_assert` whether the harness lets it ask permission.
 
     {"id": 5, "op": "stats"}   -> {"id": 5, "ok": true, "stats": {...}}
     {"id": 6, "op": "shutdown"} -> {"id": 6, "ok": true}

@@ -23,11 +23,24 @@
 //                              error telling the model to re-read / check,
 //                              and send `after` with
 //                              meta.fallback = "unknown_outcome".
+// - Permissions. With ctx.permission.assert (OpenCode 2.3), a call the
+//   daemon carries out asks OpenCode's permission service first, with the
+//   request the built-in would make (the daemon computes it). edit, write
+//   and shell go to the daemon with `preflight: true` first: the daemon runs
+//   every check, changes nothing and answers `preflight` with the
+//   permission; the plugin asserts it, then sends the call again. read,
+//   grep and glob are asserted after the answer, before the output is
+//   returned. A declined, corrected or blocked permission is the tool's
+//   error; any other failure of `assert` hands the call to the built-in
+//   (which asks itself). Passthrough calls never ask twice: only the
+//   built-in asks for them.
 // - One connection per request (open, send, read one response, close), so a
 //   slow call never queues others. Every request carries
 //   deadline_ms = Date.now() + its timeout; the daemon drops it unexecuted
-//   once that has passed. `hello` is sent once per process, on its own
-//   connection, before the first request.
+//   once that has passed. `hello` goes on its own connection: once from
+//   setup (so a loaded plugin is visible before any tool call) and once
+//   per new session, with the replaced tools' `codemode` option and whether
+//   the permission API is there.
 // - Timeouts: 30 s per request; a shell request gets the command's own
 //   timeout (input.timeout, ms; 120 s when unset, the built-in's default)
 //   plus 30 s.
@@ -59,19 +72,25 @@ class DaemonClient {
     this.path = path;
     this.timeoutMs = timeoutMs;
     this.nextId = 1;
-    this.helloSent = false;
+    this.sessions = new Set();
     this.session = undefined;
+    this.tools = {};
+    this.permissionAssert = false;
   }
 
-  // `hello` once per process, on its own short-lived connection; it is sent
-  // again only if the daemon could not be reached.
-  hello() {
-    if (this.helloSent) return;
-    this.helloSent = true;
+  // `hello` on its own short-lived connection: phase "setup" once, then
+  // phase "session" once per session (sent again if the daemon could not
+  // be reached).
+  hello(session) {
+    const key = session || "";
+    if (this.sessions.has(key)) return;
+    this.sessions.add(key);
     this.request({ op: "hello", harness: HARNESS, plugin: PLUGIN_ID,
-                   version: PLUGIN_VERSION, session: this.session },
+                   version: PLUGIN_VERSION, session,
+                   phase: session ? "session" : "setup",
+                   tools: this.tools, permission_assert: this.permissionAssert },
                  this.timeoutMs, false, false)
-      .catch((err) => { if (!err.sent) this.helloSent = false; });
+      .catch((err) => { if (!err.sent) this.sessions.delete(key); });
   }
 
   // Resolves with the response (ok: true); rejects with an Error whose
@@ -79,7 +98,7 @@ class DaemonClient {
   // may have read it. `deadline_ms` tells the daemon when to stop caring.
   // `keepAlive` holds the event loop open while a tool call waits.
   request(msg, timeoutMs = this.timeoutMs, keepAlive = true, withHello = true) {
-    if (withHello) this.hello();
+    if (withHello && this.session) this.hello(this.session);
     const id = this.nextId++;
     const line = JSON.stringify({ ...msg, id, deadline_ms: Date.now() + timeoutMs }) + "\n";
     return new Promise((resolve, reject) => {
@@ -150,28 +169,81 @@ function unknownOutcome(name, why) {
     + `it may or may not have been applied. ${what}`);
 }
 
-function wrap(client, name, tool, original) {
+// A rejection of ctx.permission.assert that means "not allowed" (declined,
+// corrected by the user, blocked by a deny rule), as opposed to the
+// permission API failing.
+function isRefusal(err) {
+  const seen = new Set();
+  for (let e = err; e && !seen.has(e); e = e.cause) {
+    seen.add(e);
+    const text = [e._tag, e.name, e.message, String(e)].filter(Boolean).join(" ");
+    if (/Permission\.(Declined|Corrected|Blocked)Error|Permission denied|rejected/.test(text)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+async function ask(perm, req, c) {
+  await perm.assert({
+    sessionID: c && c.sessionID,
+    agent: c && c.agent,
+    action: req.action,
+    resources: req.resources,
+    save: req.save || ["*"],
+    source: { type: "tool", messageID: c && c.messageID, id: c && c.id },
+  });
+}
+
+function wrap(client, perm, name, tool, original) {
   return async function execute(input, c) {
     const session = c && c.sessionID;
-    if (client.session === undefined && session) client.session = session;
+    if (session && client.session !== session) client.session = session;
     const base = { harness: HARNESS, session, tool: name, input };
+    const timeout = timeoutFor(name, input, client.timeoutMs);
     let res;
     let fallback = null;
-    try {
-      res = await client.request({ op: "tool", ...base }, timeoutFor(name, input, client.timeoutMs));
-    } catch (err) {
-      fallback = String((err && err.message) || err);
-      if (err && err.sent && MUTATING.has(name)) {
-        client.request({ op: "after", ...base, output: "",
-                         meta: { fallback: "unknown_outcome", error: fallback } },
-                       client.timeoutMs, false).catch(() => {});
-        throw unknownOutcome(name, fallback);
+    const send = async (extra) => {
+      try {
+        return await client.request({ op: "tool", ...base, ...extra }, timeout);
+      } catch (err) {
+        fallback = String((err && err.message) || err);
+        if (err && err.sent && MUTATING.has(name) && !extra.preflight) {
+          client.request({ op: "after", ...base, output: "",
+                           meta: { fallback: "unknown_outcome", error: fallback } },
+                         client.timeoutMs, false).catch(() => {});
+          throw unknownOutcome(name, fallback);
+        }
+        return undefined;
       }
+    };
+    // Ask for `req`; true when allowed, false when the permission API
+    // failed (the built-in then runs and asks itself); throws a refusal.
+    const allowed = async (req) => {
+      if (!perm || !req) return true;
+      try { await ask(perm, req, c); return true; }
+      catch (err) {
+        if (isRefusal(err)) throw err;
+        fallback = `permission: ${String((err && err.message) || err)}`;
+        return false;
+      }
+    };
+    if (perm && MUTATING.has(name)) {
+      res = await send({ preflight: true });
+      if (res && res.preflight) {
+        res = (await allowed(res.permission)) ? await send({}) : undefined;
+      }
+    } else {
+      res = await send({});
     }
     if (res && res.handled) {
       const out = typeof res.output === "string" ? res.output : asText(res.output);
-      if (res.is_error) throw new Error(out);
-      return textResult(out);
+      if (!MUTATING.has(name) && !(await allowed(res.permission))) {
+        res = undefined;
+      } else {
+        if (res.is_error) throw new Error(out);
+        return textResult(out);
+      }
     }
     // handled false (also `expired`: the daemon did nothing) -> the built-in.
     const output = asText(await original.call(tool, input, c));
@@ -199,6 +271,9 @@ export function createPlugin(options = {}) {
         const sockPath = process.env.OZAGIA_DAEMON_SOCK;
         if (!sockPath || !ctx || !ctx.tool || typeof ctx.tool.transform !== "function") return;
         const client = new DaemonClient(sockPath, timeoutMs);
+        const perm = ctx.permission && typeof ctx.permission.assert === "function"
+          ? ctx.permission : null;
+        client.permissionAssert = Boolean(perm);
         ctx.tool.transform((reg) => {
           const edit = reg.get("edit");
           const stringSchema = edit && edit.output;
@@ -209,8 +284,12 @@ export function createPlugin(options = {}) {
               if (!tool || typeof tool.execute !== "function") continue;
               const original = tool.execute;
               const description = tool.description || "";
+              client.tools[name] = {
+                codemode: tool.options && "codemode" in tool.options
+                  ? tool.options.codemode : null,
+              };
               reg.update(name, (t) => {
-                t.execute = wrap(client, name, tool, original);
+                t.execute = wrap(client, perm, name, tool, original);
                 t.output = stringSchema;
                 t.description = (description ? description + "\n\n" : "") + NOTES[name];
                 return t;
@@ -218,6 +297,7 @@ export function createPlugin(options = {}) {
             } catch { /* leave this tool as it was */ }
           }
         });
+        client.hello(undefined);
       } catch { /* never break OpenCode startup */ }
     },
   };
