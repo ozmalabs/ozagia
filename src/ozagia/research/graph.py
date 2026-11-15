@@ -18,7 +18,8 @@ from typing import Any
 
 from ozagia.config import state_path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 6
+SUPPORTED_SCHEMA_VERSIONS = frozenset({1, 2, 3, 4, 5, 6})
 LEGACY_GRAPH_DIR = Path("var") / "ocelot_research"
 NODE_TYPES = frozenset(
     {
@@ -27,6 +28,20 @@ NODE_TYPES = frozenset(
         "Claim",
         "Assumption",
         "Source",
+        "Holding",
+        "Reference",
+        "Theory",
+        "ReviewPlan",
+        "ReviewRun",
+        "ReviewFinding",
+        "Reconciliation",
+        "Argument",
+        "SearchRun",
+        "Extraction",
+        "RiskOfBias",
+        "Certainty",
+        "Contradiction",
+        "Alert",
         "Evidence",
         "Alternative",
         "Prediction",
@@ -50,6 +65,34 @@ EDGE_TYPES = frozenset(
         "produced",
         "supersedes",
         "cites",
+        "cites_work",
+        "manifestation_of",
+        "same_as",
+        "screens",
+        "addresses",
+        "reviews",
+        "finds",
+        "about",
+        "reconciles",
+        "agrees_with",
+        "disagrees_with",
+        "implements",
+        "searches",
+        "argues_for",
+        "uses",
+        "extracts",
+        "assesses",
+        "grades",
+        "contradicts",
+        "alerts",
+        "predicts",
+        "rival_of",
+        "compatible_with",
+        "supported_by",
+        "challenged_by",
+        "discriminated_by",
+        "explains",
+        "held_as",
         "defines",
         "uses_symbol",
         "constrains",
@@ -88,8 +131,85 @@ _EDGE_ENDPOINTS = {
                 "MathematicalDefinition",
             }
         ),
-        frozenset({"Source", "Evidence", "Run", "Observation"}),
+        frozenset({"Source", "Evidence", "Run", "Observation", "Reference"}),
     ),
+    # A Reference is the bibliographic work; a Source is one artifact of it.
+    "manifestation_of": (frozenset({"Source"}), frozenset({"Reference"})),
+    # Provider-asserted citation links between works are not support edges.
+    "cites_work": (frozenset({"Reference"}), frozenset({"Reference"})),
+    # Duplicate, preprint/published, or version-of relationships.
+    "same_as": (frozenset({"Reference"}), frozenset({"Reference"})),
+    # A screening decision applies to a bibliographic work.
+    "screens": (frozenset({"Decision"}), frozenset({"Reference"})),
+    # Structured review and multi-model reconciliation.
+    "addresses": (
+        frozenset({"ReviewPlan"}),
+        frozenset({"Claim", "Reference", "Report", "Argument", "Source"}),
+    ),
+    "reviews": (
+        frozenset({"ReviewRun"}),
+        frozenset({"Claim", "Reference", "Report", "Argument", "Source"}),
+    ),
+    "finds": (frozenset({"ReviewRun"}), frozenset({"ReviewFinding"})),
+    "about": (
+        frozenset({"ReviewFinding"}),
+        frozenset({"Claim", "Evidence", "Reference", "Argument", "Source"}),
+    ),
+    "reconciles": (frozenset({"Reconciliation"}), frozenset({"ReviewRun"})),
+    "agrees_with": (frozenset({"ReviewFinding"}), frozenset({"ReviewFinding"})),
+    "disagrees_with": (frozenset({"ReviewFinding"}), frozenset({"ReviewFinding"})),
+    "implements": (frozenset({"ReviewRun"}), frozenset({"ReviewPlan"})),
+    "searches": (frozenset({"SearchRun"}), frozenset({"ReviewPlan"})),
+    "argues_for": (frozenset({"Argument"}), frozenset({"Claim"})),
+    "uses": (
+        frozenset({"Argument"}),
+        frozenset({"Claim", "Evidence", "Reference", "ReviewFinding"}),
+    ),
+    # Structured extraction, appraisal, contradiction and living review.
+    "extracts": (
+        frozenset({"Extraction"}),
+        frozenset({"Reference", "Claim", "Evidence"}),
+    ),
+    "assesses": (
+        frozenset({"RiskOfBias"}),
+        frozenset({"Reference", "Claim", "Extraction"}),
+    ),
+    "grades": (
+        frozenset({"Certainty"}),
+        frozenset({"Claim", "Reference", "ReviewPlan"}),
+    ),
+    "contradicts": (
+        frozenset({"Contradiction"}),
+        frozenset({"Claim", "Evidence", "Observation"}),
+    ),
+    "alerts": (
+        frozenset({"Alert"}),
+        frozenset({"Reference", "Claim", "Source", "ReviewPlan"}),
+    ),
+    # Theory competition: predictions, rivals, compatibility and an evidence
+    # basis that can be shared, unique, or insufficient to discriminate.
+    "predicts": (frozenset({"Theory"}), frozenset({"Prediction"})),
+    "rival_of": (frozenset({"Theory"}), frozenset({"Theory"})),
+    "compatible_with": (frozenset({"Theory"}), frozenset({"Theory"})),
+    "supported_by": (
+        frozenset({"Theory"}),
+        frozenset({"Evidence", "Claim", "Observation", "Extraction"}),
+    ),
+    "challenged_by": (
+        frozenset({"Theory"}),
+        frozenset({"Evidence", "Claim", "Observation", "Extraction"}),
+    ),
+    "discriminated_by": (
+        frozenset({"Theory"}),
+        frozenset({"Prediction", "Evidence", "Observation"}),
+    ),
+    "explains": (
+        frozenset({"Theory"}),
+        frozenset({"Claim", "Evidence", "Observation"}),
+    ),
+    # A Source can have several epistemic holdings (for example, a book held
+    # as an authorial interpretation rather than as behavioural evidence).
+    "held_as": (frozenset({"Source"}), frozenset({"Holding"})),
     # A small scoped-symbol layer, following the OpenMath/OMDoc distinction
     # between a symbol's identity, its defining assertion, and its context.
     # These remain authored graph assertions; they are not inferred from TeX.
@@ -209,8 +329,14 @@ class ResearchGraph:
         return self._data["investigation_id"]
 
     def _validate(self) -> None:
-        if not isinstance(self._data, dict) or self._data.get("schema_version") != SCHEMA_VERSION:
-            raise ResearchError(f"unsupported or malformed schema (expected {SCHEMA_VERSION})")
+        if (
+            not isinstance(self._data, dict)
+            or self._data.get("schema_version") not in SUPPORTED_SCHEMA_VERSIONS
+        ):
+            raise ResearchError(
+                "unsupported or malformed schema "
+                f"(expected one of {sorted(SUPPORTED_SCHEMA_VERSIONS)})"
+            )
         if (
             not isinstance(self._data.get("events"), list)
             or not isinstance(self._data.get("nodes"), list)
@@ -242,15 +368,14 @@ class ResearchGraph:
     def _validate_event_log(self) -> None:
         """Replay append events and require exact agreement with materialized state."""
         events = self._data["events"]
-        if len(events) != len(self._data["nodes"]) + len(self._data["edges"]):
-            raise ResearchError("event log does not account for every node and edge")
         replay_nodes: list[dict[str, Any]] = []
         replay_edges: list[dict[str, Any]] = []
         node_type_counts: dict[str, int] = {}
         for ordinal, event in enumerate(events, start=1):
             if not isinstance(event, dict) or event.get("id") != f"event-{ordinal:06d}":
                 raise ResearchError("event log has invalid ordering or event id")
-            if event.get("type") == "node_recorded":
+            kind = event.get("type")
+            if kind == "node_recorded":
                 entity, collection, entity_type = event.get("node"), replay_nodes, "node"
                 if set(event) != {"id", "type", "at", "node"}:
                     raise ResearchError("event log node event content is inconsistent")
@@ -258,7 +383,7 @@ class ResearchGraph:
                     raise ResearchError("event log node event content is inconsistent")
                 if entity.get("type") not in NODE_TYPES:
                     raise ResearchError("event log contains an unknown node type")
-            elif event.get("type") == "edge_linked":
+            elif kind == "edge_linked":
                 entity, collection, entity_type = event.get("edge"), replay_edges, "edge"
                 if set(event) != {"id", "type", "at", "edge"}:
                     raise ResearchError("event log edge event content is inconsistent")
@@ -266,6 +391,23 @@ class ResearchGraph:
                     raise ResearchError("event log edge event content is inconsistent")
                 if entity.get("type") not in EDGE_TYPES:
                     raise ResearchError("event log contains an unknown edge type")
+            elif kind == "node_amended":
+                if set(event) != {"id", "type", "at", "node_id", "fields"}:
+                    raise ResearchError("event log amendment content is inconsistent")
+                target = next(
+                    (node for node in replay_nodes if node.get("id") == event.get("node_id")),
+                    None,
+                )
+                fields = event.get("fields")
+                if (
+                    target is None
+                    or not isinstance(fields, dict)
+                    or {"id", "type", "created_at"}.intersection(fields)
+                    or fields.get("updated_at", event.get("at")) != event.get("at")
+                ):
+                    raise ResearchError("event log amendment content is inconsistent")
+                target.update(fields)
+                continue
             else:
                 raise ResearchError("event log contains an unknown event type")
             if entity_type == "node":
@@ -280,6 +422,7 @@ class ResearchGraph:
             raise ResearchError("event log replay does not match persisted nodes and edges")
 
     def _save(self) -> None:
+        self._data["schema_version"] = SCHEMA_VERSION
         _atomic_write(self.path, self._data)
 
     def record(self, node_type: str, **fields: Any) -> dict[str, Any]:
@@ -316,6 +459,44 @@ class ResearchGraph:
             self._data["events"].pop()
             raise
         return _safe(node)
+
+    def amend(self, node_id: str, **fields: Any) -> dict[str, Any]:
+        """Append an amendment event and materialize the merged node.
+
+        Amendments preserve the original node event. They are for enrichment
+        (identifiers, retraction status, metadata provenance), not for changing
+        a node's type or inventing history.
+        """
+        index = next(
+            (i for i, node in enumerate(self._data["nodes"]) if node.get("id") == node_id),
+            None,
+        )
+        if index is None:
+            raise ResearchError(f"unknown node id: {node_id}")
+        reserved = {"id", "type", "created_at"}.intersection(fields)
+        if reserved:
+            raise ResearchError(f"reserved node fields cannot be amended: {sorted(reserved)}")
+        fields = _safe(fields)
+        at = _utc()
+        fields["updated_at"] = at
+        previous = self._data["nodes"][index]
+        updated = {**previous, **fields}
+        event = {
+            "id": f"event-{len(self._data['events']) + 1:06d}",
+            "type": "node_amended",
+            "at": at,
+            "node_id": node_id,
+            "fields": fields,
+        }
+        self._data["nodes"][index] = updated
+        self._data["events"].append(event)
+        try:
+            self._save()
+        except BaseException:
+            self._data["nodes"][index] = previous
+            self._data["events"].pop()
+            raise
+        return _safe(updated)
 
     def link(
         self,
@@ -420,6 +601,143 @@ class ResearchGraph:
                         "reason": "Source has no locator.",
                     }
                 )
+            if node["type"] == "Reference":
+                if not node.get("title") and not node.get("raw"):
+                    issues.append(
+                        {
+                            "code": "reference_title_missing",
+                            "node_id": node["id"],
+                            "reason": "Reference has no title or raw citation text.",
+                        }
+                    )
+                if not node.get("identifiers") and not node.get("citation_key") and not node.get("raw"):
+                    issues.append(
+                        {
+                            "code": "reference_identity_missing",
+                            "node_id": node["id"],
+                            "reason": "Reference has no identifier, citation key or raw text.",
+                        }
+                    )
+                retraction = node.get("retraction") or {}
+                if retraction.get("status") in {"retracted", "concern"}:
+                    issues.append(
+                        {
+                            "code": "reference_retracted",
+                            "node_id": node["id"],
+                            "reason": f"Reference status is {retraction.get('status')}; review before relying on it.",
+                        }
+                    )
+            if node["type"] == "Holding":
+                for field in ("source_id", "source_type", "epistemic_role", "authority"):
+                    if not node.get(field):
+                        issues.append({
+                            "code": "holding_field_missing",
+                            "node_id": node["id"],
+                            "field": field,
+                            "reason": f"Holding has no {field}.",
+                        })
+            if node["type"] == "Theory":
+                for field in ("name", "statement", "scope", "status"):
+                    if not node.get(field):
+                        issues.append({
+                            "code": "theory_field_missing",
+                            "node_id": node["id"],
+                            "field": field,
+                            "reason": f"Theory has no {field}.",
+                        })
+            if node["type"] == "ReviewPlan" and not node.get("question"):
+                issues.append({
+                    "code": "review_plan_question_missing",
+                    "node_id": node["id"],
+                    "reason": "ReviewPlan has no question.",
+                })
+            if node["type"] == "ReviewRun":
+                for field in ("plan_id", "model", "role", "packet_sha256"):
+                    if not node.get(field):
+                        issues.append({
+                            "code": "review_run_field_missing",
+                            "node_id": node["id"],
+                            "field": field,
+                            "reason": f"ReviewRun has no {field}.",
+                        })
+            if node["type"] == "ReviewFinding":
+                for field in ("severity", "issue_type", "wording"):
+                    if not node.get(field):
+                        issues.append({
+                            "code": "review_finding_field_missing",
+                            "node_id": node["id"],
+                            "field": field,
+                            "reason": f"ReviewFinding has no {field}.",
+                        })
+            if node["type"] == "Reconciliation" and not node.get("method"):
+                issues.append({
+                    "code": "reconciliation_method_missing",
+                    "node_id": node["id"],
+                    "reason": "Reconciliation has no method.",
+                })
+            if node["type"] == "Argument":
+                for field in ("mode", "thesis", "reviewer"):
+                    if not node.get(field):
+                        issues.append({
+                            "code": "argument_field_missing",
+                            "node_id": node["id"],
+                            "field": field,
+                            "reason": f"Argument has no {field}.",
+                        })
+            if node["type"] == "SearchRun":
+                for field in ("query", "provider"):
+                    if not node.get(field):
+                        issues.append({
+                            "code": "search_run_field_missing",
+                            "node_id": node["id"],
+                            "field": field,
+                            "reason": f"SearchRun has no {field}.",
+                        })
+            if node["type"] == "Extraction":
+                for field in ("target_id", "extractor"):
+                    if not node.get(field):
+                        issues.append({
+                            "code": "extraction_field_missing",
+                            "node_id": node["id"],
+                            "field": field,
+                            "reason": f"Extraction has no {field}.",
+                        })
+            if node["type"] == "RiskOfBias":
+                for field in ("target_id", "tool", "overall", "reviewer"):
+                    if not node.get(field):
+                        issues.append({
+                            "code": "risk_of_bias_field_missing",
+                            "node_id": node["id"],
+                            "field": field,
+                            "reason": f"RiskOfBias has no {field}.",
+                        })
+            if node["type"] == "Certainty":
+                for field in ("target_id", "rating", "reviewer"):
+                    if not node.get(field):
+                        issues.append({
+                            "code": "certainty_field_missing",
+                            "node_id": node["id"],
+                            "field": field,
+                            "reason": f"Certainty has no {field}.",
+                        })
+            if node["type"] == "Contradiction":
+                for field in ("claim_a_id", "claim_b_id", "kind", "status"):
+                    if not node.get(field):
+                        issues.append({
+                            "code": "contradiction_field_missing",
+                            "node_id": node["id"],
+                            "field": field,
+                            "reason": f"Contradiction has no {field}.",
+                        })
+            if node["type"] == "Alert":
+                for field in ("kind", "target_id"):
+                    if not node.get(field):
+                        issues.append({
+                            "code": "alert_field_missing",
+                            "node_id": node["id"],
+                            "field": field,
+                            "reason": f"Alert has no {field}.",
+                        })
             if node["type"] == "Claim":
                 if not any(
                     e["type"] in {"supports", "opposes", "cites", "derived_from"}
@@ -470,7 +788,8 @@ class ResearchGraph:
             "",
         ]
         for n in self._data["nodes"]:
-            title = n.get("wording") or n.get("title") or n.get("name") or n["type"]
+            title = (n.get("wording") or n.get("title") or n.get("name")
+                     or n.get("question") or n.get("summary") or n["type"])
             lines.append(f"- **{n['id']} ({n['type']})** — {title}")
             if n["type"] == "Claim":
                 lines.append(

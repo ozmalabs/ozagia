@@ -12,6 +12,7 @@ from bisect import bisect_right
 from pathlib import Path
 from typing import Any, Mapping
 
+from ozagia.research import references as refs
 from ozagia.research.graph import ResearchError
 from ozagia.research.sources import _git_state, _safe_file
 
@@ -96,6 +97,50 @@ def _root_file(graph: Any, root_id: str, relative_path: str) -> tuple[dict, Path
     except (OSError, ValueError) as exc:
         raise ResearchError(f"selected paper file is unavailable or unsafe: {exc}") from exc
     return root, path
+
+
+def _bibliography_for_paper(
+    graph: Any,
+    *,
+    root_id: str,
+    path: str,
+    bibliography_path: str | None,
+    text: str,
+    suffix: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    """Parse an explicit bibliography or the paper's embedded one.
+
+    Entries are unverified metadata; the caller records them as References.
+    """
+    entries: list[dict[str, Any]] = []
+    report = None
+    if suffix == ".tex":
+        entries = refs.parse_tex_bibliography(text)
+        if bibliography_path:
+            _, bibliography_file = _root_file(graph, root_id, bibliography_path)
+            try:
+                raw = bibliography_file.read_bytes()
+                bibliography_text = raw.decode("utf-8")
+            except (OSError, UnicodeError) as exc:
+                raise ResearchError(f"cannot read selected bibliography: {exc}") from exc
+            entries = refs.parse_reference_file(bibliography_path, bibliography_text)
+            report = {
+                "path": bibliography_path,
+                "sha256": hashlib.sha256(raw).hexdigest(),
+                "format": Path(bibliography_path).suffix.lower().lstrip("."),
+                "count": len(entries),
+                "metadata_status": "unverified",
+            }
+    deduped: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for entry in entries:
+        key = str(entry.get("citation_key") or "").casefold()
+        if key and key in seen:
+            continue
+        if key:
+            seen.add(key)
+        deduped.append(entry)
+    return deduped, report
 
 
 def _interpret(text: str) -> dict[str, Any]:
@@ -663,7 +708,8 @@ def _math_context(text: str, *, root_id: str, path: str,
 def preview_paper(graph: Any, *, root_id: str, path: str,
                   max_formula_candidates: int = 256,
                   formula_offset: int = 0,
-                  latexml_path: str | None = None) -> dict[str, Any]:
+                  latexml_path: str | None = None,
+                  bibliography_path: str | None = None) -> dict[str, Any]:
     """Parse a manifest-selected Markdown or LaTeX paper without graph writes."""
     root, source_path = _root_file(graph, root_id, path)
     try:
@@ -693,6 +739,27 @@ def preview_paper(graph: Any, *, root_id: str, path: str,
                 document_path=latexml_path)
         except OSError as exc:
             raise ResearchError(f"cannot read selected LaTeXML document: {exc}") from exc
+    bibliography, bibliography_report = _bibliography_for_paper(
+        graph,
+        root_id=root_id,
+        path=path,
+        bibliography_path=bibliography_path,
+        text=text,
+        suffix=suffix,
+    )
+    bibliography_keys = {
+        str(key).casefold()
+        for entry in bibliography
+        for key in [entry.get("citation_key"), *(entry.get("citation_keys") or [])]
+        if key
+    }
+    unresolved_citations = [
+        {"citation_key": key, "claim_label": record.get("label"),
+         "locator": record.get("locator")}
+        for record in records
+        for key in record.get("citations", [])
+        if key.casefold() not in bibliography_keys
+    ]
     git = _git_state(Path(root["path"]), [path])
     for record in records:
         record["interpretation"] = _interpret(record["wording"])
@@ -747,6 +814,9 @@ def preview_paper(graph: Any, *, root_id: str, path: str,
             "mathematical_context": math_context,
             "unresolved_extractions": unresolved,
             "unresolved_references": unresolved_refs,
+            "unresolved_citations": unresolved_citations,
+            "bibliography": bibliography,
+            "bibliography_report": bibliography_report,
             "latexml_document": latexml_report,
             "formula_offset": formula_offset,
             "duplicate": duplicate, "partial_import": partial}
@@ -755,7 +825,8 @@ def preview_paper(graph: Any, *, root_id: str, path: str,
 def ingest_paper(graph: Any, *, root_id: str, path: str,
                  max_formula_candidates: int = 256,
                  formula_offset: int = 0,
-                 latexml_path: str | None = None) -> dict[str, Any]:
+                 latexml_path: str | None = None,
+                 bibliography_path: str | None = None) -> dict[str, Any]:
     """Preview then record Source and parsed Claim nodes in an existing graph.
 
     Repeated identical imports are reported without graph mutation. Claims have
@@ -765,7 +836,8 @@ def ingest_paper(graph: Any, *, root_id: str, path: str,
     preview = preview_paper(graph, root_id=root_id, path=path,
                             max_formula_candidates=max_formula_candidates,
                             formula_offset=formula_offset,
-                            latexml_path=latexml_path)
+                            latexml_path=latexml_path,
+                            bibliography_path=bibliography_path)
     if preview["duplicate"] or preview["partial_import"]:
         existing_page = next((n for n in (graph.state() if hasattr(graph, "state") else graph).get("nodes", [])
                               if n.get("type") == "Decision"
@@ -776,7 +848,7 @@ def ingest_paper(graph: Any, *, root_id: str, path: str,
         return {"ingested": False, "duplicate": preview["duplicate"], "preview": preview,
                 "partial_import": preview["partial_import"],
                 "source": None, "claims": [], "formula_evidence": [],
-                "mathematical_context": [],
+                "mathematical_context": [], "references": [],
                 "frame_id": existing_page.get("frame_id") if existing_page else None}
     root = next(r for r in (graph.state() if hasattr(graph, "state") else graph).get("roots", [])
                 if r.get("root_id") == root_id)
@@ -793,6 +865,35 @@ def ingest_paper(graph: Any, *, root_id: str, path: str,
                                              "path": path, "sha256": preview["sha256"],
                                              "revision": preview.get("revision"),
                                              "dirty": preview.get("dirty", False), "kind": "paper"})
+    bibliography_report = preview.get("bibliography_report") or {}
+    bibliography_path = bibliography_report.get("path") or path
+    bibliography_sha256 = bibliography_report.get("sha256") or preview["sha256"]
+    reference_nodes: list[dict[str, Any]] = []
+    references_by_key: dict[str, dict[str, Any]] = {}
+    for entry in preview.get("bibliography", []):
+        recorded = refs.record_reference(
+            graph,
+            entry,
+            provenance={
+                "kind": "paper_bibliography",
+                "paper_path": path,
+                "paper_sha256": preview["sha256"],
+                "bibliography_path": bibliography_path,
+                "bibliography_sha256": bibliography_sha256,
+            },
+            source_locator={
+                "root_id": root_id,
+                "repository": root.get("repository", root_id),
+                "path": bibliography_path,
+                "sha256": bibliography_sha256,
+                "kind": "bibliography",
+            },
+        )
+        reference = recorded["reference"]
+        reference_nodes.append(reference)
+        for key in reference.get("citation_keys", []):
+            references_by_key[str(key).casefold()] = reference
+    state = graph.state()
     base_pages = [n for n in state.get("nodes", []) if n.get("type") == "Decision" and
                   n.get("paper_ingest_page_complete") is True and
                   n.get("root_id") == root_id and n.get("path") == path and
@@ -833,11 +934,25 @@ def ingest_paper(graph: Any, *, root_id: str, path: str,
                              proof_locator=({**locator, **(record["proof_locator"] or {})}
                                             if record.get("proof_locator") else None),
                              proof_references=record.get("proof_references", []),
+                             citations=record.get("citations", []),
                              unresolved_references=[r for r in preview["unresolved_references"]
                                                    if r.get("claim_label") == record.get("label")])
         graph.link(claim["id"], "cites", source["id"],
                    provenance={"kind": "source_import", "sha256": preview["sha256"]},
                    rationale="Claim wording was parsed from this source; this link does not assess truth.")
+        for citation_key in record.get("citations", []):
+            reference = references_by_key.get(str(citation_key).casefold())
+            if reference is not None:
+                graph.link(
+                    claim["id"], "cites", reference["id"],
+                    provenance={
+                        "kind": "author_citation_key",
+                        "citation_key": citation_key,
+                        "source_path": path,
+                        "source_sha256": preview["sha256"],
+                    },
+                    rationale="The author wrote this citation key in the statement; this does not establish support.",
+                )
         claims.append(claim)
         if record.get("label"):
             label_to_id[record["label"]] = claim["id"]
@@ -1033,7 +1148,8 @@ def ingest_paper(graph: Any, *, root_id: str, path: str,
             "formula_next_offset": preview["formula_extraction"]["next_offset"],
             "preview": preview,
             "source": source, "claims": claims, "formula_evidence": formula_evidence,
-            "mathematical_context": mathematical_context, "frame_id": frame_id}
+            "mathematical_context": mathematical_context, "references": reference_nodes,
+            "frame_id": frame_id}
 
 
 __all__ = ["preview_paper", "ingest_paper"]

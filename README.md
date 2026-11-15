@@ -98,8 +98,25 @@ worked example: it adds seed manifests and rules as graph nodes.
 
 Use `ozagia-mcp --mode research --root /path/to/workspace` for source-backed
 research graphs, or `--mode combined` to expose research and coding tools
-together. Coding mode remains the default. See [research mode](docs/research.md)
-for setup, optional dependencies and model/Lean limitations.
+together. Coding mode remains the default. Research mode includes bibliography
+import/export, open-access artifact fetch with content hashes, PDF/TEI text
+extraction, BM25 and optional hybrid vector search, citation-graph traversal,
+citation-context candidates, evidence tables, screening decisions,
+manuscript bundles with citation checks, structured review plans with
+multi-model runs and reconciliation, steelman/red-team arguments, structured
+extraction with effect sizes, risk-of-bias/certainty appraisal, contradiction
+scanning, living-review alerts and a theory-competition ledger with graded
+compatibility and shared-evidence analysis. See
+[research mode](docs/research.md) for setup, optional dependencies and
+model/Lean limitations, [structured review](docs/research/review.md) for the
+review matrix, [synthesis](docs/research/synthesis.md) for
+extraction/appraisal/alerts, [theory competition](docs/research/theory.md) for
+rivals and evidence basis, [paper review](docs/research/paper_review.md) for the
+end-to-end structured review, [PDF extraction](docs/research/pdf.md) for
+claim candidates, [source formats](docs/research/sources.md) for books, notes,
+websites and epistemic holdings, and
+[external providers](docs/research/providers.md) for the opt-in scraper
+boundary.
 
 ## Origin
 

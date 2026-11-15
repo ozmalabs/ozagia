@@ -170,8 +170,35 @@ def build_index(manifests: Sequence[RootManifest | Mapping[str, Any]]) -> dict[s
     }
 
 
-def open_locator(index: Mapping[str, Any], locator: Mapping[str, Any]) -> dict[str, Any]:
-    """Reopen a passage and report current hash/freshness without changing history."""
+def open_locator(
+    index: Mapping[str, Any],
+    locator: Mapping[str, Any],
+    *,
+    cache_root: str | os.PathLike[str] | None = None,
+) -> dict[str, Any]:
+    """Reopen a passage or cached artifact without changing history."""
+    if locator.get("kind") == "cached_fetch" and locator.get("cache_relative"):
+        if cache_root is None:
+            return {"status": "unavailable", "reason": "cache root not supplied"}
+        root = Path(cache_root).resolve()
+        try:
+            path = (root / str(locator["cache_relative"])).resolve()
+            if not path.is_relative_to(root) or not path.is_file():
+                raise FileNotFoundError(str(path))
+            raw = path.read_bytes()
+        except (OSError, ValueError):
+            return {"status": "unavailable", "reason": "cached artifact is missing"}
+        digest = hashlib.sha256(raw).hexdigest()
+        expected = locator.get("sha256")
+        return {
+            "status": "stale" if digest != expected else "current",
+            "sha256": digest,
+            "expected_sha256": expected,
+            "path": str(path),
+            "size": len(raw),
+            "media_type": locator.get("media_type"),
+            "url": locator.get("url"),
+        }
     root_info = next(
         (r for r in index.get("roots", []) if r["root_id"] == locator.get("root_id")), None
     )
