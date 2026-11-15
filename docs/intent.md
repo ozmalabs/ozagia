@@ -138,18 +138,71 @@ Wrote file successfully.
 
 ## shell
 
-`ozagia.intent.shell.classify(command)` (pure, `shlex`) maps only simple
-commands: no operators, redirects, substitutions, variable or tilde
-expansion, unquoted globs (except in `--include=`/`--glob=`), newlines or
-environment prefixes.
+`ozagia.intent.shell.classify(command)` (pure: it reads no files) maps a
+simple command, or a compound command made of simple steps.
+
+A simple command has no operators, redirects, substitutions, variable or
+tilde expansion, unquoted globs (except in `--include=`/`--glob=`), newlines
+or environment prefixes. The classes are:
 
 | class | commands | what happens |
 |---|---|---|
-| pytest | `pytest`, `py.test`, `python[3] -m pytest`, `<path>/python -m pytest` | `ozagia.check.run_tests` with the named interpreter (a pytest script's `#!` line), the selectors made root-relative, the other flags, `timeout`/1000 s (default 300). Refused flags (cache, `--pdb`, `--junitxml`, ...) and ambiguous options fall back. |
+| pytest | `pytest`, `py.test`, `python[3] -m pytest`, `<path>/python -m pytest` | `ozagia.check.run_tests` with the named interpreter (a pytest script's `#!` line), the selectors made root-relative, the other flags, `timeout`/1000 s (default 120). Refused flags (cache, `--pdb`, `--junitxml`, ...) and ambiguous options fall back. |
 | read | `cat F`, `head [-n N] F`, `tail [-n N\|+N] F`, `sed -n 'A[,B]p' F` | read of that range (no 2000-line cap) |
-| grep | `grep [-rRnHiFE] [--include G] PAT [PATH]`, `rg [-nHiF] [-g G] PAT [PATH]`, `git grep [-niFE] PAT [PATH]` | grep; `-i` is case-insensitive. A basic regex with `\ + ? \| { } ( )`, or GNU-only escapes, falls back. |
-| git_refs | `git commit\|push\|stash\|branch\|checkout\|switch\|reset\|rebase\|merge\|tag\|worktree\|cherry-pick\|revert\|am\|pull\|fetch\|bisect\|...` (`intent.shell.GIT_REF_MOVING`, shared with the Claude Code hook and `eval.agent.OPENCODE_GIT_DENY`), also inside a compound or multi-line command, after `VAR=value` prefixes, as `/path/to/git`, through `git -c alias.<x>=<ref-moving>`, inside a backtick or `$(...)` substitution, and inside `sh\|bash\|zsh -c '<script>'` (classified once more; a script nested deeper is refused when it names `git` and then a ref-moving subcommand) | tool error `Refused by ozagia: <command> changes git refs`. Listing forms (`git branch`, `git tag -l`, `git stash list`, `git worktree list`, `git bisect log`) are read-only. |
+| grep | `grep [-rRnHiFE] [--include G] PAT [PATH]`, `rg [-nHiF] [-g G] PAT [PATH]`, `git grep [-niFE] PAT [PATH]` | grep; `-i` is case-insensitive. A basic regex is converted to the Rust/Python dialect (`\|` `\(` `\{` become operators, `+ ? \| { } ( )` literals); one with back-references, `\<`, `\>` or POSIX classes falls back. |
+| compound | see below | the steps, in order |
+| git_refs | `git commit\|push\|stash\|branch\|checkout\|switch\|reset\|rebase\|merge\|tag\|worktree\|cherry-pick\|revert\|am\|pull\|fetch\|bisect\|...` (`intent.shell.GIT_REF_MOVING`, shared with the Claude Code hook and `eval.agent.OPENCODE_GIT_DENY`), anywhere in the command: in any segment, after `VAR=value` prefixes, shell keywords and group openers (`{ ! if then do else elif while until`), through wrapper commands (`env [-i] [-u N] [-S '...']`, `command`, `builtin`, `exec`, `nice`, `timeout`, `nohup`, `setsid`, `stdbuf`, `ionice`, `chrt`, `taskset`, `sudo`, `doas`, `time`, `xargs`, `eval`, `find -exec\|-execdir\|-ok\|-okdir`, repeated), as `/path/to/git`, through `git -c alias.<x>=<ref-moving>`, inside a backtick or `$(...)` substitution, and inside `sh\|bash\|zsh -c '<script>'` (classified once more; a script nested deeper is refused when it names `git` and then a ref-moving subcommand) | tool error `Refused by ozagia: <command> changes git refs`. Listing forms (`git branch`, `git tag -l`, `git stash list`, `git worktree list`, `git bisect log`) are read-only. |
 | git_read, other, complex | everything else | `handled: false` |
+
+A compound command (`shell.plan_compound`, run by `intent.compound`) is a
+sequence of pipelines joined by `&&`, `||`, `;` or newlines. Each pipeline
+is one step, then any number of filters (`| tail -N`, `| tail -n +N`,
+`| head -N`, `| sed -n 'A[,B]p'`, `| grep [-viEFw] [-A|-B|-C N] PAT`), with
+optional `2>&1`, `2>/dev/null` and `>/dev/null`. The steps are:
+
+- pytest, read and grep, as above; pytest may have `VAR=value` prefixes
+  (they extend the test environment);
+- read-only git (`diff`, `show`, `status`, `log`, `blame` and the listing
+  forms; `--no-pager` and `-C <dir inside the root>` allowed). It runs as an
+  argv without a shell, with `GIT_OPTIONAL_LOCKS=0` and `GIT_PAGER=cat`.
+  `--output`, `--ext-diff`, `--textconv` and other global options make the
+  command fall back;
+- `echo` with literal words, `pwd`, `ls` (paths inside the root);
+- `cd DIR` before any other step, inside the root; later steps run there.
+
+At least one step must be pytest, read, grep or git. Anything else falls
+back as a whole: heredocs, subshells, `&`, other redirects, substitutions,
+globs, `python -c`, and an unmapped command or filter. So does any problem
+found before the first step runs (a directory or file outside the root, a
+missing file, an interpreter not on PATH). A step that fails once running
+gives its error text and status 1.
+
+Statuses follow bash: `&&` and `||` short-circuit and `;` continues. A
+pipeline's status is that of its last command: 0 after a `head`/`tail`/
+`sed` filter, and for a `grep` filter 1 when no line is left. pytest takes
+its exit code, grep is 1 when nothing matches, and git takes its own code.
+One timeout covers the whole command (`input.timeout`, else 120 s).
+
+The output is each step's output in order:
+
+- pytest, read and grep give their usual lines (below);
+- `git diff` and `git show` add `[ozagia] touched: <keys>`;
+- a final status other than 0 adds `[ozagia] exit <n>`.
+
+Filters apply to a step's own text, never to its `[ozagia]` lines. A read
+or grep step is filtered at the source:
+
+- read: a contiguous result is rendered as a range read; otherwise the
+  kept lines are shown as bash prints them, with `[ozagia] lines in: <keys>`;
+- grep: the matches are filtered as grep prints them (`path:n:text`) and
+  shown in the grep format.
+
+A pytest step that pipes through a filter keeps up to 5000 lines of output
+(40 without one), so the filter sees what bash would show it. On the v2
+pilot's 1080 shell calls, 264 of the captured compound commands without
+pytest gave bash's exit status (all of them), and the 176 git/echo/ls ones
+gave bash's exact text; 12 of 12 sampled pytest compounds gave bash's
+status.
 
 pytest output is pytest's own output tail, then:
 
@@ -179,14 +232,22 @@ the plugin apply the change a second time.
 
 ## after
 
-`after(tool, input, output)` runs after a built-in call. For edit, write,
-patch and shell commands that are not read-only (read, grep, git_read and
-refused classes are), it reingests `memory.pending_changes()` and appends
-the delta line; more than `MAX_REFRESH_FILES` (200) changed files appends
-`[ozagia] many files changed; graph refresh deferred` instead. For
-`git diff` / `git show` it appends `[ozagia] touched: <keys>`: the key
-enclosing each `+` line, and the line before each deletion point, in the
-current file.
+`after(tool, input, output)` runs after a built-in call.
+
+- For edit, write, patch and shell commands that can change files, it
+  reingests `memory.pending_changes()` and appends the delta line. Read-only
+  commands are skipped: read, grep, git_read, refused classes and compound
+  commands without a pytest step. When more than `MAX_REFRESH_FILES` (200)
+  files changed, it appends `[ozagia] many files changed; graph refresh
+  deferred` instead.
+- For `git diff` / `git show`, also as one segment of a command that fell
+  back, it appends `[ozagia] touched: <keys>`. These are the key enclosing
+  each `+` line, and the line before each deletion point, in the current
+  file.
+- For a command with a pytest segment, it maps pytest's short summary
+  lines (`FAILED path::name - message`, `ERROR ...`) to `[ozagia] failed
+  test:<key>: <message>` for tests the graph knows. Paths are taken
+  relative to a leading `cd DIR &&`.
 
 ## Daemon
 
@@ -194,7 +255,8 @@ One process per repository. `socketserver.ThreadingUnixStreamServer`, a
 thread per connection, one lock around `tool` and `after` (`DevMemory` is
 not thread-safe), except a captured pytest: it reads no graph state and
 runs without the lock, so edits and reads sent while tests run are answered
-at once. Requests are JSON lines, answered in order; a line over
+at once. A compound command with a pytest step also runs without it, and
+takes the lock (`_lock`) only around the steps that read the graph. Requests are JSON lines, answered in order; a line over
 `MAX_MESSAGE_BYTES` gets an error and the connection is closed. A request
 with a `deadline_ms` that has passed when its turn comes is answered
 `expired` and not executed (`ozagia.daemon.protocol`). The socket
@@ -217,11 +279,51 @@ uptime.
 `serve` sets it to `--root` first. `DevMemory`'s own journal goes next to a
 `--dump`, else to the state dir.
 
+## Permissions
+
+With OpenCode 2.3's `ctx.permission.assert`, the plugin asks OpenCode's
+permission service before the daemon carries a call out. It uses the
+request the built-in would make, computed by the daemon
+(`intent.permission_request`):
+
+| tool | action | resources |
+|---|---|---|
+| read | `read` | the path relative to the root |
+| edit, write | `edit` | the path relative to the root |
+| grep, glob | `grep`, `glob` | the pattern |
+| shell | `shell` | one per simple command |
+
+When the call is a mutating one (edit, write or shell), the plugin works in
+three steps:
+
+1. It sends the call with `preflight: true`. The handler runs every check
+   and stops before its first change (`Preflight`).
+2. The daemon answers `preflight` with the permission. The plugin asserts
+   it.
+3. The plugin sends the call again without `preflight`.
+
+For read, grep and glob, the daemon answers first, and the output is shown
+only after the assert passes.
+
+A declined, corrected or blocked permission becomes the tool's error. Any
+other failure of `assert` hands the call to the built-in, which asks for
+itself, and the plugin sends `after` with `meta.fallback: "permission:
+..."`. A passthrough is asked once, by the built-in. A refusal (ref-moving
+git) or a tool error from preflight asks nothing, since it changes nothing.
+
 ## Known limits
 
-- Handled calls bypass OpenCode's own permission prompts. The plugin
-  replaces the tools' `execute`, so an edit, write or captured pytest the
-  daemon handles never reaches OpenCode's permission check (`ask` rules).
-  `ozagia agent` and the eval run with the eval's policy (`bash` allow-all
-  except ref-moving git), so nothing is lost there; an interactive session
-  with `ask` rules does not get its prompts for handled calls.
+- The shell resources come from ozagia's own split of the command
+  (`shell.command_resources`), which approximates OpenCode's parser. A
+  pattern rule that tells commands apart by something the split drops
+  (redirections) can match differently.
+- Verified live on OpenCode 2.3.0 with the local model:
+  - an `edit` `deny` rule on one file refused the handled edit, while an
+    edit of another file went through;
+  - a `read` deny on one file and a `bash` `cat *` deny refused the handled
+    read and the captured `cat`;
+  - a captured compound `grep ... && echo found` ran.
+- A captured pytest keeps the last 40 lines of its output, or up to 5000
+  when a compound step pipes it through a filter. A bare `pytest -v` with
+  more output shows less than bash would; the `[ozagia]` lines carry every
+  failure.

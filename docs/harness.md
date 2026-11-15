@@ -110,9 +110,12 @@ server itself, so the server inherits the environment the harness sets. The
 harness always passes `--standalone`.
 
 Verified: `opencode run --standalone` loads project plugins (the v3 W0
-probes, `docs/plans/2026-11-15_v3_graph_intent.md`). Not verified: that the TUI's private
-server does too, because the TUI was not launched while building this. The
-summary after the TUI exits shows whether the plugin connected.
+probes, `docs/plans/2026-11-15_v3_graph_intent.md`), and so does the TUI's
+private server. Checked on 2.3.0 without a model call: `opencode
+--standalone <workdir>` under a pty sent the plugin's setup `hello` (phase
+`setup`, `permission_assert: true`) to the daemon socket 1.5 s after
+starting. The plugin says hello from `setup`, so the summary after the TUI
+exits shows whether it loaded even when the session made no tool call.
 
 While the TUI runs, the harness ignores SIGINT itself, so Ctrl-C reaches the
 TUI. Teardown runs when the TUI exits.
@@ -168,14 +171,9 @@ shim and the process-group kill from `eval.agent`.
 
 ## Known limits
 
-- Handled calls bypass OpenCode's own permission prompts (see
-  `docs/intent.md`). `ozagia agent` runs with the eval's allow-all bash
-  policy (ref-moving git denied), so no prompt is expected there.
-- Attributes an adapter writes onto core nodes (Symbol, Test, File) through
-  `ctx.builder.attrs` are replaced by the fresh-parse attributes when that
-  file is reingested without an adapter pass; a build restores them.
-- A new, untracked file that only an adapter reads (a new seed manifest no
-  adapter has used yet) is not seen by `refresh`; it needs a build. A
-  changed tracked file that is neither indexed nor adapter-owned keeps the
-  snapshot stale (`DevMemory.unhandled_changes()`), and `GraphSession`
-  rebuilds it.
+- A changed tracked file that is neither indexed, adapter-owned nor matched
+  by an indexer's `watch` glob keeps the snapshot stale
+  (`DevMemory.unhandled_changes()`), and `GraphSession` rebuilds it.
+- An adapter indexer that leaves `texts` at its default (None) runs again
+  on every reingest of an indexed file; declare `watch` and `texts` to
+  avoid that (see `ozagia.adapters`).

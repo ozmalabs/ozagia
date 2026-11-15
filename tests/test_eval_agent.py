@@ -760,13 +760,15 @@ def test_opencode_parser_counts_code_mode_mcp_calls():
         tool("execute", 'const a = await tools["ozagia"].dev_code_search({q: 1});\n'
                         "return tools['ozagia'].dev_impact({});"),
         tool("ozagia_dev_context"),
+        # The form the v2 pilot's model wrote (review: it counted 0 before).
+        tool("execute", "return await tools.ozagia.dev_brief({task: 'x'})"),
         json.dumps({"type": "step_finish", "part": {"cost": 0, "tokens": {"input": 1,
                                                                         "output": 1}}}),
     ])
     out = ae._parse_opencode_events(stream)
-    assert out["tool_calls"] == 4
-    assert out["mcp_calls"] == 3
-    assert out["tools_by_name"] == {"execute": 2, "ozagia_dev_context": 1,
+    assert out["tool_calls"] == 5
+    assert out["mcp_calls"] == 4
+    assert out["tools_by_name"] == {"execute": 3, "ozagia_dev_context": 1,
                                     "read": 1}
 
 

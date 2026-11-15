@@ -571,9 +571,11 @@ DRIVER_ENV = "OZAGIA_EVAL_DRIVER"
 
 
 # OpenCode 2.3 Code Mode runs MCP tools inside its `execute` tool, as
-# `tools["ozagia"].dev_code_search(...)`. Each such call is one MCP call.
-_MCP_CODE_CALL_RE = re.compile(r"""tools\[\s*["']""" + re.escape(MCP_SERVER_NAME)
-                               + r"""["']\s*\]\s*\.\s*\w+\s*\(""")
+# `tools.ozagia.dev_code_search(...)` or `tools["ozagia"].dev_code_search(...)`.
+# Each such call is one MCP call.
+_MCP_CODE_CALL_RE = re.compile(
+    r"""tools\s*(?:\[\s*["']""" + re.escape(MCP_SERVER_NAME) + r"""["']\s*\]|\.\s*"""
+    + re.escape(MCP_SERVER_NAME) + r""")\s*\.\s*\w+\s*\(""")
 
 
 def _parse_opencode_events(stdout: str) -> dict[str, Any]:
