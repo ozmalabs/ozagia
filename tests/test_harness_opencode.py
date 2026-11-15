@@ -161,8 +161,11 @@ def test_run_agent_end_to_end(repo, stub, tmp_path):
     assert res["daemon_stats"]["hellos"] == 1
     assert Path(res["stdout_path"]).read_text().count("step_finish") == 1
     assert "stub reply" in Path(res["transcript_path"]).read_text()
-    assert _exclude_lines(repo).count(EXCLUDES[0]) == 1
+    # The plugin's exclude line goes with the plugin (review fix 14); the
+    # state dir's stays while the state dir does.
+    assert _exclude_lines(repo).count(EXCLUDES[0]) == 0
     assert _exclude_lines(repo).count(EXCLUDES[1]) == 1
+    assert res["exclude_removed"] == [EXCLUDES[0]]
     assert _git(repo, "status", "--porcelain") == ""
 
 
@@ -170,10 +173,10 @@ def test_second_run_is_idempotent_and_refreshes(repo, stub, tmp_path):
     first = _run(repo, tmp_path)
     assert sorted(first["exclude"]["added"]) == sorted(EXCLUDES)
     second = _run(repo, tmp_path)
-    assert second["exclude"]["added"] == []
+    assert second["exclude"]["added"] == [EXCLUDES[0]]
     assert second["prep"]["action"] == "fresh"
-    for line in EXCLUDES:
-        assert _exclude_lines(repo).count(line) == 1
+    assert _exclude_lines(repo).count(EXCLUDES[0]) == 0
+    assert _exclude_lines(repo).count(EXCLUDES[1]) == 1
     (repo / "pkg" / "mod.py").write_text(MOD + "\n\ndef sub(a, b):\n    return a - b\n")
     third = _run(repo, tmp_path)
     assert third["prep"]["action"] == "refreshed"
@@ -232,9 +235,15 @@ def test_clone_at_base(repo, stub, tmp_path):
 def test_keep_plugin_and_existing_plugin(repo, stub, tmp_path):
     _run(repo, tmp_path, keep_plugin=True)
     assert (repo / PLUGIN_REL).is_file()
-    # A plugin that was there before the run is not removed afterwards.
+    # A plugin that was there before the run, and is not exactly ours, is
+    # not removed afterwards. One with our exact source is (review fix 14).
+    (repo / PLUGIN_REL).write_text("// edited by the user\n", encoding="utf-8")
     _run(repo, tmp_path)
     assert (repo / PLUGIN_REL).is_file()
+    (repo / PLUGIN_REL).unlink()
+    _run(repo, tmp_path, keep_plugin=True)
+    _run(repo, tmp_path)
+    assert not (repo / PLUGIN_REL).exists()
 
 
 def test_interactive_uses_standalone_tui(repo, stub, tmp_path):
@@ -351,3 +360,30 @@ def test_graph_session_state_dir_and_run_python(repo, stub, tmp_path):
         assert s.env["PATH"].split(os.pathsep)[0] == str(tmp_path / "logs" / "bin")
     assert (state / "graph.json").is_file()
     assert not (repo / ".ozagia").exists()
+
+
+def test_plugin_left_by_a_killed_run_is_removed(repo, stub, tmp_path):
+    # review fix 14: a hard-killed run leaves the plugin (our exact source)
+    # and its exclude line; the next run treats the file as its own.
+    from ozagia.integrations.opencode import install as oc
+    oc.install(repo)
+    git_exclude(repo)
+    res = _run(repo, tmp_path)
+    assert _record(stub)["plugin_present"] is True
+    assert not (repo / PLUGIN_REL).exists()
+    assert res["exclude"]["added"] == []          # the leftover line was there
+    assert _exclude_lines(repo).count(EXCLUDES[0]) == 1  # not ours to remove
+
+
+def test_foreign_plugin_file_is_kept(repo, stub, tmp_path):
+    other = repo / PLUGIN_REL
+    other.parent.mkdir(parents=True)
+    other.write_text("// someone else's plugin\n", encoding="utf-8")
+    _run(repo, tmp_path)
+    assert other.is_file()
+
+
+def test_daemon_argv_passes_the_parent_pid():
+    import ozagia.harness.session as hs
+    argv = hs._daemon_argv("py", Path("/r"), Path("/d"), Path("/j"), Path("/s"))
+    assert argv[-2:] == ["--parent-pid", str(os.getpid())]

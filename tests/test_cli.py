@@ -159,3 +159,20 @@ def test_agent_errors(repo, capsys):
     assert exc.value.code == 2
     with pytest.raises(SystemExit):
         cli.main(["agent", "--prompt", "a", "--prompt-file", "b"])
+
+
+def test_index_rebuilds_when_refresh_cannot_take_the_change_in(repo, capsys):
+    # review fix 3: a tracked file that is not indexed changed. refresh
+    # reingests nothing, the snapshot stays stale, so the session rebuilds.
+    (repo / "notes.txt").write_text("v1\n")
+    git = ["git", "-c", "user.name=t", "-c", "user.email=t@t"]
+    subprocess.run([*git, "add", "notes.txt"], cwd=repo, check=True)
+    subprocess.run([*git, "commit", "-q", "-m", "notes"], cwd=repo, check=True)
+    assert cli.main(["index", "--root", str(repo)]) == 0
+    assert capsys.readouterr().out.startswith("built ")
+    (repo / "notes.txt").write_text("v2\n")
+    assert cli.main(["index", "--root", str(repo), "--json"]) == 0
+    rep = json.loads(capsys.readouterr().out)
+    assert rep["action"] == "built", rep
+    assert cli.main(["index", "--root", str(repo)]) == 0
+    assert capsys.readouterr().out.startswith("fresh ")

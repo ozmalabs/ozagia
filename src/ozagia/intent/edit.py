@@ -58,10 +58,18 @@ _UNHANDLED_ERRORS = ("is binary", "not valid UTF-8", "exceeds", "declares encodi
 
 
 def _target(memory: Any, path: Any):
+    from ozagia.edit.txn import in_git_dir
     target = resolve(root_of(memory), path)
     if in_state_dir(root_of(memory), target.path):
         raise IntentError(f"{path} is in ozagia's state directory; refused")
+    if in_git_dir(target.rel):
+        raise IntentError(f"{path} is inside .git; refused")
     return target
+
+
+def warning_line(error: str) -> str:
+    """The line that reports a failure after a file was written."""
+    return tag(f"warning: {one_line(error)}")
 
 
 def broken_line(ref: dict[str, Any]) -> str:
@@ -114,6 +122,8 @@ def handle_edit(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
     if res.get("parse_check") == "was_broken":
         lines.append(tag("note: the file did not parse before this edit; "
                          "the parse was not checked"))
+    if res.get("warning"):
+        lines.append(warning_line(str(res["warning"])))
     keys = list(dict.fromkeys([*res["keys"], *delta_keys(delta),
                                *(r.get("key") for r in
                                  res.get("broken_references") or [])]))
@@ -203,21 +213,29 @@ def handle_write(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
             raise IntentError(msg) from None
     else:
         _create(target.path, content)
-    memory._drop_cached(target.rel)
+    # The file is written: from here on a failure is reported as a warning
+    # line, never raised (a raise would make the plugin write it again).
+    warnings: list[str] = []
+    delta: Any = None
     try:
-        delta: Any = memory.reingest([target.rel])
+        memory._drop_cached(target.rel)
+        delta = memory.reingest([target.rel])
     except Exception as e:  # noqa: BLE001 - the file is written; report it
         delta = {"error": f"{type(e).__name__}: {e}"}
-    memory.journal_append(
-        "write", f"write {target.rel}",
-        f"{'replaced' if existed else 'created'} {target.rel}; "
-        f"{len(split_lines(content))} lines",
-        files=[target.rel], backup=backup)
+    try:
+        memory.journal_append(
+            "write", f"write {target.rel}",
+            f"{'replaced' if existed else 'created'} {target.rel}; "
+            f"{len(split_lines(content))} lines",
+            files=[target.rel], backup=backup)
+    except Exception as e:  # noqa: BLE001 - the file is written; report it
+        warnings.append(f"journal not written: {type(e).__name__}: {e}")
     fk = file_key(target.rel)
     head = f"{'replaced' if existed else 'created'} {fk}"
     if backup:
         head += f"  backup: {backup}"
-    lines = ["Wrote file successfully.", tag(head), *delta_lines(delta)]
+    lines = ["Wrote file successfully.", tag(head), *delta_lines(delta),
+             *(warning_line(w) for w in warnings)]
     keys = list(dict.fromkeys([fk, *delta_keys(delta)]))
     return {"intent": "write", "output": "\n".join(lines), "keys": keys}
 

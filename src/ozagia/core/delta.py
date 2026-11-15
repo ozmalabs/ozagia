@@ -27,16 +27,32 @@ class GraphDelta:
                     or self.edges_added or self.edges_removed)
 
     def merge(self, other: "GraphDelta") -> "GraphDelta":
-        """This delta followed by `other`, with keys deduplicated in order."""
+        """This delta followed by `other`, with keys deduplicated in order.
+
+        Opposite entries cancel: a key (or edge) added by one delta and
+        removed by the other, in either order, is in neither list. A key
+        changed and then removed is only `removed`; a key added and then
+        changed is only `added`."""
         def cat(a: list, b: list) -> list:
             return list(dict.fromkeys([*a, *b]))
+
+        def net(a_add: list, a_rem: list, b_add: list,
+                b_rem: list) -> tuple[list, list, set]:
+            gone = (set(a_add) & set(b_rem)) | (set(a_rem) & set(b_add))
+            return ([k for k in cat(a_add, b_add) if k not in gone],
+                    [k for k in cat(a_rem, b_rem) if k not in gone], gone)
+
+        added, removed, gone = net(self.added, self.removed,
+                                   other.added, other.removed)
+        final = set(added) | set(removed) | gone
+        changed = [k for k in cat(self.changed, other.changed)
+                   if k not in final]
+        e_add, e_rem, _ = net(self.edges_added, self.edges_removed,
+                              other.edges_added, other.edges_removed)
         return GraphDelta(
             files=cat(self.files, other.files),
-            added=cat(self.added, other.added),
-            removed=cat(self.removed, other.removed),
-            changed=cat(self.changed, other.changed),
-            edges_added=cat(self.edges_added, other.edges_added),
-            edges_removed=cat(self.edges_removed, other.edges_removed),
+            added=added, removed=removed, changed=changed,
+            edges_added=e_add, edges_removed=e_rem,
             seconds=self.seconds + other.seconds,
         )
 

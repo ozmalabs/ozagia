@@ -24,7 +24,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import shlex
 import signal
 import socket
 import sys
@@ -35,6 +34,7 @@ from typing import Any, TextIO
 
 from ozagia.config import repo_root, state_path
 from ozagia.daemon import protocol
+from ozagia.intent.shell import GIT_REF_MOVING, classify
 
 # The hook finishes within this many seconds; install.py sets the same value
 # as the hook's `timeout` in the Claude Code settings.
@@ -49,16 +49,10 @@ KEY_PREFIXES = ("sym:", "test:", "doc:", "text:")
 # passed as `file_path` may arrive as `<cwd>/sym:...`.
 _KEY_IN_PATH = re.compile(r"(?:^|/)((?:sym|test|doc|text):.+)$")
 
-REF_MOVING_GIT = frozenset({
-    "commit", "push", "stash", "branch", "checkout", "switch", "reset",
-    "rebase", "merge", "tag", "worktree",
-})
-# git options before the subcommand that take a separate value.
-_GIT_OPTS_WITH_VALUE = frozenset({
-    "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix",
-    "--config-env", "--exec-path",
-})
-_SHELL_PUNCT = ";&|()<>\n"
+# The intent layer's list (`ozagia.intent.shell.GIT_REF_MOVING`); the hook
+# refuses what `classify` calls `git_refs`, so listing forms (`git branch`,
+# `git tag -l`, `git stash list`) are allowed here too.
+REF_MOVING_GIT = GIT_REF_MOVING
 
 
 class HookError(Exception):
@@ -166,51 +160,13 @@ def response_text(tool_response: Any) -> str:
 # --------------------------------------------------------------------------- #
 # local checks
 # --------------------------------------------------------------------------- #
-def _shell_tokens(command: str) -> list[str]:
-    try:
-        lex = shlex.shlex(command, posix=True, punctuation_chars=_SHELL_PUNCT)
-        lex.whitespace = " \t\r"
-        lex.whitespace_split = True
-        return list(lex)
-    except ValueError:  # unbalanced quotes: fall back to a plain split
-        return command.split()
-
-
-def _simple_commands(command: str) -> list[list[str]]:
-    cmds: list[list[str]] = [[]]
-    for tok in _shell_tokens(command):
-        if tok and all(c in _SHELL_PUNCT for c in tok):
-            cmds.append([])
-        else:
-            cmds[-1].append(tok)
-    return [c for c in cmds if c]
-
-
-def _git_subcommand(argv: list[str]) -> str | None:
-    i = 0
-    while i < len(argv) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", argv[i]):
-        i += 1  # leading VAR=value assignments
-    if i >= len(argv) or os.path.basename(argv[i]) != "git":
-        return None
-    i += 1
-    while i < len(argv):
-        arg = argv[i]
-        if arg in _GIT_OPTS_WITH_VALUE:
-            i += 2
-        elif arg.startswith("-"):
-            i += 1
-        else:
-            return arg
-    return None
-
-
 def git_ref_moving(command: str) -> str | None:
-    """The first ref-moving git subcommand in a shell command, or None."""
-    for argv in _simple_commands(command or ""):
-        sub = _git_subcommand(argv)
-        if sub in REF_MOVING_GIT:
-            return sub
-    return None
+    """The ref-moving git subcommand in a shell command, or None: what
+    `ozagia.intent.shell.classify` calls `git_refs`."""
+    got = classify(command or "")
+    if got["class"] != "git_refs":
+        return None
+    return str(got.get("subcommand") or "git")
 
 
 def node_key(file_path: Any) -> str | None:

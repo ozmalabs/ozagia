@@ -523,6 +523,25 @@ CLASSIFY = [
     ("./run.sh", "other"),
     ("echo 'unbalanced", "complex"),
     ("", "other"),
+    # review fix 10: ref-moving git through paths, env prefixes,
+    # substitutions, shells, aliases and bisect
+    ("/usr/bin/git commit -am x", "git_refs"),
+    ("GIT_DIR=.git git commit -m x", "git_refs"),
+    ("echo `git stash`", "git_refs"),
+    ('echo "$(git reset --hard)"', "git_refs"),
+    ("bash -c 'git reset --hard'", "git_refs"),
+    ("sh -lc 'cd x && git checkout y'", "git_refs"),
+    ("zsh -c \"bash -c 'git commit -m x'\"", "git_refs"),
+    ("git -c alias.c=commit c -m x", "git_refs"),
+    ("git -c 'alias.x=!git push' x", "git_refs"),
+    ("git bisect start HEAD~3", "git_refs"),
+    ("echo hi\ngit commit -m x", "git_refs"),
+    ("git bisect log", "git_read"),
+    ("/usr/bin/git status", "git_read"),
+    ("FOO=1 git status", "complex"),
+    ("bash -c 'git status'", "other"),
+    ("echo '$(git stash)'", "other"),
+    ("git -c user.name=x log", "git_read"),
 ]
 
 
@@ -706,3 +725,63 @@ def test_grep_case_sensitive_false_ignores_case(mem):
     res = _call(mem, "grep", pattern="HELPER", caseSensitive=False)
     assert res["handled"] and "Found" in res["output"]
     assert "No files found" in _call(mem, "grep", pattern="HELPER")["output"]
+
+
+# --------------------------------------------------------------------------- #
+# review fixes 1d and 11
+# --------------------------------------------------------------------------- #
+def _broken_journal(*a, **k):
+    raise OSError("disk full")
+
+
+def test_journal_failure_after_an_edit_is_a_warning_not_a_fallback(mem, repo, monkeypatch):
+    monkeypatch.setattr(mem, "journal_append", _broken_journal)
+    res = _call(mem, "edit", path="pkg/mod.py", oldString="return a + b",
+                newString="return a + b + 0")
+    assert res["handled"] is True and res["is_error"] is False, res
+    assert "[ozagia] warning: journal not written: OSError: disk full" in res["output"]
+    assert (repo / "pkg/mod.py").read_text().count("return a + b + 0") == 1
+
+
+def test_journal_failure_after_a_write_is_a_warning_not_a_fallback(mem, repo, monkeypatch):
+    monkeypatch.setattr(mem, "journal_append", _broken_journal)
+    res = _call(mem, "write", path="pkg/new.py", content="X = 1\n")
+    assert res["handled"] is True and res["is_error"] is False, res
+    assert res["output"].startswith("Wrote file successfully.")
+    assert "[ozagia] warning: journal not written" in res["output"]
+
+    def boom(paths):
+        raise RuntimeError("reingest broke")
+    monkeypatch.setattr(mem, "reingest", boom)
+    res = _call(mem, "write", path="pkg/new2.py", content="Y = 1\n")
+    assert res["handled"] is True and "graph update failed" in res["output"]
+
+
+@pytest.mark.parametrize("path", [".git/HEAD", ".git/refs/heads/main", "sub/.git/config"])
+def test_edits_and_writes_into_git_are_refused(mem, repo, path):
+    head = (repo / ".git" / "HEAD").read_text()
+    (repo / "sub" / ".git").mkdir(parents=True, exist_ok=True)
+    (repo / "sub" / ".git" / "config").write_text("x\n")
+    res = _call(mem, "write", path=path, content="ref: refs/heads/evil\n")
+    assert res["handled"] and res["is_error"] and "inside .git" in res["output"]
+    res = _call(mem, "edit", path=".git/HEAD", oldString="ref:", newString="ref: ")
+    assert res["handled"] and res["is_error"] and "inside .git" in res["output"]
+    assert (repo / ".git" / "HEAD").read_text() == head
+
+
+def test_span_edit_refuses_git_paths(mem, repo):
+    from ozagia.edit.code_edit import CodeEditError
+    with pytest.raises(CodeEditError, match="inside .git"):
+        mem.span_edit(".git/HEAD", "ref:", "ref: ", apply=True)
+
+
+def test_ref_moving_list_is_shared_with_the_opencode_deny_list():
+    from ozagia.eval.agent import OPENCODE_GIT_DENY
+    from ozagia.integrations.claude_code.hook import REF_MOVING_GIT
+    from ozagia.intent.shell import GIT_REF_MOVING
+    assert REF_MOVING_GIT is GIT_REF_MOVING
+    assert OPENCODE_GIT_DENY[:11] == (
+        "git commit*", "git push*", "git stash*", "git branch*", "git checkout*",
+        "git switch*", "git reset*", "git rebase*", "git merge*", "git tag*",
+        "git worktree*")
+    assert {f"git {s}*" for s in GIT_REF_MOVING} == set(OPENCODE_GIT_DENY)

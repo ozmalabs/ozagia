@@ -243,3 +243,19 @@ def test_cli_json(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
     out = json.loads(capsys.readouterr().out)
     assert code == 0 and out["ok"] and out["counts"]["passed"] == 1
     assert out["ignored_keys"][0]["key"] == "file:pkg/mod.py"
+
+
+def test_run_tests_env_replaces_the_environment_without_inherit(tmp_path, monkeypatch):
+    # review fix 7: the agent's shell environment, not the tool process's.
+    import sys
+    _write(tmp_path, "tests/test_env.py",
+           "import os\n\n\ndef test_env():\n"
+           "    assert os.environ.get('ONLY') == 'yes'\n"
+           "    assert 'LEAKED' not in os.environ\n")
+    monkeypatch.setenv("LEAKED", "secret")
+    env = {"PATH": os.environ["PATH"], "ONLY": "yes"}
+    res = run_tests(tmp_path, ["tests/test_env.py"], python=sys.executable,
+                    env=env, inherit=False)
+    assert res["ok"] is True, res["output_tail"]
+    res = run_tests(tmp_path, ["tests/test_env.py"], python=sys.executable, env=env)
+    assert res["counts"]["failed"] == 1   # inherited: LEAKED is there

@@ -50,8 +50,18 @@ run has left. On timeout the group gets SIGTERM, then SIGKILL after 2 s, and the
 output ends with `(Command timed out after <ms> ms; its process group was
 killed)`. Output longer than `MAX_SHELL_OUTPUT_CHARS` (30 000) keeps its last
 30 000 characters after the line `(output truncated: showing the last 30000 of
-<N> characters)`. The shell's environment is the loop's without `PYTHONPATH`
-and without any variable whose value contains the API key.
+<N> characters)`. The shell's environment is the loop's without `PYTHONPATH`,
+without `OZAGIA_NATIVE_*` (one of them names the key file) and without any
+variable whose value contains the API key.
+
+Both modes refuse ref-moving git (`intent.shell.classify(...)["class"] ==
+"git_refs"`) with the tool error `Refused by ozagia: <command> changes git
+refs`. `edit` and `write` refuse paths inside `.git`. In graph mode a captured
+pytest gets the same default timeout (120 000 ms), the same cap by the run's
+remaining time and the same environment as the plain shell (the intent
+layer's reserved `_deadline_s_remaining` and `_test_env` input fields).
+Reingests during the run do not rewrite the snapshot; it is written once
+after the loop.
 
 ## The loop
 
@@ -80,16 +90,22 @@ request waits at most for the time the run has left.
 - `transcript.jsonl`: one object per step (model turn): `step`, `ms`, `usage`,
   `finish_reason`, `content`, and `tools`, one entry per call with `id`, `name`,
   `input`, `output` (as sent to the model), `output_chars`, `ms`, `is_error`, and
-  in graph mode `handled`, `fallback`, `intent`, and for fallbacks `reason` and
-  `after_intent`.
+  in graph mode `handled`, `fallback` (the intent layer raised), `intent`, and
+  for unhandled calls `reason` and `after_intent`.
 - `summary.json`: `exit_code` (0, or 1 for an error), `steps`, `tokens_in`,
   `tokens_out` (sums of `usage.prompt_tokens` and `usage.completion_tokens`),
   `cost_usd` (sum of `usage.cost` or a top-level `cost`; `null` when the server
-  sends none), `tool_calls`, `tools_by_name`, `captured_calls` and `fallbacks`
-  (graph mode: calls the intent layer handled, and calls it left to the
-  built-in; `null` in plain mode), `stopped`, `error`, `final_text`, `mode`,
-  `model`, `wall_s`, `log_dir`.
+  sends none), `tool_calls`, `tools_by_name`, `captured_calls`,
+  `passthrough_calls` and `fallbacks` (graph mode: calls the intent layer
+  handled, calls it left to the built-in by design, and calls where it raised
+  so the built-in ran; `null` in plain mode), `stopped`, `error`,
+  `final_text`, `mode`, `model`, `wall_s`, `log_dir`, and in graph mode
+  `snapshot_write_s` (the one snapshot write at the end) or `snapshot_error`.
 
 The API key is sent as `Authorization: Bearer <key>`. It is read from the named
 environment variable or the file, never taken on the command line, and any
-occurrence of it is replaced by `***` in both files.
+occurrence of it is replaced by `***` in both files. The agent's shell can read
+any file the loop can, so a key file must not be readable by the agent (keep it
+outside the workdir under another user, or pass the key in an environment
+variable, which the shell does not get). A `http://` base URL to a host other
+than loopback prints a warning on stderr: the key is sent unencrypted.

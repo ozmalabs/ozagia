@@ -74,6 +74,29 @@ process.exit(0);
 """
 
 
+# Two tool calls at once, as OpenCode runs the calls of one step.
+PARALLEL = r"""
+import * as mod from "./plugin.mjs";
+const tools = {
+  edit: { name: "edit", description: "", output: { kind: "s" },
+          execute: async () => "ORIG EDIT" },
+  shell: { name: "shell", description: "", output: { kind: "x" },
+           execute: async () => "ORIG SHELL" },
+};
+const reg = { get: (n) => tools[n] && { ...tools[n] },
+              update: (n, fn) => { const t = { ...tools[n] }; tools[n] = fn(t) || t; } };
+await mod.default.setup({ tool: { transform: (fn) => fn(reg) } });
+const c = { sessionID: "ses_par" };
+const timed = async (p) => { const t0 = Date.now(); const result = await p;
+                             return { result, ms: Date.now() - t0 }; };
+const shell = timed(tools.shell.execute({ command: "pytest -q" }, c));
+await new Promise((r) => setTimeout(r, 100));
+const edit = await timed(tools.edit.execute({ path: "x.py", oldString: "a", newString: "b" }, c));
+process.stdout.write(JSON.stringify({ edit, shell: await shell }) + "\n");
+process.exit(0);
+"""
+
+
 class StubDaemon:
     """A Unix-socket server answering each request with `script(request)`.
 
@@ -84,6 +107,7 @@ class StubDaemon:
         self.path = path
         self.script = script
         self.requests: list[dict] = []
+        self.connections = 0
         self.conns: list[threading.Thread] = []
         self.srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.srv.bind(str(path))
@@ -102,6 +126,13 @@ class StubDaemon:
             t.start()
 
     def _conn(self, conn: socket.socket) -> None:
+        self.connections += 1
+        try:
+            self._serve_conn(conn)
+        except OSError:  # the plugin closed its end first
+            pass
+
+    def _serve_conn(self, conn: socket.socket) -> None:
         with conn, conn.makefile("rwb") as fh:
             for line in fh:
                 req = json.loads(line)
@@ -111,8 +142,11 @@ class StubDaemon:
                     continue
                 resp = dict(resp)
                 time.sleep(resp.pop("_delay", 0))
-                fh.write((json.dumps({"id": req["id"], **resp}) + "\n").encode())
-                fh.flush()
+                try:
+                    fh.write((json.dumps({"id": req["id"], **resp}) + "\n").encode())
+                    fh.flush()
+                except OSError:  # the plugin gave up and closed its connection
+                    return
 
     def ops(self) -> list[str]:
         return [r["op"] for r in self.requests]
@@ -305,15 +339,97 @@ def test_shell_request_timeout_follows_the_command_timeout(tmp_path, daemon):
 
 
 @needs_node
-def test_hello_is_sent_once_on_first_connect(tmp_path, daemon):
+def test_hello_is_sent_once_on_its_own_connection(tmp_path, daemon):
     d = daemon()
     out = _run(tmp_path, {"calls": [READ, READ, {"tool": "grep", "input": {"pattern": "x"}}]},
                d.path)
     assert all(r["ok"] for r in out["results"])
-    assert d.ops() == ["hello", "tool", "tool", "tool"]
-    hello = d.requests[0]
+    assert sorted(d.ops()) == ["hello", "tool", "tool", "tool"]
+    hello = [r for r in d.requests if r["op"] == "hello"][0]
     assert hello["harness"] == "opencode" and hello["plugin"] == "ozagia"
     assert hello["version"] and hello["session"] == "ses_test"
+    # review fix 1b: one connection per request, hello on its own.
+    assert d.connections == 4
+
+
+@needs_node
+def test_every_request_carries_a_deadline(tmp_path, daemon):
+    d = daemon()
+    t0 = time.time() * 1000
+    shell = {"tool": "shell", "input": {"command": "pytest", "timeout": 5000}}
+    _run(tmp_path, {"calls": [READ, shell], "timeoutMs": 2000}, d.path)
+    t1 = time.time() * 1000
+    tools = [r for r in d.requests if r["op"] == "tool"]
+    read, sh = tools
+    assert t0 + 2000 <= read["deadline_ms"] <= t1 + 2000
+    assert t0 + 7000 <= sh["deadline_ms"] <= t1 + 7000
+
+
+@needs_node
+def test_a_slow_call_does_not_queue_the_next(tmp_path, daemon):
+    def script(req):
+        if req["op"] == "tool" and req["tool"] == "shell":
+            return {"ok": True, "handled": True, "output": "SLOW", "_delay": 2.0}
+        return _standard(req)
+
+    d = daemon(script)
+    (tmp_path / "plugin.mjs").write_text(oc.plugin_source(), encoding="utf-8")
+    (tmp_path / "par.mjs").write_text(PARALLEL, encoding="utf-8")
+    env = dict(os.environ, OZAGIA_DAEMON_SOCK=str(d.path))
+    proc = subprocess.run([NODE, str(tmp_path / "par.mjs")], cwd=tmp_path, env=env,
+                          capture_output=True, text=True, timeout=60,
+                          stdin=subprocess.DEVNULL)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert out["edit"]["result"] == {"output": "GRAPH edit",
+                                     "content": [{"type": "text", "text": "GRAPH edit"}]}
+    assert out["edit"]["ms"] < 1500  # not behind the 2 s shell call
+    assert out["shell"]["result"]["output"] == "SLOW"
+
+
+@needs_node
+@pytest.mark.parametrize("tool,inp", [
+    ("edit", {"path": "pkg/mod.py", "oldString": "a", "newString": "b"}),
+    ("shell", {"command": "pytest -q", "timeout": 100}),
+])
+def test_sent_mutating_call_that_times_out_is_not_rerun(tmp_path, daemon, tool, inp):
+    def script(req):
+        if req["op"] == "tool":
+            return None  # never answers
+        return _standard(req)
+
+    d = daemon(script)
+    out = _run(tmp_path, {"calls": [{"tool": tool, "input": inp}], "timeoutMs": 300,
+                          "settleMs": 300}, d.path)
+    res = out["results"][0]
+    assert res["ok"] is False
+    assert "may or may not have been applied" in res["error"]
+    assert out["calls"] == []  # the built-in did not run
+    afters = [r for r in d.requests if r["op"] == "after"]
+    assert len(afters) == 1 and afters[0]["meta"]["fallback"] == "unknown_outcome"
+
+
+@needs_node
+def test_mutating_call_with_daemon_down_runs_the_builtin(tmp_path, sockdir):
+    edit = {"tool": "edit", "input": {"path": "pkg/mod.py", "oldString": "a", "newString": "b"}}
+    out = _run(tmp_path, {"calls": [edit]}, sockdir / "missing.sock")
+    assert out["results"][0] == {"ok": True, "result": {
+        "output": "ORIG EDIT", "content": [{"type": "text", "text": "ORIG EDIT"}]}}
+    assert [c[0] for c in out["calls"]] == ["edit"]
+
+
+@needs_node
+def test_expired_answer_runs_the_builtin(tmp_path, daemon):
+    def script(req):
+        if req["op"] == "tool":
+            return {"ok": True, "handled": False, "reason": "expired", "expired": True}
+        return _standard(req)
+
+    d = daemon(script)
+    edit = {"tool": "edit", "input": {"path": "pkg/mod.py", "oldString": "a", "newString": "b"}}
+    out = _run(tmp_path, {"calls": [edit]}, d.path)
+    assert out["results"][0]["result"]["output"] == "ORIG EDIT"
+    assert [c[0] for c in out["calls"]] == ["edit"]
 
 
 @needs_node
@@ -388,3 +504,129 @@ def test_real_opencode_lists_the_installed_plugin(tmp_path):
     res = oc.check_loads(work, timeout=60)
     assert res["listed"] is True, res
     assert res["ok"] is (res["self_test"].get("ok") is not False)
+
+
+# --------------------------------------------------------------------------- #
+# end to end: the real daemon and the real plugin (review fix 1)
+# --------------------------------------------------------------------------- #
+E2E = r"""
+import * as mod from "./plugin.mjs";
+const cfg = JSON.parse(process.env.HARNESS_CFG);
+const calls = [];
+const tools = {
+  edit: { name: "edit", description: "", output: { kind: "s" },
+          execute: async (i) => { calls.push(["edit", i]); return "ORIG EDIT"; } },
+  shell: { name: "shell", description: "", output: { kind: "x" },
+           execute: async (i) => { calls.push(["shell", i]); return "ORIG SHELL"; } },
+};
+const reg = { get: (n) => tools[n] && { ...tools[n] },
+              update: (n, fn) => { const t = { ...tools[n] }; tools[n] = fn(t) || t; } };
+await mod.createPlugin({ requestTimeoutMs: cfg.timeoutMs }).setup(
+  { tool: { transform: (fn) => fn(reg) } });
+const c = { sessionID: "ses_e2e" };
+const timed = async (p) => {
+  const t0 = Date.now();
+  try { return { ok: true, result: await p, ms: Date.now() - t0 }; }
+  catch (e) { return { ok: false, error: String(e.message), ms: Date.now() - t0 }; }
+};
+const shell = timed(tools.shell.execute({ command: cfg.pytest, timeout: 60000 }, c));
+await new Promise((r) => setTimeout(r, 500));
+const edit = await timed(tools.edit.execute(cfg.edit, c));
+process.stdout.write(JSON.stringify({ edit, shell: await shell, calls }) + "\n");
+process.exit(0);
+"""
+
+SLOW_TEST = '''import time
+
+from pkg.mod import helper
+
+
+def test_slow():
+    time.sleep(8)
+    assert helper(1) == 2
+'''
+
+
+@needs_node
+def test_real_daemon_edit_runs_once_while_pytest_is_in_flight(tmp_path, sockdir):
+    import select
+    import sys
+    src = Path(__file__).resolve().parents[1] / "src"
+    root = tmp_path / "repo"
+    (root / "pkg").mkdir(parents=True)
+    (root / "pkg" / "__init__.py").write_text("")
+    mod = root / "pkg" / "mod.py"
+    mod.write_text("def helper(a, b=1):\n    return a + b\n")
+    (root / "tests").mkdir()
+    (root / "tests" / "test_slow.py").write_text(SLOW_TEST)
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    sock = sockdir / "real.sock"
+    env = {k: v for k, v in os.environ.items() if not k.startswith("OZAGIA_")}
+    env.update(PYTHONPATH=str(src), PYTHONDONTWRITEBYTECODE="1")
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "ozagia.daemon", "serve", "--root", str(root),
+         "--sock", str(sock), "--dump", str(tmp_path / "graph.json"),
+         "--journal", str(tmp_path / "j.jsonl"), "--parent-pid", str(os.getpid())],
+        env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        ready, _, _ = select.select([proc.stdout], [], [], 60)
+        assert ready and proc.stdout.readline().startswith("ready "), proc.stderr.read()
+        # Warm up: the first edit request imports the edit modules.
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(60)
+            s.connect(str(sock))
+            warm = {"path": "pkg/mod.py", "oldString": "no such text", "newString": "x"}
+            s.sendall((json.dumps({"id": 1, "op": "tool", "tool": "edit",
+                                   "input": warm}) + "\n").encode())
+            assert json.loads(s.makefile("rb").readline())["ok"] is True
+        # newString contains oldString: a second application would show.
+        edit = {"path": "pkg/mod.py", "oldString": "return a + b",
+                "newString": "return a + b  # once"}
+        cfg = {"timeoutMs": 5000, "edit": edit,
+               "pytest": f"{sys.executable} -m pytest tests/test_slow.py -q"}
+        (tmp_path / "plugin.mjs").write_text(oc.plugin_source(), encoding="utf-8")
+        (tmp_path / "e2e.mjs").write_text(E2E, encoding="utf-8")
+        run_env = dict(os.environ, HARNESS_CFG=json.dumps(cfg),
+                       OZAGIA_DAEMON_SOCK=str(sock))
+        out = subprocess.run([NODE, str(tmp_path / "e2e.mjs")], cwd=tmp_path,
+                             env=run_env, capture_output=True, text=True, timeout=120,
+                             stdin=subprocess.DEVNULL)
+        assert out.returncode == 0, out.stderr
+        got = json.loads(out.stdout.strip().splitlines()[-1])
+        # The edit was answered by the daemon, promptly, while pytest ran.
+        journal = (tmp_path / "j.jsonl").read_text()
+        assert got["edit"]["ok"], (got, journal)
+        assert got["edit"]["result"]["output"].startswith("Edited "), got
+        assert got["edit"]["ms"] < 5000, (got, journal)
+        assert got["shell"]["ok"] and "pytest passed" in got["shell"]["result"]["output"]
+        assert got["shell"]["ms"] >= 8000
+        assert got["edit"]["ms"] + 500 < got["shell"]["ms"]  # answered during pytest
+        assert got["calls"] == []  # no built-in ran
+        time.sleep(0.5)
+        assert mod.read_text().count("# once") == 1
+
+        # An expired request is answered without being executed.
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(10)
+            s.connect(str(sock))
+            late = {"path": "pkg/mod.py", "oldString": "# once", "newString": "# twice"}
+            s.sendall((json.dumps({"id": 7, "op": "tool", "tool": "edit", "input": late,
+                                   "deadline_ms": time.time() * 1000 - 1}) + "\n").encode())
+            resp = json.loads(s.makefile("rb").readline())
+        assert resp["expired"] is True and resp["handled"] is False
+        assert "# twice" not in mod.read_text()
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(10)
+            s.connect(str(sock))
+            s.sendall(b'{"id": 8, "op": "stats"}\n')
+            stats = json.loads(s.makefile("rb").readline())["stats"]
+        assert stats["handled"]["true"] == 2 and stats["expired"] == 1
+        assert stats["passthrough"] == 1  # the warm-up miss
+        assert stats["hellos"] == 1
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()

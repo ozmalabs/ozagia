@@ -65,6 +65,7 @@ from typing import Any, Iterable
 from ozagia.config import STATE_DIRNAME, config_path, repo_root
 from ozagia.daemon.protocol import ENV_SOCK
 from ozagia.integrations.opencode import install as opencode_plugin
+from ozagia.intent.shell import GIT_REF_MOVING
 
 ROOT = repo_root()
 DEFAULT_TASKS = ROOT / "evaluation" / "agent_e2e" / "tasks.json"
@@ -554,12 +555,17 @@ DRIVERS: dict[str, dict[str, Any]] = {
 }
 
 # Same refs-protection intent as DISALLOWED_GIT_TOOLS, in OpenCode's
-# permission syntax (glob over the bash command text, last match wins).
-OPENCODE_GIT_DENY = (
+# permission syntax (glob over the bash command text, last match wins): the
+# original entries, then one per remaining `intent.shell.GIT_REF_MOVING`
+# subcommand.
+_OPENCODE_GIT_DENY_BASE = (
     "git commit*", "git push*", "git stash*", "git branch*", "git checkout*",
     "git switch*", "git reset*", "git rebase*", "git merge*", "git tag*",
     "git worktree*",
 )
+OPENCODE_GIT_DENY = _OPENCODE_GIT_DENY_BASE + tuple(
+    f"git {sub}*" for sub in sorted(GIT_REF_MOVING)
+    if f"git {sub}*" not in _OPENCODE_GIT_DENY_BASE)
 DRIVERS["claude"]["model_flag"] = "--model"
 DRIVER_ENV = "OZAGIA_EVAL_DRIVER"
 
@@ -896,6 +902,7 @@ class NativeDriver:
             driver_error=error,
             transcript=str(summary.get("final_text") or ""),
             captured_calls=summary.get("captured_calls"),
+            passthrough_calls=summary.get("passthrough_calls"),
             fallbacks=summary.get("fallbacks"),
             stopped=summary.get("stopped"), steps=summary.get("steps"))
 
@@ -1079,10 +1086,13 @@ def daemon_command(tool_python: str, workdir: Path, log_dir: Path,
     """The argv that starts the graph daemon for one run.
 
     Module-level so tests can substitute a stub server; the stub must accept
-    connections on `sock`, print `ready <sock>` and answer stats and shutdown."""
+    connections on `sock`, print `ready <sock>` and answer stats and shutdown.
+    `--parent-pid` makes the daemon exit if this process dies without
+    stopping it."""
     return [tool_python, "-m", "ozagia.daemon", "serve", "--root", str(workdir),
             "--dump", str(log_dir / "dev_graph.json"),
-            "--journal", str(log_dir / "daemon_journal.jsonl"), "--sock", str(sock)]
+            "--journal", str(log_dir / "daemon_journal.jsonl"), "--sock", str(sock),
+            "--parent-pid", str(os.getpid())]
 
 
 def _daemon_sock_path() -> Path:
@@ -1278,9 +1288,14 @@ def _count(value: Any) -> int | None:
 
 def graph_stats_fields(stats: Any) -> dict[str, Any]:
     """Run-record fields from the daemon's `stats`: plugin_loaded
-    (hellos > 0), captured_calls (handled tool calls) and fallbacks."""
+    (hellos > 0), captured_calls (tool calls the daemon handled; an expired
+    request is never handled), passthrough_calls (left to the built-in by
+    design) and fallbacks (`stats.fallbacks`: the plugin's fallback `after`s
+    plus expired requests plus failed tool requests; see
+    `ozagia.daemon.server`)."""
     if not isinstance(stats, dict):
-        return {"plugin_loaded": None, "captured_calls": None, "fallbacks": None}
+        return {"plugin_loaded": None, "captured_calls": None,
+                "passthrough_calls": None, "fallbacks": None}
     hellos = _count(stats.get("hellos"))
     raw = stats.get("handled")
     # The daemon reports {"true": n, "false": m}; only handled calls count.
@@ -1289,6 +1304,7 @@ def graph_stats_fields(stats: Any) -> dict[str, Any]:
         handled = _count(stats["by_handled"].get("true"))
     return {"plugin_loaded": None if hellos is None else hellos > 0,
             "captured_calls": handled,
+            "passthrough_calls": _count(stats.get("passthrough")),
             "fallbacks": _count(stats.get("fallbacks"))}
 
 
@@ -1315,7 +1331,8 @@ def run_one(repo: str | Path, task: dict[str, Any], arm: str, repeat: int,
     if graph:
         record.update(daemon_ok=None, daemon_error=None, daemon_ready_s=None,
                       daemon_stats=None, daemon_stop_error=None,
-                      plugin_loaded=None, captured_calls=None, fallbacks=None)
+                      plugin_loaded=None, captured_calls=None,
+                      passthrough_calls=None, fallbacks=None)
     daemon: GraphDaemon | None = None
     plugin_installed = False
     try:
@@ -1360,6 +1377,7 @@ def run_one(repo: str | Path, task: dict[str, Any], arm: str, repeat: int,
             plugin_installed = False
         elif graph:
             record.update(captured_calls=result.get("captured_calls"),
+                          passthrough_calls=result.get("passthrough_calls"),
                           fallbacks=result.get("fallbacks"))
         if "stopped" in result:
             record.update(stopped=result["stopped"], steps=result.get("steps"))
@@ -1502,6 +1520,8 @@ def aggregate(runs: list[dict[str, Any]], arms: Iterable[str]) -> list[dict[str,
         if any("daemon_ok" in r for r in mine):
             rows[-1].update({
                 "mean_captured_calls": _mean((r.get("captured_calls") for r in mine), 1),
+                "mean_passthrough_calls": _mean((r.get("passthrough_calls")
+                                                 for r in mine), 1),
                 "total_fallbacks": sum(int(r.get("fallbacks") or 0) for r in mine),
                 # Only runs that started a daemon have a plugin to load.
                 "plugin_load_failures": sum(1 for r in mine
@@ -1569,18 +1589,23 @@ def render_markdown(report: dict[str, Any]) -> str:
     graph_rows = [row for row in report["summary"] if "mean_captured_calls" in row]
     if graph_rows:
         lines += ["", "## Graph daemon and plugin", "",
-                  "| arm | runs | mean captured calls | total fallbacks | "
-                  "plugin-load failures | daemon failures |",
-                  "|---|---|---|---|---|---|"]
+                  "| arm | runs | mean captured calls | mean passthrough calls | "
+                  "total fallbacks | plugin-load failures | daemon failures |",
+                  "|---|---|---|---|---|---|---|"]
         for row in graph_rows:
             lines.append("| " + " | ".join(_cell(v) for v in (
                 row["arm"], row["runs"], row["mean_captured_calls"],
+                row.get("mean_passthrough_calls"),
                 row["total_fallbacks"], row["plugin_load_failures"],
                 row["daemon_failures"])) + " |")
-        lines += ["", "Captured calls are tool calls the daemon handled. A plugin-load "
-                  "failure is a run whose daemon recorded no `hello` (or gave no "
-                  "stats). Fallbacks are calls the plugin sent to the built-in "
-                  "because the daemon failed or timed out."]
+        lines += ["", "Captured calls are tool calls the graph layer handled. "
+                  "Passthrough calls are calls it left to the built-in by design "
+                  "(not mapped). Fallbacks are calls where the graph layer failed: "
+                  "for the daemon, the plugin's fallback reports (daemon error, "
+                  "timeout, outcome unknown), one per call; for the native loop, "
+                  "intent-layer "
+                  "exceptions. A plugin-load failure is a run whose daemon "
+                  "recorded no `hello` (or gave no stats)."]
     lines += ["", "## Per task (paired)", ""]
     header = "| task | " + " | ".join(report["arms"]) + " |"
     lines += [header, "|---" * (len(report["arms"]) + 1) + "|"]

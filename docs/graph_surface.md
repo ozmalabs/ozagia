@@ -110,7 +110,8 @@ A wrapper around `DevMemory.span_edit`. When `key_or_file` is a key with a
 line range (`sym:`, `test:`, `text:`), every match has to lie inside that
 range. Otherwise the edit is refused with `range` and the match keys. A key
 without a line range (`file:`, `doc:`, most adapter keys) only selects the
-file.
+file. A file in ozagia's state directory or with a `.git` component (any
+depth, also through a symlink) is refused.
 
 The result contains `ok, applied, file, keys, parse_check, broken_references,
 broken_references_truncated, diff_view` (capped at 200 lines, with
@@ -145,7 +146,11 @@ journaled with kind `create`.
 
 ### `check(keys?, tests?, timeout_s=300)`
 
-Runs `ozagia.check.run_tests` on these selectors:
+Runs `ozagia.check.run_tests` with the target's interpreter:
+`$OZAGIA_RUN_PYTHON` when set, else `<root>/.venv/bin/python` when it exists,
+else the server's own interpreter (`check.default_python`). Set
+`OZAGIA_RUN_PYTHON` when the target's environment is elsewhere, or the tests
+run with ozagia's tool python. The selectors:
 
 - `tests`: test keys and test-file keys (through `resolve_selectors`) and
   pytest node ids, whose path must exist inside the root.

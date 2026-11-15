@@ -10,7 +10,9 @@ Eight verbs over the dev-memory graph, every node named by its stable key
     edit     an exact-span edit (`DevMemory.span_edit`), optionally held to
              a node's line range
     create   a new file, or a new definition appended to a Python file/class
-    check    pytest on test keys or on the tests covering other keys
+    check    pytest on test keys or on the tests covering other keys, with
+             `$OZAGIA_RUN_PYTHON` (else `<root>/.venv/bin/python`, else
+             the server's interpreter)
     note     a journal entry naming keys
 
 The server selects this surface with `OZAGIA_SURFACE=graph` or `--surface
@@ -31,7 +33,7 @@ import os
 import tempfile
 import textwrap
 import time
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from ozagia.config import state_dir
@@ -51,6 +53,8 @@ MAX_CHECK_TEST_FILES = 20
 MAX_SOURCE_LINES = 2000
 # Lines of `diff_view` that `edit` and `create` return.
 MAX_DIFF_LINES = 200
+# The target's interpreter for `check` (see `GraphSurface.run_python`).
+RUN_PYTHON_ENV = "OZAGIA_RUN_PYTHON"
 
 _CORE_KINDS = ("file", "sym", "test", "doc", "text")
 _CORE_TYPES = frozenset({"Repo", "File", "Symbol", "Test", "Doc", "Commit",
@@ -802,6 +806,7 @@ class GraphSurface:
             rel = self._rel(ref["file"])
         else:
             rel = self._rel(target)
+        self._guard_rel(rel, verb="edit")
         if ref is not None and ref["start"]:
             loc = locate(self.root, rel, old_string, replace_all=replace_all)
             if loc.get("ok"):
@@ -851,7 +856,8 @@ class GraphSurface:
                "diff_view": diff, "diff_truncated": diff_cut,
                "new_sha256": res.get("new_sha256"),
                "backup": res.get("backup"),
-               "graph_delta": res.get("graph_delta")}
+               "graph_delta": res.get("graph_delta"),
+               "warning": res.get("warning")}
         return _clean(out)
 
     # ------------------------------------------------------------------ #
@@ -866,11 +872,21 @@ class GraphSurface:
             return self._create_file(self._rel(path), content, apply)
         return self._create_in(str(parent_key).strip(), content, apply)
 
-    def _guard_rel(self, rel: str) -> None:
+    def _guard_rel(self, rel: str, *, verb: str = "create") -> None:
+        """Refuse writes into ozagia's state directory and into `.git` (at
+        any depth, also through a symlink)."""
+        from ozagia.edit.txn import in_git_dir
         p = (self.root / rel).resolve()
-        state = state_dir(self.root)
-        if p.is_relative_to(state) or ".git" in PurePosixPath(rel).parts:
-            raise SurfaceError(f"refusing to create inside {rel.split('/')[0]}")
+        state = Path(os.path.realpath(state_dir(self.root)))
+        try:
+            real = p.relative_to(self.root.resolve()).as_posix()
+        except ValueError:
+            real = rel
+        if in_git_dir(rel) or in_git_dir(real):
+            raise SurfaceError(f"refusing to {verb} inside .git: {rel}")
+        if p == state or p.is_relative_to(state):
+            raise SurfaceError(f"refusing to {verb} inside ozagia's state "
+                               f"directory: {rel}")
 
     def _create_file(self, rel: str, content: str, apply: bool) -> dict[str, Any]:
         from ozagia.edit.span_edit import _parse_error
@@ -936,6 +952,7 @@ class GraphSurface:
             raise SurfaceError("parent_key must be a file: or sym: key")
         ref = self._ref(parent_key)
         rel = self._rel(ref["file"] or "")
+        self._guard_rel(rel)
         if not rel.endswith(".py"):
             raise SurfaceError(f"{rel} is not a Python file")
         src = read_source(self.root, rel, suffixes=(".py",),
@@ -1037,6 +1054,13 @@ class GraphSurface:
     # ------------------------------------------------------------------ #
     # check
     # ------------------------------------------------------------------ #
+    def run_python(self) -> str:
+        """The interpreter `check` runs the target's tests with:
+        `$OZAGIA_RUN_PYTHON`, else `check.default_python(root)`
+        (`<root>/.venv/bin/python` when it exists, else this interpreter)."""
+        from ozagia.check import default_python
+        return os.environ.get(RUN_PYTHON_ENV) or default_python(self.root)
+
     def check(self, keys: list[str] | None = None,
               tests: list[str] | None = None,
               timeout_s: float = 300) -> dict[str, Any]:
@@ -1089,7 +1113,8 @@ class GraphSurface:
             add(rel)
         if not selectors:
             return {"ok": False, "error": "no tests to run", "ignored": ignored}
-        r = run_tests(self.root, selectors, timeout_s=float(timeout_s))
+        r = run_tests(self.root, selectors, python=self.run_python(),
+                      timeout_s=float(timeout_s))
         rows = []
         for t in r["tests"]:
             rows.append(_clean({

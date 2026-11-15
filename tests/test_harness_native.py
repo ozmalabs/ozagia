@@ -474,9 +474,12 @@ def test_graph_mode_unhandled_shell_runs_plain_then_after(repo, mem, tmp_path):
     assert "[ozagia] delta:" in out and "sym:pkg/extra.py::extra" in out
     node = _tool_msgs(stub.posts()[2]["body"])[1]["content"]
     assert "[ozagia] sym:pkg/mod.py::add" in node and "2:     return a - b" in node
-    assert s["captured_calls"] == 1 and s["fallbacks"] == 1
+    # A command the intent layer leaves to the built-in by design is a
+    # passthrough, not a fallback (review fix 4).
+    assert s["captured_calls"] == 1 and s["passthrough_calls"] == 1
+    assert s["fallbacks"] == 0
     first = _steps(log)[0]["tools"][0]
-    assert first["handled"] is False and first["fallback"] is True
+    assert first["handled"] is False and first["fallback"] is False
     assert first["after_intent"] == "after_refresh"
 
 
@@ -567,3 +570,100 @@ def test_plain_edit_and_write(repo):
     assert T.tool_write(repo, {"path": "new/deep/f.txt", "content": "hi"}) == (
         "Wrote file successfully.")
     assert (repo / "new" / "deep" / "f.txt").read_text() == "hi"
+
+
+# --------------------------------------------------------------------------- #
+# review fixes: arm parity, counters, environment, snapshot writes
+# --------------------------------------------------------------------------- #
+def _head(repo: Path) -> str:
+    return subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                          capture_output=True, text=True, check=True).stdout
+
+
+@pytest.mark.parametrize("mode", ["plain", "graph"])
+def test_both_modes_refuse_ref_moving_git(repo, mem, tmp_path, mode):
+    head = _head(repo)
+    cmd = "git -c user.name=t -c user.email=t@t commit --allow-empty -m x"
+    with StubLLM([reply(tool_call("shell", {"command": cmd})), final()]) as stub:
+        _run(stub, repo, tmp_path / "log", mode=mode, memory=mem)
+    out = _tool_msgs(stub.posts()[1]["body"])[0]["content"]
+    assert out == f"Error: Refused by ozagia: {cmd} changes git refs"
+    assert _head(repo) == head
+
+
+class _Captured(Exception):
+    pass
+
+
+def _capture_run_tests(monkeypatch) -> list[dict]:
+    from ozagia import check
+    seen: list[dict] = []
+
+    def fake(root, selectors, **kw):
+        seen.append(kw)
+        raise _Captured
+    monkeypatch.setattr(check, "run_tests", fake)
+    return seen
+
+
+def test_graph_pytest_gets_the_plain_shell_timeout_env_and_deadline(
+        repo, mem, monkeypatch):
+    seen = _capture_run_tests(monkeypatch)
+    shell_env = {"PATH": os.environ["PATH"], "ONLY": "this"}
+    cmd = {"command": PYTEST}
+    ex = native._Executor(repo, "graph", mem, shell_env, time.monotonic() + 3600)
+    ex.call("shell", dict(cmd))
+    assert seen[-1]["timeout_s"] == T.DEFAULT_SHELL_TIMEOUT_MS / 1000
+    assert seen[-1]["env"] == shell_env and seen[-1]["inherit"] is False
+    ex = native._Executor(repo, "graph", mem, shell_env, time.monotonic() + 5)
+    ex.call("shell", dict(cmd, timeout=600_000))
+    assert 4 < seen[-1]["timeout_s"] <= 5
+    ex = native._Executor(repo, "graph", mem, shell_env, time.monotonic() - 1)
+    ex.call("shell", dict(cmd))
+    assert seen[-1]["timeout_s"] == 0.1
+    # run_tests raised inside the intent layer: a fallback, not a passthrough.
+    assert ex.fallbacks == 1 and ex.passthrough == 0
+
+
+def test_shell_env_drops_native_settings_and_the_key(monkeypatch):
+    monkeypatch.setenv("OZAGIA_NATIVE_API_KEY_FILE", "/secret/key")
+    monkeypatch.setenv("OZAGIA_NATIVE_MODEL", "m")
+    monkeypatch.setenv("MY_KEY", "sk-123")
+    monkeypatch.setenv("PYTHONPATH", "/ozagia/src")
+    env = native._shell_env("sk-123")
+    assert not any(k.startswith("OZAGIA_NATIVE_") for k in env)
+    assert "MY_KEY" not in env and "PYTHONPATH" not in env
+    assert env["PATH"] == os.environ["PATH"]
+
+
+@pytest.mark.parametrize("url,warns", [
+    ("http://10.0.0.5:8000/v1", True), ("http://example.com/v1", True),
+    ("http://127.0.0.1:8000/v1", False), ("http://localhost:1/v1", False),
+    ("http://[::1]:8000/v1", False), ("https://example.com/v1", False),
+])
+def test_plain_http_to_another_host_warns(url, warns):
+    assert (native._plain_http_warning(url) is not None) is warns
+
+
+def test_graph_mode_writes_the_snapshot_once_at_the_end(repo, mem, tmp_path,
+                                                        monkeypatch):
+    writes: list[int] = []
+    real = mem.write_snapshot
+    monkeypatch.setattr(mem, "write_snapshot", lambda: writes.append(1) or real())
+    with StubLLM(_fix_script()) as stub:
+        s = _run(stub, repo, tmp_path / "log", mode="graph", memory=mem)
+    assert s["stopped"] == "done" and mem.defer_writes is True
+    assert writes == [1] and mem.snapshot_dirty is False
+    assert "snapshot_write_s" in s
+
+
+def test_plain_edit_and_write_refuse_git(repo):
+    head = (repo / ".git" / "HEAD").read_text()
+    for call in (lambda: T.tool_write(repo, {"path": ".git/HEAD", "content": "x"}),
+                 lambda: T.tool_write(repo, {"path": "a/.git/refs/x", "content": "x"}),
+                 lambda: T.tool_edit(repo, {"path": str(repo / ".git" / "HEAD"),
+                                            "oldString": "ref", "newString": "fer"})):
+        with pytest.raises(T.ToolError, match="inside .git"):
+            call()
+    assert (repo / ".git" / "HEAD").read_text() == head
+    assert not (repo / "a").exists()

@@ -55,15 +55,19 @@ daemon failure).
    remove it.
 3. `/.opencode/plugins/ozagia.js` and `/.ozagia/` are added to the
    repository's `info/exclude` when missing (anchored at the workdir), so
-   `git status` stays clean and no tracked file changes. They are not removed
-   afterwards.
+   `git status` stays clean and no tracked file changes. At teardown the
+   lines this run added are removed when their path is gone (the plugin's);
+   the state dir's line stays while the state dir (with the snapshot) does.
 4. `GraphSession` makes the snapshot current and starts the daemon (below).
 5. The plugin is written to `.opencode/plugins/ozagia.js`. A plugin file that
-   was there before is overwritten unless git tracks it, and is not removed.
+   was there before is overwritten unless git tracks it, and is not removed,
+   except one whose content is exactly the packaged plugin: a run killed
+   before its teardown left it, so it is removed like a new one.
 6. `logs/opencode_config.json` becomes `OPENCODE_CONFIG`: the eval's policy,
    `permission.bash` with `"*": "allow"` and `deny` for `git commit*`,
    `push*`, `stash*`, `branch*`, `checkout*`, `switch*`, `reset*`, `rebase*`,
-   `merge*`, `tag*`, `worktree*` (`eval.agent.OPENCODE_GIT_DENY`).
+   `merge*`, `tag*`, `worktree*` and `git <sub>*` for every other
+   subcommand in `intent.shell.GIT_REF_MOVING` (`eval.agent.OPENCODE_GIT_DENY`).
 7. OpenCode runs in the workdir with `OZAGIA_DAEMON_SOCK`, `PWD` (OpenCode
    takes its project directory from it) and `OPENCODE_CONFIG` added to this
    process's environment, and with `--python`, the python shim first on PATH.
@@ -72,23 +76,26 @@ daemon failure).
      stdout to `logs/opencode.stdout.jsonl`, stderr to
      `logs/opencode.stderr.txt`, text parts to `logs/transcript.txt`.
    - Without: `opencode --standalone [ARGS] <workdir>` on the terminal.
-8. In `finally` (also on Ctrl-C and SIGTERM): the plugin is removed unless
-   `--keep-plugin`, then the daemon is stopped. SIGINT is held off during
-   teardown.
+8. In `finally` (also on Ctrl-C and SIGTERM): the plugin and its exclude
+   line are removed unless `--keep-plugin`, then the daemon is stopped.
+   SIGINT is held off during teardown. After a hard kill (SIGKILL) no
+   teardown runs: the daemon, started with `--parent-pid`, exits by itself
+   within 2 s, and the next run removes the leftover plugin.
 
 The summary:
 
 ```
 ozagia agent: exit 0 after 41.2 s in /path/repo
   graph: refreshed (5321 nodes) in 0.8 s; daemon ready in 2.1 s
-  plugin loaded: yes; captured calls: 37; fallbacks: 0
+  plugin loaded: yes; captured calls: 37; passthrough: 9; fallbacks: 0
   transcript: /tmp/ozagia_agent/.../logs/transcript.txt
   logs: /tmp/ozagia_agent/.../logs
 ```
 
 `plugin loaded` is the daemon's `hellos > 0`, `captured calls` its
-`handled.true`, `fallbacks` the tool calls it did not handle (the
-`eval.agent.graph_stats_fields` fields). `run_agent` returns these and the
+`handled.true`, `passthrough` the calls it left to the built-in by design,
+`fallbacks` its `stats.fallbacks` (the plugin's fallback reports, expired
+requests and failed requests; the `eval.agent.graph_stats_fields` fields). `run_agent` returns these and the
 paths as a dict.
 
 ### Interactive mode and the plugin's environment
@@ -132,13 +139,16 @@ Enter:
 1. The snapshot, in a subprocess with `OZAGIA_ROOT=root`
    (`ozagia.core.memory` reads its layout at import). `auto`: build when
    missing. Otherwise `staleness()`; if stale, `refresh()`. A version-1
-   snapshot or one built for another root is rebuilt. `refresh` does not
-   recompute git history, so after a HEAD change the report has
+   snapshot or one built for another root is rebuilt, and so is one still
+   stale after a refresh that reingested nothing or left
+   `DevMemory.unhandled_changes()`. `refresh` does not recompute git
+   history, so after a HEAD change with files to reingest the report has
    `still_stale: true` and the summary suggests `ozagia index --rebuild`.
    `always` rebuilds; `never` fails without a snapshot and never refreshes.
 2. The daemon: `python -m ozagia.daemon serve --root R --dump D --journal
-   <log_dir>/daemon_journal.jsonl --sock S --no-build` in its own process
-   group, with `S` a short path in the temp dir. No `ready` line within
+   <log_dir>/daemon_journal.jsonl --sock S --no-build --parent-pid <pid>`
+   in its own process group, with `S` a short path in the temp dir; it exits
+   by itself if this process dies. No `ready` line within
    `eval.agent.DAEMON_READY_TIMEOUT_S` (120 s), or an early exit: the daemon
    is killed and `SessionError` names the reason and the log dir.
 
@@ -155,3 +165,17 @@ imported from, so the subprocesses run the same ozagia code as the caller.
 `<log_dir>/dev_graph.json`, and the session serves the repository's own
 snapshot. The session reuses `GraphDaemon.stop`, the socket path, the python
 shim and the process-group kill from `eval.agent`.
+
+## Known limits
+
+- Handled calls bypass OpenCode's own permission prompts (see
+  `docs/intent.md`). `ozagia agent` runs with the eval's allow-all bash
+  policy (ref-moving git denied), so no prompt is expected there.
+- Attributes an adapter writes onto core nodes (Symbol, Test, File) through
+  `ctx.builder.attrs` are replaced by the fresh-parse attributes when that
+  file is reingested without an adapter pass; a build restores them.
+- A new, untracked file that only an adapter reads (a new seed manifest no
+  adapter has used yet) is not seen by `refresh`; it needs a build. A
+  changed tracked file that is neither indexed nor adapter-owned keeps the
+  snapshot stale (`DevMemory.unhandled_changes()`), and `GraphSession`
+  rebuilds it.

@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+import sys
 import textwrap
 from pathlib import Path
 from typing import Any
@@ -577,3 +578,54 @@ def test_graph_surface_with_research_mode(repo) -> None:
     assert names[:len(VERBS)] == VERBS
     assert any(n.startswith("research_") for n in names[len(VERBS):])
     assert not any(n.startswith("dev_") for n in names)
+
+
+# --------------------------------------------------------------------------- #
+# review fixes 11 and 17
+# --------------------------------------------------------------------------- #
+def _error(server: DevMemoryServer, name: str, **args: Any) -> str:
+    reply = _rpc(server, "tools/call", {"name": name, "arguments": args})
+    if "error" in reply:
+        return str(reply["error"])
+    text = reply["result"]["content"][0]["text"]
+    if reply["result"]["isError"] is False:
+        doc = json.loads(text)
+        assert doc["ok"] is False, doc
+        return str(doc["error"])
+    return text
+
+
+def test_edit_and_create_refuse_git_and_the_state_dir(server, repo) -> None:
+    head = (repo / ".git" / "HEAD").read_text()
+    msg = _error(server, "edit", key_or_file=".git/HEAD", old_string="ref:",
+                 new_string="ref: ", apply=True)
+    assert "inside .git" in msg
+    assert (repo / ".git" / "HEAD").read_text() == head
+    _write(repo, ".ozagia/notes.md", "# notes\n")
+    msg = _error(server, "edit", key_or_file=".ozagia/notes.md", old_string="notes",
+                 new_string="secrets", apply=True)
+    assert "state directory" in msg
+    assert (repo / ".ozagia" / "notes.md").read_text() == "# notes\n"
+    msg = _error(server, "create", path="pkg/.git/x.py", content="X = 1\n", apply=True)
+    assert "inside .git" in msg
+
+
+def test_check_uses_the_run_python(server, repo, monkeypatch) -> None:
+    from ozagia import check
+    seen: list[dict] = []
+    real = check.run_tests
+
+    def spy(root, selectors, **kw):
+        seen.append(kw)
+        return real(root, selectors, **kw)
+
+    monkeypatch.setattr(check, "run_tests", spy)
+    monkeypatch.setenv("OZAGIA_RUN_PYTHON", sys.executable)
+    call(server, "check", tests=["tests/test_core.py::test_add"])
+    assert seen[-1]["python"] == sys.executable
+    monkeypatch.delenv("OZAGIA_RUN_PYTHON")
+    venv = repo / ".venv" / "bin"
+    venv.mkdir(parents=True)
+    (venv / "python").symlink_to(sys.executable)
+    call(server, "check", tests=["tests/test_core.py::test_add"])
+    assert seen[-1]["python"] == str(venv / "python")

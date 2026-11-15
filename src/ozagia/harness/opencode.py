@@ -11,11 +11,16 @@
    the summary prints how to remove it.
 3. Adds `/.opencode/plugins/ozagia.js` and `/.ozagia/` to the repository's
    `info/exclude` (only the lines that are missing), so neither shows in
-   `git status` and no tracked file changes.
+   `git status` and no tracked file changes. At the end (unless
+   `keep_plugin`) the lines this run added are removed again when their
+   path is gone (the plugin's); the state dir's line stays while the state
+   dir, which keeps the snapshot, exists.
 4. Opens a `GraphSession` (snapshot built or refreshed, daemon started).
 5. Installs the plugin into `<workdir>/.opencode/plugins/ozagia.js`.
    A plugin file that was already there is overwritten unless git tracks it,
-   and is never removed afterwards.
+   and is not removed afterwards, except one whose content is exactly
+   `plugin_source()`: that one was left by a run killed before teardown, and
+   is removed like a new one.
 6. Writes `OPENCODE_CONFIG` to `<run root>/logs/opencode_config.json`: the
    eval's permission policy (`bash: {"*": "allow", <ref-moving git
    commands>: "deny"}`, `eval.agent.OPENCODE_GIT_DENY`). In interactive mode
@@ -28,9 +33,11 @@
      stderr to files in the logs, killed after `timeout_s`.
    - No prompt: the TUI, `opencode --standalone [extra args] [--prompt P]
      <workdir>`, attached to the terminal.
-8. Always (also on Ctrl-C, SIGTERM or an error): removes the plugin unless
-   `keep_plugin`, stops the daemon (stats, shutdown, kill group, remove
-   socket).
+8. Always (also on Ctrl-C, SIGTERM or an error): removes the plugin and
+   the exclude lines unless `keep_plugin`, stops the daemon (stats,
+   shutdown, kill group, remove socket). After a hard kill (SIGKILL) none
+   of this runs; the daemon then exits by itself (`--parent-pid`), and the
+   next run removes the leftover plugin.
 
 Interactive mode and the plugin's environment. The plugin acts only when
 `OZAGIA_DAEMON_SOCK` is in the environment of the process that loads plugins.
@@ -97,8 +104,9 @@ def git_exclude(workdir: str | Path,
                 patterns: Sequence[str] = EXCLUDE_PATTERNS) -> dict[str, Any] | None:
     """Add the root-anchored `patterns` to the repository's `info/exclude`,
     only those not already there. Patterns are anchored at `workdir` (its
-    prefix inside the repository is added). Returns {path, added}, or None
-    when `workdir` is not in a git repository."""
+    prefix inside the repository is added). Returns {path, added, targets
+    (added line -> the path it hides)}, or None when `workdir` is not in a
+    git repository."""
     workdir = Path(workdir).resolve()
     where = _git(["rev-parse", "--git-path", "info/exclude"], workdir)
     prefix = _git(["rev-parse", "--show-prefix"], workdir)
@@ -107,7 +115,7 @@ def git_exclude(workdir: str | Path,
     path = Path(where.stdout.strip())
     if not path.is_absolute():
         path = workdir / path
-    want = ["/" + prefix.stdout.strip() + p.lstrip("/") for p in patterns]
+    want = {"/" + prefix.stdout.strip() + p.lstrip("/"): p for p in patterns}
     text = path.read_text(encoding="utf-8") if path.is_file() else ""
     have = {line.strip() for line in text.splitlines()}
     added = [w for w in want if w not in have]
@@ -116,7 +124,37 @@ def git_exclude(workdir: str | Path,
         sep = "" if not text or text.endswith("\n") else "\n"
         with path.open("a", encoding="utf-8") as fh:
             fh.write(sep + "\n".join(added) + "\n")
-    return {"path": str(path), "added": added}
+    return {"path": str(path), "added": added,
+            "targets": {w: str(workdir / want[w].strip("/")) for w in added}}
+
+
+def git_unexclude(info: dict[str, Any] | None) -> list[str]:
+    """Remove from `info/exclude` the lines `git_exclude` added (`info` is
+    its result) whose path is gone, one occurrence each, leaving every
+    other line. A line whose path still exists (the state dir, which keeps
+    the snapshot for the next run) stays, so it does not show up in `git
+    status`. Returns the lines removed."""
+    if not info or not info.get("added"):
+        return []
+    path = Path(info["path"])
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    except OSError:
+        return []
+    targets = info.get("targets") or {}
+    todo = [w for w in info["added"]
+            if not (w in targets and os.path.lexists(targets[w]))]
+    kept: list[str] = []
+    removed: list[str] = []
+    for line in lines:
+        if line.strip() in todo:
+            todo.remove(line.strip())
+            removed.append(line.strip())
+        else:
+            kept.append(line)
+    if removed:
+        path.write_text("".join(kept), encoding="utf-8")
+    return removed
 
 
 def write_opencode_config(path: Path, *, model: str | None = None) -> Path:
@@ -199,7 +237,8 @@ def _summary(res: dict[str, Any]) -> str:
         f"  graph: {prep.get('action', '?')} ({prep.get('nodes', '?')} nodes) in "
         f"{res.get('build_s')} s; daemon ready in {res.get('ready_s')} s",
         f"  plugin loaded: {yn(res.get('plugin_loaded'))}; captured calls: "
-        f"{res.get('captured_calls')}; fallbacks: {res.get('fallbacks')}",
+        f"{res.get('captured_calls')}; passthrough: {res.get('passthrough_calls')}; "
+        f"fallbacks: {res.get('fallbacks')}",
     ]
     if prep.get("still_stale"):
         lines.append("  note: the snapshot was refreshed but HEAD moved since it was built; "
@@ -247,7 +286,7 @@ def run_agent(workdir: str | Path, *, prompt: str | None = None, model: str | No
                            "transcript_path": None, "stdout_path": None,
                            "stderr_path": None, "daemon_stats": None,
                            "plugin_loaded": None, "captured_calls": None,
-                           "fallbacks": None, "workdir": str(work), "source": str(source),
+                           "passthrough_calls": None, "fallbacks": None, "workdir": str(work), "source": str(source),
                            "clone": clone, "base": None, "run_root": str(run_root),
                            "log_dir": str(log_dir), "interactive": interactive,
                            "sock": None, "prep": None, "build_s": None, "ready_s": None,
@@ -280,6 +319,9 @@ def run_agent(workdir: str | Path, *, prompt: str | None = None, model: str | No
                                         timeout_s=timeout_s, extra_args=extra_args,
                                         config=config, log_dir=log_dir))
         finally:
+            if not keep_plugin:
+                with no_interrupt():
+                    res["exclude_removed"] = git_unexclude(res["exclude"])
             res["daemon_stats"] = session.final_stats
             res["daemon_stop_error"] = session.stop_error
             res.update(ea.graph_stats_fields(session.final_stats))
@@ -298,6 +340,14 @@ def _with_plugin(exe: str, work: Path, session: GraphSession, *, prompt: str | N
     """Install the plugin, run OpenCode, remove the plugin (in `finally`)."""
     path = plugin.plugin_path(work)
     existed = path.exists()
+    # A file with exactly our source is ours, left by a run that was killed
+    # before its teardown: it is removed after this run like a new one.
+    if existed and not _tracked(work, plugin.PLUGIN_REL):
+        try:
+            if path.read_text(encoding="utf-8") == plugin.plugin_source():
+                existed = False
+        except OSError:
+            pass
     out: dict[str, Any] = {"plugin_path": str(path)}
     try:
         if not (existed and _tracked(work, plugin.PLUGIN_REL)):
@@ -339,4 +389,4 @@ def _with_plugin(exe: str, work: Path, session: GraphSession, *, prompt: str | N
 
 
 __all__ = ["AgentError", "EXCLUDE_PATTERNS", "RUN_ARGV", "TUI_ARGV", "find_opencode",
-           "git_exclude", "run_agent", "write_opencode_config"]
+           "git_exclude", "git_unexclude", "run_agent", "write_opencode_config"]

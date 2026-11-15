@@ -418,9 +418,13 @@ def _kill_group(pgid: int, sig: int) -> None:
 
 def run_tests(root: str | Path, selectors: list[str], *,
               python: str | None = None, timeout_s: float = 300,
-              env: dict | None = None,
+              env: dict | None = None, inherit: bool = True,
               extra_args: Iterable[str] = ()) -> dict[str, Any]:
     """Run pytest on `selectors` in `root` and return the results as keys.
+
+    The environment is this process's, updated with `env`; with
+    `inherit=False` it is `env` alone (an empty one without it). Either way
+    `PYTHONDONTWRITEBYTECODE=1` and `PWD=<root>` are set.
 
     `ok` is True only when pytest exits 0. Exit code 5 (no tests collected)
     has `status` "no_tests_collected" and `ok` False. On timeout the process
@@ -433,7 +437,7 @@ def run_tests(root: str | Path, selectors: list[str], *,
     cmd = [python, "-m", "pytest", "-q", "-p", "no:cacheprovider",
            f"--junitxml={xml_path}", "-o", "junit_family=xunit1",
            *list(extra_args), *list(selectors)]
-    run_env = dict(os.environ)
+    run_env = dict(os.environ) if inherit else {}
     if env:
         run_env.update({str(k): str(v) for k, v in env.items()})
     run_env["PYTHONDONTWRITEBYTECODE"] = "1"
