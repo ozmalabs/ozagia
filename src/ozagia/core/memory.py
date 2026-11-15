@@ -29,6 +29,16 @@ Adapter indexers (`ozagia.adapters`) add project node types. The query layer
 also understands `Seed` and `Rule`-like nodes (`seed`, `rule`, task anchors)
 when an adapter provides them; without them those queries find nothing.
 
+Every node has a stable key (`ozagia.core.keys`): `file:<rel>`,
+`sym:<rel>::<qualname>`, `test:<rel>::<qualname>`, `doc:<rel>`,
+`commit:<sha>`, `failure:<id>`, `repo:`, or an adapter's own kind. Python
+symbols with the same qualname in one file share one node (the first). Rust
+items are keyed by qualname too; the 2nd, 3rd ... item with the same
+qualname in a file, in file order, is `<qualname>#2`, `#3`. A node created
+without a key gets `<Type>:<file-or-path-attr-or-none>#<n>`.
+`DevMemory.reingest` updates the graph for changed files without a full
+build (see `ozagia.core.reingest`); `DevMemory.refresh` finds them.
+
 What is indexed comes from the project configuration (`ozagia.config`).
 
 Usage:
@@ -61,6 +71,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 from ozagia.config import load_project_config, repo_root, state_path, state_rel
+from ozagia.core.keys import format_key, parse_key
 
 ROOT = repo_root()
 DEFAULT_DUMP = state_path(ROOT, "graph.json")
@@ -210,6 +221,31 @@ def _stem(token: str) -> str:
 # --------------------------------------------------------------------------- #
 # graph builder
 # --------------------------------------------------------------------------- #
+# Snapshot format version. 2 adds node keys and the per-file side tables.
+SNAPSHOT_VERSION = 2
+
+# Builder key kinds the core creates. Nodes with any other kind are adapter
+# nodes (see `ozagia.core.reingest`).
+CORE_KEY_KINDS = frozenset({"file", "symbol", "test", "doc", "commit",
+                            "failure", "repo"})
+
+
+def default_node_key(counts: dict[tuple[str, str], int], type_name: str,
+                     attrs: dict[str, Any] | None) -> tuple:
+    """The builder key of a node created without one.
+
+    `(type, "<rel>#<n>")`, i.e. the string key `<type>:<rel>#<n>`, where
+    `<rel>` is the node's `file` or `path` attr (or `none`) and `<n>` counts
+    unkeyed nodes of that type and file from 1 in creation order. Such keys
+    are only stable while the creating indexer runs in the same order.
+    """
+    a = attrs or {}
+    rel = str(a.get("file") or a.get("path") or "none")
+    n = counts.get((type_name, rel), 0) + 1
+    counts[(type_name, rel)] = n
+    return (type_name, f"{rel}#{n}")
+
+
 @dataclass
 class Builder:
     nodes: list[dict[str, Any]] = field(default_factory=list)
@@ -217,17 +253,23 @@ class Builder:
     _by_key: dict[tuple, int] = field(default_factory=dict)
     _edge_keys: set[tuple[int, str, int]] = field(default_factory=set)
     _next: int = 0
+    # Nodes created without a key, and the counters behind their keys.
+    unkeyed: int = 0
+    _unkeyed_counts: dict[tuple[str, str], int] = field(default_factory=dict)
 
     def node(self, type_name: str, attrs: dict[str, Any] | None = None,
              *, key: tuple | None = None) -> int:
         if key is not None and key in self._by_key:
             return self._by_key[key]
+        if key is None:
+            key = default_node_key(self._unkeyed_counts, type_name, attrs)
+            self.unkeyed += 1
         nid = self._next
         self._next += 1
         self.nodes.append({"id": nid, "type": type_name,
-                           "attrs": dict(attrs or {})})
-        if key is not None:
-            self._by_key[key] = nid
+                           "attrs": dict(attrs or {}),
+                           "key": format_key(key)})
+        self._by_key[key] = nid
         return nid
 
     def edge(self, src: int | None, type_name: str, tgt: int | None,
@@ -269,8 +311,10 @@ class PyParse:
     source: str = ""
 
 
-def _python_parse(path: Path) -> PyParse | None:
-    src = _read_text(path)
+def _python_parse(path: Path, src: str | None = None) -> PyParse | None:
+    """Parse a Python file. `src` is its text when already read."""
+    if src is None:
+        src = _read_text(path)
     if src is None:
         return None
     # A UTF-8 byte order mark is not Python source; ast.parse rejects it.
@@ -381,8 +425,9 @@ _RUST_SYM_RE = re.compile(
 _RUST_MOD_RE = re.compile(r"^\s*(?:pub\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;")
 
 
-def _rust_parse(path: Path) -> dict[str, Any] | None:
-    src = _read_text(path)
+def _rust_parse(path: Path, src: str | None = None) -> dict[str, Any] | None:
+    if src is None:
+        src = _read_text(path)
     if src is None:
         return None
     symbols: list[dict[str, Any]] = []
@@ -410,10 +455,10 @@ def _rust_parse(path: Path) -> dict[str, Any] | None:
     return {"symbols": symbols, "mods": mods, "source": src}
 
 
-def _resolve_import(root: Path, rel_file: str, imp: dict[str, Any]) -> str | None:
-    module = imp.get("module") or ""
-    level = int(imp.get("level") or 0)
-    parts = [p for p in module.split(".") if p]
+def _import_candidates(rel_file: str, module: str, level: int) -> list[str]:
+    """Root-relative paths an import may resolve to, in resolution order."""
+    parts = [p for p in (module or "").split(".") if p]
+    level = int(level or 0)
     if level > 0:
         base = Path(rel_file).parent
         for _ in range(level - 1):
@@ -422,19 +467,31 @@ def _resolve_import(root: Path, rel_file: str, imp: dict[str, Any]) -> str | Non
                       base.joinpath(*parts, "__init__.py")]
     else:
         if not parts:
-            return None
+            return []
         candidates = [Path(*parts).with_suffix(".py"),
                       Path(*parts, "__init__.py")]
-    search_roots = [root] + [root / r for r in IMPORT_ROOTS if r != "."]
-    for base in search_roots:
+    out: list[str] = []
+    for r in [None] + [r for r in IMPORT_ROOTS if r != "."]:
         for cand in candidates:
-            p = (base / cand)
-            try:
-                if p.is_file():
-                    return p.resolve().relative_to(root.resolve()).as_posix()
-            except (OSError, ValueError):
-                continue
+            out.append((cand if r is None else Path(r) / cand).as_posix())
+    return out
+
+
+def _resolve_candidates(root: Path, candidates: Iterable[str]) -> str | None:
+    """The first candidate that is a file, as a resolved root-relative path."""
+    for cand in candidates:
+        p = root / cand
+        try:
+            if p.is_file():
+                return p.resolve().relative_to(root.resolve()).as_posix()
+        except (OSError, ValueError):
+            continue
     return None
+
+
+def _resolve_import(root: Path, rel_file: str, imp: dict[str, Any]) -> str | None:
+    return _resolve_candidates(root, _import_candidates(
+        rel_file, imp.get("module") or "", int(imp.get("level") or 0)))
 
 
 # --------------------------------------------------------------------------- #
@@ -488,154 +545,285 @@ def _iter_paths(root: Path, rel_dir: str, suffixes: tuple[str, ...],
         yield p
 
 
-def build_index(root: str | Path = ROOT, out: str | Path = DEFAULT_DUMP,
-                *, include_docs: str = "features", include_git: bool = True,
-                include_scripts: bool = True,
-                git_limit: int = 200) -> dict[str, Any]:
-    """Build the dev-memory graph and write it to `out`.
+def _read_stamped(path: Path, *, limit: int = MAX_PARSE_BYTES
+                  ) -> tuple[str | None, dict[str, Any]]:
+    """`_read_text(path, limit=limit)` and the file's stamp.
 
-    `include_docs`: "features" (default: the configured `docs` globs), "all"
-    (those plus `docs_all`), or "none". `include_scripts=False` leaves out a
-    source dir named `scripts`. Adapter indexers run after the docs.
-    Returns the graph dict plus a small build report.
+    The stamp has `size` and `mtime_ns`, and `sha256` of the bytes when the
+    file is at most MAX_PARSE_BYTES. The file is read once. Newlines are
+    translated as `read_text` does (universal newlines)."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None, {}
+    stamp: dict[str, Any] = {"size": int(st.st_size),
+                             "mtime_ns": int(st.st_mtime_ns)}
+    if st.st_size > MAX_PARSE_BYTES:
+        return None, stamp
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None, stamp
+    stamp["sha256"] = hashlib.sha256(data).hexdigest()
+    if st.st_size > limit:
+        return None, stamp
+    text = data.decode("utf-8", errors="replace")
+    if "\r" in text:
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+    return text, stamp
+
+
+def _file_attrs(root: Path, rel: str, *, indexed: bool = True) -> dict[str, Any]:
+    """The attrs of a new File node (before any parse adds `doc`/`sha256`)."""
+    p = root / rel
+    attrs: dict[str, Any] = {
+        "name": rel,
+        "path": rel,
+        "language": p.suffix.lstrip(".").lower() or "unknown",
+        "indexed": 1 if indexed else 0,
+    }
+    try:
+        if p.exists():
+            attrs["size"] = int(p.stat().st_size)
+    except OSError:
+        pass
+    return attrs
+
+
+def _is_test_path(rel: str) -> bool:
+    if not Path(rel).name.startswith("test_") or not rel.endswith(".py"):
+        return False
+    return any(d in ("", ".") or rel.startswith(d + "/") for d in TEST_DIRS)
+
+
+def _under_dir(rel: str, rel_dir: str) -> bool:
+    d = Path(rel_dir).as_posix()
+    return d in ("", ".") or rel.startswith(d.rstrip("/") + "/")
+
+
+def _glob_regex(pattern: str) -> re.Pattern[str]:
+    """A regex for the root-relative file paths `root.glob(pattern)` yields.
+
+    `**` matches zero or more directories, `*` and `?` stay inside one path
+    component, `[...]` is a character class. A trailing `**` matches only
+    directories, so it matches no file here."""
+    parts = [p for p in pattern.split("/") if p not in ("", ".")]
+    if not parts or parts[-1] == "**":
+        return re.compile(r"(?!)")
+    out = []
+    for i, part in enumerate(parts):
+        last = i == len(parts) - 1
+        if part == "**":
+            out.append(r"(?:[^/]+/)*")
+            continue
+        seg, j = [], 0
+        while j < len(part):
+            c = part[j]
+            if c == "*":
+                seg.append(r"[^/]*")
+            elif c == "?":
+                seg.append(r"[^/]")
+            elif c == "[":
+                k = part.find("]", j + 2 if part[j + 1:j + 2] in ("!", "]") else j + 1)
+                if k < 0:
+                    seg.append(re.escape(c))
+                else:
+                    body = part[j + 1:k]
+                    if body.startswith("!"):
+                        body = "^" + body[1:]
+                    seg.append("[" + body.replace("\\", "\\\\") + "]")
+                    j = k
+            else:
+                seg.append(re.escape(c))
+            j += 1
+        out.append("".join(seg) + ("" if last else "/"))
+    return re.compile("".join(out) + r"\Z")
+
+
+def file_role(root: Path, rel: str, *, include_docs: str = "features",
+              include_scripts: bool = True) -> str | None:
+    """What a full build would index `rel` as, by its path: "source", "test",
+    "doc" or None. Whether the file exists is not checked (see
+    `_walked`)."""
+    if not rel or _skipped(rel):
+        return None
+    srel = state_rel(root)
+    in_state = bool(srel and (rel == srel or rel.startswith(srel + "/")))
+    suffix = Path(rel).suffix
+    if not in_state and _is_test_path(rel):
+        return "test"
+    if not in_state and suffix in (".py", ".rs", ".lua"):
+        src_dirs = [d for d in SOURCE_DIRS
+                    if include_scripts or d != "scripts"]
+        if any(_under_dir(rel, d) for d in src_dirs):
+            return "source"
+    if include_docs != "none" and suffix.lower() == ".md":
+        globs = ALL_DOC_GLOBS if include_docs == "all" else DOC_GLOBS
+        if any(_glob_regex(g).match(rel) for g in globs):
+            return "doc"
+    return None
+
+
+def _walked(root: Path, rel: str) -> bool:
+    """`rel` is a regular file reached at that path (not through a symlink
+    that resolves elsewhere), as the build's walks see it."""
+    p = root / rel
+    try:
+        return p.is_file() and _rel(root, p) == rel
+    except (OSError, ValueError):
+        return False
+
+
+class FileIndexer:
+    """The per-file part of a build: one source, test or doc file.
+
+    Each `index_*` method adds the file's File node, the Symbol/Test/Doc
+    nodes it owns and their out-edges (defines, defined_in, contains,
+    contains_symbol, imports, has_test, tested_by_file, tests_module,
+    mentions_file, has_doc, documents) to the builder, and records the file
+    in `table` (the snapshot's `files` side table):
+
+        {"role": "source"|"test"|"doc", "ctx": 0|1,
+         "size": <bytes>, "mtime_ns": <ns>,
+         "refs": [["imports", <module>, <level>],    # Python import
+                  ["rs_mod", <rel>],                  # Rust `mod x;`
+                  ["mentions", <rel>],                # path in a test file
+                  ["documents", <rel>], ...]}         # path in a doc
+
+    `refs` lists every reference to another file, resolved or not, so a
+    reingest can resolve them again when a referenced file appears or goes
+    away without parsing the referring file. `ctx` is 1 when the file was
+    handed to adapter indexers. `build_index` calls it for every file;
+    `ozagia.core.reingest` calls it for one file against a scratch builder.
     """
-    from ozagia.adapters import (IndexContext, IndexedDoc, IndexedSource,
-                                 IndexedTests, registry)
 
-    root = Path(root).resolve()
-    out = Path(out)
-    b = Builder()
-    t0 = time.time()
+    def __init__(self, b: Builder, root: Path, repo: int) -> None:
+        from ozagia.adapters import IndexedDoc, IndexedSource, IndexedTests
+        self._types = (IndexedSource, IndexedTests, IndexedDoc)
+        self.b = b
+        self.root = root
+        self.repo = repo
+        self.files: dict[str, int] = {}
+        self.table: dict[str, dict[str, Any]] = {}
+        self._ref_seen: dict[int, set[tuple]] = {}
+        # Parsed file texts, handed to adapter indexers.
+        self.sources: list[Any] = []
+        self.tests: list[Any] = []
+        self.docs: list[Any] = []
 
-    repo = b.node("Repo", {
-        "name": root.name,
-        "root": str(root),
-        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-    })
-    files: dict[str, int] = {}
-
-    def file_node(rel: str, *, indexed: bool = True) -> int:
-        if rel in files:
-            return files[rel]
-        p = root / rel
-        lang = p.suffix.lstrip(".").lower() or "unknown"
-        attrs: dict[str, Any] = {
-            "name": rel,
-            "path": rel,
-            "language": lang,
-            "indexed": 1 if indexed else 0,
-        }
-        try:
-            if p.exists():
-                attrs["size"] = int(p.stat().st_size)
-        except OSError:
-            pass
-        nid = b.node("File", attrs, key=("file", rel))
-        files[rel] = nid
-        b.edge(repo, "contains", nid)
+    def file_node(self, rel: str, *, indexed: bool = True) -> int:
+        if rel in self.files:
+            return self.files[rel]
+        nid = self.b.node("File", _file_attrs(self.root, rel, indexed=indexed),
+                          key=("file", rel))
+        self.files[rel] = nid
+        self.b.edge(self.repo, "contains", nid)
         return nid
 
-    # Parsed file texts, handed to adapter indexers.
-    ctx_sources: list[IndexedSource] = []
-    ctx_tests: list[IndexedTests] = []
-    ctx_docs: list[IndexedDoc] = []
+    def _begin(self, rel: str, role: str, p: Path, *,
+               limit: int = MAX_PARSE_BYTES) -> tuple[int, str | None,
+                                                      dict[str, Any]]:
+        fid = self.file_node(rel)
+        text, stamp = _read_stamped(p, limit=limit)
+        if stamp.get("sha256"):
+            self.b.attrs(fid)["sha256"] = stamp["sha256"]
+        entry = {"role": role, "ctx": 0, "refs": [],
+                 "size": stamp.get("size"), "mtime_ns": stamp.get("mtime_ns")}
+        self.table[rel] = entry
+        return fid, text, entry
 
-    def is_test_path(rel: str) -> bool:
-        if not Path(rel).name.startswith("test_") or not rel.endswith(".py"):
-            return False
-        return any(d in ("", ".") or rel.startswith(d + "/") for d in TEST_DIRS)
+    def _ref(self, entry: dict[str, Any], ref: list[Any]) -> None:
+        seen = self._ref_seen.setdefault(id(entry), set())
+        if tuple(ref) not in seen:
+            seen.add(tuple(ref))
+            entry["refs"].append(ref)
 
-    # -- source / test / script files ------------------------------------- #
-    src_dirs = list(SOURCE_DIRS)
-    if not include_scripts:
-        src_dirs = [d for d in src_dirs if d != "scripts"]
-    py_files: list[tuple[str, int, PyParse]] = []
-    seen_src: set[str] = set()
-    for rel_dir in src_dirs:
-        for p in _iter_paths(root, rel_dir, (".py", ".rs", ".lua")):
-            rel = _rel(root, p)
-            # Overlapping source dirs index a file once; test files are left
-            # to the test walk below.
-            if rel in seen_src or is_test_path(rel):
-                continue
-            seen_src.add(rel)
-            fid = file_node(rel)
-            if p.suffix == ".py":
-                parsed = _python_parse(p)
-                if parsed is None:
-                    continue
-                py_files.append((rel, fid, parsed))
-                if parsed.module_doc:
-                    b.nodes[fid]["attrs"]["doc"] = parsed.module_doc
-                for sym in parsed.symbols:
-                    sid = b.node("Symbol", {
-                        "name": sym["name"],
-                        "qualname": sym["qualname"],
-                        "kind": sym["kind"],
-                        "file": rel,
-                        "start_line": sym["start_line"],
-                        "end_line": sym["end_line"],
-                        "doc": sym["doc"],
-                        "decorators": sym["decorators"],
-                        "args": sym["args"],
-                        "returns": sym.get("returns", ""),
-                        "bases": sym.get("bases", []),
-                    }, key=("symbol", rel, sym["qualname"]))
-                    b.edge(fid, "defines", sid)
-                    b.edge(sid, "defined_in", fid)
-                    if "." in sym["qualname"]:
-                        parent_q = sym["qualname"].rsplit(".", 1)[0]
-                        parent = b._by_key.get(("symbol", rel, parent_q))
-                        if parent is not None:
-                            b.edge(parent, "contains_symbol", sid)
-                for imp in parsed.imports:
-                    target = _resolve_import(root, rel, imp)
-                    if target:
-                        b.edge(fid, "imports", file_node(target))
-                ctx_sources.append(IndexedSource(rel, fid, parsed.source or ""))
-            elif p.suffix == ".rs":
-                parsed = _rust_parse(p)
-                if parsed is None:
-                    continue
-                for sym in parsed["symbols"]:
-                    sid = b.node("Symbol", {
-                        "name": sym["name"],
-                        "qualname": sym["qualname"],
-                        "kind": sym["kind"],
-                        "file": rel,
-                        "start_line": sym["start_line"],
-                        "end_line": sym["end_line"],
-                        "doc": "",
-                        "decorators": [],
-                        "args": [],
-                    }, key=("symbol", rel, f"rust:{sym['start_line']}:{sym['qualname']}"))
-                    b.edge(fid, "defines", sid)
-                    b.edge(sid, "defined_in", fid)
-                for mod in parsed["mods"]:
-                    target = (Path(rel).parent / f"{mod}.rs").as_posix()
-                    if (root / target).is_file():
-                        b.edge(fid, "imports", file_node(target))
-                ctx_sources.append(IndexedSource(rel, fid, parsed.get("source") or ""))
+    def _import_ref(self, entry: dict[str, Any], imp: dict[str, Any]) -> None:
+        # `import a.b` has no module part and never resolves (see
+        # `_resolve_import`); it is not recorded.
+        module, level = imp.get("module") or "", int(imp.get("level") or 0)
+        if module or level:
+            self._ref(entry, ["imports", module, level])
 
-    # -- tests ------------------------------------------------------------- #
-    test_paths: list[Path] = []
-    seen_tests: set[str] = set()
-    for rel_dir in TEST_DIRS:
-        for p in _iter_paths(root, rel_dir, (".py",),
-                             path_filter=lambda r: Path(r).name.startswith("test_")):
-            rel = _rel(root, p)
-            if rel not in seen_tests:
-                seen_tests.add(rel)
-                test_paths.append(p)
-    for p in test_paths:
-        rel = _rel(root, p)
-        fid = file_node(rel)
-        parsed = _python_parse(p)
+    def index_source(self, p: Path, rel: str) -> None:
+        b = self.b
+        fid, text, entry = self._begin(rel, "source", p)
+        if p.suffix == ".py":
+            parsed = _python_parse(p, text)
+            if parsed is None:
+                return
+            if parsed.module_doc:
+                b.attrs(fid)["doc"] = parsed.module_doc
+            for sym in parsed.symbols:
+                sid = b.node("Symbol", {
+                    "name": sym["name"],
+                    "qualname": sym["qualname"],
+                    "kind": sym["kind"],
+                    "file": rel,
+                    "start_line": sym["start_line"],
+                    "end_line": sym["end_line"],
+                    "doc": sym["doc"],
+                    "decorators": sym["decorators"],
+                    "args": sym["args"],
+                    "returns": sym.get("returns", ""),
+                    "bases": sym.get("bases", []),
+                }, key=("symbol", rel, sym["qualname"]))
+                b.edge(fid, "defines", sid)
+                b.edge(sid, "defined_in", fid)
+                if "." in sym["qualname"]:
+                    parent_q = sym["qualname"].rsplit(".", 1)[0]
+                    parent = b.find(("symbol", rel, parent_q))
+                    if parent is not None:
+                        b.edge(parent, "contains_symbol", sid)
+            for imp in parsed.imports:
+                self._import_ref(entry, imp)
+                target = _resolve_import(self.root, rel, imp)
+                if target:
+                    b.edge(fid, "imports", self.file_node(target))
+            self.sources.append(self._types[0](rel, fid, parsed.source or ""))
+            entry["ctx"] = 1
+        elif p.suffix == ".rs":
+            parsed = _rust_parse(p, text)
+            if parsed is None:
+                return
+            # Rust items are keyed by qualname; the 2nd, 3rd ... item with
+            # the same qualname in one file (in file order) gets `#2`, `#3`.
+            seen: dict[str, int] = {}
+            for sym in parsed["symbols"]:
+                q = sym["qualname"]
+                seen[q] = seen.get(q, 0) + 1
+                kq = q if seen[q] == 1 else f"{q}#{seen[q]}"
+                sid = b.node("Symbol", {
+                    "name": sym["name"],
+                    "qualname": sym["qualname"],
+                    "kind": sym["kind"],
+                    "file": rel,
+                    "start_line": sym["start_line"],
+                    "end_line": sym["end_line"],
+                    "doc": "",
+                    "decorators": [],
+                    "args": [],
+                }, key=("symbol", rel, kq))
+                b.edge(fid, "defines", sid)
+                b.edge(sid, "defined_in", fid)
+            for mod in parsed["mods"]:
+                target = (Path(rel).parent / f"{mod}.rs").as_posix()
+                self._ref(entry, ["rs_mod", target])
+                if (self.root / target).is_file():
+                    b.edge(fid, "imports", self.file_node(target))
+            self.sources.append(self._types[0](rel, fid,
+                                               parsed.get("source") or ""))
+            entry["ctx"] = 1
+
+    def index_test(self, p: Path, rel: str) -> None:
+        b = self.b
+        root = self.root
+        fid, text, entry = self._begin(rel, "test", p)
+        parsed = _python_parse(p, text)
         if parsed is None:
-            continue
-        py_files.append((rel, fid, parsed))
+            return
         if parsed.module_doc:
-            b.nodes[fid]["attrs"]["doc"] = parsed.module_doc
+            b.attrs(fid)["doc"] = parsed.module_doc
         for sym in parsed.symbols:
             # Test functions get a Test node below; do not duplicate them as
             # Symbols. Helper functions/classes in a test module stay Symbols.
@@ -658,9 +846,10 @@ def build_index(root: str | Path = ROOT, out: str | Path = DEFAULT_DUMP,
             b.edge(fid, "defines", sid)
             b.edge(sid, "defined_in", fid)
         for imp in parsed.imports:
+            self._import_ref(entry, imp)
             target = _resolve_import(root, rel, imp)
             if target:
-                b.edge(fid, "imports", file_node(target))
+                b.edge(fid, "imports", self.file_node(target))
         for test in parsed.tests:
             tid = b.node("Test", {
                 "name": test["name"],
@@ -673,32 +862,154 @@ def build_index(root: str | Path = ROOT, out: str | Path = DEFAULT_DUMP,
             b.edge(fid, "has_test", tid)
             b.edge(tid, "tested_by_file", fid)
             if test["doc"]:
-                b.nodes[tid]["attrs"]["doc"] = test["doc"]
+                b.attrs(tid)["doc"] = test["doc"]
         # Test-file -> module links (imports) and literal path mentions.
-        src = _read_text(p) or ""
+        src = text or ""
         seen_mods: set[int] = set()
         for imp in parsed.imports:
             target = _resolve_import(root, rel, imp)
             if not target:
                 continue
-            target_nid = file_node(target)
+            target_nid = self.file_node(target)
             for test in parsed.tests:
-                tid = b._by_key.get(("test", rel, test["qualname"]))
+                tid = b.find(("test", rel, test["qualname"]))
                 if tid is not None and target_nid not in seen_mods:
                     b.edge(tid, "tests_module", target_nid)
             seen_mods.add(target_nid)
         for path_match in _PATH_RE.findall(src):
             target = path_match.rstrip(".,);:")
+            self._ref(entry, ["mentions", target])
             if (root / target).is_file():
-                target_nid = file_node(target)
+                target_nid = self.file_node(target)
                 for test in parsed.tests:
-                    tid = b._by_key.get(("test", rel, test["qualname"]))
+                    tid = b.find(("test", rel, test["qualname"]))
                     if tid is not None:
                         b.edge(tid, "mentions_file", target_nid)
-        ctx_tests.append(IndexedTests(
+        self.tests.append(self._types[1](
             rel, fid, src,
-            [tid for tid in (b._by_key.get(("test", rel, t["qualname"]))
+            [tid for tid in (b.find(("test", rel, t["qualname"]))
                              for t in parsed.tests) if tid is not None]))
+        entry["ctx"] = 1
+
+    def index_doc(self, p: Path, rel: str) -> None:
+        b = self.b
+        # The doc's File node comes after the Doc node, as before keys.
+        text, stamp = _read_stamped(p, limit=1_000_000)
+        text = text or ""
+        title = ""
+        for line in text.splitlines()[:50]:
+            if line.startswith("#"):
+                title = line.lstrip("#").strip()[:200]
+                break
+        did = b.node("Doc", {
+            "name": rel,
+            "path": rel,
+            "title": title,
+            "kind": ("features" if "/features/" in rel else
+                     "research" if "/research/" in rel else "root"),
+        }, key=("doc", rel))
+        b.edge(self.repo, "has_doc", did)
+        # A doc is also an ordinary file: make it addressable by dev_file /
+        # dev_changed and give it the same defines/defined_in symmetry as a
+        # seed or source file.
+        dfid = self.file_node(rel)
+        if stamp.get("sha256"):
+            b.attrs(dfid)["sha256"] = stamp["sha256"]
+        entry = {"role": "doc", "ctx": 1, "refs": [],
+                 "size": stamp.get("size"), "mtime_ns": stamp.get("mtime_ns")}
+        self.table[rel] = entry
+        b.edge(dfid, "defines", did)
+        b.edge(did, "defined_in", dfid)
+        for path_match in _PATH_RE.findall(text):
+            target = path_match.rstrip(".,);:`'\"")
+            self._ref(entry, ["documents", target])
+            if (self.root / target).is_file():
+                b.edge(did, "documents", self.file_node(target))
+        self.docs.append(self._types[2](rel, did, dfid, text))
+
+    def index(self, role: str, p: Path, rel: str) -> None:
+        {"source": self.index_source, "test": self.index_test,
+         "doc": self.index_doc}[role](p, rel)
+
+
+def _adapter_core_edges(b: Builder, start: int) -> list[list[str]]:
+    """Edges from `b.edges[start:]` between two built-in nodes, by key. The
+    Repo `contains` edge of a File node an adapter created is not one: it
+    belongs to the File node."""
+    out = []
+    for e in b.edges[start:]:
+        sk, tk = b.nodes[e["src"]]["key"], b.nodes[e["tgt"]]["key"]
+        if sk == "repo:" and e["type"] == "contains":
+            continue
+        if _key_kind(sk) in CORE_KEY_KINDS and _key_kind(tk) in CORE_KEY_KINDS:
+            out.append([sk, e["type"], tk])
+    return out
+
+
+def _key_kind(key: str) -> str:
+    """The builder kind of a string key (`sym:` -> `symbol`)."""
+    return parse_key(key)[0] if key else ""
+
+
+def build_index(root: str | Path = ROOT, out: str | Path = DEFAULT_DUMP,
+                *, include_docs: str = "features", include_git: bool = True,
+                include_scripts: bool = True,
+                git_limit: int = 200) -> dict[str, Any]:
+    """Build the dev-memory graph and write it to `out`.
+
+    `include_docs`: "features" (default: the configured `docs` globs), "all"
+    (those plus `docs_all`), or "none". `include_scripts=False` leaves out a
+    source dir named `scripts`. Adapter indexers run after the docs.
+    Returns the graph dict plus a small build report.
+
+    Snapshot format (version 2): `nodes` (each with `id`, `type`, `attrs` and
+    its stable `key`, see `ozagia.core.keys`), `edges`, `next_id`, and side
+    tables for `DevMemory.reingest`: `build` (these options), `files` (see
+    `FileIndexer`) and `adapter` (`files` adapters passed to `file_node`,
+    `edges` they added between built-in nodes, `unkeyed` node count).
+    """
+    from ozagia.adapters import IndexContext, registry
+
+    root = Path(root).resolve()
+    out = Path(out)
+    b = Builder()
+    t0 = time.time()
+
+    repo = b.node("Repo", {
+        "name": root.name,
+        "root": str(root),
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }, key=("repo",))
+    ix = FileIndexer(b, root, repo)
+    file_node = ix.file_node
+
+    # -- source / test / script files ------------------------------------- #
+    src_dirs = list(SOURCE_DIRS)
+    if not include_scripts:
+        src_dirs = [d for d in src_dirs if d != "scripts"]
+    seen_src: set[str] = set()
+    for rel_dir in src_dirs:
+        for p in _iter_paths(root, rel_dir, (".py", ".rs", ".lua")):
+            rel = _rel(root, p)
+            # Overlapping source dirs index a file once; test files are left
+            # to the test walk below.
+            if rel in seen_src or _is_test_path(rel):
+                continue
+            seen_src.add(rel)
+            ix.index_source(p, rel)
+
+    # -- tests ------------------------------------------------------------- #
+    test_paths: list[Path] = []
+    seen_tests: set[str] = set()
+    for rel_dir in TEST_DIRS:
+        for p in _iter_paths(root, rel_dir, (".py",),
+                             path_filter=lambda r: Path(r).name.startswith("test_")):
+            rel = _rel(root, p)
+            if rel not in seen_tests:
+                seen_tests.add(rel)
+                test_paths.append(p)
+    for p in test_paths:
+        ix.index_test(p, _rel(root, p))
 
     # -- docs -------------------------------------------------------------- #
     doc_paths: list[Path] = []
@@ -715,44 +1026,34 @@ def build_index(root: str | Path = ROOT, out: str | Path = DEFAULT_DUMP,
                 seen_docs.add(rel)
                 doc_paths.append(p)
     for p in sorted(doc_paths):
-        rel = _rel(root, p)
-        text = _read_text(p, limit=1_000_000) or ""
-        title = ""
-        for line in text.splitlines()[:50]:
-            if line.startswith("#"):
-                title = line.lstrip("#").strip()[:200]
-                break
-        did = b.node("Doc", {
-            "name": rel,
-            "path": rel,
-            "title": title,
-            "kind": ("features" if "/features/" in rel else
-                     "research" if "/research/" in rel else "root"),
-        }, key=("doc", rel))
-        b.edge(repo, "has_doc", did)
-        # A doc is also an ordinary file: make it addressable by dev_file /
-        # dev_changed and give it the same defines/defined_in symmetry as a
-        # seed or source file.
-        dfid = file_node(rel)
-        b.edge(dfid, "defines", did)
-        b.edge(did, "defined_in", dfid)
-        for path_match in _PATH_RE.findall(text):
-            target = path_match.rstrip(".,);:`'\"")
-            if (root / target).is_file():
-                b.edge(did, "documents", file_node(target))
-        ctx_docs.append(IndexedDoc(rel, did, dfid, text))
+        ix.index_doc(p, _rel(root, p))
 
     # -- adapter indexers --------------------------------------------------- #
     srel = state_rel(root)
+    adapter_files: list[str] = []
+
+    def adapter_file_node(rel: str, *, indexed: bool = True) -> int:
+        if rel not in adapter_files:
+            adapter_files.append(rel)
+        return file_node(rel, indexed=indexed)
+
+    options = {"include_docs": include_docs, "include_git": include_git,
+               "include_scripts": include_scripts, "git_limit": git_limit}
     ctx = IndexContext(
-        builder=b, root=root, repo=repo, file_node=file_node,
+        builder=b, root=root, repo=repo, file_node=adapter_file_node,
         skipped=lambda rel: _skipped(rel) or bool(
             srel and (rel == srel or rel.startswith(srel + "/"))),
-        sources=ctx_sources, tests=ctx_tests, docs=ctx_docs,
-        options={"include_docs": include_docs, "include_git": include_git,
-                 "include_scripts": include_scripts, "git_limit": git_limit})
+        sources=ix.sources, tests=ix.tests, docs=ix.docs,
+        options=dict(options))
+    edges_before_adapters = len(b.edges)
+    unkeyed_before_adapters = b.unkeyed
     for indexer in registry(root).indexers:
         indexer(ctx)
+    adapter_info = {
+        "files": adapter_files,
+        "edges": _adapter_core_edges(b, edges_before_adapters),
+        "unkeyed": b.unkeyed - unkeyed_before_adapters,
+    }
 
     # -- checkout head ------------------------------------------------------ #
     # Recorded on its own (not only from the history walk below) so the
@@ -852,14 +1153,7 @@ def build_index(root: str | Path = ROOT, out: str | Path = DEFAULT_DUMP,
         pass
 
     # -- repo summary ------------------------------------------------------- #
-    b.nodes[repo]["attrs"].update({
-        "files": b.count("File"),
-        "symbols": b.count("Symbol"),
-        "tests": b.count("Test"),
-        "docs": b.count("Doc"),
-        "commits": b.count("Commit"),
-        "failures": b.count("Failure"),
-    })
+    b.nodes[repo]["attrs"].update(repo_counts(n["type"] for n in b.nodes))
     digest, digest_err = _tree_digest(root, dump=out)
     if digest is not None:
         b.nodes[repo]["attrs"]["tree_digest"] = digest
@@ -867,10 +1161,9 @@ def build_index(root: str | Path = ROOT, out: str | Path = DEFAULT_DUMP,
         b.nodes[repo]["attrs"]["tree_digest_error"] = digest_err or "unknown"
 
     graph = b.to_dict()
-    out.parent.mkdir(parents=True, exist_ok=True)
-    tmp = out.with_suffix(out.suffix + ".tmp")
-    tmp.write_text(json.dumps(graph, sort_keys=True))
-    tmp.replace(out)
+    graph.update({"version": SNAPSHOT_VERSION, "build": options,
+                  "files": ix.table, "adapter": adapter_info})
+    write_snapshot(out, graph)
     return {
         "out": str(out),
         "nodes": len(graph["nodes"]),
@@ -880,6 +1173,26 @@ def build_index(root: str | Path = ROOT, out: str | Path = DEFAULT_DUMP,
         "seconds": round(time.time() - t0, 2),
         "root": str(root),
     }
+
+
+REPO_COUNTS = (("files", "File"), ("symbols", "Symbol"), ("tests", "Test"),
+               ("docs", "Doc"), ("commits", "Commit"), ("failures", "Failure"))
+
+
+def repo_counts(types: Iterable[str]) -> dict[str, int]:
+    """The Repo node's summary counts for the node types `types`."""
+    from collections import Counter
+    c = Counter(types)
+    return {attr: c.get(typ, 0) for attr, typ in REPO_COUNTS}
+
+
+def write_snapshot(out: Path, graph: dict[str, Any]) -> None:
+    """Write `graph` to `out` atomically (temporary file, then rename)."""
+    out = Path(out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_suffix(out.suffix + ".tmp")
+    tmp.write_text(json.dumps(graph, sort_keys=True))
+    tmp.replace(out)
 
 
 def _histogram(values: Iterable[str]) -> dict[str, int]:
@@ -969,6 +1282,29 @@ def _tree_digest(root: Path, *, dump: str | Path | None = None
     return h.hexdigest(), None
 
 
+def _derive_v1_key(n: dict[str, Any]) -> str | None:
+    """The key of a node from a version-1 snapshot (no `key` field), from its
+    attrs: Repo, File, Symbol, Test, Doc and Commit nodes; None otherwise.
+    A version-1 Rust symbol gets `sym:<file>::<qualname>`; a second one with
+    the same qualname in a file stays keyless."""
+    typ, a = n.get("type"), n.get("attrs") or {}
+    try:
+        if typ == "Repo":
+            return format_key(("repo",))
+        if typ == "File" and a.get("path"):
+            return format_key(("file", a["path"]))
+        if typ in ("Symbol", "Test") and a.get("file") and a.get("qualname"):
+            return format_key(("symbol" if typ == "Symbol" else "test",
+                               a["file"], a["qualname"]))
+        if typ == "Doc" and a.get("path"):
+            return format_key(("doc", a["path"]))
+        if typ == "Commit" and a.get("hash"):
+            return format_key(("commit", a["hash"]))
+    except ValueError:
+        return None
+    return None
+
+
 # --------------------------------------------------------------------------- #
 # query layer
 # --------------------------------------------------------------------------- #
@@ -991,8 +1327,29 @@ class DevMemory:
                 f"no dev-memory snapshot at {self.dump}; run "
                 f"`python -m ozagia.core.memory build` first")
         self.raw = json.loads(self.dump.read_text(encoding="utf-8"))
+        self.version = int(self.raw.get("version") or 1)
         self.nodes = {int(n["id"]): n for n in self.raw.get("nodes", [])}
         self.edges = self.raw.get("edges", [])
+        self._next_id = int(self.raw.get("next_id")
+                            or (max(self.nodes, default=-1) + 1))
+        # Side tables for `reingest` (version 2). None for a version-1
+        # snapshot, which can be queried but not reingested.
+        self._files_table: dict[str, dict[str, Any]] | None = (
+            self.raw.get("files") if self.version >= 2 else None)
+        self._build_opts: dict[str, Any] = dict(self.raw.get("build") or {})
+        self._adapter_info: dict[str, Any] = dict(
+            self.raw.get("adapter") or {"files": [], "edges": [], "unkeyed": 0})
+        # Stable node keys (see `ozagia.core.keys`).
+        self._key_to_id: dict[str, int] = {}
+        self._id_to_key: dict[int, str] = {}
+        for nid, n in self.nodes.items():
+            key = n.get("key") if self.version >= 2 else _derive_v1_key(n)
+            if key and key not in self._key_to_id:
+                self._key_to_id[key] = nid
+                self._id_to_key[nid] = key
+        # Built on first use by `ozagia.core.reingest`.
+        self._reingest_state: Any = None
+        self.last_reingest_timings: dict[str, float] = {}
         self._out: dict[int, list[dict[str, Any]]] = {}
         self._in: dict[int, list[dict[str, Any]]] = {}
         for e in self.edges:
@@ -1007,31 +1364,116 @@ class DevMemory:
         # hit by how distinctive its matched words are. This is a mechanical
         # retrieval heuristic, not an agent decision.
         self._df: dict[str, int] = {}
-        for nid in self.nodes:
-            for t in set(_stem(x) for x in _word_tokens(self.label(nid))):
-                self._df[t] = self._df.get(t, 0) + 1
-        self._n_labels = max(1, len(self.nodes))
         # Exact normalized-name index for task anchors (seed/file/rule/doc/
         # test), so `context` does not scan every node for every phrasing.
         self._anchor_index: dict[str, list[tuple[int, int]]] = {}
-        for typ, prio in (("Seed", 0), ("File", 1), ("Rule", 2),
-                          ("Doc", 3), ("Test", 4)):
-            for nid in self._nodes_of(typ):
-                attrs = (self.node(nid) or {}).get("attrs", {})
-                names = [attrs.get("id"), attrs.get("name"),
-                         attrs.get("path"), attrs.get("title")]
-                if typ == "File":
-                    for name in list(names):
-                        if isinstance(name, str):
-                            names.append(str(Path(name).stem))
-                for name in names:
-                    if not isinstance(name, str) or not name:
-                        continue
-                    norm = "_".join(_word_tokens(name))
-                    if len(norm) >= 4:
-                        self._anchor_index.setdefault(norm, []).append((prio, nid))
+        for nid in self.nodes:
+            self._index_add(nid, sort=False)
+        self._n_labels = max(1, len(self.nodes))
         for k in self._anchor_index:
             self._anchor_index[k].sort()
+
+    # -- search indexes ------------------------------------------------------ #
+    _ANCHOR_PRIO = {"Seed": 0, "File": 1, "Rule": 2, "Doc": 3, "Test": 4}
+
+    def _label_tokens(self, nid: int) -> set[str]:
+        return {_stem(x) for x in _word_tokens(self.label(nid))}
+
+    def _anchor_names(self, nid: int) -> list[str]:
+        n = self.node(nid) or {}
+        if n.get("type") not in self._ANCHOR_PRIO:
+            return []
+        attrs = n.get("attrs") or {}
+        names = [attrs.get("id"), attrs.get("name"),
+                 attrs.get("path"), attrs.get("title")]
+        if n["type"] == "File":
+            for name in list(names):
+                if isinstance(name, str):
+                    names.append(str(Path(name).stem))
+        out = []
+        for name in names:
+            if not isinstance(name, str) or not name:
+                continue
+            norm = "_".join(_word_tokens(name))
+            if len(norm) >= 4:
+                out.append(norm)
+        return out
+
+    def _index_add(self, nid: int, *, sort: bool = True) -> None:
+        """Add node `nid` to the label-frequency and anchor indexes."""
+        for t in self._label_tokens(nid):
+            self._df[t] = self._df.get(t, 0) + 1
+        names = self._anchor_names(nid)
+        if names:
+            prio = self._ANCHOR_PRIO[self.nodes[nid]["type"]]
+            for norm in names:
+                lst = self._anchor_index.setdefault(norm, [])
+                lst.append((prio, nid))
+                if sort:
+                    lst.sort()
+
+    def _index_remove(self, nid: int) -> None:
+        """Remove node `nid` (still present) from the search indexes."""
+        for t in self._label_tokens(nid):
+            left = self._df.get(t, 0) - 1
+            if left > 0:
+                self._df[t] = left
+            else:
+                self._df.pop(t, None)
+        names = self._anchor_names(nid)
+        if names:
+            prio = self._ANCHOR_PRIO[self.nodes[nid]["type"]]
+            for norm in names:
+                lst = self._anchor_index.get(norm)
+                if lst and (prio, nid) in lst:
+                    lst.remove((prio, nid))
+                    if not lst:
+                        del self._anchor_index[norm]
+
+    # -- keys ---------------------------------------------------------------- #
+    def node_by_key(self, key: str) -> int | None:
+        """The id of the node with stable key `key`, or None."""
+        return self._key_to_id.get(str(key))
+
+    def key_of(self, nid: int) -> str | None:
+        """The stable key of node `nid`, or None (version-1 node without
+        a derivable key)."""
+        return self._id_to_key.get(int(nid))
+
+    # -- incremental update ---------------------------------------------------- #
+    def reingest(self, paths: Iterable[str], *, write: bool = True):
+        """Re-parse the repo-relative files `paths` (modified, created or
+        deleted), update the graph and, with `write`, rewrite the snapshot.
+        Returns a `GraphDelta`. See `ozagia.core.reingest`."""
+        from ozagia.core.reingest import reingest
+        return reingest(self, paths, write=write)
+
+    def refresh(self, *, write: bool = True):
+        """Reingest every file changed since the snapshot (see
+        `pending_changes`). Returns a `GraphDelta`."""
+        from ozagia.core.reingest import pending_changes, reingest
+        return reingest(self, pending_changes(self), write=write)
+
+    def pending_changes(self, *, limit: int | None = None) -> list[str]:
+        """Indexed files whose content differs from the snapshot, and new
+        files git reports under the indexed dirs and docs."""
+        from ozagia.core.reingest import pending_changes
+        out = pending_changes(self)
+        return out if limit is None else out[:int(limit)]
+
+    def snapshot_dict(self) -> dict[str, Any]:
+        """The current graph in snapshot form (what `write_snapshot` writes)."""
+        return {"version": SNAPSHOT_VERSION,
+                "nodes": [self.nodes[i] for i in sorted(self.nodes)],
+                "edges": self.edges, "next_id": self._next_id,
+                "build": self._build_opts, "files": self._files_table or {},
+                "adapter": self._adapter_info}
+
+    def write_snapshot(self) -> float:
+        """Rewrite the snapshot from the in-memory graph; returns seconds."""
+        t0 = time.perf_counter()
+        write_snapshot(self.dump, self.snapshot_dict())
+        return time.perf_counter() - t0
 
     # -- graph helpers ------------------------------------------------------ #
     def adapter_query(self, name: str, **kwargs: Any) -> Any:
@@ -1059,7 +1501,7 @@ class DevMemory:
     def view(self, nid: int) -> dict[str, Any]:
         n = self.node(nid) or {}
         return {"id": int(nid), "type": n.get("type", "?"),
-                "label": self.label(nid)}
+                "label": self.label(nid), "key": self.key_of(nid)}
 
     def related(self, nid: int, *, limit: int = 12) -> dict[str, list[dict[str, Any]]]:
         out: dict[str, list[dict[str, Any]]] = {}
@@ -2075,7 +2517,17 @@ class DevMemory:
                 break
         return {"ok": True, "files": files, "n": len(files),
                 "include_all": include_all, "limit": int(limit),
-                "snapshot": self.staleness()}
+                "snapshot": self.staleness(),
+                "refresh": self._refresh_status(limit=int(limit))}
+
+    def _refresh_status(self, *, limit: int = 200) -> dict[str, Any]:
+        """Whether `refresh` has files to reingest, and which."""
+        try:
+            pending = self.pending_changes()
+        except (ValueError, OSError) as e:
+            return {"needed": None, "error": str(e)}
+        return {"needed": bool(pending), "n": len(pending),
+                "files": pending[:limit]}
 
     _STALENESS_TTL_S = 5.0
 
@@ -2505,6 +2957,13 @@ class DevMemory:
                 diagnostics="requested" if diagnostics else "skipped",
             )
             result["journaled"] = entry
+            # Bring the graph up to date for the edited file. A failure here
+            # is reported, not raised: the edit is already written.
+            try:
+                result["graph_delta"] = self.reingest(
+                    [str(result.get("file") or file_rel)]).to_dict()
+            except Exception as e:  # noqa: BLE001 - recorded, not raised
+                result["graph_delta"] = {"error": f"{type(e).__name__}: {e}"}
             result["diagnostics"] = self._post_edit_diagnostics(
                 file_rel, enabled=diagnostics)
         return result
