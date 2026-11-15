@@ -1,0 +1,216 @@
+"""The ozagia command: the graph, the daemon, the integrations and the agent.
+
+    ozagia index [--root R] [--rebuild]
+    ozagia agent [--workdir W] [--prompt TEXT | --prompt-file F] [--model M]
+                 [--clone [--base REV]] [--keep-plugin] [--timeout S]
+                 [--python P] [--runs-dir D] [-- <extra opencode args>]
+    ozagia daemon serve|ping|stats|shutdown ...   (python -m ozagia.daemon)
+    ozagia mcp ...                                (ozagia.integrations.mcp.server)
+    ozagia eval ...                               (python -m ozagia.eval.agent)
+    ozagia check ...                              (python -m ozagia.check)
+    ozagia install opencode|claude [--workdir W] [...]
+    ozagia --version
+
+`daemon`, `mcp`, `eval` and `check` pass every argument after their name to
+those modules' `main`, unchanged. See docs/harness.md.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+from typing import Callable
+
+PROG = "ozagia"
+
+
+def _version() -> str:
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+        return version("ozagia")
+    except (ImportError, PackageNotFoundError):  # pragma: no cover - not installed
+        return "unknown"
+
+
+def _daemon_main(argv: list[str]) -> int:
+    from ozagia.daemon.__main__ import main
+    return main(argv)
+
+
+def _mcp_main(argv: list[str]) -> int:
+    from ozagia.integrations.mcp.server import main
+    return main(argv) or 0
+
+
+def _eval_main(argv: list[str]) -> int:
+    from ozagia.eval.agent import main
+    return main(argv)
+
+
+def _check_main(argv: list[str]) -> int:
+    from ozagia.check import main
+    return main(argv)
+
+
+# name -> (main(argv) -> int, help). Looked up at call time so tests can patch.
+DELEGATES: dict[str, tuple[str, str]] = {
+    "daemon": ("_daemon_main", "the graph daemon: serve|ping|stats|shutdown "
+                               "(python -m ozagia.daemon)"),
+    "mcp": ("_mcp_main", "the MCP server (ozagia.integrations.mcp.server)"),
+    "eval": ("_eval_main", "the break/fix agent eval (python -m ozagia.eval.agent)"),
+    "check": ("_check_main", "run tests, report graph keys (python -m ozagia.check)"),
+}
+
+
+def _delegate(name: str) -> Callable[[list[str]], int]:
+    return globals()[DELEGATES[name][0]]
+
+
+def _root(value: str | None) -> Path:
+    if value:
+        return Path(value).resolve()
+    from ozagia.config import repo_root
+    return repo_root()
+
+
+def _cmd_index(args: argparse.Namespace) -> int:
+    from ozagia.harness.session import SessionError, prepare_snapshot, tool_env
+    from ozagia.config import config_path, state_path
+    root = _root(args.root)
+    dump = Path(args.dump).resolve() if args.dump else state_path(root, "graph.json")
+    env = tool_env(root, tool_python=sys.executable, config=config_path(root))
+    try:
+        rep = prepare_snapshot(root, dump, build="always" if args.rebuild else "auto",
+                               env=env)
+    except SessionError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(rep, indent=2, sort_keys=True))
+        return 0
+    line = (f"{rep['action']} {rep['dump']}: {rep.get('nodes')} nodes, "
+            f"{rep.get('edges')} edges in {rep['seconds']} s")
+    if rep["action"] == "refreshed":
+        line += (f" ({rep['files']} files reingested; +{rep['added']} "
+                 f"-{rep['removed']} ~{rep['changed']} nodes)")
+    print(line)
+    if rep.get("still_stale"):
+        print("note: HEAD moved since the snapshot was built; "
+              "`ozagia index --rebuild` updates git history")
+    return 0
+
+
+def _cmd_agent(args: argparse.Namespace) -> int:
+    from ozagia.harness.opencode import AgentError, run_agent
+    from ozagia.harness.session import SessionError
+    prompt = args.prompt
+    if args.prompt_file:
+        try:
+            prompt = Path(args.prompt_file).read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"error: cannot read --prompt-file: {exc}", file=sys.stderr)
+            return 2
+    try:
+        res = run_agent(_root(args.workdir), prompt=prompt, model=args.model,
+                        clone=args.clone, base=args.base, keep_plugin=args.keep_plugin,
+                        timeout_s=args.timeout, extra_args=args.extra,
+                        run_python=args.python, opencode=args.opencode,
+                        runs_dir=args.runs_dir)
+    except (AgentError, SessionError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except KeyboardInterrupt:
+        print("ozagia agent: interrupted; daemon stopped and plugin removed",
+              file=sys.stderr)
+        return 130
+    if res.get("timed_out"):
+        return 124
+    code = res.get("exit_code")
+    return code if isinstance(code, int) and code >= 0 else 1
+
+
+def _cmd_install(args: argparse.Namespace, extra: list[str]) -> int:
+    if args.target == "opencode":
+        from ozagia.integrations.opencode.__main__ import main
+    else:
+        from ozagia.integrations.claude_code.__main__ import main
+    return main(["install", "--workdir", args.workdir, *extra])
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog=PROG, description=__doc__.splitlines()[0])
+    p.add_argument("--version", action="version", version=f"{PROG} {_version()}")
+    sub = p.add_subparsers(dest="command", metavar="COMMAND", required=True)
+
+    ix = sub.add_parser("index", help="build or refresh the graph snapshot",
+                        description="Build the snapshot if missing; refresh it if stale.")
+    ix.add_argument("--root", default=None, help="repository (default: OZAGIA_ROOT or "
+                                                 "the git top level of the cwd)")
+    ix.add_argument("--rebuild", action="store_true", help="build from scratch")
+    ix.add_argument("--dump", default=None, help="snapshot path (default: "
+                                                 "<state dir>/graph.json)")
+    ix.add_argument("--json", action="store_true", help="print the report as JSON")
+
+    ag = sub.add_parser("agent", help="run an OpenCode session with the graph daemon",
+                        description="Run OpenCode on a repository with the ozagia plugin "
+                                    "and graph daemon. With a prompt: `opencode run`; "
+                                    "without: the interactive TUI. Arguments after `--` "
+                                    "go to opencode.")
+    ag.add_argument("--workdir", "--root", dest="workdir", default=None,
+                    help="repository (default: OZAGIA_ROOT or the git top level of the cwd)")
+    pr = ag.add_mutually_exclusive_group()
+    pr.add_argument("--prompt", default=None, help="run non-interactively with this prompt")
+    pr.add_argument("--prompt-file", default=None, help="read the prompt from a file")
+    ag.add_argument("--model", "-m", default=None, help="provider/model, e.g. vllm/qwen3.8-27b")
+    ag.add_argument("--clone", action="store_true",
+                    help="run in an isolated clone under the temp dir (kept)")
+    ag.add_argument("--base", default=None, help="with --clone: commit to check out "
+                                                 "(default HEAD)")
+    ag.add_argument("--keep-plugin", action="store_true",
+                    help="leave .opencode/plugins/ozagia.js in the workdir")
+    ag.add_argument("--timeout", type=float, default=None,
+                    help="seconds before the session is killed (default: none)")
+    ag.add_argument("--python", default=None,
+                    help="interpreter that `python` names in the agent's shell commands")
+    ag.add_argument("--opencode", default="opencode", help="opencode executable")
+    ag.add_argument("--runs-dir", default=None,
+                    help="where run roots (logs, clones) go (default: <tmp>/ozagia_agent)")
+
+    for name, (_fn, text) in DELEGATES.items():
+        sub.add_parser(name, help=text, add_help=False)
+
+    ins = sub.add_parser("install", help="install an integration into a workdir",
+                         description="Install the OpenCode plugin or the Claude Code hooks. "
+                                     "Other options go to the integration's installer.")
+    ins.add_argument("target", choices=("opencode", "claude"))
+    ins.add_argument("--workdir", default=".", help="project directory (default: .)")
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] in DELEGATES:
+        return _delegate(argv[0])(argv[1:])
+    extra: list[str] = []
+    if argv[:1] == ["agent"] and "--" in argv:
+        at = argv.index("--")
+        argv, extra = argv[:at], argv[at + 1:]
+    parser = build_parser()
+    if argv[:1] == ["install"]:
+        args, rest = parser.parse_known_args(argv)
+        return _cmd_install(args, rest)
+    args = parser.parse_args(argv)
+    if args.command == "index":
+        return _cmd_index(args)
+    if args.command == "agent":
+        args.extra = extra
+        if args.base and not args.clone:
+            parser.error("--base needs --clone")
+        return _cmd_agent(args)
+    parser.error(f"unknown command {args.command}")  # pragma: no cover
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

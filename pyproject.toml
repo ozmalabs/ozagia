@@ -39,6 +39,7 @@ all = ["ozagia[treesitter,lsp]"]
 dev = ["ozagia[all]", "pytest>=8", "ruff>=0.6"]
 
 [project.scripts]
+ozagia = "ozagia.cli:main"
 ozagia-memory = "ozagia.core.memory:main"
 ozagia-mcp = "ozagia.integrations.mcp.server:main"
 ozagia-research = "ozagia.research.service:main"

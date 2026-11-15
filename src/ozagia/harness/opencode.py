@@ -1,0 +1,342 @@
+"""`ozagia agent`: an OpenCode session on a repository, with the graph in its path.
+
+`run_agent(workdir, prompt=...)` does, in order:
+
+1. Finds the `opencode` executable (a clear error if it is missing) and makes
+   a run root `<tmp>/ozagia_agent/<stamp>-<pid>-<hex>/` for the logs.
+2. With `clone=True`, makes an isolated clone of `workdir` at `base`
+   (default HEAD) under `<run root>/work/clone` (`eval.agent.make_workdir`,
+   isolation "clone": shared objects, own refs, no `origin`) and runs there.
+   Uncommitted changes in `workdir` are not in the clone. The clone is kept;
+   the summary prints how to remove it.
+3. Adds `/.opencode/plugins/ozagia.js` and `/.ozagia/` to the repository's
+   `info/exclude` (only the lines that are missing), so neither shows in
+   `git status` and no tracked file changes.
+4. Opens a `GraphSession` (snapshot built or refreshed, daemon started).
+5. Installs the plugin into `<workdir>/.opencode/plugins/ozagia.js`.
+   A plugin file that was already there is overwritten unless git tracks it,
+   and is never removed afterwards.
+6. Writes `OPENCODE_CONFIG` to `<run root>/logs/opencode_config.json`: the
+   eval's permission policy (`bash: {"*": "allow", <ref-moving git
+   commands>: "deny"}`, `eval.agent.OPENCODE_GIT_DENY`). In interactive mode
+   a `model` goes here too, because the TUI has no `--model` flag.
+7. Runs OpenCode in the workdir with `OZAGIA_DAEMON_SOCK`, `PWD` (OpenCode
+   takes its project directory from it), `OPENCODE_CONFIG`, and with
+   `run_python`, a PATH whose first entry is a `python` shim.
+   - Prompt given: `opencode run --standalone --format json --auto --archived
+     [-m model] [extra args] <prompt>`, its own process group, stdout and
+     stderr to files in the logs, killed after `timeout_s`.
+   - No prompt: the TUI, `opencode --standalone [extra args] [--prompt P]
+     <workdir>`, attached to the terminal.
+8. Always (also on Ctrl-C, SIGTERM or an error): removes the plugin unless
+   `keep_plugin`, stops the daemon (stats, shutdown, kill group, remove
+   socket).
+
+Interactive mode and the plugin's environment. The plugin acts only when
+`OZAGIA_DAEMON_SOCK` is in the environment of the process that loads plugins.
+Without `--standalone` the TUI attaches to OpenCode's background service,
+which was started earlier with its own environment, so the plugin there never
+sees the socket. `opencode --help` (2.3.0) lists `--standalone` for the TUI:
+"Run with a private server instead of the background service"; that server is
+started by the TUI process, so it inherits the environment set here. The
+harness therefore always passes `--standalone`. That the TUI's private server
+loads project plugins is not verified (`opencode run --standalone` is); the
+summary's `plugin loaded` (daemon `hellos > 0`) shows it after each session.
+While the TUI runs, the harness ignores SIGINT itself, so Ctrl-C goes to the
+TUI; teardown runs when the TUI exits.
+"""
+from __future__ import annotations
+
+import contextlib
+import json
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from pathlib import Path
+from typing import Any, Iterator, Sequence
+
+from ozagia.config import config_path
+from ozagia.daemon.protocol import ENV_SOCK
+from ozagia.eval import agent as ea
+from ozagia.harness.session import GraphSession, no_interrupt, run_group
+from ozagia.integrations.opencode import install as plugin
+
+RUN_ARGV = ("run", "--standalone", "--format", "json", "--auto", "--archived")
+TUI_ARGV = ("--standalone",)
+EXCLUDE_PATTERNS = ("/" + plugin.PLUGIN_REL.as_posix(), "/.ozagia/")
+RUNS_DIRNAME = "ozagia_agent"
+# Seconds the TUI gets to exit after SIGTERM before SIGKILL.
+TUI_KILL_GRACE_S = ea.KILL_GRACE_S
+
+
+class AgentError(RuntimeError):
+    """The agent session cannot run (missing opencode, bad arguments)."""
+
+
+def find_opencode(opencode: str = "opencode") -> str:
+    """The opencode executable's path, or AgentError."""
+    exe = shutil.which(opencode)
+    if not exe:
+        raise AgentError(
+            f"OpenCode executable {opencode!r} not found on PATH. Install OpenCode "
+            "(https://opencode.ai) or put it on PATH, then retry.")
+    return exe
+
+
+def _git(args: list[str], cwd: Path) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL)
+
+
+def git_exclude(workdir: str | Path,
+                patterns: Sequence[str] = EXCLUDE_PATTERNS) -> dict[str, Any] | None:
+    """Add the root-anchored `patterns` to the repository's `info/exclude`,
+    only those not already there. Patterns are anchored at `workdir` (its
+    prefix inside the repository is added). Returns {path, added}, or None
+    when `workdir` is not in a git repository."""
+    workdir = Path(workdir).resolve()
+    where = _git(["rev-parse", "--git-path", "info/exclude"], workdir)
+    prefix = _git(["rev-parse", "--show-prefix"], workdir)
+    if where.returncode != 0 or prefix.returncode != 0:
+        return None
+    path = Path(where.stdout.strip())
+    if not path.is_absolute():
+        path = workdir / path
+    want = ["/" + prefix.stdout.strip() + p.lstrip("/") for p in patterns]
+    text = path.read_text(encoding="utf-8") if path.is_file() else ""
+    have = {line.strip() for line in text.splitlines()}
+    added = [w for w in want if w not in have]
+    if added:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        sep = "" if not text or text.endswith("\n") else "\n"
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(sep + "\n".join(added) + "\n")
+    return {"path": str(path), "added": added}
+
+
+def write_opencode_config(path: Path, *, model: str | None = None) -> Path:
+    """The OPENCODE_CONFIG for one session: the eval's bash permission policy."""
+    doc: dict[str, Any] = {
+        "$schema": "https://opencode.ai/config.json",
+        "permission": {"bash": {"*": "allow", **{p: "deny" for p in ea.OPENCODE_GIT_DENY}}},
+    }
+    if model:
+        doc["model"] = model
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
+def _tracked(workdir: Path, rel: Path) -> bool:
+    return _git(["ls-files", "--error-unmatch", rel.as_posix()], workdir).returncode == 0
+
+
+@contextlib.contextmanager
+def _sigterm_as_interrupt() -> Iterator[None]:
+    """SIGTERM raises KeyboardInterrupt (main thread only), so teardown runs."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def on_term(_signum: int, _frame: Any) -> None:
+        raise KeyboardInterrupt
+
+    previous = signal.signal(signal.SIGTERM, on_term)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
+def _run_tui(argv: list[str], *, cwd: Path, env: dict[str, str],
+             timeout_s: float | None) -> dict[str, Any]:
+    """The TUI on this terminal. SIGINT is ignored here (a Python handler, so
+    the child gets the default disposition back at exec) while it runs."""
+    started = time.monotonic()
+    main = threading.current_thread() is threading.main_thread()
+    previous = signal.signal(signal.SIGINT, lambda *_: None) if main else None
+    timed_out = False
+    try:
+        proc = subprocess.Popen(argv, cwd=str(cwd), env=env)
+        try:
+            code: int | None = proc.wait(timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            timed_out, code = True, None
+            _stop(proc)
+        except BaseException:
+            _stop(proc)
+            raise
+    finally:
+        if main:
+            signal.signal(signal.SIGINT, previous)
+    return {"returncode": code, "timed_out": timed_out,
+            "seconds": round(time.monotonic() - started, 3)}
+
+
+def _stop(proc: subprocess.Popen) -> None:
+    """SIGTERM, wait TUI_KILL_GRACE_S, then SIGKILL."""
+    with no_interrupt():
+        proc.terminate()
+        try:
+            proc.wait(timeout=TUI_KILL_GRACE_S)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+
+
+def _summary(res: dict[str, Any]) -> str:
+    def yn(v: Any) -> str:
+        return "unknown" if v is None else ("yes" if v else "no")
+    prep = res.get("prep") or {}
+    lines = [
+        f"ozagia agent: {'timed out' if res.get('timed_out') else 'exit ' + str(res['exit_code'])}"
+        f" after {res['seconds']} s in {res['workdir']}",
+        f"  graph: {prep.get('action', '?')} ({prep.get('nodes', '?')} nodes) in "
+        f"{res.get('build_s')} s; daemon ready in {res.get('ready_s')} s",
+        f"  plugin loaded: {yn(res.get('plugin_loaded'))}; captured calls: "
+        f"{res.get('captured_calls')}; fallbacks: {res.get('fallbacks')}",
+    ]
+    if prep.get("still_stale"):
+        lines.append("  note: the snapshot was refreshed but HEAD moved since it was built; "
+                     "`ozagia index --rebuild` updates git history")
+    if res.get("plugin_loaded") is False:
+        lines.append("  warning: the plugin never connected to the daemon; OpenCode ran "
+                     "with its built-in tools only")
+    if res.get("transcript_path"):
+        lines.append(f"  transcript: {res['transcript_path']}")
+    lines.append(f"  logs: {res['log_dir']}")
+    if res.get("clone"):
+        lines.append(f"  clone kept at {res['workdir']}; remove it with: "
+                     f"rm -rf {res['run_root']}")
+    return "\n".join(lines)
+
+
+def run_agent(workdir: str | Path, *, prompt: str | None = None, model: str | None = None,
+              interactive: bool | None = None, clone: bool = False, base: str | None = None,
+              keep_plugin: bool = False, opencode: str = "opencode",
+              timeout_s: float | None = None, extra_args: Sequence[str] = (),
+              run_python: str | None = None, tool_python: str = sys.executable,
+              build: str = "auto", runs_dir: str | Path | None = None,
+              quiet: bool = False) -> dict[str, Any]:
+    """Run one OpenCode session on `workdir` with the graph daemon and plugin
+    (see the module docstring). Returns {exit_code, seconds, timed_out,
+    transcript_path, stdout_path, stderr_path, daemon_stats, plugin_loaded,
+    captured_calls, fallbacks, workdir, clone, run_root, log_dir, sock, prep,
+    build_s, ready_s, interactive, ...}. `interactive` None means "no prompt"."""
+    exe = find_opencode(opencode)
+    if interactive is None:
+        interactive = prompt is None
+    if not interactive and not prompt:
+        raise AgentError("a non-interactive run needs a prompt")
+    if base is not None and not clone:
+        raise AgentError("base needs clone=True (--base needs --clone)")
+    source = Path(workdir).resolve()
+    if not source.is_dir():
+        raise AgentError(f"not a directory: {source}")
+    runs = Path(runs_dir) if runs_dir else Path(tempfile.gettempdir()) / RUNS_DIRNAME
+    run_root = ea.new_run_root(runs)
+    log_dir = run_root / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    work = source
+    res: dict[str, Any] = {"exit_code": None, "seconds": 0.0, "timed_out": False,
+                           "transcript_path": None, "stdout_path": None,
+                           "stderr_path": None, "daemon_stats": None,
+                           "plugin_loaded": None, "captured_calls": None,
+                           "fallbacks": None, "workdir": str(work), "source": str(source),
+                           "clone": clone, "base": None, "run_root": str(run_root),
+                           "log_dir": str(log_dir), "interactive": interactive,
+                           "sock": None, "prep": None, "build_s": None, "ready_s": None,
+                           "exclude": None, "plugin_path": None, "daemon_stop_error": None}
+    with _sigterm_as_interrupt():
+        if clone:
+            rev = f"{base or 'HEAD'}^{{commit}}"
+            found = _git(["rev-parse", "--verify", "--quiet", rev], source)
+            if found.returncode != 0:
+                raise AgentError(f"{base or 'HEAD'!r} is not a commit in {source}")
+            res["base"] = found.stdout.strip()
+            try:
+                work = ea.make_workdir(source, res["base"], run_root, "clone",
+                                       isolation="clone")
+            except ea.HarnessError as exc:
+                raise AgentError(str(exc)) from exc
+            res["workdir"] = str(work)
+        res["exclude"] = git_exclude(work)
+        config = write_opencode_config(log_dir / "opencode_config.json",
+                                       model=model if interactive else None)
+        session = GraphSession(work, tool_python=tool_python, run_python=run_python,
+                               build=build, log_dir=log_dir, config=config_path(source))
+        try:
+            with session:
+                res.update(sock=str(session.sock), prep=session.prep,
+                           build_s=session.build_s, ready_s=session.ready_s,
+                           daemon_pid=session.pid)
+                res.update(_with_plugin(exe, work, session, prompt=prompt, model=model,
+                                        interactive=interactive, keep_plugin=keep_plugin,
+                                        timeout_s=timeout_s, extra_args=extra_args,
+                                        config=config, log_dir=log_dir))
+        finally:
+            res["daemon_stats"] = session.final_stats
+            res["daemon_stop_error"] = session.stop_error
+            res.update(ea.graph_stats_fields(session.final_stats))
+            if clone and not quiet and sys.exc_info()[0] is not None:
+                print(f"ozagia agent: clone kept at {work}; remove it with: rm -rf {run_root}",
+                      file=sys.stderr)
+    if not quiet:
+        print(_summary(res))
+    return res
+
+
+def _with_plugin(exe: str, work: Path, session: GraphSession, *, prompt: str | None,
+                 model: str | None, interactive: bool, keep_plugin: bool,
+                 timeout_s: float | None, extra_args: Sequence[str], config: Path,
+                 log_dir: Path) -> dict[str, Any]:
+    """Install the plugin, run OpenCode, remove the plugin (in `finally`)."""
+    path = plugin.plugin_path(work)
+    existed = path.exists()
+    out: dict[str, Any] = {"plugin_path": str(path)}
+    try:
+        if not (existed and _tracked(work, plugin.PLUGIN_REL)):
+            plugin.install(work)
+        # OpenCode gets this process's environment; PATH as the session's
+        # (the python shim first, when run_python is set).
+        env = dict(os.environ, PATH=session.env.get("PATH", os.environ.get("PATH", "")))
+        env.update({ENV_SOCK: str(session.sock), "PWD": str(work),
+                    "OPENCODE_CONFIG": str(config)})
+        if interactive:
+            argv = [exe, *TUI_ARGV, *extra_args, *(["--prompt", prompt] if prompt else []),
+                    str(work)]
+            ran = _run_tui(argv, cwd=work, env=env, timeout_s=timeout_s)
+        else:
+            argv = [exe, *RUN_ARGV, *(["-m", model] if model else []), *extra_args, prompt]
+            stdout_p = log_dir / "opencode.stdout.jsonl"
+            stderr_p = log_dir / "opencode.stderr.txt"
+            with stdout_p.open("w", encoding="utf-8") as so, \
+                    stderr_p.open("w", encoding="utf-8") as se:
+                ran = run_group(argv, cwd=work, env=env, timeout_s=timeout_s,
+                                stdout=so, stderr=se)
+            parsed = ea._parse_opencode_events(
+                stdout_p.read_text(encoding="utf-8", errors="replace"))
+            transcript = log_dir / "transcript.txt"
+            transcript.write_text(parsed.get("transcript") or "", encoding="utf-8")
+            out.update(stdout_path=str(stdout_p), stderr_path=str(stderr_p),
+                       transcript_path=str(transcript),
+                       tokens_in=parsed.get("tokens_in"), tokens_out=parsed.get("tokens_out"),
+                       cost_usd=parsed.get("cost_usd"), tool_calls=parsed.get("tool_calls"),
+                       tools_by_name=parsed.get("tools_by_name"),
+                       driver_error=parsed.get("driver_error"))
+        out.update(exit_code=ran["returncode"], seconds=ran["seconds"],
+                   timed_out=ran["timed_out"], argv=argv)
+        return out
+    finally:
+        if not keep_plugin and not existed:
+            with no_interrupt():
+                plugin.uninstall(work)
+
+
+__all__ = ["AgentError", "EXCLUDE_PATTERNS", "RUN_ARGV", "TUI_ARGV", "find_opencode",
+           "git_exclude", "run_agent", "write_opencode_config"]
