@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import importlib
 import json
 import os
 import re
@@ -36,10 +37,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ozagia.adapters import registry
-from ozagia.config import repo_root
+from ozagia.config import repo_root, state_path
 from ozagia.core.memory import (
-    DEFAULT_DUMP,
-    DEFAULT_JOURNAL,
     DevMemory,
     build_index,
 )
@@ -649,9 +648,15 @@ def _validate_args(schema: dict[str, Any], args: Any) -> dict[str, Any]:
 
 
 class DevMemoryServer:
-    def __init__(self, memory: DevMemory):
+    def __init__(self, memory: DevMemory | None, *, mode: str = "coding",
+                 workspace: str | Path | None = None):
+        if mode not in {"coding", "research", "combined"}:
+            raise ValueError("mode must be one of: coding, research, combined")
         self.mem = memory
-        self._handlers: dict[str, Callable[[dict[str, Any]], Any]] = {
+        self.mode = mode
+        default_workspace = memory.raw_repo_root if memory else repo_root()
+        self.workspace = str(workspace or default_workspace)
+        self._handlers: dict[str, Callable[[dict[str, Any]], Any]] = ({
             "dev_context": self._context,
             "dev_brief": self._brief,
             "dev_repo_map": self._repo_map,
@@ -696,14 +701,88 @@ class DevMemoryServer:
             "dev_symbol_callees": self._symbol_callees,
             "dev_symbol_graph_impact": self._symbol_graph_impact,
             "dev_symbol_resolve": self._symbol_resolve,
-        }
-        present = {n.get("type") for n in memory.nodes.values()}
-        for name, typ in _TOOL_NODE_TYPES.items():
-            if typ not in present:
-                del self._handlers[name]
+        } if mode in {"coding", "combined"} else {})
+        if self.mem is not None:
+            present = {n.get("type") for n in self.mem.nodes.values()}
+            for name, typ in _TOOL_NODE_TYPES.items():
+                if typ not in present:
+                    self._handlers.pop(name, None)
         self._tools = [t for t in _TOOLS if t["name"] in self._handlers]
         self._schemas = {t["name"]: t["inputSchema"] for t in self._tools}
-        self._load_adapter_tools()
+        if mode in {"coding", "combined"}:
+            self._load_adapter_tools()
+        if mode in {"research", "combined"}:
+            self._load_research_tools()
+        if mode == "combined":
+            self._load_research_dev_context()
+
+    def _load_research_tools(self) -> None:
+        """Load the optional research package only for a research mode."""
+        module = importlib.import_module("ozagia.research.mcp")
+        for spec in module.research_tools():
+            name = spec["name"]
+            if name in self._handlers:
+                print(f"[{SERVER_NAME}] research tool {name!r} clashes with an "
+                      "existing tool; ignored", file=sys.stderr)
+                continue
+            self._handlers[name] = (
+                lambda args, name=name: module.call_research_tool(
+                    name, args, self.workspace))
+            self._tools.append(spec)
+            self._schemas[name] = spec["inputSchema"]
+
+    def _load_research_dev_context(self) -> None:
+        """Expose an explicit, non-linking bridge between the two contexts."""
+        name = "research_dev_context"
+        spec = {
+            "name": name,
+            "description": (
+                "Return separate coding and research context for the same task. "
+                "The research session must exist in this workspace. The two "
+                "results are independently retrieved and are not linked or "
+                "treated as mutually supporting evidence."),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task": {"type": "string"},
+                    "session_id": {"type": "string"},
+                },
+                "required": ["task", "session_id"],
+                "additionalProperties": False,
+            },
+        }
+        if name in self._handlers:
+            print(f"[{SERVER_NAME}] bridge tool {name!r} clashes with an "
+                  "existing tool; ignored", file=sys.stderr)
+            return
+        research_module = importlib.import_module("ozagia.research.mcp")
+
+        def bridge(args: dict[str, Any]) -> Any:
+            task = str(args["task"])
+            # Let ResearchService load the requested session. This validates
+            # the id against this workspace before returning its context.
+            research_context = research_module.call_research_tool(
+                "research_context",
+                {"session_id": args["session_id"], "query": task},
+                self.workspace)
+            coding_context = self.mem.context(task)
+            return {
+                "task": task,
+                "coding_context": coding_context,
+                "research_context": research_context,
+                "relationship": {
+                    "independent_retrievals": True,
+                    "linked": False,
+                    "note": (
+                        "These are separate context results. No relationship "
+                        "or evidentiary link between them was inferred or "
+                        "created."),
+                },
+            }
+
+        self._handlers[name] = bridge
+        self._tools.append(spec)
+        self._schemas[name] = spec["inputSchema"]
 
     def _load_adapter_tools(self) -> None:
         reg = registry(self.mem.raw_repo_root)
@@ -1009,17 +1088,18 @@ class DevMemoryServer:
         if method == "tools/list":
             return self._ok(msg_id, {"tools": self._tools})
         if method == "resources/list":
-            return self._ok(msg_id, {"resources": [{
+            resources = ([{
                 "uri": BRIEF_URI,
                 "name": "Repo brief",
                 "description": "Compact repo layout, commands, docs, history and changes.",
                 "mimeType": "text/markdown",
-            }]})
+            }] if self.mode in {"coding", "combined"} else [])
+            return self._ok(msg_id, {"resources": resources})
         if method == "resources/templates/list":
             return self._ok(msg_id, {"resourceTemplates": []})
         if method == "resources/read":
             uri = str(params.get("uri", ""))
-            if uri == BRIEF_URI:
+            if uri == BRIEF_URI and self.mem is not None:
                 brief = self.mem.brief()
                 return self._ok(msg_id, {"contents": [{
                     "uri": uri,
@@ -1208,14 +1288,23 @@ def _on_sigterm(signum: int, frame: Any) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    p.add_argument("--dump", default=os.environ.get("OZAGIA_DUMP",
-                                                    str(DEFAULT_DUMP)))
-    p.add_argument("--journal", default=os.environ.get("OZAGIA_JOURNAL",
-                                                       str(DEFAULT_JOURNAL)))
+    p.add_argument("--dump", default=os.environ.get("OZAGIA_DUMP"))
+    p.add_argument("--journal", default=os.environ.get("OZAGIA_JOURNAL"))
     p.add_argument("--root", default=str(repo_root()))
     p.add_argument("--autobuild", action="store_true")
+    p.add_argument("--mode", choices=("coding", "research", "combined"),
+                   default=os.environ.get("OZAGIA_MODE", "coding"),
+                   help="tool set to expose (default: OZAGIA_MODE or coding)")
     args = p.parse_args(argv)
-    mem = _load_memory(args)
+    # Resolve defaults only after --root is known. The module-level memory
+    # defaults are anchored to the importing process's cwd, which can differ
+    # from an explicitly selected workspace. state_path also honors
+    # OZAGIA_STATE_DIR, while explicit flags and OZAGIA_DUMP/JOURNAL win.
+    if args.dump is None:
+        args.dump = str(state_path(args.root, "graph.json"))
+    if args.journal is None:
+        args.journal = str(state_path(args.root, "journal.jsonl"))
+    mem = _load_memory(args) if args.mode in {"coding", "combined"} else None
     # LSP servers are child processes: close them on normal exit, on exit via
     # an exception, and on SIGTERM.
     atexit.register(_close_lsp)
@@ -1224,7 +1313,7 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError:
         pass  # not the main thread
     try:
-        return serve(DevMemoryServer(mem))
+        return serve(DevMemoryServer(mem, mode=args.mode, workspace=args.root))
     finally:
         _close_lsp()
 

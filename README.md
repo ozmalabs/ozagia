@@ -81,6 +81,13 @@ and edge types), edit engines, MCP tools or graph queries. See
 (`tools/ozagia_ocelot_adapter.py` in https://github.com/ozmalabs/ocelot) is a
 worked example: it adds seed manifests and rules as graph nodes.
 
+## Research mode
+
+Use `ozagia-mcp --mode research --root /path/to/workspace` for source-backed
+research graphs, or `--mode combined` to expose research and coding tools
+together. Coding mode remains the default. See [research mode](docs/research.md)
+for setup, optional dependencies and model/Lean limitations.
+
 ## Origin
 
 ozagia was extracted, with its history, from the Ocelot repository, where it

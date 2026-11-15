@@ -11,6 +11,7 @@ import hashlib
 import io
 import json
 import sys
+import types
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -162,6 +163,143 @@ def test_unknown_argument_key_is_invalid_params(server) -> None:
     resp = server.handle(_call("dev_seed", {"seed_id": "demo", "bogus": 1}))
     assert resp["error"]["code"] == -32602
     assert "bogus" in resp["error"]["message"]
+
+
+def test_research_mode_exposes_only_lazy_research_tools(monkeypatch) -> None:
+    calls = []
+    module = types.ModuleType("ozagia.research.mcp")
+    module.research_tools = lambda: [{
+        "name": "research_ping", "description": "research ping",
+        "inputSchema": {"type": "object", "properties": {
+            "value": {"type": "string"}}, "required": ["value"],
+            "additionalProperties": False}}]
+    module.call_research_tool = lambda name, args, workspace: calls.append(
+        (name, args, workspace)) or {"ok": True}
+    monkeypatch.setitem(sys.modules, "ozagia.research.mcp", module)
+
+    server = DevMemoryServer(None, mode="research", workspace="/work/repo")
+    names = {t["name"] for t in server.handle(
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+    )["result"]["tools"]}
+    assert names == {"research_ping"}
+    response = server.handle(_call("research_ping", {"value": "x"}))
+    assert response["result"]["isError"] is False
+    assert calls == [("research_ping", {"value": "x"}, "/work/repo")]
+
+
+def test_mode_rejects_unknown_values() -> None:
+    with pytest.raises(ValueError, match="coding, research, combined"):
+        DevMemoryServer(None, mode="unknown")
+
+
+def test_cli_research_mode_skips_dev_memory_build(monkeypatch, tmp_path) -> None:
+    from ozagia.integrations.mcp import server as server_module
+
+    module = types.ModuleType("ozagia.research.mcp")
+    module.research_tools = lambda: []
+    module.call_research_tool = lambda *_args: None
+    monkeypatch.setitem(sys.modules, "ozagia.research.mcp", module)
+    monkeypatch.setattr(server_module, "serve", lambda instance: (
+        0 if instance.mode == "research" and instance.mem is None else 1))
+    monkeypatch.setattr(server_module, "_load_memory",
+                        lambda _args: pytest.fail("research mode loaded memory"))
+
+    assert server_module.main(["--root", str(tmp_path), "--mode", "research"]) == 0
+
+
+def test_cli_state_defaults_follow_root_and_state_dir(monkeypatch, tmp_path) -> None:
+    from ozagia.integrations.mcp import server as server_module
+
+    captured = []
+    monkeypatch.setattr(server_module, "_load_memory", lambda args: (
+        captured.append((args.dump, args.journal)) or object()))
+    monkeypatch.setattr(server_module, "DevMemoryServer",
+                        lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(server_module, "serve", lambda _server: 0)
+    monkeypatch.setattr(server_module, "_close_lsp", lambda: None)
+    monkeypatch.setattr(server_module.signal, "signal", lambda *_args: None)
+
+    root = tmp_path / "workspace"
+    root.mkdir()
+    monkeypatch.setenv("OZAGIA_STATE_DIR", "custom-state")
+    monkeypatch.delenv("OZAGIA_DUMP", raising=False)
+    monkeypatch.delenv("OZAGIA_JOURNAL", raising=False)
+    assert server_module.main(["--root", str(root)]) == 0
+    assert captured[-1] == (
+        str(root / "custom-state" / "graph.json"),
+        str(root / "custom-state" / "journal.jsonl"),
+    )
+
+    env_dump, env_journal = tmp_path / "env-graph.json", tmp_path / "env-journal.jsonl"
+    monkeypatch.setenv("OZAGIA_DUMP", str(env_dump))
+    monkeypatch.setenv("OZAGIA_JOURNAL", str(env_journal))
+    assert server_module.main(["--root", str(root)]) == 0
+    assert captured[-1] == (str(env_dump), str(env_journal))
+
+    cli_dump, cli_journal = tmp_path / "cli-graph.json", tmp_path / "cli-journal.jsonl"
+    assert server_module.main([
+        "--root", str(root), "--dump", str(cli_dump),
+        "--journal", str(cli_journal),
+    ]) == 0
+    assert captured[-1] == (str(cli_dump), str(cli_journal))
+
+
+def test_research_dev_context_is_combined_only_and_keeps_results_independent(
+        monkeypatch, server) -> None:
+    from ozagia.integrations.mcp import server as server_module
+
+    calls = []
+    research_context_spec = {
+        "name": "research_context", "description": "research context",
+        "inputSchema": {"type": "object", "properties": {},
+                        "additionalProperties": False},
+    }
+    module = types.ModuleType("ozagia.research.mcp")
+    module.research_tools = lambda: [research_context_spec]
+
+    def call_research_tool(name, args, workspace):
+        calls.append((name, args, workspace))
+        if args["session_id"] == "invalid":
+            raise ValueError("investigation not found")
+        return {"session_id": args["session_id"], "citations": ["claim-1"]}
+
+    module.call_research_tool = call_research_tool
+    monkeypatch.setitem(sys.modules, "ozagia.research.mcp", module)
+    coding_calls = []
+    monkeypatch.setattr(server.mem, "context", lambda task: (
+        coding_calls.append(task) or {"task": task, "citations": ["file.py"]}))
+
+    research_only = server_module.DevMemoryServer(None, mode="research",
+                                                   workspace=server.mem.raw_repo_root)
+    research_names = {tool["name"] for tool in research_only._tools}
+    assert "research_dev_context" not in research_names
+    assert not any(name.startswith("dev_") for name in research_names)
+
+    combined = server_module.DevMemoryServer(server.mem, mode="combined",
+                                              workspace=server.mem.raw_repo_root)
+    combined_names = {tool["name"] for tool in combined._tools}
+    assert "research_dev_context" in combined_names
+    response = combined.handle(_call("research_dev_context", {
+        "task": "inspect persistence", "session_id": "session-7"}))
+    assert response["result"]["isError"] is False
+    payload = json.loads(response["result"]["content"][0]["text"])
+    assert payload["coding_context"] == {
+        "task": "inspect persistence", "citations": ["file.py"]}
+    assert payload["research_context"] == {
+        "session_id": "session-7", "citations": ["claim-1"]}
+    assert payload["relationship"]["independent_retrievals"] is True
+    assert payload["relationship"]["linked"] is False
+    assert calls == [("research_context", {
+        "session_id": "session-7", "query": "inspect persistence"},
+        server.mem.raw_repo_root)]
+    assert coding_calls == ["inspect persistence"]
+
+    invalid = combined.handle(_call("research_dev_context", {
+        "task": "inspect persistence", "session_id": "invalid"}))
+    assert invalid["result"]["isError"] is True
+    assert "investigation not found" in invalid["result"]["content"][0]["text"]
+    # Session validation happens before querying coding context.
+    assert coding_calls == ["inspect persistence"]
 
 
 def test_missing_required_argument_is_invalid_params(server) -> None:

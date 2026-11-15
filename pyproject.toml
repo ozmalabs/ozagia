@@ -34,12 +34,14 @@ treesitter = [
     "tree-sitter-typescript>=0.23",
 ]
 lsp = ["pyright>=1.1.400"]
+research = ["sympy>=1.14,<2", "lark>=1.2,<2"]
 all = ["ozagia[treesitter,lsp]"]
 dev = ["ozagia[all]", "pytest>=8", "ruff>=0.6"]
 
 [project.scripts]
 ozagia-memory = "ozagia.core.memory:main"
 ozagia-mcp = "ozagia.integrations.mcp.server:main"
+ozagia-research = "ozagia.research.service:main"
 ozagia-edit = "ozagia.edit.code_edit:main"
 ozagia-symbols = "ozagia.core.symbol_graph:main"
 ozagia-eval = "ozagia.eval.agent:main"

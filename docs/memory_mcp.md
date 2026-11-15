@@ -186,6 +186,26 @@ The server is stdlib-only: it does **not** require the `mcp` Python package
 (and it speaks the newline-delimited MCP stdio framing, with a
 Content-Length fallback for LSP-style clients).
 
+### Tool modes
+
+The server defaults to `coding`, which exposes the repository development
+tools. Set `OZAGIA_MODE=research` to expose only the optional research tools;
+this mode does not need a dev-memory snapshot. Set `OZAGIA_MODE=combined` to
+expose both tool sets. The equivalent command-line option is `--mode` and
+overrides the environment variable:
+
+```bash
+OZAGIA_MODE=research .venv/bin/python -m ozagia.integrations.mcp.server
+.venv/bin/python -m ozagia.integrations.mcp.server --mode combined
+```
+
+Research tools are loaded only for `research` and `combined`. Their session
+store is rooted in the server's `--root` (or `OZAGIA_ROOT`) workspace.
+Combined mode also exposes `research_dev_context`, which takes a task and a
+valid research `session_id`, then returns coding context and cited research
+context as separate results. It does not create a link between them or treat
+their contents as supporting evidence for each other.
+
 ## Wire it into Claude Code
 
 `.mcp.json` in the project root:
