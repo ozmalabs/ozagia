@@ -1,6 +1,6 @@
-"""ocelot_markdown_edit — graph-addressed structural edits for Markdown.
+"""ozagia.edit.markdown — graph-addressed structural edits for Markdown.
 
-The Markdown twin of `ocelot_code_edit.py`. The canonical change is a list of
+The Markdown twin of `ozagia.edit.code_edit`. The canonical change is a list of
 semantic operations against the document's block graph (sections, bodies,
 frontmatter, spans), not a text diff. A diff is emitted only as `diff_view`.
 

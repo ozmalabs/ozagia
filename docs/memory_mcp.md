@@ -234,12 +234,12 @@ Content-Length fallback for LSP-style clients).
 | `dev_hover` / `dev_document_symbols` | Type/docs and symbol hierarchy. |
 | `dev_ast` | Python AST paths + spans for generic node edits. |
 | `dev_edit` | Apply a semantic edit script (preview by default; `diagnostics=true` waits for LSP diagnostics after an applied write). |
-| `dev_seed` | Before editing a seed: version, deps, rules/concepts, tests, docs. |
-| `dev_rule` | Before editing a rule: its seed, file, and current body. |
+| `dev_seed` | Before editing a seed: version, deps, rules/concepts, tests, docs. Listed only when the snapshot has `Seed` nodes (from an adapter). |
+| `dev_rule` | Before editing a rule: its seed, file, and current body. Listed only when the snapshot has `Rule` nodes. |
 | `dev_tests` | Before/after a change: the scoped gate. |
 | `dev_node` | Expand an id from a previous result. |
 | `dev_neighbours` | Walk dependency/seed/test/doc edges. |
-| `dev_graph_query` | Run a raw substrate DSL Term (read-only) over the snapshot. |
+| `dev_graph_query` | Ocelot adapter tool: run a raw substrate DSL Term (read-only) over the snapshot. |
 | `dev_stats` | Check snapshot freshness/histograms. |
 | `dev_changed` | Working-tree changes, linked to graph files. |
 | `dev_record` | Append a decision/verification receipt. |

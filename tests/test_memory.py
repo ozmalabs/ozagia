@@ -97,7 +97,7 @@ The demo seed lives in `seeds/demo.json` and is exercised by
     _write(root / "README.md", "# Fixture repo\n\n`seeds/demo.json`.\n")
 
 
-def test_build_and_query(tmp_path: Path) -> None:
+def test_build_and_query(tmp_path: Path, seed_adapter) -> None:
     _fixture(tmp_path)
     out = tmp_path / "var" / "dev_graph.json"
     report = build_index(tmp_path, out, include_docs="features",
@@ -176,7 +176,8 @@ def test_build_and_query(tmp_path: Path) -> None:
     # Pre-loaded brief: deterministic, citation-backed, optionally written.
     brief = mem.brief("add a rule to demo", write=True)
     assert brief["ok"]
-    assert "# Ocelot repo brief" in brief["markdown"]
+    assert f"# {tmp_path.name} repo brief" in brief["markdown"]
+    assert "seeds: 2" in brief["markdown"]
     assert "## Layout" in brief["markdown"]
     assert "## Key docs" in brief["markdown"]
     assert "## Task context: add a rule to demo" in brief["markdown"]
@@ -260,7 +261,7 @@ def test_journal(tmp_path: Path) -> None:
     assert recent[-1]["exit_code"] == 0
 
 
-def test_mcp_protocol(tmp_path: Path) -> None:
+def test_mcp_protocol(tmp_path: Path, seed_adapter) -> None:
     _fixture(tmp_path)
     out = tmp_path / "var" / "dev_graph.json"
     build_index(tmp_path, out, include_docs="features",
@@ -286,6 +287,8 @@ def test_mcp_protocol(tmp_path: Path) -> None:
             "dev_document_symbols", "dev_session_start", "dev_session_record",
             "dev_session_state", "dev_session_next", "dev_session_finish",
             "dev_session_list"} <= names
+    # From the (copied) Ocelot adapter.
+    assert "dev_graph_query" in names
 
     call = server.handle({
         "jsonrpc": "2.0", "id": 3, "method": "tools/call",
@@ -301,7 +304,7 @@ def test_mcp_protocol(tmp_path: Path) -> None:
         "params": {"name": "dev_brief", "arguments": {}},
     })
     assert brief["result"]["isError"] is False
-    assert "# Ocelot repo brief" in brief["result"]["content"][0]["text"]
+    assert f"# {tmp_path.name} repo brief" in brief["result"]["content"][0]["text"]
 
     outline = server.handle({
         "jsonrpc": "2.0", "id": 7, "method": "tools/call",
@@ -340,11 +343,11 @@ def test_mcp_protocol(tmp_path: Path) -> None:
 
     res = server.handle({"jsonrpc": "2.0", "id": 8,
                          "method": "resources/list", "params": {}})
-    assert res["result"]["resources"][0]["uri"] == "ocelot://brief"
+    assert res["result"]["resources"][0]["uri"] == "ozagia://brief"
     read = server.handle({"jsonrpc": "2.0", "id": 9,
                           "method": "resources/read",
-                          "params": {"uri": "ocelot://brief"}})
-    assert "# Ocelot repo brief" in read["result"]["contents"][0]["text"]
+                          "params": {"uri": "ozagia://brief"}})
+    assert f"# {tmp_path.name} repo brief" in read["result"]["contents"][0]["text"]
 
     rmap = server.handle({
         "jsonrpc": "2.0", "id": 21, "method": "tools/call",

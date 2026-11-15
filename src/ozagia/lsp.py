@@ -1,4 +1,4 @@
-"""ocelot_lsp — a small, honest stdio Language Server Protocol bridge.
+"""ozagia.lsp — a small, honest stdio Language Server Protocol bridge.
 
 This is the compiler-accurate layer the tree-sitter repo map cannot provide
 (see `docs/features/GRAPH_CODING_LANDSCAPE.md`, P0): definitions, references,
@@ -11,7 +11,7 @@ Design rules:
     per (root, language, command) via `get_client`, and closed explicitly
     (`close()` or a `with` block). `server_status()` never starts a server.
   * **Read-only by construction.** `rename_preview` and `symbol_impact` never
-    write. Canonical edits stay the op lists in `ocelot_code_edit.py`; this
+    write. Canonical edits stay the op lists in `ozagia.edit.code_edit`; this
     module only produces positions and previews.
   * **Honest absence.** A missing binary, an unsupported language, a dead
     server, a protocol error or a timeout returns `{"ok": False, ...}`; no
@@ -1438,7 +1438,7 @@ class LSPClient:
         """Return a server WorkspaceEdit as a read-only preview.
 
         No file is read back and no edit is applied. The canonical edit path
-        remains `ocelot_code_edit.apply_edit_script` (op list, preview first).
+        remains `ozagia.edit.dispatch.apply_edit_script` (op list, preview first).
         """
         method = "textDocument/rename"
         try:
@@ -1490,7 +1490,7 @@ class LSPClient:
                       timeout: float | None = None) -> dict[str, Any]:
         """Group resolved references by file for a symbol at a position.
 
-        This is the symbol-level complement to `ocelot_repo_map.impact`; it
+        This is the symbol-level complement to `ozagia.core.repo_map.impact`; it
         never edits and returns `written: False` explicitly.
         """
         try:

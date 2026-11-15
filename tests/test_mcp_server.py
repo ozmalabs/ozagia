@@ -51,7 +51,8 @@ def add(a: int, b: int) -> int:
 
 
 @pytest.fixture()
-def server(tmp_path: Path) -> DevMemoryServer:
+def server(tmp_path: Path, seed_adapter) -> DevMemoryServer:
+    # The seed adapter makes dev_seed available for the argument checks.
     _fixture(tmp_path)
     out = tmp_path / "var" / "dev_graph.json"
     build_index(tmp_path, out, include_docs="none",
@@ -143,7 +144,7 @@ def test_resources_read_exception_is_internal_error(
 
     monkeypatch.setattr(server.mem, "brief", boom)
     read = (b'{"jsonrpc":"2.0","id":7,"method":"resources/read",'
-            b'"params":{"uri":"ocelot://brief"}}\n')
+            b'"params":{"uri":"ozagia://brief"}}\n')
     out = _serve(monkeypatch, server, read + PING)
     assert out[0]["id"] == 7
     assert out[0]["error"]["code"] == -32603

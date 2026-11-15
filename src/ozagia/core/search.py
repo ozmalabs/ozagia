@@ -1,4 +1,4 @@
-"""ocelot_code_search — lexical hybrid code search (BM25 + graph RRF).
+"""ozagia.core.search — lexical hybrid code search (BM25 + graph RRF).
 
 This is the no-embedding half of hybrid retrieval:
 
@@ -15,10 +15,9 @@ This is the no-embedding half of hybrid retrieval:
     and a bounded source snippet.
 
 No network, no embeddings, no model, and no dependencies beyond the stdlib
-plus what ``ocelot_repo_map`` already uses. The index lives in process memory,
-cached under the tag cache's root hash so repeated searches do not re-tokenize
-the tree; the tag cache itself keeps re-parsing incremental. DEV TOOLING, NOT
-AGENT RUNTIME.
+plus what ``ozagia.core.repo_map`` already uses. The index lives in process
+memory, cached under the tag cache's root hash so repeated searches do not
+re-tokenize the tree; the tag cache itself keeps re-parsing incremental.
 """
 from __future__ import annotations
 
@@ -44,7 +43,7 @@ from ozagia.core.repo_map import (
     graph_prior,
     update_tag_cache,
 )
-from ozagia.config import state_path
+from ozagia.config import state_path, state_rel
 
 # BM25 defaults; both are keyword arguments on code_search().
 BM25_K1 = 1.5
@@ -477,11 +476,14 @@ def _discover_source_files(root: Path) -> list[str]:
     The real repository is never affected: its default cache is non-empty.
     """
     out: list[str] = []
+    srel = state_rel(root)
     for path in sorted(root.rglob("*")):
         if not path.is_file() or path.suffix.lower() not in LANGUAGES:
             continue
         rel = path.relative_to(root).as_posix()
         if any(part in SKIP_PARTS for part in rel.split("/")):
+            continue
+        if srel and (rel == srel or rel.startswith(srel + "/")):
             continue
         try:
             if path.stat().st_size > MAX_FILE_BYTES:

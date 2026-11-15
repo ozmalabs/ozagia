@@ -1,7 +1,7 @@
-"""ocelot_symbol_graph — symbol-level callers, callees and impact.
+"""ozagia.core.symbol_graph — symbol-level callers, callees and impact.
 
 Builds a graph of symbols (definitions) and the references between them from
-the tag cache that ``ocelot_repo_map`` maintains. Each node is one definition,
+the tag cache that ``ozagia.core.repo_map`` maintains. Each node is one definition,
 id ``"<rel path>::<qualname>"``. Each edge is "caller symbol references callee
 symbol", where the caller is the innermost enclosing definition of the
 reference (``"<rel path>::<module>"`` for module-level code).
@@ -17,9 +17,9 @@ Resolution is syntactic, in three levels with descending confidence:
 
 There is no type inference. ``obj.method()`` resolves by name, and dynamic
 dispatch, ``getattr`` and star re-exports are not followed. The precise layer is
-LSP (``ocelot_lsp``); see ``docs/features/SYMBOL_GRAPH.md``.
+LSP (``ozagia.lsp``).
 
-DEV TOOLING, NOT AGENT RUNTIME. Read-only: nothing here edits code.
+Read-only: nothing here edits code.
 
 CLI::
 
@@ -38,7 +38,7 @@ from typing import Any
 
 from ozagia.core.repo_map import (
     _GENERIC_IDENTS, ROOT, _graph_key, update_tag_cache)
-from ozagia.config import state_path
+from ozagia.config import load_project_config, state_path
 
 # A name with more global definitions than this is too ambiguous to link.
 MAX_NAME_CANDIDATES = 5
@@ -48,7 +48,9 @@ MEMO_SIZE = 4
 DEFAULT_DEPTH = {"callers": 1, "callees": 1, "impact": 3}
 OPS = ("callers", "callees", "impact", "resolve")
 _RESOLUTION_RANK = {"local": 3, "import": 2, "name": 1}
-_PY_ROOTS = ("", "runners/dsl/python")
+# Python import roots: the repository root plus the configured import_roots.
+_PY_ROOTS = ("",) + tuple(r for r in load_project_config(ROOT).import_roots
+                          if r != ".")
 
 _GRAPH_MEMO: OrderedDict[str, dict[str, Any]] = OrderedDict()
 _ADJ_MEMO: OrderedDict[int, tuple[dict[str, Any], dict, dict]] = OrderedDict()

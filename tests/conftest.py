@@ -56,3 +56,30 @@ def load_module_at(commit: str, rel_path: str, directory: Path, module_name: str
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+# A verbatim copy of Ocelot's `tools/ozagia_ocelot_adapter.py`: seed manifest
+# indexing (Seed/Rule/... nodes) and `dev_graph_query`.
+OCELOT_ADAPTER = Path(__file__).resolve().parent / "fixtures" / "ocelot_adapter.py"
+
+
+def write_adapter_config(directory: Path, modules: list[str],
+                         extra: str = "") -> Path:
+    """A `.ozagia.toml` in `directory` that loads `modules`."""
+    directory.mkdir(parents=True, exist_ok=True)
+    cfg = directory / ".ozagia.toml"
+    refs = ", ".join(f'"{m}"' for m in modules)
+    cfg.write_text(f"{extra}\n[adapters]\nmodules = [{refs}]\n", encoding="utf-8")
+    return cfg
+
+
+@pytest.fixture
+def seed_adapter(tmp_path_factory, monkeypatch) -> Path:
+    """Point `$OZAGIA_CONFIG` at a config outside the fixture repo that loads
+    the Ocelot seed adapter (imported from the config file's directory)."""
+    base = tmp_path_factory.mktemp("seed_adapter")
+    (base / "ozagia_test_ocelot_adapter.py").write_text(
+        OCELOT_ADAPTER.read_text(encoding="utf-8"), encoding="utf-8")
+    cfg = write_adapter_config(base, ["ozagia_test_ocelot_adapter:register"])
+    monkeypatch.setenv("OZAGIA_CONFIG", str(cfg))
+    return cfg

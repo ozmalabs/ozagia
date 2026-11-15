@@ -1,20 +1,26 @@
-"""ocelot_index_bench — timing bench for the warm repo index (DEV TOOLING).
+"""ozagia.eval.bench — timing bench for the warm repo index.
 
 Measures, in one process, the cost of the repo-map tag cache, repo_map,
 code_search and impact. The first call of each query may build a memo; the
 second call shows the warm cost that the plan targets refer to.
 
     .venv/bin/python -m ozagia.eval.bench --root . --cold --workers 4
-    .venv/bin/python -m ozagia.eval.bench --root .
+    .venv/bin/python -m ozagia.eval.bench --root . --query "tag cache"
+    .venv/bin/python -m ozagia.eval.bench --root ~/ocelot --preset ocelot
+
+The repo-map tasks, search queries and impact files come from `--preset`
+(default `generic`), each replaced by `--task`, `--query` and `--impact-file`
+when given. The generic impact files are the two largest indexed files of the
+target, so the bench runs on any repository.
 
 Output is one JSON object on stdout. ``--cold`` deletes the tag cache first,
 so the update step is a full cold index. Without it, the update reuses the
 cache left by an earlier process. The bench writes only to ``--cache``
-(default ``/tmp/ocelot_index_bench/tags.json``), never under a repo's
-``var/``. ``--check`` exits 1 when a target is missed. The plan does not use
+(default ``/tmp/ozagia_index_bench/tags.json``), never under the target
+repository. ``--check`` exits 1 when a target is missed. The plan does not use
 it as a gate: a missed target is a reported result.
 
-Stdlib only. Not agent runtime.
+Stdlib only.
 """
 from __future__ import annotations
 
@@ -32,21 +38,36 @@ from ozagia.core import search as search_module
 from ozagia.core.search import code_search, search_side_cache_path
 from ozagia.core.repo_map import ROOT, impact, repo_map, update_tag_cache
 
-DEFAULT_CACHE = Path("/tmp/ocelot_index_bench/tags.json")
-REPO_MAP_TASKS = (
-    "personalized pagerank repo map",
-    "seed loader dependency closure",
-    "lossless python cst edit",
-)
-SEARCH_QUERIES = (
-    "tag cache fingerprint",
-    "frozen core boot",
-    "replace_body one-line def",
-)
-IMPACT_FILES = (
-    "src/ozagia/core/repo_map.py",
-    "substrate/seed_loader.py",
-)
+DEFAULT_CACHE = Path("/tmp/ozagia_index_bench/tags.json")
+# Named sets of (repo-map tasks, search queries, impact files). An empty
+# impact tuple means "the two largest indexed files of the target".
+PRESETS: dict[str, dict[str, tuple[str, ...]]] = {
+    "generic": {
+        "tasks": ("main entry point", "configuration loading",
+                  "error handling and logging"),
+        "queries": ("main", "config file", "parse arguments"),
+        "impact_files": (),
+    },
+    "ozagia": {
+        "tasks": ("personalized pagerank repo map", "lossless python cst edit",
+                  "adapter registry"),
+        "queries": ("tag cache fingerprint", "replace_body one-line def",
+                    "project config"),
+        "impact_files": ("src/ozagia/core/repo_map.py", "src/ozagia/config.py"),
+    },
+    "ocelot": {
+        "tasks": ("personalized pagerank repo map",
+                  "seed loader dependency closure",
+                  "lossless python cst edit"),
+        "queries": ("tag cache fingerprint", "frozen core boot",
+                    "replace_body one-line def"),
+        "impact_files": ("scripts/ocelot_repo_map.py",
+                         "substrate/seed_loader.py"),
+    },
+}
+REPO_MAP_TASKS = PRESETS["generic"]["tasks"]
+SEARCH_QUERIES = PRESETS["generic"]["queries"]
+IMPACT_FILES = PRESETS["generic"]["impact_files"]
 REPO_MAP_BUDGET = 1500
 TARGETS = {
     "repo_map_warm_s": 1.0,
@@ -72,14 +93,24 @@ print(json.dumps({"seconds": round(seconds, 3), "n": result["n"],
 """
 
 
-def _new_process_search(cache: Path, root: Path) -> dict[str, Any]:
+def _largest_files(root: Path, files: list[str], n: int = 2) -> tuple[str, ...]:
+    sized = []
+    for rel in files:
+        try:
+            sized.append((-(root / rel).stat().st_size, rel))
+        except OSError:
+            continue
+    return tuple(rel for _, rel in sorted(sized)[:n])
+
+
+def _new_process_search(cache: Path, root: Path, query: str) -> dict[str, Any]:
     """First code_search in a new interpreter, with the side cache present."""
     side = search_side_cache_path(cache)
     before = side.stat().st_size if side.exists() else None
     code_dir = str(Path(__file__).resolve().parents[1])
     proc = subprocess.run(
         [sys.executable, "-c", _CHILD, code_dir, str(root), str(cache),
-         SEARCH_QUERIES[0]],
+         query],
         capture_output=True, text=True, cwd=code_dir)
     if proc.returncode != 0:
         return {"error": proc.stderr.strip()[-500:], "side_bytes_before": before}
@@ -115,13 +146,16 @@ def _target(value: float | None, limit: float) -> dict[str, Any]:
     return {"median_second_s": value, "target_s": limit, "met": met}
 
 
-def run(root: Path, cache: Path, cold: bool) -> dict[str, Any]:
+def run(root: Path, cache: Path, cold: bool, *,
+        tasks: tuple[str, ...] = REPO_MAP_TASKS,
+        queries: tuple[str, ...] = SEARCH_QUERIES,
+        impact_files: tuple[str, ...] = IMPACT_FILES) -> dict[str, Any]:
     if cold and cache.exists():
         cache.unlink()
     side = search_side_cache_path(cache)
     if cold and side.exists():
         side.unlink()
-    update_s, (_view, update_stats) = _timed(
+    update_s, (view, update_stats) = _timed(
         lambda: update_tag_cache(root, cache_path=cache))
     update = {
         "seconds": update_s,
@@ -133,8 +167,11 @@ def run(root: Path, cache: Path, cold: bool) -> dict[str, Any]:
         "parallel": update_stats["parallel"],
     }
 
+    if not impact_files:
+        impact_files = _largest_files(root, sorted(view.get("files") or {}))
+
     repo_rows: dict[str, dict[str, Any]] = {}
-    for task in REPO_MAP_TASKS:
+    for task in tasks:
         repo_rows[task] = _twice(
             lambda task=task: repo_map(root, task=task,
                                        budget_tokens=REPO_MAP_BUDGET,
@@ -143,20 +180,20 @@ def run(root: Path, cache: Path, cold: bool) -> dict[str, Any]:
                        "estimated_tokens": r["estimated_tokens"]})
 
     search_rows: dict[str, dict[str, Any]] = {}
-    for query in SEARCH_QUERIES:
+    for query in queries:
         search_rows[query] = _twice(
             lambda query=query: code_search(root, query, cache_path=cache),
             lambda r: {"results": r["n"]})
     search_build = dict(search_module.LAST_BUILD)
-    first_search_s = search_rows[SEARCH_QUERIES[0]]["first_s"]
+    first_search_s = search_rows[queries[0]]["first_s"]
 
     impact_rows: dict[str, dict[str, Any]] = {}
-    for rel in IMPACT_FILES:
+    for rel in impact_files:
         impact_rows[rel] = _twice(
             lambda rel=rel: impact(root, file=rel, cache_path=cache),
             lambda r: {"ok": r["ok"], "impacted": r.get("n")})
 
-    new_process = _new_process_search(cache, root)
+    new_process = _new_process_search(cache, root, queries[0])
     side_bytes = side.stat().st_size if side.exists() else None
 
     repo_second = _median(repo_rows)
@@ -188,6 +225,7 @@ def run(root: Path, cache: Path, cold: bool) -> dict[str, Any]:
         "side_cache": str(side),
         "side_cache_bytes": side_bytes,
         "mode": "cold" if cold else "warm",
+        "impact_files": list(impact_files),
         "workers_env": os.environ.get("OZAGIA_INDEX_WORKERS"),
         "cpu_count": os.cpu_count(),
         "update": update,
@@ -212,12 +250,26 @@ def main(argv: list[str] | None = None) -> int:
                         help="sets OZAGIA_INDEX_WORKERS for this process")
     parser.add_argument("--check", action="store_true",
                         help="exit 1 when any target is missed")
+    parser.add_argument("--preset", choices=sorted(PRESETS), default="generic",
+                        help="named tasks/queries/impact files (default generic; "
+                             "ocelot keeps the Ocelot bench set)")
+    parser.add_argument("--task", action="append", default=None,
+                        help="repo-map task (repeatable; replaces the preset's)")
+    parser.add_argument("--query", action="append", default=None,
+                        help="code_search query (repeatable; replaces the preset's)")
+    parser.add_argument("--impact-file", action="append", default=None,
+                        help="repo-relative file for impact (repeatable; "
+                             "replaces the preset's)")
     args = parser.parse_args(argv)
+    preset = PRESETS[args.preset]
     if args.workers is not None:
         os.environ["OZAGIA_INDEX_WORKERS"] = str(args.workers)
     cache = Path(args.cache)
     cache.parent.mkdir(parents=True, exist_ok=True)
-    report = run(Path(args.root).resolve(), cache, args.cold)
+    report = run(Path(args.root).resolve(), cache, args.cold,
+                 tasks=tuple(args.task or preset["tasks"]),
+                 queries=tuple(args.query or preset["queries"]),
+                 impact_files=tuple(args.impact_file or preset["impact_files"]))
     print(json.dumps(report, indent=2, sort_keys=True))
     if args.check:
         missed = [name for name, entry in report["targets"].items()

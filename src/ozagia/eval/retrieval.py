@@ -1,4 +1,4 @@
-"""ocelot_repo_map_eval — deterministic, offline retrieval evaluation.
+"""ozagia.eval.retrieval — deterministic, offline retrieval evaluation.
 
 This is the measurement instrument for the repo map. It answers one narrow
 question: *given an explicit task and a token budget, which repository files do
@@ -918,7 +918,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--arms", default=",".join(ARMS),
                         help="comma-separated arms: " + ",".join(ARMS))
     parser.add_argument("--cache", default=None,
-                        help="repo-map tag cache path (default: <root>/var/ocelot_repo_map_eval_tags.json)")
+                        help="repo-map tag cache path (default: <state dir>/eval_tags.json)")
     parser.add_argument("--memory", default=None,
                         help="dev-memory snapshot path (default: <root>/.ozagia/graph.json)")
     parser.add_argument("--allow-stale", action="store_true",

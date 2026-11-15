@@ -1,4 +1,4 @@
-"""ocelot_architecture — deterministic architecture summaries of a checkout.
+"""ozagia.core.architecture — deterministic architecture summaries of a checkout.
 
 This module turns the existing repo-map reference graph into a compact,
 repeatable architecture report:
@@ -14,8 +14,8 @@ repeatable architecture report:
   * **test-to-source ratio** — indexed test files vs non-test source files.
 
 The analysis is deliberately file-level and syntactic. It reuses
-:func:`ocelot_repo_map.update_tag_cache` (content-hash incremental tags) and
-:func:`ocelot_repo_map.build_reference_graph` (referencer -> definer edges),
+:func:`ozagia.core.repo_map.update_tag_cache` (content-hash incremental tags)
+and :func:`ozagia.core.repo_map.build_reference_graph` (referencer -> definer edges),
 then normalizes the graph before measuring it.
 
 Determinism contract: every list is sorted, every mapping is serialized with
@@ -24,7 +24,7 @@ values are rounded before they enter the report. Calling
 ``architecture_report(root)`` twice on unchanged files yields byte-identical
 ``markdown`` and ``json`` strings.
 
-DEV TOOLING, NOT AGENT RUNTIME. The report is read-only; it never edits.
+The report is read-only; it never edits.
 """
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from ozagia.core.repo_map import build_reference_graph, update_tag_cache
-from ozagia.config import state_path
+from ozagia.config import load_project_config, repo_root, state_path
 
 DEFAULT_TOP = 15
 DEFAULT_DAMPING = 0.85
@@ -79,7 +79,8 @@ _ENTRYPOINT_NAMES = {
 }
 # Dev tooling and command entrypoints: useful, but "nothing imports it" is
 # expected for them, so they are not dead-code candidates.
-_ENTRYPOINT_PREFIXES = ("scripts/", "tools/", "bin/", "runners/dsl/src/bin/")
+# From the project configuration (`entrypoint_prefixes`).
+_ENTRYPOINT_PREFIXES = tuple(load_project_config(repo_root()).entrypoint_prefixes)
 
 
 def _language(path: str) -> str:

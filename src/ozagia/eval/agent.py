@@ -1,7 +1,4 @@
-"""ocelot_agent_eval — end-to-end task-success harness for coding agents.
-
-DEV TOOLING. Not agent runtime: nothing here is loaded by the substrate, and
-the CLAUDE.md runtime rules (integer frames, no Python decisions) do not apply.
+"""ozagia.eval.agent — end-to-end task-success harness for coding agents.
 
 Why this exists: retrieval recall does not guarantee task success. The studies
 cited in docs/features/DEV_TOOLING_V2_PLAN.md (arXiv 2611.07286, 2610.33958)
@@ -25,8 +22,8 @@ Drivers:
   opencode  OpenCode CLI in `run` mode. LIVE ONLY.
 
 Arms:
-  baseline    no Ocelot MCP server. Claude Code runs with --strict-mcp-config.
-  dev_memory  Ocelot dev-memory MCP server (ozagia.integrations.mcp.server)
+  baseline    no ozagia MCP server. Claude Code runs with --strict-mcp-config.
+  dev_memory  ozagia MCP server (ozagia.integrations.mcp.server)
               registered through a config file written into the workdir.
 
 Live drivers refuse to run unless both `--live` and the environment variable
@@ -693,7 +690,7 @@ class CommandDriver:
         """The OPENCODE_CONFIG for one session, written under log_dir.
 
         Both arms deny the ref-moving git commands. Only dev_memory adds the
-        Ocelot MCP server (copied from the arm config in the workdir), so the
+        ozagia MCP server (copied from the arm config in the workdir), so the
         arms differ only in that server.
         """
         doc: dict[str, Any] = {
@@ -1093,7 +1090,7 @@ def render_markdown(report: dict[str, Any]) -> str:
             row["mean_cost_usd"], row.get("mean_tool_calls"),
             row.get("mean_mcp_calls"), row["localization_rate"])) + " |")
     lines += ["", "Token, cost and tool columns are blank where the driver reports no "
-              "value. MCP calls count calls to the Ocelot dev-memory server. "
+              "value. MCP calls count calls to the ozagia MCP server. "
               "Prep (dev_memory snapshot and tag cache) runs before the driver timer; "
               "mean prep s is 0 for baseline.",
               "", "## Per task (paired)", ""]

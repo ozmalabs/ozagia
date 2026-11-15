@@ -1,11 +1,11 @@
-"""ocelot_tag_languages — multi-language definition/reference tags.
+"""ozagia.index.tag_languages — multi-language definition/reference tags.
 
 Workstream D of the advanced coding-agent plan. This module is a registry of
 tree-sitter tag backends: one entry per supported file suffix, each naming the
 grammar module, the language factory inside it, and the grammar's own
 ``queries/tags.scm``.
 
-The API is deliberately uniform with ``ocelot_repo_map.extract_tags`` so the
+The API is deliberately uniform with ``ozagia.core.repo_map.extract_tags`` so the
 central integrator can swap the three-language table for this registry without
 changing the tag-cache or graph code:
 
@@ -14,13 +14,13 @@ changing the tag-cache or graph code:
     tags = extract_tags("x.rs", source)
 
 Python keeps the stdlib-AST fast path (the same definitions/references as
-``ocelot_repo_map``); every other language uses its installed grammar's
+``ozagia.core.repo_map``); every other language uses its installed grammar's
 ``queries/tags.scm``. The registry does not require a grammar import at module
 import time, so a missing optional grammar degrades to an empty tag list rather
 than breaking the caller. ``backend_status`` reports exactly what is available
 and which capture classes the shipped query provides.
 
-DEV TOOLING, NOT AGENT RUNTIME. Tags are syntactic hints for the repo map; they
+Tags are syntactic hints for the repo map; they
 are not scope-resolved and they never edit code.
 """
 from __future__ import annotations
@@ -193,7 +193,7 @@ def _python_import_tags(node: ast.AST, scope: str) -> list[dict[str, Any]]:
 def _python_tags(source: str) -> list[dict[str, Any]]:
     """Python tags via the stdlib AST: defs, refs and imports with scope.
 
-    This is the only Python extractor in the tree; ``ocelot_repo_map`` delegates
+    This is the only Python extractor in the tree; ``ozagia.core.repo_map`` delegates
     here. Definitions carry ``qualname`` (the dotted chain of enclosing defs plus
     the name) and ``end_line``. Loads carry ``scope``, the qualname of the
     innermost enclosing def ("" at module level). The set of

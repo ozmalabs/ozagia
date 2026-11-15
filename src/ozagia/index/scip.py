@@ -1,4 +1,4 @@
-"""ocelot_scip_import — ingest SCIP indexes into symbol/reference records.
+"""ozagia.index.scip — ingest SCIP indexes into symbol/reference records.
 
 Primary supported path: the JSON emitted by the Sourcegraph SCIP CLI::
 
@@ -24,7 +24,7 @@ The normalized records are file-level and symbol-level:
 * references convert to repo-map-compatible edges ``{src, tgt, weight}``
   where ``src`` references a symbol defined in ``tgt``.
 
-DEV TOOLING, NOT AGENT RUNTIME. This module only reads indexes and returns
+This module only reads indexes and returns
 plain JSON-safe dictionaries. It never edits source and never prints.
 
 The central integrator wires the public functions into the dev-memory MCP

@@ -1,10 +1,9 @@
-"""ocelot_dev_session — a replayable dev-session state graph (LangGraph-like).
+"""ozagia.core.session — a replayable dev-session state graph (LangGraph-like).
 
-DEV TOOLING, NOT AGENT RUNTIME. This module records what a coding agent did
+This module records what a coding agent did
 during one development task: the task, its plan, the steps it worked on, the
 attempts, edits, verifications and decisions. It is a *receipt graph*, not a
-runtime: it never edits files, never runs tests, never calls a model and never
-holds a live substrate handle.
+runtime: it never edits files, never runs tests and never calls a model.
 
 The graph is typed and append-only apart from the small session header:
 

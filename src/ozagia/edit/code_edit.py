@@ -1,4 +1,4 @@
-"""ocelot_code_edit — graph-addressed structural edits for Python source.
+"""ozagia.edit.code_edit — graph-addressed structural edits for Python source.
 
 THE MODEL. The canonical change is an **edit script**: semantic operations
 against a file's definition graph (replace a symbol, replace a function body,

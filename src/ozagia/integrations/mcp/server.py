@@ -1,13 +1,16 @@
-"""ocelot_dev_memory_mcp — stdio MCP server over the dev-memory snapshot.
+"""ozagia.integrations.mcp.server — stdio MCP server over the dev-memory snapshot.
 
-This is the "A" integration surface: an existing coding agent (OpenCode,
-Claude Code, Cursor, any MCP client) gets Ocelot's repo memory as tools, while
-Ocelot stays the memory and citation source. The agent decides; the tools only
+An existing coding agent (OpenCode, Claude Code, Cursor, any MCP client) gets
+the repository's graph memory as tools. The agent decides; the tools only
 answer structural questions and record decisions/verification receipts.
+
+`dev_seed` and `dev_rule` are listed only when the snapshot has `Seed` (resp.
+`Rule`) nodes, which come from an adapter indexer. Adapters can add tools
+(`Registry.add_mcp_tool`, see `ozagia.adapters`).
 
 It is deliberately stdlib-only (no `mcp` package dependency) and READ-ONLY over
 the graph, with one small append-only journal for decisions and verifications.
-The graph itself is built by `src/ozagia/core/memory.py`.
+The graph itself is built by `ozagia.core.memory`.
 
 Run (stdio):
 
@@ -17,7 +20,7 @@ Environment:
     OZAGIA_DUMP     snapshot path (default .ozagia/graph.json)
     OZAGIA_JOURNAL  journal path  (default .ozagia/journal.jsonl)
     OZAGIA_AUTOBUILD  "1" to build the snapshot on first start if absent
-    OZAGIA_ROOT     checkout the tools act on (default: this script's repo)
+    OZAGIA_ROOT     checkout the tools act on (default: the current Git top level)
 """
 from __future__ import annotations
 
@@ -32,6 +35,8 @@ import traceback
 from pathlib import Path
 from typing import Any, Callable
 
+from ozagia.adapters import registry
+from ozagia.config import repo_root
 from ozagia.core.memory import (
     DEFAULT_DUMP,
     DEFAULT_JOURNAL,
@@ -40,6 +45,7 @@ from ozagia.core.memory import (
 )
 
 SERVER_NAME = "ozagia"
+BRIEF_URI = "ozagia://brief"
 SERVER_VERSION = "0.1.0"
 SUPPORTED_PROTOCOL_VERSIONS = ("2024-11-05", "2025-03-26", "2025-06-18")
 PROTOCOL_VERSION = "2025-06-18"
@@ -309,17 +315,6 @@ _TOOLS: list[dict[str, Any]] = [
         }, ["id"]),
     },
     {
-        "name": "dev_graph_query",
-        "description": (
-            "Evaluate a substrate DSL Term-tree against the snapshot on the "
-            "substrate's own evaluator (read-only). Pass either `term` (wire "
-            "dict) or `match` ('TYPE where attr OP value [and ...]')."),
-        "inputSchema": _schema({
-            "term": {"type": "object"},
-            "match": {"type": "string"},
-        }),
-    },
-    {
         "name": "dev_stats",
         "description": "Snapshot histograms and repo summary.",
         "inputSchema": _schema({}),
@@ -565,6 +560,8 @@ class _ArgError(ValueError):
 
 
 _SCHEMAS: dict[str, dict[str, Any]] = {t["name"]: t["inputSchema"] for t in _TOOLS}
+# Built-in tools listed only when the snapshot has nodes of this type.
+_TOOL_NODE_TYPES = {"dev_seed": "Seed", "dev_rule": "Rule"}
 _INT_TEXT = re.compile(r"-?[0-9]+")
 
 
@@ -651,7 +648,6 @@ class DevMemoryServer:
             "dev_rule": self._rule,
             "dev_node": self._node,
             "dev_neighbours": self._neighbours,
-            "dev_graph_query": self._graph_query,
             "dev_stats": self._stats,
             "dev_changed": self._changed,
             "dev_record": self._record,
@@ -667,6 +663,27 @@ class DevMemoryServer:
             "dev_symbol_graph_impact": self._symbol_graph_impact,
             "dev_symbol_resolve": self._symbol_resolve,
         }
+        present = {n.get("type") for n in memory.nodes.values()}
+        for name, typ in _TOOL_NODE_TYPES.items():
+            if typ not in present:
+                del self._handlers[name]
+        self._tools = [t for t in _TOOLS if t["name"] in self._handlers]
+        self._schemas = {t["name"]: t["inputSchema"] for t in self._tools}
+        self._load_adapter_tools()
+
+    def _load_adapter_tools(self) -> None:
+        reg = registry(self.mem.raw_repo_root)
+        for err in reg.errors:
+            print(f"[{SERVER_NAME}] adapter error: {err}", file=sys.stderr)
+        for name, (spec, handler) in reg.mcp_tools.items():
+            if name in _SCHEMAS:
+                print(f"[{SERVER_NAME}] adapter tool {name!r} clashes with a "
+                      f"built-in tool; ignored", file=sys.stderr)
+                continue
+            self._handlers[name] = (
+                lambda a, handler=handler: handler(self.mem, a))
+            self._tools.append(spec)
+            self._schemas[name] = spec["inputSchema"]
 
     # -- tool implementations --------------------------------------------- #
     def _context(self, a: dict[str, Any]) -> Any:
@@ -794,13 +811,6 @@ class DevMemoryServer:
                        self.mem._in.get(nid, []) if e["type"] == edge],
             }
         return out
-
-    def _graph_query(self, a: dict[str, Any]) -> Any:
-        if bool(a.get("term")) == bool(a.get("match")):
-            return {"ok": False,
-                    "error": "pass exactly one of term= or match="}
-        return self.mem.gi.graph_query(term=a.get("term"),
-                                       match=a.get("match"))
 
     def _stats(self, _a: dict[str, Any]) -> Any:
         return self.mem.stats()
@@ -948,11 +958,11 @@ class DevMemoryServer:
         if method == "ping":
             return self._ok(msg_id, {})
         if method == "tools/list":
-            return self._ok(msg_id, {"tools": _TOOLS})
+            return self._ok(msg_id, {"tools": self._tools})
         if method == "resources/list":
             return self._ok(msg_id, {"resources": [{
-                "uri": "ocelot://brief",
-                "name": "Ocelot repo brief",
+                "uri": BRIEF_URI,
+                "name": "Repo brief",
                 "description": "Compact repo layout, commands, docs, history and changes.",
                 "mimeType": "text/markdown",
             }]})
@@ -960,7 +970,7 @@ class DevMemoryServer:
             return self._ok(msg_id, {"resourceTemplates": []})
         if method == "resources/read":
             uri = str(params.get("uri", ""))
-            if uri == "ocelot://brief":
+            if uri == BRIEF_URI:
                 brief = self.mem.brief()
                 return self._ok(msg_id, {"contents": [{
                     "uri": uri,
@@ -978,7 +988,7 @@ class DevMemoryServer:
                 return self._err(msg_id, _E_INVALID_PARAMS,
                                  "arguments must be an object")
             try:
-                args = _validate_args(_SCHEMAS[name],
+                args = _validate_args(self._schemas[name],
                                       params.get("arguments", {}))
             except _ArgError as e:
                 return self._err(msg_id, _E_INVALID_PARAMS, str(e))
@@ -1153,9 +1163,7 @@ def main(argv: list[str] | None = None) -> int:
                                                     str(DEFAULT_DUMP)))
     p.add_argument("--journal", default=os.environ.get("OZAGIA_JOURNAL",
                                                        str(DEFAULT_JOURNAL)))
-    p.add_argument("--root", default=(
-        os.environ.get("OZAGIA_ROOT")
-        or str(Path(__file__).resolve().parent.parent)))
+    p.add_argument("--root", default=str(repo_root()))
     p.add_argument("--autobuild", action="store_true")
     args = p.parse_args(argv)
     mem = _load_memory(args)

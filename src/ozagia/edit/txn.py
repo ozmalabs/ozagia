@@ -1,8 +1,7 @@
 """Shared read/hash/write transaction for the edit adapters.
 
-DEV TOOLING, NOT AGENT RUNTIME. Nothing in `runners/dsl` or the live substrate
-loads this module. The Python, JSON, Markdown, CST and IR edit adapters use it
-to read a file once, bind every hash to the bytes on disk, keep the original
+The Python, JSON, Markdown and CST edit adapters (and adapter edit engines)
+use it to read a file once, bind every hash to the bytes on disk, keep the original
 line endings and byte-order mark, and write atomically with a backup.
 
 Contract:

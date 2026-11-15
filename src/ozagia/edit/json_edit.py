@@ -1,10 +1,10 @@
-"""ocelot_json_edit — span-preserving, graph-addressed edits for JSON documents.
+"""ozagia.edit.json_edit — span-preserving, graph-addressed edits for JSON documents.
 
 JSON is a document tree, so the semantic edit targets a **path** (`["nodes", 3,
 "attrs", "name"]`) and the adapter replaces only that value's span. The rest of
 the file — key order, indentation, long descriptions, surrounding formatting —
 is left byte-identical. This is the format-adapter contract from
-`ocelot_edit.py`: semantic ops in, transaction out, diff only as a view.
+`ozagia.edit.dispatch`: semantic ops in, transaction out, diff only as a view.
 
 Why not `json.load` + `json.dumps` the whole file? Because a seed manifest is a
 large, hand-influenced document; re-rendering it would churn thousands of lines

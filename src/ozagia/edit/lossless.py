@@ -1,4 +1,4 @@
-"""ocelot_lossless — the byte-for-byte leaf structure under every format.
+"""ozagia.edit.lossless — the byte-for-byte leaf structure under every format.
 
 The edit layer must be able to recreate the original file exactly, including
 comments, blank lines, indentation, trailing spaces and line endings. A semantic

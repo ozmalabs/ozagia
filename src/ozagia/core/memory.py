@@ -1,34 +1,35 @@
-"""ocelot_dev_memory — a mechanical repo-memory index + query layer for coding agents.
+"""ozagia.core.memory — a mechanical repo-memory index and query layer.
 
-DEV TOOLING, NOT AGENT RUNTIME. This module builds a *separate* graph snapshot
-of a source checkout (files, symbols, tests, seeds, rules, docs, git history,
-known failures) and answers read-only questions over it. It never boots the
-agent, never mutates the agent substrate, and never decides what a coding agent
-should do. The external coding agent (OpenCode, Claude Code, ...) is the
-decider; Ocelot is the memory and the citation source.
+This module builds a graph snapshot of a source checkout (files, symbols,
+tests, docs, git history, known failures, plus whatever adapters add) and
+answers read-only questions over it. It never decides what a coding agent
+should do; the agent (OpenCode, Claude Code, ...) decides, and the snapshot is
+the memory and the citation source.
 
 Why a graph and not an embeddings index: the useful development questions are
-typed and relational — "which tests cover this seed?", "which rules does this
-seed ship?", "which files import this module?", "what changed recently near
-this symbol?". Those are edge traversals, not fuzzy similarity. The snapshot is
-also stable, inspectable and diffable.
+typed and relational ("which tests cover this file?", "which files import this
+module?", "what changed recently near this symbol?"). Those are edge
+traversals, not fuzzy similarity. The snapshot is also stable, inspectable and
+diffable.
 
-Graph shape (all node/edge types are ordinary typed-graph data):
+Built-in graph shape:
 
     Repo -contains-> File
-    File -defines-> Symbol | Seed | Doc | Test
+    File -defines-> Symbol | Doc
     File -imports-> File
     File -has_test-> Test
     Test -tests_module-> File
     Test -mentions_file-> File
-    Test -mentions_seed-> Seed
-    Seed -depends_on-> Seed
-    Seed -contains-> Rule | Concept | Reflex | Microtheory | <seed node type>
-    Seed -defined_in-> File
-    Doc -documents-> File | Seed
+    Doc -documents-> File
     Commit -changes-> File
     Failure -refers_to-> Test
     Failure -in_file-> File
+
+Adapter indexers (`ozagia.adapters`) add project node types. The query layer
+also understands `Seed` and `Rule`-like nodes (`seed`, `rule`, task anchors)
+when an adapter provides them; without them those queries find nothing.
+
+What is indexed comes from the project configuration (`ozagia.config`).
 
 Usage:
 
@@ -36,14 +37,14 @@ Usage:
     .venv/bin/python -m ozagia.core.memory build
 
     # query
-    .venv/bin/python -m ozagia.core.memory search "shape decode"
-    .venv/bin/python -m ozagia.core.memory symbol compose_design_for_goal
-    .venv/bin/python -m ozagia.core.memory tests seeds/shape_decode_loop.json
-    .venv/bin/python -m ozagia.core.memory context "add a new seed rule"
+    .venv/bin/python -m ozagia.core.memory search "tag cache"
+    .venv/bin/python -m ozagia.core.memory symbol build_index
+    .venv/bin/python -m ozagia.core.memory tests src/pkg/module.py
+    .venv/bin/python -m ozagia.core.memory context "add a cache option"
     .venv/bin/python -m ozagia.core.memory record --kind decision \
-        --task "..." --summary "..." --file domains/teach.py
+        --task "..." --summary "..." --file src/pkg/module.py
 
-The same surface is exposed over MCP by `src/ozagia/integrations/mcp/server.py`.
+The same surface is exposed over MCP by `ozagia.integrations.mcp.server`.
 """
 from __future__ import annotations
 
@@ -59,7 +60,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
-from ozagia.config import repo_root, state_path
+from ozagia.config import load_project_config, repo_root, state_path, state_rel
 
 ROOT = repo_root()
 DEFAULT_DUMP = state_path(ROOT, "graph.json")
@@ -69,39 +70,29 @@ DEFAULT_JOURNAL = state_path(ROOT, "journal.jsonl")
 # parsed. A repo map should stay fast and should never hang on a generated blob.
 MAX_PARSE_BYTES = 2 * 1024 * 1024
 
+# Indexing layout, from the project configuration of ROOT. Module constants so
+# tests (and callers) can override them; every build uses these values.
+_CONFIG = load_project_config(ROOT)
+
 # Directories that are never part of the development surface.
-SKIP_PARTS = {
-    ".git", ".venv", ".venv-jsbsim-f16", "__pycache__", ".pytest_cache",
-    ".mypy_cache", ".ruff_cache", "node_modules", "target", "build",
-    ".worktrees", ".claude", "data", "var", "runs", "recordings",
-    "scratch_rr", "scratchpad3", ".bigtmp", "vizdoom",
-}
+SKIP_PARTS = set(_CONFIG.memory_skip_dirs)
 
-SOURCE_DIRS = (
-    "runners/dsl/src",
-    "runners/dsl/tests",
-    "domains",
-    "domains_rs",
-    "worlds",
-    "substrate",
-    "tools",
-    "scripts",
-)
+SOURCE_DIRS = _CONFIG.source_dirs
+TEST_DIRS = _CONFIG.test_dirs
 
-DOC_GLOBS = (
-    "docs/features/*.md",
-    "docs/CODE_MAP.md",
-    "docs/SEED_DEVELOPMENT.md",
-    "docs/SCIENCE_RESEARCH.md",
-    "docs/research/engine_substrate/GRAPH_INTERROGATE.md",
-    "README.md",
-    "CLAUDE.md",
-    "VISION_PROTOCOL.md",
-    "HISTORY.md",
-    "RESULTS.local.md",
-)
+DOC_GLOBS = _CONFIG.docs
 
-ALL_DOC_GLOBS = ("docs/**/*.md",) + DOC_GLOBS
+ALL_DOC_GLOBS = _CONFIG.docs_all + DOC_GLOBS
+
+# Docs listed first in the brief, and docs scanned for build/test commands.
+KEY_DOCS = _CONFIG.key_docs
+COMMAND_DOCS = _CONFIG.command_docs
+
+# Extra Python import roots, relative to the repository root.
+IMPORT_ROOTS = _CONFIG.import_roots
+
+# Path prefixes `changed()` hides unless include_all is set.
+CHANGED_EXCLUDE = _CONFIG.changed_exclude
 
 # Words that describe the ACT of a development task rather than its subject.
 # They are still matched, but they do not earn "specific term" weight.
@@ -120,11 +111,17 @@ _STOPWORDS = {
     "should", "would", "could", "i", "we", "you", "my", "our", "your",
 }
 
-_PATH_RE = re.compile(
-    r"(?<![\w./-])((?:runners|domains|domains_rs|worlds|substrate|scripts|tools|"
-    r"tests|seeds|docs|evaluation|benchmarks)/[A-Za-z0-9_./-]+)"
-)
-_SEED_PATH_RE = re.compile(r"seeds/([A-Za-z0-9_.-]+)\.json")
+
+
+def path_mention_re(prefixes: Iterable[str]) -> re.Pattern[str]:
+    """A repo path mention starting with one of `prefixes` (`a/b.py`)."""
+    alts = "|".join(re.escape(p) for p in prefixes)
+    if not alts:
+        return re.compile(r"(?!)")
+    return re.compile(r"(?<![\w./-])((?:" + alts + r")/[A-Za-z0-9_./-]+)")
+
+
+_PATH_RE = path_mention_re(_CONFIG.path_prefixes)
 _TEST_NAME_RE = re.compile(r"^test_[A-Za-z0-9_]+$")
 
 # LSP wait for `symbol_graph(precise=True)` reference queries, in seconds.
@@ -243,6 +240,14 @@ class Builder:
         self._edge_keys.add(key)
         self.edges.append({"src": int(src), "type": type_name,
                            "tgt": int(tgt), "attrs": dict(attrs or {})})
+
+    def find(self, key: tuple) -> int | None:
+        """The node id created with `key`, or None."""
+        return self._by_key.get(key)
+
+    def attrs(self, nid: int) -> dict[str, Any]:
+        """The (mutable) attrs of node `nid`."""
+        return self.nodes[nid]["attrs"]
 
     def to_dict(self) -> dict[str, Any]:
         return {"nodes": self.nodes, "edges": self.edges,
@@ -420,7 +425,7 @@ def _resolve_import(root: Path, rel_file: str, imp: dict[str, Any]) -> str | Non
             return None
         candidates = [Path(*parts).with_suffix(".py"),
                       Path(*parts, "__init__.py")]
-    search_roots = [root, root / "runners" / "dsl" / "python"]
+    search_roots = [root] + [root / r for r in IMPORT_ROOTS if r != "."]
     for base in search_roots:
         for cand in candidates:
             p = (base / cand)
@@ -432,94 +437,51 @@ def _resolve_import(root: Path, rel_file: str, imp: dict[str, Any]) -> str | Non
     return None
 
 
-def _seed_items(d: dict[str, Any]) -> list[dict[str, Any]]:
-    """Flatten the several seed container shapes into SeedItem records."""
-    items: list[dict[str, Any]] = []
-
-    for i, node in enumerate(d.get("nodes") or []):
-        if not isinstance(node, dict):
-            continue
-        attrs = node.get("attrs") or {}
-        typ = str(node.get("type") or "SeedItem")
-        name = str(attrs.get("name") or attrs.get("id") or
-                   f"{typ}#{node.get('local_id', i)}")
-        items.append({"type": typ, "name": name, "attrs": dict(attrs),
-                      "local_id": node.get("local_id", i), "container": "nodes"})
-
-    for i, rule in enumerate(d.get("rules") or []):
-        if isinstance(rule, dict):
-            name = str(rule.get("name") or f"rule#{i}")
-            items.append({"type": "Rule", "name": name, "attrs": {},
-                          "local_id": i, "container": "rules",
-                          "where_type": (rule.get("where") or {}).get("type", "")})
-        elif isinstance(rule, str):
-            items.append({"type": "Rule", "name": rule, "attrs": {},
-                          "local_id": i, "container": "rules"})
-
-    for i, concept in enumerate(d.get("concepts") or []):
-        if isinstance(concept, dict):
-            name = str(concept.get("name") or concept.get("id") or f"concept#{i}")
-            attrs = {k: v for k, v in concept.items()
-                     if isinstance(v, (str, int, float, bool))}
-        else:
-            name = str(concept)
-            attrs = {}
-        items.append({"type": "Concept", "name": name, "attrs": attrs,
-                      "local_id": i, "container": "concepts"})
-
-    for i, prod in enumerate(d.get("productions") or []):
-        name = f"production#{i}"
-        attrs: dict[str, Any] = {}
-        if isinstance(prod, dict):
-            name = str(prod.get("provenance") or prod.get("name") or name)
-            attrs = {"src": str(prod.get("src", ""))[:200],
-                     "edge_type": str(prod.get("edge_type", "")),
-                     "tgt": str(prod.get("tgt", ""))[:200]}
-        elif isinstance(prod, (list, tuple)):
-            attrs = {"src": str(prod[0])[:200] if len(prod) > 0 else "",
-                     "edge_type": str(prod[1]) if len(prod) > 1 else "",
-                     "tgt": str(prod[2])[:200] if len(prod) > 2 else ""}
-        items.append({"type": "Production", "name": name, "attrs": attrs,
-                      "local_id": i, "container": "productions"})
-
-    mt = d.get("microtheory")
-    if isinstance(mt, dict):
-        items.append({"type": "Microtheory",
-                      "name": str(mt.get("name") or "microtheory"),
-                      "attrs": {"description": str(mt.get("description", ""))[:1000]},
-                      "local_id": 0, "container": "microtheory"})
-
-    for i, reflex in enumerate(d.get("reflexes") or []):
-        name = (str(reflex.get("name") or f"reflex#{i}")
-                if isinstance(reflex, dict) else str(reflex))
-        items.append({"type": "Reflex", "name": name, "attrs": {},
-                      "local_id": i, "container": "reflexes"})
-
-    for i, goal in enumerate(d.get("goals") or []):
-        name = (str(goal.get("name") or f"goal#{i}")
-                if isinstance(goal, dict) else str(goal))
-        items.append({"type": "GoalSpec", "name": name, "attrs": {},
-                      "local_id": i, "container": "goals"})
-
-    return items
-
-
 # --------------------------------------------------------------------------- #
 # build
 # --------------------------------------------------------------------------- #
+def _walk_files(base: Path, state: str | None) -> list[Path]:
+    """Every non-directory entry under `base`, sorted by path parts.
+
+    The same set and order as `sorted(base.rglob("*"))` filtered by SKIP_PARTS
+    on the walked path, without entering skipped directories: directory
+    symlinks are not followed, directories named in SKIP_PARTS and the state
+    directory (`state`, root-relative) are not entered.
+    """
+    found: list[tuple[tuple[str, ...], Path]] = []
+    root_parts = Path(base).parts
+    for dirpath, dirnames, filenames in os.walk(base):
+        dirnames[:] = [d for d in dirnames if d not in SKIP_PARTS]
+        here = Path(dirpath)
+        if state is not None:
+            dirnames[:] = [d for d in dirnames
+                           if not _under_state(here / d, state)]
+        rel_parts = here.parts[len(root_parts):]
+        for name in filenames:
+            found.append((rel_parts + (name,), here / name))
+    found.sort(key=lambda item: item[0])
+    return [p for _, p in found]
+
+
+def _under_state(path: Path, state: str) -> bool:
+    return str(path) == state or str(path).startswith(state + os.sep)
+
+
 def _iter_paths(root: Path, rel_dir: str, suffixes: tuple[str, ...],
                 *, path_filter=None) -> Iterable[Path]:
-    base = root / rel_dir
+    base = root / rel_dir if rel_dir not in ("", ".") else root
     if not base.exists():
         return
-    for p in sorted(base.rglob("*")):
-        if not p.is_file() or p.suffix not in suffixes:
+    srel = state_rel(root)
+    state = str(root / srel) if srel else None
+    for p in _walk_files(base, state):
+        if p.suffix not in suffixes or not p.is_file():
             continue
         try:
             rel = _rel(root, p)
         except ValueError:
             continue
-        if _skipped(rel):
+        if _skipped(rel) or (srel and (rel == srel or rel.startswith(srel + "/"))):
             continue
         if path_filter is not None and not path_filter(rel):
             continue
@@ -532,9 +494,14 @@ def build_index(root: str | Path = ROOT, out: str | Path = DEFAULT_DUMP,
                 git_limit: int = 200) -> dict[str, Any]:
     """Build the dev-memory graph and write it to `out`.
 
-    `include_docs`: "features" (default), "all", or "none".
+    `include_docs`: "features" (default: the configured `docs` globs), "all"
+    (those plus `docs_all`), or "none". `include_scripts=False` leaves out a
+    source dir named `scripts`. Adapter indexers run after the docs.
     Returns the graph dict plus a small build report.
     """
+    from ozagia.adapters import (IndexContext, IndexedDoc, IndexedSource,
+                                 IndexedTests, registry)
+
     root = Path(root).resolve()
     out = Path(out)
     b = Builder()
@@ -568,19 +535,30 @@ def build_index(root: str | Path = ROOT, out: str | Path = DEFAULT_DUMP,
         b.edge(repo, "contains", nid)
         return nid
 
-    # Test->seed mentions are resolved after the seed manifests are loaded
-    # (a test file can mention a seed that appears later in the walk).
-    pending_test_seed: list[tuple[int, str]] = []
-    pending_file_seed: list[tuple[int, str]] = []
+    # Parsed file texts, handed to adapter indexers.
+    ctx_sources: list[IndexedSource] = []
+    ctx_tests: list[IndexedTests] = []
+    ctx_docs: list[IndexedDoc] = []
+
+    def is_test_path(rel: str) -> bool:
+        if not Path(rel).name.startswith("test_") or not rel.endswith(".py"):
+            return False
+        return any(d in ("", ".") or rel.startswith(d + "/") for d in TEST_DIRS)
 
     # -- source / test / script files ------------------------------------- #
     src_dirs = list(SOURCE_DIRS)
     if not include_scripts:
         src_dirs = [d for d in src_dirs if d != "scripts"]
     py_files: list[tuple[str, int, PyParse]] = []
+    seen_src: set[str] = set()
     for rel_dir in src_dirs:
         for p in _iter_paths(root, rel_dir, (".py", ".rs", ".lua")):
             rel = _rel(root, p)
+            # Overlapping source dirs index a file once; test files are left
+            # to the test walk below.
+            if rel in seen_src or is_test_path(rel):
+                continue
+            seen_src.add(rel)
             fid = file_node(rel)
             if p.suffix == ".py":
                 parsed = _python_parse(p)
@@ -614,8 +592,7 @@ def build_index(root: str | Path = ROOT, out: str | Path = DEFAULT_DUMP,
                     target = _resolve_import(root, rel, imp)
                     if target:
                         b.edge(fid, "imports", file_node(target))
-                for seed_id in set(_SEED_PATH_RE.findall(parsed.source or "")):
-                    pending_file_seed.append((fid, seed_id))
+                ctx_sources.append(IndexedSource(rel, fid, parsed.source or ""))
             elif p.suffix == ".rs":
                 parsed = _rust_parse(p)
                 if parsed is None:
@@ -638,12 +615,19 @@ def build_index(root: str | Path = ROOT, out: str | Path = DEFAULT_DUMP,
                     target = (Path(rel).parent / f"{mod}.rs").as_posix()
                     if (root / target).is_file():
                         b.edge(fid, "imports", file_node(target))
-                for seed_id in set(_SEED_PATH_RE.findall(parsed.get("source") or "")):
-                    pending_file_seed.append((fid, seed_id))
+                ctx_sources.append(IndexedSource(rel, fid, parsed.get("source") or ""))
 
     # -- tests ------------------------------------------------------------- #
-    for p in _iter_paths(root, "tests", (".py",),
-                         path_filter=lambda r: Path(r).name.startswith("test_")):
+    test_paths: list[Path] = []
+    seen_tests: set[str] = set()
+    for rel_dir in TEST_DIRS:
+        for p in _iter_paths(root, rel_dir, (".py",),
+                             path_filter=lambda r: Path(r).name.startswith("test_")):
+            rel = _rel(root, p)
+            if rel not in seen_tests:
+                seen_tests.add(rel)
+                test_paths.append(p)
+    for p in test_paths:
         rel = _rel(root, p)
         fid = file_node(rel)
         parsed = _python_parse(p)
@@ -690,7 +674,7 @@ def build_index(root: str | Path = ROOT, out: str | Path = DEFAULT_DUMP,
             b.edge(tid, "tested_by_file", fid)
             if test["doc"]:
                 b.nodes[tid]["attrs"]["doc"] = test["doc"]
-        # Test-file -> module links (imports) and literal path / seed mentions.
+        # Test-file -> module links (imports) and literal path mentions.
         src = _read_text(p) or ""
         seen_mods: set[int] = set()
         for imp in parsed.imports:
@@ -711,82 +695,10 @@ def build_index(root: str | Path = ROOT, out: str | Path = DEFAULT_DUMP,
                     tid = b._by_key.get(("test", rel, test["qualname"]))
                     if tid is not None:
                         b.edge(tid, "mentions_file", target_nid)
-        for seed_id in set(_SEED_PATH_RE.findall(src)):
-            pending_file_seed.append((fid, seed_id))
-            for test in parsed.tests:
-                tid = b._by_key.get(("test", rel, test["qualname"]))
-                if tid is not None:
-                    pending_test_seed.append((tid, seed_id))
-
-    # -- seeds ------------------------------------------------------------- #
-    seed_dir = root / "seeds"
-    seed_paths = sorted(seed_dir.glob("*.json")) if seed_dir.exists() else []
-    seed_docs: list[tuple[str, Any]] = []
-    for p in seed_paths:
-        try:
-            d = json.loads(p.read_text(encoding="utf-8", errors="replace"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        if not isinstance(d, dict):
-            continue
-        seed_docs.append((_rel(root, p), d))
-        seed_id = str(d.get("id") or p.stem)
-        rel = _rel(root, p)
-        fid = file_node(rel)
-        sid = b.node("Seed", {
-            "name": seed_id,
-            "id": seed_id,
-            "version": str(d.get("version", "")),
-            "path": rel,
-            "description": str(d.get("description", ""))[:1000],
-            "depends_on": list(d.get("depends_on") or []),
-        }, key=("seed", seed_id))
-        # A dependency may have created a stub before the real manifest was
-        # visited. Upgrade it in place; never leave a stub when the real seed
-        # is present.
-        seed_attrs = b.nodes[sid]["attrs"]
-        if seed_attrs.get("stub"):
-            seed_attrs.update({
-                "name": seed_id,
-                "id": seed_id,
-                "version": str(d.get("version", "")),
-                "path": rel,
-                "description": str(d.get("description", ""))[:1000],
-                "depends_on": list(d.get("depends_on") or []),
-            })
-            seed_attrs.pop("stub", None)
-        b.edge(fid, "defines", sid)
-        b.edge(sid, "defined_in", fid)
-        b.edge(repo, "has_seed", sid)
-        for dep in d.get("depends_on") or []:
-            dep = str(dep)
-            dep_nid = b._by_key.get(("seed", dep))
-            if dep_nid is None:
-                dep_nid = b.node("Seed", {
-                    "name": dep, "id": dep, "version": "", "path": "",
-                    "description": "", "depends_on": [], "stub": 1,
-                }, key=("seed", dep))
-            b.edge(sid, "depends_on", dep_nid)
-        for item in _seed_items(d):
-            inode = b.node(item["type"], {
-                "name": item["name"],
-                "seed": seed_id,
-                "container": item["container"],
-                "local_id": item["local_id"],
-                **item["attrs"],
-            }, key=("seed_item", seed_id, item["type"], item["name"]))
-            b.edge(sid, "contains", inode)
-            b.edge(inode, "in_seed", sid)
-            b.edge(inode, "defined_in", fid)
-
-    for fid, seed_id in pending_file_seed:
-        seed_nid = b._by_key.get(("seed", seed_id))
-        if seed_nid is not None:
-            b.edge(fid, "mentions_seed", seed_nid)
-    for tid, seed_id in pending_test_seed:
-        seed_nid = b._by_key.get(("seed", seed_id))
-        if seed_nid is not None:
-            b.edge(tid, "mentions_seed", seed_nid)
+        ctx_tests.append(IndexedTests(
+            rel, fid, src,
+            [tid for tid in (b._by_key.get(("test", rel, t["qualname"]))
+                             for t in parsed.tests) if tid is not None]))
 
     # -- docs -------------------------------------------------------------- #
     doc_paths: list[Path] = []
@@ -828,10 +740,19 @@ def build_index(root: str | Path = ROOT, out: str | Path = DEFAULT_DUMP,
             target = path_match.rstrip(".,);:`'\"")
             if (root / target).is_file():
                 b.edge(did, "documents", file_node(target))
-        for seed_id in set(_SEED_PATH_RE.findall(text)):
-            seed_nid = b._by_key.get(("seed", seed_id))
-            if seed_nid is not None:
-                b.edge(did, "documents", seed_nid)
+        ctx_docs.append(IndexedDoc(rel, did, dfid, text))
+
+    # -- adapter indexers --------------------------------------------------- #
+    srel = state_rel(root)
+    ctx = IndexContext(
+        builder=b, root=root, repo=repo, file_node=file_node,
+        skipped=lambda rel: _skipped(rel) or bool(
+            srel and (rel == srel or rel.startswith(srel + "/"))),
+        sources=ctx_sources, tests=ctx_tests, docs=ctx_docs,
+        options={"include_docs": include_docs, "include_git": include_git,
+                 "include_scripts": include_scripts, "git_limit": git_limit})
+    for indexer in registry(root).indexers:
+        indexer(ctx)
 
     # -- checkout head ------------------------------------------------------ #
     # Recorded on its own (not only from the history walk below) so the
@@ -935,12 +856,11 @@ def build_index(root: str | Path = ROOT, out: str | Path = DEFAULT_DUMP,
         "files": b.count("File"),
         "symbols": b.count("Symbol"),
         "tests": b.count("Test"),
-        "seeds": b.count("Seed"),
         "docs": b.count("Doc"),
         "commits": b.count("Commit"),
         "failures": b.count("Failure"),
     })
-    digest, digest_err = _tree_digest(root)
+    digest, digest_err = _tree_digest(root, dump=out)
     if digest is not None:
         b.nodes[repo]["attrs"]["tree_digest"] = digest
     else:
@@ -977,15 +897,37 @@ def _strict_bool(value: Any, name: str) -> bool:
     raise ValueError(f"{name} must be a boolean")
 
 
-def _tree_digest(root: Path) -> tuple[str | None, str | None]:
+def _digest_excludes(root: Path, dump: str | Path | None) -> tuple[str, ...]:
+    """Root-relative prefixes ozagia itself writes: the state directory and
+    the snapshot's directory (or the snapshot file, if it is at the root)."""
+    out: list[str] = []
+    srel = state_rel(root)
+    if srel:
+        out.append(srel + "/")
+    if dump is not None:
+        try:
+            rel = Path(dump).resolve().relative_to(Path(root).resolve())
+        except (ValueError, OSError):
+            rel = None
+        if rel is not None:
+            parent = rel.parent.as_posix()
+            out.append(rel.as_posix() if parent in ("", ".") else parent + "/")
+    return tuple(out)
+
+
+def _tree_digest(root: Path, *, dump: str | Path | None = None
+                 ) -> tuple[str | None, str | None]:
     """(digest, error) for the working tree under `root`.
 
     The digest is sha256 over `git diff HEAD` (tracked content changes), a NUL,
     and for each untracked file under SOURCE_DIRS (sorted by git): its path, a
     NUL, then its size and sha256 of its bytes. Untracked files larger than
     MAX_PARSE_BYTES contribute path, size and mtime_ns instead. Untracked files
-    that cannot be read contribute path and "unreadable".
+    that cannot be read contribute path and "unreadable". Untracked files in
+    skipped directories, in the state directory and next to the snapshot
+    `dump` are left out: the build and the journal write there.
     """
+    excludes = _digest_excludes(root, dump)
     try:
         diff = subprocess.run(
             ["git", "-C", str(root), "diff", "HEAD", "--no-color",
@@ -1006,6 +948,9 @@ def _tree_digest(root: Path) -> tuple[str | None, str | None]:
     h.update(b"\0")
     for raw in untracked.stdout.split(b"\0"):
         if not raw:
+            continue
+        rel = raw.decode("utf-8", errors="surrogateescape")
+        if _skipped(rel) or rel.startswith(excludes) or rel in excludes:
             continue
         h.update(raw)
         h.update(b"\0")
@@ -1058,7 +1003,6 @@ class DevMemory:
         # read again.
         self._text_cache: dict[tuple[str, int, int], str] = {}
         self._staleness_memo: tuple[float, dict[str, Any]] | None = None
-        self._gi = None
         # Token document frequency over labels, used only to weight a search
         # hit by how distinctive its matched words are. This is a mechanical
         # retrieval heuristic, not an agent decision.
@@ -1090,14 +1034,14 @@ class DevMemory:
             self._anchor_index[k].sort()
 
     # -- graph helpers ------------------------------------------------------ #
-    @property
-    def gi(self):
-        """The READ-ONLY GraphInterrogator over the same snapshot, created
-        lazily so CLI commands that only need the raw dict stay light."""
-        if self._gi is None:
-            from scripts.graph_interrogate import GraphInterrogator
-            self._gi = GraphInterrogator.from_dump(str(self.dump))
-        return self._gi
+    def adapter_query(self, name: str, **kwargs: Any) -> Any:
+        """Run the adapter graph query `name` (see `ozagia.adapters`)."""
+        from ozagia.adapters import registry
+        queries = registry(self.raw_repo_root).graph_queries
+        if name not in queries:
+            return {"ok": False, "error": f"no adapter graph query {name!r}; "
+                    f"known: {sorted(queries) or 'none'}"}
+        return queries[name](self, **kwargs)
 
     def node(self, nid: int) -> dict[str, Any] | None:
         return self.nodes.get(int(nid))
@@ -1916,7 +1860,7 @@ class DevMemory:
         seen: list[str] = []
         keys = ("pytest", "maturin", "cargo test", "engine_build.sh",
                 "cargo build", "python -m pytest")
-        for rel in ("README.md", "CLAUDE.md", "docs/CODE_MAP.md"):
+        for rel in COMMAND_DOCS:
             p = Path(self.raw_repo_root) / rel
             text = _read_text(p, limit=500_000) or ""
             in_fence = False
@@ -1964,9 +1908,7 @@ class DevMemory:
         top_dirs = sorted(dirs.items(), key=lambda kv: (-kv[1], kv[0]))[:12]
         top_langs = sorted(langs.items(), key=lambda kv: (-kv[1], kv[0]))[:8]
 
-        key_paths = ("README.md", "CLAUDE.md", "docs/CODE_MAP.md",
-                     "docs/SEED_DEVELOPMENT.md", "docs/SCIENCE_RESEARCH.md",
-                     "VISION_PROTOCOL.md")
+        key_paths = tuple(KEY_DOCS)
         key_docs = []
         for nid in self._nodes_of("Doc"):
             a = (self.node(nid) or {}).get("attrs", {})
@@ -2002,7 +1944,7 @@ class DevMemory:
         changed_files = changed.get("files", []) if changed.get("ok") else []
         commands = self._build_commands()
 
-        lines = ["# Ocelot repo brief", ""]
+        lines = [f"# {repo.get('name') or 'Repo'} repo brief", ""]
         lines.append(f"repo: {repo.get('name', '?')}  head: {repo.get('head', '?')[:12]}  "
                      f"snapshot: {repo.get('generated_at', '?')}")
         snapshot = self.staleness()
@@ -2012,8 +1954,11 @@ class DevMemory:
                 f"{(snapshot['snapshot_head'] or '?')[:12]} vs HEAD "
                 f"{(snapshot['head'] or '?')[:12]}); rebuild with "
                 f"`python -m ozagia.core.memory build`")
-        lines.append(f"files: {repo.get('files', '?')}  symbols: {repo.get('symbols', '?')}  "
-                     f"tests: {repo.get('tests', '?')}  seeds: {repo.get('seeds', '?')}")
+        counts = (f"files: {repo.get('files', '?')}  symbols: {repo.get('symbols', '?')}  "
+                  f"tests: {repo.get('tests', '?')}")
+        if "seeds" in repo:
+            counts += f"  seeds: {repo['seeds']}"
+        lines.append(counts)
         lines.append("")
         lines.append("## Layout")
         for name, n in top_dirs:
@@ -2092,10 +2037,13 @@ class DevMemory:
                 limit: int = 200) -> dict[str, Any]:
         """Working-tree changes from `git status --porcelain` (mechanical).
 
-        By default only development-relevant paths are returned: generated
-        results, evaluation runs, corpora and scratch trees are noise for a
-        coding task. Pass `include_all` for the raw `git status` set."""
+        By default paths under the configured `changed_exclude` prefixes and
+        the state directory are left out (generated output and scratch trees
+        are noise for a coding task). Pass `include_all` for the raw
+        `git status` set."""
         root = self.raw_repo_root
+        srel = state_rel(root)
+        exclude = tuple(CHANGED_EXCLUDE) + ((srel + "/",) if srel else ())
         try:
             proc = subprocess.run(
                 ["git", "-C", root, "status", "--porcelain", "-uall"],
@@ -2115,13 +2063,7 @@ class DevMemory:
             path = line[3:].strip()
             if " -> " in path:
                 path = path.split(" -> ", 1)[1]
-            if not include_all and any(
-                    path.startswith(prefix) for prefix in (
-                        "results/", "evaluation/", "runs/", "var/",
-                        "recordings/", "data/", "domain_data/",
-                        "semantic-review/", "drafts/", "papers/",
-                        "benchmarks/", "seeds/acquired/", "seeds/generated/",
-                        "__pycache__/", ".pytest_cache/")):
+            if not include_all and path.startswith(exclude):
                 continue
             nid = self._file_node(path)
             rec: dict[str, Any] = {"status": status, "path": path,
@@ -2169,7 +2111,7 @@ class DevMemory:
         # The working tree is compared by digest (see `_tree_digest`). Older
         # snapshots without a digest are not judged on it.
         snapshot_tree = repo.get("tree_digest") or None
-        tree_now, _tree_err = _tree_digest(Path(root))
+        tree_now, _tree_err = _tree_digest(Path(root), dump=self.dump)
         tree_changed = bool(snapshot_tree and tree_now
                             and snapshot_tree != tree_now)
         stale = bool(root_mismatch or (head and snapshot_head != head)
@@ -2189,7 +2131,7 @@ class DevMemory:
 
     def _tag_cache(self) -> Path:
         """The tag cache under the process root. Index tools pass this so a
-        worktree does not write into the script checkout's `var/`."""
+        worktree does not write into another checkout's state directory."""
         return state_path(self.raw_repo_root, "tags.json")
 
     def repo_map(self, task: str = "", *, budget_tokens: int = 1500,
@@ -2900,10 +2842,10 @@ def main(argv: list[str] | None = None) -> int:
     sy = sub.add_parser("symbol", help="symbol details", parents=[common])
     sy.add_argument("name")
 
-    sd = sub.add_parser("seed", help="seed details", parents=[common])
+    sd = sub.add_parser("seed", help="seed details (Seed nodes from an adapter)", parents=[common])
     sd.add_argument("seed_id")
 
-    r = sub.add_parser("rule", help="rule details", parents=[common])
+    r = sub.add_parser("rule", help="rule details (Rule nodes from an adapter)", parents=[common])
     r.add_argument("name")
 
     t = sub.add_parser("tests", help="tests covering a file/symbol/seed",

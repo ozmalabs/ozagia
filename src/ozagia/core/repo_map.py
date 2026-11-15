@@ -1,4 +1,4 @@
-"""ocelot_repo_map — ranked, token-budgeted repo maps and impact queries.
+"""ozagia.core.repo_map — ranked, token-budgeted repo maps and impact queries.
 
 This is the graph/tree enhancement distilled from the current coding-agent
 landscape (Aider's repo map, RepoGraph, CodexGraph, Codebase-Memory, arbor,
@@ -12,8 +12,9 @@ context-link, Sourcegraph/SCIP):
   * the tag cache is content-hash incremental (Merkle-like file sync), so
     unchanged files are never re-parsed.
 
-DEV TOOLING, NOT AGENT RUNTIME. The map is a reading aid; it never edits.
-The canonical edit path remains the op list in `ocelot_edit.py`.
+The map is a reading aid; it never edits. The canonical edit path is the op
+list in `ozagia.edit.dispatch`. The scanned directories come from the project
+configuration (`map_dirs`, `skip_dirs`; see `ozagia.config`).
 """
 from __future__ import annotations
 
@@ -27,7 +28,7 @@ import time
 from collections import OrderedDict, defaultdict, deque
 from pathlib import Path
 from typing import Any, Iterable
-from ozagia.config import repo_root, state_path
+from ozagia.config import load_project_config, repo_root, state_path, state_rel
 
 ROOT = repo_root()
 CACHE_VERSION = 3
@@ -55,22 +56,11 @@ from ozagia.index.tag_languages import (  # noqa: E402
 LANGUAGES = {suffix: entry["module"]
              for suffix, entry in _TAG_LANGUAGES.items()
              if entry.get("module")}
-SOURCE_DIRS = (
-    "runners/dsl/src",
-    "runners/dsl/tests",
-    "domains",
-    "domains_rs",
-    "worlds",
-    "substrate",
-    "scripts",
-    "tools",
-    "tests",
-)
-SKIP_PARTS = {
-    ".git", ".venv", "__pycache__", ".pytest_cache", "node_modules",
-    "target", "build", ".worktrees", ".claude", "data", "var", "runs",
-    "recordings", "scratch_rr", "scratchpad3", ".bigtmp",
-}
+# Scanned directories and skipped directory names, from the project
+# configuration of ROOT (`map_dirs`, `skip_dirs`).
+_CONFIG = load_project_config(ROOT)
+SOURCE_DIRS = _CONFIG.map_dirs
+SKIP_PARTS = set(_CONFIG.skip_dirs)
 MAX_FILE_BYTES = 2 * 1024 * 1024
 
 
@@ -103,9 +93,10 @@ def _source_files(root: Path) -> list[str]:
       root. Its rel is the target's rel, as before.
     """
     root_real = Path(root).resolve()
+    srel = state_rel(root_real)
     out: list[str] = []
     for d in SOURCE_DIRS:
-        base = Path(root) / d
+        base = Path(root) / d if d not in ("", ".") else Path(root)
         if not base.exists():
             continue
         try:
@@ -150,6 +141,8 @@ def _source_files(root: Path) -> list[str]:
                 rel = "/".join(prefix + child_parts)
             if _skipped(rel):
                 continue
+            if srel and (rel == srel or rel.startswith(srel + "/")):
+                continue
             try:
                 if os.stat(abs_path).st_size > MAX_FILE_BYTES:
                     continue
@@ -187,7 +180,7 @@ _GENERIC_IDENTS = {
 def extract_tags(path: str | Path, source: str) -> list[dict[str, Any]]:
     """Definition/reference tags via the shared multi-language registry.
 
-    The registry (`ocelot_tag_languages`) is the only extractor: Python on the
+    The registry (`ozagia.index.tag_languages`) is the only extractor: Python on the
     stdlib-AST fast path, other languages on each grammar's `queries/tags.scm`.
     A missing grammar yields an empty list for that file, never an exception.
     """
