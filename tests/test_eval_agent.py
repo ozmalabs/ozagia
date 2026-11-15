@@ -1058,3 +1058,154 @@ def test_daemon_gets_the_run_python_first_on_path(tmp_path, monkeypatch):
     first = Path(seen["env"]["PATH"].split(os.pathsep)[0])
     assert first == tmp_path / "log" / "bin"
     assert os.path.realpath(first / "python") == os.path.realpath(_python())
+
+
+# ===================================================================================== #
+# native driver (ozagia.harness.native) against a local stub server
+# ===================================================================================== #
+from test_harness_native import StubLLM, final, reply, tool_call  # noqa: E402
+
+NATIVE_KEY = "sk-native-stub-0123456789"
+
+
+def _native_fix_script() -> list[dict]:
+    """read, edit, run the tests through the shim's `python`, then stop."""
+    return [
+        reply(tool_call("read", {"path": "pkg/mod.py"}, "r")),
+        reply(tool_call("edit", {"path": "pkg/mod.py", "oldString": "return a - b",
+                                 "newString": "return a + b"}, "e"),
+              usage={"prompt_tokens": 20, "completion_tokens": 5, "cost": 0.5}),
+        reply(tool_call("shell", {"command": "python -m pytest -q -p no:cacheprovider "
+                                             "tests/test_mod.py"}, "s")),
+        final("fixed"),
+    ]
+
+
+@pytest.fixture()
+def native_env(monkeypatch):
+    def setup(stub: StubLLM) -> None:
+        monkeypatch.setenv(LIVE_ENV, "1")
+        monkeypatch.setenv(ae.NATIVE_BASE_URL_ENV, stub.url)
+        monkeypatch.setenv(ae.NATIVE_MODEL_ENV, "stub-model")
+        monkeypatch.setenv(ae.NATIVE_KEY_ENV_ENV, "STUB_NATIVE_KEY")
+        monkeypatch.delenv(ae.NATIVE_KEY_FILE_ENV, raising=False)
+        monkeypatch.setenv("STUB_NATIVE_KEY", NATIVE_KEY)
+    return setup
+
+
+def test_native_driver_is_live_gated(monkeypatch):
+    monkeypatch.delenv(LIVE_ENV, raising=False)
+    with pytest.raises(LiveRunNotApproved):
+        make_driver("native", live=True)
+    monkeypatch.setenv(LIVE_ENV, "1")
+    with pytest.raises(LiveRunNotApproved):
+        make_driver("native", live=False)
+    driver = make_driver("native", live=True, model="m")
+    assert isinstance(driver, ae.NativeDriver) and driver.model == "m"
+    assert driver.uses_daemon is False and "native" in ae.LIVE_DRIVERS
+    # Built directly (as a test may), it still refuses to run without the env flag.
+    monkeypatch.delenv(LIVE_ENV)
+    with pytest.raises(LiveRunNotApproved):
+        driver.run(Path("/nonexistent"), "p", "baseline", 5, Path("/nonexistent"))
+
+
+def test_native_driver_refuses_dev_memory_before_any_worktree(fixture, native_env):
+    with StubLLM() as stub:
+        native_env(stub)
+        driver = make_driver("native", live=True)
+        with pytest.raises(HarnessError, match="no MCP client"):
+            run_eval(fixture["repo"], [fixture["sign"]], ["baseline", "dev_memory"],
+                     driver, fixture["base"], tasks_dir=fixture["tdir"],
+                     python=_python(), run_root=fixture["run_root"])
+        assert stub.requests == []
+    assert len(_worktrees(fixture["repo"])) == 1
+    assert ae.default_arms("native") == ["baseline", "graph_intent"]
+    with pytest.raises(HarnessError, match="cannot run arm"):
+        driver.argv(Path("/w"), Path("/p"), "dev_memory", 5, Path("/l"))
+
+
+def test_native_preflight_lists_models(native_env, monkeypatch, tmp_path):
+    with StubLLM(models=("other", "stub-model")) as stub:
+        native_env(stub)
+        driver = make_driver("native", live=True)
+        driver.preflight()
+        assert stub.requests[0]["path"] == "/v1/models"
+        assert stub.requests[0]["headers"]["Authorization"] == f"Bearer {NATIVE_KEY}"
+        driver.model = "missing-model"
+        with pytest.raises(HarnessError, match="does not list model 'missing-model'"):
+            driver.preflight()
+        assert [r["method"] for r in stub.requests] == ["GET", "GET"]
+        keyfile = tmp_path / "key"
+        keyfile.write_text("from-file\n", encoding="utf-8")
+        monkeypatch.delenv(ae.NATIVE_KEY_ENV_ENV)
+        monkeypatch.setenv(ae.NATIVE_KEY_FILE_ENV, str(keyfile))
+        make_driver("native", live=True).preflight()
+        assert stub.requests[-1]["headers"]["Authorization"] == "Bearer from-file"
+    monkeypatch.delenv(ae.NATIVE_BASE_URL_ENV)
+    with pytest.raises(HarnessError, match="OZAGIA_NATIVE_BASE_URL"):
+        make_driver("native", live=True).preflight()
+
+
+def test_native_driver_runs_both_arms_end_to_end(fixture, native_env, monkeypatch):
+    def no_daemon(*a, **kw):
+        raise AssertionError("the native driver must not start the daemon")
+
+    def no_plugin(*a, **kw):
+        raise AssertionError("the native driver must not install the plugin")
+
+    monkeypatch.setattr(ae, "start_daemon", no_daemon)
+    monkeypatch.setattr(ae.opencode_plugin, "install", no_plugin)
+    with StubLLM(_native_fix_script() + _native_fix_script()) as stub:
+        native_env(stub)
+        driver = make_driver("native", live=True)
+        report = run_eval(fixture["repo"], [fixture["sign"]],
+                          ["baseline", "graph_intent"], driver, fixture["base"],
+                          tasks_dir=fixture["tdir"], python=_python(),
+                          run_root=fixture["run_root"], timeout_s=120)
+        requests = list(stub.requests)
+    assert requests[0]["method"] == "GET"  # the preflight
+    posts = [r for r in requests if r["method"] == "POST"]
+    assert len(posts) == 8
+    assert all(r["headers"]["Authorization"] == f"Bearer {NATIVE_KEY}" for r in posts)
+    by_arm = {r["arm"]: r for r in report["runs"]}
+    for arm, rec in by_arm.items():
+        assert rec["success"] is True, (arm, rec)
+        assert rec["driver_error"] is None and rec["exit_code"] == 0
+        assert rec["tool_calls"] == 3 and rec["mcp_calls"] == 0
+        assert rec["tools_by_name"] == {"edit": 1, "read": 1, "shell": 1}
+        assert rec["tokens_in"] == 50 and rec["tokens_out"] == 11
+        assert rec["cost_usd"] == 0.5
+        assert rec["stopped"] == "done" and rec["steps"] == 4
+        assert rec["files_changed"] == ["pkg/mod.py"] and rec["localized"] is True
+        log = Path(rec["log_dir"])
+        for name in ("transcript.jsonl", "summary.json"):
+            assert NATIVE_KEY not in (log / "native" / name).read_text(encoding="utf-8")
+        assert (log / "transcript.txt").read_text(encoding="utf-8") == "fixed"
+    base, graph = by_arm["baseline"], by_arm["graph_intent"]
+    assert "captured_calls" not in base and "daemon_ok" not in base
+    assert graph["prep_ok"] is True
+    assert graph["daemon_ok"] is None and graph["plugin_loaded"] is None
+    assert graph["captured_calls"] == 3 and graph["fallbacks"] == 0
+    # The model saw graph context in graph_intent only.
+    read_plain = [m for m in posts[1]["body"]["messages"] if m["role"] == "tool"][0]
+    read_graph = [m for m in posts[5]["body"]["messages"] if m["role"] == "tool"][0]
+    assert "[ozagia]" not in read_plain["content"]
+    assert "[ozagia] sym:pkg/mod.py::add" in read_graph["content"]
+    rows = {r["arm"]: r for r in report["summary"]}
+    assert rows["graph_intent"]["mean_captured_calls"] == 3.0
+    assert rows["graph_intent"]["plugin_load_failures"] == 0
+    assert report["backend"] == {"backend": "native", "model": "stub-model",
+                                 "base_url": stub.url}
+    assert len(_worktrees(fixture["repo"])) == 1
+
+
+def test_native_driver_records_a_loop_error(fixture, native_env, monkeypatch):
+    monkeypatch.setattr(ae, "start_daemon", None)
+    with StubLLM([{"_status": 400, "_body": "bad model"}]) as stub:
+        native_env(stub)
+        driver = make_driver("native", live=True)
+        rec = ae.run_one(fixture["repo"], fixture["sign"], "baseline", 1, driver,
+                         fixture["base"], tasks_dir=fixture["tdir"], python=_python(),
+                         run_root=fixture["run_root"], timeout_s=60, keep=False)
+    assert rec["success"] is False and rec["exit_code"] == 1
+    assert "HTTP 400" in rec["driver_error"] and rec["stopped"] == "error"

@@ -95,6 +95,7 @@ after the break.
 | `fake` | Reverts the break with `git apply -R`. Expected success 100%. Checks the harness only. | no |
 | `claude` | `claude -p <prompt> --output-format json --permission-mode acceptEdits --no-session-persistence --allowedTools Read,Edit,Write,Glob,Grep,Bash --disallowedTools "Bash(git commit:*),Bash(git push:*),Bash(git stash:*),Bash(git branch:*),Bash(git checkout:*),Bash(git switch:*),Bash(git reset:*),Bash(git rebase:*),Bash(git merge:*),Bash(git tag:*),Bash(git worktree:*)"`, run in the workdir. | **untested live** |
 | `opencode` | `opencode run --standalone --format json --auto --archived [-m <model>] <prompt>`, run in the workdir with a generated `OPENCODE_CONFIG` (see OpenCode). | yes |
+| `native` | ozagia's own agent loop, `python -m ozagia.harness.native run`, against an OpenAI-compatible endpoint (see Native, and `docs/native_loop.md`). Arms `baseline` and `graph_intent` only. | yes (tested against a local stub server only) |
 
 Token and cost fields for `claude` come from its JSON output (`usage.input_tokens`,
 `usage.output_tokens`, `total_cost_usd`, `result`). Those names were confirmed in the
@@ -142,6 +143,41 @@ driver stops the run.
   global MCP servers). The baseline is "the operator's OpenCode without Ocelot", not a
   bare agent.
 
+### Native
+
+The `native` driver runs ozagia's agent loop (`src/ozagia/harness/native.py`)
+as a subprocess, through `spawn_group`, with the run's `python` shim first on
+`PATH`. It is configured from the environment:
+
+| variable | meaning |
+|---|---|
+| `OZAGIA_NATIVE_BASE_URL` | API root, e.g. `http://127.0.0.1:18020/v1` (required) |
+| `OZAGIA_NATIVE_MODEL` | model id; `--model` overrides it (one of the two is required) |
+| `OZAGIA_NATIVE_API_KEY_FILE` | file holding the API key, passed as `--api-key-file` |
+| `OZAGIA_NATIVE_API_KEY_ENV` | name of the variable holding the key, passed as `--api-key-env` |
+
+The key is never on the command line: the loop reads it from the file or the
+named variable. Arms map to the loop's modes: `baseline` is `--mode plain`
+(built-in tools only) and `graph_intent` is `--mode graph --dump
+<log_dir>/dev_graph.json` (the snapshot prep built). The loop calls the intent
+layer in its own process, so for this driver `run_one` starts no daemon and
+installs no plugin (`NativeDriver.uses_daemon = False`); it passes
+`OZAGIA_CONFIG` so the loop's graph uses the layout prep used. `dev_memory` is
+refused before any workdir is made: the loop has no MCP client.
+
+The loop gets `--timeout <timeout-s>` and stops itself; its process group is
+killed `NATIVE_GRACE_S` (30 s) later if it is still running. The driver reads the
+loop's `summary.json` (stdout, else `<log_dir>/native/summary.json`): `tokens_in`,
+`tokens_out`, `cost_usd` (only when the server reports a cost), `tool_calls`,
+`tools_by_name`, and for graph_intent `captured_calls` (calls the intent layer
+handled) and `fallbacks` (calls it left to the built-in). The run record also gets
+`stopped` (`done`, `max_steps`, `timeout`, `error`) and `steps` (model turns). A
+loop that stops with `error`, or writes no summary, sets `driver_error`. The
+loop's `transcript.jsonl` and `summary.json` stay in `<log_dir>/native/`.
+
+Preflight: `GET {base_url}/models` must list the model. It makes no completion
+request.
+
 ### Isolation
 
 Live drivers run in a clone made with `git clone --shared --no-checkout`, then
@@ -164,7 +200,7 @@ The `fake` and `noop` drivers ignore the arm. They do not start an MCP server.
 
 ### Live gate
 
-`claude` and `opencode` refuse to run unless **both** of these hold:
+`claude`, `opencode` and `native` refuse to run unless **both** of these hold:
 
 - the command includes `--live`, and
 - the environment has `OZAGIA_EVAL_LIVE=1`.
@@ -216,7 +252,7 @@ a sandbox: the agent runs as the operator and can reach any path by absolute nam
 |---|---|
 | `baseline` | No Ocelot MCP server. Claude Code runs with `--strict-mcp-config`, which ignores the user's MCP servers. OpenCode gets the generated config without the Ocelot server; a user's global MCP servers can still load in both arms. |
 | `dev_memory` | The workdir gets `.ozagia_eval_mcp.json` (Claude Code, passed with `--mcp-config`) and `.ozagia_eval_opencode.json` (OpenCode, whose `mcp` block is copied into the generated `OPENCODE_CONFIG`). Both start `<python> -m ozagia.integrations.mcp.server` with `PYTHONPATH` and `OZAGIA_ROOT` set to the workdir. The snapshot and journal go under the run's log directory. `OZAGIA_AUTOBUILD=0`, because the harness builds the snapshot before the driver starts (see Prep). |
-| `graph_intent` | No MCP server. dev_memory's prep, then the graph daemon for the session and the ozagia OpenCode plugin in `<workdir>/.opencode/plugins/`, which hands the built-in file and shell tools to the daemon. `opencode`, `fake` and `noop` drivers only. See below. |
+| `graph_intent` | No MCP server. dev_memory's prep, then the graph daemon for the session and the ozagia OpenCode plugin in `<workdir>/.opencode/plugins/`, which hands the built-in file and shell tools to the daemon. `opencode`, `fake` and `noop` drivers. The `native` driver runs this arm as its loop's graph mode, with prep but without the daemon and plugin. See below. |
 
 The two config files are untracked and are written before the snapshot. They are
 not counted as agent edits. The agent can still see them with `git status`.
@@ -285,8 +321,9 @@ Run record fields for this arm:
 | `fallbacks` | `stats.fallbacks`: calls the plugin sent to the built-in because the daemon failed or timed out |
 
 The per-arm summary adds `mean_captured_calls`, `total_fallbacks`,
-`plugin_load_failures` (runs with `plugin_loaded` not true, so `fake` and `noop`
-runs count, as they load no plugin) and `daemon_failures`. The Markdown report has
+`plugin_load_failures` (runs that started a daemon and have `plugin_loaded` not
+true, so `fake` and `noop` runs count, as they load no plugin; `native` runs start
+no daemon and do not count) and `daemon_failures`. The Markdown report has
 a "Graph daemon and plugin" table for arms with these fields.
 
 Plugin behaviour, per replaced tool: the original `execute` is kept, the output
