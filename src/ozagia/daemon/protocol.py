@@ -17,13 +17,18 @@ Requests (`op`):
     {"id": 2, "op": "tool", "harness": "opencode", "session": "ses_...",
      "tool": "read", "input": {...the tool input exactly as the model sent it}}
       -> {"id": 2, "ok": true, "handled": true, "output": "<text for the
-          model>", "meta": {"intent": "...", "keys": [...], ...}}
-      -> {"id": 2, "ok": true, "handled": false, "reason": "..."}
+          model>", "is_error": false, "meta": {"intent": "...", "keys": [...],
+          "ms": 1.2, ...}}
+      -> {"id": 2, "ok": true, "handled": false, "reason": "...",
+          "meta": {...}}
+      `meta` always has `intent` (a short name of what was done), `keys`
+      (the node keys involved) and `ms` (handler time); `ozagia.intent`
+      documents the intents and output formats.
 
     {"id": 3, "op": "after", "harness": "opencode", "session": "...",
      "tool": "shell", "input": {...}, "output": "<the built-in's output>"}
       -> {"id": 3, "ok": true, "append": "<text to append, or empty>",
-          "meta": {...}}
+          "meta": {"intent": "...", "keys": [...], "ms": 1.2}}
 
     {"id": 4, "op": "hello", "harness": "opencode", "plugin": "ozagia",
      "version": "0.1.0", "session": "..."}
@@ -47,7 +52,9 @@ broken references for an edit) in `append`.
 `handled: false` means "run the original built-in": the plugin calls it, then
 sends `after` with its output so the daemon can update the graph (for example
 re-ingest files a shell command changed) and add context. A daemon error is
-`{"ok": false, "error": "..."}`; the plugin then runs the built-in and reports
+`{"ok": false, "error": "..."}` (with `"id": null` when the request line was
+not a JSON object; a line longer than MAX_MESSAGE_BYTES gets that error and
+the connection is closed); the plugin then runs the built-in and reports
 a fallback. The plugin never fails a tool call because the daemon failed.
 
 Command line: `python -m ozagia.daemon serve --root <repo> [--dump <graph>]
