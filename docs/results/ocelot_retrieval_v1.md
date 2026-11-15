@@ -1,7 +1,7 @@
 # Repo-map retrieval evaluation
 
-- Root: `/applications/data/projects/ocelot`
-- Tasks: 21 (`/applications/data/projects/ocelot/evaluation/repo_map/tasks.json`)
+- Root: `/path/to/ocelot`
+- Tasks: 21 (`/path/to/ocelot/evaluation/repo_map/tasks.json`)
 - Source-file universe: 6826
 - Budgets: 500, 900, 1500 tokens
 - Arms: baseline, dev_context, dev_repo_map, both

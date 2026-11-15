@@ -1,7 +1,7 @@
 # Repo-map retrieval evaluation
 
-- Root: `/applications/data/projects/ocelot/.worktrees/dt-w3a-eval-v2`
-- Tasks: 30 (`/applications/data/projects/ocelot/.worktrees/dt-w3a-eval-v2/evaluation/repo_map/tasks_v2.json`)
+- Root: `<ocelot checkout>`
+- Tasks: 30 (`<ocelot checkout>/evaluation/repo_map/tasks_v2.json`)
 - Source-file universe: 6805
 - Budgets: 500, 900, 1500 tokens
 - Arms: baseline, dev_context, dev_repo_map, both, grep, code_search

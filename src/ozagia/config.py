@@ -26,7 +26,8 @@ one, every key has the generic default below. All keys are optional:
     key_docs = ["README.md"]      # docs listed first in the brief
     command_docs = [...]          # docs scanned for build/test commands;
                                   # default key_docs
-    import_roots = []             # extra Python import roots besides the root
+    import_roots = [...]          # extra Python import roots besides the root;
+                                  # default ["src"] when the root has src/
     path_prefixes = [...]         # first path components recognised as file
                                   # mentions in tests and docs; default the
                                   # first component of each source/test dir
@@ -258,7 +259,7 @@ def _parse(root: Path, source: Path | None, data: dict[str, Any]) -> ProjectConf
         docs_all=strings("docs_all", ["**/*.md"]),
         key_docs=key_docs,
         command_docs=strings("command_docs", list(key_docs)),
-        import_roots=dirs("import_roots", []),
+        import_roots=dirs("import_roots", ["src"] if (root / "src").is_dir() else []),
         path_prefixes=prefixes,
         changed_exclude=strings("changed_exclude",
                                 ["__pycache__/", ".pytest_cache/",

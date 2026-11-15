@@ -243,7 +243,7 @@ per arm, so a broken index shows up as a result and is not hidden.
 Validate the task set (no models, creates worktrees):
 
 ```
-PY=/applications/data/projects/ocelot/.venv/bin/python
+PY=/path/to/ocelot/.venv/bin/python
 $PY -m ozagia.eval.agent validate --python $PY \
     --out-json evaluation/agent_e2e/validation.json
 ```

@@ -87,7 +87,7 @@ from ozagia.core.session import (
 )
 
 session = DevSession.start("fix the stale reply rule", max_attempts=3,
-                           root="/applications/data/projects/ocelot")
+                           root="/path/to/ocelot")
 ```
 
 | Call | Returns | Effect |

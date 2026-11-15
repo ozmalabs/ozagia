@@ -30,7 +30,7 @@ file, a line range, or a node id.
 ## Build the snapshot
 
 ```bash
-cd /applications/data/projects/ocelot
+cd /path/to/ocelot
 .venv/bin/python -m ozagia.core.memory build
 ```
 
@@ -146,14 +146,14 @@ Add the server to the project's `opencode.jsonc` under `mcp.servers`:
       "ozagia": {
         "type": "local",
         "command": [
-          "/applications/data/projects/ocelot/.venv/bin/python",
+          "/path/to/ocelot/.venv/bin/python",
           "-m",
           "ozagia.integrations.mcp.server"
         ],
-        "cwd": "/applications/data/projects/ocelot",
+        "cwd": "/path/to/ocelot",
         "environment": {
-          "OZAGIA_DUMP": "/applications/data/projects/ocelot/.ozagia/graph.json",
-          "OZAGIA_JOURNAL": "/applications/data/projects/ocelot/.ozagia/journal.jsonl"
+          "OZAGIA_DUMP": "/path/to/ocelot/.ozagia/graph.json",
+          "OZAGIA_JOURNAL": "/path/to/ocelot/.ozagia/journal.jsonl"
         }
       }
     }
@@ -170,8 +170,8 @@ The CLI is the lower-tech fallback and works with any agent that can run a
 shell command:
 
 ```bash
-opencode mcp add ocelot-dev-memory --cwd /applications/data/projects/ocelot -- \
-  /applications/data/projects/ocelot/.venv/bin/python -m ozagia.integrations.mcp.server
+opencode mcp add ocelot-dev-memory --cwd /path/to/ocelot -- \
+  /path/to/ocelot/.venv/bin/python -m ozagia.integrations.mcp.server
 ```
 
 For this checkout there is already a gitignored project-local
@@ -194,12 +194,12 @@ Content-Length fallback for LSP-style clients).
 {
   "mcpServers": {
     "ozagia": {
-      "command": "/applications/data/projects/ocelot/.venv/bin/python",
+      "command": "/path/to/ocelot/.venv/bin/python",
       "args": ["-m", "ozagia.integrations.mcp.server"],
-      "cwd": "/applications/data/projects/ocelot",
+      "cwd": "/path/to/ocelot",
       "env": {
-        "OZAGIA_DUMP": "/applications/data/projects/ocelot/.ozagia/graph.json",
-        "OZAGIA_JOURNAL": "/applications/data/projects/ocelot/.ozagia/journal.jsonl"
+        "OZAGIA_DUMP": "/path/to/ocelot/.ozagia/graph.json",
+        "OZAGIA_JOURNAL": "/path/to/ocelot/.ozagia/journal.jsonl"
       }
     }
   }

@@ -242,3 +242,12 @@ def test_repo_map_respects_custom_state_dir(tmp_path: Path, monkeypatch) -> None
     files = repo_map_module._source_files(root)
     assert "work/state/inside_custom_state.py" not in files
     assert "a.py" in files
+
+
+def test_src_layout_is_a_default_import_root(tmp_path):
+    from ozagia.config import clear_config_cache, load_project_config
+    clear_config_cache()
+    assert load_project_config(tmp_path).import_roots == ()
+    (tmp_path / "src").mkdir()
+    clear_config_cache()
+    assert load_project_config(tmp_path).import_roots == ("src",)
