@@ -25,14 +25,36 @@ Requests (`op`):
       -> {"id": 3, "ok": true, "append": "<text to append, or empty>",
           "meta": {...}}
 
-    {"id": 4, "op": "stats"}   -> {"id": 4, "ok": true, "stats": {...}}
-    {"id": 5, "op": "shutdown"} -> {"id": 5, "ok": true}
+    {"id": 4, "op": "hello", "harness": "opencode", "plugin": "ozagia",
+     "version": "0.1.0", "session": "..."}
+      -> {"id": 4, "ok": true}
+      A plugin sends `hello` once when it loads. The daemon records it, so a
+      session whose plugin never loaded is visible (`stats.hellos`).
+
+    {"id": 5, "op": "stats"}   -> {"id": 5, "ok": true, "stats": {...}}
+    {"id": 6, "op": "shutdown"} -> {"id": 6, "ok": true}
+
+A handled `tool` response with `"is_error": true` is a tool error: the plugin
+reports `output` to the model as the tool's error (for OpenCode, by throwing
+an Error with that message), not as a successful result.
+
+`after` applies to every tool, handled or not by a capture plugin: a
+hook-only harness (Claude Code) runs every built-in itself and sends `after`
+for each, so the daemon re-ingests what changed and returns context (graph
+headers for a read range, grouping for grep matches, the graph delta and
+broken references for an edit) in `append`.
 
 `handled: false` means "run the original built-in": the plugin calls it, then
 sends `after` with its output so the daemon can update the graph (for example
 re-ingest files a shell command changed) and add context. A daemon error is
 `{"ok": false, "error": "..."}`; the plugin then runs the built-in and reports
 a fallback. The plugin never fails a tool call because the daemon failed.
+
+Command line: `python -m ozagia.daemon serve --root <repo> [--dump <graph>]
+[--journal <jsonl>] [--sock <path>]` loads (or, if missing, builds) the
+snapshot, listens, and prints one line `ready <socket path>` on stdout when it
+accepts connections. It exits on `shutdown`, SIGTERM or SIGINT, and removes
+its socket.
 
 Tool names are the harness-neutral names below. A plugin maps its harness's
 names onto them (OpenCode 2.3: read, grep, glob, edit, write, patch, shell;
