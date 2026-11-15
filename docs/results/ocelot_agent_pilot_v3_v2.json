@@ -1,0 +1,4094 @@
+{
+  "arms": [
+    "baseline",
+    "dev_memory",
+    "graph_intent"
+  ],
+  "backend": {
+    "backend": "opencode",
+    "model": "vllm/qwen3.8-27b (opencode config default)"
+  },
+  "base": "54e5eb5fae4592444136b9d70fde08e94cb8a914",
+  "driver": "opencode",
+  "per_task": {
+    "admissible-moves-weight": {
+      "baseline": {
+        "outcomes": [
+          true,
+          true,
+          true
+        ],
+        "repeats": 3,
+        "successes": 3
+      },
+      "dev_memory": {
+        "outcomes": [
+          true,
+          true,
+          true
+        ],
+        "repeats": 3,
+        "successes": 3
+      },
+      "graph_intent": {
+        "outcomes": [
+          true,
+          true,
+          true
+        ],
+        "repeats": 3,
+        "successes": 3
+      }
+    },
+    "bound-audit-quantifier-scope": {
+      "baseline": {
+        "outcomes": [
+          true,
+          true,
+          true
+        ],
+        "repeats": 3,
+        "successes": 3
+      },
+      "dev_memory": {
+        "outcomes": [
+          true,
+          true,
+          true
+        ],
+        "repeats": 3,
+        "successes": 3
+      },
+      "graph_intent": {
+        "outcomes": [
+          true,
+          true,
+          true
+        ],
+        "repeats": 3,
+        "successes": 3
+      }
+    },
+    "checkpoint-instance-index": {
+      "baseline": {
+        "outcomes": [
+          true,
+          true,
+          true
+        ],
+        "repeats": 3,
+        "successes": 3
+      },
+      "dev_memory": {
+        "outcomes": [
+          true,
+          true,
+          true
+        ],
+        "repeats": 3,
+        "successes": 3
+      },
+      "graph_intent": {
+        "outcomes": [
+          true,
+          true,
+          true
+        ],
+        "repeats": 3,
+        "successes": 3
+      }
+    },
+    "learner-board-pairs": {
+      "baseline": {
+        "outcomes": [
+          true,
+          true,
+          true
+        ],
+        "repeats": 3,
+        "successes": 3
+      },
+      "dev_memory": {
+        "outcomes": [
+          true,
+          true,
+          true
+        ],
+        "repeats": 3,
+        "successes": 3
+      },
+      "graph_intent": {
+        "outcomes": [
+          true,
+          true,
+          true
+        ],
+        "repeats": 3,
+        "successes": 3
+      }
+    },
+    "life-step-cache": {
+      "baseline": {
+        "outcomes": [
+          true,
+          true,
+          false
+        ],
+        "repeats": 3,
+        "successes": 2
+      },
+      "dev_memory": {
+        "outcomes": [
+          true,
+          true,
+          true
+        ],
+        "repeats": 3,
+        "successes": 3
+      },
+      "graph_intent": {
+        "outcomes": [
+          true,
+          true,
+          true
+        ],
+        "repeats": 3,
+        "successes": 3
+      }
+    },
+    "r2-cycle-arms": {
+      "baseline": {
+        "outcomes": [
+          true,
+          true,
+          true
+        ],
+        "repeats": 3,
+        "successes": 3
+      },
+      "dev_memory": {
+        "outcomes": [
+          true,
+          true,
+          true
+        ],
+        "repeats": 3,
+        "successes": 3
+      },
+      "graph_intent": {
+        "outcomes": [
+          true,
+          true,
+          true
+        ],
+        "repeats": 3,
+        "successes": 3
+      }
+    },
+    "remote-causal-posit-noop": {
+      "baseline": {
+        "outcomes": [
+          true,
+          true,
+          true
+        ],
+        "repeats": 3,
+        "successes": 3
+      },
+      "dev_memory": {
+        "outcomes": [
+          true,
+          true,
+          true
+        ],
+        "repeats": 3,
+        "successes": 3
+      },
+      "graph_intent": {
+        "outcomes": [
+          true,
+          true,
+          true
+        ],
+        "repeats": 3,
+        "successes": 3
+      }
+    },
+    "seed-dependency-closure": {
+      "baseline": {
+        "outcomes": [
+          true,
+          true,
+          true
+        ],
+        "repeats": 3,
+        "successes": 3
+      },
+      "dev_memory": {
+        "outcomes": [
+          true,
+          true,
+          true
+        ],
+        "repeats": 3,
+        "successes": 3
+      },
+      "graph_intent": {
+        "outcomes": [
+          true,
+          true,
+          true
+        ],
+        "repeats": 3,
+        "successes": 3
+      }
+    }
+  },
+  "repeats": 3,
+  "run_root": "/tmp/ozagia_pilot/v2",
+  "runs": [
+    {
+      "arm": "baseline",
+      "check_returncode": 0,
+      "check_s": 0.634,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "files_changed": [
+        "substrate/primitives.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/admissible-moves-weight-baseline-r1",
+      "mcp_calls": 0,
+      "prep_error": null,
+      "prep_ok": null,
+      "prep_s": 0.0,
+      "repeat": 1,
+      "success": true,
+      "task": "admissible-moves-weight",
+      "timed_out": false,
+      "tokens_in": 80528,
+      "tokens_out": 3388,
+      "tool_calls": 26,
+      "tools_by_name": {
+        "edit": 1,
+        "grep": 3,
+        "read": 8,
+        "shell": 14
+      },
+      "wall_s": 105.862
+    },
+    {
+      "arm": "baseline",
+      "check_returncode": 0,
+      "check_s": 0.622,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "files_changed": [
+        "substrate/primitives.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/admissible-moves-weight-baseline-r2",
+      "mcp_calls": 0,
+      "prep_error": null,
+      "prep_ok": null,
+      "prep_s": 0.0,
+      "repeat": 2,
+      "success": true,
+      "task": "admissible-moves-weight",
+      "timed_out": false,
+      "tokens_in": 71152,
+      "tokens_out": 1408,
+      "tool_calls": 12,
+      "tools_by_name": {
+        "edit": 1,
+        "grep": 1,
+        "read": 6,
+        "shell": 4
+      },
+      "wall_s": 62.381
+    },
+    {
+      "arm": "baseline",
+      "check_returncode": 0,
+      "check_s": 0.615,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "files_changed": [
+        "substrate/primitives.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/admissible-moves-weight-baseline-r3",
+      "mcp_calls": 0,
+      "prep_error": null,
+      "prep_ok": null,
+      "prep_s": 0.0,
+      "repeat": 3,
+      "success": true,
+      "task": "admissible-moves-weight",
+      "timed_out": false,
+      "tokens_in": 80723,
+      "tokens_out": 1986,
+      "tool_calls": 16,
+      "tools_by_name": {
+        "edit": 1,
+        "read": 7,
+        "shell": 7,
+        "skill": 1
+      },
+      "wall_s": 84.347
+    },
+    {
+      "arm": "dev_memory",
+      "check_returncode": 0,
+      "check_s": 0.622,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "files_changed": [
+        "substrate/primitives.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/admissible-moves-weight-dev_memory-r1",
+      "mcp_calls": 0,
+      "prep_error": null,
+      "prep_ok": true,
+      "prep_s": 75.83,
+      "repeat": 1,
+      "success": true,
+      "task": "admissible-moves-weight",
+      "timed_out": false,
+      "tokens_in": 58542,
+      "tokens_out": 2190,
+      "tool_calls": 27,
+      "tools_by_name": {
+        "edit": 1,
+        "execute": 1,
+        "grep": 7,
+        "read": 8,
+        "shell": 10
+      },
+      "wall_s": 69.696
+    },
+    {
+      "arm": "dev_memory",
+      "check_returncode": 0,
+      "check_s": 0.623,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "files_changed": [
+        "substrate/primitives.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/admissible-moves-weight-dev_memory-r2",
+      "mcp_calls": 0,
+      "prep_error": null,
+      "prep_ok": true,
+      "prep_s": 79.731,
+      "repeat": 2,
+      "success": true,
+      "task": "admissible-moves-weight",
+      "timed_out": false,
+      "tokens_in": 43401,
+      "tokens_out": 1164,
+      "tool_calls": 11,
+      "tools_by_name": {
+        "edit": 1,
+        "grep": 2,
+        "read": 3,
+        "shell": 5
+      },
+      "wall_s": 41.974
+    },
+    {
+      "arm": "dev_memory",
+      "check_returncode": 0,
+      "check_s": 0.633,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "files_changed": [
+        "substrate/primitives.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/admissible-moves-weight-dev_memory-r3",
+      "mcp_calls": 0,
+      "prep_error": null,
+      "prep_ok": true,
+      "prep_s": 91.273,
+      "repeat": 3,
+      "success": true,
+      "task": "admissible-moves-weight",
+      "timed_out": false,
+      "tokens_in": 77328,
+      "tokens_out": 2169,
+      "tool_calls": 17,
+      "tools_by_name": {
+        "edit": 1,
+        "execute": 1,
+        "grep": 2,
+        "read": 6,
+        "shell": 7
+      },
+      "wall_s": 80.817
+    },
+    {
+      "arm": "graph_intent",
+      "captured_calls": 15,
+      "check_returncode": 0,
+      "check_s": 0.619,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "daemon_error": null,
+      "daemon_ok": true,
+      "daemon_ready_s": 2.113,
+      "daemon_stats": {
+        "after_expired": 0,
+        "by_intent": {
+          "after_refresh": 5,
+          "edit": 1,
+          "glob": 1,
+          "grep": 3,
+          "read_file": 8,
+          "shell_passthrough": 5,
+          "shell_pytest": 2
+        },
+        "by_op": {
+          "after": 5,
+          "hello": 1,
+          "tool": 20
+        },
+        "by_tool": {
+          "edit": 1,
+          "glob": 1,
+          "grep": 3,
+          "read": 8,
+          "shell": 12
+        },
+        "errors": 0,
+        "expired": 0,
+        "fallbacks": 0,
+        "handled": {
+          "false": 5,
+          "true": 15
+        },
+        "hello_sessions": [
+          "ses_e2199bd50ffe6MLLX2mHvVNMFH"
+        ],
+        "hellos": 1,
+        "journal": "/tmp/ozagia_pilot/v2/logs/admissible-moves-weight-graph_intent-r1/daemon_journal.jsonl",
+        "late": 0,
+        "max_ms": 930.3,
+        "mean_ms": 187.7,
+        "passthrough": 5,
+        "pid": 1406465,
+        "plugin_fallbacks": 0,
+        "root": "/tmp/ozagia_pilot/v2/work/admissible-moves-weight-graph_intent-r1",
+        "tool_errors": 0,
+        "unknown_outcomes": 0,
+        "uptime_s": 60.5
+      },
+      "daemon_stop_error": null,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "fallbacks": 0,
+      "files_changed": [
+        "substrate/primitives.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/admissible-moves-weight-graph_intent-r1",
+      "mcp_calls": 0,
+      "passthrough_calls": 5,
+      "plugin_loaded": true,
+      "prep_error": null,
+      "prep_ok": true,
+      "prep_s": 78.767,
+      "repeat": 1,
+      "success": true,
+      "task": "admissible-moves-weight",
+      "timed_out": false,
+      "tokens_in": 54562,
+      "tokens_out": 2057,
+      "tool_calls": 20,
+      "tools_by_name": {
+        "edit": 1,
+        "glob": 1,
+        "grep": 3,
+        "read": 8,
+        "shell": 7
+      },
+      "wall_s": 60.373
+    },
+    {
+      "arm": "graph_intent",
+      "captured_calls": 14,
+      "check_returncode": 0,
+      "check_s": 0.614,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "daemon_error": null,
+      "daemon_ok": true,
+      "daemon_ready_s": 2.095,
+      "daemon_stats": {
+        "after_expired": 0,
+        "by_intent": {
+          "after_refresh": 1,
+          "edit": 1,
+          "grep": 3,
+          "read_dir": 1,
+          "read_file": 4,
+          "shell_passthrough": 1,
+          "shell_pytest": 5
+        },
+        "by_op": {
+          "after": 1,
+          "hello": 1,
+          "tool": 15
+        },
+        "by_tool": {
+          "edit": 1,
+          "grep": 3,
+          "read": 5,
+          "shell": 7
+        },
+        "errors": 0,
+        "expired": 0,
+        "fallbacks": 0,
+        "handled": {
+          "false": 1,
+          "true": 14
+        },
+        "hello_sessions": [
+          "ses_e21977c60ffeqrVznJfMxtmThj"
+        ],
+        "hellos": 1,
+        "journal": "/tmp/ozagia_pilot/v2/logs/admissible-moves-weight-graph_intent-r2/daemon_journal.jsonl",
+        "late": 0,
+        "max_ms": 300146.7,
+        "mean_ms": 19051.4,
+        "passthrough": 1,
+        "pid": 1418782,
+        "plugin_fallbacks": 0,
+        "root": "/tmp/ozagia_pilot/v2/work/admissible-moves-weight-graph_intent-r2",
+        "tool_errors": 0,
+        "unknown_outcomes": 0,
+        "uptime_s": 343.5
+      },
+      "daemon_stop_error": null,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "fallbacks": 0,
+      "files_changed": [
+        "substrate/primitives.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/admissible-moves-weight-graph_intent-r2",
+      "mcp_calls": 0,
+      "passthrough_calls": 1,
+      "plugin_loaded": true,
+      "prep_error": null,
+      "prep_ok": true,
+      "prep_s": 68.022,
+      "repeat": 2,
+      "success": true,
+      "task": "admissible-moves-weight",
+      "timed_out": false,
+      "tokens_in": 42265,
+      "tokens_out": 1189,
+      "tool_calls": 15,
+      "tools_by_name": {
+        "edit": 1,
+        "grep": 3,
+        "read": 5,
+        "shell": 6
+      },
+      "wall_s": 343.42
+    },
+    {
+      "arm": "graph_intent",
+      "captured_calls": 20,
+      "check_returncode": 0,
+      "check_s": 0.613,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "daemon_error": null,
+      "daemon_ok": true,
+      "daemon_ready_s": 2.094,
+      "daemon_stats": {
+        "after_expired": 0,
+        "by_intent": {
+          "after_refresh": 26,
+          "edit": 1,
+          "glob": 1,
+          "grep": 4,
+          "read_file": 13,
+          "shell_passthrough": 26,
+          "shell_refused": 1
+        },
+        "by_op": {
+          "after": 26,
+          "hello": 1,
+          "tool": 46
+        },
+        "by_tool": {
+          "edit": 1,
+          "glob": 1,
+          "grep": 4,
+          "read": 13,
+          "shell": 53
+        },
+        "errors": 0,
+        "expired": 0,
+        "fallbacks": 0,
+        "handled": {
+          "false": 26,
+          "true": 20
+        },
+        "hello_sessions": [
+          "ses_e2190d665ffeQMBYYuUhcsuUnx"
+        ],
+        "hellos": 1,
+        "journal": "/tmp/ozagia_pilot/v2/logs/admissible-moves-weight-graph_intent-r3/daemon_journal.jsonl",
+        "late": 0,
+        "max_ms": 879.4,
+        "mean_ms": 57.8,
+        "passthrough": 26,
+        "pid": 1470254,
+        "plugin_fallbacks": 0,
+        "root": "/tmp/ozagia_pilot/v2/work/admissible-moves-weight-graph_intent-r3",
+        "tool_errors": 1,
+        "unknown_outcomes": 0,
+        "uptime_s": 310.6
+      },
+      "daemon_stop_error": null,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "fallbacks": 0,
+      "files_changed": [
+        "substrate/primitives.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/admissible-moves-weight-graph_intent-r3",
+      "mcp_calls": 0,
+      "passthrough_calls": 26,
+      "plugin_loaded": true,
+      "prep_error": null,
+      "prep_ok": true,
+      "prep_s": 73.239,
+      "repeat": 3,
+      "success": true,
+      "task": "admissible-moves-weight",
+      "timed_out": false,
+      "tokens_in": 131701,
+      "tokens_out": 5358,
+      "tool_calls": 46,
+      "tools_by_name": {
+        "edit": 1,
+        "glob": 1,
+        "grep": 4,
+        "read": 13,
+        "shell": 27
+      },
+      "wall_s": 310.471
+    },
+    {
+      "arm": "baseline",
+      "check_returncode": 0,
+      "check_s": 3.352,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "diff_vs_base": [
+        "tests/test_ast_attr_migrated.py",
+        "tools/term_ast_audit.py"
+      ],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "files_changed": [
+        "tests/test_ast_attr_migrated.py",
+        "tools/term_ast_audit.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/bound-audit-quantifier-scope-baseline-r1",
+      "mcp_calls": 0,
+      "prep_error": null,
+      "prep_ok": null,
+      "prep_s": 0.0,
+      "repeat": 1,
+      "success": true,
+      "task": "bound-audit-quantifier-scope",
+      "timed_out": false,
+      "tokens_in": 51710,
+      "tokens_out": 3680,
+      "tool_calls": 23,
+      "tools_by_name": {
+        "edit": 4,
+        "grep": 2,
+        "read": 3,
+        "shell": 14
+      },
+      "wall_s": 79.641
+    },
+    {
+      "arm": "baseline",
+      "check_returncode": 0,
+      "check_s": 3.337,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "files_changed": [
+        "tools/term_ast_audit.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/bound-audit-quantifier-scope-baseline-r2",
+      "mcp_calls": 0,
+      "prep_error": null,
+      "prep_ok": null,
+      "prep_s": 0.0,
+      "repeat": 2,
+      "success": true,
+      "task": "bound-audit-quantifier-scope",
+      "timed_out": false,
+      "tokens_in": 72621,
+      "tokens_out": 4432,
+      "tool_calls": 27,
+      "tools_by_name": {
+        "edit": 3,
+        "grep": 2,
+        "read": 4,
+        "shell": 18
+      },
+      "wall_s": 119.277
+    },
+    {
+      "arm": "baseline",
+      "check_returncode": 0,
+      "check_s": 3.367,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "diff_vs_base": [
+        "tests/test_ast_attr_migrated.py"
+      ],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "files_changed": [
+        "tests/test_ast_attr_migrated.py",
+        "tools/term_ast_audit.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/bound-audit-quantifier-scope-baseline-r3",
+      "mcp_calls": 0,
+      "prep_error": null,
+      "prep_ok": null,
+      "prep_s": 0.0,
+      "repeat": 3,
+      "success": true,
+      "task": "bound-audit-quantifier-scope",
+      "timed_out": false,
+      "tokens_in": 61944,
+      "tokens_out": 5673,
+      "tool_calls": 33,
+      "tools_by_name": {
+        "edit": 3,
+        "grep": 3,
+        "read": 2,
+        "shell": 25
+      },
+      "wall_s": 114.906
+    },
+    {
+      "arm": "dev_memory",
+      "check_returncode": 0,
+      "check_s": 3.41,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "files_changed": [
+        "tools/term_ast_audit.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/bound-audit-quantifier-scope-dev_memory-r1",
+      "mcp_calls": 0,
+      "prep_error": null,
+      "prep_ok": true,
+      "prep_s": 79.943,
+      "repeat": 1,
+      "success": true,
+      "task": "bound-audit-quantifier-scope",
+      "timed_out": false,
+      "tokens_in": 49547,
+      "tokens_out": 2445,
+      "tool_calls": 15,
+      "tools_by_name": {
+        "edit": 1,
+        "execute": 1,
+        "grep": 1,
+        "read": 1,
+        "shell": 10,
+        "skill": 1
+      },
+      "wall_s": 74.041
+    },
+    {
+      "arm": "dev_memory",
+      "check_returncode": 0,
+      "check_s": 3.373,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "files_changed": [
+        "tools/term_ast_audit.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/bound-audit-quantifier-scope-dev_memory-r2",
+      "mcp_calls": 0,
+      "prep_error": null,
+      "prep_ok": true,
+      "prep_s": 79.498,
+      "repeat": 2,
+      "success": true,
+      "task": "bound-audit-quantifier-scope",
+      "timed_out": false,
+      "tokens_in": 43029,
+      "tokens_out": 2813,
+      "tool_calls": 16,
+      "tools_by_name": {
+        "edit": 1,
+        "grep": 1,
+        "read": 2,
+        "shell": 12
+      },
+      "wall_s": 72.905
+    },
+    {
+      "arm": "dev_memory",
+      "check_returncode": 0,
+      "check_s": 3.359,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "files_changed": [
+        "tools/term_ast_audit.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/bound-audit-quantifier-scope-dev_memory-r3",
+      "mcp_calls": 0,
+      "prep_error": null,
+      "prep_ok": true,
+      "prep_s": 78.621,
+      "repeat": 3,
+      "success": true,
+      "task": "bound-audit-quantifier-scope",
+      "timed_out": false,
+      "tokens_in": 49883,
+      "tokens_out": 3322,
+      "tool_calls": 23,
+      "tools_by_name": {
+        "edit": 1,
+        "grep": 2,
+        "read": 3,
+        "shell": 17
+      },
+      "wall_s": 78.024
+    },
+    {
+      "arm": "graph_intent",
+      "captured_calls": 10,
+      "check_returncode": 0,
+      "check_s": 3.363,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "daemon_error": null,
+      "daemon_ok": true,
+      "daemon_ready_s": 2.101,
+      "daemon_stats": {
+        "after_expired": 0,
+        "by_intent": {
+          "after_refresh": 21,
+          "edit": 2,
+          "grep": 2,
+          "read_file": 5,
+          "shell_passthrough": 21,
+          "shell_refused": 1
+        },
+        "by_op": {
+          "after": 21,
+          "hello": 1,
+          "tool": 31
+        },
+        "by_tool": {
+          "edit": 2,
+          "grep": 2,
+          "read": 5,
+          "shell": 43
+        },
+        "errors": 0,
+        "expired": 0,
+        "fallbacks": 0,
+        "handled": {
+          "false": 21,
+          "true": 10
+        },
+        "hello_sessions": [
+          "ses_e217d19d6ffeIFPS2WXc5B5Roz"
+        ],
+        "hellos": 1,
+        "journal": "/tmp/ozagia_pilot/v2/logs/bound-audit-quantifier-scope-graph_intent-r1/daemon_journal.jsonl",
+        "late": 0,
+        "max_ms": 2223.3,
+        "mean_ms": 146.5,
+        "passthrough": 21,
+        "pid": 1586359,
+        "plugin_fallbacks": 0,
+        "root": "/tmp/ozagia_pilot/v2/work/bound-audit-quantifier-scope-graph_intent-r1",
+        "tool_errors": 1,
+        "unknown_outcomes": 0,
+        "uptime_s": 140.1
+      },
+      "daemon_stop_error": null,
+      "diff_vs_base": [
+        "tests/test_ast_attr_migrated.py",
+        "tools/term_ast_audit.py"
+      ],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "fallbacks": 0,
+      "files_changed": [
+        "tests/test_ast_attr_migrated.py",
+        "tools/term_ast_audit.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/bound-audit-quantifier-scope-graph_intent-r1",
+      "mcp_calls": 0,
+      "passthrough_calls": 21,
+      "plugin_loaded": true,
+      "prep_error": null,
+      "prep_ok": true,
+      "prep_s": 73.197,
+      "repeat": 1,
+      "success": true,
+      "task": "bound-audit-quantifier-scope",
+      "timed_out": false,
+      "tokens_in": 79486,
+      "tokens_out": 6142,
+      "tool_calls": 31,
+      "tools_by_name": {
+        "edit": 2,
+        "grep": 2,
+        "read": 5,
+        "shell": 22
+      },
+      "wall_s": 139.991
+    },
+    {
+      "arm": "graph_intent",
+      "captured_calls": 9,
+      "check_returncode": 0,
+      "check_s": 3.349,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "daemon_error": null,
+      "daemon_ok": true,
+      "daemon_ready_s": 2.132,
+      "daemon_stats": {
+        "after_expired": 0,
+        "by_intent": {
+          "after_refresh": 18,
+          "edit": 1,
+          "grep": 2,
+          "read_file": 4,
+          "shell_passthrough": 18,
+          "shell_read": 1,
+          "shell_refused": 1
+        },
+        "by_op": {
+          "after": 18,
+          "hello": 1,
+          "tool": 27
+        },
+        "by_tool": {
+          "edit": 1,
+          "grep": 2,
+          "read": 4,
+          "shell": 38
+        },
+        "errors": 0,
+        "expired": 0,
+        "fallbacks": 0,
+        "handled": {
+          "false": 18,
+          "true": 9
+        },
+        "hello_sessions": [
+          "ses_e21797967ffeb7cxd5lKn1SHrK"
+        ],
+        "hellos": 1,
+        "journal": "/tmp/ozagia_pilot/v2/logs/bound-audit-quantifier-scope-graph_intent-r2/daemon_journal.jsonl",
+        "late": 0,
+        "max_ms": 903.7,
+        "mean_ms": 82.7,
+        "passthrough": 18,
+        "pid": 1608246,
+        "plugin_fallbacks": 0,
+        "root": "/tmp/ozagia_pilot/v2/work/bound-audit-quantifier-scope-graph_intent-r2",
+        "tool_errors": 1,
+        "unknown_outcomes": 0,
+        "uptime_s": 119.4
+      },
+      "daemon_stop_error": null,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "fallbacks": 0,
+      "files_changed": [
+        "tools/term_ast_audit.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/bound-audit-quantifier-scope-graph_intent-r2",
+      "mcp_calls": 0,
+      "passthrough_calls": 18,
+      "plugin_loaded": true,
+      "prep_error": null,
+      "prep_ok": true,
+      "prep_s": 72.117,
+      "repeat": 2,
+      "success": true,
+      "task": "bound-audit-quantifier-scope",
+      "timed_out": false,
+      "tokens_in": 81854,
+      "tokens_out": 3779,
+      "tool_calls": 27,
+      "tools_by_name": {
+        "edit": 1,
+        "grep": 2,
+        "read": 4,
+        "shell": 20
+      },
+      "wall_s": 119.301
+    },
+    {
+      "arm": "graph_intent",
+      "captured_calls": 7,
+      "check_returncode": 0,
+      "check_s": 3.337,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "daemon_error": null,
+      "daemon_ok": true,
+      "daemon_ready_s": 2.104,
+      "daemon_stats": {
+        "after_expired": 0,
+        "by_intent": {
+          "after_refresh": 14,
+          "edit": 1,
+          "grep": 2,
+          "read_file": 3,
+          "shell_passthrough": 14,
+          "shell_refused": 1
+        },
+        "by_op": {
+          "after": 14,
+          "hello": 1,
+          "tool": 21
+        },
+        "by_tool": {
+          "edit": 1,
+          "grep": 2,
+          "read": 3,
+          "shell": 29
+        },
+        "errors": 0,
+        "expired": 0,
+        "fallbacks": 0,
+        "handled": {
+          "false": 14,
+          "true": 7
+        },
+        "hello_sessions": [
+          "ses_e21760d6bffeqiSn0efwPuE2nU"
+        ],
+        "hellos": 1,
+        "journal": "/tmp/ozagia_pilot/v2/logs/bound-audit-quantifier-scope-graph_intent-r3/daemon_journal.jsonl",
+        "late": 0,
+        "max_ms": 1396.6,
+        "mean_ms": 109.8,
+        "passthrough": 14,
+        "pid": 1628429,
+        "plugin_fallbacks": 0,
+        "root": "/tmp/ozagia_pilot/v2/work/bound-audit-quantifier-scope-graph_intent-r3",
+        "tool_errors": 1,
+        "unknown_outcomes": 0,
+        "uptime_s": 72.3
+      },
+      "daemon_stop_error": null,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "fallbacks": 0,
+      "files_changed": [
+        "tools/term_ast_audit.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/bound-audit-quantifier-scope-graph_intent-r3",
+      "mcp_calls": 0,
+      "passthrough_calls": 14,
+      "plugin_loaded": true,
+      "prep_error": null,
+      "prep_ok": true,
+      "prep_s": 81.917,
+      "repeat": 3,
+      "success": true,
+      "task": "bound-audit-quantifier-scope",
+      "timed_out": false,
+      "tokens_in": 51716,
+      "tokens_out": 2817,
+      "tool_calls": 21,
+      "tools_by_name": {
+        "edit": 1,
+        "grep": 2,
+        "read": 3,
+        "shell": 15
+      },
+      "wall_s": 72.205
+    },
+    {
+      "arm": "baseline",
+      "check_returncode": 0,
+      "check_s": 0.927,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "files_changed": [
+        "substrate/world_adapter.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/checkpoint-instance-index-baseline-r1",
+      "mcp_calls": 0,
+      "prep_error": null,
+      "prep_ok": null,
+      "prep_s": 0.0,
+      "repeat": 1,
+      "success": true,
+      "task": "checkpoint-instance-index",
+      "timed_out": false,
+      "tokens_in": 78511,
+      "tokens_out": 3361,
+      "tool_calls": 25,
+      "tools_by_name": {
+        "edit": 1,
+        "grep": 3,
+        "read": 6,
+        "shell": 15
+      },
+      "wall_s": 237.223
+    },
+    {
+      "arm": "baseline",
+      "check_returncode": 0,
+      "check_s": 1.081,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "files_changed": [
+        "substrate/world_adapter.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/checkpoint-instance-index-baseline-r2",
+      "mcp_calls": 0,
+      "prep_error": null,
+      "prep_ok": null,
+      "prep_s": 0.0,
+      "repeat": 2,
+      "success": true,
+      "task": "checkpoint-instance-index",
+      "timed_out": false,
+      "tokens_in": 100419,
+      "tokens_out": 5815,
+      "tool_calls": 79,
+      "tools_by_name": {
+        "edit": 1,
+        "execute": 1,
+        "grep": 4,
+        "read": 1,
+        "shell": 72
+      },
+      "wall_s": 421.556
+    },
+    {
+      "arm": "baseline",
+      "check_returncode": 0,
+      "check_s": 0.914,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "files_changed": [
+        "substrate/world_adapter.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/checkpoint-instance-index-baseline-r3",
+      "mcp_calls": 0,
+      "prep_error": null,
+      "prep_ok": null,
+      "prep_s": 0.0,
+      "repeat": 3,
+      "success": true,
+      "task": "checkpoint-instance-index",
+      "timed_out": false,
+      "tokens_in": 41746,
+      "tokens_out": 1630,
+      "tool_calls": 11,
+      "tools_by_name": {
+        "edit": 1,
+        "grep": 4,
+        "read": 4,
+        "shell": 2
+      },
+      "wall_s": 51.016
+    },
+    {
+      "arm": "dev_memory",
+      "check_returncode": 0,
+      "check_s": 0.911,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "diff_vs_base": [
+        "substrate/world_adapter.py"
+      ],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "files_changed": [
+        "substrate/world_adapter.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/checkpoint-instance-index-dev_memory-r1",
+      "mcp_calls": 0,
+      "prep_error": null,
+      "prep_ok": true,
+      "prep_s": 87.632,
+      "repeat": 1,
+      "success": true,
+      "task": "checkpoint-instance-index",
+      "timed_out": false,
+      "tokens_in": 61641,
+      "tokens_out": 3553,
+      "tool_calls": 19,
+      "tools_by_name": {
+        "edit": 2,
+        "grep": 2,
+        "read": 3,
+        "shell": 12
+      },
+      "wall_s": 154.767
+    },
+    {
+      "arm": "dev_memory",
+      "check_returncode": 0,
+      "check_s": 0.912,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "files_changed": [
+        "substrate/world_adapter.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/checkpoint-instance-index-dev_memory-r2",
+      "mcp_calls": 0,
+      "prep_error": null,
+      "prep_ok": true,
+      "prep_s": 74.157,
+      "repeat": 2,
+      "success": true,
+      "task": "checkpoint-instance-index",
+      "timed_out": false,
+      "tokens_in": 77572,
+      "tokens_out": 3614,
+      "tool_calls": 24,
+      "tools_by_name": {
+        "edit": 1,
+        "execute": 2,
+        "grep": 3,
+        "read": 6,
+        "shell": 12
+      },
+      "wall_s": 132.57
+    },
+    {
+      "arm": "dev_memory",
+      "check_returncode": 0,
+      "check_s": 0.916,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "files_changed": [
+        "substrate/world_adapter.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/checkpoint-instance-index-dev_memory-r3",
+      "mcp_calls": 0,
+      "prep_error": null,
+      "prep_ok": true,
+      "prep_s": 71.496,
+      "repeat": 3,
+      "success": true,
+      "task": "checkpoint-instance-index",
+      "timed_out": false,
+      "tokens_in": 41085,
+      "tokens_out": 1477,
+      "tool_calls": 17,
+      "tools_by_name": {
+        "edit": 1,
+        "read": 4,
+        "shell": 11,
+        "skill": 1
+      },
+      "wall_s": 43.537
+    },
+    {
+      "arm": "graph_intent",
+      "captured_calls": 8,
+      "check_returncode": 0,
+      "check_s": 0.927,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "daemon_error": null,
+      "daemon_ok": true,
+      "daemon_ready_s": 2.114,
+      "daemon_stats": {
+        "after_expired": 0,
+        "by_intent": {
+          "after_refresh": 16,
+          "edit": 1,
+          "grep": 3,
+          "read_file": 4,
+          "shell_passthrough": 16
+        },
+        "by_op": {
+          "after": 16,
+          "hello": 1,
+          "tool": 24
+        },
+        "by_tool": {
+          "edit": 1,
+          "grep": 3,
+          "read": 4,
+          "shell": 32
+        },
+        "errors": 0,
+        "expired": 0,
+        "fallbacks": 0,
+        "handled": {
+          "false": 16,
+          "true": 8
+        },
+        "hello_sessions": [
+          "ses_e215e4f15ffeJk89zRr0t34Aps"
+        ],
+        "hellos": 1,
+        "journal": "/tmp/ozagia_pilot/v2/logs/checkpoint-instance-index-graph_intent-r1/daemon_journal.jsonl",
+        "late": 0,
+        "max_ms": 2662.4,
+        "mean_ms": 141.6,
+        "passthrough": 16,
+        "pid": 1794238,
+        "plugin_fallbacks": 0,
+        "root": "/tmp/ozagia_pilot/v2/work/checkpoint-instance-index-graph_intent-r1",
+        "tool_errors": 0,
+        "unknown_outcomes": 0,
+        "uptime_s": 106.9
+      },
+      "daemon_stop_error": null,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "fallbacks": 0,
+      "files_changed": [
+        "substrate/world_adapter.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/checkpoint-instance-index-graph_intent-r1",
+      "mcp_calls": 0,
+      "passthrough_calls": 16,
+      "plugin_loaded": true,
+      "prep_error": null,
+      "prep_ok": true,
+      "prep_s": 88.442,
+      "repeat": 1,
+      "success": true,
+      "task": "checkpoint-instance-index",
+      "timed_out": false,
+      "tokens_in": 53836,
+      "tokens_out": 2827,
+      "tool_calls": 24,
+      "tools_by_name": {
+        "edit": 1,
+        "grep": 3,
+        "read": 4,
+        "shell": 16
+      },
+      "wall_s": 106.757
+    },
+    {
+      "arm": "graph_intent",
+      "captured_calls": 12,
+      "check_returncode": 0,
+      "check_s": 0.922,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "daemon_error": null,
+      "daemon_ok": true,
+      "daemon_ready_s": 2.169,
+      "daemon_stats": {
+        "after_expired": 0,
+        "by_intent": {
+          "after_refresh": 40,
+          "edit": 3,
+          "edit_passthrough": 1,
+          "read_file": 8,
+          "read_passthrough": 1,
+          "shell_passthrough": 40,
+          "shell_refused": 1
+        },
+        "by_op": {
+          "after": 40,
+          "hello": 1,
+          "tool": 54
+        },
+        "by_tool": {
+          "edit": 4,
+          "read": 9,
+          "shell": 81
+        },
+        "errors": 0,
+        "expired": 0,
+        "fallbacks": 0,
+        "handled": {
+          "false": 42,
+          "true": 12
+        },
+        "hello_sessions": [
+          "ses_e215b589effebaNr9WN3WAH8oH"
+        ],
+        "hellos": 1,
+        "journal": "/tmp/ozagia_pilot/v2/logs/checkpoint-instance-index-graph_intent-r2/daemon_journal.jsonl",
+        "late": 0,
+        "max_ms": 2275.5,
+        "mean_ms": 163.5,
+        "passthrough": 42,
+        "pid": 1817388,
+        "plugin_fallbacks": 0,
+        "root": "/tmp/ozagia_pilot/v2/work/checkpoint-instance-index-graph_intent-r2",
+        "tool_errors": 1,
+        "unknown_outcomes": 0,
+        "uptime_s": 265.2
+      },
+      "daemon_stop_error": null,
+      "diff_vs_base": [
+        "substrate/world_adapter.py"
+      ],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "fallbacks": 0,
+      "files_changed": [
+        "substrate/world_adapter.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/checkpoint-instance-index-graph_intent-r2",
+      "mcp_calls": 0,
+      "passthrough_calls": 42,
+      "plugin_loaded": true,
+      "prep_error": null,
+      "prep_ok": true,
+      "prep_s": 70.293,
+      "repeat": 2,
+      "success": true,
+      "task": "checkpoint-instance-index",
+      "timed_out": false,
+      "tokens_in": 108773,
+      "tokens_out": 6009,
+      "tool_calls": 54,
+      "tools_by_name": {
+        "edit": 4,
+        "read": 9,
+        "shell": 41
+      },
+      "wall_s": 265.134
+    },
+    {
+      "arm": "graph_intent",
+      "captured_calls": 7,
+      "check_returncode": 0,
+      "check_s": 0.933,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "daemon_error": null,
+      "daemon_ok": true,
+      "daemon_ready_s": 2.11,
+      "daemon_stats": {
+        "after_expired": 0,
+        "by_intent": {
+          "after_refresh": 11,
+          "edit": 1,
+          "grep": 2,
+          "read_file": 4,
+          "shell_passthrough": 11
+        },
+        "by_op": {
+          "after": 11,
+          "hello": 1,
+          "tool": 18
+        },
+        "by_tool": {
+          "edit": 1,
+          "grep": 2,
+          "read": 4,
+          "shell": 22
+        },
+        "errors": 0,
+        "expired": 0,
+        "fallbacks": 0,
+        "handled": {
+          "false": 11,
+          "true": 7
+        },
+        "hello_sessions": [
+          "ses_e2155de75ffe6nAM5FNXqvJiuE"
+        ],
+        "hellos": 1,
+        "journal": "/tmp/ozagia_pilot/v2/logs/checkpoint-instance-index-graph_intent-r3/daemon_journal.jsonl",
+        "late": 0,
+        "max_ms": 2380.9,
+        "mean_ms": 184.1,
+        "passthrough": 11,
+        "pid": 1878135,
+        "plugin_fallbacks": 0,
+        "root": "/tmp/ozagia_pilot/v2/work/checkpoint-instance-index-graph_intent-r3",
+        "tool_errors": 0,
+        "unknown_outcomes": 0,
+        "uptime_s": 55.8
+      },
+      "daemon_stop_error": null,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "fallbacks": 0,
+      "files_changed": [
+        "substrate/world_adapter.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/checkpoint-instance-index-graph_intent-r3",
+      "mcp_calls": 0,
+      "passthrough_calls": 11,
+      "plugin_loaded": true,
+      "prep_error": null,
+      "prep_ok": true,
+      "prep_s": 76.227,
+      "repeat": 3,
+      "success": true,
+      "task": "checkpoint-instance-index",
+      "timed_out": false,
+      "tokens_in": 43612,
+      "tokens_out": 2215,
+      "tool_calls": 18,
+      "tools_by_name": {
+        "edit": 1,
+        "grep": 2,
+        "read": 4,
+        "shell": 11
+      },
+      "wall_s": 55.727
+    },
+    {
+      "arm": "baseline",
+      "check_returncode": 0,
+      "check_s": 1.667,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "files_changed": [
+        "substrate/learner.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/learner-board-pairs-baseline-r1",
+      "mcp_calls": 0,
+      "prep_error": null,
+      "prep_ok": null,
+      "prep_s": 0.0,
+      "repeat": 1,
+      "success": true,
+      "task": "learner-board-pairs",
+      "timed_out": false,
+      "tokens_in": 27285,
+      "tokens_out": 1313,
+      "tool_calls": 12,
+      "tools_by_name": {
+        "edit": 1,
+        "grep": 3,
+        "read": 2,
+        "shell": 6
+      },
+      "wall_s": 40.15
+    },
+    {
+      "arm": "baseline",
+      "check_returncode": 0,
+      "check_s": 1.06,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "files_changed": [
+        "substrate/learner.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/learner-board-pairs-baseline-r2",
+      "mcp_calls": 0,
+      "prep_error": null,
+      "prep_ok": null,
+      "prep_s": 0.0,
+      "repeat": 2,
+      "success": true,
+      "task": "learner-board-pairs",
+      "timed_out": false,
+      "tokens_in": 33741,
+      "tokens_out": 1237,
+      "tool_calls": 8,
+      "tools_by_name": {
+        "edit": 1,
+        "grep": 2,
+        "read": 2,
+        "shell": 3
+      },
+      "wall_s": 59.06
+    },
+    {
+      "arm": "baseline",
+      "check_returncode": 0,
+      "check_s": 0.98,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "files_changed": [
+        "substrate/learner.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/learner-board-pairs-baseline-r3",
+      "mcp_calls": 0,
+      "prep_error": null,
+      "prep_ok": null,
+      "prep_s": 0.0,
+      "repeat": 3,
+      "success": true,
+      "task": "learner-board-pairs",
+      "timed_out": false,
+      "tokens_in": 36820,
+      "tokens_out": 1555,
+      "tool_calls": 14,
+      "tools_by_name": {
+        "edit": 1,
+        "grep": 1,
+        "read": 2,
+        "shell": 10
+      },
+      "wall_s": 69.269
+    },
+    {
+      "arm": "dev_memory",
+      "check_returncode": 0,
+      "check_s": 0.977,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "diff_vs_base": [
+        "substrate/learner.py"
+      ],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "files_changed": [
+        "substrate/learner.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/learner-board-pairs-dev_memory-r1",
+      "mcp_calls": 0,
+      "prep_error": null,
+      "prep_ok": true,
+      "prep_s": 85.414,
+      "repeat": 1,
+      "success": true,
+      "task": "learner-board-pairs",
+      "timed_out": false,
+      "tokens_in": 49802,
+      "tokens_out": 4038,
+      "tool_calls": 21,
+      "tools_by_name": {
+        "edit": 1,
+        "glob": 1,
+        "grep": 4,
+        "read": 3,
+        "shell": 12
+      },
+      "wall_s": 99.275
+    },
+    {
+      "arm": "dev_memory",
+      "check_returncode": 0,
+      "check_s": 0.986,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "diff_vs_base": [
+        "substrate/learner.py"
+      ],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "files_changed": [
+        "substrate/learner.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/learner-board-pairs-dev_memory-r2",
+      "mcp_calls": 0,
+      "prep_error": null,
+      "prep_ok": true,
+      "prep_s": 73.526,
+      "repeat": 2,
+      "success": true,
+      "task": "learner-board-pairs",
+      "timed_out": false,
+      "tokens_in": 43971,
+      "tokens_out": 3732,
+      "tool_calls": 11,
+      "tools_by_name": {
+        "edit": 1,
+        "grep": 1,
+        "read": 4,
+        "shell": 5
+      },
+      "wall_s": 64.735
+    },
+    {
+      "arm": "dev_memory",
+      "check_returncode": 0,
+      "check_s": 0.965,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "files_changed": [
+        "substrate/learner.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/learner-board-pairs-dev_memory-r3",
+      "mcp_calls": 0,
+      "prep_error": null,
+      "prep_ok": true,
+      "prep_s": 75.481,
+      "repeat": 3,
+      "success": true,
+      "task": "learner-board-pairs",
+      "timed_out": false,
+      "tokens_in": 47000,
+      "tokens_out": 2047,
+      "tool_calls": 20,
+      "tools_by_name": {
+        "edit": 1,
+        "grep": 5,
+        "read": 3,
+        "shell": 11
+      },
+      "wall_s": 77.229
+    },
+    {
+      "arm": "graph_intent",
+      "captured_calls": 24,
+      "check_returncode": 0,
+      "check_s": 1.075,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "daemon_error": null,
+      "daemon_ok": true,
+      "daemon_ready_s": 2.201,
+      "daemon_stats": {
+        "after_expired": 0,
+        "by_intent": {
+          "after_refresh": 11,
+          "edit": 1,
+          "glob": 1,
+          "grep": 8,
+          "read_file": 13,
+          "shell_passthrough": 11,
+          "write": 1
+        },
+        "by_op": {
+          "after": 11,
+          "hello": 1,
+          "tool": 35
+        },
+        "by_tool": {
+          "edit": 1,
+          "glob": 1,
+          "grep": 8,
+          "read": 13,
+          "shell": 22,
+          "write": 1
+        },
+        "errors": 0,
+        "expired": 0,
+        "fallbacks": 0,
+        "handled": {
+          "false": 11,
+          "true": 24
+        },
+        "hello_sessions": [
+          "ses_e2147ed34ffevAQkUjsbnAHecA"
+        ],
+        "hellos": 1,
+        "journal": "/tmp/ozagia_pilot/v2/logs/learner-board-pairs-graph_intent-r1/daemon_journal.jsonl",
+        "late": 0,
+        "max_ms": 6558.3,
+        "mean_ms": 473.7,
+        "passthrough": 11,
+        "pid": 1948830,
+        "plugin_fallbacks": 0,
+        "root": "/tmp/ozagia_pilot/v2/work/learner-board-pairs-graph_intent-r1",
+        "tool_errors": 0,
+        "unknown_outcomes": 0,
+        "uptime_s": 400.2
+      },
+      "daemon_stop_error": null,
+      "diff_vs_base": [
+        "substrate/learner.py"
+      ],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "fallbacks": 0,
+      "files_changed": [
+        "substrate/learner.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/learner-board-pairs-graph_intent-r1",
+      "mcp_calls": 0,
+      "passthrough_calls": 11,
+      "plugin_loaded": true,
+      "prep_error": null,
+      "prep_ok": true,
+      "prep_s": 73.935,
+      "repeat": 1,
+      "success": true,
+      "task": "learner-board-pairs",
+      "timed_out": false,
+      "tokens_in": 264507,
+      "tokens_out": 4598,
+      "tool_calls": 24,
+      "tools_by_name": {
+        "edit": 1,
+        "grep": 3,
+        "read": 8,
+        "shell": 9,
+        "skill": 1,
+        "subagent": 1,
+        "write": 1
+      },
+      "wall_s": 400.042
+    },
+    {
+      "arm": "graph_intent",
+      "captured_calls": 6,
+      "check_returncode": 0,
+      "check_s": 0.965,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "daemon_error": null,
+      "daemon_ok": true,
+      "daemon_ready_s": 2.12,
+      "daemon_stats": {
+        "after_expired": 0,
+        "by_intent": {
+          "after_refresh": 23,
+          "edit": 1,
+          "grep": 1,
+          "read_file": 4,
+          "shell_passthrough": 23
+        },
+        "by_op": {
+          "after": 23,
+          "hello": 1,
+          "tool": 29
+        },
+        "by_tool": {
+          "edit": 1,
+          "grep": 1,
+          "read": 4,
+          "shell": 46
+        },
+        "errors": 0,
+        "expired": 0,
+        "fallbacks": 0,
+        "handled": {
+          "false": 23,
+          "true": 6
+        },
+        "hello_sessions": [
+          "ses_e2140a894ffeGUKBCCy2TBcwT7"
+        ],
+        "hellos": 1,
+        "journal": "/tmp/ozagia_pilot/v2/logs/learner-board-pairs-graph_intent-r2/daemon_journal.jsonl",
+        "late": 0,
+        "max_ms": 926.1,
+        "mean_ms": 72.8,
+        "passthrough": 23,
+        "pid": 1994877,
+        "plugin_fallbacks": 0,
+        "root": "/tmp/ozagia_pilot/v2/work/learner-board-pairs-graph_intent-r2",
+        "tool_errors": 0,
+        "unknown_outcomes": 0,
+        "uptime_s": 372.6
+      },
+      "daemon_stop_error": null,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "fallbacks": 0,
+      "files_changed": [
+        "substrate/learner.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/learner-board-pairs-graph_intent-r2",
+      "mcp_calls": 0,
+      "passthrough_calls": 23,
+      "plugin_loaded": true,
+      "prep_error": null,
+      "prep_ok": true,
+      "prep_s": 60.081,
+      "repeat": 2,
+      "success": true,
+      "task": "learner-board-pairs",
+      "timed_out": false,
+      "tokens_in": 56823,
+      "tokens_out": 6298,
+      "tool_calls": 29,
+      "tools_by_name": {
+        "edit": 1,
+        "grep": 1,
+        "read": 4,
+        "shell": 23
+      },
+      "wall_s": 372.487
+    },
+    {
+      "arm": "graph_intent",
+      "captured_calls": 6,
+      "check_returncode": 0,
+      "check_s": 1.0,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "daemon_error": null,
+      "daemon_ok": true,
+      "daemon_ready_s": 2.11,
+      "daemon_stats": {
+        "after_expired": 0,
+        "by_intent": {
+          "after_refresh": 10,
+          "edit": 1,
+          "grep": 2,
+          "read_file": 3,
+          "shell_passthrough": 10
+        },
+        "by_op": {
+          "after": 10,
+          "hello": 1,
+          "tool": 16
+        },
+        "by_tool": {
+          "edit": 1,
+          "grep": 2,
+          "read": 3,
+          "shell": 20
+        },
+        "errors": 0,
+        "expired": 0,
+        "fallbacks": 0,
+        "handled": {
+          "false": 10,
+          "true": 6
+        },
+        "hello_sessions": [
+          "ses_e213993abffezQpqE8ykPpll6t"
+        ],
+        "hellos": 1,
+        "journal": "/tmp/ozagia_pilot/v2/logs/learner-board-pairs-graph_intent-r3/daemon_journal.jsonl",
+        "late": 0,
+        "max_ms": 847.4,
+        "mean_ms": 115.8,
+        "passthrough": 10,
+        "pid": 2039552,
+        "plugin_fallbacks": 0,
+        "root": "/tmp/ozagia_pilot/v2/work/learner-board-pairs-graph_intent-r3",
+        "tool_errors": 0,
+        "unknown_outcomes": 0,
+        "uptime_s": 80.2
+      },
+      "daemon_stop_error": null,
+      "diff_vs_base": [
+        "substrate/learner.py"
+      ],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "fallbacks": 0,
+      "files_changed": [
+        "substrate/learner.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/learner-board-pairs-graph_intent-r3",
+      "mcp_calls": 0,
+      "passthrough_calls": 10,
+      "plugin_loaded": true,
+      "prep_error": null,
+      "prep_ok": true,
+      "prep_s": 69.89,
+      "repeat": 3,
+      "success": true,
+      "task": "learner-board-pairs",
+      "timed_out": false,
+      "tokens_in": 48208,
+      "tokens_out": 5131,
+      "tool_calls": 16,
+      "tools_by_name": {
+        "edit": 1,
+        "grep": 2,
+        "read": 3,
+        "shell": 10
+      },
+      "wall_s": 80.069
+    },
+    {
+      "arm": "baseline",
+      "check_returncode": 0,
+      "check_s": 2.658,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "diff_vs_base": [
+        "substrate/dsl.py"
+      ],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "files_changed": [
+        "domains/conway.py",
+        "substrate/dsl.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/life-step-cache-baseline-r1",
+      "mcp_calls": 0,
+      "prep_error": null,
+      "prep_ok": null,
+      "prep_s": 0.0,
+      "repeat": 1,
+      "success": true,
+      "task": "life-step-cache",
+      "timed_out": false,
+      "tokens_in": 118215,
+      "tokens_out": 8398,
+      "tool_calls": 43,
+      "tools_by_name": {
+        "edit": 2,
+        "grep": 1,
+        "read": 10,
+        "shell": 30
+      },
+      "wall_s": 233.391
+    },
+    {
+      "arm": "baseline",
+      "check_returncode": 0,
+      "check_s": 2.741,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "diff_vs_base": [
+        "substrate/dsl.py"
+      ],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": null,
+      "files_changed": [
+        "domains/conway.py",
+        "substrate/dsl.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/life-step-cache-baseline-r2",
+      "mcp_calls": 0,
+      "prep_error": null,
+      "prep_ok": null,
+      "prep_s": 0.0,
+      "repeat": 2,
+      "success": true,
+      "task": "life-step-cache",
+      "timed_out": true,
+      "tokens_in": 409556,
+      "tokens_out": 4978,
+      "tool_calls": 48,
+      "tools_by_name": {
+        "edit": 2,
+        "read": 9,
+        "shell": 37
+      },
+      "wall_s": 900.204
+    },
+    {
+      "arm": "baseline",
+      "check_returncode": 1,
+      "check_s": 1.795,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "diff_vs_base": [
+        "domains/conway.py",
+        "substrate/dsl.py"
+      ],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": null,
+      "files_changed": [],
+      "localized": false,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/life-step-cache-baseline-r3",
+      "mcp_calls": 0,
+      "prep_error": null,
+      "prep_ok": null,
+      "prep_s": 0.0,
+      "repeat": 3,
+      "success": false,
+      "task": "life-step-cache",
+      "timed_out": true,
+      "tokens_in": 288542,
+      "tokens_out": 1524,
+      "tool_calls": 22,
+      "tools_by_name": {
+        "glob": 1,
+        "grep": 5,
+        "read": 6,
+        "shell": 9,
+        "skill": 1
+      },
+      "wall_s": 900.203
+    },
+    {
+      "arm": "dev_memory",
+      "check_returncode": 0,
+      "check_s": 2.71,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "files_changed": [
+        "domains/conway.py",
+        "substrate/dsl.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/life-step-cache-dev_memory-r1",
+      "mcp_calls": 0,
+      "prep_error": null,
+      "prep_ok": true,
+      "prep_s": 64.641,
+      "repeat": 1,
+      "success": true,
+      "task": "life-step-cache",
+      "timed_out": false,
+      "tokens_in": 164776,
+      "tokens_out": 3149,
+      "tool_calls": 29,
+      "tools_by_name": {
+        "edit": 2,
+        "execute": 1,
+        "grep": 1,
+        "read": 6,
+        "shell": 19
+      },
+      "wall_s": 405.478
+    },
+    {
+      "arm": "dev_memory",
+      "check_returncode": 0,
+      "check_s": 2.7,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "diff_vs_base": [
+        "tests/test_conway.py"
+      ],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "files_changed": [
+        "domains/conway.py",
+        "substrate/dsl.py",
+        "tests/test_conway.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/life-step-cache-dev_memory-r2",
+      "mcp_calls": 0,
+      "prep_error": null,
+      "prep_ok": true,
+      "prep_s": 67.021,
+      "repeat": 2,
+      "success": true,
+      "task": "life-step-cache",
+      "timed_out": false,
+      "tokens_in": 65473,
+      "tokens_out": 4933,
+      "tool_calls": 30,
+      "tools_by_name": {
+        "edit": 5,
+        "grep": 2,
+        "read": 8,
+        "shell": 15
+      },
+      "wall_s": 201.143
+    },
+    {
+      "arm": "dev_memory",
+      "check_returncode": 0,
+      "check_s": 2.69,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "diff_vs_base": [
+        "substrate/dsl.py"
+      ],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "files_changed": [
+        "domains/conway.py",
+        "substrate/dsl.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/life-step-cache-dev_memory-r3",
+      "mcp_calls": 0,
+      "prep_error": null,
+      "prep_ok": true,
+      "prep_s": 63.197,
+      "repeat": 3,
+      "success": true,
+      "task": "life-step-cache",
+      "timed_out": false,
+      "tokens_in": 112152,
+      "tokens_out": 5365,
+      "tool_calls": 38,
+      "tools_by_name": {
+        "edit": 2,
+        "grep": 3,
+        "read": 11,
+        "shell": 21,
+        "skill": 1
+      },
+      "wall_s": 220.106
+    },
+    {
+      "arm": "graph_intent",
+      "captured_calls": 15,
+      "check_returncode": 0,
+      "check_s": 2.708,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "daemon_error": null,
+      "daemon_ok": true,
+      "daemon_ready_s": 2.076,
+      "daemon_stats": {
+        "after_expired": 0,
+        "by_intent": {
+          "after_git_touched": 2,
+          "after_refresh": 13,
+          "edit": 2,
+          "read_file": 4,
+          "shell_passthrough": 15,
+          "shell_pytest": 4,
+          "shell_read": 4,
+          "shell_refused": 1
+        },
+        "by_op": {
+          "after": 15,
+          "hello": 1,
+          "tool": 30
+        },
+        "by_tool": {
+          "edit": 2,
+          "read": 4,
+          "shell": 39
+        },
+        "errors": 0,
+        "expired": 0,
+        "fallbacks": 0,
+        "handled": {
+          "false": 15,
+          "true": 15
+        },
+        "hello_sessions": [
+          "ses_e21073ab2ffeMhfIiVUuDqT78C"
+        ],
+        "hellos": 1,
+        "journal": "/tmp/ozagia_pilot/v2/logs/life-step-cache-graph_intent-r1/daemon_journal.jsonl",
+        "late": 0,
+        "max_ms": 300131.8,
+        "mean_ms": 8106.0,
+        "passthrough": 15,
+        "pid": 2322908,
+        "plugin_fallbacks": 0,
+        "root": "/tmp/ozagia_pilot/v2/work/life-step-cache-graph_intent-r1",
+        "tool_errors": 1,
+        "unknown_outcomes": 0,
+        "uptime_s": 484.8
+      },
+      "daemon_stop_error": null,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "fallbacks": 0,
+      "files_changed": [
+        "domains/conway.py",
+        "substrate/dsl.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/life-step-cache-graph_intent-r1",
+      "mcp_calls": 0,
+      "passthrough_calls": 15,
+      "plugin_loaded": true,
+      "prep_error": null,
+      "prep_ok": true,
+      "prep_s": 62.623,
+      "repeat": 1,
+      "success": true,
+      "task": "life-step-cache",
+      "timed_out": false,
+      "tokens_in": 100663,
+      "tokens_out": 2464,
+      "tool_calls": 30,
+      "tools_by_name": {
+        "edit": 2,
+        "read": 4,
+        "shell": 24
+      },
+      "wall_s": 484.691
+    },
+    {
+      "arm": "graph_intent",
+      "captured_calls": 18,
+      "check_returncode": 0,
+      "check_s": 2.652,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "daemon_error": null,
+      "daemon_ok": true,
+      "daemon_ready_s": 2.072,
+      "daemon_stats": {
+        "after_expired": 0,
+        "by_intent": {
+          "after_git_touched": 1,
+          "after_none": 1,
+          "after_refresh": 7,
+          "edit": 2,
+          "grep": 5,
+          "read_file": 8,
+          "shell_passthrough": 9,
+          "shell_pytest": 3
+        },
+        "by_op": {
+          "after": 9,
+          "hello": 1,
+          "tool": 27
+        },
+        "by_tool": {
+          "edit": 2,
+          "grep": 5,
+          "read": 8,
+          "shell": 21
+        },
+        "errors": 0,
+        "expired": 0,
+        "fallbacks": 0,
+        "handled": {
+          "false": 9,
+          "true": 18
+        },
+        "hello_sessions": [
+          "ses_e20feb156ffeLBL374EomKEfz9"
+        ],
+        "hellos": 1,
+        "journal": "/tmp/ozagia_pilot/v2/logs/life-step-cache-graph_intent-r2/daemon_journal.jsonl",
+        "late": 0,
+        "max_ms": 589396.9,
+        "mean_ms": 16627.7,
+        "passthrough": 9,
+        "pid": 2371232,
+        "plugin_fallbacks": 0,
+        "root": "/tmp/ozagia_pilot/v2/work/life-step-cache-graph_intent-r2",
+        "tool_errors": 0,
+        "unknown_outcomes": 0,
+        "uptime_s": 694.7
+      },
+      "daemon_stop_error": null,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "fallbacks": 0,
+      "files_changed": [
+        "domains/conway.py",
+        "substrate/dsl.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/life-step-cache-graph_intent-r2",
+      "mcp_calls": 0,
+      "passthrough_calls": 9,
+      "plugin_loaded": true,
+      "prep_error": null,
+      "prep_ok": true,
+      "prep_s": 59.07,
+      "repeat": 2,
+      "success": true,
+      "task": "life-step-cache",
+      "timed_out": false,
+      "tokens_in": 69360,
+      "tokens_out": 2148,
+      "tool_calls": 27,
+      "tools_by_name": {
+        "edit": 2,
+        "grep": 5,
+        "read": 8,
+        "shell": 12
+      },
+      "wall_s": 694.596
+    },
+    {
+      "arm": "graph_intent",
+      "captured_calls": 15,
+      "check_returncode": 0,
+      "check_s": 2.688,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "daemon_error": null,
+      "daemon_ok": true,
+      "daemon_ready_s": 2.113,
+      "daemon_stats": {
+        "after_expired": 0,
+        "by_intent": {
+          "after_none": 1,
+          "after_refresh": 13,
+          "edit": 2,
+          "grep": 6,
+          "read_file": 7,
+          "shell_passthrough": 14
+        },
+        "by_op": {
+          "after": 14,
+          "hello": 1,
+          "tool": 29
+        },
+        "by_tool": {
+          "edit": 2,
+          "grep": 6,
+          "read": 7,
+          "shell": 28
+        },
+        "errors": 0,
+        "expired": 0,
+        "fallbacks": 0,
+        "handled": {
+          "false": 14,
+          "true": 15
+        },
+        "hello_sessions": [
+          "ses_e20f30bf1ffeJV7HNodfTlYOzc"
+        ],
+        "hellos": 1,
+        "journal": "/tmp/ozagia_pilot/v2/logs/life-step-cache-graph_intent-r3/daemon_journal.jsonl",
+        "late": 0,
+        "max_ms": 1038.0,
+        "mean_ms": 102.6,
+        "passthrough": 14,
+        "pid": 2435617,
+        "plugin_fallbacks": 0,
+        "root": "/tmp/ozagia_pilot/v2/work/life-step-cache-graph_intent-r3",
+        "tool_errors": 0,
+        "unknown_outcomes": 0,
+        "uptime_s": 114.8
+      },
+      "daemon_stop_error": null,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "fallbacks": 0,
+      "files_changed": [
+        "domains/conway.py",
+        "substrate/dsl.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/life-step-cache-graph_intent-r3",
+      "mcp_calls": 0,
+      "passthrough_calls": 14,
+      "plugin_loaded": true,
+      "prep_error": null,
+      "prep_ok": true,
+      "prep_s": 54.895,
+      "repeat": 3,
+      "success": true,
+      "task": "life-step-cache",
+      "timed_out": false,
+      "tokens_in": 64313,
+      "tokens_out": 4328,
+      "tool_calls": 29,
+      "tools_by_name": {
+        "edit": 2,
+        "grep": 6,
+        "read": 7,
+        "shell": 14
+      },
+      "wall_s": 114.737
+    },
+    {
+      "arm": "baseline",
+      "check_returncode": 0,
+      "check_s": 3.611,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "files_changed": [
+        "scripts/abusive_r2_cycle_limit_run.py",
+        "worlds/abusive_r2_cycle_limit_world.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/r2-cycle-arms-baseline-r1",
+      "mcp_calls": 0,
+      "prep_error": null,
+      "prep_ok": null,
+      "prep_s": 0.0,
+      "repeat": 1,
+      "success": true,
+      "task": "r2-cycle-arms",
+      "timed_out": false,
+      "tokens_in": 48048,
+      "tokens_out": 4791,
+      "tool_calls": 24,
+      "tools_by_name": {
+        "edit": 2,
+        "read": 2,
+        "shell": 20
+      },
+      "wall_s": 117.632
+    },
+    {
+      "arm": "baseline",
+      "check_returncode": 0,
+      "check_s": 3.601,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "files_changed": [
+        "scripts/abusive_r2_cycle_limit_run.py",
+        "worlds/abusive_r2_cycle_limit_world.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/r2-cycle-arms-baseline-r2",
+      "mcp_calls": 0,
+      "prep_error": null,
+      "prep_ok": null,
+      "prep_s": 0.0,
+      "repeat": 2,
+      "success": true,
+      "task": "r2-cycle-arms",
+      "timed_out": false,
+      "tokens_in": 74078,
+      "tokens_out": 4584,
+      "tool_calls": 26,
+      "tools_by_name": {
+        "edit": 2,
+        "grep": 1,
+        "read": 5,
+        "shell": 18
+      },
+      "wall_s": 113.152
+    },
+    {
+      "arm": "baseline",
+      "check_returncode": 0,
+      "check_s": 3.693,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "files_changed": [
+        "scripts/abusive_r2_cycle_limit_run.py",
+        "worlds/abusive_r2_cycle_limit_world.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/r2-cycle-arms-baseline-r3",
+      "mcp_calls": 0,
+      "prep_error": null,
+      "prep_ok": null,
+      "prep_s": 0.0,
+      "repeat": 3,
+      "success": true,
+      "task": "r2-cycle-arms",
+      "timed_out": false,
+      "tokens_in": 65489,
+      "tokens_out": 1887,
+      "tool_calls": 14,
+      "tools_by_name": {
+        "edit": 2,
+        "grep": 3,
+        "read": 5,
+        "shell": 4
+      },
+      "wall_s": 79.425
+    },
+    {
+      "arm": "dev_memory",
+      "check_returncode": 0,
+      "check_s": 3.586,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "files_changed": [
+        "scripts/abusive_r2_cycle_limit_run.py",
+        "worlds/abusive_r2_cycle_limit_world.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/r2-cycle-arms-dev_memory-r1",
+      "mcp_calls": 0,
+      "prep_error": null,
+      "prep_ok": true,
+      "prep_s": 68.896,
+      "repeat": 1,
+      "success": true,
+      "task": "r2-cycle-arms",
+      "timed_out": false,
+      "tokens_in": 71990,
+      "tokens_out": 2965,
+      "tool_calls": 17,
+      "tools_by_name": {
+        "edit": 2,
+        "grep": 3,
+        "read": 6,
+        "shell": 6
+      },
+      "wall_s": 90.989
+    },
+    {
+      "arm": "dev_memory",
+      "check_returncode": 0,
+      "check_s": 3.593,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "files_changed": [
+        "scripts/abusive_r2_cycle_limit_run.py",
+        "worlds/abusive_r2_cycle_limit_world.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/r2-cycle-arms-dev_memory-r2",
+      "mcp_calls": 0,
+      "prep_error": null,
+      "prep_ok": true,
+      "prep_s": 69.701,
+      "repeat": 2,
+      "success": true,
+      "task": "r2-cycle-arms",
+      "timed_out": false,
+      "tokens_in": 90289,
+      "tokens_out": 3701,
+      "tool_calls": 24,
+      "tools_by_name": {
+        "edit": 2,
+        "execute": 1,
+        "read": 6,
+        "shell": 15
+      },
+      "wall_s": 132.256
+    },
+    {
+      "arm": "dev_memory",
+      "check_returncode": 0,
+      "check_s": 3.631,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "files_changed": [
+        "scripts/abusive_r2_cycle_limit_run.py",
+        "worlds/abusive_r2_cycle_limit_world.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/r2-cycle-arms-dev_memory-r3",
+      "mcp_calls": 0,
+      "prep_error": null,
+      "prep_ok": true,
+      "prep_s": 62.937,
+      "repeat": 3,
+      "success": true,
+      "task": "r2-cycle-arms",
+      "timed_out": false,
+      "tokens_in": 81536,
+      "tokens_out": 5078,
+      "tool_calls": 25,
+      "tools_by_name": {
+        "edit": 2,
+        "read": 5,
+        "shell": 16,
+        "skill": 2
+      },
+      "wall_s": 143.585
+    },
+    {
+      "arm": "graph_intent",
+      "captured_calls": 7,
+      "check_returncode": 0,
+      "check_s": 3.639,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "daemon_error": null,
+      "daemon_ok": true,
+      "daemon_ready_s": 2.094,
+      "daemon_stats": {
+        "after_expired": 0,
+        "by_intent": {
+          "after_git_touched": 1,
+          "after_refresh": 10,
+          "edit": 2,
+          "grep": 1,
+          "read_file": 3,
+          "shell_passthrough": 11,
+          "shell_pytest": 1
+        },
+        "by_op": {
+          "after": 11,
+          "hello": 1,
+          "tool": 18
+        },
+        "by_tool": {
+          "edit": 2,
+          "grep": 1,
+          "read": 3,
+          "shell": 23
+        },
+        "errors": 0,
+        "expired": 0,
+        "fallbacks": 0,
+        "handled": {
+          "false": 11,
+          "true": 7
+        },
+        "hello_sessions": [
+          "ses_e20e12dfbffeRv7efauOzHQn1G"
+        ],
+        "hellos": 1,
+        "journal": "/tmp/ozagia_pilot/v2/logs/r2-cycle-arms-graph_intent-r1/daemon_journal.jsonl",
+        "late": 0,
+        "max_ms": 3616.4,
+        "mean_ms": 200.3,
+        "passthrough": 11,
+        "pid": 2538731,
+        "plugin_fallbacks": 0,
+        "root": "/tmp/ozagia_pilot/v2/work/r2-cycle-arms-graph_intent-r1",
+        "tool_errors": 0,
+        "unknown_outcomes": 0,
+        "uptime_s": 79.6
+      },
+      "daemon_stop_error": null,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "fallbacks": 0,
+      "files_changed": [
+        "scripts/abusive_r2_cycle_limit_run.py",
+        "worlds/abusive_r2_cycle_limit_world.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/r2-cycle-arms-graph_intent-r1",
+      "mcp_calls": 0,
+      "passthrough_calls": 11,
+      "plugin_loaded": true,
+      "prep_error": null,
+      "prep_ok": true,
+      "prep_s": 64.333,
+      "repeat": 1,
+      "success": true,
+      "task": "r2-cycle-arms",
+      "timed_out": false,
+      "tokens_in": 54324,
+      "tokens_out": 3635,
+      "tool_calls": 18,
+      "tools_by_name": {
+        "edit": 2,
+        "grep": 1,
+        "read": 3,
+        "shell": 12
+      },
+      "wall_s": 79.494
+    },
+    {
+      "arm": "graph_intent",
+      "captured_calls": 8,
+      "check_returncode": 0,
+      "check_s": 3.878,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "daemon_error": null,
+      "daemon_ok": true,
+      "daemon_ready_s": 2.086,
+      "daemon_stats": {
+        "after_expired": 0,
+        "by_intent": {
+          "after_git_touched": 1,
+          "after_refresh": 15,
+          "edit": 2,
+          "grep": 1,
+          "read_file": 4,
+          "shell_passthrough": 17,
+          "shell_pytest": 1
+        },
+        "by_op": {
+          "after": 16,
+          "hello": 1,
+          "tool": 25
+        },
+        "by_tool": {
+          "edit": 2,
+          "grep": 1,
+          "read": 4,
+          "shell": 34
+        },
+        "errors": 0,
+        "expired": 0,
+        "fallbacks": 0,
+        "handled": {
+          "false": 17,
+          "true": 8
+        },
+        "hello_sessions": [
+          "ses_e20deaff8ffeMIRwmHEbJgSahy"
+        ],
+        "hellos": 1,
+        "journal": "/tmp/ozagia_pilot/v2/logs/r2-cycle-arms-graph_intent-r2/daemon_journal.jsonl",
+        "late": 0,
+        "max_ms": 3701.4,
+        "mean_ms": 188.2,
+        "passthrough": 17,
+        "pid": 2552075,
+        "plugin_fallbacks": 0,
+        "root": "/tmp/ozagia_pilot/v2/work/r2-cycle-arms-graph_intent-r2",
+        "tool_errors": 0,
+        "unknown_outcomes": 0,
+        "uptime_s": 109.1
+      },
+      "daemon_stop_error": null,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "fallbacks": 0,
+      "files_changed": [
+        "scripts/abusive_r2_cycle_limit_run.py",
+        "worlds/abusive_r2_cycle_limit_world.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/r2-cycle-arms-graph_intent-r2",
+      "mcp_calls": 0,
+      "passthrough_calls": 17,
+      "plugin_loaded": true,
+      "prep_error": null,
+      "prep_ok": true,
+      "prep_s": 62.847,
+      "repeat": 2,
+      "success": true,
+      "task": "r2-cycle-arms",
+      "timed_out": false,
+      "tokens_in": 62450,
+      "tokens_out": 4903,
+      "tool_calls": 25,
+      "tools_by_name": {
+        "edit": 2,
+        "grep": 1,
+        "read": 4,
+        "shell": 18
+      },
+      "wall_s": 108.931
+    },
+    {
+      "arm": "graph_intent",
+      "captured_calls": 9,
+      "check_returncode": 0,
+      "check_s": 3.58,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "daemon_error": null,
+      "daemon_ok": true,
+      "daemon_ready_s": 2.092,
+      "daemon_stats": {
+        "after_expired": 0,
+        "by_intent": {
+          "after_git_touched": 1,
+          "after_refresh": 9,
+          "edit": 2,
+          "read_file": 7,
+          "shell_passthrough": 10
+        },
+        "by_op": {
+          "after": 10,
+          "hello": 1,
+          "tool": 19
+        },
+        "by_tool": {
+          "edit": 2,
+          "read": 7,
+          "shell": 20
+        },
+        "errors": 0,
+        "expired": 0,
+        "fallbacks": 0,
+        "handled": {
+          "false": 10,
+          "true": 9
+        },
+        "hello_sessions": [
+          "ses_e20dba044ffei6tNJW7pfeTZt1"
+        ],
+        "hellos": 1,
+        "journal": "/tmp/ozagia_pilot/v2/logs/r2-cycle-arms-graph_intent-r3/daemon_journal.jsonl",
+        "late": 0,
+        "max_ms": 1058.7,
+        "mean_ms": 105.5,
+        "passthrough": 10,
+        "pid": 2568364,
+        "plugin_fallbacks": 0,
+        "root": "/tmp/ozagia_pilot/v2/work/r2-cycle-arms-graph_intent-r3",
+        "tool_errors": 0,
+        "unknown_outcomes": 0,
+        "uptime_s": 127.0
+      },
+      "daemon_stop_error": null,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "fallbacks": 0,
+      "files_changed": [
+        "scripts/abusive_r2_cycle_limit_run.py",
+        "worlds/abusive_r2_cycle_limit_world.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/r2-cycle-arms-graph_intent-r3",
+      "mcp_calls": 0,
+      "passthrough_calls": 10,
+      "plugin_loaded": true,
+      "prep_error": null,
+      "prep_ok": true,
+      "prep_s": 63.494,
+      "repeat": 3,
+      "success": true,
+      "task": "r2-cycle-arms",
+      "timed_out": false,
+      "tokens_in": 77922,
+      "tokens_out": 2911,
+      "tool_calls": 19,
+      "tools_by_name": {
+        "edit": 2,
+        "read": 7,
+        "shell": 10
+      },
+      "wall_s": 126.937
+    },
+    {
+      "arm": "baseline",
+      "check_returncode": 0,
+      "check_s": 4.787,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "files_changed": [
+        "domains/remote_causal_seed.py",
+        "seeds/remote_causal.json"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/remote-causal-posit-noop-baseline-r1",
+      "mcp_calls": 0,
+      "prep_error": null,
+      "prep_ok": null,
+      "prep_s": 0.0,
+      "repeat": 1,
+      "success": true,
+      "task": "remote-causal-posit-noop",
+      "timed_out": false,
+      "tokens_in": 60008,
+      "tokens_out": 3992,
+      "tool_calls": 27,
+      "tools_by_name": {
+        "edit": 1,
+        "grep": 2,
+        "read": 3,
+        "shell": 21
+      },
+      "wall_s": 113.171
+    },
+    {
+      "arm": "baseline",
+      "check_returncode": 0,
+      "check_s": 4.812,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "files_changed": [
+        "domains/remote_causal_seed.py",
+        "seeds/remote_causal.json"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/remote-causal-posit-noop-baseline-r2",
+      "mcp_calls": 0,
+      "prep_error": null,
+      "prep_ok": null,
+      "prep_s": 0.0,
+      "repeat": 2,
+      "success": true,
+      "task": "remote-causal-posit-noop",
+      "timed_out": false,
+      "tokens_in": 61799,
+      "tokens_out": 3148,
+      "tool_calls": 25,
+      "tools_by_name": {
+        "edit": 1,
+        "grep": 2,
+        "read": 4,
+        "shell": 18
+      },
+      "wall_s": 113.134
+    },
+    {
+      "arm": "baseline",
+      "check_returncode": 0,
+      "check_s": 4.829,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "files_changed": [
+        "domains/remote_causal_seed.py",
+        "seeds/remote_causal.json"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/remote-causal-posit-noop-baseline-r3",
+      "mcp_calls": 0,
+      "prep_error": null,
+      "prep_ok": null,
+      "prep_s": 0.0,
+      "repeat": 3,
+      "success": true,
+      "task": "remote-causal-posit-noop",
+      "timed_out": false,
+      "tokens_in": 44690,
+      "tokens_out": 2489,
+      "tool_calls": 20,
+      "tools_by_name": {
+        "edit": 2,
+        "read": 2,
+        "shell": 16
+      },
+      "wall_s": 83.391
+    },
+    {
+      "arm": "dev_memory",
+      "check_returncode": 0,
+      "check_s": 4.731,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "files_changed": [
+        "domains/remote_causal_seed.py",
+        "seeds/remote_causal.json"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/remote-causal-posit-noop-dev_memory-r1",
+      "mcp_calls": 0,
+      "prep_error": null,
+      "prep_ok": true,
+      "prep_s": 70.167,
+      "repeat": 1,
+      "success": true,
+      "task": "remote-causal-posit-noop",
+      "timed_out": false,
+      "tokens_in": 56831,
+      "tokens_out": 2238,
+      "tool_calls": 18,
+      "tools_by_name": {
+        "edit": 1,
+        "grep": 6,
+        "read": 4,
+        "shell": 7
+      },
+      "wall_s": 67.936
+    },
+    {
+      "arm": "dev_memory",
+      "check_returncode": 0,
+      "check_s": 4.786,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "files_changed": [
+        "domains/remote_causal_seed.py",
+        "seeds/remote_causal.json"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/remote-causal-posit-noop-dev_memory-r2",
+      "mcp_calls": 0,
+      "prep_error": null,
+      "prep_ok": true,
+      "prep_s": 68.298,
+      "repeat": 2,
+      "success": true,
+      "task": "remote-causal-posit-noop",
+      "timed_out": false,
+      "tokens_in": 42705,
+      "tokens_out": 1515,
+      "tool_calls": 11,
+      "tools_by_name": {
+        "edit": 1,
+        "execute": 1,
+        "read": 3,
+        "shell": 6
+      },
+      "wall_s": 53.287
+    },
+    {
+      "arm": "dev_memory",
+      "check_returncode": 0,
+      "check_s": 4.811,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "files_changed": [
+        "domains/remote_causal_seed.py",
+        "seeds/remote_causal.json"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/remote-causal-posit-noop-dev_memory-r3",
+      "mcp_calls": 0,
+      "prep_error": null,
+      "prep_ok": true,
+      "prep_s": 86.873,
+      "repeat": 3,
+      "success": true,
+      "task": "remote-causal-posit-noop",
+      "timed_out": false,
+      "tokens_in": 40636,
+      "tokens_out": 2211,
+      "tool_calls": 21,
+      "tools_by_name": {
+        "edit": 6,
+        "grep": 1,
+        "read": 3,
+        "shell": 11
+      },
+      "wall_s": 55.149
+    },
+    {
+      "arm": "graph_intent",
+      "captured_calls": 7,
+      "check_returncode": 0,
+      "check_s": 4.94,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "daemon_error": null,
+      "daemon_ok": true,
+      "daemon_ready_s": 2.911,
+      "daemon_stats": {
+        "after_expired": 0,
+        "by_intent": {
+          "after_refresh": 11,
+          "edit": 1,
+          "read_file": 6,
+          "shell_passthrough": 11
+        },
+        "by_op": {
+          "after": 11,
+          "hello": 1,
+          "tool": 18
+        },
+        "by_tool": {
+          "edit": 1,
+          "read": 6,
+          "shell": 22
+        },
+        "errors": 0,
+        "expired": 0,
+        "fallbacks": 0,
+        "handled": {
+          "false": 11,
+          "true": 7
+        },
+        "hello_sessions": [
+          "ses_e20cb5211ffeqo0S3vPOwbHQL3"
+        ],
+        "hellos": 1,
+        "journal": "/tmp/ozagia_pilot/v2/logs/remote-causal-posit-noop-graph_intent-r1/daemon_journal.jsonl",
+        "late": 0,
+        "max_ms": 5102.2,
+        "mean_ms": 244.0,
+        "passthrough": 11,
+        "pid": 2715141,
+        "plugin_fallbacks": 0,
+        "root": "/tmp/ozagia_pilot/v2/work/remote-causal-posit-noop-graph_intent-r1",
+        "tool_errors": 0,
+        "unknown_outcomes": 0,
+        "uptime_s": 127.4
+      },
+      "daemon_stop_error": null,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "fallbacks": 0,
+      "files_changed": [
+        "domains/remote_causal_seed.py",
+        "seeds/remote_causal.json"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/remote-causal-posit-noop-graph_intent-r1",
+      "mcp_calls": 0,
+      "passthrough_calls": 11,
+      "plugin_loaded": true,
+      "prep_error": null,
+      "prep_ok": true,
+      "prep_s": 90.269,
+      "repeat": 1,
+      "success": true,
+      "task": "remote-causal-posit-noop",
+      "timed_out": false,
+      "tokens_in": 104008,
+      "tokens_out": 2523,
+      "tool_calls": 18,
+      "tools_by_name": {
+        "edit": 1,
+        "read": 6,
+        "shell": 11
+      },
+      "wall_s": 126.526
+    },
+    {
+      "arm": "graph_intent",
+      "captured_calls": 11,
+      "check_returncode": 0,
+      "check_s": 4.762,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "daemon_error": null,
+      "daemon_ok": true,
+      "daemon_ready_s": 2.159,
+      "daemon_stats": {
+        "after_expired": 0,
+        "by_intent": {
+          "after_refresh": 6,
+          "edit": 1,
+          "grep": 3,
+          "read_file": 7,
+          "shell_passthrough": 6
+        },
+        "by_op": {
+          "after": 6,
+          "hello": 1,
+          "tool": 17
+        },
+        "by_tool": {
+          "edit": 1,
+          "grep": 3,
+          "read": 7,
+          "shell": 12
+        },
+        "errors": 0,
+        "expired": 0,
+        "fallbacks": 0,
+        "handled": {
+          "false": 6,
+          "true": 11
+        },
+        "hello_sessions": [
+          "ses_e20c7df4fffe50tNoCdJNbzy18"
+        ],
+        "hellos": 1,
+        "journal": "/tmp/ozagia_pilot/v2/logs/remote-causal-posit-noop-graph_intent-r2/daemon_journal.jsonl",
+        "late": 0,
+        "max_ms": 7690.2,
+        "mean_ms": 710.0,
+        "passthrough": 6,
+        "pid": 2750103,
+        "plugin_fallbacks": 0,
+        "root": "/tmp/ozagia_pilot/v2/work/remote-causal-posit-noop-graph_intent-r2",
+        "tool_errors": 0,
+        "unknown_outcomes": 0,
+        "uptime_s": 84.1
+      },
+      "daemon_stop_error": null,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "fallbacks": 0,
+      "files_changed": [
+        "domains/remote_causal_seed.py",
+        "seeds/remote_causal.json"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/remote-causal-posit-noop-graph_intent-r2",
+      "mcp_calls": 0,
+      "passthrough_calls": 6,
+      "plugin_loaded": true,
+      "prep_error": null,
+      "prep_ok": true,
+      "prep_s": 77.497,
+      "repeat": 2,
+      "success": true,
+      "task": "remote-causal-posit-noop",
+      "timed_out": false,
+      "tokens_in": 60205,
+      "tokens_out": 2337,
+      "tool_calls": 17,
+      "tools_by_name": {
+        "edit": 1,
+        "grep": 3,
+        "read": 7,
+        "shell": 6
+      },
+      "wall_s": 84.012
+    },
+    {
+      "arm": "graph_intent",
+      "captured_calls": 9,
+      "check_returncode": 0,
+      "check_s": 4.759,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "daemon_error": null,
+      "daemon_ok": true,
+      "daemon_ready_s": 2.133,
+      "daemon_stats": {
+        "after_expired": 0,
+        "by_intent": {
+          "after_refresh": 8,
+          "edit": 1,
+          "glob": 1,
+          "grep": 1,
+          "read_dir": 1,
+          "read_file": 5,
+          "shell_passthrough": 9
+        },
+        "by_op": {
+          "after": 8,
+          "hello": 1,
+          "tool": 18
+        },
+        "by_tool": {
+          "edit": 1,
+          "glob": 1,
+          "grep": 1,
+          "read": 6,
+          "shell": 17
+        },
+        "errors": 0,
+        "expired": 0,
+        "fallbacks": 0,
+        "handled": {
+          "false": 9,
+          "true": 9
+        },
+        "hello_sessions": [
+          "ses_e20c4f034ffeCP7M56JFyS3KoX"
+        ],
+        "hellos": 1,
+        "journal": "/tmp/ozagia_pilot/v2/logs/remote-causal-posit-noop-graph_intent-r3/daemon_journal.jsonl",
+        "late": 0,
+        "max_ms": 6322.6,
+        "mean_ms": 366.3,
+        "passthrough": 9,
+        "pid": 2779919,
+        "plugin_fallbacks": 0,
+        "root": "/tmp/ozagia_pilot/v2/work/remote-causal-posit-noop-graph_intent-r3",
+        "tool_errors": 0,
+        "unknown_outcomes": 0,
+        "uptime_s": 900.3
+      },
+      "daemon_stop_error": null,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": null,
+      "fallbacks": 0,
+      "files_changed": [
+        "domains/remote_causal_seed.py",
+        "seeds/remote_causal.json"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/remote-causal-posit-noop-graph_intent-r3",
+      "mcp_calls": 0,
+      "passthrough_calls": 9,
+      "plugin_loaded": true,
+      "prep_error": null,
+      "prep_ok": true,
+      "prep_s": 84.017,
+      "repeat": 3,
+      "success": true,
+      "task": "remote-causal-posit-noop",
+      "timed_out": true,
+      "tokens_in": 57222,
+      "tokens_out": 1435,
+      "tool_calls": 17,
+      "tools_by_name": {
+        "edit": 1,
+        "glob": 1,
+        "grep": 1,
+        "read": 6,
+        "shell": 8
+      },
+      "wall_s": 900.24
+    },
+    {
+      "arm": "baseline",
+      "check_returncode": 0,
+      "check_s": 0.52,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "files_changed": [
+        "domains/seed_registry.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/seed-dependency-closure-baseline-r1",
+      "mcp_calls": 0,
+      "prep_error": null,
+      "prep_ok": null,
+      "prep_s": 0.0,
+      "repeat": 1,
+      "success": true,
+      "task": "seed-dependency-closure",
+      "timed_out": false,
+      "tokens_in": 54168,
+      "tokens_out": 2971,
+      "tool_calls": 27,
+      "tools_by_name": {
+        "edit": 1,
+        "grep": 4,
+        "read": 4,
+        "shell": 18
+      },
+      "wall_s": 117.135
+    },
+    {
+      "arm": "baseline",
+      "check_returncode": 0,
+      "check_s": 0.527,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "files_changed": [
+        "domains/seed_registry.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/seed-dependency-closure-baseline-r2",
+      "mcp_calls": 0,
+      "prep_error": null,
+      "prep_ok": null,
+      "prep_s": 0.0,
+      "repeat": 2,
+      "success": true,
+      "task": "seed-dependency-closure",
+      "timed_out": false,
+      "tokens_in": 82569,
+      "tokens_out": 3186,
+      "tool_calls": 29,
+      "tools_by_name": {
+        "edit": 1,
+        "grep": 6,
+        "read": 5,
+        "shell": 17
+      },
+      "wall_s": 106.332
+    },
+    {
+      "arm": "baseline",
+      "check_returncode": 0,
+      "check_s": 0.534,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "files_changed": [
+        "domains/seed_registry.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/seed-dependency-closure-baseline-r3",
+      "mcp_calls": 0,
+      "prep_error": null,
+      "prep_ok": null,
+      "prep_s": 0.0,
+      "repeat": 3,
+      "success": true,
+      "task": "seed-dependency-closure",
+      "timed_out": false,
+      "tokens_in": 44446,
+      "tokens_out": 2999,
+      "tool_calls": 17,
+      "tools_by_name": {
+        "edit": 1,
+        "grep": 2,
+        "read": 5,
+        "shell": 8,
+        "skill": 1
+      },
+      "wall_s": 70.32
+    },
+    {
+      "arm": "dev_memory",
+      "check_returncode": 0,
+      "check_s": 0.519,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "files_changed": [
+        "domains/seed_registry.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/seed-dependency-closure-dev_memory-r1",
+      "mcp_calls": 0,
+      "prep_error": null,
+      "prep_ok": true,
+      "prep_s": 101.407,
+      "repeat": 1,
+      "success": true,
+      "task": "seed-dependency-closure",
+      "timed_out": false,
+      "tokens_in": 57714,
+      "tokens_out": 2608,
+      "tool_calls": 22,
+      "tools_by_name": {
+        "edit": 1,
+        "read": 4,
+        "shell": 17
+      },
+      "wall_s": 186.526
+    },
+    {
+      "arm": "dev_memory",
+      "check_returncode": 0,
+      "check_s": 0.515,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "files_changed": [
+        "domains/seed_registry.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/seed-dependency-closure-dev_memory-r2",
+      "mcp_calls": 0,
+      "prep_error": null,
+      "prep_ok": true,
+      "prep_s": 74.345,
+      "repeat": 2,
+      "success": true,
+      "task": "seed-dependency-closure",
+      "timed_out": false,
+      "tokens_in": 100638,
+      "tokens_out": 4429,
+      "tool_calls": 31,
+      "tools_by_name": {
+        "edit": 1,
+        "grep": 5,
+        "read": 9,
+        "shell": 15,
+        "skill": 1
+      },
+      "wall_s": 127.305
+    },
+    {
+      "arm": "dev_memory",
+      "check_returncode": 0,
+      "check_s": 0.509,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "files_changed": [
+        "domains/seed_registry.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/seed-dependency-closure-dev_memory-r3",
+      "mcp_calls": 0,
+      "prep_error": null,
+      "prep_ok": true,
+      "prep_s": 73.692,
+      "repeat": 3,
+      "success": true,
+      "task": "seed-dependency-closure",
+      "timed_out": false,
+      "tokens_in": 99395,
+      "tokens_out": 4755,
+      "tool_calls": 36,
+      "tools_by_name": {
+        "edit": 1,
+        "grep": 2,
+        "read": 4,
+        "shell": 29
+      },
+      "wall_s": 720.708
+    },
+    {
+      "arm": "graph_intent",
+      "captured_calls": 14,
+      "check_returncode": 0,
+      "check_s": 0.523,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "daemon_error": null,
+      "daemon_ok": true,
+      "daemon_ready_s": 2.085,
+      "daemon_stats": {
+        "after_expired": 0,
+        "by_intent": {
+          "after_refresh": 23,
+          "edit": 1,
+          "grep": 2,
+          "read_dir": 1,
+          "read_file": 9,
+          "shell_passthrough": 23,
+          "shell_refused": 1
+        },
+        "by_op": {
+          "after": 23,
+          "hello": 1,
+          "tool": 37
+        },
+        "by_tool": {
+          "edit": 1,
+          "grep": 2,
+          "read": 10,
+          "shell": 47
+        },
+        "errors": 0,
+        "expired": 0,
+        "fallbacks": 0,
+        "handled": {
+          "false": 23,
+          "true": 14
+        },
+        "hello_sessions": [
+          "ses_e209c1647ffeWTkXKVoO9Pdi7B"
+        ],
+        "hellos": 1,
+        "journal": "/tmp/ozagia_pilot/v2/logs/seed-dependency-closure-graph_intent-r1/daemon_journal.jsonl",
+        "late": 0,
+        "max_ms": 1173.7,
+        "mean_ms": 122.7,
+        "passthrough": 23,
+        "pid": 3105458,
+        "plugin_fallbacks": 0,
+        "root": "/tmp/ozagia_pilot/v2/work/seed-dependency-closure-graph_intent-r1",
+        "tool_errors": 1,
+        "unknown_outcomes": 0,
+        "uptime_s": 149.9
+      },
+      "daemon_stop_error": null,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "fallbacks": 0,
+      "files_changed": [
+        "domains/seed_registry.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/seed-dependency-closure-graph_intent-r1",
+      "mcp_calls": 0,
+      "passthrough_calls": 23,
+      "plugin_loaded": true,
+      "prep_error": null,
+      "prep_ok": true,
+      "prep_s": 67.453,
+      "repeat": 1,
+      "success": true,
+      "task": "seed-dependency-closure",
+      "timed_out": false,
+      "tokens_in": 73411,
+      "tokens_out": 4975,
+      "tool_calls": 38,
+      "tools_by_name": {
+        "edit": 1,
+        "execute": 1,
+        "grep": 2,
+        "read": 10,
+        "shell": 24
+      },
+      "wall_s": 149.777
+    },
+    {
+      "arm": "graph_intent",
+      "captured_calls": 28,
+      "check_returncode": 0,
+      "check_s": 0.537,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "daemon_error": null,
+      "daemon_ok": true,
+      "daemon_ready_s": 2.076,
+      "daemon_stats": {
+        "after_expired": 0,
+        "by_intent": {
+          "after_refresh": 38,
+          "edit": 2,
+          "grep": 12,
+          "read_file": 13,
+          "shell_passthrough": 38,
+          "shell_refused": 1
+        },
+        "by_op": {
+          "after": 38,
+          "hello": 1,
+          "tool": 66
+        },
+        "by_tool": {
+          "edit": 2,
+          "grep": 12,
+          "read": 13,
+          "shell": 77
+        },
+        "errors": 0,
+        "expired": 0,
+        "fallbacks": 0,
+        "handled": {
+          "false": 38,
+          "true": 28
+        },
+        "hello_sessions": [
+          "ses_e2098945dffeqdP6W5J3ToTkD0"
+        ],
+        "hellos": 1,
+        "journal": "/tmp/ozagia_pilot/v2/logs/seed-dependency-closure-graph_intent-r2/daemon_journal.jsonl",
+        "late": 0,
+        "max_ms": 894.5,
+        "mean_ms": 74.5,
+        "passthrough": 38,
+        "pid": 3128764,
+        "plugin_fallbacks": 0,
+        "root": "/tmp/ozagia_pilot/v2/work/seed-dependency-closure-graph_intent-r2",
+        "tool_errors": 1,
+        "unknown_outcomes": 0,
+        "uptime_s": 395.9
+      },
+      "daemon_stop_error": null,
+      "diff_vs_base": [
+        "domains/seed_registry.py"
+      ],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "fallbacks": 0,
+      "files_changed": [
+        "domains/seed_registry.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/seed-dependency-closure-graph_intent-r2",
+      "mcp_calls": 0,
+      "passthrough_calls": 38,
+      "plugin_loaded": true,
+      "prep_error": null,
+      "prep_ok": true,
+      "prep_s": 64.148,
+      "repeat": 2,
+      "success": true,
+      "task": "seed-dependency-closure",
+      "timed_out": false,
+      "tokens_in": 166327,
+      "tokens_out": 9035,
+      "tool_calls": 66,
+      "tools_by_name": {
+        "edit": 2,
+        "grep": 12,
+        "read": 13,
+        "shell": 39
+      },
+      "wall_s": 395.833
+    },
+    {
+      "arm": "graph_intent",
+      "captured_calls": 4,
+      "check_returncode": 0,
+      "check_s": 0.516,
+      "cleanup_warnings": [],
+      "cost_usd": 0.0,
+      "daemon_error": null,
+      "daemon_ok": true,
+      "daemon_ready_s": 2.099,
+      "daemon_stats": {
+        "after_expired": 0,
+        "by_intent": {
+          "after_refresh": 19,
+          "edit": 1,
+          "read_file": 2,
+          "shell_passthrough": 19,
+          "shell_refused": 1
+        },
+        "by_op": {
+          "after": 19,
+          "hello": 1,
+          "tool": 23
+        },
+        "by_tool": {
+          "edit": 1,
+          "read": 2,
+          "shell": 39
+        },
+        "errors": 0,
+        "expired": 0,
+        "fallbacks": 0,
+        "handled": {
+          "false": 19,
+          "true": 4
+        },
+        "hello_sessions": [
+          "ses_e2091248fffe6E3n1mdmx6ocNp"
+        ],
+        "hellos": 1,
+        "journal": "/tmp/ozagia_pilot/v2/logs/seed-dependency-closure-graph_intent-r3/daemon_journal.jsonl",
+        "late": 0,
+        "max_ms": 864.9,
+        "mean_ms": 69.5,
+        "passthrough": 19,
+        "pid": 3266980,
+        "plugin_fallbacks": 0,
+        "root": "/tmp/ozagia_pilot/v2/work/seed-dependency-closure-graph_intent-r3",
+        "tool_errors": 1,
+        "unknown_outcomes": 0,
+        "uptime_s": 73.6
+      },
+      "daemon_stop_error": null,
+      "diff_vs_base": [],
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "fallbacks": 0,
+      "files_changed": [
+        "domains/seed_registry.py"
+      ],
+      "localized": true,
+      "log_dir": "/tmp/ozagia_pilot/v2/logs/seed-dependency-closure-graph_intent-r3",
+      "mcp_calls": 0,
+      "passthrough_calls": 19,
+      "plugin_loaded": true,
+      "prep_error": null,
+      "prep_ok": true,
+      "prep_s": 73.066,
+      "repeat": 3,
+      "success": true,
+      "task": "seed-dependency-closure",
+      "timed_out": false,
+      "tokens_in": 55494,
+      "tokens_out": 3398,
+      "tool_calls": 23,
+      "tools_by_name": {
+        "edit": 1,
+        "read": 2,
+        "shell": 20
+      },
+      "wall_s": 73.454
+    }
+  ],
+  "stopped": null,
+  "summary": [
+    {
+      "arm": "baseline",
+      "driver_errors": 0,
+      "localization_rate": 0.9583,
+      "mean_cost_usd": 0.0,
+      "mean_mcp_calls": 0.0,
+      "mean_prep_s": 0.0,
+      "mean_tokens_in": 87033.7,
+      "mean_tokens_out": 3351.0,
+      "mean_tool_calls": 25.3,
+      "mean_wall_s": 183.007,
+      "prep_failures": 0,
+      "runs": 24,
+      "success_rate": 0.9583,
+      "successes": 23,
+      "tokens_known_runs": 24
+    },
+    {
+      "arm": "dev_memory",
+      "driver_errors": 0,
+      "localization_rate": 1.0,
+      "mean_cost_usd": 0.0,
+      "mean_mcp_calls": 0.0,
+      "mean_prep_s": 76.0,
+      "mean_tokens_in": 67789.0,
+      "mean_tokens_out": 3146.3,
+      "mean_tool_calls": 21.8,
+      "mean_wall_s": 141.418,
+      "prep_failures": 0,
+      "runs": 24,
+      "success_rate": 1.0,
+      "successes": 24,
+      "tokens_known_runs": 24
+    },
+    {
+      "arm": "graph_intent",
+      "daemon_failures": 0,
+      "driver_errors": 0,
+      "localization_rate": 1.0,
+      "mean_captured_calls": 11.8,
+      "mean_cost_usd": 0.0,
+      "mean_mcp_calls": 0.0,
+      "mean_passthrough_calls": 15.8,
+      "mean_prep_s": 71.2,
+      "mean_tokens_in": 81793.4,
+      "mean_tokens_out": 3854.7,
+      "mean_tool_calls": 27.2,
+      "mean_wall_s": 236.05,
+      "plugin_load_failures": 0,
+      "prep_failures": 0,
+      "runs": 24,
+      "success_rate": 1.0,
+      "successes": 24,
+      "tokens_known_runs": 24,
+      "total_fallbacks": 0
+    }
+  ],
+  "tasks": [
+    "admissible-moves-weight",
+    "bound-audit-quantifier-scope",
+    "checkpoint-instance-index",
+    "learner-board-pairs",
+    "life-step-cache",
+    "r2-cycle-arms",
+    "remote-causal-posit-noop",
+    "seed-dependency-closure"
+  ],
+  "total_cost_usd": 0.0,
+  "version": 1
+}

@@ -29,7 +29,8 @@
 //   once that has passed. `hello` is sent once per process, on its own
 //   connection, before the first request.
 // - Timeouts: 30 s per request; a shell request gets the command's own
-//   timeout (input.timeout, ms; 300 s when unset) plus 30 s.
+//   timeout (input.timeout, ms; 120 s when unset, the built-in's default)
+//   plus 30 s.
 // - setup never throws.
 // Plain ES module, node: built-ins only.
 
@@ -38,7 +39,7 @@ import net from "node:net";
 export const PLUGIN_ID = "ozagia";
 export const PLUGIN_VERSION = "0.1.0";
 export const REQUEST_TIMEOUT_MS = 30000;
-const SHELL_DEFAULT_TIMEOUT_MS = 300000; // with the 30 s margin: 330000
+const SHELL_DEFAULT_TIMEOUT_MS = 120000; // with the 30 s margin: 150000
 const HARNESS = "opencode";
 const CONTEXT_NOTE = "Lines starting with [ozagia] are graph context, not part of the tool's own output.";
 const NOTES = {

@@ -159,7 +159,9 @@ pytest output is pytest's own output tail, then:
 [ozagia]   frame test:tests/test_mod.py::test_broken tests/test_mod.py:9
 ```
 
-A captured pytest runs with the timeout `input.timeout` (ms), else 300 s.
+A captured pytest runs with the timeout `input.timeout` (ms), else 120 s
+(OpenCode's built-in shell default, so capture never lets a command run
+longer than the built-in would).
 The native loop sets the reserved fields `_deadline_s_remaining` (the
 timeout is clamped to it, at least 0.1 s) and `_test_env` (the environment
 replaces the inherited one); it also passes the plain shell's default

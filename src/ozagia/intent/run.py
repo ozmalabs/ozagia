@@ -27,7 +27,10 @@ from ozagia.intent.common import (
 )
 from ozagia.intent.shell import classify
 
-DEFAULT_TIMEOUT_S = 300
+# The timeout when the model gives none: OpenCode's built-in shell default
+# (2 min) and the native loop's `harness.tools.DEFAULT_SHELL_TIMEOUT_MS`, so
+# a captured pytest is cut off when the built-in would have been.
+DEFAULT_TIMEOUT_S = 120
 # The shortest timeout a deadline clamps a captured pytest to (the native
 # loop's plain shell uses the same floor).
 MIN_TIMEOUT_S = 0.1
