@@ -5,8 +5,9 @@ agents: index a repository into typed nodes (files, symbols, tests, docs,
 imports, call edges), keep it current while the agent edits, and put it in the
 agent's path. MIT licensed.
 
-Status: alpha. The library and the MCP server work today; the tool-capture
-plugin and the agent harness are planned (see `docs/plans/`).
+Status: alpha. The library, the MCP server, the OpenCode capture plugin and
+the agent harnesses work; the Claude Code hooks are untested against a live
+Claude Code. Measurements are in `docs/results/`; plans in `docs/plans/`.
 
 ## What it does
 
@@ -28,9 +29,9 @@ plugin and the agent harness are planned (see `docs/plans/`).
 |---|---|---|
 | Library | `from ozagia.core.memory import DevMemory, build_index` | works |
 | MCP server | `ozagia mcp`: any MCP client (OpenCode, Claude Code, Cursor, ...) gets the graph tools next to its own | works |
-| OpenCode plugin | captures `read`/`grep`/`glob`/`edit`/`write`/`shell` and carries out their intent on the graph daemon; `ozagia install opencode` | implemented (OpenCode 2.3) |
-| Claude Code hooks | partial capture: rewrite or block calls, add graph context; `ozagia install claude` | implemented |
-| Harness | `ozagia agent`: an OpenCode session with the daemon and plugin set up and torn down for you ([docs/harness.md](docs/harness.md)) | implemented, not yet run against a live model; native loop planned |
+| OpenCode plugin | captures `read`/`grep`/`glob`/`edit`/`write`/`shell` and carries out their intent on the graph daemon; `ozagia install opencode` | works (OpenCode 2.3, live smoke runs) |
+| Claude Code hooks | partial capture: graph context after each tool, git ref refusal; `ozagia install claude` | implemented, untested live |
+| Harness | `ozagia agent`: an OpenCode session with the daemon and plugin set up and torn down for you ([docs/harness.md](docs/harness.md)); `python -m ozagia.harness.native`: a small agent loop over any OpenAI-compatible API, with or without the graph ([docs/native_loop.md](docs/native_loop.md)) | implemented; the eval's live runs use the same pieces |
 
 ## Quick start
 
