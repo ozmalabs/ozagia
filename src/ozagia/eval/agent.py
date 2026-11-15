@@ -1040,11 +1040,19 @@ _PREP_CODE = (
 )
 
 
-def _tool_env(workdir: Path, config: Path | None) -> dict[str, str]:
-    """Environment for ozagia subprocesses acting on `workdir` (prep, daemon)."""
+def _tool_env(workdir: Path, config: Path | None, *,
+              tool_python: str | None = None) -> dict[str, str]:
+    """Environment for ozagia subprocesses acting on `workdir` (prep, daemon).
+
+    The caller's PYTHONPATH is dropped (a target's path must not break the
+    tool). When `tool_python` is this interpreter, PYTHONPATH is the
+    directory this ozagia package was imported from, so the subprocess runs
+    the same ozagia code as the eval (as `harness.session.tool_env` does)."""
     env = dict(os.environ, OZAGIA_ROOT=str(workdir), PYTHONDONTWRITEBYTECODE="1",
                COLUMNS="250")
     env.pop("PYTHONPATH", None)
+    if tool_python and os.path.abspath(tool_python) == os.path.abspath(sys.executable):
+        env["PYTHONPATH"] = str(_ozagia_src())
     if config is not None:
         env["OZAGIA_CONFIG"] = str(config)
     else:
@@ -1064,7 +1072,7 @@ def prepare_dev_memory(workdir: Path, tool_python: str,
     still decides, so a broken index shows up as a result, not a silent skip.
     """
     log_dir.mkdir(parents=True, exist_ok=True)
-    env = _tool_env(workdir, config)
+    env = _tool_env(workdir, config, tool_python=tool_python)
     res = spawn_group([tool_python, "-c", _PREP_CODE, str(workdir),
                        str(log_dir / "dev_graph.json")],
                       cwd=workdir, env=env, timeout_s=PREP_TIMEOUT_S)
@@ -1204,7 +1212,8 @@ def start_daemon(workdir: Path, tool_python: str, log_dir: Path, *,
     log_dir.mkdir(parents=True, exist_ok=True)
     sock = _daemon_sock_path()
     argv = daemon_command(tool_python, workdir, log_dir, sock)
-    env = dict(_tool_env(workdir, config), PWD=str(Path(workdir).resolve()))
+    env = dict(_tool_env(workdir, config, tool_python=tool_python),
+               PWD=str(Path(workdir).resolve()))
     if run_python:
         # `python` in the agent's commands is the run's interpreter.
         env["PATH"] = os.pathsep.join(

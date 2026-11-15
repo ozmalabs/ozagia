@@ -1220,3 +1220,14 @@ def test_native_driver_records_a_loop_error(fixture, native_env, monkeypatch):
                          run_root=fixture["run_root"], timeout_s=60, keep=False)
     assert rec["success"] is False and rec["exit_code"] == 1
     assert "HTTP 400" in rec["driver_error"] and rec["stopped"] == "error"
+
+
+def test_tool_env_runs_the_same_ozagia_code(tmp_path, monkeypatch):
+    """The daemon and prep subprocesses import the ozagia the eval runs
+    (the v4 pilot ran an old daemon next to a new plugin without this)."""
+    import sys
+    monkeypatch.setenv("PYTHONPATH", "/somewhere/else")
+    env = ae._tool_env(tmp_path, None, tool_python=sys.executable)
+    assert env["PYTHONPATH"] == str(ae._ozagia_src())
+    env = ae._tool_env(tmp_path, None, tool_python="/other/python")
+    assert "PYTHONPATH" not in env
