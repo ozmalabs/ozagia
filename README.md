@@ -27,22 +27,34 @@ plugin and the agent harness are planned (see `docs/plans/`).
 | depth | how | status |
 |---|---|---|
 | Library | `from ozagia.core.memory import DevMemory, build_index` | works |
-| MCP server | any MCP client (OpenCode, Claude Code, Cursor, ...) gets the graph tools next to its own | works |
-| OpenCode plugin | captures `read`/`grep`/`edit`/`shell` and carries out their intent on the graph | planned (verified feasible on OpenCode 2.3) |
-| Claude Code hooks | partial capture: rewrite or block calls, add graph context | planned |
-| Harness | `ozagia agent`: a full agent session on a repository | planned |
+| MCP server | `ozagia mcp`: any MCP client (OpenCode, Claude Code, Cursor, ...) gets the graph tools next to its own | works |
+| OpenCode plugin | captures `read`/`grep`/`glob`/`edit`/`write`/`shell` and carries out their intent on the graph daemon; `ozagia install opencode` | implemented (OpenCode 2.3) |
+| Claude Code hooks | partial capture: rewrite or block calls, add graph context; `ozagia install claude` | implemented |
+| Harness | `ozagia agent`: an OpenCode session with the daemon and plugin set up and torn down for you ([docs/harness.md](docs/harness.md)) | implemented, not yet run against a live model; native loop planned |
 
 ## Quick start
 
 ```bash
 uv pip install -e '.[all]'          # or: pip install -e '.[all]'
 cd /path/to/your/repo
-ozagia-memory build                 # writes .ozagia/graph.json
+ozagia index                        # builds or refreshes .ozagia/graph.json
 ozagia-memory search "retry backoff"
 ozagia-memory context "make the retry loop give up after five attempts"
 ```
 
 Add `.ozagia/` to the repository's `.gitignore`.
+
+OpenCode with the graph in its path (needs `opencode` on PATH):
+
+```bash
+ozagia agent --prompt "make tests/test_retry.py pass" -m vllm/qwen3.8-27b
+ozagia agent --clone --prompt-file task.txt   # in a throwaway clone of HEAD
+ozagia agent                                  # the interactive TUI
+```
+
+Each session builds or refreshes the snapshot, starts the graph daemon,
+installs the plugin, runs OpenCode, and removes the plugin and stops the
+daemon afterwards, also on Ctrl-C. See [docs/harness.md](docs/harness.md).
 
 MCP (OpenCode `opencode.json`):
 
