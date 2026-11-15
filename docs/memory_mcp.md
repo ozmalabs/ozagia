@@ -234,6 +234,7 @@ Content-Length fallback for LSP-style clients).
 | `dev_hover` / `dev_document_symbols` | Type/docs and symbol hierarchy. |
 | `dev_ast` | Python AST paths + spans for generic node edits. |
 | `dev_edit` | Apply a semantic edit script (preview by default; `diagnostics=true` waits for LSP diagnostics after an applied write). |
+| `dev_span_edit` | Replace an exact text span (unique unless `replace_all`); returns the enclosing node keys, refuses an edit that breaks the parse, lists the graph delta and broken references (preview by default). |
 | `dev_seed` | Before editing a seed: version, deps, rules/concepts, tests, docs. Listed only when the snapshot has `Seed` nodes (from an adapter). |
 | `dev_rule` | Before editing a rule: its seed, file, and current body. Listed only when the snapshot has `Rule` nodes. |
 | `dev_tests` | Before/after a change: the scoped gate. |
@@ -251,7 +252,7 @@ Content-Length fallback for LSP-style clients).
 | `dev_session_list` | List persisted sessions. |
 | `dev_recent` | Read the shared journal. |
 
-All tools are read-only except `dev_edit` (structured transaction, preview by
+All tools are read-only except `dev_edit` and `dev_span_edit` (transactions, preview by
 default, backup on apply) and `dev_record` (one JSONL line). There is no shell
 execution, no raw patch application, and no network access in the server. Running tests/builds stays with the coding agent (it already has
 a shell and a permission model).

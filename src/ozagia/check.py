@@ -101,9 +101,21 @@ def _parse_spans(path: Path) -> list[tuple[int, int, str, bool]]:
     including defs nested in non-definition statements (`if`, `try`, ...).
     """
     try:
-        tree = ast.parse(path.read_bytes())
-    except (SyntaxError, ValueError, OSError):
+        return _source_spans(path.read_bytes())
+    except OSError:
         return []
+
+
+def _source_spans(source: str | bytes) -> list[tuple[int, int, str, bool]]:
+    """`_parse_spans` for a source text; [] when it does not parse."""
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return []
+    return _tree_spans(tree)
+
+
+def _tree_spans(tree: ast.Module) -> list[tuple[int, int, str, bool]]:
     out: list[tuple[int, int, str, bool]] = []
     # (node, qualname prefix, inside a Test* class chain)
     stack: list[tuple[ast.AST, str, bool]] = [
@@ -142,18 +154,38 @@ def _spans_for(path: Path) -> list[tuple[int, int, str, bool]]:
     return spans
 
 
-def symbol_at(root: str | Path, rel: str, line: int) -> str:
-    """The key of the innermost def/class of `rel` that contains `line`.
+def _text_spans(source: str, tree: ast.Module | None = None
+                ) -> list[tuple[int, int, str, bool]]:
+    cache_key = ("\0source", len(source), hash(source))
+    spans = _SPAN_CACHE.get(cache_key)
+    if spans is None:
+        if len(_SPAN_CACHE) >= _SPAN_CACHE_MAX:
+            _SPAN_CACHE.clear()
+        spans = _tree_spans(tree) if tree is not None else _source_spans(source)
+        _SPAN_CACHE[cache_key] = spans
+    return spans
 
-    `file:<rel>` for a module-level line or a non-Python file.
+
+def symbol_at(root: str | Path, rel: str, line: int, *,
+              end_line: int | None = None, source: str | None = None,
+              tree: ast.Module | None = None) -> str:
+    """The key of the innermost def/class of `rel` that contains `line`
+    (and `end_line`, when given: the lines `line..end_line`).
+
+    `file:<rel>` for a module-level line or a non-Python file. `source` is the
+    file's text to use instead of the file on disk (an edit not yet written);
+    `tree` is its parsed module, when the caller has it already.
     """
     path = Path(root) / rel
     if path.suffix.lower() != ".py":
         return file_key(rel)
+    last = line if end_line is None else max(line, int(end_line))
+    spans = (_text_spans(source, tree) if source is not None
+             else _spans_for(path))
     best: tuple[int, int, str, bool] | None = None
-    for span in _spans_for(path):
+    for span in spans:
         start, end, _, _ = span
-        if start <= line <= end and (
+        if start <= line and last <= end and (
                 best is None or (start, -end) > (best[0], -best[1])):
             best = span
     if best is None:
