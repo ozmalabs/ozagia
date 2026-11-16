@@ -1274,6 +1274,19 @@ as `e139994`, `file-ledger` as `01807a9`, and `settings-registry` as `11b33ef`.
 The supervisor reviewed each branch, ran targeted tests and ruff, merged one
 branch at a time, then ran the full suite from the main checkout.
 
+### Parallel wave 2 (2026-11-16)
+
+Four more agents start from `ab17a1a`:
+
+| Worktree | Branch | Scope |
+| --- | --- | --- |
+| `~/ozmadev/ozagia-wt/code-review` | `feat/code-review` | Deterministic code-review packet: diff, graph impact, tests, findings |
+| `~/ozmadev/ozagia-wt/resource-enforcement` | `feat/resource-enforcement` | Job resource limits, watchdog/own OOM and session feedback |
+| `~/ozmadev/ozagia-wt/bounded-tasks` | `feat/bounded-tasks` | Bounded task specification, runner, gates, budgets and evidence |
+| `~/ozmadev/ozagia-wt/ocelot-installer` | `feat/ocelot-installer` | Pinned, checksummed, explicit Ocelot install and resolution |
+
+The same review/merge/full-suite gate applies.
+
 ## Open decisions
 
 1. **Config directory (resolved).** `ozagia/` is versioned project config;
