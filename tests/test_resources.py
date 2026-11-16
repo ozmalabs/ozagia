@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from ozagia.core import cgroup as C
 from ozagia.core import resources as R
 from ozagia import resources_cli
 
@@ -134,8 +135,41 @@ def test_resources_cli_status_json(tmp_path: Path, capsys) -> None:
     assert payload["host"]["memory"]["total_mb"]
     expected = sys.platform != "win32"
     assert payload["enforcement"]["available"] is expected
-    assert payload["enforcement"]["mechanism"] in {"rlimit+watch", "watch"}
-    assert payload["enforcement"]["cgroups"] is False
+    assert payload["enforcement"]["mechanism"] in {
+        "cgroup+rlimit", "rlimit+watch", "watch", "off"}
+    cgroups = payload["enforcement"]["cgroups"]
+    assert isinstance(cgroups, dict)
+    assert cgroups["version"] in {"v2", "none"}
+    assert isinstance(cgroups["available"], bool)
+    assert set(cgroups["features"]) >= {"cgroup.controllers", "memory.max",
+                                        "pids.max"}
+
+
+def test_status_reports_the_selected_cgroup_mechanism(tmp_path: Path,
+                                                      monkeypatch) -> None:
+    capability = {
+        "schema": C.SCHEMA, "platform": "linux", "base": "/fake",
+        "version": "v2", "available": True, "delegated": True,
+        "controllers": ["memory", "pids"], "subtree_control": [],
+        "features": {name: True for name in C.FEATURES}, "reason": None,
+    }
+    monkeypatch.setattr(C, "detect", lambda *args, **kwargs: dict(capability))
+    monkeypatch.setattr(R, "host_snapshot", lambda: _host(available=900.0))
+    monkeypatch.setattr(R, "disk_usage", lambda path: _disk(free=50.0))
+    report = R.status(tmp_path, top=0)
+    enforcement = report["enforcement"]
+    assert enforcement["mechanism"] == "cgroup+rlimit"
+    assert enforcement["mechanisms"] == ["cgroup+rlimit", "rlimit+watch"]
+    assert enforcement["cgroups"]["available"] is True
+    text = R.format_status(report)
+    assert "per-job cgroup v2" in text
+
+    policy = _policy(watchdog="rlimit")
+    monkeypatch.setattr(R, "load_policy", lambda root: policy)
+    assert R.status(tmp_path, top=0)["enforcement"]["mechanism"] == (
+        "rlimit+watch")
+    policy = _policy(enabled=False)
+    assert R.status(tmp_path, top=0)["enforcement"]["mechanism"] == "off"
 
 
 # --------------------------------------------------------------------------- #

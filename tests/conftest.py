@@ -10,6 +10,12 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
+
+@pytest.fixture(autouse=True)
+def _no_host_cgroups(monkeypatch):
+    """Tests never create or write the host's real cgroup hierarchy."""
+    monkeypatch.setenv("OZAGIA_CGROUPS", "0")
+
 # Module names before the extraction from Ocelot, mapped to their ozagia
 # modules. Historical sources still import the old names.
 _OLD_MODULES = {

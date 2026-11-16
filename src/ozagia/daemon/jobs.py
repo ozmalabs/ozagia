@@ -48,19 +48,25 @@ process in it started no earlier than the job's leader (`/proc/<pid>/stat`
 field 22) and the pgid's own pid, if alive, is the leader that started then
 (`_group_ours`).
 
-Resource limits (`core.resources`): `start` takes limits from
+Resource limits (`core.resources`, `core.cgroup`): `start` takes limits from
 `[resources.limits]` (or explicit `limits=`/`policy=` arguments), runs the
 memory/disk admission check before spawning, applies child rlimits
 (`RLIMIT_AS`, optional `RLIMIT_FSIZE`) and starts a watchdog after the
-spawn. The watchdog samples the verified process group and the cwd
-filesystem; on a breach it SIGTERMs the group, waits
-`RESOURCE_KILL_GRACE_S`, then SIGKILLs it. The group is verified again
-before any signal, and an unverified/stale group is never signalled. The
-job record carries `limits`, `enforcement` (`rlimit+watch` or `off`),
-`admission`, `peak_memory_mb` and `resource_events`; the log gets
-`[ozagia] resource:` lines. `[resources] enabled = false` or
-`watchdog = "off"` opts out (the latter keeps admission). cgroups are out of
-scope for this layer.
+spawn. On Linux with a delegated cgroup v2 hierarchy, a per-job
+`ozagia/job-<id>` cgroup also gets `memory.max`/`pids.max`, the child joins it
+before exec, and `memory.peak`/`memory.events` are read back; the record then
+says `cgroup+rlimit`. Without delegation, a permission failure or a host
+without cgroup v2, the job records `rlimit+watch` and a `cgroup` report that
+names the fallback reason. The watchdog samples the verified process group and
+the cwd filesystem; on a breach it SIGTERMs the group, waits
+`RESOURCE_KILL_GRACE_S`, then uses `cgroup.kill` (or SIGKILL) if members
+remain. The group is verified again before any signal, and an unverified/stale
+group is never signalled. The job record carries `limits`, `enforcement`
+(`cgroup+rlimit`, `rlimit+watch` or `off`), `cgroup`, `admission`,
+`peak_memory_mb` and `resource_events`; the log gets `[ozagia] resource:`
+lines. `[resources] enabled = false` or `watchdog = "off"` opts out (the
+latter keeps admission); `watchdog = "rlimit"`/`"watch"` or
+`OZAGIA_CGROUPS=0` opts out of cgroups only.
 
 Logs are not truncated while a job runs. Every read is capped instead: a
 read returns at most `TAIL_LINES` lines and `TAIL_BYTES` bytes, the newest
@@ -116,6 +122,7 @@ import time
 from pathlib import Path
 from typing import Any, Mapping
 
+from ozagia.core import cgroup as C
 from ozagia.core import resources as R
 
 MAX_JOBS = 50
@@ -135,6 +142,7 @@ MATCH_LINE_BYTES = 4096
 # How often a job whose leader exited is checked for an empty group.
 GROUP_POLL_S = 0.2
 ENV_JOBS = "OZAGIA_JOBS"
+ENV_CGROUPS = "OZAGIA_CGROUPS"
 MAX_ENV = 64
 MAX_COMMAND_CHARS = 16000
 MAX_READERS = 1000
@@ -277,6 +285,17 @@ def jobs_enabled(root: str | Path) -> bool:
         return False
 
 
+def cgroups_enabled() -> bool:
+    """Whether cgroup v2 may be attempted for new jobs.
+
+    `OZAGIA_CGROUPS=0` is an emergency opt-out for hosts where a delegated
+    hierarchy is present but not usable. The policy's `watchdog` mode is the
+    normal control; this variable only turns attempts off.
+    """
+    env = os.environ.get(ENV_CGROUPS, "").strip().lower()
+    return env not in ("0", "false", "no", "off")
+
+
 def disabled_message(root: str | Path) -> str:
     return (
         "background jobs are off for this project. A job runs with the ozagia "
@@ -373,7 +392,9 @@ class JobTable:
     def __init__(self, root: str | Path, jobs_dir: str | Path | None = None, *,
                  base_env: dict[str, str] | None = None,
                  enabled: bool | None = None,
-                 resource_policy: Mapping[str, Any] | None = None) -> None:
+                 resource_policy: Mapping[str, Any] | None = None,
+                 cgroup_base: str | Path | None = None,
+                 cgroup_manager: Any | None = None) -> None:
         from ozagia.config import state_path
         self.root = Path(root).resolve()
         self.dir = Path(jobs_dir) if jobs_dir else state_path(self.root, JOBS_DIR)
@@ -383,12 +404,18 @@ class JobTable:
         # A loaded `[resources]` policy, or None to load it per start.
         self.resource_policy = (dict(resource_policy)
                                 if resource_policy is not None else None)
+        # A fake base or manager is for tests: the default is the host's
+        # `/sys/fs/cgroup`, and every write is best-effort.
+        self.cgroup_base = cgroup_base
+        self._cgroup_manager = cgroup_manager
+        self._default_cgroup_manager: C.CgroupManager | None = None
         self.cond = threading.Condition()
         self.jobs: dict[str, dict[str, Any]] = {}     # id -> record, oldest first
         # Owned jobs whose leader is not reaped yet (its pgid is reserved).
         self._procs: dict[str, subprocess.Popen] = {}
         self._reapers: dict[str, threading.Thread] = {}
         self._watchdogs: dict[str, R.ResourceWatchdog] = {}
+        self._cgroups: dict[str, Any] = {}
         self.cursors: dict[tuple[str, str], int] = {}
         self.events: list[dict[str, Any]] = []       # job ends, for job_events
         self.event_seq = 0                           # the last event's `seq`
@@ -402,7 +429,9 @@ class JobTable:
                        "sleep_hints": 0, "background_hints": 0, "job_events": 0,
                        "jobs_refused": 0, "stopped_on_load": 0,
                        "jobs_resource_killed": 0, "resource_events": 0,
-                       "resource_peak_mb": 0.0, "resource_refusals": 0}
+                       "resource_peak_mb": 0.0, "resource_refusals": 0,
+                       "cgroup_jobs": 0, "cgroup_fallbacks": 0,
+                       "cgroup_oom_kills": 0}
         self._load()
 
     def is_enabled(self) -> bool:
@@ -441,6 +470,10 @@ class JobTable:
         if orphans:
             self._stop_orphans(orphans)
             self._save()
+        # A previous daemon may have left an empty per-job cgroup behind.
+        for rec in self.jobs.values():
+            if rec.get("status") not in ("running", "detached"):
+                self._cleanup_record_cgroup(rec)
 
     def _stop_orphans(self, recs: list[dict[str, Any]]) -> None:
         """Stop jobs an earlier daemon started without `detach` and left
@@ -496,6 +529,13 @@ class JobTable:
             if jid in self._procs or self._live(rec):
                 continue
             over -= 1
+            handle = self._cgroups.pop(jid, None)
+            if handle is not None:
+                try:
+                    handle.cleanup()
+                except Exception:  # noqa: BLE001 - eviction is best-effort
+                    pass
+            self._cleanup_record_cgroup(rec)
             del self.jobs[jid]
             self._reapers.pop(jid, None)
             self._watchdogs.pop(jid, None)
@@ -569,6 +609,7 @@ class JobTable:
             "exit_code", "signal", "started", "ended", "detach", "session",
             "harness", "log", "enforcement", "admission")}
         out["limits"] = rec.get("limits")
+        out["cgroup"] = rec.get("cgroup")
         out["peak_memory_mb"] = rec.get("peak_memory_mb")
         out["resource_events"] = list(rec.get("resource_events") or [])
         out["elapsed_s"] = _elapsed(rec)
@@ -639,14 +680,173 @@ class JobTable:
         return max(0.0, reserve)
 
     @staticmethod
-    def _child_preexec(limits: R.ResourceLimits):
+    def _child_preexec(limits: R.ResourceLimits, cgroup: Any | None = None):
         if os.name != "posix":
             return None
         # RLIMIT_NPROC is per UID: applying the job's pids limit there would
-        # also count unrelated processes of the same user. The watchdog
-        # enforces the job's process-group count instead.
-        return functools.partial(R.apply_child_limits, limits,
-                                 apply_nproc=False)
+        # also count unrelated processes of the same user. The cgroup (or the
+        # watchdog, without one) enforces the job's process count instead.
+        if cgroup is None:
+            return functools.partial(R.apply_child_limits, limits,
+                                     apply_nproc=False)
+        path = cgroup.path
+
+        def prepare() -> None:
+            R.apply_child_limits(limits, apply_nproc=False)
+            C.join_self(path)
+
+        return prepare
+
+    def _manager(self) -> Any:
+        """The injected manager, or one detector per job table."""
+        if self._cgroup_manager is not None:
+            return self._cgroup_manager
+        if self._default_cgroup_manager is None:
+            self._default_cgroup_manager = C.CgroupManager(self.cgroup_base)
+        return self._default_cgroup_manager
+
+    @staticmethod
+    def _cgroup_record(mechanism: str, report: Mapping[str, Any] | None,
+                       used: bool) -> dict[str, Any]:
+        data = dict(report) if isinstance(report, Mapping) else {}
+        status = "active" if used else (
+            "fallback" if data else "off")
+        return {
+            "mechanism": mechanism,
+            "attempted": bool(data),
+            "used": bool(used),
+            "status": status,
+            "path": data.get("path"),
+            "limits": data.get("limits") or {},
+            "peak_memory_mb": None,
+            "oom_events": None,
+            "oom_kill": None,
+            "fallback": bool(data.get("fallback")),
+            "reason": data.get("reason"),
+            "errors": list(data.get("errors") or []),
+            "cleaned_up": None,
+        }
+
+    def _merge_cgroup_stats(self, jid: str, stats: Mapping[str, Any]) -> None:
+        """Record a cgroup sample/peak on the job (call with or without lock)."""
+        with self.cond:
+            rec = self.jobs.get(jid)
+            if rec is None:
+                return
+            info = rec.setdefault("cgroup", {})
+            peak = stats.get("memory_peak_mb")
+            if isinstance(peak, (int, float)):
+                old = info.get("peak_memory_mb")
+                info["peak_memory_mb"] = round(
+                    max(float(old or 0.0), float(peak)), 2)
+                rec_peak = rec.get("peak_memory_mb")
+                value = round(max(float(rec_peak or 0.0), float(peak)), 2)
+                rec["peak_memory_mb"] = value
+                self.counts["resource_peak_mb"] = max(
+                    float(self.counts.get("resource_peak_mb") or 0.0), value)
+            for key in ("memory_current_mb", "memory_max_mb", "pids_current",
+                        "pids_max", "oom_events", "oom_kill", "populated",
+                        "peak_source"):
+                if key in stats:
+                    info[key] = stats[key]
+
+    def _sample_cgroup(self, jid: str) -> None:
+        with self.cond:
+            handle = self._cgroups.get(jid)
+        if handle is None:
+            return
+        try:
+            stats = handle.stats()
+        except Exception:  # noqa: BLE001 - observation is best-effort
+            return
+        if isinstance(stats, Mapping):
+            self._merge_cgroup_stats(jid, stats)
+
+    def _cleanup_record_cgroup(self, rec: dict[str, Any]) -> None:
+        """Best-effort removal of a recorded cgroup, never inside another job."""
+        info = rec.get("cgroup")
+        if not isinstance(info, dict) or not info.get("path"):
+            return
+        if info.get("cleaned_up"):
+            return
+        try:
+            result = C.remove_path(info["path"], base=self.cgroup_base)
+        except Exception:  # noqa: BLE001 - cleanup must not fail a job
+            return
+        if not isinstance(result, Mapping):
+            return
+        if result.get("removed") or result.get("reason") == "absent":
+            info["cleaned_up"] = True
+        elif result.get("reason"):
+            info["cleanup_reason"] = result["reason"]
+
+    def _finish_cgroup(self, jid: str, rec: dict[str, Any] | None) -> None:
+        """Read the final cgroup counters and remove the group (with `cond`)."""
+        handle = self._cgroups.pop(jid, None)
+        if handle is None:
+            if rec is not None:
+                self._cleanup_record_cgroup(rec)
+            return
+        if rec is None:
+            try:
+                handle.cleanup()
+            except Exception:  # noqa: BLE001
+                pass
+            return
+        info = rec.setdefault("cgroup", self._cgroup_record(
+            rec.get("enforcement") or C.MECHANISM, None, used=True))
+        try:
+            stats = handle.stats()
+        except Exception as exc:  # noqa: BLE001
+            stats = {"error": f"{type(exc).__name__}: {exc}"}
+        if isinstance(stats, Mapping):
+            self._merge_cgroup_stats(jid, stats)
+            info = rec.get("cgroup") or info
+        oom_kill = info.get("oom_kill")
+        oom_events = info.get("oom_events")
+        if (isinstance(oom_kill, int) and oom_kill > 0) or (
+                isinstance(oom_events, int) and oom_events > 0):
+            event = {
+                "ts": _now(), "kind": "oom", "job": jid,
+                "mechanism": "cgroup", "path": info.get("path"),
+                "limit_mb": (info.get("limits") or {}).get("memory_mb"),
+                "observed_mb": info.get("peak_memory_mb"),
+                "oom_events": oom_events, "oom_kill": oom_kill,
+                "verified": True, "action": "cgroup_oom",
+            }
+            events = rec.setdefault("resource_events", [])
+            if not any(item.get("kind") == "oom" for item in events):
+                events.append(event)
+                del events[:-MAX_RESOURCE_EVENTS]
+                self.counts["resource_events"] += 1
+                self.counts["cgroup_oom_kills"] += 1
+                self._append_log_line(
+                    rec, f"{RESOURCE_LOG_PREFIX} job {jid}: "
+                         f"{R.describe_resource_event(event)}")
+        try:
+            cleanup = handle.cleanup()
+        except Exception as exc:  # noqa: BLE001
+            cleanup = {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+        if not isinstance(cleanup, Mapping):
+            cleanup = {"ok": False, "reason": "cleanup returned no report"}
+        info = rec.get("cgroup") or info
+        info["cleaned_up"] = bool(cleanup.get("ok"))
+        if not cleanup.get("ok") and cleanup.get("reason"):
+            info["cleanup_reason"] = cleanup["reason"]
+
+    def _force_kill(self, rec: dict[str, Any]) -> str:
+        """SIGKILL the job through its cgroup, or its verified process group."""
+        jid = str(rec.get("id") or "")
+        handle = self._cgroups.get(jid)
+        if handle is not None:
+            try:
+                report = handle.kill(term_first=False)
+            except Exception:  # noqa: BLE001 - signals are the fallback
+                report = {}
+            if isinstance(report, Mapping) and report.get("ok"):
+                return "cgroup.kill"
+        self._signal(rec, signal.SIGKILL)
+        return "sigkill"
 
     def _verified_group(self, rec: dict[str, Any] | None) -> bool:
         """Whether the record's group is still this job's (call with `cond`)."""
@@ -724,12 +924,16 @@ class JobTable:
                    and time.monotonic() - t0 < RESOURCE_KILL_GRACE_S):
                 self.cond.wait(0.05)
             if _group_members(pgid):
-                self._signal(rec, signal.SIGKILL)
-                action = "sigkill"
+                how = self._force_kill(rec)
+                action = how
+                if how == "cgroup.kill":
+                    detail = "sent cgroup.kill (SIGKILL semantics)"
+                else:
+                    detail = "sent SIGKILL"
                 self._append_log_line(
                     rec, f"{RESOURCE_LOG_PREFIX} job {jid} still running "
-                         f"{RESOURCE_KILL_GRACE_S:.0f} s after SIGTERM; sent "
-                         "SIGKILL")
+                         f"{RESOURCE_KILL_GRACE_S:.0f} s after SIGTERM; "
+                         f"{detail}")
             else:
                 action = "sigterm"
             recorded.update(action=action, job=jid)
@@ -820,7 +1024,8 @@ class JobTable:
         reserve_gb = (self._disk_reserve_gb(policy_data, admission, wd)
                       if enforcing else 0.0)
         mechanism = R.ENFORCEMENT_MECHANISM if enforcing else "off"
-        preexec = self._child_preexec(chosen) if enforcing else None
+        want_cgroup = (enforcing and mode in {"auto", "cgroup"}
+                       and cgroups_enabled())
         if self.base_env is not None:
             base = dict(self.base_env)
         else:
@@ -838,6 +1043,29 @@ class JobTable:
             self.next_id += 1
             self.dir.mkdir(parents=True, exist_ok=True)
             log = self.dir / f"{jid}.log"
+            cgroup_handle: Any | None = None
+            cgroup_report: dict[str, Any] | None = None
+            if want_cgroup:
+                try:
+                    cgroup_handle, cgroup_report = self._manager().start(
+                        jid, memory_mb=chosen.memory_mb, pids=chosen.pids)
+                except Exception as exc:  # noqa: BLE001 - fallback, not failure
+                    cgroup_handle = None
+                    cgroup_report = {
+                        "ok": False, "fallback": True,
+                        "reason": f"{type(exc).__name__}: {exc}",
+                        "limits": {"memory_mb": chosen.memory_mb,
+                                   "pids": chosen.pids},
+                        "errors": [],
+                    }
+                if cgroup_handle is None:
+                    mechanism = R.ENFORCEMENT_MECHANISM
+                    self.counts["cgroup_fallbacks"] += 1
+                else:
+                    mechanism = C.MECHANISM
+                    self.counts["cgroup_jobs"] += 1
+            preexec = (self._child_preexec(chosen, cgroup_handle)
+                       if enforcing else None)
             extra: dict[str, Any] = {}
             if preexec is not None:
                 extra["preexec_fn"] = preexec
@@ -848,7 +1076,45 @@ class JobTable:
                         stdout=fh, stderr=subprocess.STDOUT,
                         start_new_session=True, close_fds=True, **extra)
             except OSError as e:
+                if cgroup_handle is not None:
+                    try:
+                        cgroup_handle.cleanup()
+                    except Exception:  # noqa: BLE001 - cleanup is best-effort
+                        pass
                 raise JobError(f"cannot start {text!r}: {e}") from None
+            if cgroup_handle is not None:
+                try:
+                    attached = cgroup_handle.attach(proc.pid)
+                except Exception as exc:  # noqa: BLE001
+                    attached = {"ok": False,
+                                "error": f"{type(exc).__name__}: {exc}"}
+                if not isinstance(attached, Mapping) or not attached.get("ok"):
+                    # The child is not confirmed in the group; do not claim a
+                    # cgroup mechanism, and remove the empty group.
+                    try:
+                        cgroup_handle.cleanup()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    cgroup_handle = None
+                    mechanism = R.ENFORCEMENT_MECHANISM
+                    self.counts["cgroup_fallbacks"] += 1
+                    reason = (attached.get("error")
+                              if isinstance(attached, Mapping) else None)
+                    reason = reason or "attach was not confirmed"
+                    cgroup_report = {**(cgroup_report or {}), "fallback": True,
+                                     "reason": f"child could not join the "
+                                               f"cgroup: {reason}"}
+            cgroup_record: dict[str, Any] | None = None
+            if enforcing:
+                cgroup_record = self._cgroup_record(
+                    mechanism, cgroup_report, used=cgroup_handle is not None)
+                if not want_cgroup:
+                    cgroup_record["reason"] = (
+                        f"cgroup not attempted (watchdog={mode})")
+                elif (cgroup_handle is None
+                      and cgroup_record.get("reason") is None):
+                    cgroup_record["reason"] = (
+                        "cgroup v2 unavailable; rlimit+watch fallback")
             initial_peak: float | None = None
             if enforcing:
                 try:
@@ -868,11 +1134,14 @@ class JobTable:
                    "session": session if isinstance(session, str) else None,
                    "harness": harness if isinstance(harness, str) else None,
                    "limits": chosen.to_dict(), "enforcement": mechanism,
+                   "cgroup": cgroup_record,
                    "peak_memory_mb": initial_peak, "resource_events": [],
                    "admission": self._admission_summary(admission),
                    "owned": True}
             self.jobs[jid] = rec
             self._procs[jid] = proc
+            if cgroup_handle is not None:
+                self._cgroups[jid] = cgroup_handle
             self.counts["jobs_started"] += 1
             if initial_peak is not None:
                 self.counts["resource_peak_mb"] = max(
@@ -892,6 +1161,7 @@ class JobTable:
                 def on_sample(sample: Mapping[str, Any],
                               job_id: str = jid) -> None:
                     self._record_resource_sample(job_id, sample)
+                    self._sample_cgroup(job_id)
 
                 def killer(event: dict[str, Any],
                            job_id: str = jid) -> None:
@@ -929,6 +1199,7 @@ class JobTable:
             self._procs.pop(jid, None)
             rec = self.jobs.get(jid)
             if rec is not None:
+                self._finish_cgroup(jid, rec)
                 rec["ended"] = _now()
                 rec["group_gone"] = True
                 rec.pop("leader_exited", None)
@@ -950,6 +1221,8 @@ class JobTable:
                     "session": rec.get("session"), "harness": rec.get("harness")})
                 del self.events[:-200]
                 self._save()
+            else:
+                self._finish_cgroup(jid, None)
             self.last_end = time.monotonic()
             self.cond.notify_all()
 
@@ -1035,8 +1308,11 @@ class JobTable:
             rec["status"] = "gone"
             rec["ended"] = _now()
             rec["group_gone"] = True
+            self._cleanup_record_cgroup(rec)
             self._save()
             return True
+        if st != "running":
+            self._cleanup_record_cgroup(rec)
         return st != "running"
 
     def wait(self, job: Any = None, *, until: Any = None, deadline_s: Any = None,
@@ -1150,6 +1426,7 @@ class JobTable:
                         "exit_code": pub["exit_code"], "signal": pub["signal"],
                         "elapsed_s": pub["elapsed_s"], "command": pub["command"],
                         "limits": pub.get("limits"),
+                        "cgroup": pub.get("cgroup"),
                         "peak_memory_mb": pub.get("peak_memory_mb"),
                         "resource_events": pub.get("resource_events") or [],
                         "enforcement": pub.get("enforcement"),
@@ -1246,7 +1523,7 @@ class JobTable:
             while self._live(rec) and time.monotonic() - t0 < grace:
                 self.cond.wait(0.05)
             if self._live(rec) and name != "KILL":
-                self._signal(rec, signal.SIGKILL)
+                self._force_kill(rec)
             t1 = time.monotonic()
             while self._live(rec) and time.monotonic() - t1 < 2.0:
                 self.cond.wait(0.05)
@@ -1255,6 +1532,8 @@ class JobTable:
                     rec["status"] = "gone"
                 rec["ended"] = rec.get("ended") or _now()
                 self._save()
+            if not self._live(rec):
+                self._cleanup_record_cgroup(rec)
             return {"ok": True, **self.flat(rec)}
 
     def shutdown(self, grace_s: float = SHUTDOWN_GRACE_S) -> list[str]:
@@ -1275,13 +1554,16 @@ class JobTable:
                 self.cond.wait(0.05)
             for r in doomed:
                 if r.get("status") == "running":
-                    self._signal(r, signal.SIGKILL)
+                    self._force_kill(r)
                     notes.append(f"killed job {r['id']} (pid {r['pid']}): "
                                  f"{r['command'][:200]}")
             t1 = time.monotonic()
             while (any(r.get("status") == "running" for r in doomed)
                    and time.monotonic() - t1 < 2.0):
                 self.cond.wait(0.05)
+            for r in self.jobs.values():
+                if r.get("status") not in ("running", "detached"):
+                    self._cleanup_record_cgroup(r)
             for r in self.jobs.values():
                 if r.get("owned") and r.get("detach") and r.get("status") == "running":
                     notes.append(f"leaving detached job {r['id']} (pid {r['pid']}) "
@@ -1645,6 +1927,6 @@ def capture_ps(command: str, jobs: list[dict[str, Any]]) -> str | None:
 
 
 __all__ = ["JobError", "JobTable", "MAX_JOBS", "OPS", "ResourceRefused",
-           "WAIT_DEFAULT_S", "background_start", "capture_ps",
+           "WAIT_DEFAULT_S", "background_start", "capture_ps", "cgroups_enabled",
            "disabled_message", "jobs_enabled", "parse_until",
            "sleep_seconds"]
