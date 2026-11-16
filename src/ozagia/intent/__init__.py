@@ -17,7 +17,11 @@ returns `{"append": "<text or empty>", "meta": {...}}`. `meta` always has
 `intent` (a short name), `keys` (node keys involved) and `ms`. After a
 built-in edit, write or patch it also has the lint lines of the changed
 lines (`ozagia.intent.lint`) and `lint_runs`, `lint_findings` and
-`lint_timeouts` when a linter ran.
+`lint_timeouts` when a linter ran. After a handled `edit` or `write` that
+changes code it may add bounded `[ozagia] library hint:` lines
+(`ozagia.core.library_hints`), with `library_hints`, `library_hint_files` and
+`library_hints_suppressed` in `meta`. Hints are advisory and never fail the
+edit.
 
 Output has the shape of OpenCode's own tools. Source lines are the file's
 exact text after a `<n>: ` prefix; graph additions are separate lines that
@@ -261,6 +265,10 @@ def handle(memory: Any, tool: str, input: dict[str, Any], *,
             except Exception:  # noqa: BLE001 - a warning is advisory
                 warned = []
         from ozagia.core.owners import acting
+        # Library-first hints need the text before the edit; capture it now.
+        # The helper returns None when hints are off, the file is not code or
+        # the file cannot be read safely.
+        hint_state = _library_hint_state(memory, tool, edit_rel)
         with acting(memory, harness, session):
             res = handler(memory, input)
         if created_rel is not None and res.get("intent") in ("write", "edit_write"):
@@ -288,6 +296,9 @@ def handle(memory: Any, tool: str, input: dict[str, Any], *,
             meta["edited_files"] = [edit_rel]
         if res.get("bytes_saved"):
             meta["bytes_saved"] = int(res["bytes_saved"])
+        hint_lines = _library_hint_lines(memory, hint_state, session, meta)
+        if hint_lines:
+            output += "".join("\n" + line for line in hint_lines)
         if state is not None and not preflight:
             state.tick()
             if spec is not None:
@@ -765,6 +776,62 @@ def _after_lint(memory: Any, tool: str, inp: dict[str, Any],
         return []
     meta.update(lint_meta(got))
     return list(got["lines"])
+
+
+def _library_hint_state(memory: Any, tool: str, rel: str | None) -> Any:
+    """What a handled edit/write needs for library hints: the root-relative
+    file, its text before the call and the effective settings. None when
+    hints are off, the file is not code, or it cannot be read safely."""
+    if tool not in ("edit", "write") or not rel:
+        return None
+    try:
+        from ozagia.core import library_hints as LH
+        from ozagia.intent.common import root_of
+        root = root_of(memory)
+        settings = LH.settings_for(root)
+        if settings.mode == "off" or not LH.enabled_for(rel, settings):
+            return None
+        path = root / rel
+        if path.exists():
+            if not path.is_file():
+                return None
+            before = LH.read_source(path)
+            if before is None:
+                return None
+        else:
+            before = None
+        return {"rel": rel, "before": before, "settings": settings}
+    except Exception:  # noqa: BLE001 - hints are advisory, never fatal
+        return None
+
+
+def _library_hint_lines(memory: Any, state: Any, session: str | None,
+                        meta: dict[str, Any]) -> list[str]:
+    """The `[ozagia] library hint:` lines for a successful edit/write, and
+    its `meta` counters; never raises."""
+    if not state:
+        return []
+    try:
+        from ozagia.core import library_hints as LH
+        from ozagia.intent.common import root_of
+        root = root_of(memory)
+        after = LH.read_source(root / state["rel"])
+        if after is None:
+            return []
+        got = LH.hints_for_edit(
+            root, state["rel"], state["before"], after, session=session,
+            settings=state["settings"])
+    except Exception:  # noqa: BLE001 - hints are advisory, never fatal
+        return []
+    hints = got.get("hints") or []
+    if hints:
+        meta["library_hints"] = len(hints)
+        meta["library_hint_files"] = 1
+    suppressed = got.get("suppressed") or []
+    if suppressed:
+        meta["library_hints_suppressed"] = len(suppressed)
+    return [str(hint.get("message")) for hint in hints
+            if hint.get("message")]
 
 
 def _after_ledger(memory: Any, state: Any, tool: str, inp: dict[str, Any],
