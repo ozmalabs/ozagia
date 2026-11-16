@@ -125,8 +125,8 @@ def test_security_section(repo: Path) -> None:
     packet = RR.review_repo(repo, sections=["security"])
     assert _keys(packet, "committed_env_file") == {"file:.env"}
     env = _of(packet, "committed_env_file")[0]
-    assert {"kind": "file_absent", "args": {"key": "file:.env"}} in \
-        env["suggested_goal"]["criteria"]
+    # Untracking resolves it; the file may stay on disk.
+    assert env["suggested_goal"]["criteria"] == []
     assert _keys(packet, "sensitive_file") == {"file:keys/id_ed25519"}
     danger = _of(packet, "dangerous_construct")
     assert [f["keys"] for f in danger] == [["file:src/pkg/danger.py"]]

@@ -300,6 +300,7 @@ def changed_since(view: TreeView, fp: dict[str, Any], paths: Iterable[str]
     unhashed = set(fp.get("unhashed") or [])
     paths = list(dict.fromkeys(paths))
     now = view.blobs(paths)
+    visible = view.paths()
     changed: list[str] = []
     for rel in paths:
         if rel in dirty:
@@ -307,6 +308,11 @@ def changed_since(view: TreeView, fp: dict[str, Any], paths: Iterable[str]
         elif rel in unhashed or fp.get("overflow"):
             return [rel], (f"the run's fingerprint has no content hash for {rel} "
                            "(too many dirty files when it ran)")
+        elif rel not in tree and rel not in visible:
+            # Git-ignored now and neither committed nor dirty then: the
+            # fingerprint never covers ignored files, so their content is
+            # not compared (a file untracked and ignored after a review).
+            continue
         else:
             then = tree.get(rel)
         if now[rel] != then:

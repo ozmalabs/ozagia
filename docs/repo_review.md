@@ -279,7 +279,6 @@ check:
 | finding | criterion |
 |---|---|
 | failing_test | `test_passes {key}` |
-| committed_env_file, sensitive_file | `file_absent {key}` |
 | unreferenced_symbol | `symbol_absent {key}`, titled "Remove ..." |
 | unpinned_image | `ops_has {key, attr: "image" (a build stage: "base_image"), pinned: true}` |
 

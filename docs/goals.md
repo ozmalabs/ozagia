@@ -288,6 +288,11 @@ Limits:
   fingerprint and are not evidence.
 - A dirty symlink is compared as "not a regular file": retargeting it is
   not seen.
+- Git-ignored files are not in the fingerprint. A compared file that is
+  ignored now and was neither committed nor dirty at the run is skipped
+  rather than reported as changed (for example a `.env` untracked and
+  ignored to resolve a review finding); edits to ignored files are not
+  seen.
 - Skipped tests are not told apart from passed ones (the record keeps no
   per-test outcomes beyond failures and errors).
 

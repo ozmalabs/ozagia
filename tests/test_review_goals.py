@@ -186,7 +186,7 @@ def test_review_goal_fix_review_check_is_met(repo: Path,
     assert got["ok"] is True, got
     g_image = got["goal"]
     g_test = G.from_review(repo, _memory(repo), None, failing["id"])
-    assert [c["kind"] for c in g_env["criteria"]] == ["file_absent", "review_resolved"]
+    assert [c["kind"] for c in g_env["criteria"]] == ["review_resolved"]
     assert [c["kind"] for c in g_image["criteria"]] == ["ops_has", "review_resolved"]
     assert [c["kind"] for c in g_test["criteria"]] == ["test_passes", "review_resolved"]
     assert call("goal_from_review", {"finding_id": env["id"]})["ok"] is False
@@ -201,8 +201,10 @@ def test_review_goal_fix_review_check_is_met(repo: Path,
     assert {gid: g["status"] for gid, g in before.items()} == {
         g_env["id"]: "open", g_image["id"]: "open", g_test["id"]: "open"}
 
-    # The fix: stop tracking .env, pin the image, make the test pass.
-    _git(repo, "rm", "-q", ".env")
+    # The fix: stop tracking .env (it stays on disk), pin the image, make
+    # the test pass.
+    _git(repo, "rm", "-q", "--cached", ".env")
+    _write(repo, ".gitignore", (repo / ".gitignore").read_text() + ".env\n")
     _write(repo, "deploy/compose.yaml", (repo / "deploy" / "compose.yaml").read_text()
            .replace("image: nginx\n", "image: nginx:1.27\n"))
     _commit(repo, "fix review findings")
@@ -210,10 +212,12 @@ def test_review_goal_fix_review_check_is_met(repo: Path,
     _pytest(repo, PASSED)
 
     # Fixed, but no later review yet: the review criterion cannot pass.
-    # Files the goals are about changed since that review (stale); the
-    # test's file did not, so its goal reads the old review (still there).
+    # The compose file changed since that review (stale); the other goals'
+    # files did not, so they read the old review (finding still there).
     mid = _check_cli(repo, capsys)
-    for gid, want in ((g_env["id"], "stale"), (g_image["id"], "stale"),
+    # .env was only untracked, so its content is unchanged and the old
+    # review still names it.
+    for gid, want in ((g_env["id"], "fail"), (g_image["id"], "stale"),
                       (g_test["id"], "fail")):
         statuses = {r["kind"]: r["status"] for r in mid[gid]["results"]}
         assert statuses["review_resolved"] == want, mid[gid]

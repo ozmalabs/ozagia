@@ -1661,8 +1661,9 @@ def _security(sec: _Section) -> None:
                     f"{rel} is a tracked environment file",
                     evidence=[f"tracked by git: {rel}"], confidence="high",
                     note="the name matches; the contents were not inspected",
-                    criteria=[{"kind": "file_absent",
-                               "args": {"key": _file_key(rel)}}],
+                    # Tracking is what the finding is about; the goal
+                    # system's review_resolved checks it. file_absent would
+                    # demand deleting a local file that may be needed.
                     title=f"Stop tracking {rel}")
         elif _secret_name(name):
             sec.add("sensitive_file", "major", [_file_key(rel)],
@@ -1670,8 +1671,9 @@ def _security(sec: _Section) -> None:
                     evidence=[f"tracked by git: {rel}"], confidence="medium",
                     note="the name matches; a .pem may be a public "
                          "certificate",
-                    criteria=[{"kind": "file_absent",
-                               "args": {"key": _file_key(rel)}}],
+                    # Tracking is what the finding is about; the goal
+                    # system's review_resolved checks it. file_absent would
+                    # demand deleting a local file that may be needed.
                     title=f"Remove {rel} from the repository")
         elif _is_source(rel) and CR._sensitive_path(rel):
             sensitive_paths.append(rel)
