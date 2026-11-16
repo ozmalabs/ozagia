@@ -170,12 +170,15 @@ project config maps these groups and keys into the fields above:
     [iac]            roots, skip_globs
     [review] layers
 
-Values from the other registry groups (`security`, `hints`, `models`, `ui`,
-`resources`, `worktrees`, `markdown`, `files`, `tasks`) stay with the modules
-that own them. The loader reports them, and any unknown key, in
-`ProjectConfig.unmapped` instead of silently ignoring them. The legacy file is
-never rewritten; a migrated `ozagia/config.toml` is read for every key the
-legacy file leaves unset.
+`[security]` is consumed by `ozagia.core.security` from both files through
+:func:`load_config_section`; its supported keys are `enabled`, `tools`,
+`allow_network`, `fail_on`, `exclude`, `max_findings`, `block_secrets` and
+`secret_allowlist`. Values from the other registry groups (`hints`, `models`,
+`ui`, `resources`, `worktrees`, `markdown`, `files`, `tasks`) stay with the
+modules that own them. The loader reports them, and any unknown key or nested
+table, in `ProjectConfig.unmapped` instead of silently ignoring them. The
+legacy file is never rewritten; a migrated `ozagia/config.toml` is read for
+every key the legacy file leaves unset.
 """
 from __future__ import annotations
 
@@ -379,6 +382,11 @@ class ProjectConfig:
     review_layers: tuple[str, ...] = ()
     #: The configuration files that supplied values, highest priority first.
     sources: tuple[Path, ...] = ()
+    #: Reload identity for both configuration locations:
+    #: (kind, path, mtime_ns, size, sha256). A missing file keeps its path
+    #: with zero mtime/size and an empty digest, so creating it changes the
+    #: identity. `ozagia.adapters` uses this to invalidate its registry.
+    source_signatures: tuple[tuple[str, str, int, int, str], ...] = ()
     #: Versioned-config keys this loader does not map, as (key, reason).
     unmapped: tuple[tuple[str, str], ...] = ()
     #: Directory adapter modules are imported from when it differs from the
@@ -447,6 +455,13 @@ _KEYS = {
     "iac": {"roots", "skip_globs", "remote_states"},
     "review": {"layers"},
 }
+#: `[security]` keys `ozagia.core.security` reads from either config file.
+SECURITY_SECTION = "security"
+SECURITY_KEYS = (
+    "enabled", "tools", "allow_network", "fail_on", "exclude",
+    "max_findings", "block_secrets", "secret_allowlist",
+)
+_SECURITY_KEY_SET = frozenset(SECURITY_KEYS)
 REPEAT_POLICIES = ("stub", "note", "off")
 TEST_SELECT_POLICIES = ("all", "affected")
 
@@ -491,7 +506,6 @@ _PROJECT_CONFIG_SECTIONS = frozenset(_KEYS) | {"testing"}
 #: Registry groups another module reads. Reported once per group, never
 #: mapped into ProjectConfig and never copied into the legacy shape.
 _OWNED_SECTIONS = {
-    "security": "owned by ozagia.core.security (still reads .ozagia.toml)",
     "hints": "read by ozagia.core.library_hints",
     "models": "read by ozagia.core.models",
     "ui": "UI presentation setting; not part of the index configuration",
@@ -617,6 +631,99 @@ def config_path(root: str | Path) -> Path | None:
     :func:`config_sources`.
     """
     return config_sources(root).active
+
+
+@dataclass(frozen=True)
+class ConfigSectionError:
+    """One configuration file that could not supply a section."""
+
+    #: ``"legacy"`` or ``"repo"``.
+    kind: str
+    path: Path
+    message: str
+
+
+@dataclass(frozen=True)
+class ConfigSection:
+    """One named table merged from both configuration files.
+
+    ``values`` holds the raw TOML values. ``sources`` maps each key to
+    ``"legacy"`` or ``"repo"``; a key defined in both reports ``"legacy"``
+    because the legacy file wins. ``legacy`` is the applicable legacy file
+    (or None) and ``repo`` is ``<root>/ozagia/config.toml``, whether or not it
+    exists. ``values_by_source`` keeps each file's raw table, so a caller can
+    validate values a higher-priority file overrides. ``errors`` reports
+    unreadable or malformed files. Callers decide whether that is fatal, so the
+    security loader can keep its historical tolerance for the legacy file
+    while still reporting a broken versioned file.
+    """
+
+    name: str
+    values: dict[str, Any]
+    sources: dict[str, str]
+    legacy: Path | None
+    repo: Path
+    #: Raw table from each file that supplies the section, keyed by kind.
+    values_by_source: dict[str, dict[str, Any]]
+    errors: tuple[ConfigSectionError, ...] = ()
+
+    def source_of(self, key: str) -> str | None:
+        """``"legacy"``, ``"repo"`` or None for a key the section omits."""
+        return self.sources.get(key)
+
+
+def load_config_section(root: str | Path, section: str) -> ConfigSection:
+    """Merge one named table from both configuration files, legacy keys first.
+
+    The legacy file (``$OZAGIA_CONFIG``, ``<root>/.ozagia.toml`` or the state
+    directory's ``config.toml``) wins for every key it defines;
+    ``<root>/ozagia/config.toml`` fills the keys it leaves unset. The helper
+    is read-only and uncached, so an edit is visible on the next call.
+    Malformed or unreadable files are reported in ``ConfigSection.errors``
+    with their kind and path rather than raised: each caller keeps the error
+    policy it needs.
+    """
+    root_p = Path(root).resolve()
+    sources = config_sources(root_p)
+    values: dict[str, Any] = {}
+    origins: dict[str, str] = {}
+    values_by_source: dict[str, dict[str, Any]] = {}
+    errors: list[ConfigSectionError] = []
+    # Repo first, then legacy, so a legacy value overwrites the repo value
+    # for the same key without losing per-key source tracking.
+    layers = (
+        ("repo", sources.repo_config if sources.repo_exists else None),
+        ("legacy", sources.legacy),
+    )
+    for kind, path in layers:
+        if path is None:
+            continue
+        try:
+            raw = path.read_bytes()
+        except OSError as exc:
+            errors.append(ConfigSectionError(kind, path, f"cannot read: {exc}"))
+            continue
+        try:
+            data = tomllib.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+            errors.append(ConfigSectionError(kind, path, str(exc)))
+            continue
+        table = data.get(section)
+        if table is None:
+            continue
+        if not isinstance(table, dict):
+            errors.append(ConfigSectionError(
+                kind, path, f"[{section}] must be a table"))
+            continue
+        for name, value in table.items():
+            values[name] = value
+            origins[name] = kind
+        values_by_source[kind] = dict(table)
+    return ConfigSection(
+        name=section, values=values, sources=origins,
+        legacy=sources.legacy, repo=sources.repo_config,
+        values_by_source=values_by_source, errors=tuple(errors),
+    )
 
 
 def _str_list(table: dict[str, Any], key: str, where: str) -> list[str] | None:
@@ -1185,12 +1292,14 @@ def _read_source(path: Path | None) -> bytes | None:
 
 def _source_signature(path: Path | None, raw: bytes | None) -> tuple[Any, ...]:
     """A cache-key component: path, mtime, size and content digest."""
-    if path is None or raw is None:
+    if path is None:
         return ("", 0, 0, "")
     try:
         mtime = path.stat().st_mtime_ns
     except OSError:
         mtime = 0
+    if raw is None:
+        return (str(path), mtime, 0, "")
     return (str(path), mtime, len(raw), hashlib.sha256(raw).hexdigest())
 
 
@@ -1260,6 +1369,22 @@ def _validate_registry_value(key: str, value: Any, *, source: Path) -> Any:
         raise ConfigError(message) from exc
 
 
+def _security_unmapped(table: dict[str, Any]) -> list[tuple[str, str]]:
+    """Unknown or nested `[security]` keys, as bounded unmapped reports.
+
+    Supported keys are consumed by `ozagia.core.security` from either file, so
+    they are not reported. Values are never retained or printed.
+    """
+    out: list[tuple[str, str]] = []
+    for name, value in table.items():
+        if name in _SECURITY_KEY_SET and not isinstance(value, dict):
+            continue
+        reason = ("nested table is not mapped" if isinstance(value, dict)
+                  else "not a supported security setting")
+        out.append((f"security.{name}", reason))
+    return out
+
+
 def _project_config_values(
         data: dict[str, Any], *, source: Path,
 ) -> tuple[dict[str, Any], tuple[tuple[str, str], ...]]:
@@ -1273,6 +1398,15 @@ def _project_config_values(
     origins: dict[tuple[str, str], str] = {}
     unmapped: list[tuple[str, str]] = []
     for section, table in data.items():
+        if section == SECURITY_SECTION:
+            if not isinstance(table, dict):
+                raise ConfigError(f"{source}: [{SECURITY_SECTION}] must be a table")
+            for name, value in table.items():
+                if name in _SECURITY_KEY_SET and not isinstance(value, dict):
+                    _validate_registry_value(
+                        f"{SECURITY_SECTION}.{name}", value, source=source)
+            unmapped.extend(_security_unmapped(table))
+            continue
         if section in _OWNED_SECTIONS:
             unmapped.append((section, _OWNED_SECTIONS[section]))
             continue
@@ -1322,6 +1456,15 @@ def _legacy_values(
     unmapped: list[tuple[str, str]] = []
     for section, table in data.items():
         if section == "testing":
+            continue
+        if section == SECURITY_SECTION:
+            # The security module owns this table and reads it from both
+            # files. Report only what it cannot consume; supported keys are
+            # no longer unmapped.
+            if isinstance(table, dict):
+                unmapped.extend(_security_unmapped(table))
+            else:
+                unmapped.append((SECURITY_SECTION, "must be a table"))
             continue
         if section in _OWNED_SECTIONS:
             unmapped.append((section, _OWNED_SECTIONS[section]))
@@ -1401,8 +1544,9 @@ def load_project_config(root: str | Path | None = None) -> ProjectConfig:
     repo_path = sources.repo_config if sources.repo_exists else None
     legacy_raw = _read_source(sources.legacy)
     new_raw = _read_source(repo_path)
-    key = (str(root_p), _source_signature(sources.legacy, legacy_raw),
-           _source_signature(repo_path, new_raw))
+    legacy_signature = _source_signature(sources.legacy, legacy_raw)
+    repo_signature = _source_signature(sources.repo_config, new_raw)
+    key = (str(root_p), legacy_signature, repo_signature)
     cached = _CONFIG_CACHE.get(key)
     if cached is not None:
         return cached
@@ -1429,7 +1573,8 @@ def load_project_config(root: str | Path | None = None) -> ProjectConfig:
                      _merge_legacy(new_data, legacy_data))
     adapter_base = _adapter_base(legacy_data, sources.legacy, new_data, root_p)
     cfg = replace(cfg, sources=sources.paths, unmapped=unmapped,
-                  adapter_base_dir=adapter_base)
+                  adapter_base_dir=adapter_base,
+                  source_signatures=(legacy_signature, repo_signature))
     _CONFIG_CACHE[key] = cfg
     return cfg
 
