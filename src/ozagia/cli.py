@@ -28,6 +28,10 @@
     ozagia tunnel start|stop|status|list ...      (tunnel config vs live state)
     ozagia preflight plan ...                     (dry-run emulator plan)
     ozagia who PATH [--root R] [--json]           (sessions that edited PATH)
+    ozagia replace PATTERN REPLACEMENT [--glob G ...] [--key K ...] [--regex]
+                   [--flags F] [--expect N] [--apply --plan-id ID] ...
+                                                  (one pattern across files;
+                                                  preview unless --apply)
     ozagia --version
 
 `daemon`, `bg`, `mcp`, `eval` and `check` pass every argument after their name to
@@ -793,6 +797,86 @@ def _cmd_who(args: argparse.Namespace) -> int:
     return 0
 
 
+def _replace_memory(root: Path):
+    """The root's DevMemory; the snapshot is built first when missing."""
+    from ozagia.config import state_path
+    from ozagia.core.memory import DevMemory, build_index
+    dump = state_path(root, "graph.json")
+    if not dump.exists():
+        print(f"building {dump} ...", file=sys.stderr)
+        build_index(root, dump, include_docs="features", include_git=True,
+                    include_scripts=True)
+    return DevMemory(dump, state_path(root, "journal.jsonl"), root=root)
+
+
+def _cmd_replace(args: argparse.Namespace) -> int:
+    """`ozagia replace`: preview (default) or apply one pattern across the
+    files of a scope (`ozagia.edit.replace`)."""
+    from ozagia.edit.code_edit import CodeEditError
+    from ozagia.intent.replace import file_lines, lint_replace
+    root = _root(args.root)
+    if args.apply and not args.plan_id:
+        print("error: --apply needs --plan-id (the preview's plan_id); run "
+              "without --apply first", file=sys.stderr)
+        return 2
+    try:
+        mem = _replace_memory(root)
+        res = mem.replace(
+            args.pattern, args.replacement, regex=args.regex,
+            flags=args.flags, globs=args.glob, keys=args.key,
+            max_files=args.max_files, max_matches=args.max_matches,
+            expect=args.expect, gitignore=not args.no_gitignore,
+            any_suffix=args.any_suffix, apply=args.apply, plan_id=args.plan_id,
+            allow_parse_errors=args.allow_parse_errors, task=args.task)
+    except (CodeEditError, ValueError, FileNotFoundError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if res.get("applied"):
+        lines, meta = lint_replace(mem, res)
+        res["lint"] = lines
+        res.update(meta)
+    if args.json:
+        _print_json(res)
+        return 0 if res.get("ok") else 1
+    n = res.get("total", 0)
+    if not res.get("ok") and not res.get("applied"):
+        print(f"refused: {res.get('error')}", file=sys.stderr)
+        for line in file_lines(res):
+            print(line)
+        return 1
+    if res.get("applied"):
+        k = len(res.get("written") or [])
+        w = int(res.get("written_matches") or 0)
+        if res.get("partial") or res.get("error"):
+            print(f"partially applied: {res.get('error')}", file=sys.stderr)
+        print(f"replaced {w} match{'es' if w != 1 else ''} in {k} "
+              f"file{'s' if k != 1 else ''}")
+        for line in file_lines(res):
+            print(line)
+        for f in res.get("files") or []:
+            if f.get("backup"):
+                print(f"backup {f['file']}: {f['backup']}")
+        for line in res.get("lint") or []:
+            print(line)
+        return 1 if res.get("partial") or res.get("error") else 0
+    k = res.get("files_changed", 0)
+    print(f"preview: {n} match{'es' if n != 1 else ''} in {k} "
+          f"file{'s' if k != 1 else ''}; nothing written")
+    for line in file_lines(res):
+        print(line)
+    for f in res.get("files") or []:
+        if f.get("diff"):
+            sys.stdout.write(f["diff"])
+            if f.get("diff_truncated"):
+                print(f"... diff of {f['file']} truncated")
+    if res.get("parse_refused"):
+        print("an apply would be refused: it breaks the parse of "
+              + ", ".join(res["parse_refused"]) + " (--allow-parse-errors)")
+    print(f"plan_id {res['plan_id']}: apply with --apply --plan-id "
+          f"{res['plan_id']}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog=PROG, description=__doc__.splitlines()[0])
     p.add_argument("--version", action="version", version=f"{PROG} {_version()}")
@@ -1028,6 +1112,40 @@ def build_parser() -> argparse.ArgumentParser:
     who.add_argument("--root", default=None, help="repository root")
     who.add_argument("--json", action="store_true", help="print the report as JSON")
 
+    rp = sub.add_parser("replace", help="replace a pattern across files "
+                                        "(preview unless --apply)",
+                        description="Replace a literal (or with --regex, a Python "
+                                    "re) pattern across the files of a scope, "
+                                    "through the edit transaction. Preview by "
+                                    "default; --apply writes each file with a "
+                                    "backup and journals one entry.")
+    rp.add_argument("pattern")
+    rp.add_argument("replacement")
+    rp.add_argument("--glob", action="append", default=None,
+                    help="root-relative glob (repeatable; ** crosses dirs)")
+    rp.add_argument("--key", action="append", default=None,
+                    help="node key whose span restricts matches (repeatable)")
+    rp.add_argument("--regex", action="store_true",
+                    help="PATTERN is a Python re; REPLACEMENT may use \\1, \\g<name>")
+    rp.add_argument("--flags", default=None, help="regex flags: letters i,m,s,x,a")
+    rp.add_argument("--expect", type=int, default=None,
+                    help="refuse unless there are exactly N matches")
+    rp.add_argument("--max-files", type=int, default=None)
+    rp.add_argument("--max-matches", type=int, default=None)
+    rp.add_argument("--apply", action="store_true",
+                    help="write the change (needs --plan-id)")
+    rp.add_argument("--plan-id", default=None,
+                    help="the preview's plan_id; --apply refuses unless the "
+                         "plan is still the preview's")
+    rp.add_argument("--any-suffix", action="store_true",
+                    help="every file, not only text suffixes (dotfiles too)")
+    rp.add_argument("--allow-parse-errors", action="store_true")
+    rp.add_argument("--no-gitignore", action="store_true",
+                    help="also files .gitignore excludes")
+    rp.add_argument("--task", default=None, help="journal task label")
+    rp.add_argument("--root", default=None, help="repository root")
+    rp.add_argument("--json", action="store_true", help="print the result as JSON")
+
     preflight = sub.add_parser("preflight", help="dry-run IaC emulator plan")
     psub = preflight.add_subparsers(dest="action", required=True)
     plan = psub.add_parser("plan", help="print an ordered, scrubbed plan")
@@ -1048,7 +1166,8 @@ def _opencode_exe(value: str | None) -> str:
     return value or os.environ.get("OZAGIA_OPENCODE") or "opencode"
 
 
-_COMMANDS = frozenset({"index", "agent", "install", "who", *DELEGATES})
+_COMMANDS = frozenset({"index", "agent", "install", "who", "replace",
+                       *DELEGATES})
 # Agent options that may lead a bare `ozagia ...` (the TUI).
 _AGENT_FLAGS = frozenset({"--research", "--mcp", "--model", "-m", "--workdir",
                           "--root", "--clone", "--prompt", "--prompt-file"})
@@ -1118,6 +1237,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_preflight(args)
     if args.command == "who":
         return _cmd_who(args)
+    if args.command == "replace":
+        return _cmd_replace(args)
     parser.error(f"unknown command {args.command}")  # pragma: no cover
     return 2
 

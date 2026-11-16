@@ -1313,6 +1313,8 @@ TEST_SELECTION_FIELDS = ("affected_runs", "tests_skipped_unaffected",
 LINT_FIELDS = ("lint_runs", "lint_findings", "lint_timeouts", "ruff_captures")
 # Working sets handed back after compactions (`ozagia.core.working_set`).
 WORKING_SET_FIELDS = ("working_sets_served", "working_set_chars")
+# Multi-file replace (`ozagia.intent.replace`): previews, applies, files written.
+REPLACE_FIELDS = ("replace_previews", "replace_applies", "replace_files")
 
 
 def graph_stats_fields(stats: Any) -> dict[str, Any]:
@@ -1341,7 +1343,9 @@ def graph_stats_fields(stats: Any) -> dict[str, Any]:
     ops_after_annotations (the operations graph, `ozagia.core.ops_graph`,
     and `[ozagia] ops:` lines after log/status commands), and working_sets_served and
     working_set_chars (`WORKING_SET_FIELDS`, working sets handed back after
-    compactions, `ozagia.core.working_set`)."""
+    compactions, `ozagia.core.working_set`), and replace_previews,
+    replace_applies and replace_files (`REPLACE_FIELDS`, multi-file
+    replace, `ozagia.intent.replace`)."""
     if not isinstance(stats, dict):
         return {"plugin_loaded": None, "captured_calls": None,
                 "passthrough_calls": None, "fallbacks": None,
@@ -1357,7 +1361,8 @@ def graph_stats_fields(stats: Any) -> dict[str, Any]:
                 "ops_nodes": None, "ops_after_annotations": None,
                 **{k: None for k in LINT_FIELDS},
                 **{k: None for k in TEST_SELECTION_FIELDS},
-                **{k: None for k in WORKING_SET_FIELDS}}
+                **{k: None for k in WORKING_SET_FIELDS},
+                **{k: None for k in REPLACE_FIELDS}}
     hellos = _count(stats.get("hellos"))
     raw = stats.get("handled")
     # The daemon reports {"true": n, "false": m}; only handled calls count.
@@ -1399,7 +1404,8 @@ def graph_stats_fields(stats: Any) -> dict[str, Any]:
             "ops_after_annotations": _count(stats.get("ops_after_annotations")),
             **{k: _count(stats.get(k)) for k in LINT_FIELDS},
             **{k: _count(stats.get(k)) for k in TEST_SELECTION_FIELDS},
-            **{k: _count(stats.get(k)) for k in WORKING_SET_FIELDS}}
+            **{k: _count(stats.get(k)) for k in WORKING_SET_FIELDS},
+            **{k: _count(stats.get(k)) for k in REPLACE_FIELDS}}
 
 
 
@@ -1659,7 +1665,7 @@ def aggregate(runs: list[dict[str, Any]], arms: Iterable[str]) -> list[dict[str,
                     int(r.get("ops_after_annotations") or 0) for r in mine),
                 **{f"total_{k}": sum(int(r.get(k) or 0) for r in mine)
                    for k in (*LINT_FIELDS, *TEST_SELECTION_FIELDS,
-                             *WORKING_SET_FIELDS)},
+                             *WORKING_SET_FIELDS, *REPLACE_FIELDS)},
                 "codemode_tools": sorted({t for r in mine
                                           for t in (r.get("codemode_tools") or [])}),
             })

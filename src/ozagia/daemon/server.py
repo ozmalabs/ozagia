@@ -141,7 +141,9 @@ JOURNAL_NAME = "daemon_journal.jsonl"
 EDIT_INTENTS = frozenset({"edit", "write", "edit_key"})
 # Tools whose `tool`/`after` may lint (`ozagia.intent.lint`): they get
 # `_unlock` and `_reply_deadline`.
-LINTED_TOOLS = frozenset({"edit", "write", "patch"})
+LINTED_TOOLS = frozenset({"edit", "write", "patch", "replace"})
+# `replace` preflight plans remembered at most (oldest dropped first).
+REPLACE_PLANS_KEPT = 256
 # Built-in tools whose `after` can have created files (file ledger).
 FILE_LEDGER_TOOLS = frozenset({"edit", "write", "patch", "shell"})
 # Files a session start/end scan records at most, and paths an `after` scan
@@ -161,6 +163,9 @@ SHELL_REASONS = 200
 TEST_COUNTERS = ("affected_runs", "tests_skipped_unaffected", "cached_passes",
                  "full_runs_forced")
 SHELL_REASONS_SHOWN = 30
+# `meta` counters of the `replace` tool (`ozagia.intent.replace`): previews,
+# applies, and files the applies wrote.
+REPLACE_COUNTERS = ("replace_previews", "replace_applies", "replace_files")
 
 # Passthrough reasons that name a file or directory, rewritten to one key
 # each so paths do not fill the reason table: (pattern, replacement), in
@@ -320,6 +325,8 @@ class DaemonState:
         # Lint inside the edit (`ozagia.intent.lint`): linter runs, findings
         # reported on changed lines, linter runs cut off by the timeout.
         self.lint = {"lint_runs": 0, "lint_findings": 0, "lint_timeouts": 0}
+        # Multi-file replace (`ozagia.intent.replace`).
+        self.replace = {k: 0 for k in REPLACE_COUNTERS}
         # shell tool calls: captured (handled), refused (git refs) and
         # passthrough, with the passthrough reasons, so an eval can measure
         # the shell capture rate.
@@ -356,6 +363,9 @@ class DaemonState:
         self.owners = Owners(root, daemon_journal=journal)
         self.path_suggestions = 0
         self.ownership_warnings = 0
+        # The plan of each `replace` preflight, by (harness, session,
+        # input digest), until the call it permitted (`_granted_plan`).
+        self.replace_plans: dict[tuple[str, Any, str], str] = {}
         # Ops graph (`ozagia.core.ops_graph`): `[ozagia] ops:` lines added
         # after container/unit log and status commands.
         self.ops_after_annotations = 0
@@ -514,10 +524,16 @@ class DaemonState:
                             "meta": {"intent": "after_expired", "keys": [],
                                      "ms": 0.0}}
                 if op == "tool":
+                    is_pre = msg.get("preflight") is True
+                    granted = self._granted_plan(msg, tool, inp, harness,
+                                                 session, is_pre)
                     body = intent.handle(self.memory, tool, inp,
                                          harness=harness, session=session,
-                                         preflight=msg.get("preflight") is True,
-                                         state=state, owners=self.owners)
+                                         preflight=is_pre,
+                                         state=state, owners=self.owners,
+                                         granted_plan_id=granted)
+                    if is_pre:
+                        self._remember_plan(body, tool, inp, harness, session)
                 else:
                     req_meta = msg.get("meta")
                     body = intent.after(self.memory, tool, inp,
@@ -538,6 +554,50 @@ class DaemonState:
             self._files_observe(op, tool, inp, msg, body)
             return {"ok": True, **self._job_meta(body)}
         return {"ok": False, "error": f"unknown op {op!r}"}
+
+    @staticmethod
+    def _plan_key(tool: str, inp: Any, harness: str, session: Any
+                  ) -> tuple[str, Any, str] | None:
+        if tool != "replace" or not isinstance(inp, dict):
+            return None
+        import hashlib
+        import json as _json
+        public = {k: v for k, v in inp.items() if not str(k).startswith("_")}
+        try:
+            blob = _json.dumps(public, sort_keys=True, default=str)
+        except (TypeError, ValueError):
+            return None
+        return (harness, session, hashlib.sha256(blob.encode()).hexdigest())
+
+    def _granted_plan(self, msg: dict[str, Any], tool: str, inp: Any,
+                      harness: str, session: Any, preflight: bool
+                      ) -> str | None:
+        """The plan a `replace` call was permitted with: the caller's
+        `granted` permission, else this session's preflight of the same
+        input (consumed)."""
+        key = self._plan_key(tool, inp, harness, session)
+        if key is None or preflight:
+            return None
+        remembered = self.replace_plans.pop(key, None)
+        granted = msg.get("granted")
+        meta = granted.get("metadata") if isinstance(granted, dict) else None
+        sent = meta.get("plan_id") if isinstance(meta, dict) else None
+        if isinstance(sent, str) and sent:
+            return sent
+        return remembered
+
+    def _remember_plan(self, body: dict[str, Any], tool: str, inp: Any,
+                       harness: str, session: Any) -> None:
+        key = self._plan_key(tool, inp, harness, session)
+        perm = body.get("permission") if body.get("preflight") else None
+        meta = perm.get("metadata") if isinstance(perm, dict) else None
+        plan = meta.get("plan_id") if isinstance(meta, dict) else None
+        if key is None or not isinstance(plan, str):
+            return
+        self.replace_plans.pop(key, None)
+        self.replace_plans[key] = plan
+        while len(self.replace_plans) > REPLACE_PLANS_KEPT:
+            self.replace_plans.pop(next(iter(self.replace_plans)))
 
     def session_state(self, msg: dict[str, Any]) -> Any:
         """The ledger of the request's (harness, session, sub), with the
@@ -945,6 +1005,10 @@ class DaemonState:
                 n = meta.get(name)
                 if isinstance(n, int) and not isinstance(n, bool) and n > 0:
                     self.lint[name] += n
+            for name in self.replace:
+                n = meta.get(name)
+                if isinstance(n, int) and not isinstance(n, bool) and n > 0:
+                    self.replace[name] += n
             if handled is not None:
                 self.handled["true" if handled else "false"] += 1
             if meta.get("repeat") in ("stub", "note"):
@@ -1139,6 +1203,8 @@ class DaemonState:
                 "file_ledger_errors": self.file_ledger_errors,
                 # Lint inside the edit, and captured `ruff check` calls.
                 **self.lint,
+                # Multi-file replace: previews, applies, files written.
+                **self.replace,
                 "ruff_captures": self.by_intent.get("shell_ruff", 0),
                 # Background jobs (`ozagia.daemon.jobs`): started, waits and
                 # the seconds spent in them, and waits that returned new

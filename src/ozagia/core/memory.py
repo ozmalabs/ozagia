@@ -1486,6 +1486,10 @@ class DevMemory:
         # The acting session's {harness, id} for journal entries
         # (`ozagia.core.owners.acting`), or None.
         self.edit_session: dict[str, str] | None = None
+        # `replace` calls (`ozagia.edit.replace`): previews, applies, and
+        # files written by applies.
+        self.replace_counters: dict[str, int] = {
+            "replace_previews": 0, "replace_applies": 0, "replace_files": 0}
         if self.root is not None:
             self.root = Path(self.root)
         if not self.dump.exists():
@@ -3279,6 +3283,69 @@ class DevMemory:
                     base_sha256=result.get("base_sha256"),
                     new_sha256=result.get("new_sha256"),
                     backup=result.get("backup"),
+                )
+            except Exception as e:  # noqa: BLE001 - reported, not raised
+                result["journaled"] = None
+                result["warning"] = (f"journal not written: "
+                                     f"{type(e).__name__}: {e}")
+        return result
+
+    def replace(self, pattern: str, replacement: str, *, regex: Any = False,
+                flags: Any = None, globs: Any = None, keys: Any = None,
+                max_files: int | None = None, max_matches: int | None = None,
+                expect: int | None = None, gitignore: Any = True,
+                any_suffix: Any = False, apply: Any = False,
+                base_shas: dict[str, str] | None = None,
+                plan_id: str | None = None, allow_parse_errors: Any = False,
+                timeout_s: float | None = None,
+                task: str | None = None) -> dict[str, Any]:
+        """Replace `pattern` by `replacement` across files and journal it.
+
+        See `ozagia.edit.replace`: preview unless `apply` is true; an apply
+        writes each file through the edit transaction (with a backup),
+        reingests the written files once and journals one `replace` entry
+        listing them. Counts previews, applies and written files in
+        `replace_counters`."""
+        from ozagia.edit.replace import replace as run_replace
+        write = _strict_bool(apply, "apply")
+        result = run_replace(
+            self.raw_repo_root, pattern, replacement,
+            regex=_strict_bool(regex, "regex"), flags=flags, globs=globs,
+            keys=keys, max_files=max_files, max_matches=max_matches,
+            expect=expect, gitignore=_strict_bool(gitignore, "gitignore"),
+            any_suffix=_strict_bool(any_suffix, "any_suffix"),
+            write=write, base_shas=base_shas, plan_id=plan_id,
+            allow_parse_errors=_strict_bool(allow_parse_errors,
+                                            "allow_parse_errors"),
+            timeout_s=timeout_s, memory=self)
+        counters = self.replace_counters
+        if not write:
+            counters["replace_previews"] += 1
+        written = list(result.get("written") or [])
+        if result.get("applied"):
+            counters["replace_applies"] += 1
+            counters["replace_files"] += len(written)
+            try:
+                result["journaled"] = self.journal_append(
+                    "replace",
+                    task or f"replace in {len(written)} file(s)",
+                    f"{'regex' if result.get('regex') else 'literal'} "
+                    f"{pattern!r} -> {replacement!r}: {result['written_matches']} "
+                    f"match(es) in {len(written)} file(s)",
+                    files=written,
+                    pattern=pattern,
+                    replacement=replacement,
+                    regex=bool(result.get("regex")),
+                    flags=result.get("flags") or None,
+                    globs=result.get("globs") or None,
+                    keys=result.get("keys") or None,
+                    plan_id=result.get("plan_id"),
+                    shas={f["file"]: {"base": f["base_sha256"],
+                                      "new": f["new_sha256"],
+                                      "backup": f.get("backup")}
+                          for f in result.get("files") or []
+                          if f.get("applied")},
+                    partial=result.get("partial") or None,
                 )
             except Exception as e:  # noqa: BLE001 - reported, not raised
                 result["journaled"] = None
