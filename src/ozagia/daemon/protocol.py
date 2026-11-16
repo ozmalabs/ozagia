@@ -79,6 +79,27 @@ Requests (`op`):
       call with it as the reason. Nothing is recorded (the call's `after`
       records it). Takes the graph lock and honours `deadline_ms`.
 
+    {"id": 9, "op": "path_check", "path": "...", "cwd"?: "..."}
+      -> {"id": 9, "ok": true, "exists": bool, "line": "[ozagia] no such
+          file ...; did you mean: ..." | "", "candidates": [{"path", "rel",
+          "key", "why"}], "meta": {...}}
+      For a hook's PreToolUse read of a path: the nearest existing paths
+      when it is missing (`ozagia.intent.paths`). Changes nothing.
+
+    {"id": 10, "op": "owner_check", "harness", "session", "paths": [...],
+     "cwd"?: "..."}
+      -> {"id": 10, "ok": true, "warnings": ["[ozagia] warning: ..."],
+          "meta": {...}}
+      Before a hook-run edit: the files another live session edited and
+      left uncommitted (`ozagia.core.owners`). Never blocks anything.
+
+    {"id": 11, "op": "who", "path": "..."}
+      -> {"id": 11, "ok": true, "who": {"path", "dirty", "last_commit",
+          "sessions": [{"harness", "session", "edits", "first", "last",
+          "last_age", "live", "committed"}]}}
+
+    Any request with a `session` (and `hello`) marks that session live.
+
 Sessions. `tool`, `after` and `read_check` with a `session` use that
 session's read ledger (`ozagia.intent.ledger`), keyed by (harness, session,
 `sub`). `sub` is optional: agents that share a session id send something

@@ -542,9 +542,11 @@ def test_pre_apply_patch_uses_the_daemon_reply(cxrepo, sockdir):
         assert req["tool"] == "patch_check" and req["harness"] == "codex"
         assert req["input"]["patch"] == STALE and req["input"]["workdir"] == str(cxrepo)
         assert isinstance(req["deadline_ms"], int)
-        # A matching patch does not wait for the daemon: it is not asked.
+        # A matching patch is not checked by the daemon; only the ownership
+        # check (W11) asks it, and an empty answer prints nothing.
         proc = _pre(cxrepo, FRESH, sockdir / "d.sock")
-        assert proc.stdout == "" and len(stub.requests) == 1
+        assert proc.stdout == ""
+        assert [r["op"] for r in stub.requests] == ["tool", "owner_check"]
     finally:
         stub.close()
 

@@ -1480,6 +1480,9 @@ class DevMemory:
     def __post_init__(self) -> None:
         self.dump = Path(self.dump)
         self.journal = Path(self.journal)
+        # The acting session's {harness, id} for journal entries
+        # (`ozagia.core.owners.acting`), or None.
+        self.edit_session: dict[str, str] | None = None
         if self.root is not None:
             self.root = Path(self.root)
         if not self.dump.exists():
@@ -3331,6 +3334,9 @@ class DevMemory:
     # -- journal ------------------------------------------------------------ #
     def journal_append(self, kind: str, task: str, summary: str,
                        **fields: Any) -> dict[str, Any]:
+        """Append one entry. While a session acts (`ozagia.core.owners.acting`
+        sets `edit_session`), the entry carries `session` ({harness, id})
+        and `epoch`, so `ozagia who` can tell who edited a file."""
         entry = {
             "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "kind": str(kind),
@@ -3338,6 +3344,13 @@ class DevMemory:
             "summary": str(summary),
             **{k: v for k, v in fields.items() if v is not None},
         }
+        sess = getattr(self, "edit_session", None)
+        if isinstance(sess, dict) and "session" not in entry:
+            entry["session"] = dict(sess)
+            entry["epoch"] = round(time.time(), 3)
+            if entry.get("files"):
+                from ozagia.core.owners import head
+                entry["head"] = head(self.raw_repo_root)
         self.journal.parent.mkdir(parents=True, exist_ok=True)
         with self.journal.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(entry, sort_keys=True) + "\n")

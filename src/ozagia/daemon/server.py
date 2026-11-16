@@ -23,7 +23,19 @@ Every request is journaled, one JSON object per line, to
 `<state dir>/daemon_journal.jsonl` (or `journal`):
 
     {"ts", "op", "tool", "intent", "handled", "is_error", "expired", "ms",
-     "keys" (at most 20), "reason", "fallback", "session", "harness"}
+     "keys" (at most 20), "reason", "fallback", "session", "harness",
+     "files"}
+
+`files` lists the files the request edited (a handled edit or write, or a
+built-in edit, write or patch reported by `after`), null otherwise; with
+`session` and `harness` it says who changed what (`ozagia.core.owners`).
+
+Path resolution and ownership: `path_check`, `owner_check` and `who`
+(`ozagia.daemon.protocol`). Every request with a `session` (and `hello`)
+marks that session live (`ozagia.core.owners.Owners`); a handled edit of a
+file another live session left uncommitted gets an `[ozagia] warning:`
+line. `stats` adds `path_suggestions`, `ownership_warnings` and
+`live_sessions`.
 
 With `idle_timeout` (seconds), the daemon shuts down once no request has
 arrived for that long, none is in progress and no background job runs (the
@@ -263,11 +275,18 @@ class DaemonState:
         self.ms_count = 0
         self.server: socketserver.BaseServer | None = None
         self.jobs = J.JobTable(root, base_env=test_env)
+        from ozagia.core.owners import Owners
+        # Live sessions and ownership warnings (`ozagia.core.owners`).
+        self.owners = Owners(root, daemon_journal=journal)
+        self.path_suggestions = 0
+        self.ownership_warnings = 0
 
     # -- requests ------------------------------------------------------------ #
     def dispatch(self, msg: dict[str, Any]) -> dict[str, Any]:
         from ozagia import intent
         op = msg.get("op")
+        if op not in ("ping", "stats", "shutdown"):
+            self.owners.touch(msg.get("harness"), msg.get("session"))
         if op == "ping":
             return {"ok": True, "version": P.PROTOCOL_VERSION,
                     "root": str(self.root), "pid": os.getpid()}
@@ -317,6 +336,8 @@ class DaemonState:
                             "meta": {"intent": "check_expired", "keys": []}}
                 body = intent.check_read(self.memory, tool, inp, state=state)
             return {"ok": True, **body}
+        if op in ("path_check", "owner_check", "who"):
+            return self._owners_op(op, msg)
         if op in J.OPS:
             return self.jobs.dispatch(op, msg)
         if op == "hint":
@@ -394,7 +415,7 @@ class DaemonState:
                     body = intent.handle(self.memory, tool, inp,
                                          harness=harness, session=session,
                                          preflight=msg.get("preflight") is True,
-                                         state=state)
+                                         state=state, owners=self.owners)
                 else:
                     req_meta = msg.get("meta")
                     body = intent.after(self.memory, tool, inp,
@@ -436,6 +457,71 @@ class DaemonState:
         if msg.get("reset_pending") is True:
             self.sessions.event(harness, session, "compact")
         return st
+
+    def _rel(self, path: Any, cwd: Any) -> str | None:
+        """`path` (absolute, or relative to `cwd`, else the root) relative
+        to the root, or None (outside it, or not a path)."""
+        from ozagia.intent.common import resolve
+        base = Path(cwd) if isinstance(cwd, str) and os.path.isdir(cwd) else None
+        try:
+            return resolve(self.root, path, base=base).rel or None
+        except Exception:  # noqa: BLE001 - not a path in this root
+            return None
+
+    def _owners_op(self, op: str, msg: dict[str, Any]) -> dict[str, Any]:
+        """`path_check` {path, cwd?}: does the path exist, and if not, the
+        nearest existing paths (`ozagia.intent.paths`). `owner_check`
+        {paths, cwd?} with the request's harness and session: the ownership
+        warnings an edit of those files would get. `who` {path}: the
+        sessions that edited it (`ozagia.core.owners.who`)."""
+        from ozagia.core import owners as O
+        cwd = msg.get("cwd")
+        if op == "path_check":
+            from ozagia.intent import paths as PA
+            path = msg.get("path")
+            if not isinstance(path, str) or not path:
+                return {"ok": False, "error": "path is required"}
+            p = Path(os.path.expanduser(path))
+            if not p.is_absolute():
+                p = (Path(cwd) if isinstance(cwd, str) and cwd else self.root) / p
+            if p.exists():
+                return {"ok": True, "exists": True, "line": "", "candidates": [],
+                        "meta": {"intent": "path_check", "keys": []}}
+            with self._graph_lock():
+                cands = PA.candidates(self.root, path, base=cwd if isinstance(
+                    cwd, str) and os.path.isdir(cwd) else None, memory=self.memory)
+            line = PA.suggestion_line(path, cands)
+            return {"ok": True, "exists": False, "line": line,
+                    "candidates": [{"path": str(c.path), "rel": c.rel,
+                                    "key": c.key, "why": c.why} for c in cands],
+                    "meta": {"intent": "path_check",
+                             "keys": [c.key for c in cands if c.key],
+                             "path_suggestions": 1 if line else 0}}
+        if op == "owner_check":
+            paths = msg.get("paths")
+            if not isinstance(paths, list):
+                return {"ok": False, "error": "paths must be a list"}
+            warnings: list[str] = []
+            for path in paths[:20]:
+                rel = self._rel(path, cwd)
+                if rel is None:
+                    continue
+                try:
+                    warnings.extend(self.owners.warnings(
+                        self.memory.journal, rel, msg.get("harness"),
+                        msg.get("session")))
+                except Exception:  # noqa: BLE001 - advisory
+                    continue
+            return {"ok": True, "warnings": warnings,
+                    "meta": {"intent": "owner_check", "keys": [],
+                             "ownership_warnings": len(warnings)}}
+        rel = self._rel(msg.get("path"), cwd)
+        if rel is None:
+            return {"ok": False, "error": "path must name a file in the root"}
+        report = O.who(self.root, rel, self.memory.journal,
+                       live=self.owners.live)
+        return {"ok": True, "who": report,
+                "meta": {"intent": "who", "keys": []}}
 
     def _job_meta(self, body: dict[str, Any]) -> dict[str, Any]:
         """`body` with `meta.jobs_running` and `meta.job_seq` while a job
@@ -510,6 +596,10 @@ class DaemonState:
             rr = meta.get("region_replies")
             if isinstance(rr, int) and not isinstance(rr, bool) and rr > 0:
                 self.region_replies += rr
+            for name in ("path_suggestions", "ownership_warnings"):
+                n = meta.get(name)
+                if isinstance(n, int) and not isinstance(n, bool) and n > 0:
+                    setattr(self, name, getattr(self, name) + n)
             if handled is not None:
                 self.handled["true" if handled else "false"] += 1
             if meta.get("repeat") in ("stub", "note"):
@@ -572,7 +662,8 @@ class DaemonState:
                    "reason": resp.get("reason") or resp.get("error"),
                    "fallback": fallback,
                    "session": msg.get("session"),
-                   "harness": msg.get("harness")}
+                   "harness": msg.get("harness"),
+                   "files": list(meta.get("edited_files") or []) or None}
             try:
                 self.journal.parent.mkdir(parents=True, exist_ok=True)
                 with self.journal.open("a", encoding="utf-8") as fh:
@@ -653,6 +744,13 @@ class DaemonState:
                 "patch_misses_caught": self.by_intent.get("patch_check_miss", 0),
                 "region_replies": self.region_replies,
                 "key_edits": self.by_intent.get("edit_key", 0),
+                # Path resolution and ownership (`ozagia.intent.paths`,
+                # `ozagia.core.owners`): answers that named existing paths
+                # for a missing one, warnings about another live session's
+                # uncommitted edits, and the sessions live now.
+                "path_suggestions": self.path_suggestions,
+                "ownership_warnings": self.ownership_warnings,
+                "live_sessions": self.owners.live_sessions(),
                 # Background jobs (`ozagia.daemon.jobs`): started, waits and
                 # the seconds spent in them, and waits that returned new
                 # output or the job's end (each one a poll the agent did not

@@ -27,10 +27,13 @@ class IntentError(Exception):
     """A tool error to report to the model (handled, `is_error`)."""
 
     def __init__(self, message: str, *, keys: list[str] | None = None,
-                 intent: str | None = None):
+                 intent: str | None = None,
+                 meta: dict[str, Any] | None = None):
         super().__init__(message)
         self.keys = list(keys or [])
         self.intent = intent
+        # Added to the answer's meta (counters such as `path_suggestions`).
+        self.meta = dict(meta or {})
 
 
 class Unhandled(Exception):

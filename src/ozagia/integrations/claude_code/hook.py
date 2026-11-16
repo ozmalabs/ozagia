@@ -23,6 +23,12 @@ the version implemented against).
   `delivered`). A shell read with a `cd` is not tracked: Claude Code's
   shell keeps its directory, so PreToolUse and PostToolUse would resolve
   it differently.
+- `PreToolUse` for `Read` of a path that does not exist: deny with the
+  nearest existing paths (`[ozagia] no such file <p>; did you mean: ...`)
+  when there are any; otherwise as below.
+- `PreToolUse` for `Edit`, `MultiEdit` and `Write`: the warnings about
+  another live session's uncommitted edits of the file (`owner_check`) as
+  `additionalContext`. Never denies.
 - `SessionStart`: `session_event` `compact` (source "compact") or `start`
   (startup, resume, clear), with `compaction_hook: true`, which clears the
   session's read ledger and confirms that compaction is reported;
@@ -178,6 +184,13 @@ def handle(payload: dict[str, Any], root: Path) -> dict[str, Any] | None:
     if event == "PreToolUse" and tool_name == "Read":
         key = node_key(tool_input.get("file_path"))
         if key is None:
+            line = hookcore.missing_path_line(
+                root, tool_input.get("file_path"),
+                cwd if isinstance(cwd, str) else None)
+            if line:
+                return _pre_output("deny", "The file does not exist, so the Read "
+                                           "did not run. Pick one of these paths "
+                                           "(or check the name):\n" + line)
             mapped = map_tool(tool_name, tool_input, cwd)
             stub = (hookcore.repeat_stub(root, HARNESS, session, sub, *mapped)
                     if mapped else None)
@@ -192,6 +205,16 @@ def handle(payload: dict[str, Any], root: Path) -> dict[str, Any] | None:
         label = ("ozagia read error for" if resp.get("is_error")
                  else "ozagia answered this Read from the code graph; the built-in Read did not run. Node")
         return _pre_output("deny", f"{label} {key}:\n{resp.get('output') or ''}")
+
+    if event == "PreToolUse" and tool_name in ("Edit", "MultiEdit", "Write"):
+        path = tool_input.get("file_path")
+        warnings = hookcore.owner_warnings(
+            root, HARNESS, session, [path] if isinstance(path, str) and path else [],
+            cwd if isinstance(cwd, str) else None)
+        if not warnings:
+            return None
+        return {"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                                       "additionalContext": "\n".join(warnings)}}
 
     if event == "PostToolUse":
         mapped = map_tool(tool_name, tool_input, cwd)

@@ -64,12 +64,31 @@ _UNHANDLED_ERRORS = ("is binary", "not valid UTF-8", "exceeds", "declares encodi
 
 def _target(memory: Any, path: Any):
     from ozagia.edit.txn import in_git_dir
-    target = resolve(root_of(memory), path)
+    from ozagia.intent.paths import with_suggestions
+    try:
+        target = resolve(root_of(memory), path)
+    except IntentError as e:
+        raise with_suggestions(memory, path, e) from None
     if in_state_dir(root_of(memory), target.path):
         raise IntentError(f"{path} is in ozagia's state directory; refused")
     if in_git_dir(target.rel):
         raise IntentError(f"{path} is inside .git; refused")
     return target
+
+
+def _not_found(memory: Any, path: Any, target: Any) -> IntentError:
+    """`File <path> not found`, with the suggestion line when a close path
+    exists (`ozagia.intent.paths`)."""
+    from ozagia.intent.paths import candidates, suggestion_line
+    message = f"File {target.display} not found"
+    if target.path.exists():
+        return IntentError(message)
+    line = suggestion_line(str(path), candidates(root_of(memory), path,
+                                                 memory=memory))
+    if not line:
+        return IntentError(message)
+    return IntentError(f"{message}\n{line}", intent="edit_missing",
+                       meta={"path_suggestions": 1})
 
 
 def warning_line(error: str) -> str:
@@ -104,7 +123,7 @@ def handle_edit(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
         return res
     target = _target(memory, path)
     if not target.path.is_file():
-        raise IntentError(f"File {target.display} not found")
+        raise _not_found(memory, path, target)
     if old == new:
         raise IntentError(IDENTICAL)
     if inp.get("_preflight"):

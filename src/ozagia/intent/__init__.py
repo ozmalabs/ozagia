@@ -143,7 +143,8 @@ def permission_request(memory: Any, tool: str, inp: dict[str, Any]
 
 def handle(memory: Any, tool: str, input: dict[str, Any], *,
            harness: str = "opencode", session: str | None = None,
-           preflight: bool = False, state: Any = None) -> dict[str, Any]:
+           preflight: bool = False, state: Any = None,
+           owners: Any = None) -> dict[str, Any]:
     """Carry out one captured tool call (see the module docstring).
 
     With `preflight`, a mutating tool's handler (edit, write, shell) runs
@@ -160,7 +161,15 @@ def handle(memory: Any, tool: str, input: dict[str, Any], *,
     `SessionState.ack`), and a repeat of an unchanged range gets a stub or
     a note by its policy (`meta.repeat` is "stub" or "note",
     `meta.bytes_saved` an estimate). A `write` replacing a file the ledger
-    holds only part of gets an `[ozagia] warning:` line."""
+    holds only part of gets an `[ozagia] warning:` line.
+
+    Edits are journaled with (harness, session) (`ozagia.core.owners`);
+    a handled edit or write names its file in `meta.edited_files`. With
+    `owners` (`ozagia.core.owners.Owners`), an edit of a file another live
+    session edited and left uncommitted gets an `[ozagia] warning:` line
+    (`meta.ownership_warnings`). A read or edit of a missing path answers
+    with the nearest existing paths when there are any
+    (`ozagia.intent.paths`, `meta.path_suggestions`)."""
     t0 = time.perf_counter()
     meta: dict[str, Any] = {"intent": str(tool), "keys": []}
     body: dict[str, Any]
@@ -210,10 +219,26 @@ def handle(memory: Any, tool: str, input: dict[str, Any], *,
         if state is not None and tool == "write" and state.policy != "off":
             from ozagia.intent.ledger import partial_view
             partial = partial_view(memory, state, input)
-        res = handler(memory, input)
+        edit_rel = (_edit_rel(memory, tool, input)
+                    if tool in ("edit", "write") else None)
+        warned: list[str] = []
+        if owners is not None and edit_rel:
+            try:
+                warned = owners.warnings(memory.journal, edit_rel, harness,
+                                         session)
+            except Exception:  # noqa: BLE001 - a warning is advisory
+                warned = []
+        from ozagia.core.owners import acting
+        with acting(memory, harness, session):
+            res = handler(memory, input)
         output = res["output"]
         if partial:
             output += "\n" + partial
+        if warned:
+            output += "".join("\n" + w for w in warned)
+            meta["ownership_warnings"] = len(warned)
+        if edit_rel:
+            meta["edited_files"] = [edit_rel]
         if res.get("bytes_saved"):
             meta["bytes_saved"] = int(res["bytes_saved"])
         if state is not None and not preflight:
@@ -237,6 +262,7 @@ def handle(memory: Any, tool: str, input: dict[str, Any], *,
             except Exception:  # noqa: BLE001 - no request: the built-in runs
                 body["permission"] = None
         meta.update(intent=e.intent or f"{tool}_error", keys=e.keys)
+        meta.update(e.meta)
     except Unhandled as e:
         if state is not None and not preflight:
             state.tick(then_after=True)
@@ -250,6 +276,116 @@ def handle(memory: Any, tool: str, input: dict[str, Any], *,
     meta["ms"] = _ms(t0)
     body["meta"] = meta
     return body
+
+
+def _edit_rel(memory: Any, tool: str, inp: dict[str, Any]) -> str | None:
+    """The root-relative file an edit or write names, or None."""
+    from ozagia.intent.common import resolve, root_of
+    path = inp.get("path", inp.get("filePath"))
+    try:
+        if tool == "edit" and isinstance(inp.get("key"), str) and not path:
+            from ozagia.edit.key_edit import key_file
+            path = key_file(inp["key"].strip())
+        if not isinstance(path, str) or not path:
+            return None
+        return resolve(root_of(memory), path).rel or None
+    except Exception:  # noqa: BLE001 - the handler reports a bad path
+        return None
+
+
+# A built-in edit of a file the graph does not index counts as written by
+# the call when the file changed this recently (`_builtin_edits`).
+RECENT_WRITE_S = 60.0
+
+
+def _named_files(memory: Any, tool: str, inp: dict[str, Any]) -> list[str]:
+    """Root-relative files a built-in edit, write or patch names."""
+    import os
+    from ozagia.intent.common import resolve, root_of
+    root = root_of(memory)
+    base = inp.get("workdir")
+    base = base if isinstance(base, str) and os.path.isdir(base) else None
+    raw: list[str] = []
+    if tool in ("edit", "write"):
+        path = inp.get("path", inp.get("filePath"))
+        if isinstance(path, str) and path:
+            raw.append(path)
+    elif tool == "patch":
+        from ozagia.intent.patch import parse_patch, patch_text
+        text = patch_text(inp)
+        if text:
+            try:
+                parsed = parse_patch(text)
+            except Exception:  # noqa: BLE001 - nothing to name
+                parsed = None
+            for op in (parsed.ops if parsed else []):
+                raw.append(op.path)
+                if op.move_to:
+                    raw.append(op.move_to)
+    out: list[str] = []
+    from pathlib import Path
+    for p in raw:
+        try:
+            rel = resolve(root, p, base=Path(base) if base else None).rel
+        except Exception:  # noqa: BLE001 - outside the root: not ours
+            continue
+        if rel and rel not in out:
+            out.append(rel)
+    return out
+
+
+def _builtin_edits(memory: Any, tool: str, inp: dict[str, Any],
+                   pending: list[str]) -> list[str]:
+    """The files a built-in edit, write or patch changed: those it names
+    that the graph sees as changed, or (for files the graph does not
+    index) that were written in the last RECENT_WRITE_S seconds."""
+    from ozagia.core.keys import file_key
+    from ozagia.intent.common import root_of
+    root = root_of(memory)
+    changed = set(pending)
+    out = []
+    for rel in _named_files(memory, tool, inp):
+        if rel in changed:
+            out.append(rel)
+            continue
+        if memory.node_by_key(file_key(rel)) is not None:
+            continue
+        try:
+            mtime = (root / rel).stat().st_mtime
+        except OSError:
+            continue
+        if time.time() - mtime <= RECENT_WRITE_S:
+            out.append(rel)
+    return out
+
+
+def _path_lines(memory: Any, tool: str, inp: dict[str, Any], output: Any,
+                ) -> list[str]:
+    """Suggestion lines for a built-in read or edit of a missing path, and
+    for the "No such file or directory" paths of a shell output."""
+    import os
+    from ozagia.intent.common import is_node_key, root_of
+    from ozagia.intent.paths import missing_paths, suggest
+    root = root_of(memory)
+    lines: list[str] = []
+    if tool in ("read", "edit"):
+        path = inp.get("path", inp.get("filePath"))
+        if isinstance(path, str) and path and not is_node_key(path):
+            from ozagia.core.structured import parse_key
+            if parse_key(path) is None:
+                wd = inp.get("workdir")
+                base = wd if isinstance(wd, str) and os.path.isdir(wd) else None
+                line = suggest(root, path, base=base, memory=memory)
+                if line:
+                    lines.append(line)
+    elif tool == "shell":
+        wd = _cd_dir(inp)
+        base = wd if isinstance(wd, str) and os.path.isdir(wd) else None
+        for p in missing_paths(output):
+            line = suggest(root, p, base=base, memory=memory)
+            if line and line not in lines:
+                lines.append(line)
+    return lines
 
 
 # Intents whose output is not lines of a file range.
@@ -471,11 +607,33 @@ def after(memory: Any, tool: str, input: dict[str, Any], output: Any, *,
                 lines.extend(miss)
                 meta["region_replies"] = 1
                 meta["intent"] = "after_edit_miss"
+        try:
+            suggested = _path_lines(memory, tool, inp, output)
+        except Exception:  # noqa: BLE001 - an optional addition
+            suggested = []
+        if suggested:
+            lines.extend(suggested)
+            meta["path_suggestions"] = len(suggested)
+            if meta["intent"] == "after_none":
+                meta["intent"] = "after_path_missing"
         if changes:
             meta["intent"] = ("after_edit_miss" if meta.get("region_replies")
                               else "after_refresh")
             pending = memory.pending_changes()
             meta["changed_files"] = len(pending)
+            if (tool in _WRITING_TOOLS and isinstance(session, str) and session
+                    and req_meta.get("builtin_error") is not True):
+                edited = _builtin_edits(memory, tool, inp, pending)
+                if edited:
+                    from ozagia.core.owners import acting
+                    try:
+                        with acting(memory, harness, session):
+                            memory.journal_append(
+                                "builtin_edit", f"{tool} {', '.join(edited)}",
+                                f"{harness} built-in {tool}", files=edited)
+                    except OSError as e:
+                        lines.append(tag(f"warning: journal not written: {e}"))
+                    meta["edited_files"] = edited
             if len(pending) > MAX_REFRESH_FILES:
                 lines.append(tag("many files changed; graph refresh deferred"))
             elif pending:

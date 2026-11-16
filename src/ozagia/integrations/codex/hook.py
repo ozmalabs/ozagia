@@ -24,6 +24,12 @@ reference (https://learn.chatgpt.com/docs/hooks, see docs/codex.md).
   that matches never waits for the daemon. A patch that does not parse, one
   with `*** Environment ID:` (for another environment's files), or any
   checker error, prints nothing.
+- `PreToolUse` for `apply_patch` that matches: the warnings about another
+  live session's uncommitted edits of its files (`owner_check`, a running
+  daemon only) as `additionalContext`. Never denies.
+- `PostToolUse` for `Bash` whose output says "No such file or directory"
+  (a `sed`, `cat`, `head`, `nl` of a missing path): the daemon's `after`
+  adds the nearest existing paths (`ozagia.intent.paths`).
 - `PreToolUse` for `Bash`, a `pgrep` or `ps -p` command: when a daemon
   answers and the command is about one of its background jobs
   (`ozagia.daemon.jobs.capture_ps`), deny it with the answer (the
@@ -248,6 +254,24 @@ def pre_apply_patch(payload: dict[str, Any], root: Path,
     return _deny(reason[:PATCH_REPLY_MAX_CHARS])
 
 
+def patch_files(tool_input: dict[str, Any]) -> list[str]:
+    """The paths an apply_patch names (targets of moves too), or []."""
+    from ozagia.intent.patch import parse_patch
+    text = patch_text(tool_input)
+    if not text:
+        return []
+    try:
+        parsed = parse_patch(text)
+    except Exception:  # noqa: BLE001 - Codex reports a bad patch itself
+        return []
+    out: list[str] = []
+    for op in parsed.ops:
+        for p in (op.path, op.move_to):
+            if p and p not in out:
+                out.append(p)
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # events
 # --------------------------------------------------------------------------- #
@@ -340,7 +364,13 @@ def handle(payload: dict[str, Any], root: Path) -> dict[str, Any] | None:
         return _deny(stub) if stub else None
 
     if event == "PreToolUse" and tool_name == "apply_patch":
-        return pre_apply_patch(payload, root, tool_input)
+        denied = pre_apply_patch(payload, root, tool_input)
+        if denied is not None:
+            return denied
+        warnings = hookcore.owner_warnings(
+            root, HARNESS, session, patch_files(tool_input),
+            cwd if isinstance(cwd, str) else None)
+        return _context("PreToolUse", "\n".join(warnings)) if warnings else None
 
     if event == "PostToolUse":
         mapped = map_tool(tool_name, tool_input, cwd if isinstance(cwd, str) else None)
