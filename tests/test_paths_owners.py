@@ -158,12 +158,22 @@ def test_absolute_path_into_a_sibling_worktree(repo, wt):
     res = I.handle(mem_wt, "read", {"filePath": raw})
     assert res["handled"] and res["is_error"]
     assert "outside the project root" in res["output"]
-    assert (f"[ozagia] no such file {raw}; did you mean: "
+    # The file exists (in the sibling worktree): it is not called missing.
+    assert (f"[ozagia] {raw} is in worktree main; this checkout has: "
             f"{wt.resolve()}/pkg/mod.py (file:pkg/mod.py)") in res["output"]
+    assert "no such file" not in res["output"]
     assert res["meta"]["path_suggestions"] == 1
-    # A missing absolute path in the sibling: this root's file too.
+    # The same through a served edit.
+    res = I.handle(mem_wt, "edit", {"filePath": raw, "oldString": "x + 1",
+                                    "newString": "x + 2"})
+    assert res["is_error"] and f"{raw} is in worktree main; this checkout has: " in (
+        res["output"])
+    # A missing absolute path in the sibling: this root's file too, and that
+    # one is "no such file".
     raw2 = str(repo / "pkg" / "mdo.py")
     assert PA.candidates(wt, raw2)[0].path == wt.resolve() / "pkg" / "mod.py"
+    res = I.handle(mem_wt, "read", {"filePath": raw2})
+    assert f"[ozagia] no such file {raw2}; did you mean: " in res["output"]
 
 
 def test_missing_paths_in_shell_output():
@@ -402,8 +412,14 @@ def test_dev_who_mcp(repo, mem):
                               "new_string": "x + 5", "apply": True}}})
     assert mem.journal_recent(1)[0]["session"] == {"harness": "mcp",
                                                    "id": f"pid{os.getpid()}"}
-    # The other session sees the MCP edit as live (this process runs).
-    assert "(mcp pid" in _edit(st, "ses_beta", "x + 5", "x + 6")["output"]
+    # Another session sees the MCP edit as live (this process runs), named
+    # as the MCP server.
+    warn = st.owners.warnings(mem.journal, "pkg/mod.py", "kiro", "k-other")
+    assert any(f"(MCP server pid {os.getpid()}, " in w for w in warn)
+    # A session active within MCP_SELF_WINDOW_S of the MCP edit is taken to
+    # be the one driving the MCP server: no warning about it (the heuristic).
+    out = _edit(st, "ses_beta", "x + 5", "x + 6")["output"]
+    assert "MCP server pid" not in out and "(opencode ses_alph, " in out
 
 
 # --------------------------------------------------------------------------- #
@@ -588,3 +604,147 @@ def test_codex_failed_cat_gets_candidates_from_a_real_daemon_state(repo, mem):
                         "input": {"command": "cat pkg/mdo.py", "workdir": str(repo)},
                         "output": "cat: pkg/mdo.py: No such file or directory"})
     assert "did you mean: pkg/mod.py (file:pkg/mod.py)" in resp["append"]
+
+
+# --------------------------------------------------------------------------- #
+# review fixes: SessionEnd, MCP self-warnings, branch switch, cost, dev_recent,
+# path_check under a busy graph lock
+# --------------------------------------------------------------------------- #
+def _end(st, session, harness="claude"):
+    msg = {"op": "session_event", "event": "end", "harness": harness,
+           "session": session}
+    resp = st.dispatch(msg)
+    st.record(msg, resp, 1.0)
+    assert resp["ok"], resp
+
+
+def test_session_end_ends_liveness_also_after_a_restart(repo, mem):
+    st = _state(repo, mem)
+    _edit(st, "c-old", "x + 1", "x + 2", harness="claude")
+    assert st.owners.live("claude", "c-old")
+    _end(st, "c-old")
+    assert not st.owners.live("claude", "c-old")
+    # `/clear`: the next session id is not warned about the ended one.
+    resp = _edit(st, "c-new", "x + 2", "x + 3", harness="claude")
+    assert "warning:" not in resp["output"]
+    # The journaled end is honoured when the daemon starts again.
+    st2 = _state(repo, mem)
+    assert not st2.owners.live("claude", "c-old")
+    assert st2.owners.live("claude", "c-new")
+    assert ("claude", "c-old") not in O.seen_sessions(st.journal)
+
+
+def test_mcp_self_window_heuristic(repo, mem):
+    st = _state(repo, mem)
+    mem.edit_session = O.mcp_session()
+    try:
+        mem.journal_append("span_edit", "t", "s", files=["pkg/mod.py"])
+    finally:
+        mem.edit_session = None
+    (repo / "pkg" / "mod.py").write_text(MOD + "# dirty\n")
+    t = mem.journal_recent(1)[0]["epoch"]
+    key = ("claude", "c1")
+    # Last request a minute before the MCP edit: another agent's server.
+    st.owners.seen[key] = time.time()
+    st.owners.requests[key] = O.deque([t - 60])
+    (w,) = st.owners.warnings(mem.journal, "pkg/mod.py", *key)
+    assert f"(MCP server pid {os.getpid()}, " in w
+    # A request within MCP_SELF_WINDOW_S (after the edit, too): taken to be
+    # the session driving that MCP server.
+    for dt in (O.MCP_SELF_WINDOW_S - 1, -(O.MCP_SELF_WINDOW_S - 1)):
+        st.owners.requests[key] = O.deque([t - 60, t + dt])
+        assert st.owners.warnings(mem.journal, "pkg/mod.py", *key) == []
+
+
+def test_committed_check_requires_head_to_be_an_ancestor(repo):
+    h0 = _git(repo, "rev-parse", "HEAD").strip()
+    _git(repo, "checkout", "-q", "-b", "side")
+    _write(repo / "pkg" / "mod.py", MOD + "# side\n")
+    _git(repo, "commit", "-q", "-am", "side")
+    side = _git(repo, "rev-parse", "HEAD").strip()
+    _git(repo, "checkout", "-q", "main")
+    _write(repo / "pkg" / "mod.py", MOD + "# main\n")
+    _git(repo, "commit", "-q", "-am", "main touches mod")
+    _write(repo / "pkg" / "mod.py", MOD + "# main\n# dirty\n")
+    state = O.git_state(repo, "pkg/mod.py")
+    assert state["dirty"] is True
+    edit = {"epoch": time.time(), "head": side}
+    # `side..HEAD` holds main's commit, but `side` is off HEAD's history:
+    # not trusted, so the edit counts as uncommitted (warned).
+    assert O._committed(repo, "pkg/mod.py", edit, state) is False
+    # From an ancestor the range is trusted.
+    assert O._committed(repo, "pkg/mod.py", {**edit, "head": h0}, state) is True
+
+
+def test_no_journal_read_without_another_live_session(repo, mem, monkeypatch):
+    st = _state(repo, mem)
+    _edit(st, "solo", "x + 1", "x + 2")
+    calls = []
+    real = O.edits
+    monkeypatch.setattr(O, "edits", lambda *a, **k: calls.append(a) or real(*a, **k))
+    assert st.owners.warnings(mem.journal, "pkg/mod.py", "opencode", "solo") == []
+    assert calls == []
+    # With a second live session the journal is read.
+    st.owners.touch("claude", "other")
+    st.owners.warnings(mem.journal, "pkg/mod.py", "opencode", "solo")
+    assert len(calls) == 1
+
+
+def test_edits_prefilters_lines_on_the_path(repo, mem, monkeypatch):
+    mem.edit_session = {"harness": "claude", "id": "c1"}
+    try:
+        for i in range(50):
+            mem.journal_append("builtin_edit", "t", "s", files=[f"pkg/other{i}.py"])
+        mem.journal_append("builtin_edit", "t", "s", files=["pkg/mod.py"])
+    finally:
+        mem.edit_session = None
+    parsed = []
+    real = json.loads
+    monkeypatch.setattr(O.json, "loads", lambda s, *a, **k: parsed.append(s) or real(s))
+    got = O.edits(mem.journal, "pkg/mod.py")
+    assert [e["files"] for e in got] == [["pkg/mod.py"]]
+    assert len(parsed) == 1
+
+
+def test_dev_recent_leaves_out_builtin_edits(repo, mem):
+    from ozagia.integrations.mcp.server import DevMemoryServer
+    mem.journal_append("decision", "t", "use helper")
+    st = _state(repo, mem)
+    (repo / "pkg" / "mod.py").write_text(MOD.replace("x + 1", "x + 9"))
+    resp = st.dispatch({"op": "after", "tool": "edit", "harness": "claude",
+                        "session": "c1",
+                        "input": {"path": "pkg/mod.py", "oldString": "x + 1",
+                                  "newString": "x + 9"}, "output": "ok"})
+    assert resp["meta"]["edited_files"] == ["pkg/mod.py"]
+    assert mem.journal_recent(1)[0]["kind"] == "builtin_edit"
+    server = DevMemoryServer(mem)
+    out = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                         "params": {"name": "dev_recent", "arguments": {"n": 5}}})
+    entries = json.loads(out["result"]["content"][0]["text"])["entries"]
+    assert [e["kind"] for e in entries] == ["decision"]
+
+
+def test_path_check_does_not_wait_on_a_busy_graph_lock(repo, mem):
+    st = _state(repo, mem)
+    msg = {"op": "path_check", "path": "lib/deep/use.py", "cwd": str(repo)}
+    resp = st.dispatch(msg)
+    assert resp["graph"] is True
+    assert any(c["why"] == "same name" for c in resp["candidates"])
+    assert st.lock.acquire(timeout=1)       # a reindex holds the lock
+    try:
+        t0 = time.monotonic()
+        resp = st.dispatch(msg)
+        assert time.monotonic() - t0 < 1.0
+    finally:
+        st.lock.release()
+    assert resp["ok"] and resp["graph"] is False
+    assert not any(c["why"] == "same name" for c in resp["candidates"])
+    # A file-system candidate still comes back.
+    resp2 = None
+    assert st.lock.acquire(timeout=1)
+    try:
+        resp2 = st.dispatch({"op": "path_check", "path": "pkg/mdo.py",
+                             "cwd": str(repo)})
+    finally:
+        st.lock.release()
+    assert resp2["candidates"][0]["rel"] == "pkg/mod.py"

@@ -53,6 +53,7 @@ glibc) and macOS (arm64, x64). `ozagia self check --tui` verifies the install;
 | Harness | `ozagia agent`: an OpenCode session with the daemon and plugin set up and torn down for you ([docs/harness.md](docs/harness.md)); `python -m ozagia.harness.native`: a small agent loop over any OpenAI-compatible API, with or without the graph ([docs/native_loop.md](docs/native_loop.md)) | implemented; the eval's live runs use the same pieces |
 | Infrastructure | Opt-in source-only Terraform, Kubernetes and related infrastructure graph/context ([docs/iac_context.md](docs/iac_context.md)) | experimental, partial static analysis |
 | SRE/IaC operations | Opt-in job waiting, nested command/network relays, ops receipts, supplied live-state snapshots, offline IaC checks and dry-run preflight ([docs/sre_operations.md](docs/sre_operations.md), [docs/relay.md](docs/relay.md)) | experimental; live paths default off |
+| Workspace checks | `ozagia-worktree`, `ozagia-resources`, `ozagia-files`: worktree/branch drift and commit/merge/push policy, host/disk admission checks, created-file ledger and Markdown routing ([docs/worktree.md](docs/worktree.md), [docs/resources.md](docs/resources.md), [docs/files.md](docs/files.md)) | read-only; cleanup is dry-run |
 
 ## Quick start (from source)
 

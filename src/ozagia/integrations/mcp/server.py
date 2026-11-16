@@ -498,8 +498,11 @@ _TOOLS: list[dict[str, Any]] = [
             "edit count, first and last edit), whether each session is live "
             "(seen by the ozagia daemon in the last 15 minutes), and whether "
             "its edits are committed (the file is clean, or committed after "
-            "the edit). Check it before editing a file other sessions may "
-            "be changing in the same checkout."),
+            "the edit). Committed is judged per file, not per hunk: a partial "
+            "commit of the file (git add -p) by anyone counts the edit as "
+            "committed even if its hunk is still dirty. Check it before "
+            "editing a file other sessions may be changing in the same "
+            "checkout."),
         "inputSchema": _schema({
             "path": {"type": "string",
                      "description": "Repo-relative or absolute file path."},
@@ -507,7 +510,8 @@ _TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "dev_recent",
-        "description": "Recent dev-journal entries (decisions/verifications).",
+        "description": ("Recent dev-journal entries (decisions/verifications; "
+                        "built-in edits journaled for dev_who are left out)."),
         "inputSchema": _schema({
             "n": {"type": "integer", "default": 20},
         }),
@@ -1352,7 +1356,7 @@ class DevMemoryServer:
             command=a.get("command"), exit_code=a.get("exit_code"))}
 
     def _recent(self, a: dict[str, Any]) -> Any:
-        return {"ok": True, "entries": self.mem.journal_recent(a.get("n", 20))}
+        return {"ok": True, "entries": self.mem.journal_decisions(a.get("n", 20))}
 
     # -- background jobs (in the daemon) ----------------------------------- #
     def _job(self, op: str, fields: dict[str, Any]) -> Any:

@@ -76,6 +76,7 @@ HOOKS: tuple[tuple[str, str, str, str | None], ...] = (
     ("ozagia-session-brief", "SessionStart", "agentSpawn", None),
     ("ozagia-pre-shell", "PreToolUse", "preToolUse", "shell"),
     ("ozagia-pre-read", "PreToolUse", "preToolUse", "read"),
+    ("ozagia-pre-write", "PreToolUse", "preToolUse", "write"),
     ("ozagia-post-read", "PostToolUse", "postToolUse", "read"),
     ("ozagia-post-write", "PostToolUse", "postToolUse", "write"),
     ("ozagia-post-shell", "PostToolUse", "postToolUse", "shell"),

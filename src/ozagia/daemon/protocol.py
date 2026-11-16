@@ -82,9 +82,11 @@ Requests (`op`):
     {"id": 9, "op": "path_check", "path": "...", "cwd"?: "..."}
       -> {"id": 9, "ok": true, "exists": bool, "line": "[ozagia] no such
           file ...; did you mean: ..." | "", "candidates": [{"path", "rel",
-          "key", "why"}], "meta": {...}}
+          "key", "why"}], "graph"?: bool, "meta": {...}}
       For a hook's PreToolUse read of a path: the nearest existing paths
-      when it is missing (`ozagia.intent.paths`). Changes nothing.
+      when it is missing (`ozagia.intent.paths`). Changes nothing. Never
+      waits on the graph lock: while it is held (a reindex), the answer
+      has no graph candidates or keys (`graph: false`).
 
     {"id": 10, "op": "owner_check", "harness", "session", "paths": [...],
      "cwd"?: "..."}

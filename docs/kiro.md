@@ -133,6 +133,7 @@ The hook file:
      "timeout": 20},
     {"name": "ozagia-pre-shell",  "trigger": "PreToolUse",  "matcher": "shell", ...},
     {"name": "ozagia-pre-read",   "trigger": "PreToolUse",  "matcher": "read",  ...},
+    {"name": "ozagia-pre-write",  "trigger": "PreToolUse",  "matcher": "write", ...},
     {"name": "ozagia-post-read",  "trigger": "PostToolUse", "matcher": "read",  ...},
     {"name": "ozagia-post-write", "trigger": "PostToolUse", "matcher": "write", ...},
     {"name": "ozagia-post-shell", "trigger": "PostToolUse", "matcher": "shell", ...},
