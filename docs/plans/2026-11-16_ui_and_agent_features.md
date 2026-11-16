@@ -546,9 +546,11 @@ A refusal is structured, not a traceback:
 #### Enforcement and own OOM
 
 - Limits: memory, process count, wall time, optional per-file size, and a
-  best-effort disk budget for the job's worktree/cwd.
+  disk write budget for the job's process group/cgroup.
 - Mechanism: cgroup v2 `memory.max`/`pids.max` when delegated; otherwise
-  `resource.setrlimit` plus a watchdog sampling RSS and the filesystem.
+  `resource.setrlimit` plus a watchdog sampling RSS and the filesystem. Disk
+  writes are attributed from cgroup `io.stat` when available, otherwise from
+  the group's `/proc/<pid>/io`; the free-space delta is the fallback.
 - Kill order: SIGTERM to the verified process group, grace period, SIGKILL.
   Verify the PID start token and process-group ownership first, exactly as
   jobs do today. A stale token is never signalled.
@@ -557,9 +559,12 @@ A refusal is structured, not a traceback:
   shell or desktop. Restore the value for reused processes where possible.
 - Keep an OS reserve (memory/disk). If the host is already below the reserve,
   refuse new work rather than starting something that will fail.
-- Disk enforcement is best-effort: a process can write through paths ozagia
-  cannot attribute. The watchdog stops a job when its worktree/filesystem
-  crosses the reserve and reports the evidence; it does not claim exact usage.
+- Disk enforcement is exact where the kernel exposes attribution: a job's
+  cgroup `io.stat`, or its process group's `/proc/<pid>/io`, counts the bytes
+  the group sent to storage (not retained blocks). A process can still write
+  through paths ozagia cannot attribute, and the io controller may not be
+  delegated; then the watchdog uses the worktree/filesystem free-space delta
+  and reports host pressure rather than exact per-job usage.
 - Feed a `resource_event` back to the originating session: job id, session,
   command class, peak/limit, host headroom, action taken, and the suggested
   retry. The daemon adds a `[ozagia]` line; MCP `job_wait`/`job_log` and the
@@ -1684,11 +1689,11 @@ bundle) against OpenCode 2.3.0. A concurrent TUI-brand merge added
 updated for it.
 
 Not yet: the live OpenCode Desktop smoke test; add-in apply/mutation controls
-and an executable task launcher; exact per-job disk accounting; command-derived
-path extraction for `patch`/`shell`; live/multi-model review; model/tool
-adapters and an injected test runner; rewiring legacy loaders to
-`ozagia/config.toml`; action apply UI; live security-tool matrix/DAST; library
-hints in code review/repo scan and non-handled edits.
+and an executable task launcher; command-derived path extraction for
+`patch`/`shell`; live/multi-model review; model/tool adapters and an injected
+test runner; rewiring legacy loaders to `ozagia/config.toml`; action apply UI;
+live security-tool matrix/DAST; library hints in code review/repo scan and
+non-handled edits.
 
 ### Parallel workstreams (2026-11-16)
 
@@ -1841,9 +1846,10 @@ merged as `a9b95a3` (`504cff0`); `task-executor` merged as `33bfcfa`
 (`93f1f69`). Each passed its targeted suite and a full suite on its own tree;
 the merged tree passed the final suite (`4241 passed, 21 skipped`) and ruff.
 Wave 9 is complete; the live Desktop smoke test and model-provider adapters
-remain host/provider-dependent. Next tractable follow-ups are exact per-job
-disk accounting, command-derived path extraction for `patch`/`shell`, and live
-or multi-model review with an injected test runner.
+remain host/provider-dependent. Next tractable follow-ups are command-derived
+path extraction for `patch`/`shell`, and live or multi-model review with an
+injected test runner; exact per-job disk accounting is the wave 10
+`feat/disk-accounting` workstream.
 
 Known follow-ups from the config migration: `[security]` in
 `ozagia/config.toml` is reported as unmapped until its loader moves; the

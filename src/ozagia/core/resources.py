@@ -5,8 +5,11 @@ keeps a bounded history of observed runs, and answers whether a requested
 job/task/worktree is likely to fit. Enforcement has two layers: child rlimits
 (POSIX ``resource``) plus a watchdog that samples a verified process group and
 the filesystem, and a per-job Linux cgroup v2 (``core.cgroup``) that the daemon
-prefers when the hierarchy is delegated. The child ``oom_score_adj`` hint is
-best-effort.
+prefers when the hierarchy is delegated. Disk writes are attributed from the
+kernel's own counters: a cgroup's ``io.stat`` when the job has one, otherwise
+the sum of its group members' ``/proc/<pid>/io`` ``write_bytes``. Those count
+bytes sent to storage, not retained blocks. The child ``oom_score_adj`` hint
+is best-effort.
 
 The watchdog never signals a process itself. Callers inject a killer, and a
 watchdog only calls it while its injected verifier says the process group is
@@ -82,6 +85,8 @@ ENFORCEMENT_MECHANISM = "rlimit+watch"
 DEFAULT_OOM_SCORE_ADJ = 500
 _RESOURCE_LIMIT_FIELDS = ("memory_mb", "pids", "disk_mb", "wall_s", "file_mb")
 _MAX_RESOURCE_EVENTS = 50
+# A process group or cgroup can span many devices; keep the JSON sample small.
+MAX_IO_DEVICES = 16
 
 
 def _now() -> str:
@@ -340,6 +345,41 @@ def _proc_rss_mb(pid: int) -> float | None:
         return None
 
 
+def _proc_io(pid: int) -> dict[str, float] | None:
+    """Storage bytes for one process from ``/proc/<pid>/io``, or ``None``.
+
+    ``read_bytes`` and ``write_bytes`` are the kernel's count of bytes this
+    process caused to be fetched from, or sent to, the storage layer. They are
+    not allocated blocks: a rewrite of the same block counts again, and bytes
+    still in the page cache may not appear yet. The file is best-effort: a
+    missing procfs, a permission failure or a malformed line means no
+    attribution, never an error.
+    """
+    try:
+        text = (PROC_ROOT / str(pid) / "io").read_text(
+            encoding="ascii", errors="replace")
+    except OSError:
+        return None
+    values: dict[str, int] = {}
+    for line in text.splitlines():
+        key, _, raw = line.partition(":")
+        if key.strip() not in {"read_bytes", "write_bytes"}:
+            continue
+        try:
+            values[key.strip()] = int(raw.strip())
+        except ValueError:
+            continue
+    if not values:
+        return None
+
+    def mb(name: str) -> float | None:
+        value = values.get(name)
+        return None if value is None else round(value / (1024 * 1024), 4)
+
+    return {"io_read_mb": mb("read_bytes"),
+            "io_write_mb": mb("write_bytes")}
+
+
 def _proc_command(pid: int) -> str:
     try:
         raw = (PROC_ROOT / str(pid) / "cmdline").read_bytes()
@@ -356,7 +396,11 @@ def _command_head(value: str) -> str:
 
 
 def process_usage(pid: int) -> dict[str, Any] | None:
-    """Memory and identity for one process, or ``None`` when it is gone."""
+    """Memory, identity and best-effort storage I/O for one process.
+
+    ``io_read_mb``/``io_write_mb`` come from ``/proc/<pid>/io`` and are
+    ``None`` when that file is missing or unreadable.
+    """
     stat = _proc_stat(pid)
     if stat is None or len(stat) < 22:
         return None
@@ -366,12 +410,15 @@ def process_usage(pid: int) -> dict[str, Any] | None:
         pgid = int(stat[4])
     except (ValueError, IndexError):
         return None
+    io = _proc_io(pid)
     return {
         "pid": pid,
         "ppid": ppid,
         "pgid": pgid,
         "state": state,
         "memory_mb": _proc_rss_mb(pid),
+        "io_read_mb": io.get("io_read_mb") if io else None,
+        "io_write_mb": io.get("io_write_mb") if io else None,
         "command": _command_head(_proc_command(pid)),
     }
 
@@ -389,9 +436,19 @@ def _pids() -> list[int]:
 
 
 def process_group_usage(pgid: int) -> dict[str, Any]:
-    """Aggregate RSS for the live processes in one process group."""
+    """Aggregate RSS and attributed storage I/O for one process group.
+
+    Reads ``/proc/<pid>/io`` for each live member and sums the readable ones.
+    ``disk_read_mb``/``disk_write_mb`` and ``disk_source`` (``proc.io``) are
+    present only when at least one member was readable; a permission failure
+    for one member does not discard the others. The counters are bytes sent to
+    storage, not allocated blocks.
+    """
     members: list[dict[str, Any]] = []
     total = 0.0
+    read_total = 0.0
+    write_total = 0.0
+    io_members = 0
     for pid in _pids():
         item = process_usage(pid)
         if item is None or item.get("pgid") != pgid:
@@ -399,6 +456,14 @@ def process_group_usage(pgid: int) -> dict[str, Any]:
         memory = item.get("memory_mb")
         if isinstance(memory, (int, float)):
             total += float(memory)
+        read = item.get("io_read_mb")
+        write = item.get("io_write_mb")
+        if isinstance(read, (int, float)) or isinstance(write, (int, float)):
+            io_members += 1
+            if isinstance(read, (int, float)):
+                read_total += float(read)
+            if isinstance(write, (int, float)):
+                write_total += float(write)
         members.append(item)
     command = next((m["command"] for m in members if m.get("command")), "")
     return {
@@ -406,6 +471,10 @@ def process_group_usage(pgid: int) -> dict[str, Any]:
         "process_count": len(members),
         "memory_mb": round(total, 2),
         "command": command,
+        "disk_read_mb": round(read_total, 4) if io_members else None,
+        "disk_write_mb": round(write_total, 4) if io_members else None,
+        "disk_source": "proc.io" if io_members else None,
+        "disk_processes": io_members,
         "processes": sorted(members, key=lambda m: m["pid"])[:100],
     }
 
@@ -417,9 +486,13 @@ class ResourceLimits:
     ``memory_mb`` is enforced with ``RLIMIT_AS`` and the watchdog, ``pids``
     with the watchdog (and optionally ``RLIMIT_NPROC``, which counts every
     process of the real UID), ``file_mb`` with ``RLIMIT_FSIZE``, and ``wall_s``
-    with the watchdog. ``disk_mb`` is an admission/expected-use budget and a
-    best-effort watchdog delta (a drop in filesystem free space since the
-    first sample); exact per-job disk use cannot be attributed.
+    with the watchdog. ``disk_mb`` is an admission/expected-use budget. The
+    watchdog enforces it against exact per-job write attribution when Linux
+    exposes it: the cgroup's ``io.stat`` when the job has a cgroup, otherwise
+    the sum of the group members' ``/proc/<pid>/io`` ``write_bytes``. Those
+    are bytes sent to storage, not retained blocks. When neither source is
+    readable, the watchdog falls back to a filesystem free-space delta, which
+    measures host pressure and may include other processes.
     """
 
     memory_mb: float | None = None
@@ -581,10 +654,15 @@ def describe_resource_event(event: Mapping[str, Any]) -> str:
     if kind == "wall":
         return (f"wall-time limit {event.get('limit_s')} s exceeded "
                 f"(elapsed {event.get('observed_s')} s)")
+    if kind == "disk_write":
+        return (f"disk write budget {_fmt_mb(event.get('budget_mb'))} exceeded "
+                f"({_fmt_mb(event.get('observed_mb'))} written by this job's "
+                f"{event.get('source') or 'attributed I/O'}; bytes sent to "
+                "storage, not retained blocks)")
     if kind == "disk" and event.get("budget_mb") is not None:
         return (f"disk budget {_fmt_mb(event.get('budget_mb'))} exceeded "
-                f"({_fmt_mb(event.get('observed_mb'))} written since the job "
-                "started, best-effort)")
+                f"({_fmt_mb(event.get('observed_mb'))} free-space drop since "
+                "the job started; best-effort host pressure)")
     if kind == "disk":
         return (f"disk reserve {event.get('reserve_gb')} GiB crossed "
                 f"({event.get('free_gb')} GiB free)")
@@ -605,6 +683,15 @@ class ResourceWatchdog:
     returns true. Without a verifier, the group must still report at least one
     process; jobs pass a start-token/ownership verifier so a stale or reused
     process group is never treated as the job's.
+
+    Disk writes are attributed, in order of preference, by ``disk_attributor``
+    (the job's cgroup ``stats()``, source ``cgroup.io.stat``) and by the
+    sampler's ``disk_write_mb``/``disk_source`` (``proc.io`` for the default
+    process-group sampler). Attributed bytes are exact for the sampled group
+    or cgroup as the kernel counts them, but they are bytes sent to storage,
+    not retained blocks. Only when neither source is readable does the
+    watchdog use the filesystem free-space delta as a fallback, which is host
+    pressure rather than proof that this job wrote the bytes.
     """
 
     def __init__(self, limits: ResourceLimits | Mapping[str, Any],
@@ -612,6 +699,7 @@ class ResourceWatchdog:
                  killer: Callable[[dict[str, Any]], Any] | None = None,
                  sampler: Callable[[int], Mapping[str, Any]] = process_group_usage,
                  disk_probe: Callable[[], Mapping[str, Any]] | None = None,
+                 disk_attributor: Callable[[], Mapping[str, Any] | None] | None = None,
                  path: str | Path | None = None,
                  interval_s: float = 2.0,
                  reserve_disk_gb: float = 0.0,
@@ -624,6 +712,7 @@ class ResourceWatchdog:
         self.killer = killer
         self._sampler = sampler
         self._disk_probe = disk_probe
+        self._disk_attributor = disk_attributor
         self.path = str(path) if path is not None else None
         self.interval_s = max(0.01, float(interval_s))
         self.reserve_disk_gb = max(0.0, float(reserve_disk_gb))
@@ -632,6 +721,9 @@ class ResourceWatchdog:
         self.started_at = clock()
         self.peak_memory_mb: float | None = None
         self.disk_used_mb: float | None = None
+        self.peak_disk_write_mb: float | None = None
+        self.disk_write_mb: float | None = None
+        self.disk_write_source: str | None = None
         self._disk_baseline_free_gb: float | None = None
         self.samples = 0
         self.kills = 0
@@ -684,8 +776,45 @@ class ResourceWatchdog:
         except Exception:  # noqa: BLE001
             return None
 
+    def _attributed_disk(
+            self, usage: Mapping[str, Any]
+    ) -> tuple[float, float | None, str] | None:
+        """The preferred attributed write total, its read total and source.
+
+        A cgroup attributor wins over the process-group sampler so a job that
+        has both is never counted twice or downgraded to the less precise
+        source. A cgroup without ``io.stat`` returns no write value and the
+        sampler is used instead.
+        """
+        if self._disk_attributor is not None:
+            try:
+                value = self._disk_attributor()
+            except Exception:  # noqa: BLE001 - attribution is optional
+                value = None
+            if isinstance(value, Mapping):
+                write = value.get("io_write_mb")
+                if (isinstance(write, (int, float))
+                        and not isinstance(write, bool)):
+                    read = value.get("io_read_mb")
+                    source = value.get("io_source") or "cgroup.io.stat"
+                    return (max(0.0, float(write)),
+                            float(read) if isinstance(read, (int, float))
+                            and not isinstance(read, bool) else None,
+                            str(source))
+        write = usage.get("disk_write_mb")
+        if isinstance(write, (int, float)) and not isinstance(write, bool):
+            read = usage.get("disk_read_mb")
+            source = usage.get("disk_source") or "proc.io"
+            return (max(0.0, float(write)),
+                    float(read) if isinstance(read, (int, float))
+                    and not isinstance(read, bool) else None,
+                    str(source))
+        return None
+
     def _breach(self, usage: Mapping[str, Any], disk: Mapping[str, Any] | None,
-                elapsed: float) -> dict[str, Any] | None:
+                elapsed: float,
+                attributed: tuple[float, float | None, str] | None = None
+                ) -> dict[str, Any] | None:
         limits = self.limits
         memory = usage.get("memory_mb")
         if (limits.memory_mb is not None and isinstance(memory, (int, float))
@@ -707,7 +836,16 @@ class ResourceWatchdog:
                 return {"kind": "disk",
                         "reserve_gb": self.reserve_disk_gb,
                         "free_gb": round(float(free), 2)}
-            if (limits.disk_mb is not None and isinstance(free, (int, float))
+        if limits.disk_mb is not None and attributed is not None:
+            write, _read, source = attributed
+            if write > float(limits.disk_mb):
+                return {"kind": "disk_write",
+                        "budget_mb": limits.disk_mb,
+                        "observed_mb": round(write, 4),
+                        "source": source}
+        if disk is not None and limits.disk_mb is not None and attributed is None:
+            free = disk.get("free_gb")
+            if (isinstance(free, (int, float))
                     and self._disk_baseline_free_gb is not None):
                 used = max(0.0, (self._disk_baseline_free_gb
                                  - float(free)) * 1024)
@@ -742,6 +880,17 @@ class ResourceWatchdog:
                 if self.peak_memory_mb is None or value > self.peak_memory_mb:
                     self.peak_memory_mb = value
             disk = self._disk()
+            attributed = self._attributed_disk(usage)
+            observed_write: float | None = None
+            observed_read: float | None = None
+            if attributed is not None:
+                observed_write, observed_read, source = attributed
+                observed_write = round(observed_write, 4)
+                self.disk_write_mb = observed_write
+                self.disk_write_source = source
+                if (self.peak_disk_write_mb is None
+                        or observed_write > self.peak_disk_write_mb):
+                    self.peak_disk_write_mb = observed_write
             free = (disk or {}).get("free_gb")
             if isinstance(free, (int, float)):
                 if self._disk_baseline_free_gb is None:
@@ -759,10 +908,15 @@ class ResourceWatchdog:
                 "elapsed_s": round(elapsed, 3),
                 "disk_free_gb": free,
                 "disk_used_mb": self.disk_used_mb,
+                "disk_read_mb": (round(observed_read, 4)
+                                 if observed_read is not None else None),
+                "disk_write_mb": observed_write,
+                "disk_source": self.disk_write_source,
                 "peak_memory_mb": self.peak_memory_mb,
+                "peak_disk_write_mb": self.peak_disk_write_mb,
             }
             self.last_sample = sample
-            breach = self._breach(usage, disk, elapsed)
+            breach = self._breach(usage, disk, elapsed, attributed)
             on_sample = self._on_sample
             killer = self.killer
             if breach is not None:

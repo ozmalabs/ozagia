@@ -9,6 +9,7 @@ The layout is::
     <base>/ozagia/job-<id>/memory.max
     <base>/ozagia/job-<id>/memory.peak
     <base>/ozagia/job-<id>/memory.events
+    <base>/ozagia/job-<id>/io.stat
     <base>/ozagia/job-<id>/pids.max
     <base>/ozagia/job-<id>/cgroup.kill
 
@@ -39,6 +40,9 @@ GROUP_NAME = "ozagia"
 # The mechanism string recorded on a job that uses both the cgroup and rlimits.
 MECHANISM = "cgroup+rlimit"
 CONTROLLERS = ("memory", "pids")
+# Disk write accounting needs the io controller; enable it when the parent
+# exposes it, but never make cgroup enforcement depend on it.
+OPTIONAL_CONTROLLERS = ("io",)
 FEATURES = (
     "cgroup.controllers",
     "cgroup.subtree_control",
@@ -49,6 +53,8 @@ FEATURES = (
     "pids.max",
 )
 MAX_NAME_CHARS = 80
+# io.stat can list many devices; the job record keeps only the busiest few.
+MAX_IO_DEVICES = 16
 _ID_SAFE = re.compile(r"[^A-Za-z0-9_.-]+")
 _JOB_PREFIX = "job-"
 # Regular files a test fixture may hold; a real cgroup directory carries
@@ -56,7 +62,7 @@ _JOB_PREFIX = "job-"
 _FAKE_FILES = frozenset({
     "cgroup.procs", "cgroup.kill", "cgroup.events",
     "cgroup.subtree_control", "memory.current", "memory.max", "memory.peak",
-    "memory.events", "pids.current", "pids.max",
+    "memory.events", "pids.current", "pids.max", "io.stat",
 })
 
 
@@ -100,6 +106,78 @@ def _read_values(path: Path) -> dict[str, str]:
         if key:
             values[key.strip()] = value.strip()
     return values
+
+
+def _bytes_mb(raw: Any) -> float | None:
+    if raw is None:
+        return None
+    try:
+        return round(int(raw) / (1024 * 1024), 4)
+    except (TypeError, ValueError):
+        return None
+
+
+def _io_stats(path: Path) -> dict[str, Any]:
+    """Parse cgroup v2 ``io.stat`` into read/write megabytes.
+
+    Each line is ``<major>:<minor> rbytes=N wbytes=N rios=N wios=N ...``.
+    Values are summed across devices; malformed keys or lines are skipped.
+    A missing file means the io controller is not available and every value is
+    ``None``. An empty file is a real cgroup with no I/O yet and reports
+    ``0.0``. ``io_devices`` keeps the busiest ``MAX_IO_DEVICES`` devices only.
+    """
+    text = _read_text(path)
+    if text is None:
+        return {"io_read_mb": None, "io_write_mb": None,
+                "io_source": None, "io_devices": [], "io_device_count": 0}
+    devices: list[dict[str, Any]] = []
+    read_total = 0
+    write_total = 0
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        values: dict[str, int] = {}
+        for item in parts[1:]:
+            key, _, raw = item.partition("=")
+            if key not in {"rbytes", "wbytes"}:
+                continue
+            try:
+                values[key] = int(raw)
+            except ValueError:
+                continue
+        read = values.get("rbytes")
+        write = values.get("wbytes")
+        if read is None and write is None:
+            continue
+        read_total += read or 0
+        write_total += write or 0
+        devices.append({
+            "device": parts[0],
+            "read_mb": _bytes_mb(read),
+            "write_mb": _bytes_mb(write),
+            "_bytes": (read or 0) + (write or 0),
+        })
+    if not devices:
+        if text.strip():
+            # Non-empty io.stat with no parseable device line: report no
+            # attribution rather than a false zero.
+            return {"io_read_mb": None, "io_write_mb": None,
+                    "io_source": None, "io_devices": [],
+                    "io_device_count": 0}
+        return {"io_read_mb": 0.0, "io_write_mb": 0.0,
+                "io_source": "cgroup.io.stat", "io_devices": [],
+                "io_device_count": 0}
+    devices.sort(key=lambda item: (-item["_bytes"], item["device"]))
+    bounded = [{key: item[key] for key in ("device", "read_mb", "write_mb")}
+               for item in devices[:MAX_IO_DEVICES]]
+    return {
+        "io_read_mb": round(read_total / (1024 * 1024), 4),
+        "io_write_mb": round(write_total / (1024 * 1024), 4),
+        "io_source": "cgroup.io.stat",
+        "io_devices": bounded,
+        "io_device_count": len(devices),
+    }
 
 
 def _mb(raw: Any) -> float | None:
@@ -160,7 +238,8 @@ def _enable_controllers(parent: Path, controllers: tuple[str, ...],
     missing = [name for name in controllers if name not in current]
     if not missing:
         return True
-    ok, error = _write_text(control, " ".join(f"+{name}" for name in missing))
+    wanted = list(dict.fromkeys([*current, *missing]))
+    ok, error = _write_text(control, " ".join(f"+{name}" for name in wanted))
     if not ok:
         errors.append(str(error))
         return False
@@ -170,6 +249,17 @@ def _enable_controllers(parent: Path, controllers: tuple[str, ...],
         errors.append(f"{control}: not enabled after write: {', '.join(absent)}")
         return False
     return True
+
+
+def _enable_optional(parent: Path, name: str) -> bool:
+    """Enable one optional controller when the parent exposes it.
+
+    Failure is not an error: memory/pids limits stay active and disk
+    attribution falls back to ``/proc/<pid>/io``.
+    """
+    if name not in _read_list(parent / "cgroup.controllers"):
+        return False
+    return _enable_controllers(parent, (name,), [])
 
 
 def detect(base: str | Path | None = None) -> dict[str, Any]:
@@ -240,7 +330,8 @@ class JobCgroup:
 
     def create(self, *, memory_mb: float | int | None = None,
                pids: int | None = None) -> dict[str, Any]:
-        """Create the group, enable ``+memory +pids`` and set the limits."""
+        """Create the group, enable ``+memory +pids`` (and ``+io`` when the
+        parent exposes it) and set the limits."""
         report: dict[str, Any] = {
             "schema": SCHEMA, "mechanism": MECHANISM, "ok": False,
             "fallback": False, "created": False, "status": "fallback",
@@ -268,6 +359,8 @@ class JobCgroup:
             if not _enable_controllers(self.base, CONTROLLERS, errors):
                 report["reason"] = "cannot enable controllers in the parent cgroup"
                 return report
+            for name in OPTIONAL_CONTROLLERS:
+                _enable_optional(self.base, name)
             self.path.mkdir()
             procs = self.path / "cgroup.procs"
             if not procs.exists():           # a real cgroup has this already
@@ -279,6 +372,8 @@ class JobCgroup:
                 report["reason"] = (
                     f"cannot enable controllers in {self.group_path}")
                 return report
+            for name in OPTIONAL_CONTROLLERS:
+                _enable_optional(self.group_path, name)
             report["controllers"] = _read_list(
                 self.group_path / "cgroup.subtree_control")
             memory = None if memory_mb is None else float(memory_mb)
@@ -370,7 +465,13 @@ class JobCgroup:
         return report
 
     def stats(self) -> dict[str, Any]:
-        """Peak/current memory, pids and ``memory.events`` counters."""
+        """Peak/current memory, pids, ``memory.events`` and ``io.stat``.
+
+        ``io_read_mb``/``io_write_mb``/``io_source`` are ``None`` when the
+        cgroup has no readable ``io.stat``. They are cumulative bytes sent to
+        storage for the group, not retained blocks, and are exact for the
+        group as the kernel accounts it.
+        """
         events = _read_values(self.path / "memory.events")
         peak = _mb(_read_text(self.path / "memory.peak"))
         current = _mb(_read_text(self.path / "memory.current"))
@@ -389,6 +490,7 @@ class JobCgroup:
             "pids_max": _int(_read_text(self.path / "pids.max")),
             "oom_events": _int(events.get("oom", 0)) if events else 0,
             "oom_kill": _int(events.get("oom_kill", 0)) if events else 0,
+            **_io_stats(self.path / "io.stat"),
             "events": events or None,
         }
 
