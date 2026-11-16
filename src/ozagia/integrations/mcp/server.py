@@ -225,6 +225,32 @@ _TOOLS: list[dict[str, Any]] = [
         }, ["target"]),
     },
     {
+        "name": "dev_query",
+        "description": (
+            "Look inside a JSON, YAML or TOML file by JSON pointer (RFC 6901) "
+            "instead of loading it in Python or jq: an object's keys with "
+            "type and size, an array's length and a slice of its items, or a "
+            "scalar's value, with its line (JSON) and node key "
+            "(json:<path>#<pointer>). Output is capped at 8 kB. YAML needs "
+            "the iac-yaml extra; TOML is read-only."),
+        "inputSchema": _schema({
+            "path": {"type": "string",
+                     "description": "Repo-relative file, or a key such as "
+                                    "json:results/run.json#/runs/0."},
+            "pointer": {"type": "string",
+                        "description": "JSON pointer, e.g. /runs/0/score; "
+                                       "empty or # is the root."},
+            "format": {"type": "string", "enum": ["json", "yaml", "toml"],
+                       "description": "Default: from the file suffix."},
+            "offset": {"type": "integer", "default": 0,
+                       "description": "0-based index of the first array "
+                                      "item or object key shown."},
+            "limit": {"type": "integer",
+                      "description": "Items shown (default 20 array "
+                                     "items, 50 object keys)."},
+        }, ["path"]),
+    },
+    {
         "name": "dev_ast",
         "description": (
             "The Python AST graph for a file: structural paths "
@@ -699,6 +725,7 @@ class DevMemoryServer:
             "dev_symbol": self._symbol,
             "dev_outline": self._outline,
             "dev_ast": self._ast,
+            "dev_query": self._query,
             "dev_edit": self._edit,
             "dev_span_edit": self._span_edit,
             "dev_tests": self._tests,
@@ -868,6 +895,41 @@ class DevMemoryServer:
 
     def _symbol(self, a: dict[str, Any]) -> Any:
         return self.mem.symbol(str(a["name"]))
+
+    def _query(self, a: dict[str, Any]) -> Any:
+        from ozagia.core import structured as S
+        from ozagia.intent.common import IntentError
+        from ozagia.intent.read import structured_query
+        path = str(a["path"])
+        parsed = S.parse_key(path)
+        if parsed is not None and not (Path(self.mem.raw_repo_root) / path).exists():
+            fmt, rel, pointer = parsed
+            if a.get("pointer") not in (None, "", "#") and pointer not in ("", "#"):
+                return {"ok": False, "error": "give the pointer in the key or "
+                                              "in pointer, not both"}
+            pointer = pointer or str(a.get("pointer") or "")
+            if a.get("format") and a["format"] != fmt:
+                return {"ok": False, "error": f"format {a['format']!r} does "
+                                              f"not match the key {fmt}:"}
+        else:
+            rel, pointer = path, str(a.get("pointer") or "")
+            fmt = a.get("format") or S.format_of(rel)
+            if fmt is None:
+                return {"ok": False, "error": f"{rel}: not a .json, .yaml, "
+                                              f".yml or .toml file; give format"}
+        try:
+            res = structured_query(self.mem, rel, pointer=pointer, fmt=fmt,
+                                   offset=a.get("offset"),
+                                   limit=a.get("limit"), index_base=0)
+        except IntentError as e:
+            return {"ok": False, "error": str(e)}
+        r = res["result"]
+        return {"ok": True, "key": r["key"], "format": fmt, "path": rel,
+                "pointer": r["pointer"], "type": r["type"], "size": r["size"],
+                "line": r["line"], "total": r["total"],
+                "shown": list(r["shown"]) if r["shown"] else None,
+                "next_offset": r["next"], "truncated": r["truncated"],
+                "text": res["output"]}
 
     def _ast(self, a: dict[str, Any]) -> Any:
         return self.mem.ast(str(a["file"]), node=a.get("node"),

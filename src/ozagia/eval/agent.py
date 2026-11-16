@@ -1310,13 +1310,16 @@ def graph_stats_fields(stats: Any) -> dict[str, Any]:
     checks before a handled edit, write or shell), permission_assert and
     codemode_tools (from the plugin's `hello`), and shell_captured /
     shell_passthrough (`stats.shell`: shell calls the daemon carried out or
-    left to the built-in; absent from older daemons)."""
+    left to the built-in; absent from older daemons), structured_queries,
+    structured_outlines and jq_captures (structured data reads)."""
     if not isinstance(stats, dict):
         return {"plugin_loaded": None, "captured_calls": None,
                 "passthrough_calls": None, "fallbacks": None,
                 "preflights": None, "permission_assert": None,
                 "codemode_tools": None, "shell_captured": None,
-                "shell_passthrough": None}
+                "shell_passthrough": None,
+                "structured_queries": None, "structured_outlines": None,
+                "jq_captures": None}
     hellos = _count(stats.get("hellos"))
     raw = stats.get("handled")
     # The daemon reports {"true": n, "false": m}; only handled calls count.
@@ -1336,7 +1339,11 @@ def graph_stats_fields(stats: Any) -> dict[str, Any]:
             # Replaced tools OpenCode could also reach through Code Mode.
             "codemode_tools": list(codemode) if isinstance(codemode, list) else None,
             "shell_captured": _count(shell.get("captured")),
-            "shell_passthrough": _count(shell.get("passthrough"))}
+            "shell_passthrough": _count(shell.get("passthrough")),
+            "structured_queries": _count(stats.get("structured_queries")),
+            "structured_outlines": _count(stats.get("structured_outlines")),
+            "jq_captures": _count(stats.get("jq_captures"))}
+
 
 
 def run_one(repo: str | Path, task: dict[str, Any], arm: str, repeat: int,
@@ -1564,6 +1571,12 @@ def aggregate(runs: list[dict[str, Any]], arms: Iterable[str]) -> list[dict[str,
                                             if r.get("daemon_ok") is not None
                                             and r.get("plugin_loaded") is not True),
                 "daemon_failures": sum(1 for r in mine if r.get("daemon_ok") is False),
+                "total_structured_queries": sum(int(r.get("structured_queries") or 0)
+                                                for r in mine),
+                "total_structured_outlines": sum(
+                    int(r.get("structured_outlines") or 0) for r in mine),
+                "total_jq_captures": sum(int(r.get("jq_captures") or 0)
+                                         for r in mine),
                 "codemode_tools": sorted({t for r in mine
                                           for t in (r.get("codemode_tools") or [])}),
             })

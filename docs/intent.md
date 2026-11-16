@@ -60,6 +60,56 @@ Read file /repo/pkg/mod.py, lines 1-20
   node's line range with its header. An unknown key is a tool error that
   lists the nearest keys of the file.
 
+Structured data (`ozagia.core.structured`). A `path` of the form
+`json:<rel>#<pointer>`, `yaml:<rel>#<pointer>` or `toml:<rel>#<pointer>`
+(an RFC 6901 JSON pointer; `#` alone or nothing is the root; `~1` is `/`
+and `~0` is `~` in a key) reads the node at the pointer:
+
+```
+Read json /repo/data/run.json#/runs: array, 30 items, line 5
+[ozagia] json:data/run.json#/runs
+[2] {"id":2,"ok":true}  (line 14)
+[3] {"id":3,"ok":false}  (line 18)
+[ozagia] items 2-3 of 30 (0-based index); offset 5 shows the next ones
+[ozagia] query a member: json:data/run.json#/runs/<index>
+```
+
+- An object lists its keys with type, size and a short preview (default 50
+  keys), an array its items (default 20), a scalar its value. `offset` and
+  `limit` page the keys or items; the read tool's `offset` is 1-based
+  (offset 1 is index 0), `dev_query`'s is the 0-based index. Output is
+  capped at 8 kB (`OUTPUT_CAP`) with a truncation line.
+- JSON numbers print as written (`1.50`). Lines come from the span parser
+  of `edit.json_edit` for JSON files up to 1 MB.
+- A missing file, a bad pointer (with the nearest keys, `difflib`) and a
+  parse error (with line and column) are tool errors. Like every read
+  answer (node-key errors too), they carry the read permission for the
+  file, so the OpenCode plugin asks for it and shows the error instead of
+  running the built-in read on the literal `json:...` path.
+- YAML needs PyYAML (the `iac-yaml` extra); without it a YAML query is a
+  tool error that says so. A multi-document YAML file is the list of its
+  documents. TOML uses `tomllib` (read-only); dates print as ISO strings.
+- The same query is the MCP tool `dev_query {path, pointer?, format?,
+  offset?, limit?}`; `path` may also be a `json:`/`yaml:`/`toml:` key.
+
+Outline. A read with no `offset` and no `limit` of a `.json`, `.yaml`,
+`.yml` or `.toml` file over 2000 lines or 64 kB returns the outline
+instead of the text: the file header, `[ozagia] json:<rel>#`, the root's
+type and size, each top-level key with type, size, preview and line, one
+level below it (up to 8 keys, or an array's first item), a line saying
+how to query a path or read the text (pass `offset`/`limit`), then the
+head of the text: lines 1-200 in read format (at most 32 kB, a line over
+2000 characters cut with a note), so a read before an edit still sees the
+start of the file. For YAML the note says the outline omits comments and
+shows anchors, aliases and merge keys resolved; for TOML that it omits
+comments (comments at the head are in the text that follows). The
+limits are `[reads] structured_outline_lines` and
+`structured_outline_bytes` in `.ozagia.toml` (0 turns one off). Files over
+8 MB (2 MB for YAML when PyYAML has no libyaml `CSafeLoader`) are read as
+text, as before, so the parse stays well inside the plugin's read timeout.
+A file that does not parse (or YAML without PyYAML) is read as text. Shell
+reads (`cat`, `head`, ...) and edits are unchanged.
+
 Directory:
 
 ```
@@ -160,6 +210,7 @@ back. The classes are:
 | grep | `grep [-rRnHiFE] [-A\|-B\|-C N\|-N] [--include G] PAT [PATH...]`, `rg [-nNHiF] [-A\|-B\|-C N] [-g G]... [-t T] [-T T] PAT [PATH...]`, `git grep [-niFE] PAT [PATH]` | grep; `-i` is case-insensitive. A basic regex is converted to the Rust/Python dialect (`\|` `\(` `\{` become operators, `+ ? \| { } ( )` literals); one with back-references, `\<`, `\>` or POSIX classes falls back. Several paths are searched in the order given (matches by path and line within each); overlapping paths, grep `--include` with a file operand (grep filters it, rg does not) and `rg --hidden` fall back. `-A/-B/-C` add context lines (`  Line n- text`) and a `  --` line between groups of one file; `-A`/`-B` override `-C` whatever the order, as in both tools. rg searches as rg does (hidden and ignored files skipped; `-g`, negated `-g !G`, `-t` and `-T` passed to rg). grep and git grep are searched with rg too (hidden files included, `.gitignore` respected: this differs from grep for ignored files, and from git grep for untracked ones). |
 | files | `rg --files [PATH...] [-g G]... [-t T] [-T T] [--hidden] [--no-ignore[-vcs]] [-u\|-uu\|-uuu] [--sort path]` | runs rg itself (paths inside the root), sorted by path; rg's own order is that of its parallel walk, so this is one of the orders it can print. Intent `shell_files`. |
 | find | `find [-P] [PATH...] [-maxdepth N] [-mindepth N] [EXPR]` with `-name -iname -path -ipath -type f\|d\|l -newer F -print -prune -true -false`, `!`/`-not`, `-a`, `-o`, `\( \)` | evaluated as GNU find without `-L`: directory order (`os.scandir`), the start path first, symlinks not followed, the implicit `-print` when there is no `-print`, paths printed as find prints them. A glob range is accepted only inside a-z, A-Z or 0-9; POSIX classes, `-maxdepth` after a test (find warns on stderr), any other primary or action, a symlink start path, more than 20000 entries and a directory with more than 10000 entries (gnulib fts sorts those by inode) fall back. A `?` or bracket glob tested on a non-ASCII name falls back unless the locale (`LC_ALL`, `LC_CTYPE`, `LANG` from the prefix or the daemon's environment) is UTF-8 and the name is UTF-8 (in a C locale fnmatch matches one byte), and `-iname`/`-ipath` on a non-ASCII name falls back. `.git` and the state directory are walked like any directory. |
+| jq | `jq [-r] [-c] [-S] [-M] FILTER FILE` (flags before the filter, also clustered as `-rc`), `cat FILE \| jq ...`, `jq ... < FILE`, `< FILE jq ...`, and after `cd DIR &&`. FILTER is a pipeline (up to 6 stages) of paths (`.`, `.a`, `.a.b`, `."key with space"`, `.["k"]`, `.[N]`, `.[-N]`, `.[N:M]`, `.[]`, `.a[]`) and `keys`, `length`, `type` (`ozagia.core.jq`) | jq's exact stdout, read-only (no graph refresh). Left to the real jq: any other filter or option (reason `jq filter '...' is not mapped` / `jq option X is not mapped`), several or no files, a result jq reports as an error (`.a` of an array, `.[]` of null, `keys` of a string, ...), a number with an exponent (jq 1.7 rewrites it), with jq other than 1.7 or 1.8 any number that is not an integer below 2^53 (jq 1.6 prints doubles; versions after 1.8 are unchecked), an integer literal over 20 digits that would need converting, a computed non-integer (`length` of 2.5), a BOM, NaN, a lone surrogate escape, several JSON values, input nested deeper than jq 1.7's parser limit (256 slots: one per array, two per object member; jq 1.8 allows 10000, the 256 limit is kept), output over 1 MB, and any `jq` command when no `jq` is on the daemon's `PATH` (reason `jq is not installed`, so the shell says `command not found`). The `jq` version is re-read when `PATH` or the binary changes. |
 | compound | see below | the steps, in order |
 | git_refs | `git commit\|push\|stash\|branch\|checkout\|switch\|reset\|rebase\|merge\|tag\|worktree\|cherry-pick\|revert\|am\|pull\|fetch\|bisect\|...` (`intent.shell.GIT_REF_MOVING`, shared with the Claude Code hook and `eval.agent.OPENCODE_GIT_DENY`), anywhere in the command: in any segment, after `VAR=value` prefixes, shell keywords and group openers (`{ ! if then do else elif while until`), through wrapper commands (`env [-i] [-u N] [-S '...']`, `command`, `builtin`, `exec`, `nice`, `timeout`, `nohup`, `setsid`, `stdbuf`, `ionice`, `chrt`, `taskset`, `sudo`, `doas`, `time`, `xargs`, `watch`, `flock`, `runuser`, `strace`, `ltrace`, `busybox`, `unbuffer`, `eval`, `function NAME { ... }`, `coproc`, `find -exec\|-execdir\|-ok\|-okdir`, `su\|script\|flock -c '<script>'`, repeated, with clustered options such as `sudo -iu root`), as `/path/to/git`, through `git -c alias.<x>=<ref-moving>`, inside a backtick or `$(...)` substitution, and inside `sh\|bash\|zsh\|dash\|ksh\|fish\|... -c '<script>'` (classified once more; a script nested deeper is refused when it names `git` and then a ref-moving subcommand) | tool error `Refused by ozagia: <command> changes git refs`. Listing forms (`git branch`, `git tag -l`, `git stash list`, `git worktree list`, `git bisect log`) are read-only. |
 | git_read, other, complex | everything else | `handled: false` |
@@ -337,7 +388,8 @@ op, tool, intent and handled; `passthrough` (not handled by design),
 `unknown_outcomes`, `fallbacks` (= `plugin_fallbacks`: one per call the
 plugin could not get answered; `expired` and failed `tool` requests are the
 daemon's view of some of the same calls), errors, hellos and their sessions, mean and max ms and
-uptime.
+uptime; `structured_queries`, `structured_outlines` and `jq_captures` count
+the intents `read_structured`, `read_structured_outline` and `shell_jq`.
 
 `ozagia.core.memory` takes its layout from `$OZAGIA_ROOT` when imported, so
 `serve` sets it to `--root` first. `DevMemory`'s own journal goes next to a

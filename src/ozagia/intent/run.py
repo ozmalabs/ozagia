@@ -9,7 +9,8 @@ pytest output: pytest's own output tail (verbatim, `ozagia.check`'s last
     [ozagia] collection error file:<rel>: <message>
 
 A read-like command becomes a read of the same range; a search-like command
-becomes a grep; a ref-moving git command is refused.
+becomes a grep; a `jq` command in the subset of `ozagia.core.jq` prints
+jq's exact output (`run_jq`); a ref-moving git command is refused.
 """
 from __future__ import annotations
 
@@ -218,6 +219,36 @@ def run_pytest(memory: Any, cls: dict[str, Any], inp: dict[str, Any],
             "keys": list(dict.fromkeys(keys)), "exit_code": res["exit_code"]}
 
 
+def run_jq(memory: Any, cls: dict[str, Any], path: Path) -> dict[str, Any]:
+    """A `jq` command in `ozagia.core.jq`'s subset: jq's exact stdout.
+    Anything the subset does not reproduce (a jq error, an exponent,
+    a non-JSON input) is left to the real jq."""
+    from ozagia.core import jq as J
+    from ozagia.core import structured as S
+    if not path.is_file():
+        raise Unhandled(f"not a regular file: {path}")
+    # No jq: the shell says `command not found`, and the agent should see
+    # that rather than learn to rely on a jq this machine lacks.
+    if J.jq_version() is None:
+        raise Unhandled("jq is not installed")
+    try:
+        if path.stat().st_size > S.MAX_QUERY_BYTES:
+            raise Unhandled(f"{path} is larger than {S.MAX_QUERY_BYTES} bytes")
+        text = path.read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        raise Unhandled(f"cannot read {path} as UTF-8: {e}") from None
+    try:
+        out = J.run_text(text, cls["program"], raw=cls["raw"],
+                         compact=cls["compact"], sort_keys=cls["sort_keys"],
+                         numbers=J.number_policy())
+    except J.Refused as e:
+        raise Unhandled(f"jq: {e}") from None
+    rel = os.path.relpath(path, root_of(memory)).replace(os.sep, "/")
+    tokens = J.pointer_of(cls["program"])
+    keys = [S.node_key("json", rel, tokens)] if tokens is not None else []
+    return {"intent": "shell_jq", "output": out, "keys": keys}
+
+
 def handle_shell(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
     from ozagia.intent.read import read_range
     command = inp.get("command")
@@ -227,7 +258,7 @@ def handle_shell(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
     kind = cls["class"]
     if kind == "git_refs":
         raise IntentError(refusal(command), intent="shell_refused")
-    if kind not in ("pytest", "read", "grep", "ls", "find", "files", "compound"):
+    if kind not in ("pytest", "read", "grep", "ls", "find", "files", "jq", "compound"):
         raise Unhandled(cls.get("compound_reason") or cls.get("reason")
                         or kind)
     root = root_of(memory)
@@ -255,6 +286,12 @@ def handle_shell(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
         p = Path(cls["file"])
         p = _inside(root, p if p.is_absolute() else wd / p)
         res = read_range(memory, p, cls["range"], numbering=cls.get("number"))
+        preflight_stop(inp)
+        return res
+    if kind == "jq":
+        p = Path(cls["file"])
+        p = _inside(root, p if p.is_absolute() else wd / p)
+        res = run_jq(memory, cls, p)
         preflight_stop(inp)
         return res
     if kind == "ls":
@@ -297,4 +334,4 @@ def handle_shell(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
     return res
 
 
-__all__ = ["handle_shell", "refusal", "run_pytest"]
+__all__ = ["handle_shell", "refusal", "run_jq", "run_pytest"]

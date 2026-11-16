@@ -464,6 +464,12 @@ class DaemonState:
                         self.shell_reasons.items(),
                         key=lambda kv: (-kv[1], kv[0]))[:SHELL_REASONS_SHOWN]),
                 },
+                # Structured data reads (`json:`/`yaml:`/`toml:` queries),
+                # outlines of large structured files, captured `jq` calls.
+                "structured_queries": self.by_intent.get("read_structured", 0),
+                "structured_outlines": self.by_intent.get(
+                    "read_structured_outline", 0),
+                "jq_captures": self.by_intent.get("shell_jq", 0),
                 "permission_assert": _last(self.hellos, "permission_assert"),
                 "codemode_tools": sorted({
                     name for h in self.hellos

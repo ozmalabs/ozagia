@@ -48,6 +48,11 @@ Classes (`result["class"]`):
                   -name -iname -path -ipath -type f|d|l -newer F -print
                   -prune -true -false ! -not -a -o ( ): `expr` (a tree),
                   `prints`, `paths`, `maxdepth`, `mindepth`, `newer`.
+    jq            `jq [-r|-c|-S|-M] FILTER FILE`, `cat FILE | jq ...`, `jq ...
+                  < FILE`, with a filter in `ozagia.core.jq`'s subset
+                  (read-only). Fields: `file`, `filter`, `program`, `raw`,
+                  `compact`, `sort_keys`, `stdin`. Other filters are `other`
+                  with reason `jq filter '...' is not mapped`.
     complex       not a simple command (see above).
     other         anything else (including wc, unsupported find/ls, sed -i,
                   python -c, scripts).
@@ -304,7 +309,7 @@ def _cd_read_wrapper(command: str) -> dict[str, Any] | None:
     if len(cd) != 2 or cd[0] != "cd" or cd[1] in ("", "-"):
         return None
     got = classify(right, _filters=False)
-    if got["class"] not in ("read", "grep", "ls", "find", "files"):
+    if got["class"] not in ("read", "grep", "ls", "find", "files", "jq"):
         return None
     return {**got, "cd": cd[1]}
 
@@ -1192,9 +1197,101 @@ def _rg_files(args: list[str]) -> dict[str, Any]:
     return _result("files", paths=paths, options=opts, tool="rg")
 
 
+_JQ_FLAGS = {"-r": "raw", "--raw-output": "raw", "-c": "compact",
+             "--compact-output": "compact", "-S": "sort_keys",
+             "--sort-keys": "sort_keys", "-M": None,
+             "--monochrome-output": None}
+
+
+def _jq(args: list[str], *, stdin_file: str | None = None) -> dict[str, Any]:
+    """`jq [-r] [-c] [-S] [-M] FILTER FILE` (or with `stdin_file` as the
+    input, FILTER only), with a filter in `ozagia.core.jq`'s subset."""
+    from ozagia.core import jq as J
+    opts = {"raw": False, "compact": False, "sort_keys": False}
+    positional: list[str] = []
+    for a in args:
+        if a.startswith("-") and a != "-" and not positional:
+            if a in _JQ_FLAGS:
+                name = _JQ_FLAGS[a]
+            elif (not a.startswith("--") and len(a) > 2
+                  and all(f"-{c}" in _JQ_FLAGS for c in a[1:])):
+                for c in a[1:]:
+                    if _JQ_FLAGS[f"-{c}"]:
+                        opts[_JQ_FLAGS[f"-{c}"]] = True
+                continue
+            else:
+                return _result("other", f"jq option {a} is not mapped")
+            if name:
+                opts[name] = True
+            continue
+        if a.startswith("-") and a != "-":
+            return _result("other", f"jq option {a} after the filter is "
+                                    f"not mapped")
+        positional.append(a)
+    if not positional:
+        return _result("other", "jq without a filter")
+    filt, files = positional[0], positional[1:]
+    if stdin_file is not None:
+        if files:
+            return _result("other", "jq with both a file and stdin")
+        files = [stdin_file]
+    if len(files) != 1 or files[0] == "-":
+        return _result("other", f"jq of {len(files)} files is not mapped")
+    try:
+        program = J.parse(filt)
+    except J.Unsupported as e:
+        return _result("other", str(e))
+    return _result("jq", file=files[0], filter=filt, program=program,
+                   tool="jq", stdin=stdin_file is not None, **opts)
+
+
+def _jq_wrapper(command: str) -> dict[str, Any] | None:
+    """`cat F | jq ...` or `jq ... < F` (also `< F jq ...`), else None."""
+    toks, _why = _lex(command)
+    if toks is None:
+        return None
+    words: list[list[tuple[str, str, str]]] = [[]]
+    redirs: list[str] = []
+    i = 0
+    while i < len(toks):
+        kind, text, _val = toks[i]
+        if kind == "word":
+            words[-1].append(toks[i])
+        elif kind == "redir":
+            if text not in ("<", "0<") or i + 1 >= len(toks) \
+                    or toks[i + 1][0] != "word":
+                return None
+            redirs.append(toks[i + 1][2])
+            if _scan(toks[i + 1][1]) is not None:
+                return None
+            i += 1
+        elif text == "|":
+            words.append([])
+        else:
+            return None
+        i += 1
+    for seg in words:
+        if not seg or _scan(" ".join(w[1] for w in seg)) is not None:
+            return None
+    if len(words) == 2 and not redirs:
+        cat, jq = [[w[2] for w in seg] for seg in words]
+        if (len(cat) != 2 or cat[0] != "cat" or cat[1].startswith("-")
+                or jq[0] != "jq"):
+            return None
+        return _jq(jq[1:], stdin_file=cat[1])
+    if len(words) == 1 and len(redirs) == 1:
+        argv = [w[2] for w in words[0]]
+        if argv[0] != "jq":
+            return None
+        return _jq(argv[1:], stdin_file=redirs[0])
+    return None
+
+
 def _simple(tokens: list[str]) -> dict[str, Any]:
     cmd = tokens[0]
     base = os.path.basename(cmd)
+    if cmd == "jq":
+        return _jq(tokens[1:])
     if base == "git":
         return _git(tokens)
     if base in ("pytest", "py.test"):
@@ -1360,7 +1457,7 @@ def classify(command: str, *, _filters: bool = True,
         if hit is not None:
             return _result("git_refs", "command substitution", subcommand=hit)
     if why == "operator":
-        wrapped = _cd_read_wrapper(command)
+        wrapped = _cd_read_wrapper(command) or _jq_wrapper(command)
         if wrapped is not None:
             return wrapped
     if why is not None:

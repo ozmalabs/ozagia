@@ -336,7 +336,7 @@ function wrap(client, perm, name, tool, original, hintCache) {
       res = await send({});
     }
     const readOnlyShell = name === "shell" && res && res.handled
-      && ["shell_read", "shell_find", "shell_ls", "shell_grep", "shell_files"].includes(
+      && ["shell_read", "shell_find", "shell_ls", "shell_grep", "shell_files", "shell_jq"].includes(
         res.meta && res.meta.intent);
     if (MUTATING.has(name) && session && !readOnlyShell) hintCache.delete(session);
     if (res && res.handled) {

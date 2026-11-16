@@ -8,6 +8,10 @@ returns the body of the protocol's `tool` response:
     {"handled": True, "output": "<error text>", "is_error": True, "meta": {...}}
     {"handled": False, "reason": "<why>", "meta": {...}}
 
+A handled answer of a non-mutating tool (read, grep, glob), error or not,
+also carries `permission` (`permission_request`), which the plugin asks for
+before it shows the output.
+
 `after(memory, tool, input, output)` runs after a built-in (or any) call and
 returns `{"append": "<text or empty>", "meta": {...}}`. `meta` always has
 `intent` (a short name), `keys` (node keys involved) and `ms`.
@@ -96,6 +100,11 @@ def permission_request(memory: Any, tool: str, inp: dict[str, Any]
         if not isinstance(path, str) or not path:
             return None
         root = root_of(memory)
+        if tool == "read":
+            from ozagia.core.structured import parse_key
+            skey = parse_key(path)
+            if skey is not None and not os.path.exists(os.path.join(str(root), path)):
+                path = skey[1]          # json:<rel>#<pointer> reads <rel>
         p = path if os.path.isabs(path) else os.path.join(str(root), path)
         p = os.path.normpath(p)
         rel = os.path.relpath(p, root)
@@ -163,6 +172,13 @@ def handle(memory: Any, tool: str, input: dict[str, Any], *,
         meta.update(intent=res["intent"], keys=list(res.get("keys") or []))
     except IntentError as e:
         body = {"handled": True, "output": str(e), "is_error": True}
+        # A read-only tool's error is shown after the same permission as its
+        # answer (the plugin runs the built-in when an answer has none).
+        if tool not in MUTATING_TOOLS:
+            try:
+                body["permission"] = permission_request(memory, tool, input)
+            except Exception:  # noqa: BLE001 - no request: the built-in runs
+                body["permission"] = None
         meta.update(intent=e.intent or f"{tool}_error", keys=e.keys)
     except Unhandled as e:
         body = {"handled": False, "reason": str(e)}
@@ -238,7 +254,7 @@ def _may_change_files(tool: str, input: dict[str, Any]) -> tuple[bool, dict]:
     if cls["class"] == "compound":
         from ozagia.intent.shell import compound_steps
         return any(s["kind"] == "pytest" for s in compound_steps(cls)), cls
-    return cls["class"] not in ("read", "grep", "ls", "find", "files",
+    return cls["class"] not in ("read", "grep", "ls", "find", "files", "jq",
                                 "git_read", "git_refs"), cls
 
 
