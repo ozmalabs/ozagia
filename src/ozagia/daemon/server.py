@@ -17,7 +17,9 @@ answered `expired` and not executed (see `ozagia.daemon.protocol`).
 Captured pytest runs with `test_env` (default: this process's environment
 without `OZAGIA_*`, `PYTHONPATH` and `COLUMNS`, the variables the harness
 adds for ozagia itself), passed to the intent layer as `_test_env`. Reserved
-`_` fields a client puts in `input` are dropped.
+`_` fields a client puts in `input` are dropped, except `_reason`: the
+bounded one-line label the created-file ledger records for a handled write
+or an `after` that created files.
 
 Every request is journaled, one JSON object per line, to
 `<state dir>/daemon_journal.jsonl` (or `journal`):
@@ -91,6 +93,17 @@ state dir); the ledger copies reads into it. The `working_set` op renders
 it; `stats` adds `working_sets_served`, `working_set_chars` and
 `session_briefs_served`.
 
+Created-file ledger (`ozagia.core.files`): a handled `write` (or `edit`
+that creates the file) records it from the intent layer, with the reserved
+`_reason` as its reason; `after` for `edit`, `write`, `patch` and `shell`
+records newly created files among `meta.changed_paths` (and, for edit and
+write, the file they name) with one bounded `git status` pathspec scan;
+`session_event` `start`/`end` scans the root, bounded, and records
+untracked files with `reason: unknown`. A request with `file_ledger: false`
+skips the `after` and session scans; `$OZAGIA_FILE_LEDGER=0` turns them
+off. `stats` adds `files_recorded`, `file_ledger_scans` and
+`file_ledger_errors`.
+
 Test selection (`ozagia.intent.affected`): `stats` adds `affected_runs`,
 `tests_skipped_unaffected`, `cached_passes` and `full_runs_forced`, summed
 from the answers' `meta.tests`.
@@ -120,6 +133,17 @@ from ozagia.daemon import protocol as P
 JOURNAL_NAME = "daemon_journal.jsonl"
 # Handled `tool` intents that edit a file (for the working set).
 EDIT_INTENTS = frozenset({"edit", "write", "edit_key"})
+# Built-in tools whose `after` can have created files (file ledger).
+FILE_LEDGER_TOOLS = frozenset({"edit", "write", "patch", "shell"})
+# Files a session start/end scan records at most, and paths an `after` scan
+# checks at most.
+FILE_LEDGER_SCAN_LIMIT = 100
+FILE_LEDGER_PATHS = 20
+# `$OZAGIA_FILE_LEDGER=0` turns the daemon's ledger scans off.
+ENV_FILE_LEDGER = "OZAGIA_FILE_LEDGER"
+# `meta` counters the daemon sums into its stats.
+META_COUNTERS = ("path_suggestions", "ownership_warnings", "files_recorded",
+                 "file_ledger_errors")
 # Keys kept per journal record.
 JOURNAL_KEYS = 20
 # Distinct shell passthrough reasons kept, and shown in `stats`.
@@ -308,6 +332,12 @@ class DaemonState:
         self.owners = Owners(root, daemon_journal=journal)
         self.path_suggestions = 0
         self.ownership_warnings = 0
+        # Created-file ledger (`ozagia.core.files`): rows appended from
+        # handled writes and `after`/`session_event` scans, scans run, and
+        # ledger/git failures (the tool call itself never fails for them).
+        self.files_recorded = 0
+        self.file_ledger_scans = 0
+        self.file_ledger_errors = 0
 
     # -- requests ------------------------------------------------------------ #
     def dispatch(self, msg: dict[str, Any]) -> dict[str, Any]:
@@ -350,6 +380,7 @@ class DaemonState:
             self.session_state(msg)     # caps, acks, a pending reset
             n = self.sessions.event(str(msg.get("harness") or "opencode"),
                                     session, event)
+            self._files_session_scan(msg, event)
             return {"ok": True, "cleared": n,
                     "meta": {"intent": f"session_{event}", "keys": []}}
         if op == "read_check":
@@ -418,8 +449,13 @@ class DaemonState:
             if inp is None:
                 inp = {}
             if isinstance(inp, dict):
+                # `_reason` is the one reserved field kept (a bounded label
+                # for the created-file ledger); the rest are caller-only.
+                reason = inp.get("_reason")
                 inp = {k: v for k, v in inp.items()
                        if not str(k).startswith("_")}
+                if isinstance(reason, str) and reason.strip():
+                    inp["_reason"] = reason
                 if op == "tool" and self.test_env is not None:
                     inp["_test_env"] = dict(self.test_env)
             harness = str(msg.get("harness") or "opencode")
@@ -465,6 +501,7 @@ class DaemonState:
                     body = {**body, "append": "\n".join(
                         [x for x in [body.get("append") or ""] if x] + hints)}
             self._observe(op, tool, inp, msg, body, state)
+            self._files_observe(op, tool, inp, msg, body)
             return {"ok": True, **self._job_meta(body)}
         return {"ok": False, "error": f"unknown op {op!r}"}
 
@@ -557,6 +594,85 @@ class DaemonState:
         except Exception as e:  # noqa: BLE001 - bookkeeping only
             print(f"working set update failed: {type(e).__name__}: {e}",
                   file=sys.stderr, flush=True)
+
+    # -- the created-file ledger (`ozagia.core.files`) ---------------------- #
+    def _file_ledger_enabled(self, msg: dict[str, Any]) -> bool:
+        """The request's `file_ledger: false` or `$OZAGIA_FILE_LEDGER=0`
+        turns the daemon's `after` and session scans off."""
+        if msg.get("file_ledger") is False:
+            return False
+        return os.environ.get(ENV_FILE_LEDGER, "1").strip().lower() not in (
+            "0", "false", "no", "off")
+
+    @staticmethod
+    def _ledger_reason(inp: dict[str, Any]) -> str:
+        reason = inp.get("_reason")
+        return reason if isinstance(reason, str) and reason.strip() else "unknown"
+
+    def _files_session_scan(self, msg: dict[str, Any], event: Any) -> None:
+        """Record the root's untracked/added files at session start and end
+        (bounded; `reason: unknown`). Never raises and never fails the
+        session event."""
+        if event not in ("start", "end") or not self._file_ledger_enabled(msg):
+            return
+        session = msg.get("session")
+        if not isinstance(session, str) or not session:
+            return
+        try:
+            from ozagia.core import files as F
+            recorded = F.scan_new_files(
+                self.root, session=session,
+                harness=str(msg.get("harness") or "opencode"),
+                reason="unknown", tool="session_event",
+                limit=FILE_LEDGER_SCAN_LIMIT)
+        except Exception as e:  # noqa: BLE001 - bookkeeping only
+            with self._stats_lock:
+                self.file_ledger_errors += 1
+            print(f"file ledger scan failed: {type(e).__name__}: {e}",
+                  file=sys.stderr, flush=True)
+            return
+        with self._stats_lock:
+            self.file_ledger_scans += 1
+            self.files_recorded += len(recorded)
+
+    def _files_observe(self, op: str, tool: str, inp: Any, msg: dict[str, Any],
+                       body: dict[str, Any]) -> None:
+        """Record files a built-in `edit`, `write`, `patch` or `shell` call
+        created: the `after` answer's `meta.changed_paths`, plus the file an
+        edit or write names. One bounded `git status` pathspec run, only for
+        the paths named (never a whole-repository scan). Never raises."""
+        if op != "after" or tool not in FILE_LEDGER_TOOLS:
+            return
+        if not isinstance(inp, dict) or not self._file_ledger_enabled(msg):
+            return
+        meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
+        changed = meta.get("changed_paths")
+        paths: list[str] = ([p for p in changed if isinstance(p, str)]
+                            if isinstance(changed, list) else [])
+        if tool in ("edit", "write"):
+            rel = self._ws_rel(inp.get("path", inp.get("filePath")))
+            if rel:
+                paths.append(rel)
+        paths = list(dict.fromkeys(paths))[:FILE_LEDGER_PATHS]
+        if not paths:
+            return
+        try:
+            from ozagia.core import files as F
+            recorded = F.scan_new_files(
+                self.root, session=msg.get("session") if isinstance(
+                    msg.get("session"), str) else None,
+                harness=str(msg.get("harness") or "opencode"),
+                reason=self._ledger_reason(inp), tool=tool, paths=paths,
+                limit=FILE_LEDGER_SCAN_LIMIT)
+        except Exception as e:  # noqa: BLE001 - bookkeeping only
+            with self._stats_lock:
+                self.file_ledger_errors += 1
+            print(f"file ledger update failed: {type(e).__name__}: {e}",
+                  file=sys.stderr, flush=True)
+            return
+        with self._stats_lock:
+            self.file_ledger_scans += 1
+            self.files_recorded += len(recorded)
 
     def _running_jobs(self) -> list[dict[str, Any]]:
         try:
@@ -770,7 +886,7 @@ class DaemonState:
             rr = meta.get("region_replies")
             if isinstance(rr, int) and not isinstance(rr, bool) and rr > 0:
                 self.region_replies += rr
-            for name in ("path_suggestions", "ownership_warnings"):
+            for name in META_COUNTERS:
                 n = meta.get(name)
                 if isinstance(n, int) and not isinstance(n, bool) and n > 0:
                     setattr(self, name, getattr(self, name) + n)
@@ -935,6 +1051,12 @@ class DaemonState:
                 "path_suggestions": self.path_suggestions,
                 "ownership_warnings": self.ownership_warnings,
                 "live_sessions": self.owners.live_sessions(),
+                # Created-file ledger (`ozagia.core.files`): rows recorded
+                # (handled writes, `after` scans, session start/end scans),
+                # scans run, and ledger/git failures.
+                "files_recorded": self.files_recorded,
+                "file_ledger_scans": self.file_ledger_scans,
+                "file_ledger_errors": self.file_ledger_errors,
                 # Lint inside the edit, and captured `ruff check` calls.
                 **self.lint,
                 "ruff_captures": self.by_intent.get("shell_ruff", 0),

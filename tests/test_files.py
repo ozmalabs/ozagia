@@ -126,3 +126,58 @@ def test_files_cli_route_and_scan(tmp_path: Path, capsys) -> None:
     assert code == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["count"] == 1
+
+
+def test_record_file_dedupes_and_stores_no_content(tmp_path: Path) -> None:
+    root = _repo(tmp_path)
+    note = root / "notes.md"
+    note.write_text("# Notes\n\nsecret content\n", encoding="utf-8")
+    item = F.record_file(root, "notes.md", session="ses-1", harness="claude",
+                         task="notes.write", tool="write",
+                         reason="one-off note")
+    assert item is not None
+    assert item["path"] == "notes.md"
+    assert item["classification"] == "note"
+    assert item["created_by"] == {"session": "ses-1", "harness": "claude",
+                                  "task": "notes.write", "tool": "write",
+                                  "command": None}
+    assert item["reason"] == "one-off note"
+    ledger = F.ledger_path(root).read_text(encoding="utf-8")
+    assert "secret content" not in ledger
+    # Same path and hash: no second row.
+    assert F.record_file(root, "notes.md", session="ses-1",
+                         reason="again") is None
+    assert len(F._read_ledger(root)) == 1
+    # A changed file is a new record.
+    note.write_text("# Notes\n\nchanged\n", encoding="utf-8")
+    again = F.record_file(root, "notes.md", session="ses-1",
+                          reason="changed note")
+    assert again is not None and again["hash"] != item["hash"]
+    assert F.explain(root, "notes.md")["record"]["reason"] == "changed note"
+
+
+def test_record_paths_skips_ignored_outside_and_missing(tmp_path: Path) -> None:
+    root = _repo(tmp_path)
+    (root / "a.py").write_text("x = 1\n", encoding="utf-8")
+    (root / ".ozagia").mkdir()
+    (root / ".ozagia" / "state.txt").write_text("x", encoding="utf-8")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("x", encoding="utf-8")
+    got = F.record_paths(
+        root, ["a.py", ".ozagia/state.txt", outside, "missing.py"],
+        session="ses-2", harness="codex", tool="edit", reason="line\nbreak")
+    assert [item["path"] for item in got] == ["a.py"]
+    assert got[0]["reason"] == "line break"
+    assert F.record_file(root, "a.py", reason="x") is None
+
+
+def test_scan_new_files_paths_and_limit(tmp_path: Path) -> None:
+    root = _repo(tmp_path)
+    (root / "one.md").write_text("# One\n", encoding="utf-8")
+    (root / "two.md").write_text("# Two\n", encoding="utf-8")
+    got = F.scan_new_files(root, session="s", paths=["one.md"])
+    assert [item["path"] for item in got] == ["one.md"]
+    assert F.scan_new_files(root, session="s", paths=[]) == []
+    got = F.scan_new_files(root, session="s", limit=1)
+    assert [item["path"] for item in got] == ["two.md"]
+    assert F.scan_new_files(root, session="s", limit=10) == []

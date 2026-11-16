@@ -38,6 +38,34 @@ cleanup always asks.
 Ignored/cache trees are summarized by directory, not one row per file. Moves
 and deletes keep `moved_from` or `status: deleted`.
 
+## Integration with the daemon, edits and hooks
+
+- A handled `write`, and an `edit` that creates the file, records it after
+  the tool succeeds: session, harness, tool and the reason from the reserved
+  `_reason` input field (else `unknown`). An edit of an existing file is not
+  recorded as a creation. Key edits are not creations.
+- `after` for a built-in `edit`, `write`, `patch` or `shell` records the
+  newly created files among `meta.changed_paths`, plus the file an edit or
+  write names. It runs one bounded `git status` pathspec check for those
+  paths only, never a whole-repository scan.
+- `session_event` `start` and `end` run one bounded scan of the root and
+  record untracked/added files with `reason: unknown` (the daemon records at
+  most 100 rows per scan). `compact` does not scan.
+- Records are deduplicated by path and hash: an unchanged file already in
+  the ledger is not recorded again. The ledger stores hashes, sizes and
+  labels, never file contents or prompts.
+- Daemon `stats` adds `files_recorded` (rows appended), `file_ledger_scans`
+  (bounded scans run) and `file_ledger_errors` (ledger/git failures; the
+  tool call itself never fails for them).
+- Opt out of the daemon's `after` and session scans per request with
+  `file_ledger: false`, or for a daemon with `OZAGIA_FILE_LEDGER=0`.
+- MCP read-only `dev_files_list` and `dev_files_explain` list and explain
+  ledger rows (no writes, no cleanup).
+
+Programmatic entry points: `record_file(root, rel, ...)` for one file,
+`record_paths(root, paths, ...)` for several, and `scan_new_files(root, ...)`
+for untracked/added files (`paths=` restricts it).
+
 ## Commands
 
 ```text
@@ -113,14 +141,20 @@ reason, references and a recommendation.
 - Cleanup runs before `worktree remove` and when the resource monitor is short
   on disk.
 
-The current build does not move or delete anything. The apply/trash/restore
-path lands with the integration into edit/write/patch and session hooks.
+The current build does not move or delete anything. Cleanup stays dry-run:
+the apply/trash/restore path still needs the resource monitor and worktree
+remove integration, and an explicit confirmation surface.
 
 ## Limits
 
 - No full filesystem DLP and no content indexing beyond the existing research
   ingest.
-- Files created outside the session manifest are not tracked; they are reported
-  as unknown if a later scan sees them.
-- Near-duplicate detection is deterministic and bounded. It can suggest an
-  append; it does not rewrite a document.
+- Files created outside handled calls are captured by the session start/end
+  scan only when git reports them as untracked/added; files in ignored trees
+  are skipped. Files created after the session end scan are not attributed to
+  that session.
+- A built-in `patch` or `shell` that creates a file outside
+  `meta.changed_paths` is not recorded until a session scan sees it.
+- The ledger and the scans are metadata-only. Near-duplicate detection is
+  deterministic and bounded. It can suggest an append; it does not rewrite a
+  document.

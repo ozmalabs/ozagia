@@ -403,3 +403,22 @@ def test_dev_edit_diagnostics_defaults_to_off(server) -> None:
     prop = tools["dev_edit"]["inputSchema"]["properties"]["diagnostics"]
     assert prop["default"] is False
     assert "diagnostics=true" in prop["description"]
+
+
+def test_dev_files_tools_read_the_ledger(server, tmp_path: Path) -> None:
+    from ozagia.core import files as F
+    (tmp_path / "notes.md").write_text("# Notes\n", encoding="utf-8")
+    F.record_file(tmp_path, "notes.md", session="ses-mcp", harness="mcp",
+                  tool="write", reason="one-off note")
+    reply = server.handle(_call("dev_files_list", {}))
+    payload = json.loads(reply["result"]["content"][0]["text"])
+    assert payload["ok"] and payload["count"] == 1
+    assert payload["files"][0]["path"] == "notes.md"
+    reply = server.handle(_call("dev_files_explain", {"path": "notes.md"}))
+    payload = json.loads(reply["result"]["content"][0]["text"])
+    assert payload["ok"] is True
+    assert payload["record"]["reason"] == "one-off note"
+    assert payload["route"]["kind"] == "note"
+    reply = server.handle(_call("dev_files_explain", {"path": "../outside.md"}))
+    payload = json.loads(reply["result"]["content"][0]["text"])
+    assert payload["ok"] is False
