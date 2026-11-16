@@ -7,7 +7,9 @@ existing runtime managers. It does not add another process or tunnel model:
 - tunnels call `TunnelManager` and its relay policy;
 - the daemon calls `DaemonClient` and `ozagia.daemon.autostart.ensure`;
 - integration status reads the existing OpenCode, Claude Code, Codex and Kiro
-  path helpers.
+  path helpers;
+- integration install, uninstall and verify call those installers' own
+  `__main__.main` (or OpenCode's `check_loads`) in-process.
 
 Every mutating action is described first and performed only with a one-time
 confirmation token. A passive status refresh never starts, stops or signals
@@ -32,10 +34,15 @@ anything.
 | `tunnel.status` | read-only | Show one tunnel; an unheld persisted lease is stale. |
 | `tunnel.start` | mutating, live-gated | Preview the exact relay command; apply opens the live tunnel. |
 | `integration.status` | read-only | Show install paths/state for OpenCode, Claude, Codex and Kiro. |
+| `integration.install` | mutating | Preview the exact installer call and paths; apply installs through the existing installer. |
+| `integration.uninstall` | mutating, destructive | Remove only ozagia's own entries through the existing installer. |
+| `integration.verify` | read-only | Run the installer's local check when one exists; otherwise report `unavailable`. |
 
-Integration install and uninstall are deliberately not actions in this slice.
-They remain the existing installer CLIs and must gain their own preview/apply
-flow before a UI exposes them.
+Integration actions use the landed installers, not a second installation
+model. They never subprocess an installer CLI, never auto-install a missing
+tool, never install a git hook and never start a service. The only hooks
+written are the selected tool integration's own hook files, through its
+installer.
 
 ## Preview and apply
 
@@ -46,12 +53,15 @@ python -m ozagia.actions_cli preview service.start --name api
 python -m ozagia.actions_cli preview tunnel.start --name database
 python -m ozagia.actions_cli preview daemon.ensure
 python -m ozagia.actions_cli preview integration.status --name codex
+python -m ozagia.actions_cli preview integration.install --name codex \
+  --scope project --python /path/to/python
 ```
 
 A preview returns:
 
 - the exact operation and expected effect;
 - the manager call and, where available, the exact argv;
+- the scope and target paths for integration actions;
 - preconditions and risks;
 - the current observed state;
 - a one-time confirmation token.
@@ -67,6 +77,12 @@ Apply uses the token:
 python -m ozagia.actions_cli apply service.start --name api --confirm TOKEN
 python -m ozagia.actions_cli apply tunnel.start --name database \
   --confirm TOKEN --allow-live --allow-network
+python -m ozagia.actions_cli apply integration.install --name codex \
+  --scope project --python /path/to/python --confirm TOKEN
+python -m ozagia.actions_cli apply integration.uninstall --name kiro \
+  --scope user --confirm TOKEN
+python -m ozagia.actions_cli apply integration.verify --name opencode \
+  --confirm TOKEN
 ```
 
 `apply` verifies that the token matches the action, arguments and repository,
@@ -84,7 +100,114 @@ Preconditions and refusals:
 - `tunnel.start` requires `--allow-live` and `--allow-network` in addition to
   the confirmation token;
 - an unheld tunnel lease is stale and cannot be claimed or stopped by a new
-  manager.
+  manager;
+- an installed integration is re-installed idempotently by
+  `integration.install`; an absent integration is a no-op for
+  `integration.uninstall`;
+- an unsupported scope is refused before the installer is called.
+
+## Integration install, uninstall and verify
+
+The integration actions reuse each tool's installer. The preview names the
+installer module, the exact in-process arguments and the equivalent CLI argv.
+
+| Action name | Installer module | Scopes | Install targets (project scope) |
+| --- | --- | --- | --- |
+| `opencode` | `ozagia.integrations.opencode` | project | `.opencode/plugins/ozagia.js`, `.opencode/plugins/ozagia/tui.js` |
+| `claude` | `ozagia.integrations.claude_code` | project | `.claude/settings.local.json` |
+| `codex` | `ozagia.integrations.codex` | project, user | `.codex/hooks.json`, `.codex/config.toml`, `AGENTS.md` |
+| `kiro` | `ozagia.integrations.kiro` | project, user | `.kiro/hooks/ozagia.json`, `.kiro/agents/ozagia.json`, `.kiro/settings/mcp.json` |
+
+User scope uses the tool's own home: `$CODEX_HOME` (default `~/.codex`) for
+Codex and `~/.kiro` for Kiro. OpenCode and Claude have no user-scope path, so
+`--scope user` is refused for them. Uninstall targets the same set, except
+Claude, whose uninstall cleans both `settings.local.json` and `settings.json`.
+
+`--python` sets the interpreter written into Claude, Codex and Kiro hook/MCP
+commands. It defaults to the interpreter running ozagia. Use an absolute path
+or a name on `PATH`; it is written into the tool's configuration. The OpenCode
+installer does not use a Python path and rejects the option.
+
+### Install
+
+```sh
+python -m ozagia.actions_cli preview integration.install --name codex \
+  --scope project --python /path/to/python
+```
+
+The preview shows:
+
+- the installer module and call, e.g.
+  `ozagia.integrations.codex.__main__.main([...])`;
+- the equivalent argv, e.g.
+  `python -m ozagia.integrations.codex install --workdir REPO --scope project --python PYTHON`;
+- the scope and exact target files;
+- the current integration state (`absent`, `partial` or `installed`);
+- the trust step and the risks (user-scope writes outside the repository,
+  hooks taking effect only in the next session).
+
+Preview writes nothing to the target files. The only write is the pending
+confirmation token under the state directory.
+
+Apply re-checks the scope, installer availability, configured Python and the
+current state, consumes the token, then calls the installer's `main(argv)` in
+process. Success output is discarded; a failure message is bounded and redacted
+before it appears in the result or audit. The installer's merge rules preserve
+unrelated settings; a re-install replaces only ozagia's own entries, so
+install is idempotent and also completes a partial install. No hook is run and
+no service is started.
+
+### Uninstall
+
+```sh
+python -m ozagia.actions_cli preview integration.uninstall --name kiro \
+  --scope user
+```
+
+Uninstall removes only ozagia's hooks, MCP entry and generated section/profile.
+Other keys, hooks, servers and file content are left alone. A file that holds
+nothing else afterwards can be deleted by the installer. An absent integration
+is a no-op. This action is marked destructive because it edits the tool's live
+configuration, but it never removes a user's unrelated settings.
+
+### Verify
+
+```sh
+python -m ozagia.actions_cli preview integration.verify --name opencode
+```
+
+Verify is read-only and always reports its limit:
+
+- OpenCode: runs `ozagia.integrations.opencode.install.check_loads` in process.
+  It may run the local `opencode plugin list` and a Node self-test; it makes no
+  model call and installs nothing. The result is `verified` when the check
+  passes, `failed` with a bounded error when it does not.
+- Claude, Codex and Kiro: their installers have no status/check command, so
+  verify reports `unavailable` with the reason. Use `integration.status` for
+  read-only path and marker inspection; it is not a load test.
+
+A missing tool is reported by the check, never installed. `unavailable` is not
+a failure of the action (exit status `0`); a failed check is (exit status `1`).
+
+### Limits
+
+- One action handles one integration. There is no cross-tool transaction or
+  rollback beyond each installer's own merge behavior.
+- Install writes the current package's files. There is no version pin,
+  download, upgrade check or cache lookup.
+- The token binds the integration name, scope and `--python`, so changing any
+  of them needs a new preview.
+- Target paths are what the installer reports now. Apply re-checks scope and
+  state, while the installer performs the actual safe merge against the files
+  at call time.
+- Only OpenCode exposes a load check. Claude, Codex and Kiro report
+  `unavailable`; `integration.status` is path/marker inspection, not a load
+  test.
+- The OpenCode check depends on the local `opencode` and Node installations
+  and can take up to 60 seconds. A missing tool is reported, not installed.
+- User scope writes outside the repository under the tool's home directory;
+  there is no automatic backup of the tool's configuration outside the
+  installer's behavior.
 
 ## Live gates
 
@@ -95,8 +218,9 @@ output limit still apply. The preview shows the planned argv produced by the
 relay backend; if a backend cannot plan a command, the preview says so instead
 of inventing one.
 
-No preview or test starts a real service, tunnel or daemon. Tests use fake
-managers, fake daemon clients and fake relays.
+No preview or test starts a real service, tunnel or daemon, and no test runs a
+real integration install. Tests use fake managers, fake daemon clients, fake
+relays and fake installer/check runners.
 
 ## Audit
 
@@ -108,12 +232,14 @@ A record contains:
 
 - timestamp, action, outcome state and success flag;
 - the target label (service, tunnel or integration name);
+- the integration scope (`project` or `user`) when one applies;
 - whether live/network gates were requested;
 - a short hash of the consumed token;
 - a bounded, redacted error message for a refusal or failure.
 
-It never contains argv, environment values, credentials, process output or log
-contents. Pending tokens live under `<state dir>/actions/pending/` (`0600`) and
+It never contains argv, the configured Python path, installer output, target
+file content, environment values, credentials or log contents. Pending tokens
+live under `<state dir>/actions/pending/` (`0600`) and
 are pruned after ten minutes or when the pending set grows too large. Neither
 path is written outside the configured state directory.
 
@@ -127,6 +253,8 @@ path is written outside the configured state directory.
 
 `list` prints the supported actions and marks each as mutating, destructive and
 live-gated. `--json` prints the same structured result for a UI or test.
+`--scope project|user` and `--python PYTHON` are passed through to the
+integration actions; a changed value needs a new preview and token.
 
 ## What remains
 
@@ -136,7 +264,8 @@ live-gated. `--json` prints the same structured result for a UI or test.
   MCP client receives a token or mutation surface yet).
 - Mutating MCP actions are intentionally absent: MCP remains observation and
   review-first until the host can show a confirmation UI.
-- Integration install/uninstall previews and trust steps.
+- Integrated trust-step dialogs and version/upgrade checks; this slice shows
+  the trust text and installs only the current package.
 - Provider/MCP enable/disable, resource-limit changes, file cleanup and index
   rebuild actions from the wider plan.
 - Daemon idle-timeout adjustment as a separate action.

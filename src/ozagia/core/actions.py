@@ -22,12 +22,18 @@ environment, credentials, process output or log contents.
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import importlib
+import importlib.util
+import io
 import json
 import math
 import os
 import re
 import secrets
+import shutil
+import sys
 import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -69,6 +75,18 @@ _TOKEN = re.compile(r"[A-Za-z0-9_-]{20,128}\Z")
 _NAME = re.compile(r"[^\x00-\x1f\x7f]{1,128}\Z")
 _INTEGRATIONS = ("opencode", "claude", "codex", "kiro")
 _SCOPES = ("project", "user")
+_INSTALLER_MODULES = {
+    "opencode": "ozagia.integrations.opencode",
+    "claude": "ozagia.integrations.claude_code",
+    "codex": "ozagia.integrations.codex",
+    "kiro": "ozagia.integrations.kiro",
+}
+_INTEGRATION_SCOPES = {
+    "opencode": ("project",),
+    "claude": ("project",),
+    "codex": ("project", "user"),
+    "kiro": ("project", "user"),
+}
 _SECRET_TEXT = re.compile(
     r"(?i)\b(token|secret|password|passwd|api[_-]?key|authorization)"
     r"(\s*[=:]\s*)\S+"
@@ -116,6 +134,11 @@ ACTION_SPECS: tuple[ActionSpec, ...] = (
     ActionSpec("tunnel.start", "Open one configured live tunnel through its relay.",
                mutating=True, live_gated=True),
     ActionSpec("integration.status", "Show read-only OpenCode/Claude/Codex/Kiro paths."),
+    ActionSpec("integration.install", "Install one integration through its installer.",
+               mutating=True),
+    ActionSpec("integration.uninstall", "Remove one integration's own entries.",
+               mutating=True, destructive=True),
+    ActionSpec("integration.verify", "Run a read-only installer check when one exists."),
 )
 _ACTIONS: dict[str, ActionSpec] = {spec.name: spec for spec in ACTION_SPECS}
 
@@ -129,6 +152,8 @@ class ActionContext:
     daemon_client_factory: Callable[..., Any] | None = None
     daemon_ensure: Callable[..., Any] | None = None
     relay_factory: Callable[[Any, RelayPolicy], Any] | None = None
+    installer_runner: Callable[[str, list[str]], int] | None = None
+    integration_check: Callable[[str, Path], dict[str, Any]] | None = None
     clock: Callable[[], datetime] | None = None
     token_factory: Callable[[], str] | None = None
     runtime_state_dir: str | Path | None = None
@@ -163,6 +188,10 @@ class ActionResult:
     live: bool = False
     gated: bool = False
     notes: tuple[str, ...] = ()
+    scope: str | None = None
+    targets: tuple[str, ...] = ()
+    installer: str | None = None
+    python: str | None = None
     audit: str | None = None
     audit_error: str | None = None
 
@@ -188,6 +217,10 @@ class ActionResult:
             "live": self.live,
             "gated": self.gated,
             "notes": list(self.notes),
+            "scope": self.scope,
+            "targets": list(self.targets),
+            "installer": self.installer,
+            "python": self.python,
             "audit": self.audit,
             "audit_error": self.audit_error,
         }
@@ -271,6 +304,14 @@ def _bool_arg(value: Any, name: str) -> bool:
     return value
 
 
+def _python_arg(value: Any) -> str:
+    if value is None:
+        value = sys.executable
+    text = _text_arg(value, "python", required=True)
+    assert text is not None
+    return text
+
+
 def _int_arg(value: Any, name: str, *, minimum: int, maximum: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ActionError(f"{name} must be an integer")
@@ -309,6 +350,9 @@ def _canonical(action: str, args: Mapping[str, Any]) -> dict[str, Any]:
         "tunnel.status": {"name"},
         "tunnel.start": {"name", "live", "network"},
         "integration.status": {"name", "scope"},
+        "integration.install": {"name", "scope", "python"},
+        "integration.uninstall": {"name", "scope"},
+        "integration.verify": {"name", "scope"},
     }[action]
     unknown = set(args) - allowed
     if unknown:
@@ -316,7 +360,19 @@ def _canonical(action: str, args: Mapping[str, Any]) -> dict[str, Any]:
             f"unsupported argument(s) for {action}: {', '.join(sorted(unknown))}")
     out: dict[str, Any] = {}
     if "name" in allowed:
-        out["name"] = _text_arg(args.get("name"), "name", required=action != "integration.status")
+        name = args.get("name")
+        if action == "integration.status":
+            if name is None:
+                out["name"] = None
+            elif isinstance(name, str) and name in _INTEGRATIONS:
+                out["name"] = name
+            else:
+                raise ActionError(f"name must be one of {', '.join(_INTEGRATIONS)}")
+        else:
+            selected = _text_arg(name, "name", required=True)
+            if action.startswith("integration.") and selected not in _INTEGRATIONS:
+                raise ActionError(f"name must be one of {', '.join(_INTEGRATIONS)}")
+            out["name"] = selected
     if action == "service.logs":
         out["max_bytes"] = _int_arg(
             args.get("max_bytes", DEFAULT_SERVICE_LOG_BYTES), "max_bytes",
@@ -330,18 +386,17 @@ def _canonical(action: str, args: Mapping[str, Any]) -> dict[str, Any]:
     if action == "tunnel.start":
         out["live"] = _bool_arg(args.get("live", False), "live")
         out["network"] = _bool_arg(args.get("network", False), "network")
-    if action == "integration.status":
-        name = args.get("name")
-        if name is None:
-            out["name"] = None
-        elif isinstance(name, str) and name in _INTEGRATIONS:
-            out["name"] = name
-        else:
-            raise ActionError(f"name must be one of {', '.join(_INTEGRATIONS)}")
+    if action.startswith("integration."):
         scope = args.get("scope", "project")
         if scope not in _SCOPES:
             raise ActionError(f"scope must be one of {', '.join(_SCOPES)}")
         out["scope"] = scope
+        if action == "integration.install":
+            if out.get("name") == "opencode":
+                if args.get("python") is not None:
+                    raise ActionError("python is not used by the opencode installer")
+            else:
+                out["python"] = _python_arg(args.get("python"))
     return out
 
 
@@ -516,6 +571,8 @@ def _append_audit(root: Path, result: ActionResult, args: Mapping[str, Any],
             "network": bool(args.get("network", False)),
             "token": _token_id(confirmation) if confirmation else None,
         }
+        if args.get("scope") is not None:
+            record["scope"] = args["scope"]
         lines.append(json.dumps(record, sort_keys=True, separators=(",", ":"),
                                 ensure_ascii=True))
         lines = lines[-MAX_AUDIT_RECORDS:]
@@ -683,37 +740,38 @@ def _preview(action: str, *, operation: str, expected_effect: str,
              current: dict[str, Any] | None = None,
              current_state: str = "", applicable: bool = True,
              live: bool = False, gated: bool = False,
-             notes: tuple[str, ...] = ()) -> ActionResult:
+             notes: tuple[str, ...] = (), **fields: Any) -> ActionResult:
     return _result(
         action, mode="preview", state="preview", operation=operation,
         expected_effect=expected_effect, manager_call=manager_call, argv=argv,
         preconditions=preconditions, risks=risks, current=current,
         current_state=current_state, applicable=applicable, live=live,
-        gated=gated, notes=notes)
+        gated=gated, notes=notes, **fields)
 
 
 def _applied(action: str, *, current_state: str, expected_effect: str,
              result: Any = None, manager_call: str | None = None,
              argv: tuple[str, ...] = (), live: bool = False,
-             notes: tuple[str, ...] = ()) -> ActionResult:
+             notes: tuple[str, ...] = (), **fields: Any) -> ActionResult:
     return _result(
         action, mode="apply", state="applied", ok=True,
         current_state=current_state, expected_effect=expected_effect,
         result=result, manager_call=manager_call, argv=argv, live=live,
-        notes=notes)
+        notes=notes, **fields)
 
 
 def _noop(action: str, *, current_state: str, message: str,
-          result: Any = None) -> ActionResult:
+          result: Any = None, **fields: Any) -> ActionResult:
     return _applied(action, current_state=current_state,
-                    expected_effect=f"none ({message})", result=result)
+                    expected_effect=f"none ({message})", result=result,
+                    **fields)
 
 
 def _refused(action: str, *, current_state: str, error: str,
-             result: Any = None) -> ActionResult:
+             result: Any = None, **fields: Any) -> ActionResult:
     return _result(action, mode="apply", state="refused", ok=False,
                    current_state=current_state, error=_safe_error(error),
-                   result=result)
+                   result=result, **fields)
 
 
 def _absent_result(action: str, *, name: str | None, error: str | None,
@@ -1434,7 +1492,7 @@ def _preview_integration(root: Path, action: str, args: Mapping[str, Any],
         risks=("paths outside the repository may be shown for user-scope installs",),
         current={"integrations": reports},
         current_state=reports[0]["state"] if len(reports) == 1 else "inspected",
-        notes=("install and uninstall are intentionally not actions in this slice",))
+        scope=args.get("scope"))
 
 
 def _apply_integration(root: Path, action: str, args: Mapping[str, Any],
@@ -1443,7 +1501,394 @@ def _apply_integration(root: Path, action: str, args: Mapping[str, Any],
     consume()
     return _applied(
         action, current_state=reports[0]["state"] if len(reports) == 1 else "inspected",
-        expected_effect="none (read-only)", result={"integrations": reports})
+        expected_effect="none (read-only)", result={"integrations": reports},
+        scope=args.get("scope"))
+
+
+# --------------------------------------------------------------------------- #
+# integration install, uninstall and verify
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class _IntegrationPlan:
+    name: str
+    scope: str
+    module: str
+    arguments: tuple[str, ...]
+    argv: tuple[str, ...]
+    targets: tuple[str, ...]
+    python: str | None
+    supported: bool
+    reason: str
+
+
+def _integration_targets(name: str, root: Path, scope: str,
+                         action: str) -> tuple[str, ...]:
+    """The files this action would read or write, using installer path helpers."""
+    try:
+        if name == "opencode":
+            from ozagia.integrations.opencode import install as opener
+            paths = [opener.plugin_path(root)]
+            if action != "verify":
+                paths.append(opener.tui_brand_path(root))
+            return tuple(str(path) for path in paths)
+        if name == "claude":
+            from ozagia.integrations.claude_code import install as claude
+            settings = ("local",) if action == "install" else ("local", "project")
+            return tuple(str(claude.settings_path(root, item)) for item in settings)
+        if name == "codex":
+            from ozagia.integrations.codex import install as codex
+            paths = codex.paths(root, scope)
+            return tuple(str(paths[key]) for key in ("hooks", "config", "agents"))
+        from ozagia.integrations.kiro import install as kiro
+        paths = kiro.paths(root, scope, agent=kiro.DEFAULT_AGENT)
+        return tuple(str(paths[key]) for key in ("hooks", "agent", "mcp"))
+    except (ImportError, OSError, ValueError):
+        return ()
+
+
+def _integration_plan(root: Path, action: str,
+                      args: Mapping[str, Any]) -> _IntegrationPlan:
+    name = str(args["name"])
+    scope = str(args["scope"])
+    module = _INSTALLER_MODULES[name]
+    supported = scope in _INTEGRATION_SCOPES[name]
+    python = args.get("python") if action == "install" and name != "opencode" else None
+    if not supported:
+        reason = (f"the {name} installer supports "
+                  f"{', '.join(_INTEGRATION_SCOPES[name])} scope only, not {scope}")
+        return _IntegrationPlan(name, scope, module, (), (), (), python,
+                                False, reason)
+    arguments: list[str] = []
+    if action == "install":
+        arguments = ["install", "--workdir", str(root)]
+        if name == "claude":
+            arguments += ["--settings", "local", "--python", str(python)]
+        elif name == "codex":
+            arguments += ["--scope", scope, "--python", str(python)]
+        elif name == "kiro":
+            arguments += ["--scope", scope, "--python", str(python),
+                          "--format", "v3", "--agent", "ozagia"]
+    elif action == "uninstall":
+        arguments = ["uninstall", "--workdir", str(root)]
+        if name == "codex":
+            arguments += ["--scope", scope]
+        elif name == "kiro":
+            arguments += ["--scope", scope, "--agent", "ozagia"]
+    elif action == "verify" and name == "opencode":
+        arguments = ["check", "--workdir", str(root)]
+    argv = ((sys.executable, "-m", module, *arguments) if arguments else ())
+    targets = _integration_targets(name, root, scope, action)
+    reason = ""
+    if action == "verify" and name != "opencode":
+        reason = f"the {name} installer has no read-only status/check command"
+    return _IntegrationPlan(name, scope, module, tuple(arguments), argv,
+                            targets, python, True, reason)
+
+
+def _installer_available(module: str, context: ActionContext) -> bool:
+    if context.installer_runner is not None:
+        return True
+    try:
+        return importlib.util.find_spec(f"{module}.__main__") is not None
+    except (AttributeError, ImportError, ValueError):
+        return False
+
+
+def _python_available(value: str | None) -> bool:
+    if not value:
+        return False
+    path = Path(value).expanduser()
+    if path.is_absolute() or os.sep in value:
+        return path.is_file() and os.access(path, os.X_OK)
+    return shutil.which(value) is not None
+
+
+def _integration_complete(report: Mapping[str, Any], name: str,
+                          action: str) -> bool:
+    if name == "claude" and action == "install":
+        # Install writes the personal settings file; a project settings file
+        # alone does not make that install complete.
+        return any(item.get("name") == "local settings" and item.get("installed")
+                   for item in report.get("components") or [])
+    return report.get("state") == "installed"
+
+
+def _integration_effect(plan: _IntegrationPlan, action: str,
+                        check_available: bool) -> str:
+    if not plan.supported:
+        return "none (unsupported scope)"
+    labels = ", ".join(plan.targets) or "no target paths"
+    if action == "install":
+        return (f"write ozagia's {plan.name} files ({labels}); merge only their "
+                "own entries, keep unrelated settings, and run no hook or service")
+    if action == "uninstall":
+        return (f"remove only ozagia's entries from {labels}; keep everything "
+                "else, and run no hook or service")
+    if check_available:
+        return ("none (read-only): run the installer's local load check; "
+                "no model call, network request or install")
+    return ("none: this installer has no status/check command, so apply reports "
+            "`unavailable`")
+
+
+def _integration_operation(plan: _IntegrationPlan, action: str) -> str:
+    if action == "install":
+        return f"install ozagia's {plan.name} integration for {plan.scope} scope"
+    if action == "uninstall":
+        return f"uninstall ozagia's {plan.name} integration for {plan.scope} scope"
+    return f"verify ozagia's {plan.name} integration for {plan.scope} scope"
+
+
+def _integration_manager_call(plan: _IntegrationPlan, root: Path,
+                              action: str, check_available: bool,
+                              context: ActionContext) -> str | None:
+    if not plan.supported:
+        return None
+    if action in {"install", "uninstall"}:
+        return f"{plan.module}.__main__.main({list(plan.arguments)!r})"
+    if check_available:
+        if context.integration_check is not None:
+            return "integration_check(name, root)"
+        return f"{plan.module}.install.check_loads({str(root)!r})"
+    return None
+
+
+def _preview_integration_action(root: Path, action: str, args: Mapping[str, Any],
+                                context: ActionContext) -> ActionResult:
+    kind = action.split(".", 1)[1]
+    plan = _integration_plan(root, kind, args)
+    report = _integration_report(root, plan.name, plan.scope)[0]
+    state = str(report.get("state") or "unknown")
+    current = {
+        **report,
+        "requested_scope": plan.scope,
+        "supported_scopes": list(_INTEGRATION_SCOPES[plan.name]),
+    }
+    notes: list[str] = []
+    check_available = (kind == "verify"
+                       and (plan.name == "opencode"
+                            or context.integration_check is not None))
+    if not plan.supported:
+        notes.append(plan.reason)
+    elif kind == "verify" and not check_available:
+        notes.append(f"{plan.reason}; apply reports `unavailable`")
+
+    complete = _integration_complete(report, plan.name, kind)
+    absent = state == "absent"
+    installer_available = _installer_available(plan.module, context)
+    python_ok = (plan.python is None or _python_available(plan.python))
+    applicable = plan.supported
+    effect = _integration_effect(plan, kind, check_available)
+    if plan.supported:
+        if kind == "install" and complete:
+            notes.append("the integration is already installed for this scope; apply "
+                         "re-runs the idempotent installer and keeps unrelated settings")
+        elif kind == "uninstall" and absent:
+            applicable = False
+            effect = "none (the integration is not installed for this scope)"
+            notes.append("the integration is not installed for this scope; "
+                         "apply is a no-op")
+        elif kind in {"install", "uninstall"} and not installer_available:
+            applicable = False
+            notes.append("the installer module is not available")
+        elif kind == "install" and not python_ok:
+            applicable = False
+            notes.append("the configured Python does not exist or is not executable")
+
+    preconditions = [
+        f"integration {plan.name!r} is supported",
+        f"{plan.scope} scope is supported by the {plan.name} installer",
+        "existing target files, if present, are valid and mergeable",
+    ]
+    if kind in {"install", "uninstall"}:
+        preconditions.append("the installer module is available")
+    if kind == "install" and plan.python is not None:
+        preconditions.append("the configured Python exists and is executable")
+    if kind == "verify" and check_available:
+        preconditions.append(
+            "the tool's own CLI is optional; a missing tool is reported, never installed")
+
+    risks = [
+        "no hook is started and no service is started by this action",
+        "the installer changes only ozagia's own entries; unrelated settings are kept",
+    ]
+    if plan.scope == "user":
+        risks.append("user scope writes outside the repository, under the tool's home directory")
+    if kind == "install":
+        risks.append("hooks take effect on the next session or tool call, after the "
+                     "tool's own trust step")
+    elif kind == "uninstall":
+        risks.append("a file left with nothing else can be deleted; ozagia's entries "
+                     "are removed, not the user's")
+    elif check_available:
+        risks.append("the check may run local tool/Node processes and take up to 60 seconds")
+    else:
+        risks.append("`unavailable` is reported honestly; it is not a claim that the "
+                     "integration works")
+
+    return _preview(
+        action,
+        operation=_integration_operation(plan, kind),
+        expected_effect=effect,
+        manager_call=_integration_manager_call(plan, root, kind, check_available,
+                                               context),
+        argv=plan.argv,
+        preconditions=tuple(preconditions),
+        risks=tuple(risks),
+        current=current,
+        current_state=state,
+        applicable=applicable,
+        notes=tuple(dict.fromkeys(notes)),
+        scope=plan.scope,
+        targets=plan.targets,
+        installer=plan.module if plan.supported else None,
+        python=plan.python,
+    )
+
+
+def _invoke_installer(module: str, arguments: tuple[str, ...],
+                      context: ActionContext) -> tuple[int | None, str | None]:
+    """Call an installer main() in-process (or the test runner). Never spawns."""
+    if context.installer_runner is not None:
+        try:
+            value = context.installer_runner(module, list(arguments))
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            return None, _safe_error(exc)
+        if isinstance(value, bool) or not isinstance(value, int):
+            return None, "installer runner returned an invalid status"
+        if value != 0:
+            return value, f"installer exited with status {value}"
+        return 0, None
+    output = io.StringIO()
+    try:
+        imported = importlib.import_module(f"{module}.__main__")
+        main = getattr(imported, "main", None)
+        if not callable(main):
+            return None, "installer module has no main()"
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            code = main(list(arguments))
+    except SystemExit as exc:
+        code = exc.code if exc.code is not None else 0
+        if isinstance(code, bool) or not isinstance(code, int):
+            return None, "installer exited without a numeric status"
+    except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        return None, _safe_error(exc)
+    if isinstance(code, bool) or not isinstance(code, int):
+        return None, "installer returned an invalid status"
+    if code != 0:
+        message = _safe_error(output.getvalue().strip())
+        return code, message or f"installer exited with status {code}"
+    return 0, None
+
+
+def _run_integration_check(name: str, root: Path,
+                           context: ActionContext) -> dict[str, Any]:
+    if context.integration_check is not None:
+        try:
+            value = context.integration_check(name, root)
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise ActionError(_safe_error(exc) or "integration check failed") from None
+        if not isinstance(value, Mapping):
+            raise ActionError("integration check returned an invalid result")
+        payload = dict(value)
+        payload.setdefault("available", True)
+        return payload
+    if name != "opencode":
+        return {"available": False,
+                "reason": f"the {name} installer has no read-only status/check command"}
+    from ozagia.integrations.opencode import install as opener
+    try:
+        value = opener.check_loads(root)
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise ActionError(_safe_error(exc) or "OpenCode load check failed") from None
+    if not isinstance(value, Mapping):
+        raise ActionError("OpenCode load check returned an invalid result")
+    return {"available": True, **dict(value)}
+
+
+def _apply_integration_action(root: Path, action: str, args: Mapping[str, Any],
+                              context: ActionContext,
+                              consume: Callable[[], None]) -> ActionResult:
+    kind = action.split(".", 1)[1]
+    plan = _integration_plan(root, kind, args)
+    report = _integration_report(root, plan.name, plan.scope)[0]
+    state = str(report.get("state") or "unknown")
+    scope_fields = {
+        "scope": plan.scope,
+        "targets": plan.targets,
+        "installer": plan.module if plan.supported else None,
+        "python": plan.python,
+    }
+    if not plan.supported:
+        consume()
+        return _refused(action, current_state=state, error=plan.reason,
+                         result={"integration": report}, **scope_fields)
+
+    if kind == "verify":
+        check_available = (plan.name == "opencode"
+                           or context.integration_check is not None)
+        consume()
+        try:
+            payload = _run_integration_check(plan.name, root, context)
+        except ActionError as exc:
+            return _result(
+                action, mode="apply", state="failed", ok=False,
+                current_state=state, expected_effect="none (read-only)",
+                error=_safe_error(exc), result={"available": True},
+                **scope_fields)
+        if payload.get("available") is False:
+            return _result(
+                action, mode="apply", state="unavailable", ok=True,
+                current_state=state,
+                expected_effect="none (no installer check available)",
+                result={**payload, "integration": report},
+                **scope_fields)
+        ok = payload.get("ok") is not False
+        return _result(
+            action, mode="apply", state="verified" if ok else "failed", ok=ok,
+            current_state=state, expected_effect="none (read-only)",
+            result=payload,
+            manager_call=_integration_manager_call(plan, root, kind, check_available,
+                                                   context),
+            error=None if ok else (_safe_error(payload.get("error"))
+                                   or "integration check failed"),
+            **scope_fields)
+
+    absent = state == "absent"
+    if kind == "uninstall" and absent:
+        consume()
+        return _noop(action, current_state=state,
+                     message="the integration is not installed for this scope",
+                     result={"integration": report}, **scope_fields)
+    if not _installer_available(plan.module, context):
+        consume()
+        return _refused(action, current_state=state,
+                        error="the installer module is not available",
+                        result={"integration": report}, **scope_fields)
+    if kind == "install" and plan.python is not None and not _python_available(plan.python):
+        consume()
+        return _refused(action, current_state=state,
+                        error="the configured Python does not exist or is not executable",
+                        result={"integration": report}, **scope_fields)
+
+    effect = _integration_effect(plan, kind, False)
+    manager_call = _integration_manager_call(plan, root, kind, False, context)
+    consume()
+    code, error = _invoke_installer(plan.module, plan.arguments, context)
+    if code != 0 or error is not None:
+        return _result(
+            action, mode="apply", state="failed", ok=False,
+            current_state=state, expected_effect=effect,
+            error=error or f"installer exited with status {code}",
+            result={"installer": plan.module, "exit": code,
+                    "scope": plan.scope},
+            manager_call=manager_call, argv=plan.argv, **scope_fields)
+    target_state = "installed" if kind == "install" else "absent"
+    return _applied(
+        action, current_state=target_state, expected_effect=effect,
+        result={"installer": plan.module, "exit": 0, "scope": plan.scope,
+                "targets": list(plan.targets)},
+        manager_call=manager_call, argv=plan.argv, **scope_fields)
 
 
 # --------------------------------------------------------------------------- #
@@ -1473,6 +1918,8 @@ def _dispatch_preview(root: Path, action: str, args: Mapping[str, Any],
         return _preview_tunnel(root, action, args, context)
     if action == "integration.status":
         return _preview_integration(root, action, args, context)
+    if action.startswith("integration."):
+        return _preview_integration_action(root, action, args, context)
     raise ActionError(f"unsupported action: {action!r}")
 
 
@@ -1511,6 +1958,8 @@ def _dispatch_apply(root: Path, action: str, args: Mapping[str, Any],
         return _apply_tunnel(root, action, args, context, consume)
     if action == "integration.status":
         return _apply_integration(root, action, args, context, consume)
+    if action.startswith("integration."):
+        return _apply_integration_action(root, action, args, context, consume)
     raise ActionError(f"unsupported action: {action!r}")
 
 

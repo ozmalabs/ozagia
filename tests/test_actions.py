@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -480,3 +481,417 @@ def test_no_real_process_or_network_was_created(tmp_path):
     assert fake.calls == [("status", "api"), ("start", "api")]
     assert not (tmp_path / ".ozagia" / "runtime").exists()
     assert os.environ.get("OZAGIA_STARTED_REAL_SERVICE") is None
+
+
+# --------------------------------------------------------------------------- #
+# integration install / uninstall / verify
+# --------------------------------------------------------------------------- #
+INSTALL_CASES = (
+    ("opencode", "ozagia.integrations.opencode", False,
+     (".opencode/plugins/ozagia.js", ".opencode/plugins/ozagia/tui.js")),
+    ("claude", "ozagia.integrations.claude_code", True,
+     (".claude/settings.local.json",)),
+    ("codex", "ozagia.integrations.codex", True,
+     (".codex/hooks.json", ".codex/config.toml", "AGENTS.md")),
+    ("kiro", "ozagia.integrations.kiro", True,
+     (".kiro/hooks/ozagia.json", ".kiro/agents/ozagia.json",
+      ".kiro/settings/mcp.json")),
+)
+
+
+class FakeInstaller:
+    """Records installer main() calls without importing or writing anything."""
+
+    def __init__(self, code: int = 0, error: Exception | None = None):
+        self.code = code
+        self.error = error
+        self.calls: list[tuple[str, list[str]]] = []
+
+    def __call__(self, module: str, arguments: list[str]) -> int:
+        self.calls.append((module, list(arguments)))
+        if self.error is not None:
+            raise self.error
+        return self.code
+
+
+@pytest.mark.parametrize("name,module,uses_python,suffixes", INSTALL_CASES)
+def test_integration_install_preview_is_read_only_and_exact(
+        tmp_path, name, module, uses_python, suffixes):
+    kwargs: dict[str, Any] = {"name": name}
+    if uses_python:
+        kwargs["python"] = sys.executable
+    result = preview(tmp_path, "integration.install", **kwargs)
+
+    assert result.mode == "preview" and result.state == "preview"
+    assert result.ok is True and result.applicable is True
+    assert result.current_state == "absent"
+    assert result.scope == "project"
+    assert result.installer == module
+    assert result.argv[:3] == (sys.executable, "-m", module)
+    assert result.argv[3] == "install"
+    workdir = result.argv.index("--workdir") + 1
+    assert result.argv[workdir] == str(tmp_path)
+    assert result.manager_call == (
+        f"{module}.__main__.main({list(result.argv[3:])!r})")
+    assert result.targets == tuple(str(tmp_path / item) for item in suffixes)
+    assert result.python == (sys.executable if uses_python else None)
+    assert result.confirmation
+    assert any("no hook is started" in risk for risk in result.risks)
+    for target in result.targets:
+        assert not Path(target).exists()
+    assert not (tmp_path / ".ozagia" / "runtime").exists()
+    assert not (tmp_path / ".ozagia" / "actions" / "audit.jsonl").exists()
+    token_file = (tmp_path / ".ozagia" / "actions" / "pending"
+                  / f"{result.confirmation}.json")
+    assert token_file.is_file()
+
+
+def test_integration_install_preview_preserves_existing_config(tmp_path):
+    config = tmp_path / ".codex" / "config.toml"
+    config.parent.mkdir(parents=True)
+    original = 'model = "gpt-5"\n\n[mcp_servers.other]\ncommand = "other"\n'
+    config.write_text(original, encoding="utf-8")
+    agents = tmp_path / "AGENTS.md"
+    agents.write_text("# Team rules\n\nKeep this.\n", encoding="utf-8")
+
+    result = preview(tmp_path, "integration.install", name="codex",
+                     python=sys.executable)
+
+    assert result.applicable is True
+    assert config.read_text(encoding="utf-8") == original
+    assert agents.read_text(encoding="utf-8") == "# Team rules\n\nKeep this.\n"
+    assert not (tmp_path / ".codex" / "hooks.json").exists()
+
+
+def test_integration_install_apply_uses_the_fake_installer_and_consumes_the_token(tmp_path):
+    fake = FakeInstaller()
+    ctx = ActionContext(installer_runner=fake)
+    request = preview(tmp_path, "integration.install", context=ctx,
+                      name="codex", python=sys.executable)
+    result = apply(tmp_path, "integration.install", request.confirmation,
+                   context=ctx, name="codex", python=sys.executable)
+
+    assert result.ok is True and result.state == "applied"
+    assert result.current_state == "installed"
+    assert result.result["installer"] == "ozagia.integrations.codex"
+    assert result.result["exit"] == 0
+    assert fake.calls == [(
+        "ozagia.integrations.codex",
+        ["install", "--workdir", str(tmp_path), "--scope", "project",
+         "--python", sys.executable],
+    )]
+    assert not (tmp_path / ".codex").exists()
+    with pytest.raises(ActionRefused, match="already used"):
+        apply(tmp_path, "integration.install", request.confirmation,
+              context=ctx, name="codex", python=sys.executable)
+
+
+def test_integration_apply_requires_a_matching_one_time_token(tmp_path):
+    fake = FakeInstaller()
+    ctx = ActionContext(installer_runner=fake)
+
+    with pytest.raises(ActionError, match="required"):
+        apply(tmp_path, "integration.install", "", context=ctx, name="codex",
+              python=sys.executable)
+    with pytest.raises(ActionRefused, match="malformed"):
+        apply(tmp_path, "integration.install", "not a token", context=ctx,
+              name="codex", python=sys.executable)
+    with pytest.raises(ActionRefused, match="unknown"):
+        apply(tmp_path, "integration.install", "a" * 24, context=ctx,
+              name="codex", python=sys.executable)
+
+    request = preview(tmp_path, "integration.install", context=ctx,
+                      name="codex", python=sys.executable)
+    with pytest.raises(ActionRefused, match="different arguments"):
+        apply(tmp_path, "integration.install", request.confirmation,
+              context=ctx, name="codex", scope="user", python=sys.executable)
+
+    result = apply(tmp_path, "integration.install", request.confirmation,
+                   context=ctx, name="codex", python=sys.executable)
+    assert result.ok is True
+    assert len(fake.calls) == 1
+
+
+def test_integration_user_scope_arguments_and_unknown_name(tmp_path, monkeypatch):
+    from ozagia.integrations.codex import install as codex_install
+    from ozagia.integrations.kiro import install as kiro_install
+
+    home = tmp_path / "home"
+    monkeypatch.setattr(codex_install, "codex_home", lambda: home / ".codex")
+    monkeypatch.setattr(kiro_install, "kiro_home", lambda: home / ".kiro")
+    fake = FakeInstaller()
+    ctx = ActionContext(installer_runner=fake)
+
+    for name, module in (("codex", "ozagia.integrations.codex"),
+                         ("kiro", "ozagia.integrations.kiro")):
+        request = preview(tmp_path, "integration.install", context=ctx,
+                          name=name, scope="user", python=sys.executable)
+        assert request.applicable is True
+        assert request.scope == "user"
+        assert request.argv[request.argv.index("--scope") + 1] == "user"
+        assert request.targets
+        assert all(Path(target).is_relative_to(home) for target in request.targets)
+        assert not home.exists()
+        assert request.installer == module
+
+    request = preview(tmp_path, "integration.install", context=ctx,
+                      name="codex", scope="user", python=sys.executable)
+    result = apply(tmp_path, "integration.install", request.confirmation,
+                   context=ctx, name="codex", scope="user",
+                   python=sys.executable)
+    assert result.ok is True
+    assert fake.calls[0][1][fake.calls[0][1].index("--scope") + 1] == "user"
+    assert not home.exists()
+
+    with pytest.raises(ActionError, match="name must be one of"):
+        preview(tmp_path, "integration.install", name="vscode",
+                python=sys.executable)
+    with pytest.raises(ActionError, match="name must be one of"):
+        preview(tmp_path, "integration.verify", name="vscode")
+
+
+def test_integration_unsupported_scope_is_refused_without_the_installer(tmp_path):
+    fake = FakeInstaller()
+    ctx = ActionContext(installer_runner=fake)
+    for name in ("opencode", "claude"):
+        request = preview(tmp_path, "integration.install", context=ctx,
+                          name=name, scope="user")
+        assert request.applicable is False
+        assert request.targets == ()
+        assert any("supports project scope only" in note
+                   for note in request.notes)
+        result = apply(tmp_path, "integration.install", request.confirmation,
+                       context=ctx, name=name, scope="user")
+        assert result.ok is False and result.state == "refused"
+        assert "project scope only" in (result.error or "")
+    assert fake.calls == []
+
+
+def test_integration_installer_failure_is_bounded_and_audited_without_secrets(tmp_path):
+    failing = FakeInstaller(error=RuntimeError(f"token={SECRET}"))
+    ctx = ActionContext(installer_runner=failing)
+    request = preview(tmp_path, "integration.install", context=ctx,
+                      name="codex", python=sys.executable)
+    result = apply(tmp_path, "integration.install", request.confirmation,
+                   context=ctx, name="codex", python=sys.executable)
+
+    assert result.ok is False and result.state == "failed"
+    assert SECRET not in (result.error or "")
+    assert "[redacted]" in (result.error or "")
+    audit_text = (tmp_path / ".ozagia" / "actions" / "audit.jsonl").read_text(
+        encoding="utf-8")
+    assert SECRET not in audit_text
+    assert "--workdir" not in audit_text
+    assert sys.executable not in audit_text
+    record = json.loads(audit_text.splitlines()[-1])
+    assert record["action"] == "integration.install"
+    assert record["target"] == "codex"
+    assert record["scope"] == "project"
+    assert record["result"]["state"] == "failed"
+    assert record["result"]["ok"] is False
+    with pytest.raises(ActionRefused, match="already used"):
+        apply(tmp_path, "integration.install", request.confirmation,
+              context=ctx, name="codex", python=sys.executable)
+
+    nonzero = FakeInstaller(code=1)
+    ctx = ActionContext(installer_runner=nonzero)
+    request = preview(tmp_path, "integration.install", context=ctx,
+                      name="codex", python=sys.executable)
+    result = apply(tmp_path, "integration.install", request.confirmation,
+                   context=ctx, name="codex", python=sys.executable)
+    assert result.ok is False and result.state == "failed"
+    assert "exited with status 1" in (result.error or "")
+    assert nonzero.calls and not (tmp_path / ".codex").exists()
+
+
+def test_integration_verify_is_read_only_and_reports_unavailable(tmp_path):
+    calls: list[tuple[str, str]] = []
+
+    def check(name: str, root: Path) -> dict[str, Any]:
+        calls.append((name, str(root)))
+        return {"ok": True, "listed": True, "self_test": {"ok": True}}
+
+    ctx = ActionContext(integration_check=check)
+    request = preview(tmp_path, "integration.verify", context=ctx,
+                      name="opencode")
+    assert request.applicable is True
+    assert request.targets == (str(tmp_path / ".opencode" / "plugins" / "ozagia.js"),)
+    assert "integration_check" in (request.manager_call or "")
+    result = apply(tmp_path, "integration.verify", request.confirmation,
+                   context=ctx, name="opencode")
+    assert result.ok is True and result.state == "verified"
+    assert result.result["listed"] is True
+    assert calls == [("opencode", str(tmp_path))]
+    assert not (tmp_path / ".opencode").exists()
+
+    def failing_check(name: str, root: Path) -> dict[str, Any]:
+        return {"ok": False, "error": f"token={SECRET}"}
+
+    ctx = ActionContext(integration_check=failing_check)
+    request = preview(tmp_path, "integration.verify", context=ctx,
+                      name="opencode")
+    result = apply(tmp_path, "integration.verify", request.confirmation,
+                   context=ctx, name="opencode")
+    assert result.ok is False and result.state == "failed"
+    assert SECRET not in (result.error or "")
+    assert SECRET not in (tmp_path / ".ozagia" / "actions" / "audit.jsonl").read_text(
+        encoding="utf-8")
+
+    ctx = ActionContext()
+    request = preview(tmp_path, "integration.verify", context=ctx, name="codex")
+    assert request.applicable is True
+    assert "unavailable" in request.expected_effect
+    result = apply(tmp_path, "integration.verify", request.confirmation,
+                   context=ctx, name="codex")
+    assert result.ok is True and result.state == "unavailable"
+    assert result.result["available"] is False
+    assert "no read-only status/check" in result.result["reason"]
+    assert not (tmp_path / ".codex").exists()
+
+
+def test_integration_noops_do_not_call_the_installer(tmp_path):
+    fake = FakeInstaller()
+    ctx = ActionContext(installer_runner=fake)
+
+    request = preview(tmp_path, "integration.uninstall", context=ctx,
+                      name="opencode")
+    assert request.applicable is False
+    result = apply(tmp_path, "integration.uninstall", request.confirmation,
+                   context=ctx, name="opencode")
+    assert result.ok is True and result.state == "applied"
+    assert "not installed" in result.expected_effect
+    assert fake.calls == []
+
+    server = tmp_path / ".opencode" / "plugins" / "ozagia.js"
+    brand = tmp_path / ".opencode" / "plugins" / "ozagia" / "tui.js"
+    server.parent.mkdir(parents=True)
+    brand.parent.mkdir(parents=True)
+    server.write_text("// server\n", encoding="utf-8")
+    brand.write_text("// brand\n", encoding="utf-8")
+
+    request = preview(tmp_path, "integration.install", context=ctx,
+                      name="opencode")
+    assert request.applicable is True
+    assert any("already installed" in note for note in request.notes)
+    result = apply(tmp_path, "integration.install", request.confirmation,
+                   context=ctx, name="opencode")
+    assert result.ok is True and result.state == "applied"
+    assert fake.calls == [(
+        "ozagia.integrations.opencode",
+        ["install", "--workdir", str(tmp_path)],
+    )]
+
+    request = preview(tmp_path, "integration.uninstall", context=ctx,
+                      name="opencode")
+    assert request.applicable is True
+    assert request.targets == (str(server), str(brand))
+    result = apply(tmp_path, "integration.uninstall", request.confirmation,
+                   context=ctx, name="opencode")
+    assert result.ok is True and result.current_state == "absent"
+    assert fake.calls == [
+        ("ozagia.integrations.opencode",
+         ["install", "--workdir", str(tmp_path)]),
+        ("ozagia.integrations.opencode",
+         ["uninstall", "--workdir", str(tmp_path)]),
+    ]
+    assert server.is_file() and brand.is_file()
+
+
+def test_cli_lists_integration_actions_and_passes_scope_and_python(tmp_path, capsys):
+    assert cli_main(["list", "--json"]) == 0
+    listing = {row["name"]: row for row in json.loads(capsys.readouterr().out)}
+    assert {"integration.install", "integration.uninstall",
+            "integration.verify"} <= set(listing)
+    assert listing["integration.install"]["mutating"] is True
+    assert listing["integration.uninstall"]["destructive"] is True
+    assert listing["integration.verify"]["mutating"] is False
+
+    assert cli_main(["preview", "integration.install", "--root", str(tmp_path),
+                     "--name", "codex", "--scope", "project",
+                     "--python", sys.executable, "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["scope"] == "project"
+    assert payload["installer"] == "ozagia.integrations.codex"
+    assert payload["python"] == sys.executable
+    assert payload["argv"][3] == "install"
+    assert payload["confirmation"]
+    assert payload["targets"]
+    assert not (tmp_path / ".codex").exists()
+
+    assert cli_main(["preview", "integration.install", "--root", str(tmp_path),
+                     "--name", "opencode", "--scope", "user", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["applicable"] is False
+    assert payload["targets"] == []
+
+    assert cli_main(["preview", "integration.install", "--root", str(tmp_path),
+                     "--name", "opencode", "--python", sys.executable]) == 2
+    capsys.readouterr()
+    assert cli_main(["preview", "integration.install", "--root", str(tmp_path),
+                     "--name", "vscode"]) == 2
+    capsys.readouterr()
+    assert cli_main(["apply", "integration.install", "--root", str(tmp_path),
+                     "--name", "codex", "--confirm", "a" * 24,
+                     "--python", sys.executable]) == 1
+
+
+@pytest.mark.parametrize("name,module", (
+    ("opencode", "ozagia.integrations.opencode"),
+    ("claude", "ozagia.integrations.claude_code"),
+    ("codex", "ozagia.integrations.codex"),
+    ("kiro", "ozagia.integrations.kiro"),
+))
+def test_integration_uninstall_and_verify_previews_are_exact(tmp_path, name, module):
+    uninstall = preview(tmp_path, "integration.uninstall", name=name)
+    assert uninstall.applicable is False
+    assert uninstall.current_state == "absent"
+    assert uninstall.argv[:3] == (sys.executable, "-m", module)
+    assert uninstall.argv[3] == "uninstall"
+    assert uninstall.argv[uninstall.argv.index("--workdir") + 1] == str(tmp_path)
+    if name == "kiro":
+        assert uninstall.argv[uninstall.argv.index("--agent") + 1] == "ozagia"
+    if name in {"opencode", "claude"}:
+        assert "--scope" not in uninstall.argv
+    assert uninstall.targets
+    assert all(not Path(target).exists() for target in uninstall.targets)
+
+    verify = preview(tmp_path, "integration.verify", name=name)
+    assert verify.applicable is True
+    if name == "opencode":
+        assert verify.argv[:3] == (sys.executable, "-m", module)
+        assert verify.argv[3] == "check"
+        assert "check_loads" in (verify.manager_call or "")
+    else:
+        assert verify.argv == ()
+        assert verify.manager_call is None
+        assert "unavailable" in verify.expected_effect
+        assert any("no read-only status/check" in note for note in verify.notes)
+    assert all(not Path(target).exists() for target in verify.targets)
+    assert not (tmp_path / ".ozagia" / "actions" / "audit.jsonl").exists()
+
+
+def test_installer_default_runner_is_in_process_not_a_subprocess(tmp_path, monkeypatch):
+    import types
+
+    recorded: list[list[str]] = []
+
+    def fake_main(arguments: list[str]) -> int:
+        recorded.append(list(arguments))
+        return 0
+
+    fake = types.ModuleType("ozagia.integrations.codex.__main__")
+    fake.main = fake_main
+    monkeypatch.setitem(sys.modules, "ozagia.integrations.codex.__main__", fake)
+    monkeypatch.setattr(actions, "_installer_available", lambda *_a, **_k: True)
+
+    ctx = ActionContext()
+    request = preview(tmp_path, "integration.install", context=ctx,
+                      name="codex", python=sys.executable)
+    result = apply(tmp_path, "integration.install", request.confirmation,
+                   context=ctx, name="codex", python=sys.executable)
+
+    assert result.ok is True and result.state == "applied"
+    assert recorded == [["install", "--workdir", str(tmp_path),
+                         "--scope", "project", "--python", sys.executable]]
+    assert not (tmp_path / ".codex").exists()
+    assert not (tmp_path / "AGENTS.md").exists()
