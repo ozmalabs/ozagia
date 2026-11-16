@@ -56,7 +56,9 @@ one, every key has the generic default below. All keys are optional:
     repeat = "note" | "stub" | "off"  # what a same-session re-read of an
                                       # unchanged range gets; unset: `note`
                                       # for every harness. `stub` is
-                                      # experimental (no eval yet) and needs
+                                      # experimental (one live eval showed no
+                                      # benefit: docs/results/ocelot_live_
+                                      # eval_2026-11-17.md) and needs
                                       # the harness to report compaction
                                       # (`ozagia.intent.ledger`)
     repeat_by_harness = {opencode = "stub"}  # per-harness override
