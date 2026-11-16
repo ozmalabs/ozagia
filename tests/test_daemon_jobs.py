@@ -33,6 +33,7 @@ def _env(**extra: str) -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if not k.startswith("OZAGIA_")}
     env["PYTHONPATH"] = str(SRC)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
+    env["OZAGIA_CGROUPS"] = "0"     # tests never touch the host hierarchy
     env.update(extra)
     return env
 
@@ -60,11 +61,76 @@ def repo(bare_repo):
     return bare_repo
 
 
+class _FakeCgroupHandle:
+    """A cgroup handle that records calls and never touches the host."""
+
+    def __init__(self, job_id: str = "j1", *,
+                 stats: dict | None = None) -> None:
+        self.path = Path("/fake/cgroup/ozagia") / f"job-{job_id}"
+        self.attached: list[int] = []
+        self.killed: list[dict] = []
+        self.cleaned: list[bool] = []
+        self._stats = dict(stats or {
+            "memory_peak_mb": 12.5, "memory_current_mb": 12.5,
+            "memory_max_mb": 64.0, "pids_current": 1, "pids_max": 8,
+            "oom_events": 0, "oom_kill": 0, "populated": False,
+            "peak_source": "memory.peak",
+        })
+
+    def attach(self, pid: int) -> dict:
+        self.attached.append(pid)
+        return {"ok": True, "pid": pid, "path": str(self.path)}
+
+    def stats(self) -> dict:
+        return dict(self._stats)
+
+    def kill(self, *, fallback=None, grace_s: float = 0.0,
+             term_first: bool = True) -> dict:
+        self.killed.append({"fallback": fallback is not None,
+                            "term_first": term_first})
+        return {"ok": True, "method": "cgroup.kill",
+                "action": "cgroup.kill", "signals": []}
+
+    def cleanup(self) -> dict:
+        self.cleaned.append(True)
+        return {"ok": True, "removed": True, "path": str(self.path),
+                "reason": None}
+
+
+class _FakeCgroupManager:
+    def __init__(self, handle: _FakeCgroupHandle | None = None,
+                 report: dict | None = None) -> None:
+        self.handle = handle
+        self.report = report
+        self.calls: list[dict] = []
+
+    def start(self, job_id: str, *, memory_mb=None, pids=None):
+        self.calls.append({"job": job_id, "memory_mb": memory_mb, "pids": pids})
+        if self.handle is not None:
+            return self.handle, {
+                "ok": True, "fallback": False, "path": str(self.handle.path),
+                "limits": {"memory_mb": memory_mb, "pids": pids},
+                "errors": [], "reason": None,
+            }
+        report = dict(self.report or {
+            "ok": False, "fallback": True, "path": None,
+            "limits": {"memory_mb": memory_mb, "pids": pids},
+            "errors": [],
+            "reason": "cgroup v2 is not mounted at /sys/fs/cgroup",
+        })
+        return None, report
+
+
+class _UnavailableCgroupManager(_FakeCgroupManager):
+    pass
+
+
 @pytest.fixture
 def table(repo):
     tables: list[J.JobTable] = []
 
     def make(**kw) -> J.JobTable:
+        kw.setdefault("cgroup_manager", _UnavailableCgroupManager())
         t = J.JobTable(repo, base_env=PATH_ENV, **kw)
         tables.append(t)
         return t
@@ -499,6 +565,146 @@ def test_watchdog_path_never_signals_an_unverified_group(table, monkeypatch):
     assert rec["resource_events"][-1]["verified"] is False
 
 
+def test_cgroup_mechanism_records_path_limits_peak_and_cleanup(
+        table, monkeypatch):
+    monkeypatch.setattr(J, "cgroups_enabled", lambda: True)
+    handle = _FakeCgroupHandle("j1", stats={
+        "memory_peak_mb": 12.5, "memory_current_mb": 12.5,
+        "memory_max_mb": 64.0, "pids_current": 1, "pids_max": 8,
+        "oom_events": 0, "oom_kill": 0, "populated": False,
+        "peak_source": "memory.peak",
+    })
+    manager = _FakeCgroupManager(handle)
+    t = table(cgroup_manager=manager)
+    job = t.start(argv=["sleep", "0.3"],
+                  limits=R.ResourceLimits(memory_mb=64, pids=8))
+    assert job["enforcement"] == "cgroup+rlimit"
+    assert job["cgroup"]["used"] is True
+    assert job["cgroup"]["path"] == str(handle.path)
+    assert job["cgroup"]["limits"] == {"memory_mb": 64.0, "pids": 8}
+    assert manager.calls == [{"job": job["id"], "memory_mb": 64.0, "pids": 8}]
+    assert handle.attached == [job["pid"]]
+
+    got = t.wait(job["id"], deadline_s=10)
+    assert got["status"] == "exited"
+    assert got["enforcement"] == "cgroup+rlimit"
+    assert got["cgroup"]["peak_memory_mb"] == 12.5
+    assert got["cgroup"]["cleaned_up"] is True
+    assert handle.cleaned == [True]
+    stats = t.stats()
+    assert stats["cgroup_jobs"] == 1
+    assert stats["cgroup_fallbacks"] == 0
+    assert stats["cgroup_oom_kills"] == 0
+
+
+def test_cgroup_oom_counters_become_a_resource_event(table, monkeypatch):
+    monkeypatch.setattr(J, "cgroups_enabled", lambda: True)
+    handle = _FakeCgroupHandle("j1", stats={
+        "memory_peak_mb": 80.0, "memory_current_mb": 0.0,
+        "memory_max_mb": 64.0, "pids_current": 0, "pids_max": 8,
+        "oom_events": 2, "oom_kill": 1, "populated": False,
+        "peak_source": "memory.peak",
+    })
+    t = table(cgroup_manager=_FakeCgroupManager(handle))
+    job = t.start(argv=["true"], limits=R.ResourceLimits(memory_mb=64, pids=8))
+    got = t.wait(job["id"], deadline_s=10)
+    assert got["status"] == "exited"
+    event = next(item for item in got["resource_events"]
+                 if item["kind"] == "oom")
+    assert event["oom_events"] == 2 and event["oom_kill"] == 1
+    assert event["observed_mb"] == 80.0
+    assert event["action"] == "cgroup_oom"
+    logged = t.log(job["id"], reader="oom-reader")
+    assert "[ozagia] resource:" in logged["output"]
+    assert "cgroup OOM kill" in logged["output"]
+    assert t.stats()["cgroup_oom_kills"] == 1
+
+
+def test_cgroup_unavailable_falls_back_to_rlimit_and_watch(table):
+    manager = _FakeCgroupManager(report={
+        "ok": False, "fallback": True, "path": None,
+        "limits": {"memory_mb": 2048.0, "pids": 256},
+        "errors": [], "reason": "cgroup v2 is not mounted at /sys/fs/cgroup",
+    })
+    t = table(cgroup_manager=manager)
+    job = t.start(argv=["true"])
+    assert job["enforcement"] == "rlimit+watch"
+    assert job["cgroup"]["used"] is False
+    assert job["cgroup"]["fallback"] is True
+    assert "not mounted" in job["cgroup"]["reason"]
+    got = t.wait(job["id"], deadline_s=10)
+    assert got["status"] == "exited"
+    assert t.stats()["cgroup_fallbacks"] == 1
+
+
+def test_cgroup_modes_and_the_environment_opt_out_skip_attempts(
+        table, monkeypatch):
+    manager = _FakeCgroupManager(_FakeCgroupHandle("j1"))
+    t = table(cgroup_manager=manager)
+    job = t.start(argv=["true"], policy={"watchdog": "rlimit"})
+    assert job["enforcement"] == "rlimit+watch"
+    assert job["cgroup"]["attempted"] is False
+    assert job["cgroup"]["status"] == "off"
+    assert "not attempted" in job["cgroup"]["reason"]
+    t.wait(job["id"], deadline_s=10)
+    assert manager.calls == []
+
+    monkeypatch.setattr(J, "cgroups_enabled", lambda: False)
+    job = t.start(argv=["true"], policy={"watchdog": "cgroup"})
+    assert job["enforcement"] == "rlimit+watch"
+    assert job["cgroup"]["attempted"] is False
+    t.wait(job["id"], deadline_s=10)
+    assert manager.calls == []
+
+
+def test_cgroup_attach_failure_falls_back_and_cleans_up(table, monkeypatch):
+    monkeypatch.setattr(J, "cgroups_enabled", lambda: True)
+
+    class _RefusingHandle(_FakeCgroupHandle):
+        def attach(self, pid: int) -> dict:
+            self.attached.append(pid)
+            return {"ok": False, "pid": pid, "path": str(self.path),
+                    "error": "permission denied"}
+
+    handle = _RefusingHandle("j1")
+    t = table(cgroup_manager=_FakeCgroupManager(handle))
+    job = t.start(argv=["true"], limits=R.ResourceLimits(memory_mb=64, pids=8))
+    assert job["enforcement"] == "rlimit+watch"
+    assert job["cgroup"]["used"] is False
+    assert "could not join the cgroup" in job["cgroup"]["reason"]
+    assert handle.cleaned == [True]
+    assert t.wait(job["id"], deadline_s=10)["status"] == "exited"
+
+
+def test_resource_breach_uses_cgroup_kill_only_after_sigterm(table, monkeypatch):
+    monkeypatch.setattr(J, "cgroups_enabled", lambda: True)
+    monkeypatch.setattr(J, "_group_ours", lambda *args: True)
+    monkeypatch.setattr(J, "_group_members", lambda pgid: [123])
+    monkeypatch.setattr(J, "RESOURCE_KILL_GRACE_S", 0.0)
+    signals: list[tuple[int, int]] = []
+    monkeypatch.setattr(J, "_killpg",
+                        lambda pgid, sig: signals.append((pgid, sig)))
+    handle = _FakeCgroupHandle("j-breach")
+    t = table()
+    rec = {"id": "j-breach", "owned": True, "status": "running",
+           "pgid": 424242, "proc_start": "1", "log": "",
+           "resource_events": []}
+    t.jobs["j-breach"] = rec
+    t._procs["j-breach"] = object()
+    t._cgroups["j-breach"] = handle
+    event = {"kind": "memory", "limit_mb": 1.0, "observed_mb": 2.0}
+    try:
+        t._resource_breach("j-breach", event)
+    finally:
+        rec["status"] = "exited"
+        t.jobs.pop("j-breach", None)
+        t._procs.pop("j-breach", None)
+        t._cgroups.pop("j-breach", None)
+    assert signals == [(424242, signal.SIGTERM)]
+    assert handle.killed and handle.killed[0]["term_first"] is False
+    assert event["action"] == "cgroup.kill"
+
+
 # --------------------------------------------------------------------------- #
 # the daemon state
 # --------------------------------------------------------------------------- #
@@ -798,7 +1004,8 @@ def test_agents_section_names_the_job_tools_only_with_jobs():
 # review fixes: opt-in, refusals, process-group safety, lock, MCP, CLI
 # --------------------------------------------------------------------------- #
 def test_jobs_are_opt_in(bare_repo, monkeypatch):
-    t = J.JobTable(bare_repo, base_env=PATH_ENV)
+    t = J.JobTable(bare_repo, base_env=PATH_ENV,
+                   cgroup_manager=_UnavailableCgroupManager())
     try:
         with pytest.raises(J.JobError) as e:
             t.start(command="true")

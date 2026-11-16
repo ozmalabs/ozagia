@@ -1,14 +1,17 @@
-"""Host resource observation, admission checks and first-layer enforcement.
+"""Host resource observation, admission checks and enforcement.
 
 The module reports what the host and ozagia-owned process groups are using,
 keeps a bounded history of observed runs, and answers whether a requested
-job/task/worktree is likely to fit. It also carries the first enforcement
-layer: child rlimits (POSIX ``resource``), a watchdog that samples a verified
-process group and the filesystem, and the child ``oom_score_adj`` hint.
+job/task/worktree is likely to fit. Enforcement has two layers: child rlimits
+(POSIX ``resource``) plus a watchdog that samples a verified process group and
+the filesystem, and a per-job Linux cgroup v2 (``core.cgroup``) that the daemon
+prefers when the hierarchy is delegated. The child ``oom_score_adj`` hint is
+best-effort.
 
 The watchdog never signals a process itself. Callers inject a killer, and a
 watchdog only calls it while its injected verifier says the process group is
-still the caller's. cgroups are out of scope for this layer.
+still the caller's. cgroups are created, limited and removed by
+``core.cgroup``; this module only reports their availability and mechanism.
 """
 from __future__ import annotations
 
@@ -70,8 +73,9 @@ DEFAULT_POLICY: dict[str, Any] = {
     },
 }
 TMPFS_TYPES = frozenset({"tmpfs", "ramfs"})
-# The first enforcement layer: rlimits in the child plus a sampling watchdog.
-# cgroups (memory.max/pids.max) are a later layer.
+# The fallback enforcement layer: rlimits in the child plus a sampling
+# watchdog. A delegated cgroup v2 hierarchy (`core.cgroup`) is preferred; this
+# string is still recorded for hosts and modes without one.
 ENFORCEMENT_MECHANISM = "rlimit+watch"
 # Best-effort: if the kernel OOM killer runs anyway, prefer ozagia's children
 # over the user's shell or desktop. Raising oom_score_adj needs no privilege.
@@ -584,6 +588,10 @@ def describe_resource_event(event: Mapping[str, Any]) -> str:
     if kind == "disk":
         return (f"disk reserve {event.get('reserve_gb')} GiB crossed "
                 f"({event.get('free_gb')} GiB free)")
+    if kind == "oom":
+        return (f"cgroup OOM kill (memory.events oom={event.get('oom_events')}, "
+                f"oom_kill={event.get('oom_kill')}; peak "
+                f"{_fmt_mb(event.get('observed_mb'))})")
     if kind == "unverified":
         return "process group is not verified as the job's; not signalled"
     return f"resource event {kind or 'unknown'}"
@@ -1291,12 +1299,25 @@ def check_admission(root: str | Path, *, kind: str = "job",
 
 def status(root: str | Path, *, path: str | Path | None = None,
            top: int = 10) -> dict[str, Any]:
+    from ozagia.core import cgroup as C
+
     root = Path(root).resolve()
     host = host_snapshot()
     disks = [disk_usage(root)]
     if path is not None:
         disks.append(disk_usage(path))
     policy = load_policy(root)
+    capability = C.detect()
+    mode = str(policy.get("watchdog") or "auto").strip().lower()
+    if not policy.get("enabled", True) or mode == "off":
+        mechanism = "off"
+    elif mode in {"auto", "cgroup"} and capability.get("available"):
+        mechanism = C.MECHANISM
+    elif _resource is not None:
+        mechanism = ENFORCEMENT_MECHANISM
+    else:
+        mechanism = "watch"
+    mechanisms = [C.MECHANISM, ENFORCEMENT_MECHANISM]
     return {
         "schema": SCHEMA,
         "checked_at": _now(),
@@ -1307,14 +1328,15 @@ def status(root: str | Path, *, path: str | Path | None = None,
         "history": history_summary(root, limit=500),
         "enforcement": {
             "available": _resource is not None,
-            "mechanism": ENFORCEMENT_MECHANISM if _resource is not None else "watch",
+            "mechanism": mechanism,
+            "mechanisms": mechanisms,
             "rlimits": sorted({"RLIMIT_AS", "RLIMIT_FSIZE", "RLIMIT_NPROC"}
                               & {name for name in dir(_resource)
                                  if name.startswith("RLIMIT_")}
                               ) if _resource is not None else [],
-            "cgroups": False,
-            "note": ("child rlimits + verified-group watchdog; cgroups are "
-                     "not used"),
+            "cgroups": capability,
+            "note": ("per-job cgroup v2 when delegated, with child rlimits and "
+                     "the verified-group watchdog as the fallback"),
         },
     }
 
@@ -1366,12 +1388,21 @@ def format_status(report: Mapping[str, Any]) -> str:
     if report.get("policy", {}).get("errors"):
         lines.append("policy errors: " + "; ".join(report["policy"]["errors"]))
     enforcement = report.get("enforcement") or {}
-    if enforcement.get("available"):
+    cgroups = enforcement.get("cgroups") or {}
+    mechanism = enforcement.get("mechanism")
+    if mechanism == "cgroup+rlimit":
+        lines.append("enforcement: per-job cgroup v2 + child rlimits "
+                     "(verified-group watchdog fallback)")
+    elif mechanism == "off":
+        lines.append("enforcement: off (resources disabled or watchdog=off)")
+    elif enforcement.get("available"):
         lines.append("enforcement: child rlimits + verified-group watchdog "
-                     "(cgroups are not used)")
+                     "(cgroup v2 not selected)")
     else:
         lines.append("enforcement: observation only (rlimits unavailable on "
                      "this platform)")
+    if cgroups and not cgroups.get("available") and cgroups.get("reason"):
+        lines.append(f"cgroups: fallback ({cgroups.get('reason')})")
     return "\n".join(lines)
 
 
