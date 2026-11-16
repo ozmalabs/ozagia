@@ -119,6 +119,14 @@ same class and leaves other classes intact. Local providers and models are
 unioned across layers. Every effective value carries its layer in
 `ModelSettings.sources`; each task pin carries its layer in `task_sources`.
 
+The typed settings registry validates the same dynamic tables, so
+`ozagia config values` and `ozagia config set models.tasks.<class> ...` accept
+a config containing `[models.tasks]`, `[models.by_task_class]` and
+`[models.local]`. `settings.model_overrides(root)` returns the effective
+`tasks` and `local` maps from that registry. The two loaders are tested for
+consistency; `core.models` remains the source of per-layer evidence and
+resolution.
+
 ## API
 
 ```python
@@ -212,6 +220,11 @@ Exit status is `0` on success and `2` for validation, configuration or IO
 errors. Unavailable discovery is **not** an error: `list` and `resolve` still
 exit 0 and report the discovery status, configured records and warnings.
 
+`ozagia config values --root .` shows the same dynamic entries with their
+source, and `ozagia config get models.tasks.diff_review` reads one pin. Writes
+are preview-first: `ozagia config set models.tasks.diff_review provider/model
+--root . --dry-run`.
+
 JSON shapes are versioned with `schema: 1`:
 
 ```json
@@ -247,10 +260,9 @@ it beats the explicit default on success rate and cost.
 - Locality is explicit configuration, not provider-name inference.
 - `ozagia/models.toml` is not read yet. Defaults and task pins live in
   `[models]` in `ozagia/config.toml`, as this slice specifies.
-- The settings registry does not know about `[models.tasks]` or
-  `[models.local]` yet, so `python -m ozagia.settings_cli values` will reject
-  a config containing them until the registry gains those dynamic keys. The
-  model registry reads only `[models]` and ignores unrelated sections.
+- The settings registry validates `[models.tasks]`/`[models.by_task_class]`
+  and `[models.local]` as dynamic tables. `core.models` still reads `[models]`
+  directly and ignores unrelated sections.
 - `max_cost_usd`, provider-configured detection, a persisted registry cache and
   live provider probes are not implemented. Costs are therefore not used to
   filter or rank models.

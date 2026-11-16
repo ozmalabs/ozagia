@@ -79,3 +79,62 @@ def test_doctor_does_not_certify_different_index_scope(tmp_path, monkeypatch):
     result = diagnose(tmp_path)
     assert result["snapshot"]["state"] == "unknown"
     assert "configuration differs" in result["snapshot"]["details"]["verification_errors"][0]
+
+
+def _isolate_settings(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    monkeypatch.setenv("HOME", str(home))
+    for name in ("OZAGIA_CONFIG", "OZAGIA_STATE_DIR", "OZAGIA_USER_CONFIG",
+                 "OZAGIA_ROOT"):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_doctor_reports_settings_paths_and_sources(tmp_path, monkeypatch, capsys):
+    _isolate_settings(tmp_path, monkeypatch)
+    (tmp_path / "ozagia").mkdir()
+    config = tmp_path / "ozagia" / "config.toml"
+    config.write_text(
+        '[ui]\ntheme = "dark"\n\n[models.tasks]\ndiff_review = "local/qwen"\n',
+        encoding="utf-8")
+
+    assert cli.main(["doctor", "--root", str(tmp_path), "--json"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    settings = result["settings"]
+    assert settings["valid"] is True
+    assert settings["registry"]["valid"] is True
+    assert settings["registry"]["keys"] > 0
+    assert settings["locations"]["repo_config"] == str(config.resolve())
+    assert settings["locations"]["repo_config_exists"] is True
+    assert settings["source_counts"]["repo"] == 2
+    non_default = {item["key"]: item["source"]
+                   for item in settings["non_default"]}
+    assert non_default["ui.theme"] == "repo"
+    assert non_default["models.tasks.diff_review"] == "repo"
+    assert settings["non_default_truncated"] is False
+
+    assert cli.main(["doctor", "--root", str(tmp_path)]) == 0
+    text = capsys.readouterr().out
+    assert "Settings: valid" in text
+    assert "repo=2" in text
+
+
+def test_doctor_reports_invalid_settings_without_crashing(
+        tmp_path, monkeypatch, capsys):
+    _isolate_settings(tmp_path, monkeypatch)
+    (tmp_path / "ozagia").mkdir()
+    config = tmp_path / "ozagia" / "config.toml"
+    config.write_text('[index]\nsource_dir = ["."]\n', encoding="utf-8")
+
+    # The project config (.ozagia.toml) is still valid, so the exit status is
+    # unchanged; the settings section reports the registry error.
+    assert cli.main(["doctor", "--root", str(tmp_path), "--json"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    settings = result["settings"]
+    assert settings["valid"] is False
+    assert "index.source_dir" in settings["error"]
+    assert settings["errors"]
+    assert settings["locations"]["repo_config"] == str(config.resolve())
+
+    assert cli.main(["doctor", "--root", str(tmp_path)]) == 0
+    assert "Settings: invalid" in capsys.readouterr().out

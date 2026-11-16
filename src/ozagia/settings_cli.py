@@ -78,9 +78,9 @@ def _print_set(result: dict[str, Any]) -> None:
         print(f"note: {source} currently overrides this value")
 
 
-def build_parser() -> argparse.ArgumentParser:
+def build_parser(prog: str = "ozagia-settings") -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="ozagia-settings",
+        prog=prog,
         description="inspect the typed settings registry and preview writes")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -107,8 +107,9 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+def main(argv: list[str] | None = None, *,
+         prog: str = "ozagia-settings") -> int:
+    args = build_parser(prog).parse_args(argv)
     try:
         if args.command == "schema":
             items = S.schema()

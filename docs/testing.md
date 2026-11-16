@@ -44,7 +44,8 @@ Highest first:
 
 The default for a bounded task is `affected`. An interactive captured pytest
 uses `testing.captured`, which defaults to `all`: a typed `pytest` is not
-silently reduced to a subset.
+silently reduced to a subset. An explicit `[tests] select` in `.ozagia.toml`
+still wins over `testing.captured` (see below).
 
 When several path globs match, the most inclusive mode wins for the task
 (`none < smoke < affected < package < all`); within one path, the first
@@ -56,7 +57,7 @@ mode = "affected"
 fallback = "all"          # all | refuse | affected_with_warning
 max_tests = 50
 timeout_s = 300
-captured = "all"
+captured = "all"          # interactive default; [tests] select wins if set
 
 [testing.tasks]
 code_review = "none"
@@ -74,6 +75,37 @@ follow the normal user < repository < environment < override precedence. The
 two override tables are open-ended; they are validated by the same parser and
 are reported by `settings.testing_overrides(root)` (and as individual
 `testing.tasks.<class>` / `testing.paths.<glob>` entries in `values()`).
+
+## Captured pytest
+
+`ozagia.intent.affected` remains the executor for an interactive captured
+`pytest`. It reads, highest precedence first:
+
+1. `[tests] select` in `.ozagia.toml` (`all` or `affected`) when the key is
+   present. This setting keeps its original meaning and is never reinterpreted.
+2. `testing.captured` from the settings registry (user, repository,
+   environment or override), default `all`.
+3. `all`.
+
+`OZAGIA_TESTS_ALL=1` on the command or in the caller's environment always
+runs the command as typed, before any of the above.
+
+`testing.captured` accepts `none` (or its alias `off`), `smoke`, `affected`,
+`package` and `all`. The executor only implements `all` and `affected`;
+`testing.captured_select(mode)` maps the rest without overstating what ran:
+
+| `testing.captured` | Captured selector | Effect |
+| --- | --- | --- |
+| `all` | `all` | Run the command as typed. |
+| `affected` | `affected` | Run the linked tests and report the rest as not run. |
+| `smoke` | `affected` | Use the affected subset (over-inclusion). |
+| `package` | `all` | The affected selector is narrower than `package`; run everything rather than under-run. |
+| `none`, `off` | `all` | Selection off: run the command as typed. |
+
+`[tests] cache = true` still controls the test-result cache independently of
+the selector. A malformed `.ozagia.toml` or an invalid `testing.captured`
+falls back to `all`; a captured command is never silently made partial by a
+broken config.
 
 ## Planning
 
@@ -258,6 +290,7 @@ test selection.
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_testing.py \
-  tests/test_tasks.py tests/test_code_review.py tests/test_settings.py
+  tests/test_tasks.py tests/test_code_review.py tests/test_settings.py \
+  tests/test_affected_tests.py
 .venv/bin/ruff check src tests
 ```

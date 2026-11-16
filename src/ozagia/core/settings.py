@@ -80,6 +80,18 @@ The canonical layout follows the setting keys. The ``resources`` and
     root = "../ozagia-wt"
     avoid_tmpfs = true
 
+    [models]
+    default = ""
+    fallback = ""
+    local_only = false
+
+    [models.tasks]
+    diff_review = "openai/gpt-5-mini"
+
+    [models.local]
+    providers = ["ollama"]
+    models = ["vllm/private"]
+
     [markdown]
     history = "history"
 
@@ -130,6 +142,12 @@ TESTING_FALLBACKS = ("all", "refuse", "affected_with_warning")
 # so they are validated here and collected by :func:`testing_overrides`.
 TESTING_TASKS_TABLE = "testing.tasks"
 TESTING_PATHS_TABLE = "testing.paths"
+# Per-task model pins and explicit locality declarations. They are open-ended
+# tables, validated by the same parser as the scalar ``models`` settings.
+MODELS_TASKS_TABLE = "models.tasks"
+MODELS_TASKS_ALIAS = "models.by_task_class"
+MODELS_LOCAL_TABLE = "models.local"
+MODEL_LOCAL_KEYS = ("providers", "models")
 
 #: Location selectors: they change where ozagia reads, not a registered value.
 ENV_LOCATIONS: dict[str, str] = {
@@ -329,7 +347,10 @@ def _check_ecosystems(value: Any) -> list[str]:
 
 
 _MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+~-]{0,199}\Z")
+_MODEL_PROVIDER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@+~-]{0,63}\Z")
+_MODEL_PART = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+~#\[\]-]{0,199}\Z")
 _APERTURE_ID = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z")
+_MAX_MODEL_LIST = 500
 
 
 def _check_model_id(value: Any) -> str:
@@ -337,6 +358,46 @@ def _check_model_id(value: Any) -> str:
     if text and not _MODEL_ID.fullmatch(text):
         raise ValueError("must be a model id such as provider/model, or empty")
     return text
+
+
+def _check_required_model_id(value: Any) -> str:
+    """A non-empty OpenCode ``provider/model`` id.
+
+    This mirrors ``ozagia.core.models.validate_model_id`` so a per-task pin or
+    a local declaration accepted by the model registry is accepted by the
+    settings registry, and vice versa.
+    """
+    text = _text(value, max_len=200)
+    provider, separator, model = text.partition("/")
+    if not separator or not provider:
+        raise ValueError("must be a model id such as provider/model")
+    if not _MODEL_PROVIDER.fullmatch(provider):
+        raise ValueError("provider must be a bounded provider name")
+    if (not model or not _MODEL_PART.fullmatch(model)
+            or model.endswith("/") or "//" in model):
+        raise ValueError("model must be a bounded model name")
+    return text
+
+
+def _check_model_provider(value: Any) -> str:
+    text = _text(value, max_len=64)
+    if not _MODEL_PROVIDER.fullmatch(text):
+        raise ValueError("must be a bounded provider name")
+    return text
+
+
+def _check_model_provider_list(value: Any) -> list[str]:
+    items = _list(value)
+    if len(items) > _MAX_MODEL_LIST:
+        raise ValueError(f"must contain at most {_MAX_MODEL_LIST} providers")
+    return _dedupe([_check_model_provider(item) for item in items])
+
+
+def _check_model_id_list(value: Any) -> list[str]:
+    items = _list(value)
+    if len(items) > _MAX_MODEL_LIST:
+        raise ValueError(f"must contain at most {_MAX_MODEL_LIST} model ids")
+    return _dedupe([_check_required_model_id(item) for item in items])
 
 
 def _check_aperture(value: Any) -> str:
@@ -383,6 +444,14 @@ _TEST_MODE = _choice(*TESTING_MODES)
 _TASK_CLASS = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,63}\Z")
 
 
+def _check_captured(value: Any) -> str:
+    """A captured-pytest mode; ``off`` is an alias for ``none``."""
+    text = _text(value, max_len=64)
+    if text == "off":
+        return "none"
+    return _TEST_MODE(text)
+
+
 def _check_testing_task_name(value: Any) -> str:
     name = _text(value, max_len=64)
     if not _TASK_CLASS.fullmatch(name):
@@ -402,18 +471,89 @@ def _check_testing_path_pattern(value: Any) -> str:
     return pattern
 
 
-#: Dynamic table -> (key validation, value validation, description).
-_DYNAMIC_TABLES: dict[str, tuple[
-    Callable[[Any], str], Callable[[Any], str], str]] = {
-    TESTING_TASKS_TABLE: (
-        _check_testing_task_name, _TEST_MODE,
+@dataclass(frozen=True)
+class _DynamicTable:
+    """One open-ended TOML table whose leaves are settings.
+
+    ``leaves``, when set, restricts the leaf names and gives each one its own
+    validation, type, validation text and description. Otherwise any key that
+    ``key_check`` accepts is a setting and ``value_check`` validates it.
+    """
+
+    key_check: Callable[[Any], str]
+    value_check: Callable[[Any], Any]
+    value_type: str
+    description: str
+    validation: str
+    aliases: tuple[str, ...] = ()
+    leaves: Mapping[str, tuple[
+        Callable[[Any], Any], str, str, str]] = field(default_factory=dict)
+
+
+#: Canonical dynamic table -> its specification.
+_DYNAMIC_TABLES: dict[str, _DynamicTable] = {
+    TESTING_TASKS_TABLE: _DynamicTable(
+        _check_testing_task_name, _TEST_MODE, "string",
         "Test-selection mode per bounded task class.",
+        "a test-selection mode",
     ),
-    TESTING_PATHS_TABLE: (
-        _check_testing_path_pattern, _TEST_MODE,
+    TESTING_PATHS_TABLE: _DynamicTable(
+        _check_testing_path_pattern, _TEST_MODE, "string",
         "Test-selection mode per repository path glob.",
+        "a test-selection mode",
+    ),
+    MODELS_TASKS_TABLE: _DynamicTable(
+        _check_testing_task_name, _check_required_model_id, "string",
+        "Model id pinned to a task class; the task class uses the default "
+        "when it has no pin.",
+        "a model id such as provider/model",
+        aliases=(MODELS_TASKS_ALIAS,),
+    ),
+    MODELS_LOCAL_TABLE: _DynamicTable(
+        _choice(*MODEL_LOCAL_KEYS), _check_required_model_id, "string",
+        "Providers and models declared local for local_only routing.",
+        "one of providers or models",
+        leaves={
+            "providers": (
+                _check_model_provider_list, "string_list",
+                "provider names (may be empty)",
+                "Provider names declared local.",
+            ),
+            "models": (
+                _check_model_id_list, "string_list",
+                "provider/model ids (may be empty)",
+                "Model ids declared local.",
+            ),
+        },
     ),
 }
+_DYNAMIC_ALIASES: dict[str, str] = {
+    alias: table
+    for table, spec in _DYNAMIC_TABLES.items()
+    for alias in spec.aliases
+}
+_DYNAMIC_TABLE_LOOKUP: dict[str, str] = {
+    **{table: table for table in _DYNAMIC_TABLES},
+    **_DYNAMIC_ALIASES,
+}
+
+
+def _dynamic_leaf(table: str, name: str) -> tuple[
+        Callable[[Any], Any], str, str, str]:
+    """The value check, type, validation text and description of a leaf."""
+    spec = _DYNAMIC_TABLES[table]
+    if not spec.leaves:
+        return spec.value_check, spec.value_type, spec.validation, \
+            spec.description
+    got = spec.leaves.get(name)
+    if got is None:
+        message = f"unknown key {name!r} in [{table}]"
+        matches = difflib.get_close_matches(
+            name, sorted(spec.leaves), n=1, cutoff=0.55)
+        if matches:
+            message += f"; did you mean {matches[0]!r}?"
+        raise SettingsError(message)
+    return got
 
 
 # --------------------------------------------------------------------------- #
@@ -748,10 +888,11 @@ _SETTINGS: tuple[Setting, ...] = (
     ),
     Setting(
         "testing.captured", "string", "all", "both",
-        "Default mode for an interactive captured pytest.",
+        "Default mode for an interactive captured pytest; off is an alias "
+        "for none and disables selection.",
         section="testing", name="captured",
-        validation="one of none, smoke, affected, package, all",
-        check=_TEST_MODE,
+        validation="one of none (or off), smoke, affected, package, all",
+        check=_check_captured,
     ),
     Setting(
         "ui.default_aperture", "string", "architecture", "both",
@@ -819,9 +960,11 @@ def _build_indexes() -> tuple[
 
 
 _BY_KEY, _BY_STORAGE, _KNOWN_SECTIONS = _build_indexes()
+_KNOWN_SECTIONS |= set(_DYNAMIC_TABLES) | set(_DYNAMIC_ALIASES)
 _ENV_BY_KEY = {key: name for name, key in ENV_SETTINGS.items()}
 _KEY_CANDIDATES = sorted(
-    set(_BY_KEY) | {f"{section}.{name}" for section, name in _BY_STORAGE})
+    set(_BY_KEY) | {f"{section}.{name}" for section, name in _BY_STORAGE}
+    | set(_DYNAMIC_TABLE_LOOKUP))
 
 
 # --------------------------------------------------------------------------- #
@@ -873,24 +1016,38 @@ def _suggest_key(text: str) -> str | None:
 
 
 def _dynamic_setting(text: str) -> Setting | None:
-    """A synthesized setting for a ``[testing.tasks]`` or ``[testing.paths]``
-    entry, or None when the key is not in one of those tables."""
-    for table, (key_check, value_check, description) in _DYNAMIC_TABLES.items():
-        prefix = table + "."
-        if not text.startswith(prefix):
-            continue
-        name = text[len(prefix):]
-        try:
-            name = key_check(name)
-        except ValueError as exc:
-            raise SettingsError(f"{text}: {exc}") from None
-        return Setting(
-            key=text, type="string", default="", scope="both",
-            description=description, section=table, name=name,
-            validation="a test-selection mode",
-            check=value_check,
-        )
-    return None
+    """A synthesized setting for one dynamic table entry, or None.
+
+    The key is returned in its canonical form: ``models.by_task_class.foo``
+    resolves to ``models.tasks.foo``. Read and write callers use the same
+    canonical key, while the TOML location stays wherever the file put it.
+    """
+    matched: str | None = None
+    for candidate in _DYNAMIC_TABLE_LOOKUP:
+        prefix = candidate + "."
+        if text.startswith(prefix) and (
+                matched is None or len(candidate) > len(matched)):
+            matched = candidate
+    if matched is None:
+        return None
+    table = _DYNAMIC_TABLE_LOOKUP[matched]
+    spec = _DYNAMIC_TABLES[table]
+    name = text[len(matched) + 1:]
+    try:
+        name = spec.key_check(name)
+    except ValueError as exc:
+        raise SettingsError(f"{text}: {exc}") from None
+    try:
+        value_check, value_type, validation, description = _dynamic_leaf(
+            table, name)
+    except SettingsError as exc:
+        raise SettingsError(f"{text}: {exc}") from None
+    default = () if value_type == "string_list" else ""
+    return Setting(
+        key=f"{table}.{name}", type=value_type, default=default,
+        scope="both", description=description, section=table, name=name,
+        validation=validation, check=value_check,
+    )
 
 
 def _setting_for_key(key: Any) -> Setting:
@@ -1013,7 +1170,7 @@ def _read_toml(path: Path) -> tuple[dict[str, Any], str]:
 
 
 def _is_known_table(dotted: str) -> bool:
-    if dotted in _DYNAMIC_TABLES:
+    if dotted in _DYNAMIC_TABLE_LOOKUP:
         return True
     return any(dotted == section or section.startswith(dotted + ".")
                for section in _KNOWN_SECTIONS)
@@ -1042,6 +1199,7 @@ def _parse_layer(data: Mapping[str, Any], path: Path, layer: str) -> tuple[
     values: dict[str, Any] = {}
     where_defined: dict[str, str] = {}
     locations: dict[str, tuple[str, str]] = {}
+    dynamic_seen: dict[str, str] = {}
 
     def walk(table: Mapping[str, Any], prefix: str) -> None:
         for name, raw in table.items():
@@ -1052,18 +1210,30 @@ def _parse_layer(data: Mapping[str, Any], path: Path, layer: str) -> tuple[
                 if (prefix, name) in _BY_STORAGE:
                     raise SettingsError(
                         f"{path}: [{dotted}] must be a value, not a table")
-                if dotted in _DYNAMIC_TABLES:
-                    key_check, value_check, _description = _DYNAMIC_TABLES[dotted]
+                canonical = _DYNAMIC_TABLE_LOOKUP.get(dotted)
+                if canonical is not None:
+                    spec = _DYNAMIC_TABLES[canonical]
+                    previous = dynamic_seen.get(canonical)
+                    if previous is not None:
+                        raise SettingsError(
+                            f"{path}: [{previous}] and [{dotted}] define the "
+                            "same settings; use one")
+                    dynamic_seen[canonical] = dotted
                     for leaf, leaf_raw in raw.items():
                         if not isinstance(leaf, str):
                             raise SettingsError(
                                 f"{path}: TOML keys must be strings")
                         try:
-                            leaf_name = key_check(leaf)
+                            leaf_name = spec.key_check(leaf)
                         except ValueError as exc:
                             raise SettingsError(
                                 f"{path}: [{dotted}].{leaf}: {exc}") from None
-                        key = f"{dotted}.{leaf_name}"
+                        try:
+                            value_check, _type, _validation, _description = (
+                                _dynamic_leaf(canonical, leaf_name))
+                        except SettingsError as exc:
+                            raise SettingsError(f"{path}: {exc}") from None
+                        key = f"{canonical}.{leaf_name}"
                         if key in values:
                             raise SettingsError(
                                 f"{path}: setting {key!r} is defined twice: "
@@ -1606,13 +1776,49 @@ def testing_overrides(root: str | Path | None = None) -> dict[
     # Repository entries come first so they win both for the same key and
     # when a repository glob and a user glob both match a path.
     for layer_values in (repo_values, user_values):
-        for table in _DYNAMIC_TABLES:
-            name = table.split(".", 1)[1]
+        for table, name in ((TESTING_TASKS_TABLE, "tasks"),
+                            (TESTING_PATHS_TABLE, "paths")):
             prefix = table + "."
             for key, value in layer_values.items():
                 if key.startswith(prefix):
                     tables[name].setdefault(key[len(prefix):], value)
     return tables
+
+
+def model_overrides(root: str | Path | None = None) -> dict[str, Any]:
+    """The open-ended ``[models.tasks]`` and ``[models.local]`` tables.
+
+    ``tasks`` maps a task class to its model id; repository entries override
+    user entries for the same class. ``local`` holds the union of declared
+    local providers and model ids, sorted for a deterministic result. The
+    shape matches ``ozagia.core.models.ModelSettings``; ``models`` uses the
+    same validation through its own loader.
+    """
+    root_p = _resolve_root(root)
+    user_path = user_config_path()
+    repo_path = repo_config_path(root_p)
+    user_data, _ = _read_toml(user_path)
+    repo_data, _ = _read_toml(repo_path)
+    user_values, _ = _parse_layer(user_data, user_path, "user")
+    repo_values, _ = _parse_layer(repo_data, repo_path, "repo")
+    tasks: dict[str, str] = {}
+    providers: set[str] = set()
+    models: set[str] = set()
+    for layer_values in (user_values, repo_values):
+        for key, value in layer_values.items():
+            if key.startswith(MODELS_TASKS_TABLE + "."):
+                tasks[key[len(MODELS_TASKS_TABLE) + 1:]] = value
+            elif key == f"{MODELS_LOCAL_TABLE}.providers":
+                providers.update(value)
+            elif key == f"{MODELS_LOCAL_TABLE}.models":
+                models.update(value)
+    return {
+        "tasks": dict(sorted(tasks.items())),
+        "local": {
+            "providers": sorted(providers),
+            "models": sorted(models),
+        },
+    }
 
 
 def set_value(root: str | Path | None, key: str, value: Any,
@@ -1706,15 +1912,21 @@ __all__ = [
     "ENV_SETTINGS",
     "ENV_STATE_DIR",
     "ENV_USER_CONFIG",
+    "MODELS_LOCAL_TABLE",
+    "MODELS_TASKS_ALIAS",
+    "MODELS_TASKS_TABLE",
     "REPO_CONFIG_DIRNAME",
     "REPO_CONFIG_FILENAME",
     "SCHEMA",
     "TESTING_FALLBACKS",
     "TESTING_MODES",
+    "TESTING_PATHS_TABLE",
+    "TESTING_TASKS_TABLE",
     "Setting",
     "SettingsError",
     "get",
     "locations",
+    "model_overrides",
     "repo_config_path",
     "schema",
     "set_value",

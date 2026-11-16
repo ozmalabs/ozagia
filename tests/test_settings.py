@@ -522,6 +522,133 @@ def test_atomic_write_failure_leaves_the_original(
 
 
 # --------------------------------------------------------------------------- #
+# dynamic model tables
+# --------------------------------------------------------------------------- #
+def test_models_tasks_and_local_are_dynamic_settings(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    _repo_config(root, """
+[models]
+default = "openai/gpt-5"
+
+[models.tasks]
+diff_review = "openai/gpt-5-mini"
+paper_triage = "ollama/qwen"
+
+[models.local]
+providers = ["ollama", "lmstudio"]
+models = ["vllm/private", "claude-agent/claude-fable-5-1[1m]"]
+""")
+    values = S.values(root)
+    assert values["models.tasks.diff_review"]["value"] == "openai/gpt-5-mini"
+    assert values["models.tasks.diff_review"]["source"] == "repo"
+    assert values["models.tasks.diff_review"]["type"] == "string"
+    assert values["models.local.providers"]["value"] == ["ollama", "lmstudio"]
+    assert values["models.local.providers"]["type"] == "string_list"
+    assert values["models.local.models"]["value"] == [
+        "vllm/private", "claude-agent/claude-fable-5-1[1m]"]
+    assert S.get(root, "models.tasks.diff_review")["value"] == (
+        "openai/gpt-5-mini")
+    # `by_task_class` is an alias for the same canonical setting.
+    alias = S.get(root, "models.by_task_class.diff_review")
+    assert alias["key"] == "models.tasks.diff_review"
+    assert S.model_overrides(root) == {
+        "tasks": {
+            "diff_review": "openai/gpt-5-mini",
+            "paper_triage": "ollama/qwen",
+        },
+        "local": {
+            "providers": ["lmstudio", "ollama"],
+            "models": [
+                "claude-agent/claude-fable-5-1[1m]", "vllm/private"],
+        },
+    }
+
+    preview = S.set_value(root, "models.tasks.code_review", "local/qwen")
+    assert preview["changed"] is True
+    assert 'code_review = "local/qwen"' in preview["diff"]
+    assert (root / "ozagia" / "config.toml").read_text(
+        encoding="utf-8").count("code_review") == 0
+
+    S.set_value(root, "models.tasks.code_review", "local/qwen", dry_run=False)
+    S.set_value(root, "models.local.providers", ["ollama"], dry_run=False)
+    text = (root / "ozagia" / "config.toml").read_text(encoding="utf-8")
+    assert "[models.tasks]" in text
+    assert 'code_review = "local/qwen"' in text
+    assert 'providers = ["ollama"]' in text
+    assert S.model_overrides(root)["tasks"]["code_review"] == "local/qwen"
+    assert S.model_overrides(root)["local"]["providers"] == ["ollama"]
+
+
+def test_models_by_task_class_alias_is_updated_in_place(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    path = _repo_config(
+        root, '[models.by_task_class]\ndiff_review = "local/one"\n')
+    assert S.get(root, "models.tasks.diff_review")["value"] == "local/one"
+    S.set_value(root, "models.tasks.diff_review", "local/two", dry_run=False)
+    text = path.read_text(encoding="utf-8")
+    assert 'diff_review = "local/two"' in text
+    assert text.count("[models.by_task_class]") == 1
+    assert "[models.tasks]" not in text
+
+
+def test_models_tasks_and_by_task_class_cannot_both_be_defined(
+        tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    _repo_config(root, """
+[models.tasks]
+diff_review = "local/one"
+
+[models.by_task_class]
+paper_triage = "local/two"
+""")
+    with pytest.raises(S.SettingsError, match="use one"):
+        S.values(root)
+
+
+@pytest.mark.parametrize(("key", "value", "needle"), [
+    ("models.tasks.bad class", "local/qwen", "task class"),
+    ("models.tasks.diff_review", "gpt-5", "provider/model"),
+    ("models.tasks.diff_review", "provider/", "model"),
+    ("models.local.providers", ["bad/provider"], "provider"),
+    ("models.local.models", ["gpt-5"], "provider/model"),
+])
+def test_dynamic_model_validation(tmp_path: Path, key: str, value: object,
+                                  needle: str) -> None:
+    root = _root(tmp_path)
+    with pytest.raises(S.SettingsError, match=needle):
+        S.set_value(root, key, value)
+
+
+def test_models_local_rejects_unknown_leaf_with_path(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    path = _repo_config(root, "[models.local]\nother = []\n")
+    with pytest.raises(S.SettingsError) as excinfo:
+        S.values(root)
+    message = str(excinfo.value)
+    assert str(path) in message
+    assert "models.local" in message
+    assert "other" in message
+
+
+def test_cli_values_accepts_models_dynamic_tables(tmp_path: Path,
+                                                  capsys) -> None:
+    root = _root(tmp_path)
+    _repo_config(root, """
+[models.tasks]
+diff_review = "local/qwen"
+
+[models.local]
+providers = ["ollama"]
+""")
+    assert settings_cli.main(
+        ["values", "--root", str(root), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["settings"]["models.tasks.diff_review"]["value"] == (
+        "local/qwen")
+    assert payload["settings"]["models.local.providers"]["value"] == ["ollama"]
+
+
+# --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
 def test_cli_schema_json(capsys) -> None:
