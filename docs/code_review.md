@@ -176,6 +176,10 @@ Important fields:
              "generated": false, "size": 123, "graph_keys": [],
              "symbols": [], "covering_tests": []}],
   "findings": [],
+  "test_plan": {"mode": "affected", "selected_files": ["tests/test_app.py"],
+                "executed": false, "truth_assessed": false,
+                "not_run_reason": "..."},
+  "tests_executed": false,
   "summary": {"findings": 0, "blocking": 0, "major": 0, "minor": 0, "note": 0},
   "omissions": [],
   "not_assessed": [],
@@ -187,6 +191,20 @@ Important fields:
 `truth_assessed` is always `false`. A finding is evidence for a human or a
 later reviewer, not a proof that the change is wrong. The packet does not
 invent consensus, test results, or freshness.
+
+## Test plan
+
+The packet includes a deterministic `test_plan` from
+`ozagia.core.testing` (see `docs/testing.md`). It is computed from the reviewed
+diff and an existing graph snapshot; it selects test files, records graph node
+ids, omissions, fallback reason and graph freshness. Tests are **not run**:
+`test_plan.executed` and `tests_executed` are `false`, `not_run_reason` says
+so, and the packet adds an entry to `not_assessed` when tests were planned.
+The text form prints a one-line summary.
+
+A repository may set `[testing.tasks] code_review = "none"` when a review
+should record that no test selection is needed. The packet still reports the
+policy and the reason; it never invents a pass.
 
 ## Optional model review
 
@@ -216,8 +234,8 @@ Not in this slice:
 - commit/merge/push policy checks beyond the worktree and branch expectation;
 - live or optional model calls, Ocelot reconciliation, or multi-model
   agreement;
-- running tests, builds, linters or type checkers (only resource admission is
-  checked);
+- running tests, builds, linters or type checkers (a test plan is recorded,
+  but nothing is executed; only resource admission is checked);
 - semantic signature/behaviour compatibility, duplicate-logic detection, or
   contract-mismatch detection;
 - `markdown_route` and file-ledger integration for the output path;

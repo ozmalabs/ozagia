@@ -85,6 +85,11 @@ restricted by file scope.
 | `OZAGIA_MODELS_DEFAULT` | `models.default` |
 | `OZAGIA_MODELS_LOCAL_ONLY` | `models.local_only` |
 | `OZAGIA_TASKS_MAX_WALL_S` | `tasks.max_wall_s` |
+| `OZAGIA_TESTING_MODE` | `testing.mode` |
+| `OZAGIA_TESTING_FALLBACK` | `testing.fallback` |
+| `OZAGIA_TESTING_MAX_TESTS` | `testing.max_tests` |
+| `OZAGIA_TESTING_TIMEOUT_S` | `testing.timeout_s` |
+| `OZAGIA_TESTING_CAPTURED` | `testing.captured` |
 | `OZAGIA_UI_THEME` | `ui.theme` |
 
 Environment values are parsed with the setting's type. An invalid value is an
@@ -178,6 +183,43 @@ An empty model id means "use the host default" (`default`) or "no fallback"
 | `review.min_reviewers` | integer | `1` | both | no |
 | `review.require_clean` | boolean | `true` | both | no |
 
+### testing
+
+| Key | Type | Default | Scope | Restart |
+| --- | --- | --- | --- | --- |
+| `testing.mode` | string | `"affected"` | both | no |
+| `testing.fallback` | string | `"all"` | both | no |
+| `testing.max_tests` | integer | `50` | both | no |
+| `testing.timeout_s` | integer | `300` | both | no |
+| `testing.captured` | string | `"all"` | both | no |
+
+`testing.mode` and `testing.captured` are one of `none`, `smoke`, `affected`,
+`package` or `all`. `testing.fallback` is one of `all`, `refuse` or
+`affected_with_warning`. `testing.mode` is the default for bounded tasks;
+`testing.captured` is the interactive captured-pytest default and stays `all`
+unless a repository opts into a subset. `testing.timeout_s` is recorded for a
+caller that executes the plan; the planner never runs tests.
+
+Two open-ended tables hold per-task and per-path overrides:
+
+```toml
+[testing.tasks]
+code_review = "none"
+diff_review = "affected"
+
+[testing.paths]
+"docs/**" = "none"
+"src/**" = "affected"
+```
+
+The tables are validated by the same registry parser, report their source and
+are available through `settings.testing_overrides(root)`. `values()` also
+lists every present entry as `testing.tasks.<class>` or
+`testing.paths.<glob>`, and `set` accepts those keys. A path key containing
+`*`, `/` or other non-bare characters is written quoted. The test-policy
+precedence (task specification, task class, path, repository, default) is
+documented in `docs/testing.md`.
+
 ### ui
 
 | Key | Type | Default | Scope | Restart |
@@ -243,6 +285,19 @@ max_wall_s = 900
 [review]
 min_reviewers = 1
 require_clean = true
+
+[testing]
+mode = "affected"
+fallback = "all"
+max_tests = 50
+timeout_s = 300
+captured = "all"
+
+[testing.tasks]
+code_review = "none"
+
+[testing.paths]
+"docs/**" = "none"
 
 [ui]
 default_aperture = "architecture"
@@ -353,6 +408,10 @@ This module is deliberately standalone until the existing loaders are wired:
   `ozagia/policies.toml`. `ozagia/worktrees.toml` (expected worktree/branch
   mapping) is separate from the registry's `worktrees` group (resource
   placement policy), which is stored under `[resources.worktrees]`.
+- `ozagia.core.testing` reads the `testing` group and its open-ended tables.
+  The interactive captured-pytest selector in `ozagia.intent.affected` still
+  reads `[tests] select` and `[tests] cache` from `.ozagia.toml`; this slice
+  records `testing.captured` but does not change the interactive default.
 - `ozagia doctor` does not yet report registry sources.
 - There is no migration command from `.ozagia.toml` to `ozagia/config.toml` in
   this slice.

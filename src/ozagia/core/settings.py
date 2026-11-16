@@ -41,6 +41,11 @@ that names the variable):
     OZAGIA_MODELS_DEFAULT           models.default
     OZAGIA_MODELS_LOCAL_ONLY        models.local_only
     OZAGIA_TASKS_MAX_WALL_S         tasks.max_wall_s
+    OZAGIA_TESTING_MODE             testing.mode
+    OZAGIA_TESTING_FALLBACK         testing.fallback
+    OZAGIA_TESTING_MAX_TESTS        testing.max_tests
+    OZAGIA_TESTING_TIMEOUT_S        testing.timeout_s
+    OZAGIA_TESTING_CAPTURED         testing.captured
     OZAGIA_UI_THEME                 ui.theme
 
 TOML layout
@@ -107,6 +112,15 @@ REPO_CONFIG_FILENAME = "config.toml"
 ENV_USER_CONFIG = "OZAGIA_USER_CONFIG"
 ENV_STATE_DIR = "OZAGIA_STATE_DIR"
 
+#: Test-selection modes, least to most inclusive. `ozagia.core.testing` uses
+#: the same order when resolving path overrides.
+TESTING_MODES = ("none", "smoke", "affected", "package", "all")
+TESTING_FALLBACKS = ("all", "refuse", "affected_with_warning")
+# Open-ended override tables: values are modes. They are not scalar settings,
+# so they are validated here and collected by :func:`testing_overrides`.
+TESTING_TASKS_TABLE = "testing.tasks"
+TESTING_PATHS_TABLE = "testing.paths"
+
 #: Location selectors: they change where ozagia reads, not a registered value.
 ENV_LOCATIONS: dict[str, str] = {
     "OZAGIA_ROOT": "root",
@@ -123,6 +137,11 @@ ENV_SETTINGS: dict[str, str] = {
     "OZAGIA_MODELS_DEFAULT": "models.default",
     "OZAGIA_MODELS_LOCAL_ONLY": "models.local_only",
     "OZAGIA_TASKS_MAX_WALL_S": "tasks.max_wall_s",
+    "OZAGIA_TESTING_MODE": "testing.mode",
+    "OZAGIA_TESTING_FALLBACK": "testing.fallback",
+    "OZAGIA_TESTING_MAX_TESTS": "testing.max_tests",
+    "OZAGIA_TESTING_TIMEOUT_S": "testing.timeout_s",
+    "OZAGIA_TESTING_CAPTURED": "testing.captured",
     "OZAGIA_UI_THEME": "ui.theme",
 }
 
@@ -326,6 +345,43 @@ def _number_between(low: float, high: float) -> Callable[[Any], float]:
             raise ValueError(f"must be between {low:g} and {high:g}")
         return number
     return check
+
+
+_TEST_MODE = _choice(*TESTING_MODES)
+_TASK_CLASS = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,63}\Z")
+
+
+def _check_testing_task_name(value: Any) -> str:
+    name = _text(value, max_len=64)
+    if not _TASK_CLASS.fullmatch(name):
+        raise ValueError("must be a task class id matching "
+                         "[A-Za-z][A-Za-z0-9_.-]{0,63}")
+    return name
+
+
+def _check_testing_path_pattern(value: Any) -> str:
+    pattern = _text(value, max_len=256).replace("\\", "/")
+    if pattern.startswith("/") or re.match(r"^[A-Za-z]:/", pattern):
+        raise ValueError("must be relative to the repository root")
+    if any(part == ".." for part in pattern.split("/")):
+        raise ValueError("must stay inside the repository root")
+    if "\0" in pattern:
+        raise ValueError("must not contain control characters")
+    return pattern
+
+
+#: Dynamic table -> (key validation, value validation, description).
+_DYNAMIC_TABLES: dict[str, tuple[
+    Callable[[Any], str], Callable[[Any], str], str]] = {
+    TESTING_TASKS_TABLE: (
+        _check_testing_task_name, _TEST_MODE,
+        "Test-selection mode per bounded task class.",
+    ),
+    TESTING_PATHS_TABLE: (
+        _check_testing_path_pattern, _TEST_MODE,
+        "Test-selection mode per repository path glob.",
+    ),
+}
 
 
 # --------------------------------------------------------------------------- #
@@ -630,6 +686,42 @@ _SETTINGS: tuple[Setting, ...] = (
         check=_check_bool,
     ),
     Setting(
+        "testing.mode", "string", "affected", "both",
+        "Default test-selection mode for bounded tasks.",
+        section="testing", name="mode",
+        validation="one of none, smoke, affected, package, all",
+        check=_TEST_MODE,
+    ),
+    Setting(
+        "testing.fallback", "string", "all", "both",
+        "What a plan does when a changed file has no linked test or the graph "
+        "is missing or stale.",
+        section="testing", name="fallback",
+        validation="one of all, refuse, affected_with_warning",
+        check=_choice(*TESTING_FALLBACKS),
+    ),
+    Setting(
+        "testing.max_tests", "integer", 50, "both",
+        "Maximum number of test files a plan selects.",
+        section="testing", name="max_tests",
+        validation="an integer between 1 and 100000",
+        check=_integer_between(1, 100_000),
+    ),
+    Setting(
+        "testing.timeout_s", "integer", 300, "both",
+        "Timeout a caller should apply to the planned test run, in seconds.",
+        section="testing", name="timeout_s",
+        validation="an integer between 1 and 86400",
+        check=_integer_between(1, 86_400),
+    ),
+    Setting(
+        "testing.captured", "string", "all", "both",
+        "Default mode for an interactive captured pytest.",
+        section="testing", name="captured",
+        validation="one of none, smoke, affected, package, all",
+        check=_TEST_MODE,
+    ),
+    Setting(
         "ui.default_aperture", "string", "architecture", "both",
         "Aperture shown first in a graph view.",
         section="ui", name="default_aperture",
@@ -717,6 +809,27 @@ def _suggest_key(text: str) -> str | None:
     return matches[0] if matches else None
 
 
+def _dynamic_setting(text: str) -> Setting | None:
+    """A synthesized setting for a ``[testing.tasks]`` or ``[testing.paths]``
+    entry, or None when the key is not in one of those tables."""
+    for table, (key_check, value_check, description) in _DYNAMIC_TABLES.items():
+        prefix = table + "."
+        if not text.startswith(prefix):
+            continue
+        name = text[len(prefix):]
+        try:
+            name = key_check(name)
+        except ValueError as exc:
+            raise SettingsError(f"{text}: {exc}") from None
+        return Setting(
+            key=text, type="string", default="", scope="both",
+            description=description, section=table, name=name,
+            validation="a test-selection mode",
+            check=value_check,
+        )
+    return None
+
+
 def _setting_for_key(key: Any) -> Setting:
     if not isinstance(key, str) or not key.strip():
         raise SettingsError("a setting key must be a non-empty string")
@@ -725,6 +838,8 @@ def _setting_for_key(key: Any) -> Setting:
     if setting is None and "." in text:
         section, _, name = text.rpartition(".")
         setting = _BY_STORAGE.get((section, name))
+    if setting is None:
+        setting = _dynamic_setting(text)
     if setting is None:
         message = f"unknown setting {text!r}"
         suggestion = _suggest_key(text)
@@ -835,6 +950,8 @@ def _read_toml(path: Path) -> tuple[dict[str, Any], str]:
 
 
 def _is_known_table(dotted: str) -> bool:
+    if dotted in _DYNAMIC_TABLES:
+        return True
     return any(dotted == section or section.startswith(dotted + ".")
                for section in _KNOWN_SECTIONS)
 
@@ -872,6 +989,32 @@ def _parse_layer(data: Mapping[str, Any], path: Path, layer: str) -> tuple[
                 if (prefix, name) in _BY_STORAGE:
                     raise SettingsError(
                         f"{path}: [{dotted}] must be a value, not a table")
+                if dotted in _DYNAMIC_TABLES:
+                    key_check, value_check, _description = _DYNAMIC_TABLES[dotted]
+                    for leaf, leaf_raw in raw.items():
+                        if not isinstance(leaf, str):
+                            raise SettingsError(
+                                f"{path}: TOML keys must be strings")
+                        try:
+                            leaf_name = key_check(leaf)
+                        except ValueError as exc:
+                            raise SettingsError(
+                                f"{path}: [{dotted}].{leaf}: {exc}") from None
+                        key = f"{dotted}.{leaf_name}"
+                        if key in values:
+                            raise SettingsError(
+                                f"{path}: setting {key!r} is defined twice: "
+                                f"[{where_defined[key]}] and "
+                                f"[{dotted}.{leaf_name}]")
+                        try:
+                            values[key] = value_check(leaf_raw)
+                        except ValueError as exc:
+                            raise SettingsError(
+                                f"{path}: [{dotted}].{leaf_name}: {exc}"
+                            ) from None
+                        where_defined[key] = f"{dotted}.{leaf_name}"
+                        locations[key] = (dotted, leaf_name)
+                    continue
                 if not _is_known_table(dotted):
                     raise SettingsError(_unknown_section(path, dotted))
                 walk(raw, dotted)
@@ -1160,6 +1303,13 @@ def _render_value(setting: Setting, value: Any) -> str:
     raise SettingsError(f"{setting.key}: unsupported type {setting.type!r}")
 
 
+def _render_name(name: str) -> str:
+    """A TOML bare key when possible, else a quoted key."""
+    if re.fullmatch(r"[A-Za-z0-9_-]+", name):
+        return name
+    return json.dumps(name, ensure_ascii=False)
+
+
 def _append_section(lines: list[str], section: str, name: str,
                     rendered: str, newline: str) -> None:
     if lines:
@@ -1168,7 +1318,7 @@ def _append_section(lines: list[str], section: str, name: str,
         if lines[-1].strip():
             lines.append(newline)
     lines.append(f"[{section}]{newline}")
-    lines.append(f"{name} = {rendered}{newline}")
+    lines.append(f"{_render_name(name)} = {rendered}{newline}")
 
 
 def _apply_setting(text: str, section: str, name: str, setting: Setting,
@@ -1176,6 +1326,7 @@ def _apply_setting(text: str, section: str, name: str, setting: Setting,
     newline = _newline_for(text)
     lines = text.splitlines(keepends=True)
     rendered = _render_value(setting, value)
+    rendered_name = _render_name(name)
     headers = _headers(lines)
     bounds = _section_bounds(lines, headers, section)
     if bounds is None:
@@ -1199,12 +1350,12 @@ def _apply_setting(text: str, section: str, name: str, setting: Setting,
                 if comment:
                     suffix = f"  {comment}"
         lines[first:last + 1] = [
-            f"{name} = {rendered}{suffix}{newline}"]
+            f"{rendered_name} = {rendered}{suffix}{newline}"]
     else:
         position = insert_after + 1
         if position > 0 and not lines[position - 1].endswith(("\n", "\r")):
             lines[position - 1] += newline
-        lines.insert(position, f"{name} = {rendered}{newline}")
+        lines.insert(position, f"{rendered_name} = {rendered}{newline}")
     return "".join(lines)
 
 
@@ -1326,6 +1477,24 @@ def values(root: str | Path | None = None, *,
             source = "repo"
         result[setting.key] = _record(setting, value, source)
 
+    # Open-ended override tables: every entry present in a layer is reported
+    # as a setting of its own. They have no built-in default.
+    for key in sorted(set(user_values) | set(repo_values)):
+        if key in result:
+            continue
+        setting = _dynamic_setting(key)
+        if setting is None:
+            continue
+        value = setting.default
+        source = "default"
+        if key in user_values:
+            value = user_values[key]
+            source = "user"
+        if key in repo_values:
+            value = repo_values[key]
+            source = "repo"
+        result[key] = _record(setting, value, source)
+
     for variable, key in ENV_SETTINGS.items():
         if variable not in os.environ:
             continue
@@ -1349,7 +1518,38 @@ def get(root: str | Path | None, key: str, *,
         overrides: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """One setting with its value and source."""
     setting = _setting_for_key(key)
-    return values(root, overrides=overrides)[setting.key]
+    items = values(root, overrides=overrides)
+    if setting.key in items:
+        return items[setting.key]
+    # An open-ended override entry that is not present in any layer.
+    return _record(setting, setting.default, "default")
+
+
+def testing_overrides(root: str | Path | None = None) -> dict[
+        str, dict[str, str]]:
+    """The open-ended ``[testing.tasks]`` and ``[testing.paths]`` tables.
+
+    Values are validated test-selection modes. User entries are overlaid by
+    repository entries, matching the registry's precedence. The returned
+    dictionaries preserve TOML order, which matters for path globs.
+    """
+    root_p = _resolve_root(root)
+    user_data, _ = _read_toml(user_config_path())
+    repo_data, _ = _read_toml(repo_config_path(root_p))
+    user_values, _ = _parse_layer(user_data, user_config_path(), "user")
+    repo_values, _ = _parse_layer(
+        repo_data, repo_config_path(root_p), "repo")
+    tables: dict[str, dict[str, str]] = {"tasks": {}, "paths": {}}
+    # Repository entries come first so they win both for the same key and
+    # when a repository glob and a user glob both match a path.
+    for layer_values in (repo_values, user_values):
+        for table in _DYNAMIC_TABLES:
+            name = table.split(".", 1)[1]
+            prefix = table + "."
+            for key, value in layer_values.items():
+                if key.startswith(prefix):
+                    tables[name].setdefault(key[len(prefix):], value)
+    return tables
 
 
 def set_value(root: str | Path | None, key: str, value: Any,
@@ -1446,6 +1646,8 @@ __all__ = [
     "REPO_CONFIG_DIRNAME",
     "REPO_CONFIG_FILENAME",
     "SCHEMA",
+    "TESTING_FALLBACKS",
+    "TESTING_MODES",
     "Setting",
     "SettingsError",
     "get",
@@ -1453,6 +1655,7 @@ __all__ = [
     "repo_config_path",
     "schema",
     "set_value",
+    "testing_overrides",
     "user_config_path",
     "values",
 ]
