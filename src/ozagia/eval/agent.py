@@ -1308,6 +1308,9 @@ READ_LEDGER_FIELDS = ("repeats_seen", "stubs_served", "notes_served",
 # Affected-test selection and the test-result cache (`ozagia.intent.affected`).
 TEST_SELECTION_FIELDS = ("affected_runs", "tests_skipped_unaffected",
                          "cached_passes", "full_runs_forced")
+# Lint inside the edit (`ozagia.intent.lint`) and captured `ruff check`
+# calls, copied into each run record and totalled per arm.
+LINT_FIELDS = ("lint_runs", "lint_findings", "lint_timeouts", "ruff_captures")
 
 
 def graph_stats_fields(stats: Any) -> dict[str, Any]:
@@ -1325,9 +1328,11 @@ def graph_stats_fields(stats: Any) -> dict[str, Any]:
     and bytes_saved (`ozagia.intent.ledger`), and patch_checks,
     patch_misses_caught, region_replies and key_edits (patch and edit miss
     recovery), and jobs_started, job_waits, job_wait_seconds and
-    polls_avoided (background jobs, `ozagia.daemon.jobs`), and
-    affected_runs, tests_skipped_unaffected, cached_passes and
-    full_runs_forced (test selection, `ozagia.intent.affected`)."""
+    polls_avoided (background jobs, `ozagia.daemon.jobs`), lint_runs,
+    lint_findings, lint_timeouts and ruff_captures (`LINT_FIELDS`, lint
+    inside the edit), and affected_runs, tests_skipped_unaffected,
+    cached_passes and full_runs_forced (`TEST_SELECTION_FIELDS`, test
+    selection, `ozagia.intent.affected`)."""
     if not isinstance(stats, dict):
         return {"plugin_loaded": None, "captured_calls": None,
                 "passthrough_calls": None, "fallbacks": None,
@@ -1339,6 +1344,7 @@ def graph_stats_fields(stats: Any) -> dict[str, Any]:
                 "patch_checks": None, "patch_misses_caught": None,
                 "region_replies": None, "key_edits": None, "jobs_started": None, "job_waits": None,
                 "job_wait_seconds": None, "polls_avoided": None,
+                **{k: None for k in LINT_FIELDS},
                 **{k: None for k in TEST_SELECTION_FIELDS}}
     hellos = _count(stats.get("hellos"))
     raw = stats.get("handled")
@@ -1375,6 +1381,7 @@ def graph_stats_fields(stats: Any) -> dict[str, Any]:
                                  and not isinstance(stats.get("wait_seconds"), bool)
                                  else None),
             "polls_avoided": _count(stats.get("polls_avoided")),
+            **{k: _count(stats.get(k)) for k in LINT_FIELDS},
             **{k: _count(stats.get(k)) for k in TEST_SELECTION_FIELDS}}
 
 
@@ -1628,7 +1635,7 @@ def aggregate(runs: list[dict[str, Any]], arms: Iterable[str]) -> list[dict[str,
                 "total_polls_avoided": sum(int(r.get("polls_avoided") or 0)
                                            for r in mine),
                 **{f"total_{k}": sum(int(r.get(k) or 0) for r in mine)
-                   for k in TEST_SELECTION_FIELDS},
+                   for k in (*LINT_FIELDS, *TEST_SELECTION_FIELDS)},
                 "codemode_tools": sorted({t for r in mine
                                           for t in (r.get("codemode_tools") or [])}),
             })

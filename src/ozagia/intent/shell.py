@@ -53,6 +53,13 @@ Classes (`result["class"]`):
                   (read-only). Fields: `file`, `filter`, `program`, `raw`,
                   `compact`, `sort_keys`, `stdin`. Other filters are `other`
                   with reason `jq filter '...' is not mapped`.
+    ruff          `ruff check [PATH...] [--select X]... [--output-format
+                  concise|full]`, the executable as `ruff` or a path such
+                  as `.venv/bin/ruff`: run by ruff itself, with the node
+                  keys of its findings appended. Fields: `tool`, `argv`,
+                  `paths`, `select`, `output_format`. Any other option
+                  (`--fix`, `--watch`, ...) and other subcommands (`ruff
+                  format`) are `other`.
     complex       not a simple command (see above).
     other         anything else (including wc, unsupported find/ls, sed -i,
                   python -c, scripts).
@@ -1287,6 +1294,49 @@ def _jq_wrapper(command: str) -> dict[str, Any] | None:
     return None
 
 
+_RUFF_VALUE_OPTS = frozenset({"--select", "--output-format"})
+RUFF_OUTPUT_FORMATS = frozenset({"concise", "full"})
+
+
+def _ruff(tokens: list[str]) -> dict[str, Any]:
+    """`ruff check [PATH...] [--select X]... [--output-format concise|full]`
+    (the executable as `ruff` or a path ending in `/ruff`)."""
+    if len(tokens) < 2 or tokens[1] != "check":
+        sub = tokens[1] if len(tokens) > 1 else "with no subcommand"
+        return _result("other", f"ruff {sub} is not mapped")
+    paths: list[str] = []
+    select: list[str] = []
+    fmt: str | None = None
+    args = tokens[2:]
+    i = 0
+    while i < len(args):
+        tok = args[i]
+        if tok == "--":
+            paths.extend(args[i + 1:])
+            break
+        name, eq, value = tok.partition("=")
+        if name in _RUFF_VALUE_OPTS:
+            if not eq:
+                if i + 1 >= len(args):
+                    return _result("other", f"ruff option {name} needs a value")
+                value = args[i + 1]
+                i += 1
+            if name == "--select":
+                select.append(value)
+            elif value not in RUFF_OUTPUT_FORMATS:
+                return _result("other",
+                               f"ruff --output-format {value} is not mapped")
+            else:
+                fmt = value
+        elif tok.startswith("-"):
+            return _result("other", f"ruff check option {name} is not mapped")
+        else:
+            paths.append(tok)
+        i += 1
+    return _result("ruff", tool=tokens[0], argv=list(tokens), paths=paths,
+                   select=select, output_format=fmt)
+
+
 def _simple(tokens: list[str]) -> dict[str, Any]:
     cmd = tokens[0]
     base = os.path.basename(cmd)
@@ -1309,6 +1359,8 @@ def _simple(tokens: list[str]) -> dict[str, Any]:
         return read
     if cmd == "find":
         return _find(tokens[1:])
+    if base == "ruff":
+        return _ruff(tokens)
     if cmd == "timeout":
         secs, rest, why = timeout_args(tokens)
         if why:

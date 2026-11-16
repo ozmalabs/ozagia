@@ -1030,6 +1030,10 @@ def test_graph_stats_fields_read_counts():
                                            "job_waits": None,
                                            "job_wait_seconds": None,
                                            "polls_avoided": None,
+                                           "lint_runs": None,
+                                           "lint_findings": None,
+                                           "lint_timeouts": None,
+                                           "ruff_captures": None,
                                            **{k: None for k in
                                               ae.TEST_SELECTION_FIELDS}}
     # The daemon's shape: handled {"true": captured, "false": passthrough and
@@ -1056,6 +1060,8 @@ def test_graph_stats_fields_read_counts():
         "bytes_saved": 900, "patch_checks": 5,
         "patch_misses_caught": 2, "region_replies": 3, "key_edits": 1, "jobs_started": None,
         "job_waits": None, "job_wait_seconds": None, "polls_avoided": None,
+        "lint_runs": None, "lint_findings": None, "lint_timeouts": None,
+        "ruff_captures": None,
         **{k: None for k in ae.TEST_SELECTION_FIELDS}}
     got = ae.graph_stats_fields({"hellos": 1, "shell": {"captured": 4,
                                                         "passthrough": 1}})
