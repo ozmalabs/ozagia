@@ -18,6 +18,7 @@ python -m ozagia.code_review_cli \
   [--graph .ozagia/graph.json] \
   [--ocelot [--ocelot-root PATH] [--ocelot-mode auto|inprocess|subprocess]] \
   [--ocelot-impact] [--ocelot-patterns] \
+  [--library-hints|--no-library-hints] \
   [--json] \
   [--out review-packet.json] \
   [--fail-on blocking|major|never]
@@ -49,6 +50,7 @@ Operational flags:
 --ocelot-timeout S     worker timeout in seconds (default 120)
 --ocelot-impact        optional ocelot.impact candidate test sets (default off)
 --ocelot-patterns      optional ocelot.patterns candidate patterns (default off)
+--no-library-hints     omit the advisory library_hints section (default: on)
 ```
 
 Python API:
@@ -63,6 +65,7 @@ packet = R.review_range(root, "main..HEAD", ocelot=True,
                         ocelot_root="/path/to/ocelot", ocelot_mode="auto")
 packet = R.review_range(root, "main..HEAD", ocelot_impact=True,
                         ocelot_patterns=True)
+packet = R.review_range(root, "main..HEAD", library_hints=False)
 status = R.exit_code(packet, "blocking")
 ```
 
@@ -196,6 +199,9 @@ Important fields:
   "omissions": [],
   "not_assessed": [],
   "model_review": {"status": "not_run", "truth_assessed": false},
+  "library_hints": {"requested": true, "mode": "gentle", "state": "ready",
+                    "files": ["src/app.py"], "hints": [], "counts": {},
+                    "recorded": false, "truth_assessed": false},
   "security": {"provided": true, "findings": [], "truth_assessed": false},
   "ocelot": {"requested": true, "state": "not_installed",
              "clusters": [], "truth_assessed": false},
@@ -296,6 +302,56 @@ candidate test set is not a completeness or coverage claim. Every pattern has
 `candidate: true` and `truth_assessed: false`; it is not an anti-pattern or
 defect verdict. See `docs/ocelot_code.md` for the shapes and clustering rules.
 
+## Library hints
+
+The packet includes an advisory `library_hints` section by default. It runs
+`ozagia.core.library_hints.hints_for_paths` over the changed source files
+(tests, docs, generated files, binaries and deleted files are skipped) and
+reads the base commit's text for modified and renamed files, so gentle mode
+reports only new or changed symbols. The review records no hint events and
+writes nothing.
+
+```json
+{
+  "schema": 1,
+  "rule_version": "2026.11.1",
+  "requested": true,
+  "mode": "gentle",
+  "state": "ready",
+  "files": ["src/retry.py"],
+  "hints": [{
+    "hint_id": "...",
+    "file": "src/retry.py",
+    "symbol": "_retry",
+    "language": "python",
+    "capability": "retry",
+    "package": "tenacity",
+    "availability": "declared",
+    "confidence": "medium",
+    "evidence": "bounded attempts, sleep, backoff, name `_retry`",
+    "message": "[ozagia] library hint: ..."
+  }],
+  "counts": {"hints": 1, "suppressed": 0, "files": 1, "truncated": false},
+  "recorded": false,
+  "truth_assessed": false
+}
+```
+
+Every hint has a package, capability, availability (`stdlib`, `declared`,
+`installed` or `known`), confidence and file/symbol evidence. Evidence is
+short rule labels, never source text. The per-file cap is
+`[hints] max_per_edit`; the packet caps the list at 10. `state` is `ready`,
+`no_hints`, `no_files`, `off`, `disabled` or `error`. `off` comes from
+`[hints] library = "off"` or `$OZAGIA_LIBRARY_HINTS=0`; `disabled` means the
+caller passed `library_hints=False` (CLI: `--no-library-hints`). Hints read
+the working tree for the named files, so a dirty file or a reviewed head that
+is not the checkout gets the section's `source: "working_tree"` caveat.
+
+A hint is a candidate: the review does not refactor, install a package or
+change a dependency, and `not_assessed` records that the match is heuristic
+and covers only the changed files. The section never adds findings or changes
+`exit_code`.
+
 ## Test plan
 
 The packet includes a deterministic `test_plan` from
@@ -347,7 +403,9 @@ Not in this slice:
   contract-mismatch detection;
 - `markdown_route` and file-ledger integration for the output path;
 - writing any repository file. `--out` is the caller's explicit path;
-- fetching, network access, graph builds or graph reingestion.
+- fetching, network access, graph builds or graph reingestion;
+- refactoring, dependency installation or the claim that a library hint is
+  better in every context.
 
 Binary content, generated output, and changes in files absent from the graph
 are reported as not assessed rather than guessed.
@@ -362,6 +420,8 @@ PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_code_review.py
 The tests build temporary git repositories with base/head commits, a deleted
 file, a missing test, conflict markers, binary, large and generated files,
 whitespace errors, a fresh graph, a stale graph, a missing graph, a wrong
-branch, an unresolved merge, a resource refusal, CLI JSON/exit codes and the
-injected-runner seam. Ocelot tests use an explicit missing checkout and an
-injected clusterer; no test uses a model, the network or an install.
+branch, an unresolved merge, a resource refusal, CLI JSON/exit codes, the
+injected-runner seam and the advisory library-hints section (default, cap,
+off, imported-package suppression and no file contents). Ocelot tests use an
+explicit missing checkout and an injected clusterer; no test uses a model, the
+network or an install.

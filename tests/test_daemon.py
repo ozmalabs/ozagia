@@ -33,6 +33,34 @@ def other():
     return helper(1)
 '''
 
+HINT_RETRY = '''import time
+
+
+def _retry(fn):
+    delay = 1
+    for attempt in range(3):
+        try:
+            return fn()
+        except Exception:
+            time.sleep(delay)
+            delay *= 2
+    raise RuntimeError("failed")
+'''
+
+HINT_IMPORTED = '''import time
+import tenacity
+
+
+def _retry(fn):
+    delay = 1
+    for attempt in range(3):
+        try:
+            return fn()
+        except Exception:
+            time.sleep(delay)
+            delay *= 2
+'''
+
 
 def _env() -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if not k.startswith("OZAGIA_")}
@@ -680,3 +708,141 @@ def test_hook_session_end_scan_records_untracked_file(tmp_path):
         assert stats["file_manifest_sessions"] >= 1
     finally:
         _stop(proc)
+
+
+# --------------------------------------------------------------------------- #
+# library hints for built-in edits (`ozagia.core.library_hints`)
+# --------------------------------------------------------------------------- #
+def test_after_builtin_write_adds_library_hints_and_counters(tmp_path,
+                                                             monkeypatch):
+    from ozagia.daemon.server import DaemonState
+    monkeypatch.setattr(
+        "ozagia.core.library_hints._installed_version", lambda dist: None)
+    root = _ledger_repo(tmp_path)
+    (root / "pkg" / "retry_util.py").write_text(HINT_RETRY, encoding="utf-8")
+    st = DaemonState(root, None, tmp_path / "j.jsonl")
+    msg = {"op": "after", "tool": "write", "harness": "claude",
+           "session": "ses-builtin",
+           "input": {"path": "pkg/retry_util.py"}, "output": "", "meta": {}}
+    resp = st.dispatch(msg)
+    assert resp["ok"], resp
+    assert "[ozagia] library hint:" in resp["append"]
+    meta = resp["meta"]
+    assert meta["library_hints_builtin"] >= 1
+    assert meta["library_hint_builtin_files"] == 1
+    st.record(msg, resp, 1.0)
+    stats = st.stats()
+    assert stats["library_hints_builtin"] == meta["library_hints_builtin"]
+    assert stats["library_hint_builtin_files"] == 1
+    assert stats["library_hints"] == 0
+
+    # The same unchanged content is not hinted again for this session.
+    resp2 = st.dispatch(msg)
+    assert resp2["ok"], resp2
+    assert "library hint" not in resp2["append"]
+    assert "library_hints_builtin" not in resp2.get("meta", {})
+    st.record(msg, resp2, 1.0)
+    assert st.stats()["library_hints_builtin"] == stats["library_hints_builtin"]
+
+
+def test_after_builtin_patch_adds_library_hints(tmp_path, monkeypatch):
+    from ozagia.daemon.server import DaemonState
+    monkeypatch.setattr(
+        "ozagia.core.library_hints._installed_version", lambda dist: None)
+    root = _ledger_repo(tmp_path)
+    (root / "pkg" / "retry_util.py").write_text(HINT_RETRY, encoding="utf-8")
+    st = DaemonState(root, None, tmp_path / "j.jsonl")
+    patch = ("*** Begin Patch\n"
+             "*** Update File: pkg/retry_util.py\n"
+             "@@\n"
+             " def _retry(fn):\n"
+             "*** End Patch\n")
+    msg = {"op": "after", "tool": "patch", "harness": "claude",
+           "session": "ses-patch", "input": {"patch": patch},
+           "output": "", "meta": {}}
+    resp = st.dispatch(msg)
+    assert resp["ok"], resp
+    assert "[ozagia] library hint:" in resp["append"]
+    assert resp["meta"]["library_hints_builtin"] >= 1
+
+
+def test_after_builtin_write_respects_env_opt_out(tmp_path, monkeypatch):
+    from ozagia.daemon.server import DaemonState
+    monkeypatch.setenv("OZAGIA_LIBRARY_HINTS", "0")
+    root = _ledger_repo(tmp_path)
+    (root / "pkg" / "retry_util.py").write_text(HINT_RETRY, encoding="utf-8")
+    st = DaemonState(root, None, tmp_path / "j.jsonl")
+    msg = {"op": "after", "tool": "write", "harness": "claude",
+           "session": "ses-off",
+           "input": {"path": "pkg/retry_util.py"}, "output": "", "meta": {}}
+    resp = st.dispatch(msg)
+    assert resp["ok"], resp
+    assert "library hint" not in resp["append"]
+    assert "library_hints_builtin" not in resp.get("meta", {})
+    st.record(msg, resp, 1.0)
+    assert st.stats()["library_hints_builtin"] == 0
+
+
+def test_after_builtin_write_no_hint_when_the_package_is_imported(tmp_path):
+    from ozagia.daemon.server import DaemonState
+    root = _ledger_repo(tmp_path)
+    (root / "pkg" / "retry_util.py").write_text(HINT_IMPORTED,
+                                               encoding="utf-8")
+    st = DaemonState(root, None, tmp_path / "j.jsonl")
+    msg = {"op": "after", "tool": "write", "harness": "claude",
+           "session": "ses-imported",
+           "input": {"path": "pkg/retry_util.py"}, "output": "", "meta": {}}
+    resp = st.dispatch(msg)
+    assert resp["ok"], resp
+    assert "library hint" not in resp["append"]
+    meta = resp.get("meta") or {}
+    assert "library_hints_builtin" not in meta
+    assert meta.get("library_hints_suppressed", 0) >= 1
+
+
+def test_handled_write_does_not_duplicate_a_library_hint(tmp_path,
+                                                         monkeypatch):
+    from ozagia.core.memory import DevMemory, build_index
+    from ozagia.daemon.server import DaemonState
+    monkeypatch.setattr(
+        "ozagia.core.library_hints._installed_version", lambda dist: None)
+    root = _ledger_repo(tmp_path)
+    dump = tmp_path / "graph.json"
+    build_index(root, dump, include_docs="features", include_git=False)
+    mem = DevMemory(dump, tmp_path / "state" / "journal.jsonl", root=root)
+    st = DaemonState(root, mem, tmp_path / "j.jsonl")
+    msg = {"op": "tool", "tool": "write", "harness": "claude",
+           "session": "ses-handled",
+           "input": {"path": "pkg/retry_util.py", "content": HINT_RETRY}}
+    resp = st.dispatch(msg)
+    assert resp["ok"] and resp["handled"], resp
+    assert "[ozagia] library hint:" in resp["output"]
+    assert resp["meta"]["library_hints"] >= 1
+    st.record(msg, resp, 1.0)
+
+    after = {"op": "after", "tool": "write", "harness": "claude",
+             "session": "ses-handled",
+             "input": {"path": "pkg/retry_util.py"}, "output": "",
+             "meta": {}}
+    resp2 = st.dispatch(after)
+    assert resp2["ok"], resp2
+    assert "library hint" not in resp2["append"]
+    assert "library_hints_builtin" not in resp2.get("meta", {})
+    st.record(after, resp2, 1.0)
+    stats = st.stats()
+    assert stats["library_hints"] >= 1
+    assert stats["library_hints_builtin"] == 0
+
+
+def test_after_builtin_edit_failure_adds_no_hints(tmp_path):
+    from ozagia.daemon.server import DaemonState
+    root = _ledger_repo(tmp_path)
+    (root / "pkg" / "retry_util.py").write_text(HINT_RETRY, encoding="utf-8")
+    st = DaemonState(root, None, tmp_path / "j.jsonl")
+    msg = {"op": "after", "tool": "edit", "harness": "claude",
+           "session": "ses-miss", "input": {"path": "pkg/retry_util.py"},
+           "output": "", "meta": {"builtin_error": True}}
+    resp = st.dispatch(msg)
+    assert resp["ok"], resp
+    assert "library hint" not in resp["append"]
+    assert "library_hints_builtin" not in resp.get("meta", {})

@@ -24,6 +24,7 @@ import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence
 
+from ozagia.core import library_hints as LH
 from ozagia.core import ocelot_code
 from ozagia.core import resources
 from ozagia.core import testing as test_plans
@@ -66,6 +67,10 @@ MAX_ITEMS = 100
 MAX_WHITESPACE_FINDINGS = 50
 MAX_CONFLICT_FINDINGS = 50
 MAX_SENSITIVE_FINDINGS = 50
+# Library hints in a packet: changed source files inspected, hints shown. The
+# per-file cap is the configured ``hints.max_per_edit``.
+MAX_LIBRARY_HINT_FILES = 40
+MAX_LIBRARY_HINTS = 10
 
 # Extensions treated as executable source. A diff that changes one of these
 # without a test is reported, unless a covering test is recorded.
@@ -1442,6 +1447,124 @@ def _plan_tests(root: Path, base_commit: str, head_commit: str,
     return plan
 
 
+def _library_hint_files(files: Sequence[Mapping[str, Any]]
+                        ) -> list[Mapping[str, Any]]:
+    """Changed source files the hint layer may read, in diff order."""
+    out: list[Mapping[str, Any]] = []
+    for item in files:
+        if item.get("deleted") or item.get("binary") or item.get("generated"):
+            continue
+        if item.get("file_kind") != "source":
+            continue
+        path = item.get("path")
+        if isinstance(path, str) and path:
+            out.append(item)
+        if len(out) >= MAX_LIBRARY_HINT_FILES:
+            break
+    return out
+
+
+def _library_before_text(root: Path, base: str,
+                         files: Sequence[Mapping[str, Any]]
+                         ) -> dict[str, str]:
+    """The base commit's text for each changed source file, bounded.
+
+    ``None``/absent for an added file is what ``hints_for_paths`` expects.
+    A failed or oversized read is skipped; hints are advisory.
+    """
+    before: dict[str, str] = {}
+    for item in files:
+        path = str(item.get("path") or "")
+        old = str(item.get("old_path") or path)
+        if not path or not old:
+            continue
+        size = _blob_size(root, base, old)
+        if size is None or size > LH.MAX_FILE_BYTES:
+            continue
+        proc = _git(root, ["show", f"{base}:{old}"])
+        if proc.returncode != 0:
+            continue
+        data = proc.stdout
+        if len(data) > LH.MAX_FILE_BYTES or b"\0" in data[:8192]:
+            continue
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        before[path] = text[1:] if text.startswith("\ufeff") else text
+    return before
+
+
+def _library_hints_section(root: Path, base: str,
+                           files: Sequence[dict[str, Any]], *,
+                           requested: bool) -> dict[str, Any]:
+    """The ``library_hints`` packet section. Advisory, read-only, bounded.
+
+    The detector reads the named changed files and the manifests beside them.
+    It never records events here (a review writes nothing) and its evidence is
+    rule labels plus file/symbol names, never file contents.
+    """
+    try:
+        settings = LH.settings_for(root)
+    except Exception:  # noqa: BLE001 - a hint preference must never fail
+        settings = LH.HintSettings()
+    section: dict[str, Any] = {
+        "schema": LH.SCHEMA,
+        "rule_version": LH.RULE_VERSION,
+        "requested": bool(requested),
+        "mode": settings.mode,
+        "state": "disabled",
+        "files": [],
+        "hints": [],
+        "counts": {"hints": 0, "suppressed": 0, "files": 0,
+                   "truncated": False},
+        "recorded": False,
+        "truth_assessed": False,
+        "source": "working_tree",
+        "note": ("capability hints from a curated registry; the named files "
+                 "are read from the working tree, so a dirty or non-checkout "
+                 "head may differ; no refactor, dependency change, model or "
+                 "network call was made"),
+    }
+    if not requested:
+        section["note"] = "library hints were disabled for this review"
+        return section
+    if settings.mode == "off":
+        section["state"] = "off"
+        section["note"] = ("library hints are off (settings or "
+                           "OZAGIA_LIBRARY_HINTS); no check was made")
+        return section
+    selected = _library_hint_files(files)
+    section["files"] = [str(item["path"]) for item in selected]
+    section["counts"]["files"] = len(selected)
+    if not selected:
+        section["state"] = "no_files"
+        return section
+    try:
+        before = _library_before_text(root, base, selected)
+        got = LH.hints_for_paths(
+            root, [str(item["path"]) for item in selected],
+            mode=settings.mode, before=before, settings=settings,
+            record=False, max_per_edit=settings.max_per_edit)
+    except Exception as exc:  # noqa: BLE001 - a review must report, not crash
+        section["state"] = "error"
+        section["error"] = f"{type(exc).__name__}: {exc}"
+        return section
+    hints = [dict(item) for item in (got.get("hints") or [])
+             if isinstance(item, Mapping)]
+    suppressed = [dict(item) for item in (got.get("suppressed") or [])
+                  if isinstance(item, Mapping)]
+    truncated = len(hints) > MAX_LIBRARY_HINTS
+    section["hints"] = hints[:MAX_LIBRARY_HINTS]
+    section["counts"].update({
+        "hints": len(section["hints"]),
+        "suppressed": len(suppressed),
+        "truncated": truncated,
+    })
+    section["state"] = "ready" if section["hints"] else "no_hints"
+    return section
+
+
 def _security_section(report: Mapping[str, Any]) -> dict[str, Any]:
     """Copy supplied security findings without running or renumbering them."""
     raw_findings = report.get("findings")
@@ -1548,7 +1671,9 @@ def _packet(root: Path, pre: Mapping[str, Any], graph_info: Mapping[str, Any],
             not_assessed: Sequence[Mapping[str, Any]],
             test_plan: Mapping[str, Any] | None = None,
             security_report: Mapping[str, Any] | None = None,
-            ocelot_section: Mapping[str, Any] | None = None) -> dict[str, Any]:
+            ocelot_section: Mapping[str, Any] | None = None,
+            library_hints_section: Mapping[str, Any] | None = None
+            ) -> dict[str, Any]:
     range_info = dict(pre.get("range") or {})
     packet = {
         "schema": PACKET_SCHEMA,
@@ -1601,9 +1726,21 @@ def _packet(root: Path, pre: Mapping[str, Any], graph_info: Mapping[str, Any],
                       "slice; no model was called",
             "truth_assessed": False,
         },
+        "library_hints": dict(library_hints_section)
+        if library_hints_section is not None else {
+            "requested": False,
+            "state": "disabled",
+            "hints": [],
+            "truth_assessed": False,
+        },
         "truth_assessed": False,
         "root": str(root),
     }
+    if library_hints_section is not None:
+        packet["summary"]["library_hints"] = len(
+            library_hints_section.get("hints") or [])
+        packet["summary"]["library_hints_state"] = library_hints_section.get(
+            "state")
     if security_report is not None:
         section = _security_section(security_report)
         packet["security"] = section
@@ -1641,7 +1778,8 @@ def review_diff(root: str | Path, *, base: str, head: str = "HEAD",
                 ocelot_impact: Any = False,
                 ocelot_patterns: Any = False,
                 ocelot_impact_clusterer: Any = None,
-                ocelot_patterns_clusterer: Any = None
+                ocelot_patterns_clusterer: Any = None,
+                library_hints: bool = True
                 ) -> dict[str, Any]:
     """Review ``base..head`` deterministically and return a review packet.
 
@@ -1773,9 +1911,26 @@ def review_diff(root: str | Path, *, base: str, head: str = "HEAD",
                     f"{patterns_section.get('state')}; exact signature/"
                     "overlap patterns were reported and no install was "
                     "attempted.")
+    library_section = _library_hints_section(
+        root_path, base_sha, files, requested=library_hints)
+    if library_section["state"] in {"disabled", "off"}:
+        not_assessed.append({
+            "area": "library-hints",
+            "reason": (
+                "library hints were not checked; no library-reuse signal was "
+                "assessed"),
+        })
+    else:
+        not_assessed.append({
+            "area": "library-hints",
+            "reason": (
+                "capability hints are heuristic and cover only the changed "
+                "source files; no refactor or dependency change was made"),
+        })
     packet = _packet(root_path, pre, graph_info, files, diff_info,
                      final_findings, omissions, not_assessed,
-                     test_plan, security_report, ocelot_section)
+                     test_plan, security_report, ocelot_section,
+                     library_section)
     return packet
 
 
@@ -1970,6 +2125,23 @@ def format_packet(packet: Mapping[str, Any]) -> str:
             f"fallback={test_plan.get('fallback_used')}); tests were not run"
             + (f" - {test_plan['not_run_reason']}"
                if test_plan.get("not_run_reason") else ""))
+    library = packet.get("library_hints")
+    if isinstance(library, Mapping):
+        hints = library.get("hints") or []
+        if library.get("state") in {"disabled", "off"}:
+            lines.append(
+                f"library hints: {library.get('state')}; not checked")
+        else:
+            lines.append(
+                f"library hints: {library.get('state')}, {len(hints)} "
+                f"candidate(s) from {library.get('counts', {}).get('files', 0)} "
+                "file(s); advisory only, nothing was refactored")
+            for hint in hints:
+                lines.append(
+                    f"  {hint.get('file')}::{hint.get('symbol')} "
+                    f"{hint.get('capability')} -> {hint.get('package')} "
+                    f"({hint.get('availability')}, "
+                    f"{hint.get('confidence')})")
     ocelot = packet.get("ocelot")
     if isinstance(ocelot, Mapping):
         clusters = ocelot.get("clusters") or []

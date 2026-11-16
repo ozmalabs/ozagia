@@ -14,6 +14,60 @@ from ozagia.core import code_review as R
 from ozagia.core.memory import _tree_digest
 
 
+HINT_RETRY = '''import time
+
+
+def _retry(fn):
+    delay = 1
+    for attempt in range(3):
+        try:
+            return fn()
+        except Exception:
+            time.sleep(delay)
+            delay *= 2
+    raise RuntimeError("failed")
+'''
+
+HINT_IMPORTED = '''import time
+import tenacity
+
+
+def _retry(fn):
+    delay = 1
+    for attempt in range(3):
+        try:
+            return fn()
+        except Exception:
+            time.sleep(delay)
+            delay *= 2
+'''
+
+HINT_MIXED = '''import sys
+import time
+
+
+def _retry(fn):
+    delay = 1
+    for attempt in range(3):
+        try:
+            return fn()
+        except Exception:
+            time.sleep(delay)
+            delay *= 2
+    raise RuntimeError("failed")
+
+
+def main():
+    args = sys.argv[1:]
+    if not args:
+        print("usage: app [--verbose]")
+        return 2
+    if args[0].startswith("--"):
+        return 1
+    return 0
+'''
+
+
 # --------------------------------------------------------------------------- #
 # helpers
 # --------------------------------------------------------------------------- #
@@ -217,6 +271,18 @@ def _findings(packet: dict[str, Any], *, ftype: str | None = None,
     return out
 
 
+def _hint_repo(tmp_path: Path, text: str = HINT_RETRY) -> dict[str, Any]:
+    repo = _init_repo(tmp_path / "hint-repo")
+    (repo / "src").mkdir()
+    (repo / "src" / "app.py").write_text(
+        "def placeholder():\n    return 0\n", encoding="utf-8")
+    base = _commit(repo, "base")
+    (repo / "src" / "app.py").write_text(text, encoding="utf-8")
+    head = _commit(repo, "hint change")
+    return {"repo": repo, "base": base, "head": head,
+            "range": f"{base}..{head}"}
+
+
 # --------------------------------------------------------------------------- #
 # no graph: file-level diff checks
 # --------------------------------------------------------------------------- #
@@ -343,6 +409,85 @@ def test_testing_task_override_can_select_none_for_review(review_repo):
     assert packet["test_plan"]["mode"] == "none"
     assert packet["test_plan"]["selected_files"] == []
     assert packet["tests_executed"] is False
+
+
+def test_packet_includes_bounded_library_hints(tmp_path):
+    repo = _hint_repo(tmp_path)
+    packet = R.review_range(repo["repo"], repo["range"])
+
+    section = packet["library_hints"]
+    assert section["requested"] is True
+    assert section["state"] == "ready"
+    assert section["recorded"] is False
+    assert section["truth_assessed"] is False
+    assert section["counts"]["hints"] >= 1
+    hint = next(item for item in section["hints"]
+                if item["capability"] == "retry")
+    assert hint["file"] == "src/app.py"
+    assert hint["symbol"] == "_retry"
+    assert hint["package"]
+    assert hint["availability"] in ("stdlib", "declared", "installed", "known")
+    assert hint["confidence"] in ("low", "medium", "high")
+    assert "evidence" in hint and "time.sleep" not in hint["evidence"]
+    # Evidence and the packet never carry file contents.
+    raw = json.dumps(packet, sort_keys=True)
+    assert "time.sleep" not in raw
+    assert "for attempt in range" not in raw
+    assert packet["summary"]["library_hints"] >= 1
+    assert packet["summary"]["library_hints_state"] == "ready"
+    assert any(entry.get("area") == "library-hints"
+               for entry in packet["not_assessed"])
+    text = R.format_packet(packet)
+    assert "library hints: ready" in text
+    assert "src/app.py::_retry" in text
+
+
+def test_library_hint_cap_and_off_setting(tmp_path):
+    repo = _hint_repo(tmp_path, HINT_MIXED)
+    (repo["repo"] / "ozagia" / "config.toml").write_text(
+        "[hints]\n"
+        'library = "gentle"\n'
+        "max_per_edit = 1\n",
+        encoding="utf-8",
+    )
+    packet = R.review_range(repo["repo"], repo["range"])
+    section = packet["library_hints"]
+    assert len(section["hints"]) == 1
+    assert section["hints"][0]["capability"] == "retry"
+    assert section["counts"]["suppressed"] >= 1
+
+    (repo["repo"] / "ozagia" / "config.toml").write_text(
+        "[hints]\n"
+        'library = "off"\n',
+        encoding="utf-8",
+    )
+    packet = R.review_range(repo["repo"], repo["range"])
+    section = packet["library_hints"]
+    assert section["state"] == "off"
+    assert section["hints"] == []
+    assert section["counts"]["hints"] == 0
+    assert "not checked" in R.format_packet(packet)
+
+
+def test_library_hints_are_suppressed_when_the_package_is_imported(tmp_path):
+    repo = _hint_repo(tmp_path, HINT_IMPORTED)
+    packet = R.review_range(repo["repo"], repo["range"])
+    section = packet["library_hints"]
+    assert section["hints"] == []
+    assert section["state"] == "no_hints"
+    assert section["counts"]["suppressed"] >= 1
+
+
+def test_cli_can_disable_library_hints(tmp_path, capsys):
+    repo = _hint_repo(tmp_path)
+    code = CLI.main([
+        "--root", str(repo["repo"]), "--range", repo["range"],
+        "--json", "--fail-on", "never", "--no-library-hints",
+    ])
+    assert code == 0
+    packet = json.loads(capsys.readouterr().out)
+    assert packet["library_hints"]["state"] == "disabled"
+    assert packet["library_hints"]["hints"] == []
 
 
 def test_stale_graph_is_reported_and_not_used(review_repo):
