@@ -600,17 +600,28 @@ def _offsets(text: str) -> list[int]:
 def region_key(root: str | Path, rel: str, text: str, start_line: int,
                end_line: int, memory: Any = None) -> str:
     """The key of the node enclosing lines `start_line..end_line` of `rel`:
-    sym:/test: for Python, `doc:<rel>#<section>` for Markdown,
-    `json:<rel>#<pointer>` for JSON, the `text:` chunk of an unparsed file,
-    else `file:`. With `memory`, the graph's own key for Python."""
+    sym:/test: for Python, `doc:<rel>#<slug>` for Markdown and TeX (the
+    `ozagia.core.sections` key a read or outline shows; `doc:<rel>` before
+    the first heading), `json:<rel>#<pointer>` for JSON, the `text:` chunk
+    of an unparsed file, else `file:`. With `memory`, the graph's own key
+    for Python."""
     suffix = PurePosixPath(rel).suffix.lower()
     offs = _offsets(text)
     s = offs[start_line - 1] if start_line - 1 < len(offs) else len(text)
     e = offs[end_line] - 1 if end_line < len(offs) else len(text)
     e = max(e, s)
-    if suffix in (".md", ".markdown"):
-        from ozagia.edit.key_edit import section_key
-        return section_key(rel, text, s, e)
+    from ozagia.core.sections import (
+        doc_sections,
+        has_sections,
+        innermost_section,
+        line_at,
+        section_key,
+    )
+    if has_sections(rel):
+        # Sections count lines at "\n"; locate the region by its offsets.
+        sec = innermost_section(doc_sections(rel, text), line_at(text, s),
+                                line_at(text, e))
+        return section_key(rel, sec.slug) if sec else f"doc:{rel}"
     if suffix == ".json":
         from ozagia.edit.json_edit import _Parser
         from ozagia.edit.span_edit import _json_pointer

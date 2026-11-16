@@ -28,7 +28,8 @@ A read with no range of any other text file over `[reads] outline_lines` /
 `outline_bytes` (400 lines / 40 kB) is an outline of its symbols or
 sections with line ranges and keys, then its first lines
 (`source_outline`); `cat F` too. `doc:<rel>#<slug>` reads one Markdown or
-TeX section (`ozagia.core.sections`, `render_section`).
+TeX section (`ozagia.core.sections`, `render_section`); the path alias
+`doc:<rel>#<a>/<b>` reads the section it names, under its slug key.
 """
 from __future__ import annotations
 
@@ -239,40 +240,57 @@ def _node_range(memory: Any, key: str, text: str, total: int
     raise IntentError(f"No node {key}{hint}")
 
 
-def section_range(memory: Any, key: str) -> tuple[Target, int, int]:
-    """(file, first line, last line) of a `doc:<rel>#<slug>` section key
-    (`ozagia.core.sections`). IntentError for a missing file or section,
-    with the nearest slugs."""
+def resolve_section_key(memory: Any, key: str) -> tuple[Target, Any]:
+    """(file, `DocSection`) of a `doc:<rel>#<slug>` section key, or of the
+    path alias `doc:<rel>#<a>/<b>` (`ozagia.core.sections`). IntentError
+    for a missing file or section, with the nearest section keys."""
     from ozagia.core.sections import (
+        SectionError,
         doc_sections,
         has_sections,
         parse_section_key,
+        resolve_section,
         section_key,
     )
     parsed = parse_section_key(key)
     if parsed is None:
         raise IntentError(f"not a section key: {key}")
-    rel, slug = parsed
+    rel, fragment = parsed
     target = resolve(root_of(memory), rel)
     if not has_sections(target.rel):
         raise IntentError(f"No node {key}: {rel} is not a Markdown or TeX file")
     if not target.path.is_file():
         raise IntentError(f"No node {key}: {rel} does not exist")
     sections = doc_sections(target.rel, read_text(target.path))
-    for s in sections:
-        if s.slug == slug:
-            return target, s.start, s.end
+    try:
+        return target, resolve_section(sections, fragment)
+    except SectionError as e:
+        if e.matches:
+            keys = ", ".join(section_key(target.rel, s.slug) for s in e.matches)
+            raise IntentError(f"No node {key}: ambiguous\n"
+                              f"{tag('matches: ' + keys)}") from None
     import difflib
-    near = difflib.get_close_matches(slug, [s.slug for s in sections], n=3,
+    want = fragment.rsplit("/", 1)[-1]
+    near = difflib.get_close_matches(want, [s.slug for s in sections], n=3,
                                      cutoff=0.5)
     hint = (f"\n{tag('nearest: ' + ', '.join(section_key(target.rel, s) for s in near))}"
             if near else "")
     raise IntentError(f"No node {key}{hint}")
 
 
+def section_range(memory: Any, key: str) -> tuple[Target, int, int]:
+    """(file, first line, last line) of a section key (`resolve_section_key`)."""
+    target, sec = resolve_section_key(memory, key)
+    return target, sec.start, sec.end
+
+
 def render_section(memory: Any, key: str) -> _Rendered:
-    """A Markdown or TeX section, subsections included, in read format."""
-    target, a, b = section_range(memory, key)
+    """A Markdown or TeX section, subsections included, in read format,
+    under its slug key (an alias key reads as the key it stands for)."""
+    from ozagia.core.sections import section_key
+    target, sec = resolve_section_key(memory, key)
+    a, b = sec.start, sec.end
+    key = section_key(target.rel, sec.slug)
     lines = split_lines(read_text(target.path))
     out = _Rendered()
     out.key(key)

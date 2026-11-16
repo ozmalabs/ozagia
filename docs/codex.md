@@ -325,14 +325,16 @@ hunk 2 of 3 (@@ def foo): the expected lines are not in the file after line 40
 
 The nearest region is the window of the file most like the hunk's expected
 lines (whitespace-normalised difflib ratios; windows after the anchor are
-preferred). Its key is the enclosing symbol (`sym:`/`test:`), Markdown
-section (`doc:<file>#<slug>`), JSON value (`json:<file>#<pointer>`) or text
-chunk (`text:<file>#L<a>-L<b>`, for `.tex` and other unparsed files). The
+preferred). Its key is the enclosing symbol (`sym:`/`test:`), Markdown or TeX
+section (`doc:<file>#<slug>`, the key reads and outlines show, see
+`ozagia.core.sections`), JSON value (`json:<file>#<pointer>`) or text
+chunk (`text:<file>#L<a>-L<b>`, for other unparsed files). The
 `node` line gives that node's full line range and the sha256 of its current
 text: the `base_sha256` a key edit (`dev_key_edit`) of it takes. A key edit
 of part of a file does not take the file's sha256, since the region may show
 only part of the node it would replace. Lines are counted at CRLF, lone CR
-and LF, the same in the reply and in key edits. A
+and LF, the same in the reply and in key edits (a section key's node range
+counts at LF, as reads do; the two differ only for lone-CR files). A
 region shows at most 60 lines, a line at most 1,500 characters, and the
 whole reason stays under 7,000 characters (about 2,000 tokens, under
 Codex's limit of about 2,500 tokens of hook output). When the expected lines

@@ -320,8 +320,9 @@ _TOOLS: list[dict[str, Any]] = [
         "name": "dev_key_edit",
         "description": (
             "Replace the WHOLE text of one node, named by its key: a symbol "
-            "or test (sym:path::Name, test:path::test_x), a Markdown section "
-            "(doc:path.md#section-slug, or #parent/child when ambiguous), a "
+            "or test (sym:path::Name, test:path::test_x), a Markdown or TeX "
+            "section (doc:path.md#section-slug as reads and outlines show it; "
+            "#parent/child is accepted too), a "
             "line range (text:path#L10-L42) or a JSON value "
             "(json:path.json#/a/0). base_sha256 is the sha256 of the node's "
             "current text (node sha256 in region replies; the file's sha256 "

@@ -30,6 +30,7 @@ from ozagia.intent.patch import (
     check_patch,
     nearest_region,
     parse_patch,
+    region_key,
     seek_sequence,
     split_source,
 )
@@ -44,6 +45,10 @@ def _patch(*body: str) -> str:
 
 def _sha(p: Path) -> str:
     return hashlib.sha256(p.read_bytes()).hexdigest()
+
+
+def _sha_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _node_sha(path: Path, a: int, b: int) -> str:
@@ -363,7 +368,9 @@ def test_region_tex_paragraph(tmp_path):
         "iteration on every level of the hierarchy.",
         "+The method is new."])
     assert (reg["start_line"], reg["end_line"]) == (7, 7)
-    assert reg["key"] == "text:paper.tex#L6-L8"
+    # The section key a read or outline of the file shows (core.sections).
+    assert reg["key"] == "doc:paper.tex#method"
+    assert reg["node"]["start_line"] == 6 and reg["node"]["end_line"] == 8
     assert reg["ratio"] > 0.9
 
 
@@ -806,15 +813,39 @@ def test_key_edit_markdown_text_and_json(mem, repo):
         mem.key_edit("doc:README.md#nope", "x", base_sha256=_sha(md))
 
 
-def test_section_keys_and_ambiguous_slugs():
-    from ozagia.edit.key_edit import find_section, section_key, slug
-    text = "# A\n\n## Setup\n\nx\n\n# B\n\n## Setup\n\ny\n"
-    assert slug("Hello, World!") == "hello-world"
-    assert section_key("r.md", text, text.index("y"), text.index("y")) == "doc:r.md#b/setup"
-    assert find_section(text, "b/setup").start_line == 9
+def test_section_keys_and_path_alias(tmp_path):
+    """Region and edit keys are core.sections slugs; `a/b` is an alias."""
+    from ozagia.core.sections import doc_sections, slugify
     from ozagia.edit.code_edit import CodeEditError
-    with pytest.raises(CodeEditError, match="ambiguous"):
-        find_section(text, "setup")
+    from ozagia.edit.key_edit import apply_key_edit, find_section
+    text = "# A\n\n## Setup\n\nx\n\n# B\n\n## Setup\n\ny\n"
+    (tmp_path / "r.md").write_text(text)
+    assert slugify("Hello, World!") == "hello-world"
+    assert [s.slug for s in doc_sections("r.md", text)] == ["a", "setup", "b", "setup-1"]
+    # The region key of the second Setup is its unique slug, not a path.
+    assert region_key(tmp_path, "r.md", text, 11, 11) == "doc:r.md#setup-1"
+    assert region_key(tmp_path, "r.md", text, 1, 11) == "doc:r.md"
+    assert find_section("r.md", text, "setup-1").start == 9
+    assert find_section("r.md", text, "b/setup").start == 9
+    assert find_section("r.md", text, "a/setup").start == 3
+    assert find_section("r.md", text, "setup").start == 3   # the slug, not ambiguous
+    with pytest.raises(CodeEditError, match="no section.*doc:r.md#setup-1"):
+        find_section("r.md", text, "c/setup")
+    # An alias edit is the slug key's edit, and the result says so.
+    node = "## Setup\n\ny\n"
+    res = apply_key_edit(tmp_path, "doc:r.md#b/setup", "## Setup\n\nz\n",
+                         base_sha256=_sha_text(node))
+    assert res["ok"] and res["key"] == "doc:r.md#setup-1"
+    assert (res["start_line"], res["end_line"]) == (9, 11)
+
+
+def test_section_alias_ambiguous(tmp_path):
+    from ozagia.edit.code_edit import CodeEditError
+    from ozagia.edit.key_edit import find_section
+    text = "# A\n## S\n### T\n# B\n## S\n### T\n"
+    with pytest.raises(CodeEditError, match="ambiguous.*doc:r.md#t.*doc:r.md#t-1"):
+        find_section("r.md", text, "s/t")
+    assert find_section("r.md", text, "b/s/t").slug == "t-1"
 
 
 def test_mcp_dev_key_edit_schema_and_calls(mem, repo):

@@ -87,13 +87,15 @@ def _line_end(offsets: list[int], lineno: int, n: int) -> int:
 
 
 def headings(source: str) -> list[Section]:
-    """All headings outside fenced code blocks, with their section spans."""
+    """All headings outside fenced code blocks, with their section spans.
+    Lines end at "\\n" (a CRLF line keeps its "\\r", which the patterns
+    ignore), as the offsets and `ozagia.core.sections` count them."""
     offsets = _line_offsets(source)
     n = len(source)
     raw: list[dict[str, Any]] = []
     in_fence = False
     fence = ""
-    for i, line in enumerate(source.splitlines(keepends=True), start=1):
+    for i, line in enumerate(source.split("\n"), start=1):
         m = _FENCE_RE.match(line)
         if m:
             token = m.group(1)
@@ -104,7 +106,7 @@ def headings(source: str) -> list[Section]:
             continue
         if in_fence:
             continue
-        hm = _HEADING_RE.match(line.rstrip("\n"))
+        hm = _HEADING_RE.match(line.rstrip("\r"))
         if not hm:
             continue
         raw.append({

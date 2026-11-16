@@ -744,3 +744,63 @@ def test_write_over_a_partly_read_file_warns(mem, repo):
     assert "warning" not in unseen["output"]
     new = I.handle(mem, "write", {"path": "pkg/new.py", "content": "z\n"}, state=st)
     assert "warning" not in new["output"]
+
+
+def _section_read(mem, key):
+    """(first line, last line, text) of a section read: the lines it shows,
+    joined with their newlines (the fixture files are LF)."""
+    out = _read(mem, None, path=key)["output"].split("\n")
+    m = re.search(r"lines (\d+)-(\d+)(?: of|$)", out[0])
+    assert m, out[0]
+    body = [re.sub(r"^\d+: ", "", ln, count=1) for ln in out[2:]]
+    return int(m.group(1)), int(m.group(2)), "".join(ln + "\n" for ln in body)
+
+
+@pytest.mark.parametrize("rel,miss", [
+    ("docs/plan.md", ["@@", "-mroe details", "+x"]),
+    ("paper/main.tex", ["@@", "-\\section{Ending}", "+x"]),
+])
+def test_section_keys_round_trip(mem, repo, rel, miss):
+    """Every key an outline shows reads its range and takes a key edit with
+    the read text's sha256; a region reply's key reads back its node."""
+    import hashlib
+
+    from ozagia.edit.key_edit import apply_key_edit
+    from ozagia.intent.patch import check_patch
+
+    def sha(t):
+        return hashlib.sha256(t.encode()).hexdigest()
+
+    res = _read(mem, None, path=rel)
+    assert res["meta"]["intent"] == "read_outline"
+    rows = re.findall(r"^\[ozagia\] +L(\d+)-(\d+) (doc:\S+)", res["output"], re.M)
+    want = [(s.start, s.end, f"doc:{rel}#{s.slug}")
+            for s in doc_sections(rel, (repo / rel).read_text())]
+    assert [(int(a), int(b), k) for a, b, k in rows] == want and want
+    for a, b, key in want:
+        ra, rb, text = _section_read(mem, key)
+        assert (ra, rb) == (a, b), key
+        prev = apply_key_edit(repo, key, text + "added\n", base_sha256=sha(text))
+        assert prev["ok"] and not prev["applied"], (key, prev)
+        assert (prev["key"], prev["start_line"], prev["end_line"]) == (key, a, b)
+        assert prev["node_sha256"] == sha(text)
+    got = check_patch(repo, "\n".join(["*** Begin Patch", f"*** Update File: {rel}",
+                                       *miss, "*** End Patch"]) + "\n")
+    reg = got["files"][0]["hunks"][0]["region"]
+    assert reg["key"].startswith(f"doc:{rel}#") and "/" not in reg["key"].split("#")[1]
+    ra, rb, text = _section_read(mem, reg["key"])
+    assert reg["node"] == {"start_line": ra, "end_line": rb, "sha256": sha(text)}
+
+
+def test_section_path_alias_reads(mem, repo):
+    """`doc:<rel>#<a>/<b>` reads the section it names, under its slug key."""
+    secs = {s.slug: s for s in doc_sections("docs/plan.md", DOC)}
+    res = _read(mem, None, path="doc:docs/plan.md#install/details")
+    lines = res["output"].split("\n")
+    assert lines[1] == "[ozagia] doc:docs/plan.md#details"
+    assert lines[2] == f"{secs['details'].start}: ### Details"
+    assert res["meta"]["keys"] == ["doc:docs/plan.md#details"]
+    deep = _read(mem, None, path="doc:docs/plan.md#title/install/details")
+    assert deep["output"] == res["output"]
+    miss = I.handle(mem, "read", {"path": "doc:docs/plan.md#usage/details"})
+    assert miss["is_error"] and "doc:docs/plan.md#details" in miss["output"]

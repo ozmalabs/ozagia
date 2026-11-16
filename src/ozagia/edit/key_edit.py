@@ -11,11 +11,11 @@ Keys and the span each names:
     sym:<rel>::<qualname>     the def/class (decorators included), whole
     test:<rel>::<qualname>    lines; Python by its own parse, other languages
                               by the graph node's line range (needs memory)
-    doc:<rel>#<section>       a Markdown section: its heading line to the next
-                              heading of the same or a higher level.
-                              <section> is the heading's slug (lowercase,
-                              punctuation dropped, spaces as `-`), or a path
-                              of slugs `a/b` when the slug alone is ambiguous
+    doc:<rel>#<slug>          a Markdown or TeX section, subsections
+                              included: the key, slug and line range a read
+                              or outline shows (`ozagia.core.sections`);
+                              the path alias `a/b` is taken too, and the
+                              result names the section by its slug key
     doc:<rel>, file:<rel>     the whole file
     text:<rel>#L<a>-L<b>      lines a..b
     json:<rel>#<pointer>      the JSON value at the pointer (RFC 6901), only
@@ -45,7 +45,9 @@ line range; when the file changed since it was ingested
 current one.
 
 Lines are counted at CRLF, lone CR and LF (`txn.LINE_BREAK_RE`), as the
-patch checker and the region replies count them.
+patch checker and the region replies count them; a `doc:` section's lines
+are counted at "\\n" as reads count them (`ozagia.core.sections`). The two
+agree except in a file with lone-CR line ends.
 
 A line-range node replaced by text without a final newline gets one when
 the old text had one (the next line is not joined onto it). Newlines are
@@ -62,16 +64,8 @@ from ozagia.core.keys import parse_key
 from ozagia.edit.code_edit import CodeEditError
 from ozagia.edit.txn import SourceFile, line_starts, normalize_newlines
 
-_MD_SUFFIXES = frozenset({".md", ".markdown"})
 _TEXT_KEY_RE = re.compile(r"^text:(?P<rel>.+)#L(?P<a>\d+)-L(?P<b>\d+)$")
-_SLUG_DROP_RE = re.compile(r"[^\w\- ]", re.UNICODE)
 KEY_KINDS = ("sym", "test", "doc", "file", "text", "json")
-
-
-def slug(title: str) -> str:
-    """A heading's slug, GitHub style: lowercase, punctuation dropped,
-    spaces as `-`."""
-    return _SLUG_DROP_RE.sub("", str(title).strip().lower()).replace(" ", "-")
 
 
 def sha256_text(text: str) -> str:
@@ -91,69 +85,27 @@ def _line_span(text: str, a: int, b: int) -> tuple[int, int]:
 
 
 # --------------------------------------------------------------------------- #
-# Markdown sections
+# Document sections
 # --------------------------------------------------------------------------- #
-def _chains(text: str) -> list[tuple[Any, list[Any]]]:
-    """Each heading with its ancestors (outermost first)."""
-    from ozagia.edit.markdown import headings
-    hs = headings(text)
-    out = []
-    for h in hs:
-        anc = [g for g in hs if g.start < h.start and g.level < h.level
-               and h.start < g.section_end]
-        # The nearest ancestor of each level.
-        chain: list[Any] = []
-        for g in sorted(anc, key=lambda g: g.start):
-            while chain and chain[-1].level >= g.level:
-                chain.pop()
-            chain.append(g)
-        out.append((h, chain))
-    return out
-
-
-def section_key(rel: str, text: str, start: int, end: int) -> str:
-    """The `doc:<rel>#<section>` key of the innermost section holding the
-    span `start..end`, or `doc:<rel>` before the first heading."""
-    chains = _chains(text)
-    inner = None
-    for h, chain in chains:
-        if h.start <= start and end <= max(h.section_end, h.heading_end):
-            if inner is None or h.start >= inner[0].start:
-                inner = (h, chain)
-    if inner is None:
-        return f"doc:{rel}"
-    h, chain = inner
-    s = slug(h.title)
-    if sum(1 for g, _ in chains if slug(g.title) == s) == 1:
-        return f"doc:{rel}#{s}"
-    return f"doc:{rel}#" + "/".join([*(slug(g.title) for g in chain), s])
-
-
-def find_section(text: str, fragment: str) -> Any:
-    """The heading a `doc:` key's fragment names (see the module docstring)."""
-    parts = [p for p in fragment.strip("/").split("/") if p]
-    if not parts:
-        raise CodeEditError("empty section name")
-    want = [slug(p) for p in parts]
-    found = []
-    for h, chain in _chains(text):
-        if slug(h.title) != want[-1]:
-            continue
-        path = [slug(g.title) for g in chain]
-        if len(want) > 1 and path[-(len(want) - 1):] != want[:-1]:
-            continue
-        found.append((h, chain))
-    if not found:
-        known = [slug(h.title) for h, _ in _chains(text)]
-        raise CodeEditError(f"no section {fragment!r}; sections: "
-                            f"{', '.join(known[:20]) or '(none)'}")
-    if len(found) > 1:
-        where = ", ".join(
-            "/".join([*(slug(g.title) for g in c), slug(h.title)])
-            + f" (L{h.start_line})" for h, c in found)
-        raise CodeEditError(f"section {fragment!r} is ambiguous: {where}; "
-                            f"name it by its path")
-    return found[0][0]
+def find_section(rel: str, text: str, fragment: str) -> Any:
+    """The `ozagia.core.sections.DocSection` a `doc:` key's fragment names
+    (a slug, or a path alias `a/b`), or CodeEditError listing the section
+    keys."""
+    from ozagia.core.sections import (
+        SectionError,
+        doc_sections,
+        resolve_section,
+        section_key,
+    )
+    sections = doc_sections(rel, text)
+    try:
+        return resolve_section(sections, fragment)
+    except SectionError as e:
+        listed = e.matches or tuple(sections)
+        keys = ", ".join(f"{section_key(rel, s.slug)} (L{s.start}-L{s.end})"
+                         for s in listed[:20]) or "(none)"
+        what = "matches" if e.matches else "sections"
+        raise CodeEditError(f"{e}; {what}: {keys}") from None
 
 
 # --------------------------------------------------------------------------- #
@@ -199,12 +151,13 @@ def node_span(src: Any, key: str, *, memory: Any = None,
         return {"start": 0, "end": len(text), "start_line": 1,
                 "end_line": max(1, line_of(max(len(text) - 1, 0))), "lines": True}
     if kind == "doc":
-        if PurePosixPath(src.rel).suffix.lower() not in _MD_SUFFIXES:
-            raise CodeEditError(f"{key}: sections are for Markdown files")
-        h = find_section(text, key.split("#", 1)[1])
-        end = max(h.section_end, h.heading_end)
-        return {"start": h.start, "end": end, "start_line": h.start_line,
-                "end_line": line_of(max(end - 1, h.start)), "lines": True}
+        from ozagia.core.sections import has_sections, section_offsets
+        if not has_sections(src.rel):
+            raise CodeEditError(f"{key}: sections are for Markdown and TeX files")
+        sec = find_section(src.rel, text, key.split("#", 1)[1])
+        s, e = section_offsets(text, sec)
+        return {"start": s, "end": e, "start_line": sec.start,
+                "end_line": sec.end, "lines": True, "slug": sec.slug}
     if kind == "text":
         m = _TEXT_KEY_RE.match(key)
         if not m:
@@ -312,6 +265,9 @@ def apply_key_edit(root: Any, key: str, new_text: str, *,
     rel = key_file(key)
     src = _read(root, rel)
     span = node_span(src, key, memory=memory)
+    if span.get("slug"):
+        from ozagia.core.sections import section_key
+        key = section_key(src.rel, span["slug"])     # an alias's own key
     old = src.text[span["start"]:span["end"]]
     node_sha = sha256_text(old)
     view = {"key": key, "file": src.rel, "start_line": span["start_line"],
@@ -352,4 +308,4 @@ def apply_key_edit(root: Any, key: str, new_text: str, *,
 
 
 __all__ = ["accepted_bases", "apply_key_edit", "find_section", "key_file", "node_span",
-           "section_key", "sha256_text", "slug"]
+           "sha256_text"]

@@ -144,7 +144,12 @@ lowercased, punctuation dropped, spaces as `-`, a repeated slug gets `-1`,
 the next heading of the same or a higher level, so it holds its
 subsections. Reading the key returns that whole range with
 `[ozagia] doc:<rel>#<slug>` as the header; an unknown slug is a tool error
-that lists the nearest section keys. We chose this over the positional
+that lists the nearest section keys. The path alias
+`doc:<rel>#<a>/<b>` (a heading's title slug after its enclosing headings'
+slugs, e.g. `#cli/usage`) is accepted too and reads under the slug key it
+stands for; it is never shown. Key edits (`edit` with `key`) and the region
+keys of patch-miss replies use the same slugs and line ranges, so a key an
+outline, read or region reply shows can be read and key-edited. We chose this over the positional
 `text:<rel>#L<a>-L<b>` because a slug depends only on the titles, not on
 line numbers, so a key stays valid across edits elsewhere in the file.
 Markdown headings are ATX headings outside fenced code (the rule of
@@ -288,7 +293,8 @@ Edit refused: the result does not parse (invalid syntax at line 19)
 
 An edit with `key` (and `newString`, `base_sha256`) instead of
 `oldString` replaces the whole text of that node (`ozagia.edit.key_edit`:
-`sym:`/`test:` symbols, `doc:<file>#<section slug>` Markdown sections,
+`sym:`/`test:` symbols, `doc:<file>#<slug>` Markdown and TeX sections as
+reads and outlines name them (`ozagia.core.sections`; the `a/b` alias too),
 `text:<file>#L<a>-L<b>` line ranges, `json:<file>#<pointer>` values).
 `base_sha256` is the sha256 of the node's current text, as region replies,
 edit-miss replies and refusals give it. The file's sha256 is taken only
