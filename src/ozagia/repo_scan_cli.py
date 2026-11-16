@@ -50,6 +50,9 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--ocelot-patterns", action="store_true",
                       help="add the optional ocelot.patterns candidate "
                            "architecture-pattern section")
+    scan.add_argument("--no-library-hints", dest="library_hints",
+                      action="store_false", default=True,
+                      help="skip the bounded library-reuse category")
     sub.add_parser("list-categories",
                    help="list scan categories and their descriptions")
     return parser
@@ -76,7 +79,8 @@ def main(argv: list[str] | None = None) -> int:
             ocelot=args.ocelot, ocelot_root=args.ocelot_root,
             ocelot_mode=args.ocelot_mode,
             ocelot_timeout=args.ocelot_timeout,
-            ocelot_patterns=args.ocelot_patterns)
+            ocelot_patterns=args.ocelot_patterns,
+            library_hints=args.library_hints)
     except (scan_core.RepoScanError, OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

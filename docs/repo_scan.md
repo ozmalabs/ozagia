@@ -25,6 +25,10 @@ Read-only inputs:
   and flaky tests), the created-file ledger (`.ozagia/files/ledger.jsonl`),
   review packets under `.ozagia/reviews/*.json` and an already-produced
   security report at `.ozagia/security/latest.json`.
+- bounded source reads for library hints: at most 20 changed/hotspot source
+  files, their imports, and the manifests beside them (`pyproject.toml`,
+  `requirements*.txt`, `package.json`, `Cargo.toml`). No hint event is
+  recorded.
 
 The graph's commit nodes provide churn; `--since N` bounds the churn window and
 the age used for stale `history/` notes. `--top N` bounds the number of
@@ -71,6 +75,14 @@ unavailable graph: that is a reported state, not a tool failure.
   while changes are local, and a graph with no Test nodes.
 - `code_review` — blocking/major findings from existing review packets and
   known-failure nodes from the graph.
+- `library_reuse` — bounded capability hints over changed files first, then
+  the highest-churn/highest-degree source files: a hand-written helper may
+  match a standard-library primitive or a known package. At most five hints
+  become opportunities. A hint names the package, capability, availability
+  and confidence; it is not a refactor and adds no dependency. With no hint
+  the category records an explicit no-candidate note, not a clean bill. The
+  report also has a `library_hints` object with the mode, state, sampled files
+  and counts. `--no-library-hints` skips the category.
 - `security` — high-confidence findings from an explicit security report
   passed to the API or found under `.ozagia/security/latest.json`. The scan
   never runs a security tool, scanner or network call itself. Without a
@@ -92,7 +104,9 @@ Each opportunity has:
 Ordering is deterministic: score descending, then category order, then id.
 The report includes `summary`, `omitted.by_category`, `omitted.total`, the
 per-category cap and the global cap. Re-running a scan on an unchanged
-checkout produces byte-identical JSON.
+checkout produces byte-identical JSON. The `library_hints` object records
+whether hints were enabled, the mode, the sampled files and hint/suppressed
+counts; it never stores source text.
 
 ## Optional Ocelot clustering
 
@@ -123,15 +137,17 @@ PYTHONPATH=src python -m ozagia.repo_scan_cli scan --root . --since 30 --top 25
 PYTHONPATH=src python -m ozagia.repo_scan_cli scan --root . --json --out /tmp/scan.json
 PYTHONPATH=src python -m ozagia.repo_scan_cli scan --root . --ocelot
 PYTHONPATH=src python -m ozagia.repo_scan_cli scan --root . --ocelot-patterns
+PYTHONPATH=src python -m ozagia.repo_scan_cli scan --root . --no-library-hints
 PYTHONPATH=src python -m ozagia.repo_scan_cli list-categories
 ```
 
 `--ocelot` (with optional `--ocelot-root`, `--ocelot-mode` and
 `--ocelot-timeout`) adds structural clusters for the duplicate, weak-boundary
 and security opportunities that are shown. `--ocelot-patterns` adds candidate
-architecture patterns; both flags are off by default. An unavailable checkout
-is reported, not installed, and never fails the scan. See
-`docs/ocelot_code.md`.
+architecture patterns; both flags are off by default. `--no-library-hints`
+skips the bounded `library_reuse` category; it is on by default. An unavailable
+checkout is reported, not installed, and never fails the scan. See
+`docs/ocelot_code.md` and `docs/library_hints.md`.
 
 Exit codes: `0` for a completed scan (including an unavailable graph) and
 `list-categories`; `2` for usage or IO errors. `--out` is the only write and
@@ -159,6 +175,10 @@ happens only when the caller asks for it.
 - No security, licence, dependency or supply-chain analysis is performed by
   this scan itself. A supplied security report is ranked as advisory evidence;
   a missing report is recorded as not assessed.
+- Library hints are heuristic and cover only the bounded sample of changed and
+  hotspot files. A missed hint is expected, a false positive is possible, and
+  a hint never proves semantic equivalence or that a dependency change is
+  acceptable. No package is installed and no code is refactored.
 
 A scan never edits the repository. Cleanup actions described in the report
 require explicit confirmation and, for ledger-managed files, the existing

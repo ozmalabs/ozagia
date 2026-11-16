@@ -299,6 +299,43 @@ def _snapshot_tree(root: Path) -> dict[str, str]:
     return out
 
 
+HINT_RETRY = '''import time
+
+
+def _retry(fn):
+    delay = 1
+    for attempt in range(3):
+        try:
+            return fn()
+        except Exception:
+            time.sleep(delay)
+            delay *= 2
+    raise RuntimeError("failed")
+'''
+
+
+def _library_repo(tmp_path: Path, text: str = HINT_RETRY) -> Path:
+    repo = _init_repo(tmp_path / "library-repo")
+    (repo / "src").mkdir()
+    (repo / "src" / "retry_util.py").write_text(text, encoding="utf-8")
+    head = _commit(repo, "library hint fixture")
+    rel = "src/retry_util.py"
+    _write_graph(repo, {
+        "version": 2,
+        "nodes": [
+            {"id": 0, "type": "Repo", "key": "repo:",
+             "attrs": {"name": "repo", "root": str(repo), "head": head}},
+            {"id": 1, "type": "File", "key": f"file:{rel}",
+             "attrs": {"name": rel, "path": rel, "language": "python"}},
+        ],
+        "edges": [{"src": 0, "type": "contains", "tgt": 1}],
+        "next_id": 2,
+        "files": {rel: {"role": "source"}},
+        "adapter": {},
+    })
+    return repo
+
+
 # --------------------------------------------------------------------------- #
 # categories and report shape
 # --------------------------------------------------------------------------- #
@@ -331,7 +368,46 @@ def test_scan_reports_every_category(tmp_path: Path) -> None:
     assert "missing_tests" not in text or "Missing tests" in text
 
 
-def test_missing_tests_prioritise_changed_files(tmp_path: Path) -> None:
+def test_library_reuse_reports_bounded_hints(tmp_path: Path) -> None:
+    repo = _library_repo(tmp_path)
+    report = RS.scan(repo, top=100)
+
+    info = report["library_hints"]
+    assert info["enabled"] is True
+    assert info["state"] == "ready"
+    assert info["recorded"] is False
+    assert info["hints"] >= 1
+    assert "src/retry_util.py" in info["sampled_files"]
+    items = [item for item in report["opportunities"]
+             if item["category"] == "library_reuse"]
+    hint = next(item for item in items if item.get("capability") == "retry")
+    assert hint["package"]
+    assert hint["availability"] in ("stdlib", "declared", "installed", "known")
+    assert hint["proposed_module"] == "src/retry_util.py"
+    assert hint["not_assessed"]
+    assert "never refactors" in hint["action"]
+    assert any(entry.get("kind") == "file"
+               and entry.get("path") == "src/retry_util.py"
+               for entry in hint["evidence"])
+    assert "time.sleep" not in json.dumps(report)
+    assert "library reuse" in " ".join(report["not_assessed"])
+    assert "library hints:" in RS.format_report(report)
+
+
+def test_library_reuse_can_be_disabled(tmp_path: Path) -> None:
+    repo = _library_repo(tmp_path)
+    report = RS.scan(repo, top=100, library_hints=False)
+    assert report["library_hints"]["enabled"] is False
+    assert report["library_hints"]["state"] == "disabled"
+    assert not [item for item in report["opportunities"]
+                if item["category"] == "library_reuse"]
+    assert any("library reuse was not assessed" in entry
+               for entry in report["not_assessed"])
+    assert CLI.main(["scan", "--root", str(repo), "--json",
+                     "--no-library-hints"]) == 0
+
+
+
     repo = _make_repo(tmp_path)
     (repo / "src" / "uncovered.py").write_text(
         "def uncovered():\n    return 99\n", encoding="utf-8")

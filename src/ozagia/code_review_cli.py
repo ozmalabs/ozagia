@@ -51,6 +51,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ocelot-patterns", action="store_true",
                         help="add the optional ocelot.patterns candidate "
                              "architecture-pattern section")
+    hints = parser.add_mutually_exclusive_group()
+    hints.add_argument("--library-hints", dest="library_hints",
+                       action="store_true", default=True,
+                       help="include the advisory library_hints packet "
+                            "section (default: on)")
+    hints.add_argument("--no-library-hints", dest="library_hints",
+                       action="store_false",
+                       help="omit the advisory library_hints packet section")
     return parser
 
 
@@ -79,6 +87,7 @@ def main(argv: list[str] | None = None) -> int:
         "ocelot_timeout": args.ocelot_timeout,
         "ocelot_impact": args.ocelot_impact,
         "ocelot_patterns": args.ocelot_patterns,
+        "library_hints": args.library_hints,
     }
     if args.max_file_bytes is not None:
         kwargs["max_file_bytes"] = args.max_file_bytes

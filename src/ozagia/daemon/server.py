@@ -115,9 +115,12 @@ off. `stats` adds `files_recorded`, `file_ledger_scans`,
 `file_ledger_errors`, `file_manifest_sessions` and `file_manifest_errors`.
 
 Library-first hints (`ozagia.core.library_hints`): a handled `edit` or `write`
-computes hints for new/changed symbols; `stats` adds `library_hints`,
-`library_hint_files` and `library_hints_suppressed`, summed from the answers'
-`meta`. Hints are advisory text only and are never applied.
+computes hints for new/changed symbols; a built-in `edit`, `write` or `patch`
+reported by `after` gets bounded `[ozagia] library hint:` lines when the same
+file was not just annotated by a handled call. `stats` adds `library_hints`,
+`library_hint_files` and `library_hints_suppressed` (from handled calls) and
+`library_hints_builtin` / `library_hint_builtin_files` (from `after`). Hints
+are advisory text only and are never applied.
 
 Goals (`ozagia.core.goals`): the read-only `goals` op summarises the
 store as last checked. After a `tool`/`after` answer that edited files,
@@ -172,6 +175,13 @@ FILE_LEDGER_TOOLS = frozenset({"edit", "write", "patch", "shell"})
 # most.
 FILE_LEDGER_SCAN_LIMIT = 100
 FILE_LEDGER_PATHS = 20
+# Built-in edits/writes/patches whose `after` may get library hints: tools,
+# changed paths per call, and how long a handled/`after` annotation suppresses
+# a repeat for the same session and unchanged file.
+LIBRARY_HINT_TOOLS = frozenset({"edit", "write", "patch"})
+LIBRARY_HINT_FILES = 20
+LIBRARY_HINT_DEDUPE_S = 300.0
+LIBRARY_HINT_SEEN_KEPT = 512
 # `$OZAGIA_FILE_LEDGER=0` turns the daemon's ledger scans off.
 ENV_FILE_LEDGER = "OZAGIA_FILE_LEDGER"
 # `meta` counters the daemon sums into its stats.
@@ -179,7 +189,8 @@ META_COUNTERS = ("path_suggestions", "ownership_warnings", "files_recorded",
                  "file_ledger_errors", "fetch_fallback_hints",
                  "ops_after_annotations",
                  "library_hints", "library_hint_files",
-                 "library_hints_suppressed")
+                 "library_hints_suppressed", "library_hints_builtin",
+                 "library_hint_builtin_files")
 # Keys kept per journal record.
 JOURNAL_KEYS = 20
 # Distinct shell passthrough reasons kept, and shown in `stats`.
@@ -425,6 +436,12 @@ class DaemonState:
         self.library_hints = 0
         self.library_hint_files = 0
         self.library_hints_suppressed = 0
+        # Built-in `after` edits/writes/patches: hints shown and files with
+        # one, plus the recent (harness, session, file) annotations used to
+        # avoid repeating a hint for an unchanged file.
+        self.library_hints_builtin = 0
+        self.library_hint_builtin_files = 0
+        self.library_seen: dict[tuple[str, str, str], tuple[int, int, float]] = {}
         # Goal lines added after edits (`ozagia.core.goals.edit_hints`).
         self.goal_hints = 0
 
@@ -609,6 +626,10 @@ class DaemonState:
             if edited is not None:
                 body = self._goal_hints(op, body, harness, session, *edited)
             self._files_observe(op, tool, inp, msg, body)
+            if op == "tool":
+                self._note_library_hint_handled(tool, inp, msg, body)
+            else:
+                body = self._library_hints_after(op, tool, inp, msg, body)
             return {"ok": True, **self._job_meta(body)}
         return {"ok": False, "error": f"unknown op {op!r}"}
 
@@ -680,16 +701,20 @@ class DaemonState:
         return st
 
     # -- the working set (`ozagia.core.working_set`) ------------------------ #
-    def _ws_rel(self, path: Any) -> str | None:
-        """`path` (absolute, or relative to the root) relative to the root,
-        or None for a node key, an empty path or one outside the root."""
+    def _ws_rel(self, path: Any, base: str | Path | None = None) -> str | None:
+        """`path` (absolute, or relative to the root or `base`) relative to
+        the root, or None for a node key, an empty path or one outside the
+        root."""
         if not isinstance(path, str) or not path:
             return None
         from ozagia.core.working_set import KEY_PREFIXES
         if path.startswith(KEY_PREFIXES + ("file:",)):
             return None
         p = Path(path)
-        full = os.path.realpath(p if p.is_absolute() else self.root / p)
+        base_path = Path(base) if base else self.root
+        if not base_path.is_absolute():
+            base_path = self.root / base_path
+        full = os.path.realpath(p if p.is_absolute() else base_path / p)
         rel = os.path.relpath(full, self.root).replace(os.sep, "/")
         return None if rel.startswith("..") or rel == "." else rel
 
@@ -937,6 +962,163 @@ class DaemonState:
         with self._stats_lock:
             self.file_ledger_scans += 1
             self.files_recorded += len(recorded)
+
+    # -- library hints for built-in edits (`ozagia.core.library_hints`) ---- #
+    @staticmethod
+    def _library_seen_key(msg: dict[str, Any],
+                          rel: str) -> tuple[str, str, str]:
+        return (str(msg.get("harness") or "opencode"),
+                str(msg.get("session") or ""), rel)
+
+    def _library_stamp(self, rel: str) -> tuple[int, int] | None:
+        try:
+            st = (self.root / rel).stat()
+        except OSError:
+            return None
+        return (st.st_mtime_ns, st.st_size)
+
+    def _library_already_annotated(self, msg: dict[str, Any], rel: str) -> bool:
+        """Whether this session got a library hint for this exact file
+        content recently (a handled call or an earlier `after`)."""
+        stamp = self._library_stamp(rel)
+        if stamp is None:
+            return False
+        seen = self.library_seen.get(self._library_seen_key(msg, rel))
+        if seen is None:
+            return False
+        mtime, size, when = seen
+        return ((mtime, size) == stamp
+                and time.time() - when <= LIBRARY_HINT_DEDUPE_S)
+
+    def _mark_library_annotated(self, msg: dict[str, Any], rel: str) -> None:
+        stamp = self._library_stamp(rel)
+        if stamp is None:
+            return
+        key = self._library_seen_key(msg, rel)
+        self.library_seen.pop(key, None)
+        self.library_seen[key] = (stamp[0], stamp[1], time.time())
+        while len(self.library_seen) > LIBRARY_HINT_SEEN_KEPT:
+            self.library_seen.pop(next(iter(self.library_seen)))
+
+    def _note_library_hint_handled(self, tool: str, inp: Any,
+                                   msg: dict[str, Any],
+                                   body: dict[str, Any]) -> None:
+        """Remember files a handled edit/write already annotated, so a later
+        `after` for the same unchanged content does not repeat the hint."""
+        if (tool not in ("edit", "write") or not body.get("handled")
+                or body.get("is_error") or body.get("preflight")):
+            return
+        meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
+        for rel in meta.get("edited_files") or []:
+            if isinstance(rel, str) and rel:
+                self._mark_library_annotated(msg, rel)
+
+    def _library_after_paths(self, tool: str, inp: Any,
+                             meta: dict[str, Any]) -> list[str]:
+        """Changed paths a built-in `after` names, root-relative, bounded."""
+        raw: list[str] = []
+        for key in ("edited_files", "changed_paths"):
+            values = meta.get(key)
+            if isinstance(values, list):
+                raw.extend(value for value in values
+                           if isinstance(value, str) and value)
+        if tool in ("edit", "write") and isinstance(inp, dict):
+            rel = self._ws_rel(inp.get("path", inp.get("filePath")))
+            if rel:
+                raw.append(rel)
+        elif tool == "patch" and not raw and isinstance(inp, dict):
+            # Without `meta.edited_files` (no session), the patch text still
+            # names the files; a parse failure only means no hint.
+            try:
+                from ozagia.intent.patch import parse_patch, patch_text
+                text = patch_text(inp)
+                parsed = parse_patch(text) if text else None
+                base = inp.get("workdir")
+                for op in (parsed.ops if parsed else []):
+                    for value in (op.path, op.move_to):
+                        if isinstance(value, str) and value:
+                            rel = self._ws_rel(value, base=base)
+                            if rel:
+                                raw.append(rel)
+            except Exception:  # noqa: BLE001 - hints are advisory
+                pass
+        out: list[str] = []
+        for rel in raw:
+            if rel not in out:
+                out.append(rel)
+            if len(out) >= LIBRARY_HINT_FILES:
+                break
+        return out
+
+    def _library_hints_after(self, op: str, tool: str, inp: Any,
+                             msg: dict[str, Any], body: dict[str, Any]
+                             ) -> dict[str, Any]:
+        """Append bounded `[ozagia] library hint:` lines after a built-in
+        edit, write or patch. Never fails the tool and never edits code."""
+        if op != "after" or tool not in LIBRARY_HINT_TOOLS:
+            return body
+        if body.get("preflight") or body.get("expired"):
+            return body
+        req_meta = msg.get("meta") if isinstance(msg.get("meta"), dict) else {}
+        if req_meta.get("builtin_error") is True:
+            return body
+        meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
+        if meta.get("intent") == "after_edit_miss":
+            return body
+        paths = self._library_after_paths(tool, inp, meta)
+        if not paths:
+            return body
+        try:
+            from ozagia.core import library_hints as LH
+            settings = LH.settings_for(self.root)
+            if settings.mode == "off" or settings.max_per_edit <= 0:
+                return body
+            candidates = [
+                rel for rel in paths
+                if LH.enabled_for(rel, settings)
+                and not self._library_already_annotated(msg, rel)
+            ]
+            if not candidates:
+                return body
+            got = LH.hints_for_paths(
+                self.root, candidates, settings=settings,
+                record=settings.record, max_per_edit=settings.max_per_edit)
+            hints = [hint for hint in (got.get("hints") or [])
+                     if isinstance(hint, dict) and hint.get("message")]
+            hints = hints[:max(0, settings.max_per_edit)]
+            suppressed = got.get("suppressed") or []
+            # Even with no hint, the same unchanged content should not be
+            # recomputed on every `after` in this session.
+            for rel in candidates:
+                self._mark_library_annotated(msg, rel)
+            if not hints:
+                if suppressed:
+                    meta["library_hints_suppressed"] = (
+                        int(meta.get("library_hints_suppressed") or 0)
+                        + len(suppressed))
+                    body = {**body, "meta": meta}
+                return body
+            lines = [str(hint["message"]) for hint in hints]
+            existing = body.get("append")
+            body = {
+                **body,
+                "append": "\n".join(
+                    [value for value in [existing if isinstance(existing, str)
+                                         else ""] + lines if value]),
+            }
+            meta = dict(meta)
+            meta["library_hints_builtin"] = len(lines)
+            meta["library_hint_builtin_files"] = len({
+                str(hint.get("file")) for hint in hints if hint.get("file")})
+            if suppressed:
+                meta["library_hints_suppressed"] = (
+                    int(meta.get("library_hints_suppressed") or 0)
+                    + len(suppressed))
+            body["meta"] = meta
+        except Exception as exc:  # noqa: BLE001 - the tool already ran
+            print(f"library hint after failed: {type(exc).__name__}: {exc}",
+                  file=sys.stderr, flush=True)
+        return body
 
     def _running_jobs(self) -> list[dict[str, Any]]:
         try:
@@ -1390,6 +1572,9 @@ class DaemonState:
                 "library_hints": self.library_hints,
                 "library_hint_files": self.library_hint_files,
                 "library_hints_suppressed": self.library_hints_suppressed,
+                # The same, from built-in edit/write/patch `after` answers.
+                "library_hints_builtin": self.library_hints_builtin,
+                "library_hint_builtin_files": self.library_hint_builtin_files,
                 # Goal lines added after edits (`ozagia.core.goals`).
                 "goal_hints": self.goal_hints,
                 # Lint inside the edit, and captured `ruff check` calls.

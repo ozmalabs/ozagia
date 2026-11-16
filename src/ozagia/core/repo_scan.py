@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from ozagia.config import load_project_config, state_path, state_rel
+from ozagia.core import library_hints as LH
 from ozagia.core import ocelot_code
 
 SCHEMA = "ozagia.repo_scan.report.v1"
@@ -60,6 +61,9 @@ MAX_REVIEW_FILES = 20
 MAX_REVIEW_BYTES = 2 * 1024 * 1024
 MAX_DOC_WALK_FILES = 500
 MAX_HISTORY_FILES = 2000
+# Library reuse: source files inspected per scan and opportunities emitted.
+LIBRARY_SCAN_FILES = 20
+LIBRARY_SCAN_HINTS = 5
 
 GIT_TIMEOUT_S = 20
 
@@ -185,6 +189,14 @@ CATEGORIES: tuple[dict[str, str], ...] = (
         "title": "Code review signals",
         "description": "Blocking or major findings from existing review "
                        "packets, plus known-failure records.",
+    },
+    {
+        "id": "library_reuse",
+        "title": "Library reuse",
+        "description": "Bounded capability hints for changed and hotspot "
+                       "files: a hand-written helper may match a standard-"
+                       "library primitive or a known package. Advisory only; "
+                       "the scan never refactors or adds a dependency.",
     },
     {
         "id": "security",
@@ -639,6 +651,8 @@ class _ScanContext:
     clutter: list[dict[str, Any]] = field(default_factory=list)
     history: dict[str, Any] | None = None
     security_report: dict[str, Any] | None = None
+    library_hints: bool = True
+    library_info: dict[str, Any] = field(default_factory=dict)
 
     @property
     def has_graph(self) -> bool:
@@ -1903,6 +1917,212 @@ def _detect_security(ctx: _ScanContext) -> list[dict[str, Any]]:
         ], score=20, graph_derived=False)]
 
 
+_LIBRARY_AVAILABILITY_SCORE = {
+    "stdlib": 58,
+    "declared": 54,
+    "installed": 47,
+    "known": 40,
+}
+_LIBRARY_CONFIDENCE_BONUS = {"high": 4, "medium": 2, "low": 0}
+
+
+def _library_candidate_paths(ctx: _ScanContext,
+                             settings: Any) -> list[str]:
+    """Bounded source files for library hints: changed first, then the
+    highest-churn / highest-degree indexed files."""
+    paths: list[str] = []
+    seen: set[str] = set()
+
+    def add(rel: str) -> None:
+        if len(paths) >= LIBRARY_SCAN_FILES or rel in seen:
+            return
+        if not isinstance(rel, str) or not rel:
+            return
+        role = ctx.roles.get(rel) or _infer_role(rel, ctx.cfg)
+        if role in ("test", "doc"):
+            return
+        if not LH.enabled_for(rel, settings):
+            return
+        try:
+            if not (ctx.root / rel).is_file():
+                return
+        except OSError:
+            return
+        seen.add(rel)
+        paths.append(rel)
+
+    for rel in ctx.changed_all:
+        add(rel)
+    hot = sorted(
+        (path for path in set(ctx.files) | set(ctx.roles)
+         if ctx.roles.get(path) == "source"),
+        key=lambda path: (-ctx.churn.get(path, 0),
+                          -(ctx.in_degree.get(path, 0)
+                            + ctx.out_degree.get(path, 0)), path))
+    for rel in hot:
+        add(rel)
+    return paths
+
+
+def _library_reuse_opportunities(ctx: _ScanContext,
+                                 hints: Sequence[Mapping[str, Any]]
+                                 ) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for hint in hints[:LIBRARY_SCAN_HINTS]:
+        if not isinstance(hint, Mapping):
+            continue
+        file_path = str(hint.get("file") or "")
+        if not file_path:
+            continue
+        capability = str(hint.get("capability") or "unknown")
+        package = str(hint.get("package") or "unknown")
+        availability = str(hint.get("availability") or "known")
+        confidence = str(hint.get("confidence") or "low")
+        if confidence not in CONFIDENCES:
+            confidence = "low"
+        hint_id = str(hint.get("hint_id") or _short(
+            f"{file_path}:{hint.get('symbol')}:{capability}:{package}"))
+        score = _LIBRARY_AVAILABILITY_SCORE.get(availability, 40)
+        score += _LIBRARY_CONFIDENCE_BONUS.get(confidence, 0)
+        evidence = [
+            _file_ev(file_path, None,
+                     f"{hint.get('symbol') or '(module)'}: {capability}"),
+            _metric_ev("package", package),
+            _metric_ev("availability", availability),
+            _cmd_ev(f"python -m ozagia.library_hints_cli explain {hint_id}",
+                    "show the local hint and its recorded evidence"),
+        ]
+        item = _opportunity(
+            ctx, "library_reuse", f"library-reuse:{hint_id}",
+            f"Library reuse: {capability} may match {package}",
+            evidence=evidence,
+            expected_effect="less hand-written code where a maintained "
+                            "standard-library primitive or package fits",
+            effort="S", risk="low", confidence=confidence,
+            proposed_module=file_path,
+            action="Review the hint and decide whether the standard library "
+                   "or package fits. The scan never refactors code, installs "
+                   "a package or changes a dependency.",
+            not_assessed=[
+                "semantic equivalence to the suggested package",
+                "whether adding or changing a dependency is acceptable here",
+                "files outside the sampled changed and hotspot set",
+            ],
+            score=score, graph_derived=False)
+        item.update({
+            "library_hint_id": hint_id,
+            "capability": capability,
+            "package": package,
+            "availability": availability,
+            "symbol": str(hint.get("symbol") or ""),
+            "rule_evidence": str(hint.get("evidence") or ""),
+        })
+        out.append(item)
+    return out
+
+
+def _detect_library_reuse(ctx: _ScanContext) -> list[dict[str, Any]]:
+    """Bounded library-reuse hints over changed and hotspot files.
+
+    Advisory only: a hint names a package, it does not prove the code is a
+    duplicate or that a refactor is safe. Nothing is installed or rewritten.
+    """
+    info: dict[str, Any] = {
+        "enabled": bool(ctx.library_hints),
+        "state": "disabled",
+        "mode": None,
+        "rule_version": LH.RULE_VERSION,
+        "sampled_files": [],
+        "hints": 0,
+        "suppressed": 0,
+        "recorded": False,
+    }
+    ctx.library_info = info
+    if not ctx.library_hints:
+        return []
+    try:
+        settings = LH.settings_for(ctx.root)
+    except Exception:  # noqa: BLE001 - a hint preference must never fail
+        settings = LH.HintSettings()
+    info["mode"] = settings.mode
+    if settings.mode == "off":
+        info["state"] = "off"
+        return []
+    paths = _library_candidate_paths(ctx, settings)
+    info["sampled_files"] = list(paths)
+    if not paths:
+        info["state"] = "no_files"
+        if ctx.graph_info.get("empty"):
+            return []
+        return [_opportunity(
+            ctx, "library_reuse", "library-reuse:not-assessed",
+            "Library reuse was not assessed",
+            evidence=[
+                _metric_ev("sampled_files", 0),
+                _cmd_ev("python -m ozagia.library_hints_cli detect "
+                        "--root . --changed <file>",
+                        "run the hint layer on an explicit changed file"),
+            ],
+            expected_effect="a bounded hint instead of an unexamined gap",
+            effort="S", risk="low", confidence="low",
+            proposed_module="library_hints",
+            action="Name changed or hotspot files, then re-run the scan; the "
+                   "scan does not guess at library use.",
+            not_assessed=[
+                "library reuse: no code file was sampled",
+                "semantic equivalence, dependency suitability and refactor "
+                "safety",
+            ], score=12, graph_derived=False)]
+    try:
+        got = LH.hints_for_paths(
+            ctx.root, paths, settings=settings, record=False,
+            max_per_edit=settings.max_per_edit)
+    except Exception as exc:  # noqa: BLE001 - a scan must report, not crash
+        info["state"] = "error"
+        info["error"] = f"{type(exc).__name__}: {exc}"
+        return [_opportunity(
+            ctx, "library_reuse", "library-reuse:not-assessed",
+            "Library reuse could not be assessed",
+            evidence=[
+                _metric_ev("sampled_files", len(paths)),
+                _metric_ev("error", info["error"]),
+            ],
+            expected_effect="a reported gap instead of a silent one",
+            effort="S", risk="low", confidence="low",
+            proposed_module="library_hints",
+            action="Run the hint CLI directly to see the error; the scan "
+                   "makes no refactor.",
+            not_assessed=[
+                "library reuse: the hint layer failed",
+                "semantic equivalence and dependency suitability",
+            ], score=10, graph_derived=False)]
+    hints = [dict(item) for item in (got.get("hints") or [])
+             if isinstance(item, Mapping)]
+    info["hints"] = min(len(hints), LIBRARY_SCAN_HINTS)
+    info["suppressed"] = len(got.get("suppressed") or [])
+    info["state"] = "ready" if hints else "no_hints"
+    if hints:
+        return _library_reuse_opportunities(ctx, hints)
+    return [_opportunity(
+        ctx, "library_reuse", "library-reuse:no-candidates",
+        "No library reuse candidates in the sampled files",
+        evidence=[
+            _metric_ev("sampled_files", len(paths)),
+            _metric_ev("rule_version", LH.RULE_VERSION),
+        ],
+        expected_effect="an explicit no-candidate state instead of silence",
+        effort="S", risk="low", confidence="low",
+        proposed_module="library_hints",
+        action="Treat this as a bounded check, not a clean bill: inspect "
+               "files outside the sample or run the hint CLI on a diff.",
+        not_assessed=[
+            "files outside the sampled changed and hotspot set",
+            "capabilities the curated registry does not know",
+            "semantic equivalence, dependency suitability and refactor "
+            "safety",
+        ], score=12, graph_derived=False)]
+
+
 def _node_types(ctx: _ScanContext) -> set[str]:
     nodes = ctx.graph.get("nodes")
     if not isinstance(nodes, list):
@@ -2047,6 +2267,7 @@ _DETECTORS = (
     ("missing_adapters", _detect_missing_adapters),
     ("test_policy", _detect_test_policy),
     ("code_review", _detect_code_review),
+    ("library_reuse", _detect_library_reuse),
     ("security", _detect_security),
 )
 
@@ -2131,6 +2352,30 @@ def _global_not_assessed(ctx: _ScanContext) -> list[str]:
         items.append(
             "security findings: the report is advisory and does not prove "
             "exploitability; this scan did not rerun a security tool")
+    library_state = ctx.library_info.get("state")
+    if not ctx.library_hints:
+        items.append(
+            "library reuse was not assessed: library hints are disabled for "
+            "this scan")
+    elif not ctx.library_info:
+        items.append(
+            "library reuse was not assessed: the category did not run")
+    elif library_state == "error":
+        items.append(
+            "library reuse could not be assessed: the hint layer failed; no "
+            "refactor or dependency change was attempted")
+    elif library_state in {"off"}:
+        items.append(
+            "library reuse was not assessed: library hints are off in the "
+            "settings or OZAGIA_LIBRARY_HINTS=0")
+    elif library_state in {"no_files", "no_hints"}:
+        items.append(
+            "library reuse: no candidates were found in the bounded sample; "
+            "this is not a clean bill and no refactor was applied")
+    else:
+        items.append(
+            "library reuse: capability hints are heuristic and cover only the "
+            "sampled files; no refactor or dependency change was made")
     if not ctx.has_graph:
         items.append(
             "every graph-derived category (missing tests, hotspots, weak "
@@ -2193,6 +2438,13 @@ def format_report(report: Mapping[str, Any]) -> str:
         lines.append(
             f"security report: {security.get('findings', 0)} supplied "
             f"finding(s) from {security.get('source')} (not rerun)")
+    library = report.get("library_hints") or {}
+    if library:
+        lines.append(
+            f"library hints: {library.get('state')} "
+            f"({library.get('mode')}), {library.get('hints', 0)} candidate(s) "
+            f"from {len(library.get('sampled_files') or [])} sampled file(s); "
+            "advisory, no refactor")
     ocelot = report.get("ocelot")
     if isinstance(ocelot, Mapping):
         lines.append(
@@ -2273,7 +2525,8 @@ def scan(root: str | Path = ".", *, graph_path: str | Path | None = None,
          ocelot_timeout: int = ocelot_code.DEFAULT_TIMEOUT,
          ocelot_clusterer: Any = None,
          ocelot_patterns: Any = False,
-         ocelot_patterns_clusterer: Any = None) -> dict[str, Any]:
+         ocelot_patterns_clusterer: Any = None,
+         library_hints: bool = True) -> dict[str, Any]:
     """Scan one checkout read-only and return a deterministic report.
 
     `since_days` bounds the churn window and the stale-note age. `top` bounds
@@ -2318,6 +2571,7 @@ def scan(root: str | Path = ".", *, graph_path: str | Path | None = None,
     security, security_info = _load_security_report(root_path, security_report)
     ctx = _prepare(root_path, cfg, graph, graph_info, since, changed, warnings)
     ctx.security_report = security
+    ctx.library_hints = bool(library_hints)
     if graph_info.get("available") and graph_info.get("empty"):
         warnings.append("graph snapshot is empty; graph-derived categories "
                         "were not assessed")
@@ -2379,6 +2633,8 @@ def scan(root: str | Path = ".", *, graph_path: str | Path | None = None,
         "security_findings": (
             int(security_info.get("findings") or 0)
             if security_info.get("available") else 0),
+        "library_hints": int(ctx.library_info.get("hints") or 0),
+        "library_hints_state": ctx.library_info.get("state"),
     }
     report = {
         "schema": SCHEMA,
@@ -2389,6 +2645,7 @@ def scan(root: str | Path = ".", *, graph_path: str | Path | None = None,
         "root": str(root_path),
         "graph": dict(graph_info),
         "security": dict(security_info),
+        "library_hints": dict(ctx.library_info),
         "inputs": {
             "since_days": since,
             "top": top_n,
@@ -2397,6 +2654,7 @@ def scan(root: str | Path = ".", *, graph_path: str | Path | None = None,
             "working_tree_dirty": bool(dirty),
             "changed_count": len(changed),
             "changed_files": changed[:50],
+            "library_hints": bool(library_hints),
             "measurements": {
                 "clutter_directories": len(ctx.clutter),
                 "clutter_bytes": sum(
