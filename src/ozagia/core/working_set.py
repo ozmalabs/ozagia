@@ -107,6 +107,9 @@ _RAW_FAIL_RE = re.compile(
     r"^(FAILED|ERROR) (\S+?\.py)::(\S+?)(\[[^\]]*\])?(?: - (.*))?$")
 # The captured run's head line: `[ozagia] pytest failed: exit 1, ...`.
 _CAPTURED_RE = re.compile(r"^\[ozagia\] pytest (\w+): exit (-?\d+|None)")
+# A captured run that affected-test selection cut to a subset.
+_AFFECTED_RE = re.compile(r"^\[ozagia\] ran \d+ (?:affected )?tests? of \d+",
+                          re.M)
 # pytest's final summary: `3 failed, 10 passed in 1.2s` (with or without `=`).
 _SUMMARY_RE = re.compile(
     r"^\W*(\d+ (?:passed|failed|errors?|skipped|deselected|xfailed|xpassed|"
@@ -285,6 +288,9 @@ def pytest_run(command: str, heads: Iterable[list[str]], text: str, *,
     complete, count = _completed(text)
     if complete and count > 0 and not failures:
         complete = False        # failures the graph does not know: unknown
+    # Affected-test selection (`ozagia.intent.affected`) ran a subset.
+    if _AFFECTED_RE.search(text or ""):
+        filtered = True
     return TestRun(command=command, prefix=_rerun_prefix(prefix, wd, root_p),
                    selectors=selectors, failures=failures,
                    complete=complete, filtered=filtered, stops=stops)

@@ -8,14 +8,22 @@ pytest output: pytest's own output tail (verbatim, `ozagia.check`'s last
     [ozagia]   frame sym:<rel>::<qual> <file>:<line>
     [ozagia] collection error file:<rel>: <message>
 
+With `[tests] select = "affected"` or `[tests] cache = true`
+(`ozagia.intent.affected`), a pytest with no test selector may run only the
+affected or uncached tests; the line after the head then says what ran and
+what did not (`[ozagia] ran N affected tests of M; not run: ...; run all:
+<cmd>`, or `[ozagia] ran all tests: <reason>`), followed by `cached pass`
+lines, and slow and flaky tests come last.
 A read-like command becomes a read of the same range; a search-like command
-becomes a grep; a `jq` command in the subset of `ozagia.core.jq` prints
+becomes a grep; `ruff check` runs ruff itself and appends the node keys
+of its findings (`run_ruff`); a `jq` command in the subset of `ozagia.core.jq` prints
 jq's exact output (`run_jq`); a ref-moving git command is refused.
 """
 from __future__ import annotations
 
 import os
 import shutil
+import time
 from pathlib import Path
 from typing import Any
 
@@ -168,12 +176,32 @@ def run_pytest(memory: Any, cls: dict[str, Any], inp: dict[str, Any],
         base_env = env if isinstance(env, dict) else dict(os.environ)
         env = {**base_env, **cls["env"]}
     preflight_stop(inp)
-    res = run_tests(root, selectors, python=python, timeout_s=timeout_s,
-                    extra_args=_verbosity(list(cls["extra_args"])),
-                    tail_lines=int(OUTPUT_TAIL_LINES if cls.get("tail_lines") is None
-                                   else cls["tail_lines"]),
-                    **({"env": env, "inherit": False}
-                       if isinstance(env, dict) else {}))
+    from ozagia.intent import affected as A
+    plan = A.plan(memory, cls, inp, root=root, python=python,
+                  selectors=selectors,
+                  env=env if isinstance(env, dict) else None)
+    run_selectors = (selectors if plan is None or plan.selectors is None
+                     else plan.selectors)
+    if plan is not None and plan.nothing_to_run:
+        res = None
+    else:
+        res = run_tests(root, run_selectors, python=python, timeout_s=timeout_s,
+                        extra_args=_verbosity(list(cls["extra_args"])),
+                        tail_lines=int(OUTPUT_TAIL_LINES
+                                       if cls.get("tail_lines") is None
+                                       else cls["tail_lines"]),
+                        **({"env": env, "inherit": False}
+                           if isinstance(env, dict) else {}))
+    sel_head: list[str] = []
+    sel_tail: list[str] = []
+    meta: dict[str, Any] = {}
+    if plan is not None:
+        sel_head, sel_tail, meta = A.finish(plan, res)
+    if res is None:
+        lines = [tag("pytest not run: every selected test has a cached pass "
+                     "(exit 0)"), *sel_head, *sel_tail]
+        return {"intent": "shell_pytest", "output": "\n".join(lines),
+                "keys": [], "exit_code": 0, "meta": meta}
     c = res["counts"]
     out = res.get("output_tail") or ""
     filt = cls.get("output_filter")
@@ -189,6 +217,7 @@ def run_pytest(memory: Any, cls: dict[str, Any], inp: dict[str, Any],
     if res["collection_errors"]:
         head += f", {len(res['collection_errors'])} collection errors"
     lines.append(tag(head))
+    lines.extend(sel_head)
     if res.get("error"):
         lines.append(tag(f"error: {res['error']}"))
     keys: list[str] = []
@@ -215,8 +244,13 @@ def run_pytest(memory: Any, cls: dict[str, Any], inp: dict[str, Any],
         lines.append(tag(f"{t['outcome']} {t['key']}{param}: "
                          f"{one_line(t['message'])}"))
         frames(t)
-    return {"intent": "shell_pytest", "output": "\n".join(lines),
-            "keys": list(dict.fromkeys(keys)), "exit_code": res["exit_code"]}
+    lines.extend(sel_tail)
+    out_res: dict[str, Any] = {
+        "intent": "shell_pytest", "output": "\n".join(lines),
+        "keys": list(dict.fromkeys(keys)), "exit_code": res["exit_code"]}
+    if meta:
+        out_res["meta"] = meta
+    return out_res
 
 
 def run_jq(memory: Any, cls: dict[str, Any], path: Path) -> dict[str, Any]:
@@ -249,6 +283,130 @@ def run_jq(memory: Any, cls: dict[str, Any], path: Path) -> dict[str, Any]:
     return {"intent": "shell_jq", "output": out, "keys": keys}
 
 
+def _ruff_fixes(root: Path, where: list[Path]) -> bool:
+    """Whether the ruff configuration nearest to any of `where` sets
+    `fix = true` (then `ruff check` would change files)."""
+    from ozagia.intent.lint import _toml, ruff_config
+    for p in where:
+        rel = os.path.relpath(p if p.is_dir() else p.parent, root)
+        rel = "" if rel == "." else Path(rel).as_posix()
+        cfg = ruff_config(root, (rel + "/" if rel else "") + "_")
+        if cfg is None:
+            continue
+        data = _toml(cfg) or {}
+        table = (data.get("tool") or {}).get("ruff") if cfg.name == "pyproject.toml" else data
+        if isinstance(table, dict) and table.get("fix") is True:
+            return True
+    return False
+
+
+# Key lines appended to a captured `ruff check`.
+RUFF_KEY_LINES = 30
+
+
+def run_ruff(memory: Any, cls: dict[str, Any], inp: dict[str, Any],
+             wd: Path) -> dict[str, Any]:
+    """`ruff check ...` run by ruff itself: its exact output (stdout and
+    stderr as one stream), then `[ozagia] lint <rule> <file>:<line> <key>`
+    per finding (from a second run with `--output-format json`) and
+    `[ozagia] exit <n>` when ruff exits non-zero."""
+    import subprocess
+    from ozagia.intent.common import Keyer
+    from ozagia.intent.lint import _ruff_findings
+    root = root_of(memory)
+    env = inp.get("_test_env") if isinstance(inp.get("_test_env"), dict) else None
+    tool = cls["tool"]
+    if "/" in tool:
+        exe = Path(tool) if Path(tool).is_absolute() else wd / tool
+        if not _executable(exe):
+            raise Unhandled(f"{tool} is not an executable")
+        exe_s = str(exe)
+    else:
+        found = shutil.which(tool, path=(env or os.environ).get("PATH"))
+        if not found:
+            raise Unhandled(f"{tool} is not on PATH")
+        exe_s = found
+    where = [_inside(root, Path(p) if Path(p).is_absolute() else wd / p)
+             for p in cls["paths"]] or [wd]
+    if _ruff_fixes(root, [wd, *where]):
+        raise Unhandled("the ruff configuration sets fix = true")
+    timeout = inp.get("timeout")
+    try:
+        timeout_s = float(timeout) / 1000 if timeout else DEFAULT_TIMEOUT_S
+    except (TypeError, ValueError):
+        timeout_s = DEFAULT_TIMEOUT_S
+    remaining = inp.get("_deadline_s_remaining")
+    if isinstance(remaining, (int, float)) and not isinstance(remaining, bool):
+        timeout_s = max(MIN_TIMEOUT_S, min(timeout_s, float(remaining)))
+    args = list(cls["argv"][2:])
+    preflight_stop(inp)
+    t0 = time.monotonic()
+    try:
+        p = subprocess.run([exe_s, "check", "--no-fix", *args], cwd=str(wd),
+                           env=env, stdin=subprocess.DEVNULL,
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                           timeout=timeout_s)
+    except subprocess.TimeoutExpired as e:
+        text = (e.output or b"").decode("utf-8", errors="replace").rstrip("\n")
+        out = (text + "\n" if text else "") + tag(
+            f"timed out after {round(timeout_s, 1)} s") + "\n" + tag("exit 124")
+        return {"intent": "shell_ruff", "output": out, "keys": [],
+                "exit_code": 124}
+    except OSError as e:
+        raise Unhandled(f"{tool}: {e}") from None
+    text = p.stdout.decode("utf-8", errors="replace").rstrip("\n")
+    lines = [text] if text else []
+    keys: list[str] = []
+    # The node keys: the same check once more as JSON (ruff's cache makes
+    # it cheap), within what is left of the timeout.
+    left = timeout_s - (time.monotonic() - t0)
+    json_args = _without_output_format(args)
+    findings: list[dict[str, Any]] = []
+    if p.returncode == 1 and left > 0:
+        try:
+            q = subprocess.run([exe_s, "check", "--no-fix", "--output-format",
+                                "json", *json_args], cwd=str(wd), env=env,
+                               stdin=subprocess.DEVNULL, capture_output=True,
+                               timeout=left)
+            findings = _ruff_findings(root, q.stdout.decode("utf-8", "replace"))
+        except (subprocess.TimeoutExpired, OSError):
+            findings = []
+    keyers: dict[str, Keyer] = {}
+    for f in findings[:RUFF_KEY_LINES]:
+        keyer = keyers.setdefault(f["rel"], Keyer(memory, f["rel"]))
+        try:
+            key = keyer.key(f["line"])
+        except Exception:  # noqa: BLE001 - the file key instead
+            key = f"file:{f['rel']}"
+        if key not in keys:
+            keys.append(key)
+        lines.append(tag(f"lint {f['rule']} {f['rel']}:{f['line']} {key}"))
+    if len(findings) > RUFF_KEY_LINES:
+        lines.append(tag(f"lint: {len(findings) - RUFF_KEY_LINES} more findings"))
+    if p.returncode != 0:
+        lines.append(tag(f"exit {p.returncode}"))
+    return {"intent": "shell_ruff", "output": "\n".join(lines), "keys": keys,
+            "exit_code": p.returncode}
+
+
+def _without_output_format(args: list[str]) -> list[str]:
+    """ruff check arguments without `--output-format` (before `--`)."""
+    out: list[str] = []
+    i = 0
+    while i < len(args):
+        tok = args[i]
+        if tok == "--":
+            out.extend(args[i:])
+            break
+        if tok == "--output-format":
+            i += 2
+            continue
+        if not tok.startswith("--output-format="):
+            out.append(tok)
+        i += 1
+    return out
+
+
 def handle_shell(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
     from ozagia.intent.read import read_range
     command = inp.get("command")
@@ -258,7 +416,8 @@ def handle_shell(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
     kind = cls["class"]
     if kind == "git_refs":
         raise IntentError(refusal(command), intent="shell_refused")
-    if kind not in ("pytest", "read", "grep", "ls", "find", "files", "jq", "compound"):
+    if kind not in ("pytest", "read", "grep", "ls", "find", "files", "jq",
+                    "compound", "ruff"):
         raise Unhandled(cls.get("compound_reason") or cls.get("reason")
                         or kind)
     root = root_of(memory)
@@ -282,6 +441,8 @@ def handle_shell(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
         wd = _workdir(root, p if p.is_absolute() else wd / p)
     if kind == "pytest":
         return run_pytest(memory, cls, inp, wd)
+    if kind == "ruff":
+        return run_ruff(memory, cls, inp, wd)
     if kind == "read":
         p = Path(cls["file"])
         p = _inside(root, p if p.is_absolute() else wd / p)
@@ -335,4 +496,4 @@ def handle_shell(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
     return res
 
 
-__all__ = ["handle_shell", "refusal", "run_jq", "run_pytest"]
+__all__ = ["handle_shell", "refusal", "run_jq", "run_pytest", "run_ruff"]

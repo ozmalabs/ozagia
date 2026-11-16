@@ -576,3 +576,16 @@ def test_opencode_compaction_keeps_the_working_set(tmp_path):
         assert all(r["session"] == "ses_c" and r["harness"] == "opencode" for r in ws)
     finally:
         stub.server.close()
+
+
+def test_an_affected_subset_run_clears_nothing_else(tmp_path):
+    tests: OrderedDict = OrderedDict()
+    W.apply_test_run(tests, _run("pytest", "[ozagia] failed test:tests/a.py::test_x: no\n"
+                                 "1 failed in 0.1s", tmp_path))
+    text = ("[ozagia] pytest passed: exit 0, 0.1 s, 2 passed, 0 failed, 0 error, 0 skipped\n"
+            "[ozagia] ran 2 affected tests of 40; not run: ...; run all: pytest\n")
+    W.apply_test_run(tests, _run("pytest", text, tmp_path))
+    assert list(tests) == ["test:tests/a.py::test_x"]
+    W.apply_test_run(tests, _run("pytest", "[ozagia] pytest not run: every selected "
+                                 "test has a cached pass (exit 0)", tmp_path))
+    assert list(tests) == ["test:tests/a.py::test_x"]

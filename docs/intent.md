@@ -341,6 +341,42 @@ Wrote file successfully.
 [ozagia] delta: 1 added, 1 removed, 1 changed, edges +2 -3: +sym:pkg/use.py::other, -sym:pkg/use.py::run, ~file:pkg/use.py
 ```
 
+### Lint inside the edit
+
+After a handled edit, key edit or write, and in `after` for a built-in
+edit, write or Codex patch, the project's linter runs on the changed files
+only (`ozagia.intent.lint`) and its findings on the changed lines follow
+the other lines, at most 10, then a count of the rest:
+
+```
+[ozagia] lint F821 L9 sym:pkg/mod.py::target: Undefined name `undefined_b`
+[ozagia] lint rustfmt L4 file:src/lib.rs: rustfmt would reformat L4-4
+[ozagia] lint: 5 more findings on the changed lines
+[ozagia] lint: ruff timed out after 3 s
+```
+
+- ruff (`ruff check --output-format json --no-fix --no-cache
+  --force-exclude`) for `.py` files when a `pyproject.toml` with
+  `[tool.ruff]`, a `ruff.toml` or `.ruff.toml` sits in the file's directory
+  or above it, or `.ozagia.toml` has `[lint] python = "ruff"`; the
+  executable is `<root>/.venv/bin/ruff`, else `ruff` on `PATH`.
+- `rustfmt --check --edition <edition> --color never` for `.rs` files when a
+  `Cargo.toml` is above the file (its edition; 2015 when unset), and
+  rustfmt is on `PATH`. Each run of lines rustfmt would change is one
+  finding.
+- `[lint] enabled = false` turns it off; `enabled = true` lints without a
+  ruff or Cargo configuration; `python`/`rust = "off"` exclude a language;
+  `timeout_s` (default 3) is the budget of one call's linter runs.
+- Changed lines: a handled call diffs the file before and after (a new
+  file: every line). In `after`: a write lints the whole file, an edit the
+  lines its `newString` occupies, a patch the lines its chunks added (an
+  added file: every line); else the line ranges of the delta's added and
+  changed keys.
+- Linters never modify files and write no cache. A missing linter, a
+  failing run or unparsable output adds nothing; lint never fails the edit.
+  `meta` has `lint_runs`, `lint_findings` and `lint_timeouts` when a linter
+  ran; the daemon's stats total them.
+
 ## shell
 
 `ozagia.intent.shell.classify(command)` (pure: it reads no files) maps a
@@ -366,6 +402,7 @@ back. The classes are:
 | files | `rg --files [PATH...] [-g G]... [-t T] [-T T] [--hidden] [--no-ignore[-vcs]] [-u\|-uu\|-uuu] [--sort path]` | runs rg itself (paths inside the root), sorted by path; rg's own order is that of its parallel walk, so this is one of the orders it can print. Intent `shell_files`. |
 | find | `find [-P] [PATH...] [-maxdepth N] [-mindepth N] [EXPR]` with `-name -iname -path -ipath -type f\|d\|l -newer F -print -prune -true -false`, `!`/`-not`, `-a`, `-o`, `\( \)` | evaluated as GNU find without `-L`: directory order (`os.scandir`), the start path first, symlinks not followed, the implicit `-print` when there is no `-print`, paths printed as find prints them. A glob range is accepted only inside a-z, A-Z or 0-9; POSIX classes, `-maxdepth` after a test (find warns on stderr), any other primary or action, a symlink start path, more than 20000 entries and a directory with more than 10000 entries (gnulib fts sorts those by inode) fall back. A `?` or bracket glob tested on a non-ASCII name falls back unless the locale (`LC_ALL`, `LC_CTYPE`, `LANG` from the prefix or the daemon's environment) is UTF-8 and the name is UTF-8 (in a C locale fnmatch matches one byte), and `-iname`/`-ipath` on a non-ASCII name falls back. `.git` and the state directory are walked like any directory. |
 | jq | `jq [-r] [-c] [-S] [-M] FILTER FILE` (flags before the filter, also clustered as `-rc`), `cat FILE \| jq ...`, `jq ... < FILE`, `< FILE jq ...`, and after `cd DIR &&`. FILTER is a pipeline (up to 6 stages) of paths (`.`, `.a`, `.a.b`, `."key with space"`, `.["k"]`, `.[N]`, `.[-N]`, `.[N:M]`, `.[]`, `.a[]`) and `keys`, `length`, `type` (`ozagia.core.jq`) | jq's exact stdout, read-only (no graph refresh). Left to the real jq: any other filter or option (reason `jq filter '...' is not mapped` / `jq option X is not mapped`), several or no files, a result jq reports as an error (`.a` of an array, `.[]` of null, `keys` of a string, ...), a number with an exponent (jq 1.7 rewrites it), with jq other than 1.7 or 1.8 any number that is not an integer below 2^53 (jq 1.6 prints doubles; versions after 1.8 are unchecked), an integer literal over 20 digits that would need converting, a computed non-integer (`length` of 2.5), a BOM, NaN, a lone surrogate escape, several JSON values, input nested deeper than jq 1.7's parser limit (256 slots: one per array, two per object member; jq 1.8 allows 10000, the 256 limit is kept), output over 1 MB, and any `jq` command when no `jq` is on the daemon's `PATH` (reason `jq is not installed`, so the shell says `command not found`). The `jq` version is re-read when `PATH` or the binary changes. |
+| ruff | `ruff check [PATH...] [--select X]... [--output-format concise\|full]` (also `--select=X`, `--output-format=X`, `--`), the executable as `ruff` on `PATH` or a path such as `.venv/bin/ruff` | runs ruff itself (with `--no-fix`; paths inside the root): its exact output, stdout and stderr as one stream, then `[ozagia] lint <rule> <file>:<line> <key>` per finding (at most 30; from a second run with `--output-format json`) and `[ozagia] exit <n>` when ruff exits non-zero. Left to the shell: any other option (`--fix`, `--watch`, `--output-format json`, ...), `ruff format` and other subcommands, a ruff configuration nearest the working directory or a path that sets `fix = true`, and a missing executable. |
 | compound | see below | the steps, in order |
 | git_refs | `git commit\|push\|stash\|branch\|checkout\|switch\|reset\|rebase\|merge\|tag\|worktree\|cherry-pick\|revert\|am\|pull\|fetch\|bisect\|...` (`intent.shell.GIT_REF_MOVING`, shared with the Claude Code hook and `eval.agent.OPENCODE_GIT_DENY`), anywhere in the command: in any segment, after `VAR=value` prefixes, shell keywords and group openers (`{ ! if then do else elif while until`), through wrapper commands (`env [-i] [-u N] [-S '...']`, `command`, `builtin`, `exec`, `nice`, `timeout`, `nohup`, `setsid`, `stdbuf`, `ionice`, `chrt`, `taskset`, `sudo`, `doas`, `time`, `xargs`, `watch`, `flock`, `runuser`, `strace`, `ltrace`, `busybox`, `unbuffer`, `eval`, `function NAME { ... }`, `coproc`, `find -exec\|-execdir\|-ok\|-okdir`, `su\|script\|flock -c '<script>'`, repeated, with clustered options such as `sudo -iu root`), as `/path/to/git`, through `git -c alias.<x>=<ref-moving>`, inside a backtick or `$(...)` substitution, and inside `sh\|bash\|zsh\|dash\|ksh\|fish\|... -c '<script>'` (classified once more; a script nested deeper is refused when it names `git` and then a ref-moving subcommand) | tool error `Refused by ozagia: <command> changes git refs`. Listing forms (`git branch`, `git tag -l`, `git stash list`, `git worktree list`, `git bisect log`) are read-only. |
 | git_read, other, complex | everything else | `handled: false` |
@@ -479,8 +516,32 @@ pytest output is pytest's own output tail, then:
 ```
 [ozagia] pytest failed: exit 1, 0.4 s, 1 passed, 1 failed, 0 error, 0 skipped
 [ozagia] failed test:tests/test_mod.py::test_broken: assert 3 == 5
-[ozagia]   frame test:tests/test_mod.py::test_broken tests/test_mod.py:9
 ```
+
+Affected tests and the result cache (`ozagia.intent.affected`, off by
+default; `[tests] select = "affected"`, `[tests] cache = true`). A captured
+pytest with no test selector (or only directory selectors) and only
+reporting options runs the tests linked to the files changed since the last
+fully green run of that suite (git working-tree changes, the import walk of
+`ozagia.intent.affected`, the graph's covering tests), and says so after
+the head line:
+
+```
+[ozagia] ran 2 affected tests of 3; not run: 1 test in 1 file (tests/test_other.py); run all: OZAGIA_TESTS_ALL=1 python -m pytest -q
+```
+
+When it cannot decide (no green run yet, conftest.py, a non-Python file or
+the pytest config changed, a changed file no test is linked to, no change
+at all, `OZAGIA_TESTS_ALL=1`) it runs the command as typed and says
+`[ozagia] ran all tests: <reason>`. With the cache, a test whose inputs are
+unchanged since it passed is reported as `[ozagia] cached pass <file>: ...`
+instead of run; failures are never cached. Slow (> 5 s) and flaky tests are
+listed at the end (`[ozagia] slow test ...`, `[ozagia] flaky test ...`).
+`select = "all"` is the default because changing what a command runs is
+surprising. `meta.tests` has the counters `affected_runs`,
+`tests_skipped_unaffected`, `cached_passes`, `full_runs_forced`, which the
+daemon's `stats` sums. `cargo test` is not covered (not a captured command,
+and the Rust graph has no crate or test-target nodes).
 
 A captured pytest runs with the timeout `input.timeout` (ms), else 120 s
 (OpenCode's built-in shell default, so capture never lets a command run
@@ -569,6 +630,8 @@ plugin could not get answered; `expired` and failed `tool` requests are the
 daemon's view of some of the same calls), errors, hellos and their sessions, mean and max ms and
 uptime; `structured_queries`, `structured_outlines` and `jq_captures` count
 the intents `read_structured`, `read_structured_outline` and `shell_jq`.
+`lint_runs`, `lint_findings` and `lint_timeouts` total the lint
+counters of edit and `after` metas; `ruff_captures` counts `shell_ruff`.
 The read ledger adds `repeats_seen` (repeats stubbed or noted),
 `stubs_served`, `notes_served`, `outlines_served` (intents `read_outline`
 and `shell_read_outline`), `bytes_saved` (the estimates in

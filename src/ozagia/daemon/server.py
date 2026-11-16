@@ -79,6 +79,10 @@ state dir); the ledger copies reads into it. The `working_set` op renders
 it; `stats` adds `working_sets_served`, `working_set_chars` and
 `session_briefs_served`.
 
+Test selection (`ozagia.intent.affected`): `stats` adds `affected_runs`,
+`tests_skipped_unaffected`, `cached_passes` and `full_runs_forced`, summed
+from the answers' `meta.tests`.
+
 The socket is created mode 0600. A socket file left at the path by a daemon
 that no longer answers `ping` is replaced; a live daemon or a non-socket
 file at the path is an error.
@@ -108,6 +112,9 @@ EDIT_INTENTS = frozenset({"edit", "write", "edit_key"})
 JOURNAL_KEYS = 20
 # Distinct shell passthrough reasons kept, and shown in `stats`.
 SHELL_REASONS = 200
+# `meta.tests` counters of a captured pytest (`ozagia.intent.affected`).
+TEST_COUNTERS = ("affected_runs", "tests_skipped_unaffected", "cached_passes",
+                 "full_runs_forced")
 SHELL_REASONS_SHOWN = 30
 
 # Passthrough reasons that name a file or directory, rewritten to one key
@@ -256,7 +263,9 @@ class DaemonState:
         # Region replies: the current text of the nearest region sent for a
         # patch hunk or an edit whose old text is not in the file.
         self.region_replies = 0
-        # shell tool calls: captured (handled), refused (git refs) and
+        # Lint inside the edit (`ozagia.intent.lint`): linter runs, findings
+        # reported on changed lines, linter runs cut off by the timeout.
+        self.lint = {"lint_runs": 0, "lint_findings": 0, "lint_timeouts": 0}        # shell tool calls: captured (handled), refused (git refs) and
         # passthrough, with the passthrough reasons, so an eval can measure
         # the shell capture rate.
         self.shell = {"captured": 0, "refused": 0, "passthrough": 0}
@@ -268,6 +277,9 @@ class DaemonState:
         self.sessions = SessionStore()
         self.reads = {"repeats_seen": 0, "stubs_served": 0, "notes_served": 0,
                       "bytes_saved": 0}
+        # Affected-test selection and the test-result cache
+        # (`ozagia.intent.affected`), from the answers' `meta.tests`.
+        self.tests = {k: 0 for k in TEST_COUNTERS}
         self.ms_total = 0.0
         self.ms_max = 0.0
         self.ms_count = 0
@@ -661,6 +673,10 @@ class DaemonState:
             rr = meta.get("region_replies")
             if isinstance(rr, int) and not isinstance(rr, bool) and rr > 0:
                 self.region_replies += rr
+            for name in self.lint:
+                n = meta.get(name)
+                if isinstance(n, int) and not isinstance(n, bool) and n > 0:
+                    self.lint[name] += n
             if handled is not None:
                 self.handled["true" if handled else "false"] += 1
             if meta.get("repeat") in ("stub", "note"):
@@ -670,6 +686,12 @@ class DaemonState:
             saved = meta.get("bytes_saved")
             if isinstance(saved, int) and not isinstance(saved, bool) and saved > 0:
                 self.reads["bytes_saved"] += saved
+            tests = meta.get("tests")
+            if isinstance(tests, dict):
+                for k in TEST_COUNTERS:
+                    v = tests.get(k)
+                    if isinstance(v, int) and not isinstance(v, bool) and v > 0:
+                        self.tests[k] += v
             if not resp.get("ok"):
                 self.errors += 1
             if resp.get("is_error"):
@@ -804,6 +826,9 @@ class DaemonState:
                 "patch_misses_caught": self.by_intent.get("patch_check_miss", 0),
                 "region_replies": self.region_replies,
                 "key_edits": self.by_intent.get("edit_key", 0),
+                # Lint inside the edit, and captured `ruff check` calls.
+                **self.lint,
+                "ruff_captures": self.by_intent.get("shell_ruff", 0),
                 # Background jobs (`ozagia.daemon.jobs`): started, waits and
                 # the seconds spent in them, and waits that returned new
                 # output or the job's end (each one a poll the agent did not
@@ -815,6 +840,11 @@ class DaemonState:
                 # handed back after a compaction (or to dev_working_set),
                 # their characters, and session-start briefs from the daemon.
                 **self.working,
+                # Affected-test selection and the test-result cache: subset
+                # runs, tests not run because no change reached them, tests
+                # answered from the cache, and runs that fell back to the
+                # whole suite while selection was on.
+                **self.tests,
                 "permission_assert": _last(self.hellos, "permission_assert"),
                 "codemode_tools": sorted({
                     name for h in self.hellos
