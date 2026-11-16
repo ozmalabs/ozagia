@@ -15,36 +15,64 @@ At most `MAX_LINES` finding lines are shown. Linters:
   --force-exclude`) for `.py` files, when ruff is configured: a
   `pyproject.toml` with `[tool.ruff]`, or a `ruff.toml`/`.ruff.toml`, in the
   file's directory or one above it up to the root, or `[lint] python =
-  "ruff"` in `.ozagia.toml`. The executable is `<root>/.venv/bin/ruff`, else
-  `ruff` on PATH.
-- rustfmt (`rustfmt --check --edition <edition> --color never`) for `.rs`
-  files, when a `Cargo.toml` is in the file's directory or above it (its
-  `[package] edition`, or the workspace's for `edition.workspace = true`;
-  Cargo's default 2015 when unset), or `[lint] rust = "rustfmt"`; rustfmt
-  must be on PATH. A hunk rustfmt would change is reported as `lint
-  rustfmt L<a> <key>: rustfmt would reformat L<a>-<b>`.
+  "ruff"` in `.ozagia.toml`. The executable is `ruff` on PATH.
+- rustfmt (`rustfmt --check --edition <edition> --color never`, the file's
+  text on stdin, run in the file's directory so its `rustfmt.toml` applies
+  and out-of-line child modules are not checked) for `.rs` files, when a
+  `Cargo.toml` is in the file's directory or above it (its `[package]
+  edition`, or the workspace's for `edition.workspace = true`; Cargo's
+  default 2015 when unset), or `[lint] rust = "rustfmt"`; rustfmt must be
+  on PATH. A hunk rustfmt would change is reported as `lint rustfmt L<a>
+  <key>: rustfmt would reformat L<a>-<b>`.
+
+Trust: lint runs on edit permission alone, so it never executes a program
+from inside the repository unless the user opts in outside it. A linter
+whose path or real path lies inside the root is skipped (PATH entries that
+are relative or empty are ignored), and `<root>/.venv/bin/ruff` is not
+considered. `OZAGIA_LINT_TRUST_VENV=1` in the daemon's environment, or
+`[lint] trust_project_venv = true` in the user-level
+`$XDG_CONFIG_HOME/ozagia/config.toml` (default `~/.config/ozagia/`; ignored
+when it lies inside the root), lifts that: `<root>/.venv/bin/ruff` is then
+preferred and in-root PATH entries are accepted. A repository's own
+`.ozagia.toml` cannot enable it. Linters run with the environment of a
+captured pytest (`_test_env`, else this process's environment without
+`OZAGIA_*`, `PYTHONPATH` and `COLUMNS`).
 
 `.ozagia.toml`: `[lint] enabled = false` turns this off; `enabled = true`
 lints Python and Rust files even without a ruff or Cargo configuration
-(`python = "off"` / `rust = "off"` still exclude a language). `timeout_s`
-(default 3) is the budget of all linter runs of one call. Linters never
-modify files and write no cache. A missing linter, a linter that fails or
-output that does not parse adds nothing; nothing here fails the edit.
+(`python = "off"` / `rust = "off"` still exclude a language). A
+configuration file that does not load turns lint off. `timeout_s` (default
+3, at most `MAX_TIMEOUT_S` = 10 whatever the file says) is the budget of
+all linter runs of one call; it is further cut to what is left before the
+caller stops waiting (`_reply_deadline`, `_deadline_s_remaining`) less
+`DEADLINE_MARGIN_S`. Under the daemon the linters run with the graph lock
+released (`_unlock`); the lock is taken again for the node keys. Linters
+never modify files and write no cache. A missing linter, a linter that
+fails or output that does not parse adds nothing; nothing here fails the
+edit.
 
 Changed lines: a handled call diffs the file's text before and after
 (`changed_lines`); a new file counts as changed everywhere. In `after`
-(`after_changes`): a write lints the whole file, an edit the lines its
-`newString` occupies now, a Codex patch the lines its chunks added (located
-like Codex's own matcher) and every line of an added file. Where those
-cannot be found, the line ranges of the added and changed keys of the graph
-delta stand in.
+(`after_changes`): a write lints the whole file; an edit the lines its
+`newString` occupies now when it occurs exactly once in the file (every
+occurrence for `replaceAll`, up to `MAX_OCCURRENCES`). Before that, a
+single edit is undone at each occurrence of its `newString`; when exactly
+one result has the sha256 the graph had for the file before the refresh,
+the edit's changed lines are exact. Otherwise the line ranges
+of the added and changed keys of the graph delta (narrowed to the
+occurrences inside them, when there are any); a Codex patch the lines its
+chunks added (located like Codex's own matcher) and every line of an added
+file. Where those cannot be found, the graph delta's ranges stand in. A
+finding counts when any line of its span (`location` to `end_location`)
+is a changed line.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
-import shutil
+import signal
 import subprocess
 import time
 import tomllib
@@ -57,22 +85,100 @@ from ozagia.intent.common import Keyer, one_line, read_text, root_of, split_line
 MAX_LINES = 10
 # Files linted per call.
 MAX_FILES = 50
-# Occurrences of an edit's newString located in `after`.
+# Occurrences of an edit's newString located in `after` (replaceAll).
 MAX_OCCURRENCES = 20
 DEFAULT_TIMEOUT_S = 3.0
-RUFF_CONFIGS = ("ruff.toml", ".ruff.toml")
+# The most a call's linters may take, whatever `[lint] timeout_s` says.
+MAX_TIMEOUT_S = 10.0
+# Time left for the rest of the answer when the budget follows a deadline.
+DEADLINE_MARGIN_S = 1.0
+# Below this budget no linter starts.
+MIN_BUDGET_S = 0.05
+# How long to wait for a killed linter's pipes to close.
+KILL_WAIT_S = 1.0
+# ruff's own precedence within one directory.
+RUFF_CONFIGS = (".ruff.toml", "ruff.toml")
+TRUST_ENV = "OZAGIA_LINT_TRUST_VENV"
 _RUSTFMT_HEAD_RE = re.compile(r"^Diff in (.+?)(?::(\d+):| at line (\d+):)\s*$")
 
 
 # --------------------------------------------------------------------------- #
-# Configuration
+# Configuration and trust
 # --------------------------------------------------------------------------- #
-def _config(root: Path) -> Any:
+def _config(root: Path) -> tuple[Any, bool]:
+    """(project config, loaded); a config that does not load is (None,
+    False), which turns lint off."""
     from ozagia.config import load_project_config
     try:
-        return load_project_config(root)
-    except Exception:  # noqa: BLE001 - a broken config: lint with defaults
-        return None
+        return load_project_config(root), True
+    except Exception:  # noqa: BLE001 - a broken config: lint off
+        return None, False
+
+
+def _within(root: Path, path: str | Path) -> bool:
+    real = Path(os.path.realpath(path))
+    root_real = Path(os.path.realpath(root))
+    return real == root_real or root_real in real.parents
+
+
+def user_config_path() -> Path:
+    """`$XDG_CONFIG_HOME/ozagia/config.toml` (default `~/.config/...`)."""
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    base = Path(xdg) if xdg and os.path.isabs(xdg) else Path.home() / ".config"
+    return base / "ozagia" / "config.toml"
+
+
+def trust_project_venv(root: Path) -> bool:
+    """Whether the user allowed linters from inside the repository:
+    `OZAGIA_LINT_TRUST_VENV=1` in this process's environment, or `[lint]
+    trust_project_venv = true` in the user-level config (not one inside the
+    root)."""
+    if os.environ.get(TRUST_ENV, "").strip().lower() in ("1", "true", "yes"):
+        return True
+    try:
+        path = user_config_path()
+        if not path.is_file() or _within(root, path):
+            return False
+    except (OSError, RuntimeError):
+        return False
+    data = _toml(path) or {}
+    table = data.get("lint")
+    return isinstance(table, dict) and table.get("trust_project_venv") is True
+
+
+def find_executable(root: Path, name: str, *, trusted: bool,
+                    venv: bool = False) -> str | None:
+    """The first `name` on PATH (absolute entries only) that is an
+    executable file and, unless `trusted`, neither lies nor resolves inside
+    the root; with `trusted` and `venv`, `<root>/.venv/bin/<name>` first.
+    The path is returned as found (a rustup proxy needs its own name)."""
+    cands: list[Path] = []
+    if trusted and venv:
+        cands.append(root / ".venv" / "bin" / name)
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        if d and os.path.isabs(d):
+            cands.append(Path(d) / name)
+    for c in cands:
+        try:
+            real = os.path.realpath(c)
+            if not (os.path.isfile(real) and os.access(real, os.X_OK)):
+                continue
+            if not trusted and (_within(root, real) or _within(root, c.parent)):
+                continue
+        except OSError:
+            continue
+        return str(c)
+    return None
+
+
+def lint_env(inp: dict[str, Any] | None) -> dict[str, str]:
+    """The linters' environment: the caller's `_test_env`, else this
+    process's without the variables meant for ozagia itself."""
+    env = (inp or {}).get("_test_env")
+    if isinstance(env, dict):
+        return {str(k): str(v) for k, v in env.items()}
+    from ozagia.daemon.server import captured_test_env
+    return captured_test_env()
 
 
 def _ancestors(root: Path, rel: str) -> list[Path]:
@@ -142,10 +248,9 @@ def cargo_edition(root: Path, rel: str) -> str | None:
 
 
 def ruff_executable(root: Path) -> str | None:
-    venv = root / ".venv" / "bin" / "ruff"
-    if venv.is_file() and os.access(venv, os.X_OK):
-        return str(venv)
-    return shutil.which("ruff")
+    """The ruff lint runs (see "Trust" in the module docstring)."""
+    return find_executable(root, "ruff", trusted=trust_project_venv(root),
+                           venv=True)
 
 
 class Plan:
@@ -153,10 +258,11 @@ class Plan:
 
     def __init__(self, root: Path):
         self.root = root
-        cfg = _config(root)
-        self.enabled = getattr(cfg, "lint_enabled", None)
-        self.timeout_s = float(getattr(cfg, "lint_timeout_s", DEFAULT_TIMEOUT_S)
-                               or DEFAULT_TIMEOUT_S)
+        cfg, loaded = _config(root)
+        self.enabled = getattr(cfg, "lint_enabled", None) if loaded else False
+        timeout = float(getattr(cfg, "lint_timeout_s", DEFAULT_TIMEOUT_S)
+                        or DEFAULT_TIMEOUT_S)
+        self.timeout_s = min(timeout, MAX_TIMEOUT_S)
         self.python = getattr(cfg, "lint_python", None)
         self.rust = getattr(cfg, "lint_rust", None)
         self._ruff: str | None | bool = False
@@ -169,7 +275,8 @@ class Plan:
 
     def rustfmt(self) -> str | None:
         if self._rustfmt is False:
-            self._rustfmt = shutil.which("rustfmt")
+            self._rustfmt = find_executable(
+                self.root, "rustfmt", trusted=trust_project_venv(self.root))
         return self._rustfmt  # type: ignore[return-value]
 
     def linter(self, rel: str) -> tuple[str, str | None] | None:
@@ -233,17 +340,18 @@ def _line_of(text: str, offset: int) -> int:
     return text.count("\n", 0, offset) + 1
 
 
-def _occurrence_lines(text: str, new: str) -> set[int]:
-    out: set[int] = set()
-    start, n = 0, 0
-    while n < MAX_OCCURRENCES:
+def _occurrences(text: str, new: str, limit: int) -> list[set[int]]:
+    """The lines of each occurrence of `new` in `text` (at most `limit`)."""
+    out: list[set[int]] = []
+    start = 0
+    while len(out) < limit:
         i = text.find(new, start)
         if i < 0:
             break
         end = i + len(new)
         last = end - 1 if new.endswith("\n") and end > i else end
-        out.update(range(_line_of(text, i), _line_of(text, max(last, i)) + 1))
-        start, n = end, n + 1
+        out.append(set(range(_line_of(text, i), _line_of(text, max(last, i)) + 1)))
+        start = end
     return out
 
 
@@ -322,12 +430,57 @@ def _delta_lines(memory: Any, delta: Any) -> dict[str, set[int]]:
     return out
 
 
+def file_shas(memory: Any, rels: Iterable[str]) -> dict[str, str]:
+    """The sha256 the graph has for each file (taken before a refresh: the
+    text a built-in edit started from)."""
+    out: dict[str, str] = {}
+    for rel in rels:
+        try:
+            nid = memory.node_by_key(f"file:{rel}")
+            sha = ((memory.node(nid) or {}).get("attrs") or {}).get("sha256") \
+                if nid is not None else None
+        except Exception:  # noqa: BLE001 - no hash for this file
+            sha = None
+        if isinstance(sha, str) and sha:
+            out[rel] = sha
+    return out
+
+
+def _verified_lines(data: bytes, old: str, new: str, replace_all: bool,
+                    before_sha: str) -> set[int] | None:
+    """The changed lines of a built-in edit (`old` -> `new`) when exactly
+    one way of undoing it gives the text whose sha256 the graph had before
+    the edit; None otherwise."""
+    import hashlib
+    old_b, new_b = old.encode("utf-8"), new.encode("utf-8")
+    cands: list[bytes] = []
+    if replace_all:
+        cands.append(data.replace(new_b, old_b))
+    else:
+        start = 0
+        while len(cands) < MAX_OCCURRENCES:
+            i = data.find(new_b, start)
+            if i < 0:
+                break
+            cands.append(data[:i] + old_b + data[i + len(new_b):])
+            start = i + len(new_b)
+    hits = [c for c in cands if hashlib.sha256(c).hexdigest() == before_sha]
+    if len(hits) != 1:
+        return None
+    try:
+        return changed_lines(hits[0].decode("utf-8"), data.decode("utf-8"))
+    except UnicodeDecodeError:
+        return None
+
+
 def after_changes(memory: Any, tool: str, inp: dict[str, Any],
-                  files: Iterable[str], delta: Any = None
+                  files: Iterable[str], delta: Any = None,
+                  before_sha: dict[str, str] | None = None
                   ) -> dict[str, set[int] | None]:
     """The changed lines of the files a built-in edit, write or patch
     changed (`files`: what the graph refresh found changed), for the files
-    a linter applies to (see the module docstring)."""
+    a linter applies to (see the module docstring). `before_sha`: the
+    graph's sha256 of the files before the refresh (`file_shas`)."""
     from ozagia.intent.common import resolve
     root = root_of(memory)
     plan = Plan(root)
@@ -351,8 +504,24 @@ def after_changes(memory: Any, tool: str, inp: dict[str, Any],
                 text = read_text(root / rel)
             except Exception:  # noqa: BLE001 - not a text file now
                 return {}
+            one = [e for e in edits if isinstance(e, dict)]
+            sha = (before_sha or {}).get(rel)
+            if (sha and len(one) == 1 and isinstance(one[0].get("oldString"), str)
+                    and isinstance(one[0].get("newString"), str)
+                    and one[0]["oldString"] and one[0]["newString"]):
+                try:
+                    exact = _verified_lines((root / rel).read_bytes(),
+                                            one[0]["oldString"],
+                                            one[0]["newString"],
+                                            one[0].get("replaceAll") is True, sha)
+                except OSError:
+                    exact = None
+                if exact is not None:
+                    return {rel: exact} if exact else {}
             got: set[int] = set()
             whole = False
+            vague = False           # some newString is not located exactly
+            spots: set[int] = set()     # every occurrence of those
             for e in edits:
                 if not isinstance(e, dict):
                     continue
@@ -360,9 +529,28 @@ def after_changes(memory: Any, tool: str, inp: dict[str, Any],
                 if old == "" and isinstance(new, str):
                     whole = True
                 elif isinstance(new, str) and new:
-                    got |= _occurrence_lines(text, new)
+                    if e.get("replaceAll") is True:
+                        occ = _occurrences(text, new, MAX_OCCURRENCES + 1)
+                        if 0 < len(occ) <= MAX_OCCURRENCES:
+                            for s in occ:
+                                got |= s
+                            continue
+                    else:
+                        occ = _occurrences(text, new, 2)
+                        if len(occ) == 1:
+                            got |= occ[0]
+                            continue
+                    vague = True
+                    for s in _occurrences(text, new, MAX_OCCURRENCES):
+                        spots |= s
             if whole:
                 out[rel] = None
+            elif vague:
+                by_delta = _delta_lines(memory, delta).get(rel) or set()
+                narrowed = by_delta & spots
+                lines = got | (narrowed or by_delta)
+                if lines:
+                    out[rel] = lines
             elif got:
                 out[rel] = got
             else:
@@ -387,25 +575,52 @@ def after_changes(memory: Any, tool: str, inp: dict[str, Any],
 # --------------------------------------------------------------------------- #
 # Running the linters
 # --------------------------------------------------------------------------- #
-def _run(argv: list[str], cwd: Path, timeout_s: float
-         ) -> tuple[str | None, bool]:
-    """(stdout, timed out); stdout None when the linter could not run. On
-    timeout the linter's whole process group is killed."""
-    import signal
+def run_bounded(argv: list[str], *, cwd: Path, env: dict[str, str] | None,
+                timeout_s: float, stdin: bytes | None = None,
+                merge_stderr: bool = False) -> tuple[int | None, bytes, bool]:
+    """Run `argv` in a new session: (exit code, stdout, timed out). On
+    timeout the whole process group is killed and the output so far is
+    collected for at most `KILL_WAIT_S` (a descendant that left the group
+    may still hold the pipes); the exit code is then None. Raises OSError
+    when the program cannot start."""
+    p = subprocess.Popen(
+        argv, cwd=str(cwd), env=env,
+        stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT if merge_stderr else subprocess.PIPE,
+        start_new_session=True)
     try:
-        p = subprocess.Popen(argv, cwd=str(cwd), stdin=subprocess.DEVNULL,
-                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                             start_new_session=True)
+        out, _err = p.communicate(stdin, timeout=max(timeout_s, MIN_BUDGET_S))
+        return p.returncode, out or b"", False
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(p.pid, signal.SIGKILL)
+    except OSError:
+        p.kill()
+    try:
+        out, _err = p.communicate(timeout=KILL_WAIT_S)
+    except (subprocess.TimeoutExpired, ValueError, OSError):
+        out = b""
+        for f in (p.stdin, p.stdout, p.stderr):
+            with contextlib.suppress(OSError, ValueError):
+                if f is not None:
+                    f.close()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            p.wait(timeout=KILL_WAIT_S)
+    return None, out or b"", True
+
+
+def _run(argv: list[str], cwd: Path, timeout_s: float, env: dict[str, str],
+         stdin: bytes | None = None) -> tuple[str | None, bool]:
+    """(stdout, timed out); stdout None when the linter could not run or
+    timed out."""
+    try:
+        _rc, out, timed_out = run_bounded(argv, cwd=cwd, env=env,
+                                          timeout_s=timeout_s, stdin=stdin)
     except OSError:
         return None, False
-    try:
-        out, _err = p.communicate(timeout=max(timeout_s, 0.05))
-    except subprocess.TimeoutExpired:
-        try:
-            os.killpg(p.pid, signal.SIGKILL)
-        except OSError:
-            p.kill()
-        p.communicate()
+    if timed_out:
         return None, True
     return out.decode("utf-8", errors="replace"), False
 
@@ -429,20 +644,27 @@ def _ruff_findings(root: Path, stdout: str) -> list[dict[str, Any]]:
         if not isinstance(d, dict):
             continue
         loc = d.get("location") or {}
+        end = d.get("end_location") or {}
         rel = _rel(root, str(d.get("filename") or ""), root)
         row = loc.get("row") if isinstance(loc, dict) else None
         if rel is None or not isinstance(row, int):
             continue
-        out.append({"rel": rel, "line": row, "rule": str(d.get("code") or "syntax"),
+        end_row = end.get("row") if isinstance(end, dict) else None
+        if not isinstance(end_row, int) or isinstance(end_row, bool) or end_row < row:
+            end_row = row
+        out.append({"rel": rel, "line": row, "end": end_row,
+                    "rule": str(d.get("code") or "syntax"),
                     "message": str(d.get("message") or "")})
     return out
 
 
-def rustfmt_hunks(stdout: str, root: Path, cwd: Path) -> list[dict[str, Any]]:
+def rustfmt_hunks(stdout: str, root: Path, cwd: Path,
+                  stdin_rel: str | None = None) -> list[dict[str, Any]]:
     """`{rel, start, end}` per change of `rustfmt --check` output: each run
     of changed lines between context lines, as lines of the file as it is
     (the lines rustfmt would replace, or the line an insertion goes
-    before)."""
+    before). With `stdin_rel` (the file was piped through stdin), every
+    hunk belongs to that file."""
     out: list[dict[str, Any]] = []
     rel: str | None = None
     group: list[int] = []
@@ -458,7 +680,7 @@ def rustfmt_hunks(stdout: str, root: Path, cwd: Path) -> list[dict[str, Any]]:
         m = _RUSTFMT_HEAD_RE.match(raw)
         if m:
             close()
-            rel = _rel(root, m.group(1), cwd)
+            rel = stdin_rel if stdin_rel is not None else _rel(root, m.group(1), cwd)
             line = int(m.group(2) or m.group(3))
             replacing = False
             continue
@@ -479,16 +701,34 @@ def rustfmt_hunks(stdout: str, root: Path, cwd: Path) -> list[dict[str, Any]]:
     return out
 
 
-def lint_changes(memory: Any, changes: dict[str, set[int] | None]
-                 ) -> dict[str, Any]:
+def lint_budget(timeout_s: float, inp: dict[str, Any] | None) -> float:
+    """`timeout_s` cut to what is left before the caller stops waiting
+    (`_reply_deadline`, a `time.monotonic()` value, and
+    `_deadline_s_remaining`), less `DEADLINE_MARGIN_S`."""
+    budget = min(timeout_s, MAX_TIMEOUT_S)
+    inp = inp or {}
+    at = inp.get("_reply_deadline")
+    if isinstance(at, (int, float)) and not isinstance(at, bool):
+        budget = min(budget, float(at) - time.monotonic() - DEADLINE_MARGIN_S)
+    left = inp.get("_deadline_s_remaining")
+    if isinstance(left, (int, float)) and not isinstance(left, bool):
+        budget = min(budget, float(left) - DEADLINE_MARGIN_S)
+    return budget
+
+
+def lint_changes(memory: Any, changes: dict[str, set[int] | None], *,
+                 inp: dict[str, Any] | None = None) -> dict[str, Any]:
     """Run the linters on the files of `changes` (rel -> changed lines, None
     for all) and return `{"lines": [...], "runs", "findings", "timeouts"}`
-    (see the module docstring)."""
+    (see the module docstring). `inp` is the call's input, for its reserved
+    fields: `_test_env`, `_unlock` (a context manager that releases the
+    caller's graph lock while the linters run), `_reply_deadline` and
+    `_deadline_s_remaining`."""
     root = root_of(memory)
     plan = Plan(root)
     res: dict[str, Any] = {"lines": [], "runs": 0, "findings": 0, "timeouts": 0}
     ruff_files: list[str] = []
-    rust_files: dict[str, list[str]] = {}
+    rust_files: list[tuple[str, str, bytes]] = []    # (rel, edition, text)
     for rel in list(changes)[:MAX_FILES]:
         lines = changes[rel]
         if lines is not None and not lines:
@@ -501,49 +741,63 @@ def lint_changes(memory: Any, changes: dict[str, set[int] | None]
         if got[0] == "ruff":
             ruff_files.append(rel)
         else:
-            rust_files.setdefault(str(got[1]), []).append(rel)
+            try:
+                text = (root / rel).read_bytes()
+            except OSError:
+                continue
+            rust_files.append((rel, str(got[1]), text))
     if not ruff_files and not rust_files:
         return res
-    deadline = time.monotonic() + plan.timeout_s
+    budget = lint_budget(plan.timeout_s, inp)
+    shown = f"{round(max(budget, 0.0), 1):g}"
+    if budget < MIN_BUDGET_S:
+        res["timeouts"] += 1
+        res["lines"].append(tag("lint: not run; the request deadline is too near"))
+        return res
+    ruff_exe, rustfmt_exe = plan.ruff(), plan.rustfmt()
+    env = lint_env(inp)
+    deadline = time.monotonic() + budget
     findings: list[dict[str, Any]] = []
     notes: list[str] = []
 
     def left() -> float:
         return deadline - time.monotonic()
 
-    if ruff_files:
-        exe = plan.ruff()
-        argv = [str(exe), "check", "--output-format", "json", "--no-fix",
-                "--no-cache", "--force-exclude", "--", *ruff_files]
-        stdout, timed_out = _run(argv, root, left())
-        res["runs"] += 1
-        if timed_out:
-            res["timeouts"] += 1
-            notes.append(tag(f"lint: ruff timed out after {plan.timeout_s:g} s"))
-        elif stdout:
-            for f in _ruff_findings(root, stdout):
-                findings.append(f)
-    for edition, rels in rust_files.items():
-        if left() <= 0:
-            res["timeouts"] += 1
-            notes.append(tag(f"lint: rustfmt not run; the {plan.timeout_s:g} s "
-                             f"lint budget is spent"))
-            break
-        argv = [str(plan.rustfmt()), "--check", "--edition", edition,
-                "--color", "never", *(str(root / r) for r in rels)]
-        stdout, timed_out = _run(argv, root, left())
-        res["runs"] += 1
-        if timed_out:
-            res["timeouts"] += 1
-            notes.append(tag(f"lint: rustfmt timed out after {plan.timeout_s:g} s"))
-            continue
-        for h in rustfmt_hunks(stdout or "", root, root):
-            if h["rel"] not in rels:
+    unlock = (inp or {}).get("_unlock")
+    # The linters read files only: the graph lock is free meanwhile.
+    with (unlock() if callable(unlock) else contextlib.nullcontext()):
+        if ruff_files and ruff_exe:
+            argv = [ruff_exe, "check", "--output-format", "json", "--no-fix",
+                    "--no-cache", "--force-exclude", "--", *ruff_files]
+            stdout, timed_out = _run(argv, root, left(), env)
+            res["runs"] += 1
+            if timed_out:
+                res["timeouts"] += 1
+                notes.append(tag(f"lint: ruff timed out after {shown} s"))
+            elif stdout:
+                findings.extend(_ruff_findings(root, stdout))
+        for rel, edition, text in rust_files if rustfmt_exe else []:
+            if left() < MIN_BUDGET_S:
+                res["timeouts"] += 1
+                notes.append(tag(f"lint: rustfmt not run on {rel}; the {shown} s "
+                                 f"lint budget is spent"))
                 continue
-            findings.append({"rel": h["rel"], "line": h["start"], "end": h["end"],
-                             "rule": "rustfmt",
-                             "message": (f"rustfmt would reformat "
-                                         f"L{h['start']}-{h['end']}")})
+            # The file on stdin: only it is checked, not its child modules.
+            # Its directory as cwd: rustfmt finds its rustfmt.toml from there.
+            argv = [rustfmt_exe, "--check", "--edition", edition,
+                    "--color", "never"]
+            cwd = root.joinpath(*PurePosixPath(rel).parent.parts)
+            stdout, timed_out = _run(argv, cwd, left(), env, stdin=text)
+            res["runs"] += 1
+            if timed_out:
+                res["timeouts"] += 1
+                notes.append(tag(f"lint: rustfmt timed out after {shown} s"))
+                continue
+            for h in rustfmt_hunks(stdout or "", root, cwd, stdin_rel=rel):
+                findings.append({"rel": rel, "line": h["start"], "end": h["end"],
+                                 "rule": "rustfmt",
+                                 "message": (f"rustfmt would reformat "
+                                             f"L{h['start']}-{h['end']}")})
     kept = []
     for f in findings:
         lines = changes.get(f["rel"])
@@ -576,6 +830,8 @@ def lint_meta(got: dict[str, Any]) -> dict[str, int]:
             "lint_timeouts": int(got["timeouts"])}
 
 
-__all__ = ["MAX_LINES", "Plan", "after_changes", "applies", "cargo_edition",
-           "changed_lines", "lint_changes", "lint_meta", "ruff_config",
-           "ruff_executable", "rustfmt_hunks"]
+__all__ = ["MAX_LINES", "MAX_TIMEOUT_S", "Plan", "after_changes", "applies",
+           "cargo_edition", "changed_lines", "find_executable", "lint_budget",
+           "lint_changes", "lint_env", "lint_meta", "ruff_config",
+           "ruff_executable", "run_bounded", "rustfmt_hunks",
+           "trust_project_venv", "user_config_path"]

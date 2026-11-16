@@ -6,17 +6,21 @@ until `shutdown`, SIGTERM or SIGINT, or, with `parent_pid`, until that
 process is gone (checked every `PARENT_POLL_S` seconds). Connections are
 served by threads; one global lock serialises `tool` and `after`, because
 `DevMemory` is not thread-safe. `ping`, `hello` and `stats` do not take that
-lock, and neither does a captured pytest (`shell` that classifies as
-`pytest`): it reads no graph state, so a long test run does not hold up the
-edits and reads sent meanwhile.
+lock, and neither does a captured pytest or `ruff check` (`shell` that
+classifies as `pytest` or `ruff`): it reads no graph state while it runs, so
+a long run does not hold up the edits and reads sent meanwhile. Lint after
+an edit (`ozagia.intent.lint`) releases the lock while its linters run
+(`_unlock`), and its budget ends a margin before `deadline_ms`
+(`_reply_deadline`).
 
 A `tool` or `after` request whose `deadline_ms` (Unix epoch, ms) has passed
 when its turn comes (after the lock is taken, before the handler runs) is
 answered `expired` and not executed (see `ozagia.daemon.protocol`).
 
-Captured pytest runs with `test_env` (default: this process's environment
-without `OZAGIA_*`, `PYTHONPATH` and `COLUMNS`, the variables the harness
-adds for ozagia itself), passed to the intent layer as `_test_env`. Reserved
+Captured pytest, captured `ruff check` and lint run with `test_env`
+(default: this process's environment without `OZAGIA_*`, `PYTHONPATH` and
+`COLUMNS`, the variables the harness adds for ozagia itself), passed to the
+intent layer as `_test_env` (for `tool` and `after`). Reserved
 `_` fields a client puts in `input` are dropped.
 
 Every request is journaled, one JSON object per line, to
@@ -120,6 +124,9 @@ from ozagia.daemon import protocol as P
 JOURNAL_NAME = "daemon_journal.jsonl"
 # Handled `tool` intents that edit a file (for the working set).
 EDIT_INTENTS = frozenset({"edit", "write", "edit_key"})
+# Tools whose `tool`/`after` may lint (`ozagia.intent.lint`): they get
+# `_unlock` and `_reply_deadline`.
+LINTED_TOOLS = frozenset({"edit", "write", "patch"})
 # Keys kept per journal record.
 JOURNAL_KEYS = 20
 # Distinct shell passthrough reasons kept, and shown in `stats`.
@@ -224,17 +231,26 @@ def _expired(msg: dict[str, Any]) -> bool:
     return time.time() * 1000 > deadline
 
 
+def _reply_deadline(msg: dict[str, Any]) -> float | None:
+    """The request's `deadline_ms` as a `time.monotonic()` value, or None."""
+    deadline = msg.get("deadline_ms")
+    if isinstance(deadline, bool) or not isinstance(deadline, (int, float)):
+        return None
+    return time.monotonic() + (deadline / 1000.0 - time.time())
+
+
 def _lock_free(op: Any, tool: Any, inp: Any) -> bool:
-    """A captured pytest reads no graph state, so it skips the lock. So
-    does a compound command with a pytest step: it takes the lock itself
-    (`_lock`) for the steps that read the graph."""
+    """A captured pytest reads no graph state, so it skips the lock; so does
+    a captured `ruff check`, which takes the lock itself (`_lock`) only for
+    its node keys. So does a compound command with a pytest step: it takes
+    the lock itself for the steps that read the graph."""
     if op != "tool" or tool != "shell" or not isinstance(inp, dict):
         return False
     from ozagia.intent.shell import classify, compound_steps
     cls = classify(str(inp.get("command") or ""))
     if cls["class"] == "compound":
         return any(s["kind"] == "pytest" for s in compound_steps(cls))
-    return cls["class"] == "pytest"
+    return cls["class"] in ("pytest", "ruff")
 
 
 class DaemonState:
@@ -277,7 +293,8 @@ class DaemonState:
         self.region_replies = 0
         # Lint inside the edit (`ozagia.intent.lint`): linter runs, findings
         # reported on changed lines, linter runs cut off by the timeout.
-        self.lint = {"lint_runs": 0, "lint_findings": 0, "lint_timeouts": 0}        # shell tool calls: captured (handled), refused (git refs) and
+        self.lint = {"lint_runs": 0, "lint_findings": 0, "lint_timeouts": 0}
+        # shell tool calls: captured (handled), refused (git refs) and
         # passthrough, with the passthrough reasons, so an eval can measure
         # the shell capture rate.
         self.shell = {"captured": 0, "refused": 0, "passthrough": 0}
@@ -418,7 +435,7 @@ class DaemonState:
             if isinstance(inp, dict):
                 inp = {k: v for k, v in inp.items()
                        if not str(k).startswith("_")}
-                if op == "tool" and self.test_env is not None:
+                if self.test_env is not None:
                     inp["_test_env"] = dict(self.test_env)
             harness = str(msg.get("harness") or "opencode")
             session = msg.get("session")
@@ -431,7 +448,14 @@ class DaemonState:
             if free and isinstance(inp, dict):
                 inp["_lock"] = self.lock
             lock = contextlib.nullcontext() if free else self._graph_lock()
+            lints = isinstance(inp, dict) and tool in LINTED_TOOLS
+            if not free and lints:
+                # Lint after an edit runs its linters with the lock released.
+                inp["_unlock"] = self._unlocked
             with lock:
+                reply_at = _reply_deadline(msg)
+                if reply_at is not None and lints:
+                    inp["_reply_deadline"] = reply_at
                 if _expired(msg):
                     if op == "tool":
                         return {"ok": True, "handled": False,
@@ -843,6 +867,22 @@ class DaemonState:
                     fh.write(json.dumps(rec, sort_keys=True) + "\n")
             except OSError as e:
                 print(f"journal write failed: {e}", file=sys.stderr, flush=True)
+
+    @contextlib.contextmanager
+    def _unlocked(self):
+        """Release the graph lock this thread holds, and take it again
+        (recording the wait) when the block ends."""
+        self.lock.release()
+        try:
+            yield
+        finally:
+            started = time.perf_counter()
+            self.lock.acquire()
+            wait_ms = (time.perf_counter() - started) * 1000.0
+            with self._stats_lock:
+                self.lock_wait_total_ms += wait_ms
+                self.lock_wait_max_ms = max(self.lock_wait_max_ms, wait_ms)
+                self.lock_wait_count += 1
 
     @contextlib.contextmanager
     def _graph_lock(self):

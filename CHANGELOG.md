@@ -12,7 +12,12 @@
   [--select X] [--output-format concise|full]` (also `.venv/bin/ruff`) is a
   captured shell class: ruff's own output plus the node key of each
   finding. New stats: `lint_runs`, `lint_findings`, `lint_timeouts`,
-  `ruff_captures`. See docs/intent.md.
+  `ruff_captures`. Lint runs no program from inside the repository unless
+  the user opts in outside it (`OZAGIA_LINT_TRUST_VENV=1` or
+  `~/.config/ozagia/config.toml` `[lint] trust_project_venv = true`), runs
+  with the graph lock released and the captured-pytest environment, and
+  its budget is capped at 10 s and ends before the request deadline.
+  See docs/intent.md.
 
 - Kiro CLI integration: `ozagia install kiro [--scope project|user]
   [--format v3|agent|both]` writes command hooks to `.kiro/hooks/ozagia.json`

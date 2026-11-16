@@ -21,6 +21,7 @@ jq's exact output (`run_jq`); a ref-moving git command is refused.
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import time
@@ -283,19 +284,106 @@ def run_jq(memory: Any, cls: dict[str, Any], path: Path) -> dict[str, Any]:
     return {"intent": "shell_jq", "output": out, "keys": keys}
 
 
-def _ruff_fixes(root: Path, where: list[Path]) -> bool:
-    """Whether the ruff configuration nearest to any of `where` sets
-    `fix = true` (then `ruff check` would change files)."""
-    from ozagia.intent.lint import _toml, ruff_config
+# `extend` links followed from one ruff configuration.
+RUFF_EXTEND_DEPTH = 8
+
+
+def _ruff_table(path: Path) -> dict[str, Any] | None:
+    """The ruff settings of a configuration file ({} for a pyproject.toml
+    without `[tool.ruff]`), or None when it cannot be read."""
+    from ozagia.intent.lint import _toml
+    data = _toml(path)
+    if data is None:
+        return None
+    if path.name == "pyproject.toml":
+        tool = data.get("tool")
+        table = tool.get("ruff") if isinstance(tool, dict) else None
+        return table if isinstance(table, dict) else {}
+    return data
+
+
+def _ruff_project_config(start: Path) -> Path | None:
+    """ruff's own discovery: the nearest `.ruff.toml`, `ruff.toml` or
+    `pyproject.toml` with `[tool.ruff]` in `start` or a directory above it
+    (also above the root)."""
+    from ozagia.intent.lint import RUFF_CONFIGS
+    d = start
+    while True:
+        for name in RUFF_CONFIGS:
+            if (d / name).is_file():
+                return d / name
+        py = d / "pyproject.toml"
+        if py.is_file():
+            from ozagia.intent.lint import _toml
+            tool = (_toml(py) or {}).get("tool")
+            if isinstance(tool, dict) and "ruff" in tool:
+                return py
+        if d.parent == d:
+            return None
+        d = d.parent
+
+
+def _ruff_user_config(env: dict[str, str] | None) -> Path | None:
+    """ruff's user-level configuration (`$XDG_CONFIG_HOME/ruff/` or
+    `~/.config/ruff/`), used when a file has no project configuration."""
+    src = env if env is not None else os.environ
+    xdg = src.get("XDG_CONFIG_HOME")
+    home = src.get("HOME")
+    if xdg and os.path.isabs(xdg):
+        base = Path(xdg)
+    elif home:
+        base = Path(home) / ".config"
+    else:
+        base = Path.home() / ".config"
+    from ozagia.intent.lint import RUFF_CONFIGS
+    for name in (*RUFF_CONFIGS, "pyproject.toml"):
+        p = base / "ruff" / name
+        if p.is_file():
+            return p
+    return None
+
+
+def _ruff_fix_setting(cfg: Path) -> bool | None:
+    """`fix` of a ruff configuration with its `extend` chain (the nearer
+    file wins): True, False (unset counts as False), or None when unsure (a
+    file that does not read, an `extend` loop or a chain too long)."""
+    seen: set[Path] = set()
+    path = cfg
+    for _ in range(RUFF_EXTEND_DEPTH):
+        real = path.resolve()
+        if real in seen:
+            return None
+        seen.add(real)
+        table = _ruff_table(path)
+        if table is None:
+            return None
+        fix = table.get("fix")
+        if fix is not None:
+            return fix is True
+        ext = table.get("extend")
+        if ext is None:
+            return False
+        if not isinstance(ext, str) or not ext:
+            return None
+        nxt = Path(os.path.expanduser(ext))
+        path = nxt if nxt.is_absolute() else path.parent / nxt
+        if not path.is_file():
+            return None
+    return None
+
+
+def _ruff_fixes(root: Path, where: list[Path],
+                env: dict[str, str] | None = None) -> bool:
+    """Whether `ruff check` on `where` might change files: the
+    configuration ruff would use for any of them (the nearest project
+    configuration, else the user-level one) sets `fix = true` itself or
+    through `extend`, or ozagia cannot tell."""
     for p in where:
-        rel = os.path.relpath(p if p.is_dir() else p.parent, root)
-        rel = "" if rel == "." else Path(rel).as_posix()
-        cfg = ruff_config(root, (rel + "/" if rel else "") + "_")
+        start = p if p.is_dir() else p.parent
+        cfg = _ruff_project_config(start) or _ruff_user_config(env)
         if cfg is None:
             continue
-        data = _toml(cfg) or {}
-        table = (data.get("tool") or {}).get("ruff") if cfg.name == "pyproject.toml" else data
-        if isinstance(table, dict) and table.get("fix") is True:
+        if _ruff_fix_setting(cfg) is not False:
             return True
     return False
 
@@ -310,9 +398,8 @@ def run_ruff(memory: Any, cls: dict[str, Any], inp: dict[str, Any],
     stderr as one stream), then `[ozagia] lint <rule> <file>:<line> <key>`
     per finding (from a second run with `--output-format json`) and
     `[ozagia] exit <n>` when ruff exits non-zero."""
-    import subprocess
     from ozagia.intent.common import Keyer
-    from ozagia.intent.lint import _ruff_findings
+    from ozagia.intent.lint import _ruff_findings, run_bounded
     root = root_of(memory)
     env = inp.get("_test_env") if isinstance(inp.get("_test_env"), dict) else None
     tool = cls["tool"]
@@ -328,8 +415,9 @@ def run_ruff(memory: Any, cls: dict[str, Any], inp: dict[str, Any],
         exe_s = found
     where = [_inside(root, Path(p) if Path(p).is_absolute() else wd / p)
              for p in cls["paths"]] or [wd]
-    if _ruff_fixes(root, [wd, *where]):
-        raise Unhandled("the ruff configuration sets fix = true")
+    if _ruff_fixes(root, [wd, *where], env):
+        raise Unhandled("the ruff configuration sets fix = true (or may, "
+                        "through extend)")
     timeout = inp.get("timeout")
     try:
         timeout_s = float(timeout) / 1000 if timeout else DEFAULT_TIMEOUT_S
@@ -342,19 +430,18 @@ def run_ruff(memory: Any, cls: dict[str, Any], inp: dict[str, Any],
     preflight_stop(inp)
     t0 = time.monotonic()
     try:
-        p = subprocess.run([exe_s, "check", "--no-fix", *args], cwd=str(wd),
-                           env=env, stdin=subprocess.DEVNULL,
-                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                           timeout=timeout_s)
-    except subprocess.TimeoutExpired as e:
-        text = (e.output or b"").decode("utf-8", errors="replace").rstrip("\n")
+        rc, raw, timed_out = run_bounded([exe_s, "check", "--no-fix", *args],
+                                         cwd=wd, env=env, timeout_s=timeout_s,
+                                         merge_stderr=True)
+    except OSError as e:
+        raise Unhandled(f"{tool}: {e}") from None
+    if timed_out or rc is None:
+        text = raw.decode("utf-8", errors="replace").rstrip("\n")
         out = (text + "\n" if text else "") + tag(
             f"timed out after {round(timeout_s, 1)} s") + "\n" + tag("exit 124")
         return {"intent": "shell_ruff", "output": out, "keys": [],
                 "exit_code": 124}
-    except OSError as e:
-        raise Unhandled(f"{tool}: {e}") from None
-    text = p.stdout.decode("utf-8", errors="replace").rstrip("\n")
+    text = raw.decode("utf-8", errors="replace").rstrip("\n")
     lines = [text] if text else []
     keys: list[str] = []
     # The node keys: the same check once more as JSON (ruff's cache makes
@@ -362,31 +449,33 @@ def run_ruff(memory: Any, cls: dict[str, Any], inp: dict[str, Any],
     left = timeout_s - (time.monotonic() - t0)
     json_args = _without_output_format(args)
     findings: list[dict[str, Any]] = []
-    if p.returncode == 1 and left > 0:
+    if rc == 1 and left > 0:
         try:
-            q = subprocess.run([exe_s, "check", "--no-fix", "--output-format",
-                                "json", *json_args], cwd=str(wd), env=env,
-                               stdin=subprocess.DEVNULL, capture_output=True,
-                               timeout=left)
-            findings = _ruff_findings(root, q.stdout.decode("utf-8", "replace"))
-        except (subprocess.TimeoutExpired, OSError):
+            _qrc, qout, q_timed_out = run_bounded(
+                [exe_s, "check", "--no-fix", "--output-format", "json",
+                 *json_args], cwd=wd, env=env, timeout_s=left)
+            if not q_timed_out:
+                findings = _ruff_findings(root, qout.decode("utf-8", "replace"))
+        except OSError:
             findings = []
     keyers: dict[str, Keyer] = {}
-    for f in findings[:RUFF_KEY_LINES]:
-        keyer = keyers.setdefault(f["rel"], Keyer(memory, f["rel"]))
-        try:
-            key = keyer.key(f["line"])
-        except Exception:  # noqa: BLE001 - the file key instead
-            key = f"file:{f['rel']}"
-        if key not in keys:
-            keys.append(key)
-        lines.append(tag(f"lint {f['rule']} {f['rel']}:{f['line']} {key}"))
+    # Lock-free under the daemon: the graph lock (`_lock`) for the keys only.
+    with inp.get("_lock") or contextlib.nullcontext():
+        for f in findings[:RUFF_KEY_LINES]:
+            keyer = keyers.setdefault(f["rel"], Keyer(memory, f["rel"]))
+            try:
+                key = keyer.key(f["line"])
+            except Exception:  # noqa: BLE001 - the file key instead
+                key = f"file:{f['rel']}"
+            if key not in keys:
+                keys.append(key)
+            lines.append(tag(f"lint {f['rule']} {f['rel']}:{f['line']} {key}"))
     if len(findings) > RUFF_KEY_LINES:
         lines.append(tag(f"lint: {len(findings) - RUFF_KEY_LINES} more findings"))
-    if p.returncode != 0:
-        lines.append(tag(f"exit {p.returncode}"))
+    if rc != 0:
+        lines.append(tag(f"exit {rc}"))
     return {"intent": "shell_ruff", "output": "\n".join(lines), "keys": keys,
-            "exit_code": p.returncode}
+            "exit_code": rc}
 
 
 def _without_output_format(args: list[str]) -> list[str]:

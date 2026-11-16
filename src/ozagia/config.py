@@ -91,6 +91,7 @@ one, every key has the generic default below. All keys are optional:
                                   # when a linter is configured
                                   # (`ozagia.intent.lint`)
     timeout_s = 3                 # the budget for the linter runs of one call
+                                  # (at most 10 s is used)
     python = "ruff" | "off"       # unset: ruff when pyproject.toml has
                                   # [tool.ruff] or ruff.toml/.ruff.toml exists
     rust = "rustfmt" | "off"      # unset: rustfmt when Cargo.toml exists

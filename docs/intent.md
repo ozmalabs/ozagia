@@ -359,19 +359,38 @@ the other lines, at most 10, then a count of the rest:
   --force-exclude`) for `.py` files when a `pyproject.toml` with
   `[tool.ruff]`, a `ruff.toml` or `.ruff.toml` sits in the file's directory
   or above it, or `.ozagia.toml` has `[lint] python = "ruff"`; the
-  executable is `<root>/.venv/bin/ruff`, else `ruff` on `PATH`.
+  executable is `ruff` on `PATH`.
 - `rustfmt --check --edition <edition> --color never` for `.rs` files when a
   `Cargo.toml` is above the file (its edition; 2015 when unset), and
-  rustfmt is on `PATH`. Each run of lines rustfmt would change is one
+  rustfmt is on `PATH`. The file goes in on stdin, with its directory as
+  the working directory (its `rustfmt.toml` applies; out-of-line child
+  modules are not checked). Each run of lines rustfmt would change is one
   finding.
+- Trust: lint needs only edit permission, so it runs no program from inside
+  the repository. A linter whose path or real path is inside the root is
+  skipped, relative `PATH` entries are ignored, and `<root>/.venv/bin/ruff`
+  is not used. The user can opt in outside the repository:
+  `OZAGIA_LINT_TRUST_VENV=1` in the daemon's environment, or
+  `[lint] trust_project_venv = true` in `~/.config/ozagia/config.toml`
+  (`$XDG_CONFIG_HOME/ozagia/config.toml`; ignored when inside the root).
+  Then `<root>/.venv/bin/ruff` comes first. A repository's `.ozagia.toml`
+  cannot set this. Linters get the environment of a captured pytest (no
+  `OZAGIA_*`, `PYTHONPATH`, `COLUMNS`).
 - `[lint] enabled = false` turns it off; `enabled = true` lints without a
-  ruff or Cargo configuration; `python`/`rust = "off"` exclude a language;
-  `timeout_s` (default 3) is the budget of one call's linter runs.
+  ruff or Cargo configuration; `python`/`rust = "off"` exclude a language.
+  A `.ozagia.toml` that does not load turns lint off. `timeout_s` (default
+  3, at most 10 whatever the file says) is the budget of one call's linter
+  runs, cut to 1 s before the request's `deadline_ms`. The daemon releases
+  its graph lock while the linters run.
 - Changed lines: a handled call diffs the file before and after (a new
-  file: every line). In `after`: a write lints the whole file, an edit the
-  lines its `newString` occupies, a patch the lines its chunks added (an
-  added file: every line); else the line ranges of the delta's added and
-  changed keys.
+  file: every line). In `after`: a write lints the whole file; an edit is
+  undone at each occurrence of its `newString`, and when exactly one result
+  matches the file hash the graph had before, the diff gives the changed
+  lines; else a `newString` that occurs once gives its lines, and a
+  repeated one the delta's changed ranges (narrowed to the occurrences in
+  them). A patch: the lines its chunks added (an added file: every line);
+  else the line ranges of the delta's added and changed keys. A finding
+  counts when any line of its span (start to end row) changed.
 - Linters never modify files and write no cache. A missing linter, a
   failing run or unparsable output adds nothing; lint never fails the edit.
   `meta` has `lint_runs`, `lint_findings` and `lint_timeouts` when a linter
@@ -402,7 +421,7 @@ back. The classes are:
 | files | `rg --files [PATH...] [-g G]... [-t T] [-T T] [--hidden] [--no-ignore[-vcs]] [-u\|-uu\|-uuu] [--sort path]` | runs rg itself (paths inside the root), sorted by path; rg's own order is that of its parallel walk, so this is one of the orders it can print. Intent `shell_files`. |
 | find | `find [-P] [PATH...] [-maxdepth N] [-mindepth N] [EXPR]` with `-name -iname -path -ipath -type f\|d\|l -newer F -print -prune -true -false`, `!`/`-not`, `-a`, `-o`, `\( \)` | evaluated as GNU find without `-L`: directory order (`os.scandir`), the start path first, symlinks not followed, the implicit `-print` when there is no `-print`, paths printed as find prints them. A glob range is accepted only inside a-z, A-Z or 0-9; POSIX classes, `-maxdepth` after a test (find warns on stderr), any other primary or action, a symlink start path, more than 20000 entries and a directory with more than 10000 entries (gnulib fts sorts those by inode) fall back. A `?` or bracket glob tested on a non-ASCII name falls back unless the locale (`LC_ALL`, `LC_CTYPE`, `LANG` from the prefix or the daemon's environment) is UTF-8 and the name is UTF-8 (in a C locale fnmatch matches one byte), and `-iname`/`-ipath` on a non-ASCII name falls back. `.git` and the state directory are walked like any directory. |
 | jq | `jq [-r] [-c] [-S] [-M] FILTER FILE` (flags before the filter, also clustered as `-rc`), `cat FILE \| jq ...`, `jq ... < FILE`, `< FILE jq ...`, and after `cd DIR &&`. FILTER is a pipeline (up to 6 stages) of paths (`.`, `.a`, `.a.b`, `."key with space"`, `.["k"]`, `.[N]`, `.[-N]`, `.[N:M]`, `.[]`, `.a[]`) and `keys`, `length`, `type` (`ozagia.core.jq`) | jq's exact stdout, read-only (no graph refresh). Left to the real jq: any other filter or option (reason `jq filter '...' is not mapped` / `jq option X is not mapped`), several or no files, a result jq reports as an error (`.a` of an array, `.[]` of null, `keys` of a string, ...), a number with an exponent (jq 1.7 rewrites it), with jq other than 1.7 or 1.8 any number that is not an integer below 2^53 (jq 1.6 prints doubles; versions after 1.8 are unchecked), an integer literal over 20 digits that would need converting, a computed non-integer (`length` of 2.5), a BOM, NaN, a lone surrogate escape, several JSON values, input nested deeper than jq 1.7's parser limit (256 slots: one per array, two per object member; jq 1.8 allows 10000, the 256 limit is kept), output over 1 MB, and any `jq` command when no `jq` is on the daemon's `PATH` (reason `jq is not installed`, so the shell says `command not found`). The `jq` version is re-read when `PATH` or the binary changes. |
-| ruff | `ruff check [PATH...] [--select X]... [--output-format concise\|full]` (also `--select=X`, `--output-format=X`, `--`), the executable as `ruff` on `PATH` or a path such as `.venv/bin/ruff` | runs ruff itself (with `--no-fix`; paths inside the root): its exact output, stdout and stderr as one stream, then `[ozagia] lint <rule> <file>:<line> <key>` per finding (at most 30; from a second run with `--output-format json`) and `[ozagia] exit <n>` when ruff exits non-zero. Left to the shell: any other option (`--fix`, `--watch`, `--output-format json`, ...), `ruff format` and other subcommands, a ruff configuration nearest the working directory or a path that sets `fix = true`, and a missing executable. |
+| ruff | `ruff check [PATH...] [--select X]... [--output-format concise\|full]` (also `--select=X`, `--output-format=X`, `--`), the executable as `ruff` on `PATH` or a path such as `.venv/bin/ruff` | runs ruff itself (with `--no-fix`; paths inside the root): its exact output, stdout and stderr as one stream, then `[ozagia] lint <rule> <file>:<line> <key>` per finding (at most 30; from a second run with `--output-format json`) and `[ozagia] exit <n>` when ruff exits non-zero. Left to the shell: any other option (`--fix`, `--watch`, `--output-format json`, ...), `ruff format` and other subcommands, a ruff configuration ruff would use for the working directory or a path (the nearest project configuration, else the user-level `~/.config/ruff/` one) that sets `fix = true`, also through `extend`, or whose `extend` chain cannot be read, and a missing executable. Like captured pytest it runs without the daemon's graph lock (taken only for the keys), in its own process group, killed as a group on timeout. |
 | compound | see below | the steps, in order |
 | git_refs | `git commit\|push\|stash\|branch\|checkout\|switch\|reset\|rebase\|merge\|tag\|worktree\|cherry-pick\|revert\|am\|pull\|fetch\|bisect\|...` (`intent.shell.GIT_REF_MOVING`, shared with the Claude Code hook and `eval.agent.OPENCODE_GIT_DENY`), anywhere in the command: in any segment, after `VAR=value` prefixes, shell keywords and group openers (`{ ! if then do else elif while until`), through wrapper commands (`env [-i] [-u N] [-S '...']`, `command`, `builtin`, `exec`, `nice`, `timeout`, `nohup`, `setsid`, `stdbuf`, `ionice`, `chrt`, `taskset`, `sudo`, `doas`, `time`, `xargs`, `watch`, `flock`, `runuser`, `strace`, `ltrace`, `busybox`, `unbuffer`, `eval`, `function NAME { ... }`, `coproc`, `find -exec\|-execdir\|-ok\|-okdir`, `su\|script\|flock -c '<script>'`, repeated, with clustered options such as `sudo -iu root`), as `/path/to/git`, through `git -c alias.<x>=<ref-moving>`, inside a backtick or `$(...)` substitution, and inside `sh\|bash\|zsh\|dash\|ksh\|fish\|... -c '<script>'` (classified once more; a script nested deeper is refused when it names `git` and then a ref-moving subcommand) | tool error `Refused by ozagia: <command> changes git refs`. Listing forms (`git branch`, `git tag -l`, `git stash list`, `git worktree list`, `git bisect log`) are read-only. |
 | git_read, other, complex | everything else | `handled: false` |

@@ -12,7 +12,7 @@ A handled answer of a non-mutating tool (read, grep, glob), error or not,
 also carries `permission` (`permission_request`), which the plugin asks for
 before it shows the output.
 
-    `after(memory, tool, input, output)` runs after a built-in (or any) call and
+`after(memory, tool, input, output)` runs after a built-in (or any) call and
 returns `{"append": "<text or empty>", "meta": {...}}`. `meta` always has
 `intent` (a short name), `keys` (node keys involved) and `ms`. After a
 built-in edit, write or patch it also has the lint lines of the changed
@@ -38,6 +38,16 @@ receives), and never appear in outputs:
     _test_env               the environment (dict) for a captured pytest. It
                             replaces the inherited environment, so the tests
                             see what the agent's own shell would.
+                            Linters after an edit run with it too.
+    _reply_deadline         `time.monotonic()` when the caller stops waiting
+                            for the answer; the lint budget is cut to it.
+    _unlock                 a context manager that releases the caller's
+                            graph lock and takes it again; lint runs its
+                            linters inside it.
+    _lock                   the graph lock, for a call the caller runs
+                            without it (captured pytest, `ruff check`): the
+                            handler takes it for the steps that read the
+                            graph.
 """
 from __future__ import annotations
 
@@ -644,12 +654,16 @@ def after(memory: Any, tool: str, input: dict[str, Any], output: Any, *,
             if len(pending) > MAX_REFRESH_FILES:
                 lines.append(tag("many files changed; graph refresh deferred"))
             elif pending:
+                shas: dict[str, str] = {}
+                if tool == "edit":
+                    from ozagia.intent.lint import file_shas
+                    shas = file_shas(memory, pending)
                 delta = memory.reingest(pending)
                 lines.extend(delta_lines(delta))
                 meta["keys"].extend(delta_keys(delta))
                 if tool in ("edit", "write", "patch"):
                     lines.extend(_after_lint(memory, tool, inp, pending,
-                                             delta, meta))
+                                             delta, meta, shas))
     except Exception as e:  # noqa: BLE001 - the tool already ran
         meta.update(intent="after_exception", error=f"{type(e).__name__}: {e}")
     try:
@@ -667,16 +681,17 @@ def after(memory: Any, tool: str, input: dict[str, Any], output: Any, *,
 
 
 def _after_lint(memory: Any, tool: str, inp: dict[str, Any],
-                pending: list[str], delta: Any, meta: dict[str, Any]
-                ) -> list[str]:
+                pending: list[str], delta: Any, meta: dict[str, Any],
+                before_sha: dict[str, str] | None = None) -> list[str]:
     """Lint lines for the lines a built-in edit, write or patch changed
     (`ozagia.intent.lint`); never raises."""
     try:
         from ozagia.intent.lint import after_changes, lint_changes, lint_meta
-        changes = after_changes(memory, tool, inp, pending, delta)
+        changes = after_changes(memory, tool, inp, pending, delta,
+                                before_sha=before_sha)
         if not changes:
             return []
-        got = lint_changes(memory, changes)
+        got = lint_changes(memory, changes, inp=inp)
     except Exception:  # noqa: BLE001 - lint is advisory only
         return []
     meta.update(lint_meta(got))

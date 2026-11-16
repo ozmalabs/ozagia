@@ -122,10 +122,10 @@ def _before(memory: Any, target: Any) -> str | None:
         return None
 
 
-def _lint(memory: Any, target: Any, before: str | None, *, created: bool = False
-          ) -> tuple[list[str], dict[str, int]]:
-    """Lint lines for the lines the edit changed (`ozagia.intent.lint`);
-    never raises."""
+def _lint(memory: Any, target: Any, before: str | None, inp: dict[str, Any], *,
+          created: bool = False) -> tuple[list[str], dict[str, int]]:
+    """Lint lines for the lines the edit changed (`ozagia.intent.lint`;
+    `inp` for its reserved fields); never raises."""
     if before is None and not created:
         return [], {}
     try:
@@ -138,7 +138,8 @@ def _lint(memory: Any, target: Any, before: str | None, *, created: bool = False
         if created and not applies(memory, target.rel):
             return [], {}
         after = target.path.read_text(encoding="utf-8", errors="replace")
-        got = lint_changes(memory, {target.rel: changed_lines(before, after)})
+        got = lint_changes(memory, {target.rel: changed_lines(before, after)},
+                           inp=inp)
         return list(got["lines"]), lint_meta(got)
     except Exception:  # noqa: BLE001 - lint never fails the edit
         return [], {}
@@ -153,7 +154,8 @@ def handle_edit(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(old, str) or not isinstance(new, str):
         raise IntentError("oldString and newString must be strings")
     if old == "":
-        res = handle_write(memory, {"path": path, "content": new,
+        reserved = {k: v for k, v in inp.items() if str(k).startswith("_")}
+        res = handle_write(memory, {**reserved, "path": path, "content": new,
                                     "_preflight": inp.get("_preflight")})
         res["intent"] = "edit_write"
         return res
@@ -204,7 +206,7 @@ def handle_edit(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
                          "the parse was not checked"))
     if res.get("warning"):
         lines.append(warning_line(str(res["warning"])))
-    lint_lines, lint_meta = _lint(memory, target, before)
+    lint_lines, lint_meta = _lint(memory, target, before, inp)
     lines.extend(lint_lines)
     keys = list(dict.fromkeys([*res["keys"], *delta_keys(delta),
                                *(r.get("key") for r in
@@ -293,7 +295,7 @@ def handle_key_edit(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
         lines.append(tag("broken references truncated"))
     if res.get("warning"):
         lines.append(warning_line(str(res["warning"])))
-    lint_lines, lint_meta = _lint(memory, target, before)
+    lint_lines, lint_meta = _lint(memory, target, before, inp)
     lines.extend(lint_lines)
     keys = list(dict.fromkeys([*res["keys"], *delta_keys(delta),
                                *(r.get("key") for r in
@@ -413,7 +415,8 @@ def handle_write(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
     head = f"{'replaced' if existed else 'created'} {fk}"
     if backup:
         head += f"  backup: {backup}"
-    lint_lines, lint_meta = _lint(memory, target, before, created=not existed)
+    lint_lines, lint_meta = _lint(memory, target, before, inp,
+                                 created=not existed)
     lines = ["Wrote file successfully.", tag(head), *delta_lines(delta),
              *(warning_line(w) for w in warnings), *lint_lines]
     keys = list(dict.fromkeys([fk, *delta_keys(delta)]))
