@@ -1,8 +1,9 @@
 # Changelog
 
-## 0.1.0 (2026-11-16)
+## Unreleased
 
-First release.
+First published release. (`v0.1.0` was tagged, but its release build failed
+on the test job and it was never published.)
 
 - One-shot install: `curl -fsSL https://ozagia.com/install | bash` puts a
   self-contained ozagia (bundled CPython, tree-sitter parsers, PyYAML, SymPy
