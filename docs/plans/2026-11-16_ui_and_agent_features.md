@@ -1836,6 +1836,21 @@ Three agents start from the current main:
 The same review/merge/full-suite gate applies. The live Desktop smoke test and
 model-provider adapters remain host/provider-dependent.
 
+Status: `hints-integration` merged as `3648304` (`fed25bd`); `config-rewire`
+merged as `a9b95a3` (`504cff0`); `task-executor` merged as `33bfcfa`
+(`93f1f69`). Each passed its targeted suite and a full suite on its own tree;
+the merged tree passed the final suite (`4241 passed, 21 skipped`) and ruff.
+Wave 9 is complete; the live Desktop smoke test and model-provider adapters
+remain host/provider-dependent. Next tractable follow-ups are exact per-job
+disk accounting, command-derived path extraction for `patch`/`shell`, and live
+or multi-model review with an injected test runner.
+
+Known follow-ups from the config migration: `[security]` in
+`ozagia/config.toml` is reported as unmapped until its loader moves; the
+doctor text summary still prints only the active path (the structured section
+has the full source report); `adapters.registry` reload caching keys on the
+active config path only.
+
 ### Library-first workstream (2026-11-16)
 
 One additional agent starts from `79c3b3e`:
