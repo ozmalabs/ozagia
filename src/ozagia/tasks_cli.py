@@ -1,9 +1,11 @@
 """``python -m ozagia.tasks_cli``: validate, preview and run bounded tasks.
 
-``run`` is a preview unless ``--allow-exec`` is passed. The CLI never calls a
-model and never supplies a tool executor: a test or host integration must
-inject one through :func:`main` (``executor=...``). Without one, an
-``--allow-exec`` run is refused and records the refusal.
+``run`` is a preview unless ``--allow-exec`` is passed. By default the CLI
+supplies no executor and never calls a model or a tool: a test or host
+integration must inject one through :func:`main` (``executor=...``). Without
+one, an ``--allow-exec`` run is refused and records the refusal. Passing
+``--executor local`` (or ``--local``) selects the built-in read-only
+:class:`ozagia.core.task_exec.LocalExecutor`.
 """
 from __future__ import annotations
 
@@ -14,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from ozagia.config import repo_root
+from ozagia.core import task_exec
 from ozagia.core import tasks as T
 
 
@@ -54,7 +57,12 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--dry-run", action="store_true",
                      help="validate and preview even with --allow-exec")
     run.add_argument("--allow-exec", action="store_true",
-                     help="execute steps through the injected executor")
+                     help="execute steps through the injected or local executor")
+    run.add_argument("--executor", choices=("local",), default=None,
+                     help="built-in executor to use with --allow-exec "
+                          "(local = read-only tools and planned pytest)")
+    run.add_argument("--local", action="store_true",
+                     help="alias for --executor local")
     run.add_argument("--approve", action="store_true",
                      help="approve mutating steps whose approval is 'ask'")
     run.add_argument("--root", default=None)
@@ -86,6 +94,8 @@ def main(argv: list[str] | None = None, *,
         if args.command == "run":
             spec = T.load_spec(args.spec)
             root = _root(args.root)
+            if args.local or args.executor == "local":
+                executor = task_exec.LocalExecutor(root)
             runner = T.TaskRunner(spec, root, executor=executor)
             execute = bool(args.allow_exec and not args.dry_run)
             report = runner.run(
