@@ -37,6 +37,10 @@ glibc) and macOS (arm64, x64). `ozagia self check --tui` verifies the install;
   Markdown section ops, JSON path ops, HCL block/attribute ops and optional
   comment-preserving YAML path ops. Preview by default, base hash check,
   atomic write, backup. A diff is output only, never input.
+- **Review**: deterministic review of a commit range (`ozagia-review`) or of the
+  whole repository (`ozagia review-repo`: import cycles, test gaps, dead
+  symbols, stale doc references, security hygiene, ops sources, lock files),
+  with stable finding ids and graph keys. No model calls.
 - **Evals**: a leakage-checked retrieval eval, a break/fix agent eval with
   selectable agent backends (OpenCode, Claude Code), and an index bench.
 

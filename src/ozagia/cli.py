@@ -32,6 +32,11 @@
                    [--flags F] [--expect N] [--apply --plan-id ID] ...
                                                   (one pattern across files;
                                                   preview unless --apply)
+    ozagia review-repo [--root R] [--json] [--out F] [--section S ...]
+                       [--compare PACKET] [--fail-on blocking|major|never]
+                       [--index] [--budget-s S] [--model-pass]
+                                                  (deterministic whole-repo
+                                                  review, docs/repo_review.md)
     ozagia --version
 
 `daemon`, `bg`, `mcp`, `eval` and `check` pass every argument after their name to
@@ -877,6 +882,47 @@ def _cmd_replace(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_review_repo(args: argparse.Namespace) -> int:
+    """`ozagia review-repo`: a deterministic whole-repository review packet
+    (`ozagia.core.repo_review`)."""
+    from ozagia.core import repo_review as RR
+    root = _root(args.root)
+    try:
+        packet = RR.review_repo(root, sections=args.section, compare=args.compare,
+                                budget_s=args.budget_s, index=args.index,
+                                graph_path=args.graph)
+        if args.model_pass:
+            path = RR.save_compact(root, packet)
+            packet["model_review"] = {
+                "status": "prepared",
+                "compact_path": path,
+                "reason": ("the CLI never calls a model; run the reviewers on "
+                           "the compact packet with `python -m "
+                           "ozagia.harness.review --live --packet PATH --plan "
+                           "PLAN --base-url URL` and OZAGIA_EVAL_LIVE=1"),
+                "truth_assessed": False,
+            }
+    except RR.PreflightError as exc:
+        if args.json:
+            print(RR.packet_json(exc.report), end="")
+        else:
+            print(RR.format_refusal(exc.report), end="", file=sys.stderr)
+        return 2
+    except (RR.RepoReviewError, RR.CR.CodeReviewError, OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    text = RR.packet_json(packet) if args.json else RR.format_packet(packet)
+    if args.out:
+        try:
+            RR.atomic_write(args.out, RR.packet_json(packet) if args.json
+                            or str(args.out).endswith(".json") else text)
+        except RR.CR.CodeReviewError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+    print(text, end="")
+    return RR.exit_code(packet, args.fail_on)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog=PROG, description=__doc__.splitlines()[0])
     p.add_argument("--version", action="version", version=f"{PROG} {_version()}")
@@ -1146,6 +1192,37 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument("--root", default=None, help="repository root")
     rp.add_argument("--json", action="store_true", help="print the result as JSON")
 
+    rr = sub.add_parser("review-repo", help="deterministic review of the whole "
+                                            "repository (docs/repo_review.md)",
+                        description="Review the checkout: architecture, tests, "
+                                    "health, churn, docs, security hygiene, ops "
+                                    "sources and dependencies. No model calls, no "
+                                    "network, no writes to the repository.")
+    rr.add_argument("--root", default=None, help="repository root")
+    rr.add_argument("--json", action="store_true", help="print the packet as JSON")
+    rr.add_argument("--out", default=None,
+                    help="also write the output atomically to this path (a .json "
+                         "path gets the JSON packet)")
+    rr.add_argument("--section", action="append", default=None,
+                    choices=("architecture", "tests", "health", "churn", "docs",
+                             "security", "ops", "dependencies"),
+                    help="review only this section (repeatable; default: all)")
+    rr.add_argument("--compare", default=None, metavar="PACKET",
+                    help="previous packet JSON: report new, resolved and "
+                         "unchanged finding ids")
+    rr.add_argument("--fail-on", default="blocking",
+                    choices=("blocking", "major", "never"),
+                    help="exit 1 at or above this severity (default: blocking)")
+    rr.add_argument("--index", action="store_true",
+                    help="build or refresh the graph snapshot first")
+    rr.add_argument("--graph", default=None,
+                    help="graph snapshot (default: <state dir>/graph.json)")
+    rr.add_argument("--budget-s", type=float, default=60.0,
+                    help="wall-clock budget for the sections (default: 60)")
+    rr.add_argument("--model-pass", action="store_true",
+                    help="also write a compact packet for model reviewers under "
+                         "<state dir>/reviews/ (no model is called)")
+
     preflight = sub.add_parser("preflight", help="dry-run IaC emulator plan")
     psub = preflight.add_subparsers(dest="action", required=True)
     plan = psub.add_parser("plan", help="print an ordered, scrubbed plan")
@@ -1167,7 +1244,7 @@ def _opencode_exe(value: str | None) -> str:
 
 
 _COMMANDS = frozenset({"index", "agent", "install", "who", "replace",
-                       *DELEGATES})
+                       "review-repo", *DELEGATES})
 # Agent options that may lead a bare `ozagia ...` (the TUI).
 _AGENT_FLAGS = frozenset({"--research", "--mcp", "--model", "-m", "--workdir",
                           "--root", "--clone", "--prompt", "--prompt-file"})
@@ -1239,6 +1316,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_who(args)
     if args.command == "replace":
         return _cmd_replace(args)
+    if args.command == "review-repo":
+        return _cmd_review_repo(args)
     parser.error(f"unknown command {args.command}")  # pragma: no cover
     return 2
 

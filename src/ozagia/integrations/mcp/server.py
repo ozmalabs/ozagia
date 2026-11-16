@@ -882,6 +882,36 @@ _TOOLS.extend([
 ])
 
 
+# Whole-repository review (`ozagia.core.repo_review`): deterministic, no model
+# calls. The full packet goes to `<state dir>/reviews/`; the answer is a
+# budgeted summary.
+_TOOLS.append({
+    "name": "dev_review_repo",
+    "description": (
+        "Review the whole repository deterministically: architecture (import "
+        "cycles, hubs, layering), tests (failing tests from the record, "
+        "untested modules), health (large files and functions, TODO density, "
+        "unreferenced symbols), churn hotspots without tests, stale doc "
+        "references, security hygiene (tracked .env and key files, sensitive "
+        "constructs; not a security audit), ops sources (unpinned images, "
+        "restart policy, health checks, published ports) and dependency lock "
+        "files. Uses the graph only when it is fresh and says what it could "
+        "not check. Returns counts and the top findings, each with an id, graph "
+        "keys and a suggested goal; the full packet is written under "
+        ".ozagia/reviews/ (latest.json is the newest)."),
+    "inputSchema": _schema({
+        "sections": {"type": "array", "items": {"type": "string"},
+                     "description": "Only these sections (architecture, tests, health, churn, docs, security, ops, dependencies); default all."},
+        "compare_latest": {"type": "boolean", "default": False,
+                           "description": "Compare finding ids with the previous latest.json packet."},
+        "budget_s": {"type": "number", "default": 30,
+                     "description": "Wall-clock budget for the sections (at most 300 s)."},
+        "max_findings": {"type": "integer", "default": 10,
+                         "description": "Top findings to return (at most 50)."},
+    }),
+})
+
+
 # --------------------------------------------------------------------------- #
 # dispatch
 # --------------------------------------------------------------------------- #
@@ -1027,6 +1057,7 @@ class DevMemoryServer:
             "dev_working_set": self._working_set,
             "dev_files_list": self._files_list,
             "dev_files_explain": self._files_explain,
+            "dev_review_repo": self._review_repo,
         } if mode in {"coding", "combined"} else {})
         if self.mem is not None:
             present = {n.get("type") for n in self.mem.nodes.values()}
@@ -1306,6 +1337,31 @@ class DevMemoryServer:
             res["lint"] = lines
             res.update(meta)
         return res
+
+    def _review_repo(self, a: dict[str, Any]) -> Any:
+        """A whole-repo review (`ozagia.core.repo_review`): the packet is
+        saved under the state dir and a budgeted summary returned."""
+        from ozagia.core import repo_review as RR
+        root = Path(self.mem.raw_repo_root if self.mem else self.workspace).resolve()
+        budget = min(max(float(a.get("budget_s", 30)), 0.0), 300.0)
+        limit = min(max(int(a.get("max_findings", 10)), 0), 50)
+        compare = None
+        if a.get("compare_latest"):
+            latest = RR.reviews_dir(root) / RR.LATEST_NAME
+            compare = latest if latest.is_file() else None
+        try:
+            packet = RR.review_repo(
+                root, sections=a.get("sections") or None, compare=compare,
+                budget_s=budget,
+                graph_path=self.mem.dump if self.mem else None)
+            paths = RR.save_packet(root, packet)
+        except RR.PreflightError as exc:
+            return {"ok": False, "refused": True, "error": str(exc),
+                    "report": exc.report}
+        except RR.CR.CodeReviewError as exc:
+            return {"ok": False, "error": str(exc)}
+        return {"ok": True, **paths, **RR.brief(packet, max_findings=limit),
+                "compared_with": str(compare) if compare else None}
 
     def _who(self, a: dict[str, Any]) -> Any:
         """The sessions that edited a file (`ozagia.core.owners.who`): from

@@ -42,6 +42,7 @@ FULL_SURFACE_TOOLS = [
     "dev_symbol_callers", "dev_symbol_callees", "dev_symbol_graph_impact",
     "dev_symbol_resolve", "job_start", "job_wait", "job_list", "job_log",
     "job_stop", "dev_working_set", "dev_files_list", "dev_files_explain",
+    "dev_review_repo",
     "dev_graph_query", "dev_environments",
     "dev_check_iac", "dev_ops_record", "dev_ops_resume", "dev_live_import",
     "dev_live_diff", "dev_live_save", "dev_aws_cli_check",
