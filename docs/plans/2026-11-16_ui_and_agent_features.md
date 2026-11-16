@@ -139,6 +139,7 @@ Effort: S = 1-3 days, M = 1-2 weeks, L = 3-6 weeks of focused agent work.
 | 13 | Inspect agent logs and propose improvements | 3 | M | Medium-high | 10, 11 | 4 |
 | 14 | Process/connection management actions | 3 | M | Medium | 4, 6, 8; runtime (landed), W11 | 4 |
 | 15 | Scan repo and build modules (advisory first) | 4 | L | High | 4, 5, 7, 10, 11 | 4 |
+| 15a | Security and antipattern scan (graph + tools) | 5 | M | Medium | 5, 7, 15 | 5-6 |
 | 16 | Ocelot pinned installer and default auto-detect | 3 | S-M | Medium | 2 | 4 |
 | 17 | Ocelot enhancements for coding and other tasks | 3 | M | Medium | 7, 15 | 4 |
 | 18 | Standalone console | 3 | L | Medium | 1, 6, 8, 9 | 5 |
@@ -1168,6 +1169,112 @@ Two stages, deliberately separated:
 The scan is a bounded task. The build is a bounded task with a write scope and
 a review gate. "Submit upstream" is a separate export, not a side effect.
 
+### 15a. Security and antipattern scan
+
+Find security-relevant code, configuration and dependency problems using the
+graph plus optional off-the-shelf tools. This is a triage layer, not a proof
+of exploitability: every finding carries evidence, provenance and a confidence
+note, and `truth_assessed` is false.
+
+**Graph-derived checks** (no network, no extra tools):
+
+- entry points and request handlers (HTTP routes, CLI arguments, queue
+  consumers) mapped to sinks;
+- injection candidates: `eval`/`exec`, shell execution, `shell=True`,
+  string-built SQL, template injection, unsafe deserialization (`pickle`,
+  `marshal`, `yaml.load`), path traversal and unsafe archive extraction;
+- SSRF candidates: request-controlled URL fetch without an allowlist;
+- crypto misuse: MD5/SHA-1 for security, disabled TLS verification, `verify=False`,
+  static IVs, hardcoded keys, weak password hashing;
+- auth/session issues: missing permission checks on routes, cookie flags,
+  JWT `alg: none`/unverified decode, default credentials;
+- configuration: debug mode, wildcard CORS, permissive file modes, public
+  buckets, missing security headers where the framework is known;
+- secret-like literals (the file ledger/redactor patterns), separated from
+  false positives by location and entropy;
+- CI/supply chain: unpinned actions, `curl | sh`, `--no-verify`, untrusted
+  pull-request workflows, dependency manifests without lockfiles;
+- OWASP Top 10 mapping (`A01`-`A10`) and CWE where the rule is specific.
+
+**Optional tool adapters** (explicit, injected, never auto-installed):
+
+- dependency/CVE: `pip-audit`, `npm audit --json`, `cargo audit --json`,
+  `govulncheck`, `osv-scanner --format json`;
+- SAST/secrets/containers: `semgrep --sarif`, `bandit -f json`,
+  `gitleaks detect --report-format json`, `trivy fs --format json`;
+- parse SARIF/JSON/OSV into the same finding shape; record tool name,
+  version, command (no secrets), database time and exit status;
+- offline by default. A tool that needs a network database refresh requires
+  `--allow-network`, a tool allowlist and an explicit user action. A missing
+  tool is reported as `unavailable`, not a failure. No arbitrary command
+  execution: the registry is fixed and each adapter has a timeout/output cap.
+
+**Finding shape:**
+
+```json
+{
+  "id": "sec-...",
+  "category": "owasp:a03",
+  "kind": "injection",
+  "severity": "high",
+  "confidence": "medium",
+  "file": "src/app.py",
+  "line": 42,
+  "graph_path": ["route:POST /run", "sym:run", "sink:subprocess"],
+  "message": "request data reaches a shell command",
+  "evidence": {"kind": "graph_path", "detail": "..."},
+  "source": {"type": "graph", "rule": "shell-from-request"},
+  "remediation": "use an argv list and validate the input",
+  "false_positive_note": "manual review required",
+  "not_assessed": ["runtime reachability", "authentication policy"]
+}
+```
+
+**Configuration:**
+
+```toml
+[security]
+enabled = true
+tools = ["semgrep", "bandit", "gitleaks"]   # explicit opt-in
+allow_network = false
+fail_on = "high"          # blocking|high|medium|low|never
+exclude = ["tests/**", "vendor/**", "docs/**"]
+max_findings = 200
+```
+
+**Integration:**
+
+- code review: security/antipattern findings are added to the packet with
+  their evidence and confidence; `--fail-on` can include them.
+- repo scan: a `security` category ranks the highest-confidence findings and
+  vulnerable manifests.
+- bounded tasks: a `security_scan` task class with a read-only tool allowlist
+  and an explicit network gate; no auto-fix.
+- UI: security tab/panel later, driven by the same JSON.
+- MCP: read-only `dev_security_scan`/`dev_security_explain` if the surface is
+  small.
+
+**CLI:** `python -m ozagia.security_cli scan --root R [--tool NAME ...]
+[--allow-network] [--fail-on LEVEL] [--json] [--out FILE]`,
+`python -m ozagia.security_cli tools`, and `explain FINDING_ID`.
+
+**Acceptance:**
+
+- a graph path from a request parameter to a shell/SQL sink produces a
+  finding with the path and evidence;
+- a secret-like literal is found without printing the value;
+- a fake tool adapter produces a dependency CVE with tool/version/database
+  provenance;
+- no network, no tool install and no mutation by default;
+- missing tools and unknown dependency versions are explicit;
+- findings are capped and deduplicated across graph and tools;
+- code review and repo scan include the findings with the same IDs;
+- no auto-remediation and no claim of exploitability.
+
+**Non-goals:** no DAST, no exploit generation, no auto-fix, no arbitrary tool
+installation, no hosted vulnerability database, and no claim that a clean scan
+means the code is secure.
+
 ### 16. Ocelot distribution
 
 Do not silently download code on first run. Preferred order:
@@ -1462,6 +1569,17 @@ Four agents start from `75a39dd`:
 
 The same review/merge/full-suite gate applies; Ocelot coding enhancements and
 the live Desktop smoke test remain for the following wave.
+
+### Security workstream (2026-11-16)
+
+One additional agent starts from `64dc640`:
+
+| Worktree | Branch | Scope |
+| --- | --- | --- |
+| `~/ozmadev/ozagia-wt/security-scan` | `feat/security-scan` | Graph-derived OWASP/bad-practice findings plus explicit offline tool adapters |
+
+Status: `repo-scan` and `addin-extensions` are merged; `standalone-console`,
+`upstream` and `security-scan` are running.
 
 ## Open decisions
 
