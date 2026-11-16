@@ -10,7 +10,8 @@ The runner is not an agent and not a chat session:
 
 - it never calls a model;
 - it never reaches the network;
-- it never executes a tool itself;
+- it never executes a tool itself (the optional `LocalExecutor` described below
+  is a separate adapter the caller opts into);
 - the caller supplies the executor, and a run with no executor is refused.
 
 This is the safety and reproducibility layer that model and tool adapters will
@@ -246,6 +247,167 @@ executor is trusted to keep them short and non-secret; the runner cannot prove
 that a 200-character label contains no excerpt, so adapters must not put file
 bodies or prompts in labels.
 
+## Local executor (read-only)
+
+`ozagia.core.task_exec.LocalExecutor` is the built-in executor behind
+`--executor local` (or `--local`). It is an ordinary executor: the runner
+still validates the task, checks preflight and gates, accounts the budget and
+writes evidence.
+
+```python
+from ozagia.core.task_exec import LocalExecutor
+
+executor = LocalExecutor(root)
+executor(step, context)
+```
+
+`LocalExecutor(root, *, policy=None, graph_path=None, python=None)`:
+
+- `policy` is a `LocalPolicy` or a mapping of its fields. Unknown keys,
+  non-integers and non-positive caps are rejected at construction.
+- `graph_path` defaults to `<root>/.ozagia/graph.json`. A relative path is
+  resolved against `root`.
+- `python` defaults to the interpreter running the process, so a test step
+  does not depend on a `PATH` lookup.
+
+Supported tools and arguments:
+
+| Tool | Arguments | Behaviour |
+| --- | --- | --- |
+| `read` | `path` or `file`; `start`/`end` (1-based, inclusive) or `offset`/`limit` | Reads one UTF-8 regular file inside the step's declared paths. |
+| `grep` | `pattern`; `regex`, `case_sensitive`, `max_matches`/`limit` | Literal search by default, or a Python regular expression, over the step's paths. |
+| `glob` | `pattern` or `glob`; `max_results`/`limit` | Matches paths under the step's paths, against both the repository-relative path and the path relative to each step path. `*` and `?` stay inside one path component; `**` matches any number of directories (including none); a trailing `**` matches everything below that directory. |
+| `graph_search` | `query`; `types`, `limit` | Read-only `DevMemory.search` over the existing graph snapshot. |
+| `graph_impact` | `path` or `file`; `depth` | Reverse dependents and directly linked test files from the existing snapshot. |
+| `test` | `test_plan` (supplied by the runner) | Runs `python -m pytest` on exactly the plan's selected files. |
+
+Examples:
+
+```toml
+[[steps]]
+id = "read-task"
+tool = "read"
+goal = "Read the runner's docstring."
+paths = ["src/ozagia/core"]
+[steps.args]
+path = "src/ozagia/core/tasks.py"
+start = 1
+end = 80
+
+[[steps]]
+id = "find-tests"
+tool = "glob"
+goal = "Find task tests."
+paths = ["tests"]
+[steps.args]
+pattern = "**/test_task*.py"
+```
+
+### Paths and caps
+
+Step `paths` are the read scope. An empty list means the repository root (still
+subject to the exclusions below). `read` requires its target to be inside that
+scope; `grep` and `glob` walk only inside it; `graph_impact` accepts only a
+path inside it.
+
+The executor rejects absolute paths, `..` traversal, `.git`, `.hg`, `.svn`, the
+state directory and every symlink component. Directory walks do not follow
+symlinks. A `read` target must resolve inside the repository root, and every
+`grep`/`glob` candidate comes from a validated scope root.
+
+Caps are enforced by `LocalPolicy`:
+
+| Field | Default | Effect |
+| --- | --- | --- |
+| `max_read_bytes` | 262144 | UTF-8 bytes returned by one `read`. |
+| `max_read_lines` | 1000 | Lines returned by one `read`. |
+| `max_file_bytes` | 4194304 | Files larger than this are refused by `read` and skipped by `grep`. |
+| `max_grep_matches` | 200 | Matching lines returned by `grep`. |
+| `max_grep_files` | 2000 | Files read by one `grep`. |
+| `max_grep_bytes` | 8388608 | Bytes read by one `grep`. |
+| `max_glob_results` | 1000 | Paths returned by `glob`. |
+| `max_walk_entries` | 100000 | Files considered by a walk. |
+| `max_graph_results` | 50 | Results from `graph_search`, dependents from `graph_impact`. |
+| `max_graph_depth` | 3 | Maximum `graph_impact` depth. |
+| `max_test_files` | 100 | Selected files one test step may run. |
+| `test_timeout_s` | 900 | Hard cap on one pytest process. |
+| `max_test_output_bytes` | 65536 | Pytest stdout/stderr returned. |
+| `max_output_bytes` | 524288 | Tool output serialised into one result. |
+| `allow_tests` | true | When false, `test` is blocked. |
+| `allow_graph` | true | When false, both graph tools are blocked. |
+
+Reaching a cap sets `truncated` or `output_truncated` in the tool output. A
+cap is never a silent full result.
+
+### Graph snapshots
+
+The graph tools load an existing snapshot through
+`ozagia.core.memory.DevMemory` and never call `build`, `refresh`, `reingest` or
+`write_snapshot`. A missing snapshot, an unreadable snapshot or one whose
+freshness is `stale`/`unknown` returns a structured error with
+`error_code` (`graph_missing`, `graph_invalid`, `graph_stale` or
+`graph_unverified`) and a `details` table naming the path and freshness. The
+executor does not build a graph to make the call succeed.
+
+### Test steps
+
+The runner computes the deterministic test plan and attaches it to a `test`
+step (`step["args"]["test_plan"]` and `context["test_plan"]`). The local
+executor runs pytest only when the plan is available, not refused, not
+`mode = "none"` and has at least one selected file. No plan, a refused plan, a
+`none` plan or an empty selection returns `blocked`; it never falls back to the
+full suite. Selected paths must be existing Python files inside the root.
+
+The command is a fixed argument list, never a shell:
+
+```text
+<python> -m pytest -q -p no:cacheprovider --rootdir=<root> --basetemp=<temp> -- FILES...
+```
+
+The child environment is a small whitelist: `PATH`, locale and timezone
+settings, a temporary `HOME`/`TMPDIR`, `PYTHONDONTWRITEBYTECODE=1`,
+`PYTHONHASHSEED=0`, `PYTHONIOENCODING=utf-8`, `NO_COLOR=1` and
+`GIT_TERMINAL_PROMPT=0`. Task variables, proxies, credentials and
+`PYTEST_ADDOPTS` are not inherited. `-p no:cacheprovider` and
+`PYTHONDONTWRITEBYTECODE=1` keep pytest from writing a cache or bytecode into
+the repository.
+
+The plan's `timeout_s` is capped by `policy.test_timeout_s`; a timeout returns
+an error with `timed_out: true`, no exit code and the partial output. A
+non-zero pytest exit is a completed execution: the result is `ok` with
+`exit_code` and `output.ok = false`, so the task can report a failing test
+instead of pretending the step crashed. A signal termination is an error.
+
+### Blocked tools
+
+`write`, `edit`, `patch`, `shell` and `model` return a structured `blocked`
+result in this slice; so do known tools this executor does not implement
+(`list`, `stat`, `lint`, `build`). An unknown tool is an `error`. A blocked
+result has `status = "blocked"`, `output.blocked = true`, the tool name and a
+reason; the runner records it and stops the run.
+
+Approval still belongs to the runner. A mutating step with
+`approval.mutate = "ask"` stops for `approval_required` unless the run is
+approved (`--approve` or `approve=True`); `deny` always stops. Because
+`LocalExecutor` blocks mutation, approving a mutating step only lets it reach
+the executor's `blocked` result; it never turns a write, patch or shell into an
+action. `approval.network` is likewise policy metadata: the local executor
+makes no network call and provides no network tool.
+
+### Result shape and safety
+
+Every result uses only the keys accepted by the task runner: `status`,
+`summary`, `usage`, `artifacts`, `evidence`, `output` and `state`. `usage`
+reports wall time; token, model-call, cost, memory, disk and pid values are
+never invented. `artifacts` is always empty and `evidence` contains labels and
+kinds only. File text and grep lines are returned in `output` (bounded by the
+caps above), not copied into evidence.
+
+The executor makes no model calls and no network calls. It does not sandbox
+the pytest child: tests can do whatever the test code does. Use test and task
+classes you trust, and remember that a subset run is still not a full-suite
+result.
+
 ## Test plan
 
 A `test_policy` field or a `test` step makes preflight compute a plan with
@@ -360,20 +522,26 @@ silently skipped.
 
 ```text
 python -m ozagia.tasks_cli validate SPEC [--json]
-python -m ozagia.tasks_cli run SPEC --input K=V [--dry-run] [--allow-exec] [--approve] [--root R] [--json]
+python -m ozagia.tasks_cli run SPEC --input K=V [--dry-run] [--allow-exec] [--executor local | --local] [--approve] [--root R] [--json]
 python -m ozagia.tasks_cli list [--root R] [--limit N] [--json]
 python -m ozagia.tasks_cli show [RUN] [--root R] [--json]
 ```
 
 `run` is a preview unless `--allow-exec` is passed; `--dry-run` forces a
-preview even when `--allow-exec` is present. The CLI has no built-in executor,
-so a real `--allow-exec` run without one is refused and records that refusal.
-Tests and host integrations inject an executor:
+preview even when `--allow-exec` is present. By default the CLI has no
+executor, so a real `--allow-exec` run without one is refused and records that
+refusal. `--executor local` (or `--local`) selects the built-in read-only
+[`LocalExecutor`](#local-executor-read-only). Tests and host integrations can
+still inject an executor:
 
 ```python
 from ozagia import tasks_cli
 tasks_cli.main(["run", spec, "--allow-exec"], executor=my_executor)
 ```
+
+`--executor local` takes precedence over an injected executor. `validate`
+never accepts an executor option and never touches the repository or the
+state directory.
 
 Exit status is `0` for a valid spec/preview or a successful run, `1` for an
 invalid spec, a refused run or a failed/stopped run, and `2` for a usage,
@@ -383,31 +551,40 @@ a paper-notes extraction.
 
 ## Safety limits
 
-- No model calls, no network and no tool execution happen here. Preflight runs
-  read-only git plumbing through `core.worktree`; nothing in this module starts
-  a service, job or shell.
+- `core/tasks.py` itself makes no model calls, no network calls and starts no
+  tool. Its preflight runs read-only git plumbing through `core.worktree`.
+  The optional `LocalExecutor` starts a pytest child for a declared `test`
+  step; it never starts a shell and never calls a model.
 - The executor is **trusted**. The runner constrains declarations, reported
   tools and reported artifacts. It does not sandbox the Python process or
-  inspect what the executor actually read.
-- `approval.network` is passed to the executor as policy; this build has no
-  network adapter and cannot enforce it.
+  inspect what the executor actually read. `LocalExecutor` validates paths and
+  symlinks, but it is not an OS sandbox.
+- `approval.network` is passed to the executor as policy; neither this build
+  nor `LocalExecutor` makes a network call. The pytest child is not
+  network-isolated.
 - Resource values are self-reported by the executor and accounted; enforcement
-  is not implemented here.
+  is not implemented here. The pytest timeout is a wall-clock timeout, not a
+  process-group, memory or disk limit.
 - Wall-time and approval checks happen between steps. A long-running executor
-  call is not interrupted.
+  call is not interrupted, except by `LocalExecutor`'s own test timeout.
 - Evidence is metadata-only. It records labels and hashes, not prompts or file
-  bodies. It cannot detect a secret embedded in a short summary or evidence
-  label; adapters must avoid that.
+  bodies. A tool's `output` may contain bounded file text or grep lines; it is
+  recorded as the step output, not as evidence. It cannot detect a secret
+  embedded in a short summary or evidence label; adapters must avoid that.
 - Artifact hashing reads files under the repository to compute SHA-256; it
-  does not copy their contents into the record.
+  does not copy their contents into the record. `LocalExecutor` reports no
+  artifacts because it is read-only.
 - The worktree policies are repository configuration, not a security boundary.
 
 ## What remains
 
-- Tool and model adapters: `read`/`grep`/`graph_search`/`test` implementations,
-  a model client and per-task model routing from the settings registry.
+- A model client and per-task model routing from the settings registry.
+  `LocalExecutor` covers the read-only `read`/`grep`/`glob`/`graph_search`/
+  `graph_impact`/`test` slice; mutating adapters and project-specific tools
+  remain open.
 - Resource enforcement: cgroup/rlimit limits, a watchdog, own OOM and
-  `resource_event` feedback to the task record.
+  `resource_event` feedback to the task record. The local test timeout is only
+  a wall-clock cap.
 - File-ledger and `markdown_route` integration: every artifact gets a ledger
   row with the task id, reason and retention policy.
 - A task-class library, approval surfaces and a UI for starting, watching and

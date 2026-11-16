@@ -694,6 +694,68 @@ def test_cli_validate_and_preview(repo, tmp_path: Path, capsys) -> None:
     assert tasks_cli.main(["validate", str(bad)]) == 1
 
 
+def test_cli_local_executor_preview_and_run(repo, capsys) -> None:
+    _root, worktree = repo
+    doc = _doc(
+        tools=["read"],
+        steps=[{"id": "read", "tool": "read", "goal": "Read the readme.",
+                "paths": ["."], "args": {"path": "README.md"}}],
+        gates={"after": ["evidence_present"]},
+    )
+    doc.pop("output_schema", None)
+    spec_path = _write_spec(worktree, doc, name="local.json")
+
+    assert tasks_cli.main([
+        "run", str(spec_path), "--root", str(worktree),
+        "--input", "diff=x", "--allow-exec", "--executor", "local",
+        "--dry-run", "--json",
+    ]) == 0
+    preview = json.loads(capsys.readouterr().out)
+    assert preview["mode"] == "preview"
+    assert preview["executed"] is False
+    assert preview["executor_configured"] is True
+    assert not T.tasks_dir(worktree).exists()
+
+    assert tasks_cli.main([
+        "run", str(spec_path), "--root", str(worktree),
+        "--input", "diff=x", "--allow-exec", "--local", "--json",
+    ]) == 0
+    run = json.loads(capsys.readouterr().out)
+    assert run["status"] == "ok", run
+    assert run["executed"] is True
+    assert run["steps"][0]["tool"] == "read"
+    assert run["evidence_count"] == 1
+    assert run["artifacts"] == []
+    run_dir = Path(run["run_dir"])
+    for name in ("events.jsonl", "manifest.json", "artifacts.json",
+                 "output.json"):
+        assert (run_dir / name).is_file()
+    artifacts = json.loads((run_dir / "artifacts.json").read_text(
+        encoding="utf-8"))
+    assert artifacts["count"] == 0
+    manifest = json.loads((run_dir / "manifest.json").read_text(
+        encoding="utf-8"))
+    assert manifest["status"] == "ok"
+    for path in (run_dir / "events.jsonl", run_dir / "manifest.json",
+                 run_dir / "artifacts.json"):
+        text = path.read_text(encoding="utf-8")
+        assert "# Test" not in text
+    assert not (worktree / ".pytest_cache").exists()
+
+
+def test_cli_without_executor_is_refused(repo, capsys) -> None:
+    _root, worktree = repo
+    spec_path = _write_spec(worktree, name="no-executor.json")
+    assert tasks_cli.main([
+        "run", str(spec_path), "--root", str(worktree),
+        "--input", "diff=x", "--allow-exec", "--json",
+    ]) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "refused"
+    assert report["stop"] == "error"
+    assert "no executor" in report["stop_detail"]
+
+
 def test_cli_run_list_and_show(repo, capsys) -> None:
     _root, worktree = repo
     spec_path = _write_spec(worktree, name="cli-run.json")
