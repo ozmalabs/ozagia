@@ -1423,6 +1423,18 @@ Status: all five are merged: `task-library` as `6259c99`, `research-ui` as
 `test-policy` as `5fdab35`. The final full suite is `3626 passed, 21 skipped`;
 ruff passes.
 
+### Wave 4: OpenCode add-in (2026-11-16)
+
+OpenCode is the first UI host. One agent starts from `acce262`:
+
+| Worktree | Branch | Scope |
+| --- | --- | --- |
+| `~/ozmadev/ozagia-wt/opencode-addin` | `feat/opencode-addin` | Local GUI plugin: server RPC over the ozagia CLIs, graph/status/testing panels and commands |
+
+Read-only in this slice: the panel renders graph views, status, worktree,
+resource and test-plan data. Mutating actions remain in the CLI until the
+action layer is reviewed.
+
 ## Open decisions
 
 1. **Config directory (resolved).** `ozagia/` is versioned project config;
