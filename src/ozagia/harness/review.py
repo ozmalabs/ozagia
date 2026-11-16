@@ -122,6 +122,11 @@ OUTPUT_SCHEMA: dict[str, Any] = {
             "type": "string",
             "description": "Short review summary; not a truth verdict.",
         },
+        "strengths": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Specific strengths of the work or argument.",
+        },
         "findings": {
             "type": "array",
             "items": {
@@ -427,6 +432,8 @@ def _validator_call(validator: Callable[..., Any], output: Mapping[str, Any],
         kwargs["state"] = state
     if _accepts_kwarg(validator, "packet"):
         kwargs["packet"] = packet
+    if _accepts_kwarg(validator, "drop_invalid_findings"):
+        kwargs["drop_invalid_findings"] = True
     try:
         return validator(output, **kwargs)
     except TypeError:
@@ -480,6 +487,21 @@ def _default_recorder() -> Callable[..., Any]:
         raise ReviewDriverError(
             "structured_review.record_review_run is unavailable")
     return function
+
+
+def _record_output(output: Mapping[str, Any],
+                   validation: Mapping[str, Any]) -> dict[str, Any]:
+    """Use normalized findings; invalid findings may have been dropped."""
+    findings = validation.get("findings")
+    if not isinstance(findings, list):
+        return dict(output)
+    cleaned = {
+        key: output[key]
+        for key in ("summary", "strengths", "recommendation", "confidence")
+        if key in output
+    }
+    cleaned["findings"] = findings
+    return cleaned
 
 
 def _recorder_payload(*, plan_id: str, role: str, model: str, round: str,
@@ -688,12 +710,14 @@ def run_review_matrix(
             })
             continue
 
+        recorded_output = _record_output(output, validation)
         entry: dict[str, Any] = {
             "role": role,
             "model": model,
             "reviewer_id": reviewer_id(role, model),
             "round": round_name,
             "output": output,
+            "recorded_output": recorded_output,
             "validation": validation,
             "usage": usage,
             "provider": meta["provider"],
@@ -709,7 +733,7 @@ def run_review_matrix(
                 model=model,
                 round=round_name,
                 packet_sha=packet_hash,
-                output=output,
+                output=recorded_output,
                 usage=usage,
                 provider=meta["provider"],
                 prompt_sha=prompt_hash,

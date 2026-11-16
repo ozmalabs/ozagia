@@ -29,7 +29,7 @@ _DOI_RE = re.compile(r"\b10\.\d{4,9}/[^\s\"'<>]+", re.I)
 _ARXIV_RE = re.compile(r"(?:arXiv\s*:\s*)?((?:\d{4}\.\d{4,5})|(?:[a-z-]+/\d{7}))(?:v\d+)?", re.I)
 _PMID_RE = re.compile(r"\bPMID\s*:?\s*(\d{1,9})\b", re.I)
 _PMCID_RE = re.compile(r"\bPMC\d{5,9}\b", re.I)
-_YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
+_YEAR_RE = re.compile(r"(?<!\d)(?:1[0-9]{3}|2[0-9]{3})(?!\d)")
 
 
 def _utc() -> str:
@@ -1002,7 +1002,14 @@ def export_bibtex(state: Mapping[str, Any]) -> str:
         if reference.get("year"):
             fields.append(("year", _bibtex_value(reference["year"])))
         if reference.get("venue"):
-            field = "journal" if reference.get("reference_type") == "article" else "booktitle"
+            reference_type = _collapse(reference.get("reference_type"))
+            field = (
+                "journal" if reference_type == "article"
+                else "publisher" if reference_type == "book"
+                else "school" if reference_type == "thesis"
+                else "institution" if reference_type == "report"
+                else "booktitle"
+            )
             fields.append((field, _bibtex_value(reference["venue"])))
         identifiers = normalize_identifiers(reference.get("identifiers"))
         if identifiers.get("doi"):

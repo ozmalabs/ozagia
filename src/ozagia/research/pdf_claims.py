@@ -116,6 +116,11 @@ _ABSTRACT_CUES = (
     "increase",
     "decrease",
     "we conclude",
+    "i am convinced",
+    "i believe",
+    "i conclude",
+    "i have no doubt",
+    "it seems to me",
 )
 _CONTRIBUTION_CUES = (
     "we propose",
@@ -125,6 +130,15 @@ _CONTRIBUTION_CUES = (
     "this paper presents",
     "we introduce",
     "we contribute",
+    "i argue",
+    "i am convinced",
+    "i am fully convinced",
+    "i believe",
+    "i contend",
+    "i have no doubt",
+    "i propose",
+    "in my view",
+    "my view is",
 )
 _DEFINE_RE = re.compile(
     r"\bwe\s+define\s+(?P<term>[^.;:]{1,120}?)\s+as\s+"
@@ -620,7 +634,7 @@ def candidate_claims(extraction: Any, *, max_claims: int = DEFAULT_MAX_CLAIMS) -
             sentence = block["text"][start:end]
             if _citation_or_url_only(sentence):
                 continue
-            folded = sentence.casefold()
+            folded = " ".join(sentence.casefold().split())
             if not any(cue in folded for cue in _ABSTRACT_CUES):
                 continue
             claim_type = (
@@ -658,7 +672,7 @@ def candidate_claims(extraction: Any, *, max_claims: int = DEFAULT_MAX_CLAIMS) -
             sentence = block["text"][start:end]
             if _citation_or_url_only(sentence):
                 continue
-            folded = sentence.casefold()
+            folded = " ".join(sentence.casefold().split())
             if not any(cue in folded for cue in _CONTRIBUTION_CUES):
                 continue
             bounded_end = _bounded_end(block["text"], start)

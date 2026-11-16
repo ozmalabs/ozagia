@@ -120,6 +120,29 @@ OZAGIA_EVAL_LIVE=1 python -m ozagia.harness.review --live \
 API keys are read from an environment variable or file and only sent in the
 Authorization header. They are not placed in prompts, outputs or logs.
 
+## Reconciliation backends
+
+Exact-string clustering is the conservative default. Two optional backends add
+a second view without replacing it:
+
+- **Embeddings (Ollama).** `review_reconcile` accepts `embedding_model` and
+  `embedding_url`. The default local model is `nomic-embed-text:latest`. Rows
+  with high cosine similarity on the same target are merged; the model, threshold
+  and clusters are recorded.
+- **Ocelot graph shapes (optional checkout).** `review_reconcile` accepts
+  `ocelot_root`, `ocelot_python`, and `ocelot_mode` (`inprocess`, `subprocess`,
+  or `auto`) or `OZAGIA_OCELOT` / `OZAGIA_OCELOT_PYTHON`. A worker mirrors
+  findings into Ocelot `Microtheory`/`Concept` nodes with target and
+  issue-family edges, loads `shape_vocabulary` and `analogy_search`, and returns
+  structural analogies and clusters. In-process mode requires the Ocelot tree
+  and its `substrate_rs` runtime to be importable; subprocess mode uses the
+  Ocelot venv. Core ozagia never imports Ocelot unless this optional path is
+  selected. Ocelot is MIT licensed; see `THIRD_PARTY_NOTICES.md`.
+
+Both backends record a candidate reconciliation. The exact clusters, original
+findings and dissent remain in the graph. Ocelot itself is MIT licensed but is
+not bundled; it remains an optional local checkout.
+
 ## Guardrails
 
 - Paper text is untrusted. A model can be prompt-injected; validation and quote

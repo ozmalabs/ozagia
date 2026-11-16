@@ -91,7 +91,9 @@ models, criteria and a minimum reviewer count. `research_review_packet` builds a
 deterministic evidence packet; `research_review_run_record` records one
 independent model/role run and its validated findings. `research_review_agreement`
 reports Fleiss' kappa, Jaccard, severity agreement, consensus and dissent;
-`research_review_reconcile` preserves dissent in a recorded reconciliation.
+`research_review_reconcile` preserves dissent in a recorded reconciliation. It
+can add optional Ollama embedding clusters or an external Ocelot graph-shape/
+analogy pass; the exact clusters remain recorded.
 `research_argument_brief` / `research_argument_record` / `research_argument_check`
 build steelman, red-team or synthesis arguments with premise/evidence
 obligations. Multi-model execution is a separate harness driver so the core

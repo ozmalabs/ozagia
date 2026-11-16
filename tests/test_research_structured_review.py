@@ -582,6 +582,28 @@ def test_reconciliation_preserves_dissent_without_support_edges(tmp_path):
     )
 
 
+def test_validate_review_output_can_drop_a_bad_finding_without_losing_the_run(tmp_path):
+    graph, claim, _reference = _base_graph(tmp_path)
+    plan = _plan(graph, claim)
+    packet = sr.build_review_packet(graph.state(), plan_id=plan["id"])
+    output = {
+        "summary": "One valid finding and one unsupported quote.",
+        "findings": [
+            _finding(claim["id"], wording="Missing baseline.", quote=claim["wording"]),
+            _finding(claim["id"], wording="Bad quote.",
+                     quote="This sentence is not in the packet."),
+        ],
+    }
+    strict = sr.validate_review_output(output, state=graph.state(), packet=packet)
+    assert strict["valid"] is False
+    partial = sr.validate_review_output(
+        output, state=graph.state(), packet=packet, drop_invalid_findings=True)
+    assert partial["valid"] is True
+    assert len(partial["findings"]) == 1
+    assert partial["findings"][0]["wording"] == "Missing baseline."
+    assert any("dropped" in warning for warning in partial["warnings"])
+
+
 def test_review_report_collects_plan_runs_findings_and_latest_reconciliation(tmp_path):
     graph, plan, _claim, _reference, runs = _review_fixture(tmp_path)
     sr.record_reconciliation(graph, plan_id=plan["id"], method="consensus")

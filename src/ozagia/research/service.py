@@ -730,18 +730,64 @@ class ResearchService:
             )
         if operation == "review_agreement":
             from ozagia.research import structured_review
-            return structured_review.review_agreement(state, args["plan_id"])
+            embedder = None
+            if args.get("embedding_model"):
+                from ozagia.research.semantic_reconcile import ollama_embedder
+                embedder = ollama_embedder(
+                    model=args["embedding_model"],
+                    base_url=args.get("embedding_url") or "http://127.0.0.1:11434",
+                )
+            return structured_review.review_agreement(
+                state, args["plan_id"], embedder=embedder,
+                cluster_threshold=args.get("cluster_threshold", 0.76))
         if operation == "review_reconcile":
             from ozagia.research import structured_review
-            return structured_review.record_reconciliation(
+            embedder = None
+            cluster_groups = None
+            cluster_method = "embedding"
+            cluster_model = None
+            ocelot = None
+            if args.get("ocelot_root") or args.get("ocelot") is True \
+                    or os.environ.get("OZAGIA_OCELOT"):
+                from ozagia.research import ocelot_reconcile
+                exact = structured_review.review_agreement(state, args["plan_id"])
+                ocelot = ocelot_reconcile.ocelot_groups(
+                    exact,
+                    ocelot_root=args.get("ocelot_root"),
+                    python=args.get("ocelot_python"),
+                    timeout=args.get("ocelot_timeout", 120),
+                    mode=args.get("ocelot_mode", "subprocess"),
+                )
+                cluster_groups = ocelot["groups"]
+                cluster_method = "ocelot_analogy"
+                cluster_model = ocelot["engine"]
+            elif args.get("embedding_model"):
+                from ozagia.research.semantic_reconcile import ollama_embedder
+                embedder = ollama_embedder(
+                    model=args["embedding_model"],
+                    base_url=args.get("embedding_url") or "http://127.0.0.1:11434",
+                )
+                cluster_model = args["embedding_model"]
+            result = structured_review.record_reconciliation(
                 graph,
                 plan_id=args["plan_id"],
-                method=args.get("method", "consensus"),
+                method=args.get("method") or (
+                    "ocelot_analogy" if cluster_groups is not None else "consensus"),
                 min_reviewers=args.get("min_reviewers"),
                 adjudicator=args.get("adjudicator"),
                 rationale=args.get("rationale"),
                 run_ids=args.get("run_ids"),
+                embedder=embedder,
+                cluster_threshold=(
+                    args["cluster_threshold"] if "cluster_threshold" in args
+                    else (None if cluster_groups is not None else 0.76)),
+                cluster_groups=cluster_groups,
+                cluster_method=cluster_method,
+                cluster_model=cluster_model,
             )
+            if ocelot is not None:
+                result["ocelot"] = ocelot
+            return result
         if operation == "review_report":
             from ozagia.research import structured_review
             return structured_review.review_report(state, args["plan_id"])

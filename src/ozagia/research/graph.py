@@ -163,7 +163,7 @@ _EDGE_ENDPOINTS = {
     "argues_for": (frozenset({"Argument"}), frozenset({"Claim"})),
     "uses": (
         frozenset({"Argument"}),
-        frozenset({"Claim", "Evidence", "Reference", "ReviewFinding"}),
+        frozenset({"Claim", "Evidence", "Reference", "ReviewFinding", "Source"}),
     ),
     # Structured extraction, appraisal, contradiction and living review.
     "extracts": (

@@ -23,7 +23,7 @@ INFERENCE_TYPES = frozenset(
 UNANSWERED_OBJECTION_STATUSES = frozenset(
     {"unanswered", "open", "unresolved", "pending"}
 )
-_USES_TARGET_TYPES = frozenset({"Claim", "Evidence", "Reference", "ReviewFinding"})
+_USES_TARGET_TYPES = frozenset({"Claim", "Evidence", "Reference", "ReviewFinding", "Source"})
 _ID_FIELD_TYPES = {
     "claim_ids": frozenset({"Claim"}),
     "evidence_ids": _USES_TARGET_TYPES,

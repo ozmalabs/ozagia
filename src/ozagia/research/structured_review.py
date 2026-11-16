@@ -15,7 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from itertools import combinations
 from typing import Any
 
@@ -927,8 +927,15 @@ def validate_review_output(
     *,
     state: Any = None,
     packet: Any = None,
+    drop_invalid_findings: bool = False,
 ) -> dict[str, Any]:
-    """Validate one model-shaped review output without recording anything."""
+    """Validate one model-shaped review output without recording anything.
+
+    With ``drop_invalid_findings=True``, a malformed or unsupported finding is
+    reported as a warning and omitted instead of invalidating the whole run.
+    This is for model drivers: one unsupported quote should not discard every
+    valid finding in the same review.
+    """
     errors: list[str] = []
     warnings: list[str] = []
     findings: list[dict[str, Any]] = []
@@ -953,7 +960,7 @@ def validate_review_output(
         errors.append("output must be an object")
         return {"valid": False, "errors": errors, "warnings": warnings, "findings": findings}
 
-    known = {"summary", "findings", "recommendation", "confidence"}
+    known = {"summary", "strengths", "findings", "recommendation", "confidence"}
     unknown = sorted(str(key) for key in output if key not in known)
     if unknown:
         warnings.append(f"output has unknown fields: {', '.join(unknown)}")
@@ -964,6 +971,16 @@ def validate_review_output(
     elif not summary.strip():
         warnings.append("summary is empty")
 
+    raw_strengths = output.get("strengths")
+    strengths: list[str] = []
+    if raw_strengths is not None:
+        if not isinstance(raw_strengths, list) or any(
+            not isinstance(item, str) or not item.strip() for item in raw_strengths
+        ):
+            errors.append("strengths must be a list of non-empty strings")
+        else:
+            strengths = list(dict.fromkeys(item.strip() for item in raw_strengths))
+
     raw_findings = output.get("findings")
     if not isinstance(raw_findings, list):
         errors.append("findings must be a list")
@@ -971,17 +988,22 @@ def validate_review_output(
         warnings.append("findings is empty")
     else:
         for index, raw in enumerate(raw_findings):
-            findings.append(
-                _normalise_finding(
-                    raw,
-                    index,
-                    state=current,
-                    reference_keys=reference_keys,
-                    packet_text=packet_text,
-                    errors=errors,
-                    warnings=warnings,
-                )
+            finding_errors: list[str] = []
+            finding = _normalise_finding(
+                raw,
+                index,
+                state=current,
+                reference_keys=reference_keys,
+                packet_text=packet_text,
+                errors=finding_errors,
+                warnings=warnings,
             )
+            if finding_errors and drop_invalid_findings:
+                warnings.append(
+                    f"findings[{index}] dropped: " + "; ".join(finding_errors))
+                continue
+            errors.extend(finding_errors)
+            findings.append(finding)
 
     recommendation = output.get("recommendation")
     if recommendation is not None and not isinstance(recommendation, str):
@@ -992,6 +1014,7 @@ def validate_review_output(
         "valid": not errors,
         "errors": errors,
         "warnings": warnings,
+        "strengths": strengths,
         "findings": findings,
     }
 
@@ -1101,6 +1124,7 @@ def record_review_run(
         "status": status,
         "output_sha256": output_sha256,
         "summary": summary,
+        "strengths": list(validation.get("strengths") or []),
         "recommendation": recommendation,
         "confidence": confidence,
         "finding_count": len(validation["findings"]),
@@ -1328,6 +1352,11 @@ def _agreement(
     *,
     run_ids: Sequence[str] | None = None,
     min_reviewers: int | None = None,
+    embedder: Callable[..., Any] | None = None,
+    cluster_threshold: float = 0.76,
+    cluster_groups: Sequence[Sequence[int]] | None = None,
+    cluster_method: str = "embedding",
+    cluster_model: str | None = None,
 ) -> dict[str, Any]:
     plan = _require_node(state, plan_id, frozenset({"ReviewPlan"}), "review plan")
     runs = _independent_runs(state, plan_id, run_ids)
@@ -1486,7 +1515,7 @@ def _agreement(
             for finding_id in row["finding_ids"]
             if finding_id in finding_nodes
         ]
-    return {
+    result = {
         "plan_id": plan["id"],
         "plan": dict(plan),
         "min_reviewers": min_reviewers,
@@ -1526,12 +1555,34 @@ def _agreement(
         "warnings": warnings,
         "truth_assessed": False,
     }
+    if cluster_groups is not None:
+        from ozagia.research.semantic_reconcile import recluster_agreement
+        return recluster_agreement(
+            result, groups=cluster_groups, method=cluster_method,
+            model=cluster_model, threshold=cluster_threshold)
+    if embedder is not None:
+        from ozagia.research.semantic_reconcile import recluster_agreement
+        return recluster_agreement(
+            result, embedder=embedder, threshold=cluster_threshold)
+    return result
 
 
-def review_agreement(state: Any, plan_id: str) -> dict[str, Any]:
+def review_agreement(
+    state: Any,
+    plan_id: str,
+    *,
+    embedder: Callable[..., Any] | None = None,
+    cluster_threshold: float = 0.76,
+    cluster_groups: Sequence[Sequence[int]] | None = None,
+    cluster_method: str = "embedding",
+    cluster_model: str | None = None,
+) -> dict[str, Any]:
     """Report finding agreement across independent runs; not accuracy."""
     current = _as_state(state)
-    return _agreement(current, plan_id)
+    return _agreement(
+        current, plan_id, embedder=embedder, cluster_threshold=cluster_threshold,
+        cluster_groups=cluster_groups, cluster_method=cluster_method,
+        cluster_model=cluster_model)
 
 
 # --------------------------------------------------------------------------- #
@@ -1546,6 +1597,11 @@ def record_reconciliation(
     adjudicator: Any = None,
     rationale: str | None = None,
     run_ids: Sequence[str] | None = None,
+    embedder: Callable[..., Any] | None = None,
+    cluster_threshold: float = 0.76,
+    cluster_groups: Sequence[Sequence[int]] | None = None,
+    cluster_method: str = "embedding",
+    cluster_model: str | None = None,
 ) -> dict[str, Any]:
     """Record a reconciliation over runs while preserving every dissent."""
     state = graph.state()
@@ -1559,7 +1615,11 @@ def record_reconciliation(
         adjudicator = _json_safe(adjudicator, "adjudicator")
     rationale = _optional_string(rationale, "rationale")
 
-    agreement = _agreement(state, plan_id, run_ids=run_ids, min_reviewers=min_reviewers)
+    agreement = _agreement(
+        state, plan_id, run_ids=run_ids, min_reviewers=min_reviewers,
+        embedder=embedder, cluster_threshold=cluster_threshold,
+        cluster_groups=cluster_groups, cluster_method=cluster_method,
+        cluster_model=cluster_model)
     selected_run_ids = agreement["run_ids"]
     metrics = {
         "fleiss_kappa": agreement["fleiss_kappa"],
@@ -1574,6 +1634,7 @@ def record_reconciliation(
         "min_reviewers": min_reviewers,
         "run_ids": selected_run_ids,
         "metrics": metrics,
+        "clustering": agreement.get("clustering"),
         "clusters": agreement["issues"],
         "consensus": agreement["consensus"],
         "dissent": agreement["dissent"],

@@ -1337,6 +1337,18 @@ def paper_review_report(state: Any, *, plan_id: str) -> dict[str, Any]:
     finding_items = [_finding_item(finding, runs_by_id) for finding in findings]
     strength_items = [item for item in finding_items if _is_strength(item)]
     weakness_items = [item for item in finding_items if not _is_strength(item)]
+    strength_items.extend(
+        {
+            "wording": strength,
+            "run_id": run.get("id"),
+            "reviewer": run.get("reviewer_id"),
+            "severity": "strength",
+            "issue_type": "strength",
+        }
+        for run in runs
+        for strength in (run.get("strengths") or [])
+        if isinstance(strength, str) and strength.strip()
+    )
     major_items = [
         item for item in finding_items if item.get("severity") in {"blocking", "major"}
     ]

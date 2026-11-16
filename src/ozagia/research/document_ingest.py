@@ -238,6 +238,18 @@ def ingest_document_claims(
             },
             rationale="The candidate wording was extracted from this document; this locates text and does not assess truth.",
         )
+        reference = registered.get("reference")
+        if isinstance(reference, Mapping) and reference.get("id"):
+            graph.link(
+                claim["id"], "cites", reference["id"],
+                provenance={
+                    "kind": f"{kind}_claim_reference",
+                    "candidate_id": candidate_id,
+                    "path": path,
+                    "sha256": sha256,
+                },
+                rationale="The claim was extracted from this work; the link identifies the work and does not assess truth.",
+            )
         existing[candidate_id] = claim
         claims.append(claim)
 
