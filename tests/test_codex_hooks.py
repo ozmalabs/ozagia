@@ -303,7 +303,8 @@ def test_pre_compact_sends_compact(repo, daemon):
                     sock=stub.sock)
     assert proc.returncode == 0 and proc.stdout == ""
     assert stub.requests == [{"id": 1, "op": "session_event", "harness": "codex",
-                              "session": "019a-sess", "event": "compact"}]
+                              "session": "019a-sess", "event": "compact",
+                              "compaction_hook": True}]
 
 
 def test_session_end_sends_end(repo, daemon):

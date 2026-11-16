@@ -71,19 +71,35 @@ def _config(repo: Path, text: str) -> None:
 
 def _state(policy: str = "stub", session: str = "s1", harness: str = "opencode",
            store: L.SessionStore | None = None) -> L.SessionState:
-    return (store or L.SessionStore()).get(harness, session, policy=policy)
+    """A session whose harness confirmed what `stub` needs."""
+    store = L.SessionStore() if store is None else store
+    store.confirm(harness, session, L.CAP_COMPACTION)
+    store.confirm(harness, session, L.CAP_AGENT_ID)
+    return store.get(harness, session, policy=policy)
 
 
-def _read(mem, state, **inp):
+def _ack(state, res):
+    if state is not None and isinstance(res["meta"].get("ack"), str):
+        state.ack([res["meta"]["ack"]])
+    return res
+
+
+def _read(mem, state, *, ack=True, **inp):
     res = I.handle(mem, "read", inp, state=state)
     assert res["handled"] and not res["is_error"], res
-    return res
+    return _ack(state, res) if ack else res
 
 
 def _shell(mem, state, command, **extra):
     res = I.handle(mem, "shell", {"command": command, **extra}, state=state)
     assert res["handled"] and not res["is_error"], res
-    return res
+    return _ack(state, res)
+
+
+def _small(a, b, fmt="{line}"):
+    """Lines a..b of SMALL_PY as a harness would show them."""
+    rows = SMALL_PY.splitlines()
+    return "\n".join(fmt.format(n=i, line=rows[i - 1]) for i in range(a, b + 1)) + "\n"
 
 
 # --------------------------------------------------------------------------- #
@@ -154,9 +170,9 @@ def test_containment_overlap_and_sha(tmp_path):
 # policy
 # --------------------------------------------------------------------------- #
 def test_harness_defaults(repo):
-    assert L.policy_for(repo, "opencode") == "stub"
-    assert L.policy_for(repo, "claude") == "stub"
-    # Codex subagent hooks carry the parent's session id: note, not stub.
+    # `stub` is opt-in for every harness until the eval has run.
+    assert L.policy_for(repo, "opencode") == "note"
+    assert L.policy_for(repo, "claude") == "note"
     assert L.policy_for(repo, "codex") == "note"
     assert L.policy_for(repo, "native") == "note"
     assert L.policy_for(repo, "kiro") == "note"
@@ -169,7 +185,7 @@ def test_policy_config(repo):
     _config(repo, '[reads]\nrepeat = "always"\n')
     with pytest.raises(ConfigError):
         load_project_config(repo)
-    assert L.policy_for(repo, "claude") == "stub"     # a bad file: defaults
+    assert L.policy_for(repo, "claude") == "note"     # a bad file: defaults
     _config(repo, '[reads]\noutline_lines = 10\noutline_bytes = 0\n')
     cfg = load_project_config(repo)
     assert (cfg.outline_lines, cfg.outline_bytes, cfg.repeat) == (10, 0, None)
@@ -199,7 +215,7 @@ def test_stub_for_an_unchanged_repeat(mem, repo):
 
 def test_edit_and_compaction_give_the_text_again(mem, repo):
     store = L.SessionStore()
-    st = store.get("opencode", "s1", policy="stub")
+    st = _state("stub", store=store)
     _read(mem, st, path="pkg/small.py")
     assert _read(mem, st, path="pkg/small.py")["meta"]["intent"] == "read_stub"
     (repo / "pkg" / "small.py").write_text(SMALL_PY + "V41 = 41\n")
@@ -299,15 +315,16 @@ def test_read_spec_ranges(mem, repo):
 def test_after_records_builtin_reads_and_notes(mem):
     st = _state("note", harness="codex")
     inp = {"command": "sed -n '1,10p' pkg/small.py"}
-    first = I.after(mem, "shell", inp, "V1 = 1\n", state=st)
+    first = I.after(mem, "shell", inp, _small(1, 10), state=st)
     assert first["append"] == "" and first["meta"]["intent"] == "after_read"
-    again = I.after(mem, "shell", {"command": "sed -n '2,3p' pkg/small.py"}, "x",
-                    state=st)
+    again = I.after(mem, "shell", {"command": "sed -n '2,3p' pkg/small.py"},
+                    _small(2, 3), state=st)
     assert re.match(r"^\[ozagia\] unchanged since read 1 \(lines 2-3, sha ", again["append"])
     assert again["meta"]["repeat"] == "note"
     # Claude's built-in Read, through after.
     claude = _state("stub", harness="claude")
-    I.after(mem, "read", {"path": "pkg/small.py", "offset": 1, "limit": 2000}, "", state=claude)
+    I.after(mem, "read", {"path": "pkg/small.py", "offset": 1, "limit": 2000},
+            _small(1, 40), state=claude)
     assert claude.find(L.read_spec(mem, "read", {"path": "pkg/small.py"}, served=False))
 
 
@@ -317,12 +334,12 @@ def test_check_read_for_hooks(mem):
     got = I.check_read(mem, "read", inp, state=st)
     assert (got["repeat"], got["stub"]) == (False, None)
     assert st.files == {}                     # a check records nothing
-    I.after(mem, "read", inp, "", state=st)
+    I.after(mem, "read", inp, _small(3, 6), state=st)
     got = I.check_read(mem, "read", inp, state=st)
     assert got["repeat"] and got["stub"].startswith("[ozagia] pkg/small.py unchanged")
     assert got["meta"]["repeat"] == "stub"
     note = _state("note", harness="codex")
-    I.after(mem, "read", inp, "", state=note)
+    I.after(mem, "read", inp, _small(3, 6), state=note)
     got = I.check_read(mem, "read", inp, state=note)
     assert got["repeat"] and got["stub"] is None and "repeat" not in got["meta"]
     assert I.check_read(mem, "read", inp, state=None)["policy"] == "off"
@@ -331,7 +348,8 @@ def test_check_read_for_hooks(mem):
 def test_call_index_counts_each_call_once(mem):
     st = _state("stub", harness="claude")
     I.check_read(mem, "shell", {"command": "sed -n '1,2p' pkg/small.py"}, state=st)
-    I.after(mem, "shell", {"command": "sed -n '1,2p' pkg/small.py"}, "", state=st)
+    I.after(mem, "shell", {"command": "sed -n '1,2p' pkg/small.py"}, _small(1, 2),
+            state=st)
     I.after(mem, "shell", {"command": "ls"}, "", state=st)
     assert st.calls == 2
     (rec,) = st.files["pkg/small.py"]
@@ -451,6 +469,7 @@ def test_cat_without_range_is_an_outline(mem, repo):
 # --------------------------------------------------------------------------- #
 def test_daemon_ledger_ops_and_counters(mem, repo, tmp_path):
     from ozagia.daemon.server import DaemonState
+    _config(repo, '[reads]\nrepeat_by_harness = {opencode = "stub", claude = "stub"}\n')
     st = DaemonState(repo, mem, tmp_path / "j.jsonl")
 
     def req(msg):
@@ -458,9 +477,13 @@ def test_daemon_ledger_ops_and_counters(mem, repo, tmp_path):
         st.record(msg, resp, 1.0)
         return resp
     read = {"op": "tool", "harness": "opencode", "session": "ses_1", "tool": "read",
-            "input": {"path": "pkg/small.py"}}
-    assert req(read)["output"].startswith("Read file")
-    assert req(read)["meta"]["intent"] == "read_stub"
+            "input": {"path": "pkg/small.py"}, "compaction_hook": True}
+    first = req(read)
+    assert first["output"].startswith("Read file")
+    # Not acknowledged: not recorded, so the text again.
+    second = req(read)
+    assert second["output"].startswith("Read file")
+    assert req({**read, "acks": [second["meta"]["ack"]]})["meta"]["intent"] == "read_stub"
     assert req({**read, "session": "ses_2"})["output"].startswith("Read file")
     assert req({"op": "session_event", "harness": "opencode", "session": "ses_1",
                 "event": "compact"})["cleared"] == 1
@@ -470,24 +493,32 @@ def test_daemon_ledger_ops_and_counters(mem, repo, tmp_path):
     sh = {"harness": "codex", "session": "thr", "sub": "/x/rollout.jsonl", "tool": "shell",
           "input": {"command": "sed -n '1,9p' pkg/small.py"}}
     assert req({"op": "read_check", **sh})["stub"] is None
-    req({"op": "after", **sh, "output": "..."})
+    req({"op": "after", **sh, "output": _small(1, 9)})
     chk = req({"op": "read_check", **sh})
     assert chk["repeat"] and chk["policy"] == "note" and chk["stub"] is None
-    assert "unchanged since read 1" in req({"op": "after", **sh, "output": "."})["append"]
-    # Claude: stub through read_check.
+    assert "unchanged since read 1" in req({"op": "after", **sh,
+                                            "output": _small(1, 9)})["append"]
+    # Claude: stub through read_check once SessionStart confirmed compaction
+    # and an agent_id was seen.
     cl = {"harness": "claude", "session": "c", "tool": "read",
           "input": {"path": "pkg/small.py"}}
-    req({"op": "after", **cl, "output": ""})
+    req({"op": "after", **cl, "output": _small(1, 40)})
+    assert req({"op": "read_check", **cl})["policy"] == "note"
+    req({"op": "session_event", "harness": "claude", "session": "c",
+         "event": "start", "compaction_hook": True})
+    req({"op": "after", **cl, "output": _small(1, 40)})
+    assert req({"op": "read_check", **cl})["policy"] == "note"     # no agent_id yet
+    req({"op": "read_check", **cl, "sub": "agent-1"})
     assert req({"op": "read_check", **cl})["stub"].startswith("[ozagia] pkg/small.py")
     assert req({"op": "session_event", "harness": "claude", "session": "c",
-                "event": "end"})["cleared"] == 1
+                "event": "end"})["cleared"] == 2
     assert req({"op": "read_check", **cl})["stub"] is None
     stats = st.stats()
     assert stats["repeats_seen"] == 3
     assert (stats["stubs_served"], stats["notes_served"]) == (2, 1)
     assert stats["outlines_served"] == 1
     assert stats["bytes_saved"] > 0
-    assert stats["ledger"]["events"] == {"compact": 1, "end": 1}
+    assert stats["ledger"]["events"] == {"compact": 1, "start": 1, "end": 1}
     bad = st.dispatch({"op": "session_event", "session": "x", "event": "nap"})
     assert bad["ok"] is False
     assert st.dispatch({"op": "session_event", "event": "end"})["ok"] is False
@@ -500,9 +531,216 @@ def test_daemon_policy_follows_config(mem, repo, tmp_path):
     st = DaemonState(repo, mem, tmp_path / "j.jsonl")
     read = {"op": "tool", "harness": "opencode", "session": "s", "tool": "read",
             "input": {"path": "pkg/small.py"}}
-    st.dispatch(read)
-    assert st.dispatch(read)["meta"]["repeat"] == "note"
+    ack = st.dispatch(read)["meta"]["ack"]
+    assert st.dispatch({**read, "acks": [ack]})["meta"]["repeat"] == "note"
     # No session id: no ledger.
     anon = {**read, "session": None}
-    st.dispatch(anon)
+    assert "ack" not in st.dispatch(anon)["meta"]
     assert "repeat" not in st.dispatch(anon)["meta"]
+
+
+# --------------------------------------------------------------------------- #
+# review fixes: what the model received (1, 6), delivery acks (2), the
+# default and its guards (3, 7), pending resets (5), `cd` (8), writes (10)
+# --------------------------------------------------------------------------- #
+def test_after_records_only_the_lines_the_output_shows(mem, repo):
+    st = _state("stub", harness="claude")
+    inp = {"command": "cat pkg/small.py"}
+    # Claude's Bash cut the middle: only the head before the cut counts.
+    truncated = _small(1, 12) + "\n... [output truncated] ...\n" + _small(35, 40)
+    I.after(mem, "shell", inp, truncated, state=st)
+    assert [(r.a, r.b) for r in st.files["pkg/small.py"]] == [(1, 12)]
+    hidden = I.check_read(mem, "shell", {"command": "sed -n '20,25p' pkg/small.py"},
+                          state=st)
+    assert hidden["stub"] is None and not hidden["repeat"]
+    shown = I.check_read(mem, "shell", {"command": "sed -n '2,5p' pkg/small.py"},
+                         state=st)
+    assert shown["stub"] is not None
+    # Output that matches nothing records nothing.
+    other = _state("stub", harness="claude", session="s9")
+    got = I.after(mem, "shell", {"command": "sed -n '1,9p' pkg/small.py"},
+                  "permission denied\n", state=other)
+    assert other.files == {} and got["meta"]["intent"] == "after_read_unconfirmed"
+
+
+@pytest.mark.parametrize("fmt", ["{n}: {line}", "{n:6d}\t{line}", "{n:6d}\u2192{line}"])
+def test_numbered_output_is_matched_by_its_numbers(mem, fmt):
+    st = _state("note", harness="codex")
+    out = "Exit code: 0\nWall time: 0.1 seconds\nOutput:\n" + _small(5, 9, fmt)
+    I.after(mem, "shell", {"command": "nl -ba pkg/small.py | sed -n '5,9p'"}, out,
+            state=st)
+    assert [(r.a, r.b) for r in st.files["pkg/small.py"]] == [(5, 9)]
+    # A number that is not the line's own does not match.
+    wrong = _state("note", harness="codex", session="s2")
+    I.after(mem, "shell", {"command": "sed -n '5,9p' pkg/small.py"},
+            _small(5, 9, "{n}: {line}").replace("5: V5", "6: V5"), state=wrong)
+    assert wrong.files == {}
+
+
+def test_an_edit_between_read_and_hook_records_only_matching_lines(mem, repo):
+    st = _state("stub", harness="codex")
+    seen = _small(1, 10)                        # what the built-in read
+    rows = SMALL_PY.splitlines()
+    rows[5] = "V6 = 'edited'"                   # then another session edited line 6
+    (repo / "pkg" / "small.py").write_text("\n".join(rows) + "\n")
+    I.after(mem, "shell", {"command": "sed -n '1,10p' pkg/small.py"}, seen, state=st)
+    assert [(r.a, r.b) for r in st.files["pkg/small.py"]] == [(1, 5)]
+    assert I.check_read(mem, "shell", {"command": "sed -n '6,8p' pkg/small.py"},
+                        state=st)["repeat"] is False
+
+
+def test_claude_read_is_bounded_by_start_line_and_num_lines(mem):
+    st = _state("stub", harness="claude")
+    inp = {"path": "pkg/small.py"}               # nominal 1..40
+    I.after(mem, "read", inp, _small(1, 40), state=st,
+            delivered={"start": 1, "lines": 15})
+    assert [(r.a, r.b) for r in st.files["pkg/small.py"]] == [(1, 15)]
+    spec = L.read_spec(mem, "read", inp, served=False)
+    assert L.delivered_spec(spec, _small(1, 40), {"start": 50, "lines": 3}) is None
+    assert L.delivered_spec(spec, "", None) is None
+
+
+def test_served_reads_count_only_once_acknowledged(mem):
+    st = _state("stub")
+    first = _read(mem, st, ack=False, path="pkg/small.py")
+    token = first["meta"]["ack"]
+    assert st.files == {} and token in st.staged
+    # Not acked (the permission was refused, the answer came late): text again.
+    again = _read(mem, st, ack=False, path="pkg/small.py")
+    assert again["output"].startswith("Read file")
+    assert st.ack(["bogus", 7, token]) == 1 and st.ack([token]) == 0
+    assert _read(mem, st, path="pkg/small.py")["meta"]["intent"] == "read_stub"
+    # A compaction drops staged reads as well.
+    pending = _read(mem, st, ack=False, path="pkg/big.py", offset=1, limit=5)
+    st._store.event("opencode", "s1", "compact")
+    assert st.ack([pending["meta"]["ack"]]) == 0 and st.files == {}
+
+
+def test_staged_reads_are_bounded(mem, monkeypatch):
+    monkeypatch.setattr(L, "MAX_STAGED", 2)
+    st = _state("note")
+    tokens = [_read(mem, st, ack=False, path="pkg/small.py", offset=i, limit=1)
+              ["meta"]["ack"] for i in (1, 2, 3)]
+    assert list(st.staged) == tokens[1:]
+    assert st.ack(tokens) == 2
+
+
+def test_configured_stub_needs_the_harness_to_confirm_it():
+    store = L.SessionStore()
+    oc = store.get("opencode", "s", policy="stub")
+    assert (oc.policy, oc.configured) == ("note", "stub")
+    store.confirm("opencode", "s", L.CAP_COMPACTION)
+    assert oc.policy == "stub"
+    # Claude also needs an agent_id seen in the session.
+    cl = store.get("claude", "c", policy="stub")
+    store.confirm("claude", "c", L.CAP_COMPACTION)
+    assert cl.policy == "note"
+    store.get("claude", "c", "agent-1", policy="stub")
+    assert store.get("claude", "c", policy="stub").policy == "stub"
+    # An end forgets the capabilities; other harnesses never stub.
+    store.event("claude", "c", "end")
+    assert store.get("claude", "c", policy="stub").policy == "note"
+    store.confirm("kiro", "k", L.CAP_COMPACTION)
+    assert store.get("kiro", "k", policy="stub").policy == "note"
+    assert L.effective_policy("codex", "off", set()) == "off"
+
+
+def test_daemon_confirms_compaction_from_hello_and_requests(mem, repo, tmp_path):
+    from ozagia.daemon.server import DaemonState
+    _config(repo, '[reads]\nrepeat = "stub"\n')
+    st = DaemonState(repo, mem, tmp_path / "j.jsonl")
+    read = {"op": "tool", "harness": "opencode", "session": "a", "tool": "read",
+            "input": {"path": "pkg/small.py"}}
+
+    def twice(msg):
+        ack = st.dispatch(msg)["meta"]["ack"]
+        return st.dispatch({**msg, "acks": [ack]})["meta"]
+    # The plugin could not register its compaction hook: note, not stub.
+    assert twice(read)["repeat"] == "note"
+    st.dispatch({"op": "hello", "harness": "opencode", "session": "b",
+                 "compaction_hook": True})
+    assert twice({**read, "session": "b"})["intent"] == "read_stub"
+    assert twice({**read, "session": "c", "compaction_hook": True})["intent"] == "read_stub"
+
+
+def test_reset_pending_is_applied_as_a_compaction_first(mem, repo, tmp_path):
+    from ozagia.daemon.server import DaemonState
+    _config(repo, '[reads]\nrepeat = "stub"\n')
+    st = DaemonState(repo, mem, tmp_path / "j.jsonl")
+    read = {"op": "tool", "harness": "opencode", "session": "s", "tool": "read",
+            "input": {"path": "pkg/small.py"}, "compaction_hook": True}
+    ack = st.dispatch(read)["meta"]["ack"]
+    assert st.dispatch({**read, "acks": [ack]})["meta"]["intent"] == "read_stub"
+    # The compaction's session_event was lost; the next request says so.
+    res = st.dispatch({**read, "reset_pending": True})
+    assert res["output"].startswith("Read file")
+    assert st.sessions.stats()["events"] == {"compact": 1}
+
+
+def test_hook_session_event_failure_leaves_a_marker(repo, tmp_path, monkeypatch):
+    from ozagia.integrations import hookcore
+    monkeypatch.setenv("OZAGIA_STATE_DIR", str(tmp_path / "st"))
+    monkeypatch.setenv("OZAGIA_DAEMON_SOCK", str(tmp_path / "none.sock"))
+    assert hookcore.session_event(repo, "claude", "sess", "compact", timeout=0.2) is False
+    sent = []
+
+    def send(msg):
+        sent.append(msg)
+        return {"ok": True}
+    hookcore.ledger_request(repo, {"op": "after", "harness": "claude",
+                                   "session": "sess"}, send)
+    assert sent[-1]["reset_pending"] is True and sent[-1]["compaction_hook"] is True
+    hookcore.ledger_request(repo, {"op": "after", "harness": "claude",
+                                   "session": "sess"}, send)
+    assert "reset_pending" not in sent[-1]               # sent once, then cleared
+    # A failed send keeps the marker for the next request.
+    hookcore.session_event(repo, "claude", "sess", "start", timeout=0.2)
+
+    def broken(msg):
+        raise OSError("down")
+    with pytest.raises(OSError):
+        hookcore.ledger_request(repo, {"op": "after", "harness": "claude",
+                                       "session": "sess"}, broken)
+    hookcore.ledger_request(repo, {"op": "after", "harness": "claude",
+                                   "session": "sess"}, send)
+    assert sent[-1]["reset_pending"] is True
+    # Another session or harness is not affected; an end removes the marker.
+    hookcore.session_event(repo, "codex", "sess", "compact", timeout=0.2)
+    hookcore.ledger_request(repo, {"op": "x", "harness": "claude", "session": "sess"}, send)
+    assert "reset_pending" not in sent[-1]
+    hookcore.session_event(repo, "codex", "sess", "end", timeout=0.2)
+    hookcore.ledger_request(repo, {"op": "x", "harness": "codex", "session": "sess"}, send)
+    assert "reset_pending" not in sent[-1]
+
+
+def test_hook_harnesses_skip_shell_reads_with_cd(mem, repo):
+    for harness in ("claude", "codex"):
+        st = _state("stub", harness=harness)
+        inp = {"command": "cd pkg && cat small.py", "workdir": str(repo)}
+        I.after(mem, "shell", inp, _small(1, 40), state=st)
+        assert st.files == {}
+        assert I.check_read(mem, "shell", inp, state=st)["meta"]["intent"] == "check_read"
+    # OpenCode's shell runs each command in its workdir: a `cd` is tracked.
+    oc = _state("stub")
+    _shell(mem, oc, "cd pkg && sed -n '1,3p' small.py")
+    assert [(r.a, r.b) for r in oc.files["pkg/small.py"]] == [(1, 3)]
+
+
+def test_write_over_a_partly_read_file_warns(mem, repo):
+    st = _state("note")
+    _read(mem, st, path="pkg/big.py")                       # outline + lines 1-120
+    res = I.handle(mem, "write", {"path": "pkg/big.py", "content": "x = 1\n"}, state=st)
+    assert res["handled"] and not res["is_error"], res
+    last = res["output"].split("\n")[-1]
+    n = len(BIG_PY.splitlines())
+    assert last.startswith("[ozagia] warning: pkg/big.py was replaced as a whole, "
+                           f"but this session has read only lines 1-120 of its {n} lines")
+    # Read in full (two ranges that meet), never read, or a new file: no warning.
+    _read(mem, st, path="pkg/small.py", offset=1, limit=20)
+    _read(mem, st, path="pkg/small.py", offset=21, limit=20)
+    ok = I.handle(mem, "write", {"path": "pkg/small.py", "content": "y = 2\n"}, state=st)
+    assert "warning" not in ok["output"]
+    unseen = I.handle(mem, "write", {"path": "notes.txt", "content": "z\n"}, state=st)
+    assert "warning" not in unseen["output"]
+    new = I.handle(mem, "write", {"path": "pkg/new.py", "content": "z\n"}, state=st)
+    assert "warning" not in new["output"]

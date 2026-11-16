@@ -466,7 +466,35 @@ def test_session_start_sends_session_event(repo, daemon, source, event):
     assert proc.returncode == 0 and proc.stdout == ""
     (req,) = stub.requests
     assert req == {"id": 1, "op": "session_event", "harness": "claude",
-                   "session": "abc123", "event": event}
+                   "session": "abc123", "event": event, "compaction_hook": True}
+
+
+def test_post_read_sends_the_lines_claude_showed(repo, daemon):
+    stub = daemon()
+    fp = str(repo / "src" / "a.py")
+    run_hook(post(repo, "Read", {"file_path": fp},
+                  {"type": "text", "file": {"filePath": fp, "content": "x\ny",
+                                            "startLine": 3, "numLines": 2,
+                                            "totalLines": 9}}), sock=stub.sock)
+    (req,) = stub.requests
+    assert req["delivered"] == {"start": 3, "lines": 2} and req["output"] == "x\ny"
+    assert hook.delivered_lines("Bash", {"file": {"startLine": 1, "numLines": 1}}) is None
+    assert hook.delivered_lines("Read", {"file": {"startLine": True, "numLines": 1}}) is None
+
+
+def test_failed_session_start_is_carried_as_reset_pending(repo, daemon, sockdir):
+    payload = {"session_id": "abc123", "cwd": str(repo),
+               "hook_event_name": "SessionStart", "source": "compact"}
+    assert run_hook(payload, sock=sockdir / "none.sock").returncode == 0
+    stub = daemon()
+    fp = str(repo / "src" / "a.py")
+    run_hook(post(repo, "Read", {"file_path": fp}, {"file": {"content": "x"}}),
+             sock=stub.sock)
+    run_hook(post(repo, "Read", {"file_path": fp}, {"file": {"content": "x"}}),
+             sock=stub.sock)
+    first, second = stub.requests
+    assert first["reset_pending"] is True and first["compaction_hook"] is True
+    assert "reset_pending" not in second
 
 
 def test_session_end_sends_end(repo, daemon):

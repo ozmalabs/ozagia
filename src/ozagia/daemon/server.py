@@ -256,7 +256,12 @@ class DaemonState:
                     "plugin": msg.get("plugin"), "version": msg.get("version"),
                     "session": msg.get("session"), "phase": msg.get("phase"),
                     "tools": tools,
-                    "permission_assert": msg.get("permission_assert")})
+                    "permission_assert": msg.get("permission_assert"),
+                    "compaction_hook": msg.get("compaction_hook")})
+            if msg.get("compaction_hook") is True:
+                from ozagia.intent.ledger import CAP_COMPACTION
+                self.sessions.confirm(str(msg.get("harness") or "opencode"),
+                                      msg.get("session"), CAP_COMPACTION)
             return {"ok": True}
         if op == "stats":
             return {"ok": True, "stats": self.stats()}
@@ -270,6 +275,7 @@ class DaemonState:
             if event not in SESSION_EVENTS:
                 return {"ok": False, "error": "event must be one of "
                         + ", ".join(SESSION_EVENTS)}
+            self.session_state(msg)     # caps, acks, a pending reset
             n = self.sessions.event(str(msg.get("harness") or "opencode"),
                                     session, event)
             return {"ok": True, "cleared": n,
@@ -363,22 +369,35 @@ class DaemonState:
                 else:
                     body = intent.after(self.memory, tool, inp,
                                         msg.get("output"), harness=harness,
-                                        session=session, state=state)
+                                        session=session, state=state,
+                                        delivered=msg.get("delivered"))
             if op == "tool" and body.get("handled") and _expired(msg):
                 body = {**body, "late": True}
             return {"ok": True, **body}
         return {"ok": False, "error": f"unknown op {op!r}"}
 
     def session_state(self, msg: dict[str, Any]) -> Any:
-        """The ledger of the request's (harness, session, sub), created
-        with the harness's repeat policy; None without a session id."""
-        from ozagia.intent.ledger import policy_for
+        """The ledger of the request's (harness, session, sub), with the
+        harness's configured repeat policy (`ledger.effective_policy` may
+        lower `stub` to `note`); None without a session id. Before the
+        request itself: `compaction_hook: true` confirms that the harness
+        reports compaction, `acks` records staged served reads, and
+        `reset_pending: true` (a `session_event` that failed earlier) is
+        applied as a `compact`, in that order."""
+        from ozagia.intent.ledger import CAP_COMPACTION, policy_for
         harness = str(msg.get("harness") or "opencode")
         session = msg.get("session")
         if not isinstance(session, str) or not session:
             return None
-        return self.sessions.get(harness, session, msg.get("sub"),
-                                 policy=policy_for(self.root, harness))
+        if msg.get("compaction_hook") is True:
+            self.sessions.confirm(harness, session, CAP_COMPACTION)
+        st = self.sessions.get(harness, session, msg.get("sub"),
+                               policy=policy_for(self.root, harness))
+        if msg.get("acks"):
+            st.ack(msg.get("acks"))
+        if msg.get("reset_pending") is True:
+            self.sessions.event(harness, session, "compact")
+        return st
 
     def begin(self) -> None:
         """A request arrived (for the idle timeout)."""

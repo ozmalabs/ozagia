@@ -154,12 +154,11 @@ start of a line outside `%` comments.
 
 Read ledger and repeats (`ozagia.intent.ledger`). The daemon keeps a ledger
 per session (`harness`, `session`, and the request's `sub`): for every read
-it serves or sees through `after` (the read tool, `cat`, `head`, `tail`,
-`sed -n`, `nl`, `nl -ba F | sed -n 'a,bp'`, a leading `cd`), the file's
-sha256 and line range. A read of a range inside one recorded range of the
-unchanged file, with no compaction since, is a repeat. By the repeat
-policy (`[reads] repeat`, `[reads] repeat_by_harness`, else the harness
-default):
+the model received (the read tool, `cat`, `head`, `tail`, `sed -n`, `nl`,
+`nl -ba F | sed -n 'a,bp'`, a leading `cd`), the file's sha256 and line
+range. A read of a range inside one recorded range of the unchanged file,
+with no compaction since, is a repeat. By the repeat policy (`[reads]
+repeat`, `[reads] repeat_by_harness`, else the harness default):
 
 - `stub`: one line instead of the text (intent `read_stub` or
   `shell_read_stub`):
@@ -170,12 +169,56 @@ default):
 - `off`: no ledger.
 
 A read that overlaps an earlier one without being inside it gets the text
-and `[ozagia] lines x-y were already read unchanged (read N)`. The default
-is `stub` for OpenCode and Claude Code, which report compaction and whose
-subagents are told apart, and `note` for every other harness. Codex reports
-compaction but documents that subagent hooks carry the parent's session id,
-so a stub could hide text a subagent never saw; it stays on `note` unless
-`repeat_by_harness = {codex = "stub"}` opts it in.
+and `[ozagia] lines x-y were already read unchanged (read N)`.
+
+What counts as received:
+
+- A served read is staged with a token (`meta.ack`) and recorded only when
+  the caller acknowledges delivery: the OpenCode plugin sends the token in
+  `acks` on its next request for the session, after the permission check
+  passed and the output went to the model. A refused permission, a failed
+  fallback, a late answer or a lost ack leaves it unrecorded.
+- A read the harness ran (`after`) is recorded only as far as its `output`
+  shows the file's current lines, contiguous from the first line of the
+  range (line-number prefixes `<n>: `, `<n>\t`, `<n>→` are accepted when the
+  number matches; up to 10 header lines are skipped). A truncated output
+  (Claude Code's Bash, Codex exec) records the matched prefix; an output
+  that differs from the file (edited between the read and the hook)
+  records nothing from the first differing line on. Claude Code's Read
+  also sends `file.startLine`/`numLines` as `delivered`, which bounds the
+  range first.
+- Under the hook harnesses (Claude Code, Codex) a shell read with a `cd` is
+  not tracked: Claude Code's shell keeps its directory between calls and
+  the hook's `cwd` follows it.
+
+The default is `note` for every harness. `stub` is opt-in (for example
+`repeat_by_harness = {opencode = "stub"}`) and experimental until the live
+eval shows no drop in success rate. Even when configured, a session gets
+`note` until its harness has confirmed that it reports compaction: the
+OpenCode plugin sends `compaction_hook: true` (in `hello` and on its
+requests) when its `compaction` session hook registered; the Claude Code
+and Codex hooks send it with their SessionStart `session_event`. Claude
+Code additionally needs an `agent_id` seen in the session, since a version
+that sends none would merge a subagent's ledger into its parent's. Codex is
+a poor candidate: subagent hooks carry the parent's session id.
+
+`stub` stays opt-in because context can shrink without any event the
+ledger hears about: OpenCode's tool-output pruning (`compaction.prune`) and
+message revert (`/undo`), and Claude Code's rewind, remove earlier tool
+results without a compaction hook or `SessionStart`. Under `note` such a
+loss costs nothing; under `stub` the model is told it has text it no
+longer holds.
+
+A `session_event` that fails is carried forward: the hooks leave a marker
+in the state dir (`ledger_reset/`), the plugin keeps the session in
+memory, and the session's next ledger request carries `reset_pending:
+true`, which the daemon applies as a `compact` before the request.
+
+A `write` that replaces an existing file of which the session's ledger
+holds only part (an outline's head, some ranges) of the current text
+appends `[ozagia] warning: <rel> was replaced as a whole, but this session
+has read only lines ... of its N lines (an outline or a partial read);
+check that nothing outside them was lost`. The write is not refused.
 
 Directory:
 
@@ -431,8 +474,9 @@ the plugin apply the change a second time.
   test:<key>: <message>` for tests the graph knows. Paths are taken
   relative to a leading `cd DIR &&`.
 - With a session, a read or shell read the built-in ran is recorded in the
-  read ledger (intent `after_read`); a repeat or overlap appends its note
-  line (see read).
+  read ledger as far as `output` shows the file's lines (intent
+  `after_read`; `after_read_unconfirmed` when nothing matched and nothing
+  was recorded); a repeat or overlap appends its note line (see read).
 
 `check_read(tool, input)` (the daemon's `read_check`) tells a hook whether
 a read the harness is about to run repeats an unchanged range: `{"repeat",

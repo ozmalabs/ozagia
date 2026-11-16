@@ -53,11 +53,14 @@ one, every key has the generic default below. All keys are optional:
     outline_bytes = 40960             # by the daemon (read tool, `cat F`):
                                       # symbols/sections with keys, then the
                                       # first lines; 0 turns a limit off
-    repeat = "stub" | "note" | "off"  # what a same-session re-read of an
-                                      # unchanged range gets; unset: the
-                                      # harness default (`ozagia.intent.ledger`)
-    repeat_by_harness = {codex = "stub"}  # per-harness override of the
-                                      # harness default (wins over `repeat`)
+    repeat = "note" | "stub" | "off"  # what a same-session re-read of an
+                                      # unchanged range gets; unset: `note`
+                                      # for every harness. `stub` is
+                                      # experimental (no eval yet) and needs
+                                      # the harness to report compaction
+                                      # (`ozagia.intent.ledger`)
+    repeat_by_harness = {opencode = "stub"}  # per-harness override
+                                      # (wins over `repeat`)
 
 Directory entries are paths relative to the root ("." is the root itself).
 """
@@ -159,7 +162,7 @@ class ProjectConfig:
     structured_outline_bytes: int = 64 * 1024
     outline_lines: int = 400
     outline_bytes: int = 40 * 1024
-    # None: each harness's default (`ozagia.intent.ledger.HARNESS_REPEAT`).
+    # None: each harness's default (`ozagia.intent.ledger.HARNESS_REPEAT`, `note`).
     repeat: str | None = None
     repeat_by_harness: tuple[tuple[str, str], ...] = ()
 

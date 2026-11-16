@@ -145,9 +145,12 @@ def handle(memory: Any, tool: str, input: dict[str, Any], *,
     `preflight`; every handled answer carries `permission` (or None).
 
     `state` is the session's `ozagia.intent.ledger.SessionState` (or
-    None): a read or shell read is recorded in its ledger, and a repeat of
-    an unchanged range gets a stub or a note by its policy (`meta.repeat`
-    is "stub" or "note", `meta.bytes_saved` an estimate)."""
+    None): a read or shell read is staged in its ledger (`meta.ack` is the
+    token; it counts once the caller acknowledges delivery, see
+    `SessionState.ack`), and a repeat of an unchanged range gets a stub or
+    a note by its policy (`meta.repeat` is "stub" or "note",
+    `meta.bytes_saved` an estimate). A `write` replacing a file the ledger
+    holds only part of gets an `[ozagia] warning:` line."""
     t0 = time.perf_counter()
     meta: dict[str, Any] = {"intent": str(tool), "keys": []}
     body: dict[str, Any]
@@ -155,7 +158,8 @@ def handle(memory: Any, tool: str, input: dict[str, Any], *,
     if (state is not None and not preflight and tool in ("read", "shell")
             and state.policy != "off" and isinstance(input, dict)):
         from ozagia.intent import ledger as L
-        spec = L.read_spec(memory, tool, input, served=True)
+        spec = L.read_spec(memory, tool, input, served=True,
+                           no_cd=state.harness in L.HOOK_HARNESSES)
         prior = state.find(spec) if spec is not None else None
         if prior is not None and state.policy == "stub":
             try:
@@ -192,8 +196,14 @@ def handle(memory: Any, tool: str, input: dict[str, Any], *,
             return {"handled": False, "preflight": True,
                     "reason": "permission required", "permission": perm,
                     "meta": meta}
+        partial = None
+        if state is not None and tool == "write" and state.policy != "off":
+            from ozagia.intent.ledger import partial_view
+            partial = partial_view(memory, state, input)
         res = handler(memory, input)
         output = res["output"]
+        if partial:
+            output += "\n" + partial
         if res.get("bytes_saved"):
             meta["bytes_saved"] = int(res["bytes_saved"])
         if state is not None and not preflight:
@@ -237,8 +247,9 @@ _NOT_A_RANGE = frozenset({"read_dir", "read_structured",
 
 def _ledger_note(state: Any, spec: Any, prior: Any, res: dict[str, Any],
                  meta: dict[str, Any]) -> str:
-    """Record a served read in the session's ledger; the note lines to
-    append ("" for none)."""
+    """Stage a served read in the session's ledger (`meta.ack` is its
+    token: it is recorded once the caller acknowledges delivery); the note
+    lines to append ("" for none)."""
     from ozagia.intent import ledger as L
     if res.get("intent") in _NOT_A_RANGE:
         return ""
@@ -250,7 +261,7 @@ def _ledger_note(state: Any, spec: Any, prior: Any, res: dict[str, Any],
             spec.a, spec.b = a, min(b, len(spec.lines))
             prior = state.find(spec)
     overlaps = [] if prior is not None else state.overlaps(spec)
-    state.record(spec)
+    meta["ack"] = state.stage(spec)
     lines = L.note_lines(spec, prior, overlaps)
     if prior is not None:
         meta["repeat"] = "note"
@@ -392,12 +403,14 @@ def _cd_dir(inp: dict[str, Any]) -> Any:
 
 def after(memory: Any, tool: str, input: dict[str, Any], output: Any, *,
           harness: str = "opencode", session: str | None = None,
-          state: Any = None) -> dict[str, Any]:
+          state: Any = None, delivered: Any = None) -> dict[str, Any]:
     """Graph context after a tool ran: the delta of any files it changed,
     and for `git diff`/`git show` the keys its hunks touch. With `state`
     (`ozagia.intent.ledger.SessionState`), a read or shell read the
-    built-in ran is recorded in the session's ledger, with a note when it
-    repeats or overlaps an earlier read of the unchanged file."""
+    built-in ran is recorded in the session's ledger, as far as `output`
+    shows the file's current lines (`ledger.delivered_spec`; `delivered`
+    is a harness's own `{"start", "lines"}`), with a note when it repeats
+    or overlaps an earlier read of the unchanged file."""
     t0 = time.perf_counter()
     meta: dict[str, Any] = {"intent": "after_none", "keys": []}
     lines: list[str] = []
@@ -406,7 +419,8 @@ def after(memory: Any, tool: str, input: dict[str, Any], output: Any, *,
         if state is not None:
             state.tick_after()
             if tool in ("read", "shell") and state.policy != "off":
-                lines.extend(_after_ledger(memory, state, tool, inp, meta))
+                lines.extend(_after_ledger(memory, state, tool, inp, meta,
+                                           output, delivered))
         changes, cls = _may_change_files(tool, inp)
         heads: list[list[str]] = []
         if cls.get("class") in ("complex", "compound") and isinstance(output, str):
@@ -444,10 +458,16 @@ def after(memory: Any, tool: str, input: dict[str, Any], output: Any, *,
 
 
 def _after_ledger(memory: Any, state: Any, tool: str, inp: dict[str, Any],
-                  meta: dict[str, Any]) -> list[str]:
+                  meta: dict[str, Any], output: Any, delivered: Any
+                  ) -> list[str]:
     from ozagia.intent import ledger as L
-    spec = L.read_spec(memory, tool, inp, served=False)
+    spec = L.read_spec(memory, tool, inp, served=False,
+                       no_cd=state.harness in L.HOOK_HARNESSES)
     if spec is None:
+        return []
+    spec = L.delivered_spec(spec, output, delivered)
+    if spec is None:            # the output does not show the file's lines
+        meta["intent"] = "after_read_unconfirmed"
         return []
     prior = state.find(spec)
     overlaps = [] if prior is not None else state.overlaps(spec)
@@ -473,7 +493,8 @@ def check_read(memory: Any, tool: str, input: Any, *, state: Any = None
         meta["ms"] = _ms(t0)
         return {**out, "meta": meta}
     from ozagia.intent import ledger as L
-    spec = L.read_spec(memory, tool, input, served=False)
+    spec = L.read_spec(memory, tool, input, served=False,
+                       no_cd=state.harness in L.HOOK_HARNESSES)
     prior = state.find(spec) if spec is not None else None
     if prior is None:
         if spec is not None:

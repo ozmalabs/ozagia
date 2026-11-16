@@ -87,6 +87,22 @@ that tells them apart (Claude Code subagents: `agent_id`; Codex:
 repeats an unchanged range gets a stub or a note by the harness's repeat
 policy (`meta.repeat`, `meta.bytes_saved`; see `docs/intent.md`).
 
+Ledger fields on `tool`, `after`, `read_check` and `session_event` (all
+optional):
+    acks             tokens (`meta.ack` of earlier served reads) whose output
+                     reached the model; a served read is recorded only once
+                     acked. The OpenCode plugin sends them on its next
+                     request for the session.
+    reset_pending    true: a `session_event` for the session failed earlier;
+                     applied as `compact` before the request (after `acks`).
+    compaction_hook  true: the sender reports compaction for this session
+                     (the plugin's `compaction` hook registered; also in
+                     `hello`), so a configured `stub` may apply.
+    delivered        `after` only: `{"start": n, "lines": k}`, the lines the
+                     harness says it showed (Claude Code Read's
+                     `file.startLine`/`numLines`). `after` records only the
+                     lines `output` shows in any case.
+
 Deadlines. Every `tool` and `after` request may carry `"deadline_ms"`: an
 absolute Unix epoch time in milliseconds, after which the sender no longer
 waits for the answer (the plugin sends `Date.now() + its timeout`). The

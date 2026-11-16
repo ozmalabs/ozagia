@@ -8,9 +8,11 @@ reference (https://learn.chatgpt.com/docs/hooks, see docs/codex.md).
   `permissionDecision: "deny"`. Local; no daemon needed. A shell read
   (`sed -n`, `cat`, `nl -ba F | sed -n ...`) is checked with the daemon's
   `read_check`: under the `stub` repeat policy a repeat of an unchanged
-  range is denied with the one-line stub as the reason. Codex's default
-  policy is `note` (`ozagia.intent.ledger`: subagent hooks carry the
-  parent's session id), so this denies only when `[reads]` opts Codex in.
+  range is denied with the one-line stub as the reason. The default
+  policy is `note` (`ozagia.intent.ledger`), so this denies only when
+  `[reads]` opts in. Codex is a poor candidate: subagent hooks carry the
+  parent's session id, and exec output is truncated (the ledger records
+  only the lines the output shows). A command with a `cd` is not tracked.
 - `PostToolUse` for `Bash`: send `after` as `shell` ({command, workdir})
   with the command's output, and return the daemon's `append` as
   `additionalContext` (with the ledger's `unchanged since read N` note).
@@ -20,8 +22,11 @@ reference (https://learn.chatgpt.com/docs/hooks, see docs/codex.md).
   tools to prefer) as `additionalContext`, and a start of the daemon so it
   is loaded by the first tool call. Outside a git work tree it prints
   nothing. It also sends `session_event`: `compact` for source "compact",
-  `start` otherwise, which clears the session's read ledger.
-- `PreCompact`: `session_event` `compact`; `SessionEnd`: `end`.
+  `start` otherwise, which clears the session's read ledger; it carries
+  `compaction_hook: true` (PreCompact is installed with it).
+- `PreCompact`: `session_event` `compact`; `SessionEnd`: `end`. A failed
+  compact or start leaves a marker; the session's next ledger request
+  (`after`, `read_check`) carries `reset_pending`.
 
 Ledger requests carry `sub`: the payload's `transcript_path` (and
 `agent_id` when present), so threads sharing a session id are kept apart
@@ -195,13 +200,16 @@ def handle(payload: dict[str, Any], root: Path) -> dict[str, Any] | None:
             hookcore.log_failure(root, LOG_NAME, payload, exc)
         if not in_repo:
             return None
+        # The brief first: a failed event writes a marker in the state dir,
+        # which would show up in the brief's `git status`.
+        brief = session_brief(root)
         try:
             hookcore.session_event(root, HARNESS, session,
                                    hookcore.start_event(payload.get("source")),
                                    timeout=SESSION_EVENT_TIMEOUT_S)
         except Exception as exc:  # the brief does not need the daemon
             hookcore.log_failure(root, LOG_NAME, payload, exc)
-        return _context("SessionStart", session_brief(root))
+        return _context("SessionStart", brief)
 
     if event == "PreToolUse" and tool_name == "Bash":
         command = str(tool_input.get("command") or "")
@@ -224,7 +232,8 @@ def handle(payload: dict[str, Any], root: Path) -> dict[str, Any] | None:
                "output": output_text(payload.get("tool_response"))}
         if sub:
             msg["sub"] = sub
-        resp = hookcore.daemon_request_autostart(root, msg, timeout=DAEMON_TIMEOUT_S)
+        resp = hookcore.ledger_request(root, msg, lambda m: hookcore.daemon_request_autostart(
+            root, m, timeout=DAEMON_TIMEOUT_S))
         append = resp.get("append")
         if not isinstance(append, str) or not append:
             return None

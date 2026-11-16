@@ -15,17 +15,25 @@ the version implemented against).
   built-in with the daemon's output as the reason, which Claude reads.
   Experimental.
 - `PreToolUse` for `Read` of a path and for a shell read in `Bash`: ask the
-  daemon's `read_check`. Under the `stub` repeat policy (Claude Code's
-  default, `ozagia.intent.ledger`) a repeat of an unchanged range this
-  session already read is denied with the one-line stub as the reason;
-  otherwise the built-in runs, and `PostToolUse` records it in the ledger.
+  daemon's `read_check`. Under the `stub` repeat policy (opt-in; the
+  default is `note`, `ozagia.intent.ledger`) a repeat of an unchanged
+  range this session already read is denied with the one-line stub as the
+  reason; otherwise the built-in runs, and `PostToolUse` records the lines
+  its output shows (a Read sends `file.startLine`/`numLines` as
+  `delivered`). A shell read with a `cd` is not tracked: Claude Code's
+  shell keeps its directory, so PreToolUse and PostToolUse would resolve
+  it differently.
 - `SessionStart`: `session_event` `compact` (source "compact") or `start`
-  (startup, resume, clear), which clears the session's read ledger;
-  `SessionEnd`: `end`. Nothing is printed.
+  (startup, resume, clear), with `compaction_hook: true`, which clears the
+  session's read ledger and confirms that compaction is reported;
+  `SessionEnd`: `end`. Nothing is printed. A failed event leaves a marker,
+  and the session's next ledger request carries `reset_pending`.
 
 Requests carry `sub` = the payload's `agent_id` when a subagent makes the
 call (subagents share the parent's session id), so a subagent's ledger is
-its own.
+its own. A configured `stub` stays `note` until an `agent_id` has been
+seen in the session (an older Claude Code that sends none would merge a
+subagent into its parent's ledger).
 
 The hook never blocks the agent because ozagia failed: any error prints
 nothing and exits 0, and is logged as one JSON line to
@@ -59,6 +67,21 @@ HARNESS = "claude"
 # --------------------------------------------------------------------------- #
 # mapping Claude Code tools onto the protocol
 # --------------------------------------------------------------------------- #
+def delivered_lines(tool_name: str, tool_response: Any) -> dict[str, int] | None:
+    """`{"start", "lines"}` from a Read's `tool_response.file.startLine` /
+    `numLines` (the lines Claude Code showed the model), or None."""
+    if tool_name != "Read" or not isinstance(tool_response, dict):
+        return None
+    file = tool_response.get("file")
+    if not isinstance(file, dict):
+        return None
+    start, count = file.get("startLine"), file.get("numLines")
+    if (isinstance(start, int) and isinstance(count, int)
+            and not isinstance(start, bool) and not isinstance(count, bool)
+            and start >= 1 and count >= 0):
+        return {"start": start, "lines": count}
+    return None
+
 def _put(out: dict[str, Any], key: str, src: dict[str, Any], name: str) -> None:
     if src.get(name) is not None:
         out[key] = src[name]
@@ -180,7 +203,11 @@ def handle(payload: dict[str, Any], root: Path) -> dict[str, Any] | None:
                "output": response_text(payload.get("tool_response"))}
         if sub:
             msg["sub"] = sub
-        resp = daemon_request(protocol.socket_path(root), msg)
+        shown = delivered_lines(tool_name, payload.get("tool_response"))
+        if shown is not None:
+            msg["delivered"] = shown
+        resp = hookcore.ledger_request(
+            root, msg, lambda m: daemon_request(protocol.socket_path(root), m))
         append = resp.get("append")
         if not isinstance(append, str) or not append:
             return None

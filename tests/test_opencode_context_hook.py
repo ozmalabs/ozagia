@@ -57,6 +57,7 @@ class StubDaemon:
     def __init__(self, path: Path):
         self.path = path
         self.requests: list[dict] = []
+        self.fail_events = 0            # session_event requests to refuse
         self.lock = threading.Lock()
         self.server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.server.bind(str(path))
@@ -79,6 +80,9 @@ class StubDaemon:
                 with self.lock:
                     self.requests.append(request)
                 response = {"id": request["id"], "ok": True}
+                if request["op"] == "session_event" and self.fail_events > 0:
+                    self.fail_events -= 1
+                    response = {"id": request["id"], "ok": False, "error": "busy"}
                 if request["op"] == "hint":
                     response["context"] = "Relevant source file: src/checkout.py"
                     response["meta"] = {"items": 1}
@@ -199,10 +203,21 @@ const ctx = { session: { hook: async (name, fn) => {
 } } };
 await mod.createPlugin({}).setup(ctx);
 const names = Object.keys(hooks).sort();
+// OpenCode 2.3 triggers the session hook "compaction" with the event of the
+// compaction model request, the same shape as "context":
+// L.trigger("session", "compaction", {sessionID, model, system, messages,
+// options, agent, tools}) (from the 2.3 binary).
+const event = (sessionID) => ({
+  sessionID, model: { providerID: "openai", modelID: "gpt-5" }, system: [],
+  messages: [], options: { maxTokens: 4096 }, agent: "build", tools: {} });
 if (hooks.compaction) {
-  await hooks.compaction({ sessionID: "ses_compact", system: [], messages: [] });
-  await hooks.compaction({ system: [], messages: [] });   // no session: nothing sent
+  for (let i = 0; i < Number(process.env.COMPACTIONS || 1); i++) {
+    await hooks.compaction(event("ses_compact"));
+  }
+  const { sessionID, ...noSession } = event("x");
+  await hooks.compaction(noSession);   // no session: nothing sent
 }
+await new Promise((r) => setTimeout(r, 30));
 process.stdout.write(JSON.stringify({ names }) + "\n");
 """
 
@@ -247,3 +262,35 @@ def test_compaction_hook_is_fail_safe(tmp_path):
     proc = _run_compaction(tmp_path, tmp_path / "missing.sock", NO_COMPACTION_HOOK="1")
     assert proc.returncode == 0, proc.stderr
     assert json.loads(proc.stdout)["names"] == ["context"]
+
+
+@needs_node
+def test_hello_reports_whether_the_compaction_hook_registered(tmp_path):
+    daemon = StubDaemon(tmp_path / "daemon.sock")
+    try:
+        proc = _run_compaction(tmp_path, daemon.path)
+        assert proc.returncode == 0, proc.stderr
+        hellos = [r for r in daemon.requests if r["op"] == "hello"]
+        assert hellos and all(h["compaction_hook"] is True for h in hellos)
+        (event,) = [r for r in daemon.requests if r["op"] == "session_event"]
+        assert event["compaction_hook"] is True and "reset_pending" not in event
+        daemon.requests.clear()
+        proc = _run_compaction(tmp_path, daemon.path, NO_COMPACTION_HOOK="1")
+        assert proc.returncode == 0, proc.stderr
+        hellos = [r for r in daemon.requests if r["op"] == "hello"]
+        assert hellos and all(h["compaction_hook"] is False for h in hellos)
+    finally:
+        daemon.close()
+
+
+@needs_node
+def test_a_failed_compaction_event_is_sent_again_as_reset_pending(tmp_path):
+    daemon = StubDaemon(tmp_path / "daemon.sock")
+    daemon.fail_events = 1
+    try:
+        proc = _run_compaction(tmp_path, daemon.path, COMPACTIONS="3")
+        assert proc.returncode == 0, proc.stderr
+        events = [r for r in daemon.requests if r["op"] == "session_event"]
+        assert [e.get("reset_pending") for e in events] == [None, True, None]
+    finally:
+        daemon.close()

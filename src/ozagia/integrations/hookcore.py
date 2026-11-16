@@ -20,9 +20,13 @@ pieces here do not depend on a harness's tool names or output envelope:
   (`ozagia.intent.shell.classify` is `git_refs`), and `git_refusal_reason`.
 - `node_key`: the node key a file path names, if any.
 - `response_text`: a built-in's result flattened to text for `after`.
-- `repeat_stub`, `session_event`, `start_event`: the read ledger
-  (`ozagia.intent.ledger`): ask whether a read repeats an unchanged range
-  (PreToolUse), and report compaction, start and end of a session.
+- `repeat_stub`, `session_event`, `start_event`, `ledger_request`: the
+  read ledger (`ozagia.intent.ledger`): ask whether a read repeats an
+  unchanged range (PreToolUse), report compaction, start and end of a
+  session (with `compaction_hook: true`: the hook is installed with its
+  compaction events), and carry a reset that could not be sent
+  (`reset_pending`, a marker file in the state dir) on the session's next
+  ledger request.
 """
 from __future__ import annotations
 
@@ -287,26 +291,82 @@ def repeat_stub(root: Path, harness: str, session: Any, sub: Any, tool: str,
     if isinstance(sub, str) and sub:
         msg["sub"] = sub
     try:
-        resp = daemon_request(protocol.socket_path(root), msg, timeout)
+        resp = ledger_request(root, msg, lambda m: daemon_request(
+            protocol.socket_path(root), m, timeout))
     except (OSError, HookError, ValueError):
         return None
     stub = resp.get("stub")
     return stub if isinstance(stub, str) and stub else None
 
 
+def _reset_marker(root: Path, harness: str, session: str) -> Path:
+    import hashlib
+    digest = hashlib.sha256(f"{harness}\0{session}".encode()).hexdigest()[:24]
+    return state_path(root, "ledger_reset", f"{harness}-{digest}")
+
+
+def ledger_request(root: Path, msg: dict[str, Any],
+                   send: Callable[[dict[str, Any]], dict[str, Any]]
+                   ) -> dict[str, Any]:
+    """`send(msg)` for a request that uses the session's ledger, with
+    `reset_pending: true` (and `compaction_hook: true`) added when an
+    earlier `session_event` for the session failed; the marker is removed
+    once the daemon answered."""
+    session, harness = msg.get("session"), str(msg.get("harness") or "")
+    marker = None
+    if isinstance(session, str) and session:
+        try:
+            m = _reset_marker(root, harness, session)
+            if m.exists():
+                marker = m
+                msg = {**msg, "reset_pending": True, "compaction_hook": True}
+        except OSError:
+            pass
+    resp = send(msg)
+    if marker is not None:
+        try:
+            marker.unlink()
+        except OSError:
+            pass
+    return resp
+
+
 def session_event(root: Path, harness: str, session: Any, event: str,
                   timeout: float = SESSION_EVENT_TIMEOUT_S) -> bool:
     """Tell the daemon about a compaction, start or end of a session
-    (`session_event`), so its ledger is cleared. False when no daemon
-    answers: a daemon that starts later has an empty ledger anyway."""
+    (`session_event`, with `compaction_hook: true` for compact and start:
+    the hook that sends them is installed), so its ledger is cleared.
+    When no daemon answers, a compact or start leaves a marker in the
+    state dir and the session's next ledger request carries
+    `reset_pending` (`ledger_request`); an end removes the marker."""
     if not isinstance(session, str) or not session:
         return False
+    msg: dict[str, Any] = {"id": 1, "op": "session_event", "harness": harness,
+                           "session": session, "event": event}
+    if event != "end":
+        msg["compaction_hook"] = True
     try:
-        daemon_request(protocol.socket_path(root), {
-            "id": 1, "op": "session_event", "harness": harness,
-            "session": session, "event": event}, timeout)
+        marker = _reset_marker(root, harness, session)
+    except OSError:
+        marker = None
+    try:
+        daemon_request(protocol.socket_path(root), msg, timeout)
     except (OSError, HookError, ValueError):
+        if marker is not None:
+            try:
+                if event == "end":
+                    marker.unlink(missing_ok=True)
+                else:
+                    marker.parent.mkdir(parents=True, exist_ok=True)
+                    marker.write_text(event + "\n", encoding="utf-8")
+            except OSError:
+                pass
         return False
+    if marker is not None:
+        try:
+            marker.unlink(missing_ok=True)
+        except OSError:
+            pass
     return True
 
 
@@ -408,5 +468,5 @@ __all__ = ["AUTOSTART_BUDGET_S", "DAEMON_TIMEOUT_S", "AutostartRefused", "HookEr
            "HookTimeout", "KEY_PREFIXES", "REF_MOVING_GIT", "autostart_allowed",
            "autostart_enabled", "daemon_request", "daemon_request_autostart",
            "ensure_daemon", "git_ref_moving", "git_refusal_reason", "in_work_tree",
-           "log_failure", "maybe_read", "node_key", "rearm_alarm", "repeat_stub",
+           "ledger_request", "log_failure", "maybe_read", "node_key", "rearm_alarm", "repeat_stub",
            "response_text", "root_for", "run_hook", "session_event", "start_event"]
