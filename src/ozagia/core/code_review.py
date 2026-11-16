@@ -22,8 +22,9 @@ import re
 import subprocess
 import tempfile
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterable, Mapping, Protocol, Sequence
+from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence
 
+from ozagia.core import ocelot_code
 from ozagia.core import resources
 from ozagia.core import testing as test_plans
 from ozagia.core import worktree as W
@@ -1467,12 +1468,32 @@ def _security_section(report: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+OcelotClusterer = Callable[..., Mapping[str, Any]]
+
+
+def _ocelot_section(findings: Sequence[Mapping[str, Any]], *, root: Path,
+                    ocelot: bool | OcelotClusterer | None,
+                    ocelot_root: str | Path | None,
+                    ocelot_mode: str, ocelot_timeout: int,
+                    clusterer: OcelotClusterer | None
+                    ) -> dict[str, Any] | None:
+    if callable(ocelot) and clusterer is None:
+        clusterer = ocelot
+        ocelot = True
+    if not ocelot and clusterer is None:
+        return None
+    return ocelot_code.cluster_section(
+        findings, root=root, ocelot_root=ocelot_root, mode=ocelot_mode,
+        timeout=ocelot_timeout, clusterer=clusterer)
+
+
 def _packet(root: Path, pre: Mapping[str, Any], graph_info: Mapping[str, Any],
             files: Sequence[dict[str, Any]], diff_info: Mapping[str, Any],
             findings: Sequence[Mapping[str, Any]], omissions: Sequence[str],
             not_assessed: Sequence[Mapping[str, Any]],
             test_plan: Mapping[str, Any] | None = None,
-            security_report: Mapping[str, Any] | None = None) -> dict[str, Any]:
+            security_report: Mapping[str, Any] | None = None,
+            ocelot_section: Mapping[str, Any] | None = None) -> dict[str, Any]:
     range_info = dict(pre.get("range") or {})
     packet = {
         "schema": PACKET_SCHEMA,
@@ -1532,6 +1553,11 @@ def _packet(root: Path, pre: Mapping[str, Any], graph_info: Mapping[str, Any],
         section = _security_section(security_report)
         packet["security"] = section
         packet["summary"]["security_findings"] = len(section["findings"])
+    if ocelot_section is not None:
+        packet["ocelot"] = dict(ocelot_section)
+        packet["summary"]["ocelot_clusters"] = len(
+            ocelot_section.get("clusters") or [])
+        packet["summary"]["ocelot_state"] = ocelot_section.get("state")
     return packet
 
 
@@ -1541,7 +1567,12 @@ def review_diff(root: str | Path, *, base: str, head: str = "HEAD",
                 memory_mb: float = 2048.0, disk_mb: float = 4096.0,
                 config_dir: str | Path | None = None,
                 worktree_base: str = "main",
-                security_report: Mapping[str, Any] | None = None
+                security_report: Mapping[str, Any] | None = None,
+                ocelot: bool | OcelotClusterer | None = False,
+                ocelot_root: str | Path | None = None,
+                ocelot_mode: str = "auto",
+                ocelot_timeout: int = ocelot_code.DEFAULT_TIMEOUT,
+                ocelot_clusterer: OcelotClusterer | None = None
                 ) -> dict[str, Any]:
     """Review ``base..head`` deterministically and return a review packet.
 
@@ -1607,9 +1638,31 @@ def review_diff(root: str | Path, *, base: str, head: str = "HEAD",
                 "did not run a scan, and a finding is not a proof of "
                 "exploitability"),
         })
+    final_findings = _finalize_findings(findings)
+    ocelot_section = _ocelot_section(
+        final_findings, root=root_path, ocelot=ocelot,
+        ocelot_root=ocelot_root, ocelot_mode=ocelot_mode,
+        ocelot_timeout=ocelot_timeout, clusterer=ocelot_clusterer)
+    if ocelot_section is not None:
+        state = str(ocelot_section.get("state") or "unknown")
+        not_assessed.append({
+            "area": "ocelot",
+            "reason": (
+                "structural clustering is a candidate signal; it did not "
+                "assess truth, and exact findings and dissent remain"),
+        })
+        if state == "no_findings":
+            omissions.append(
+                "Ocelot clustering was requested but there were no findings "
+                "to cluster.")
+        elif state != "ready":
+            omissions.append(
+                f"Ocelot structural clustering was requested but is {state}; "
+                "exact clusters by issue family and target were reported. No "
+                "install or download was attempted.")
     packet = _packet(root_path, pre, graph_info, files, diff_info,
-                     _finalize_findings(findings), omissions, not_assessed,
-                     test_plan, security_report)
+                     final_findings, omissions, not_assessed,
+                     test_plan, security_report, ocelot_section)
     return packet
 
 
@@ -1804,6 +1857,14 @@ def format_packet(packet: Mapping[str, Any]) -> str:
             f"fallback={test_plan.get('fallback_used')}); tests were not run"
             + (f" - {test_plan['not_run_reason']}"
                if test_plan.get("not_run_reason") else ""))
+    ocelot = packet.get("ocelot")
+    if isinstance(ocelot, Mapping):
+        clusters = ocelot.get("clusters") or []
+        analogies = ocelot.get("analogies") or []
+        lines.append(
+            f"ocelot: {ocelot.get('state')} ({ocelot.get('engine')}), "
+            f"{len(clusters)} cluster(s), {len(analogies)} analogies; "
+            "candidate only, truth not assessed")
     findings = packet.get("findings") or []
     lines.append(f"findings: {len(findings)}")
     for item in findings:
@@ -1870,8 +1931,8 @@ def format_refusal(report: Mapping[str, Any]) -> str:
 
 __all__ = [
     "CodeReviewError", "DEFAULT_MAX_FILE_BYTES", "FAIL_ON", "FINDING_TYPES",
-    "PACKET_SCHEMA", "PreflightError", "ReviewRunner", "SCHEMA", "SEVERITIES",
-    "atomic_write", "exit_code", "format_packet", "format_refusal",
-    "packet_json", "parse_range", "preflight", "review_diff", "review_range",
-    "run_injected_review",
+    "OcelotClusterer", "PACKET_SCHEMA", "PreflightError", "ReviewRunner",
+    "SCHEMA", "SEVERITIES", "atomic_write", "exit_code", "format_packet",
+    "format_refusal", "packet_json", "parse_range", "preflight",
+    "review_diff", "review_range", "run_injected_review",
 ]

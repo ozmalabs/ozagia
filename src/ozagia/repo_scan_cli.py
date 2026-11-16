@@ -37,6 +37,16 @@ def build_parser() -> argparse.ArgumentParser:
                       help="emit the report as deterministic JSON")
     scan.add_argument("--out", default=None,
                       help="write the same output atomically to this path")
+    scan.add_argument("--ocelot", action="store_true",
+                      help="add optional Ocelot structural clusters "
+                           "(default: off; no install or download)")
+    scan.add_argument("--ocelot-root", default=None,
+                      help="explicit Ocelot checkout (default: resolve one)")
+    scan.add_argument("--ocelot-mode", default="auto",
+                      choices=("auto", "inprocess", "subprocess"),
+                      help="Ocelot worker transport (default: auto)")
+    scan.add_argument("--ocelot-timeout", type=int, default=120,
+                      help="Ocelot worker timeout in seconds (default: 120)")
     sub.add_parser("list-categories",
                    help="list scan categories and their descriptions")
     return parser
@@ -53,9 +63,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.since < 1:
         print("error: --since must be a positive integer", file=sys.stderr)
         return 2
+    if args.ocelot_timeout < 1:
+        print("error: --ocelot-timeout must be a positive integer",
+              file=sys.stderr)
+        return 2
     try:
         report = scan_core.scan(
-            Path(args.root), since_days=args.since, top=args.top)
+            Path(args.root), since_days=args.since, top=args.top,
+            ocelot=args.ocelot, ocelot_root=args.ocelot_root,
+            ocelot_mode=args.ocelot_mode,
+            ocelot_timeout=args.ocelot_timeout)
     except (scan_core.RepoScanError, OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

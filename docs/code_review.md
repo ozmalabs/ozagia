@@ -16,6 +16,7 @@ python -m ozagia.code_review_cli \
   --root /path/to/repo \
   --range HEAD~1..HEAD \
   [--graph .ozagia/graph.json] \
+  [--ocelot [--ocelot-root PATH] [--ocelot-mode auto|inprocess|subprocess]] \
   [--json] \
   [--out review-packet.json] \
   [--fail-on blocking|major|never]
@@ -41,6 +42,10 @@ Operational flags:
 --disk-mb N            expected test/build disk for admission (default 4096)
 --max-file-bytes N     large-file threshold (default 1000000)
 --worktree-base NAME   branch expected for the main worktree (default main)
+--ocelot               optional Ocelot structural clusters (default off)
+--ocelot-root PATH     explicit Ocelot checkout (default: resolve one)
+--ocelot-mode MODE     auto, inprocess or subprocess (default auto)
+--ocelot-timeout S     worker timeout in seconds (default 120)
 ```
 
 Python API:
@@ -51,6 +56,8 @@ from ozagia.core import code_review as R
 packet = R.review_range(root, "main..HEAD")
 packet = R.review_diff(root, base="HEAD~1", head="HEAD",
                        graph_path=".ozagia/graph.json")
+packet = R.review_range(root, "main..HEAD", ocelot=True,
+                        ocelot_root="/path/to/ocelot", ocelot_mode="auto")
 status = R.exit_code(packet, "blocking")
 ```
 
@@ -185,11 +192,14 @@ Important fields:
   "not_assessed": [],
   "model_review": {"status": "not_run", "truth_assessed": false},
   "security": {"provided": true, "findings": [], "truth_assessed": false},
+  "ocelot": {"requested": true, "state": "not_installed",
+             "clusters": [], "truth_assessed": false},
   "truth_assessed": false
 }
 ```
 
-`security` is present only when the caller supplies a security report.
+`security` is present only when the caller supplies a security report;
+`ocelot` is present only when clustering is requested.
 
 ## Optional security findings
 
@@ -210,6 +220,46 @@ This is a review flag, not a vulnerability claim.
 `truth_assessed` is always `false`. A finding is evidence for a human or a
 later reviewer, not a proof that the change is wrong. The packet does not
 invent consensus, test results, or freshness.
+
+## Optional Ocelot clustering
+
+`ozagia.core.ocelot_code` can add structural clusters from a separate,
+optional Ocelot checkout. It is off by default and never installs or downloads
+Ocelot. Request it with `ocelot=True` (or a callable injected through the same
+argument), plus optional `ocelot_root`, `ocelot_mode` and `ocelot_timeout`:
+
+```python
+packet = R.review_range(root, "main..HEAD", ocelot=True)
+```
+
+The packet then contains an `ocelot` section:
+
+```json
+{
+  "schema": "ozagia.ocelot_code.clusters.v1",
+  "requested": true,
+  "available": true,
+  "state": "ready",
+  "mode": "auto",
+  "actual_mode": "subprocess",
+  "engine": "ocelot:analogy_search",
+  "clusters": [{"key": {"family": "duplicate", "target_type": "File",
+                        "target_id": "src/x.py"},
+                "findings": ["CR-001", "CR-002"], "size": 2,
+                "origin": "exact+ocelot", "analogy_count": 1}],
+  "analogies": [],
+  "truth_assessed": false
+}
+```
+
+The exact `findings` list is unchanged. Clusters are always keyed by issue
+family and target, so different families or targets are never merged. When
+Ocelot is not installed or fails, the section says `not_installed`,
+`unavailable` or `error` and carries the exact fallback clusters; the review
+still succeeds and records an omission. No install is attempted, and the
+section never adds findings or changes `exit_code`.
+
+See `docs/ocelot_code.md` for the payload, family mapping and fallback states.
 
 ## Test plan
 
@@ -251,8 +301,9 @@ reviewers agree.
 Not in this slice:
 
 - commit/merge/push policy checks beyond the worktree and branch expectation;
-- live or optional model calls, Ocelot reconciliation, or multi-model
-  agreement;
+- live or optional model calls, or multi-model agreement (optional Ocelot
+  structural clustering is available separately and never changes the
+  findings or their truth status);
 - running tests, builds, linters or type checkers (a test plan is recorded,
   but nothing is executed; only resource admission is checked);
 - semantic signature/behaviour compatibility, duplicate-logic detection, or
@@ -275,4 +326,5 @@ The tests build temporary git repositories with base/head commits, a deleted
 file, a missing test, conflict markers, binary, large and generated files,
 whitespace errors, a fresh graph, a stale graph, a missing graph, a wrong
 branch, an unresolved merge, a resource refusal, CLI JSON/exit codes and the
-injected-runner seam. No test uses a model or the network.
+injected-runner seam. Ocelot tests use an explicit missing checkout and an
+injected clusterer; no test uses a model, the network or an install.

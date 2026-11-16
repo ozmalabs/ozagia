@@ -8,6 +8,10 @@ structural machinery. The plan's distribution item is implemented by
 a checkout. It never imports Ocelot and never decides that reconciliation
 should use it.
 
+Code-review and repo-scan clustering use the same checkout through
+`ozagia.core.ocelot_code`; see `docs/ocelot_code.md`. That path is also optional
+and read-only, and it never installs or downloads Ocelot.
+
 ## Resolution order
 
 `resolve(root)` (default `root`: `repo_root()`) tries, in order:

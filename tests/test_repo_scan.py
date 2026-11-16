@@ -536,3 +536,44 @@ def test_cli_smoke(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert CLI.main(["scan", "--root", str(repo), "--since", "0"]) == 2
     captured = capsys.readouterr()
     assert "error:" in captured.err
+
+
+# --------------------------------------------------------------------------- #
+# optional Ocelot clustering
+# --------------------------------------------------------------------------- #
+def test_ocelot_section_is_optional_and_reports_unavailable(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = _make_repo(tmp_path)
+    report = RS.scan(repo, top=100)
+    assert "ocelot" not in report
+
+    def _not_installed(_root: Any = None) -> dict[str, Any]:
+        return {
+            "state": "not_installed",
+            "path": None,
+            "version": None,
+            "source": None,
+            "manifest": None,
+            "manifest_path": None,
+            "install_root": "/nonexistent/ozagia/ocelot",
+            "invalid_installs": [],
+            "note": "Ocelot is not installed.",
+        }
+
+    monkeypatch.setattr(
+        RS.ocelot_code.ocelot_installer, "resolve", _not_installed)
+    report = RS.scan(repo, top=100, ocelot=True)
+    section = report["ocelot"]
+    assert section["requested"] is True
+    assert section["available"] is False
+    assert section["state"] == "not_installed"
+    assert section["engine"] == "exact"
+    assert section["truth_assessed"] is False
+    assert section["clusters"]
+    assert report["summary"]["ocelot_clusters"] == len(section["clusters"])
+    selected = {item["id"] for item in report["opportunities"]
+                if item["category"] in RS.ocelot_code.SCAN_CATEGORIES}
+    clustered = {finding for cluster in section["clusters"]
+                 for finding in cluster["findings"]}
+    assert clustered == selected
+    assert "ocelot: not_installed" in RS.format_report(report)
