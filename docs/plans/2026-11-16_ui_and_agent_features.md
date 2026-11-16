@@ -1644,6 +1644,17 @@ The read-only part of 1a landed as new files:
 - Settings plumbing: `[models.tasks]`/`[models.local]`, `ozagia config`,
   captured-pytest `testing.captured`, and doctor settings sources
   (`feat/plumbing`, merged as `07ad251`).
+- File lifecycle: bounded session baselines and true deltas, one-time cleanup
+  plans, trash/restore, no deletion (`feat/file-lifecycle`, merged as
+  `44aa80d`).
+- Linux cgroup v2: per-job `memory.max`/`pids.max`, OOM feedback, fake-fs
+  tests and rlimit/watchdog fallback (`feat/cgroup-enforcement`, merged as
+  `514b229`).
+- Config migration and Git hooks: `.ozagia.toml` preview migration,
+  `ozagia config migrate`, opt-in pre-commit/pre-push hooks with foreign-hook
+  preservation (`feat/config-hooks`, merged as `2e0b359`).
+- Add-in task catalogue: 13 task classes, validation, detail and preview
+  command copy; 20 Node tests (`feat/addin-tasks`, merged as `9957764`).
 - Tests for all of the above; docs `worktree.md`, `resources.md`, `files.md`,
   `status.md`, `view.md`, `settings.md`, `code_review.md`, `tasks.md`,
   `task_library.md`, `research_ui.md`, `log_inspect.md`, `models.md`,
@@ -1652,26 +1663,23 @@ The read-only part of 1a landed as new files:
   `upstream.md`, `security.md`, `library_hints.md`; console scripts for view,
   status, settings, tasks, task library, research UI, log inspection, models,
   testing, actions, repo scan, module build, upstream, console, security,
-  library hints, Ocelot code, review, Ocelot, worktree, resources and files in
-  `pyproject.toml`.
+  library hints, Ocelot code, hooks, review, Ocelot, worktree, resources and
+  files in `pyproject.toml`.
 
-Checks after all six waves: `3816 passed, 21 skipped`;
+Checks after all seven waves: `4134 passed, 21 skipped`;
 `ruff check src tests` passes. The OpenCode add-in additionally passes
-`npm run typecheck`, `node --test` (17/17) and `npm run build` (one CJS
+`npm run typecheck`, `node --test` (20/20) and `npm run build` (one CJS
 bundle) against OpenCode 2.3.0. A concurrent TUI-brand merge added
 `.opencode/plugins/ozagia/tui.js`; the harness exclude patterns and tests were
 updated for it.
 
 Not yet: the live OpenCode Desktop smoke test; add-in apply/mutation controls
-and a bounded-task launcher; Ocelot test-impact/architecture-pattern
-clustering; cgroups and exact per-job disk accounting; cleanup apply/trash;
-command-derived path extraction for `patch`/`shell`; a true before/after
-session manifest (the current scan attributes pre-existing untracked files to
-the session with `reason: unknown`); live/multi-model review; model/tool
-adapters and an injected test runner; migration from `.ozagia.toml`; action
-apply UI and integration install/uninstall; live security-tool matrix/DAST;
-library hints in code review/repo scan and non-handled edits; and hook
-installer CLI.
+and an executable task launcher; Ocelot test-impact/architecture-pattern
+clustering; exact per-job disk accounting; command-derived path extraction for
+`patch`/`shell`; live/multi-model review; model/tool adapters and an injected
+test runner; rewiring legacy loaders to `ozagia/config.toml`; action apply UI
+and integration install/uninstall; live security-tool matrix/DAST; library
+hints in code review/repo scan and non-handled edits; and trash purge/retention.
 
 ### Parallel workstreams (2026-11-16)
 
@@ -1787,8 +1795,10 @@ Four agents start from `5863870`:
 | `~/ozmadev/ozagia-wt/config-hooks` | `feat/config-hooks` | `.ozagia.toml` migration and opt-in pre-commit/pre-push hooks |
 | `~/ozmadev/ozagia-wt/addin-tasks` | `feat/addin-tasks` | Task-class catalogue tab in the OpenCode add-in |
 
-The same review/merge/full-suite gate applies; the live Desktop smoke test and
-remaining model/tool adapters stay for the following wave.
+Status: all merged: `addin-tasks` as `9957764`, `config-hooks` as `2e0b359`,
+`cgroup-enforcement` as `514b229`, and `file-lifecycle` as `44aa80d`. The
+final full suite is `4134 passed, 21 skipped`; ruff passes. The live Desktop
+smoke test and the remaining model/tool adapters stay for a later wave.
 
 ### Library-first workstream (2026-11-16)
 
