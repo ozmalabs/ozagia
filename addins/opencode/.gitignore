@@ -1,0 +1,7 @@
+node_modules/
+
+# Keep the built GUI bundle: OpenCode Desktop loads dist/gui-experimental.cjs
+# from a local plugin directory. The repository root ignores dist/ generally.
+!dist/
+dist/*
+!dist/gui-experimental.cjs

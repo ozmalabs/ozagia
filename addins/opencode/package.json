@@ -1,0 +1,30 @@
+{
+  "name": "ozagia-opencode",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Read-only ozagia graph, status and test-planning panels for OpenCode Desktop",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./rpc": "./src/rpc.ts",
+    "./gui-experimental": "./dist/gui-experimental.cjs"
+  },
+  "files": [
+    "src",
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test tests/*.test.cjs"
+  },
+  "devDependencies": {
+    "@opencode/plugin": "^2.3.0",
+    "@types/node": "^22.10.0",
+    "solid-js": "^1.9.17",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.7",
+    "vite-plugin-solid": "^2.11.10"
+  }
+}
