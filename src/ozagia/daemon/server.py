@@ -224,6 +224,9 @@ class DaemonState:
         self.unknown_outcomes = 0  # ... whose fallback is "unknown_outcome"
         self.tool_failures = 0   # tool: ok false
         self.preflights = 0      # tool: preflight answered "permission required"
+        # Region replies: the current text of the nearest region sent for a
+        # patch hunk or an edit whose old text is not in the file.
+        self.region_replies = 0
         # shell tool calls: captured (handled), refused (git refs) and
         # passthrough, with the passthrough reasons, so an eval can measure
         # the shell capture rate.
@@ -367,10 +370,13 @@ class DaemonState:
                                          preflight=msg.get("preflight") is True,
                                          state=state)
                 else:
+                    req_meta = msg.get("meta")
                     body = intent.after(self.memory, tool, inp,
                                         msg.get("output"), harness=harness,
                                         session=session, state=state,
-                                        delivered=msg.get("delivered"))
+                                        delivered=msg.get("delivered"),
+                                        meta=req_meta if isinstance(
+                                            req_meta, dict) else None)
             if op == "tool" and body.get("handled") and _expired(msg):
                 body = {**body, "late": True}
             return {"ok": True, **body}
@@ -436,6 +442,9 @@ class DaemonState:
             if meta.get("intent"):
                 it = str(meta["intent"])
                 self.by_intent[it] = self.by_intent.get(it, 0) + 1
+            rr = meta.get("region_replies")
+            if isinstance(rr, int) and not isinstance(rr, bool) and rr > 0:
+                self.region_replies += rr
             if handled is not None:
                 self.handled["true" if handled else "false"] += 1
             if meta.get("repeat") in ("stub", "note"):
@@ -554,6 +563,15 @@ class DaemonState:
                 "outlines_served": (self.by_intent.get("read_outline", 0)
                                     + self.by_intent.get("shell_read_outline", 0)),
                 "ledger": self.sessions.stats(),
+                # Patch and edit miss recovery: patches checked before
+                # apply_patch ran, those with failing hunks (the hook denied
+                # them with region replies), region replies sent (patch
+                # hunks and edit misses), key-addressed edits applied.
+                "patch_checks": (self.by_intent.get("patch_check_ok", 0)
+                                 + self.by_intent.get("patch_check_miss", 0)),
+                "patch_misses_caught": self.by_intent.get("patch_check_miss", 0),
+                "region_replies": self.region_replies,
+                "key_edits": self.by_intent.get("edit_key", 0),
                 "permission_assert": _last(self.hellos, "permission_assert"),
                 "codemode_tools": sorted({
                     name for h in self.hellos

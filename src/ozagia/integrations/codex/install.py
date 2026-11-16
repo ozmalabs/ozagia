@@ -5,8 +5,8 @@ and `<workdir>/AGENTS.md`) or for the user (`scope="user"`, under
 `$CODEX_HOME`, default `~/.codex/`):
 
 - `hooks.json`: ozagia's command handlers for `SessionStart`, `PreToolUse`
-  (Bash), `PostToolUse` (Bash, apply_patch), `PreCompact` and `SessionEnd`
-  (both clear the read ledger). Other keys and handlers are
+  (Bash, apply_patch), `PostToolUse` (Bash, apply_patch), `PreCompact` and
+  `SessionEnd` (both clear the read ledger). Other keys and handlers are
   kept. ozagia's handlers are those whose command ends with this package's
   `hook` subcommand; installing again replaces them.
 - `config.toml`: the `[mcp_servers.ozagia]` table (the ozagia MCP server in
@@ -52,7 +52,7 @@ MCP_NAME = "ozagia"
 MCP_MODE = "coding"
 MATCHERS: dict[str, str | None] = {
     "SessionStart": None,
-    "PreToolUse": "^Bash$",
+    "PreToolUse": "^(Bash|apply_patch)$",
     "PostToolUse": "^(Bash|apply_patch)$",
     "PreCompact": None,
     "SessionEnd": None,

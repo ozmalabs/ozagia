@@ -52,6 +52,7 @@ from ozagia.intent.common import (
     tag,
 )
 from ozagia.intent.edit import handle_edit, handle_write
+from ozagia.intent.patch import edit_miss_lines, handle_patch_check
 from ozagia.intent.read import handle_read
 from ozagia.intent.run import handle_shell
 from ozagia.intent.search import handle_glob, handle_grep
@@ -67,6 +68,8 @@ HANDLERS: dict[str, Callable[[Any, dict[str, Any]], dict[str, Any]]] = {
     "edit": handle_edit,
     "write": handle_write,
     "shell": handle_shell,
+    # A check only: never writes (the Codex hook's PreToolUse on apply_patch).
+    "patch_check": handle_patch_check,
 }
 # Tools whose built-in run can change files.
 _WRITING_TOOLS = frozenset({"edit", "write", "patch"})
@@ -97,6 +100,13 @@ def permission_request(memory: Any, tool: str, inp: dict[str, Any]
         return None
     if tool in ("read", "edit", "write"):
         path = inp.get("path", inp.get("filePath"))
+        if (tool == "edit" and (not isinstance(path, str) or not path)
+                and isinstance(inp.get("key"), str)):
+            from ozagia.edit.key_edit import key_file
+            try:
+                path = key_file(inp["key"])
+            except Exception:  # noqa: BLE001 - no file: nothing to ask
+                return None
         if not isinstance(path, str) or not path:
             return None
         root = root_of(memory)
@@ -213,6 +223,8 @@ def handle(memory: Any, tool: str, input: dict[str, Any], *,
         body = {"handled": True, "output": output, "is_error": False,
                 "permission": permission_request(memory, tool, input)}
         meta.update(intent=res["intent"], keys=list(res.get("keys") or []))
+        if isinstance(res.get("meta"), dict):
+            meta.update(res["meta"])
     except IntentError as e:
         if state is not None and not preflight:
             state.tick()
@@ -403,16 +415,20 @@ def _cd_dir(inp: dict[str, Any]) -> Any:
 
 def after(memory: Any, tool: str, input: dict[str, Any], output: Any, *,
           harness: str = "opencode", session: str | None = None,
-          state: Any = None, delivered: Any = None) -> dict[str, Any]:
+          state: Any = None, delivered: Any = None,
+          meta: dict[str, Any] | None = None) -> dict[str, Any]:
     """Graph context after a tool ran: the delta of any files it changed,
     and for `git diff`/`git show` the keys its hunks touch. With `state`
     (`ozagia.intent.ledger.SessionState`), a read or shell read the
     built-in ran is recorded in the session's ledger, as far as `output`
     shows the file's current lines (`ledger.delivered_spec`; `delivered`
     is a harness's own `{"start", "lines"}`), with a note when it repeats
-    or overlaps an earlier read of the unchanged file."""
+    or overlaps an earlier read of the unchanged file. `meta` is the request's own meta
+    (`builtin_error: true` from the OpenCode plugin's failed built-in edit
+    gates the edit-miss reply)."""
+    req_meta = meta if isinstance(meta, dict) else {}
     t0 = time.perf_counter()
-    meta: dict[str, Any] = {"intent": "after_none", "keys": []}
+    meta = {"intent": "after_none", "keys": []}
     lines: list[str] = []
     try:
         inp = input if isinstance(input, dict) else {}
@@ -441,8 +457,23 @@ def after(memory: Any, tool: str, input: dict[str, Any], output: Any, *,
                 lines.extend(failed)
                 meta["keys"].extend(k for k in fkeys if k not in meta["keys"])
                 meta["intent"] = "after_pytest_summary"
+        if tool == "edit" and isinstance(output, str):
+            # A built-in edit whose old text is not in the file: the nearest
+            # region, so the next try needs no re-read.
+            try:
+                flag = req_meta.get("builtin_error")
+                miss = edit_miss_lines(
+                    memory, inp, output,
+                    builtin_error=flag if isinstance(flag, bool) else None)
+            except Exception:  # noqa: BLE001 - an optional addition
+                miss = []
+            if miss:
+                lines.extend(miss)
+                meta["region_replies"] = 1
+                meta["intent"] = "after_edit_miss"
         if changes:
-            meta["intent"] = "after_refresh"
+            meta["intent"] = ("after_edit_miss" if meta.get("region_replies")
+                              else "after_refresh")
             pending = memory.pending_changes()
             meta["changed_files"] = len(pending)
             if len(pending) > MAX_REFRESH_FILES:
@@ -522,5 +553,6 @@ def check_read(memory: Any, tool: str, input: Any, *, state: Any = None
 
 __all__ = ["HANDLERS", "MAX_REFRESH_FILES", "MUTATING_TOOLS", "Preflight",
            "after", "check_read", "classify", "handle", "permission_request",
-           "handle_edit", "handle_glob", "handle_grep", "handle_read",
+           "handle_edit", "handle_glob", "handle_grep", "handle_patch_check",
+           "handle_read",
            "handle_shell", "handle_write", "touched_keys"]

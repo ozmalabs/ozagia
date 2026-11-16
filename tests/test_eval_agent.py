@@ -1021,7 +1021,11 @@ def test_graph_stats_fields_read_counts():
                                            "stubs_served": None,
                                            "notes_served": None,
                                            "outlines_served": None,
-                                           "bytes_saved": None}
+                                           "bytes_saved": None,
+                                           "patch_checks": None,
+                                           "patch_misses_caught": None,
+                                           "region_replies": None,
+                                           "key_edits": None}
     # The daemon's shape: handled {"true": captured, "false": passthrough and
     # expired}; fallbacks = plugin fallbacks + expired + failed (review fix 4).
     assert ae.graph_stats_fields({"hellos": 2, "handled": {"true": 3, "false": 4},
@@ -1034,14 +1038,17 @@ def test_graph_stats_fields_read_counts():
                                   "jq_captures": 2, "repeats_seen": 5,
                                   "stubs_served": 3, "notes_served": 2,
                                   "outlines_served": 1,
-                                  "bytes_saved": 900}) == {
+                                  "bytes_saved": 900, "patch_checks": 5,
+                                  "patch_misses_caught": 2,
+                                  "region_replies": 3, "key_edits": 1}) == {
         "plugin_loaded": True, "captured_calls": 3, "passthrough_calls": 3,
         "fallbacks": 3, "preflights": 2, "permission_assert": True,
         "codemode_tools": ["read"], "shell_captured": None,
         "shell_passthrough": None, "structured_queries": 4,
         "structured_outlines": 1, "jq_captures": 2, "repeats_seen": 5,
         "stubs_served": 3, "notes_served": 2, "outlines_served": 1,
-        "bytes_saved": 900}
+        "bytes_saved": 900, "patch_checks": 5,
+        "patch_misses_caught": 2, "region_replies": 3, "key_edits": 1}
     got = ae.graph_stats_fields({"hellos": 1, "shell": {"captured": 4,
                                                         "passthrough": 1}})
     assert (got["shell_captured"], got["shell_passthrough"]) == (4, 1)
@@ -1057,6 +1064,7 @@ def test_aggregate_totals_structured_reads():
              "structured_outlines": 4, "jq_captures": None}]
     row = ae.aggregate(runs, ["graph_intent"])[0]
     assert row["total_structured_queries"] == 2
+    assert row["total_patch_checks"] == 0 and row["total_key_edits"] == 0
     assert row["total_structured_outlines"] == 7
     assert row["total_jq_captures"] == 1
 

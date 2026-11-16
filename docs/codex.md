@@ -2,9 +2,11 @@
 
 `ozagia.integrations.codex` connects Codex to ozagia in three ways:
 
-- **Command hooks** (`.codex/hooks.json`): graph context after shell
-  commands and patches, refusal of ref-moving git commands, and a short brief
-  at session start.
+- **Command hooks** (`.codex/hooks.json`): a check of every `apply_patch`
+  before it runs (a patch that would fail is refused with the current text
+  of the regions it missed), graph context after shell commands and
+  patches, refusal of ref-moving git commands, and a short brief at session
+  start.
 - **The ozagia MCP server** (`[mcp_servers.ozagia]` in `.codex/config.toml`):
   the graph tools (`dev_symbol`, `dev_node`, `dev_outline`, `dev_impact`,
   `dev_context`, ...) next to Codex's own.
@@ -12,7 +14,8 @@
   reading by key, outlines and impact.
 
 Codex keeps running its own tools. The hooks add context to their results;
-they never replace a result.
+they never replace a result. They refuse two kinds of call: ref-moving git
+commands, and a patch whose hunks would not apply.
 
 **Status: untested live.** The hooks have been run only as subprocesses
 against a stub daemon and a real daemon on a temp repository, with payloads
@@ -81,7 +84,7 @@ The hook entries:
   "hooks": {
     "SessionStart": [{"hooks": [{"type": "command", "timeout": 20,
       "command": "/path/to/python -m ozagia.integrations.codex hook"}]}],
-    "PreToolUse": [{"matcher": "^Bash$", "hooks": [{"type": "command", "timeout": 20,
+    "PreToolUse": [{"matcher": "^(Bash|apply_patch)$", "hooks": [{"type": "command", "timeout": 20,
       "command": "/path/to/python -m ozagia.integrations.codex hook"}]}],
     "PostToolUse": [{"matcher": "^(Bash|apply_patch)$", "hooks": [{"type": "command",
       "timeout": 20, "command": "/path/to/python -m ozagia.integrations.codex hook"}]}],
@@ -155,6 +158,7 @@ root's default locks `<socket>.lock` instead.)
 | `PreCompact`, `SessionEnd` | ledger | `session_event` `compact` / `end`: the session's read ledger is cleared / dropped. | nothing |
 | `PreToolUse` `Bash` with a shell read (`sed -n`, `cat`, `head`, `tail`, `nl`, `nl -ba F \| sed -n 'a,bp'`) | repeat check | Asks the daemon's `read_check`. Under the `stub` policy, a repeat of an unchanged range this session already read is refused with the one-line stub. The default policy is `note` (see below), so by default this never refuses. A command with a `cd` is not tracked. | `permissionDecision: "deny"` with the stub as the reason, or nothing |
 | `PreToolUse` `Bash` with a ref-moving git command | refusal | Refuses it locally, without the daemon, with the intent layer's check (`ozagia.intent.shell.classify` is `git_refs`; see docs/claude_code.md for the list and the parsing). Listing forms (`git branch`, `git tag -l`, `git stash list`) are allowed. | `permissionDecision: "deny"` with a reason |
+| `PreToolUse` `apply_patch` | patch check | Checks the patch against the current files locally, as Codex's apply_patch matches hunks (see "Patch check" below). If every hunk matches, prints nothing. If one would fail, refuses the call with the nearest region of each failing hunk; only then, if a daemon is running, it is asked too (at most 1.5 s, never started for this), for the graph's keys and to count the miss. A matching patch never waits for the daemon. | nothing, or `permissionDecision: "deny"` with the regions as the reason |
 | `PostToolUse` `Bash` | `after` as `shell` | Sends `{command, workdir: cwd}` and the command's output. The daemon maps pytest runs to test keys, re-ingests files the command changed, and maps `git diff`/`git show` hunks to node keys. | `additionalContext` with the daemon's `append`, when not empty |
 | `PostToolUse` `apply_patch` | `after` as `patch` | Sends `{patch: <patch text>}`; the daemon re-ingests the changed files. | the graph delta (`[ozagia] delta: ...`) as `additionalContext` |
 
@@ -194,6 +198,60 @@ and appends one JSON line (`ts`, `event`, `tool`, `session`, `error`) to
 starts the daemon, the brief still gets 3 s (`BRIEF_ALARM_S`) before the
 hook gives up. The hook never exits 2.
 
+## Patch check
+
+`ozagia.intent.patch` ports Codex's apply_patch parser and matcher
+(`codex-rs/apply-patch` in github.com/openai/codex; the module docstring
+lists the files and the rules). In short: hunks are matched in order, each
+`@@ <line>` anchor is searched forward from the previous hunk, and the
+expected lines (context and `-` lines) are matched exactly, then with
+trailing whitespace ignored, then with leading and trailing whitespace
+ignored, then with Unicode dashes, quotes and spaces read as ASCII. With
+`*** End of File` the lines must end the file.
+
+For each failing hunk (at most 4), the reason gives:
+
+```
+*** src/a.py  sha256 <64 hex>  (412 lines)
+hunk 2 of 3 (@@ def foo): the expected lines are not in the file after line 40
+  nearest region: L120-L131 sym:src/a.py::Foo.foo  similarity 0.86
+  node L118-L140 node sha256 <64 hex>; the region is part of it, a key edit replaces all of it
+  differs (-patch expects, +file has):
+  -    return x+1
+  +    return x + 2
+  current L120-L131:
+120:     def foo(self):
+...
+```
+
+The nearest region is the window of the file most like the hunk's expected
+lines (whitespace-normalised difflib ratios; windows after the anchor are
+preferred). Its key is the enclosing symbol (`sym:`/`test:`), Markdown
+section (`doc:<file>#<slug>`), JSON value (`json:<file>#<pointer>`) or text
+chunk (`text:<file>#L<a>-L<b>`, for `.tex` and other unparsed files). The
+`node` line gives that node's full line range and the sha256 of its current
+text: the `base_sha256` a key edit (`dev_key_edit`) of it takes. A key edit
+of part of a file does not take the file's sha256, since the region may show
+only part of the node it would replace. Lines are counted at CRLF, lone CR
+and LF, the same in the reply and in key edits. A
+region shows at most 60 lines, a line at most 1,500 characters, and the
+whole reason stays under 7,000 characters (about 2,000 tokens, under
+Codex's limit of about 2,500 tokens of hook output). When the expected lines
+exist but before the anchor or the previous hunk, the reason says so.
+
+The patch is allowed (the hook prints nothing) when it does not parse,
+when the checker fails, and for files the check cannot judge: paths outside
+the repository or in `.git`, files that do not exist, binary or non-UTF-8
+files, and files over 4 MB. Codex reports those itself. A patch with an
+`*** Environment ID:` line is not checked at all: Codex applies it in that
+environment, whose files the hook may not see. Paths are taken
+relative to the event's `cwd`.
+
+The daemon counts checks in `stats`: `patch_checks`, `patch_misses_caught`
+and `region_replies`. The Codex hook asks the daemon only after a local
+miss, so from Codex `patch_checks` counts the patches that missed; checks
+made while no daemon runs are not counted.
+
 ## Uninstall
 
 ```
@@ -212,8 +270,8 @@ timeout, or with `ozagia daemon shutdown --root <project>`.
   hooks, so output read that way gets no context.
 - The built-in result is never replaced. ozagia does not use PostToolUse
   `decision: "block"` or PreToolUse `updatedInput`.
-- Patch misses get no special handling: when `apply_patch` fails, the
-  `after` finds no changed files and adds nothing.
+- The patch check reads the files when the hook runs. A file changed
+  between the check and Codex's own apply is not seen.
 - Codex spills `additionalContext` over about 2,500 tokens to a file and
   gives the model a preview. The handlers do not set
   `additionalContextLimit`; the brief is far below the limit, and the

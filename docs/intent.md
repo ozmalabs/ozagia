@@ -286,6 +286,35 @@ Edit refused: the result does not parse (invalid syntax at line 19)
 [ozagia] in: sym:pkg/mod.py::Box.m
 ```
 
+An edit with `key` (and `newString`, `base_sha256`) instead of
+`oldString` replaces the whole text of that node (`ozagia.edit.key_edit`:
+`sym:`/`test:` symbols, `doc:<file>#<section slug>` Markdown sections,
+`text:<file>#L<a>-L<b>` line ranges, `json:<file>#<pointer>` values).
+`base_sha256` is the sha256 of the node's current text, as region replies,
+edit-miss replies and refusals give it. The file's sha256 is taken only
+when the node is the whole file (`file:`, `doc:<file>`): a key edit cannot
+tell whether a file sha came from a read of the whole node or from a reply
+that showed part of it, and the edit replaces all of it. A missing, stale
+or file-only base is a tool error with the node's current text and both
+hashes. A `sym:` qualname with several defs (a property getter and setter)
+is refused with each def's line range; edit one by its `text:` key. Other
+languages' symbols use the graph's line range, after a reingest when the
+file changed since the graph took it in.
+
+```
+Edited /repo/pkg/mod.py (node sym:pkg/mod.py::helper, lines 5-10)
+[ozagia] in: sym:pkg/mod.py::helper
+[ozagia] sha256 <new file sha> (the file now); node sha256 <new node sha> (base_sha256 for the next key edit of this node)
+
+Edit refused: stale base: <sha> is neither the node's sha256 nor the file's; ...
+[ozagia] sym:pkg/mod.py::helper L5-L10  file sha256 <sha>  node sha256 <sha>
+5: def helper(a, b=1):
+...
+```
+
+Intents `edit_key` and `edit_key_stale`. The parse guard and broken
+references work as for an exact edit.
+
 An empty `oldString` writes `newString` as the file. `write` goes through
 `ozagia.edit.txn` (backup of an existing file; atomic create of a new one,
 parent directories made), then `reingest`:
@@ -469,6 +498,21 @@ the plugin apply the change a second time.
   back, it appends `[ozagia] touched: <keys>`. These are the key enclosing
   each `+` line, and the line before each deletion point, in the current
   file.
+- For an edit that failed while its `oldString` (or one of `edits`) is not
+  in the file, it appends the nearest region (`ozagia.intent.patch`):
+  `[ozagia] oldString is not in <file>; nearest region L<a>-L<b> <key>
+  (similarity r), sha256 <file sha>`, `[ozagia] node L<c>-L<d> node sha256
+  <sha>` (the key's whole node, and the base a key edit of it takes), the
+  differing lines as `[ozagia] -<oldString line>` / `[ozagia] +<file
+  line>`, then the region's lines as `<n>: <text>` (at most 60). Intent
+  `after_edit_miss`, `meta.region_replies` 1. The OpenCode plugin sends
+  this `after` when the built-in edit throws, with `meta.builtin_error:
+  true`, and throws the error with the append added; a request meta
+  `builtin_error` decides whether the edit failed. Without it (the Claude
+  Code and Codex hooks) the output must report a failure ("not found",
+  "could not find", "no match", ...) and no `newString` may be in the file,
+  so a successful edit whose output carries such words in diagnostics gets
+  no region.
 - For a command with a pytest segment, it maps pytest's short summary
   lines (`FAILED path::name - message`, `ERROR ...`) to `[ozagia] failed
   test:<key>: <message>` for tests the graph knows. Paths are taken
@@ -517,6 +561,17 @@ The ledgers live in the daemon only: at most 64 sessions (least recently
 used dropped), 256 files per session and 32 ranges per file. A
 `session_event` (`compact`, `start`, `end`) clears or drops every ledger of
 a (harness, session).
+
+The patch checks add `patch_checks` and `patch_misses_caught` count `patch_check_ok` plus
+`patch_check_miss`, and `patch_check_miss`; `region_replies` sums
+`meta.region_replies` (patch hunks and edit misses); `key_edits` counts
+`edit_key`.
+
+The `patch_check` tool (`input.patch`, optional `workdir`) checks an
+apply_patch text against the current files and never writes (see
+docs/codex.md, "Patch check"). Its output is the region reply, or `the
+patch matches the current files`; intents `patch_check_ok`,
+`patch_check_miss` and `patch_check_unparsed`.
 
 `ozagia.core.memory` takes its layout from `$OZAGIA_ROOT` when imported, so
 `serve` sets it to `--root` first. `DevMemory`'s own journal goes next to a

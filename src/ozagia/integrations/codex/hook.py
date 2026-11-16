@@ -13,6 +13,17 @@ reference (https://learn.chatgpt.com/docs/hooks, see docs/codex.md).
   `[reads]` opts in. Codex is a poor candidate: subagent hooks carry the
   parent's session id, and exec output is truncated (the ledger records
   only the lines the output shows). A command with a `cd` is not tracked.
+- `PreToolUse` for `apply_patch`: check the patch against the current files
+  as Codex would apply it (`ozagia.intent.patch.check_patch`, local). If
+  every hunk matches, print nothing. If a hunk would fail ("Failed to find
+  expected lines"), deny with the nearest region of each failing hunk (its
+  current text with line numbers, range, node key, file sha256), so the
+  agent can fix the patch without reading the file again. On a local miss
+  only, a running daemon (never started for this) is asked too, for its
+  graph keys and to count the miss; it has `PATCH_DAEMON_TIMEOUT_S`. A patch
+  that matches never waits for the daemon. A patch that does not parse, one
+  with `*** Environment ID:` (for another environment's files), or any
+  checker error, prints nothing.
 - `PostToolUse` for `Bash`: send `after` as `shell` ({command, workdir})
   with the command's output, and return the daemon's `append` as
   `additionalContext` (with the ledger's `unchanged since read N` note).
@@ -42,11 +53,15 @@ is logged as one JSON line to `<state dir>/codex_hook.log`.
 """
 from __future__ import annotations
 
+import os
 import subprocess
+import time
 from pathlib import Path
 from typing import Any, TextIO
 
+from ozagia.daemon import protocol
 from ozagia.integrations import hookcore
+from ozagia.intent.patch import check_patch, patch_text
 
 # Codex's handler timeout, which install.py writes to hooks.json.
 HOOK_TIMEOUT_S = 20
@@ -71,6 +86,11 @@ GIT_TIMEOUT_S = 3
 BRIEF_ALARM_S = 3
 # SessionStart's `session_event` (the ledger reset) waits this long at most.
 SESSION_EVENT_TIMEOUT_S = 1.0
+# PreToolUse apply_patch: how long the hook waits for the daemon's keyed
+# answer, and the largest deny reason. Codex shows the model about 2,500
+# tokens of hook output; 7,000 characters of code and prose stay under it.
+PATCH_DAEMON_TIMEOUT_S = 1.5
+PATCH_REPLY_MAX_CHARS = 7000
 
 MCP_TOOLS_LINE = (
     "Prefer the ozagia MCP tools over reading whole files: dev_symbol / "
@@ -155,6 +175,66 @@ def session_brief(root: Path, max_chars: int = BRIEF_MAX_CHARS) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# PreToolUse apply_patch: patch miss recovery
+# --------------------------------------------------------------------------- #
+def _deny(reason: str) -> dict[str, Any]:
+    return {"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                                   "permissionDecision": "deny",
+                                   "permissionDecisionReason": reason}}
+
+
+def _daemon_check(root: Path, payload: dict[str, Any], text: str,
+                  cwd: str | None) -> dict[str, Any] | None:
+    """The daemon's `patch_check` answer (graph keys, and the counters), or
+    None when no daemon answers within PATCH_DAEMON_TIMEOUT_S. Never starts
+    one."""
+    deadline = int((time.time() + PATCH_DAEMON_TIMEOUT_S) * 1000)
+    inp: dict[str, Any] = {"patch": text, "max_chars": PATCH_REPLY_MAX_CHARS}
+    if cwd:
+        inp["workdir"] = cwd
+    try:
+        resp = hookcore.daemon_request(protocol.socket_path(root), {
+            "id": 1, "op": "tool", "harness": HARNESS,
+            "session": payload.get("session_id") or "", "tool": "patch_check",
+            "input": inp, "deadline_ms": deadline},
+            timeout=PATCH_DAEMON_TIMEOUT_S)
+    except (OSError, ValueError, hookcore.HookError):
+        return None
+    if not resp.get("handled") or resp.get("is_error"):
+        return None
+    return resp
+
+
+def pre_apply_patch(payload: dict[str, Any], root: Path,
+                    tool_input: dict[str, Any]) -> dict[str, Any] | None:
+    """Check the patch against the current files (`ozagia.intent.patch`):
+    print nothing when every hunk matches, deny with the nearest regions
+    when one would fail. A patch that does not parse, or a checker error,
+    prints nothing (Codex reports its own errors)."""
+    text = patch_text(tool_input)
+    if not text:
+        return None
+    cwd = payload.get("cwd")
+    cwd = cwd if isinstance(cwd, str) and os.path.isdir(cwd) else None
+    try:
+        local = check_patch(root, text, cwd=cwd, max_chars=PATCH_REPLY_MAX_CHARS)
+    except Exception as exc:  # noqa: BLE001 - fail open
+        hookcore.log_failure(root, LOG_NAME, payload, exc)
+        local = None
+    if local is None or not local.get("parsed") or not local.get("misses"):
+        return None
+    # Only on a local miss: the daemon (if one runs) checks it again with the
+    # graph's keys and counts it; its answer is used for the reason only.
+    resp = _daemon_check(root, payload, text, cwd)
+    reason = local["reply"]
+    meta = (resp or {}).get("meta") or {}
+    if (meta.get("intent") == "patch_check_miss"
+            and isinstance(resp.get("output"), str) and resp["output"]):
+        reason = resp["output"]
+    return _deny(reason[:PATCH_REPLY_MAX_CHARS])
+
+
+# --------------------------------------------------------------------------- #
 # events
 # --------------------------------------------------------------------------- #
 def _context(event: str, text: str) -> dict[str, Any]:
@@ -221,6 +301,9 @@ def handle(payload: dict[str, Any], root: Path) -> dict[str, Any] | None:
             return None
         stub = hookcore.repeat_stub(root, HARNESS, session, sub, *mapped)
         return _deny(stub) if stub else None
+
+    if event == "PreToolUse" and tool_name == "apply_patch":
+        return pre_apply_patch(payload, root, tool_input)
 
     if event == "PostToolUse":
         mapped = map_tool(tool_name, tool_input, cwd if isinstance(cwd, str) else None)

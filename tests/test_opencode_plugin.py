@@ -42,7 +42,9 @@ const tools = {
           execute: async (input) => { calls.push(["grep", input]); return { output: { matches: 2 } }; } },
   edit: { name: "edit", description: "Edit a file.", output: schema,
           options: { codemode: false, permission: "edit" },
-          execute: async (input) => { calls.push(["edit", input]); return "ORIG EDIT"; } },
+          execute: async (input) => { calls.push(["edit", input]);
+            if (cfg.editThrows) throw new Error(cfg.editThrows);
+            return "ORIG EDIT"; } },
   shell: { name: "shell", description: "Run a command.", output: { kind: "shell" },
            execute: async (input) => { calls.push(["shell", input]);
              return { output: "ORIG SHELL", content: [{ type: "text", text: "ORIG SHELL" }] }; } },
@@ -298,6 +300,36 @@ def test_unhandled_call_runs_the_original_and_appends_after(tmp_path, daemon):
     afters = [r for r in d.requests if r["op"] == "after"]
     assert [a["output"] for a in afters] == ["ORIG READ", '{"matches":2}']
     assert afters[0]["input"] == {"path": "pkg/mod.py"} and "meta" not in afters[0]
+
+
+@needs_node
+def test_failed_builtin_edit_gets_the_nearest_region(tmp_path, daemon):
+    def script(req):
+        if req["op"] == "tool":
+            return {"ok": True, "handled": False, "reason": "no exact match"}
+        if req["op"] == "after":
+            return {"ok": True, "append": "[ozagia] nearest region L3-L4"}
+        return _standard(req)
+
+    d = daemon(script)
+    edit = {"tool": "edit", "input": {"path": "x.py", "oldString": "a", "newString": "b"}}
+    out = _run(tmp_path, {"calls": [edit], "editThrows": "oldString not found in content"},
+               d.path)
+    assert out["results"][0] == {
+        "ok": False, "error": "oldString not found in content\n[ozagia] nearest region L3-L4"}
+    after = [r for r in d.requests if r["op"] == "after"][0]
+    assert after["output"] == "oldString not found in content"
+    assert after["meta"] == {"builtin_error": True}
+
+    # No append: the built-in's error as it was.
+    def quiet(req):
+        if req["op"] == "after":
+            return {"ok": True, "append": ""}
+        return script(req)
+
+    d.script = quiet
+    out = _run(tmp_path, {"calls": [edit], "editThrows": "boom"}, d.path)
+    assert out["results"][0] == {"ok": False, "error": "boom"}
 
 
 @needs_node

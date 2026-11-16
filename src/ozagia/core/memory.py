@@ -3243,6 +3243,43 @@ class DevMemory:
                                      f"{type(e).__name__}: {e}")
         return result
 
+    def key_edit(self, key: str, new_text: str, *,
+                 base_sha256: str | None = None, apply: Any = False,
+                 task: str | None = None) -> dict[str, Any]:
+        """Replace the whole text of node `key` by `new_text` and journal it.
+
+        See `ozagia.edit.key_edit`: `base_sha256` (the node's sha256; the
+        file's only for a whole-file node) is required; a missing, stale or
+        file-only one is refused with the node's current text. Otherwise as `span_edit` (parse guard, broken
+        references, reingest). Preview unless `apply` is true."""
+        from ozagia.edit.key_edit import apply_key_edit
+        write = _strict_bool(apply, "apply")
+        result = apply_key_edit(self.raw_repo_root, key, new_text,
+                                base_sha256=base_sha256, write=write,
+                                memory=self)
+        if result.get("applied"):
+            file_rel = str(result.get("file") or "")
+            try:
+                self._drop_cached(file_rel)
+                result["journaled"] = self.journal_append(
+                    "key_edit",
+                    task or f"key edit {key}",
+                    f"{key} L{result['start_line']}-L{result['end_line']}; "
+                    f"{result['before']['lines']} -> {result['after']['lines']} "
+                    f"lines; sha {result['new_sha256'][:12]}",
+                    files=[file_rel],
+                    keys=result.get("keys"),
+                    new_text=new_text,
+                    base_sha256=result.get("base_sha256"),
+                    new_sha256=result.get("new_sha256"),
+                    backup=result.get("backup"),
+                )
+            except Exception as e:  # noqa: BLE001 - reported, not raised
+                result["journaled"] = None
+                result["warning"] = (f"journal not written: "
+                                     f"{type(e).__name__}: {e}")
+        return result
+
     def _post_edit_diagnostics(self, file: str, *,
                                enabled: bool) -> dict[str, Any]:
         """Push diagnostics for a just-written file, or why there are none.
