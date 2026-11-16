@@ -469,8 +469,32 @@ pytest output is pytest's own output tail, then:
 ```
 [ozagia] pytest failed: exit 1, 0.4 s, 1 passed, 1 failed, 0 error, 0 skipped
 [ozagia] failed test:tests/test_mod.py::test_broken: assert 3 == 5
-[ozagia]   frame test:tests/test_mod.py::test_broken tests/test_mod.py:9
 ```
+
+Affected tests and the result cache (`ozagia.intent.affected`, off by
+default; `[tests] select = "affected"`, `[tests] cache = true`). A captured
+pytest with no test selector (or only directory selectors) and only
+reporting options runs the tests linked to the files changed since the last
+fully green run of that suite (git working-tree changes, the import walk of
+`ozagia.intent.affected`, the graph's covering tests), and says so after
+the head line:
+
+```
+[ozagia] ran 2 affected tests of 3; not run: 1 test in 1 file (tests/test_other.py); run all: OZAGIA_TESTS_ALL=1 python -m pytest -q
+```
+
+When it cannot decide (no green run yet, conftest.py, a non-Python file or
+the pytest config changed, a changed file no test is linked to, no change
+at all, `OZAGIA_TESTS_ALL=1`) it runs the command as typed and says
+`[ozagia] ran all tests: <reason>`. With the cache, a test whose inputs are
+unchanged since it passed is reported as `[ozagia] cached pass <file>: ...`
+instead of run; failures are never cached. Slow (> 5 s) and flaky tests are
+listed at the end (`[ozagia] slow test ...`, `[ozagia] flaky test ...`).
+`select = "all"` is the default because changing what a command runs is
+surprising. `meta.tests` has the counters `affected_runs`,
+`tests_skipped_unaffected`, `cached_passes`, `full_runs_forced`, which the
+daemon's `stats` sums. `cargo test` is not covered (not a captured command,
+and the Rust graph has no crate or test-target nodes).
 
 A captured pytest runs with the timeout `input.timeout` (ms), else 120 s
 (OpenCode's built-in shell default, so capture never lets a command run

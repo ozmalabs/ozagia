@@ -1,0 +1,1078 @@
+"""Affected-test selection and a test-result cache for a captured pytest.
+
+Both are off by default and turned on in the project configuration:
+
+    [tests]
+    select = "affected"   # default "all"
+    cache = true          # default false
+
+`select = "all"` is the default because changing what a command runs is
+surprising: an agent that types `pytest -q` expects the whole suite, and a
+partial run reported as a pass could hide a regression. With the default
+and `cache = false` a captured pytest runs exactly as before and this module
+writes nothing.
+
+Which commands: a captured pytest (alone or as a compound step) with no test
+selector, or whose selectors are all directories (`pytest`, `pytest -q`,
+`python -m pytest -x tests/`), and whose options only change reporting
+(`-q`, `-v`, `-x`, `-s`, `-l`, `--tb`, `-r`, `--maxfail`, `--durations`,
+`--color`, `--no-header`, `--disable-warnings`, `--strict-*`, ...). Anything
+else (`-k`, `-m`, `-p`, `--deselect`, `--doctest-modules`, a pytest config
+whose `addopts` has `--doctest`) runs as before. `OZAGIA_TESTS_ALL=1` on the
+command (or in the caller's environment) runs everything.
+
+Selection (`select = "affected"`). A suite is the interpreter, the directory
+selectors, the environment assignments and the options that can change a
+result. For each suite the state keeps its last fully green run: a run of the
+command as typed that exited 0, with the git HEAD, the hashes of the files
+that were dirty then, and the test files with their test counts. The files
+changed since then are `git diff --no-renames <head>` plus untracked files
+plus the files dirty at that run, less those whose content is what it was.
+The tests linked to them are:
+
+- test files that changed (a new test file only when its directory already
+  holds a test file of the green run);
+- test files whose transitive project imports reach a changed file. Imports
+  are resolved here, not from the graph's `imports` edges, because those do
+  not resolve `import a.b` or `from pkg import submodule`: every project file
+  whose dotted path ends with the imported name counts (over-inclusion only
+  runs more tests). A file depends on its package `__init__.py` files, a test
+  file on its conftest chain, and any file on project files named by its
+  string literals (`"pkg.mod"`, `"tests/fixtures/x.py"`);
+- the graph's covering tests (`intent.common.covering_tests`) of a changed
+  file;
+- a test file whose import closure holds a dynamic import that cannot be
+  resolved (`importlib.import_module(name)`, `__import__`, `exec`, entry
+  points, ...) is linked to every change.
+
+Everything runs, as typed, when the graph cannot decide: no green run yet,
+the green run's commit is gone, not a git work tree, a conftest.py changed,
+a non-Python file changed (tests may read it; this includes pytest and
+packaging config), a changed Python file no test is linked to, too many
+changed or untracked files, or no file changed at all. The output then says
+`[ozagia] ran all tests: <reason>`. A subset run says
+
+    [ozagia] ran N affected tests of M; not run: K tests in F files (a, b, +n more); run all: OZAGIA_TESTS_ALL=1 <command>
+
+Only a run of the command as typed that exits 0 moves the green run forward;
+an affected run never does, so changes accumulate until the next full pass.
+
+Cache (`cache = true`). Each test node's last outcome is stored with the key
+of its test file: a hash of the test file, its conftest chain, the project
+files of its import closure (conftest closures included), the root pytest
+config files, the interpreter (version and installed distributions), the
+environment (less a few per-terminal variables), the result-changing
+options, and the size and mtime of every non-Python file git does not
+ignore. A test file whose closure has a dynamic import has no key. The key
+is taken before the run and again after it; results are stored only when
+both agree. Of the tests that would run, a node whose stored key equals the
+current one with outcome passed (or skipped), and that is not flaky, is not
+run and is reported as `[ozagia] cached pass <file>: ...`. A failure or an
+error is never served from the cache; a node seen with no stored outcome
+under the current key (the file's node list is stored only by a run of the
+whole file that was not cut short by `-x`) makes the whole file run. With
+`select = "all"` the cache applies to every test file of the green run.
+
+Slow (> `SLOW_S`) and flaky (passed and failed under one key) tests are
+remembered while either feature is on and listed at the end of the output.
+
+State: `<state dir>/tests/results.json` (bounded: `MAX_NODES` nodes,
+`MAX_FILES` files, `MAX_SUITES` suites, `MAX_SLOW`/`MAX_FLAKY`).
+
+Known limits: tests that pass alone but fail with others (order or shared
+state) can pass in a subset run; files git ignores (generated data, the
+virtualenv beyond its distribution list) are not seen as changes. `cargo
+test` is not covered: it is not a captured command, and the Rust graph has
+no crate or test-target nodes to map changed files to.
+"""
+from __future__ import annotations
+
+import ast
+import contextlib
+import hashlib
+import json
+import os
+import re
+import subprocess
+import threading
+import time
+from dataclasses import dataclass, field
+from pathlib import Path, PurePosixPath
+from typing import Any, Iterator
+
+from ozagia.config import GENERIC_SKIP_DIRS, state_path, state_rel
+
+ENV_ALL = "OZAGIA_TESTS_ALL"
+SLOW_S = 5.0
+VERSION = 1
+MAX_NODES = 20000
+MAX_FILES = 5000
+MAX_SUITES = 16
+MAX_SLOW = 500
+MAX_FLAKY = 500
+MAX_PY_FILES = 20000
+MAX_CHANGED = 500
+MAX_UNTRACKED = 5000
+MAX_SELECTOR_CHARS = 100_000
+MAX_LISTED = 5
+MAX_CACHED_LINES = 10
+GIT_TIMEOUT_S = 20
+
+PYTEST_CONFIG_FILES = ("pytest.ini", ".pytest.ini", "pyproject.toml",
+                       "setup.cfg", "tox.ini")
+
+# Options that only change what pytest reports, or when it stops.
+_REPORT_FLAGS = frozenset({
+    "-q", "-v", "-x", "-l", "--quiet", "--verbose", "--exitfirst",
+    "--showlocals", "--no-header", "--no-summary", "--disable-warnings",
+    "--full-trace",
+})
+_REPORT_VALUE_OPTS = frozenset({"--tb", "-r", "--maxfail", "--durations",
+                                "--durations-min", "--color"})
+# Options that may change a result but not which tests run.
+_RESULT_FLAGS = frozenset({"-s", "--capture=no", "--strict-markers",
+                           "--strict-config", "--strict"})
+_EARLY_STOP = ("-x", "--exitfirst", "--maxfail")
+# Variables that differ per terminal, not per test environment.
+_VOLATILE_ENV = frozenset({
+    "_", "SHLVL", "OLDPWD", "PWD", "COLUMNS", "LINES", "TERM_SESSION_ID",
+    "WINDOWID", "SSH_AUTH_SOCK", "SSH_AGENT_PID", "SSH_CLIENT",
+    "SSH_CONNECTION", "SSH_TTY", "XDG_SESSION_ID", "TMUX", "TMUX_PANE",
+    "STY", "WINDOW", "KITTY_WINDOW_ID", "GPG_AGENT_INFO", "PYTEST_CURRENT_TEST",
+    ENV_ALL,
+})
+_DYNAMIC_CALLS = frozenset({
+    "import_module", "__import__", "spec_from_file_location", "run_path",
+    "run_module", "load_source", "load_module", "iter_modules",
+    "walk_packages", "entry_points", "exec", "find_spec", "module_from_spec",
+})
+_SAFE_NODEID = re.compile(r"^[\w./:\[\]-]+$")
+
+_LOCK = threading.Lock()
+
+
+# --------------------------------------------------------------------------- #
+# options and configuration
+# --------------------------------------------------------------------------- #
+
+def _split_cluster(tok: str) -> str | None:
+    """The result-changing letters of a short-flag cluster (`-xvs` -> "s"),
+    or None when `tok` is not a cluster of known letters."""
+    if tok.startswith("--") or len(tok) < 2 or not set(tok[1:]) <= set("vqxsl"):
+        return None
+    return "".join(c for c in tok[1:] if c == "s")
+
+
+def _args(extra: list[str]) -> tuple[list[str], str | None, bool]:
+    """(result-changing options, why the options are not eligible, whether
+    an option stops the run early)."""
+    keep: list[str] = []
+    early = False
+    i = 0
+    while i < len(extra):
+        tok = extra[i]
+        name = tok.split("=", 1)[0]
+        if tok in _REPORT_FLAGS:
+            early |= tok in _EARLY_STOP
+        elif tok in _RESULT_FLAGS:
+            keep.append(tok)
+        elif name in _REPORT_VALUE_OPTS and "=" in tok:
+            early |= name in _EARLY_STOP
+        elif tok in _REPORT_VALUE_OPTS:
+            early |= tok in _EARLY_STOP
+            i += 1
+        elif not tok.startswith("--") and tok[:2] == "-r" and len(tok) > 2:
+            pass
+        elif (cl := _split_cluster(tok)) is not None:
+            early |= "x" in tok
+            if cl:
+                keep.append("-s")
+        else:
+            return [], f"option {tok} is not a reporting option", early
+        i += 1
+    return sorted(set(keep)), None, early
+
+
+def _config_reason(root: Path) -> str | None:
+    """Why the pytest configuration rules selection out, or None."""
+    for name in PYTEST_CONFIG_FILES:
+        p = root / name
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            s = line.strip()
+            if s.startswith("addopts") and "--doctest" in s:
+                return f"{name} addopts collects doctests"
+    return None
+
+
+def _settings(root: Path) -> tuple[str, bool]:
+    from ozagia.config import ConfigError, load_project_config
+    try:
+        cfg = load_project_config(root)
+    except ConfigError:
+        return "all", False
+    return cfg.tests_select, cfg.tests_cache
+
+
+# --------------------------------------------------------------------------- #
+# files
+# --------------------------------------------------------------------------- #
+
+_SHA_CACHE: dict[str, tuple[int, int, int, str]] = {}
+_SHA_CACHE_MAX = 50000
+
+
+def _sha(path: Path) -> str | None:
+    """The content sha256 of a file, or None when it is missing."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    if not path.is_file():
+        return None
+    k = str(path)
+    hit = _SHA_CACHE.get(k)
+    if hit and hit[:3] == (st.st_mtime_ns, st.st_size, st.st_ino):
+        return hit[3]
+    try:
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+    if len(_SHA_CACHE) >= _SHA_CACHE_MAX:
+        _SHA_CACHE.clear()
+    _SHA_CACHE[k] = (st.st_mtime_ns, st.st_size, st.st_ino, digest)
+    return digest
+
+
+def _excluded(rel: str, state: str | None) -> bool:
+    parts = PurePosixPath(rel).parts
+    if any(p in GENERIC_SKIP_DIRS for p in parts[:-1]):
+        return True
+    return bool(state) and (rel == state or rel.startswith(state + "/"))
+
+
+def _git(root: Path, *args: str) -> bytes | None:
+    env = {**os.environ, "GIT_OPTIONAL_LOCKS": "0", "GIT_PAGER": "cat",
+           "GIT_TERMINAL_PROMPT": "0"}
+    try:
+        proc = subprocess.run(["git", "-C", str(root), *args], env=env,
+                              stdin=subprocess.DEVNULL, capture_output=True,
+                              timeout=GIT_TIMEOUT_S, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return proc.stdout if proc.returncode == 0 else None
+
+
+def _zsplit(out: bytes) -> list[str]:
+    return [p.decode("utf-8", "surrogateescape") for p in out.split(b"\0") if p]
+
+
+def _head(root: Path) -> str | None:
+    out = _git(root, "rev-parse", "--verify", "-q", "HEAD")
+    return out.decode().strip() if out else None
+
+
+def _dirty_since(root: Path, base: str) -> tuple[list[str], list[str]] | None:
+    """(tracked files that differ from `base`, untracked files), relative to
+    `root`, or None when git cannot tell."""
+    tracked = _git(root, "diff", "--name-only", "--no-renames", "--relative",
+                   "-z", base, "--")
+    untracked = _git(root, "ls-files", "-z", "--others", "--exclude-standard")
+    if tracked is None or untracked is None:
+        return None
+    return _zsplit(tracked), _zsplit(untracked)
+
+
+def _nonpy_fingerprint(root: Path, state: str | None) -> str | None:
+    """A hash of the size and mtime of every non-Python file git does not
+    ignore (tests may read any of them)."""
+    out = _git(root, "ls-files", "-z", "-c", "-o", "--exclude-standard")
+    if out is None:
+        return None
+    h = hashlib.sha256()
+    for rel in sorted(set(_zsplit(out))):
+        if rel.endswith(".py") or _excluded(rel, state):
+            continue
+        try:
+            st = (root / rel).stat()
+        except OSError:
+            h.update(f"{rel}\0-\n".encode("utf-8", "surrogateescape"))
+            continue
+        h.update(f"{rel}\0{st.st_size}\0{st.st_mtime_ns}\n".encode(
+            "utf-8", "surrogateescape"))
+    return h.hexdigest()
+
+
+_PY_FP: dict[tuple[str, int], tuple[str, list[str]]] = {}
+
+
+def _python_fingerprint(python: str) -> str | None:
+    """The interpreter's version and installed distributions, or None."""
+    try:
+        real = os.path.realpath(python)
+        k = (real, os.stat(real).st_mtime_ns)
+    except OSError:
+        return None
+    hit = _PY_FP.get((python, k[1]))
+    if hit is None:
+        code = ("import sys, sysconfig; p = sysconfig.get_paths(); "
+                "print(sys.version.replace(chr(10), ' ')); "
+                "print(p['purelib']); print(p['platlib'])")
+        try:
+            proc = subprocess.run([python, "-c", code], capture_output=True,
+                                  text=True, timeout=30, check=False,
+                                  stdin=subprocess.DEVNULL)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        rows = proc.stdout.splitlines()
+        if proc.returncode != 0 or len(rows) < 3:
+            return None
+        hit = (rows[0], sorted(set(rows[1:3])))
+        _PY_FP[(python, k[1])] = hit
+    h = hashlib.sha256(hit[0].encode())
+    for d in hit[1]:
+        try:
+            names = sorted(os.listdir(d))
+        except OSError:
+            names = []
+        for n in names:
+            if n.endswith((".dist-info", ".egg-info", ".pth", ".egg-link")):
+                try:
+                    m = os.stat(os.path.join(d, n)).st_mtime_ns
+                except OSError:
+                    m = 0
+                h.update(f"{d}/{n}\0{m}\n".encode("utf-8", "surrogateescape"))
+    return h.hexdigest()
+
+
+def _env_hash(env: dict[str, str]) -> str:
+    h = hashlib.sha256()
+    for k in sorted(env):
+        if k in _VOLATILE_ENV:
+            continue
+        h.update(f"{k}={env[k]}\0".encode("utf-8", "surrogateescape"))
+    return h.hexdigest()
+
+
+# --------------------------------------------------------------------------- #
+# Python imports
+# --------------------------------------------------------------------------- #
+
+@dataclass
+class _PyInfo:
+    sha: str | None
+    imports: list[tuple[str, int, tuple[str, ...]]] = field(default_factory=list)
+    literals: list[str] = field(default_factory=list)
+    opaque: bool = False
+
+
+_PARSE_CACHE: dict[str, tuple[int, int, _PyInfo]] = {}
+
+
+def _call_name(func: ast.AST) -> str:
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return ""
+
+
+def _parse_py(path: Path) -> _PyInfo:
+    try:
+        st = path.stat()
+    except OSError:
+        return _PyInfo(sha=None, opaque=True)
+    k = str(path)
+    hit = _PARSE_CACHE.get(k)
+    if hit and hit[:2] == (st.st_mtime_ns, st.st_size):
+        return hit[2]
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return _PyInfo(sha=None, opaque=True)
+    info = _PyInfo(sha=hashlib.sha256(data).hexdigest())
+    try:
+        tree = ast.parse(data)
+    except (SyntaxError, ValueError):
+        info.opaque = True
+        tree = None
+    if tree is not None:
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Import):
+                for a in n.names:
+                    info.imports.append((a.name, 0, ()))
+            elif isinstance(n, ast.ImportFrom):
+                info.imports.append((n.module or "", int(n.level or 0),
+                                     tuple(a.name for a in n.names)))
+            elif isinstance(n, ast.Call):
+                name = _call_name(n.func)
+                if name not in _DYNAMIC_CALLS:
+                    continue
+                arg = n.args[0] if n.args else None
+                if (name in ("import_module", "__import__")
+                        and isinstance(arg, ast.Constant)
+                        and isinstance(arg.value, str)
+                        and not arg.value.startswith(".")):
+                    info.imports.append((arg.value, 0, ()))
+                elif (name in ("run_path", "spec_from_file_location",
+                               "load_source")
+                      and all(isinstance(a, ast.Constant)
+                              and isinstance(a.value, str) for a in n.args)):
+                    info.literals.extend(a.value for a in n.args)
+                else:
+                    info.opaque = True
+            elif (isinstance(n, ast.Constant) and isinstance(n.value, str)
+                  and 0 < len(n.value) <= 300
+                  and ("." in n.value or "/" in n.value)
+                  and not any(c.isspace() for c in n.value)):
+                info.literals.append(n.value)
+    if len(_PARSE_CACHE) >= MAX_PY_FILES:
+        _PARSE_CACHE.clear()
+    _PARSE_CACHE[k] = (st.st_mtime_ns, st.st_size, info)
+    return info
+
+
+class _Project:
+    """The project's Python files and their dependencies."""
+
+    def __init__(self, root: Path, state: str | None,
+                 extra: set[str] = frozenset()) -> None:
+        self.root = root
+        self.files: dict[str, _PyInfo] = {}
+        self.too_many = False
+        for dirpath, dirnames, filenames in os.walk(root):
+            here = Path(dirpath)
+            rel_dir = here.relative_to(root).as_posix()
+            rel_dir = "" if rel_dir == "." else rel_dir
+            dirnames[:] = sorted(
+                d for d in dirnames if d not in GENERIC_SKIP_DIRS
+                and not (state and (f"{rel_dir}/{d}" if rel_dir else d) == state))
+            for name in filenames:
+                if not name.endswith(".py"):
+                    continue
+                rel = f"{rel_dir}/{name}" if rel_dir else name
+                self.files[rel] = _parse_py(here / name)
+                if len(self.files) > MAX_PY_FILES:
+                    self.too_many = True
+                    return
+        # Deleted files still resolve, so their importers are linked.
+        names = set(self.files) | {r for r in extra if r.endswith(".py")}
+        self.by_dotted: dict[str, set[str]] = {}
+        self.by_tail: dict[str, set[str]] = {}
+        for rel in names:
+            parts = list(PurePosixPath(rel).parts)
+            parts[-1] = parts[-1][:-3]
+            if parts[-1] == "__init__":
+                parts.pop()
+            for i in range(len(parts)):
+                self.by_dotted.setdefault(".".join(parts[i:]), set()).add(rel)
+            self.by_tail.setdefault(PurePosixPath(rel).name, set()).add(rel)
+        self.names = names
+        self._deps: dict[str, set[str]] = {}
+
+    def _rel_module(self, rel: str, module: str, level: int) -> list[str]:
+        base = PurePosixPath(rel).parent
+        for _ in range(level - 1):
+            base = base.parent
+        parts = [p for p in module.split(".") if p]
+        d = base.joinpath(*parts) if parts else base
+        return [f"{d.as_posix()}.py" if parts else "",
+                (d / "__init__.py").as_posix()]
+
+    def _absolute(self, module: str) -> set[str]:
+        out: set[str] = set()
+        parts = module.split(".")
+        for i in range(1, len(parts) + 1):
+            out |= self.by_dotted.get(".".join(parts[:i]), set())
+        return out
+
+    def deps(self, rel: str) -> set[str]:
+        """Project files `rel` depends on directly."""
+        got = self._deps.get(rel)
+        if got is not None:
+            return got
+        out: set[str] = set()
+        info = self.files.get(rel)
+        p = PurePosixPath(rel).parent
+        while p.as_posix() not in ("", "."):
+            init = (p / "__init__.py").as_posix()
+            if init in self.names and init != rel:
+                out.add(init)
+            p = p.parent
+        if info is not None:
+            for module, level, names in info.imports:
+                if level:
+                    cands = [c for c in self._rel_module(rel, module, level) if c]
+                    pkg = PurePosixPath(cands[-1]).parent
+                    for n in names:
+                        cands += [(pkg / f"{n}.py").as_posix(),
+                                  (pkg / n / "__init__.py").as_posix()]
+                    out |= {c for c in cands if c in self.names}
+                else:
+                    out |= self._absolute(module)
+                    for n in names:
+                        if n != "*":
+                            out |= self.by_dotted.get(f"{module}.{n}", set())
+            for s in info.literals:
+                s = s.strip().removeprefix("./")
+                if "/" in s:
+                    if s in self.names:
+                        out.add(s)
+                    elif s.endswith(".py"):
+                        out |= {r for r in self.by_tail.get(PurePosixPath(s).name, ())
+                                if r.endswith("/" + s)}
+                else:
+                    out |= self.by_dotted.get(s, set())
+        out.discard(rel)
+        self._deps[rel] = out
+        return out
+
+    def conftests(self, rel: str) -> list[str]:
+        out = []
+        parts = PurePosixPath(rel).parts[:-1]
+        for i in range(len(parts) + 1):
+            c = "/".join([*parts[:i], "conftest.py"])
+            if c in self.files:
+                out.append(c)
+        return out
+
+    def closure(self, test_rel: str) -> tuple[set[str], bool]:
+        """(files the test file depends on, transitively, with its conftest
+        chain; whether any of them has an unresolvable dynamic import)."""
+        todo = [test_rel, *self.conftests(test_rel)]
+        seen = set(todo)
+        opaque = False
+        while todo:
+            r = todo.pop()
+            info = self.files.get(r)
+            if info is not None and info.opaque:
+                opaque = True
+            for d in self.deps(r):
+                if d not in seen:
+                    seen.add(d)
+                    todo.append(d)
+        return seen, opaque
+
+    def key(self, test_rel: str, common: str) -> str | None:
+        files, opaque = self.closure(test_rel)
+        if opaque:
+            return None
+        h = hashlib.sha256(common.encode())
+        for r in sorted(files):
+            info = self.files.get(r)
+            sha = info.sha if info is not None else None
+            if sha is None:
+                return None
+            h.update(f"{r}\0{sha}\n".encode("utf-8", "surrogateescape"))
+        return h.hexdigest()
+
+
+# --------------------------------------------------------------------------- #
+# state
+# --------------------------------------------------------------------------- #
+
+def _empty() -> dict[str, Any]:
+    return {"version": VERSION, "suites": {}, "files": {}, "nodes": {},
+            "flaky": {}, "slow": {}}
+
+
+def _state_file(root: Path) -> Path:
+    return state_path(root, "tests", "results.json")
+
+
+def load_state(root: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(_state_file(root).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return _empty()
+    if not isinstance(data, dict) or data.get("version") != VERSION:
+        return _empty()
+    for k, v in _empty().items():
+        if not isinstance(data.get(k), type(v)):
+            data[k] = v
+    return data
+
+
+def _prune(table: dict[str, Any], limit: int) -> None:
+    if len(table) <= limit:
+        return
+    order = sorted(table, key=lambda k: (table[k].get("t") or 0)
+                   if isinstance(table[k], dict) else 0)
+    for k in order[:len(table) - limit]:
+        del table[k]
+
+
+@contextlib.contextmanager
+def _locked(root: Path) -> Iterator[dict[str, Any]]:
+    path = _state_file(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _LOCK, open(path.parent / ".lock", "a+") as lk:
+        try:
+            import fcntl
+            fcntl.flock(lk, fcntl.LOCK_EX)
+        except (ImportError, OSError):
+            pass
+        data = load_state(root)
+        yield data
+        _prune(data["suites"], MAX_SUITES)
+        _prune(data["files"], MAX_FILES)
+        _prune(data["nodes"], MAX_NODES)
+        _prune(data["flaky"], MAX_FLAKY)
+        _prune(data["slow"], MAX_SLOW)
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8")
+        os.replace(tmp, path)
+
+
+# --------------------------------------------------------------------------- #
+# the plan
+# --------------------------------------------------------------------------- #
+
+@dataclass
+class Plan:
+    """What a captured pytest runs, and what to record after it."""
+    root: Path
+    select: str
+    cache: bool
+    suite: str
+    run_all_cmd: str
+    early_stop: bool
+    # None: the command as typed.
+    selectors: list[str] | None = None
+    reason: str | None = None            # why everything runs
+    forced: bool = False                 # selection was asked for, all ran
+    selected: list[str] = field(default_factory=list)   # test files
+    not_run: dict[str, int] = field(default_factory=dict)
+    cached: dict[str, dict[str, int]] = field(default_factory=dict)
+    cached_since: dict[str, float] = field(default_factory=dict)
+    whole_files: set[str] = field(default_factory=set)
+    keys: dict[str, str] = field(default_factory=dict)
+    key_inputs: dict[str, Any] = field(default_factory=dict)
+    state: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def nothing_to_run(self) -> bool:
+        return self.selectors is not None and not self.selectors
+
+
+def _run_all_cmd(inp: dict[str, Any], cls: dict[str, Any]) -> str:
+    command = str(inp.get("command") or "pytest")
+    raw = cls.get("_raw")
+    prefix = f"{ENV_ALL}=1 "
+    if isinstance(raw, str) and raw and raw in command:
+        return command.replace(raw, prefix + raw.lstrip(), 1)
+    if "cd" in cls and "&&" in command:
+        left, right = command.split("&&", 1)
+        return f"{left}&& {prefix}{right.strip()}"
+    return prefix + command
+
+
+def _suite_id(python: str, scope: list[str], cls: dict[str, Any],
+              args: list[str]) -> str:
+    env = {k: v for k, v in (cls.get("env") or {}).items() if k != ENV_ALL}
+    blob = json.dumps([python, sorted(scope), sorted(env.items()), args])
+    return hashlib.sha256(blob.encode()).hexdigest()[:24]
+
+
+def _is_test_name(rel: str) -> bool:
+    name = PurePosixPath(rel).name
+    return name.endswith(".py") and (name.startswith("test_")
+                                     or name.endswith("_test.py"))
+
+
+def _in_scope(rel: str, scope: list[str]) -> bool:
+    return not scope or any(s in (".", "") or rel == s or rel.startswith(s.rstrip("/") + "/")
+                            for s in scope)
+
+
+def plan(memory: Any, cls: dict[str, Any], inp: dict[str, Any], *,
+         root: Path, python: str, selectors: list[str],
+         env: dict[str, str] | None) -> Plan | None:
+    """The plan for a captured pytest, or None when neither feature is on or
+    the command is not one this module changes (see the module docstring)."""
+    select, cache = _settings(root)
+    if select == "all" and not cache:
+        return None
+    scope = []
+    for s in selectors:
+        if "::" in s or not (root / s).is_dir():
+            return None
+        scope.append(s.rstrip("/") or ".")
+    args, why, early = _args(list(cls.get("extra_args") or []))
+    if why is not None:
+        return None
+    eff_env = dict(env if isinstance(env, dict) else os.environ)
+    p = Plan(root=root, select=select, cache=cache,
+             suite=_suite_id(python, scope, cls, args),
+             run_all_cmd=_run_all_cmd(inp, cls), early_stop=early)
+    state = load_state(root)
+    p.state = state
+    srel = state_rel(root)
+
+    def everything(reason: str, proj: _Project | None = None) -> Plan:
+        p.selectors = None
+        p.reason = reason
+        p.forced = select == "affected"
+        if cache:
+            # Keys for every test file, so this run fills the cache.
+            if proj is None:
+                proj = _Project(root, srel)
+            if not proj.too_many:
+                p.selected = sorted(
+                    f for f in proj.files
+                    if (_is_test_name(f) or f in state["files"])
+                    and _in_scope(f, scope))
+                _key_inputs(p, proj, python, eff_env, args)
+                p.key_inputs["project"] = proj
+                p.selected = []
+        return p
+
+    if (cls.get("env") or {}).get(ENV_ALL) == "1" or eff_env.get(ENV_ALL) == "1":
+        return everything(f"{ENV_ALL}=1")
+    cfg_why = _config_reason(root)
+    if cfg_why:
+        return everything(cfg_why)
+    base = state["suites"].get(p.suite)
+    if not isinstance(base, dict) or not isinstance(base.get("files"), dict):
+        return everything("no fully green run of this suite recorded yet")
+    head = base.get("head")
+    if not head or _git(root, "cat-file", "-e", f"{head}^{{commit}}") is None:
+        return everything("the commit of the last green run is not available")
+    dirty = _dirty_since(root, head)
+    if dirty is None:
+        return everything("git cannot list the changed files")
+    tracked, untracked = dirty
+    if len(untracked) > MAX_UNTRACKED:
+        return everything(f"more than {MAX_UNTRACKED} untracked files")
+    recorded: dict[str, str | None] = base.get("dirty") or {}
+    changed: list[str] = []
+    for rel in sorted(set(tracked) | set(untracked) | set(recorded)):
+        if _excluded(rel, srel):
+            continue
+        now = _sha(root / rel)
+        if rel in recorded and recorded[rel] == now:
+            continue
+        changed.append(rel)
+    if len(changed) > MAX_CHANGED:
+        return everything(f"{len(changed)} files changed since the last green run")
+    for rel in changed:
+        if PurePosixPath(rel).name == "conftest.py":
+            return everything(f"conftest.py changed: {rel}")
+    for rel in changed:
+        if not rel.endswith(".py"):
+            return everything(f"non-Python file changed: {rel}")
+
+    gone = {r for r in changed if not (root / r).exists()}
+    proj = _Project(root, srel, extra=gone)
+    if proj.too_many:
+        return everything(f"more than {MAX_PY_FILES} Python files", proj)
+    green_files: dict[str, int] = {f: int(n) for f, n in base["files"].items()
+                                   if isinstance(n, int)}
+    green_dirs = {PurePosixPath(f).parent.as_posix() for f in green_files}
+    candidates = {f for f in green_files if f in proj.files}
+    for rel in changed:
+        if rel in proj.files and _is_test_name(rel) and rel not in candidates:
+            if (PurePosixPath(rel).parent.as_posix() in green_dirs
+                    and _in_scope(rel, scope)):
+                candidates.add(rel)
+            else:
+                return everything(f"new test file outside the known test "
+                                  f"directories: {rel}", proj)
+    changed_py = [r for r in changed if r.endswith(".py")]
+    closures = {t: proj.closure(t) for t in candidates}
+    linked: set[str] = set()
+    affected: set[str] = set()
+    for t, (files, opaque) in closures.items():
+        hit = files.intersection(changed_py)
+        if hit or (opaque and changed_py):
+            affected.add(t)
+            linked |= hit
+    # A captured pytest runs outside the daemon's graph lock; the graph is
+    # read under it (`_lock`, set by the daemon for lock-free calls).
+    with inp.get("_lock") or contextlib.nullcontext():
+        graph = _graph_tests(memory, changed_py)
+    for rel, tests in graph.items():
+        got = tests & candidates
+        if got:
+            affected |= got
+            linked.add(rel)
+    for rel in changed_py:
+        if rel in linked or rel in candidates:
+            continue
+        if rel in gone and rel in green_files:
+            continue
+        return everything(f"no test is linked to {rel}", proj)
+
+    if select == "all" or not affected:
+        if select == "affected":
+            reason = ("no files changed since the last green run"
+                      if not changed else "no test is affected by the changes")
+            if not cache:
+                return everything(reason, proj)
+            p.forced, p.reason = True, reason
+        affected = set(candidates)
+
+    p.selected = sorted(affected)
+    p.not_run = {f: n for f, n in green_files.items()
+                 if f not in affected and f in proj.files}
+    if cache:
+        _key_inputs(p, proj, python, eff_env, args)
+        _apply_cache(p, proj)
+    else:
+        p.selectors = list(p.selected)
+        p.whole_files = set(p.selected)
+    if sum(len(s) + 1 for s in p.selectors or []) > MAX_SELECTOR_CHARS:
+        return everything("too many tests to name on the command line")
+    p.key_inputs["project"] = proj
+    return p
+
+
+def _graph_tests(memory: Any, changed: list[str]) -> dict[str, set[str]]:
+    """The test files of the graph's covering tests of each changed file."""
+    out: dict[str, set[str]] = {}
+    try:
+        from ozagia.intent.common import covering_tests, file_nid
+        for rel in changed:
+            fid = file_nid(memory, rel)
+            if fid is None:
+                continue
+            files = set()
+            for tid in covering_tests(memory, fid):
+                f = (memory.node(tid) or {}).get("file")
+                if f:
+                    files.add(str(f))
+            out[rel] = files
+    except Exception:  # noqa: BLE001 - the import walk decides alone
+        return {}
+    return out
+
+
+def _common_key(root: Path, python: str, env: dict[str, str],
+                args: list[str], state: str | None) -> str | None:
+    pyfp = _python_fingerprint(python)
+    nonpy = _nonpy_fingerprint(root, state)
+    if pyfp is None or nonpy is None:
+        return None
+    cfg = [(n, _sha(root / n) or "-") for n in PYTEST_CONFIG_FILES]
+    return json.dumps([VERSION, pyfp, nonpy, cfg, _env_hash(env), args])
+
+
+def _key_inputs(p: Plan, proj: _Project, python: str, env: dict[str, str],
+                args: list[str]) -> None:
+    p.key_inputs.update(python=python, env=env, args=args)
+    common = _common_key(p.root, python, env, args, state_rel(p.root))
+    p.key_inputs["common"] = common
+    if common is None:
+        return
+    names = set(p.selected) | {f for f in p.state["files"] if f in proj.files}
+    for f in names:
+        k = proj.key(f, common)
+        if k is not None:
+            p.keys[f] = k
+
+
+def _apply_cache(p: Plan, proj: _Project) -> None:
+    nodes = p.state["nodes"]
+    flaky = p.state["flaky"]
+    sel: list[str] = []
+    for f in p.selected:
+        k = p.keys.get(f)
+        entry = p.state["files"].get(f)
+        if (k is None or not isinstance(entry, dict) or entry.get("k") != k
+                or not isinstance(entry.get("nodes"), list)):
+            sel.append(f)
+            p.whole_files.add(f)
+            continue
+        cached = {"passed": 0, "skipped": 0}
+        rerun: list[str] = []
+        since = 0.0
+        for nid in entry["nodes"]:
+            rec = nodes.get(nid)
+            if (isinstance(rec, dict) and rec.get("k") == k
+                    and rec.get("o") in ("passed", "skipped") and nid not in flaky):
+                cached[rec["o"]] += 1
+                since = max(since, float(rec.get("t") or 0))
+            else:
+                rerun.append(nid)
+        if rerun and not all(_SAFE_NODEID.match(n) for n in rerun):
+            sel.append(f)
+            p.whole_files.add(f)
+            continue
+        sel.extend(rerun)
+        if cached["passed"] or cached["skipped"]:
+            p.cached[f] = cached
+            p.cached_since[f] = since
+    p.selectors = sel
+
+
+# --------------------------------------------------------------------------- #
+# after the run
+# --------------------------------------------------------------------------- #
+
+def _listed(files: list[str]) -> str:
+    shown = ", ".join(files[:MAX_LISTED])
+    more = f", +{len(files) - MAX_LISTED} more" if len(files) > MAX_LISTED else ""
+    return f"{shown}{more}"
+
+
+def _record(p: Plan, res: dict[str, Any] | None, *, full: bool) -> list[str]:
+    """Store the run's outcomes; return the slow and flaky lines."""
+    from ozagia.intent.common import tag
+    now = time.time()
+    lines: list[str] = []
+    if res is None:
+        return lines
+    usable = res.get("status") in ("passed", "failed")
+    tests = res.get("tests") or []
+    bad_files = {e.get("file") for e in res.get("collection_errors") or []}
+    proj: _Project | None = p.key_inputs.get("project")
+    post: dict[str, str] = {}
+    if p.cache and usable and proj is not None and p.key_inputs.get("common"):
+        srel = state_rel(p.root)
+        fresh = _Project(p.root, srel)
+        common = _common_key(p.root, p.key_inputs["python"],
+                             p.key_inputs["env"], p.key_inputs["args"], srel)
+        if common is not None and common == p.key_inputs["common"]:
+            for f in {t["file"] for t in tests}:
+                k = fresh.key(f, common)
+                if k is not None and p.keys.get(f) == k:
+                    post[f] = k
+    slow_now: list[tuple[str, float]] = []
+    flaky_now: list[str] = []
+    with _locked(p.root) as data:
+        by_file: dict[str, list[str]] = {}
+        for t in tests:
+            nid = t.get("nodeid")
+            if not nid:
+                continue
+            secs = float(t.get("seconds") or 0)
+            if secs > SLOW_S:
+                data["slow"][nid] = {"s": round(secs, 2), "t": now}
+                slow_now.append((nid, secs))
+            k = post.get(t["file"])
+            if k is None or t["file"] in bad_files:
+                continue
+            by_file.setdefault(t["file"], []).append(nid)
+            old = data["nodes"].get(nid)
+            out = t["outcome"]
+            if (isinstance(old, dict) and old.get("k") == k
+                    and {old.get("o"), out} in ({"passed", "failed"},
+                                                {"passed", "error"})):
+                prev = data["flaky"].get(nid) or {}
+                data["flaky"][nid] = {"k": k, "t": now,
+                                      "n": int(prev.get("n") or 0) + 1}
+            data["nodes"][nid] = {"k": k, "o": out,
+                                  "s": round(float(t.get("seconds") or 0), 3),
+                                  "t": now}
+            if nid in data["flaky"]:
+                flaky_now.append(nid)
+        complete = not (p.early_stop and res.get("exit_code") != 0)
+        for f, nids in by_file.items():
+            if complete and (p.selectors is None or f in p.whole_files):
+                data["files"][f] = {"k": post[f], "nodes": nids, "t": now}
+        if full and res.get("exit_code") == 0 and res.get("status") == "passed":
+            _green(p, data, tests, now)
+    for nid, secs in sorted(slow_now, key=lambda x: -x[1])[:MAX_LISTED]:
+        lines.append(tag(f"slow test (> {SLOW_S:g} s): {nid} {secs:.1f} s"))
+    if len(slow_now) > MAX_LISTED:
+        lines.append(tag(f"slow tests: +{len(slow_now) - MAX_LISTED} more"))
+    for nid in flaky_now[:MAX_LISTED]:
+        lines.append(tag(f"flaky test: {nid} (passed and failed with the "
+                         "same inputs; never served from the cache)"))
+    if len(flaky_now) > MAX_LISTED:
+        lines.append(tag(f"flaky tests: +{len(flaky_now) - MAX_LISTED} more"))
+    return lines
+
+
+def _green(p: Plan, data: dict[str, Any], tests: list[dict[str, Any]],
+           now: float) -> None:
+    head = _head(p.root)
+    if head is None:
+        return
+    dirty = _dirty_since(p.root, head)
+    if dirty is None:
+        return
+    srel = state_rel(p.root)
+    rels = [r for r in set(dirty[0]) | set(dirty[1]) if not _excluded(r, srel)]
+    if len(rels) > MAX_CHANGED or len(dirty[1]) > MAX_UNTRACKED:
+        return
+    files: dict[str, int] = {}
+    for t in tests:
+        if t.get("file"):
+            files[t["file"]] = files.get(t["file"], 0) + 1
+    data["suites"][p.suite] = {
+        "head": head, "dirty": {r: _sha(p.root / r) for r in sorted(rels)},
+        "files": files, "t": now}
+
+
+def finish(p: Plan, res: dict[str, Any] | None) -> tuple[list[str], list[str],
+                                                         dict[str, Any]]:
+    """(lines after the pytest head, lines at the end, meta) for a run made
+    by `p`; `res` is `check.run_tests`'s result, None when nothing ran."""
+    from ozagia.intent.common import tag
+    head: list[str] = []
+    counts = {"affected_runs": 0, "tests_skipped_unaffected": 0,
+              "cached_passes": 0, "full_runs_forced": 0}
+    full = p.selectors is None
+    if full:
+        if p.forced:
+            counts["full_runs_forced"] = 1
+        if p.select == "affected" or p.reason:
+            head.append(tag(f"ran all tests: {p.reason}"))
+    else:
+        ran = len((res or {}).get("tests") or [])
+        cached_p = sum(c["passed"] for c in p.cached.values())
+        cached_s = sum(c["skipped"] for c in p.cached.values())
+        not_run = sum(p.not_run.values())
+        total = ran + cached_p + cached_s + not_run
+        word = ("affected tests" if p.select == "affected" and not p.forced
+                else "tests")
+        parts = [f"ran {ran} {word} of {total}"]
+        if cached_p or cached_s:
+            parts.append(f"cached: {cached_p} passed"
+                         + (f", {cached_s} skipped" if cached_s else ""))
+        if not_run:
+            nf = len(p.not_run)
+            parts.append(f"not run: {not_run} test{'s' * (not_run != 1)} in "
+                         f"{nf} file{'s' * (nf != 1)} "
+                         f"({_listed(sorted(p.not_run))})")
+        parts.append(f"run all: {p.run_all_cmd}")
+        head.append(tag("; ".join(parts)))
+        if p.forced and p.reason:
+            head.append(tag(f"selection off for this run: {p.reason}"))
+        for f in sorted(p.cached)[:MAX_CACHED_LINES]:
+            c = p.cached[f]
+            since = time.strftime("%Y-%m-%d %H:%M:%S",
+                                  time.localtime(p.cached_since.get(f) or 0))
+            head.append(tag(
+                f"cached pass {f}: {c['passed']} passed"
+                + (f", {c['skipped']} skipped" if c["skipped"] else "")
+                + f" (inputs unchanged since {since})"))
+        if len(p.cached) > MAX_CACHED_LINES:
+            head.append(tag(f"cached pass: +{len(p.cached) - MAX_CACHED_LINES}"
+                            " more files"))
+        if p.select == "affected" and not p.forced:
+            counts["affected_runs"] = 1
+        counts["tests_skipped_unaffected"] = not_run
+        counts["cached_passes"] = cached_p
+    try:
+        tail = _record(p, res, full=full)
+    except Exception as e:  # noqa: BLE001 - the run's own lines still stand
+        tail = [tag(f"warning: test results not stored: {e}")]
+    return head, tail, {"tests": counts}
+
+
+def merge_meta(metas: list[dict[str, Any]]) -> dict[str, Any]:
+    """The `tests` counters of several runs (a compound's pytest steps)."""
+    out: dict[str, int] = {}
+    for m in metas:
+        for k, v in ((m or {}).get("tests") or {}).items():
+            if isinstance(v, int) and not isinstance(v, bool):
+                out[k] = out.get(k, 0) + v
+    return {"tests": out} if out else {}
+
+
+__all__ = ["ENV_ALL", "Plan", "finish", "load_state", "merge_meta", "plan"]
