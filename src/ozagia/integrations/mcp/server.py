@@ -322,10 +322,11 @@ _TOOLS: list[dict[str, Any]] = [
             "or test (sym:path::Name, test:path::test_x), a Markdown section "
             "(doc:path.md#section-slug, or #parent/child when ambiguous), a "
             "line range (text:path#L10-L42) or a JSON value "
-            "(json:path.json#/a/0). base_sha256 is the file's sha256 or the "
-            "sha256 of the node's current text; a missing or stale one is "
-            "refused with the node's current text and both hashes, so retry "
-            "with those. Parse guard, backup, journal and graph update as "
+            "(json:path.json#/a/0). base_sha256 is the sha256 of the node's "
+            "current text (node sha256 in region replies; the file's sha256 "
+            "only when the node is the whole file); a missing, stale or "
+            "file-only one is refused with the node's current text and its "
+            "node sha256, so retry with that. Parse guard, backup, journal and graph update as "
             "dev_span_edit. Preview by default; apply=true writes."),
         "inputSchema": _schema({
             "key": {"type": "string",
@@ -334,8 +335,8 @@ _TOOLS: list[dict[str, Any]] = [
             "new_text": {"type": "string",
                          "description": "The node's complete new text."},
             "base_sha256": {"type": "string",
-                            "description": "sha256 of the file or of the node's "
-                                           "current text."},
+                            "description": "sha256 of the node's current text "
+                                           "(of the file, for a whole-file node)."},
             "apply": {"type": "boolean", "default": False},
             "task": {"type": "string",
                      "description": "Optional journal task label."},

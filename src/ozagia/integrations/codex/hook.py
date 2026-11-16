@@ -11,10 +11,12 @@ reference (https://learn.chatgpt.com/docs/hooks, see docs/codex.md).
   every hunk matches, print nothing. If a hunk would fail ("Failed to find
   expected lines"), deny with the nearest region of each failing hunk (its
   current text with line numbers, range, node key, file sha256), so the
-  agent can fix the patch without reading the file again. A running daemon
-  (never started for this) is asked too, for its graph keys and to count the
-  check; it has `PATCH_DAEMON_TIMEOUT_S`. A patch that does not parse, or
-  any checker error, prints nothing.
+  agent can fix the patch without reading the file again. On a local miss
+  only, a running daemon (never started for this) is asked too, for its
+  graph keys and to count the miss; it has `PATCH_DAEMON_TIMEOUT_S`. A patch
+  that matches never waits for the daemon. A patch that does not parse, one
+  with `*** Environment ID:` (for another environment's files), or any
+  checker error, prints nothing.
 - `PostToolUse` for `Bash`: send `after` as `shell` ({command, workdir})
   with the command's output, and return the daemon's `append` as
   `additionalContext`.
@@ -201,11 +203,11 @@ def pre_apply_patch(payload: dict[str, Any], root: Path,
     except Exception as exc:  # noqa: BLE001 - fail open
         hookcore.log_failure(root, LOG_NAME, payload, exc)
         local = None
-    # The daemon (if one runs) checks it again with the graph's keys and
-    # counts it; its answer is used for the reason only.
-    resp = _daemon_check(root, payload, text, cwd)
     if local is None or not local.get("parsed") or not local.get("misses"):
         return None
+    # Only on a local miss: the daemon (if one runs) checks it again with the
+    # graph's keys and counts it; its answer is used for the reason only.
+    resp = _daemon_check(root, payload, text, cwd)
     reason = local["reply"]
     meta = (resp or {}).get("meta") or {}
     if (meta.get("intent") == "patch_check_miss"

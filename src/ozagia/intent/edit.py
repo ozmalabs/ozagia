@@ -220,8 +220,9 @@ def handle_key_edit(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
     lines = [f"Edited {target.display} (node {key}, lines "
              f"{res['start_line']}-{res['end_line']})",
              tag("in: " + ", ".join(res["keys"])),
-             tag(f"sha256 {res['new_sha256']} (the file now; base_sha256 for "
-                 f"the next key edit)")]
+             tag(f"sha256 {res['new_sha256']} (the file now); node sha256 "
+                 f"{res['new_node_sha256']} (base_sha256 for the next key edit "
+                 f"of this node)")]
     delta = res.get("graph_delta")
     lines.extend(delta_lines(delta))
     for ref in res.get("broken_references") or []:

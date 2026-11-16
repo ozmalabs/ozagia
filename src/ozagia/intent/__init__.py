@@ -337,12 +337,15 @@ def _cd_dir(inp: dict[str, Any]) -> Any:
 
 
 def after(memory: Any, tool: str, input: dict[str, Any], output: Any, *,
-          harness: str = "opencode", session: str | None = None
-          ) -> dict[str, Any]:
+          harness: str = "opencode", session: str | None = None,
+          meta: dict[str, Any] | None = None) -> dict[str, Any]:
     """Graph context after a tool ran: the delta of any files it changed,
-    and for `git diff`/`git show` the keys its hunks touch."""
+    and for `git diff`/`git show` the keys its hunks touch. `meta` is the
+    request's own meta (`builtin_error: true` from the OpenCode plugin's
+    failed built-in edit gates the edit-miss reply)."""
+    req_meta = meta if isinstance(meta, dict) else {}
     t0 = time.perf_counter()
-    meta: dict[str, Any] = {"intent": "after_none", "keys": []}
+    meta = {"intent": "after_none", "keys": []}
     lines: list[str] = []
     try:
         inp = input if isinstance(input, dict) else {}
@@ -370,7 +373,10 @@ def after(memory: Any, tool: str, input: dict[str, Any], output: Any, *,
             # A built-in edit whose old text is not in the file: the nearest
             # region, so the next try needs no re-read.
             try:
-                miss = edit_miss_lines(memory, inp, output)
+                flag = req_meta.get("builtin_error")
+                miss = edit_miss_lines(
+                    memory, inp, output,
+                    builtin_error=flag if isinstance(flag, bool) else None)
             except Exception:  # noqa: BLE001 - an optional addition
                 miss = []
             if miss:

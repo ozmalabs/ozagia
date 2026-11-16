@@ -24,7 +24,8 @@ splitting and line endings). Ported here:
   trimmed): `*** Add File: p` (then `+` lines, each one line of content
   plus "\\n"), `*** Delete File: p`, `*** Update File: p` (then an optional
   `*** Move to: p` before the first chunk), `*** End Patch`. `*** Environment
-  ID: x` right after Begin Patch is accepted and ignored.
+  ID: x` right after Begin Patch names the environment the patch is for
+  (`ParsedPatch.env_id`).
 - An update section: `@@` or `@@ <context line>` starts a chunk (the first
   chunk needs none); ` x` is context, `-x` old, `+x` new, an empty line is
   empty context; `*** End of File` marks the chunk as the end of the file
@@ -50,6 +51,9 @@ splitting and line endings). Ported here:
 
 ozagia's own rules on top:
 
+- A patch with `*** Environment ID:` (any value) is for an environment the
+  checker may not see; it is not checked (`skipped: "environment"`, `ok`),
+  so the hook lets it through.
 - Paths are taken relative to `cwd` (default: the root), as Codex does, and
   must resolve (symlinks too) inside the root, outside `.git`; others are
   `refused` and not checked.
@@ -71,6 +75,12 @@ start before the cursor (before the anchor or the previous chunk) lose 0.05.
 Below `MIN_SIMILARITY` there is no region. When the expected lines occur
 exactly before the cursor (hunks out of order), that place is the region.
 
+Each region names the node that encloses it (`region_key`) with the node's
+full line range and the sha256 of its current text (`node_view`), which is
+the `base_sha256` a key edit of that node takes (`ozagia.edit.key_edit`).
+When the region is only part of the node the reply says so: a key edit
+replaces the whole node.
+
 Caps: `MAX_REGIONS` failing hunks get a region, each shows at most
 `MAX_REGION_LINES` lines (lines cut at `MAX_LINE_CHARS`), and the reply
 stays within `max_chars` (default `MAX_REPLY_CHARS`).
@@ -84,6 +94,8 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
+
+from ozagia.edit.txn import LINE_BREAK_RE
 
 BEGIN = "*** Begin Patch"
 END = "*** End Patch"
@@ -119,7 +131,7 @@ _PUNCT = str.maketrans({
                     "\u200a\u202f\u205f\u3000", " "),
 })
 _HEREDOC_OPEN = ("<<EOF", "<<'EOF'", '<<"EOF"')
-_LINE_SPLIT_RE = re.compile(r"(\r\n|\r|\n)")
+_LINE_SPLIT_RE = LINE_BREAK_RE
 
 
 class PatchParseError(ValueError):
@@ -148,6 +160,12 @@ class Chunk:
     @property
     def empty(self) -> bool:
         return not self.old and not self.new
+
+
+@dataclass
+class ParsedPatch:
+    ops: list["FileOp"]
+    env_id: str | None = None
 
 
 @dataclass
@@ -343,9 +361,10 @@ def _bad_header(trimmed: str) -> str:
             f"'*** Update File: {{path}}'")
 
 
-def parse_patch(text: str) -> list[FileOp]:
-    """The file operations of an apply_patch text, in order. Raises
-    PatchParseError as Codex would refuse the patch."""
+def parse_patch(text: str) -> ParsedPatch:
+    """The file operations of an apply_patch text, in order, and its
+    `*** Environment ID:` (or None). Raises PatchParseError as Codex would
+    refuse the patch."""
     if not isinstance(text, str):
         raise PatchParseError("invalid patch: not a string")
     body = _trim(text)
@@ -354,7 +373,8 @@ def parse_patch(text: str) -> list[FileOp]:
     p = _Parser()
     for ln in lines[:-1]:
         p.line(ln)
-    return p.finish(lines[-1] if lines else None)
+    ops = p.finish(lines[-1] if lines else None)
+    return ParsedPatch(ops, p.env_id)
 
 
 # --------------------------------------------------------------------------- #
@@ -675,14 +695,23 @@ def check_patch(root: str | Path, text: str, *, cwd: str | Path | None = None,
     anchor, reason (context|lines), line, match, region, note}]}. A region:
     {start_line, end_line, ratio, key, text: [lines], diff: [lines]}.
     `reply` is `render_reply(result)` when there are misses, else "".
-    A parse error gives `{parsed: False, ok: False, error}`."""
+    A parse error gives `{parsed: False, ok: False, error}`. A patch with an
+    `*** Environment ID:` is not checked: `{parsed: True, ok: True,
+    skipped: "environment", env_id}`."""
     root_p = Path(os.path.realpath(root))
     base = Path(os.path.realpath(cwd)) if cwd else root_p
     try:
-        ops = parse_patch(text)
+        parsed = parse_patch(text)
     except PatchParseError as e:
         return {"parsed": False, "ok": False, "error": str(e), "hunks": 0,
                 "misses": 0, "files": [], "regions": 0, "keys": [], "reply": ""}
+    if parsed.env_id is not None:
+        # Codex routes the patch to that environment's files, which may not
+        # be these: fail open.
+        return {"parsed": True, "ok": True, "error": None, "hunks": 0,
+                "misses": 0, "files": [], "regions": 0, "keys": [], "reply": "",
+                "skipped": "environment", "env_id": parsed.env_id}
+    ops = parsed.ops
     files = _Files()
     out_files: list[dict[str, Any]] = []
     hunks = misses = regions = 0
@@ -736,7 +765,8 @@ def check_patch(root: str | Path, text: str, *, cwd: str | Path | None = None,
                 if regions < max_regions:
                     reg = _region_for(root_p, rel, content, lines, chunk, res,
                                       key_fn=key_fn, memory=memory,
-                                      max_region_lines=max_region_lines)
+                                      max_region_lines=max_region_lines,
+                                      file_sha=sha)
                     res["region"] = reg
                     if reg is not None:
                         regions += 1
@@ -759,9 +789,43 @@ def check_patch(root: str | Path, text: str, *, cwd: str | Path | None = None,
     return result
 
 
+def node_view(root: str | Path, rel: str, key: str, file_sha: str | None,
+              memory: Any = None) -> dict[str, Any] | None:
+    """`{start_line, end_line, sha256}` of node `key` in the file on disk
+    (`sha256` of its current text: the base a key edit of it takes), or None
+    when the file is not the one `file_sha` names (changed earlier in the
+    patch, or since) or the key has no span (`key_edit.node_span`; a
+    graph-sourced span of a file changed since ingest has none here)."""
+    if not file_sha:
+        return None
+    from ozagia.edit.key_edit import node_span, sha256_text
+    from ozagia.edit.span_edit import _read
+    try:
+        src = _read(root, rel)
+        if src.sha256 != file_sha:
+            return None
+        span = node_span(src, key, memory=memory, refresh=False)
+    except Exception:  # noqa: BLE001 - the region stands without it
+        return None
+    return {"start_line": span["start_line"], "end_line": span["end_line"],
+            "sha256": sha256_text(src.text[span["start"]:span["end"]])}
+
+
+def _node_note(start_line: int, end_line: int, node: dict[str, Any] | None) -> str:
+    """The node part of a region line: its range and sha256, and whether
+    the region is all of it."""
+    if node is None:
+        return ""
+    part = ("" if node["start_line"] >= start_line and node["end_line"] <= end_line
+            else "; the region is part of it, a key edit replaces all of it")
+    return (f"node L{node['start_line']}-L{node['end_line']} node sha256 "
+            f"{node['sha256']}{part}")
+
+
 def _region_for(root: Path, rel: str, content: str, lines: list[str],
                 chunk: Chunk, res: dict[str, Any], *, key_fn: KeyFn | None,
-                memory: Any, max_region_lines: int) -> dict[str, Any] | None:
+                memory: Any, max_region_lines: int,
+                file_sha: str | None = None) -> dict[str, Any] | None:
     cursor = int(res.get("cursor") or 0)
     pattern = list(chunk.old)
     if res["reason"] == "context":
@@ -802,7 +866,7 @@ def _region_for(root: Path, rel: str, content: str, lines: list[str],
         key = f"file:{rel}"
     shown = actual[:max_region_lines]
     return {"start_line": s + 1, "end_line": e, "ratio": found["ratio"],
-            "key": key,
+            "key": key, "node": node_view(root, rel, key, file_sha, memory),
             "text": [f"{s + 1 + k}: {_cut(t)}" for k, t in enumerate(shown)],
             "more_lines": len(actual) - len(shown),
             "diff": compact_diff([_cut(x) for x in expected],
@@ -830,8 +894,9 @@ def _hunk_head(entry: dict[str, Any], h: dict[str, Any]) -> str:
 def render_reply(result: dict[str, Any], *, max_chars: int = MAX_REPLY_CHARS,
                  tool: str = "apply_patch") -> str:
     """The deny reason for a patch with misses: per failing hunk, the
-    nearest region's current text with line numbers, range, key and the
-    file's sha256, within `max_chars`."""
+    nearest region's current text with line numbers, range, key (with the
+    node's full range and sha256) and the file's sha256, within
+    `max_chars`."""
     misses, total = result["misses"], result["hunks"]
     lines = [f"ozagia checked this patch against the current files: {misses} of "
              f"{total} hunk(s) would fail (\"Failed to find ...\"), so {tool} "
@@ -880,6 +945,9 @@ def render_reply(result: dict[str, Any], *, max_chars: int = MAX_REPLY_CHARS,
                 continue
             head.append(f"  nearest region: L{reg['start_line']}-L{reg['end_line']} "
                         f"{reg['key']}  similarity {reg['ratio']:.2f}")
+            note = _node_note(reg["start_line"], reg["end_line"], reg.get("node"))
+            if note:
+                head.append(f"  {note}")
             if reg["diff"]:
                 head.append("  differs (-patch expects, +file has):")
                 head.extend(f"  {d}" for d in reg["diff"])
@@ -969,20 +1037,36 @@ _EDIT_FAILED_RE = re.compile(
 
 
 def edit_miss_lines(memory: Any, inp: dict[str, Any], output: Any, *,
+                    builtin_error: bool | None = None,
                     max_chars: int = MAX_REPLY_CHARS // 2) -> list[str]:
     """For a built-in edit that failed because its old text is not in the
-    file: `[ozagia] ` lines naming the nearest region (range, key, sha256,
-    what differs) and the region's current text. [] when the output does
-    not report such a failure or the old text is in the file."""
+    file: `[ozagia] ` lines naming the nearest region (range, key with the
+    node's range and sha256, the file's sha256, what differs) and the
+    region's current text. [] when the old text is in the file.
+
+    `builtin_error` is the caller's word on whether the edit failed (the
+    OpenCode plugin sends `meta.builtin_error: true` from its failure
+    path): True means it failed, False that it did not. Without it (hooks
+    that only see the output) the output must report a miss
+    (`_EDIT_FAILED_RE`) and no edit's `newString` may be in the file: after
+    a successful edit the old text is gone and the new text is there, and
+    the output may still say "not found" in appended diagnostics."""
     from ozagia.intent.common import read_text, resolve, root_of, tag
-    if not isinstance(output, str) or not _EDIT_FAILED_RE.search(output):
+    if builtin_error is False or not isinstance(output, str):
+        return []
+    if builtin_error is None and not _EDIT_FAILED_RE.search(output):
         return []
     olds: list[str] = []
+    news: list[str] = []
     if isinstance(inp.get("oldString"), str):
         olds.append(inp["oldString"])
+    if isinstance(inp.get("newString"), str):
+        news.append(inp["newString"])
     for e in inp.get("edits") or []:
         if isinstance(e, dict) and isinstance(e.get("oldString"), str):
             olds.append(e["oldString"])
+        if isinstance(e, dict) and isinstance(e.get("newString"), str):
+            news.append(e["newString"])
     path = inp.get("path", inp.get("filePath"))
     if not olds or not isinstance(path, str):
         return []
@@ -999,6 +1083,11 @@ def edit_miss_lines(memory: Any, inp: dict[str, Any], output: Any, *,
                 and o.replace("\n", "\r\n") not in content), None)
     if old is None:
         return []
+    if builtin_error is None and any(
+            n and (n in content or n.replace("\n", "\r\n") in content)
+            for n in news):
+        # The new text is in the file: most likely the edit went through.
+        return []
     lines = [t for t, _ in split_source(content)]
     expected = [t for t, _ in split_source(old)]
     found = nearest_region(lines, expected)
@@ -1014,6 +1103,9 @@ def edit_miss_lines(memory: Any, inp: dict[str, Any], output: Any, *,
     out = [tag(f"oldString is not in {target.rel}; nearest region "
                f"L{s + 1}-L{e} {key} (similarity {found['ratio']:.2f}), "
                f"sha256 {sha}")]
+    note = _node_note(s + 1, e, node_view(root, target.rel, key, sha, memory))
+    if note:
+        out.append(tag(note))
     diff = compact_diff([_cut(x) for x in expected], [_cut(x) for x in lines[s:e]])
     if diff:
         out.append(tag("differs (-oldString, +file):"))
@@ -1032,7 +1124,7 @@ def edit_miss_lines(memory: Any, inp: dict[str, Any], output: Any, *,
     return out
 
 
-__all__ = ["Chunk", "FileOp", "MAX_REPLY_CHARS", "PatchParseError", "check_patch",
-           "compact_diff", "edit_miss_lines", "handle_patch_check",
-           "nearest_region", "parse_patch", "patch_text", "region_key",
+__all__ = ["Chunk", "FileOp", "MAX_REPLY_CHARS", "ParsedPatch", "PatchParseError",
+           "check_patch", "compact_diff", "edit_miss_lines", "handle_patch_check",
+           "nearest_region", "node_view", "parse_patch", "patch_text", "region_key",
            "render_reply", "seek_sequence", "split_source"]

@@ -180,16 +180,23 @@ An edit with `key` (and `newString`, `base_sha256`) instead of
 `oldString` replaces the whole text of that node (`ozagia.edit.key_edit`:
 `sym:`/`test:` symbols, `doc:<file>#<section slug>` Markdown sections,
 `text:<file>#L<a>-L<b>` line ranges, `json:<file>#<pointer>` values).
-`base_sha256` is the file's sha256 or the sha256 of the node's current
-text; a missing or stale one is a tool error with the node's current text
-and both hashes:
+`base_sha256` is the sha256 of the node's current text, as region replies,
+edit-miss replies and refusals give it. The file's sha256 is taken only
+when the node is the whole file (`file:`, `doc:<file>`): a key edit cannot
+tell whether a file sha came from a read of the whole node or from a reply
+that showed part of it, and the edit replaces all of it. A missing, stale
+or file-only base is a tool error with the node's current text and both
+hashes. A `sym:` qualname with several defs (a property getter and setter)
+is refused with each def's line range; edit one by its `text:` key. Other
+languages' symbols use the graph's line range, after a reingest when the
+file changed since the graph took it in.
 
 ```
 Edited /repo/pkg/mod.py (node sym:pkg/mod.py::helper, lines 5-10)
 [ozagia] in: sym:pkg/mod.py::helper
-[ozagia] sha256 <new file sha> (the file now; base_sha256 for the next key edit)
+[ozagia] sha256 <new file sha> (the file now); node sha256 <new node sha> (base_sha256 for the next key edit of this node)
 
-Edit refused: stale base: <sha> is neither the file's sha256 nor the node's; ...
+Edit refused: stale base: <sha> is neither the node's sha256 nor the file's; ...
 [ozagia] sym:pkg/mod.py::helper L5-L10  file sha256 <sha>  node sha256 <sha>
 5: def helper(a, b=1):
 ...
@@ -381,15 +388,21 @@ the plugin apply the change a second time.
   back, it appends `[ozagia] touched: <keys>`. These are the key enclosing
   each `+` line, and the line before each deletion point, in the current
   file.
-- For an edit whose output reports a failure ("not found", "could not
-  find", "no match", ...) while its `oldString` (or one of `edits`) is not
+- For an edit that failed while its `oldString` (or one of `edits`) is not
   in the file, it appends the nearest region (`ozagia.intent.patch`):
   `[ozagia] oldString is not in <file>; nearest region L<a>-L<b> <key>
-  (similarity r), sha256 <file sha>`, the differing lines as `[ozagia]
-  -<oldString line>` / `[ozagia] +<file line>`, then the region's lines as
-  `<n>: <text>` (at most 60). Intent `after_edit_miss`, `meta.region_replies`
-  1. The OpenCode plugin sends this `after` when the built-in edit throws
-  (`meta.builtin_error`), and throws the error with the append added.
+  (similarity r), sha256 <file sha>`, `[ozagia] node L<c>-L<d> node sha256
+  <sha>` (the key's whole node, and the base a key edit of it takes), the
+  differing lines as `[ozagia] -<oldString line>` / `[ozagia] +<file
+  line>`, then the region's lines as `<n>: <text>` (at most 60). Intent
+  `after_edit_miss`, `meta.region_replies` 1. The OpenCode plugin sends
+  this `after` when the built-in edit throws, with `meta.builtin_error:
+  true`, and throws the error with the append added; a request meta
+  `builtin_error` decides whether the edit failed. Without it (the Claude
+  Code and Codex hooks) the output must report a failure ("not found",
+  "could not find", "no match", ...) and no `newString` may be in the file,
+  so a successful edit whose output carries such words in diagnostics gets
+  no region.
 - For a command with a pytest segment, it maps pytest's short summary
   lines (`FAILED path::name - message`, `ERROR ...`) to `[ozagia] failed
   test:<key>: <message>` for tests the graph knows. Paths are taken

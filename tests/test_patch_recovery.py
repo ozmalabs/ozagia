@@ -46,11 +46,17 @@ def _sha(p: Path) -> str:
     return hashlib.sha256(p.read_bytes()).hexdigest()
 
 
+def _node_sha(path: Path, a: int, b: int) -> str:
+    """The sha256 of lines a..b (1-based, inclusive) of `path`."""
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    return hashlib.sha256("".join(lines[a - 1:b]).encode()).hexdigest()
+
+
 # --------------------------------------------------------------------------- #
 # parser
 # --------------------------------------------------------------------------- #
 def test_parse_every_header():
-    ops = parse_patch(_patch(
+    parsed = parse_patch(_patch(
         "*** Environment ID: local",
         "*** Add File: path/add.py",
         "+abc",
@@ -70,6 +76,8 @@ def test_parse_every_header():
         "*** Update File: other.py",
         " import foo",
         "+bar"))
+    assert parsed.env_id == "local"
+    ops = parsed.ops
     assert [(o.kind, o.path) for o in ops] == [
         ("add", "path/add.py"), ("delete", "path/delete.py"),
         ("update", "path/update.py"), ("update", "other.py")]
@@ -89,13 +97,14 @@ def test_parse_every_header():
 
 def test_parse_lenient_heredoc_and_crlf_and_whitespace():
     body = _patch("*** Update File: a.py", "@@", "-x", "+y")
-    ops = parse_patch("<<'EOF'\n" + body + "EOF\n")
+    ops = parse_patch("<<'EOF'\n" + body + "EOF\n").ops
     assert ops[0].chunks[0].old == ["x"]
     crlf = body.replace("\n", "\r\n")
-    assert parse_patch(crlf)[0].chunks[0].new == ["y"]
+    assert parse_patch(crlf).ops[0].chunks[0].new == ["y"]
     # Markers may carry surrounding whitespace.
-    assert parse_patch("  *** Begin Patch \n*** Add File: f\n+hi\n *** End Patch  ")[0].contents == "hi\n"
-    assert parse_patch(_patch()) == []
+    assert parse_patch("  *** Begin Patch \n*** Add File: f\n+hi\n *** End Patch  "
+                       ).ops[0].contents == "hi\n"
+    assert parse_patch(_patch()).ops == [] and parse_patch(_patch()).env_id is None
 
 
 @pytest.mark.parametrize("text, msg", [
@@ -211,7 +220,7 @@ def test_crlf_files_match_and_keep_their_endings(tmp_path):
     src = split_source("alpha\r\nbeta\r\ngamma")
     assert src == [("alpha", "\r\n"), ("beta", "\r\n"), ("gamma", None)]
     _res, repl, _ = P._match_chunk([t for t, _ in src], parse_patch(_patch(
-        "*** Update File: w", "@@", " alpha", "-beta", "+BETA"))[0].chunks[0], 0)
+        "*** Update File: w", "@@", " alpha", "-beta", "+BETA")).ops[0].chunks[0], 0)
     assert P._apply(src, repl) == "alpha\r\nBETA\r\ngamma\r\n"
     # A miss in a CRLF file shows its lines without the CR.
     bad = check_patch(tmp_path, _patch("*** Update File: w.txt", "@@", "-betta",
@@ -323,6 +332,17 @@ def test_region_python_function(tmp_path):
     assert _sha(tmp_path / "m.py") in reply
     assert "nearest region: L6-L9 sym:m.py::helper" in reply
     assert "8:     if total > 10:" in reply
+    # The node's full range and sha256, and that the region is part of it.
+    node_sha = _node_sha(tmp_path / "m.py", 5, 10)
+    assert reg["node"] == {"start_line": 5, "end_line": 10, "sha256": node_sha}
+    assert (f"  node L5-L10 node sha256 {node_sha}; the region is part of it, "
+            f"a key edit replaces all of it") in reply.split("\n")
+    # That sha is the base a key edit of the node takes; the file sha is not.
+    from ozagia.edit.key_edit import apply_key_edit
+    key = reg["key"]
+    assert apply_key_edit(tmp_path, key, NEW_HELPER,
+                          base_sha256=_sha(tmp_path / "m.py"))["stale"] is True
+    assert apply_key_edit(tmp_path, key, NEW_HELPER, base_sha256=node_sha)["ok"]
 
 
 def test_region_markdown_section(tmp_path):
@@ -479,6 +499,8 @@ def test_pre_apply_patch_denies_a_miss_with_the_region(cxrepo, sockdir):
     "not a patch at all",
     _patch("*** Update File: ../../etc/passwd", "@@", "-root", "+x"),
     _patch("*** Update File: src/missing.py", "@@", "-x", "+y"),
+    # For another environment's files: not checked against these.
+    STALE.replace("*** Begin Patch\n", "*** Begin Patch\n*** Environment ID: remote\n"),
 ])
 def test_pre_apply_patch_allows_silently(cxrepo, sockdir, text):
     proc = _pre(cxrepo, text, sockdir / "missing.sock")
@@ -513,10 +535,9 @@ def test_pre_apply_patch_uses_the_daemon_reply(cxrepo, sockdir):
         assert req["tool"] == "patch_check" and req["harness"] == "codex"
         assert req["input"]["patch"] == STALE and req["input"]["workdir"] == str(cxrepo)
         assert isinstance(req["deadline_ms"], int)
-        # The daemon is asked for a matching patch too (it counts checks),
-        # and its answer never turns an allow into a deny.
+        # A matching patch does not wait for the daemon: it is not asked.
         proc = _pre(cxrepo, FRESH, sockdir / "d.sock")
-        assert proc.stdout == "" and len(stub.requests) == 2
+        assert proc.stdout == "" and len(stub.requests) == 1
     finally:
         stub.close()
 
@@ -633,11 +654,15 @@ def test_after_edit_miss_appends_the_nearest_region(mem, repo):
            "newString": "    total = a * b"}
     got = I.after(mem, "edit", inp, "Error: oldString not found in content")
     assert got["meta"]["intent"] == "after_edit_miss"
+    path = repo / "pkg" / "mod.py"
     assert got["meta"]["region_replies"] == 1
     lines = got["append"].split("\n")
     assert lines[0].startswith("[ozagia] oldString is not in pkg/mod.py; nearest "
                                "region L7-L8 sym:pkg/mod.py::helper")
-    assert _sha(repo / "pkg" / "mod.py") in lines[0]
+    assert _sha(path) in lines[0]
+    # The node's whole range and its sha256 (the key-edit base).
+    assert lines[1] == (f"[ozagia] node L5-L10 node sha256 {_node_sha(path, 5, 10)}; "
+                        f"the region is part of it, a key edit replaces all of it")
     assert "7:     total = a + b" in lines and "8:     if total > 10:" in lines
     assert "[ozagia] +    if total > 10:" in lines
     # A successful edit, or one whose old text is in the file, gets nothing.
@@ -646,7 +671,7 @@ def test_after_edit_miss_appends_the_nearest_region(mem, repo):
     assert I.after(mem, "edit", ok, "String to replace not found")["append"] == ""
     # MultiEdit-style input (Claude Code).
     multi = {"path": "pkg/mod.py", "edits": [{"oldString": "return total - 11",
-                                              "newString": "x"}]}
+                                              "newString": "return total - 12"}]}
     got = I.after(mem, "edit", multi, "String to replace not found in file.")
     assert "nearest region L9-L9" in got["append"]
 
@@ -663,20 +688,35 @@ def test_intent_edit_still_hands_inexact_matches_to_the_builtin(mem):
 NEW_HELPER = 'def helper(a, b=1):\n    """Help."""\n    return a * b\n'
 
 
-def test_key_edit_fresh_base_file_or_node_sha(mem, repo):
+def test_key_edit_takes_the_node_sha_and_the_file_sha_only_for_whole_files(mem, repo):
     path = repo / "pkg" / "mod.py"
+    # The file's sha256 does not prove the caller saw all of a part-of-file
+    # node (a region reply may have shown a few of its lines): refused.
     res = I.handle(mem, "edit", {"key": "sym:pkg/mod.py::helper",
                                  "newString": NEW_HELPER,
                                  "base_sha256": _sha(path)})
+    assert res["is_error"] and res["meta"]["intent"] == "edit_key_stale"
+    assert "is the file's sha256; a key edit of part of a file takes the node's" \
+        in res["output"]
+    assert path.read_text() == PY
+    res = I.handle(mem, "edit", {"key": "sym:pkg/mod.py::helper",
+                                 "newString": NEW_HELPER,
+                                 "base_sha256": _node_sha(path, 5, 10)})
     assert res["handled"] and not res["is_error"], res
     assert res["meta"]["intent"] == "edit_key"
     first = res["output"].split("\n")[0]
     assert first == f"Edited {path} (node sym:pkg/mod.py::helper, lines 5-10)"
     assert f"sha256 {_sha(path)}" in res["output"]
+    # The new node sha is the base for the next edit of the node.
+    new_sha = hashlib.sha256(NEW_HELPER.encode()).hexdigest()
+    assert f"node sha256 {new_sha} (base_sha256 for the next key edit" in res["output"]
     text = path.read_text()
     assert "return a * b" in text and "total" not in text
     assert "class Box:" in text and text.count("\n\n\nclass Box") == 1
-    # The node's own hash also works, after an unrelated edit elsewhere.
+    again = mem.key_edit("sym:pkg/mod.py::helper", NEW_HELPER.replace("*", "-"),
+                         base_sha256=new_sha)
+    assert again["ok"], again
+    # The node's own hash also works after an unrelated edit elsewhere.
     path.write_text(text.replace('"""Module."""', '"""Module!"""'))
     old = "    def grow(self, k):\n        self.n += k\n        return self.n\n"
     node_sha = hashlib.sha256(old.encode()).hexdigest()
@@ -685,6 +725,21 @@ def test_key_edit_fresh_base_file_or_node_sha(mem, repo):
                                  "base_sha256": node_sha})
     assert not res["is_error"], res["output"]
     assert path.read_text().endswith("    def grow(self, k):\n        return k\n")
+    # A whole-file node takes the file's sha256 too.
+    y = repo / "deploy.yaml"
+    done = mem.key_edit("file:deploy.yaml", "name: b\n", base_sha256=_sha(y),
+                        apply=True)
+    assert done["applied"] and y.read_text() == "name: b\n"
+
+
+def test_key_edit_writes_a_backup(mem, repo):
+    path = repo / "pkg" / "mod.py"
+    done = mem.key_edit("sym:pkg/mod.py::helper", NEW_HELPER,
+                        base_sha256=_node_sha(path, 5, 10), apply=True)
+    assert done["applied"] and done["backup"]
+    backup = Path(done["backup"])
+    assert backup.is_file() and backup.read_text() == PY
+    assert mem.journal_recent()[-1]["backup"] == done["backup"]
 
 
 def test_key_edit_stale_or_missing_base_is_refused_with_the_node(mem, repo):
@@ -710,11 +765,12 @@ def test_key_edit_stale_or_missing_base_is_refused_with_the_node(mem, repo):
 
 def test_key_edit_parse_guard_and_preflight(mem, repo):
     path = repo / "pkg" / "mod.py"
+    base = _node_sha(path, 5, 10)
     res = I.handle(mem, "edit", {"key": "sym:pkg/mod.py::helper",
-                                 "newString": "def helper(:\n", "base_sha256": _sha(path)})
+                                 "newString": "def helper(:\n", "base_sha256": base})
     assert res["is_error"] and "does not parse" in res["output"]
     pre = I.handle(mem, "edit", {"key": "sym:pkg/mod.py::helper",
-                                 "newString": NEW_HELPER, "base_sha256": _sha(path)},
+                                 "newString": NEW_HELPER, "base_sha256": base},
                    preflight=True)
     assert pre["preflight"] and pre["permission"]["resources"] == ["pkg/mod.py"]
     assert "return a * b" in pre["permission"]["metadata"]["files"][0]["patch"]
@@ -723,24 +779,27 @@ def test_key_edit_parse_guard_and_preflight(mem, repo):
 
 def test_key_edit_markdown_text_and_json(mem, repo):
     md = repo / "README.md"
+    md_base = _node_sha(md, 5, 8)
     prev = mem.key_edit("doc:README.md#install", "## Install\n\nRun make install.\n",
-                        base_sha256=_sha(md))
+                        base_sha256=md_base)
     assert prev["ok"] and prev["applied"] is False
     assert (prev["start_line"], prev["end_line"]) == (5, 8)
     # The section runs to the next heading, blank lines included.
     done = mem.key_edit("doc:README.md#install", "## Install\n\nRun make install.\n\n",
-                        base_sha256=_sha(md), apply=True)
+                        base_sha256=md_base, apply=True)
     assert done["applied"]
     assert md.read_text() == README.replace("Run make.", "Run make install.")
     assert mem.journal_recent()[-1]["kind"] == "key_edit"
     y = repo / "deploy.yaml"
     done = mem.key_edit("text:deploy.yaml#L3-L5", "steps:\n  - lint",
-                        base_sha256=_sha(y), apply=True)
+                        base_sha256=_node_sha(y, 3, 5), apply=True)
     assert done["applied"] and y.read_text() == "name: app\n\nsteps:\n  - lint\n"
     j = repo / "conf.json"
-    done = mem.key_edit("json:conf.json#/deps/1", '"c"', base_sha256=_sha(j), apply=True)
+    b_sha = hashlib.sha256(b'"b"').hexdigest()
+    done = mem.key_edit("json:conf.json#/deps/1", '"c"', base_sha256=b_sha, apply=True)
     assert done["applied"] and json.loads(j.read_text())["deps"] == ["a", "c"]
-    bad = mem.key_edit("json:conf.json#/opts", "{", base_sha256=_sha(j))
+    opts_sha = hashlib.sha256(b'{"level": 1}').hexdigest()
+    bad = mem.key_edit("json:conf.json#/opts", "{", base_sha256=opts_sha)
     assert bad["ok"] is False and bad["parse_check"] == "refused"
     from ozagia.edit.code_edit import CodeEditError
     with pytest.raises(CodeEditError, match="no section"):
@@ -795,8 +854,200 @@ def test_daemon_counts_key_edits(mem, repo, tmp_path):
     st = DaemonState(repo, mem, tmp_path / "j.jsonl")
     msg = {"op": "tool", "tool": "edit", "input": {
         "key": "sym:pkg/mod.py::helper", "newString": NEW_HELPER,
-        "base_sha256": _sha(repo / "pkg" / "mod.py")}}
+        "base_sha256": _node_sha(repo / "pkg" / "mod.py", 5, 10)}}
     resp = st.dispatch(msg)
     st.record(msg, resp, 1.0)
     assert resp["handled"] and not resp["is_error"], resp
     assert st.stats()["key_edits"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# review fixes
+# --------------------------------------------------------------------------- #
+def test_environment_id_patches_are_not_checked(tmp_path):
+    (tmp_path / "a.py").write_text("x = 1\n")
+    body = ["*** Update File: a.py", "@@", "-x = 2", "+x = 3"]
+    local = check_patch(tmp_path, _patch(*body))
+    assert local["misses"] == 1
+    for env in ("remote", "local"):
+        got = check_patch(tmp_path, _patch(f"*** Environment ID: {env}", *body))
+        assert got["parsed"] and got["ok"] and got["misses"] == 0
+        assert got["skipped"] == "environment" and got["env_id"] == env
+        assert got["reply"] == ""
+    assert parse_patch(_patch("*** Environment ID: remote", *body)).env_id == "remote"
+
+
+def test_region_covering_the_whole_node_has_no_part_note(tmp_path):
+    text = ("def f():\n    value = compute(1)\n    return value\n\n\n"
+            "def g():\n    return 2\n")
+    got, reg = _region(tmp_path, "w.py", text, [
+        "@@", "-def f():", "-    value = compute(2)", "-    return value",
+        "+def f():", "+    return 3"])
+    assert (reg["start_line"], reg["end_line"]) == (1, 3)
+    assert reg["node"] == {"start_line": 1, "end_line": 3,
+                           "sha256": _node_sha(tmp_path / "w.py", 1, 3)}
+    assert f"  node L1-L3 node sha256 {reg['node']['sha256']}" in got["reply"].split("\n")
+
+
+def test_region_node_for_a_file_changed_earlier_in_the_patch_is_omitted(tmp_path):
+    (tmp_path / "a.py").write_text(PY)
+    got = check_patch(tmp_path, _patch(
+        "*** Update File: a.py", "@@", '-"""Module."""', '+"""Mod."""',
+        "*** Update File: a.py", "@@", "-    total = a+b", "+    total = 0"))
+    hunk = got["files"][1]["hunks"][0]
+    assert hunk["status"] == "failed" and hunk["region"]["node"] is None
+    assert "node sha256" not in got["reply"]
+
+
+def test_after_edit_miss_not_after_a_successful_edit(mem, repo):
+    path = repo / "pkg" / "mod.py"
+    old, new = "        return total - 10\n", "        return total - 11\n"
+    path.write_text(PY.replace(old, new))
+    inp = {"path": "pkg/mod.py", "oldString": old, "newString": new}
+    # Diagnostics in a successful edit's output match the failure words.
+    out = ("Edit applied successfully.\n\nLSP errors detected in this file:\n"
+           "ERROR [1:8] Stub file not found for \"os\"\n"
+           "ERROR [3:1] could not find `x` in `y`")
+    got = I.after(mem, "edit", inp, out, harness="claude")
+    assert "oldString is not" not in got["append"]
+    assert "region_replies" not in got["meta"]
+    # The plugin's flag decides when it is there.
+    got = I.after(mem, "edit", inp, out, meta={"builtin_error": False})
+    assert "oldString is not" not in got["append"]
+    failed = I.after(mem, "edit", {**inp, "oldString": "        return total - 9\n"},
+                     "Error: something else entirely", meta={"builtin_error": True})
+    assert failed["meta"]["intent"] == "after_edit_miss"
+    assert "nearest region L9-L9" in failed["append"]
+
+
+def test_daemon_passes_after_meta_to_the_edit_miss_gate(mem, repo, tmp_path):
+    from ozagia.daemon.server import DaemonState
+    st = DaemonState(repo, mem, tmp_path / "j.jsonl")
+    inp = {"path": "pkg/mod.py", "oldString": "        return total - 9\n",
+           "newString": "        return total - 8\n"}
+    base = {"op": "after", "tool": "edit", "input": inp, "output": "boom"}
+    assert "oldString is not" not in st.dispatch(base)["append"]
+    got = st.dispatch({**base, "meta": {"builtin_error": True}})
+    assert "nearest region L9-L9" in got["append"]
+
+
+PROP = """class C:
+    @property
+    def x(self):
+        return self._x
+
+    @x.setter
+    def x(self, v):
+        self._x = v
+"""
+
+
+def test_key_edit_refuses_an_ambiguous_qualname(tmp_path):
+    from ozagia.edit.code_edit import CodeEditError
+    from ozagia.edit.key_edit import apply_key_edit
+    (tmp_path / "a.py").write_text(PROP)
+    with pytest.raises(CodeEditError) as exc:
+        apply_key_edit(tmp_path, "sym:a.py::C.x", "    def x(self):\n        return 1\n",
+                       base_sha256="0" * 64)
+    msg = str(exc.value)
+    assert "sym:a.py::C.x is ambiguous: 2 defs" in msg
+    assert "(L2-L4, L6-L8)" in msg and "text:a.py#L<a>-L<b>" in msg
+    # The setter by its line range.
+    setter = "".join(PROP.splitlines(keepends=True)[5:8])
+    res = apply_key_edit(tmp_path, "text:a.py#L6-L8",
+                         "    @x.setter\n    def x(self, v):\n        self._x = v * 2\n",
+                         base_sha256=hashlib.sha256(setter.encode()).hexdigest(),
+                         write=True)
+    assert res["applied"] and "self._x = v * 2" in (tmp_path / "a.py").read_text()
+    assert "return self._x" in (tmp_path / "a.py").read_text()
+
+
+class _GraphMemory:
+    """A memory whose graph has one non-Python symbol, stale until a
+    reingest."""
+
+    def __init__(self, rel: str, start: int, end: int, fresh: tuple[int, int]):
+        self.rel, self.attrs, self.fresh = rel, {"start_line": start,
+                                                 "end_line": end}, fresh
+        self.pending = [rel]
+        self.reingested: list[list[str]] = []
+
+    def pending_changes(self):
+        return list(self.pending)
+
+    def reingest(self, paths):
+        self.reingested.append(list(paths))
+        self.attrs = {"start_line": self.fresh[0], "end_line": self.fresh[1]}
+        self.pending = []
+
+    def node_by_key(self, key):
+        return 1 if key == f"sym:{self.rel}::run" else None
+
+    def node(self, nid):
+        return {"attrs": dict(self.attrs)}
+
+
+GO = "package m\n\n// inserted\n// lines\nfunc run() int {\n\treturn 1\n}\n"
+
+
+def test_key_edit_graph_sourced_span_reingests_a_changed_file(tmp_path):
+    from ozagia.edit.key_edit import apply_key_edit, node_span
+    from ozagia.edit.span_edit import _read
+    (tmp_path / "m.go").write_text(GO)
+    # The graph still has `run` at L3-L5 (before two lines were inserted).
+    memory = _GraphMemory("m.go", 3, 5, fresh=(5, 7))
+    span = node_span(_read(tmp_path, "m.go"), "sym:m.go::run", memory=memory)
+    assert memory.reingested == [["m.go"]]
+    assert (span["start_line"], span["end_line"], span["graph"]) == (5, 7, True)
+    # Without a refresh (region replies) a stale range is refused.
+    memory = _GraphMemory("m.go", 3, 5, fresh=(5, 7))
+    from ozagia.edit.code_edit import CodeEditError
+    with pytest.raises(CodeEditError, match="stale"):
+        node_span(_read(tmp_path, "m.go"), "sym:m.go::run", memory=memory,
+                  refresh=False)
+    # Graph-sourced spans take only the node sha.
+    memory = _GraphMemory("m.go", 3, 5, fresh=(5, 7))
+    new = "func run() int {\n\treturn 2\n}\n"
+    file_sha = _sha(tmp_path / "m.go")
+    assert apply_key_edit(tmp_path, "sym:m.go::run", new, base_sha256=file_sha,
+                          memory=memory)["stale"] is True
+    node_sha = _node_sha(tmp_path / "m.go", 5, 7)
+    res = apply_key_edit(tmp_path, "sym:m.go::run", new, base_sha256=node_sha,
+                         memory=memory)
+    assert res["ok"] and (res["start_line"], res["end_line"]) == (5, 7)
+    assert "return 2" in res["diff_view"] and "// lines" not in res["new_node_text"]
+
+
+def test_lone_cr_lines_count_the_same_in_replies_and_key_edits(tmp_path):
+    from types import SimpleNamespace
+
+    from ozagia.edit.code_edit import CodeEditError
+    from ozagia.edit.key_edit import apply_key_edit, node_span
+    text = "alpha\rbeta\rgamma\rdelta\r"
+    (tmp_path / "t.txt").write_bytes(text.encode())
+    got = check_patch(tmp_path, _patch("*** Update File: t.txt", "@@", "-gamma!",
+                                       "+G"))
+    reg = got["files"][0]["hunks"][0]["region"]
+    assert (reg["start_line"], reg["end_line"]) == (3, 3)
+    # A key's line range addresses the same line the reply numbered.
+    span = node_span(SimpleNamespace(rel="t.txt", text=text), "text:t.txt#L3-L3")
+    assert text[span["start"]:span["end"]] == "gamma\r"
+    assert (span["start_line"], span["end_line"]) == (3, 3)
+    # (The edit layer itself refuses lone-CR files.)
+    with pytest.raises(CodeEditError, match="lone CR"):
+        apply_key_edit(tmp_path, "text:t.txt#L3-L3", "G", base_sha256="0" * 64)
+
+
+def test_span_edit_parses_the_old_python_text_once(tmp_path, monkeypatch):
+    from ozagia.edit import span_edit
+    (tmp_path / "a.py").write_text(PY)
+    seen: list[str] = []
+    real = span_edit._parse_py
+
+    def counting(text):
+        seen.append(text)
+        return real(text)
+    monkeypatch.setattr(span_edit, "_parse_py", counting)
+    res = span_edit.apply_span_edit(tmp_path, "a.py", "total = a + b", "total = a - b")
+    assert res["ok"], res
+    assert seen.count(PY) == 1 and len(seen) == 2

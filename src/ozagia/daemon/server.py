@@ -324,9 +324,12 @@ class DaemonState:
                                          harness=harness, session=session,
                                          preflight=msg.get("preflight") is True)
                 else:
+                    req_meta = msg.get("meta")
                     body = intent.after(self.memory, tool, inp,
                                         msg.get("output"), harness=harness,
-                                        session=session)
+                                        session=session,
+                                        meta=req_meta if isinstance(
+                                            req_meta, dict) else None)
             if op == "tool" and body.get("handled") and _expired(msg):
                 body = {**body, "late": True}
             return {"ok": True, **body}

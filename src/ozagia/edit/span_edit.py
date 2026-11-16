@@ -883,19 +883,25 @@ def apply_span_edit(root: str | Path, rel: str, old_string: str,
     return apply_spans(root, src, loc["matches"],
                        normalize_newlines(new_string, src.newline),
                        keys=loc["keys"], write=write, memory=memory,
-                       newline_converted=loc["newline_converted"])
+                       newline_converted=loc["newline_converted"],
+                       old_tree=old_tree)
 
 
 def apply_spans(root: str | Path, src: SourceFile,
                 matches: list[dict[str, Any]], replacement: str, *,
                 keys: list[str], write: bool = False, memory: Any = None,
                 newline_converted: bool = False,
-                fmt: str = "span") -> dict[str, Any]:
+                fmt: str = "span",
+                old_tree: ast.Module | None = None) -> dict[str, Any]:
     """Replace each match span (`start`/`end` offsets into `src.text`, in
     order, not overlapping) by `replacement`: the parse guard, broken
-    references, the write and the reingest of `apply_span_edit`."""
+    references, the write and the reingest of `apply_span_edit`.
+    `old_tree` is `src.text` parsed (Python), when the caller has it; it is
+    not parsed again."""
     is_py = PurePosixPath(src.rel).suffix.lower() == ".py"
-    if is_py:
+    if is_py and old_tree is not None:
+        before_status = "ok"
+    elif is_py:
         before_status, _, old_tree = _parse_py(src.text)
     else:
         (before_status, _), old_tree = _parse_error(src.rel, src.text), None

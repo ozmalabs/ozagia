@@ -58,6 +58,19 @@ def normalize_newlines(text: str, newline: str) -> str:
     return re.sub(r"\r\n|\r|\n", lambda _m: newline, text)
 
 
+#: The line breaks Codex's apply_patch and ozagia's line numbers count:
+#: CRLF, lone CR and LF (the patch checker, region replies and key edits all
+#: number lines with it).
+LINE_BREAK_RE = re.compile(r"(\r\n|\r|\n)")
+
+
+def line_starts(text: str) -> list[int]:
+    """The offset of each line's first character (lines end at CRLF, lone
+    CR or LF); a text ending in a line break has a last, empty entry at
+    `len(text)`."""
+    return [0, *(m.end() for m in LINE_BREAK_RE.finditer(text))]
+
+
 def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -218,9 +231,11 @@ def write_source(root: str | Path, src: SourceFile, new_text: str, *,
 
 __all__ = [
     "SourceFile",
+    "LINE_BREAK_RE",
     "check_base",
     "detect_newline",
     "encode_text",
+    "line_starts",
     "normalize_newlines",
     "read_source",
     "sha256_bytes",

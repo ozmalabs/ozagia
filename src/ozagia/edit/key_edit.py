@@ -21,13 +21,31 @@ Keys and the span each names:
     json:<rel>#<pointer>      the JSON value at the pointer (RFC 6901), only
                               the value's own text
 
-Base hash. `base_sha256` must be the file's sha256 (the bytes on disk, as
-`txn` and the region replies report it) or the sha256 of the node's current
-text (UTF-8). Either one proves the caller saw the text it replaces; the
-node hash also survives edits elsewhere in the file. A missing or stale base
-is refused with `{ok: False, stale: True}` and the node's current text,
-line range, `file_sha256` and `node_sha256`, so the caller can retry
-without another read.
+Base hash. `base_sha256` must be the sha256 of the node's current text
+(UTF-8, `node_sha256`). The file's sha256 (the bytes on disk) is accepted
+only when the node is the whole file (`file:<rel>`, `doc:<rel>`, or any key
+whose span is the whole text). The rule: a base must prove the caller saw
+the text it replaces. A key edit cannot tell where a file sha came from (a
+full read, or a region reply that showed a few lines of a longer node), so
+for a node that is part of a file only its own hash is that proof. The node
+hash also survives edits elsewhere in the file. Region replies, edit-miss
+replies and stale refusals give the node's full line range and its
+`node_sha256`; a successful key edit gives `new_node_sha256` for the next
+edit of the same node. A missing, stale or file-only base is refused with
+`{ok: False, stale: True}` and the node's current text, line range,
+`file_sha256` and `node_sha256`, so the caller can retry without another
+read.
+
+Python symbols come from the file's own parse; a qualname with more than
+one def (a property getter and setter, `@overload` stubs, `if`/`else`
+definitions) is refused as ambiguous with each def's line range (address
+one by its `text:` key). Other languages' symbols take the graph node's
+line range; when the file changed since it was ingested
+(`memory.pending_changes()`) it is reingested first, so the range is the
+current one.
+
+Lines are counted at CRLF, lone CR and LF (`txn.LINE_BREAK_RE`), as the
+patch checker and the region replies count them.
 
 A line-range node replaced by text without a final newline gets one when
 the old text had one (the next line is not joined onto it). Newlines are
@@ -42,7 +60,7 @@ from typing import Any
 
 from ozagia.core.keys import parse_key
 from ozagia.edit.code_edit import CodeEditError
-from ozagia.edit.txn import SourceFile, normalize_newlines
+from ozagia.edit.txn import SourceFile, line_starts, normalize_newlines
 
 _MD_SUFFIXES = frozenset({".md", ".markdown"})
 _TEXT_KEY_RE = re.compile(r"^text:(?P<rel>.+)#L(?P<a>\d+)-L(?P<b>\d+)$")
@@ -60,19 +78,10 @@ def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _line_starts(text: str) -> list[int]:
-    out = [0]
-    i = text.find("\n")
-    while i >= 0:
-        out.append(i + 1)
-        i = text.find("\n", i + 1)
-    return out
-
-
 def _line_span(text: str, a: int, b: int) -> tuple[int, int]:
     """Offsets of lines a..b (1-based, inclusive), the last line's newline
     included."""
-    starts = _line_starts(text)
+    starts = line_starts(text)
     total = len(starts) - (1 if starts[-1] == len(text) else 0)
     if a < 1 or b < a or a > max(total, 1):
         raise CodeEditError(f"lines {a}-{b} are not in the file ({total} lines)")
@@ -169,13 +178,18 @@ def key_file(key: str) -> str:
     return rel
 
 
-def node_span(src: SourceFile, key: str, *, memory: Any = None) -> dict[str, Any]:
-    """`{start, end, start_line, end_line, lines: bool}` of the node `key`
-    in `src` (offsets into `src.text`). `lines` says whether the span is
-    whole lines. Raises CodeEditError for a key with no node."""
+def node_span(src: Any, key: str, *, memory: Any = None,
+              refresh: bool = True) -> dict[str, Any]:
+    """`{start, end, start_line, end_line, lines: bool, graph: bool}` of the
+    node `key` in `src` (a SourceFile, or anything with `rel` and `text`;
+    offsets into `src.text`). `lines` says whether the span is whole lines,
+    `graph` whether the line range came from the graph. A graph-sourced
+    span of a file changed since ingest is reingested first (`refresh`), or
+    refused (`refresh=False`). Raises CodeEditError for a key with no node
+    or a qualname with several defs."""
     text = src.text
     kind = key.partition(":")[0]
-    starts = _line_starts(text)
+    starts = line_starts(text)
 
     def line_of(off: int) -> int:
         import bisect
@@ -210,9 +224,21 @@ def node_span(src: SourceFile, key: str, *, memory: Any = None) -> dict[str, Any
             raise CodeEditError(f"no node {key} in {src.rel}")
         # A test key names a test span; a sym key prefers a non-test span.
         want_test = kind == "test"
-        spans.sort(key=lambda sp: (bool(sp[3]) != want_test, sp[0]))
+        spans = ([sp for sp in spans if bool(sp[3]) == want_test] or spans)
+        spans.sort(key=lambda sp: sp[0])
+        if len(spans) > 1:
+            where = ", ".join(f"L{sp[0]}-L{sp[1]}" for sp in spans)
+            raise CodeEditError(
+                f"{key} is ambiguous: {len(spans)} defs of {qual} in {src.rel} "
+                f"({where}); edit one by its text:{src.rel}#L<a>-L<b> key")
         a, b = spans[0][0], spans[0][1]
     else:
+        if memory is not None and src.rel in memory.pending_changes():
+            # The graph's line range is from before the file changed.
+            if not refresh:
+                raise CodeEditError(f"{src.rel} changed since the graph took it "
+                                    f"in; the line range of {key} is stale")
+            memory.reingest([src.rel])
         nid = memory.node_by_key(key) if memory is not None else None
         if nid is None:
             raise CodeEditError(f"no node {key}"
@@ -223,9 +249,23 @@ def node_span(src: SourceFile, key: str, *, memory: Any = None) -> dict[str, Any
         b = int(attrs.get("end_line") or a)
         if a < 1:
             raise CodeEditError(f"node {key} has no line range")
+        s, e = _line_span(text, a, b)
+        return {"start": s, "end": e, "start_line": a,
+                "end_line": line_of(max(e - 1, s)), "lines": True,
+                "graph": True}
     s, e = _line_span(text, a, b)
     return {"start": s, "end": e, "start_line": a,
             "end_line": line_of(max(e - 1, s)), "lines": True}
+
+
+def accepted_bases(src: Any, span: dict[str, Any]) -> tuple[str, ...]:
+    """The base hashes a key edit of `span` takes: the node's sha256, and
+    the file's when the node is the whole file (see the module
+    docstring)."""
+    node_sha = sha256_text(src.text[span["start"]:span["end"]])
+    whole = (span["start"] == 0 and span["end"] == len(src.text)
+             and not span.get("graph"))
+    return (node_sha, src.sha256) if whole else (node_sha,)
 
 
 def _json_span(src: SourceFile, key: str, line_of: Any) -> dict[str, Any]:
@@ -265,7 +305,7 @@ def apply_key_edit(root: Any, key: str, new_text: str, *,
     docstring). Returns `span_edit`'s result shape with `format: "key"`,
     `key`, `start_line`/`end_line` (of the old node) and `node_sha256` (of
     its old text), or `{ok: False, stale: True, ...}`."""
-    from ozagia.edit.span_edit import _Keyer, _read, apply_spans
+    from ozagia.edit.span_edit import _Keyer, _parse_py, _read, apply_spans
     if not isinstance(new_text, str):
         raise CodeEditError("new_text must be a string")
     key = str(key or "").strip()
@@ -278,10 +318,12 @@ def apply_key_edit(root: Any, key: str, new_text: str, *,
             "end_line": span["end_line"], "file_sha256": src.sha256,
             "node_sha256": node_sha}
     base = str(base_sha256 or "").strip()
-    if base not in (src.sha256, node_sha):
+    if base not in accepted_bases(src, span):
         why = ("base_sha256 is required" if not base else
-               f"stale base: {base} is neither the file's sha256 nor the "
-               f"node's")
+               f"base_sha256 {base} is the file's sha256; a key edit of part "
+               f"of a file takes the node's sha256" if base == src.sha256 else
+               f"stale base: {base} is neither the node's sha256 nor the "
+               f"file's")
         return {"ok": False, "applied": False, "stale": True, **view,
                 "error": (f"{why}; the node's current text is in node_text "
                           f"(retry with base_sha256 {node_sha})"),
@@ -293,18 +335,21 @@ def apply_key_edit(root: Any, key: str, new_text: str, *,
     if replacement == old:
         raise CodeEditError("new_text is the node's current text; nothing to do")
     s, e = span["start"], span["end"]
-    keyer = _Keyer(root, src.rel, src.text)
+    old_tree = (_parse_py(src.text)[2]
+                if PurePosixPath(src.rel).suffix.lower() == ".py" else None)
+    keyer = _Keyer(root, src.rel, src.text, py_tree=old_tree)
     match = {"start": s, "end": e, "start_line": span["start_line"],
              "end_line": span["end_line"],
              **keyer.key(s, max(e, s + 1), span["start_line"], span["end_line"])}
     match["key"] = key
     res = apply_spans(root, src, [match], replacement, keys=[key],
-                      write=write, memory=memory, fmt="key")
+                      write=write, memory=memory, fmt="key", old_tree=old_tree)
     res.update({"key": key, "start_line": span["start_line"],
                 "end_line": span["end_line"], "node_sha256": node_sha,
-                "file_sha256": src.sha256, "new_node_text": replacement})
+                "file_sha256": src.sha256, "new_node_text": replacement,
+                "new_node_sha256": sha256_text(replacement)})
     return res
 
 
-__all__ = ["apply_key_edit", "find_section", "key_file", "node_span",
+__all__ = ["accepted_bases", "apply_key_edit", "find_section", "key_file", "node_span",
            "section_key", "sha256_text", "slug"]

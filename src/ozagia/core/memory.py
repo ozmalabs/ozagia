@@ -3248,9 +3248,9 @@ class DevMemory:
                  task: str | None = None) -> dict[str, Any]:
         """Replace the whole text of node `key` by `new_text` and journal it.
 
-        See `ozagia.edit.key_edit`: `base_sha256` (the file's or the node's
-        sha256) is required; a missing or stale one is refused with the
-        node's current text. Otherwise as `span_edit` (parse guard, broken
+        See `ozagia.edit.key_edit`: `base_sha256` (the node's sha256; the
+        file's only for a whole-file node) is required; a missing, stale or
+        file-only one is refused with the node's current text. Otherwise as `span_edit` (parse guard, broken
         references, reingest). Preview unless `apply` is true."""
         from ozagia.edit.key_edit import apply_key_edit
         write = _strict_bool(apply, "apply")

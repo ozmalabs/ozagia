@@ -254,7 +254,7 @@ their contents as supporting evidence for each other.
 | `dev_ast` | Python AST paths + spans for generic node edits. |
 | `dev_edit` | Apply a semantic edit script (preview by default; `diagnostics=true` waits for LSP diagnostics after an applied write). |
 | `dev_span_edit` | Replace an exact text span (unique unless `replace_all`); returns the enclosing node keys, refuses an edit that breaks the parse, lists the graph delta and broken references (preview by default). |
-| `dev_key_edit` | Replace the whole text of one node by key (`sym:`, `test:`, `doc:<file>#<section>`, `text:<file>#L<a>-L<b>`, `json:<file>#<pointer>`); `base_sha256` (the file's or the node's sha256) is required, and a missing or stale one returns `stale: true` with the node's current text and both hashes. Parse guard, backup, journal and graph update as `dev_span_edit` (preview by default). |
+| `dev_key_edit` | Replace the whole text of one node by key (`sym:`, `test:`, `doc:<file>#<section>`, `text:<file>#L<a>-L<b>`, `json:<file>#<pointer>`); `base_sha256` (the node's sha256; the file's only when the node is the whole file) is required, and a missing, stale or file-only one returns `stale: true` with the node's current text and both hashes. Ambiguous `sym:` qualnames are refused with each def's line range. Parse guard, backup, journal and graph update as `dev_span_edit` (preview by default). |
 | `dev_seed` | Before editing a seed: version, deps, rules/concepts, tests, docs. Listed only when the snapshot has `Seed` nodes (from an adapter). |
 | `dev_rule` | Before editing a rule: its seed, file, and current body. Listed only when the snapshot has `Rule` nodes. |
 | `dev_tests` | Before/after a change: the scoped gate. |

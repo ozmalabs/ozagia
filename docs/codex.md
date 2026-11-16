@@ -152,7 +152,7 @@ root's default locks `<socket>.lock` instead.)
 |---|---|---|---|
 | `SessionStart` (every `source`) | brief | In a git work tree only: starts the daemon if needed (waits at most 0.5 s, not for the snapshot load), and lists the dirty files (`git status --porcelain`, at most 15), the last 3 commits, and the ozagia MCP tools to prefer. At most 1,500 characters. | `additionalContext` |
 | `PreToolUse` `Bash` with a ref-moving git command | refusal | Refuses it locally, without the daemon, with the intent layer's check (`ozagia.intent.shell.classify` is `git_refs`; see docs/claude_code.md for the list and the parsing). Listing forms (`git branch`, `git tag -l`, `git stash list`) are allowed. | `permissionDecision: "deny"` with a reason |
-| `PreToolUse` `apply_patch` | patch check | Checks the patch against the current files locally, as Codex's apply_patch matches hunks (see "Patch check" below). If every hunk matches, prints nothing. If one would fail, refuses the call with the nearest region of each failing hunk. If a daemon is running, it is asked too (at most 1.5 s, never started for this), for the graph's keys and to count the check. | nothing, or `permissionDecision: "deny"` with the regions as the reason |
+| `PreToolUse` `apply_patch` | patch check | Checks the patch against the current files locally, as Codex's apply_patch matches hunks (see "Patch check" below). If every hunk matches, prints nothing. If one would fail, refuses the call with the nearest region of each failing hunk; only then, if a daemon is running, it is asked too (at most 1.5 s, never started for this), for the graph's keys and to count the miss. A matching patch never waits for the daemon. | nothing, or `permissionDecision: "deny"` with the regions as the reason |
 | `PostToolUse` `Bash` | `after` as `shell` | Sends `{command, workdir: cwd}` and the command's output. The daemon maps pytest runs to test keys, re-ingests files the command changed, and maps `git diff`/`git show` hunks to node keys. | `additionalContext` with the daemon's `append`, when not empty |
 | `PostToolUse` `apply_patch` | `after` as `patch` | Sends `{patch: <patch text>}`; the daemon re-ingests the changed files. | the graph delta (`[ozagia] delta: ...`) as `additionalContext` |
 
@@ -191,6 +191,7 @@ For each failing hunk (at most 4), the reason gives:
 *** src/a.py  sha256 <64 hex>  (412 lines)
 hunk 2 of 3 (@@ def foo): the expected lines are not in the file after line 40
   nearest region: L120-L131 sym:src/a.py::Foo.foo  similarity 0.86
+  node L118-L140 node sha256 <64 hex>; the region is part of it, a key edit replaces all of it
   differs (-patch expects, +file has):
   -    return x+1
   +    return x + 2
@@ -203,7 +204,12 @@ The nearest region is the window of the file most like the hunk's expected
 lines (whitespace-normalised difflib ratios; windows after the anchor are
 preferred). Its key is the enclosing symbol (`sym:`/`test:`), Markdown
 section (`doc:<file>#<slug>`), JSON value (`json:<file>#<pointer>`) or text
-chunk (`text:<file>#L<a>-L<b>`, for `.tex` and other unparsed files). A
+chunk (`text:<file>#L<a>-L<b>`, for `.tex` and other unparsed files). The
+`node` line gives that node's full line range and the sha256 of its current
+text: the `base_sha256` a key edit (`dev_key_edit`) of it takes. A key edit
+of part of a file does not take the file's sha256, since the region may show
+only part of the node it would replace. Lines are counted at CRLF, lone CR
+and LF, the same in the reply and in key edits. A
 region shows at most 60 lines, a line at most 1,500 characters, and the
 whole reason stays under 7,000 characters (about 2,000 tokens, under
 Codex's limit of about 2,500 tokens of hook output). When the expected lines
@@ -212,11 +218,15 @@ exist but before the anchor or the previous hunk, the reason says so.
 The patch is allowed (the hook prints nothing) when it does not parse,
 when the checker fails, and for files the check cannot judge: paths outside
 the repository or in `.git`, files that do not exist, binary or non-UTF-8
-files, and files over 4 MB. Codex reports those itself. Paths are taken
+files, and files over 4 MB. Codex reports those itself. A patch with an
+`*** Environment ID:` line is not checked at all: Codex applies it in that
+environment, whose files the hook may not see. Paths are taken
 relative to the event's `cwd`.
 
 The daemon counts checks in `stats`: `patch_checks`, `patch_misses_caught`
-and `region_replies`. Checks made while no daemon runs are not counted.
+and `region_replies`. The Codex hook asks the daemon only after a local
+miss, so from Codex `patch_checks` counts the patches that missed; checks
+made while no daemon runs are not counted.
 
 ## Uninstall
 
