@@ -2,6 +2,7 @@ import {
   Command,
   Panel,
   Plugin,
+  SettingsPage,
   Style,
   type Command as CommandItem,
   type PanelProps,
@@ -13,9 +14,10 @@ import type { Envelope, TestPlan, WorktreeReport } from "./types"
 import { failureText, invoke } from "./gui/client"
 import { definition } from "./gui/definition"
 import { OzagiaPanel } from "./gui/panel"
+import { OzagiaSettings } from "./gui/settings"
 import { panelCss } from "./gui/styles"
 
-type TabId = "graph" | "status" | "testing"
+type TabId = "graph" | "status" | "testing" | "research" | "actions"
 
 export default Plugin.define({
   ...definition,
@@ -34,11 +36,13 @@ export default Plugin.define({
       closable: pinned ? false : "compact",
     })
 
-    // The graph tab is pinned so the panel is discoverable; status and testing
-    // are opened by their commands or the panel launcher and stay closeable.
+    // The graph tab is pinned so the panel is discoverable; the other tabs are
+    // opened by their commands or the panel launcher and stay closeable.
     const graphTab = tab("graph", "tab.graph", true)
     const statusTab = tab("status", "tab.status")
     const testingTab = tab("testing", "tab.testing")
+    const researchTab = tab("research", "tab.research")
+    const actionsTab = tab("actions", "tab.actions")
 
     ctx.add(Panel, {
       id: "ozagia",
@@ -56,6 +60,8 @@ export default Plugin.define({
         graphTab,
         ...(input.open.includes("status") ? [statusTab] : []),
         ...(input.open.includes("testing") ? [testingTab] : []),
+        ...(input.open.includes("research") ? [researchTab] : []),
+        ...(input.open.includes("actions") ? [actionsTab] : []),
       ],
       render: (props: PanelProps) => (
         <OzagiaPanel
@@ -64,6 +70,30 @@ export default Plugin.define({
           setLastPlan={setLastTestPlan}
         />
       ),
+    })
+
+    ctx.add(SettingsPage, {
+      id: "ozagia-settings",
+      icon: "settings-gear",
+      get title() {
+        return ctx.t("settings.title")
+      },
+      get entries() {
+        return [
+          {
+            id: "ozagia-settings",
+            title: ctx.t("settings.title"),
+            description: ctx.t("settings.description"),
+            keywords: "ozagia settings registry config source scope read-only",
+          },
+          {
+            id: "ozagia-settings-readonly",
+            title: ctx.t("settings.readonly"),
+            description: ctx.t("settings.readonly.description"),
+          },
+        ]
+      },
+      render: () => <OzagiaSettings />,
     })
 
     const open = (id: TabId) => {
@@ -87,6 +117,23 @@ export default Plugin.define({
     ctx.add(Command, openCommand("graph", "open-graph", "command.openGraph"))
     ctx.add(Command, openCommand("status", "open-status", "command.openStatus"))
     ctx.add(Command, openCommand("testing", "open-testing", "command.openTesting"))
+    ctx.add(Command, openCommand("research", "open-research", "command.openResearch"))
+    ctx.add(Command, openCommand("actions", "open-actions", "command.openActions"))
+
+    ctx.add(Command, (): CommandItem => ({
+      id: "open-settings",
+      get title() {
+        return ctx.t("command.openSettings")
+      },
+      description: ctx.t("command.openSettings.description"),
+      keywords: "ozagia settings config registry sources",
+      get group() {
+        return ctx.t("command.group")
+      },
+      section: "navigation",
+      enabled: true,
+      run: () => ctx.layout.settings("ozagia-settings"),
+    }))
 
     ctx.add(Command, (): CommandItem => ({
       id: "check-worktree",

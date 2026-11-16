@@ -1,9 +1,9 @@
 # ozagia OpenCode add-in
 
-Read-only graph, status and test-planning panels for OpenCode Desktop. This is
-the first interactive UI host for ozagia (plan item 8): the add-in talks to the
-local `ozagia` CLIs over a typed RPC and never imports Python or edits the
-repository.
+Read-only graph, status, testing, research, settings and action-preview surfaces
+for OpenCode Desktop. This is the first interactive UI host for ozagia (plan
+item 8): the add-in talks to the local `ozagia` CLIs over a typed RPC and never
+imports Python, applies an action or edits the repository.
 
 ## Requirements
 
@@ -17,6 +17,11 @@ repository.
   before starting OpenCode.
 - A graph snapshot (`.ozagia/graph.json`) for the graph panel. The panel does
   not build one; a missing graph is reported as an actionable error.
+- A recorded research investigation under `.ozagia/research/` for the Research
+  tab. A missing investigation is reported as an error, not an empty view.
+- Optional user/repository configuration for the Settings page; with no files it
+  shows the built-in defaults and their source. The Actions tab needs no extra
+  file unless the selected action targets a configured service or tunnel.
 - Node 20.19+ or 22.12+ to build the GUI bundle with Vite 7. Node 20.5 builds
   successfully but prints Vite's engine warning.
 
@@ -63,7 +68,7 @@ If you only want to experiment without options, the equivalent string entry is:
 
 ## What it shows
 
-One side panel, `ozagia`, with up to three tabs:
+One side panel, `ozagia`, with up to five tabs:
 
 - **Graph** (pinned): aperture picker loaded from `view_cli --list-apertures`,
   refresh, node/edge/group counts, deterministic seeded circle layout in SVG,
@@ -77,22 +82,42 @@ One side panel, `ozagia`, with up to three tabs:
 - **Testing**: base, head, task-class and changed-file inputs; a Plan button;
   mode, counts, selected tests, omissions, fallback, graph freshness and the
   plan's explicit "not assessed" list.
+- **Research**: investigation id and a six-view picker (`library`, `fetch`,
+  `screening`, `evidence`, `consensus`, `citation`); summary counts, the primary
+  row table, provenance and record counts, omitted rows/graph material and the
+  explicit "not assessed" list. A missing investigation or graph is an
+  actionable error, never an empty successful view.
+- **Actions**: the action catalogue with `read-only`, `mutating`, `destructive`
+  and `live-gated` badges, action-specific arguments, and a Preview button. The
+  preview shows the exact operation, manager call, argv, preconditions, risks,
+  current state and one-time confirmation token. There is no Apply button.
+
+A `SettingsPage` also contributes an **ozagia settings** page under Settings.
+It reads `settings_cli schema` and `settings_cli values` and shows every key's
+value, source (`default`, `user`, `repo`, `env` or `override`), scope, type,
+default, description and restart flag. It uses the host's
+`SettingsLayout`/`SettingsSection`/`SettingsRow` components and has no write
+control.
 
 Commands in the palette:
 
 - `ozagia: Open graph panel`
 - `ozagia: Open status panel`
 - `ozagia: Open testing panel`
+- `ozagia: Open research panel`
+- `ozagia: Open action previews`
+- `ozagia: Open settings page`
 - `ozagia: Check worktree` (runs the read-only check and opens status)
 - `ozagia: Plan tests` (plans HEAD against the working tree and opens testing)
 
-The status and testing tabs are opened by their commands; the graph tab is
-pinned so the panel is discoverable. All actions are read-only.
+The status, testing, research and actions tabs are opened by their commands;
+the graph tab is pinned so the panel is discoverable. The settings command
+opens the contributed settings page directly. All actions are read-only.
 
 ## Read-only scope
 
 This slice has no commits, edits, service starts/stops, downloads, index
-builds, test runs or model calls. It only invokes:
+builds, test runs, setting writes or model calls. It only invokes:
 
 ```text
 python -m ozagia.status_cli
@@ -101,13 +126,31 @@ python -m ozagia.worktree_cli
 python -m ozagia.resources_cli
 python -m ozagia.testing_cli
 python -m ozagia.research_ui_cli
+python -m ozagia.settings_cli schema|values
+python -m ozagia.actions_cli list|preview
 ```
+
+The settings page only uses `schema` and `values`; it never calls `settings_cli
+set`. The actions tab only uses `list` and `preview`; it never calls
+`actions_cli apply` and has no mutating RPC. A preview issues a one-time
+confirmation token and records it under `.ozagia/actions/pending` (mode `0600`,
+ten-minute TTL); it does not start, stop, signal or connect anything. Applying
+an action remains a separate, explicit CLI command after a person reviews the
+preview.
 
 The subprocesses use `spawn` with argument arrays, no shell, closed stdin,
 a bounded timeout and a bounded output buffer. Stdout is parsed as JSON; stderr
 is capped, redacted and returned as a short tail. A CLI exit status of 1 is
 treated as a successful report because these CLIs use it for findings, policy
 failures and admission refusals while still emitting JSON.
+
+The RPC contract exposes `status`, `apertures`, `view`, `worktreeCheck`,
+`policyCheck`, `resourcesCheck`, `testingPlan`, `researchView`,
+`settingsSchema`, `settingsValues`, `actionsList` and `actionPreview`. There is
+no `actionApply`, settings write or other mutating method. Action input is
+limited to the published action names and each action's documented arguments;
+names are bounded, byte caps and timeouts are range-checked, and no value is
+passed through a shell.
 
 ## Build and test
 
@@ -133,9 +176,9 @@ a local plugin directory loads without a build step. `node_modules/` is ignored;
 `package-lock.json` and `dist/` are committed.
 
 The Node tests (`tests/*.test.cjs`) cover the pure argument builders, input
-bounds, redaction and the subprocess wrapper. They are offline and do not load
-`@opencode/plugin`; a small helper transpiles `src/runner.ts` with the installed
-TypeScript package.
+bounds, action argument/action matching, redaction and the subprocess wrapper.
+They are offline and do not load `@opencode/plugin`; a small helper transpiles
+`src/runner.ts` with the installed TypeScript package.
 
 ## Package layout
 
@@ -146,8 +189,9 @@ tsconfig.json
 src/rpc.ts            Rpc.define contract (ozagia)
 src/index.ts          server part: Plugin.define + ctx.rpc.register
 src/runner.ts         argument builders + bounded subprocess runner
-src/gui.tsx           GUI Plugin.define, Panel/Command/Style registrations
-src/gui/              Solid components (graph, status, testing)
+src/gui.tsx           GUI Plugin.define, Panel/SettingsPage/Command/Style
+src/gui/              Solid components (graph, status, testing, research,
+                      actions, settings)
 src/types.ts          envelope and read-only data shapes
 tests/                node:test for runner/argument builders
 dist/gui-experimental.cjs

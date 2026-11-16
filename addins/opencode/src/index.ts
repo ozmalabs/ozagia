@@ -3,11 +3,15 @@ import { Plugin } from "@opencode/plugin"
 import { Ozagia } from "./rpc.js"
 import {
   InputError,
+  actionPreviewSpec,
+  actionsListSpec,
   aperturesSpec,
   policyCheckSpec,
   researchViewSpec,
   resourcesCheckSpec,
   runOzagia,
+  settingsSchemaSpec,
+  settingsValuesSpec,
   statusSpec,
   testingPlanSpec,
   viewSpec,
@@ -93,6 +97,14 @@ export default Plugin.define({
         run(() => testingPlanSpec(config.root, input as Record<string, unknown>), context.signal),
       researchView: async (input, context) =>
         run(() => researchViewSpec(config.root, input as Record<string, unknown>), context.signal),
+      settingsSchema: async (_input, context) =>
+        run(() => settingsSchemaSpec(), context.signal),
+      settingsValues: async (_input, context) =>
+        run(() => settingsValuesSpec(config.root), context.signal),
+      actionsList: async (_input, context) =>
+        run(() => actionsListSpec(), context.signal),
+      actionPreview: async (input, context) =>
+        run(() => actionPreviewSpec(config.root, input as Record<string, unknown>), context.signal),
     })
 
     return async () => {

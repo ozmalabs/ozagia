@@ -1,6 +1,7 @@
 /** Styles contributed through the GUI `Style` registry. */
 export const panelCss = `
-.ozagia-panel {
+.ozagia-panel,
+.ozagia-settings {
   --ozagia-line: color-mix(in srgb, currentColor 16%, transparent);
   --ozagia-line-strong: color-mix(in srgb, currentColor 30%, transparent);
   --ozagia-muted: color-mix(in srgb, currentColor 62%, transparent);
@@ -8,10 +9,17 @@ export const panelCss = `
   --ozagia-ok: #2f8a6b;
   --ozagia-warn: #b07818;
   --ozagia-error: #c24b4b;
+}
+.ozagia-panel {
   padding: 10px 12px 28px;
   font-size: 12px;
   line-height: 1.45;
   color: inherit;
+  overflow-wrap: anywhere;
+}
+.ozagia-settings {
+  font-size: 12px;
+  line-height: 1.45;
   overflow-wrap: anywhere;
 }
 .ozagia-head {
@@ -183,4 +191,35 @@ export const panelCss = `
 .ozagia-grid > dd { margin: 0; }
 .ozagia-note { color: var(--ozagia-muted); font-size: 10.5px; }
 .ozagia-sep { height: 1px; background: var(--ozagia-line); margin: 8px 0; }
+.ozagia-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--ozagia-muted);
+  font-size: 11px;
+}
+.ozagia-check input { margin: 0; }
+.ozagia-setting-value {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  max-width: 360px;
+}
+.ozagia-setting-value code {
+  font-size: 11px;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+.ozagia-token {
+  display: block;
+  padding: 6px;
+  border: 1px solid var(--ozagia-line-strong);
+  border-radius: 5px;
+  background: var(--ozagia-soft);
+  font-size: 11px;
+  word-break: break-all;
+  user-select: all;
+}
 `
