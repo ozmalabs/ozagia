@@ -162,7 +162,7 @@ def _may_change_files(tool: str, input: dict[str, Any]) -> tuple[bool, dict]:
     if tool != "shell":
         return False, {}
     cls = classify(str(input.get("command") or ""))
-    return cls["class"] not in ("read", "grep", "git_read", "git_refs"), cls
+    return cls["class"] not in ("read", "grep", "ls", "find", "git_read", "git_refs"), cls
 
 
 def after(memory: Any, tool: str, input: dict[str, Any], output: Any, *,

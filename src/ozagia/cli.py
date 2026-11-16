@@ -1,5 +1,6 @@
 """The ozagia command: the graph, the daemon, the integrations and the agent.
 
+    ozagia doctor [--root R] [--json]
     ozagia index [--root R] [--rebuild]
     ozagia agent [--workdir W] [--prompt TEXT | --prompt-file F] [--model M]
                  [--clone [--base REV]] [--keep-plugin] [--timeout S]
@@ -74,6 +75,23 @@ def _root(value: str | None) -> Path:
     return repo_root()
 
 
+
+def _cmd_doctor(args: argparse.Namespace) -> int:
+    from ozagia.doctor import diagnose
+    report = diagnose(_root(args.root))
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(f"Repository: {report['root']}")
+        print(f"Snapshot: {report['snapshot']['state']} ({report['snapshot']['path']})")
+        config = report["config"]
+        print(f"Config: {'valid' if config['valid'] else 'invalid'} ({config['path']})")
+        for language, status in report["parsers"].items():
+            if not status["available"]:
+                print(f"Parser {language}: unavailable ({status['error']})")
+        print(report["language_server_note"])
+    return 0 if report["root_exists"] and report["config"]["valid"] else 2
+
 def _cmd_index(args: argparse.Namespace) -> int:
     from ozagia.harness.session import SessionError, prepare_snapshot, tool_env
     from ozagia.config import config_path, state_path
@@ -143,6 +161,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--version", action="version", version=f"{PROG} {_version()}")
     sub = p.add_subparsers(dest="command", metavar="COMMAND", required=True)
 
+    doc = sub.add_parser("doctor", help="inspect snapshot and optional tool availability")
+    doc.add_argument("--root", default=None, help="repository root")
+    doc.add_argument("--json", action="store_true", help="print structured diagnostics")
+
     ix = sub.add_parser("index", help="build or refresh the graph snapshot",
                         description="Build the snapshot if missing; refresh it if stale.")
     ix.add_argument("--root", default=None, help="repository (default: OZAGIA_ROOT or "
@@ -201,6 +223,8 @@ def main(argv: list[str] | None = None) -> int:
         args, rest = parser.parse_known_args(argv)
         return _cmd_install(args, rest)
     args = parser.parse_args(argv)
+    if args.command == "doctor":
+        return _cmd_doctor(args)
     if args.command == "index":
         return _cmd_index(args)
     if args.command == "agent":

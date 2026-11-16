@@ -128,6 +128,38 @@ def test_ops_round_trip(daemon):
         assert stats["uptime_s"] >= 0 and stats["max_ms"] >= stats["mean_ms"] > 0
 
 
+def test_hint_round_trip_with_real_index(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "checkout.py").write_text(
+        "def calculate_checkout_total(price, tax):\n    return price + tax\n")
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(["git", "-C", str(root), "add", "checkout.py"], check=True)
+    subprocess.run(["git", "-C", str(root), "-c", "user.name=Test",
+                    "-c", "user.email=test@example.invalid", "commit", "-qm",
+                    "fixture"], check=True)
+    sock = tmp_path / "hint.sock"
+    journal = tmp_path / "hint.jsonl"
+    proc = _start(root, sock, tmp_path / "graph.json", journal)
+    try:
+        with DaemonClient(sock, timeout=30) as client:
+            result = client.request(
+                "hint", prompt="calculate checkout total",
+                history=[{"role": "user", "text": "private pricing task"}],
+                session="hint-test")
+        assert result["ok"]
+        assert "checkout.py" in result["context"]
+        assert len(result["context"]) <= 1600
+        assert "file:checkout.py" in result["meta"]["keys"]
+        assert result["meta"]["token_estimate_method"] == "estimated_chars_div_4"
+        assert result["meta"]["estimated_tokens"] <= 400
+        assert result["meta"]["allocation"]["budget_chars"] == 1600
+        assert "private pricing task" not in repr(result["meta"])
+        assert "private pricing task" not in journal.read_text()
+    finally:
+        _stop(proc)
+
+
 def test_bad_requests(daemon):
     with DaemonClient(daemon["sock"], timeout=10) as c:
         assert c.request("nope")["ok"] is False
@@ -351,9 +383,9 @@ def test_expired_request_is_not_executed(tmp_path):
     assert got[2]["handled"] is True and "expired" not in got[2]
     assert "return a + b" in (root / "pkg" / "mod.py").read_text()
     st = got[6]["stats"]
-    assert st["handled"] == {"true": 1, "false": 2}
+    assert st["handled"] == {"true": 2, "false": 1}
     assert st["expired"] == 1 and st["after_expired"] == 1
-    assert st["passthrough"] == 1          # ls
+    assert st["passthrough"] == 0
     assert st["plugin_fallbacks"] == 2 and st["unknown_outcomes"] == 1
     assert st["fallbacks"] == 2            # one per plugin fallback; expired is separate
 

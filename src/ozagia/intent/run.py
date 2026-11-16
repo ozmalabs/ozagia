@@ -218,16 +218,82 @@ def handle_shell(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
     kind = cls["class"]
     if kind == "git_refs":
         raise IntentError(refusal(command), intent="shell_refused")
-    if kind not in ("pytest", "read", "grep"):
+    if kind not in ("pytest", "read", "grep", "ls", "find"):
         raise Unhandled(cls.get("reason") or kind)
     root = root_of(memory)
     wd = _workdir(root, inp.get("workdir"))
+    if "cd" in cls:
+        p = Path(cls["cd"])
+        wd = _workdir(root, p if p.is_absolute() else wd / p)
     if kind == "pytest":
         return run_pytest(memory, cls, inp, wd)
     if kind == "read":
         p = Path(cls["file"])
         p = _inside(root, p if p.is_absolute() else wd / p)
         return read_range(memory, p, cls["range"])
+    if kind == "ls":
+        p = Path(cls["path"])
+        candidate = p if p.is_absolute() else wd / p
+        target = _inside(root, candidate)
+        if not target.is_dir():
+            raise Unhandled("ls capture requires an existing directory")
+        try:
+            with os.scandir(target) as scan:
+                names = sorted(entry.name for entry in scan
+                               if not entry.name.startswith("."))
+        except OSError as e:
+            raise Unhandled(f"ls directory cannot be read: {e}") from None
+        if len(names) > 2000:
+            raise Unhandled("ls output exceeds capture limit")
+        return {"intent": "shell_ls", "output": "\n".join(names), "keys": []}
+    if kind == "find":
+        import fnmatch
+        p = Path(cls["path"])
+        candidate = p if p.is_absolute() else wd / p
+        if candidate.is_symlink():
+            raise Unhandled("find capture does not follow a symlink start path")
+        base = _inside(root, candidate)
+        if not base.is_dir() and not base.is_file():
+            raise Unhandled(f"find root does not exist: {base}")
+        if base.name in (".git", ".ozagia"):
+            raise Unhandled("find capture excludes repository state")
+        if not cls["file_only"]:
+            raise Unhandled("find capture requires -type f")
+        found: list[str] = []
+        visited = 0
+        if base.is_file() and not base.is_symlink() and fnmatch.fnmatchcase(base.name, cls["pattern"]):
+            found.append(cls["path"])
+        def walk_error(error: OSError) -> None:
+            raise Unhandled(f"find traversal failed: {error}") from None
+
+        try:
+            for current, dirs, files in os.walk(base, followlinks=False,
+                                                onerror=walk_error):
+                if any(d in (".git", ".ozagia") for d in dirs):
+                    raise Unhandled("find capture would traverse repository state")
+                dirs[:] = [d for d in dirs if not (Path(current) / d).is_symlink()]
+                visited += len(dirs) + len(files)
+                if visited > 5000:
+                    raise Unhandled("find traversal exceeds capture limit")
+                if len(found) > 1000:
+                    raise Unhandled("find result exceeds capture limit")
+                for name in files:
+                    item = Path(current) / name
+                    if item.is_symlink():
+                        continue
+                    if fnmatch.fnmatchcase(name, cls["pattern"]):
+                        rel = item.relative_to(base).as_posix()
+                        # find prints the starting path as written, then paths
+                        # relative to it; absolute starts remain absolute.
+                        prefix = cls["path"].rstrip("/")
+                        found.append((prefix + "/" if prefix not in ("", ".") else
+                                      ("./" if prefix == "." else "")) + rel)
+                        if len(found) > 1000:
+                            raise Unhandled("find result exceeds capture limit")
+        except OSError as e:
+            raise Unhandled(f"find traversal failed: {e}") from None
+        return {"intent": "shell_find", "output": "\n".join(found),
+                "keys": []}
     base = wd
     if cls["path"] is not None:
         p = Path(cls["path"])

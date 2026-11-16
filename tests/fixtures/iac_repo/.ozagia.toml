@@ -1,0 +1,2 @@
+[adapters]
+modules = ["ozagia.integrations.iac.adapter:register"]

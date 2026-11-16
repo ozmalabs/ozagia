@@ -176,6 +176,44 @@ class DaemonState:
             return {"ok": True, "stats": self.stats()}
         if op == "shutdown":
             return {"ok": True}
+        if op == "hint":
+            prompt = msg.get("prompt")
+            history = msg.get("history", [])
+            if not isinstance(prompt, str) or len(prompt) > 12000:
+                return {"ok": False, "error": "prompt must be a string of at most 12000 characters"}
+            if (not isinstance(history, list) or len(history) > 6
+                    or any(not isinstance(item, dict)
+                           or item.get("role") not in ("user", "assistant")
+                           or not isinstance(item.get("text"), str)
+                           or len(item["text"]) > 2000 for item in history)):
+                return {"ok": False, "error": "history must contain at most six bounded user/assistant messages"}
+            with self.lock:
+                if _expired(msg):
+                    return {"ok": True, "context": "", "expired": True,
+                            "meta": {"intent": "hint_expired", "keys": []}}
+                from ozagia.core.proactive_context import build_context
+                try:
+                    hint = build_context(self.memory, prompt,
+                                         history=[item["text"] for item in history],
+                                         budget_tokens=400, max_history_turns=2)
+                    infra = hint.get("infra") or {}
+                    result = {"context": hint.get("context", ""),
+                              "meta": {
+                                  "intent": "hint",
+                                  "keys": hint.get("keys", []),
+                                  "freshness": hint.get("freshness", "unknown"),
+                                  "truncated": hint.get("truncated", False),
+                                  "estimated_tokens": hint.get("estimated_tokens"),
+                                  "token_estimate_method": hint.get(
+                                      "token_estimate_method"),
+                                  "allocation": hint.get("allocation"),
+                                  "infra_results": len(infra.get("results") or []),
+                                  "infra_edges": len(infra.get("edges") or []),
+                              }}
+                except Exception as exc:  # a hint must never block the agent
+                    return {"ok": True, "context": "", "meta": {
+                        "intent": "hint_error", "keys": [], "error": type(exc).__name__}}
+            return {"ok": True, **result}
         if op in ("tool", "after"):
             tool = msg.get("tool")
             if not isinstance(tool, str) or not tool:

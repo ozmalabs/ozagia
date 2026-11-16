@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "mappings": [
+    {"relation": "produces_api", "repo": "service", "path": "src/server.py", "symbol": "list_pets", "api": "contracts:openapi.json#listPets"},
+    {"relation": "consumes_api", "repo": "client", "path": "src/client.py", "symbol": "fetch_pets", "api": "contracts:openapi.json#listPets"},
+    {"relation": "tests_api", "repo": "client", "path": "tests/test_client.py", "symbol": "test_fetch_pets", "api": "contracts:openapi.json#listPets"}
+  ]
+}

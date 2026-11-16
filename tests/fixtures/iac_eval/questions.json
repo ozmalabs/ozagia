@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "description": "Synthetic Terraform and Kubernetes context labels; no live state.",
+  "questions": [
+    {
+      "id": "terraform-network",
+      "question": "Which declaration defines the app subnet and what does it depend on?",
+      "expected_sources": ["infra/network/main.tf:18", "infra/network/main.tf:4"],
+      "expected_edges": [
+        {"source": "module.app.aws_subnet.private", "target": "module.network.aws_vpc.main", "kind": "depends_on", "evidence": "infra/network/main.tf:18"}
+      ]
+    },
+    {
+      "id": "kubernetes-service",
+      "question": "Which Service routes to the payments workload?",
+      "expected_sources": ["deploy/payments/workload.yaml:1", "deploy/payments/service.yaml:1"],
+      "expected_edges": [
+        {"source": "Deployment/payments/api", "target": "Service/payments/api", "kind": "selector_match", "evidence": "deploy/payments/workload.yaml:1"}
+      ]
+    }
+  ]
+}

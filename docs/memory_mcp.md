@@ -58,14 +58,13 @@ Staleness: `staleness()` (shown in `brief`, `context` and `changed`) compares
 the snapshot with the checkout now. It is stale when the root differs, when
 `git rev-parse HEAD` moved, or when the working tree changed since the build.
 The working tree check is `tree_changed`: a sha256 over `git diff HEAD` and the
-names of untracked files under the indexed source dirs, recorded at build time
-as the `tree_digest` repo attribute. Each untracked file also contributes its
-path, size and sha256, so editing an untracked file's content marks the
-snapshot stale. Untracked files over 2 MiB contribute path, size and mtime
-instead of a hash. Unreadable untracked files contribute their path and an "unreadable" marker.
-Snapshots without a digest are not judged on the tree. Snapshots built before
-this change carry a different digest, so they report `tree_changed` until
-rebuilt.
+names and content of untracked or ignored source-root files, indexed tests
+and selected documentation, and known adapter-owned files. Files above the
+parse limit contribute path, size, mtime and ctime rather than content hashes.
+Unknown newly added adapter inputs outside configured roots may remain
+undiscovered until an adapter or rebuild records them. If the digest cannot be
+computed, `freshness` is `unknown`; older snapshots can report stale after the
+digest algorithm changes and may need to be rebuilt.
 
 What is indexed:
 

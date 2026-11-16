@@ -34,8 +34,10 @@ Classes (`result["class"]`):
                   bisect log`) are `git_read`.
     git_read      a read-only git command (diff, show, status, log, blame,
                   and the listing forms above). Fields: `subcommand`.
+    ls            `ls [PATH]`, captured as a sorted visible-name listing.
+    find          `find [PATH] -name GLOB [-type f]`, a constrained name search.
     complex       not a simple command (see above).
-    other         anything else (including wc, nl, find, ls, sed -i,
+    other         anything else (including wc, nl, unsupported find/ls, sed -i,
                   python -c, scripts).
 
 Every result has `class` and `reason` (why it is not mapped, or "").
@@ -228,6 +230,44 @@ def _substitutions(command: str) -> list[str]:
             continue
         i += 1
     return out
+
+
+def _cd_read_wrapper(command: str) -> dict[str, Any] | None:
+    """Recognize exactly `cd LITERAL && SAFE_READ_COMMAND`."""
+    quote = ""
+    split = None
+    i = 0
+    while i < len(command) - 1:
+        c = command[i]
+        if c == "\\":
+            i += 2
+            continue
+        if quote:
+            if c == quote:
+                quote = ""
+        elif c in "'\"":
+            quote = c
+        elif command[i:i + 2] == "&&":
+            if split is not None:
+                return None
+            split = i
+            i += 1
+        i += 1
+    if split is None:
+        return None
+    left, right = command[:split].strip(), command[split + 2:].strip()
+    if not left or not right or _scan(left) is not None:
+        return None
+    try:
+        cd = shlex.split(left)
+    except ValueError:
+        return None
+    if len(cd) != 2 or cd[0] != "cd" or cd[1] in ("", "-"):
+        return None
+    got = classify(right, _filters=False)
+    if got["class"] not in ("read", "grep", "ls", "find"):
+        return None
+    return {**got, "cd": cd[1]}
 
 
 def _shell_script(args: list[str]) -> str | None:
@@ -454,7 +494,34 @@ def _read_like(tokens: list[str]) -> dict[str, Any] | None:
         return _result("other", "sed form is not mapped")
     if cmd in ("wc", "nl"):
         return _result("other", f"{cmd} is not mapped")
+    if cmd == "ls":
+        # Keep this deliberately small: ls formatting and option semantics
+        # vary, while the graph's directory view is stable and useful.
+        if len(args) <= 1 and not any(a.startswith("-") for a in args):
+            return _result("ls", path=args[0] if args else ".")
+        return _result("other", "ls options or multiple paths are not mapped")
     return None
+
+
+def _find(args: list[str]) -> dict[str, Any]:
+    """A conservative find subset: one root and one -name glob, files only."""
+    path = "."
+    pattern = None
+    file_only = False
+    i = 0
+    if i < len(args) and not args[0].startswith("-"):
+        path, i = args[0], 1
+    while i < len(args):
+        if args[i] == "-name" and i + 1 < len(args) and pattern is None:
+            pattern, i = args[i + 1], i + 2
+        elif args[i] == "-type" and i + 1 < len(args) and args[i + 1] == "f" and not file_only:
+            file_only, i = True, i + 2
+        else:
+            return _result("other", "find expression is not mapped")
+    if (pattern is None or not pattern or not file_only
+            or re.fullmatch(r"[A-Za-z0-9._*?-]+", pattern) is None):
+        return _result("other", "find capture requires -type f and one safe -name pattern")
+    return _result("find", path=path, pattern=pattern, file_only=file_only)
 
 
 def _bre_safe(pattern: str) -> bool:
@@ -546,8 +613,8 @@ def _simple(tokens: list[str]) -> dict[str, Any]:
     read = _read_like(tokens)
     if read is not None:
         return read
-    if cmd in ("find", "ls"):
-        return _result("other", f"{cmd} is left to the built-in")
+    if cmd == "find":
+        return _find(tokens[1:])
     return _result("other", f"{cmd} is not mapped")
 
 
@@ -600,6 +667,10 @@ def classify(command: str, *, _filters: bool = True,
             hit = got.get("subcommand") if got["class"] == "git_refs" else None
         if hit is not None:
             return _result("git_refs", "command substitution", subcommand=hit)
+    if why == "operator":
+        wrapped = _cd_read_wrapper(command)
+        if wrapped is not None:
+            return wrapped
     if why is not None:
         return _result("complex", why)
     tokens = segments[0]

@@ -32,6 +32,7 @@ Claude Code. Measurements are in `docs/results/`; plans in `docs/plans/`.
 | OpenCode plugin | captures `read`/`grep`/`glob`/`edit`/`write`/`shell` and carries out their intent on the graph daemon; `ozagia install opencode` | works (OpenCode 2.3, live smoke runs) |
 | Claude Code hooks | partial capture: graph context after each tool, git ref refusal; `ozagia install claude` | implemented, untested live |
 | Harness | `ozagia agent`: an OpenCode session with the daemon and plugin set up and torn down for you ([docs/harness.md](docs/harness.md)); `python -m ozagia.harness.native`: a small agent loop over any OpenAI-compatible API, with or without the graph ([docs/native_loop.md](docs/native_loop.md)) | implemented; the eval's live runs use the same pieces |
+| Infrastructure | Opt-in source-only Terraform, Kubernetes and related infrastructure graph/context ([docs/iac_context.md](docs/iac_context.md)) | experimental, partial static analysis |
 
 ## Quick start
 
@@ -56,6 +57,15 @@ ozagia agent                                  # the interactive TUI
 Each session builds or refreshes the snapshot, starts the graph daemon,
 installs the plugin, runs OpenCode, and removes the plugin and stops the
 daemon afterwards, also on Ctrl-C. See [docs/harness.md](docs/harness.md).
+
+When OpenCode exposes its V2 session context hook, the plugin also uses the
+current request and recent conversation to retrieve a small, source-attributed
+graph hint before a model call. It omits hints when the snapshot cannot be
+verified as fresh. The hint is capped at 1,600 characters (an approximate,
+model-dependent token budget), and can recur on later model calls; its effect
+on total tokens and elapsed time depends on the task. Prompts and history are
+not written to the daemon journal. The hook is optional and falls back if the
+daemon or hook is unavailable.
 
 MCP (OpenCode `opencode.json`):
 

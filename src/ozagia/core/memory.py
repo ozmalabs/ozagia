@@ -291,6 +291,11 @@ class Builder:
         """The (mutable) attrs of node `nid`."""
         return self.nodes[nid]["attrs"]
 
+    def find_nodes(self, type_name: str) -> list[int]:
+        """Return IDs of current nodes with this exact type."""
+        return [int(node["id"]) for node in self.nodes
+                if node.get("type") == type_name]
+
     def to_dict(self) -> dict[str, Any]:
         return {"nodes": self.nodes, "edges": self.edges,
                 "next_id": self._next}
@@ -557,7 +562,8 @@ def _read_stamped(path: Path, *, limit: int = MAX_PARSE_BYTES
     except OSError:
         return None, {}
     stamp: dict[str, Any] = {"size": int(st.st_size),
-                             "mtime_ns": int(st.st_mtime_ns)}
+                             "mtime_ns": int(st.st_mtime_ns),
+                             "ctime_ns": int(st.st_ctime_ns)}
     if st.st_size > MAX_PARSE_BYTES:
         return None, stamp
     try:
@@ -728,7 +734,8 @@ class FileIndexer:
         if stamp.get("sha256"):
             self.b.attrs(fid)["sha256"] = stamp["sha256"]
         entry = {"role": role, "ctx": 0, "refs": [],
-                 "size": stamp.get("size"), "mtime_ns": stamp.get("mtime_ns")}
+                 "size": stamp.get("size"), "mtime_ns": stamp.get("mtime_ns"),
+                 "ctime_ns": stamp.get("ctime_ns")}
         self.table[rel] = entry
         return fid, text, entry
 
@@ -916,7 +923,8 @@ class FileIndexer:
         if stamp.get("sha256"):
             b.attrs(dfid)["sha256"] = stamp["sha256"]
         entry = {"role": "doc", "ctx": 1, "refs": [],
-                 "size": stamp.get("size"), "mtime_ns": stamp.get("mtime_ns")}
+                 "size": stamp.get("size"), "mtime_ns": stamp.get("mtime_ns"),
+                 "ctime_ns": stamp.get("ctime_ns")}
         self.table[rel] = entry
         b.edge(dfid, "defines", did)
         b.edge(did, "defined_in", dfid)
@@ -1156,19 +1164,28 @@ def build_index(root: str | Path = ROOT, out: str | Path = DEFAULT_DUMP,
 
     # -- repo summary ------------------------------------------------------- #
     b.nodes[repo]["attrs"].update(repo_counts(n["type"] for n in b.nodes))
-    digest, digest_err = _tree_digest(root, dump=out)
+    digest, digest_err = _tree_digest(root, dump=out,
+                                     include_docs=include_docs,
+                                     adapter_paths=adapter_files)
     if digest is not None:
         b.nodes[repo]["attrs"]["tree_digest"] = digest
     else:
         b.nodes[repo]["attrs"]["tree_digest_error"] = digest_err or "unknown"
 
     from ozagia.core.reingest import stamps as _stamps, unhandled_paths
+    untracked_paths = _build_untracked_paths(root, dump=out,
+                                            include_docs=include_docs) or []
+    opaque_paths = [rel for rel in untracked_paths
+                    if rel not in ix.table and rel not in adapter_files
+                    and file_role(root, rel, include_docs=include_docs) is None]
+    opaque_stamps = _stamps(root, opaque_paths)
     other_stamps = _stamps(root, unhandled_paths(
         root, ix.table, adapter_files, options, out))
     graph = b.to_dict()
     graph.update({"version": SNAPSHOT_VERSION, "build": options,
                   "files": ix.table, "adapter": adapter_info,
-                  "other_stamps": other_stamps})
+                  "other_stamps": other_stamps,
+                  "opaque_stamps": opaque_stamps})
     write_snapshot(out, graph)
     return {
         "out": str(out),
@@ -1234,58 +1251,166 @@ def _digest_excludes(root: Path, dump: str | Path | None) -> tuple[str, ...]:
     return tuple(out)
 
 
-def _tree_digest(root: Path, *, dump: str | Path | None = None
+def _tree_digest(root: Path, *, dump: str | Path | None = None,
+                 include_docs: str = "features",
+                 adapter_paths: Iterable[str] = ()
                  ) -> tuple[str | None, str | None]:
     """(digest, error) for the working tree under `root`.
 
     The digest is sha256 over `git diff HEAD` (tracked content changes), a NUL,
-    and for each untracked file under SOURCE_DIRS (sorted by git): its path, a
+    and for each untracked or ignored file the build would index (sorted by git): its path, a
     NUL, then its size and sha256 of its bytes. Untracked files larger than
     MAX_PARSE_BYTES contribute path, size and mtime_ns instead. Untracked files
     that cannot be read contribute path and "unreadable". Untracked files in
     skipped directories, in the state directory and next to the snapshot
     `dump` are left out: the build and the journal write there.
     """
+    root = root.resolve()
+    adapter_paths = tuple(adapter_paths)
+    for rel in adapter_paths:
+        try:
+            if not rel or _rel(root, root / rel) != rel:
+                return None, f"adapter path escapes repository root: {rel!r}"
+        except (OSError, ValueError):
+            return None, f"adapter path escapes repository root: {rel!r}"
     excludes = _digest_excludes(root, dump)
     try:
         diff = subprocess.run(
             ["git", "-C", str(root), "diff", "HEAD", "--no-color",
              "--no-ext-diff"],
             capture_output=True, timeout=60, check=False)
-        untracked = subprocess.run(
-            ["git", "-C", str(root), "ls-files", "-z", "--others",
-             "--exclude-standard", "--", *SOURCE_DIRS],
-            capture_output=True, timeout=60, check=False)
+        paths = _build_untracked_paths(root, dump=dump,
+                                       include_docs=include_docs)
+        if paths is None:
+            return None, "cannot enumerate build-indexed untracked files"
     except (OSError, subprocess.SubprocessError) as e:
         return None, str(e)
-    if diff.returncode != 0 or untracked.returncode != 0:
-        err = (diff.stderr or untracked.stderr or b"git failed").decode(
+    if diff.returncode != 0:
+        err = (diff.stderr or b"git failed").decode(
             "utf-8", errors="replace").strip()
         return None, err
     h = hashlib.sha256()
     h.update(diff.stdout)
     h.update(b"\0")
-    for raw in untracked.stdout.split(b"\0"):
-        if not raw:
-            continue
-        rel = raw.decode("utf-8", errors="surrogateescape")
+    for rel in sorted(set(paths) | set(adapter_paths)):
+        raw = rel.encode("utf-8", errors="surrogateescape")
         if _skipped(rel) or rel.startswith(excludes) or rel in excludes:
             continue
         h.update(raw)
         h.update(b"\0")
-        path = root / raw.decode("utf-8", errors="surrogateescape")
+        path = root / rel
         try:
             st = path.stat()
             if st.st_size > MAX_PARSE_BYTES:
-                h.update(f"big:{st.st_size}:{st.st_mtime_ns}".encode())
+                h.update(f"big:{st.st_size}:{st.st_mtime_ns}:{st.st_ctime_ns}".encode())
             else:
                 data = path.read_bytes()
                 h.update(f"{len(data)}:".encode())
                 h.update(hashlib.sha256(data).hexdigest().encode())
         except OSError:
-            h.update(b"unreadable")
+            h.update(b"missing-or-unreadable")
         h.update(b"\0")
     return h.hexdigest(), None
+
+
+def _build_untracked_paths(root: Path, *, dump: str | Path | None,
+                           include_docs: str) -> list[str] | None:
+    """Untracked and ignored paths that the configured build can index.
+
+    Git collapses fully ignored directories with --directory. Expand only
+    those directories using the build's pruned walk, then ask Git which files
+    remain ignored (including nested negation rules).
+    """
+    args = ["git", "-C", str(root), "ls-files", "-z", "--others",
+            "--directory", "--exclude-standard", "--", *_digest_pathspecs()]
+    ignored_args = ["git", "-C", str(root), "ls-files", "-z", "--others",
+                    "--ignored", "--directory", "--exclude-standard", "--",
+                    *_digest_pathspecs()]
+    try:
+        ordinary = subprocess.run(args, capture_output=True, timeout=60,
+                                  check=False)
+        ignored = subprocess.run(ignored_args, capture_output=True, timeout=60,
+                                 check=False)
+        if ordinary.returncode or ignored.returncode:
+            return None
+        state = state_rel(root)
+        state_abs = str(root / state) if state else None
+        exclude = _digest_excludes(root, dump)
+        ordinary_records = set(ordinary.stdout.split(b"\0")) - {b""}
+        ignored_records = set(ignored.stdout.split(b"\0")) - {b""}
+        records = ordinary_records | ignored_records
+        candidates: set[str] = set()
+        expanded_dirs: list[str] = []
+        ignored_dirs: list[str] = []
+        for raw in records - {b""}:
+            rel = raw.decode("utf-8", errors="surrogateescape")
+            if rel.endswith("/"):
+                rel = rel.rstrip("/")
+                if not (_skipped(rel) or rel.startswith(exclude)
+                        or rel in exclude):
+                    expanded_dirs.append(rel)
+                    if raw in ignored_records:
+                        ignored_dirs.append(rel)
+                continue
+            candidates.add(rel)
+        for rel_dir in expanded_dirs:
+            base = root / rel_dir
+            for path in _walk_files(base, state_abs):
+                try:
+                    rel = _rel(root, path)
+                except (OSError, ValueError):
+                    continue
+                if not _skipped(rel) and not rel.startswith(exclude):
+                    candidates.add(rel)
+        # Files under collapsed directories can include negated, unignored
+        # paths. Filter them in one check-ignore invocation.
+        expanded_ignored = {p for p in candidates if any(
+            p.startswith(d.rstrip("/") + "/") for d in ignored_dirs)}
+        ignored_expanded: set[str] = set()
+        if expanded_ignored:
+            check = subprocess.run(
+                ["git", "-C", str(root), "check-ignore", "--no-index",
+                 "-z", "--stdin"],
+                input=b"\0".join(p.encode("utf-8", errors="surrogateescape")
+                                  for p in sorted(expanded_ignored)) + b"\0",
+                capture_output=True, timeout=60, check=False)
+            if check.returncode not in (0, 1):
+                return None
+            ignored_expanded = {p.decode("utf-8", errors="surrogateescape")
+                                for p in check.stdout.split(b"\0") if p}
+        output = []
+        for rel in sorted(candidates):
+            if rel in expanded_ignored and rel not in ignored_expanded:
+                continue
+            if not _walked(root, rel):
+                continue
+            is_source_path = any(_under_dir(rel, source_dir)
+                                 for source_dir in SOURCE_DIRS)
+            if (file_role(root, rel, include_docs=include_docs) is not None
+                    or is_source_path):
+                output.append(rel)
+        return output
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _digest_pathspecs() -> tuple[str, ...]:
+    """Pathspec roots the build can index; keep Git enumeration bounded to
+    those roots instead of walking arbitrary ignored directories."""
+    roots = list(dict.fromkeys((*SOURCE_DIRS, *TEST_DIRS)))
+    for pattern in (*DOC_GLOBS, *ALL_DOC_GLOBS):
+        parts = pattern.split("/")
+        fixed = []
+        for part in parts:
+            if any(ch in part for ch in "*?["):
+                break
+            fixed.append(part)
+        prefix = "/".join(fixed)
+        if not prefix:
+            prefix = parts[0] if len(parts) > 1 else "."
+        if prefix:
+            roots.append(prefix)
+    return tuple(dict.fromkeys(roots)) or (".",)
 
 
 def _derive_v1_key(n: dict[str, Any]) -> str | None:
@@ -1348,6 +1473,7 @@ class DevMemory:
         # Stamps of changed paths reingest cannot take in, taken with the
         # tree digest (see `ozagia.core.reingest`). None: an older snapshot.
         self._other_stamps: dict[str, Any] | None = self.raw.get("other_stamps")
+        self._opaque_stamps: dict[str, Any] = self.raw.get("opaque_stamps", {})
         # Stable node keys (see `ozagia.core.keys`).
         self._key_to_id: dict[str, int] = {}
         self._id_to_key: dict[int, str] = {}
@@ -1376,6 +1502,12 @@ class DevMemory:
         # Exact normalized-name index for task anchors (seed/file/rule/doc/
         # test), so `context` does not scan every node for every phrasing.
         self._anchor_index: dict[str, list[tuple[int, int]]] = {}
+        # Node ids by type, so optional domains such as infrastructure do not
+        # scan the entire graph to discover that they have no nodes. The
+        # version changes whenever a node is added or removed; derived caches
+        # use it to invalidate.
+        self._type_ids: dict[str, dict[int, None]] = {}
+        self._index_version = 0
         for nid in self.nodes:
             self._index_add(nid, sort=False)
         self._n_labels = max(1, len(self.nodes))
@@ -1410,6 +1542,10 @@ class DevMemory:
 
     def _index_add(self, nid: int, *, sort: bool = True) -> None:
         """Add node `nid` to the label-frequency and anchor indexes."""
+        self._index_version = getattr(self, "_index_version", 0) + 1
+        type_name = (self.nodes.get(nid) or {}).get("type")
+        if isinstance(type_name, str):
+            self._type_ids.setdefault(type_name, {})[nid] = None
         for t in self._label_tokens(nid):
             self._df[t] = self._df.get(t, 0) + 1
         names = self._anchor_names(nid)
@@ -1423,6 +1559,14 @@ class DevMemory:
 
     def _index_remove(self, nid: int) -> None:
         """Remove node `nid` (still present) from the search indexes."""
+        self._index_version = getattr(self, "_index_version", 0) + 1
+        type_name = (self.nodes.get(nid) or {}).get("type")
+        if isinstance(type_name, str):
+            ids = self._type_ids.get(type_name)
+            if ids is not None:
+                ids.pop(nid, None)
+                if not ids:
+                    self._type_ids.pop(type_name, None)
         for t in self._label_tokens(nid):
             left = self._df.get(t, 0) - 1
             if left > 0:
@@ -1485,7 +1629,8 @@ class DevMemory:
                 "edges": self.edges, "next_id": self._next_id,
                 "build": self._build_opts, "files": self._files_table or {},
                 "adapter": self._adapter_info,
-                "other_stamps": self._other_stamps or {}}
+                "other_stamps": self._other_stamps or {},
+                "opaque_stamps": self._opaque_stamps}
 
     def write_snapshot(self) -> float:
         """Rewrite the snapshot from the in-memory graph; returns seconds."""
@@ -1531,8 +1676,15 @@ class DevMemory:
             out[k] = out[k][:limit]
         return out
 
+    def nodes_of_type(self, type_name: str) -> list[int]:
+        """Node ids of one type, maintained as nodes are added and removed."""
+        return list(self._type_ids.get(str(type_name), ()))
+
+    def has_node_type(self, type_name: str) -> bool:
+        return bool(self._type_ids.get(str(type_name)))
+
     def _nodes_of(self, type_name: str) -> list[int]:
-        return [nid for nid, n in self.nodes.items() if n["type"] == type_name]
+        return self.nodes_of_type(type_name)
 
     def _neighbours(self, nid: int, edge_type: str, *,
                     incoming: bool = False) -> list[int]:
@@ -1663,6 +1815,18 @@ class DevMemory:
             rel = attrs.get("path") or rel
         if not rel:
             return {"path": "", "lines": "", "text": ""}
+        # An IaC file can contain secrets anywhere, including otherwise normal
+        # configuration fields. Opt-in infrastructure indexing exposes only
+        # structural metadata in automatic context; explicit file reads remain
+        # available to the caller through the normal read tools.
+        if rel in (self._adapter_info.get("files") or ()):
+            from ozagia.adapters import registry
+            if any(getattr(fn, "__module__", "") == "ozagia.integrations.iac.adapter"
+                   for fn in registry(self.raw_repo_root).indexers):
+                from ozagia.core.infra_discovery import source_kind
+                if source_kind(Path(str(rel)).name):
+                    return {"path": str(rel), "lines": "", "text": "",
+                            "note": "Infrastructure source omitted from automatic snippets"}
         text = self._read(str(rel))
         lines = text.splitlines()
         if typ in ("Symbol", "Test"):
@@ -2581,11 +2745,29 @@ class DevMemory:
         # The working tree is compared by digest (see `_tree_digest`). Older
         # snapshots without a digest are not judged on it.
         snapshot_tree = repo.get("tree_digest") or None
-        tree_now, _tree_err = _tree_digest(Path(root), dump=self.dump)
+        tree_now, tree_err = _tree_digest(
+            Path(root), dump=self.dump,
+            include_docs=self._build_opts.get("include_docs", "features"),
+            adapter_paths=(set(self._adapter_info.get("files", ()))
+                           | set((self._adapter_info.get("stamps") or {}).keys())))
         tree_changed = bool(snapshot_tree and tree_now
                             and snapshot_tree != tree_now)
+        verification_errors: list[str] = []
+        if not snapshot_root:
+            verification_errors.append("snapshot does not record its repository root")
+        if not snapshot_head:
+            verification_errors.append("snapshot does not record git HEAD")
+        elif head is None:
+            verification_errors.append("cannot read current git HEAD")
+        if not snapshot_tree:
+            verification_errors.append("snapshot does not record a working-tree digest")
+        elif tree_now is None:
+            verification_errors.append(
+                f"cannot compute working-tree digest: {tree_err or 'unknown error'}")
         stale = bool(root_mismatch or (head and snapshot_head != head)
                      or tree_changed)
+        freshness = ("stale" if stale else
+                     "unknown" if verification_errors else "fresh")
         result: dict[str, Any] = {
             "snapshot_root": snapshot_root,
             "root": root,
@@ -2593,7 +2775,10 @@ class DevMemory:
             "snapshot_head": snapshot_head,
             "head": head,
             "tree_changed": tree_changed,
+            "current_tree_digest": tree_now,
             "stale": stale,
+            "freshness": freshness,
+            "verification_errors": verification_errors,
             "generated_at": repo.get("generated_at"),
         }
         self._staleness_memo = (now, result)

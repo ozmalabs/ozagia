@@ -1,0 +1,7 @@
+[index]
+source_dirs = ["src"]
+test_dirs = ["tests"]
+docs = []
+docs_all = []
+key_docs = []
+command_docs = []

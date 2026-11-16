@@ -1,0 +1,55 @@
+{
+  "version": 1,
+  "description": "Executed against tests/fixtures/iac_repo through the real opt-in adapter; labels are source locations and graph relationships, not live state.",
+  "questions": [
+    {
+      "id": "terraform-private-subnet",
+      "question": "Which declaration defines the private subnet and what does it reference?",
+      "history": [],
+      "expected_sources": ["infra/subnet.tf:1", "infra/network.tf:1"],
+      "expected_edges": [
+        {
+          "source": "aws_subnet.private",
+          "target": "aws_vpc.payments",
+          "kind": "infra_references",
+          "evidence": "infra/subnet.tf:1"
+        }
+      ]
+    },
+    {
+      "id": "kubernetes-service-account-selector",
+      "question": "payments-api service account selector",
+      "history": [],
+      "expected_sources": [
+        "k8s/deployment.yaml#/documents/0",
+        "k8s/service.yaml#/documents/0",
+        "k8s/service-account.yaml#/documents/0"
+      ],
+      "expected_edges": [
+        {
+          "source": "prod/payments-api",
+          "target": "prod/payments-api",
+          "kind": "infra_workload_service_account",
+          "evidence": "k8s/deployment.yaml#/documents/0"
+        },
+        {
+          "source": "prod/payments-api",
+          "target": "prod/payments-api",
+          "kind": "infra_workload_service_selector",
+          "evidence": "k8s/deployment.yaml#/documents/0"
+        }
+      ]
+    },
+    {
+      "id": "history-follow-up",
+      "question": "show me the workload",
+      "history": ["payments-api"],
+      "expected_sources": [
+        "k8s/deployment.yaml#/documents/0",
+        "k8s/service.yaml#/documents/0",
+        "k8s/service-account.yaml#/documents/0"
+      ],
+      "expected_edges": []
+    }
+  ]
+}

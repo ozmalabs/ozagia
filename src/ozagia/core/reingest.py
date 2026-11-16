@@ -587,7 +587,14 @@ def _adapter_known(mem: Any) -> set[str]:
 
 def _needs_adapter_pass(txn: _Txn, files: list[str]) -> bool:
     mem = txn.mem
-    afiles = _adapter_files(mem)
+    afiles = _adapter_known(mem)
+    from ozagia.adapters import registry
+    iac_enabled = any(getattr(fn, "__module__", "") == "ozagia.integrations.iac.adapter"
+                      for fn in registry(txn.root).indexers)
+    if iac_enabled:
+        from ozagia.core.infra_discovery import source_kind
+        if any(source_kind(Path(rel).name) for rel in files):
+            return True
     for rel in files:
         if rel in afiles:
             return True
@@ -635,6 +642,11 @@ class _AdapterBuilder:
     def attrs(self, nid: int) -> dict[str, Any]:
         self.txn.watch(int(nid))
         return self.mem.nodes[int(nid)]["attrs"]
+
+    def find_nodes(self, type_name: str) -> list[int]:
+        """Return IDs of current nodes with this exact type."""
+        return [int(nid) for nid, node in self.mem.nodes.items()
+                if node.get("type") == type_name]
 
     def count(self, type_name: str) -> int:
         return sum(1 for n in self.mem.nodes.values() if n["type"] == type_name)
@@ -830,11 +842,29 @@ def reingest(mem: Any, paths: Iterable[str], *, write: bool = True) -> GraphDelt
         status = _git_status(root)
         if (not pending_changes(mem, status=status)
                 and not unhandled_changes(mem, status=status)):
-            digest, err = M._tree_digest(root, dump=mem.dump)
-            if digest is not None:
+            digest, err = M._tree_digest(
+                root, dump=mem.dump,
+                include_docs=mem._build_opts.get("include_docs", "features"),
+                adapter_paths=_adapter_known(mem))
+            untracked = M._build_untracked_paths(
+                root, dump=mem.dump,
+                include_docs=mem._build_opts.get("include_docs", "features"))
+            if untracked is None:
+                digest = None
+                err = "cannot enumerate untracked build-indexed files"
+                opaque_untracked = False
+            else:
+                opaque_untracked = _opaque_untracked_changed(mem, untracked)
+            # Preserve freshness information for source-root files (for
+            # example adapter-specific JSON manifests) that the built-in
+            # reingester cannot represent. Keep the digest old when their
+            # content or set differs from the build-time per-path baseline.
+            if digest is not None and not opaque_untracked:
                 attrs.pop("tree_digest_error", None)
                 attrs["tree_digest"] = digest
-            else:
+                mem._opaque_stamps = _opaque_stamps(
+                    mem, untracked or [])
+            elif digest is None:
                 attrs.pop("tree_digest", None)
                 attrs["tree_digest_error"] = err or "unknown"
             mem._other_stamps = stamps(root, unhandled_paths(
@@ -886,6 +916,34 @@ def _git_status(root: Path) -> list[tuple[str, str]]:
     return out
 
 
+def _opaque_untracked_changed(mem: Any, paths: Iterable[str]) -> bool:
+    """Whether an untracked source-root file outside built-in roles moved
+    since the build baseline. Adapters may consume such files during a build,
+    but generic reingest cannot safely infer their semantics."""
+    table = mem._files_table or {}
+    adapter = _adapter_known(mem)
+    baseline = mem._opaque_stamps or {}
+    current = {rel for rel in paths if rel not in table and rel not in adapter
+               and _role(Path(mem.raw_repo_root), rel, mem._build_opts) is None
+               and any(M._under_dir(rel, directory)
+                       for directory in M.SOURCE_DIRS)}
+    if current != set(baseline):
+        return True
+    root = Path(mem.raw_repo_root)
+    return any(_stamp_changed(root, rel, baseline[rel]) for rel in current)
+
+
+def _opaque_stamps(mem: Any, paths: Iterable[str]) -> dict[str, Any]:
+    table = mem._files_table or {}
+    adapter = _adapter_known(mem)
+    root = Path(mem.raw_repo_root)
+    return stamps(root, (rel for rel in paths
+                         if rel not in table and rel not in adapter
+                         and _role(root, rel, mem._build_opts) is None
+                         and any(M._under_dir(rel, directory)
+                                 for directory in M.SOURCE_DIRS)))
+
+
 def _git_status_paths(root: Path) -> list[str]:
     return [path for _code, path in _git_status(root)]
 
@@ -905,7 +963,7 @@ def file_stamp(root: Path, rel: str) -> list[Any] | None:
                if st.st_size <= M.MAX_PARSE_BYTES else None)
     except OSError:
         return None
-    return [st.st_size, st.st_mtime_ns, sha]
+    return [st.st_size, st.st_mtime_ns, sha, st.st_ctime_ns]
 
 
 def stamps(root: Path, rels: Iterable[str]) -> dict[str, list[Any] | None]:
@@ -925,17 +983,19 @@ def _stamp_changed(root: Path, rel: str, stamp: Any) -> bool:
         return exists
     if not exists:
         return True
-    if [st.st_size, st.st_mtime_ns] == list(stamp[:2]):
-        return False
     if stamp[2] is None or st.st_size > M.MAX_PARSE_BYTES:
-        return True
+        recorded = [*stamp[:2], *(stamp[3:4])]
+        current = [st.st_size, st.st_mtime_ns]
+        if len(stamp) > 3:
+            current.append(st.st_ctime_ns)
+        return current != recorded
     try:
         now = hashlib.sha256(p.read_bytes()).hexdigest()
     except OSError:
         return True
     if now != stamp[2]:
         return True
-    stamp[0], stamp[1] = st.st_size, st.st_mtime_ns
+    stamp[0], stamp[1], stamp[3:] = st.st_size, st.st_mtime_ns, [st.st_ctime_ns]
     return False
 
 
@@ -1008,13 +1068,18 @@ def pending_changes(mem: Any, *,
         if not p.is_file():
             out.append(rel)
             continue
-        if (st.st_size, st.st_mtime_ns) == (entry.get("size"),
-                                            entry.get("mtime_ns")):
-            continue
         fid = mem.node_by_key(file_key(rel))
         sha = ((mem.nodes[fid]["attrs"].get("sha256") if fid is not None
                 else None))
         if sha is None or st.st_size > M.MAX_PARSE_BYTES:
+            if (entry.get("ctime_ns") is None
+                    and (st.st_size, st.st_mtime_ns) ==
+                    (entry.get("size"), entry.get("mtime_ns"))):
+                continue  # Legacy snapshot without ctime metadata.
+            if (st.st_size, st.st_mtime_ns, st.st_ctime_ns) == (
+                    entry.get("size"), entry.get("mtime_ns"),
+                    entry.get("ctime_ns")):
+                continue
             out.append(rel)
             continue
         try:
@@ -1027,19 +1092,51 @@ def pending_changes(mem: Any, *,
         else:
             # Same content: remember the new stamp to skip the hash next time.
             entry["size"], entry["mtime_ns"] = st.st_size, st.st_mtime_ns
+            entry["ctime_ns"] = st.st_ctime_ns
     afiles = _adapter_files(mem)
     astamps = mem._adapter_info.get("stamps") or {}
-    for rel in sorted(afiles):
+    for rel in sorted(afiles | set(astamps)):
         if rel in table or rel in out or rel not in astamps:
             continue
         if _stamp_changed(root, rel, astamps[rel]):
             out.append(rel)
     opts = mem._build_opts
+    # The opt-in IaC adapter discovers source types outside the built-in
+    # source roles. Include newly created candidates, including ignored files,
+    # so its graph cannot silently miss them on refresh.
+    from ozagia.adapters import registry
+    if any(getattr(fn, "__module__", "") == "ozagia.integrations.iac.adapter"
+           for fn in registry(root).indexers):
+        from ozagia.core.infra_discovery import iter_candidate_paths
+        known = afiles | set(astamps)
+        for rel, _ in iter_candidate_paths(root):
+            if rel not in known and rel not in out:
+                out.append(rel)
     for _code, rel in (status if status is not None else _git_status(root)):
         if rel in table or rel in out:
             continue
         if _role(root, rel, opts) and M._walked(root, rel):
             out.append(rel)
         elif rel in afiles and rel not in astamps:
+            out.append(rel)
+    # Git status suppresses ignored files. The snapshot digest includes them
+    # when the build would index them, so refresh must discover them by the
+    # same bounded pathspec query.
+    build_paths = M._build_untracked_paths(
+        root, dump=mem.dump,
+        include_docs=opts.get("include_docs", "features"))
+    if build_paths is None:
+        has_digest = any(
+            node.get("type") == "Repo"
+            and (node.get("attrs") or {}).get("tree_digest")
+            for node in mem.nodes.values())
+        if has_digest:
+            raise RuntimeError("cannot enumerate untracked build-indexed files")
+        # Older/non-Git snapshots have no digest baseline. Keep the prior
+        # tracked-status refresh behavior, while freshness remains unknown.
+        build_paths = []
+    for rel in build_paths:
+        if (rel not in table and rel not in out
+                and _role(root, rel, opts) is not None):
             out.append(rel)
     return out

@@ -23,7 +23,8 @@ Extension points:
 - `add_indexer(fn)`: called once per graph build as `fn(ctx)`, where `ctx` is
   an `IndexContext`, after the built-in file, test and doc indexers and before
   the git history and failure baseline. The indexer adds project-specific
-  nodes and edges through `ctx.builder` (`node`, `edge`, `find`, `attrs`) and
+  nodes and edges through `ctx.builder` (`node`, `edge`, `find`, `find_nodes`,
+  `attrs`) and
   `ctx.file_node(rel)`.
 - `add_graph_query(name, fn)`: a named read-only query, exposed by
   `DevMemory.adapter_query(name, **kwargs)` as `fn(memory, **kwargs)`.

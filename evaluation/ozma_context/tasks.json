@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "name": "ozma-context-contract-fixture-v1",
+  "description": "Synthetic checkout task with explicit relevant-file labels.",
+  "tasks": [
+    {
+      "id": "checkout-payment",
+      "task": "Trace checkout payment charge and receipt creation for an empty or paid cart",
+      "expected_files": ["src/checkout/service.py", "src/checkout/cart.py", "src/billing/gateway.py"],
+      "expected_content_files": ["src/checkout/service.py"],
+      "style": "symptom",
+      "area": "dev_tooling"
+    }
+  ]
+}

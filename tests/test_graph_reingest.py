@@ -405,6 +405,21 @@ def test_reingest_persists_and_is_not_stale(repo) -> None:
     assert _canon(again.snapshot_dict()) == _canon(mem.snapshot_dict())
 
 
+
+def test_reingest_does_not_certify_failed_second_enumeration(repo, monkeypatch) -> None:
+    import ozagia.core.reingest as reingest_module
+
+    root, dump = repo
+    mem = _mem(dump, root)
+    monkeypatch.setattr(reingest_module, "pending_changes", lambda *args, **kwargs: [])
+    monkeypatch.setattr(reingest_module, "unhandled_changes", lambda *args, **kwargs: [])
+    monkeypatch.setattr(M, "_tree_digest", lambda *args, **kwargs: ("digest", None))
+    monkeypatch.setattr(M, "_build_untracked_paths", lambda *args, **kwargs: None)
+    mem.reingest(["pkg/a.py"])
+    attrs = mem.nodes[mem.node_by_key("repo:")]["attrs"]
+    assert "tree_digest" not in attrs
+    assert "cannot enumerate" in attrs["tree_digest_error"]
+
 def test_partial_reingest_stays_stale(repo) -> None:
     root, dump = repo
     mem = _mem(dump, root)
@@ -432,6 +447,11 @@ def test_refresh_finds_changed_new_and_deleted(repo) -> None:
     assert sorted(delta.files) == ["docs/guide.md", "pkg/b.py", "pkg/new.py"]
     assert mem.pending_changes() == []
     assert mem.changed()["refresh"]["needed"] is False
+    # The digest includes untracked files in the source roots, even when the
+    # built-in graph has no role for their extension.
+    assert mem.staleness()["stale"] is True
+    (root / "other.txt").unlink()
+    mem.refresh()
     assert mem.staleness()["stale"] is False
     _assert_equivalent(mem, root, root.parent / "fresh.json")
     assert mem.refresh().empty

@@ -604,6 +604,50 @@ def test_staleness_reports_moved_head(tmp_path: Path) -> None:
     assert "WARNING: snapshot is stale" in mem.brief()["markdown"]
 
 
+def test_staleness_marks_failed_digest_check_unknown(tmp_path: Path, monkeypatch) -> None:
+    _fixture(tmp_path)
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "-c", "user.name=t", "-c", "user.email=t@t",
+         "commit", "-q", "-m", "one")
+    out = tmp_path / "var" / "dev_graph.json"
+    build_index(tmp_path, out, include_docs="none",
+                include_git=True, include_scripts=False)
+    mem = DevMemory(out, tmp_path / "var" / "journal.jsonl")
+    monkeypatch.setattr("ozagia.core.memory._tree_digest",
+                        lambda *_args, **_kwargs: (None, "git unavailable"))
+
+    status = mem.staleness()
+
+    assert status["stale"] is False
+    assert status["freshness"] == "unknown"
+    assert status["verification_errors"] == [
+        "cannot compute working-tree digest: git unavailable"]
+
+
+def test_legacy_snapshot_without_freshness_metadata_is_unknown(
+        tmp_path: Path, monkeypatch) -> None:
+    _fixture(tmp_path)
+    out = tmp_path / "var" / "dev_graph.json"
+    build_index(tmp_path, out, include_docs="none",
+                include_git=False, include_scripts=False)
+    raw = json.loads(out.read_text(encoding="utf-8"))
+    repo = next(node for node in raw["nodes"] if node["type"] == "Repo")
+    for key in ("root", "head", "tree_digest"):
+        repo["attrs"].pop(key, None)
+    out.write_text(json.dumps(raw), encoding="utf-8")
+    monkeypatch.setattr("ozagia.core.memory.subprocess.run",
+                        lambda *_args, **_kwargs: type(
+                            "Proc", (), {"returncode": 1, "stdout": "",
+                                         "stderr": b"no git"})())
+
+    status = DevMemory(out, tmp_path / "var" / "journal.jsonl").staleness()
+
+    assert status["stale"] is False
+    assert status["freshness"] == "unknown"
+    assert len(status["verification_errors"]) == 3
+
+
 def test_read_returns_new_content_after_file_changes(tmp_path: Path) -> None:
     _fixture(tmp_path)
     out = tmp_path / "var" / "dev_graph.json"
@@ -723,6 +767,23 @@ def test_staleness_sees_new_untracked_source_file(tmp_path: Path) -> None:
     assert stale["stale"] is True
 
 
+
+def test_staleness_sees_untracked_tests_outside_source_dirs(tmp_path: Path, monkeypatch) -> None:
+    from ozagia.core import memory as memory_module
+
+    monkeypatch.setattr(memory_module, "SOURCE_DIRS", ("src",))
+    monkeypatch.setattr(memory_module, "TEST_DIRS", ("tests",))
+    _write(tmp_path / "src" / "main.py", "value = 1\n")
+    _write(tmp_path / "tests" / "test_existing.py", "def test_existing(): pass\n")
+    _git(tmp_path, "init", "-q")
+    _commit_all(tmp_path)
+    out = tmp_path / "var" / "dev_graph.json"
+    build_index(tmp_path, out, include_docs="none", include_git=True)
+    _write(tmp_path / "tests" / "test_new.py", "def test_new(): pass\n")
+    status = DevMemory(out, tmp_path / "var" / "journal.jsonl", root=tmp_path).staleness()
+    assert status["tree_changed"] is True
+    assert status["freshness"] == "stale"
+
 def test_snapshot_without_git_records_digest_error(tmp_path: Path) -> None:
     _fixture(tmp_path)
     out = tmp_path / "var" / "dev_graph.json"
@@ -792,3 +853,211 @@ def test_staleness_sees_untracked_file_content_edit(tmp_path: Path) -> None:
     restored = DevMemory(out, tmp_path / "var" / "journal.jsonl").staleness()
     assert restored["stale"] is False
     assert restored["tree_changed"] is False
+
+
+def test_ignored_build_files_affect_freshness_and_refresh(tmp_path: Path) -> None:
+    _fixture(tmp_path)
+    _write(tmp_path / ".gitignore", "domains/ignored.py\ntests/test_ignored.py\ndocs/ignored.md\n")
+    _git(tmp_path, "init", "-q")
+    _commit_all(tmp_path)
+    out = tmp_path / "var" / "dev_graph.json"
+    journal = tmp_path / "var" / "journal.jsonl"
+    build_index(tmp_path, out, include_docs="features", include_git=True,
+                include_scripts=False)
+    mem = DevMemory(out, journal)
+
+    _write(tmp_path / "domains" / "ignored.py", "def ignored_source():\n    return 1\n")
+    _write(tmp_path / "tests" / "test_ignored.py", "def test_ignored():\n    assert True\n")
+    _write(tmp_path / "docs" / "ignored.md", "# ignored documentation\n\nA special ignored detail.\n")
+    stale = DevMemory(out, journal).staleness()
+    assert stale["stale"] is True
+    delta = mem.refresh()
+    assert {"domains/ignored.py", "tests/test_ignored.py",
+            "docs/ignored.md"} <= set(delta.files)
+    assert DevMemory(out, journal).staleness()["stale"] is False
+
+    _write(tmp_path / "domains" / "ignored.py", "def changed_ignored_source():\n    return 2\n")
+    assert DevMemory(out, journal).staleness()["stale"] is True
+    mem.refresh()
+    assert DevMemory(out, journal).node_by_key(
+        "sym:domains/ignored.py::changed_ignored_source") is not None
+
+    (tmp_path / "domains" / "ignored.py").unlink()
+    assert DevMemory(out, journal).staleness()["stale"] is True
+    mem.refresh()
+    assert DevMemory(out, journal).node_by_key(
+        "file:domains/ignored.py") is None
+
+
+def test_refresh_detects_same_size_restored_mtime_for_tracked_and_ignored(
+        tmp_path: Path) -> None:
+    import os
+
+    _fixture(tmp_path)
+    _write(tmp_path / ".gitignore", "domains/ignored.py\n")
+    _git(tmp_path, "init", "-q")
+    _commit_all(tmp_path)
+    out = tmp_path / "var" / "dev_graph.json"
+    journal = tmp_path / "var" / "journal.jsonl"
+    ignored = tmp_path / "domains" / "ignored.py"
+    _write(ignored, "def hidden_one():\n    return 1\n")
+    build_index(tmp_path, out, include_docs="none", include_git=True,
+                include_scripts=False)
+    mem = DevMemory(out, journal)
+    mem.refresh()
+
+    tracked = tmp_path / "domains" / "foo.py"
+    for path, before, after in (
+            (ignored, "hidden_one", "hidden_two"),
+            (tracked, "def add", "def sub")):
+        original = path.read_text(encoding="utf-8")
+        changed = original.replace(before, after, 1)
+        assert len(changed) == len(original)
+        stat = path.stat()
+        _write(path, changed)
+        os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+        mem._staleness_memo = None
+        assert path.relative_to(tmp_path).as_posix() in mem.pending_changes()
+        mem.refresh()
+        assert DevMemory(out, journal).staleness()["freshness"] == "fresh"
+
+
+def test_unchanged_large_indexed_file_does_not_stay_pending(tmp_path: Path) -> None:
+    _fixture(tmp_path)
+    _write(tmp_path / "domains" / "large.py",
+           "#" + "x" * (2 * 1024 * 1024 + 10) + "\n")
+    out = tmp_path / "var" / "dev_graph.json"
+    build_index(tmp_path, out, include_docs="none", include_git=False,
+                include_scripts=False)
+    mem = DevMemory(out, tmp_path / "var" / "journal.jsonl")
+    assert "domains/large.py" not in mem.pending_changes()
+
+
+def test_ignored_directories_and_all_docs_match_build(tmp_path: Path) -> None:
+    _fixture(tmp_path)
+    _write(tmp_path / ".gitignore", "domains/ignored_dir/\nextra.md\n")
+    _git(tmp_path, "init", "-q")
+    _commit_all(tmp_path)
+    out = tmp_path / "var" / "dev_graph.json"
+    journal = tmp_path / "var" / "journal.jsonl"
+    build_index(tmp_path, out, include_docs="all", include_git=True,
+                include_scripts=False)
+
+    _write(tmp_path / "domains" / "ignored_dir" / "nested.py",
+           "def nested_ignored():\n    return 1\n")
+    _write(tmp_path / "extra.md", "# Extra ignored document\n")
+    status = DevMemory(out, journal).staleness()
+    assert status["freshness"] == "stale"
+    mem = DevMemory(out, journal)
+    delta = mem.refresh()
+    assert {"domains/ignored_dir/nested.py", "extra.md"} <= set(delta.files)
+    assert DevMemory(out, journal).node_by_key(
+        "doc:extra.md") is not None
+    assert DevMemory(out, journal).staleness()["freshness"] == "fresh"
+
+
+def test_untracked_nested_source_directory_is_reingested(tmp_path: Path) -> None:
+    _fixture(tmp_path)
+    _git(tmp_path, "init", "-q")
+    _commit_all(tmp_path)
+    out = tmp_path / "var" / "dev_graph.json"
+    journal = tmp_path / "var" / "journal.jsonl"
+    build_index(tmp_path, out, include_docs="none", include_git=True,
+                include_scripts=False)
+    _write(tmp_path / "domains" / "new_dir" / "nested.py",
+           "def nested_new():\n    return 1\n")
+    delta = DevMemory(out, journal).refresh()
+    assert "domains/new_dir/nested.py" in delta.files
+
+
+def test_untracked_source_manifest_stales_digest_but_is_not_reingested(
+        tmp_path: Path) -> None:
+    _fixture(tmp_path)
+    _git(tmp_path, "init", "-q")
+    _commit_all(tmp_path)
+    out = tmp_path / "var" / "dev_graph.json"
+    journal = tmp_path / "var" / "journal.jsonl"
+    build_index(tmp_path, out, include_docs="none", include_git=True,
+                include_scripts=False)
+    manifest = tmp_path / "domains" / "new_seed_manifest.json"
+    _write(manifest, '{"id": "new", "nodes": []}\n')
+
+    mem = DevMemory(out, journal)
+    assert mem.staleness()["stale"] is True
+    assert "domains/new_seed_manifest.json" not in mem.pending_changes()
+    mem.refresh()
+    assert DevMemory(out, journal).staleness()["stale"] is True
+
+
+def test_untracked_source_yaml_stays_stale_and_old_candidate_is_baselined(
+        tmp_path: Path) -> None:
+    _fixture(tmp_path)
+    old_yaml = tmp_path / "domains" / "old_manifest.yaml"
+    _write(old_yaml, "id: old\n")
+    _git(tmp_path, "init", "-q")
+    _commit_all(tmp_path)
+    out = tmp_path / "var" / "dev_graph.json"
+    journal = tmp_path / "var" / "journal.jsonl"
+    build_index(tmp_path, out, include_docs="none", include_git=True,
+                include_scripts=False)
+    _write(tmp_path / "domains" / "new_manifest.yaml", "id: new\n")
+    mem = DevMemory(out, journal)
+    assert mem.staleness()["stale"] is True
+    mem.refresh()
+    assert DevMemory(out, journal).staleness()["stale"] is True
+
+    (tmp_path / "domains" / "new_manifest.yaml").unlink()
+    python_file = tmp_path / "domains" / "foo.py"
+    _write(python_file, python_file.read_text(encoding="utf-8") + "\n# edit\n")
+    mem.refresh()
+    assert DevMemory(out, journal).staleness()["stale"] is False
+
+
+def test_tree_digest_rejects_escaping_adapter_paths(tmp_path: Path) -> None:
+    from ozagia.core.memory import _tree_digest
+
+    _fixture(tmp_path)
+    _git(tmp_path, "init", "-q")
+    _commit_all(tmp_path)
+    outside = tmp_path.parent / f"{tmp_path.name}-outside.json"
+    _write(outside, '{"outside": true}\n')
+    link = tmp_path / "domains" / "outside.json"
+    link.symlink_to(outside)
+
+    traversal = _tree_digest(tmp_path, adapter_paths=("../outside.json",))
+    symlink = _tree_digest(tmp_path, adapter_paths=("domains/outside.json",))
+
+    assert traversal[0] is None
+    assert "escapes repository root" in (traversal[1] or "")
+    assert symlink[0] is None
+    assert "escapes repository root" in (symlink[1] or "")
+
+
+def test_all_docs_pathspecs_with_separate_source_root(tmp_path: Path,
+                                                      monkeypatch) -> None:
+    from ozagia.core import memory as memory_module
+
+    monkeypatch.setattr(memory_module, "SOURCE_DIRS", ("src",))
+    monkeypatch.setattr(memory_module, "TEST_DIRS", ("tests",))
+    monkeypatch.setattr(memory_module, "DOC_GLOBS", ("docs/**/*.md",))
+    monkeypatch.setattr(memory_module, "ALL_DOC_GLOBS", ("**/*.md",))
+    _write(tmp_path / "src" / "main.py", "value = 1\n")
+    _write(tmp_path / "tests" / "test_main.py", "def test_main(): pass\n")
+    _write(tmp_path / "README.md", "# Root readme\n")
+    _write(tmp_path / ".gitignore", "root_ignored.md\ndocs/ignored.md\n")
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "-c", "user.name=t", "-c", "user.email=t@t",
+         "commit", "-q", "-m", "base")
+    out = tmp_path / "var" / "graph.json"
+    journal = tmp_path / "var" / "journal.jsonl"
+    build_index(tmp_path, out, include_docs="all", include_git=True)
+
+    _write(tmp_path / "root_ignored.md", "# ignored root\n")
+    _write(tmp_path / "root_untracked.md", "# untracked root\n")
+    _write(tmp_path / "docs" / "nested" / "ignored.md", "# ignored nested\n")
+    stale = DevMemory(out, journal).staleness()
+    assert stale["stale"] is True
+    delta = DevMemory(out, journal).refresh()
+    assert {"root_ignored.md", "root_untracked.md",
+            "docs/nested/ignored.md"} <= set(delta.files)

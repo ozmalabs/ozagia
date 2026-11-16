@@ -503,9 +503,21 @@ CLASSIFY = [
     ("git worktree add ../x", "git_refs"),
     ("git add . && git commit -m x", "git_refs"),
     ("git add pkg", "other"),
+    ("ls", "ls"),
+    ("ls pkg", "ls"),
     ("ls -la", "other"),
-    ("find . -name '*.py'", "other"),
+    ("find . -type f -name '*.py'", "find"),
+    ("find src -type f -name '*.py'", "find"),
+    ("find . -type f -name '[ab].py'", "other"),
+    ("find . -type f -name 'a\\*.py'", "other"),
+    ("find . -exec rm {} \\;", "complex"),
     ("cd src && pytest", "complex"),
+    ("cd pkg && cat mod.py", "read"),
+    ("cd 'pkg' && grep -rn helper .", "grep"),
+    ("cd $DIR && cat a.py", "complex"),
+    ("cd pkg && python gen.py", "complex"),
+    ("cd missing && ls", "ls"),
+    ("cd pkg && cat mod.py | head -3", "complex"),
     ("FOO=1 pytest", "complex"),
     ("pytest | tail", "complex"),
     ("pytest > out.txt", "complex"),
@@ -600,6 +612,9 @@ def test_shell_reads_map_to_read_ranges(mem, repo):
     assert big.split("\n")[0].endswith("lines 1-2100")
     assert _call(mem, "shell", command="cat ../x")["handled"] is False
     assert _call(mem, "shell", command="wc -l pkg/mod.py")["handled"] is False
+    wrapped = _call(mem, "shell", command="cd pkg && head -n 2 mod.py")
+    assert wrapped["handled"] and wrapped["meta"]["intent"] == "shell_read"
+    assert str(repo / "pkg" / "mod.py") in wrapped["output"].splitlines()[0]
 
 
 def test_shell_grep_and_passthrough(mem, repo):
@@ -609,7 +624,57 @@ def test_shell_grep_and_passthrough(mem, repo):
     assert str(repo / "tests") not in res["output"]
     res = _call(mem, "shell", command="grep -rni HELPER tests")
     assert "Line 4: def test_helper():" in res["output"]
-    for cmd in ("ls", "git status", "python -c 'print(1)'", "pytest | tail"):
+    ls = _call(mem, "shell", command="ls pkg")
+    assert ls["handled"] and ls["meta"]["intent"] == "shell_ls"
+    (repo / "pkg" / ".hidden.py").write_text("hidden\n")
+    ls = _call(mem, "shell", command="ls pkg")
+    assert ".hidden.py" not in ls["output"]
+    found = _call(mem, "shell", command="find pkg -type f -name '*.py'")
+    assert found["handled"] and found["meta"]["intent"] == "shell_find"
+    assert "pkg/mod.py" in found["output"]
+    assert "\\n" not in found["output"]
+    subdir = _call(mem, "shell", command="find . -type f -name '*.py'",
+                   workdir="pkg")
+    assert subdir["handled"] and "./mod.py" in subdir["output"]
+    listed = _call(mem, "shell", command="ls .", workdir="pkg")
+    assert listed["handled"] and "mod.py" in listed["output"]
+    assert _call(mem, "shell", command="ls pkg/mod.py")["handled"] is False
+    assert _call(mem, "shell", command="cd missing && ls")["handled"] is False
+    link = repo / "pkg" / "alias.py"
+    link.symlink_to(repo / "pkg" / "mod.py")
+    symlink_search = _call(mem, "shell", command="find pkg -type f -name '*.py'")
+    assert symlink_search["handled"] and "alias.py" not in symlink_search["output"]
+    root_link = repo / "pkg-link"
+    root_link.symlink_to(repo / "pkg", target_is_directory=True)
+    assert _call(mem, "shell", command="find pkg-link -type f -name '*.py'")["handled"] is False
+
+
+def test_shell_ls_refuses_truncated_or_unreadable_directory(mem, repo, monkeypatch):
+    from ozagia.intent import run
+    import os
+
+    for n in range(2001):
+        (repo / "pkg" / f"f{n:04}.txt").touch()
+    assert _call(mem, "shell", command="ls pkg")["handled"] is False
+
+    original = os.scandir
+    def denied(path):
+        if Path(path) == repo / "pkg":
+            raise PermissionError("denied")
+        return original(path)
+    monkeypatch.setattr(run.os, "scandir", denied)
+    assert _call(mem, "shell", command="ls pkg")["handled"] is False
+
+
+def test_shell_find_permission_errors_fall_back(mem, repo, monkeypatch):
+    from ozagia.intent import run
+
+    def denied_walk(path, *, followlinks, onerror):
+        onerror(PermissionError(str(path)))
+        yield  # pragma: no cover
+    monkeypatch.setattr(run.os, "walk", denied_walk)
+    assert _call(mem, "shell", command="find pkg -type f -name '*.py'")["handled"] is False
+    for cmd in ("git status", "python -c 'print(1)'", "pytest | tail"):
         assert _call(mem, "shell", command=cmd)["handled"] is False, cmd
 
 
