@@ -500,8 +500,7 @@ def test_cd_home_inside_the_root(mem, tree):
     "sed -n '3p' nonl.txt | wc -c",
     "tail -n 1 nonl.txt | wc -l",
     "cat nonl.txt | grep t | wc -c",
-    "cat words.txt | wc -w",
-    "cat words.txt | LC_ALL=C wc -w",
+    "cat pairs.txt | LC_ALL=C wc -w",
     "cat words.txt | LC_ALL=C.UTF-8 wc -w",
     "cat ctx.txt | wc -l && cat ctx.txt | wc --bytes",
     "git log --oneline | wc -l",
@@ -509,6 +508,12 @@ def test_cd_home_inside_the_root(mem, tree):
 ])
 def test_transform_filters_match_coreutils(mem, tree, command):
     _same(mem, tree, command)
+
+
+def test_wc_words_over_non_ascii_in_c_falls_back(mem, tree):
+    # coreutils versions count non-printable bytes differently in C.
+    res = _call(mem, "shell", command="cat words.txt | LC_ALL=C wc -w")
+    assert res["handled"] is False and "wc -w over non-ASCII" in res["reason"]
 
 
 def test_sort_outside_byte_order_falls_back(mem, tree):

@@ -187,6 +187,12 @@ def _wc(text: str, mode: str, env: dict[str, str]) -> int:
              else _ASCII_SPACE)
     if space is _ASCII_SPACE:
         data = text.encode("utf-8")
+        # coreutils versions disagree on bytes that are neither printable
+        # nor white space in the C locale (older ones start no word with
+        # them): only count what every version counts the same.
+        if any(not (0x20 <= b < 0x7f or b in (9, 10, 11, 12, 13)) for b in data):
+            raise Unhandled("wc -w over non-ASCII or control bytes in the C "
+                            "locale is not mapped")
         words, inword = 0, False
         for b in data:
             if chr(b) in space:
