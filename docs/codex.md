@@ -84,7 +84,11 @@ The hook entries:
     "PreToolUse": [{"matcher": "^Bash$", "hooks": [{"type": "command", "timeout": 20,
       "command": "/path/to/python -m ozagia.integrations.codex hook"}]}],
     "PostToolUse": [{"matcher": "^(Bash|apply_patch)$", "hooks": [{"type": "command",
-      "timeout": 20, "command": "/path/to/python -m ozagia.integrations.codex hook"}]}]
+      "timeout": 20, "command": "/path/to/python -m ozagia.integrations.codex hook"}]}],
+    "PreCompact": [{"hooks": [{"type": "command", "timeout": 20,
+      "command": "/path/to/python -m ozagia.integrations.codex hook"}]}],
+    "SessionEnd": [{"hooks": [{"type": "command", "timeout": 20,
+      "command": "/path/to/python -m ozagia.integrations.codex hook"}]}]
   }
 }
 ```
@@ -147,13 +151,30 @@ root's default locks `<socket>.lock` instead.)
 
 | Codex event | hook | what ozagia does | what Codex gets |
 |---|---|---|---|
-| `SessionStart` (every `source`) | brief | In a git work tree only: starts the daemon if needed (waits at most 0.5 s, not for the snapshot load), and lists the dirty files (`git status --porcelain`, at most 15), the last 3 commits, and the ozagia MCP tools to prefer. At most 1,500 characters. | `additionalContext` |
+| `SessionStart` (every `source`) | brief | In a git work tree only: starts the daemon if needed (waits at most 0.5 s, not for the snapshot load), and lists the dirty files (`git status --porcelain`, at most 15), the last 3 commits, and the ozagia MCP tools to prefer. At most 1,500 characters. Also sends `session_event` (`compact` for source `compact`, else `start`), which clears the session's read ledger. | `additionalContext` |
+| `PreCompact`, `SessionEnd` | ledger | `session_event` `compact` / `end`: the session's read ledger is cleared / dropped. | nothing |
+| `PreToolUse` `Bash` with a shell read (`sed -n`, `cat`, `head`, `tail`, `nl`, `nl -ba F \| sed -n 'a,bp'`) | repeat check | Asks the daemon's `read_check`. Under the `stub` policy, a repeat of an unchanged range this session already read is refused with the one-line stub. Codex's default policy is `note` (see below), so by default this never refuses. | `permissionDecision: "deny"` with the stub as the reason, or nothing |
 | `PreToolUse` `Bash` with a ref-moving git command | refusal | Refuses it locally, without the daemon, with the intent layer's check (`ozagia.intent.shell.classify` is `git_refs`; see docs/claude_code.md for the list and the parsing). Listing forms (`git branch`, `git tag -l`, `git stash list`) are allowed. | `permissionDecision: "deny"` with a reason |
 | `PostToolUse` `Bash` | `after` as `shell` | Sends `{command, workdir: cwd}` and the command's output. The daemon maps pytest runs to test keys, re-ingests files the command changed, and maps `git diff`/`git show` hunks to node keys. | `additionalContext` with the daemon's `append`, when not empty |
 | `PostToolUse` `apply_patch` | `after` as `patch` | Sends `{patch: <patch text>}`; the daemon re-ingests the changed files. | the graph delta (`[ozagia] delta: ...`) as `additionalContext` |
 
 The hook sends `harness: "codex"` and `session` = `session_id`; the daemon
-counts requests by harness (`stats.by_harness`).
+counts requests by harness (`stats.by_harness`). Ledger requests also send
+`sub` = `transcript_path` (and `agent_id` when the payload has one).
+
+### Read ledger and subagents
+
+The daemon records each shell read (file sha256 and line range) per
+session; `PostToolUse` adds `[ozagia] unchanged since read N (lines a-b,
+sha ...)` to a read that repeats an unchanged range (`docs/intent.md`,
+read). Codex's default repeat policy is `note`, not `stub`: the Codex hooks
+reference says subagent hooks use the parent's session id, and documents no
+subagent field (`agent_id`) for PreToolUse or PostToolUse. A subagent does
+not have its parent's context, so a stub keyed on the shared session id
+could hide text it never saw. `transcript_path` (and `agent_id`, if Codex
+sends it) separates ledgers where the payload differs, but that is not
+documented to tell subagents apart. Once a live session shows that it does,
+opt in with `[reads] repeat_by_harness = {codex = "stub"}`.
 
 The hook prints only fields Codex supports for each event: on PreToolUse
 `hookSpecificOutput` with `permissionDecision: "deny"` (never `ask`,

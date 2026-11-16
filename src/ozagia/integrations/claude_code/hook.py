@@ -14,6 +14,18 @@ the version implemented against).
   ask the daemon with the `tool` op and, when it handles the read, deny the
   built-in with the daemon's output as the reason, which Claude reads.
   Experimental.
+- `PreToolUse` for `Read` of a path and for a shell read in `Bash`: ask the
+  daemon's `read_check`. Under the `stub` repeat policy (Claude Code's
+  default, `ozagia.intent.ledger`) a repeat of an unchanged range this
+  session already read is denied with the one-line stub as the reason;
+  otherwise the built-in runs, and `PostToolUse` records it in the ledger.
+- `SessionStart`: `session_event` `compact` (source "compact") or `start`
+  (startup, resume, clear), which clears the session's read ledger;
+  `SessionEnd`: `end`. Nothing is printed.
+
+Requests carry `sub` = the payload's `agent_id` when a subagent makes the
+call (subagents share the parent's session id), so a subagent's ledger is
+its own.
 
 The hook never blocks the agent because ozagia failed: any error prints
 nothing and exits 0, and is logged as one JSON line to
@@ -121,20 +133,37 @@ def handle(payload: dict[str, Any], root: Path) -> dict[str, Any] | None:
         tool_input = {}
     session = payload.get("session_id") or ""
     cwd = payload.get("cwd")
+    # Subagent calls carry `agent_id` (and the parent's session id).
+    sub = payload.get("agent_id") if isinstance(payload.get("agent_id"), str) else ""
+
+    if event == "SessionStart":
+        hookcore.session_event(root, HARNESS, session,
+                               hookcore.start_event(payload.get("source")))
+        return None
+    if event == "SessionEnd":
+        hookcore.session_event(root, HARNESS, session, "end")
+        return None
 
     if event == "PreToolUse" and tool_name == "Bash":
-        sub = git_ref_moving(str(tool_input.get("command") or ""))
-        if sub is None:
-            return None
-        return _pre_output("deny", hookcore.git_refusal_reason(sub))
+        sub_cmd = git_ref_moving(str(tool_input.get("command") or ""))
+        if sub_cmd is not None:
+            return _pre_output("deny", hookcore.git_refusal_reason(sub_cmd))
+        mapped = map_tool(tool_name, tool_input, cwd)
+        stub = hookcore.repeat_stub(root, HARNESS, session, sub, *mapped) if mapped else None
+        return _pre_output("deny", stub) if stub else None
 
     if event == "PreToolUse" and tool_name == "Read":
         key = node_key(tool_input.get("file_path"))
         if key is None:
-            return None
-        resp = daemon_request(protocol.socket_path(root), {
-            "id": 1, "op": "tool", "harness": HARNESS, "session": session,
-            "tool": "read", "input": {"path": key}})
+            mapped = map_tool(tool_name, tool_input, cwd)
+            stub = (hookcore.repeat_stub(root, HARNESS, session, sub, *mapped)
+                    if mapped else None)
+            return _pre_output("deny", stub) if stub else None
+        msg = {"id": 1, "op": "tool", "harness": HARNESS, "session": session,
+               "tool": "read", "input": {"path": key}}
+        if sub:
+            msg["sub"] = sub
+        resp = daemon_request(protocol.socket_path(root), msg)
         if not resp.get("handled"):
             return None
         label = ("ozagia read error for" if resp.get("is_error")
@@ -146,10 +175,12 @@ def handle(payload: dict[str, Any], root: Path) -> dict[str, Any] | None:
         if mapped is None:
             return None
         tool, inp = mapped
-        resp = daemon_request(protocol.socket_path(root), {
-            "id": 1, "op": "after", "harness": HARNESS, "session": session,
-            "tool": tool, "input": inp,
-            "output": response_text(payload.get("tool_response"))})
+        msg = {"id": 1, "op": "after", "harness": HARNESS, "session": session,
+               "tool": tool, "input": inp,
+               "output": response_text(payload.get("tool_response"))}
+        if sub:
+            msg["sub"] = sub
+        resp = daemon_request(protocol.socket_path(root), msg)
         append = resp.get("append")
         if not isinstance(append, str) or not append:
             return None

@@ -45,6 +45,11 @@
 //   timeout (input.timeout, ms; 120 s when unset, the built-in's default)
 //   plus 30 s.
 // - setup never throws.
+// - Read ledger. A handled read that repeats an unchanged range comes back
+//   from the daemon as a one-line stub (OpenCode's default repeat policy is
+//   `stub`); the plugin returns it like any other output. The `compaction`
+//   session hook sends `session_event` (`compact`) so the daemon clears the
+//   session's ledger.
 // Plain ES module, node: built-ins only.
 
 import net from "node:net";
@@ -56,6 +61,7 @@ export const REQUEST_TIMEOUT_MS = 30000;
 const SHELL_DEFAULT_TIMEOUT_MS = 120000; // with the 30 s margin: 150000
 const HARNESS = "opencode";
 const HINT_TIMEOUT_MS = 6000;
+const COMPACTION_TIMEOUT_MS = 2000;
 const HINT_MAX_TOTAL_CHARS = 6000;
 const HINT_MAX_MESSAGE_CHARS = 2000;
 const HINT_MAX_HISTORY = 4;
@@ -251,6 +257,22 @@ function contextHook(client, cache, historyRefreshMs) {
   };
 }
 
+// OpenCode runs the `compaction` session hook on the request that builds
+// a compaction summary. Tell the daemon (`session_event`, `compact`) so the
+// session's read ledger is cleared and a read after the compaction gets
+// the text again. Awaited, so the ledger is cleared before any later tool
+// call; bounded by the request timeout, and never throws.
+function compactionHook(client) {
+  return async function clearLedger(event) {
+    try {
+      const session = event && typeof event.sessionID === "string" ? event.sessionID : undefined;
+      if (!session) return;
+      await client.request({ op: "session_event", harness: HARNESS, session,
+                             event: "compact" }, COMPACTION_TIMEOUT_MS, true, false);
+    } catch { /* fail-safe: the compaction goes on */ }
+  };
+}
+
 // Tools whose request, once sent, may have changed files or run commands.
 const MUTATING = new Set(["edit", "write", "shell"]);
 
@@ -336,7 +358,8 @@ function wrap(client, perm, name, tool, original, hintCache) {
       res = await send({});
     }
     const readOnlyShell = name === "shell" && res && res.handled
-      && ["shell_read", "shell_find", "shell_ls", "shell_grep", "shell_files", "shell_jq"].includes(
+      && ["shell_read", "shell_read_outline", "shell_read_stub", "shell_find",
+        "shell_ls", "shell_grep", "shell_files", "shell_jq"].includes(
         res.meta && res.meta.intent);
     if (MUTATING.has(name) && session && !readOnlyShell) hintCache.delete(session);
     if (res && res.handled) {
@@ -380,6 +403,10 @@ export function createPlugin(options = {}) {
           try { await ctx.session.hook("context", contextHook(client, hintCache,
             historyRefreshMs)); }
           catch { /* older OpenCode versions do not expose this hook */ }
+          // The compaction request: the session's earlier reads leave the
+          // context, so the daemon's read ledger for it is cleared.
+          try { await ctx.session.hook("compaction", compactionHook(client)); }
+          catch { /* a version without the hook keeps every read noted */ }
         }
         const perm = ctx.permission && typeof ctx.permission.assert === "function"
           ? ctx.permission : null;

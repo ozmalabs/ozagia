@@ -379,12 +379,101 @@ def test_pre_read_node_key_unhandled_lets_builtin_run(repo, daemon):
     assert proc.returncode == 0 and proc.stdout == ""
 
 
-def test_pre_read_plain_file_skips_daemon(repo, daemon):
+def test_pre_read_plain_file_only_asks_for_a_repeat(repo, daemon):
     stub = daemon()
     proc = run_hook(pre(repo, "Read", {"file_path": str(repo / "src" / "a.py")}),
                     sock=stub.sock)
     assert proc.returncode == 0 and proc.stdout == ""
+    (req,) = stub.requests
+    assert req["op"] == "read_check" and req["tool"] == "read"
+    assert req["input"] == {"path": str(repo / "src" / "a.py")}
+    assert "sub" not in req
+
+
+# --------------------------------------------------------------------------- #
+# read ledger: PreToolUse repeat checks, session events
+# --------------------------------------------------------------------------- #
+STUB = "[ozagia] src/a.py unchanged since read 1 (lines 1-2, sha 0123456789ab)"
+
+
+def _stub_reply(req):
+    if req["op"] == "read_check":
+        return {"ok": True, "repeat": True, "policy": "stub", "stub": STUB, "meta": {}}
+    return {"ok": True}
+
+
+def test_pre_read_repeat_is_denied_with_the_stub(repo, daemon):
+    stub = daemon(_stub_reply)
+    proc = run_hook(pre(repo, "Read", {"file_path": str(repo / "src" / "a.py"),
+                                       "offset": 1, "limit": 2}), sock=stub.sock)
+    out = json.loads(proc.stdout)["hookSpecificOutput"]
+    assert out["permissionDecision"] == "deny"
+    assert out["permissionDecisionReason"] == STUB
+    (req,) = stub.requests
+    assert req["input"] == {"path": str(repo / "src" / "a.py"), "offset": 1, "limit": 2}
+
+
+def test_pre_read_note_policy_allows_silently(repo, daemon):
+    stub = daemon(lambda req: {"ok": True, "repeat": True, "policy": "note",
+                               "stub": None, "meta": {}})
+    proc = run_hook(pre(repo, "Read", {"file_path": str(repo / "src" / "a.py")}),
+                    sock=stub.sock)
+    assert proc.returncode == 0 and proc.stdout == ""
+
+
+def test_pre_bash_shell_read_repeat_is_denied(repo, daemon):
+    stub = daemon(_stub_reply)
+    proc = run_hook(pre(repo, "Bash", {"command": "sed -n '1,2p' src/a.py"}),
+                    sock=stub.sock)
+    out = json.loads(proc.stdout)["hookSpecificOutput"]
+    assert out["permissionDecision"] == "deny" and out["permissionDecisionReason"] == STUB
+    (req,) = stub.requests
+    assert req["op"] == "read_check" and req["tool"] == "shell"
+
+
+def test_pre_bash_non_read_does_not_ask(repo, daemon):
+    stub = daemon(_stub_reply)
+    proc = run_hook(pre(repo, "Bash", {"command": "make build"}), sock=stub.sock)
+    assert proc.returncode == 0 and proc.stdout == ""
     assert stub.requests == []
+
+
+def test_pre_read_without_daemon_allows(repo, sockdir):
+    proc = run_hook(pre(repo, "Read", {"file_path": str(repo / "src" / "a.py")}),
+                    sock=sockdir / "none.sock")
+    assert proc.returncode == 0 and proc.stdout == ""
+
+
+def test_subagent_calls_carry_agent_id_as_sub(repo, daemon):
+    stub = daemon()
+    payload = pre(repo, "Read", {"file_path": str(repo / "src" / "a.py")})
+    payload.update(agent_id="agent-7", agent_type="Explore")
+    run_hook(payload, sock=stub.sock)
+    fp = str(repo / "src" / "a.py")
+    p2 = post(repo, "Read", {"file_path": fp}, {"file": {"content": "x"}})
+    p2["agent_id"] = "agent-7"
+    run_hook(p2, sock=stub.sock)
+    assert [r.get("sub") for r in stub.requests] == ["agent-7", "agent-7"]
+
+
+@pytest.mark.parametrize("source,event", [("compact", "compact"), ("clear", "start"),
+                                          ("startup", "start"), ("resume", "start")])
+def test_session_start_sends_session_event(repo, daemon, source, event):
+    stub = daemon()
+    payload = {"session_id": "abc123", "cwd": str(repo),
+               "hook_event_name": "SessionStart", "source": source}
+    proc = run_hook(payload, sock=stub.sock)
+    assert proc.returncode == 0 and proc.stdout == ""
+    (req,) = stub.requests
+    assert req == {"id": 1, "op": "session_event", "harness": "claude",
+                   "session": "abc123", "event": event}
+
+
+def test_session_end_sends_end(repo, daemon):
+    stub = daemon()
+    run_hook({"session_id": "abc123", "cwd": str(repo),
+              "hook_event_name": "SessionEnd", "reason": "other"}, sock=stub.sock)
+    assert [r["event"] for r in stub.requests] == ["end"]
 
 
 # --------------------------------------------------------------------------- #
@@ -440,6 +529,8 @@ def test_install_merges_and_is_idempotent(tmp_path):
     assert _ours(data, "PostToolUse") == [("Read|Grep|Glob|Edit|MultiEdit|Write|Bash",
                                            expected)]
     assert _ours(data, "PreToolUse") == [("Bash|Read", expected)]
+    assert _ours(data, "SessionStart") == [("startup|resume|clear|compact", expected)]
+    assert _ours(data, "SessionEnd") == [("", expected)]
 
 
 def test_install_updates_python_without_duplicates(tmp_path):

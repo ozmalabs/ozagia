@@ -108,7 +108,74 @@ limits are `[reads] structured_outline_lines` and
 8 MB (2 MB for YAML when PyYAML has no libyaml `CSafeLoader`) are read as
 text, as before, so the parse stays well inside the plugin's read timeout.
 A file that does not parse (or YAML without PyYAML) is read as text. Shell
-reads (`cat`, `head`, ...) and edits are unchanged.
+reads (`head`, `sed -n`, ...) and edits are unchanged.
+
+Outline-first reads of other files. A read with no `offset` and no `limit`
+of any other text file over 400 lines or 40 kB (`[reads] outline_lines` and
+`outline_bytes`; 0 turns one off, both 0 turn it off) returns an outline,
+and so does a shell `cat F` (intent `shell_read_outline`; `nl`, `head`,
+`sed -n` and pipelines are unchanged):
+
+```
+Read file /repo/pkg/big.py, outline of 815 lines, 21456 bytes
+[ozagia] file:pkg/big.py  imports: 1  imported by: 0  tests: 0
+[ozagia] L4-6 sym:pkg/big.py::f1
+[ozagia] L400-405 sym:pkg/big.py::Box
+[ozagia]   L401-402 sym:pkg/big.py::Box.a
+[ozagia] an outline instead of the whole text: the file is over 400 lines or 40960 bytes. Read a key above for one symbol or section, or pass offset/limit (a line range) for the text. Lines 1-120 follow
+1: import os
+...
+```
+
+- Entries: Python defs and classes with their methods (one level, keys as
+  in the read headers); for another language the graph's symbols of the
+  file; Markdown and TeX sections (below); else the text chunks
+  (`text:<rel>#L<a>-L<b>`). At most 200 entries, then `+N more entries`.
+- The head is lines 1-120 in read format, at most 32 kB, a line over 2000
+  characters cut with a note. The read ledger counts only the lines shown
+  in full.
+- Intent `read_outline`; `meta.bytes_saved` estimates the text it kept out
+  (the plain read's output size minus the outline's).
+
+Section keys. A Markdown or TeX section is `doc:<rel>#<slug>`
+(`ozagia.core.sections`). The slug is GitHub's anchor: the title
+lowercased, punctuation dropped, spaces as `-`, a repeated slug gets `-1`,
+`-2`, ... in file order. A section runs from its heading to the line before
+the next heading of the same or a higher level, so it holds its
+subsections. Reading the key returns that whole range with
+`[ozagia] doc:<rel>#<slug>` as the header; an unknown slug is a tool error
+that lists the nearest section keys. We chose this over the positional
+`text:<rel>#L<a>-L<b>` because a slug depends only on the titles, not on
+line numbers, so a key stays valid across edits elsewhere in the file.
+Markdown headings are ATX headings outside fenced code (the rule of
+`edit.markdown`). TeX headings are `\part`, `\chapter`, `\section`,
+`\subsection`, `\subsubsection` and `\paragraph` (starred or not) at the
+start of a line outside `%` comments.
+
+Read ledger and repeats (`ozagia.intent.ledger`). The daemon keeps a ledger
+per session (`harness`, `session`, and the request's `sub`): for every read
+it serves or sees through `after` (the read tool, `cat`, `head`, `tail`,
+`sed -n`, `nl`, `nl -ba F | sed -n 'a,bp'`, a leading `cd`), the file's
+sha256 and line range. A read of a range inside one recorded range of the
+unchanged file, with no compaction since, is a repeat. By the repeat
+policy (`[reads] repeat`, `[reads] repeat_by_harness`, else the harness
+default):
+
+- `stub`: one line instead of the text (intent `read_stub` or
+  `shell_read_stub`):
+  `[ozagia] <rel> unchanged since read N (lines a-b, sha <12 hex>); keys:
+  <up to 5>; read with a different range or after an edit to get text`.
+- `note`: the text, then `[ozagia] unchanged since read N (lines a-b, sha
+  ...)`.
+- `off`: no ledger.
+
+A read that overlaps an earlier one without being inside it gets the text
+and `[ozagia] lines x-y were already read unchanged (read N)`. The default
+is `stub` for OpenCode and Claude Code, which report compaction and whose
+subagents are told apart, and `note` for every other harness. Codex reports
+compaction but documents that subagent hooks carry the parent's session id,
+so a stub could hide text a subagent never saw; it stays on `note` unless
+`repeat_by_harness = {codex = "stub"}` opts it in.
 
 Directory:
 
@@ -363,6 +430,14 @@ the plugin apply the change a second time.
   lines (`FAILED path::name - message`, `ERROR ...`) to `[ozagia] failed
   test:<key>: <message>` for tests the graph knows. Paths are taken
   relative to a leading `cd DIR &&`.
+- With a session, a read or shell read the built-in ran is recorded in the
+  read ledger (intent `after_read`); a repeat or overlap appends its note
+  line (see read).
+
+`check_read(tool, input)` (the daemon's `read_check`) tells a hook whether
+a read the harness is about to run repeats an unchanged range: `{"repeat",
+"policy", "stub"}`, with `stub` only under the `stub` policy. It records
+nothing; the call's `after` does.
 
 ## Daemon
 
@@ -390,6 +465,14 @@ plugin could not get answered; `expired` and failed `tool` requests are the
 daemon's view of some of the same calls), errors, hellos and their sessions, mean and max ms and
 uptime; `structured_queries`, `structured_outlines` and `jq_captures` count
 the intents `read_structured`, `read_structured_outline` and `shell_jq`.
+The read ledger adds `repeats_seen` (repeats stubbed or noted),
+`stubs_served`, `notes_served`, `outlines_served` (intents `read_outline`
+and `shell_read_outline`), `bytes_saved` (the estimates in
+`meta.bytes_saved`) and `ledger` (`sessions`, `evicted`, `events` by kind).
+The ledgers live in the daemon only: at most 64 sessions (least recently
+used dropped), 256 files per session and 32 ranges per file. A
+`session_event` (`compact`, `start`, `end`) clears or drops every ledger of
+a (harness, session).
 
 `ozagia.core.memory` takes its layout from `$OZAGIA_ROOT` when imported, so
 `serve` sets it to `--root` first. `DevMemory`'s own journal goes next to a

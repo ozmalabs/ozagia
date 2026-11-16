@@ -285,7 +285,8 @@ def handle_shell(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
     if kind == "read":
         p = Path(cls["file"])
         p = _inside(root, p if p.is_absolute() else wd / p)
-        res = read_range(memory, p, cls["range"], numbering=cls.get("number"))
+        res = read_range(memory, p, cls["range"], numbering=cls.get("number"),
+                         outline=cls.get("tool") == "cat")
         preflight_stop(inp)
         return res
     if kind == "jq":

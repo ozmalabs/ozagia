@@ -49,6 +49,15 @@ one, every key has the generic default below. All keys are optional:
     structured_outline_bytes = 65536  # .yaml, .yml or .toml file over either
                                       # limit returns its outline; 0 turns a
                                       # limit off
+    outline_lines = 400               # the same for any other text file read
+    outline_bytes = 40960             # by the daemon (read tool, `cat F`):
+                                      # symbols/sections with keys, then the
+                                      # first lines; 0 turns a limit off
+    repeat = "stub" | "note" | "off"  # what a same-session re-read of an
+                                      # unchanged range gets; unset: the
+                                      # harness default (`ozagia.intent.ledger`)
+    repeat_by_harness = {codex = "stub"}  # per-harness override of the
+                                      # harness default (wins over `repeat`)
 
 Directory entries are paths relative to the root ("." is the root itself).
 """
@@ -148,6 +157,11 @@ class ProjectConfig:
     adapters: tuple[str, ...]
     structured_outline_lines: int = 2000
     structured_outline_bytes: int = 64 * 1024
+    outline_lines: int = 400
+    outline_bytes: int = 40 * 1024
+    # None: each harness's default (`ozagia.intent.ledger.HARNESS_REPEAT`).
+    repeat: str | None = None
+    repeat_by_harness: tuple[tuple[str, str], ...] = ()
 
     @property
     def adapter_base(self) -> Path | None:
@@ -161,8 +175,11 @@ _KEYS = {
               "path_prefixes", "changed_exclude", "entrypoint_prefixes"},
     "memory": {"skip_dirs"},
     "adapters": {"modules"},
-    "reads": {"structured_outline_lines", "structured_outline_bytes"},
+    "reads": {"structured_outline_lines", "structured_outline_bytes",
+              "outline_lines", "outline_bytes", "repeat",
+              "repeat_by_harness"},
 }
+REPEAT_POLICIES = ("stub", "note", "off")
 
 
 def config_path(root: str | Path) -> Path | None:
@@ -264,6 +281,20 @@ def _parse(root: Path, source: Path | None, data: dict[str, Any]) -> ProjectConf
             raise ConfigError(f"{where}: [reads] {key} must be a "
                               f"non-negative integer")
         return value
+
+    def policy(value: Any, what: str) -> str:
+        if value not in REPEAT_POLICIES:
+            raise ConfigError(f"{where}: [reads] {what} must be one of "
+                              + ", ".join(f'"{p}"' for p in REPEAT_POLICIES))
+        return value
+    repeat = (policy(reads["repeat"], "repeat") if "repeat" in reads
+              else None)
+    by_harness = reads.get("repeat_by_harness", {})
+    if not isinstance(by_harness, dict):
+        raise ConfigError(f"{where}: [reads] repeat_by_harness must be a table")
+    repeat_by_harness = tuple(sorted(
+        (str(h), policy(v, f"repeat_by_harness.{h}"))
+        for h, v in by_harness.items()))
     return ProjectConfig(
         root=root,
         source=source,
@@ -286,6 +317,10 @@ def _parse(root: Path, source: Path | None, data: dict[str, Any]) -> ProjectConf
         adapters=tuple(m.strip() for m in modules if m.strip()),
         structured_outline_lines=count("structured_outline_lines", 2000),
         structured_outline_bytes=count("structured_outline_bytes", 64 * 1024),
+        outline_lines=count("outline_lines", 400),
+        outline_bytes=count("outline_bytes", 40 * 1024),
+        repeat=repeat,
+        repeat_by_harness=repeat_by_harness,
     )
 
 

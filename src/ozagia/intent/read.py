@@ -23,6 +23,12 @@ A `json:<rel>#<pointer>` (or `yaml:`, `toml:`) path is a structured query
 array's items (`offset` is 1-based here: offset 1 is index 0) or a
 scalar. A read with no range of a .json/.yaml/.yml/.toml file over the
 outline limits is that file's outline (`structured_outline`).
+
+A read with no range of any other text file over `[reads] outline_lines` /
+`outline_bytes` (400 lines / 40 kB) is an outline of its symbols or
+sections with line ranges and keys, then its first lines
+(`source_outline`); `cat F` too. `doc:<rel>#<slug>` reads one Markdown or
+TeX section (`ozagia.core.sections`, `render_section`).
 """
 from __future__ import annotations
 
@@ -40,6 +46,7 @@ from ozagia.intent.common import (
     file_header,
     file_summary,
     is_node_key,
+    one_line,
     py_spans,
     read_text,
     resolve,
@@ -66,6 +73,13 @@ OUTLINE_MAX_BYTES_PURE_YAML = 2 * 1024 * 1024
 OUTLINE_HEAD_LINES = 200
 OUTLINE_HEAD_BYTES = 32 * 1024
 OUTLINE_HEAD_LINE_CHARS = 2000
+# A plain read of any other text file over either limit (`[reads]
+# outline_lines` / `outline_bytes`) is an outline of its symbols or
+# sections (at most SOURCE_OUTLINE_ENTRIES) and its first SOURCE_HEAD_LINES.
+SOURCE_OUTLINE_LINES = 400
+SOURCE_OUTLINE_BYTES = 40 * 1024
+SOURCE_HEAD_LINES = 120
+SOURCE_OUTLINE_ENTRIES = 200
 _TEXT_KEY_RE = re.compile(r"^text:(?P<rel>.+)#L(?P<a>\d+)-L(?P<b>\d+)$")
 
 
@@ -225,6 +239,51 @@ def _node_range(memory: Any, key: str, text: str, total: int
     raise IntentError(f"No node {key}{hint}")
 
 
+def section_range(memory: Any, key: str) -> tuple[Target, int, int]:
+    """(file, first line, last line) of a `doc:<rel>#<slug>` section key
+    (`ozagia.core.sections`). IntentError for a missing file or section,
+    with the nearest slugs."""
+    from ozagia.core.sections import (
+        doc_sections,
+        has_sections,
+        parse_section_key,
+        section_key,
+    )
+    parsed = parse_section_key(key)
+    if parsed is None:
+        raise IntentError(f"not a section key: {key}")
+    rel, slug = parsed
+    target = resolve(root_of(memory), rel)
+    if not has_sections(target.rel):
+        raise IntentError(f"No node {key}: {rel} is not a Markdown or TeX file")
+    if not target.path.is_file():
+        raise IntentError(f"No node {key}: {rel} does not exist")
+    sections = doc_sections(target.rel, read_text(target.path))
+    for s in sections:
+        if s.slug == slug:
+            return target, s.start, s.end
+    import difflib
+    near = difflib.get_close_matches(slug, [s.slug for s in sections], n=3,
+                                     cutoff=0.5)
+    hint = (f"\n{tag('nearest: ' + ', '.join(section_key(target.rel, s) for s in near))}"
+            if near else "")
+    raise IntentError(f"No node {key}{hint}")
+
+
+def render_section(memory: Any, key: str) -> _Rendered:
+    """A Markdown or TeX section, subsections included, in read format."""
+    target, a, b = section_range(memory, key)
+    lines = split_lines(read_text(target.path))
+    out = _Rendered()
+    out.key(key)
+    out.lines.append(_first_line("file", target.display, a, b, len(lines),
+                                 "lines"))
+    out.lines.append(tag(key))
+    for i in range(a, b + 1):
+        out.lines.append(f"{i}: {lines[i - 1]}")
+    return out
+
+
 def render_node(memory: Any, key: str, *, offset: int | None,
                 limit: int | None) -> _Rendered:
     root = root_of(memory)
@@ -233,6 +292,8 @@ def render_node(memory: Any, key: str, *, offset: int | None,
         parsed = parse_key(key)
     except ValueError:
         raise IntentError(f"not a node key: {key}") from None
+    if kind == "doc" and "#" in key:
+        return render_section(memory, key)
     if kind in ("file", "doc"):
         return render_file(memory, resolve(root, parsed[1]),
                            offset=offset, limit=limit)
@@ -367,6 +428,135 @@ def _outline_limits(root: Path) -> tuple[int, int]:
     return cfg.structured_outline_lines, cfg.structured_outline_bytes
 
 
+def _source_outline_limits(root: Path) -> tuple[int, int]:
+    from ozagia.config import ConfigError, load_project_config
+    try:
+        cfg = load_project_config(root)
+    except ConfigError:
+        return SOURCE_OUTLINE_LINES, SOURCE_OUTLINE_BYTES
+    return cfg.outline_lines, cfg.outline_bytes
+
+
+def outline_head(memory: Any, target: Target) -> tuple[str, list[str], int] | None:
+    """For a text file a plain read gives an outline (`source_outline`):
+    (text, head rows, last line shown in full). None when the file is
+    structured data (it has its own outline), under both limits (`[reads]
+    outline_lines` / `outline_bytes`, 0 turns one off), or not readable
+    text."""
+    from ozagia.core import structured as S
+    if S.format_of(target.rel) is not None:
+        return None
+    max_lines, max_bytes = _source_outline_limits(root_of(memory))
+    if max_lines <= 0 and max_bytes <= 0:
+        return None
+    try:
+        size = target.path.stat().st_size
+    except OSError:
+        return None
+    over = max_bytes > 0 and size > max_bytes
+    if not over and (max_lines <= 0 or size <= max_lines):
+        return None             # fewer bytes than the line limit: fewer lines
+    try:
+        text = read_text(target.path)
+    except Unhandled:
+        return None
+    lines = split_lines(text)
+    if not over and len(lines) <= max_lines:
+        return None
+    rows, full = _head_rows(lines, SOURCE_HEAD_LINES)
+    return text, rows, full
+
+
+def _outline_entries(memory: Any, rel: str, text: str,
+                     info: dict[str, Any] | None, out: _Rendered) -> list[str]:
+    """`[ozagia] L<a>-<b> <key>` lines: Python defs and classes (methods
+    indented), the graph's symbols of another language, Markdown and TeX
+    sections, else the text chunks."""
+    from ozagia.core.sections import doc_sections, has_sections
+    from ozagia.index.text_nodes import is_structured, text_chunks
+    rows: list[tuple[str, str]] = []      # (line, key)
+    if rel.endswith(".py"):
+        for s in py_spans(text):
+            depth = s.qualname.count(".")
+            if depth > 1:
+                continue
+            key = span_key(memory, rel, s)
+            rows.append((f"{'  ' * depth}L{s.start}-{s.end} {key}", key))
+    elif has_sections(rel):
+        for sec in doc_sections(rel, text):
+            from ozagia.core.sections import section_key
+            key = section_key(rel, sec.slug)
+            indent = "  " * max(0, sec.level - 1)
+            rows.append((f"{indent}L{sec.start}-{sec.end} {key}  "
+                         f"{one_line(sec.title, 80)}", key))
+    elif info is not None and info.get("symbols"):
+        syms = []
+        for nid in info["symbols"]:
+            attrs = (memory.node(nid) or {}).get("attrs") or {}
+            key = memory.key_of(nid)
+            if not key or not attrs.get("start_line"):
+                continue
+            a = int(attrs["start_line"])
+            syms.append((a, int(attrs.get("end_line") or a), key))
+        for a, b, key in sorted(syms):
+            rows.append((f"L{a}-{b} {key}", key))
+    elif not is_structured(rel):
+        for c in text_chunks(rel, text):
+            rows.append((f"L{c['start_line']}-{c['end_line']} {c['key']}",
+                         c["key"]))
+    lines = []
+    for line, key in rows[:SOURCE_OUTLINE_ENTRIES]:
+        out.key(key)
+        lines.append(tag(line))
+    if len(rows) > SOURCE_OUTLINE_ENTRIES:
+        lines.append(tag(f"+{len(rows) - SOURCE_OUTLINE_ENTRIES} more "
+                         f"entries; read a range to see them"))
+    if not rows:
+        lines.append(tag("no symbols or sections found"))
+    return lines
+
+
+def source_outline(memory: Any, target: Target, *,
+                   intent: str = "read_outline") -> dict[str, Any] | None:
+    """The outline of a text file over the outline limits (see
+    `outline_head`), or None: the symbols or sections with their line
+    ranges and keys, then the first lines. The result's `shown` is the
+    range of lines it shows in full (None for none)."""
+    got = outline_head(memory, target)
+    if got is None:
+        return None
+    text, head, full = got
+    lines = split_lines(text)
+    size = target.path.stat().st_size
+    out = _Rendered()
+    out.lines.append(f"Read file {target.display}, outline of {len(lines)} "
+                     f"lines, {size} bytes")
+    info = file_summary(memory, target.rel)
+    if info is not None:
+        out.key(file_key(target.rel))
+        out.lines.append(file_header(memory, target.rel, info))
+        dk = f"doc:{target.rel}"
+        if memory.node_by_key(dk) is not None:
+            out.key(dk)
+            out.lines.append(tag(dk))
+    out.lines.extend(_outline_entries(memory, target.rel, text, info, out))
+    max_lines, max_bytes = _source_outline_limits(root_of(memory))
+    limits = " or ".join(
+        x for x in ((f"{max_lines} lines" if max_lines > 0 else ""),
+                    (f"{max_bytes} bytes" if max_bytes > 0 else "")) if x)
+    out.lines.append(tag(
+        f"an outline instead of the whole text: the file is over {limits}. "
+        f"Read a key above for one symbol or section, or pass offset/limit "
+        f"(a line range) for the text. Lines 1-{len(head)} follow"))
+    out.lines.extend(head)
+    output = "\n".join(out.lines)
+    full_size = sum(len(f"{i}: {ln}") + 1 for i, ln in
+                    enumerate(lines[:DEFAULT_LIMIT], 1))
+    return {"intent": intent, "output": output, "keys": out.keys,
+            "shown": (1, full) if full else None,
+            "bytes_saved": max(0, full_size - len(output))}
+
+
 def structured_outline(memory: Any, target: Target) -> dict[str, Any] | None:
     """The outline of a .json/.yaml/.yml/.toml file over the outline
     threshold (`[reads] structured_outline_lines` / `_bytes`), or None:
@@ -447,19 +637,31 @@ def _head_lines(text: str) -> list[str]:
     """The first lines of `text` in read format (`<n>: <line>`), within
     OUTLINE_HEAD_LINES and OUTLINE_HEAD_BYTES; a line over
     OUTLINE_HEAD_LINE_CHARS is cut with a note."""
+    return _head_rows(split_lines(text), OUTLINE_HEAD_LINES)[0]
+
+
+def _head_rows(lines: list[str], max_lines: int) -> tuple[list[str], int]:
+    """(rows, last line shown in full) for the first `max_lines` of
+    `lines`, within OUTLINE_HEAD_BYTES, lines over OUTLINE_HEAD_LINE_CHARS
+    cut with a note."""
     out: list[str] = []
     size = 0
-    for i, line in enumerate(split_lines(text)[:OUTLINE_HEAD_LINES], 1):
+    full = 0
+    cut = False
+    for i, line in enumerate(lines[:max_lines], 1):
         if len(line) > OUTLINE_HEAD_LINE_CHARS:
             line = (line[:OUTLINE_HEAD_LINE_CHARS] + " "
                     + tag(f"line cut at {OUTLINE_HEAD_LINE_CHARS} of "
                           f"{len(line)} characters"))
+            cut = True
         row = f"{i}: {line}"
         size += len(row) + 1
         if out and size > OUTLINE_HEAD_BYTES:
             break
         out.append(row)
-    return out
+        if not cut:
+            full = i
+    return out, full
 
 
 def handle_read(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
@@ -487,6 +689,9 @@ def handle_read(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
             got = structured_outline(memory, target)
             if got is not None:
                 return got
+            got = source_outline(memory, target)
+            if got is not None:
+                return got
         out = render_file(memory, target, offset=offset, limit=limit)
         intent = "read_file"
     else:
@@ -495,9 +700,12 @@ def handle_read(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
 
 
 def read_range(memory: Any, path: Path, rng: tuple, *,
-               numbering: str | None = None) -> dict[str, Any]:
+               numbering: str | None = None,
+               outline: bool = False) -> dict[str, Any]:
     """A shell read (`cat`, `head`, `tail`, `sed -n`, `nl`) as a read;
-    `tail -c` ranges go to `read_bytes`."""
+    `tail -c` ranges go to `read_bytes`. With `outline`, a whole-file read
+    (`cat F`) of a file over the outline limits is its outline
+    (`source_outline`)."""
     if rng[0] in ("bytes_tail", "bytes_from"):
         return read_bytes(memory, path, rng)
     target = resolve(root_of(memory), str(path))
@@ -508,6 +716,10 @@ def read_range(memory: Any, path: Path, rng: tuple, *,
     text = read_text(target.path)
     total = len(split_lines(text))
     kind = rng[0]
+    if kind == "all" and outline and numbering is None:
+        got = source_outline(memory, target, intent="shell_read_outline")
+        if got is not None:
+            return got
     if kind == "all":
         offset, limit = 1, max(total, 1)
     elif kind == "head":

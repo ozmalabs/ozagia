@@ -20,6 +20,9 @@ pieces here do not depend on a harness's tool names or output envelope:
   (`ozagia.intent.shell.classify` is `git_refs`), and `git_refusal_reason`.
 - `node_key`: the node key a file path names, if any.
 - `response_text`: a built-in's result flattened to text for `after`.
+- `repeat_stub`, `session_event`, `start_event`: the read ledger
+  (`ozagia.intent.ledger`): ask whether a read repeats an unchanged range
+  (PreToolUse), and report compaction, start and end of a session.
 """
 from __future__ import annotations
 
@@ -251,6 +254,69 @@ def daemon_request_autostart(root: Path, msg: dict[str, Any], *,
 
 
 # --------------------------------------------------------------------------- #
+# the read ledger
+# --------------------------------------------------------------------------- #
+# Shell command classes that may be a file read the ledger tracks.
+_READ_CLASSES = ("read", "compound")
+# A PreToolUse repeat check gets this long; the read runs when it is late.
+READ_CHECK_TIMEOUT_S = 3.0
+SESSION_EVENT_TIMEOUT_S = 2.0
+
+
+def maybe_read(tool: str, inp: dict[str, Any]) -> bool:
+    """Whether a call may be a read the daemon's ledger tracks (cheap,
+    local): a read, or a shell read (`classify` is read or compound)."""
+    if tool == "read":
+        return isinstance(inp.get("path"), str)
+    if tool == "shell":
+        return classify(str(inp.get("command") or ""))["class"] in _READ_CLASSES
+    return False
+
+
+def repeat_stub(root: Path, harness: str, session: Any, sub: Any, tool: str,
+                inp: dict[str, Any], timeout: float = READ_CHECK_TIMEOUT_S
+                ) -> str | None:
+    """The daemon's stub for a read that repeats an unchanged range this
+    session already read (`read_check`, stub policy), or None: not a
+    repeat, another policy, or no daemon (nothing to compare against)."""
+    if not isinstance(session, str) or not session or not maybe_read(tool, inp):
+        return None
+    msg: dict[str, Any] = {"id": 1, "op": "read_check", "harness": harness,
+                           "session": session, "tool": tool, "input": inp,
+                           "deadline_ms": int((time.time() + timeout) * 1000)}
+    if isinstance(sub, str) and sub:
+        msg["sub"] = sub
+    try:
+        resp = daemon_request(protocol.socket_path(root), msg, timeout)
+    except (OSError, HookError, ValueError):
+        return None
+    stub = resp.get("stub")
+    return stub if isinstance(stub, str) and stub else None
+
+
+def session_event(root: Path, harness: str, session: Any, event: str,
+                  timeout: float = SESSION_EVENT_TIMEOUT_S) -> bool:
+    """Tell the daemon about a compaction, start or end of a session
+    (`session_event`), so its ledger is cleared. False when no daemon
+    answers: a daemon that starts later has an empty ledger anyway."""
+    if not isinstance(session, str) or not session:
+        return False
+    try:
+        daemon_request(protocol.socket_path(root), {
+            "id": 1, "op": "session_event", "harness": harness,
+            "session": session, "event": event}, timeout)
+    except (OSError, HookError, ValueError):
+        return False
+    return True
+
+
+def start_event(source: Any) -> str:
+    """The `session_event` for a SessionStart `source`: `compact` after a
+    compaction, else `start` (startup, clear, resume, fork)."""
+    return "compact" if source == "compact" else "start"
+
+
+# --------------------------------------------------------------------------- #
 # the fail-open main
 # --------------------------------------------------------------------------- #
 def root_for(payload: Any) -> Path:
@@ -342,5 +408,5 @@ __all__ = ["AUTOSTART_BUDGET_S", "DAEMON_TIMEOUT_S", "AutostartRefused", "HookEr
            "HookTimeout", "KEY_PREFIXES", "REF_MOVING_GIT", "autostart_allowed",
            "autostart_enabled", "daemon_request", "daemon_request_autostart",
            "ensure_daemon", "git_ref_moving", "git_refusal_reason", "in_work_tree",
-           "log_failure", "node_key", "rearm_alarm", "response_text", "root_for",
-           "run_hook"]
+           "log_failure", "maybe_read", "node_key", "rearm_alarm", "repeat_stub",
+           "response_text", "root_for", "run_hook", "session_event", "start_event"]

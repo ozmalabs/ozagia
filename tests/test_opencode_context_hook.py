@@ -188,3 +188,62 @@ process.stdout.write("ok\n");
         assert sum(request["op"] == "hint" for request in daemon.requests) == 2
     finally:
         daemon.close()
+
+
+COMPACTION_HARNESS = r"""
+import * as mod from "./plugin.mjs";
+const hooks = {};
+const ctx = { session: { hook: async (name, fn) => {
+  if (name === "compaction" && process.env.NO_COMPACTION_HOOK) throw new Error("no such hook");
+  hooks[name] = fn;
+} } };
+await mod.createPlugin({}).setup(ctx);
+const names = Object.keys(hooks).sort();
+if (hooks.compaction) {
+  await hooks.compaction({ sessionID: "ses_compact", system: [], messages: [] });
+  await hooks.compaction({ system: [], messages: [] });   // no session: nothing sent
+}
+process.stdout.write(JSON.stringify({ names }) + "\n");
+"""
+
+
+def _run_compaction(tmp_path: Path, sock: Path | None, **env_extra: str):
+    source = Path(oc.__file__).with_name("plugin.js")
+    (tmp_path / "plugin.mjs").write_text(source.read_text(encoding="utf-8"),
+                                         encoding="utf-8")
+    harness = tmp_path / "compaction.mjs"
+    harness.write_text(COMPACTION_HARNESS, encoding="utf-8")
+    env = dict(os.environ, **env_extra)
+    if sock is not None:
+        env["OZAGIA_DAEMON_SOCK"] = str(sock)
+    else:
+        env.pop("OZAGIA_DAEMON_SOCK", None)
+    return subprocess.run([NODE, str(harness)], cwd=tmp_path, env=env,
+                          capture_output=True, text=True, timeout=10)
+
+
+@needs_node
+def test_compaction_hook_sends_session_event(tmp_path):
+    daemon = StubDaemon(tmp_path / "daemon.sock")
+    try:
+        proc = _run_compaction(tmp_path, daemon.path)
+        assert proc.returncode == 0, proc.stderr
+        assert json.loads(proc.stdout)["names"] == ["compaction", "context"]
+        events = [r for r in daemon.requests if r["op"] == "session_event"]
+        assert len(events) == 1
+        assert {k: events[0][k] for k in ("harness", "session", "event")} == {
+            "harness": "opencode", "session": "ses_compact", "event": "compact"}
+    finally:
+        daemon.close()
+
+
+@needs_node
+def test_compaction_hook_is_fail_safe(tmp_path):
+    # No daemon listening: the hook returns without throwing.
+    proc = _run_compaction(tmp_path, tmp_path / "missing.sock")
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout)["names"] == ["compaction", "context"]
+    # A harness without the hook: setup still succeeds.
+    proc = _run_compaction(tmp_path, tmp_path / "missing.sock", NO_COMPACTION_HOOK="1")
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout)["names"] == ["context"]

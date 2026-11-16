@@ -1016,7 +1016,12 @@ def test_graph_stats_fields_read_counts():
                                            "shell_passthrough": None,
                                            "structured_queries": None,
                                            "structured_outlines": None,
-                                           "jq_captures": None}
+                                           "jq_captures": None,
+                                           "repeats_seen": None,
+                                           "stubs_served": None,
+                                           "notes_served": None,
+                                           "outlines_served": None,
+                                           "bytes_saved": None}
     # The daemon's shape: handled {"true": captured, "false": passthrough and
     # expired}; fallbacks = plugin fallbacks + expired + failed (review fix 4).
     assert ae.graph_stats_fields({"hellos": 2, "handled": {"true": 3, "false": 4},
@@ -1026,12 +1031,17 @@ def test_graph_stats_fields_read_counts():
                                   "codemode_tools": ["read"],
                                   "structured_queries": 4,
                                   "structured_outlines": 1,
-                                  "jq_captures": 2}) == {
+                                  "jq_captures": 2, "repeats_seen": 5,
+                                  "stubs_served": 3, "notes_served": 2,
+                                  "outlines_served": 1,
+                                  "bytes_saved": 900}) == {
         "plugin_loaded": True, "captured_calls": 3, "passthrough_calls": 3,
         "fallbacks": 3, "preflights": 2, "permission_assert": True,
         "codemode_tools": ["read"], "shell_captured": None,
         "shell_passthrough": None, "structured_queries": 4,
-        "structured_outlines": 1, "jq_captures": 2}
+        "structured_outlines": 1, "jq_captures": 2, "repeats_seen": 5,
+        "stubs_served": 3, "notes_served": 2, "outlines_served": 1,
+        "bytes_saved": 900}
     got = ae.graph_stats_fields({"hellos": 1, "shell": {"captured": 4,
                                                         "passthrough": 1}})
     assert (got["shell_captured"], got["shell_passthrough"]) == (4, 1)
@@ -1049,6 +1059,18 @@ def test_aggregate_totals_structured_reads():
     assert row["total_structured_queries"] == 2
     assert row["total_structured_outlines"] == 7
     assert row["total_jq_captures"] == 1
+
+
+def test_aggregate_totals_read_ledger():
+    runs = [{"arm": "graph_intent", "daemon_ok": True, "repeats_seen": 2,
+             "stubs_served": 1, "notes_served": 1, "outlines_served": 3,
+             "bytes_saved": 100},
+            {"arm": "graph_intent", "daemon_ok": True, "repeats_seen": None,
+             "stubs_served": 4, "bytes_saved": 50}]
+    row = ae.aggregate(runs, ["graph_intent"])[0]
+    assert (row["total_repeats_seen"], row["total_stubs_served"],
+            row["total_notes_served"], row["total_outlines_served"],
+            row["total_bytes_saved"]) == (2, 5, 1, 3, 150)
 
 
 def test_opencode_graph_intent_config_and_socket_env(tmp_path, monkeypatch):
