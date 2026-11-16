@@ -29,9 +29,11 @@ accepts both.
   counts the call. A non-empty `append` is printed on stdout. (Kiro 2.37
   does not pass PostToolUse output to the model in any engine; see
   docs/kiro.md. The refresh still keeps the graph current.)
-- `PreCompact` / `PostCompact` (CLI V3 3.1.0 and later only):
-  `compaction_context`, a stub until the compaction working set (W8)
-  exists. install.py registers no compaction triggers.
+- `PostCompact` (CLI V3 3.1.0 and later only): the session's working set
+  (`compaction_context`, at most 3,000 characters on stdout) and a
+  `session_event` `compact`. install.py registers it in the V3 hook file
+  only (2.37's V3 loader skips a trigger it does not know; the CLI 2.x
+  profile validator rejects one). `PreCompact` does nothing.
 
 The hook stops itself after `HOOK_ALARM_S`, a few seconds before the
 handler timeout install.py writes. It never blocks the agent because
@@ -45,7 +47,7 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from ozagia.integrations import hookcore
-from ozagia.integrations.codex.hook import session_brief
+from ozagia.integrations.hookcore import session_brief
 
 # The handler timeout install.py writes (`timeout` in seconds in a hook
 # file; `timeout_ms` in a CLI 2.x agent profile).
@@ -61,6 +63,10 @@ SESSION_START_BUDGET_S = 0.5
 # After the alarm fired during the SessionStart daemon start, the brief gets
 # this long; HOOK_ALARM_S plus this stays under HOOK_TIMEOUT_S.
 BRIEF_ALARM_S = 3
+# Kiro adds at most 3,000 characters of a PostCompact hook's stdout.
+COMPACTION_MAX_CHARS = 3000
+# PostCompact's `session_event` and `working_set` requests wait this long.
+COMPACTION_TIMEOUT_S = 3.0
 # A read tool asking for more node keys than this runs as usual.
 MAX_KEY_READS = 8
 
@@ -271,18 +277,24 @@ def output_text(tool_response: Any) -> str:
 # --------------------------------------------------------------------------- #
 def compaction_context(event: str, payload: dict[str, Any], root: Path) -> str | None:
     """`PreCompact` / `PostCompact` (Kiro CLI V3 3.1.0 and later; 2.37 has
-    neither): nothing yet.
+    neither, and its V3 loader skips a hook with a trigger it does not know).
 
-    Stub for W8 (compaction working set). It will ask the daemon for the
-    session's working set (the `session_event` op from W5) and return it as
-    text: on `PostCompact`, Kiro adds stdout to the context after the
-    summary replaced the history (the event has `summary` and
-    `summary_path`); on `PreCompact`, stdout (up to 3,000 characters) is
-    added before compaction, and exit 2 would cancel it, which ozagia must
-    never do. Register the triggers in `install.HOOKS` when this returns
-    something.
-    """
-    return None
+    `PostCompact` (after the summary replaced the history): `session_event`
+    `compact` (the read ledger is cleared), then the session's working set
+    from a running daemon (`ozagia.core.working_set`), at most
+    `COMPACTION_MAX_CHARS`, on stdout, which Kiro adds to the context.
+    `PreCompact` does nothing: its stdout would be summarised away, and a
+    non-zero exit would cancel the compaction, which ozagia must never do
+    (`run_hook` exits 0 on any failure)."""
+    if event != "PostCompact":
+        return None
+    session = payload.get("session_id")
+    text = hookcore.working_set(root, HARNESS, session,
+                                max_chars=COMPACTION_MAX_CHARS,
+                                timeout=COMPACTION_TIMEOUT_S)
+    hookcore.session_event(root, HARNESS, session, "compact",
+                           timeout=COMPACTION_TIMEOUT_S)
+    return text[:COMPACTION_MAX_CHARS] if text else None
 
 
 def _pre_read(tool_name: str, tool_input: dict[str, Any], root: Path,

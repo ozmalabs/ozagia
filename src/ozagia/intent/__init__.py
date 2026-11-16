@@ -60,6 +60,8 @@ from ozagia.intent.shell import classify
 
 # `after` skips the graph refresh when more files than this changed.
 MAX_REFRESH_FILES = 200
+# Changed files named in an `after` refresh's `meta.changed_paths`.
+MAX_CHANGED_PATHS = 20
 
 HANDLERS: dict[str, Callable[[Any, dict[str, Any]], dict[str, Any]]] = {
     "read": handle_read,
@@ -476,6 +478,8 @@ def after(memory: Any, tool: str, input: dict[str, Any], output: Any, *,
                               else "after_refresh")
             pending = memory.pending_changes()
             meta["changed_files"] = len(pending)
+            # For the session's working set (`ozagia.core.working_set`).
+            meta["changed_paths"] = list(pending[:MAX_CHANGED_PATHS])
             if len(pending) > MAX_REFRESH_FILES:
                 lines.append(tag("many files changed; graph refresh deferred"))
             elif pending:

@@ -26,7 +26,11 @@ the version implemented against).
 - `SessionStart`: `session_event` `compact` (source "compact") or `start`
   (startup, resume, clear), with `compaction_hook: true`, which clears the
   session's read ledger and confirms that compaction is reported;
-  `SessionEnd`: `end`. Nothing is printed. A failed event leaves a marker,
+  `SessionEnd`: `end`. With source "compact" the session's working set
+  (`ozagia.core.working_set`: files and keys it edited, failing tests and
+  their rerun command, jobs, recent reads; from a running daemon, at most
+  `WORKING_SET_MAX_CHARS`) is returned as `additionalContext`; otherwise
+  nothing is printed. A failed event leaves a marker,
   and the session's next ledger request carries `reset_pending`.
 
 Requests carry `sub` = the payload's `agent_id` when a subagent makes the
@@ -62,6 +66,8 @@ from ozagia.integrations.hookcore import (  # noqa: F401 - part of this module's
 HOOK_TIMEOUT_S = 20
 LOG_NAME = "claude_hook.log"
 HARNESS = "claude"
+# SessionStart after a compaction: the working set, at most this long.
+WORKING_SET_MAX_CHARS = 7000
 
 
 # --------------------------------------------------------------------------- #
@@ -160,9 +166,16 @@ def handle(payload: dict[str, Any], root: Path) -> dict[str, Any] | None:
     sub = payload.get("agent_id") if isinstance(payload.get("agent_id"), str) else ""
 
     if event == "SessionStart":
+        # The working set first (it survives the ledger reset anyway).
+        text = (hookcore.working_set(root, HARNESS, session, sub,
+                                     max_chars=WORKING_SET_MAX_CHARS)
+                if payload.get("source") == "compact" else None)
         hookcore.session_event(root, HARNESS, session,
                                hookcore.start_event(payload.get("source")))
-        return None
+        if not text:
+            return None
+        return {"hookSpecificOutput": {"hookEventName": "SessionStart",
+                                       "additionalContext": text}}
     if event == "SessionEnd":
         hookcore.session_event(root, HARNESS, session, "end")
         return None

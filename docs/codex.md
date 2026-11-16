@@ -252,7 +252,8 @@ The hooks help too:
 
 | Codex event | hook | what ozagia does | what Codex gets |
 |---|---|---|---|
-| `SessionStart` (every `source`) | brief | In a git work tree only: starts the daemon if needed (waits at most 0.5 s, not for the snapshot load), and lists the dirty files (`git status --porcelain`, at most 15), the last 3 commits, and the ozagia MCP tools to prefer. At most 1,500 characters. Also sends `session_event` (`compact` for source `compact`, else `start`, with `compaction_hook: true`), which clears the session's read ledger; a failed one leaves a marker, and the next ledger request carries `reset_pending`. | `additionalContext` |
+| `SessionStart` (`startup`, `resume`, `clear`) | brief | In a git work tree only: starts the daemon if needed (waits at most 0.5 s, not for the snapshot load), and gives the brief "since the last session": the dirty files (`git status --porcelain`, at most 15), the last 3 commits, the tests failing at the last pytest run in the root with their rerun command, running background jobs, and the ozagia MCP tools to prefer. At most 1,500 characters. A running daemon builds it (1 s); otherwise the hook builds it from git and `.ozagia/working_set/tests.json`, without jobs. Also sends `session_event` `start` (with `compaction_hook: true`), which clears the session's read ledger; a failed one leaves a marker, and the next ledger request carries `reset_pending`. | `additionalContext` |
+| `SessionStart` `compact` | working set | The session's working set from a running daemon (`working_set` op, 3 s, keyed by `session_id` and `transcript_path`): files and node keys it edited, tests failing in its last pytest runs with the command that reruns them, running jobs, the newest open DevSession's step, and the files and line ranges it read last (see "Working set" below). At most 7,000 characters (about 2,000 tokens), under Codex's 2,500-token cap on hook output, so `additionalContextLimit` is not set. When the daemon has nothing, the brief instead. Then `session_event` `compact`. | `additionalContext` |
 | `PreCompact`, `SessionEnd` | ledger | `session_event` `compact` / `end`: the session's read ledger is cleared / dropped. | nothing |
 | `PreToolUse` `Bash` with a shell read (`sed -n`, `cat`, `head`, `tail`, `nl`, `nl -ba F \| sed -n 'a,bp'`) | repeat check | Asks the daemon's `read_check`. Under the `stub` policy, a repeat of an unchanged range this session already read is refused with the one-line stub. The default policy is `note` (see below), so by default this never refuses. A command with a `cd` is not tracked. | `permissionDecision: "deny"` with the stub as the reason, or nothing |
 | `PreToolUse` `Bash` with a ref-moving git command | refusal | Refuses it locally, without the daemon, with the intent layer's check (`ozagia.intent.shell.classify` is `git_refs`; see docs/claude_code.md for the list and the parsing). Listing forms (`git branch`, `git tag -l`, `git stash list`) are allowed. | `permissionDecision: "deny"` with a reason |
@@ -296,6 +297,54 @@ and appends one JSON line (`ts`, `event`, `tool`, `session`, `error`) to
 3 s and a daemon request has 10 s. If the alarm fires while `SessionStart`
 starts the daemon, the brief still gets 3 s (`BRIEF_ALARM_S`) before the
 hook gives up. The hook never exits 2.
+
+## Working set
+
+Codex compacts often (1,571 compactions in the usage logs, 1,485 of them
+Codex, one session with 476) and the model then reads the same files
+again (13k re-reads right after a compaction). The daemon keeps, per
+session, what the session was working on, and `SessionStart` with source
+`compact` hands it back:
+
+```
+[ozagia] working set (codex session 019a...): what this session edited, ran and read before the context was compacted (1 compaction(s) so far). Re-read only what the next step needs.
+How to read: read a key with the ozagia MCP tool dev_node (key=...), a range with sed -n 'a,bp' FILE.
+failing tests (last pytest run 12:03:10 UTC: `.venv/bin/python -m pytest -q tests/test_a.py`):
+  failed test:tests/test_a.py::test_one: assert 2 == 1
+  rerun (from the repo root): .venv/bin/python -m pytest -q tests/test_a.py::test_one
+running jobs:
+  j3 `npm run dev` running, 120 s: job_wait job=j3 (or job_log)
+edited (most recent first; read a key instead of the whole file):
+  src/a.py: sym:src/a.py::f, sym:src/a.py::g
+recently read (re-read a range only if the summary lacks it):
+  src/b.py lines 1-120, 300-340
+```
+
+What goes in (`ozagia.core.working_set`):
+
+- edited files and keys: `after` for `apply_patch` and for shell commands
+  that changed files (the files the graph refresh took in, and the delta's
+  keys); at most 20 files and 30 keys;
+- failing tests: pytest runs seen by `after` (pytest's `FAILED`/`ERROR`
+  summary lines); a later run that selects a test and does not fail it
+  clears it, unless it was filtered (`-k`, `-m`, `--deselect`, `--lf`),
+  stopped early with failures (`-x`, `--maxfail`), or printed no summary;
+  at most 10;
+- the last 12 files read with up to 4 ranges each (a copy of the read
+  ledger's records, which the compaction clears);
+- running jobs (this session's first; jobs started through MCP carry the
+  MCP server's id, so they are listed as "another session");
+- the current step of the newest open DevSession in the root (best effort:
+  nothing links a Codex session to a DevSession).
+
+It lives in the daemon's memory, keyed like the read ledger (session id,
+`transcript_path`), survives `PreCompact` and `SessionStart:compact`, and
+goes with `SessionEnd` or a daemon restart. The root's failing tests are
+also kept in `.ozagia/working_set/tests.json` for the next session's brief.
+The MCP tool `dev_working_set` returns the same text; an MCP server does
+not know Codex's session id, so without `session` it answers for the
+session whose working set changed last in the repository. Counters:
+`stats.working_sets_served`, `working_set_chars`, `session_briefs_served`.
 
 ## Patch check
 

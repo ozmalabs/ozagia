@@ -50,7 +50,12 @@ How this was established, offline only:
   profile hooks, converting the object form and mapping the CLI 2.x names
   (`agentSpawn` → `SessionStart`, `preToolUse` → `PreToolUse`, ...).
   Its trigger list has no `PreCompact`/`PostCompact` (the docs say they
-  need CLI 3.1.0).
+  need CLI 3.1.0). A hook document with a trigger it does not know is
+  skipped with a warning ("Hook trigger is not a recognized name") and the
+  rest of the file loads (the schema takes any non-empty `trigger`), so
+  install puts `PostCompact` in the hook file: inert on 2.37, live on
+  3.1.0+. The CLI 2.x agent validator rejects unknown object-form
+  triggers, so profiles do not get it.
 - The Rust binary (`kiro-cli-chat`) has no `.kiro/hooks` path; its agent
   schema knows `agentSpawn`, `userPromptSubmit`, `preToolUse`,
   `postToolUse`, `stop`, and reads both `hooks` shapes ("Schema-only
@@ -130,12 +135,15 @@ The hook file:
     {"name": "ozagia-pre-read",   "trigger": "PreToolUse",  "matcher": "read",  ...},
     {"name": "ozagia-post-read",  "trigger": "PostToolUse", "matcher": "read",  ...},
     {"name": "ozagia-post-write", "trigger": "PostToolUse", "matcher": "write", ...},
-    {"name": "ozagia-post-shell", "trigger": "PostToolUse", "matcher": "shell", ...}
+    {"name": "ozagia-post-shell", "trigger": "PostToolUse", "matcher": "shell", ...},
+    {"name": "ozagia-post-compact", "trigger": "PostCompact", ...}
   ]
 }
 ```
 
-The profile has the same six hooks with the triggers `agentSpawn`,
+`ozagia-post-compact` is skipped by the 2.37 V3 loader (it does not know
+the trigger) and runs on CLI 3.1.0 and later. The profile has the first six
+hooks with the triggers `agentSpawn`,
 `preToolUse` and `postToolUse`. The matchers are Kiro's tool categories:
 in V3 they match a tool's tags (`read`: file reads, grep, file search,
 directory listing; `write`: fs_write, fs_append, str_replace; `shell`:
@@ -175,11 +183,12 @@ stops after 30 minutes without requests (`OZAGIA_DAEMON_IDLE_TIMEOUT`).
 
 | Kiro event | tools | what ozagia does | what Kiro gets |
 |---|---|---|---|
-| `SessionStart` (V3), `agentSpawn` (V1/V2) | | In a git work tree only: starts the daemon (0.5 s budget) and prints the brief: dirty files (at most 15), the last 3 commits, the MCP tools to prefer; at most 1,500 characters. | stdout, exit 0: added to the agent's context |
+| `SessionStart` (V3), `agentSpawn` (V1/V2) | | In a git work tree only: starts the daemon (0.5 s budget) and prints the brief "since the last session": dirty files (at most 15), the last 3 commits, the tests failing at the last pytest run, running jobs (from a running daemon), the MCP tools to prefer; at most 1,500 characters. | stdout, exit 0: added to the agent's context |
 | `PreToolUse` | shell: `execute_bash`, `execute_pwsh`, `execute_cmd`, `shell` | A ref-moving git command (`ozagia.intent.shell.classify` is `git_refs`) is refused, locally. | exit 2, the reason on stderr: the tool is blocked and the model gets the reason |
 | `PreToolUse` | read: `read_file`, `readFile`, `read_files`, `fs_read`, `read` | When every requested path is a node key (`sym:`, `test:`, `doc:`, `text:`, `json:`, `yaml:`, `toml:`; also after `<cwd>/`), the daemon answers each (`tool` op, `read`, at most 8). If it handled any, the built-in is blocked with the answers. Real paths, mixed batches and image reads run as usual. | exit 2, the node text on stderr |
 | `PostToolUse` | see the mapping below | `after` with the neutral tool and input and the tool's result; the daemon re-ingests changed files and counts the call. | stdout, when the `append` is not empty (but see "Limits") |
-| `PreCompact`, `PostCompact` | | Nothing yet: `hook.compaction_context` is a stub for the compaction working set (W8). Install registers neither (2.37 has neither). | nothing |
+| `PostCompact` (CLI 3.1.0+) | | `hook.compaction_context`: asks a running daemon (3 s, no autostart) for the session's working set (`working_set` op: edited files and keys, failing tests and their rerun command, running jobs, the DevSession step, recent reads; see docs/codex.md, "Working set"), then sends `session_event` `compact`. Install registers it in the V3 hook file only (see below). | stdout, at most 3,000 characters (Kiro's cap), added after the summary |
+| `PreCompact` | | Nothing, and not registered: its stdout would be summarised away, and a non-zero exit would cancel the compaction. | nothing |
 
 Every request has `harness: "kiro"` and `session` = `session_id`; the
 daemon counts requests by harness (`stats.by_harness`).

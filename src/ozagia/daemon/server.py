@@ -71,6 +71,14 @@ clears or drops them, `read_check` answers a hook's PreToolUse.
 `outlines_served`, `bytes_saved` (from the answers' `meta.repeat` and
 `meta.bytes_saved`) and `ledger` (sessions, evictions, events).
 
+Working set (`ozagia.core.working_set`): after each `tool`/`after` answer
+the daemon notes in the session state's `work` what it edited (handled
+`edit`/`write`/key edits; `after_refresh` with `meta.changed_paths`) and
+which tests a pytest run failed (also in the root's test record in the
+state dir); the ledger copies reads into it. The `working_set` op renders
+it; `stats` adds `working_sets_served`, `working_set_chars` and
+`session_briefs_served`.
+
 The socket is created mode 0600. A socket file left at the path by a daemon
 that no longer answers `ping` is replaced; a live daemon or a non-socket
 file at the path is an error.
@@ -94,6 +102,8 @@ from ozagia.daemon import jobs as J
 from ozagia.daemon import protocol as P
 
 JOURNAL_NAME = "daemon_journal.jsonl"
+# Handled `tool` intents that edit a file (for the working set).
+EDIT_INTENTS = frozenset({"edit", "write", "edit_key"})
 # Keys kept per journal record.
 JOURNAL_KEYS = 20
 # Distinct shell passthrough reasons kept, and shown in `stats`.
@@ -263,6 +273,12 @@ class DaemonState:
         self.ms_count = 0
         self.server: socketserver.BaseServer | None = None
         self.jobs = J.JobTable(root, base_env=test_env)
+        from ozagia.core.working_set import TestRecord
+        # The root's failing tests across sessions (`working_set` with
+        # `since`), persisted in the state dir.
+        self.test_record = TestRecord(root)
+        self.working = {"working_sets_served": 0, "working_set_chars": 0,
+                        "session_briefs_served": 0}
 
     # -- requests ------------------------------------------------------------ #
     def dispatch(self, msg: dict[str, Any]) -> dict[str, Any]:
@@ -319,6 +335,8 @@ class DaemonState:
             return {"ok": True, **body}
         if op in J.OPS:
             return self.jobs.dispatch(op, msg)
+        if op == "working_set":
+            return self.working_set(msg)
         if op == "hint":
             prompt = msg.get("prompt")
             history = msg.get("history", [])
@@ -411,6 +429,7 @@ class DaemonState:
                 if hints:
                     body = {**body, "append": "\n".join(
                         [x for x in [body.get("append") or ""] if x] + hints)}
+            self._observe(op, tool, inp, msg, body, state)
             return {"ok": True, **self._job_meta(body)}
         return {"ok": False, "error": f"unknown op {op!r}"}
 
@@ -436,6 +455,138 @@ class DaemonState:
         if msg.get("reset_pending") is True:
             self.sessions.event(harness, session, "compact")
         return st
+
+    # -- the working set (`ozagia.core.working_set`) ------------------------ #
+    def _rel(self, path: Any) -> str | None:
+        """`path` (absolute, or relative to the root) relative to the root,
+        or None for a node key, an empty path or one outside the root."""
+        if not isinstance(path, str) or not path:
+            return None
+        from ozagia.core.working_set import KEY_PREFIXES
+        if path.startswith(KEY_PREFIXES + ("file:",)):
+            return None
+        p = Path(path)
+        full = os.path.realpath(p if p.is_absolute() else self.root / p)
+        rel = os.path.relpath(full, self.root).replace(os.sep, "/")
+        return None if rel.startswith("..") or rel == "." else rel
+
+    def _observe(self, op: str, tool: str, inp: Any, msg: dict[str, Any],
+                 body: dict[str, Any], state: Any) -> None:
+        """Note in the session's working set what a `tool`/`after` answer
+        shows it edited (handled edits and writes, `after` refreshes) and
+        which tests a pytest run failed (also in the root's test record).
+        Never raises."""
+        try:
+            from ozagia.core import working_set as W
+            if not isinstance(inp, dict):
+                return
+            meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
+            it = meta.get("intent")
+            keys = [k for k in meta.get("keys") or [] if isinstance(k, str)]
+            work = state.work if state is not None else None
+            files: list[str | None] = []
+            edited = False
+            if (op == "tool" and body.get("handled") and not body.get("is_error")
+                    and it in EDIT_INTENTS):
+                edited = True
+                files.append(self._rel(inp.get("path", inp.get("filePath"))))
+                if it == "edit_key":
+                    files.append(W.key_file(str(inp.get("key") or "")))
+            elif op == "after" and it == "after_refresh":
+                edited = True
+                if tool in ("edit", "write"):
+                    files.append(self._rel(inp.get("path", inp.get("filePath"))))
+                files.extend(p for p in meta.get("changed_paths") or []
+                             if isinstance(p, str))
+            if work is not None and edited:
+                work.note_edit([f for f in files if f], keys)
+            command = inp.get("command")
+            if tool != "shell" or not isinstance(command, str) or "pytest" not in command:
+                return
+            if op == "tool":
+                if not body.get("handled"):
+                    return
+                text = str(body.get("output") or "")
+            else:
+                out = msg.get("output")
+                text = (out if isinstance(out, str) else "") + "\n" + str(
+                    body.get("append") or "")
+            from ozagia.intent.shell import command_heads
+            run = W.pytest_run(command, command_heads(command), text,
+                               workdir=inp.get("workdir"), root=self.root)
+            if run is None:
+                return
+            if work is not None:
+                work.note_tests(run)
+            self.test_record.apply(run)
+        except Exception as e:  # noqa: BLE001 - bookkeeping only
+            print(f"working set update failed: {type(e).__name__}: {e}",
+                  file=sys.stderr, flush=True)
+
+    def _running_jobs(self) -> list[dict[str, Any]]:
+        try:
+            return [self.jobs.public(r) for r in self.jobs.running()]
+        except Exception:  # noqa: BLE001 - the text goes without jobs
+            return []
+
+    def working_set(self, msg: dict[str, Any]) -> dict[str, Any]:
+        """The `working_set` op: the session's working set as text, or with
+        `since: true` the session-start brief (`ozagia.core.working_set`).
+        Without `session`, the session whose working set changed last (of
+        `harness`, when given) is used (`meta.resolved: "latest"`)."""
+        from ozagia.core import working_set as W
+        harness = msg.get("harness") if isinstance(msg.get("harness"), str) and msg.get(
+            "harness") else None
+        session = msg.get("session") if isinstance(msg.get("session"), str) and msg.get(
+            "session") else None
+        since = msg.get("since") is True
+        cap = W.BRIEF_MAX_CHARS if since else W.TEXT_MAX_CHARS
+        raw = msg.get("max_chars")
+        if isinstance(raw, int) and not isinstance(raw, bool):
+            cap = max(200, min(raw, cap))
+        if since:
+            tests, last = self.test_record.view()
+            text = W.session_brief(self.root, cap, tests=tests, last_test=last,
+                                   jobs=self._running_jobs())
+            with self._stats_lock:
+                self.working["session_briefs_served"] += 1
+            return {"ok": True, "text": text,
+                    "meta": {"intent": "session_brief", "keys": [],
+                             "tests": len(tests), "chars": len(text)}}
+        resolved = "explicit"
+        if session is None:
+            got = self.sessions.latest(harness)
+            resolved = "latest" if got else "none"
+            if got:
+                harness, session = got
+        states = (self.sessions.states(harness, session, msg.get("sub"))
+                  if session else [])
+        view = W.merge_views([st.work.view() for st in states])
+        text = ""
+        jobs: list[dict[str, Any]] = []
+        if states:
+            harness = harness or states[0].harness
+            jobs = self._running_jobs()
+            plan = W.devsession_line(self.root)
+
+            def exists(key: str) -> bool:
+                if not key.startswith(("sym:", "test:")):
+                    return True
+                return self.memory.node_by_key(key) is not None
+            with self._graph_lock():
+                text = W.working_set_text(
+                    view, harness=harness, session=session,
+                    compactions=max(st.compactions for st in states),
+                    jobs=jobs, plan=plan, key_exists=exists, max_chars=cap)
+        if text:
+            with self._stats_lock:
+                self.working["working_sets_served"] += 1
+                self.working["working_set_chars"] += len(text)
+        return {"ok": True, "text": text,
+                "meta": {"intent": "working_set" if text else "working_set_empty",
+                         "keys": view.keys[:JOURNAL_KEYS], "harness": harness,
+                         "session": session, "resolved": resolved,
+                         "jobs": len(jobs), **W.text_meta(view, text)}}
 
     def _job_meta(self, body: dict[str, Any]) -> dict[str, Any]:
         """`body` with `meta.jobs_running` and `meta.job_seq` while a job
@@ -660,6 +811,10 @@ class DaemonState:
                 **{k: job_stats[k] for k in ("jobs_started", "waits",
                                             "wait_seconds", "polls_avoided")},
                 "jobs": job_stats,
+                # The working set (`ozagia.core.working_set`): working sets
+                # handed back after a compaction (or to dev_working_set),
+                # their characters, and session-start briefs from the daemon.
+                **self.working,
                 "permission_assert": _last(self.hellos, "permission_assert"),
                 "codemode_tools": sorted({
                     name for h in self.hellos

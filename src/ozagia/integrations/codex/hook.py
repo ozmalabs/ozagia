@@ -34,10 +34,15 @@ reference (https://learn.chatgpt.com/docs/hooks, see docs/codex.md).
   `additionalContext` (with the ledger's `unchanged since read N` note).
 - `PostToolUse` for `apply_patch`: send `after` as `patch` ({patch}); the
   daemon re-ingests the changed files and returns the graph delta.
-- `SessionStart`: a short brief (dirty files, recent commits, the ozagia MCP
-  tools to prefer) as `additionalContext`, and a start of the daemon so it
-  is loaded by the first tool call. Outside a git work tree it prints
-  nothing. It also sends `session_event`: `compact` for source "compact",
+- `SessionStart`: a short brief "since the last session" (dirty files,
+  recent commits, tests failing at the last pytest run, running jobs, the
+  ozagia MCP tools to prefer; `ozagia.core.working_set.session_brief`) as
+  `additionalContext`, and a start of the daemon so it is loaded by the
+  first tool call. With source "compact", the session's working set
+  instead (files and keys it edited, failing tests and their rerun
+  command, jobs, recent reads; at most `WORKING_SET_MAX_CHARS`, under
+  Codex's 2,500-token hook output cap), or the brief when the daemon has
+  none. Outside a git work tree it prints nothing. It also sends `session_event`: `compact` for source "compact",
   `start` otherwise, which clears the session's read ledger; it carries
   `compaction_hook: true` (PreCompact is installed with it).
 - `PreCompact`: `session_event` `compact`; `SessionEnd`: `end`. A failed
@@ -59,12 +64,12 @@ is logged as one JSON line to `<state dir>/codex_hook.log`.
 from __future__ import annotations
 
 import os
-import subprocess
 import time
 from pathlib import Path
 from typing import Any, TextIO
 
 from ozagia.daemon import protocol
+from ozagia.core import working_set as W
 from ozagia.integrations import hookcore
 from ozagia.intent.patch import check_patch, patch_text
 
@@ -81,12 +86,9 @@ PS_TIMEOUT_S = 3
 LOG_NAME = "codex_hook.log"
 HARNESS = "codex"
 # The SessionStart brief stays under this many characters.
-BRIEF_MAX_CHARS = 1500
-BRIEF_DIRTY_FILES = 15
-BRIEF_COMMITS = 3
+BRIEF_MAX_CHARS = W.BRIEF_MAX_CHARS
 # SessionStart only kicks the daemon off; it does not wait for the load.
 SESSION_START_BUDGET_S = 0.5
-GIT_TIMEOUT_S = 3
 # After the alarm fired during the SessionStart daemon start, the brief gets
 # this long (its git calls take GIT_TIMEOUT_S each at most); HOOK_ALARM_S
 # plus this stays under HOOK_TIMEOUT_S.
@@ -99,16 +101,14 @@ SESSION_EVENT_TIMEOUT_S = 1.0
 PATCH_DAEMON_TIMEOUT_S = 1.5
 PATCH_REPLY_MAX_CHARS = 7000
 
-MCP_TOOLS_LINE = (
-    "Prefer the ozagia MCP tools to reading whole files: dev_symbol / dev_node "
-    "(one symbol by key, sym:path::name), dev_outline, dev_impact before "
-    "changing a shared module, dev_context to start a task.")
-# Added to the brief only when the project enables jobs (`[jobs] enabled`).
-JOBS_LINE = (
-    "Long commands: job_start, then job_wait (blocks until exit or a log line, "
-    "returns only new output) instead of polling write_stdin, sleep or ps. "
-    "Jobs run outside the Codex sandbox and approvals, with the ozagia "
-    "daemon's privileges.")
+# The brief's lines on the MCP tools and jobs (`ozagia.core.working_set`).
+MCP_TOOLS_LINE = W.MCP_TOOLS_LINE
+JOBS_LINE = W.JOBS_LINE
+# SessionStart after a compaction: the working set, at most this many
+# characters (about 2,000 tokens; Codex shows 2,500 tokens of hook output
+# without `additionalContextLimit`), asked of the daemon for this long.
+WORKING_SET_MAX_CHARS = W.TEXT_MAX_CHARS
+WORKING_SET_TIMEOUT_S = 3.0
 
 
 # --------------------------------------------------------------------------- #
@@ -146,46 +146,11 @@ def map_tool(tool_name: str, tool_input: Any,
 # --------------------------------------------------------------------------- #
 # SessionStart brief
 # --------------------------------------------------------------------------- #
-def _git(root: Path, *args: str) -> str | None:
-    try:
-        proc = subprocess.run(["git", "-C", str(root), *args], capture_output=True,
-                              text=True, timeout=GIT_TIMEOUT_S,
-                              stdin=subprocess.DEVNULL, check=False)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    return proc.stdout if proc.returncode == 0 else None
-
-
 def session_brief(root: Path, max_chars: int = BRIEF_MAX_CHARS) -> str:
-    """Dirty files, the last commits and the MCP tools to prefer."""
-    lines = ["[ozagia] session brief"]
-    branch = _git(root, "rev-parse", "--abbrev-ref", "HEAD")
-    status = _git(root, "status", "--porcelain=v1", "--untracked-files=normal")
-    if status is not None:
-        dirty = [x for x in status.splitlines() if x.strip()]
-        head = f"branch {branch.strip()}; " if branch else ""
-        if dirty:
-            shown = dirty[:BRIEF_DIRTY_FILES]
-            more = len(dirty) - len(shown)
-            lines.append(f"{head}{len(dirty)} changed file(s):")
-            lines.extend(f"  {x}" for x in shown)
-            if more:
-                lines.append(f"  ... and {more} more")
-        else:
-            lines.append(f"{head}working tree clean")
-    log = _git(root, "log", f"-{BRIEF_COMMITS}", "--format=%h %s")
-    if log and log.strip():
-        lines.append("recent commits:")
-        lines.extend(f"  {x[:120]}" for x in log.splitlines() if x.strip())
-    from ozagia.daemon.jobs import jobs_enabled
-    tools = MCP_TOOLS_LINE + (" " + JOBS_LINE if jobs_enabled(root) else "")
-    lines.append(tools)
-    text = "\n".join(lines)
-    if len(text) <= max_chars:
-        return text
-    # Keep the tools line; cut the middle.
-    keep = max_chars - len(tools) - len("\n...\n")
-    return text[:max(keep, 0)].rstrip() + "\n...\n" + tools
+    """Dirty files, the last commits, the tests failing at the last pytest
+    run, running jobs and the MCP tools to prefer (`hookcore.session_brief`:
+    from the daemon when one answers, else from git and the state dir)."""
+    return hookcore.session_brief(root, max_chars)
 
 
 # --------------------------------------------------------------------------- #
@@ -314,9 +279,16 @@ def handle(payload: dict[str, Any], root: Path) -> dict[str, Any] | None:
             hookcore.log_failure(root, LOG_NAME, payload, exc)
         if not in_repo:
             return None
+        # After a compaction, the session's working set (it survives the
+        # ledger reset below); the brief when the daemon has none.
+        text = None
+        if payload.get("source") == "compact":
+            text = hookcore.working_set(root, HARNESS, session, sub,
+                                        max_chars=WORKING_SET_MAX_CHARS,
+                                        timeout=WORKING_SET_TIMEOUT_S)
         # The brief first: a failed event writes a marker in the state dir,
         # which would show up in the brief's `git status`.
-        brief = session_brief(root)
+        brief = text or session_brief(root)
         try:
             hookcore.session_event(root, HARNESS, session,
                                    hookcore.start_event(payload.get("source")),

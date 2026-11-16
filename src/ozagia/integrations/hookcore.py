@@ -30,6 +30,10 @@ pieces here do not depend on a harness's tool names or output envelope:
   compaction events), and carry a reset that could not be sent
   (`reset_pending`, a marker file in the state dir) on the session's next
   ledger request.
+- `working_set`, `session_brief`: the session's working set after a
+  compaction, and the session-start brief "since the last session"
+  (`ozagia.core.working_set`), from the daemon's `working_set` op; the
+  brief falls back to one built from git when no daemon answers.
 """
 from __future__ import annotations
 
@@ -399,6 +403,57 @@ def start_event(source: Any) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# the working set (`ozagia.core.working_set`)
+# --------------------------------------------------------------------------- #
+WORKING_SET_TIMEOUT_S = 3.0
+# A session-start brief from the daemon gets this long, else the hook
+# builds it without the daemon's tests and jobs.
+BRIEF_DAEMON_TIMEOUT_S = 1.0
+
+
+def working_set(root: Path, harness: str, session: Any, sub: Any = None, *,
+                max_chars: int | None = None,
+                timeout: float = WORKING_SET_TIMEOUT_S) -> str | None:
+    """The daemon's working set for (harness, session, sub) as text (the
+    `working_set` op), or None: no session, nothing tracked, or no daemon
+    (none is started for this: a new daemon knows nothing of the session)."""
+    if not isinstance(session, str) or not session:
+        return None
+    msg: dict[str, Any] = {"id": 1, "op": "working_set", "harness": harness,
+                           "session": session}
+    if isinstance(sub, str) and sub:
+        msg["sub"] = sub
+    if max_chars is not None:
+        msg["max_chars"] = int(max_chars)
+    try:
+        resp = daemon_request(protocol.socket_path(root), msg, timeout)
+    except (OSError, HookError, ValueError):
+        return None
+    text = resp.get("text")
+    return text if isinstance(text, str) and text else None
+
+
+def session_brief(root: Path, max_chars: int | None = None, *,
+                  timeout: float = BRIEF_DAEMON_TIMEOUT_S) -> str:
+    """The session-start brief ("since the last session":
+    `ozagia.core.working_set.session_brief`): from a running daemon (with
+    its running jobs and the root's failing tests), else built here from
+    git and the persisted test record. Never starts a daemon."""
+    from ozagia.core import working_set as W
+    cap = W.BRIEF_MAX_CHARS if max_chars is None else int(max_chars)
+    msg: dict[str, Any] = {"id": 1, "op": "working_set", "since": True,
+                           "max_chars": cap}
+    try:
+        resp = daemon_request(protocol.socket_path(root), msg, timeout)
+        text = resp.get("text")
+        if isinstance(text, str) and text.startswith(W.BRIEF_HEADER):
+            return text[:cap]
+    except (OSError, HookError, ValueError):
+        pass
+    return W.session_brief(root, cap)
+
+
+# --------------------------------------------------------------------------- #
 # the fail-open main
 # --------------------------------------------------------------------------- #
 def root_for(payload: Any) -> Path:
@@ -519,4 +574,5 @@ __all__ = ["AUTOSTART_BUDGET_S", "DAEMON_TIMEOUT_S", "AutostartRefused", "HookBl
            "autostart_enabled", "daemon_request", "daemon_request_autostart",
            "ensure_daemon", "git_ref_moving", "git_refusal_reason", "in_work_tree",
            "ledger_request", "log_failure", "maybe_read", "node_key", "rearm_alarm", "repeat_stub",
-           "response_text", "root_for", "run_hook", "session_event", "start_event"]
+           "response_text", "root_for", "run_hook", "session_brief", "session_event",
+           "start_event", "working_set"]

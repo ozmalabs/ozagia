@@ -79,6 +79,25 @@ Requests (`op`):
       call with it as the reason. Nothing is recorded (the call's `after`
       records it). Takes the graph lock and honours `deadline_ms`.
 
+    {"id": 9, "op": "working_set", "harness": "codex", "session": "...",
+     "sub"?: "...", "max_chars"?: 7000, "since"?: false}
+      -> {"id": 9, "ok": true, "text": "<[ozagia] working set ...>" | "",
+          "meta": {"intent": "working_set"|"working_set_empty"|"session_brief",
+                   "keys", "harness", "session", "resolved", "files",
+                   "edited_keys", "tests", "reads", "jobs", "chars"}}
+      The session's working set (`ozagia.core.working_set`): files and keys
+      it edited, tests failing in its last pytest runs with a rerun
+      command, running jobs, the newest open DevSession's step, recent
+      reads; at most `max_chars` (default and maximum 7,000). It survives
+      `session_event` `compact`/`start`. With `sub`, that sub-key's state
+      when it has one, else all of the session's. Without `session`, the
+      session whose working set changed last (of `harness`, when given;
+      `meta.resolved: "latest"`): the MCP tool `dev_working_set` uses this,
+      since an MCP server does not know the harness's session id. `text` is
+      empty when the daemon has nothing for the session. With
+      `since: true`, the session-start brief instead (git status, recent
+      commits, the root's failing tests, running jobs; at most 1,500).
+
 Sessions. `tool`, `after` and `read_check` with a `session` use that
 session's read ledger (`ozagia.intent.ledger`), keyed by (harness, session,
 `sub`). `sub` is optional: agents that share a session id send something

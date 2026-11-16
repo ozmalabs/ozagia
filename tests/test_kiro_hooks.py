@@ -401,7 +401,7 @@ def test_session_start_brief_is_plain_text(repo, sockdir, name):
         json.loads(proc.stdout)
 
 
-@pytest.mark.parametrize("name", ["PreCompact", "PostCompact", "Stop", "UserPromptSubmit",
+@pytest.mark.parametrize("name", ["PreCompact", "Stop", "UserPromptSubmit",
                                   "SomethingNew"])
 def test_other_events_print_nothing(repo, daemon, name):
     stub = daemon()
@@ -410,10 +410,14 @@ def test_other_events_print_nothing(repo, daemon, name):
     assert stub.requests == []
 
 
-def test_compaction_stub_returns_nothing(repo):
-    assert hook.compaction_context("PostCompact", {"summary": "s"}, repo) is None
-    assert all(trigger not in ("PreCompact", "PostCompact")
-               for _, trigger, _, _ in inst.HOOKS)
+def test_compaction_triggers_are_v3_only():
+    # PostCompact goes in the V3 hook file only (2.37's V3 loader skips an
+    # unknown trigger; the CLI 2.x validator rejects one); PreCompact nowhere.
+    assert all({v3, cli}.isdisjoint({"PreCompact", "PostCompact", "postCompact"})
+               for _, v3, cli, _ in inst.HOOKS)
+    assert [t for _, t, _ in inst.V3_ONLY_HOOKS] == ["PostCompact"]
+    assert "postCompact" not in json.dumps(inst.legacy_hooks(PY))
+    assert all(h["trigger"] != "PostCompact" for h in inst.profile_hooks(PY))
 
 
 @pytest.mark.parametrize("stdin", ["", "not json", "[1, 2]"])
@@ -556,9 +560,10 @@ def test_install_v3_writes_hook_file_and_mcp(tmp_path):
     hooks = data["hooks"]
     assert [(h["trigger"], h.get("matcher")) for h in hooks] == [
         ("SessionStart", None), ("PreToolUse", "shell"), ("PreToolUse", "read"),
-        ("PostToolUse", "read"), ("PostToolUse", "write"), ("PostToolUse", "shell")]
+        ("PostToolUse", "read"), ("PostToolUse", "write"), ("PostToolUse", "shell"),
+        ("PostCompact", None)]
     for h in hooks:
-        assert set(h) <= V3_FIELDS and h["trigger"] in V3_TRIGGERS
+        assert set(h) <= V3_FIELDS and h["trigger"] in V3_TRIGGERS | {"PostCompact"}
         assert h["action"] == {"type": "command", "command": CMD}
         assert h["timeout"] == hook.HOOK_TIMEOUT_S
         assert h["name"].startswith("ozagia-")
@@ -577,9 +582,10 @@ def test_install_is_idempotent_and_updates_python(tmp_path):
     inst.install(tmp_path, python=PY, fmt="both")
     assert [p.read_bytes() for p in files] == first
     inst.install(tmp_path, python="/new dir/python", fmt="both")
-    for p in files[:2]:
+    for p, n in zip(files[:2], (len(inst.HOOKS) + len(inst.V3_ONLY_HOOKS),
+                                len(inst.HOOKS))):
         hooks = _json(p)["hooks"]
-        assert len(hooks) == len(inst.HOOKS)
+        assert len(hooks) == n
         assert all(h["action"]["command"] ==
                    "'/new dir/python' -m ozagia.integrations.kiro hook" for h in hooks)
     assert _json(_mcp(tmp_path))["mcpServers"]["ozagia"]["command"] == "/new dir/python"
@@ -597,7 +603,8 @@ def test_install_keeps_other_hooks_and_servers(tmp_path):
     _mcp(tmp_path).write_text(json.dumps(mcp))
     inst.install(tmp_path, python=PY)
     data = _json(_hook_file(tmp_path))
-    assert data["hooks"][0] == other_hook and len(data["hooks"]) == 1 + len(inst.HOOKS)
+    assert data["hooks"][0] == other_hook and len(data["hooks"]) == (
+        1 + len(inst.HOOKS) + len(inst.V3_ONLY_HOOKS))
     merged = _json(_mcp(tmp_path))
     assert merged["note"] == "team servers"
     assert list(merged["mcpServers"]) == ["docs", "ozagia"]

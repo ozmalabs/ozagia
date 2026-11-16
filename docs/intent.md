@@ -219,6 +219,16 @@ in the state dir (`ledger_reset/`), the plugin keeps the session in
 memory, and the session's next ledger request carries `reset_pending:
 true`, which the daemon applies as a `compact` before the request.
 
+A compaction clears the ledger but not the session's working set
+(`ozagia.core.working_set`): the files and keys it edited, the tests its
+last pytest runs failed, and a copy of its most recent reads. The daemon's
+`working_set` op renders it as an `[ozagia] working set` block (at most
+7,000 characters), which the compaction hooks hand back: OpenCode's
+`compaction` hook pushes it onto the summary request's system prompt and
+adds it once to the next request, Codex and Claude Code return it from
+`SessionStart` with source `compact`, Kiro prints it on `PostCompact`. The
+MCP tool `dev_working_set` returns it too (docs/codex.md, "Working set").
+
 A `write` that replaces an existing file of which the session's ledger
 holds only part (an outline's head, some ranges) of the current text
 appends `[ozagia] warning: <rel> was replaced as a whole, but this session

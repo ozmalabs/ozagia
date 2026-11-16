@@ -734,6 +734,33 @@ _TOOLS.extend([
     },
 ])
 
+# The working set (`ozagia.core.working_set`), kept by the daemon per
+# harness session. An MCP server does not learn the harness's session id,
+# so without `session` the daemon answers for the session whose working set
+# changed last in this root (of `harness`, when given); `since: true` gives
+# the session-start brief instead.
+_TOOLS.append({
+    "name": "dev_working_set",
+    "description": (
+        "What this agent session was working on, kept by the ozagia daemon "
+        "across context compaction: files and node keys it edited, tests that "
+        "failed in its last pytest runs (with the command that reruns them), "
+        "running background jobs, the current DevSession step, and the files "
+        "and line ranges it read last. Use it after a compaction or when "
+        "resuming, instead of re-reading files. Without session it answers "
+        "for the most recently active session in this repository; "
+        "since=true gives the session-start brief (dirty files, recent "
+        "commits, tests failing at the last run, running jobs)."),
+    "inputSchema": _schema({
+        "session": {"type": "string",
+                    "description": "The harness's session id (default: the most recently active session)."},
+        "harness": {"type": "string",
+                    "description": "opencode, claude, codex or kiro (default: any)."},
+        "since": {"type": "boolean", "default": False,
+                  "description": "The session-start brief instead of a session's working set."},
+    }),
+})
+
 
 # --------------------------------------------------------------------------- #
 # dispatch
@@ -875,6 +902,7 @@ class DevMemoryServer:
             "job_list": self._job_list,
             "job_log": self._job_log,
             "job_stop": self._job_stop,
+            "dev_working_set": self._working_set,
         } if mode in {"coding", "combined"} else {})
         if self.mem is not None:
             present = {n.get("type") for n in self.mem.nodes.values()}
@@ -1312,6 +1340,29 @@ class DevMemoryServer:
         if isinstance(grace, (int, float)) and not isinstance(grace, bool):
             a = {**a, "grace_s": min(max(float(grace), 0.0), MCP_STOP_GRACE_MAX_S)}
         return self._job("job_stop", a)
+
+    def _daemon(self, op: str, fields: dict[str, Any]) -> Any:
+        """One daemon op (started when none answers), its reply without `id`."""
+        from ozagia.daemon.jobcli import JobUnavailable, request
+        try:
+            reply = request(self.workspace, op, fields)
+        except JobUnavailable as e:
+            raise RuntimeError(str(e)) from None
+        reply.pop("id", None)
+        return reply
+
+    def _working_set(self, a: dict[str, Any]) -> Any:
+        fields = {k: a.get(k) for k in ("session", "harness") if a.get(k)}
+        if a.get("since") is True:
+            fields["since"] = True
+        reply = self._daemon("working_set", fields)
+        if not reply.get("text"):
+            who = (f"session {a['session']}" if a.get("session")
+                   else "any session in this repository")
+            reply["text"] = (f"[ozagia] no working set for {who}: the daemon has "
+                             "seen no edits, test runs or reads for it (it "
+                             "keeps them only while it runs).")
+        return reply
 
     # -- JSON-RPC ---------------------------------------------------------- #
     def handle(self, msg: Any) -> dict[str, Any] | None:

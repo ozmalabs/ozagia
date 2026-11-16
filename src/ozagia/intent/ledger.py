@@ -83,6 +83,12 @@ applies it as a `compact` first.
 Bounds: `MAX_SESSIONS` sessions (least recently used dropped first),
 `MAX_FILES` files per session (least recently read dropped), `MAX_RANGES`
 ranges per file (oldest dropped).
+
+Each state also carries the session's working set (`work`,
+`ozagia.core.working_set.WorkingSet`): what it edited, the tests it last
+failed, and a copy of its most recent reads. A `session_event` `compact` or
+`start` clears the ledger but not the working set, which the compaction
+hooks hand back (the daemon's `working_set` op); `end` drops both.
 """
 from __future__ import annotations
 
@@ -186,6 +192,9 @@ class SessionState:
         self.files: OrderedDict[str, list[Read]] = OrderedDict()
         # token -> (rel, a, b, sha, call) of served reads awaiting an ack.
         self.staged: OrderedDict[str, tuple[str, int, int, str, int]] = OrderedDict()
+        from ozagia.core.working_set import WorkingSet
+        # Not cleared by a compaction (`SessionStore.event`).
+        self.work = WorkingSet()
 
     # -- call index ---------------------------------------------------------- #
     def tick(self, *, then_after: bool = False) -> int:
@@ -235,6 +244,7 @@ class SessionState:
         self.files[rel] = [*kept, rec]
         while len(self.files) > MAX_FILES:
             self.files.popitem(last=False)
+        self.work.note_read(rel, a, b)
         return rec
 
     def stage(self, spec: ReadSpec) -> str:
@@ -289,6 +299,7 @@ class SessionState:
                     "reads": self.reads, "calls": self.calls,
                     "compactions": self.compactions,
                     "staged": len(self.staged),
+                    "work": self.work.counts(),
                     "files": {rel: [(r.n, r.a, r.b, r.sha[:12]) for r in rs]
                               for rel, rs in self.files.items()}}
 
@@ -377,6 +388,34 @@ class SessionStore:
             if event == "end":
                 self._caps.pop((harness, session), None)
             return len(keys)
+
+    def states(self, harness: str | None, session: str | None,
+               sub: Any = None) -> list[SessionState]:
+        """The existing states of (harness, session): the one of `sub` when
+        given and present, else every sub-key's. Creates nothing."""
+        with self.lock:
+            got = [st for k, st in self._sessions.items()
+                   if (harness is None or k[0] == harness) and k[1] == session]
+            if isinstance(sub, str) and sub:
+                exact = [st for st in got if st.sub == sub]
+                if exact:
+                    return exact
+            return got
+
+    def latest(self, harness: str | None = None) -> tuple[str, str] | None:
+        """(harness, session) of the state whose working set changed last
+        (of `harness`, when given), or None."""
+        with self.lock:
+            best: tuple[float, str, str] | None = None
+            for (h, s, _sub), st in self._sessions.items():
+                if harness is not None and h != harness:
+                    continue
+                if not any(st.work.counts().values()):
+                    continue
+                t = st.work.last_active
+                if best is None or t >= best[0]:
+                    best = (t, h, s)
+            return None if best is None else (best[1], best[2])
 
     def __len__(self) -> int:
         with self.lock:

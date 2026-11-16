@@ -1029,7 +1029,9 @@ def test_graph_stats_fields_read_counts():
                                            "jobs_started": None,
                                            "job_waits": None,
                                            "job_wait_seconds": None,
-                                           "polls_avoided": None}
+                                           "polls_avoided": None,
+                                           "working_sets_served": None,
+                                           "working_set_chars": None}
     # The daemon's shape: handled {"true": captured, "false": passthrough and
     # expired}; fallbacks = plugin fallbacks + expired + failed (review fix 4).
     assert ae.graph_stats_fields({"hellos": 2, "handled": {"true": 3, "false": 4},
@@ -1053,7 +1055,8 @@ def test_graph_stats_fields_read_counts():
         "stubs_served": 3, "notes_served": 2, "outlines_served": 1,
         "bytes_saved": 900, "patch_checks": 5,
         "patch_misses_caught": 2, "region_replies": 3, "key_edits": 1, "jobs_started": None,
-        "job_waits": None, "job_wait_seconds": None, "polls_avoided": None}
+        "job_waits": None, "job_wait_seconds": None, "polls_avoided": None,
+        "working_sets_served": None, "working_set_chars": None}
     got = ae.graph_stats_fields({"hellos": 1, "shell": {"captured": 4,
                                                         "passthrough": 1}})
     assert (got["shell_captured"], got["shell_passthrough"]) == (4, 1)
@@ -1303,3 +1306,14 @@ def test_tool_env_runs_the_same_ozagia_code(tmp_path, monkeypatch):
     assert env["PYTHONPATH"] == str(ae._ozagia_src())
     env = ae._tool_env(tmp_path, None, tool_python="/other/python")
     assert "PYTHONPATH" not in env
+
+
+def test_graph_stats_fields_and_aggregate_read_working_set_counters():
+    got = ae.graph_stats_fields({"hellos": 1, "working_sets_served": 2,
+                                 "working_set_chars": 4100})
+    assert (got["working_sets_served"], got["working_set_chars"]) == (2, 4100)
+    runs = [{"arm": "graph_intent", "daemon_ok": True, **got},
+            {"arm": "graph_intent", "daemon_ok": True, "working_sets_served": 1,
+             "working_set_chars": None}]
+    row = ae.aggregate(runs, ["graph_intent"])[0]
+    assert (row["total_working_sets_served"], row["total_working_set_chars"]) == (3, 4100)

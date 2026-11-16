@@ -464,7 +464,12 @@ def test_session_start_sends_session_event(repo, daemon, source, event):
                "hook_event_name": "SessionStart", "source": source}
     proc = run_hook(payload, sock=stub.sock)
     assert proc.returncode == 0 and proc.stdout == ""
-    (req,) = stub.requests
+    # After a compaction the hook asks for the working set first (the stub
+    # has none, so nothing is printed).
+    ops = [r["op"] for r in stub.requests]
+    assert ops == (["working_set", "session_event"] if source == "compact"
+                   else ["session_event"])
+    req = stub.requests[-1]
     assert req == {"id": 1, "op": "session_event", "harness": "claude",
                    "session": "abc123", "event": event, "compaction_hook": True}
 

@@ -71,7 +71,7 @@ DESCRIPTION = ("Added by `ozagia install kiro`; removed by "
 # (name, V3 trigger, CLI 2.x trigger, matcher). Matchers are Kiro's tool
 # categories, which every engine knows: shell (execute_bash), read (file
 # reads, grep, file search, directory listing), write (fs_write, fs_append,
-# str_replace). No compaction triggers yet (see hook.compaction_context).
+# str_replace).
 HOOKS: tuple[tuple[str, str, str, str | None], ...] = (
     ("ozagia-session-brief", "SessionStart", "agentSpawn", None),
     ("ozagia-pre-shell", "PreToolUse", "preToolUse", "shell"),
@@ -79,6 +79,15 @@ HOOKS: tuple[tuple[str, str, str, str | None], ...] = (
     ("ozagia-post-read", "PostToolUse", "postToolUse", "read"),
     ("ozagia-post-write", "PostToolUse", "postToolUse", "write"),
     ("ozagia-post-shell", "PostToolUse", "postToolUse", "shell"),
+)
+# Hooks only the V3 hook file gets: (name, trigger, matcher). PostCompact
+# (CLI 3.1.0+) hands back the working set (hook.compaction_context). The
+# 2.37 V3 loader skips a hook whose trigger it does not know, with a
+# warning, and loads the rest of the file; the CLI 2.x agent validator
+# rejects an unknown trigger, so profiles do not get it. PreCompact is not
+# registered: a non-zero exit there would cancel the compaction.
+V3_ONLY_HOOKS: tuple[tuple[str, str, str | None], ...] = (
+    ("ozagia-post-compact", "PostCompact", None),
 )
 
 NEXT_STEPS = """\
@@ -205,8 +214,10 @@ def is_ozagia_hook(hook: Any) -> bool:
 
 def v3_hooks(python: str) -> list[dict[str, Any]]:
     """ozagia's hook documents for a `.kiro/hooks/*.json` file."""
-    return [_hook_doc(name, trigger, matcher, python)
-            for name, trigger, _, matcher in HOOKS]
+    return ([_hook_doc(name, trigger, matcher, python)
+             for name, trigger, _, matcher in HOOKS]
+            + [_hook_doc(name, trigger, matcher, python)
+               for name, trigger, matcher in V3_ONLY_HOOKS])
 
 
 def _hook_doc(name: str, trigger: str, matcher: str | None, python: str
