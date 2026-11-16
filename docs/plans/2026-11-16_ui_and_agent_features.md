@@ -1614,36 +1614,54 @@ The read-only part of 1a landed as new files:
   actions with one-time confirmation, precondition rechecks and a redacted
   audit log (`feat/process-actions`, merged as `abe0e8f`).
 - `addins/opencode/`: read-only OpenCode GUI add-in with server RPC over the
-  ozagia CLIs, graph/status/testing panels, commands, typecheck, 14 offline
-  Node tests and a built CJS bundle (`feat/opencode-addin`, merged as
-  `f052248`).
+  ozagia CLIs, graph/status/testing/research/settings/action-preview panels,
+  commands, typecheck, 17 offline Node tests and a built CJS bundle
+  (`feat/opencode-addin` `f052248`, extensions `0b71bb3`).
+- `core/repo_scan.py`, `repo_scan_cli.py`: advisory graph/history/test scan
+  with 12 ranked opportunity categories (`feat/repo-scan`, merged as
+  `64dc640`).
+- `core/console.py`: loopback-only, token-protected read-only web console
+  with graph/status/worktree/testing/research/action-preview tabs
+  (`feat/standalone-console`, merged as `72698dc`).
+- `core/upstream.py`, `upstream_cli.py`: consent-based, redacted local
+  improvement bundles; no upload (`feat/upstream`, merged as `79c3b3e`).
+- `core/security.py`, `security_cli.py`, worktree secret gate: OWASP/CWE and
+  antipattern rules, dependency inventory, fixed offline tool adapters, and
+  default `commit.secret`/`push.secret` blocking with redacted fingerprints
+  (`feat/security-scan`, merged as `f1254eb`).
+- `core/library_hints.py`, `library_hints_cli.py`, handled-edit hook: stdlib-
+  and dependency-aware reuse hints with local events and feedback
+  (`feat/library-hints`, merged as `d270f20`).
 - Tests for all of the above; docs `worktree.md`, `resources.md`, `files.md`,
   `status.md`, `view.md`, `settings.md`, `code_review.md`, `tasks.md`,
   `task_library.md`, `research_ui.md`, `log_inspect.md`, `models.md`,
-  `testing.md`, `actions.md`, `ocelot.md`, `opencode_addin.md`; console scripts
-  for view, status, settings, tasks, task library, research UI, log inspection,
-  models, testing, actions, review, Ocelot, worktree, resources and files in
+  `testing.md`, `actions.md`, `ocelot.md`, `opencode_addin.md`, `repo_scan.md`,
+  `console.md`, `upstream.md`, `security.md`, `library_hints.md`; console
+  scripts for view, status, settings, tasks, task library, research UI, log
+  inspection, models, testing, actions, repo scan, upstream, console, security,
+  library hints, review, Ocelot, worktree, resources and files in
   `pyproject.toml`.
 
-Checks after all four waves: `3637 passed, 21 skipped`;
+Checks after all five waves: `3737 passed, 21 skipped`;
 `ruff check src tests` passes. The OpenCode add-in additionally passes
-`npm run typecheck`, `node --test` (14/14) and `npm run build` (one CJS
+`npm run typecheck`, `node --test` (17/17) and `npm run build` (one CJS
 bundle) against OpenCode 2.3.0. A concurrent TUI-brand merge added
 `.opencode/plugins/ozagia/tui.js`; the harness exclude patterns and tests were
 updated for it.
 
-Not yet: cgroups and exact per-job disk accounting; cleanup apply/trash;
-command-derived path extraction for `patch`/`shell`; a true before/after
-session manifest (the current scan attributes pre-existing untracked files to
-the session with `reason: unknown`); live/multi-model review and Ocelot
-reconciliation in the code-review harness; model/tool adapters and an injected
-test runner; interactive captured-pytest wiring for `testing.captured`;
-`[models.tasks]`/`[models.local]` support in the settings registry;
-`ozagia config` CLI/`config.py` integration, migration from `.ozagia.toml`,
-doctor source reporting; the add-in settings page, mutation commands, research
-tab and a live Desktop smoke test; action UI buttons/MCP preview tools; repo
-scan; Ocelot coding enhancements; the standalone console; and upstream
-submission.
+Not yet: Ocelot coding enhancements; the live OpenCode Desktop smoke test;
+add-in apply/mutation controls and a bounded-task launcher; the repo-scan
+module-build stage; cgroups and exact per-job disk accounting; cleanup
+apply/trash; command-derived path extraction for `patch`/`shell`; a true
+before/after session manifest (the current scan attributes pre-existing
+untracked files to the session with `reason: unknown`); live/multi-model review
+and Ocelot reconciliation in the code-review harness; model/tool adapters and
+an injected test runner; interactive captured-pytest wiring for
+`testing.captured`; `[models.tasks]`/`[models.local]` support in the settings
+registry; `ozagia config` CLI/`config.py` integration, migration from
+`.ozagia.toml`, doctor source reporting; action apply UI and integration
+install/uninstall; live security-tool matrix/DAST; library hints in code
+review/repo scan and non-handled edits; and hook installer CLI.
 
 ### Parallel workstreams (2026-11-16)
 
@@ -1729,8 +1747,9 @@ One additional agent starts from `64dc640`:
 | --- | --- | --- |
 | `~/ozmadev/ozagia-wt/security-scan` | `feat/security-scan` | Graph-derived OWASP/bad-practice findings plus explicit offline tool adapters |
 
-Status: `repo-scan`, `addin-extensions` and `upstream` are merged;
-`standalone-console` and `security-scan` are running.
+Status: all are merged: `repo-scan` as `64dc640`, `addin-extensions` as
+`0b71bb3`, `standalone-console` as `72698dc`, `upstream` as `79c3b3e`,
+`security-scan` as `f1254eb`, and `library-hints` as `d270f20`.
 
 ### Library-first workstream (2026-11-16)
 
@@ -1740,14 +1759,15 @@ One additional agent starts from `79c3b3e`:
 | --- | --- | --- |
 | `~/ozmadev/ozagia-wt/library-hints` | `feat/library-hints` | Detect hand-rolled capabilities and hint at stdlib/known libraries, with local capture |
 
-Status: running.
+Status: merged as `d270f20`.
 
 ## Open decisions
 
 1. **Config directory (resolved).** `ozagia/` is versioned project config;
    `.ozagia/` remains local state. No case-insensitivity guard is needed.
-2. **OpenCode host.** Confirm whether the target is OpenCode Desktop, the
-   browser web UI, or both, and which GUI API version is acceptable.
+2. **OpenCode host (resolved).** OpenCode first. The GUI plugin is built and
+   typechecked against 2.3.0; a live Desktop mount and browser-tab support
+   still need a host test.
 3. **First renderers.** SVG force/layered first, or a vendored graph library?
    The former keeps the core dependency-free; the latter is faster to polish.
 4. **Worktree policy scope.** Check-only plus preview actions in the first
