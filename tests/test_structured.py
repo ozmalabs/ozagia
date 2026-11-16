@@ -365,3 +365,8 @@ def test_mcp_dev_query(mem):
                                     "arguments": {"path": "x.json",
                                                   "format": "xml"}}})
     assert bad["error"]["code"] == -32602
+
+
+def test_read_form_permission_names_the_file(mem):
+    res = I.handle(mem, "read", {"path": "json:data/run.json#/runs"})
+    assert res["permission"]["resources"] == ["data/run.json"]

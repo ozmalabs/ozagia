@@ -96,6 +96,11 @@ def permission_request(memory: Any, tool: str, inp: dict[str, Any]
         if not isinstance(path, str) or not path:
             return None
         root = root_of(memory)
+        if tool == "read":
+            from ozagia.core.structured import parse_key
+            skey = parse_key(path)
+            if skey is not None and not os.path.exists(os.path.join(str(root), path)):
+                path = skey[1]          # json:<rel>#<pointer> reads <rel>
         p = path if os.path.isabs(path) else os.path.join(str(root), path)
         p = os.path.normpath(p)
         rel = os.path.relpath(p, root)
