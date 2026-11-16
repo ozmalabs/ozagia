@@ -44,12 +44,39 @@ one, every key has the generic default below. All keys are optional:
     modules = []                  # "module:attr" adapters, imported with the
                                   # directory of this config file on sys.path
 
+    [iac]
+    roots = []                    # explicit Terraform/OpenTofu roots
+    skip_globs = []               # extra IaC source files/directories to skip
+    [[iac.remote_states]]
+    consumer = "envs/app"
+    name = "iam"                  # data "terraform_remote_state" label
+    producer = "envs/iam"
+
+    [environments.dev]
+    paths = ["envs/dev"]
+    namespaces = ["dev"]
+    account_alias = "development"
+    region = "us-east-1"
+    cluster = "dev-cluster"
+    risk = "low"
+    pipelines = ["deploy-dev"]
+
+    [services.api]
+    chart = "charts/api"
+    values_globs = ["charts/api/values.*.yaml"]
+    buildspec = "buildspec.yml"
+    pipeline = "pipelines/api.yaml"
+    namespace = "api"
+    environment = "dev"
+    paths = ["services/api"]
+
 Directory entries are paths relative to the root ("." is the root itself).
 """
 from __future__ import annotations
 
 import os
 import posixpath
+import re
 import subprocess
 import tomllib
 from dataclasses import dataclass
@@ -62,6 +89,7 @@ ENV_CONFIG = "OZAGIA_CONFIG"
 STATE_DIRNAME = ".ozagia"
 CONFIG_FILENAME = ".ozagia.toml"
 STATE_CONFIG_FILENAME = "config.toml"
+DEFAULT_IAC_SKIP_GLOBS = ("*.backup.last", "*.backup", "*.bak", "*.orig")
 
 # Directory names no indexer enters, in any repository.
 GENERIC_SKIP_DIRS = frozenset({
@@ -120,6 +148,37 @@ class ConfigError(ValueError):
 
 
 @dataclass(frozen=True)
+class EnvironmentConfig:
+    name: str
+    paths: tuple[str, ...] = ()
+    namespaces: tuple[str, ...] = ()
+    account_alias: str | None = None
+    region: str | None = None
+    cluster: str | None = None
+    risk: str | None = None
+    pipelines: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ServiceConfig:
+    name: str
+    chart: str | None = None
+    values_globs: tuple[str, ...] = ()
+    buildspec: str | None = None
+    pipeline: str | None = None
+    namespace: str | None = None
+    environment: str | None = None
+    paths: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class RemoteStateConfig:
+    consumer: str
+    name: str
+    producer: str
+
+
+@dataclass(frozen=True)
 class ProjectConfig:
     """The resolved project configuration (see the module docstring)."""
     root: Path
@@ -140,6 +199,11 @@ class ProjectConfig:
     changed_exclude: tuple[str, ...]
     entrypoint_prefixes: tuple[str, ...]
     adapters: tuple[str, ...]
+    iac_roots: tuple[str, ...] = ()
+    iac_skip_globs: tuple[str, ...] = DEFAULT_IAC_SKIP_GLOBS
+    remote_states: tuple[RemoteStateConfig, ...] = ()
+    environments: tuple[EnvironmentConfig, ...] = ()
+    services: tuple[ServiceConfig, ...] = ()
 
     @property
     def adapter_base(self) -> Path | None:
@@ -153,7 +217,19 @@ _KEYS = {
               "path_prefixes", "changed_exclude", "entrypoint_prefixes"},
     "memory": {"skip_dirs"},
     "adapters": {"modules"},
+    "iac": {"roots", "skip_globs", "remote_states"},
 }
+
+_ENVIRONMENT_KEYS = {
+    "paths", "namespaces", "account_alias", "region", "cluster", "risk",
+    "pipelines",
+}
+_SERVICE_KEYS = {
+    "chart", "values_globs", "buildspec", "pipeline", "namespace",
+    "environment", "paths",
+}
+_REMOTE_STATE_KEYS = {"consumer", "name", "producer"}
+_STRUCTURAL_VALUE = re.compile(r"[A-Za-z0-9_./:@#*?+\[\]-]{1,256}\Z")
 
 
 def config_path(root: str | Path) -> Path | None:
@@ -188,6 +264,62 @@ def _rel_dir(value: str, key: str, where: str) -> str:
     return norm
 
 
+def _structural(value: Any, *, key: str, where: str) -> str:
+    if (not isinstance(value, str) or len(value) > 256
+            or not _STRUCTURAL_VALUE.fullmatch(value)
+            or any(part == ".." for part in value.replace("\\", "/").split("/"))):
+        raise ConfigError(f"{where}: {key} must be a bounded non-secret structural string")
+    return value
+
+
+def _path_pattern(value: Any, *, key: str, where: str) -> str:
+    if (not isinstance(value, str) or not value
+            or len(value) > 256 or not _STRUCTURAL_VALUE.fullmatch(value)):
+        raise ConfigError(f"{where}: {key} must be a bounded non-secret structural string")
+    result = value.replace("\\", "/")
+    if (posixpath.isabs(result) or re.match(r"^[A-Za-z]:/", result)
+            or any(part == ".." for part in result.split("/"))):
+        raise ConfigError(f"{where}: {key} must stay inside the repository root")
+    return result
+
+
+def _repo_dir(value: Any, *, key: str, where: str) -> str:
+    result = _path_pattern(value, key=key, where=where)
+    if any(char in result for char in "*?[]"):
+        raise ConfigError(
+            f"{where}: {key} entries must be repository-relative directories")
+    return _rel_dir(result, key, where)
+
+
+def _config_list(table: dict[str, Any], key: str, where: str,
+                 *, limit: int = 100) -> list[str]:
+    values = _str_list(table, key, where) or []
+    if len(values) > limit:
+        raise ConfigError(f"{where}: {key} exceeds the {limit}-item limit")
+    return values
+
+
+def _table_entries(data: Any, *, section: str, allowed: set[str],
+                   where: str) -> list[tuple[str, dict[str, Any]]]:
+    if data is None:
+        return []
+    if not isinstance(data, dict):
+        raise ConfigError(f"{where}: [{section}] must contain named tables")
+    if len(data) > 100:
+        raise ConfigError(f"{where}: [{section}] exceeds the 100-table limit")
+    result = []
+    for name, table in data.items():
+        _structural(name, key=f"[{section}] name", where=where)
+        if not isinstance(table, dict):
+            raise ConfigError(f"{where}: [{section}.{name}] must be a table")
+        unknown = sorted(set(table) - allowed)
+        if unknown:
+            raise ConfigError(f"{where}: unknown key(s) in [{section}.{name}]: "
+                              + ", ".join(unknown))
+        result.append((name, table))
+    return result
+
+
 def _dedup(values: list[str]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(values))
 
@@ -204,6 +336,10 @@ def _uncovered(dirs: list[str]) -> list[str]:
 def _parse(root: Path, source: Path | None, data: dict[str, Any]) -> ProjectConfig:
     where = str(source) if source is not None else "defaults"
     for section, table in data.items():
+        if section in {"environments", "services"}:
+            if not isinstance(table, dict):
+                raise ConfigError(f"{where}: [{section}] must contain named tables")
+            continue
         if section not in _KEYS:
             raise ConfigError(f"{where}: unknown section [{section}]")
         if not isinstance(table, dict):
@@ -215,6 +351,7 @@ def _parse(root: Path, source: Path | None, data: dict[str, Any]) -> ProjectConf
     index = data.get("index", {})
     memory = data.get("memory", {})
     adapters = data.get("adapters", {})
+    iac = data.get("iac", {})
 
     def dirs(key: str, default: list[str]) -> tuple[str, ...]:
         got = _str_list(index, key, where)
@@ -247,6 +384,107 @@ def _parse(root: Path, source: Path | None, data: dict[str, Any]) -> ProjectConf
             raise ConfigError(f"{where}: path_prefixes entries are single path "
                               f"components, got {p!r}")
     modules = _str_list(adapters, "modules", f"{where} [adapters]") or []
+    roots = _config_list(iac, "roots", f"{where} [iac]")
+    iac_roots = _dedup([
+        _repo_dir(v, key="roots", where=f"{where} [iac]") for v in roots
+    ])
+    configured_iac_skip_globs = [
+        _path_pattern(v, key="skip_globs", where=f"{where} [iac]")
+        for v in _config_list(iac, "skip_globs", f"{where} [iac]")
+    ]
+    iac_skip_globs = _dedup([
+        *DEFAULT_IAC_SKIP_GLOBS, *configured_iac_skip_globs,
+    ])
+
+    raw_remote_states = iac.get("remote_states", [])
+    if not isinstance(raw_remote_states, list):
+        raise ConfigError(f"{where} [iac]: remote_states must be an array of tables")
+    if len(raw_remote_states) > 256:
+        raise ConfigError(f"{where} [iac]: remote_states exceeds the 256-item limit")
+    remote_states: list[RemoteStateConfig] = []
+    seen_remote_states: set[tuple[str, str]] = set()
+    for mapping_index, mapping in enumerate(raw_remote_states):
+        location = f"{where} [iac.remote_states[{mapping_index}]]"
+        if not isinstance(mapping, dict):
+            raise ConfigError(f"{location}: entry must be a table")
+        unknown = sorted(set(mapping) - _REMOTE_STATE_KEYS)
+        if unknown:
+            raise ConfigError(f"{location}: unknown key(s): " + ", ".join(unknown))
+        if set(mapping) != _REMOTE_STATE_KEYS:
+            raise ConfigError(f"{location}: consumer, name and producer are required")
+        consumer = _repo_dir(
+            _structural(mapping["consumer"], key="consumer", where=location),
+            key="consumer", where=location)
+        name = _structural(mapping["name"], key="name", where=location)
+        producer = _repo_dir(
+            _structural(mapping["producer"], key="producer", where=location),
+            key="producer", where=location)
+        identity = (consumer, name)
+        if identity in seen_remote_states:
+            raise ConfigError(f"{location}: duplicate consumer/name mapping")
+        seen_remote_states.add(identity)
+        remote_states.append(RemoteStateConfig(consumer, name, producer))
+
+    environments: list[EnvironmentConfig] = []
+    for name, table in _table_entries(
+            data.get("environments"), section="environments",
+            allowed=_ENVIRONMENT_KEYS, where=where):
+        section = f"{where} [environments.{name}]"
+
+        def env_list(key: str, *, paths: bool = False) -> tuple[str, ...]:
+            values = _config_list(table, key, section)
+            clean = [(_repo_dir(v, key=key, where=section) if paths else
+                      _structural(v, key=key, where=section)) for v in values]
+            return _dedup(clean)
+
+        def env_scalar(key: str) -> str | None:
+            if key not in table:
+                return None
+            return _structural(table[key], key=key, where=section)
+
+        environments.append(EnvironmentConfig(
+            name=name, paths=env_list("paths", paths=True),
+            namespaces=env_list("namespaces"),
+            account_alias=env_scalar("account_alias"),
+            region=env_scalar("region"), cluster=env_scalar("cluster"),
+            risk=env_scalar("risk"), pipelines=env_list("pipelines"),
+        ))
+    environment_names = {item.name for item in environments}
+
+    services: list[ServiceConfig] = []
+    for name, table in _table_entries(
+            data.get("services"), section="services", allowed=_SERVICE_KEYS,
+            where=where):
+        section = f"{where} [services.{name}]"
+
+        def service_scalar(key: str, *, path: bool = False) -> str | None:
+            if key not in table:
+                return None
+            if path:
+                return _repo_dir(table[key], key=key, where=section)
+            return _structural(table[key], key=key, where=section)
+
+        values = _config_list(table, "values_globs", section)
+        values_globs = _dedup([
+            _path_pattern(value, key="values_globs", where=section)
+            for value in values
+        ])
+        service_paths = _config_list(table, "paths", section)
+        paths = _dedup([
+            _repo_dir(value, key="paths", where=section)
+            for value in service_paths
+        ])
+        environment = service_scalar("environment")
+        if environment is not None and environment not in environment_names:
+            raise ConfigError(f"{section}: environment {environment!r} is not configured")
+        services.append(ServiceConfig(
+            name=name, chart=service_scalar("chart", path=True),
+            values_globs=values_globs,
+            buildspec=service_scalar("buildspec", path=True),
+            pipeline=service_scalar("pipeline", path=True),
+            namespace=service_scalar("namespace"), environment=environment,
+            paths=paths,
+        ))
     return ProjectConfig(
         root=root,
         source=source,
@@ -267,6 +505,11 @@ def _parse(root: Path, source: Path | None, data: dict[str, Any]) -> ProjectConf
         entrypoint_prefixes=strings("entrypoint_prefixes",
                                     ["scripts/", "tools/", "bin/"]),
         adapters=tuple(m.strip() for m in modules if m.strip()),
+        iac_roots=iac_roots,
+        iac_skip_globs=iac_skip_globs,
+        remote_states=tuple(remote_states),
+        environments=tuple(environments),
+        services=tuple(services),
     )
 
 

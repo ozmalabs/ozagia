@@ -10,6 +10,7 @@ import pytest
 
 from ozagia import adapters
 from ozagia.config import (
+    DEFAULT_IAC_SKIP_GLOBS,
     GENERIC_SKIP_DIRS,
     ConfigError,
     load_project_config,
@@ -54,6 +55,7 @@ def test_defaults_without_a_config_file(tmp_path: Path) -> None:
     assert ".ozagia/" in cfg.changed_exclude
     assert cfg.entrypoint_prefixes == ("scripts/", "tools/", "bin/")
     assert cfg.adapters == ()
+    assert cfg.iac_skip_globs == DEFAULT_IAC_SKIP_GLOBS
 
 
 def test_derived_defaults_follow_the_dirs(tmp_path: Path) -> None:
@@ -251,3 +253,64 @@ def test_src_layout_is_a_default_import_root(tmp_path):
     (tmp_path / "src").mkdir()
     clear_config_cache()
     assert load_project_config(tmp_path).import_roots == ("src",)
+
+
+def test_iac_environment_service_roots_and_remote_state_config_are_bounded(
+        tmp_path):
+    _write(tmp_path / ".ozagia.toml", """
+[iac]
+roots = ["envs/prod", "envs/iam"]
+skip_globs = ["generated/**"]
+[[iac.remote_states]]
+consumer = "envs/prod"
+name = "iam"
+producer = "envs/iam"
+
+[environments.pprd]
+paths = ["envs/pprd"]
+namespaces = ["pprd"]
+account_alias = "production-preview"
+region = "us-east-1"
+cluster = "pprd-cluster"
+risk = "high"
+pipelines = ["deploy-pprd"]
+
+[services.api]
+chart = "charts/api"
+values_globs = ["charts/api/values.*.yaml"]
+buildspec = "buildspec.yml"
+pipeline = "pipelines/api.yml"
+namespace = "pprd"
+environment = "pprd"
+paths = ["services/api"]
+""")
+    config = load_project_config(tmp_path)
+    assert config.iac_roots == ("envs/prod", "envs/iam")
+    assert config.iac_skip_globs == (*DEFAULT_IAC_SKIP_GLOBS, "generated/**")
+    assert [(item.consumer, item.name, item.producer)
+            for item in config.remote_states] == [
+                ("envs/prod", "iam", "envs/iam")]
+    assert config.environments[0].region == "us-east-1"
+    assert config.environments[0].paths == ("envs/pprd",)
+    service = config.services[0]
+    assert service.name == "api" and service.environment == "pprd"
+    assert service.values_globs == ("charts/api/values.*.yaml",)
+
+
+@pytest.mark.parametrize("text, message", [
+    ("[environments.dev]\ncredentials = 'nope'\n", "unknown key"),
+    ("[services.api]\nsecret = 'nope'\n", "unknown key"),
+    ("[environments.dev]\npaths = ['../outside']\n",
+     "inside the repository root"),
+    ("[services.api]\nchart = '/outside/chart'\n", "inside the repository root"),
+    ("[services.api]\nenvironment = 'missing'\n", "not configured"),
+    ("[iac]\nroots = ['../../outside']\n",
+     "inside the repository root"),
+    ("[iac]\n[[iac.remote_states]]\nconsumer='a'\nname='x'\n"
+     "producer='b'\naccess_key='canary'\n", "unknown key"),
+])
+def test_iac_config_rejects_secrets_unknown_fields_and_escaping_paths(
+        tmp_path, text, message):
+    _write(tmp_path / ".ozagia.toml", text)
+    with pytest.raises(ConfigError, match=message):
+        load_project_config(tmp_path)

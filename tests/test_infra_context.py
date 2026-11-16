@@ -135,6 +135,66 @@ class AmbiguousMemory:
         return {"ok": True, "results": []}
 
 
+class EnvironmentMemory:
+    _index_version = 1
+    nodes = {
+        1: {"type": "InfraResource", "key": "env:dev", "attrs": {
+            "name": "dev", "kind": "Environment", "family": "environment",
+            "environment": "dev", "environment_values": ["dev", "us-east-1"],
+            "region": "us-east-1", "cluster": "dev-cluster",
+            "namespaces": ["dev"]}},
+        2: {"type": "InfraResource", "key": "env:stg", "attrs": {
+            "name": "stg", "kind": "Environment", "family": "environment",
+            "environment": "stg", "environment_values": ["stg", "us-west-2"]}},
+        3: {"type": "InfraResource", "key": "env:pprd", "attrs": {
+            "name": "pprd", "kind": "Environment", "family": "environment",
+            "environment": "pprd", "environment_values": ["pprd", "preview"]}},
+        4: {"type": "InfraResource", "key": "env:prd", "attrs": {
+            "name": "prd", "kind": "Environment", "family": "environment",
+            "environment": "prd", "environment_values": ["prd", "production"]}},
+        5: {"type": "InfraResource", "key": "local:dev", "attrs": {
+            "name": "dev", "address": "local.dev", "kind": "local",
+            "family": "terraform", "path": "infra/locals.tf"}},
+        6: {"type": "InfraResource", "key": "local:stg", "attrs": {
+            "name": "stg", "address": "local.stg", "kind": "local",
+            "family": "terraform", "path": "infra/locals.tf"}},
+        7: {"type": "InfraResource", "key": "local:pprd", "attrs": {
+            "name": "pprd", "address": "local.pprd", "kind": "local",
+            "family": "terraform", "path": "infra/locals.tf"}},
+        8: {"type": "InfraResource", "key": "local:prd", "attrs": {
+            "name": "prd", "address": "local.prd", "kind": "local",
+            "family": "terraform", "path": "infra/locals.tf"}},
+        9: {"type": "InfraResource", "key": "deploy:dev", "attrs": {
+            "name": "payments-api", "kind": "Deployment", "family": "kubernetes",
+            "path": "envs/dev/deployment.yaml", "namespace": "dev",
+            "environment": "dev"}},
+        10: {"type": "InfraResource", "key": "deploy:stg", "attrs": {
+            "name": "payments-api", "kind": "Deployment", "family": "kubernetes",
+            "path": "envs/stg/deployment.yaml", "namespace": "stg",
+            "environment": "stg"}},
+        11: {"type": "InfraResource", "key": "deploy:pprd", "attrs": {
+            "name": "payments-api", "kind": "Deployment", "family": "kubernetes",
+            "path": "envs/pprd/deployment.yaml", "namespace": "pprd",
+            "environment": "pprd"}},
+        12: {"type": "InfraResource", "key": "deploy:prd", "attrs": {
+            "name": "payments-api", "kind": "Deployment", "family": "kubernetes",
+            "path": "envs/prd/deployment.yaml", "namespace": "prd",
+            "environment": "prd"}},
+    }
+    _out = {}
+    _in = {}
+
+    def nodes_of_type(self, type_name):
+        return [nid for nid, node in self.nodes.items()
+                if node.get("type") == type_name]
+
+    def staleness(self):
+        return {"freshness": "fresh"}
+
+    def code_search(self, *args, **kwargs):
+        return {"results": []}
+
+
 def test_infrastructure_context_is_attributed_bounded_and_uses_history():
     result = build_context(Memory(), "Check configuration", ["payments"], budget_tokens=80)
     assert "deploy/app.yaml#/documents/0" in result["context"]
@@ -277,3 +337,29 @@ def test_relationship_line_names_the_target_and_avoids_inbound_duplicate():
     assert "Service payments-service" in edge_lines[0]
     assert "deploy/svc.yaml#/documents/0" not in edge_lines[0]
     assert not any("<- selector" in line for line in result["context"].splitlines())
+
+
+def test_environment_terms_filter_generic_names_paths_and_deployment_kinds():
+    from ozagia.core.infra_query import locate
+
+    located_environment = locate(EnvironmentMemory(), "dev")
+    assert {row["kind"] for row in located_environment["results"]} == {
+        "Environment",
+    }
+    for environment in ("dev", "stg", "pprd", "prd"):
+        result = context(
+            EnvironmentMemory(), f"payments-api {environment} deployment",
+            max_chars=800,
+        )
+        assert [row["path"] for row in result["results"]] == [
+            f"envs/{environment}/deployment.yaml",
+        ]
+        assert f"local:{environment}" not in result["keys"]
+    region = context(EnvironmentMemory(), "payments-api us-east-1 deployment",
+                     max_chars=800)
+    assert [row["path"] for row in region["results"]] == [
+        "envs/dev/deployment.yaml",
+    ]
+    hint = context(EnvironmentMemory(), "us-east-1", max_chars=800)
+    assert "Environment dev" in hint["context"]
+    assert "region=us-east-1" in hint["context"]

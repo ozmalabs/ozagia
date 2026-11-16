@@ -731,6 +731,7 @@ class DevMemoryServer:
         self._schemas = {t["name"]: t["inputSchema"] for t in self._tools}
         if mode in {"coding", "combined"}:
             self._load_adapter_tools()
+            self._load_sre_tools()
         if mode in {"research", "combined"}:
             self._load_research_tools()
         if mode == "combined":
@@ -803,6 +804,20 @@ class DevMemoryServer:
         self._handlers[name] = bridge
         self._tools.append(spec)
         self._schemas[name] = spec["inputSchema"]
+
+    def _load_sre_tools(self) -> None:
+        if self.mem is None:
+            return
+        from ozagia.integrations.mcp.sre import sre_tools
+        for spec, handler in sre_tools(self.mem):
+            name = spec["name"]
+            if name in _SCHEMAS or name in self._schemas:
+                print(f"[{SERVER_NAME}] SRE tool {name!r} clashes with a "
+                      "built-in tool; ignored", file=sys.stderr)
+                continue
+            self._handlers[name] = handler
+            self._tools.append(spec)
+            self._schemas[name] = spec["inputSchema"]
 
     def _load_adapter_tools(self) -> None:
         reg = registry(self.mem.raw_repo_root)

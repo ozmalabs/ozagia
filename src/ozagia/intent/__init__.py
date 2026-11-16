@@ -196,6 +196,16 @@ def after(memory: Any, tool: str, input: dict[str, Any], output: Any, *,
                 meta["keys"].extend(delta_keys(delta))
     except Exception as e:  # noqa: BLE001 - the tool already ran
         meta.update(intent="after_exception", error=f"{type(e).__name__}: {e}")
+    try:
+        command = (input if isinstance(input, dict) else {}).get("command")
+        if isinstance(command, str) and isinstance(output, str):
+            from ozagia.intent.live_hints import hints
+            live = hints(command, output)
+            if live:
+                lines.extend(live)
+                meta["live_hints"] = len(live)
+    except Exception:  # noqa: BLE001 - hints are advisory only
+        pass
     meta["ms"] = _ms(t0)
     return {"append": "\n".join(lines), "meta": meta}
 

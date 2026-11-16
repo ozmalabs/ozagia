@@ -402,3 +402,39 @@ more tokens.
 Each step lands with tests, docs, secret canaries, `ruff` and the full suite.
 Do not enable a new live provider or call a cluster/account merely because
 this plan exists; each live phase needs its own explicit approval and scope.
+
+## Implementation progress (2026-11-16)
+
+Kiro is being integrated on the main line separately; this branch does not
+duplicate it. The remaining offline workstreams are implemented:
+
+- **IaC accuracy:** Terraform root nodes and remote-state edges (explicit and
+  unique static matching), default backup/generated skips with status
+  reporting, environment facets, templated Helm classification, and
+  config-driven service-to-deployment links.
+- **Jobs:** library and CLI wait providers for SSM, CodeBuild, CodePipeline and
+  `kubectl rollout`, disabled by default; shell capture emits a wait hint for
+  newly started jobs.
+- **Environments:** declarative `[environments]` profiles, `ozagia env
+  list/show`, `dev_environments`, and environment-aware context/locate filters.
+- **Live snapshots:** strict imported snapshot schema, TTL/diff helpers,
+  `.ozagia/live/` save/read, and MCP/CLI import/diff/save tools. No live
+  provider is implemented.
+- **Edits/checks:** HCL block/attribute editing, optional comment-preserving
+  YAML editing, and source-only `ozagia iac check`/`dev_check_iac`.
+- **Ops records:** append-only redacted receipts and environment-scoped
+  resume summaries, exposed through MCP and CLI.
+- **Offline validation/preflight:** `dev_aws_cli_check`, AWS CLI shell hints,
+  and a dry-run emulator plan. Execution requires an injected runner and two
+  explicit opt-ins; this branch does not run an emulator.
+
+Validation on this branch: full suite `1779 passed, 39 skipped` (the optional
+`ruamel.yaml` round-trip cases are included locally); `ruff check src tests`
+passed; benchmark and scale numbers are in
+[the benchmark results](../results/iac_bench_2026-11-16.md).
+
+Still gated or unimplemented: live job-provider trials, the live environment
+identity/cluster route, live snapshot collection, real emulator execution,
+Kiro-side measurement on the main line, and matched model/token evaluation.
+No live cloud, cluster, model or emulator call was made while implementing
+this progress.

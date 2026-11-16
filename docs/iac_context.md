@@ -52,6 +52,77 @@ provenance; it never synthesizes the app, runs CDK, or loads assets.
 Name and address matching uses identifier components and exact/qualified forms,
 not arbitrary substrings, and a bare path coincidence is not enough to emit a
 hint.
+
+## Configured IaC roots, environments and services
+
+All of the following configuration is optional and declarative. Paths and
+globs are repository-relative; values are bounded structural names, not
+credentials.
+
+```toml
+[iac]
+roots = ["envs/prod", "envs/iam"]
+skip_globs = ["generated/**"]
+
+[[iac.remote_states]]
+consumer = "envs/prod"
+name = "iam"                 # data "terraform_remote_state" label
+producer = "envs/iam"
+
+[environments.pprd]
+paths = ["envs/pprd"]
+namespaces = ["pprd"]
+account_alias = "production-preview"
+region = "us-east-1"
+cluster = "pprd-cluster"
+risk = "high"
+pipelines = ["deploy-pprd"]
+
+[services.api]
+chart = "charts/api"
+values_globs = ["charts/api/values.pprd.yaml"]
+buildspec = "buildspec.yml"
+pipeline = "pipelines/api.yaml"
+namespace = "pprd"
+environment = "pprd"
+paths = ["envs/pprd"]
+```
+
+Configured Terraform roots take precedence. Without them, root detection is
+conservative: lockfile directories are roots, and otherwise the highest
+Terraform/OpenTofu source directories without a parent root are roots. Nested
+modules are not roots. A remote-state declaration retains only backend type,
+workspace and statically literal allowlisted identity fields (`bucket`, `key`,
+`region`). It never reads state, contacts a backend, or stores arbitrary
+backend config values. A remote-state edge is created only for a unique static
+backend/key match or an exact `consumer`/`name`/`producer` mapping. Missing,
+dynamic and ambiguous mappings remain unresolved and appear in diagnostics.
+Output references point to the remote-state declaration; output values are
+never fetched or evaluated.
+
+IaC discovery skips `.terraform`, `.terragrunt-cache`, `.pulumi`, `.kube` and
+backup/generated names matching `*.backup.last`, `*.backup`, `*.bak` and
+`*.orig`. `[iac].skip_globs` extends these defaults. `infra.status` reports a
+bounded count and repository-relative paths for skipped entries, not their
+contents.
+
+Configured environments create queryable environment facts. Their `paths` and
+`namespaces` attach an `environment` facet to matching source nodes; explicit
+service mappings can also attach that facet. Environment names and configured
+metadata are not treated as generic substring matches, so a local or resource
+merely named `dev` does not satisfy a request for the configured `dev`
+environment.
+
+Configured services link only to unique matching chart/path declarations,
+matching values files, explicitly scoped deployment/service-account/ingress or
+Kustomize nodes, and existing configured buildspec/pipeline files. Missing,
+ambiguous, skipped and nonexistent targets are diagnosed rather than guessed;
+the adapter does not infer services from arbitrary values or create files for
+expected-but-absent paths.
+
+Helm files under a discovered chart's `templates/` directory, and sources with
+Go-template markers, are retained as template source with chart links. They
+are not parsed as Kubernetes YAML, rendered, evaluated or run with Helm.
 Context can also be included by the OpenCode proactive hook when its snapshot
 is fresh and a query matches infrastructure identifiers. Code results and
 infrastructure facts share one character budget, with infrastructure limited to

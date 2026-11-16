@@ -270,6 +270,11 @@ their contents as supporting evidence for each other.
 | `dev_session_finish` | Close the session. |
 | `dev_session_list` | List persisted sessions. |
 | `dev_recent` | Read the shared journal. |
+| `dev_check_iac` | Offline, source-only Terraform/OpenTofu pre-plan checks; never runs Terraform, providers or project code. |
+| `dev_ops_record` / `dev_ops_resume` | Append and read bounded, redacted ops receipts; receipts are not replayed. |
+| `dev_live_import` / `dev_live_diff` / `dev_live_save` | Validate, diff or save supplied live-state artifacts; no live provider call. |
+| `dev_aws_cli_check` | Offline AWS CLI service/operation check using local models. |
+| `dev_preflight_plan` | Build a dry-run, scrubbed emulator plan; never executes it. |
 
 All tools are read-only except `dev_edit` and `dev_span_edit` (transactions, preview by
 default, backup on apply) and `dev_record` (one JSONL line). There is no shell

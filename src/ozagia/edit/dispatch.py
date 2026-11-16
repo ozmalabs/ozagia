@@ -7,7 +7,8 @@ One edit-script contract, multiple format adapters:
                            its ops; see `ozagia.adapters`)
     .md / .markdown     -> ozagia.edit.markdown (section ops)
     .json               -> ozagia.edit.json_edit (span-preserving path ops)
-    .yaml / .yml / ...  -> refused in v0 (no silent text-patch fallback)
+    .tf / .tofu / .hcl   -> ozagia.edit.hcl (block/attribute ops)
+    .yaml / .yml         -> ozagia.edit.yaml_edit (optional round-trip parser)
     .rs / .lua         -> ozagia.edit.cst (CstNode subtree/leaf ops;
                            tree-sitter backend or a supplied synthetic graph)
 
@@ -44,8 +45,10 @@ def adapter_for(file: str) -> str:
         return "markdown"
     if suffix == ".json":
         return "json"
+    if suffix in (".tf", ".tofu", ".hcl"):
+        return "hcl"
     if suffix in (".yaml", ".yml"):
-        return "yaml-refused"
+        return "yaml"
     if suffix == ".rs":
         return "rust"
     if suffix == ".lua":
@@ -93,12 +96,19 @@ def apply_edit_script(root: str | Path, script: dict[str, Any], *,
         return apply_markdown_edit_script(root, script, write=write)
     if kind == "json":
         return apply_json_edit_script(root, script, write=write)
+    if kind == "hcl":
+        from ozagia.edit.hcl import apply_hcl_edit_script
+        return apply_hcl_edit_script(root, script, write=write)
+    if kind == "yaml":
+        from ozagia.edit.yaml_edit import apply_yaml_edit_script
+        return apply_yaml_edit_script(root, script, write=write)
     if kind in ("rust", "lua"):
         return apply_cst_edit_script(root, script, write=write)
-    if kind in ("yaml-refused", "source-refused"):
+    if kind == "source-refused":
         raise CodeEditError(
             f"no graph edit adapter for {Path(file).suffix!r} yet; supported "
             f"in v0: .py (symbol/AST ops, plus adapter engines), .md/.markdown (section ops), "
-            f".json (path ops), and .rs/.lua (CST ops). "
+            f".json (path ops), .tf/.tofu/.hcl (HCL block/attribute ops), "
+            f".yaml/.yml (round-trip path ops), and .rs/.lua (CST ops). "
             f"Refusing rather than falling back to a text patch.")
     raise CodeEditError(f"unsupported file type: {file}")

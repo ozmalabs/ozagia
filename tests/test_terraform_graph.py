@@ -4,7 +4,9 @@ from ozagia.core.terraform_graph import (
     discover_terraform_files,
     index_terraform_text,
     merge_terraform_graphs,
+    resolve_terraform_roots,
 )
+from ozagia.config import RemoteStateConfig
 
 
 def test_extracts_declarations_and_explicit_reference_without_values():
@@ -584,3 +586,192 @@ def test_local_module_source_does_not_cross_dialects():
         edge.evidence == "local module source has no statically discovered declarations"
         for edge in merged.unresolved
     )
+
+
+def _remote_state_fixture():
+    consumer = index_terraform_text(
+        "envs/app/main.tf",
+        '''data "terraform_remote_state" "iam" {
+  backend = "s3"
+  workspace = "default"
+  config = {
+    bucket = "state-bucket"
+    key = "iam/terraform.tfstate"
+    region = "us-east-1"
+    access_key = "CANARY_SECRET"
+  }
+}
+output "vpc" {
+  value = data.terraform_remote_state.iam.outputs.vpc_id
+}
+''',
+        module_scope="envs/app",
+    )
+    producer = index_terraform_text(
+        "envs/iam/main.tf",
+        '''terraform {
+  backend "s3" {
+    bucket = "state-bucket"
+    key = "iam/terraform.tfstate"
+    region = "us-east-1"
+    secret_key = "CANARY_SECRET"
+  }
+}
+resource "aws_iam_role" "role" {}
+''',
+        module_scope="envs/iam",
+    )
+    return consumer, producer
+
+
+def test_remote_state_parses_output_reference_and_unique_static_root_match():
+    consumer, producer = _remote_state_fixture()
+    merged = merge_terraform_graphs((consumer, producer))
+    graph = resolve_terraform_roots(
+        merged, ["envs/app/main.tf", "envs/iam/main.tf"],
+        explicit_roots=["envs/app", "envs/iam"],
+    )
+    remote = next(node for node in graph.nodes
+                  if node.address == "data.terraform_remote_state.iam")
+    output = next(node for node in graph.nodes
+                  if node.kind == "output" and node.address == "vpc")
+    root = next(node for node in graph.nodes
+                if node.kind == "root" and node.address == "envs/iam")
+    assert any(edge.source == output.key and edge.target == remote.key
+               and edge.evidence.endswith(".outputs.vpc_id")
+               for edge in graph.edges)
+    link = next(edge for edge in graph.edges if edge.relation == "remote_state")
+    assert (link.source, link.target) == (remote.key, root.key)
+    assert link.provenance == "inferred"
+    assert link.confidence == "medium"
+    assert link.evidence == "unique static backend/key match"
+    assert remote.remote_backend_type == "s3"
+    assert remote.remote_key == "iam/terraform.tfstate"
+    assert "CANARY_SECRET" not in repr(graph)
+
+
+def test_remote_state_explicit_mapping_resolves_even_dynamic_backend():
+    consumer = index_terraform_text(
+        "envs/app/main.tf",
+        '''data "terraform_remote_state" "iam" {
+  backend = var.backend
+  config = { key = local.state_key }
+}
+''',
+        module_scope="envs/app",
+    )
+    producer = index_terraform_text(
+        "envs/iam/main.tf",
+        'resource "aws_iam_role" "role" {}',
+        module_scope="envs/iam",
+    )
+    merged = merge_terraform_graphs((consumer, producer))
+    graph = resolve_terraform_roots(
+        merged, ["envs/app/main.tf", "envs/iam/main.tf"],
+        explicit_roots=["envs/app", "envs/iam"],
+        remote_states=(RemoteStateConfig("envs/app", "iam", "envs/iam"),),
+    )
+    edge = next(edge for edge in graph.edges if edge.relation == "remote_state")
+    assert edge.provenance == "declared"
+    assert edge.confidence == "high"
+    assert edge.evidence == "project config"
+    assert not any(edge.relation == "remote_state" for edge in graph.unresolved)
+
+
+def test_remote_state_ambiguous_static_match_and_dynamic_state_stay_unresolved():
+    consumer = index_terraform_text(
+        "envs/app/main.tf",
+        '''data "terraform_remote_state" "iam" {
+  backend = "s3"
+  config = { bucket = "state-bucket" key = "iam.tfstate" }
+}
+data "terraform_remote_state" "dynamic" {
+  backend = var.backend
+  config = { key = local.state_key }
+}
+data "terraform_remote_state" "dynamic_bucket" {
+  backend = "s3"
+  config = { bucket = var.bucket, key = "iam.tfstate" }
+}
+''',
+        module_scope="envs/app",
+    )
+    producer_a = index_terraform_text(
+        "envs/iam-a/main.tf",
+        'terraform { backend "s3" { bucket = "state-bucket" key = "iam.tfstate" } }',
+        module_scope="envs/iam-a",
+    )
+    producer_b = index_terraform_text(
+        "envs/iam-b/main.tf",
+        'terraform { backend "s3" { bucket = "state-bucket" key = "iam.tfstate" } }',
+        module_scope="envs/iam-b",
+    )
+    graph = resolve_terraform_roots(
+        merge_terraform_graphs((consumer, producer_a, producer_b)),
+        ["envs/app/main.tf", "envs/iam-a/main.tf", "envs/iam-b/main.tf"],
+        explicit_roots=["envs/app", "envs/iam-a", "envs/iam-b"],
+    )
+    reasons = {edge.evidence for edge in graph.unresolved
+               if edge.relation == "remote_state"}
+    assert "static backend/key match is ambiguous" in reasons
+    assert "remote-state backend identity is dynamic or incomplete" in reasons
+    dynamic_bucket = next(
+        node for node in graph.nodes
+        if node.address == "data.terraform_remote_state.dynamic_bucket")
+    assert dynamic_bucket.remote_dynamic
+    assert not any(edge.relation == "remote_state" for edge in graph.edges)
+
+
+def test_terraform_json_remote_state_retains_only_static_identity_fields():
+    graph = index_terraform_text(
+        "main.tf.json",
+        json.dumps({
+            "data": {"terraform_remote_state": {"iam": {
+                "backend": "s3", "workspace": "default",
+                "config": {
+                    "bucket": "state-bucket",
+                    "key": "iam.tfstate",
+                    "region": "us-east-1",
+                    "access_key": "CANARY_SECRET",
+                    "arbitrary": "UNSAFE_CONFIG_VALUE",
+                },
+            }}},
+        }),
+    )
+    remote = graph.nodes[0]
+    assert remote.address == "data.terraform_remote_state.iam"
+    assert remote.remote_backend_type == "s3"
+    assert remote.remote_workspace == "default"
+    assert remote.remote_bucket == "state-bucket"
+    assert remote.remote_key == "iam.tfstate"
+    assert remote.remote_region == "us-east-1"
+    assert "CANARY_SECRET" not in repr(graph)
+    assert "UNSAFE_CONFIG_VALUE" not in repr(graph)
+
+
+def test_root_fallback_uses_top_level_sources_and_lockfile_markers():
+    top = index_terraform_text(
+        "main.tf", 'resource "aws_vpc" "root" {}', module_scope=".")
+    child = index_terraform_text(
+        "modules/net/main.tf", 'resource "aws_vpc" "module" {}',
+        module_scope="modules/net")
+    graph = resolve_terraform_roots(
+        merge_terraform_graphs((top, child)),
+        ["main.tf", "modules/net/main.tf"],
+    )
+    assert [node.path for node in graph.nodes if node.kind == "root"] == ["."]
+
+    prod = index_terraform_text(
+        "envs/prod/main.tf", 'resource "aws_vpc" "prod" {}',
+        module_scope="envs/prod")
+    iam = index_terraform_text(
+        "envs/iam/main.tf", 'resource "aws_iam_role" "iam" {}',
+        module_scope="envs/iam")
+    locked = resolve_terraform_roots(
+        merge_terraform_graphs((prod, iam)),
+        ["envs/prod/main.tf", "envs/iam/main.tf"],
+        lock_dirs=["envs/prod", "envs/iam"],
+    )
+    assert {node.path for node in locked.nodes if node.kind == "root"} == {
+        "envs/prod", "envs/iam",
+    }

@@ -1,0 +1,5 @@
+replicaCount: 2
+image:
+  repository: example.invalid/api
+  tag: preview
+password: VALUES_SECRET_CANARY_2468

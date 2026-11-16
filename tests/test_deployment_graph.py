@@ -4,7 +4,10 @@ import json
 
 import pytest
 
-from ozagia.core.deployment_graph import extract_deployment_metadata
+from ozagia.core.deployment_graph import (
+    extract_deployment_metadata,
+    helm_template_paths,
+)
 
 
 def test_helm_metadata_links_chart_sources_without_emitting_contents() -> None:
@@ -24,6 +27,25 @@ def test_helm_metadata_links_chart_sources_without_emitting_contents() -> None:
     assert "Release.Name" not in serialized
     template_edge = next(e for e in graph.edges if e.relation == "chart_template_source")
     assert "not rendered" in template_edge.evidence
+
+
+def test_helm_template_path_and_go_markers_are_classified_without_rendering():
+    files = {
+        "chart/Chart.yaml": "name: sample\n",
+        "chart/templates/deploy.yaml": "kind: Deployment\nmetadata: {name: '{{ .Values.name }}'}\n",
+        "loose/template.yaml": "kind: Deployment\nmetadata: {name: '{% if enabled %}x{% endif %}'}\n",
+        "values.yaml": "replicas: 2\n",
+        "config.json": '{"template": "{{ literal JSON value }}"}',
+    }
+    assert helm_template_paths(files) == {
+        "chart/templates/deploy.yaml", "loose/template.yaml",
+    }
+    graph = extract_deployment_metadata(files)
+    assert any(node.kind == "helm_template_source"
+               and node.path == "chart/templates/deploy.yaml"
+               for node in graph.nodes)
+    assert not any(node.path == "loose/template.yaml" for node in graph.nodes)
+    assert any(edge.relation == "chart_template_source" for edge in graph.edges)
 
 
 def test_kustomize_local_bases_and_patches_resolve_and_remote_does_not() -> None:

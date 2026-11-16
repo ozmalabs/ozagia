@@ -156,7 +156,8 @@ def test_renamed_infra_file_replaces_old_nodes_and_edges(tmp_path, monkeypatch):
     memory._staleness_memo = None
     memory.refresh()
     infra = [(nid, n) for nid, n in memory.nodes.items()
-             if n["type"] == "InfraResource"]
+             if n["type"] == "InfraResource"
+             and n["attrs"].get("kind") != "root"]
     assert {n["attrs"]["path"] for _, n in infra} == {"renamed.tf"}
     assert not any(
         (memory.nodes.get(nid) or {}).get("attrs", {}).get("path") == "main.tf"
@@ -332,3 +333,95 @@ def test_adapter_discovers_candidates_once_per_build(tmp_path, monkeypatch):
     build_index(root, tmp_path / "graph.json", include_docs="none",
                 include_git=False)
     assert len(calls) == 1
+
+
+def test_backup_skip_status_and_refresh_remove_renamed_resources(tmp_path,
+                                                                 monkeypatch):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / ".ozagia.toml").write_text(
+        '[adapters]\nmodules = ["ozagia.integrations.iac.adapter:register"]\n'
+        '[iac]\nskip_globs = ["generated/**"]\n')
+    live = root / "envs" / "live"
+    live.mkdir(parents=True)
+    (live / "main.tf").write_text('resource "aws_vpc" "live" {}\n')
+    backup = root / "envs" / "old.backup.last"
+    backup.mkdir(parents=True)
+    (backup / "main.tf").write_text('resource "aws_vpc" "duplicate" {}\n')
+    (root / "generated").mkdir()
+    (root / "generated" / "extra.tf").write_text(
+        'resource "aws_vpc" "generated" {}\n')
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(root), "-c", "user.name=T", "-c",
+                    "user.email=t@example.invalid", "commit", "-qm", "fixture"],
+                   check=True)
+    monkeypatch.delenv("OZAGIA_CONFIG", raising=False)
+    dump = tmp_path / "graph.json"
+    build_index(root, dump, include_docs="none", include_git=False)
+    memory = DevMemory(dump, tmp_path / "journal.jsonl", root=root)
+    resources = [node["attrs"] for node in memory.nodes.values()
+                 if node["type"] == "InfraResource"]
+    assert any(item.get("path") == "envs/live/main.tf" for item in resources)
+    assert not any(item.get("path") == "envs/old.backup.last/main.tf"
+                   for item in resources)
+    assert not any(item.get("path") == "generated/extra.tf"
+                   for item in resources)
+    status = memory.adapter_query("infra.status")
+    assert status["skipped"]["count"] >= 2
+    assert "envs/old.backup.last" in status["skipped"]["paths"]
+    assert "generated" in status["skipped"]["paths"]
+
+    (root / "envs" / "live").rename(root / "envs" / "live.backup")
+    memory._staleness_memo = None
+    memory.refresh()
+    assert not any(node["type"] == "InfraResource"
+                   and node["attrs"].get("path") == "envs/live/main.tf"
+                   for node in memory.nodes.values())
+    assert not any(node["type"] == "InfraResource"
+                   and node["attrs"].get("name") == "aws_vpc.duplicate"
+                   for node in memory.nodes.values())
+
+
+def test_remote_state_nodes_link_roots_and_keep_backend_secrets_out(tmp_path,
+                                                                     monkeypatch):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / ".ozagia.toml").write_text("""
+[adapters]
+modules = ["ozagia.integrations.iac.adapter:register"]
+[iac]
+roots = ["envs/app", "envs/iam"]
+""")
+    (root / "envs" / "app").mkdir(parents=True)
+    (root / "envs" / "iam").mkdir(parents=True)
+    (root / "envs" / "app" / "main.tf").write_text(
+        'data "terraform_remote_state" "iam" {\n'
+        '  backend = "s3"\n'
+        '  config = { bucket = "state-bucket" key = "iam.tfstate"\n'
+        '    access_key = "CANARY_SECRET" }\n'
+        '}\n')
+    (root / "envs" / "iam" / "main.tf").write_text(
+        'terraform { backend "s3" { bucket = "state-bucket"\n'
+        '  key = "iam.tfstate" secret_key = "CANARY_SECRET" } }\n'
+        'resource "aws_iam_role" "role" {}\n')
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(root), "-c", "user.name=T", "-c",
+                    "user.email=t@example.invalid", "commit", "-qm", "fixture"],
+                   check=True)
+    monkeypatch.delenv("OZAGIA_CONFIG", raising=False)
+    dump = tmp_path / "graph.json"
+    build_index(root, dump, include_docs="none", include_git=False)
+    memory = DevMemory(dump, tmp_path / "journal.jsonl", root=root)
+    remote = memory.adapter_query(
+        "infra.locate", query="data.terraform_remote_state.iam")["results"][0]
+    deps = memory.adapter_query(
+        "infra.dependencies", key=remote["key"], depth=1)
+    assert any(node["kind"] == "root" and node["path"] == "envs/iam"
+               for node in deps["nodes"])
+    assert any(edge["relation"] == "infra_remote_state"
+               and edge["evidence"] == "unique static backend/key match"
+               and edge["confidence"] == "medium"
+               for edge in deps["edges"])
+    assert "CANARY_SECRET" not in dump.read_text(encoding="utf-8")

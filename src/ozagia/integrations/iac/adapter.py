@@ -6,18 +6,40 @@ This is static partial analysis, never an account, cluster, or runtime view.
 from __future__ import annotations
 
 from collections import OrderedDict
+from dataclasses import dataclass
+import fnmatch
 import hashlib
-from pathlib import PurePosixPath
+import re
+from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 from typing import Any
 
-from ozagia.core.infra_discovery import iter_candidate_paths, read_source
+from ozagia.config import load_project_config
+from ozagia.core.infra_discovery import (
+    is_skipped_path,
+    iter_candidate_paths,
+    read_source,
+    skipped_summary,
+)
 
 MAX_TOTAL_SOURCE_BYTES = 16 * 1024 * 1024
 # Parsed per-file graphs are immutable and keyed by root, path, dialect and
-# content digest. The cache never stores source text or extracted values, and
-# covers the adapter's 5,000-file discovery budget with headroom.
+# content digest. The cache never stores source text or arbitrary values;
+# Terraform graphs retain only allowlisted literal backend identity fields.
+# It covers the adapter's 5,000-file discovery budget with headroom.
 PARSE_CACHE_MAX = 6000
 _PARSE_CACHE: OrderedDict[tuple[Any, ...], Any] = OrderedDict()
+
+
+@dataclass(frozen=True)
+class _AdapterEdge:
+    source: str
+    target: str
+    relation: str
+    provenance: str
+    evidence: str
+    scope: str
+    confidence: str = "high"
 
 
 def _cached_parse(key: tuple[Any, ...], parse: Any) -> Any:
@@ -39,10 +61,25 @@ def clear_parse_cache() -> None:
 
 def _safe_identifier(value: Any) -> str:
     """Bound graph labels to identifiers and paths, not arbitrary source text."""
-    import re
     if not isinstance(value, str) or len(value) > 256:
         return ""
     return value if re.fullmatch(r"[A-Za-z0-9_./:@#-]+", value) else ""
+
+
+def _safe_diagnostic_path(value: Any) -> str:
+    if not isinstance(value, str) or len(value) > 256:
+        return ""
+    return (value if re.fullmatch(
+        r"[A-Za-z0-9_./:@#*?+\[\]-]+", value) else "")
+
+
+def _safe_evidence(value: Any) -> str:
+    """Keep bounded static evidence labels, including spaces, not source text."""
+    if (not isinstance(value, str) or len(value) > 256
+            or any(ord(char) < 32 for char in value)
+            or not value.strip()):
+        return ""
+    return value
 
 
 _TERRAFORM_ADDRESS_PREFIX = {
@@ -65,14 +102,21 @@ def index(ctx: Any) -> None:
     from ozagia.core.cloudformation_graph import (
         CloudFormationParseError, parse_cloudformation_source,
     )
-    from ozagia.core.deployment_graph import extract_deployment_metadata
+    from ozagia.core.deployment_graph import (
+        extract_deployment_metadata, helm_template_paths,
+    )
     from ozagia.core.gitops_graph import GitOpsParseError, parse_gitops_source
     from ozagia.core.kubernetes_graph import (
         KubernetesParseError, merge_kubernetes_graphs, parse_kubernetes_source,
     )
     from ozagia.core.pulumi_graph import parse_pulumi_yaml
-    from ozagia.core.terraform_graph import index_terraform_text, merge_terraform_graphs
+    from ozagia.core.terraform_graph import (
+        index_terraform_text,
+        merge_terraform_graphs,
+        resolve_terraform_roots,
+    )
 
+    config = load_project_config(ctx.root)
     all_nodes: list[tuple[Any, str]] = []
     all_edges: list[Any] = []
     kube_graphs = []
@@ -80,6 +124,7 @@ def index(ctx: Any) -> None:
     diagnostics: list[tuple[str, str]] = []
     manifests: dict[str, str] = {}
     terraform_by_dir: dict[str, dict[str, str]] = {}
+    terraform_paths: list[str] = []
     # One bounded walk: register every candidate even when a source cannot be
     # read or the cumulative content budget is reached, otherwise every refresh
     # would repeatedly treat those paths as newly discovered.
@@ -103,6 +148,7 @@ def index(ctx: Any) -> None:
             continue
         digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
         if kind == "terraform":
+            terraform_paths.append(rel)
             scope = PurePosixPath(rel).parent.as_posix()
             dialect = ("opentofu" if rel.lower().endswith((".tofu", ".tofu.json"))
                        else "terraform")
@@ -154,17 +200,6 @@ def index(ctx: Any) -> None:
                     all_edges.extend(cloudformation.edges)
                     if cloudformation.unresolved:
                         diagnostics.append((rel, f"CloudFormation references unresolved: {len(cloudformation.unresolved)}"))
-            try:
-                graph = _cached_parse(
-                    (root_key, rel, "kubernetes", digest),
-                    lambda: parse_kubernetes_source(text, rel))
-            except KubernetesParseError as exc:
-                if "apiVersion" in text and "kind" in text:
-                    diagnostics.append(
-                        (rel, f"Kubernetes: {exc}"))
-                continue
-            if graph.nodes:
-                kube_graphs.append(graph)
     for _scope, dialects in sorted(terraform_by_dir.items()):
         if len(dialects) > 1:
             path = dialects.get("terraform") or next(iter(dialects.values()))
@@ -175,11 +210,49 @@ def index(ctx: Any) -> None:
             ))
     if terraform_graphs:
         terraform = merge_terraform_graphs(terraform_graphs)
+        lock_dirs: set[str] = set()
+        for path in terraform_paths:
+            current = PurePosixPath(path).parent
+            while True:
+                rel_lock = (PurePosixPath(".terraform.lock.hcl")
+                            if current.as_posix() == "."
+                            else current / ".terraform.lock.hcl")
+                lock_path = ctx.root / rel_lock.as_posix()
+                if lock_path.is_file() and not lock_path.is_symlink():
+                    lock_dirs.add(current.as_posix())
+                if current.as_posix() == ".":
+                    break
+                current = current.parent
+        terraform = resolve_terraform_roots(
+            terraform, terraform_paths, lock_dirs=tuple(lock_dirs),
+            explicit_roots=config.iac_roots,
+            remote_states=config.remote_states,
+        )
         all_nodes.extend((node, "terraform") for node in terraform.nodes)
         all_edges.extend(terraform.edges)
         by_key = {node.key: node.path for node in terraform.nodes}
         for edge in terraform.unresolved:
-            diagnostics.append((by_key.get(edge.source, ""), "Terraform reference unresolved"))
+            diagnostics.append((
+                by_key.get(edge.source, ""),
+                f"Terraform {edge.relation} unresolved: {edge.evidence}",
+            ))
+
+    template_paths = helm_template_paths(manifests)
+    for rel, text in sorted(manifests.items()):
+        if rel in template_paths:
+            diagnostics.append((rel, "Helm template source; not parsed or rendered"))
+            continue
+        try:
+            graph = _cached_parse(
+                (root_key, rel, "kubernetes",
+                 hashlib.sha256(text.encode("utf-8")).hexdigest()),
+                lambda: parse_kubernetes_source(text, rel))
+        except KubernetesParseError as exc:
+            if "apiVersion" in text and "kind" in text:
+                diagnostics.append((rel, f"Kubernetes: {exc}"))
+            continue
+        if graph.nodes:
+            kube_graphs.append(graph)
     if kube_graphs:
         kube = merge_kubernetes_graphs(kube_graphs)
         all_nodes.extend((node, "kubernetes") for node in kube.nodes)
@@ -192,6 +265,224 @@ def index(ctx: Any) -> None:
                        for rel, _ in deployment.diagnostics)
     all_nodes.extend((node, "deployment") for node in deployment.nodes)
     all_edges.extend(deployment.edges)
+
+    extra_attrs: dict[str, dict[str, Any]] = {}
+    environment_by_node: dict[str, str | None] = {}
+    ambiguous_environment_nodes: set[str] = set()
+
+    def add_config_node(family: str, kind: str, name: str, path: str,
+                        extra: dict[str, Any]) -> Any:
+        key = f"infra-config:v1:{family}:{hashlib.sha256(name.encode()).hexdigest()}"
+        node = SimpleNamespace(
+            key=key, kind=kind, name=name, address=name, path=path,
+            source_digest=hashlib.sha256(
+                (family + "\0" + name + "\0" + repr(extra)).encode()).hexdigest(),
+            extractor_version="iac-config-v1", confidence="high",
+        )
+        extra_attrs[key] = extra
+        all_nodes.append((node, family))
+        return node
+
+    def path_matches(path: str, prefix: str) -> bool:
+        prefix = prefix.rstrip("/") or "."
+        return prefix == "." or path == prefix or path.startswith(prefix + "/")
+
+    def environment_matches(path: str, namespace: str | None) -> set[str]:
+        matched = {
+            environment.name for environment in config.environments
+            if any(path_matches(path, prefix) for prefix in environment.paths)
+            or (namespace is not None and namespace in environment.namespaces)
+        }
+        return matched
+
+    def existing_project_path(rel: str, *, directory: bool) -> Path | None:
+        if is_skipped_path(ctx.root, rel):
+            return None
+        current = ctx.root
+        for part in PurePosixPath(rel).parts:
+            current = current / part
+            if current.is_symlink():
+                return None
+        if directory:
+            return current if current.is_dir() else None
+        return current if current.is_file() else None
+
+    for environment in config.environments:
+        values = tuple(dict.fromkeys((
+            environment.name, *environment.paths, *environment.namespaces,
+            *(value for value in (
+                environment.account_alias, environment.region,
+                environment.cluster, environment.risk,
+            ) if value),
+            *environment.pipelines,
+        )))
+        add_config_node(
+            "environment", "Environment", environment.name, ".",
+            {"environment": environment.name,
+             "environment_values": list(values),
+             "paths": list(environment.paths),
+             "namespaces": list(environment.namespaces),
+             "account_alias": environment.account_alias,
+             "region": environment.region, "cluster": environment.cluster,
+             "risk": environment.risk, "pipelines": list(environment.pipelines)},
+        )
+
+    source_nodes = list(all_nodes)
+    for service in config.services:
+        service_path = "."
+        if service.paths:
+            existing_dir = existing_project_path(service.paths[0], directory=True)
+            if existing_dir is not None:
+                service_path = service.paths[0]
+            else:
+                diagnostics.append((
+                    service.paths[0], "Service path directory is missing or skipped",
+                ))
+        service_extra = {
+            "service": service.name, "chart": service.chart,
+            "values_globs": list(service.values_globs),
+            "buildspec": service.buildspec, "pipeline": service.pipeline,
+            "namespace": service.namespace,
+            "environment": service.environment, "paths": list(service.paths),
+        }
+        service_node = add_config_node(
+            "service", "Service", service.name, service_path, service_extra)
+        if service.environment:
+            environment_by_node[service_node.key] = service.environment
+        linked: list[str] = []
+
+        def link(target: Any, relation: str, evidence: str = "project config") -> None:
+            all_edges.append(_AdapterEdge(
+                service_node.key, target.key, relation, "declared",
+                evidence, service_path, "high",
+            ))
+            linked.append(target.key)
+            if service.environment:
+                previous = environment_by_node.get(target.key)
+                if previous is None:
+                    if target.key not in ambiguous_environment_nodes:
+                        environment_by_node[target.key] = service.environment
+                elif previous != service.environment:
+                    environment_by_node[target.key] = None
+                    ambiguous_environment_nodes.add(target.key)
+                    diagnostics.append((
+                        getattr(target, "path", service_path),
+                        "Service mappings assign conflicting environments; facet omitted",
+                    ))
+
+        deployment_nodes = [
+            node for node, family in source_nodes if family == "deployment"
+        ]
+        if service.chart:
+            chart_matches = {
+                node.key: node for node in deployment_nodes
+                if getattr(node, "kind", "") == "helm_chart"
+                and (PurePosixPath(node.path).parent.as_posix() == service.chart
+                     or node.name == service.chart)
+            }
+            if len(chart_matches) == 1:
+                link(next(iter(chart_matches.values())), "service_chart")
+            else:
+                diagnostics.append((
+                    service.chart,
+                    "Service chart target " + (
+                        "is missing" if not chart_matches else "is ambiguous"),
+                ))
+
+        for pattern in service.values_globs:
+            matches = {
+                node.key: node for node in deployment_nodes
+                if getattr(node, "kind", "") == "helm_values_file"
+                and fnmatch.fnmatchcase(node.path, pattern)
+            }
+            if not matches:
+                diagnostics.append((pattern, "Service values glob matched no source files"))
+            for target in matches.values():
+                link(target, "service_values")
+
+        for prefix in service.paths:
+            candidates = [
+                node for node, _family in source_nodes
+                if path_matches(str(getattr(node, "path", "")), prefix)
+                and str(getattr(node, "kind", "")).lower() in {
+                    "deployment", "statefulset", "daemonset", "replicaset",
+                    "job", "pod", "serviceaccount", "ingress",
+                    "kustomize_overlay",
+                }
+                and (service.namespace is None
+                     or getattr(node, "namespace", None) == service.namespace)
+            ]
+            grouped: dict[tuple[str, str, str], list[Any]] = {}
+            for target in candidates:
+                identity = (str(getattr(target, "kind", "")),
+                            str(getattr(target, "name", "")),
+                            str(getattr(target, "namespace", "") or ""))
+                grouped.setdefault(identity, []).append(target)
+            for identity, group in grouped.items():
+                if len(group) != 1:
+                    diagnostics.append((
+                        prefix, f"Service {identity[0]} target is ambiguous",
+                    ))
+                    continue
+                target = group[0]
+                kind = str(getattr(target, "kind", "")).lower()
+                relation = {
+                    "deployment": "service_deployment",
+                    "statefulset": "service_deployment",
+                    "daemonset": "service_deployment",
+                    "replicaset": "service_deployment",
+                    "job": "service_deployment",
+                    "pod": "service_deployment",
+                    "serviceaccount": "service_account",
+                    "ingress": "service_ingress",
+                    "kustomize_overlay": "service_kustomize",
+                }.get(kind)
+                if relation:
+                    link(target, relation)
+            if not candidates:
+                diagnostics.append((prefix, "Service path has no matching deployment sources"))
+
+        def add_source_file(path: str, kind: str) -> None:
+            if existing_project_path(path, directory=False) is None:
+                message = ("is skipped" if is_skipped_path(ctx.root, path)
+                           else "is missing or not a regular source file")
+                diagnostics.append((path, f"Service {kind} target {message}"))
+                return
+            key = f"infra-config:v1:service-source:{hashlib.sha256((kind + chr(0) + path).encode()).hexdigest()}"
+            source = SimpleNamespace(
+                key=key, kind=kind, name=PurePosixPath(path).name,
+                address=PurePosixPath(path).name, path=path,
+                source_digest=hashlib.sha256(path.encode()).hexdigest(),
+                extractor_version="iac-config-v1", confidence="high",
+            )
+            extra_attrs[key] = {"service": service.name}
+            if key not in {node.key for node, _family in all_nodes}:
+                all_nodes.append((source, "service"))
+            link(source, "service_" + kind)
+
+        if service.buildspec:
+            add_source_file(service.buildspec, "buildspec")
+        if service.pipeline:
+            add_source_file(service.pipeline, "pipeline")
+    for node, _family in source_nodes:
+        node_path = str(getattr(node, "path", ""))
+        namespace = getattr(node, "namespace", None)
+        matches = environment_matches(
+            node_path, namespace if isinstance(namespace, str) else None)
+        if len(matches) > 1:
+            ambiguous_environment_nodes.add(node.key)
+            environment_by_node[node.key] = None
+            diagnostics.append((node_path, "Environment facet is ambiguous"))
+        elif len(matches) == 1 and node.key not in ambiguous_environment_nodes:
+            configured_environment = next(iter(matches))
+            existing = environment_by_node.get(node.key)
+            if existing is None:
+                environment_by_node[node.key] = configured_environment
+            elif existing != configured_environment:
+                environment_by_node[node.key] = None
+                ambiguous_environment_nodes.add(node.key)
+
+    skip_info = skipped_summary(ctx.root)
     ids: dict[str, int] = {}
     for node, family in all_nodes:
         name = _safe_identifier(getattr(node, "address", None) or getattr(node, "name", None)
@@ -228,28 +519,67 @@ def index(ctx: Any) -> None:
         if namespace:
             attrs["namespace"] = namespace
         raw_key = node.key
+        extras = extra_attrs.get(raw_key, {})
+        for field in (
+                "service", "chart", "buildspec", "pipeline", "account_alias",
+                "region", "cluster", "risk", "environment"):
+            value = extras.get(field)
+            safe = _safe_identifier(value)
+            if safe:
+                attrs[field] = safe
+        for field in (
+                "environment_values", "paths", "namespaces", "pipelines",
+                "values_globs"):
+            value = extras.get(field)
+            if isinstance(value, (list, tuple)):
+                safe_values = [
+                    safe for item in value
+                    if (safe := _safe_identifier(item))
+                ]
+                if safe_values:
+                    attrs[field] = safe_values
+        facet = environment_by_node.get(raw_key)
+        if facet is not None:
+            safe_facet = _safe_identifier(facet)
+            if safe_facet:
+                attrs["environment"] = safe_facet
         digest = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
         nid = ctx.builder.node("InfraResource", attrs, key=("infra", digest))
         ids[raw_key] = nid
-        ctx.builder.edge(nid, "declared_in", ctx.file_node(path))
+        if kind not in {"root", "Environment", "Service"}:
+            ctx.builder.edge(nid, "declared_in", ctx.file_node(path))
     for edge in all_edges:
         if edge.source in ids and edge.target in ids:
             relation = _safe_identifier(edge.relation)
             if relation:
                 edge_attrs: dict[str, Any] = {"provenance": edge.provenance}
-                evidence = _safe_identifier(getattr(edge, "evidence", None))
+                evidence = _safe_evidence(getattr(edge, "evidence", None))
                 if evidence:
                     edge_attrs["evidence"] = evidence
                 scope = _safe_identifier(getattr(edge, "scope", None))
                 if scope:
                     edge_attrs["scope"] = scope
+                confidence = _safe_identifier(getattr(edge, "confidence", None))
+                if confidence:
+                    edge_attrs["confidence"] = confidence
                 ctx.builder.edge(ids[edge.source], "infra_" + relation,
                                  ids[edge.target], edge_attrs)
+    skip_key = hashlib.sha256(
+        (root_key + "\0iac-skip-summary").encode()).hexdigest()
+    ctx.builder.node(
+        "InfraDiagnostic",
+        {"path": ".", "message": "IaC skipped paths",
+         "category": "skipped", "count": int(skip_info["count"]),
+         "paths": list(skip_info["paths"]),
+         "truncated": bool(skip_info["truncated"])},
+        key=("infra-skip-summary", skip_key),
+    )
     for path, message in diagnostics[:100]:
-        if not _safe_identifier(path):
+        safe_path = _safe_diagnostic_path(path)
+        if not safe_path:
             continue
         key = hashlib.sha256((path + "\0" + message).encode()).hexdigest()
-        ctx.builder.node("InfraDiagnostic", {"path": path, "message": message},
+        ctx.builder.node("InfraDiagnostic", {"path": safe_path, "message": message},
                          key=("infra-diagnostic", key))
 
 
@@ -317,11 +647,22 @@ def register(registry: Any) -> None:
         out = getattr(memory, "_out", {}) or {}
         edges = sum(1 for bucket in out.values() for edge in bucket
                     if str(edge.get("type", "")).startswith("infra_"))
+        skip_reports = [item for item in diagnostics
+                        if item.get("category") == "skipped"]
+        skipped_count = max(
+            (int(item.get("count") or 0) for item in skip_reports), default=0)
+        skipped_paths = list(dict.fromkeys(
+            path for item in skip_reports
+            for path in item.get("paths", []) if isinstance(path, str)
+        ))[:500]
         return {"freshness": memory.staleness().get("freshness", "unknown"),
                 "resources": len(resources), "families": dict(sorted(families.items())),
                 "edges": edges, "extractors": sorted(extractors),
                 "query_cache": cache_stats(memory),
                 "diagnostics": diagnostics[:100],
+                "skipped": {"count": skipped_count, "paths": skipped_paths,
+                            "truncated": any(bool(item.get("truncated"))
+                                             for item in skip_reports)},
                 "complete": False,
                 "note": "Static, partial source analysis; not deployed state."}
 

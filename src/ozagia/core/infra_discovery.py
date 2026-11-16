@@ -9,14 +9,99 @@ from __future__ import annotations
 
 import os
 import stat
+import fnmatch
 from pathlib import Path
 from typing import Iterator
 
-from ozagia.config import load_project_config, state_rel
+from ozagia.config import (
+    DEFAULT_IAC_SKIP_GLOBS,
+    load_project_config,
+    state_rel,
+)
 
 MAX_FILES = 5000
 MAX_FILE_BYTES = 1024 * 1024
 _EXTRA_SKIP = frozenset({".terraform", ".terragrunt-cache", ".pulumi", ".kube"})
+DEFAULT_SKIP_GLOBS = DEFAULT_IAC_SKIP_GLOBS
+_STATUS_PATH_LIMIT = 500
+_STATUS_SCAN_LIMIT = 50_000
+
+
+def _skip_patterns(root: Path) -> tuple[str, ...]:
+    cfg = load_project_config(root)
+    return cfg.iac_skip_globs
+
+
+def _matches_skip(rel: str, patterns: tuple[str, ...]) -> bool:
+    name = Path(rel).name
+    for pattern in patterns:
+        if (fnmatch.fnmatchcase(rel, pattern)
+                or fnmatch.fnmatchcase(name, pattern)):
+            return True
+        if pattern.endswith("/**"):
+            directory = pattern[:-3].rstrip("/")
+            if rel == directory or rel.startswith(directory + "/"):
+                return True
+    return False
+
+
+def skipped_summary(root: str | Path) -> dict[str, object]:
+    """Return bounded names/counts of excluded IaC paths, never file contents."""
+    base = Path(root).resolve()
+    cfg = load_project_config(base)
+    patterns = _skip_patterns(base)
+    count = 0
+    visited = 0
+    paths: list[str] = []
+    truncated = False
+
+    def record(rel: str) -> None:
+        nonlocal count, truncated
+        count += 1
+        if len(paths) < _STATUS_PATH_LIMIT:
+            paths.append(rel)
+        else:
+            truncated = True
+
+    for current, dirs, files in os.walk(base, followlinks=False):
+        visited += 1 + len(dirs) + len(files)
+        if visited > _STATUS_SCAN_LIMIT:
+            truncated = True
+            break
+        directory = Path(current)
+        rel_dir = directory.relative_to(base).as_posix()
+        kept_dirs: list[str] = []
+        for name in sorted(dirs):
+            rel = name if rel_dir == "." else f"{rel_dir}/{name}"
+            if (name in cfg.memory_skip_dirs or name in _EXTRA_SKIP
+                    or _matches_skip(rel, patterns)
+                    or (directory / name).is_symlink()):
+                if name not in cfg.memory_skip_dirs or name in _EXTRA_SKIP \
+                        or _matches_skip(rel, patterns):
+                    record(rel)
+                continue
+            kept_dirs.append(name)
+        dirs[:] = kept_dirs
+        for name in sorted(files):
+            rel = name if rel_dir == "." else f"{rel_dir}/{name}"
+            if _matches_skip(rel, patterns):
+                record(rel)
+    return {"count": count, "paths": paths, "truncated": truncated}
+
+
+def is_skipped_path(root: str | Path, rel: str) -> bool:
+    """Check a repository-relative path against IaC's merged skip policy."""
+    base = Path(root).resolve()
+    path = Path(rel)
+    if path.is_absolute() or ".." in path.parts:
+        return True
+    cfg = load_project_config(base)
+    parts = path.parts
+    if any(part in cfg.memory_skip_dirs or part in _EXTRA_SKIP for part in parts):
+        return True
+    patterns = _skip_patterns(base)
+    return any(_matches_skip(Path(*parts[:end]).as_posix(), patterns)
+               for end in range(1, len(parts) + 1))
 
 
 def source_kind(name: str) -> str | None:
@@ -43,15 +128,21 @@ def iter_candidate_paths(root: str | Path, *, max_files: int = MAX_FILES
     base = Path(root).resolve()
     cfg = load_project_config(base)
     state = state_rel(base)
+    patterns = cfg.iac_skip_globs
     count = 0
     for current, dirs, files in os.walk(base, followlinks=False):
         directory = Path(current)
         rel_dir = directory.relative_to(base).as_posix()
         dirs[:] = sorted(d for d in dirs if d not in cfg.memory_skip_dirs
                          and d not in _EXTRA_SKIP
+                         and not _matches_skip(
+                             d if rel_dir == "." else f"{rel_dir}/{d}", patterns)
                          and not (directory / d).is_symlink()
                          and (not state or (Path(rel_dir) / d).as_posix() != state))
         for name in sorted(files):
+            rel = name if rel_dir == "." else f"{rel_dir}/{name}"
+            if _matches_skip(rel, patterns):
+                continue
             kind = source_kind(name)
             if not kind:
                 continue

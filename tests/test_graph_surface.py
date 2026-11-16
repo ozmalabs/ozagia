@@ -38,7 +38,10 @@ FULL_SURFACE_TOOLS = [
     "dev_callers", "dev_callees", "dev_symbol_impact", "dev_rename_preview",
     "dev_diagnostics", "dev_hover", "dev_document_symbols",
     "dev_symbol_callers", "dev_symbol_callees", "dev_symbol_graph_impact",
-    "dev_symbol_resolve", "dev_graph_query",
+    "dev_symbol_resolve", "dev_graph_query", "dev_environments",
+    "dev_check_iac", "dev_ops_record", "dev_ops_resume", "dev_live_import",
+    "dev_live_diff", "dev_live_save", "dev_aws_cli_check",
+    "dev_preflight_plan",
 ]
 VERBS = ["find", "node", "expand", "impact", "edit", "create", "check", "note"]
 

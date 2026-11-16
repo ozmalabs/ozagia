@@ -1,10 +1,11 @@
 """Bounded, source-only Terraform/OpenTofu structure extraction.
 
 This deliberately stores declaration identifiers and references, never
-arbitrary HCL attribute values. The sole captured value is an allowlisted
-static module source path. It does not evaluate expressions, load modules, or
-inspect state. The stdlib backend handles common block syntax and Terraform
-JSON.
+arbitrary HCL attribute values. Captured literals are limited to an allowlisted
+static module source path and structural Terraform backend identity fields
+(backend type, workspace, bucket, key and region). It does not evaluate
+expressions, load modules, or inspect state. The stdlib backend handles common
+block syntax and Terraform JSON.
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ SUPPORTED_SUFFIXES = (".tf", ".tf.json", ".tofu", ".tofu.json")
 _BLOCK = re.compile(
     r"(?m)^\s*(terraform|provider|resource|data|ephemeral|variable|locals|"
     r"output|module|moved|import|removed|check)\b")
-_REF = re.compile(r"\b([A-Za-z_][\w-]*(?:\.[A-Za-z_][\w-]*){1,3})\b")
+_REF = re.compile(r"\b([A-Za-z_][\w-]*(?:\.[A-Za-z_][\w-]*){1,5})\b")
 _INTERPOLATION = re.compile(r"\$\{([^}]{1,256})\}")
 _ADDR_PREFIX = {"variable": "var", "local": "local", "module": "module",
                 "data": "data"}
@@ -55,6 +56,12 @@ class TerraformNode:
     confidence: str = "low"
     module_source: str | None = None
     instance_mode: str | None = None
+    remote_backend_type: str | None = None
+    remote_workspace: str | None = None
+    remote_bucket: str | None = None
+    remote_key: str | None = None
+    remote_region: str | None = None
+    remote_dynamic: bool = False
 
 
 @dataclass(frozen=True)
@@ -65,6 +72,19 @@ class TerraformEdge:
     provenance: str
     scope: str
     evidence: str
+    confidence: str = "low"
+
+
+@dataclass(frozen=True)
+class TerraformBackend:
+    path: str
+    dialect: str
+    backend_type: str
+    workspace: str | None = None
+    bucket: str | None = None
+    key: str | None = None
+    region: str | None = None
+    dynamic: bool = False
 
 
 @dataclass(frozen=True)
@@ -73,6 +93,7 @@ class TerraformGraph:
     edges: tuple[TerraformEdge, ...]
     unresolved: tuple[TerraformEdge, ...]
     errors: tuple[tuple[str, str], ...]
+    backends: tuple[TerraformBackend, ...] = ()
 
 
 def discover_terraform_files(
@@ -276,6 +297,169 @@ def _hcl_literal_attr(raw_body: str, clean_body: str, attr: str) -> str | None:
     return literal.group(1) if literal is not None else None
 
 
+_SAFE_BACKEND_VALUE = re.compile(r"[A-Za-z0-9_./:@+=,-]{1,256}\Z")
+
+
+def _safe_backend_value(value: object) -> str | None:
+    if isinstance(value, str) and _SAFE_BACKEND_VALUE.fullmatch(value):
+        return value
+    return None
+
+
+def _json_remote_state(body: object) -> tuple[str | None, str | None,
+                                               str | None, str | None,
+                                               str | None, bool]:
+    if not isinstance(body, dict):
+        return None, None, None, None, None, True
+    backend = _safe_backend_value(body.get("backend"))
+    workspace = _safe_backend_value(body.get("workspace"))
+    config = body.get("config")
+    config = config if isinstance(config, dict) else {}
+    bucket = _safe_backend_value(config.get("bucket"))
+    key = _safe_backend_value(config.get("key"))
+    region = _safe_backend_value(config.get("region"))
+    dynamic = (backend is None or key is None
+               or ("workspace" in body and workspace is None)
+               or ("config" in body and not isinstance(body.get("config"), dict))
+                or any(field in config and value is None
+                       for field, value in (
+                           ("bucket", bucket), ("key", key), ("region", region))))
+    return backend, workspace, bucket, key, region, dynamic
+
+
+def _hcl_block_end(clean: str, open_brace: int) -> int | None:
+    depth = 1
+    pos = open_brace + 1
+    while pos < len(clean) and depth:
+        if clean[pos] == "{":
+            depth += 1
+        elif clean[pos] == "}":
+            depth -= 1
+        pos += 1
+    return pos if depth == 0 else None
+
+
+def _dynamic_hcl_attrs(clean_body: str, attrs: tuple[str, ...],
+                       values: dict[str, str | None]) -> bool:
+    return any(
+        values.get(attr) is None
+        and re.search(rf"\b{re.escape(attr)}[ \t]*=", clean_body) is not None
+        for attr in attrs
+    )
+
+
+def _hcl_remote_state(raw_body: str, clean_body: str
+                      ) -> tuple[str | None, str | None, str | None,
+                                 str | None, str | None, bool]:
+    backend = _safe_backend_value(
+        _hcl_literal_attr(raw_body, clean_body, "backend"))
+    workspace = _safe_backend_value(
+        _hcl_literal_attr(raw_body, clean_body, "workspace"))
+    config_match = re.search(r"\bconfig\s*=\s*\{", clean_body)
+    config_raw = config_clean = ""
+    if config_match:
+        open_brace = clean_body.find("{", config_match.start())
+        end = _hcl_block_end(clean_body, open_brace)
+        if end is not None:
+            config_clean = clean_body[open_brace + 1:end - 1]
+            config_raw = raw_body[open_brace + 1:end - 1]
+    bucket = _safe_backend_value(
+        _hcl_literal_attr(config_raw, config_clean, "bucket"))
+    key = _safe_backend_value(
+        _hcl_literal_attr(config_raw, config_clean, "key"))
+    region = _safe_backend_value(
+        _hcl_literal_attr(config_raw, config_clean, "region"))
+    dynamic = (
+        backend is None or key is None
+        or _dynamic_hcl_attrs(
+            clean_body, ("backend", "workspace"),
+            {"backend": backend, "workspace": workspace},
+        )
+        or (re.search(r"\bconfig[ \t]*=", clean_body) is not None
+            and not config_match)
+        or _dynamic_hcl_attrs(
+            config_clean, ("bucket", "key", "region"),
+            {"bucket": bucket, "key": key, "region": region},
+        )
+    )
+    return backend, workspace, bucket, key, region, dynamic
+
+
+def _hcl_backends(path: str, dialect: str, text: str,
+                  clean: str) -> tuple[TerraformBackend, ...]:
+    result: list[TerraformBackend] = []
+    for kind, _labels, begin, end, body in _blocks(text, clean):
+        if kind != "terraform":
+            continue
+        body_start = clean.find(body, begin, end)
+        if body_start < 0:
+            continue
+        raw_block = text[body_start:body_start + len(body)]
+        for match in re.finditer(r"\bbackend\b", body):
+            open_brace = body.find("{", match.end())
+            if open_brace < 0:
+                continue
+            label = re.fullmatch(
+                r'\s*"([^"\n]*)"\s*', raw_block[match.end():open_brace])
+            backend_type = (_safe_backend_value(label.group(1))
+                            if label is not None else None)
+            if backend_type is None:
+                continue
+            block_end = _hcl_block_end(body, open_brace)
+            if block_end is None:
+                continue
+            local_clean = body[open_brace + 1:block_end - 1]
+            body_raw = raw_block[open_brace + 1:block_end - 1]
+            bucket = _safe_backend_value(
+                _hcl_literal_attr(body_raw, local_clean, "bucket"))
+            key = _safe_backend_value(
+                _hcl_literal_attr(body_raw, local_clean, "key"))
+            region = _safe_backend_value(
+                _hcl_literal_attr(body_raw, local_clean, "region"))
+            workspace = _safe_backend_value(
+                _hcl_literal_attr(body_raw, local_clean, "workspace"))
+            result.append(TerraformBackend(
+                path, dialect, backend_type,
+                workspace=workspace, bucket=bucket, key=key, region=region,
+                dynamic=_dynamic_hcl_attrs(
+                    local_clean, ("bucket", "key", "region", "workspace"),
+                    {"bucket": bucket, "key": key, "region": region,
+                     "workspace": workspace},
+                ),
+            ))
+    return tuple(result)
+
+
+def _json_backends(path: str, dialect: str, root: dict[str, object]
+                   ) -> tuple[TerraformBackend, ...]:
+    terraform = root.get("terraform")
+    blocks = terraform if isinstance(terraform, list) else [terraform]
+    found: list[TerraformBackend] = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        backends = block.get("backend")
+        if not isinstance(backends, dict):
+            continue
+        for backend_type, config in backends.items():
+            safe_type = _safe_backend_value(backend_type)
+            if safe_type is None or not isinstance(config, dict):
+                continue
+            bucket = _safe_backend_value(config.get("bucket"))
+            key = _safe_backend_value(config.get("key"))
+            region = _safe_backend_value(config.get("region"))
+            workspace = _safe_backend_value(config.get("workspace"))
+            found.append(TerraformBackend(
+                path, dialect, safe_type,
+                workspace=workspace, bucket=bucket, key=key, region=region,
+                dynamic=any(field in config and value is None
+                            for field, value in (
+                                ("bucket", bucket), ("key", key),
+                                ("region", region), ("workspace", workspace))),
+            ))
+    return tuple(found)
+
+
 def _hcl_module_source(raw_body: str, clean_body: str) -> str | None:
     return _hcl_literal_attr(raw_body, clean_body, "source")
 
@@ -400,6 +584,7 @@ def index_terraform_text(path: str, text: str, *, module_scope: str = "root") ->
     bodies: dict[str, str] = {}
     module_sources: list[tuple[TerraformNode, str]] = []
     errors: list[tuple[str, str]] = []
+    backends: list[TerraformBackend] = []
     if low.endswith(".json"):
         try:
             root = json.loads(text)
@@ -431,10 +616,17 @@ def index_terraform_text(path: str, text: str, *, module_scope: str = "root") ->
                         address = f"{kind}.{address}"
                     mode = ("for_each" if "for_each" in body
                             else "count" if "count" in body else None)
+                    remote = (_json_remote_state(body)
+                              if kind == "data" and typ == "terraform_remote_state"
+                              else (None, None, None, None, None, False))
                     identity = f"{kind}:{address}"
                     node = _node(
                         path, dialect, module_scope, identity, kind, address,
                         1, 1, digest, instance_mode=mode,
+                        remote_backend_type=remote[0],
+                        remote_workspace=remote[1],
+                        remote_bucket=remote[2], remote_key=remote[3],
+                        remote_region=remote[4], remote_dynamic=remote[5],
                     )
                     decls.append(node)
                     bodies[node.key] = " ".join(
@@ -466,6 +658,7 @@ def index_terraform_text(path: str, text: str, *, module_scope: str = "root") ->
                     _json_references(body, allowed_refs_frozen))
                 if kind == "module" and isinstance(source, str):
                     module_sources.append((node, source))
+        backends.extend(_json_backends(path, dialect, root))
         for kind in ("moved", "import", "removed", "check"):
             group = root.get(kind, {})
             entries: list[tuple[str, object]] = []
@@ -504,6 +697,7 @@ def index_terraform_text(path: str, text: str, *, module_scope: str = "root") ->
                     return TerraformGraph((), (), (), ((path, "malformed HCL block structure"),))
         if depth:
             return TerraformGraph((), (), (), ((path, "malformed HCL block structure"),))
+        backends.extend(_hcl_backends(path, dialect, text, clean))
         for kind, labels, begin, end, body in _blocks(text, clean):
             start_line = text.count("\n", 0, begin) + 1
             end_line = text.count("\n", 0, end) + 1
@@ -546,11 +740,18 @@ def index_terraform_text(path: str, text: str, *, module_scope: str = "root") ->
                     address = f"{address}.{alias}"
             identity = f"{kind}:{address}"
             source = _hcl_module_source(raw_body, clean_body) if kind == "module" else None
+            remote = (_hcl_remote_state(raw_body, clean_body)
+                      if kind == "data" and labels[0] == "terraform_remote_state"
+                      else (None, None, None, None, None, False))
             node = _node(
                 path, dialect, module_scope, identity, kind, address,
                 start_line, end_line, digest,
                 module_source=_safe_module_source(source),
                 instance_mode=_instance_mode(body),
+                remote_backend_type=remote[0],
+                remote_workspace=remote[1],
+                remote_bucket=remote[2], remote_key=remote[3],
+                remote_region=remote[4], remote_dynamic=remote[5],
             )
             decls.append(node)
             bodies[node.key] = body_with_templates(begin, end, clean_body)
@@ -596,7 +797,8 @@ def index_terraform_text(path: str, text: str, *, module_scope: str = "root") ->
     for node, source in module_sources:
         unresolved.append(_module_source_edge(node, source))
     return TerraformGraph(
-        tuple(decls), tuple(_dedupe(edges)), tuple(_dedupe(unresolved)), tuple(errors)
+        tuple(decls), tuple(_dedupe(edges)), tuple(_dedupe(unresolved)),
+        tuple(errors), tuple(backends),
     )
 
 
@@ -794,6 +996,162 @@ def merge_terraform_graphs(graphs) -> TerraformGraph:
         tuple(_dedupe(edges)),
         tuple(_dedupe(unresolved)),
         errors,
+        tuple(backend for graph in graphs for backend in graph.backends),
+    )
+
+
+def resolve_terraform_roots(
+    graph: TerraformGraph,
+    source_paths: tuple[str, ...] | list[str],
+    *,
+    lock_dirs: tuple[str, ...] | list[str] = (),
+    explicit_roots: tuple[str, ...] | list[str] = (),
+    remote_states: tuple[object, ...] | list[object] = (),
+) -> TerraformGraph:
+    """Add conservative root nodes and declared/static remote-state links.
+
+    Backend identities are compared transiently and are not copied onto root
+    nodes or edges. Only a source backend's backend type, key and any additional
+    identity fields explicitly present on the consumer participate in matching.
+    """
+    paths = tuple(sorted(set(PurePosixPath(p).as_posix() for p in source_paths)))
+    if explicit_roots:
+        roots = sorted(set(PurePosixPath(p).as_posix() for p in explicit_roots))
+    else:
+        source_dirs = {PurePosixPath(path).parent.as_posix() for path in paths}
+        locked = {
+            PurePosixPath(path).as_posix()
+            for path in lock_dirs
+        }
+        roots = sorted(locked, key=lambda value: (value.count("/"), value))
+        for source_dir in sorted(source_dirs, key=lambda value: (value.count("/"), value)):
+            if any(_in_root(source_dir, root) for root in roots):
+                continue
+            roots.append(source_dir)
+        roots.sort()
+
+    def owning_root(path: str) -> str | None:
+        matches = [root for root in roots if _in_root(path, root)]
+        return max(matches, key=len) if matches else None
+
+    root_nodes: list[TerraformNode] = []
+    by_root: dict[str, TerraformNode] = {}
+    for root in roots:
+        digest = hashlib.sha256(root.encode("utf-8")).hexdigest()
+        node = _node(
+            root, "terraform", root, f"root:{root}", "root", root,
+            0, 0, digest,
+        )
+        root_nodes.append(node)
+        by_root[root] = node
+
+    backend_by_root: dict[str, list[TerraformBackend]] = {}
+    for backend in graph.backends:
+        root = owning_root(backend.path)
+        if root is not None:
+            backend_by_root.setdefault(root, []).append(backend)
+
+    edges = list(graph.edges)
+    unresolved = list(graph.unresolved)
+    declarations_by_identity: dict[tuple[str, str], list[TerraformNode]] = {}
+    for node in graph.nodes:
+        if node.kind == "data" and node.address.startswith(
+                "data.terraform_remote_state."):
+            consumer = owning_root(node.path)
+            if consumer is not None:
+                label = node.address.rsplit(".", 1)[-1]
+                declarations_by_identity.setdefault((consumer, label), []).append(node)
+
+    mappings = list(remote_states)
+    for (consumer, label), declarations in sorted(declarations_by_identity.items()):
+        if len(declarations) != 1:
+            unresolved.extend(_unresolved_remote(
+                node, consumer, "duplicate remote-state declarations are ambiguous")
+                for node in declarations)
+            continue
+        node = declarations[0]
+        mapping_candidates = [
+            item for item in mappings
+            if getattr(item, "consumer", None) == consumer
+            and getattr(item, "name", None) in {label, node.address}
+        ]
+        if len(mapping_candidates) > 1:
+            unresolved.append(_unresolved_remote(
+                node, consumer, "multiple project-config mappings are ambiguous"))
+            continue
+        if mapping_candidates:
+            producer_path = str(getattr(mapping_candidates[0], "producer", ""))
+            producer = by_root.get(producer_path)
+            if producer is None:
+                unresolved.append(_unresolved_remote(
+                    node, consumer, "configured producer root is not present"))
+                continue
+            edges.append(TerraformEdge(
+                node.key, producer.key, "remote_state", "declared",
+                consumer, "project config", "high",
+            ))
+            continue
+
+        static_match = (
+            not node.remote_dynamic
+            and node.remote_backend_type is not None
+            and node.remote_key is not None
+        )
+        if not static_match:
+            unresolved.append(_unresolved_remote(
+                node, consumer, "remote-state backend identity is dynamic or incomplete"))
+            continue
+        candidates: set[str] = set()
+        for producer_path, backend_configs in backend_by_root.items():
+            for backend in backend_configs:
+                if (backend.dynamic
+                        or backend.backend_type != node.remote_backend_type
+                        or backend.key != node.remote_key):
+                    continue
+                supplied = (
+                    ("bucket", node.remote_bucket, backend.bucket),
+                    ("region", node.remote_region, backend.region),
+                    ("workspace", node.remote_workspace, backend.workspace),
+                )
+                if any(
+                        wanted is not None
+                        and not (_field == "workspace" and actual is None)
+                        and wanted != actual
+                        for _field, wanted, actual in supplied):
+                    continue
+                candidates.add(producer_path)
+        if len(candidates) == 1:
+            producer = by_root[next(iter(candidates))]
+            edges.append(TerraformEdge(
+                node.key, producer.key, "remote_state", "inferred",
+                consumer, "unique static backend/key match", "medium",
+            ))
+        elif len(candidates) > 1:
+            unresolved.append(_unresolved_remote(
+                node, consumer, "static backend/key match is ambiguous"))
+        else:
+            unresolved.append(_unresolved_remote(
+                node, consumer, "no static backend/key producer matched"))
+
+    return TerraformGraph(
+        tuple((*graph.nodes, *root_nodes)),
+        tuple(_dedupe(edges)),
+        tuple(_dedupe(unresolved)),
+        graph.errors,
+        graph.backends,
+    )
+
+
+def _in_root(path: str, root: str) -> bool:
+    return root in {"", "."} or path == root or path.startswith(root + "/")
+
+
+def _unresolved_remote(node: TerraformNode, consumer: str,
+                       reason: str) -> TerraformEdge:
+    return TerraformEdge(
+        node.key, _reference_key(node.path, node.dialect, consumer,
+                                 node.address),
+        "remote_state", "declared", consumer, reason, "low",
     )
 
 
@@ -810,6 +1168,12 @@ def _node(
     *,
     module_source=None,
     instance_mode=None,
+    remote_backend_type=None,
+    remote_workspace=None,
+    remote_bucket=None,
+    remote_key=None,
+    remote_region=None,
+    remote_dynamic=False,
 ):
     key = f"infra:v1:{dialect}:{path}:{scope}:{ident}"
     return TerraformNode(
@@ -824,6 +1188,12 @@ def _node(
         digest,
         module_source=module_source,
         instance_mode=instance_mode,
+        remote_backend_type=remote_backend_type,
+        remote_workspace=remote_workspace,
+        remote_bucket=remote_bucket,
+        remote_key=remote_key,
+        remote_region=remote_region,
+        remote_dynamic=remote_dynamic,
     )
 
 
