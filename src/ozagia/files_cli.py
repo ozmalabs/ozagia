@@ -1,4 +1,4 @@
-"""``ozagia-files``: created-file ledger, Markdown routing and dry-run cleanup."""
+"""``ozagia-files``: created-file ledger, Markdown routing and cleanup/trash."""
 from __future__ import annotations
 
 import argparse
@@ -48,13 +48,33 @@ def build_parser() -> argparse.ArgumentParser:
     orphans.add_argument("--root", default=None)
     orphans.add_argument("--json", action="store_true")
 
-    cleanup = sub.add_parser("cleanup", help="dry-run cleanup candidates")
+    cleanup = sub.add_parser("cleanup", help="dry-run cleanup, or apply a token")
     cleanup.add_argument("--older-than-days", type=int, default=30)
     cleanup.add_argument("--classification", action="append", default=None)
     cleanup.add_argument("--apply", action="store_true",
-                         help="not enabled: this build is dry-run only")
+                         help="move planned files to trash (never delete)")
+    cleanup.add_argument("--confirm", default=None,
+                         help="one-time token from the dry-run plan")
+    cleanup.add_argument("--force", action="store_true",
+                         help="record a forced move of a referenced/unknown file")
+    cleanup.add_argument("--include-referenced", action="store_true",
+                         help="dry-run also lists referenced files (apply needs --force)")
     cleanup.add_argument("--root", default=None)
     cleanup.add_argument("--json", action="store_true")
+
+    trash = sub.add_parser("trash", help="list trash runs (nothing is purged)")
+    trash_sub = trash.add_subparsers(dest="trash_command", required=True)
+    trash_list = trash_sub.add_parser("list", help="list trash runs and files")
+    trash_list.add_argument("--limit", type=int, default=F.MAX_TRASH_RUNS)
+    trash_list.add_argument("--root", default=None)
+    trash_list.add_argument("--json", action="store_true")
+
+    restore = sub.add_parser("restore", help="restore files from a trash run")
+    restore.add_argument("trash_id", help="trash id, directory or manifest path")
+    restore.add_argument("paths", nargs="*", default=None,
+                         help="only these repository-relative paths")
+    restore.add_argument("--root", default=None)
+    restore.add_argument("--json", action="store_true")
 
     route = sub.add_parser("route", help="classify a Markdown path")
     route.add_argument("path")
@@ -105,18 +125,41 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "cleanup":
             if args.apply:
-                print("error: applying cleanup is not enabled in this build; "
-                      "dry-run only", file=sys.stderr)
-                return 2
-            records = F.cleanup_candidates(
+                if not args.confirm:
+                    print("error: --apply requires --confirm TOKEN from a "
+                          "dry-run plan", file=sys.stderr)
+                    return 2
+                result = F.cleanup_apply(
+                    root, confirmation=args.confirm, force=args.force)
+                if args.json:
+                    _print_json(result)
+                else:
+                    print(F.format_cleanup_apply(result))
+                return 0 if result.get("ok") else 1
+            plan = F.cleanup_plan(
                 root, older_than_days=args.older_than_days,
-                classifications=args.classification)
+                classifications=args.classification,
+                include_referenced=args.include_referenced)
             if args.json:
-                _print_json({"schema": F.SCHEMA, "dry_run": True,
-                             "candidates": records, "count": len(records)})
+                _print_json(plan)
             else:
-                print(F.format_cleanup(records))
+                print(F.format_cleanup_plan(plan))
             return 0
+        if args.command == "trash" and args.trash_command == "list":
+            listing = F.list_trash(root, limit=args.limit)
+            if args.json:
+                _print_json(listing)
+            else:
+                print(F.format_trash(listing))
+            return 0
+        if args.command == "restore":
+            result = F.restore(root, args.trash_id,
+                               paths=args.paths or None)
+            if args.json:
+                _print_json(result)
+            else:
+                print(F.format_restore(result))
+            return 0 if result.get("ok") else 1
         if args.command == "route":
             content = ""
             if args.content_file:

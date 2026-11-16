@@ -104,11 +104,15 @@ that creates the file) records it from the intent layer, with the reserved
 `_reason` as its reason; `after` for `edit`, `write`, `patch` and `shell`
 records newly created files among `meta.changed_paths` (and, for edit and
 write, the file they name) with one bounded `git status` pathspec scan;
-`session_event` `start`/`end` scans the root, bounded, and records
-untracked files with `reason: unknown`. A request with `file_ledger: false`
-skips the `after` and session scans; `$OZAGIA_FILE_LEDGER=0` turns them
-off. `stats` adds `files_recorded`, `file_ledger_scans` and
-`file_ledger_errors`.
+`session_event` `start` writes a bounded manifest of tracked and untracked
+files under `.ozagia/files/sessions/`; `end` diffs against it and records only
+new/changed files (moves and deletes keep metadata tombstones), so files that
+were already untracked before the session are not attributed to it. Without a
+baseline the daemon falls back to one current scan marked `baseline: missing`
+and records no session attribution. A request with `file_ledger: false`
+skips the `after` and session work; `$OZAGIA_FILE_LEDGER=0` turns them
+off. `stats` adds `files_recorded`, `file_ledger_scans`,
+`file_ledger_errors`, `file_manifest_sessions` and `file_manifest_errors`.
 
 Library-first hints (`ozagia.core.library_hints`): a handled `edit` or `write`
 computes hints for new/changed symbols; `stats` adds `library_hints`,
@@ -164,8 +168,8 @@ LINTED_TOOLS = frozenset({"edit", "write", "patch", "replace"})
 REPLACE_PLANS_KEPT = 256
 # Built-in tools whose `after` can have created files (file ledger).
 FILE_LEDGER_TOOLS = frozenset({"edit", "write", "patch", "shell"})
-# Files a session start/end scan records at most, and paths an `after` scan
-# checks at most.
+# Files one session delta records at most, and paths an after scan checks at
+# most.
 FILE_LEDGER_SCAN_LIMIT = 100
 FILE_LEDGER_PATHS = 20
 # `$OZAGIA_FILE_LEDGER=0` turns the daemon's ledger scans off.
@@ -408,11 +412,14 @@ class DaemonState:
         # after container/unit log and status commands.
         self.ops_after_annotations = 0
         # Created-file ledger (`ozagia.core.files`): rows appended from
-        # handled writes and `after`/`session_event` scans, scans run, and
+        # handled writes and `after`/session deltas, scans run, and
         # ledger/git failures (the tool call itself never fails for them).
         self.files_recorded = 0
         self.file_ledger_scans = 0
         self.file_ledger_errors = 0
+        # Session manifest snapshots/deltas written, and manifest failures.
+        self.file_manifest_sessions = 0
+        self.file_manifest_errors = 0
         # Library-first hints (`ozagia.core.library_hints`): hints shown,
         # edited files that produced one, and candidates suppressed.
         self.library_hints = 0
@@ -462,7 +469,7 @@ class DaemonState:
             self.session_state(msg)     # caps, acks, a pending reset
             n = self.sessions.event(str(msg.get("harness") or "opencode"),
                                     session, event)
-            self._files_session_scan(msg, event)
+            self._files_session_event(msg, event)
             return {"ok": True, "cleared": n,
                     "meta": {"intent": f"session_{event}", "keys": []}}
         if op == "read_check":
@@ -855,30 +862,41 @@ class DaemonState:
         reason = inp.get("_reason")
         return reason if isinstance(reason, str) and reason.strip() else "unknown"
 
-    def _files_session_scan(self, msg: dict[str, Any], event: Any) -> None:
-        """Record the root's untracked/added files at session start and end
-        (bounded; `reason: unknown`). Never raises and never fails the
-        session event."""
+    def _files_session_event(self, msg: dict[str, Any], event: Any) -> None:
+        """Snapshot the worktree at session start and diff it at session end.
+
+        Bounded and metadata-only. A missing baseline (old daemon, crash,
+        pruned state) falls back to one current scan, marked `baseline:
+        missing` and without session attribution. Never raises and never
+        fails the session event.
+        """
         if event not in ("start", "end") or not self._file_ledger_enabled(msg):
             return
         session = msg.get("session")
         if not isinstance(session, str) or not session:
             return
+        harness = str(msg.get("harness") or "opencode")
         try:
             from ozagia.core import files as F
-            recorded = F.scan_new_files(
-                self.root, session=session,
-                harness=str(msg.get("harness") or "opencode"),
-                reason="unknown", tool="session_event",
-                limit=FILE_LEDGER_SCAN_LIMIT)
+            recorded: list[dict[str, Any]] = []
+            if event == "start":
+                F.session_snapshot(self.root, session, harness=harness)
+            else:
+                delta = F.session_delta(
+                    self.root, session, harness=harness, record=True,
+                    reason="unknown", tool="session_event",
+                    limit=FILE_LEDGER_SCAN_LIMIT)
+                recorded = list(delta.get("recorded") or [])
         except Exception as e:  # noqa: BLE001 - bookkeeping only
             with self._stats_lock:
                 self.file_ledger_errors += 1
-            print(f"file ledger scan failed: {type(e).__name__}: {e}",
+                self.file_manifest_errors += 1
+            print(f"file session manifest failed: {type(e).__name__}: {e}",
                   file=sys.stderr, flush=True)
             return
         with self._stats_lock:
             self.file_ledger_scans += 1
+            self.file_manifest_sessions += 1
             self.files_recorded += len(recorded)
 
     def _files_observe(self, op: str, tool: str, inp: Any, msg: dict[str, Any],
@@ -1359,11 +1377,14 @@ class DaemonState:
                 "fetch_fallback_hints": self.fetch_fallback_hints,
                 **_research_fetch_counters(self.root),
                 # Created-file ledger (`ozagia.core.files`): rows recorded
-                # (handled writes, `after` scans, session start/end scans),
-                # scans run, and ledger/git failures.
+                # (handled writes, `after` scans, session deltas), scans run,
+                # ledger/git failures, and session manifests written or
+                # diffed (with manifest failures).
                 "files_recorded": self.files_recorded,
                 "file_ledger_scans": self.file_ledger_scans,
                 "file_ledger_errors": self.file_ledger_errors,
+                "file_manifest_sessions": self.file_manifest_sessions,
+                "file_manifest_errors": self.file_manifest_errors,
                 # Library-first hints (`ozagia.core.library_hints`): shown,
                 # edited files with a hint, and suppressed candidates.
                 "library_hints": self.library_hints,
