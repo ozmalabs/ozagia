@@ -33,6 +33,19 @@ The position is stored as:
   stance, topic, date, optional quote and optional `correction_of`;
 - a `concerns` edge to each record it is about.
 
+`documents` are workspace-relative paths, stored in normal form
+(`./notes/a.md` becomes `notes/a.md`).
+
+The graph enforces the boundary. A conversation `Source` can only hold
+`user_position` holdings, a `user_position` holding must be held by a
+conversation `Source`, and a conversation `Source` cannot be an endpoint of
+`supports`, `opposes` or `cites`. `record`, `link` and `holding_record`
+refuse these. `research_check` and `research_holding_check` report them in a
+graph written another way (`conversation_source_used_as_evidence`,
+`conversation_held_as_non_position`, `user_position_without_conversation`).
+A Holding counts as a position only with `position: true`, `epistemic_role:
+user_position` and a conversation `source_id`.
+
 Only what the call passes is stored. Nothing reads a transcript; pass a quote
 only when the user approved that span.
 
@@ -52,9 +65,12 @@ status.
 `user_positions` block next to the sourced results. It holds active positions
 that touch the query:
 
-- `concerns_retrieved_source`: the position concerns a record whose source
-  path is among the retrieved passages;
-- `names_retrieved_document`: one of its `documents` was retrieved;
+- `concerns_retrieved_source`: the position concerns a record whose locator
+  names the `(root_id, path)` of a retrieved passage;
+- `names_retrieved_document`: one of its `documents` was retrieved. A
+  passage's root-relative path is mapped to its workspace-relative path first,
+  so a root at `notes/` retrieving `chapter3.md` matches `notes/chapter3.md`;
+  roots outside the workspace never match a document;
 - `concerns_listed_record`: it concerns a record listed in the call's
   `node_ids`;
 - `topic_similarity`: its topic, stance and concerned records are similar to
@@ -64,7 +80,9 @@ that touch the query:
 Each item carries `label: "user position"`, its `date` and the conversation
 it came from. The block is marked `separate_from_evidence: true`. A position
 is the user's stance; it is never listed as a result and never supports or
-contradicts a claim.
+contradicts a claim. `recorded_claims` in the same response leaves positions
+and `concerns` edges out of each claim's related records and gives the number
+left out as `user_positions_omitted`.
 
 ## Review ledger
 
@@ -72,7 +90,9 @@ A review run records what one reviewer said once (see [review](review.md)).
 The ledger tracks each issue until it is closed, across sessions. A
 `LedgerFinding` has:
 
-- `document` (workspace-relative path) and an optional `anchor`: a Markdown
+- `document` (workspace-relative path, stored in normal form; lookups
+  normalise too, so `./paper.md` and `paper.md` are the same document) and an
+  optional `anchor`: a Markdown
   or TeX section slug, a `doc:<rel>#<slug>` key, or a path alias such as
   `methods/sampling` (see `ozagia.core.sections`); an optional `quote`;
 - `severity` (`blocking`, `major`, `minor`, `note`) and `text`;
@@ -81,11 +101,19 @@ The ledger tracks each issue until it is closed, across sessions. A
 - `history`: each status change with the previous status, note, time and
   conversation session id.
 
+`record` and amendments refuse a `LedgerFinding` whose status or severity is
+not one of these, or whose history is empty or does not end at its status.
+`research_check` reports such a node in a graph written another way, and
+`research_review_outstanding` counts an unknown severity under its own name
+instead of failing.
+
 `research_review_finding_add` adds findings given in the call, or imports a
 recorded run's findings with `run_id` (each `ReviewFinding` once; a finding
 about a claim takes the claim's source path as its document). All findings in
 a call are validated before any is recorded. When the document's text is
-given (`document_text`) or the file is readable inside the workspace, the
+given (`document_text`) or the file is readable inside the workspace (a
+regular file outside the state directory, not a dotfile or under a
+dot-directory, no symlink leading out), the
 ledger stores a baseline: the document hash, the anchored section's hash and
 lines, and whether the quote was present. An anchor is stored as the section's
 slug and `doc:` key.
@@ -103,17 +131,24 @@ workspace file) and proposes, for each open finding on it:
 
 | reason | verdict |
 |---|---|
+| `document_unchanged`: the document hash equals the baseline | `likely_open` |
 | `anchor_missing`: the section is gone | `may_be_addressed` |
+| `anchor_missing_at_baseline`: the anchor did not resolve when recorded either | `unknown` |
 | `quote_gone`: the quoted text is no longer in the span | `may_be_addressed` |
+| `quote_absent_at_baseline`: the quote was not in the span when recorded, and the span changed | `unknown` |
 | `anchor_changed`: the span's hash differs from the baseline | `may_be_addressed` |
 | `anchor_changed_quote_present` | `likely_open` |
 | `anchor_unchanged` | `likely_open` |
 | `quote_present` (no baseline hash) | `likely_open` |
 | `no_baseline`: no hash and no quote | `unknown` |
 
-It records nothing and closes nothing (`auto_closed: false`). Read the span,
-then mark the finding.
+A finding without an anchor hashes the whole document, so any edit anywhere
+reports it as `anchor_changed`. It records nothing and closes nothing
+(`auto_closed: false`). Read the span, then mark the finding.
 
 Positions and ledger findings live in the investigation's graph file under
 `.ozagia/research/` (or `OZAGIA_STATE_DIR`), like every other research record.
-Workspace documents are only read, never written.
+Workspace documents are only read, never written. This build writes graph
+schema 7 (the version that adds positions and ledger findings) and still loads
+schemas 1–6; earlier builds refuse a schema 7 graph with an
+unsupported-schema error.

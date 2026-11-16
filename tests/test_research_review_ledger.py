@@ -166,7 +166,7 @@ def test_rereview_proposes_without_closing(tmp_path):
     # Unchanged text: everything is likely still open.
     same = svc.call("review_rereview", {"session_id": sid, "document": "draft.md",
                                         "text": DRAFT_V1})
-    assert {p["reason"] for p in same["proposals"]} == {"anchor_unchanged"}
+    assert {p["reason"] for p in same["proposals"]} == {"document_unchanged"}
     assert {p["verdict"] for p in same["proposals"]} == {"likely_open"}
 
     # Without text, the workspace file is read.

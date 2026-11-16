@@ -22,6 +22,7 @@ status itself.
 from __future__ import annotations
 
 import hashlib
+import posixpath
 import time
 from collections.abc import Mapping, Sequence
 from typing import Any, Callable
@@ -35,19 +36,20 @@ from ozagia.core.sections import (
     section_key,
     section_offsets,
 )
-from ozagia.research.graph import ResearchError
-from ozagia.research.structured_review import SEVERITIES
+from ozagia.research.graph import LEDGER_SEVERITIES as SEVERITIES
+from ozagia.research.graph import LEDGER_STATUSES, ResearchError
 
 __all__ = [
     "LEDGER_STATUSES",
     "LedgerError",
     "add_findings",
+    "document_key",
+    "normalise_document",
     "outstanding",
     "rereview",
     "set_status",
 ]
 
-LEDGER_STATUSES = ("open", "addressed", "wont_fix", "disputed")
 _STATUS_ALIASES = {"wont-fix": "wont_fix", "wontfix": "wont_fix", "won't fix": "wont_fix"}
 _SEVERITY_RANK = {name: rank for rank, name in enumerate(SEVERITIES)}
 MAX_FINDINGS = 500
@@ -93,6 +95,26 @@ def _optional(value: Any, field: str) -> str | None:
     return None if value is None else _text(value, field)
 
 
+def document_key(value: Any) -> str:
+    """The comparable form of a document path: ``./a//b.md`` is ``a/b.md``."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return posixpath.normpath(text)
+
+
+def normalise_document(value: Any, field: str = "document") -> str:
+    """A non-empty document path in normal form, for storing and lookups."""
+    key = document_key(_text(value, field))
+    if key in ("", "."):
+        raise LedgerError(f"{field} must name a document")
+    return key
+
+
+def _optional_document(value: Any, field: str = "document") -> str | None:
+    return None if value is None else normalise_document(value, field)
+
+
 def _status(value: Any) -> str:
     text = _text(value, "status").casefold()
     text = _STATUS_ALIASES.get(text, text)
@@ -122,6 +144,7 @@ def _split_anchor(document: str | None, anchor: str | None) -> tuple[str | None,
     parsed = parse_section_key(anchor)
     if parsed is not None:
         rel, fragment = parsed
+        rel = normalise_document(rel)
         if document is not None and document != rel:
             raise LedgerError(f"anchor {anchor!r} names {rel}, not {document}")
         return rel, fragment
@@ -180,7 +203,7 @@ def _prepare(
     origin: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
     """Validate one finding into node fields and ``about`` targets."""
-    document = _optional(raw.get("document"), "document") or default_document
+    document = _optional_document(raw.get("document")) or default_document
     anchor = _optional(raw.get("anchor") or raw.get("key"), "anchor")
     document, fragment = _split_anchor(document, anchor)
     if document is None:
@@ -287,7 +310,7 @@ def add_findings(
     the current version, used as the baseline for ``rereview``.
     """
     session = _text(conversation_session_id, "conversation_session_id")
-    document = _optional(document, "document")
+    document = _optional_document(document)
     if findings is None and run_id is None:
         raise LedgerError("give findings, a run_id, or both")
     items: list[tuple[Mapping[str, Any], dict | None]] = []
@@ -389,21 +412,25 @@ def outstanding(
 ) -> dict[str, Any]:
     """Ledger findings in ``statuses`` (default: open), grouped by document."""
     wanted = _statuses(statuses)
+    document = _optional_document(document)
     ledger = _ledger(state)
     counts = {name: 0 for name in LEDGER_STATUSES}
     for node in ledger:
         counts[str(node.get("status"))] = counts.get(str(node.get("status")), 0) + 1
     groups: dict[str, list[Mapping[str, Any]]] = {}
     for node in ledger:
-        if node.get("status") in wanted and (document is None
-                                             or node.get("document") == document):
-            groups.setdefault(str(node["document"]), []).append(node)
+        if node.get("status") in wanted and (
+                document is None or document_key(node.get("document")) == document):
+            groups.setdefault(document_key(node.get("document")), []).append(node)
     documents = []
     for name in sorted(groups):
         items = sorted(groups[name], key=_sort_key)
+        # A malformed node (an unknown severity from a hand-made record) is
+        # counted under its own value rather than breaking the report.
         by_severity = {severity: 0 for severity in SEVERITIES}
         for item in items:
-            by_severity[str(item["severity"])] += 1
+            severity = str(item.get("severity"))
+            by_severity[severity] = by_severity.get(severity, 0) + 1
         documents.append({"document": name, "count": len(items),
                           "by_severity": by_severity,
                           "findings": [_summary(item) for item in items]})
@@ -412,20 +439,31 @@ def outstanding(
             "status_counts": counts, "truth_assessed": False}
 
 
-def _proposal(node: Mapping[str, Any], text: str) -> dict[str, Any]:
-    document = str(node["document"])
+def _proposal(node: Mapping[str, Any], text: str, document_sha: str) -> dict[str, Any]:
+    document = document_key(node["document"])
     fragment = node.get("anchor")
     quote = node.get("quote")
     base = node.get("baseline") if isinstance(node.get("baseline"), Mapping) else {}
-    span = _anchored_text(document, fragment, text)
     item: dict[str, Any] = {
         "finding_id": node["id"], "severity": node.get("severity"),
         "text": node.get("text"), "anchor": fragment, "key": node.get("key"),
         "status": node.get("status"),
     }
+    # The same bytes as the baseline: nothing can have been addressed.
+    if base.get("document_sha256") == document_sha:
+        item.update(anchor_changed=False, verdict="likely_open",
+                    reason="document_unchanged",
+                    detail="the document is identical to the recorded version")
+        return item
+    span = _anchored_text(document, fragment, text)
     if not span["found"]:
-        item.update(verdict="may_be_addressed", reason="anchor_missing",
-                    detail=span.get("reason") or "the anchored section is gone")
+        if base.get("anchor_found") is False:
+            item.update(verdict="unknown", reason="anchor_missing_at_baseline",
+                        detail="the anchor did not resolve when the finding was "
+                               "recorded either; read the document")
+        else:
+            item.update(verdict="may_be_addressed", reason="anchor_missing",
+                        detail=span.get("reason") or "the anchored section is gone")
         return item
     current = span["text"]
     changed = (base.get("anchor_sha256") != _sha(current)
@@ -434,7 +472,17 @@ def _proposal(node: Mapping[str, Any], text: str) -> dict[str, Any]:
     item["anchor_changed"] = changed
     if quote_present is not None:
         item["quote_present"] = quote_present
-    if quote_present is False:
+    # A quote that was not in the span at baseline says nothing by its absence.
+    quote_absent_at_baseline = base.get("quote_present") is False
+    if quote_present is False and quote_absent_at_baseline:
+        if changed is False:
+            item.update(verdict="likely_open", reason="anchor_unchanged",
+                        detail="the anchored text is unchanged")
+        else:
+            item.update(verdict="unknown", reason="quote_absent_at_baseline",
+                        detail="the quote was not in the span when the finding "
+                               "was recorded; read the span")
+    elif quote_present is False:
         item.update(verdict="may_be_addressed", reason="quote_gone",
                     detail="the quoted text is no longer in the anchored span")
     elif changed and quote_present:
@@ -442,7 +490,9 @@ def _proposal(node: Mapping[str, Any], text: str) -> dict[str, Any]:
                     detail="the span changed but the quoted text is still there")
     elif changed:
         item.update(verdict="may_be_addressed", reason="anchor_changed",
-                    detail="the anchored text changed since the finding was recorded")
+                    detail=("the anchored text changed since the finding was recorded"
+                            if fragment is not None else
+                            "the finding has no anchor and the document changed"))
     elif changed is False:
         item.update(verdict="likely_open", reason="anchor_unchanged",
                     detail="the anchored text is unchanged")
@@ -467,18 +517,19 @@ def rereview(
     Nothing is recorded: a proposal is a prompt to read the anchored span and
     then mark the finding with ``set_status``.
     """
-    document = _text(document, "document")
+    document = normalise_document(document)
     if not isinstance(text, str):
         raise LedgerError("text must be a string")
     wanted = _statuses(statuses)
     nodes = sorted((node for node in _ledger(state)
-                    if node.get("document") == document
+                    if document_key(node.get("document")) == document
                     and node.get("status") in wanted), key=_sort_key)
-    proposals = [_proposal(node, text) for node in nodes]
+    document_sha = _sha(text)
+    proposals = [_proposal(node, text, document_sha) for node in nodes]
     counts: dict[str, int] = {}
     for item in proposals:
         counts[item["verdict"]] = counts.get(item["verdict"], 0) + 1
-    return {"document": document, "document_sha256": _sha(text),
+    return {"document": document, "document_sha256": document_sha,
             "statuses": wanted, "proposals": proposals, "verdict_counts": counts,
             "auto_closed": False,
             "note": "Proposals only. Read each anchored span, then mark the "

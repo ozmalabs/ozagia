@@ -7,9 +7,10 @@ from collections.abc import Callable
 import os
 from pathlib import Path
 import shutil
+import stat
 from typing import Any
 
-from ozagia.config import state_path
+from ozagia.config import state_dir, state_path
 from ozagia.research.graph import ResearchGraph, ResearchError
 from ozagia.research.sources import build_index, retrieve, open_locator
 from ozagia.research.checks import check_research_workflow, check_finite_math
@@ -22,6 +23,52 @@ from ozagia.research.runtime import (
     engine_preamble as _default_engine_preamble,
     provenance_stamp as _default_provenance_stamp,
 )
+
+MAX_WORKSPACE_DOCUMENT_BYTES = 5_000_000
+
+
+def _without_positions(inspected: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+    """A claim's ``inspect`` view with user positions taken out.
+
+    Research context reports positions in their own ``user_positions`` block;
+    a position's ``concerns`` edge must not list it beside a claim's evidence.
+    """
+    from ozagia.research.positions import is_position
+
+    hidden = {node["id"] for node in inspected["related_nodes"]
+              if is_position(node, state)}
+    edges = [edge for edge in inspected["edges"]
+             if edge["type"] != "concerns"
+             and edge["src"] not in hidden and edge["tgt"] not in hidden]
+    linked = {edge[end] for edge in edges for end in ("src", "tgt")}
+    out = {**inspected, "edges": edges,
+           "related_nodes": [node for node in inspected["related_nodes"]
+                             if node["id"] not in hidden and node["id"] in linked]}
+    if hidden:
+        out["user_positions_omitted"] = len(hidden)
+    return out
+
+
+def _open_beneath(base: Path, rel: Path) -> int:
+    """An fd for ``base/rel`` opened one component at a time without symlinks.
+
+    ``rel`` is already resolved, so it has no symlinks; a component swapped
+    for a symlink after resolution makes the open fail instead of escaping.
+    """
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if os.open not in os.supports_dir_fd or not nofollow:
+        return os.open(base / rel, os.O_RDONLY | nofollow)
+    directory = getattr(os, "O_DIRECTORY", 0)
+    fd = os.open(base, os.O_RDONLY | directory)
+    try:
+        for part in rel.parts[:-1]:
+            next_fd = os.open(part, os.O_RDONLY | directory | nofollow, dir_fd=fd)
+            os.close(fd)
+            fd = next_fd
+        return os.open(rel.parts[-1], os.O_RDONLY | nofollow
+                       | getattr(os, "O_NONBLOCK", 0), dir_fd=fd)
+    finally:
+        os.close(fd)
 
 
 class ResearchService:
@@ -103,17 +150,33 @@ class ResearchService:
         """Text of a workspace-relative document, or None when unavailable.
 
         Used for review-ledger baselines and re-reviews. Only regular files
-        inside the workspace are read (no absolute paths, no escaping
-        symlinks), up to 5 MB of UTF-8.
+        inside the workspace are read: no absolute paths, no symlinks that
+        leave the workspace, nothing in the ozagia state directory and no
+        dotfiles or dot-directories (``.env``, ``.git/``). The file is opened
+        without following symlinks after resolution and checked through its
+        fd, up to 5 MB of UTF-8.
         """
         if not document or Path(document).is_absolute():
             return None
         try:
-            path = (self.workspace / document).resolve()
-            path.relative_to(self.workspace)
-            if not path.is_file() or path.stat().st_size > 5_000_000:
+            requested = Path(os.path.normpath(document))
+            path = (self.workspace / requested).resolve()
+            rel = path.relative_to(self.workspace)
+            if not rel.parts or any(part.startswith(".")
+                                    for part in (*requested.parts, *rel.parts)):
                 return None
-            return path.read_text(encoding="utf-8")
+            state = state_dir(self.workspace)
+            if path == state or state in path.parents:
+                return None
+            fd = _open_beneath(self.workspace, rel)
+            with os.fdopen(fd, "rb") as stream:
+                info = os.fstat(stream.fileno())
+                if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_WORKSPACE_DOCUMENT_BYTES:
+                    return None
+                data = stream.read(MAX_WORKSPACE_DOCUMENT_BYTES + 1)
+            if len(data) > MAX_WORKSPACE_DOCUMENT_BYTES:
+                return None
+            return data.decode("utf-8")
         except (OSError, ValueError, UnicodeError):
             return None
 
@@ -1270,17 +1333,37 @@ class ResearchService:
             from ozagia.research import positions
             index = build_index(state["roots"])
             result = retrieve(index, args["query"], limit=args.get("limit", 8))
-            retrieved_paths = [
-                item["citation"]["path"] for item in result.get("results", [])
-                if isinstance(item.get("citation"), dict)
-            ]
+            retrieved: list[tuple[str, str]] = []
+            retrieved_documents: list[str] = []
+            root_dirs = {root["root_id"]: Path(root["path"])
+                         for root in index.get("roots", [])}
+            for item in result.get("results", []):
+                citation = item.get("citation")
+                if not isinstance(citation, dict):
+                    continue
+                root_id, rel = citation.get("root_id"), citation.get("path")
+                if not isinstance(root_id, str) or not isinstance(rel, str):
+                    continue
+                retrieved.append((root_id, rel))
+                # Position documents are workspace-relative; a root may be a
+                # subdirectory of the workspace (or lie outside it).
+                if root_id in root_dirs:
+                    try:
+                        retrieved_documents.append(
+                            (root_dirs[root_id] / rel).resolve()
+                            .relative_to(self.workspace).as_posix())
+                    except (OSError, ValueError):
+                        pass
             # Kept apart from the sourced results above: a user position is
             # the user's stance, not evidence.
             result["user_positions"] = positions.context_section(
-                state, args["query"], retrieved_paths=retrieved_paths,
+                state, args["query"], retrieved=retrieved,
+                retrieved_documents=retrieved_documents,
                 node_ids=args.get("node_ids") or [])
             result["mechanical_check"] = graph.check()
-            result["recorded_claims"] = [graph.inspect(n["id"]) for n in state["nodes"] if n["type"] == "Claim"]
+            result["recorded_claims"] = [
+                _without_positions(graph.inspect(n["id"]), state)
+                for n in state["nodes"] if n["type"] == "Claim"]
             frames = [n for n in state["nodes"] if n["type"] == "Frame"]
             ledger_fields = ("boundary", "state", "rules", "grammar", "possibilities", "realisation", "residual", "cost", "grounding", "test")
             result["frame_ledger"] = [{"node_id": f["id"], "missing": [k for k in ledger_fields if k not in f]} for f in frames]

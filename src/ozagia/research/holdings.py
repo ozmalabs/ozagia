@@ -1674,6 +1674,11 @@ def record_holding(
     canonical_authority = (
         _authority(authority) if authority is not None else spec["authority"]
     )
+    if (canonical_type == "conversation") != (role == "user_position"):
+        raise HoldingError(
+            "a conversation Source can only be held as user_position, and a "
+            "user_position holding needs a conversation Source"
+        )
     canonical_review = (
         _review_status(review_status)
         if review_status is not None
@@ -1853,6 +1858,37 @@ def _check_holding_node(
                 "context, not external evidence, unless separately linked to support."
             ),
         })
+    conversation = source_type == "conversation" or (
+        source is not None and _token(source.get("source_type")) == "conversation")
+    if conversation and role != "user_position":
+        issues.append({
+            "code": "conversation_held_as_non_position",
+            "holding_id": holding_id,
+            "epistemic_role": holding.get("epistemic_role"),
+            "reason": (
+                "A conversation is held with a role other than user_position. "
+                "What the user said in conversation is their stance, not evidence."
+            ),
+        })
+    if role == "user_position" and not conversation:
+        issues.append({
+            "code": "user_position_without_conversation",
+            "holding_id": holding_id,
+            "reason": "A user_position holding must be held by a conversation Source.",
+        })
+    if conversation and isinstance(source_id, str):
+        for item in _edges(state):
+            if (item.get("type") in {"supports", "opposes", "cites"}
+                    and source_id in (item.get("src"), item.get("tgt"))):
+                issues.append({
+                    "code": "conversation_source_used_as_evidence",
+                    "holding_id": holding_id,
+                    "edge_id": item.get("id"),
+                    "reason": (
+                        f"The conversation Source is an endpoint of a "
+                        f"{item.get('type')} edge; a user position is not evidence."
+                    ),
+                })
     if source_type == "website":
         missing = [
             field

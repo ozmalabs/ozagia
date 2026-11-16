@@ -26,7 +26,8 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import Any, Callable
 
-from ozagia.research.graph import ResearchError
+from ozagia.research.graph import ResearchError, is_conversation_source
+from ozagia.research.review_ledger import document_key, normalise_document
 
 __all__ = [
     "POSITION_STATUSES",
@@ -121,14 +122,25 @@ def _timestamp(value: Any) -> str:
     return text
 
 
-def is_position(node: Mapping[str, Any]) -> bool:
-    return node.get("type") == "Holding" and node.get("position") is True
+def is_position(node: Mapping[str, Any], state: Mapping[str, Any]) -> bool:
+    """True for a user-position Holding held by a conversation Source.
+
+    ``position: True`` alone is not enough: a hand-recorded Holding with that
+    flag and an evidence role is not a user position.
+    """
+    if (node.get("type") != "Holding" or node.get("position") is not True
+            or node.get("epistemic_role") != "user_position"
+            or node.get("source_type") != "conversation"
+            or not isinstance(node.get("source_id"), str)):
+        return False
+    source = _node(state, node["source_id"])
+    return source is not None and is_conversation_source(dict(source))
 
 
 def _require_position(state: Mapping[str, Any], position_id: Any) -> Mapping[str, Any]:
     node_id = _text(position_id, "position_id")
     node = _node(state, node_id)
-    if node is None or not is_position(node):
+    if node is None or not is_position(node, state):
         raise PositionError(f"unknown user position: {node_id}")
     return node
 
@@ -168,7 +180,8 @@ def record_position(
     """Record a user's stated stance as a conversation-sourced Holding.
 
     ``concerns`` names existing records (claims, sources, references ...);
-    ``documents`` names document paths the position is about. With
+    ``documents`` names workspace-relative document paths the position is
+    about (normalised, so ``./notes/a.md`` is stored as ``notes/a.md``). With
     ``supersedes``, the earlier position is marked superseded and the new one
     inherits its topic, concerns and documents when they are omitted.
     """
@@ -180,7 +193,9 @@ def record_position(
     correction_of = _optional_text(correction_of, "correction_of", limit=MAX_STANCE_CHARS)
     when = _timestamp(stated_at)
     concern_ids = _string_list(concerns, "concerns")
-    document_paths = _string_list(documents, "documents")
+    document_paths = list(dict.fromkeys(
+        normalise_document(path, "documents")
+        for path in _string_list(documents, "documents")))
 
     previous = None
     if supersedes is not None:
@@ -323,7 +338,9 @@ def list_positions(
     """Positions in recording order, filtered by status, record or document."""
     if status not in (None, "all", *POSITION_STATUSES):
         raise PositionError(f"status must be one of {[*POSITION_STATUSES, 'all']}")
-    positions = [node for node in _nodes(state) if is_position(node)]
+    positions = [node for node in _nodes(state) if is_position(node, state)]
+    wanted_document = (normalise_document(document, "document")
+                       if document is not None else None)
     counts = {name: 0 for name in POSITION_STATUSES}
     for node in positions:
         counts[str(node.get("position_status"))] = counts.get(
@@ -332,7 +349,8 @@ def list_positions(
         node for node in positions
         if (status in (None, "all") or node.get("position_status") == status)
         and (node_id is None or node_id in (node.get("concerns") or []))
-        and (document is None or document in (node.get("documents") or []))
+        and (wanted_document is None or wanted_document in {
+            document_key(path) for path in node.get("documents") or []})
     ]
     return {
         "positions": [_view(node) for node in selected],
@@ -358,12 +376,14 @@ def _record_text(node: Mapping[str, Any]) -> str:
     return " ".join(str(part) for part in parts if isinstance(part, str))
 
 
-def _record_paths(node: Mapping[str, Any]) -> set[str]:
+def _record_paths(node: Mapping[str, Any]) -> set[tuple[str, str]]:
+    """(root_id, root-relative path) pairs named by a record's locators."""
     paths = set()
     for key in ("locator", "source_locator"):
         locator = node.get(key)
-        if isinstance(locator, Mapping) and isinstance(locator.get("path"), str):
-            paths.add(locator["path"])
+        if (isinstance(locator, Mapping) and isinstance(locator.get("path"), str)
+                and isinstance(locator.get("root_id"), str)):
+            paths.add((locator["root_id"], document_key(locator["path"])))
     return paths
 
 
@@ -371,7 +391,8 @@ def relevant_positions(
     state: Mapping[str, Any],
     query: str,
     *,
-    retrieved_paths: Sequence[str] = (),
+    retrieved: Sequence[tuple[str, str]] = (),
+    retrieved_documents: Sequence[str] = (),
     node_ids: Sequence[str] = (),
     threshold: float = DEFAULT_THRESHOLD,
     limit: int = 8,
@@ -379,8 +400,12 @@ def relevant_positions(
 ) -> list[dict[str, Any]]:
     """Active positions that touch a research query or its retrieved context.
 
-    A position matches when it concerns a record whose source path was
-    retrieved (or a listed node), names a retrieved document, or when its
+    ``retrieved`` holds the ``(root_id, path)`` of each retrieved citation
+    (paths relative to the indexed root) and ``retrieved_documents`` the same
+    citations as workspace-relative paths, where the root is inside the
+    workspace. A position matches when it concerns a record whose locator
+    names a retrieved ``(root_id, path)`` (or a listed node), when one of its
+    workspace-relative ``documents`` was retrieved, or when its
     topic, stance and concerned records are similar to the query under the
     research package's ``hash-bow`` embedder (or an injected one).
     """
@@ -388,11 +413,12 @@ def relevant_positions(
 
     positions = [
         node for node in _nodes(state)
-        if is_position(node) and node.get("position_status") == "active"
+        if is_position(node, state) and node.get("position_status") == "active"
     ]
     if not positions:
         return []
-    paths = set(retrieved_paths)
+    pairs = {(root_id, document_key(path)) for root_id, path in retrieved}
+    documents = {document_key(path) for path in retrieved_documents}
     wanted = set(node_ids)
     texts = []
     for node in positions:
@@ -411,10 +437,10 @@ def relevant_positions(
             concerned = _node(state, cid)
             if cid in wanted:
                 reasons.append({"kind": "concerns_listed_record", "node_id": cid})
-            elif concerned is not None and _record_paths(concerned) & paths:
+            elif concerned is not None and _record_paths(concerned) & pairs:
                 reasons.append({"kind": "concerns_retrieved_source", "node_id": cid})
         for path in node.get("documents") or []:
-            if path in paths:
+            if document_key(path) in documents:
                 reasons.append({"kind": "names_retrieved_document", "path": path})
         score = _cosine(vectors[0], vector) if query_text else 0.0
         if score >= threshold:
@@ -428,10 +454,12 @@ def relevant_positions(
 
 
 def context_section(state: Mapping[str, Any], query: str, *,
-                    retrieved_paths: Sequence[str] = (),
+                    retrieved: Sequence[tuple[str, str]] = (),
+                    retrieved_documents: Sequence[str] = (),
                     node_ids: Sequence[str] = ()) -> dict[str, Any]:
     """The ``user_positions`` block of research context, apart from evidence."""
-    items = relevant_positions(state, query, retrieved_paths=retrieved_paths,
+    items = relevant_positions(state, query, retrieved=retrieved,
+                               retrieved_documents=retrieved_documents,
                                node_ids=node_ids)
     return {
         "label": "user position",
