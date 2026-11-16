@@ -407,6 +407,23 @@ def _builtin_edits(memory: Any, tool: str, inp: dict[str, Any],
     return out
 
 
+def _recent_writes(memory: Any, pending: list[str]) -> list[str]:
+    """The files of `pending` that exist and were written in the last
+    RECENT_WRITE_S seconds."""
+    from ozagia.intent.common import root_of
+    root = root_of(memory)
+    now = time.time()
+    out = []
+    for rel in pending:
+        try:
+            mtime = (root / rel).stat().st_mtime
+        except OSError:
+            continue
+        if now - mtime <= RECENT_WRITE_S:
+            out.append(rel)
+    return out
+
+
 def _path_lines(memory: Any, tool: str, inp: dict[str, Any], output: Any,
                 ) -> list[str]:
     """Suggestion lines for a built-in read or edit of a missing path, and
@@ -669,8 +686,14 @@ def after(memory: Any, tool: str, input: dict[str, Any], output: Any, *,
                               else "after_refresh")
             pending = memory.pending_changes()
             meta["changed_files"] = len(pending)
-            # For the session's working set (`ozagia.core.working_set`).
-            meta["changed_paths"] = list(pending[:MAX_CHANGED_PATHS])
+            if tool == "shell":
+                # For the session's working set (`ozagia.core.working_set`):
+                # the changed files this command may have written (written
+                # in the last RECENT_WRITE_S seconds), not every pending
+                # change in the root. Built-in edits, writes and patches
+                # name theirs in `edited_files`.
+                meta["changed_paths"] = _recent_writes(
+                    memory, pending)[:MAX_CHANGED_PATHS]
             if (tool in _WRITING_TOOLS and isinstance(session, str) and session
                     and req_meta.get("builtin_error") is not True):
                 edited = _builtin_edits(memory, tool, inp, pending)

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from collections import OrderedDict
 from pathlib import Path
@@ -236,7 +237,8 @@ def test_session_brief_since_last_session(tmp_path):
                            jobs_enabled=False)
     lines = text.splitlines()
     assert lines[0] == W.BRIEF_HEADER and lines[-1] == W.MCP_TOOLS_LINE
-    assert "  failed test:tests/a.py::test_x: boom" in lines
+    assert ("  failed test:tests/a.py::test_x (failing since 1970-01-01 00:00 UTC): "
+            "boom") in lines
     assert "  rerun (from the repo root): pytest -q tests/a.py::test_x" in lines
     assert any(x.startswith("  j2 `make serve` running") for x in lines)
     short = W.session_brief(tmp_path, 300, tests=tests * 1, jobs=jobs * 20,
@@ -284,7 +286,8 @@ def test_daemon_tracks_edits_tests_and_reads_across_compaction(daemon, repo):
                              "oldString": "x", "newString": "x + 0"},
                    "output": "ok"})
     assert resp["meta"]["intent"] == "after_refresh"
-    assert resp["meta"]["changed_paths"] == ["pkg/small.py"]
+    assert resp["meta"]["edited_files"] == ["pkg/small.py"]
+    assert "changed_paths" not in resp["meta"]   # shell refreshes only
     # A failing pytest run seen by after.
     daemon({"op": "after", **base, "tool": "shell", "input": {
         "command": PYTEST, "workdir": str(repo)}, "output": FAIL_OUT})
@@ -297,7 +300,8 @@ def test_daemon_tracks_edits_tests_and_reads_across_compaction(daemon, repo):
     assert text.startswith(W.HEADER) and "1 compaction(s)" in text
     # The refresh's delta keys (here the file's own) and the file.
     assert "  pkg/small.py" in text
-    assert "failed test:tests/test_a.py::test_one: assert 2 == 1" in text
+    assert re.search(r"  failed test:tests/test_a.py::test_one \(failing since "
+                     r"\d{4}-\d\d-\d\d \d\d:\d\d UTC\): assert 2 == 1\n", text)
     assert ("rerun (from the repo root): .venv/bin/python -m pytest -q "
             "tests/test_a.py::test_one") in text
     assert "  pkg/small.py lines 1-6" in text
@@ -574,6 +578,11 @@ def test_opencode_compaction_keeps_the_working_set(tmp_path):
         assert ops[:2] == ["working_set", "session_event"]
         ws = [r for r in stub.requests if r["op"] == "working_set"]
         assert all(r["session"] == "ses_c" and r["harness"] == "opencode" for r in ws)
+        # Identifiers only, marked as untrusted data in the system role.
+        assert ws and all(r.get("free_text") is False for r in ws)
+        assert all("untrusted data" in p["text"] for p in got["summary"])
+        assert all("untrusted data" in p["text"] for p in got["ctx1"]
+                   if "[ozagia working set]" in p["text"])
     finally:
         stub.server.close()
 
@@ -589,3 +598,228 @@ def test_an_affected_subset_run_clears_nothing_else(tmp_path):
     W.apply_test_run(tests, _run("pytest", "[ozagia] pytest not run: every selected "
                                  "test has a cached pass (exit 0)", tmp_path))
     assert list(tests) == ["test:tests/a.py::test_x"]
+
+
+# --------------------------------------------------------------------------- #
+# W8 review fixes: when a run clears a failing test, what is persisted and
+# shown, edit attribution, the MCP description
+# --------------------------------------------------------------------------- #
+def _failing(root, *keys):
+    tests: OrderedDict = OrderedDict()
+    text = "".join(f"[ozagia] failed {k}: no\n" for k in keys) + f"{len(keys)} failed in 0.1s\n"
+    W.apply_test_run(tests, _run("pytest", text, root))
+    assert list(tests) == list(keys)
+    return tests
+
+
+HEAD = "[ozagia] pytest {status}: exit {code}, 1.0 s, 0 passed, 0 failed, 0 error, 0 skipped"
+
+
+@pytest.mark.parametrize("head", [
+    HEAD.format(status="timed_out", code=-15),
+    HEAD.format(status="interrupted", code=2) + ", 1 collection errors",
+    HEAD.format(status="failed", code=1) + ", 1 collection errors",
+    HEAD.format(status="usage_error", code=4),
+    HEAD.format(status="internal_error", code=3),
+    HEAD.format(status="no_tests_collected", code=5),
+    HEAD.format(status="passed", code=0) + "\n[ozagia] error: no junit report",
+])
+def test_an_aborted_captured_run_clears_nothing(tmp_path, head):
+    tests = _failing(tmp_path, "test:tests/a.py::test_x")
+    run = _run("pytest", head, tmp_path)
+    assert not run.complete
+    W.apply_test_run(tests, run)
+    assert list(tests) == ["test:tests/a.py::test_x"]
+    # A finished captured pass does clear it.
+    W.apply_test_run(tests, _run("pytest", HEAD.format(status="passed", code=0),
+                                 tmp_path))
+    assert not tests
+
+
+def test_a_bare_run_from_a_subdirectory_selects_only_it(tmp_path):
+    (tmp_path / "pkgb").mkdir()
+    tests = _failing(tmp_path, "test:tests/a.py::test_x", "test:pkgb/tests/b.py::test_y")
+    run = _run("pytest", "3 passed in 0.1s", tmp_path, workdir=tmp_path / "pkgb")
+    assert run.selectors == ["pkgb"]
+    W.apply_test_run(tests, run)
+    assert list(tests) == ["test:tests/a.py::test_x"]
+    tests = _failing(tmp_path, "test:tests/a.py::test_x", "test:pkgb/tests/b.py::test_y")
+    run = _run("cd pkgb && pytest", "3 passed in 0.1s", tmp_path,
+               heads=[["cd", "pkgb"], ["pytest"]])
+    assert run.selectors == ["pkgb"]
+    W.apply_test_run(tests, run)
+    assert list(tests) == ["test:tests/a.py::test_x"]
+    # A workdir outside the root, or paths all outside it: nothing cleared.
+    run = _run("pytest", "3 passed in 0.1s", tmp_path, workdir=tmp_path.parent)
+    assert not run.complete
+    run = _run("pytest ../elsewhere", "3 passed in 0.1s", tmp_path)
+    assert not run.complete
+
+
+@pytest.mark.parametrize("opts", ["-ktest_z", "-k=test_z", "-k test_z", "-mslow",
+                                  "-qktest_z", "--deselect=tests/a.py::test_x"])
+def test_attached_filter_values_are_filters(tmp_path, opts):
+    tests = _failing(tmp_path, "test:tests/a.py::test_x")
+    run = _run(f"pytest {opts}", "1 passed, 5 deselected in 0.1s", tmp_path)
+    assert run.filtered and run.selectors == []
+    W.apply_test_run(tests, run)
+    assert list(tests) == ["test:tests/a.py::test_x"]
+
+
+def test_attached_values_of_short_options(tmp_path):
+    # The value of -p/-r is not a cluster of flags: no -x there.
+    for opts in ("-pno:xdist", "-rxs", "-Werror::DeprecationWarning"):
+        run = _run(f"pytest {opts} tests", "1 passed in 0.1s", tmp_path)
+        assert not run.stops and not run.filtered and run.selectors == ["tests"], opts
+    run = _run("pytest -vx tests", "1 passed in 0.1s", tmp_path)
+    assert run.stops
+    # `-k EXPR` consumes the next word: it is not a path.
+    run = _run("pytest -k tests/z tests/a.py", "1 passed in 0.1s", tmp_path)
+    assert run.selectors == ["tests/a.py"] and run.filtered
+
+
+def test_a_summary_with_more_failures_than_named_is_incomplete(tmp_path):
+    tests = _failing(tmp_path, "test:tests/a.py::test_x", "test:pkgb/tests/b.py::test_y")
+    out = "FAILED tests/a.py::test_x - no\n3 failed, 1 passed in 0.1s\n"
+    run = _run("pytest", out, tmp_path)
+    assert not run.complete
+    W.apply_test_run(tests, run)
+    assert "test:pkgb/tests/b.py::test_y" in tests
+    # A collection error beside one failure.
+    out = "ERROR tests/c.py\nFAILED tests/a.py::test_x - no\n1 failed, 1 error in 0.1s\n"
+    assert not _run("pytest", out, tmp_path).complete
+    # Parameters count one each.
+    out = ("FAILED tests/a.py::test_x[1] - no\nFAILED tests/a.py::test_x[2] - no\n"
+           "2 failed, 3 passed in 0.1s\n")
+    run = _run("pytest", out, tmp_path)
+    assert run.complete
+    W.apply_test_run(tests, run)
+    assert list(tests) == ["test:tests/a.py::test_x"]
+
+
+def test_each_failing_test_shows_its_own_date_and_time(tmp_path):
+    day = 86400
+    tests: OrderedDict = OrderedDict()
+    old = _run("pytest tests/a.py", "[ozagia] failed test:tests/a.py::test_x: no\n"
+               "1 failed in 0.1s", tmp_path)
+    old.ts = 10 * day
+    W.apply_test_run(tests, old)
+    new = _run("pytest tests/b.py", "[ozagia] failed test:tests/b.py::test_y: no\n"
+               "1 failed in 0.1s", tmp_path)
+    new.ts = 20 * day + 3600
+    W.apply_test_run(tests, new)
+    # Failing again later keeps the first time.
+    again = _run("pytest tests/a.py", "[ozagia] failed test:tests/a.py::test_x: no\n"
+                 "1 failed in 0.1s", tmp_path)
+    again.ts = 30 * day
+    W.apply_test_run(tests, again)
+    text = W.session_brief(tmp_path, tests=list(tests.items()),
+                           last_test={"ts": 30 * day}, jobs_enabled=False)
+    assert "test:tests/a.py::test_x (failing since 1970-01-11 00:00 UTC)" in text
+    assert "test:tests/b.py::test_y (failing since 1970-01-21 01:00 UTC)" in text
+    assert "last pytest run" not in text and "1970-01-31" not in text
+    ws = W.WorkingSet()
+    ws.note_tests(old)
+    text = W.working_set_text(ws.view(), harness="codex")
+    assert "last pytest run 1970-01-11 00:00 UTC" in text
+    assert "(failing since 1970-01-11 00:00 UTC): no" in text
+
+
+def test_the_test_record_keeps_no_free_text(tmp_path):
+    rec = W.TestRecord(tmp_path)
+    out = ("FAILED tests/a.py::test_x - assert token == 'hunter2'\n"
+           "1 failed in 0.1s\n")
+    rec.apply(_run("API_KEY=hunter2 .venv/bin/python -m pytest -q tests", out, tmp_path,
+                   heads=[[".venv/bin/python", "-m", "pytest", "-q", "tests"]]))
+    raw = (tmp_path / ".ozagia" / "working_set" / "tests.json").read_text()
+    assert "hunter2" not in raw and "message" not in raw and "command" not in raw
+    data = json.loads(raw)
+    assert data["tests"]["test:tests/a.py::test_x"]["prefix"] == [
+        ".venv/bin/python", "-m", "pytest"]
+    assert set(data["tests"]["test:tests/a.py::test_x"]) <= {
+        "outcome", "params", "ts", "since", "prefix"}
+    assert set(data["last"]) <= {"ts", "failed", "complete"}
+    # An older file with free text is read without it.
+    path = tmp_path / ".ozagia" / "working_set" / "tests.json"
+    path.write_text(json.dumps({"tests": {"test:tests/b.py::test_y": {
+        "outcome": "failed", "params": [], "message": "secret", "command": "X=secret pytest",
+        "prefix": ["X=secret", "pytest"], "ts": 5}}, "last": {"command": "secret", "ts": 5}}))
+    text = W.session_brief(tmp_path, jobs_enabled=False)
+    assert "test:tests/b.py::test_y" in text and "secret" not in text
+    assert "rerun (from the repo root): python -m pytest -q tests/b.py::test_y" in text
+    # The session's own text keeps a short message.
+    ws = W.WorkingSet()
+    ws.note_tests(_run("pytest", out, tmp_path))
+    assert "hunter2" in W.working_set_text(ws.view())
+
+
+def test_free_text_false_keeps_only_identifiers(tmp_path):
+    from ozagia.core.session import DevSession
+    s = DevSession.start("secret task title", root=tmp_path)
+    s.record("plan", steps=["secret step", "other"])
+    s.record("step", title="secret step")
+    ws = W.WorkingSet()
+    ws.note_edit(["pkg/a.py"], ["sym:pkg/a.py::f"])
+    ws.note_tests(_run("pytest tests", "FAILED tests/a.py::test_x - secret message\n"
+                       "1 failed in 0.1s\n", tmp_path))
+    jobs = [{"id": "j1", "command": "secret-cmd --token=x", "status": "running",
+             "session": "s"}]
+    plan = W.devsession_line(tmp_path, free_text=False)
+    assert plan.startswith(f"DevSession {s.session_id}: step 1/2 (")
+    text = W.working_set_text(ws.view(), harness="opencode", session="s", jobs=jobs,
+                              plan=plan, free_text=False)
+    assert "secret" not in text
+    assert "test:tests/a.py::test_x" in text and "j1 running" in text
+    assert "sym:pkg/a.py::f" in text and "pytest -q tests/a.py::test_x" in text
+    full = W.working_set_text(ws.view(), harness="opencode", session="s", jobs=jobs,
+                              plan=W.devsession_line(tmp_path))
+    assert "secret message" in full and "secret-cmd" in full and "secret task" in full
+
+
+def test_daemon_working_set_free_text_false(daemon, repo):
+    base = {"harness": "opencode", "session": "ses_f"}
+    daemon({"op": "after", **base, "tool": "shell", "input": {
+        "command": PYTEST, "workdir": str(repo)}, "output": FAIL_OUT})
+    full = daemon({"op": "working_set", **base})["text"]
+    bare = daemon({"op": "working_set", **base, "free_text": False})["text"]
+    assert "assert 2 == 1" in full and PYTEST in full
+    assert "test:tests/test_a.py::test_one" in bare
+    assert "assert 2 == 1" not in bare and "-q tests/test_a.py`" not in bare
+
+
+def test_after_refresh_attributes_only_this_calls_files(daemon, repo):
+    base = {"harness": "claude", "session": "ses_a"}
+    # Another session (or the user's editor) changed tests/test_a.py long ago.
+    other = repo / "tests" / "test_a.py"
+    other.write_text(TESTS + "\n\ndef test_three():\n    pass\n")
+    os.utime(other, (1, 1))
+    # This session's built-in edit of pkg/small.py.
+    (repo / "pkg" / "small.py").write_text(SMALL.replace("x\n", "x + 0\n", 1))
+    resp = daemon({"op": "after", **base, "tool": "edit",
+                   "input": {"path": str(repo / "pkg" / "small.py"),
+                             "oldString": "x", "newString": "x + 0"},
+                   "output": "ok"})
+    assert resp["meta"]["edited_files"] == ["pkg/small.py"]
+    (state,) = daemon.state.sessions.states("claude", "ses_a")
+    view = state.work.view()
+    assert view.files == ["pkg/small.py"]
+    assert all(W.key_file(k) == "pkg/small.py" for k in view.keys)
+    # A shell command: only recently written changed files.
+    (repo / "pkg" / "__init__.py").write_text("X = 1\n")
+    other.write_text(TESTS + "\n\ndef test_four():\n    pass\n")
+    os.utime(other, (1, 1))
+    resp = daemon({"op": "after", **base, "tool": "shell",
+                   "input": {"command": "python gen.py", "workdir": str(repo)},
+                   "output": ""})
+    assert resp["meta"]["changed_paths"] == ["pkg/__init__.py"]
+    view = state.work.view()
+    assert "tests/test_a.py" not in view.files and view.files[0] == "pkg/__init__.py"
+
+
+def test_mcp_dev_working_set_description_names_the_default():
+    from ozagia.integrations.mcp import server as S
+    (tool,) = [t for t in S._TOOLS if t["name"] == "dev_working_set"]
+    desc = tool["description"]
+    assert "What this agent session" not in desc
+    assert "most recently active session" in desc and "any harness" in desc
+    assert "named in the header" in desc
