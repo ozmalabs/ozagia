@@ -131,3 +131,11 @@ Authorization header. They are not placed in prompts, outputs or logs.
 - Keep a human adjudication path for contested findings.
 - Calibrate agreement against human labels before treating it as quality.
 - Do not turn a majority vote into support evidence.
+
+## Closing findings across sessions
+
+A run's findings can be imported into the review ledger
+(`research_review_finding_add` with `run_id`), which tracks each one as open,
+addressed, wont_fix or disputed until it is closed, and proposes which open
+findings a new document version may address. See
+[positions and the review ledger](positions.md).

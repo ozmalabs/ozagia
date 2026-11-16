@@ -34,6 +34,8 @@ NODE_TYPES = frozenset(
         "ReviewPlan",
         "ReviewRun",
         "ReviewFinding",
+        # A review finding tracked across sessions until it is closed.
+        "LedgerFinding",
         "Reconciliation",
         "Argument",
         "SearchRun",
@@ -93,6 +95,7 @@ EDGE_TYPES = frozenset(
         "discriminated_by",
         "explains",
         "held_as",
+        "concerns",
         "defines",
         "uses_symbol",
         "constrains",
@@ -152,7 +155,7 @@ _EDGE_ENDPOINTS = {
     ),
     "finds": (frozenset({"ReviewRun"}), frozenset({"ReviewFinding"})),
     "about": (
-        frozenset({"ReviewFinding"}),
+        frozenset({"ReviewFinding", "LedgerFinding"}),
         frozenset({"Claim", "Evidence", "Reference", "Argument", "Source"}),
     ),
     "reconciles": (frozenset({"Reconciliation"}), frozenset({"ReviewRun"})),
@@ -210,6 +213,16 @@ _EDGE_ENDPOINTS = {
     # A Source can have several epistemic holdings (for example, a book held
     # as an authorial interpretation rather than as behavioural evidence).
     "held_as": (frozenset({"Source"}), frozenset({"Holding"})),
+    # A user position (a conversation-sourced Holding) concerns the records
+    # it is about. The link is topical, not a support relation.
+    "concerns": (
+        frozenset({"Holding"}),
+        frozenset({
+            "Question", "Frame", "Claim", "Assumption", "Source", "Reference",
+            "Theory", "Argument", "Evidence", "Prediction", "ReviewFinding",
+            "LedgerFinding", "Holding",
+        }),
+    ),
     # A small scoped-symbol layer, following the OpenMath/OMDoc distinction
     # between a symbol's identity, its defining assertion, and its context.
     # These remain authored graph assertions; they are not inferred from TeX.
@@ -668,6 +681,15 @@ class ResearchGraph:
                             "node_id": node["id"],
                             "field": field,
                             "reason": f"ReviewFinding has no {field}.",
+                        })
+            if node["type"] == "LedgerFinding":
+                for field in ("document", "severity", "text", "status"):
+                    if not node.get(field):
+                        issues.append({
+                            "code": "ledger_finding_field_missing",
+                            "node_id": node["id"],
+                            "field": field,
+                            "reason": f"LedgerFinding has no {field}.",
                         })
             if node["type"] == "Reconciliation" and not node.get("method"):
                 issues.append({

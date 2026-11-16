@@ -59,6 +59,8 @@ EPISTEMIC_ROLES = (
     "technical_claim",
     "context",
     "evaluation",
+    # A user's own stated stance, sourced to a conversation.
+    "user_position",
 )
 AUTHORITY_LEVELS = (
     "peer_reviewed",
@@ -1193,6 +1195,19 @@ SOURCE_TYPES: dict[str, dict[str, Any]] = {
         "notes": (
             "Model output is generated material. It is synthetic until "
             "validated against independent observation; record model and version."
+        ),
+    },
+    "conversation": {
+        "label": "Conversation",
+        "epistemic_role": "user_position",
+        "authority": "personal",
+        "review_status": "none",
+        "use_constraints": ["user_stance", "not_external_evidence"],
+        "required_metadata": ["session_id", "date"],
+        "notes": (
+            "A stance or correction the user stated in a conversation with "
+            "an agent. It records what the user holds, with its date; it is "
+            "not sourced evidence and is reported apart from evidence."
         ),
     },
     "other": {
