@@ -25,6 +25,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Mapping, Protocol, Sequence
 
 from ozagia.core import resources
+from ozagia.core import testing as test_plans
 from ozagia.core import worktree as W
 
 SCHEMA = 1
@@ -1405,10 +1406,35 @@ def _derive_findings(files: Sequence[dict[str, Any]],
 # --------------------------------------------------------------------------- #
 
 
+def _plan_tests(root: Path, base_commit: str, head_commit: str,
+                changed: Sequence[str], graph_file: Path) -> dict[str, Any]:
+    """The selection plan recorded in the packet. No test is executed."""
+    try:
+        plan = test_plans.plan(
+            root, base=base_commit, head=head_commit,
+            changed=sorted(changed), task_class="code_review",
+            graph_path=graph_file)
+    except Exception as exc:  # noqa: BLE001 - a review must report, not crash
+        return {
+            "schema": test_plans.SCHEMA,
+            "available": False,
+            "executed": False,
+            "truth_assessed": False,
+            "error": f"{type(exc).__name__}: {exc}",
+            "not_run_reason": "the deterministic review does not execute tests",
+        }
+    plan["executed"] = False
+    plan["not_run_reason"] = (
+        "the deterministic code review does not execute tests; the plan is "
+        "evidence for a later runner")
+    return plan
+
+
 def _packet(root: Path, pre: Mapping[str, Any], graph_info: Mapping[str, Any],
             files: Sequence[dict[str, Any]], diff_info: Mapping[str, Any],
             findings: Sequence[Mapping[str, Any]], omissions: Sequence[str],
-            not_assessed: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+            not_assessed: Sequence[Mapping[str, Any]],
+            test_plan: Mapping[str, Any] | None = None) -> dict[str, Any]:
     range_info = dict(pre.get("range") or {})
     return {
         "schema": PACKET_SCHEMA,
@@ -1440,6 +1466,8 @@ def _packet(root: Path, pre: Mapping[str, Any], graph_info: Mapping[str, Any],
         },
         "files": list(files),
         "findings": list(findings),
+        "test_plan": dict(test_plan) if test_plan is not None else None,
+        "tests_executed": False,
         "summary": {
             "findings": len(findings),
             "blocking": sum(1 for item in findings
@@ -1509,8 +1537,26 @@ def review_diff(root: str | Path, *, base: str, head: str = "HEAD",
     repo_tests = _tree_tests(root_path, head_sha)
     findings, omissions, not_assessed = _derive_findings(
         files, diff_info, graph_info, graph, changed_paths, repo_tests)
+    test_plan = _plan_tests(root_path, base_sha, head_sha,
+                            sorted(changed_paths), graph_file)
+    if test_plan.get("selected_files"):
+        not_assessed.append({
+            "area": "tests",
+            "reason": (
+                f"{len(test_plan['selected_files'])} test file(s) were planned "
+                "but not executed; the packet records a selection, not a "
+                "result"),
+        })
+    else:
+        not_assessed.append({
+            "area": "tests",
+            "reason": (
+                test_plan.get("not_run_reason")
+                or "no test was selected and no test was executed"),
+        })
     packet = _packet(root_path, pre, graph_info, files, diff_info,
-                     _finalize_findings(findings), omissions, not_assessed)
+                     _finalize_findings(findings), omissions, not_assessed,
+                     test_plan)
     return packet
 
 
@@ -1684,6 +1730,14 @@ def format_packet(packet: Mapping[str, Any]) -> str:
     lines.append(
         f"files: {diff.get('files', 0)} changed, {diff.get('additions', 0)} "
         f"added lines, {diff.get('deletions', 0)} deleted lines")
+    test_plan = packet.get("test_plan") or {}
+    if test_plan:
+        lines.append(
+            f"test plan: {test_plan.get('mode')} "
+            f"({len(test_plan.get('selected_files') or [])} selected, "
+            f"fallback={test_plan.get('fallback_used')}); tests were not run"
+            + (f" - {test_plan['not_run_reason']}"
+               if test_plan.get("not_run_reason") else ""))
     findings = packet.get("findings") or []
     lines.append(f"findings: {len(findings)}")
     for item in findings:

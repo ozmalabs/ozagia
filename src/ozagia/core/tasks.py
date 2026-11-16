@@ -32,6 +32,7 @@ from typing import Any
 from ozagia.config import state_dir as default_state_dir
 from ozagia.config import state_path
 from ozagia.core import resources
+from ozagia.core import testing as test_plans
 from ozagia.core import worktree as worktree_checks
 
 SCHEMA = 1
@@ -112,12 +113,13 @@ MANDATORY_STOPS = (
 TOP_KEYS = frozenset({
     "id", "version", "title", "objective", "inputs", "tools", "write_scope",
     "steps", "worktree", "resources", "budget", "gates", "stop", "output",
-    "output_schema", "approval", "requires_graph",
+    "output_schema", "approval", "requires_graph", "test_policy",
 })
 STEP_KEYS = frozenset({
     "id", "tool", "goal", "paths", "write_paths", "budget", "args",
 })
 STEP_BUDGET_KEYS = frozenset({"tokens", "model_calls", "cost_usd", "wall_s"})
+TEST_POLICY_KEYS = frozenset({"mode", "fallback", "max_tests", "timeout_s"})
 WORKTREE_KEYS = frozenset({
     "expected_branch", "base", "require_clean", "require_up_to_date",
 })
@@ -304,6 +306,7 @@ class TaskSpec:
     output_schema: dict[str, Any] | None
     approval: Approval
     requires_graph: bool
+    test_policy: dict[str, Any] | None = None
     warnings: tuple[str, ...] = ()
 
     @property
@@ -329,6 +332,8 @@ class TaskSpec:
             "output_schema": self.output_schema,
             "approval": self.approval.to_dict(),
             "requires_graph": self.requires_graph,
+            "test_policy": (dict(self.test_policy)
+                            if self.test_policy is not None else None),
         }
 
     def summary(self) -> dict[str, Any]:
@@ -347,6 +352,8 @@ class TaskSpec:
             "budget": self.budget.to_dict(),
             "resources": self.resources.to_dict(),
             "approval": self.approval.to_dict(),
+            "test_policy": (dict(self.test_policy)
+                            if self.test_policy is not None else None),
         }
 
 
@@ -745,6 +752,51 @@ def _check_approval(value: Any, *, errors: list[str]) -> Approval:
     return Approval(mutate=choices["mutate"], network=choices["network"])
 
 
+def _check_test_policy(value: Any, *, errors: list[str]) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        table: dict[str, Any] = {"mode": value}
+    elif isinstance(value, Mapping):
+        table = _safe(errors, _table, value, where="test_policy",
+                      allowed=TEST_POLICY_KEYS, default={}) or {}
+    else:
+        errors.append("test_policy: must be a mode string or a table")
+        return None
+    cleaned: dict[str, Any] = {}
+    if "mode" in table:
+        mode = _safe(errors, _text, table["mode"], where="test_policy.mode",
+                     max_len=32, default="")
+        if mode and mode not in test_plans.MODES:
+            errors.append(
+                "test_policy.mode: must be one of "
+                + ", ".join(test_plans.MODES))
+        elif mode:
+            cleaned["mode"] = mode
+    if "fallback" in table:
+        fallback = _safe(errors, _text, table["fallback"],
+                         where="test_policy.fallback", max_len=32, default="")
+        if fallback and fallback not in test_plans.FALLBACKS:
+            errors.append(
+                "test_policy.fallback: must be one of "
+                + ", ".join(test_plans.FALLBACKS))
+        elif fallback:
+            cleaned["fallback"] = fallback
+    if "max_tests" in table:
+        max_tests = _safe(errors, _integer, table["max_tests"],
+                          where="test_policy.max_tests", low=1,
+                          high=100_000)
+        if max_tests is not None:
+            cleaned["max_tests"] = int(max_tests)
+    if "timeout_s" in table:
+        timeout_s = _safe(errors, _integer, table["timeout_s"],
+                          where="test_policy.timeout_s", low=1,
+                          high=86_400)
+        if timeout_s is not None:
+            cleaned["timeout_s"] = int(timeout_s)
+    return cleaned or None
+
+
 def _check_output_name(value: Any, *, errors: list[str]) -> str:
     return _safe(errors, _text, value, where="output", max_len=120,
                  default="") or ""
@@ -870,6 +922,8 @@ def _parse_spec(data: Any, path: Path) -> TaskSpec:
         schema = _check_output_schema(data["output_schema"], errors=errors)
     approval = _safe(errors, _check_approval, data.get("approval", {}),
                      errors=errors, default=Approval()) or Approval()
+    test_policy = _safe(errors, _check_test_policy, data.get("test_policy"),
+                        errors=errors)
     requires_graph = _safe(errors, _boolean,
                            data.get("requires_graph", False),
                            where="requires_graph", default=False)
@@ -926,6 +980,7 @@ def _parse_spec(data: Any, path: Path) -> TaskSpec:
         output_schema=schema,
         approval=approval,
         requires_graph=requires_graph,
+        test_policy=test_policy,
         warnings=tuple(warnings),
     )
 
@@ -1689,6 +1744,44 @@ class TaskRunner:
             & WORKTREE_GATES
         )
 
+    def _has_test_steps(self) -> bool:
+        return any(step.tool == "test" for step in self.spec.steps)
+
+    def _needs_test_plan(self) -> bool:
+        return self.spec.test_policy is not None or self._has_test_steps()
+
+    def _test_scope_paths(self) -> list[str]:
+        paths: list[str] = [entry for entry in self.spec.write_scope
+                            if entry not in ("", ".")]
+        for step in self.spec.steps:
+            for path in (*step.paths, *step.write_paths):
+                if path not in ("", ".") and path not in paths:
+                    paths.append(path)
+        return paths
+
+    def _test_plan(self) -> dict[str, Any] | None:
+        """Compute the preflight test plan, read-only and without execution."""
+        if not self._needs_test_plan():
+            return None
+        try:
+            policy = test_plans.load_policy(
+                self.root, task_class=self.spec.id,
+                paths=self._test_scope_paths() or None)
+            if self.spec.test_policy is not None:
+                policy = test_plans.with_overrides(policy,
+                                                   **self.spec.test_policy)
+            return test_plans.plan(
+                self.root, task_class=self.spec.id, policy=policy)
+        except Exception as exc:  # noqa: BLE001 - preflight must report, not crash
+            return {
+                "schema": test_plans.SCHEMA,
+                "available": False,
+                "executed": False,
+                "truth_assessed": False,
+                "error": _bounded(f"{type(exc).__name__}: {exc}", 300),
+                "not_run_reason": "the test plan could not be computed",
+            }
+
     def preflight(self) -> dict[str, Any]:
         """Read-only precondition report: worktree, admission, snapshot, paths."""
         failures: list[str] = []
@@ -1756,6 +1849,27 @@ class TaskRunner:
             failures.append(
                 f"graph snapshot is {snapshot['state']}; a fresh snapshot is "
                 "required")
+        test_plan = self._test_plan()
+        if test_plan is not None:
+            if test_plan.get("available") is False:
+                warnings.append(
+                    "test plan could not be computed: "
+                    f"{test_plan.get('error') or 'unknown error'}")
+            elif test_plan.get("refused"):
+                message = (f"test policy refused to select tests: "
+                           f"{test_plan.get('fallback_reason') or 'no reason'}")
+                if self._has_test_steps():
+                    failures.append(message)
+                else:
+                    warnings.append(message)
+            elif test_plan.get("mode") == "none" and self._has_test_steps():
+                warnings.append(
+                    "test steps will be skipped: "
+                    f"{test_plan.get('mode_reason') or 'the test policy is none'}")
+            elif test_plan.get("fallback_used"):
+                warnings.append(
+                    f"test plan used the {test_plan.get('fallback')} fallback: "
+                    f"{test_plan.get('fallback_reason') or 'no reason'}")
         result = {
             "schema": SCHEMA,
             "root": str(self.root),
@@ -1776,6 +1890,7 @@ class TaskRunner:
             "paths": paths,
             "resources": _admission_summary(admission),
             "snapshot": snapshot,
+            "test_plan": test_plan,
         }
         self._preflight_cache = result
         self._preflight_item = item
@@ -2141,7 +2256,7 @@ class TaskRunner:
         return entries
 
     # -- execution --------------------------------------------------------- #
-    def _call_executor(self, executor: Any, step: TaskStep,
+    def _call_executor(self, executor: Any, step: Mapping[str, Any],
                        context: Mapping[str, Any]) -> Any:
         target = executor
         if not callable(target):
@@ -2149,7 +2264,7 @@ class TaskRunner:
         if not callable(target):
             raise TaskError(
                 "executor must be callable or have an execute() method")
-        return target(step.to_dict(), dict(context))
+        return target(dict(step), dict(context))
 
     def _deadline(self, started_mono: float) -> tuple[str, str] | None:
         elapsed = time.monotonic() - started_mono
@@ -2224,6 +2339,7 @@ class TaskRunner:
             "errors": errors,
             "warnings": list(self.spec.warnings),
             "preflight": preflight,
+            "test_plan": preflight.get("test_plan"),
             "steps": [step.to_dict() for step in self.spec.steps],
             "gates": self.spec.gates.to_dict(),
             "budget": self.spec.budget.to_dict(),
@@ -2280,6 +2396,7 @@ class TaskRunner:
             resources=preflight["resources"],
             snapshot=preflight["snapshot"],
             paths=preflight["paths"],
+            test_plan=preflight.get("test_plan"),
         )
         gates: dict[str, Any] = {"before": [], "after": [],
                                  "after_skipped": None}
@@ -2349,6 +2466,33 @@ class TaskRunner:
             if approval is not None:
                 stop, detail = approval
                 break
+            planned = preflight.get("test_plan") or {}
+            if step.tool == "test" and planned:
+                skip_reason: str | None = None
+                if planned.get("available") is False:
+                    skip_reason = (
+                        "test plan unavailable: "
+                        f"{planned.get('error') or 'unknown error'}")
+                elif planned.get("refused"):
+                    skip_reason = (
+                        "test policy refused to select tests: "
+                        f"{planned.get('fallback_reason') or 'no reason'}")
+                elif planned.get("mode") == "none":
+                    skip_reason = (
+                        "test policy is none: "
+                        f"{planned.get('mode_reason') or 'no test selected'}")
+                if skip_reason is not None:
+                    events.write(
+                        "step_skipped", index=index, step=step.id,
+                        tool=step.tool, reason=_bounded(skip_reason, 300))
+                    step_reports.append({
+                        "id": step.id, "index": index, "tool": step.tool,
+                        "status": "skipped", "summary": _bounded(skip_reason, 200),
+                        "elapsed_s": 0.0, "usage": {}, "artifacts": 0,
+                        "evidence": 0, "skipped": True,
+                        "reason": _bounded(skip_reason, 300),
+                    })
+                    continue
             events.write(
                 "step_started", index=index, step=step.id, tool=step.tool,
                 paths=list(step.paths), write_paths=list(step.write_paths),
@@ -2365,9 +2509,16 @@ class TaskRunner:
                 "step_index": index,
                 "steps_total": len(self.spec.steps),
             }
+            step_table = step.to_dict()
+            if step.tool == "test" and planned:
+                context["test_plan"] = planned
+                step_table["args"] = {
+                    **dict(step_table.get("args") or {}),
+                    "test_plan": planned,
+                }
             step_start = time.monotonic()
             try:
-                raw = self._call_executor(executor, step, context)
+                raw = self._call_executor(executor, step_table, context)
             except Exception as exc:  # noqa: BLE001 - report, never crash
                 elapsed = round(time.monotonic() - step_start, 3)
                 events.write(
@@ -2530,6 +2681,25 @@ class TaskRunner:
             after_skipped=gates.get("after_skipped"),
             output_info=output_info,
         )
+        test_plan = (preflight.get("test_plan")
+                     if isinstance(preflight, Mapping) else None)
+        if isinstance(test_plan, Mapping):
+            if test_plan.get("available") is False:
+                not_assessed.append(
+                    "the test plan was unavailable: "
+                    f"{test_plan.get('error') or 'unknown error'}")
+            elif test_plan.get("refused"):
+                not_assessed.append(
+                    "test steps were skipped because the test policy refused "
+                    f"to select tests: {test_plan.get('fallback_reason')}")
+            elif test_plan.get("mode") == "none":
+                not_assessed.append(
+                    "test steps were skipped by the test policy (none): "
+                    f"{test_plan.get('mode_reason') or 'no test selected'}")
+            else:
+                not_assessed.append(
+                    "the runner did not execute the planned tests; the plan "
+                    "is recorded in the manifest and passed to test steps")
         public_output = {key: value for key, value in output_info.items()
                          if key != "value"}
         report = {
@@ -2548,6 +2718,7 @@ class TaskRunner:
             "stop": stop,
             "stop_detail": _bounded(detail, 400),
             "preflight": dict(preflight),
+            "test_plan": preflight.get("test_plan"),
             "gates": {
                 "before": list(gates.get("before") or []),
                 "after": list(gates.get("after") or []),
@@ -2762,6 +2933,14 @@ def format_preview(report: Mapping[str, Any]) -> str:
         lines.append(f"  error: {failure}")
     for warning in report.get("warnings") or []:
         lines.append(f"  warning: {warning}")
+    plan = report.get("test_plan") or {}
+    if plan:
+        lines.append(
+            f"  test plan: mode={plan.get('mode')} "
+            f"selected={len(plan.get('selected_files') or [])} "
+            f"fallback={plan.get('fallback_used')}"
+            + (f" ({plan['fallback_reason']})"
+               if plan.get("fallback_reason") else ""))
     return "\n".join(lines)
 
 
@@ -2784,6 +2963,12 @@ def format_run(report: Mapping[str, Any]) -> str:
     if output.get("digest"):
         lines.append(f"  output: {output.get('name')} {output.get('digest')} "
                      f"schema_valid={output.get('schema_valid')}")
+    plan = report.get("test_plan") or {}
+    if plan:
+        lines.append(
+            f"  test plan: mode={plan.get('mode')} "
+            f"selected={len(plan.get('selected_files') or [])} "
+            f"fallback={plan.get('fallback_used')}")
     for item in report.get("what_was_not_assessed") or []:
         lines.append(f"  not assessed: {item}")
     return "\n".join(lines)

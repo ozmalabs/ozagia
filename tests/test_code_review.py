@@ -315,6 +315,36 @@ def test_fresh_graph_maps_symbols_callers_and_tests(review_repo):
     assert packet["truth_assessed"] is False
 
 
+def test_packet_includes_a_test_plan_without_running_tests(review_repo):
+    _write_graph(review_repo["repo"], review_repo["head"])
+    packet = R.review_range(
+        review_repo["repo"], review_repo["range"], max_file_bytes=1024)
+
+    plan = packet["test_plan"]
+    assert plan["executed"] is False
+    assert plan["truth_assessed"] is False
+    assert "does not execute tests" in plan["not_run_reason"]
+    assert packet["tests_executed"] is False
+    assert "tests/test_app.py" in plan["selected_files"]
+    assert any(entry.get("area") == "tests"
+               for entry in packet["not_assessed"])
+    assert "test plan:" in R.format_packet(packet)
+
+
+def test_testing_task_override_can_select_none_for_review(review_repo):
+    _write_graph(review_repo["repo"], review_repo["head"])
+    (review_repo["repo"] / "ozagia" / "config.toml").write_text(
+        "[testing.tasks]\n"
+        'code_review = "none"\n',
+        encoding="utf-8",
+    )
+    packet = R.review_range(
+        review_repo["repo"], review_repo["range"], max_file_bytes=1024)
+    assert packet["test_plan"]["mode"] == "none"
+    assert packet["test_plan"]["selected_files"] == []
+    assert packet["tests_executed"] is False
+
+
 def test_stale_graph_is_reported_and_not_used(review_repo):
     _write_graph(review_repo["repo"], review_repo["head"],
                  snapshot_head=review_repo["base"])

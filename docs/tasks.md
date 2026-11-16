@@ -32,6 +32,7 @@ write_scope = []
 requires_graph = true
 stop = ["gate_failed", "budget_exhausted", "resource_limit", "no_progress", "repeated_state"]
 output = "review_packet.v1"
+test_policy = "affected"   # none | smoke | affected | package | all
 
 [worktree]
 expected_branch = "feat/code-review"   # optional; the repository mapping is used otherwise
@@ -115,6 +116,7 @@ unknown stop conditions and unknown tools are errors, not warnings.
 | `output_schema` | Optional minimal JSON schema for the output value. |
 | `approval` | `mutate` and `network`, each `ask`, `auto` or `deny`. |
 | `requires_graph` | Whether a fresh graph snapshot is required. Declaring a graph tool implies it. |
+| `test_policy` | Optional test-selection policy: a mode string or a table with `mode`, `fallback`, `max_tests` and `timeout_s`. See `docs/testing.md`. |
 
 ### Neutral tools
 
@@ -177,15 +179,20 @@ report = runner.run({"diff": "HEAD~1..HEAD"}, allow_exec=True)
 1. **Validate** the specification and the supplied inputs.
 2. **Preflight** (read-only): the expected worktree and branch through
    `core.worktree`, dirty/conflict/in-progress state, admission through
-   `core.resources`, snapshot freshness when `requires_graph` is set, and path
-   containment. Preflight constraints are enforced even when the corresponding
-   `before` gate is not listed; the gate records the same check in the audit
-   trail.
+   `core.resources`, snapshot freshness when `requires_graph` is set, path
+   containment and, when the task has `test` steps or a `test_policy`, a
+   deterministic test plan from `core.testing`. Preflight constraints are
+   enforced even when the corresponding `before` gate is not listed; the gate
+   records the same check in the audit trail.
 3. **Before gates**, each recorded as a gate event.
 4. **Steps**, in declaration order. A step may not use an undeclared tool. A
    mutating step honours `approval.mutate`: `deny` always stops, `ask` stops
    unless the run is explicitly approved (`approve=True` or `--approve`), and
-   `auto` proceeds.
+   `auto` proceeds. A `test` step receives the preflight plan as
+   `step["args"]["test_plan"]` and `context["test_plan"]`. When the plan mode
+   is `none`, the plan refused or the plan is unavailable, the `test` step is
+   skipped and the run records `step_skipped` instead of calling the executor.
+   The runner itself never executes a test.
 5. **After gates**, unless a stop occurred.
 6. **Output validation** against `output_schema`; schema failure fails the run
    even if `schema_valid` was not listed as a gate.
@@ -200,7 +207,8 @@ created for a preview.
 The executor is a callable `executor(step, context)` or an object with an
 `execute(step, context)` method. `step` is the normalised step table. `context`
 contains `run_id`, `root`, `task_id`, `inputs`, `write_scope`, `remaining`
-(budget), `step_index` and `steps_total`.
+(budget), `step_index` and `steps_total`. A `test` step's step table also has
+`args.test_plan` and its context has `test_plan`; no other step is changed.
 
 A result is a table:
 
@@ -237,6 +245,19 @@ read into evidence.
 executor is trusted to keep them short and non-secret; the runner cannot prove
 that a 200-character label contains no excerpt, so adapters must not put file
 bodies or prompts in labels.
+
+## Test plan
+
+A `test_policy` field or a `test` step makes preflight compute a plan with
+`ozagia.core.testing` (see `docs/testing.md`). The plan is deterministic and
+read-only: it names changed files, selected test files and graph node ids,
+counts, omissions, fallback reason, graph freshness and `not_assessed`.
+
+Preflight records the plan but never runs a test. A `test` step receives it in
+its arguments. `mode = "none"` skips the step and records why; a refused plan
+fails preflight only when the task actually declares a `test` step. The
+manifest and `preflight` event keep the plan for later evidence, and
+`what_was_not_assessed` repeats that no test result exists.
 
 ## Gates
 
@@ -309,10 +330,13 @@ output.json      the validated output value, when one was supplied
 ```
 
 Events include `run_started`, `preflight`, `step_started`, `step_finished`,
-`evidence`, `artifact`, `gate`, `budget_exceeded`, `repeated_state`,
-`gates_skipped` and `run_finished`. Inputs are recorded by name and digest,
-never by value. The manifest records the specification id/version/digest and
-title, not the objective or input values.
+`step_skipped`, `evidence`, `artifact`, `gate`, `budget_exceeded`,
+`repeated_state`, `gates_skipped` and `run_finished`. Inputs are recorded by
+name and digest, never by value. The manifest records the specification
+id/version/digest and title, not the objective or input values. When a test
+plan was computed it is recorded in the preflight report, the `preflight`
+event and the manifest under `test_plan`; it is a selection, never a test
+result.
 
 No raw prompts, input values, model messages or file contents are written.
 Artifacts are hashed, not copied. The output value is recorded because it is
