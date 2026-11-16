@@ -1,8 +1,9 @@
 """``python -m ozagia.settings_cli``: inspect and preview settings writes.
 
 Reads the typed registry in :mod:`ozagia.core.settings`. ``set`` writes unless
-``--dry-run`` is given; the Python API defaults to a dry run. Exit status is 2
-for validation, configuration or IO errors.
+``--dry-run`` is given; the Python API defaults to a dry run. ``migrate``
+previews the legacy ``.ozagia.toml`` migration unless ``--apply --confirm
+TOKEN`` is given. Exit status is 2 for validation, configuration or IO errors.
 """
 from __future__ import annotations
 
@@ -13,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from ozagia.config import repo_root
+from ozagia.core import migrate as M
 from ozagia.core import settings as S
 
 
@@ -104,6 +106,19 @@ def build_parser(prog: str = "ozagia-settings") -> argparse.ArgumentParser:
     set_value.add_argument("--root", default=None)
     set_value.add_argument("--dry-run", action="store_true")
     set_value.add_argument("--json", action="store_true")
+
+    migrate = sub.add_parser(
+        "migrate", help="preview or apply the .ozagia.toml migration")
+    migrate.add_argument("--root", default=None)
+    mode = migrate.add_mutually_exclusive_group()
+    mode.add_argument("--dry-run", action="store_true",
+                      help="preview only (the default)")
+    mode.add_argument("--apply", action="store_true",
+                      help="write the previewed values; needs --confirm")
+    migrate.add_argument("--confirm", default=None,
+                         metavar="TOKEN",
+                         help="the token printed by a previous dry run")
+    migrate.add_argument("--json", action="store_true")
     return parser
 
 
@@ -138,6 +153,15 @@ def main(argv: list[str] | None = None, *,
                 _print_get(item)
             return 0
 
+        if args.command == "migrate":
+            report = M.migrate(root, dry_run=not args.apply,
+                               confirm=args.confirm)
+            if args.json:
+                _print_json(report)
+            else:
+                print(M.format_report(report))
+            return 0 if report.get("ok") else 1
+
         result = S.set_value(root, args.key, args.value, scope=args.scope,
                              dry_run=args.dry_run)
         if args.json:
@@ -145,7 +169,7 @@ def main(argv: list[str] | None = None, *,
         else:
             _print_set(result)
         return 0
-    except (S.SettingsError, ValueError, OSError) as exc:
+    except (S.SettingsError, M.MigrateError, ValueError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 

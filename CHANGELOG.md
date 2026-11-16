@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Config migration and opt-in Git hooks: `ozagia config migrate [--root R]
+  [--dry-run|--apply --confirm TOKEN]` copies the supported `.ozagia.toml`
+  sections (index, memory, adapters, reads, tests, jobs, lint, security,
+  hints, review layers, IaC roots) into the typed registry at
+  `ozagia/config.toml`, with a unified diff, an apply token, conflict and
+  unknown/unmapped reporting, one atomic write and no deletion of the legacy
+  file. `ozagia hooks install|uninstall|status --pre-commit|--pre-push`
+  writes or removes small executable policy wrappers (configured Python,
+  redacted failure output, no silent install), preserves foreign hooks
+  unless `--force`, and is idempotent. Registry additions cover the legacy
+  index/read/lint/jobs/security groups and `testing.cache`.
+
 - Repo review and goals together (W19): `review_resolved` reads the newest
   packet in `.ozagia/reviews/` (`latest.json`, else the newest timestamped
   one) and decides with `repo_review.finding_state`, using the finding's

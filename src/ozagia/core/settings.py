@@ -138,6 +138,16 @@ ENV_STATE_DIR = "OZAGIA_STATE_DIR"
 #: the same order when resolving path overrides.
 TESTING_MODES = ("none", "smoke", "affected", "package", "all")
 TESTING_FALLBACKS = ("all", "refuse", "affected_with_warning")
+READ_REPEAT_POLICIES = ("stub", "note", "off")
+SECURITY_FAIL_ON = ("blocking", "high", "medium", "low", "never")
+SECURITY_TOOLS = (
+    "bandit", "cargo", "gitleaks", "govulncheck", "npm", "osv-scanner",
+    "pip-audit", "semgrep", "trivy",
+)
+LINT_TOOLS = {
+    "python": ("auto", "ruff", "off"),
+    "rust": ("auto", "rustfmt", "off"),
+}
 # Open-ended override tables: values are modes. They are not scalar settings,
 # so they are validated here and collected by :func:`testing_overrides`.
 TESTING_TASKS_TABLE = "testing.tasks"
@@ -346,6 +356,88 @@ def _check_ecosystems(value: Any) -> list[str]:
     return _dedupe(result)
 
 
+def _check_text_list(value: Any, *, limit: int = 200,
+                     max_len: int = 256) -> list[str]:
+    """A bounded list of non-empty structural strings."""
+    items = _list(value)
+    if len(items) > limit:
+        raise ValueError(f"must contain at most {limit} entries")
+    result = []
+    for item in items:
+        text = _text(item, max_len=max_len)
+        if any(char in "\r\n\t" for char in text):
+            raise ValueError("entries must be single-line strings")
+        result.append(text)
+    return _dedupe(result)
+
+
+def _check_index_path_prefixes(value: Any) -> list[str]:
+    items = _list(value)
+    if len(items) > 100:
+        raise ValueError("must contain at most 100 path prefixes")
+    result = []
+    for item in items:
+        text = _text(item, max_len=128).replace("\\", "/")
+        if text in (".", "..") or "/" in text:
+            raise ValueError("entries must be single path components")
+        if any(char in text for char in "*?[]"):
+            raise ValueError("entries must be path components, not globs")
+        result.append(text)
+    return _dedupe(result)
+
+
+def _check_adapter_modules(value: Any) -> list[str]:
+    items = _check_text_list(value, limit=100, max_len=256)
+    for item in items:
+        module, separator, attr = item.partition(":")
+        if (not separator or not module or not attr
+                or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*", module)
+                or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*", attr)
+                or ".." in module.split(".") or ".." in attr.split(".")):
+            raise ValueError('entries must be "module:attr" adapter names')
+    return items
+
+
+def _check_security_tools(value: Any) -> list[str]:
+    items = _check_text_list(value, limit=32, max_len=64)
+    for item in items:
+        if item not in SECURITY_TOOLS:
+            raise ValueError(
+                "must be one of " + ", ".join(SECURITY_TOOLS))
+    return items
+
+
+def _check_security_allowlist(value: Any) -> list[str]:
+    """Secret-gate allowlist patterns; values are never secrets themselves."""
+    items = _check_text_list(value, limit=500, max_len=256)
+    for item in items:
+        if item.startswith(("path:", "rule:", "sha256:")):
+            if len(item.split(":", 1)[1]) < 1:
+                raise ValueError("allowlist entries need a value after the prefix")
+        else:
+            raise ValueError("must start with path:, rule: or sha256:")
+    return items
+
+
+def _check_harness_name(value: Any) -> str:
+    text = _text(value, max_len=64)
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,63}", text):
+        raise ValueError("must be a bounded harness name")
+    return text
+
+
+def _check_security_fail_on(value: Any) -> str:
+    text = _text(value, max_len=16)
+    if text not in SECURITY_FAIL_ON:
+        raise ValueError("must be one of " + ", ".join(SECURITY_FAIL_ON))
+    return text
+
+
+def _check_lint_timeout(value: Any) -> float:
+    number = _number_between(0.001, 600.0)(value)
+    return number
+
+
 _MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+~-]{0,199}\Z")
 _MODEL_PROVIDER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@+~-]{0,63}\Z")
 _MODEL_PART = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+~#\[\]-]{0,199}\Z")
@@ -526,6 +618,11 @@ _DYNAMIC_TABLES: dict[str, _DynamicTable] = {
             ),
         },
     ),
+    "reads.repeat_by_harness": _DynamicTable(
+        _check_harness_name, _choice(*READ_REPEAT_POLICIES), "string",
+        "Per-harness read-repeat policy; wins over [reads] repeat.",
+        "one of stub, note or off",
+    ),
 }
 _DYNAMIC_ALIASES: dict[str, str] = {
     alias: table
@@ -616,6 +713,82 @@ _SETTINGS: tuple[Setting, ...] = (
         section="index", name="skip_dirs",
         validation="single directory names (may be empty)",
         check=_check_skip_dirs, restart_required=True,
+    ),
+    Setting(
+        "index.map_dirs", "string_list", (), "repo",
+        "Directories scanned by the repo map, search and symbol graph; "
+        "empty derives source_dirs plus test_dirs.",
+        section="index", name="map_dirs",
+        validation="repository-relative directories (may be empty)",
+        check=_check_test_dirs, restart_required=True,
+    ),
+    Setting(
+        "index.docs_all", "string_list", ("**/*.md",), "repo",
+        "Additional documentation globs used by include_docs=\"all\".",
+        section="index", name="docs_all",
+        validation="repository-relative glob patterns (may be empty)",
+        check=_check_docs, restart_required=True,
+    ),
+    Setting(
+        "index.key_docs", "string_list", ("README.md",), "repo",
+        "Documentation listed first in the repository brief.",
+        section="index", name="key_docs",
+        validation="repository-relative glob patterns (may be empty)",
+        check=_check_docs, restart_required=True,
+    ),
+    Setting(
+        "index.command_docs", "string_list", (), "repo",
+        "Documentation scanned for build and test commands; empty uses "
+        "key_docs.",
+        section="index", name="command_docs",
+        validation="repository-relative glob patterns (may be empty)",
+        check=_check_docs, restart_required=True,
+    ),
+    Setting(
+        "index.import_roots", "string_list", (), "repo",
+        "Additional Python import roots; empty derives src when it exists.",
+        section="index", name="import_roots",
+        validation="repository-relative directories (may be empty)",
+        check=_check_test_dirs, restart_required=True,
+    ),
+    Setting(
+        "index.path_prefixes", "string_list", (), "repo",
+        "First path components recognised as file mentions; empty derives "
+        "them from source_dirs, test_dirs and docs.",
+        section="index", name="path_prefixes",
+        validation="single path components (may be empty)",
+        check=_check_index_path_prefixes, restart_required=True,
+    ),
+    Setting(
+        "index.changed_exclude", "string_list",
+        ("__pycache__/", ".pytest_cache/", ".ozagia/"), "repo",
+        "Path prefixes hidden from the changed-file list.",
+        section="index", name="changed_exclude",
+        validation="repository-relative path prefixes or globs",
+        check=_check_docs, restart_required=True,
+    ),
+    Setting(
+        "index.entrypoint_prefixes", "string_list",
+        ("scripts/", "tools/", "bin/"), "repo",
+        "Path prefixes that are never reported as dead code.",
+        section="index", name="entrypoint_prefixes",
+        validation="repository-relative path prefixes or globs",
+        check=_check_docs, restart_required=True,
+    ),
+    Setting(
+        "memory.skip_dirs", "string_list", (), "repo",
+        "Additional directory names skipped by the graph build only.",
+        section="memory", name="skip_dirs",
+        validation="single directory names (may be empty)",
+        check=_check_skip_dirs, restart_required=True,
+    ),
+    Setting(
+        "adapters.modules", "string_list", (), "repo",
+        "Opt-in project adapter modules as \"module:attr\"; never imported "
+        "by reading the setting.",
+        section="adapters", name="modules",
+        validation="module:attr adapter names (may be empty)",
+        check=_check_adapter_modules, restart_required=True,
     ),
     Setting(
         "resources.enabled", "boolean", True, "both",
@@ -748,6 +921,41 @@ _SETTINGS: tuple[Setting, ...] = (
         aliases=(("worktrees", "avoid_tmpfs"),),
     ),
     Setting(
+        "reads.structured_outline_lines", "integer", 2000, "repo",
+        "Line limit for a structured read with no range; 0 turns it off.",
+        section="reads", name="structured_outline_lines",
+        validation="an integer between 0 and 10000000",
+        check=_integer_between(0, 10_000_000),
+    ),
+    Setting(
+        "reads.structured_outline_bytes", "integer", 65_536, "repo",
+        "Byte limit for a structured read with no range; 0 turns it off.",
+        section="reads", name="structured_outline_bytes",
+        validation="an integer between 0 and 1000000000",
+        check=_integer_between(0, 1_000_000_000),
+    ),
+    Setting(
+        "reads.outline_lines", "integer", 400, "repo",
+        "Line limit for an ordinary text read with no range; 0 turns it off.",
+        section="reads", name="outline_lines",
+        validation="an integer between 0 and 10000000",
+        check=_integer_between(0, 10_000_000),
+    ),
+    Setting(
+        "reads.outline_bytes", "integer", 40_960, "repo",
+        "Byte limit for an ordinary text read with no range; 0 turns it off.",
+        section="reads", name="outline_bytes",
+        validation="an integer between 0 and 1000000000",
+        check=_integer_between(0, 1_000_000_000),
+    ),
+    Setting(
+        "reads.repeat", "string", "note", "repo",
+        "What a same-session re-read of an unchanged range gets.",
+        section="reads", name="repeat",
+        validation="one of stub, note or off",
+        check=_choice(*READ_REPEAT_POLICIES),
+    ),
+    Setting(
         "markdown.history", "string", "history", "repo",
         "Versioned directory for dated one-off Markdown.",
         section="markdown", name="history",
@@ -858,6 +1066,14 @@ _SETTINGS: tuple[Setting, ...] = (
         check=_check_bool,
     ),
     Setting(
+        "review.layers", "string_list", (), "repo",
+        "Path prefixes from the lowest layer to the highest for layering "
+        "checks.",
+        section="review", name="layers",
+        validation="repository-relative directories (may be empty)",
+        check=_check_test_dirs, restart_required=True,
+    ),
+    Setting(
         "testing.mode", "string", "affected", "both",
         "Default test-selection mode for bounded tasks.",
         section="testing", name="mode",
@@ -893,6 +1109,130 @@ _SETTINGS: tuple[Setting, ...] = (
         section="testing", name="captured",
         validation="one of none (or off), smoke, affected, package, all",
         check=_check_captured,
+        aliases=(("tests", "select"),),
+    ),
+    Setting(
+        "testing.cache", "boolean", False, "both",
+        "Skip a selected test whose inputs are unchanged since it passed.",
+        section="testing", name="cache",
+        validation="true or false",
+        check=_check_bool,
+        aliases=(("tests", "cache"),),
+    ),
+    Setting(
+        "lint.enabled", "boolean", True, "repo",
+        "Lint changed files after a handled edit; the legacy loader treats "
+        "an unset value as automatic.",
+        section="lint", name="enabled",
+        validation="true or false",
+        check=_check_bool,
+    ),
+    Setting(
+        "lint.timeout_s", "number", 3.0, "repo",
+        "Budget for the linter runs of one call, in seconds.",
+        section="lint", name="timeout_s",
+        validation="a number between 0.001 and 600",
+        check=_check_lint_timeout,
+    ),
+    Setting(
+        "lint.python", "string", "auto", "repo",
+        "Python linter: auto, ruff or off.",
+        section="lint", name="python",
+        validation="one of auto, ruff or off",
+        check=_choice(*LINT_TOOLS["python"]),
+    ),
+    Setting(
+        "lint.rust", "string", "auto", "repo",
+        "Rust linter: auto, rustfmt or off.",
+        section="lint", name="rust",
+        validation="one of auto, rustfmt or off",
+        check=_choice(*LINT_TOOLS["rust"]),
+    ),
+    Setting(
+        "lint.trust_project_venv", "boolean", False, "user",
+        "Allow linters from inside the repository (user config only).",
+        section="lint", name="trust_project_venv",
+        validation="true or false",
+        check=_check_bool,
+    ),
+    Setting(
+        "jobs.enabled", "boolean", False, "repo",
+        "Allow background jobs in the daemon for this repository.",
+        section="jobs", name="enabled",
+        validation="true or false",
+        check=_check_bool,
+    ),
+    Setting(
+        "iac.roots", "string_list", (), "repo",
+        "Explicit Terraform/OpenTofu roots.",
+        section="iac", name="roots",
+        validation="repository-relative directories (may be empty)",
+        check=_check_test_dirs, restart_required=True,
+    ),
+    Setting(
+        "iac.skip_globs", "string_list", (), "repo",
+        "Extra IaC source files or directories to skip; built-in backup "
+        "globs still apply.",
+        section="iac", name="skip_globs",
+        validation="repository-relative glob patterns (may be empty)",
+        check=_check_docs, restart_required=True,
+    ),
+    Setting(
+        "security.enabled", "boolean", True, "repo",
+        "Enable the security and antipattern scan for this repository.",
+        section="security", name="enabled",
+        validation="true or false",
+        check=_check_bool,
+    ),
+    Setting(
+        "security.tools", "string_list", (), "repo",
+        "Explicit opt-in offline security tools.",
+        section="security", name="tools",
+        validation="one of the fixed tool registry names",
+        check=_check_security_tools,
+    ),
+    Setting(
+        "security.allow_network", "boolean", False, "repo",
+        "Allow a security tool to refresh a remote database.",
+        section="security", name="allow_network",
+        validation="true or false",
+        check=_check_bool,
+    ),
+    Setting(
+        "security.fail_on", "string", "high", "repo",
+        "Severity at which a security scan reports a blocking result.",
+        section="security", name="fail_on",
+        validation="one of blocking, high, medium, low or never",
+        check=_check_security_fail_on,
+    ),
+    Setting(
+        "security.exclude", "string_list",
+        ("tests/**", "test/**", "docs/**", "vendor/**"), "repo",
+        "Path globs excluded from security findings.",
+        section="security", name="exclude",
+        validation="repository-relative glob patterns",
+        check=_check_docs,
+    ),
+    Setting(
+        "security.max_findings", "integer", 200, "repo",
+        "Cap the number of security findings a scan reports.",
+        section="security", name="max_findings",
+        validation="an integer between 1 and 10000",
+        check=_integer_between(1, 10_000),
+    ),
+    Setting(
+        "security.block_secrets", "boolean", True, "repo",
+        "Block staged or pushed secrets by default.",
+        section="security", name="block_secrets",
+        validation="true or false",
+        check=_check_bool,
+    ),
+    Setting(
+        "security.secret_allowlist", "string_list", (), "repo",
+        "Secret-gate allowlist entries: path:, rule: or sha256: patterns.",
+        section="security", name="secret_allowlist",
+        validation="path:, rule: or sha256: entries",
+        check=_check_security_allowlist,
     ),
     Setting(
         "ui.default_aperture", "string", "architecture", "both",
@@ -1821,6 +2161,128 @@ def model_overrides(root: str | Path | None = None) -> dict[str, Any]:
     }
 
 
+def layer_values(root: str | Path | None = None, *,
+                 scope: str = "repo") -> dict[str, Any]:
+    """The values defined in one config layer, without defaults or env.
+
+    ``scope="repo"`` reads ``<root>/ozagia/config.toml``; ``scope="user"``
+    reads the user config. This is the exact file layer, so callers can tell
+    a repository conflict from a user or environment override.
+    """
+    if scope not in {"repo", "user"}:
+        raise SettingsError(f"scope must be 'repo' or 'user', got {scope!r}")
+    root_p = _resolve_root(root)
+    path = repo_config_path(root_p) if scope == "repo" else user_config_path()
+    data, _ = _read_toml(path)
+    values, _ = _parse_layer(data, path, scope)
+    return values
+
+
+def validate_value(key: str, value: Any) -> Any:
+    """Validate one value against the registry and return its normalized form."""
+    setting = _setting_for_key(key)
+    return _coerce_value(setting, value, where=setting.key)
+
+
+def set_values(root: str | Path | None, values: Mapping[str, Any],
+               scope: str = "repo", dry_run: bool = True) -> dict[str, Any]:
+    """Validate and write several settings in one atomic update.
+
+    Existing keys keep their TOML location (including aliases); new keys use
+    the canonical section. Values already equal to the file's value are left
+    alone. A preview (the default) changes nothing. Unrelated TOML and
+    comments are preserved.
+    """
+    if scope not in {"repo", "user"}:
+        raise SettingsError(f"scope must be 'repo' or 'user', got {scope!r}")
+    if not isinstance(values, Mapping) or not values:
+        raise SettingsError("values must be a non-empty mapping of setting keys")
+    root_p = _resolve_root(root)
+    if scope == "repo":
+        if not root_p.is_dir():
+            raise SettingsError(f"repository root does not exist: {root_p}")
+        path = repo_config_path(root_p)
+    else:
+        path = user_config_path()
+    path = path.resolve()
+
+    cleaned: dict[str, Any] = {}
+    settings: dict[str, Setting] = {}
+    for raw_key, raw_value in values.items():
+        setting = _setting_for_key(raw_key)
+        if setting.scope != "both" and setting.scope != scope:
+            raise SettingsError(
+                f"{setting.key} is {setting.scope}-only; "
+                f"use scope={setting.scope!r}")
+        if setting.key in cleaned:
+            raise SettingsError(f"setting {setting.key!r} is given twice")
+        cleaned[setting.key] = _coerce_value(
+            setting, raw_value, where=f"[] {setting.key}")
+        settings[setting.key] = setting
+
+    data, old_text = _read_toml(path)
+    layer, locations = _parse_layer(data, path, scope)
+    existed = path.is_file()
+    new_text = old_text
+    written: dict[str, Any] = {}
+    for key, value in cleaned.items():
+        if key in layer and layer[key] == value:
+            continue
+        setting = settings[key]
+        section, name = locations.get(key, (setting.section, setting.name))
+        new_text = _apply_setting(new_text, section, name, setting, value)
+        written[key] = value
+
+    changed = new_text != old_text
+    if changed:
+        try:
+            new_data = tomllib.loads(new_text)
+        except tomllib.TOMLDecodeError as exc:
+            raise SettingsError(f"{path}: cannot update in place ({exc})") from exc
+        new_layer, _ = _parse_layer(new_data, path, scope)
+        for key, value in cleaned.items():
+            if key in written and new_layer.get(key) != value:
+                raise SettingsError(
+                    f"{path}: cannot write {key} without changing its meaning")
+        for other_key, other_value in layer.items():
+            if other_key not in written and new_layer.get(other_key) != other_value:
+                raise SettingsError(
+                    f"{path}: cannot write the settings without changing "
+                    f"{other_key}")
+        unexpected = set(new_layer) - set(layer) - set(written)
+        if unexpected:
+            raise SettingsError(
+                f"{path}: the update would also add {sorted(unexpected)[0]!r}")
+
+    applied = False
+    if not dry_run and changed:
+        if _read_toml(path)[1] != old_text:
+            raise SettingsError(
+                f"{path}: changed since it was read; preview again")
+        _atomic_write(path, new_text)
+        applied = True
+    return {
+        "schema": SCHEMA,
+        "scope": scope,
+        "path": str(path),
+        "exists": existed,
+        "dry_run": dry_run,
+        "changed": changed,
+        "applied": applied,
+        "created": not existed and applied,
+        "values": {key: _json_value(settings[key], value)
+                   for key, value in cleaned.items()},
+        "written": {key: _json_value(settings[key], value)
+                    for key, value in written.items()},
+        "skipped": {key: _json_value(settings[key], value)
+                    for key, value in cleaned.items()
+                    if key not in written},
+        "old": {key: _json_value(settings[key], layer[key])
+                for key in cleaned if key in layer},
+        "diff": _unified_diff(path, old_text, new_text),
+    }
+
+
 def set_value(root: str | Path | None, key: str, value: Any,
               scope: str = "repo", dry_run: bool = True, *,
               user_config: str | Path | None = None) -> dict[str, Any]:
@@ -1925,12 +2387,15 @@ __all__ = [
     "Setting",
     "SettingsError",
     "get",
+    "layer_values",
     "locations",
     "model_overrides",
     "repo_config_path",
     "schema",
     "set_value",
+    "set_values",
     "testing_overrides",
     "user_config_path",
+    "validate_value",
     "values",
 ]

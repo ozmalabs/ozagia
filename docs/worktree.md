@@ -132,11 +132,39 @@ rule, path, line, mode and fingerprint, never the value. A disabled gate is
 reported as a warning (`commit.secret_gate` / `push.secret_gate`); findings
 are still listed but do not block.
 
-Pre-commit and pre-push hooks may call the same commands. Installation is
-opt-in and reversible through `ozagia.core.security.install_hook` /
-`uninstall_hook`; nothing installs a hook automatically. An existing hook
-without the `# ozagia security gate` marker is never overwritten without an
-explicit force.
+## Opt-in hooks
+
+`ozagia hooks` installs and removes the pre-commit and pre-push wrappers.
+Installation is explicit and reversible; no check, preview or scan installs a
+hook by itself.
+
+```text
+ozagia hooks install --pre-commit --pre-push [--root R] [--force] [--python P]
+ozagia hooks uninstall [--pre-commit] [--pre-push] [--all] [--root R]
+ozagia hooks status [--pre-commit] [--pre-push] [--root R]
+```
+
+The wrapper is a small `/bin/sh` script in the Git hooks directory with the
+marker `# ozagia security gate`. It runs the configured Python interpreter as
+`-m ozagia.worktree_cli policy --for commit` (or `--for push`) and exits with
+that policy's status. On success it prints nothing; on failure it prints the
+same concise, redacted policy report and a one-line failure message. Secret
+findings never show the value, only the rule, path, line and fingerprint.
+
+The interpreter is the one running ozagia, or `--python`, or
+`$OZAGIA_HOOK_PYTHON`. A path that cannot be resolved is refused rather than
+written into the hook.
+
+An existing hook without the marker is kept unless `--force` is passed;
+`uninstall` removes only a hook with the marker. `status` reports `installed`,
+`foreign` or `absent`, and whether the file is executable. `install` is
+idempotent: re-running it reports `unchanged` and does not rewrite the file.
+Exit status is `0` on success, `1` when a requested hook was kept because it
+was not ours, and `2` for usage, Git or IO errors.
+
+The Python API is `ozagia.core.hooks.install`, `uninstall` and `status`. The
+older `ozagia.core.security.install_hook` remains a compatible small wrapper
+for callers that already use it; the CLI is the supported interface.
 
 The secret scan is bounded to 1 MiB per file and 16 MiB of diff text. Binary
 and larger files are reported as skipped with a reason; their path is still

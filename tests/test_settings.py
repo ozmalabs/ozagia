@@ -7,7 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from ozagia import settings_cli
+from ozagia import cli, settings_cli
+from ozagia.core import migrate as M
 from ozagia.core import settings as S
 
 
@@ -740,3 +741,257 @@ def test_cli_errors_exit_2(tmp_path: Path, capsys) -> None:
     _repo_config(root, '[index]\nsource_dir = ["."]\n')
     assert settings_cli.main(["values", "--root", str(root)]) == 2
     assert "source_dirs" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- #
+# legacy .ozagia.toml migration
+# --------------------------------------------------------------------------- #
+def _migrate_statuses(report: dict) -> dict[str, str]:
+    return {item["legacy"]: item["status"] for item in report["entries"]}
+
+
+def test_migrate_maps_supported_sections_and_is_idempotent(
+        tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    legacy_text = """
+[index]
+source_dirs = ["src"]
+test_dirs = ["tests"]
+map_dirs = ["src", "tests"]
+docs = ["README.md"]
+key_docs = ["README.md", "HACKING.md"]
+import_roots = ["src"]
+path_prefixes = ["src", "tests"]
+changed_exclude = ["__pycache__/"]
+entrypoint_prefixes = ["scripts/"]
+
+[memory]
+skip_dirs = ["vendor"]
+
+[adapters]
+modules = ["project_adapter:build"]
+
+[reads]
+structured_outline_lines = 1200
+outline_lines = 250
+repeat = "off"
+
+[reads.repeat_by_harness]
+opencode = "stub"
+
+[tests]
+select = "affected"
+cache = true
+
+[jobs]
+enabled = true
+
+[lint]
+enabled = false
+timeout_s = 5
+python = "off"
+rust = "off"
+
+[security]
+enabled = true
+tools = ["semgrep"]
+allow_network = false
+fail_on = "medium"
+exclude = ["vendor/**"]
+max_findings = 50
+block_secrets = true
+secret_allowlist = ["path:tests/fixtures/**", "sha256:0123abcd"]
+
+[hints]
+library = "strict"
+max_per_edit = 3
+record = false
+ecosystems = ["python", "rust"]
+
+[review]
+layers = ["src/core", "src/api"]
+
+[iac]
+roots = ["infra"]
+skip_globs = ["*.backup"]
+
+[environments.dev]
+paths = ["envs/dev"]
+"""
+    legacy = _write(root / ".ozagia.toml", legacy_text)
+    before = legacy.read_text(encoding="utf-8")
+    target = root / "ozagia" / "config.toml"
+
+    preview = M.migrate(root)
+    assert preview["dry_run"] is True
+    assert preview["ok"] is True
+    assert preview["changed"] is True
+    assert preview["token"]
+    assert not target.exists()
+    assert legacy.read_text(encoding="utf-8") == before
+    statuses = _migrate_statuses(preview)
+    for legacy_key in (
+            "index.source_dirs", "tests.select", "tests.cache",
+            "jobs.enabled", "lint.enabled", "security.block_secrets",
+            "hints.library"):
+        assert statuses[legacy_key] == "move", legacy_key
+    assert statuses["[environments]"] == "unmapped"
+    assert preview["counts"]["move"] >= 25
+    assert 'library = "strict"' in preview["diff"]
+
+    applied = M.migrate(root, dry_run=False, confirm=preview["token"])
+    assert applied["applied"] is True
+    assert applied["ok"] is True
+    assert target.is_file()
+    assert legacy.read_text(encoding="utf-8") == before
+    values = S.layer_values(root)
+    assert values["index.source_dirs"] == ["src"]
+    assert values["index.map_dirs"] == ["src", "tests"]
+    assert values["index.path_prefixes"] == ["src", "tests"]
+    assert values["memory.skip_dirs"] == ["vendor"]
+    assert values["adapters.modules"] == ["project_adapter:build"]
+    assert values["reads.repeat"] == "off"
+    assert values["reads.repeat_by_harness.opencode"] == "stub"
+    assert values["testing.captured"] == "affected"
+    assert values["testing.cache"] is True
+    assert values["jobs.enabled"] is True
+    assert values["lint.enabled"] is False
+    assert values["lint.timeout_s"] == 5.0
+    assert values["security.secret_allowlist"] == [
+        "path:tests/fixtures/**", "sha256:0123abcd"]
+    assert values["hints.library"] == "strict"
+    assert values["review.layers"] == ["src/core", "src/api"]
+    assert values["iac.roots"] == ["infra"]
+
+    second = M.migrate(root)
+    assert second["changed"] is False
+    assert second["token"] is None
+    assert second["diff"] == ""
+    assert set(_migrate_statuses(second).values()) == {"same", "unmapped"}
+
+    noop = M.migrate(root, dry_run=False)
+    assert noop["applied"] is False
+    assert noop["changed"] is False
+
+
+def test_migrate_reports_unknown_unmapped_and_invalid_keys(
+        tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    _write(root / ".ozagia.toml", """
+[index]
+source_dir = ["src"]
+
+[unknown_section]
+value = true
+
+[iac]
+remote_states = [{consumer = "envs/app", name = "iam", producer = "envs/iam"}]
+
+[lint]
+trust_project_venv = true
+
+[hints]
+library = "loud"
+""")
+    report = M.migrate(root)
+    statuses = _migrate_statuses(report)
+    assert statuses["index.source_dir"] == "unknown"
+    assert "did you mean source_dirs" in next(
+        item["message"] for item in report["entries"]
+        if item["legacy"] == "index.source_dir")
+    assert statuses["[unknown_section]"] == "unknown"
+    assert statuses["iac.remote_states"] == "unmapped"
+    assert statuses["lint.trust_project_venv"] == "unmapped"
+    assert "user-level" in next(
+        item["message"] for item in report["entries"]
+        if item["legacy"] == "lint.trust_project_venv")
+    assert statuses["hints.library"] == "invalid"
+    assert report["ok"] is False
+    assert report["changed"] is False
+    assert not (root / "ozagia" / "config.toml").exists()
+
+
+def test_migrate_preserves_existing_repo_config_and_reports_conflicts(
+        tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    target = _repo_config(root, '# keep this comment\n[index]\nsource_dirs = ["."]\n\n'
+                                '[ui]\ntheme = "dark"  # keep theme\n')
+    _write(root / ".ozagia.toml",
+           '[index]\nsource_dirs = ["src"]\ntest_dirs = ["spec"]\n')
+    preview = M.migrate(root)
+    statuses = _migrate_statuses(preview)
+    assert statuses["index.source_dirs"] == "conflict"
+    assert statuses["index.test_dirs"] == "move"
+    assert preview["conflicts"] == 1
+    assert '+source_dirs' not in preview["diff"]
+    assert '+test_dirs = ["spec"]' in preview["diff"]
+    applied = M.migrate(root, dry_run=False, confirm=preview["token"])
+    assert applied["applied"] is True
+    text = target.read_text(encoding="utf-8")
+    assert "# keep this comment" in text
+    assert 'source_dirs = ["."]' in text
+    assert 'test_dirs = ["spec"]' in text
+    assert 'theme = "dark"  # keep theme' in text
+    assert S.layer_values(root)["index.source_dirs"] == ["."]
+
+
+def test_migrate_apply_requires_the_preview_token_and_rejects_staleness(
+        tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    legacy = _write(root / ".ozagia.toml", '[index]\nsource_dirs = ["src"]\n')
+    target = root / "ozagia" / "config.toml"
+    with pytest.raises(M.MigrateError, match="confirm"):
+        M.migrate(root, dry_run=False)
+    assert not target.exists()
+
+    preview = M.migrate(root)
+    assert preview["token"]
+    legacy.write_text('[index]\nsource_dirs = ["lib"]\n', encoding="utf-8")
+    with pytest.raises(M.MigrateError, match="stale"):
+        M.migrate(root, dry_run=False, confirm=preview["token"])
+    assert not target.exists()
+
+    fresh = M.migrate(root)
+    with pytest.raises(M.MigrateError, match="stale"):
+        M.migrate(root, dry_run=False, confirm="not-the-token")
+    applied = M.migrate(root, dry_run=False, confirm=fresh["token"])
+    assert applied["applied"] is True
+    assert S.layer_values(root)["index.source_dirs"] == ["lib"]
+
+
+def test_migrate_cli_and_config_delegate(tmp_path: Path,
+                                        capsys: pytest.CaptureFixture[str]
+                                        ) -> None:
+    root = _root(tmp_path)
+    _write(root / ".ozagia.toml", '[hints]\nlibrary = "strict"\n')
+    target = root / "ozagia" / "config.toml"
+    assert settings_cli.main(
+        ["migrate", "--root", str(root), "--json"]) == 0
+    preview = json.loads(capsys.readouterr().out)
+    assert preview["dry_run"] is True
+    assert preview["token"]
+    assert not target.exists()
+
+    assert settings_cli.main(
+        ["migrate", "--root", str(root), "--apply", "--confirm", "wrong"]
+    ) == 2
+    assert "stale" in capsys.readouterr().err
+    assert not target.exists()
+
+    assert settings_cli.main(
+        ["migrate", "--root", str(root), "--apply",
+         "--confirm", preview["token"]]) == 0
+    assert target.is_file()
+    assert "wrote" in capsys.readouterr().out
+    assert cli.main(["config", "migrate", "--root", str(root)]) == 0
+
+
+def test_migrate_without_a_legacy_file_is_a_noop(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    report = M.migrate(root)
+    assert report["legacy_exists"] is False
+    assert report["ok"] is True
+    assert report["changed"] is False
+    assert report["token"] is None
+    assert report["entries"] == []
+    assert not (root / "ozagia" / "config.toml").exists()
