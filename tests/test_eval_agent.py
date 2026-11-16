@@ -1031,7 +1031,11 @@ def test_graph_stats_fields_read_counts():
                                            "job_wait_seconds": None,
                                            "polls_avoided": None,
                                            "path_suggestions": None,
-                                           "ownership_warnings": None}
+                                           "ownership_warnings": None,
+                                           "lint_runs": None,
+                                           "lint_findings": None,
+                                           "lint_timeouts": None,
+                                           "ruff_captures": None}
     # The daemon's shape: handled {"true": captured, "false": passthrough and
     # expired}; fallbacks = plugin fallbacks + expired + failed (review fix 4).
     assert ae.graph_stats_fields({"hellos": 2, "handled": {"true": 3, "false": 4},
@@ -1056,7 +1060,9 @@ def test_graph_stats_fields_read_counts():
         "bytes_saved": 900, "patch_checks": 5,
         "patch_misses_caught": 2, "region_replies": 3, "key_edits": 1, "jobs_started": None,
         "job_waits": None, "job_wait_seconds": None, "polls_avoided": None,
-        "path_suggestions": None, "ownership_warnings": None}
+        "path_suggestions": None, "ownership_warnings": None,
+        "lint_runs": None, "lint_findings": None, "lint_timeouts": None,
+        "ruff_captures": None}
     got = ae.graph_stats_fields({"hellos": 1, "shell": {"captured": 4,
                                                         "passthrough": 1}})
     assert (got["shell_captured"], got["shell_passthrough"]) == (4, 1)

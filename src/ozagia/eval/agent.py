@@ -1305,6 +1305,9 @@ def _rate(part: int, whole: int) -> float | None:
 # copied into each run record and totalled per arm.
 READ_LEDGER_FIELDS = ("repeats_seen", "stubs_served", "notes_served",
                       "outlines_served", "bytes_saved")
+# Lint inside the edit (`ozagia.intent.lint`) and captured `ruff check`
+# calls, copied into each run record and totalled per arm.
+LINT_FIELDS = ("lint_runs", "lint_findings", "lint_timeouts", "ruff_captures")
 
 
 def graph_stats_fields(stats: Any) -> dict[str, Any]:
@@ -1322,10 +1325,11 @@ def graph_stats_fields(stats: Any) -> dict[str, Any]:
     and bytes_saved (`ozagia.intent.ledger`), and patch_checks,
     patch_misses_caught, region_replies and key_edits (patch and edit miss
     recovery), and jobs_started, job_waits, job_wait_seconds and
-    polls_avoided (background jobs, `ozagia.daemon.jobs`), and
-    path_suggestions and ownership_warnings (missing paths answered with
-    candidates, `ozagia.intent.paths`; warnings about another live
-    session's uncommitted edits, `ozagia.core.owners`)."""
+    polls_avoided (background jobs, `ozagia.daemon.jobs`), lint_runs,
+    lint_findings, lint_timeouts and ruff_captures (`LINT_FIELDS`, lint
+    inside the edit), and path_suggestions and ownership_warnings (missing
+    paths answered with candidates, `ozagia.intent.paths`; warnings about
+    another live session's uncommitted edits, `ozagia.core.owners`)."""
     if not isinstance(stats, dict):
         return {"plugin_loaded": None, "captured_calls": None,
                 "passthrough_calls": None, "fallbacks": None,
@@ -1337,7 +1341,8 @@ def graph_stats_fields(stats: Any) -> dict[str, Any]:
                 "patch_checks": None, "patch_misses_caught": None,
                 "region_replies": None, "key_edits": None, "jobs_started": None, "job_waits": None,
                 "job_wait_seconds": None, "polls_avoided": None,
-                "path_suggestions": None, "ownership_warnings": None}
+                "path_suggestions": None, "ownership_warnings": None,
+                **{k: None for k in LINT_FIELDS}}
     hellos = _count(stats.get("hellos"))
     raw = stats.get("handled")
     # The daemon reports {"true": n, "false": m}; only handled calls count.
@@ -1374,7 +1379,8 @@ def graph_stats_fields(stats: Any) -> dict[str, Any]:
                                  else None),
             "polls_avoided": _count(stats.get("polls_avoided")),
             "path_suggestions": _count(stats.get("path_suggestions")),
-            "ownership_warnings": _count(stats.get("ownership_warnings"))}
+            "ownership_warnings": _count(stats.get("ownership_warnings")),
+            **{k: _count(stats.get(k)) for k in LINT_FIELDS}}
 
 
 
@@ -1630,6 +1636,8 @@ def aggregate(runs: list[dict[str, Any]], arms: Iterable[str]) -> list[dict[str,
                     int(r.get("path_suggestions") or 0) for r in mine),
                 "total_ownership_warnings": sum(
                     int(r.get("ownership_warnings") or 0) for r in mine),
+                **{f"total_{k}": sum(int(r.get(k) or 0) for r in mine)
+                   for k in LINT_FIELDS},
                 "codemode_tools": sorted({t for r in mine
                                           for t in (r.get("codemode_tools") or [])}),
             })

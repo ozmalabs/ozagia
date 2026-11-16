@@ -69,6 +69,17 @@ one, every key has the generic default below. All keys are optional:
                                   # harness sandbox. $OZAGIA_JOBS=1 in the
                                   # daemon's environment also enables them.
 
+    [lint]
+    enabled = true                # lint the changed files after a handled
+                                  # edit or write and in `after` for a
+                                  # built-in edit, write or patch; unset: on
+                                  # when a linter is configured
+                                  # (`ozagia.intent.lint`)
+    timeout_s = 3                 # the budget for the linter runs of one call
+    python = "ruff" | "off"       # unset: ruff when pyproject.toml has
+                                  # [tool.ruff] or ruff.toml/.ruff.toml exists
+    rust = "rustfmt" | "off"      # unset: rustfmt when Cargo.toml exists
+
     [iac]
     roots = []                    # explicit Terraform/OpenTofu roots
     skip_globs = []               # extra IaC source files/directories to skip
@@ -294,6 +305,11 @@ class ProjectConfig:
     repeat: str | None = None
     repeat_by_harness: tuple[tuple[str, str], ...] = ()
     jobs_enabled: bool = False
+    # `[lint]`: None means "unset" (decided by the files of the project).
+    lint_enabled: bool | None = None
+    lint_timeout_s: float = 3.0
+    lint_python: str | None = None
+    lint_rust: str | None = None
     iac_roots: tuple[str, ...] = ()
     iac_skip_globs: tuple[str, ...] = DEFAULT_IAC_SKIP_GLOBS
     remote_states: tuple[RemoteStateConfig, ...] = ()
@@ -319,6 +335,7 @@ _KEYS = {
               "outline_lines", "outline_bytes", "repeat",
               "repeat_by_harness"},
     "jobs": {"enabled"},
+    "lint": {"enabled", "timeout_s", "python", "rust"},
     "iac": {"roots", "skip_globs", "remote_states"},
 }
 REPEAT_POLICIES = ("stub", "note", "off")
@@ -681,6 +698,21 @@ def _parse(root: Path, source: Path | None, data: dict[str, Any]) -> ProjectConf
     jobs_enabled = data.get("jobs", {}).get("enabled", False)
     if not isinstance(jobs_enabled, bool):
         raise ConfigError(f"{where}: [jobs] enabled must be true or false")
+    lint = data.get("lint", {})
+    lint_enabled = lint.get("enabled")
+    if lint_enabled is not None and not isinstance(lint_enabled, bool):
+        raise ConfigError(f"{where}: [lint] enabled must be true or false")
+    lint_timeout = lint.get("timeout_s", 3.0)
+    if (isinstance(lint_timeout, bool) or not isinstance(lint_timeout, (int, float))
+            or not 0 < lint_timeout <= 600):
+        raise ConfigError(f"{where}: [lint] timeout_s must be a number of "
+                          f"seconds in (0, 600]")
+    lint_langs: dict[str, str | None] = {}
+    for lang, tool in (("python", "ruff"), ("rust", "rustfmt")):
+        value = lint.get(lang)
+        if value is not None and value not in (tool, "off"):
+            raise ConfigError(f'{where}: [lint] {lang} must be "{tool}" or "off"')
+        lint_langs[lang] = value
 
     roots = _config_list(iac, "roots", f"{where} [iac]")
     iac_roots = _dedup([
@@ -877,6 +909,10 @@ def _parse(root: Path, source: Path | None, data: dict[str, Any]) -> ProjectConf
         repeat=repeat,
         repeat_by_harness=repeat_by_harness,
         jobs_enabled=jobs_enabled,
+        lint_enabled=lint_enabled,
+        lint_timeout_s=float(lint_timeout),
+        lint_python=lint_langs["python"],
+        lint_rust=lint_langs["rust"],
         iac_roots=iac_roots,
         iac_skip_globs=iac_skip_globs,
         remote_states=tuple(remote_states),
