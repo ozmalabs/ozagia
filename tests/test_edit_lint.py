@@ -609,8 +609,9 @@ def test_lint_stops_before_the_reply_deadline(mem, repo, tmp_path, monkeypatch):
     res = _edit(mem, repo, "    return a\n", "    return a + 1\n",
                 _reply_deadline=time.monotonic() + 1.6)
     assert time.monotonic() - t0 < 1.6
-    assert _lint_lines(res["output"]) == [
-        "[ozagia] lint: ruff timed out after 0.6 s"]
+    # The budget is what is left of the 0.6 s once the edit itself is done.
+    got = _lint_lines(res["output"])
+    assert len(got) == 1 and got[0].startswith("[ozagia] lint: ruff timed out after 0.")
     # No time left: no linter starts.
     res = _edit(mem, repo, "    return a + 1\n", "    return a + 2\n",
                 _reply_deadline=time.monotonic() + 0.5)
