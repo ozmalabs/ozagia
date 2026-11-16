@@ -27,8 +27,11 @@
     ozagia process start|run -- ARGV ...          (explicit local processes)
     ozagia tunnel start|stop|status|list ...      (tunnel config vs live state)
     ozagia preflight plan ...                     (dry-run emulator plan)
-    ozagia config schema|get|values|set ...        (settings registry; see
+    ozagia config schema|get|values|set|migrate ... (settings registry and
+                                                   .ozagia.toml migration; see
                                                    docs/settings.md)
+    ozagia hooks install|uninstall|status ...      (opt-in commit/push hooks;
+                                                   docs/worktree.md)
     ozagia who PATH [--root R] [--json]           (sessions that edited PATH)
     ozagia goal add|list|show|check|claim|drop|block|from-review ...
                                                   (graph-addressed goals;
@@ -101,6 +104,11 @@ def _settings_main(argv: list[str]) -> int:
     return main(argv, prog=f"{PROG} config")
 
 
+def _hooks_main(argv: list[str]) -> int:
+    from ozagia.hooks_cli import main
+    return main(argv, prog=f"{PROG} hooks")
+
+
 # name -> (main(argv) -> int, help). Looked up at call time so tests can patch.
 DELEGATES: dict[str, tuple[str, str]] = {
     "daemon": ("_daemon_main", "the graph daemon: serve|ensure|ping|stats|shutdown "
@@ -111,8 +119,11 @@ DELEGATES: dict[str, tuple[str, str]] = {
     "eval": ("_eval_main", "the break/fix agent eval (python -m ozagia.eval.agent)"),
     "check": ("_check_main", "run tests, report graph keys (python -m ozagia.check)"),
     "self": ("_self_main", "the installed ozagia: info|check|upgrade|uninstall"),
-    "config": ("_settings_main", "inspect settings and preview config writes "
-                                "(schema|get|values|set)"),
+    "config": ("_settings_main", "inspect settings, preview config writes and "
+                                 "migrate .ozagia.toml "
+                                 "(schema|get|values|set|migrate)"),
+    "hooks": ("_hooks_main", "opt-in Git commit/push hooks "
+                             "(install|uninstall|status)"),
 }
 
 

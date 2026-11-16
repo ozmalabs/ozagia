@@ -116,6 +116,44 @@ again before the value takes effect.
 | `index.test_dirs` | string_list | `["tests"]` | repo | yes |
 | `index.docs` | string_list | `["README.md", "docs/**/*.md"]` | repo | yes |
 | `index.skip_dirs` | string_list | `[]` | repo | yes |
+| `index.map_dirs` | string_list | `[]` (derived) | repo | yes |
+| `index.docs_all` | string_list | `["**/*.md"]` | repo | yes |
+| `index.key_docs` | string_list | `["README.md"]` | repo | yes |
+| `index.command_docs` | string_list | `[]` (uses key_docs) | repo | yes |
+| `index.import_roots` | string_list | `[]` (derives `src`) | repo | yes |
+| `index.path_prefixes` | string_list | `[]` (derived) | repo | yes |
+| `index.changed_exclude` | string_list | `["__pycache__/", ".pytest_cache/", ".ozagia/"]` | repo | yes |
+| `index.entrypoint_prefixes` | string_list | `["scripts/", "tools/", "bin/"]` | repo | yes |
+
+Empty derived values have the same meaning as in `ozagia.config`: the
+loader derives map directories, command docs, import roots and path prefixes
+from the other index settings when they are not set explicitly.
+
+### memory and adapters
+
+| Key | Type | Default | Scope | Restart |
+| --- | --- | --- | --- | --- |
+| `memory.skip_dirs` | string_list | `[]` | repo | yes |
+| `adapters.modules` | string_list | `[]` | repo | yes |
+
+`adapters.modules` holds `module:attr` names. Reading the setting never
+imports them; the existing adapter loader still imports only when a caller
+asks it to.
+
+### reads
+
+| Key | Type | Default | Scope | Restart |
+| --- | --- | --- | --- | --- |
+| `reads.structured_outline_lines` | integer | `2000` | repo | no |
+| `reads.structured_outline_bytes` | integer | `65536` | repo | no |
+| `reads.outline_lines` | integer | `400` | repo | no |
+| `reads.outline_bytes` | integer | `40960` | repo | no |
+| `reads.repeat` | string | `"note"` | repo | no |
+| `reads.repeat_by_harness.<harness>` | string | none | repo | no |
+
+`reads.repeat` and each per-harness entry are `stub`, `note` or `off`. The
+per-harness table is dynamic: every harness present is reported as its own
+setting, for example `reads.repeat_by_harness.opencode = "stub"`.
 
 ### resources
 
@@ -199,6 +237,59 @@ own loader; `settings.model_overrides(root)` returns its effective
 | --- | --- | --- | --- | --- |
 | `review.min_reviewers` | integer | `1` | both | no |
 | `review.require_clean` | boolean | `true` | both | no |
+| `review.layers` | string_list | `[]` | repo | yes |
+
+### lint
+
+| Key | Type | Default | Scope | Restart |
+| --- | --- | --- | --- | --- |
+| `lint.enabled` | boolean | `true` | repo | no |
+| `lint.timeout_s` | number | `3.0` | repo | no |
+| `lint.python` | string | `"auto"` | repo | no |
+| `lint.rust` | string | `"auto"` | repo | no |
+| `lint.trust_project_venv` | boolean | `false` | user | no |
+
+`lint.python` is `auto`, `ruff` or `off`; `lint.rust` is `auto`, `rustfmt`
+or `off`. The legacy loader treats an unset `enabled` as automatic; the
+registry default is `true`. `lint.trust_project_venv` is user-only and is
+read by the linter from the user config, not the repository config.
+
+### jobs
+
+| Key | Type | Default | Scope | Restart |
+| --- | --- | --- | --- | --- |
+| `jobs.enabled` | boolean | `false` | repo | no |
+
+Background jobs remain opt-in per repository. Enabling the setting does not
+start anything.
+
+### security
+
+| Key | Type | Default | Scope | Restart |
+| --- | --- | --- | --- | --- |
+| `security.enabled` | boolean | `true` | repo | no |
+| `security.tools` | string_list | `[]` | repo | no |
+| `security.allow_network` | boolean | `false` | repo | no |
+| `security.fail_on` | string | `"high"` | repo | no |
+| `security.exclude` | string_list | `["tests/**", "test/**", "docs/**", "vendor/**"]` | repo | no |
+| `security.max_findings` | integer | `200` | repo | no |
+| `security.block_secrets` | boolean | `true` | repo | no |
+| `security.secret_allowlist` | string_list | `[]` | repo | no |
+
+`security.tools` is a subset of the fixed offline tool registry; nothing is
+installed or run by setting it. `security.fail_on` is `blocking`, `high`,
+`medium`, `low` or `never`. `security.secret_allowlist` accepts `path:`,
+`rule:` and `sha256:` entries and never contains the secret value.
+
+### iac
+
+| Key | Type | Default | Scope | Restart |
+| --- | --- | --- | --- | --- |
+| `iac.roots` | string_list | `[]` | repo | yes |
+| `iac.skip_globs` | string_list | `[]` | repo | yes |
+
+The built-in backup-file globs still apply. Legacy `iac.remote_states` is an
+array of tables and is reported, not migrated, until it has a registry shape.
 
 ### testing
 
@@ -209,10 +300,13 @@ own loader; `settings.model_overrides(root)` returns its effective
 | `testing.max_tests` | integer | `50` | both | no |
 | `testing.timeout_s` | integer | `300` | both | no |
 | `testing.captured` | string | `"all"` | both | no |
+| `testing.cache` | boolean | `false` | both | no |
 
 `testing.mode` and `testing.captured` are one of `none`, `smoke`, `affected`,
 `package` or `all`. `testing.captured` also accepts `off` as an alias for
-`none`. `testing.fallback` is one of `all`, `refuse` or
+`none`. `[tests] select` and `[tests] cache` are accepted as aliases for
+`testing.captured` and `testing.cache`, so migrated legacy files keep working
+in place. `testing.fallback` is one of `all`, `refuse` or
 `affected_with_warning`. `testing.mode` is the default for bounded tasks;
 `testing.captured` is the interactive captured-pytest default and stays `all`
 unless a repository opts into a subset. An explicit `[tests] select` in
@@ -309,6 +403,33 @@ duplicate_threshold = 0.85
 trash = ".ozagia/trash"
 retention_days = 30
 
+[reads]
+structured_outline_lines = 2000
+outline_lines = 400
+repeat = "note"
+
+[reads.repeat_by_harness]
+opencode = "stub"
+
+[lint]
+enabled = true
+timeout_s = 3
+python = "auto"
+rust = "auto"
+
+[jobs]
+enabled = false
+
+[security]
+enabled = true
+tools = []
+allow_network = false
+fail_on = "high"
+exclude = ["tests/**", "vendor/**", "docs/**"]
+max_findings = 200
+block_secrets = true
+secret_allowlist = []
+
 [models]
 default = ""
 fallback = ""
@@ -380,6 +501,7 @@ ozagia config schema [--json]
 ozagia config get KEY [--root R] [--json]
 ozagia config values [--root R] [--json]
 ozagia config set KEY VALUE --scope repo|user [--root R] [--dry-run] [--json]
+ozagia config migrate [--root R] [--dry-run|--apply --confirm TOKEN] [--json]
 ```
 
 Examples:
@@ -406,13 +528,83 @@ ozagia config set resources.job_pids 512 --root . --dry-run
 # Preview a per-task model pin and a local-provider list.
 ozagia config set models.tasks.diff_review openai/gpt-5-mini --root . --dry-run
 ozagia config set models.local.providers ollama,lmstudio --root . --dry-run
+
+# Preview the legacy .ozagia.toml migration; nothing is written.
+ozagia config migrate --root .
+
+# Apply the exact preview with the token it printed.
+ozagia config migrate --root . --apply --confirm TOKEN
 ```
 
 Exit status is `0` on success and `2` for a validation, configuration or IO
-error. The CLI applies unless `--dry-run` is passed; the Python API
-`set_value()` defaults to `dry_run=True`.
+error. `config set` applies unless `--dry-run` is passed; the Python API
+`set_value()` defaults to `dry_run=True`. `config migrate` previews unless
+`--apply` is passed.
 
-JSON shapes:
+## Migrating `.ozagia.toml`
+
+`ozagia config migrate` copies legacy settings into `ozagia/config.toml`
+through the registry's validation. It is preview-first:
+
+1. The default is a dry run. It returns a unified diff, a per-key report and
+   a confirmation token.
+2. `--apply --confirm TOKEN` writes the previewed values in one atomic
+   update. The token covers the legacy and target file contents and the exact
+   planned values; a changed file or a wrong token is refused as stale.
+3. Re-running after an apply reports `same` for values already present and
+   makes no write. A no-op apply needs no token.
+
+The legacy file is **never deleted, rewritten or moved**. The migration only
+adds or updates `ozagia/config.toml`, so existing loaders keep working and
+`ozagia.core.settings` sees the same values. The mapping is:
+
+| Legacy | Registry | Notes |
+| --- | --- | --- |
+| `[index]` | `index.*` | all legacy index keys |
+| `[memory] skip_dirs` | `memory.skip_dirs` | |
+| `[adapters] modules` | `adapters.modules` | |
+| `[reads]` | `reads.*` | `repeat_by_harness` becomes one setting per harness |
+| `[tests] select` | `testing.captured` | `all`/`affected` are the same modes |
+| `[tests] cache` | `testing.cache` | |
+| `[jobs] enabled` | `jobs.enabled` | |
+| `[lint]` | `lint.*` | `trust_project_venv` is user-only and reported, not copied |
+| `[security]` | `security.*` | |
+| `[hints]` | `hints.*` | |
+| `[review] layers` | `review.layers` | |
+| `[iac] roots`, `skip_globs` | `iac.*` | `remote_states` is reported, not copied |
+
+Unsupported keys are reported, never guessed:
+
+- `unknown`: not a legacy key or not a known section; a close suggestion is
+  included when one exists.
+- `unmapped`: a known legacy setting with no registry equivalent yet, such
+  as `[environments]`, `[services]`, `[relays]`, `[runtime]`,
+  `iac.remote_states` or `lint.trust_project_venv`. It stays in
+  `.ozagia.toml`.
+- `conflict`: `ozagia/config.toml` already has a different value. The
+  existing value is kept and named in the report; resolve it with
+  `ozagia config set` and preview again.
+- `invalid`: the value violates the registry; it is not written and the
+  command exits 1.
+
+Example JSON shape:
+
+```json
+{"schema": 1, "root": "/repo", "legacy": "/repo/.ozagia.toml",
+ "target": "/repo/ozagia/config.toml", "dry_run": true, "ok": true,
+ "changed": true, "applied": false, "token": "...",
+ "entries": [{"legacy": "tests.select", "key": "testing.captured",
+              "status": "move", "value": "affected"}],
+ "counts": {"move": 1}, "conflicts": 0, "unmapped": 0, "unknown": 0,
+ "diff": "--- ..."}
+```
+
+The migration is deliberately not a replacement for the existing loaders:
+`ozagia.config` still reads `.ozagia.toml` for the graph, index, lint, jobs
+and reads until those loaders are wired to the registry. The legacy file is
+kept so behaviour does not change during that transition.
+
+## JSON shapes
 
 ```json
 {"schema": 1, "settings": [{"key": "ui.theme", "...": "..."}]}
@@ -451,8 +643,9 @@ JSON shapes:
 This module is deliberately standalone until the existing loaders are wired:
 
 - `.ozagia.toml` still loads through `ozagia.config` for the index, memory,
-  reads, jobs, tests and lint. The registry's `index` group mirrors the subset
-  that will migrate; it does not replace that parser yet.
+  reads, jobs, tests and lint. `ozagia config migrate` copies the registry
+  subset into `ozagia/config.toml` and keeps the legacy file; the registry
+  does not replace that parser yet.
 - `ozagia.core.resources` still reads `ozagia/resources.toml` or `[resources]`
   from `ozagia/config.toml`. The canonical registry locations match its nested
   `limits`, `admission` and `worktrees` tables.
@@ -473,18 +666,26 @@ This module is deliberately standalone until the existing loaders are wired:
 - `ozagia.core.library_hints` reads the `hints` group on each handled edit and
   write (with `$OZAGIA_LIBRARY_HINTS=0` as a hard local opt-out); the daemon
   sums its `meta` counters.
+- `ozagia.core.security` still reads `[security]` from `.ozagia.toml`. The
+  registry validates and migrates the same keys into `ozagia/config.toml`,
+  and the legacy file is kept, so the commit/push gate keeps using the
+  existing loader until it is switched to the registry.
 - `ozagia doctor` reports a `settings` section: the active user/repository/
   state paths, registry validity and the first error, per-source counts, and a
   bounded list of non-default keys. A broken settings file is reported there
   and does not change doctor's exit status, which still follows the root and
   `.ozagia.toml` validity.
-- There is no migration command from `.ozagia.toml` to `ozagia/config.toml` in
-  this slice.
+- `ozagia config migrate` handles the legacy `.ozagia.toml` file. It is
+  preview-first (dry run by default), applies only with the preview token,
+  never deletes the legacy file and reports unknown, unmapped, conflicting
+  and invalid keys. It does not install Git hooks; `ozagia hooks` does that
+  separately and only when asked.
 
 ## Tests
 
 ```bash
 PYTHONPATH=src python -m pytest -q tests/test_settings.py tests/test_models.py \
-  tests/test_testing.py tests/test_doctor.py tests/test_cli.py
+  tests/test_testing.py tests/test_doctor.py tests/test_cli.py \
+  tests/test_hooks.py
 ruff check src tests
 ```

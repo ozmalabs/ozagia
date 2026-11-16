@@ -238,28 +238,33 @@ The same input produces the same JSON.
   `.ozagia/security/latest.json`; the scan reads it and ranks a `security`
   category. It never runs a security tool itself. Without a report the
   category contains a low-ranked "security has not been assessed" gap.
-- **Hooks:** `security.install_hook(root, "commit")` and
-  `security.install_hook(root, "push")` install an opt-in pre-commit/pre-push
-  hook that calls `policy_check`. `uninstall_hook` removes only a hook with
-  the ozagia marker. There is no automatic installation.
+- **Hooks:** `ozagia hooks install --pre-commit --pre-push` installs an
+  opt-in wrapper that calls the same `policy_check` gate. `ozagia hooks
+  uninstall` removes only a hook with the ozagia marker, and `ozagia hooks
+  status` reports ownership. There is no automatic installation.
 - **Bounded tasks/UI/MCP:** future callers use the same JSON; no auto-fix,
   exploit generation or hosted database is in this slice.
 
 ## Hooks
 
-```python
-from ozagia.core import security
-
-security.install_hook("/path/to/repo", "commit")   # explicit, reversible
-# -> .git/hooks/pre-commit calls `python -m ozagia.worktree_cli policy --for commit`
-
-security.install_hook("/path/to/repo", "push")
-security.uninstall_hook("/path/to/repo", "commit")
+```bash
+ozagia hooks install --pre-commit --pre-push   # explicit, reversible
+ozagia hooks status
+ozagia hooks uninstall --pre-commit
 ```
 
+The wrapper calls `python -m ozagia.worktree_cli policy --for commit` (or
+`--for push`) and exits nonzero on a policy error. It prints nothing on
+success and a concise, redacted report on failure; secret values are never
+printed. The interpreter is the one running ozagia, or `--python`, or
+`$OZAGIA_HOOK_PYTHON`.
+
 An existing hook without the `# ozagia security gate` marker is never
-overwritten unless `force=True` is passed. The hooks are shell wrappers, not a
-second policy implementation.
+overwritten unless `--force` is passed. `uninstall` keeps a foreign hook.
+Installation is always explicit: no policy check, scan or preview installs a
+hook. The hooks are shell wrappers, not a second policy implementation. The
+Python API is `ozagia.core.hooks.install`, `uninstall` and `status`;
+`ozagia.core.security.install_hook` remains for existing callers.
 
 ## Limits and non-goals
 
