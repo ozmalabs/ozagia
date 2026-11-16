@@ -1,0 +1,107 @@
+{
+  "work": "On the Origin of Species (excerpt, 1859, public domain)",
+  "models": [
+    "opencode-go/deepseek-v4.1-flash",
+    "opencode-go/gpt-6-luna",
+    "vllm/qwen3.8-27b"
+  ],
+  "roles": [
+    "domain"
+  ],
+  "argument_roles": [
+    "advocate",
+    "critic"
+  ],
+  "investigation_id": "research-20261116-041011-a1071f95",
+  "source": {
+    "id": "source-0001",
+    "type": "book",
+    "path": "origin_excerpt.md",
+    "sha256": "4ca1df29349dc66283ad6715227dbe0f35f564a80c3bac1cea05acaa5b958376"
+  },
+  "holding": {
+    "id": "holding-0001",
+    "type": "Holding",
+    "created_at": "2026-11-16T04:10:11Z",
+    "source_id": "source-0001",
+    "source_type": "book",
+    "epistemic_role": "interpretation",
+    "authority": "editorial",
+    "review_status": "editorial",
+    "use_constraints": [
+      "treat_as_author_argument",
+      "not_as_behavioural_evidence_without_extraction"
+    ],
+    "status": "proposed",
+    "truth_assessed": false,
+    "reviewer": "demo"
+  },
+  "claims": [
+    {
+      "id": "claim-0001",
+      "wording": "I am fully convinced that species are not immutable; but that those belonging to what are called the same genera are lineal descendants of some other and generally extinct species, in the same manner as the acknowledged varieties of any one species are the descendants of that species. Furthermore, I am convinced that Natural Selection has been the main but not exclusive means of modification.",
+      "method": "contribution_claim",
+      "confidence": 0.5
+    },
+    {
+      "id": "claim-0002",
+      "wording": "Furthermore, I am convinced that Natural Selection has been the main but not exclusive means of modification.",
+      "method": "contribution_claim",
+      "confidence": 0.5
+    }
+  ],
+  "plan_id": "reviewplan-0001",
+  "packet_sha256": "288cc4f602d27a1be4316a088de407da8a50e3b9b22f3e7693ada986846590bc",
+  "review_runs": 3,
+  "review_errors": [],
+  "argument_count": 6,
+  "reconciliation": {
+    "id": "reconciliation-0003",
+    "method": "ocelot_analogy",
+    "clustering": {
+      "method": "ocelot_analogy",
+      "model": "ocelot:analogy_search",
+      "threshold": null,
+      "clusters": 16,
+      "exact_clusters": 18
+    },
+    "counts": {
+      "runs": 3,
+      "reviewers": 3,
+      "findings": 12,
+      "issues": 16,
+      "consensus": 2,
+      "dissent": 14,
+      "single_reviewer": 14
+    },
+    "fleiss_kappa": -0.422222,
+    "mean_pairwise_jaccard": 0.058081,
+    "consensus": 2,
+    "dissent": 14
+  },
+  "ocelot": {
+    "used": true,
+    "analogies": 2,
+    "clusters": 16,
+    "notes": [
+      "Ocelot analogy search recorded as the latest reconciliation"
+    ],
+    "mode": "inprocess"
+  },
+  "usage": {
+    "input": 18770,
+    "output": 4585,
+    "total": 23355,
+    "cost": 0.0
+  },
+  "bundle": {
+    "review.md": "/home/matt/ozmadev/ozagia/docs/results/popular_science_origin_2026-11-16/bundle/review.md",
+    "review.json": "/home/matt/ozmadev/ozagia/docs/results/popular_science_origin_2026-11-16/bundle/review.json",
+    "claims.csv": "/home/matt/ozmadev/ozagia/docs/results/popular_science_origin_2026-11-16/bundle/claims.csv",
+    "evidence.csv": "/home/matt/ozmadev/ozagia/docs/results/popular_science_origin_2026-11-16/bundle/evidence.csv",
+    "references.bib": "/home/matt/ozmadev/ozagia/docs/results/popular_science_origin_2026-11-16/bundle/references.bib",
+    "arguments.json": "/home/matt/ozmadev/ozagia/docs/results/popular_science_origin_2026-11-16/bundle/arguments.json",
+    "checks.json": "/home/matt/ozmadev/ozagia/docs/results/popular_science_origin_2026-11-16/bundle/checks.json"
+  },
+  "truth_assessed": false
+}

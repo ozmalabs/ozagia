@@ -1,0 +1,236 @@
+{
+  "appraisal_table": {
+    "count": 0,
+    "rows": []
+  },
+  "checks": {
+    "alerts": {
+      "count": 1,
+      "recorded": 0,
+      "relevant": 1
+    },
+    "appraisal": {
+      "count": 0,
+      "target_ids": [
+        "claim-0001",
+        "claim-0002",
+        "reference-0001"
+      ]
+    },
+    "arguments": {
+      "checks": [
+        {
+          "counts": {
+            "answered_objections": 5,
+            "assumptions": 5,
+            "citation_keys": 1,
+            "evidenced_premises": 6,
+            "explicitly_unanswered_objections": 0,
+            "falsifiers": 6,
+            "issues": 0,
+            "linked_ids": 3,
+            "non_assumption_premises": 6,
+            "objections": 5,
+            "premises": 7,
+            "supports_or_opposes_edges": 0,
+            "unanswered_objections": 0,
+            "warnings": 0
+          },
+          "issues": [],
+          "ok": true,
+          "truth_assessed": false,
+          "warnings": []
+        },
+        {
+          "counts": {
+            "answered_objections": 2,
+            "assumptions": 2,
+            "citation_keys": 1,
+            "evidenced_premises": 3,
+            "explicitly_unanswered_objections": 0,
+            "falsifiers": 3,
+            "issues": 0,
+            "linked_ids": 2,
+            "non_assumption_premises": 3,
+            "objections": 2,
+            "premises": 3,
+            "supports_or_opposes_edges": 0,
+            "unanswered_objections": 0,
+            "warnings": 0
+          },
+          "issues": [],
+          "ok": true,
+          "truth_assessed": false,
+          "warnings": []
+        },
+        {
+          "counts": {
+            "answered_objections": 4,
+            "assumptions": 5,
+            "citation_keys": 1,
+            "evidenced_premises": 6,
+            "explicitly_unanswered_objections": 0,
+            "falsifiers": 5,
+            "issues": 0,
+            "linked_ids": 3,
+            "non_assumption_premises": 6,
+            "objections": 4,
+            "premises": 6,
+            "supports_or_opposes_edges": 0,
+            "unanswered_objections": 0,
+            "warnings": 0
+          },
+          "issues": [],
+          "ok": true,
+          "truth_assessed": false,
+          "warnings": []
+        },
+        {
+          "counts": {
+            "answered_objections": 6,
+            "assumptions": 7,
+            "citation_keys": 1,
+            "evidenced_premises": 7,
+            "explicitly_unanswered_objections": 0,
+            "falsifiers": 6,
+            "issues": 0,
+            "linked_ids": 3,
+            "non_assumption_premises": 7,
+            "objections": 6,
+            "premises": 7,
+            "supports_or_opposes_edges": 0,
+            "unanswered_objections": 0,
+            "warnings": 0
+          },
+          "issues": [],
+          "ok": true,
+          "truth_assessed": false,
+          "warnings": []
+        },
+        {
+          "counts": {
+            "answered_objections": 3,
+            "assumptions": 5,
+            "citation_keys": 1,
+            "evidenced_premises": 4,
+            "explicitly_unanswered_objections": 0,
+            "falsifiers": 5,
+            "issues": 0,
+            "linked_ids": 3,
+            "non_assumption_premises": 4,
+            "objections": 3,
+            "premises": 4,
+            "supports_or_opposes_edges": 0,
+            "unanswered_objections": 0,
+            "warnings": 0
+          },
+          "issues": [],
+          "ok": true,
+          "truth_assessed": false,
+          "warnings": []
+        },
+        {
+          "counts": {
+            "answered_objections": 2,
+            "assumptions": 4,
+            "citation_keys": 1,
+            "evidenced_premises": 3,
+            "explicitly_unanswered_objections": 0,
+            "falsifiers": 3,
+            "issues": 0,
+            "linked_ids": 3,
+            "non_assumption_premises": 3,
+            "objections": 2,
+            "premises": 3,
+            "supports_or_opposes_edges": 0,
+            "unanswered_objections": 0,
+            "warnings": 0
+          },
+          "issues": [],
+          "ok": true,
+          "truth_assessed": false,
+          "warnings": []
+        }
+      ],
+      "count": 6,
+      "issues": [],
+      "ok": true
+    },
+    "contradictions": {
+      "count": 0,
+      "recorded": 0,
+      "relevant": 0
+    },
+    "extraction": {
+      "count": 0,
+      "target_ids": [
+        "claim-0001",
+        "claim-0002",
+        "reference-0001"
+      ]
+    },
+    "ok": true,
+    "references": {
+      "counts": {
+        "citation_keys": 1,
+        "cited_keys": 1,
+        "references": 1
+      },
+      "issues": [],
+      "ok": true,
+      "truth_assessed": false,
+      "warnings": [
+        {
+          "code": "reference_identifier_missing",
+          "node_id": "reference-0001",
+          "reason": "Reference has no DOI/arXiv/PMID and cannot be enriched automatically."
+        }
+      ]
+    },
+    "run_warnings": [],
+    "severity_counts": {
+      "blocking": 0,
+      "major": 2,
+      "minor": 7,
+      "note": 3
+    },
+    "truth_assessed": false
+  },
+  "counts": {
+    "alerts": 1,
+    "appraisals": 0,
+    "arguments": 6,
+    "claims": 2,
+    "contradictions": 0,
+    "extractions": 0,
+    "findings": 12,
+    "reconciliations": 3,
+    "references": 1,
+    "runs": 3,
+    "theories": 0
+  },
+  "extraction_table": {
+    "count": 0,
+    "rows": []
+  },
+  "plan_id": "reviewplan-0001",
+  "reference_checks": {
+    "counts": {
+      "citation_keys": 1,
+      "cited_keys": 1,
+      "references": 1
+    },
+    "issues": [],
+    "ok": true,
+    "truth_assessed": false,
+    "warnings": [
+      {
+        "code": "reference_identifier_missing",
+        "node_id": "reference-0001",
+        "reason": "Reference has no DOI/arXiv/PMID and cannot be enriched automatically."
+      }
+    ]
+  },
+  "schema": "ozagia.paper_review_bundle.v1",
+  "truth_assessed": false
+}
