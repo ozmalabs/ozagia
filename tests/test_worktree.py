@@ -34,6 +34,9 @@ def repo(tmp_path: Path) -> tuple[Path, Path]:
     root.mkdir()
     _git(root, "init", "-q")
     _git(root, "symbolic-ref", "HEAD", "refs/heads/main")
+    # The commit policy reads `git config user.*`; CI has no global identity.
+    _git(root, "config", "user.name", "Test")
+    _git(root, "config", "user.email", "test@example.com")
     _write(root / "README.md", "# Test\n")
     _git(root, "add", "README.md")
     _git(root, "commit", "-q", "-m", "initial")
