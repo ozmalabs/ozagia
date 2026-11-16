@@ -42,12 +42,12 @@ import math
 import os
 import re
 import time
-import tomllib
 from collections import Counter, defaultdict
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from ozagia.core import code_review as CR
+from ozagia.core import manifests as MF
 from ozagia.core import resources
 
 SCHEMA = 1
@@ -95,6 +95,9 @@ FINDING_TYPES = {
     "no_healthcheck": "ops",
     "published_port": "ops",
     "missing_lock_file": "dependencies",
+    "undeclared_import": "dependencies",
+    "optional_only_import": "dependencies",
+    "test_env_gap": "dependencies",
 }
 
 # Finding type -> the check that produces it. `--compare` compares a type
@@ -122,6 +125,9 @@ FINDING_CHECKS = {
     "no_healthcheck": "restart_and_healthcheck",
     "published_port": "published_ports",
     "missing_lock_file": "lock_files",
+    "undeclared_import": "undeclared_imports",
+    "optional_only_import": "optional_only_imports",
+    "test_env_gap": "test_environments",
 }
 
 DEFAULT_BUDGET_S = 60.0
@@ -1899,60 +1905,15 @@ def _ops(sec: _Section) -> None:
 # --------------------------------------------------------------------------- #
 
 
-def _requirement_names(items: Iterable[Any]) -> list[str]:
-    out = []
-    for item in items:
-        if isinstance(item, str):
-            match = re.match(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)", item)
-            if match:
-                out.append(match.group(1))
-    return out
-
-
 def _manifest(rel: str, text: str) -> tuple[str, list[str], bool] | None:
-    """(ecosystem, dependency names, is its own lock) or None."""
-    name = PurePosixPath(rel).name
-    try:
-        if name == "pyproject.toml":
-            data = tomllib.loads(text)
-            project = data.get("project") or {}
-            deps = _requirement_names(project.get("dependencies") or [])
-            for group in (project.get("optional-dependencies") or {}).values():
-                deps += _requirement_names(group or [])
-            for group in (data.get("dependency-groups") or {}).values():
-                deps += _requirement_names(group or [])
-            poetry = ((data.get("tool") or {}).get("poetry") or {})
-            deps += [k for k in (poetry.get("dependencies") or {}) if k != "python"]
-            return "python", deps, False
-        if name == "package.json":
-            data = json.loads(text)
-            deps = []
-            for field in ("dependencies", "devDependencies",
-                          "optionalDependencies", "peerDependencies"):
-                if isinstance(data.get(field), dict):
-                    deps += list(data[field])
-            return "node", deps, False
-        if name == "Cargo.toml":
-            data = tomllib.loads(text)
-            deps = []
-            for field in ("dependencies", "dev-dependencies", "build-dependencies"):
-                deps += list((data.get(field) or {}))
-            deps += list(((data.get("workspace") or {}).get("dependencies") or {}))
-            return "rust", deps, False
-        if name == "go.mod":
-            deps = re.findall(r"^\s*(?:require\s+)?([a-z0-9][\w.\-]*\.[a-z]{2,}"
-                              r"/[\w.\-/]+)\s+v[\w.\-+]+", text, re.M)
-            return "go", deps, False
-        if name.startswith("requirements") and name.endswith(".txt"):
-            lines = [line.split("#", 1)[0].strip() for line in text.splitlines()]
-            reqs = [line for line in lines
-                    if line and not line.startswith(("-", "--"))]
-            pinned = bool(reqs) and all("==" in line or "@" in line
-                                        for line in reqs)
-            return "python", _requirement_names(reqs), pinned
-    except (ValueError, tomllib.TOMLDecodeError, AttributeError, TypeError):
+    """(ecosystem, dependency names, is its own lock) or None
+    (`core.manifests.parse_manifest`, which also says which declarations
+    are optional)."""
+    parsed = MF.parse_manifest(rel, text)
+    if parsed is None:
         return None
-    return None
+    return (parsed["ecosystem"], [d["name"] for d in parsed["dependencies"]],
+            parsed["own_lock"])
 
 
 def _lock_for(ctx: _Context, rel: str, ecosystem: str) -> str | None:
@@ -2003,7 +1964,172 @@ def _dependencies(sec: _Section) -> None:
     sec.data["manifests"] = manifests[:MAX_DATA_ITEMS]
     sec.ran("manifests")
     sec.ran("lock_files")
+    _python_imports(sec)
     sec.skip("advisories", "no vulnerability database was consulted")
+
+
+_IMPORT_CHECKS = ("undeclared_imports", "optional_only_imports",
+                  "test_environments")
+MAX_TEST_GOAL_KEYS = 5
+
+
+def _tests_in(ctx: _Context, rels: Iterable[str]) -> list[str]:
+    """Test keys of the tests defined in these test files (fresh graph only)."""
+    if ctx.index is None:
+        return []
+    out: list[str] = []
+    for rel in rels:
+        for nid in (ctx.index.get("tests_by_file") or {}).get(rel, []):
+            entry = ctx.index["nodes"].get(nid) or {}
+            key = entry.get("key")
+            if (entry.get("attrs") or {}).get("file") == rel and key:
+                out.append(str(key))
+    return sorted(set(out))[:MAX_TEST_GOAL_KEYS]
+
+
+def _test_criteria(ctx: _Context, rels: Iterable[str]) -> list[dict[str, Any]]:
+    return [{"kind": "test_passes", "args": {"key": key}}
+            for key in _tests_in(ctx, [r for r in rels if _is_test(r)])]
+
+
+def _where(entries: Sequence[Mapping[str, Any]]) -> str:
+    return ", ".join(
+        str(e["file"]) + (f" [{e['group']}]" if e.get("group") else "")
+        for e in entries)
+
+
+def _python_imports(sec: _Section) -> None:
+    """Third-party imports against the manifests and the interpreters found
+    (`core.environments`): undeclared imports, imports declared only in an
+    optional file, and tests no found interpreter can import."""
+    from ozagia.config import GENERIC_SKIP_DIRS
+    from ozagia.core import environments as EN
+    ctx = sec.ctx
+    py = [rel for rel in ctx.files if rel.endswith(".py") and not _fixture(rel)
+          and not CR._is_generated(rel, ())
+          and not any(p in GENERIC_SKIP_DIRS for p in PurePosixPath(rel).parts[:-1])]
+    if not py:
+        for check in _IMPORT_CHECKS:
+            sec.skip(check, "no tracked Python files")
+        return
+
+    def read(rel: str) -> str | None:
+        return sec.read(rel, *_IMPORT_CHECKS)
+
+    model = EN.ImportModel(ctx.root, ctx.files, read=read)
+    declared = EN.declared_dependencies(ctx.root, ctx.files, read=ctx.text)
+    # module -> {rel: kind}
+    usage: dict[str, dict[str, str]] = defaultdict(dict)
+    lines: dict[tuple[str, str], int] = {}
+    for rel in py:
+        if sec.expired():
+            return
+        for top, info in model.third_party(rel).items():
+            usage[top][rel] = info["kind"]
+            lines[(top, rel)] = info["line"]
+    candidates = EN.discover(ctx.root)
+    cache = EN.ProbeCache.for_root(ctx.root, "read")
+    probed = [{**c, "probe": EN.probe(c["path"], cache=cache)} for c in candidates]
+    ok = [item for item in probed if item["probe"].get("ok")]
+    sec.data["interpreters"] = [
+        {"path": item["path"], "source": item["source"],
+         "version": item["probe"].get("version"), "ok": bool(item["probe"].get("ok"))}
+        for item in probed][:MAX_DATA_ITEMS]
+    probes = [item["probe"] for item in ok]
+
+    def importers(top: str, keep: Callable[[str, str], bool]) -> list[str]:
+        return sorted(rel for rel, kind in usage[top].items() if keep(rel, kind))
+
+    def shown(top: str, rels: Sequence[str]) -> list[str]:
+        return [f"imported by {rel}:{lines[(top, rel)]}" for rel in rels[:5]]
+
+    if not declared["manifests"]:
+        sec.skip("undeclared_imports", "no Python manifest is tracked")
+        sec.skip("optional_only_imports", "no Python manifest is tracked")
+    else:
+        for top in sorted(usage):
+            rels = importers(top, lambda _r, kind: kind != "guarded")
+            if not rels:
+                continue
+            entries = EN.declarations(top, declared, probes)
+            have = [item["path"] for item in ok if EN.provides(item["probe"], top)]
+            evidence = shown(top, rels)
+            if not entries:
+                evidence.append("looked in: " + ", ".join(declared["manifests"][:10]))
+                if have:
+                    evidence.append(f"installed in {have[0]}")
+                sec.add("undeclared_import", "minor",
+                        [_file_key(r) for r in rels],
+                        f"{top} is imported by {len(rels)} file(s) but no "
+                        "manifest declares it",
+                        evidence=evidence, confidence="medium",
+                        note="the distribution name may differ from the import "
+                             "name; known aliases and installed metadata were "
+                             "checked",
+                        criteria=_test_criteria(ctx, rels),
+                        title=f"Declare {top} in a dependency manifest",
+                        id_keys=[f"import:{top}"])
+                continue
+            if any(not e["optional"] for e in entries):
+                continue
+            dev = any(MF.is_dev_group(e.get("group")) for e in entries)
+            tests = [] if dev else [r for r in rels if _is_test(r)]
+            core = [r for r in importers(top, lambda _r, kind: kind == "module")
+                    if _is_source(r) and not _entrypoint(r)]
+            hit = tests + core
+            if not hit:
+                continue
+            evidence = shown(top, hit)
+            evidence.insert(0, "declared only in optional files or groups: "
+                            + _where(entries))
+            sec.add("optional_only_import", "minor",
+                    [_file_key(r) for r in hit],
+                    f"{top} is imported by "
+                    + " and ".join(part for part in (
+                        f"{len(tests)} test file(s)" if tests else "",
+                        f"{len(core)} source module(s) at import time" if core else "")
+                        if part)
+                    + f" but declared only in {_where(entries)}",
+                    evidence=evidence, confidence="medium",
+                    note="an interpreter set up from the required manifests "
+                         "alone cannot import it",
+                    criteria=_test_criteria(ctx, hit),
+                    title=f"Declare {top} as a required or test dependency",
+                    id_keys=[f"import:{top}"])
+        sec.ran("undeclared_imports")
+        sec.ran("optional_only_imports")
+    if not ok:
+        sec.skip("test_environments", "no Python interpreter could be probed")
+        return
+    for rel in ctx.tests:
+        if not rel.endswith(".py") or _fixture(rel):
+            continue
+        if sec.expired():
+            return
+        need = model.requirements([rel], lazy_required=False)
+        required = list(need["required"]) + list(need["stdlib"])
+        if not need["required"]:
+            continue
+        gaps = sorted(((len(m), n, item["path"], item["probe"].get("version"), m)
+                       for n, item in enumerate(ok)
+                       for m in [[x for x in required
+                                  if not EN.provides(item["probe"], x)]]),
+                      key=lambda row: (row[0], row[1]))
+        if gaps[0][0] == 0:
+            continue
+        best_missing = gaps[0][4]
+        sec.add("test_env_gap", "minor", [_file_key(rel)],
+                f"no found interpreter can import the dependencies of {rel}",
+                evidence=[f"{path} (Python {version}): missing {', '.join(m)}"
+                          for _n, _o, path, version, m in gaps[:3]]
+                + [f"{len(need['closure'])} file(s) read for its imports"],
+                confidence="medium",
+                note="only the interpreters found on this machine were probed "
+                     "(ozagia env); a CI image may have them",
+                criteria=_test_criteria(ctx, [rel]),
+                title=f"Set up an environment that can import {rel} "
+                      f"(needs {', '.join(best_missing)})")
+    sec.ran("test_environments")
 
 
 SECTION_RUNNERS: dict[str, Callable[[_Section], None]] = {

@@ -151,6 +151,14 @@ def _rich_repo(repo: Path) -> None:
     _write(repo, "tests/test_big.py",
            "from pkg.big import long_one\n\n\ndef test_big():\n"
            "    assert long_one() == 0\n")
+    # An import no manifest declares and no interpreter has, and one
+    # declared only in an optional extra.
+    _write(repo, "pyproject.toml",
+           FILES["pyproject.toml"]
+           + "\n[project.optional-dependencies]\nplot = [\"zz-optional-pkg\"]\n")
+    _write(repo, "tests/test_env.py",
+           "import zz_absent_pkg\nimport zz_optional_pkg\n\n\n"
+           "def test_env():\n    assert zz_absent_pkg and zz_optional_pkg\n")
     _commit(repo, "rich")
     for number in range(3):
         _write(repo, "src/pkg/c.py", f"def lonely():\n    return {number + 4}\n")

@@ -1347,3 +1347,99 @@ def test_graph_stats_fields_and_aggregate_read_working_set_counters():
              "working_set_chars": None}]
     row = ae.aggregate(runs, ["graph_intent"])[0]
     assert (row["total_working_sets_served"], row["total_working_set_chars"]) == (3, 4100)
+
+
+# ===================================================================================== #
+# W20: the check interpreter and the validate preflight
+# ===================================================================================== #
+def test_check_files_and_modules():
+    task = {"check": {"argv": ["-m", "pytest", "-q", "--confcutdir={workdir}",
+                               "tests/test_a.py::test_x", "{workdir}/tests/test_b.py",
+                               "tests/test_a.py::test_y", "/abs/test_c.py", "-k", "x"],
+                      "timeout_s": 1}}
+    assert ae.check_files(task) == ["tests/test_a.py", "tests/test_b.py"]
+    assert ae.check_modules(task) == ["pytest"]
+
+
+def test_default_check_python_is_the_env_that_has_the_imports(tmp_path, monkeypatch):
+    from ozagia.core import environments as EN
+    from venv_fixture import make_venv
+    repo, _base = _repo(tmp_path)
+    (repo / "tests" / "test_np.py").write_text(
+        "import zzfake_numpy\n\n\ndef test_np():\n    assert zzfake_numpy\n",
+        encoding="utf-8")
+    venv_python = make_venv(repo / ".venv", {"fake-numpy": ["zzfake_numpy", "pytest"]})
+    monkeypatch.setattr(EN, "_lock_candidates", lambda *a, **k: [])
+    task = _task("np", BREAK_SIGN, node="tests/test_np.py::test_np")
+    EN.clear_memo()
+    chosen = ae.default_check_python(repo, [task], cache_mode="off")
+    assert chosen["python"] == str(venv_python)
+    assert chosen["missing"] == []
+    assert "root_venv" in chosen["reason"] and "zzfake_numpy" in chosen["reason"]
+    assert ae.resolve_check_python(repo, [task], "/x/python") == (
+        "/x/python", "explicit --python")
+    # Nothing has the import: the interpreter missing the fewest, and why.
+    other = _task("none", BREAK_SIGN, node="tests/test_none.py::test_n")
+    (repo / "tests" / "test_none.py").write_text("import zz_nowhere_w20\n",
+                                                 encoding="utf-8")
+    chosen = ae.default_check_python(repo, [other], cache_mode="off")
+    assert chosen["missing"] == ["zz_nowhere_w20"]
+    assert "misses the fewest: zz_nowhere_w20" in chosen["reason"]
+
+
+def test_runs_record_the_check_python(fixture, monkeypatch):
+    explicit = run_eval(fixture["repo"], [fixture["sign"]], ["baseline"], NoopDriver(),
+                        fixture["base"], tasks_dir=fixture["tdir"], python=_python(),
+                        run_root=fixture["run_root"])
+    assert explicit["check_python"] == _python()
+    assert explicit["check_python_reason"] == "explicit --python"
+    assert explicit["runs"][0]["check_python_reason"] == "explicit --python"
+    asked = []
+    monkeypatch.setattr(ae, "default_check_python", lambda repo, tasks: asked.append(
+        [t["id"] for t in tasks]) or {"python": _python(), "reason": "stub reason",
+                                      "missing": []})
+    chosen = run_eval(fixture["repo"], [fixture["sign"]], ["baseline"], NoopDriver(),
+                      fixture["base"], tasks_dir=fixture["tdir"],
+                      run_root=fixture["run_root"])
+    assert asked == [["add-sign"]]
+    assert chosen["runs"][0]["check_python"] == _python()
+    assert chosen["runs"][0]["check_python_reason"] == "stub reason"
+    report = ae.validate_all(fixture["repo"], [fixture["sign"]], fixture["base"],
+                             tasks_dir=fixture["tdir"], run_root=fixture["run_root"])
+    assert report["check_python_reason"] == "stub reason" and report["ok"]
+
+
+def test_run_refuses_tasks_that_fail_validation(tmp_path, capsys):
+    repo, base = _repo(tmp_path)
+    good = _task("add-sign", BREAK_SIGN)
+    harmless = _task("comment-only", BREAK_COMMENT_ONLY)
+    tdir = _tasks_dir(tmp_path, [(good, BREAK_SIGN), (harmless, BREAK_COMMENT_ONLY)])
+    tasks = tdir / "tasks.json"
+    tasks.write_text(json.dumps({"version": 1, "base": base, "tasks": [good, harmless]}),
+                     encoding="utf-8")
+    argv = ["run", "--driver", "fake", "--repo", str(repo), "--tasks", str(tasks),
+            "--python", _python(), "--arms", "baseline"]
+    out_json = tmp_path / "out.json"
+    code = main([*argv, "--run-root", str(tmp_path / "r1"), "--out-json", str(out_json)])
+    err = capsys.readouterr().err
+    assert code == 2
+    assert "refused: 1 of 2 task(s) fail validation" in err
+    assert "comment-only" in err and "check still passes after the break patch" in err
+    assert "add-sign:" not in err
+    assert not out_json.exists()
+    assert len(_worktrees(repo)) == 1
+    # Only the good task: validated, then run.
+    assert main([*argv, "--task-ids", "add-sign", "--run-root", str(tmp_path / "r2"),
+                 "--out-json", str(out_json)]) == 0
+    assert json.loads(out_json.read_text())["runs"][0]["success"] is True
+    # --skip-validate starts anyway.
+    assert main([*argv, "--skip-validate", "--run-root", str(tmp_path / "r3"),
+                 "--out-json", str(out_json)]) == 0
+    report = json.loads(out_json.read_text())
+    assert [r["task"] for r in report["runs"]] == ["add-sign", "comment-only"]
+    assert report["check_python_reason"] == "explicit --python"
+    # Bad arms are refused before any validation.
+    capsys.readouterr()
+    assert main([*argv, "--arms", "nope", "--run-root", str(tmp_path / "r4")]) == 2
+    assert "unknown arms" in capsys.readouterr().err
+    assert not (tmp_path / "r4").exists()

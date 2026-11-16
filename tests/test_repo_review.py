@@ -554,6 +554,88 @@ def test_imported_modules() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# imports against manifests and interpreters
+# --------------------------------------------------------------------------- #
+
+
+def _stub_interpreters(monkeypatch, *module_sets: set[str]) -> None:
+    from ozagia.core import environments as EN
+    paths = [f"/stub/env{n}/bin/python" for n in range(len(module_sets))]
+    table = dict(zip(paths, module_sets))
+    monkeypatch.setattr(EN, "discover", lambda root, **_k: [
+        {"path": p, "source": "path", "evidence": p, "also": []} for p in paths])
+    monkeypatch.setattr(EN, "probe", lambda python, **_k: {
+        "ok": True, "path": python, "version": "3.13.0", "stdlib": sorted(EN.STDLIB),
+        "modules": {m: [] for m in table[python]}, "scanned": []})
+
+
+def _import_repo(repo: Path) -> None:
+    _write(repo, "pyproject.toml",
+           FILES["pyproject.toml"]
+           + "\n[project.optional-dependencies]\nplot = [\"zz-plot\"]\n"
+           "\n[dependency-groups]\ndev = [\"zz-devtool\"]\n")
+    _write(repo, "src/pkg/uses_plot.py", "import zz_plot\n")
+    _write(repo, "src/pkg/later_plot.py", "def f():\n    import zz_plot\n")
+    _write(repo, "src/pkg/guarded.py",
+           "try:\n    import zz_guarded\nexcept ImportError:\n    zz_guarded = None\n")
+    _write(repo, "scripts/tool.py", "import zz_plot\n")
+    _write(repo, "tests/test_dev.py",
+           "import zz_devtool\nfrom pkg.uses_plot import zz_plot\n\n\n"
+           "def test_d():\n    import zz_undeclared\n    assert zz_undeclared\n")
+    _commit(repo, "imports")
+    _graph(repo)
+
+
+def test_dependency_import_findings(repo: Path, monkeypatch) -> None:
+    _import_repo(repo)
+    _stub_interpreters(monkeypatch, {"zz_plot"}, set())
+    packet = RR.review_repo(repo, sections=["dependencies"])
+    # Imported, declared nowhere: lazy imports count, guarded ones do not.
+    assert {f["message"].split()[0] for f in _of(packet, "undeclared_import")} \
+        == {"zz_undeclared"}
+    undeclared = _of(packet, "undeclared_import")[0]
+    assert undeclared["keys"] == ["file:tests/test_dev.py"]
+    assert undeclared["id"] == RR.finding_id("undeclared_import",
+                                             ["import:zz_undeclared"])
+    assert undeclared["suggested_goal"]["criteria"] == [
+        {"kind": "test_passes", "args": {"key": "test:tests/test_dev.py::test_d"}}]
+    # Declared only in an extra and imported at import time by a source
+    # module (not a script, not lazily); the dev group covers the test.
+    optional = _of(packet, "optional_only_import")
+    assert [f["keys"] for f in optional] == [["file:src/pkg/uses_plot.py"]]
+    assert "plot" in optional[0]["evidence"][0]
+    # Through pkg.uses_plot, the test needs zz_plot too; no interpreter
+    # has both zz_devtool and zz_plot.
+    gaps = _of(packet, "test_env_gap")
+    assert [f["keys"] for f in gaps] == [["file:tests/test_dev.py"]]
+    assert "missing zz_devtool" in gaps[0]["evidence"][0]
+    assert gaps[0]["suggested_goal"]["criteria"][0]["kind"] == "test_passes"
+    data = packet["sections"]["dependencies"]
+    assert {"undeclared_imports", "optional_only_imports",
+            "test_environments"} <= set(data["checked"])
+    assert [i["path"] for i in data["data"]["interpreters"]] == [
+        "/stub/env0/bin/python", "/stub/env1/bin/python"]
+
+
+def test_dependency_import_checks_degrade(repo: Path, monkeypatch) -> None:
+    _import_repo(repo)
+    _stub_interpreters(monkeypatch, {"zz_plot", "zz_devtool"})
+    packet = RR.review_repo(repo, sections=["dependencies"])
+    assert not _of(packet, "test_env_gap")
+    _stub_interpreters(monkeypatch)
+    packet = RR.review_repo(repo, sections=["dependencies"])
+    reasons = {i["check"]: i["reason"] for i in packet["not_checked"]}
+    assert reasons["test_environments"] == "no Python interpreter could be probed"
+    # Without a Python manifest, imports cannot be compared with one.
+    (repo / "pyproject.toml").unlink()
+    _commit(repo, "no manifest")
+    packet = RR.review_repo(repo, sections=["dependencies"])
+    reasons = {i["check"]: i["reason"] for i in packet["not_checked"]}
+    assert reasons["undeclared_imports"] == "no Python manifest is tracked"
+    assert not _of(packet, "undeclared_import")
+
+
+# --------------------------------------------------------------------------- #
 # compare across changed populations
 # --------------------------------------------------------------------------- #
 

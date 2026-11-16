@@ -34,6 +34,11 @@ Arms:
               the intent layer in its own process instead (no daemon, no
               plugin).
 
+Checks run under `--python`, by default the interpreter
+`ozagia.core.environments.env_for` picks for the check files in `--repo`
+(docs/environments.md). `run` validates the selected tasks first and refuses
+(exit 2) when one fails, unless `--skip-validate`.
+
 Live drivers refuse to run unless both `--live` and the environment variable
 OZAGIA_EVAL_LIVE=1 are set. A live run spends hosted-model tokens and
 needs explicit user approval.
@@ -381,6 +386,74 @@ def run_check(workdir: Path, check: dict[str, Any], python: str,
 
 
 # --------------------------------------------------------------------------- #
+# the check interpreter
+# --------------------------------------------------------------------------- #
+WORKDIR_TOKEN = "{workdir}"
+
+
+def check_files(task: dict[str, Any]) -> list[str]:
+    """Repo-relative Python files a task's check names (`tests/x.py`,
+    `tests/x.py::test_y`, `{workdir}/tests/x.py`)."""
+    out: list[str] = []
+    for arg in task["check"]["argv"]:
+        if arg.startswith("-"):
+            continue
+        path = arg.split("::", 1)[0]
+        if path.startswith(WORKDIR_TOKEN):
+            path = path[len(WORKDIR_TOKEN):].lstrip("/")
+        if path.endswith(".py") and not os.path.isabs(path) and path not in out:
+            out.append(path)
+    return out
+
+
+def check_modules(task: dict[str, Any]) -> list[str]:
+    """Modules a check runs with `-m` (`pytest`)."""
+    argv = task["check"]["argv"]
+    return [argv[n + 1] for n, arg in enumerate(argv[:-1]) if arg == "-m"]
+
+
+def default_check_python(repo: str | Path, tasks: list[dict[str, Any]],
+                         **env_kwargs: Any) -> dict[str, Any]:
+    """The interpreter for the checks of ``tasks``: the best of
+    ``environments.env_for`` over their test files in the source repo (and
+    the modules they run with `-m`), else this interpreter. Returns
+    {"python", "reason", "missing"}."""
+    from ozagia.core import environments as EN
+    files = list(dict.fromkeys(f for t in tasks for f in check_files(t)))
+    modules = list(dict.fromkeys(m for t in tasks for m in check_modules(t)))
+    try:
+        doc = EN.env_for(repo, files, extra_modules=modules, **env_kwargs)
+    except (EN.EnvError, OSError) as exc:
+        return {"python": sys.executable, "missing": None,
+                "reason": f"environments failed ({exc}); this interpreter"}
+    needs = ", ".join(doc["required"]) or "no third-party module"
+    best = doc["best"]
+    if best is not None:
+        return {"python": best["path"], "missing": [],
+                "reason": f"env_for: {best['source']} ({best['evidence']}) "
+                          f"imports every module the checks need ({needs})"}
+    usable = [e for e in doc["interpreters"] if e.get("ok")]
+    if usable:
+        top = usable[0]
+        return {"python": top["path"], "missing": top["missing"],
+                "reason": f"env_for: no found interpreter imports every module "
+                          f"the checks need ({needs}); {top['source']} "
+                          f"({top['evidence']}) misses the fewest: "
+                          + ", ".join(top["missing"])}
+    return {"python": sys.executable, "missing": None,
+            "reason": "env_for: no interpreter could be probed; this interpreter"}
+
+
+def resolve_check_python(repo: str | Path, tasks: list[dict[str, Any]],
+                         python: str | None) -> tuple[str, str]:
+    """(interpreter, why): an explicit `python` wins."""
+    if python:
+        return python, "explicit --python"
+    chosen = default_check_python(repo, tasks)
+    return chosen["python"], chosen["reason"]
+
+
+# --------------------------------------------------------------------------- #
 # validation: pass on base, fail after the break
 # --------------------------------------------------------------------------- #
 def validate_task(repo: str | Path, task: dict[str, Any], base: str, *,
@@ -439,11 +512,18 @@ def _validation_reason(pass_on_base: bool, applied: bool, fail_after_break: bool
 
 def validate_all(repo: str | Path, tasks: list[dict[str, Any]], base: str, *,
                  tasks_dir: str | Path, python: str | None = None,
+                 python_reason: str | None = None,
                  run_root: Path | None = None, keep: bool = False) -> dict[str, Any]:
+    """Validate every task. Without ``python`` the check interpreter is
+    ``default_check_python``'s choice."""
+    if python is None:
+        python, python_reason = resolve_check_python(repo, tasks, None)
     run_root = run_root or new_run_root()
     results = [validate_task(repo, t, base, tasks_dir=tasks_dir, python=python,
                              run_root=run_root, keep=keep) for t in tasks]
     return {"version": 1, "base": base, "run_root": str(run_root),
+            "check_python": python,
+            "check_python_reason": python_reason or "explicit --python",
             "ok": all(r["ok"] for r in results), "results": results}
 
 
@@ -1517,20 +1597,11 @@ def run_one(repo: str | Path, task: dict[str, Any], arm: str, repeat: int,
             record["workdir"] = str(workdir)
 
 
-def run_eval(repo: str | Path, tasks: list[dict[str, Any]], arms: Iterable[str],
-             driver: Any, base: str, *, tasks_dir: str | Path = DEFAULT_TASKS.parent,
-             repeats: int = 1, python: str | None = None, run_root: Path | None = None,
-             keep: bool = False, timeout_s: int = 900,
-             max_total_usd: float | None = None) -> dict[str, Any]:
-    """Run every task × arm × repeat. `max_total_usd` stops the run once the
-    reported cost of finished sessions exceeds it (a soft cap: the session
-    that crosses it still completes)."""
-    arms = list(arms)
+def check_arms(arms: list[str], driver: Any) -> None:
+    """Refuse arms that are unknown or that the driver cannot run."""
     unknown = [a for a in arms if a not in ARMS]
     if unknown:
         raise HarnessError(f"unknown arms: {', '.join(unknown)}")
-    if repeats < 1:
-        raise HarnessError("repeats must be at least 1")
     if GRAPH_ARM in arms and driver.name not in GRAPH_ARM_DRIVERS:
         raise HarnessError(
             f"arm {GRAPH_ARM} needs one of the drivers {', '.join(GRAPH_ARM_DRIVERS)}: "
@@ -1541,7 +1612,26 @@ def run_eval(repo: str | Path, tasks: list[dict[str, Any]], arms: Iterable[str],
             f"driver {driver.name!r} runs only the arms {', '.join(allowed)}"
             + (" (the native loop has no MCP client)" if driver.name == "native"
                else ""))
-    python = python or sys.executable
+
+
+def run_eval(repo: str | Path, tasks: list[dict[str, Any]], arms: Iterable[str],
+             driver: Any, base: str, *, tasks_dir: str | Path = DEFAULT_TASKS.parent,
+             repeats: int = 1, python: str | None = None,
+             python_reason: str | None = None, run_root: Path | None = None,
+             keep: bool = False, timeout_s: int = 900,
+             max_total_usd: float | None = None) -> dict[str, Any]:
+    """Run every task × arm × repeat. `max_total_usd` stops the run once the
+    reported cost of finished sessions exceeds it (a soft cap: the session
+    that crosses it still completes). Without `python` the checks run under
+    `default_check_python`'s choice; each run records the interpreter and
+    why (`check_python`, `check_python_reason`)."""
+    arms = list(arms)
+    check_arms(arms, driver)
+    if repeats < 1:
+        raise HarnessError("repeats must be at least 1")
+    if python is None:
+        python, python_reason = resolve_check_python(repo, tasks, None)
+    python_reason = python_reason or "explicit --python"
     run_root = run_root or new_run_root()
     ordered_arms = [a for a in ARMS if a in arms]
     runs: list[dict[str, Any]] = []
@@ -1561,6 +1651,8 @@ def run_eval(repo: str | Path, tasks: list[dict[str, Any]], arms: Iterable[str],
                                  tasks_dir=tasks_dir, python=python,
                                  run_root=run_root, timeout_s=timeout_s,
                                  keep=keep, isolation=isolation)
+                record.update(check_python=python,
+                              check_python_reason=python_reason)
                 runs.append(record)
                 if _AUTH_ERROR_RE.search(str(record.get("driver_error") or "")):
                     raise HarnessError(
@@ -1578,6 +1670,7 @@ def run_eval(repo: str | Path, tasks: list[dict[str, Any]], arms: Iterable[str],
             "total_cost_usd": round(sum(float(r.get("cost_usd") or 0)
                                         for r in runs), 6),
             "stopped": stopped,
+            "check_python": python, "check_python_reason": python_reason,
             "arms": ordered_arms, "repeats": repeats,
             "tasks": [t["id"] for t in sorted(tasks, key=lambda t: t["id"])],
             "run_root": str(run_root),
@@ -1786,15 +1879,25 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     spec = load_tasks(args.tasks)
     base = args.base or spec["base"]
     tasks = select_tasks(spec["tasks"], _split(args.task_ids))
+    python, reason = resolve_check_python(args.repo, tasks, args.python)
+    print(f"check python: {python} ({reason})")
     report = validate_all(args.repo, tasks, base, tasks_dir=spec["dir"],
-                          python=args.python, run_root=_run_root(args),
-                          keep=args.keep)
-    for r in report["results"]:
-        print(f"{'ok  ' if r['ok'] else 'FAIL'} {r['id']}: pass_on_base={r['pass_on_base']} "
-              f"fail_after_break={r['fail_after_break']} "
-              + ("" if r["ok"] else f"({r['details'].get('reason')})"))
+                          python=python, python_reason=reason,
+                          run_root=_run_root(args), keep=args.keep)
+    _print_validation(report)
     _write(args.out_json, json.dumps(report, indent=2, sort_keys=True) + "\n")
     return 0 if report["ok"] else 1
+
+
+def _print_validation(report: dict[str, Any], *, failed_only: bool = False,
+                      file: Any = None) -> None:
+    for r in report["results"]:
+        if failed_only and r["ok"]:
+            continue
+        print(f"{'ok  ' if r['ok'] else 'FAIL'} {r['id']}: pass_on_base={r['pass_on_base']} "
+              f"fail_after_break={r['fail_after_break']} "
+              + ("" if r["ok"] else f"({r['details'].get('reason')})"),
+              file=file or sys.stdout)
 
 
 def _run_root(args: argparse.Namespace) -> Path:
@@ -1815,9 +1918,25 @@ def _cmd_run(args: argparse.Namespace) -> int:
     driver = make_driver(args.driver, live=args.live,
                          max_budget_usd=args.max_budget_usd, model=args.model)
     arms = _split(args.arms) or default_arms(driver.name)
+    check_arms(arms, driver)
+    run_root = _run_root(args)
+    python, reason = resolve_check_python(args.repo, tasks, args.python)
+    print(f"check python: {python} ({reason})")
+    if not args.skip_validate:
+        # A check that does not pass on base or does not fail after the
+        # break measures the harness, not the agent.
+        checked = validate_all(args.repo, tasks, base, tasks_dir=spec["dir"],
+                               python=python, python_reason=reason,
+                               run_root=run_root, keep=False)
+        if not checked["ok"]:
+            bad = [r for r in checked["results"] if not r["ok"]]
+            print(f"refused: {len(bad)} of {len(tasks)} task(s) fail validation "
+                  f"with {python} (--skip-validate runs anyway):", file=sys.stderr)
+            _print_validation(checked, failed_only=True, file=sys.stderr)
+            return 2
     report = run_eval(args.repo, tasks, arms, driver, base,
                       tasks_dir=spec["dir"], repeats=args.repeats,
-                      python=args.python, run_root=_run_root(args),
+                      python=python, python_reason=reason, run_root=run_root,
                       keep=args.keep, timeout_s=args.timeout_s,
                       max_total_usd=args.max_total_usd)
     _write(args.out_json, json.dumps(report, indent=2, sort_keys=True) + "\n")
@@ -1838,7 +1957,9 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--base", default=None, help="base commit (default: tasks file)")
         sp.add_argument("--task-ids", default=None, help="comma-separated subset")
         sp.add_argument("--python", default=None,
-                        help="python for checks and the MCP server (default: this one)")
+                        help="python for the checks and the agent's `python` "
+                             "(default: the interpreter `ozagia env --for` picks "
+                             "for the checks' test files in --repo)")
         sp.add_argument("--run-root", default=None,
                         help="scratch root (default: a new dir under /tmp/ozagia_eval)")
         sp.add_argument("--keep", action="store_true", help="keep worktrees")
@@ -1872,6 +1993,10 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--max-total-usd", type=float, default=None,
                    help="any backend: stop once reported session cost exceeds this")
     r.add_argument("--out-md", default=None)
+    r.add_argument("--skip-validate", action="store_true",
+                   help="start without validating the selected tasks first "
+                        "(by default `run` refuses with exit 2 when a check "
+                        "does not pass on base or does not fail after the break)")
     r.set_defaults(func=_cmd_run)
     return p
 

@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- Python environments (`ozagia.core.environments`, docs/environments.md):
+  `ozagia env [--for PATH ...] [--json] [--no-cache]` and the MCP tool
+  `dev_environment` list a project's interpreters ($VIRTUAL_ENV, root and
+  source-repo venvs, lock-file tool envs, command docs, PATH), probe each with
+  `python -I -c` (bounded, cached under the state dir by interpreter path and
+  site-packages mtime) and rank them for given files by their third-party
+  imports, including the transitive first-party closure and conftests of
+  tests. `who_has(root, module)` names the interpreters that have a module.
+  The manifest readers moved to `ozagia.core.manifests` and now say which
+  declarations are optional. The repo review's dependencies section adds
+  `undeclared_import`, `optional_only_import` and `test_env_gap`. The eval
+  harness defaults `--python` to the interpreter `env_for` picks for the
+  checks' test files in `--repo` and records it per run (`check_python`,
+  `check_python_reason`); `run` validates the selected tasks first and
+  refuses with exit 2 unless `--skip-validate`.
+
 - Ocelot test-impact and architecture-pattern candidates:
   `ocelot_code.change_shape` records changed files, graph symbols, edge
   types, test links, import/package directories and a stable digest;

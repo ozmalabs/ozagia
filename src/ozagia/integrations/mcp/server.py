@@ -895,8 +895,9 @@ _TOOLS.append({
         "unreferenced symbols), churn hotspots without tests, stale doc "
         "references, security hygiene (tracked .env and key files, sensitive "
         "constructs; not a security audit), ops sources (unpinned images, "
-        "restart policy, health checks, published ports) and dependency lock "
-        "files. Uses the graph only when it is fresh and says what it could "
+        "restart policy, health checks, published ports) and dependencies (lock "
+        "files; imports no manifest declares or only an optional one does; tests "
+        "no found interpreter can import). Uses the graph only when it is fresh and says what it could "
         "not check. Returns counts and the top findings, each with an id, graph "
         "keys and a suggested goal; the full packet is written under "
         ".ozagia/reviews/ (latest.json is the newest)."),
@@ -909,6 +910,29 @@ _TOOLS.append({
                      "description": "Wall-clock budget for the sections (at most 300 s)."},
         "max_findings": {"type": "integer", "default": 10,
                          "description": "Top findings to return (at most 50)."},
+    }),
+})
+# Python environments (`ozagia.core.environments`): interpreters are probed
+# with `python -I -c`; project code is not run.
+_TOOLS.append({
+    "name": "dev_environment",
+    "description": (
+        "Which Python interpreter can run what in this project. Without "
+        "arguments: the interpreters found ($VIRTUAL_ENV, .venv/venv/.venv-*, "
+        "the source repository's venv for a worktree or clone, lock-file tool "
+        "envs, interpreters named in command docs, python/python3 on PATH) "
+        "with version, prefix and distribution count, and the declared Python "
+        "dependencies. With `paths`: the interpreters under which every "
+        "third-party import of those files (and of the first-party modules "
+        "they import) resolves, best first, and per import which interpreters "
+        "have it and which manifest declares it. With `module`: the "
+        "interpreters that can import it. Use it before running tests with a "
+        "`python` you have not checked."),
+    "inputSchema": _schema({
+        "paths": {"type": "array", "items": {"type": "string"},
+                  "description": "Root-relative files or directories, e.g. tests/test_x.py."},
+        "module": {"type": "string",
+                   "description": "A module name, e.g. numpy: which interpreters have it."},
     }),
 })
 # Goals (`ozagia.core.goals`): repo-level records in `.ozagia/goals/`, whose
@@ -1151,6 +1175,7 @@ class DevMemoryServer:
             "dev_files_list": self._files_list,
             "dev_files_explain": self._files_explain,
             "dev_review_repo": self._review_repo,
+            "dev_environment": self._environment,
             "goal_list": self._goal_list,
             "goal_show": self._goal_show,
             "goal_check": self._goal_check,
@@ -1473,6 +1498,21 @@ class DevMemoryServer:
         for item in out["top_findings"]:
             item["goal"] = tracked.get(str(item.get("id")))
         return out
+
+    def _environment(self, a: dict[str, Any]) -> Any:
+        """Interpreters and what they can import (`core.environments`)."""
+        from ozagia.core import environments as EN
+        root = Path(self.mem.raw_repo_root if self.mem else self.workspace).resolve()
+        try:
+            if a.get("module"):
+                module = str(a["module"]).strip()
+                return {"ok": True, "module": module,
+                        "interpreters": EN.who_has(root, module)}
+            if a.get("paths"):
+                return {"ok": True, **EN.env_for(root, [str(p) for p in a["paths"]])}
+            return {"ok": True, **EN.environments(root)}
+        except EN.EnvError as exc:
+            return {"ok": False, "error": str(exc)}
 
     def _who(self, a: dict[str, Any]) -> Any:
         """The sessions that edited a file (`ozagia.core.owners.who`): from

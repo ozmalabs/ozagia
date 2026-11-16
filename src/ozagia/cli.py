@@ -20,6 +20,10 @@
     ozagia ops record|resume ...                  (append-only ops receipts)
     ozagia live import|diff|save ...              (supplied snapshots only)
     ozagia iac check ...                          (offline Terraform checks)
+    ozagia env [--root R] [--for PATH ...] [--json] [--no-cache]
+                                                  (Python interpreters and what
+                                                  they can import,
+                                                  docs/environments.md)
     ozagia env list|show ...                      (declarative environment profiles)
     ozagia relay plan|run|tunnel ...              (nested command/network relays)
     ozagia runtime status|list ...                (configured services and tunnels)
@@ -431,7 +435,33 @@ def _cmd_iac(args: argparse.Namespace) -> int:
     return 0 if result.status in {"clean", "findings", "ambiguous"} else 2
 
 
+def _cmd_python_env(args: argparse.Namespace) -> int:
+    """`ozagia env [--for PATH ...]`: interpreters and what they can import."""
+    from ozagia.core import environments as EN
+    root = _root(args.env_root)
+    mode = "off" if args.env_no_cache else "rw"
+    try:
+        if args.env_for:
+            doc = EN.env_for(root, args.env_for, cache_mode=mode)
+            text = EN.format_env_for(doc)
+        else:
+            doc = EN.environments(root, cache_mode=mode)
+            text = EN.format_environments(doc)
+    except EN.EnvError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if args.env_json:
+        _print_json(doc)
+    else:
+        print(text, end="")
+    if args.env_for:
+        return 0 if doc["best"] is not None else 1
+    return 0
+
+
 def _cmd_env(args: argparse.Namespace) -> int:
+    if args.action is None:
+        return _cmd_python_env(args)
     from ozagia.config import ConfigError, load_project_config
     try:
         cfg = load_project_config(_root(args.root))
@@ -1085,8 +1115,25 @@ def build_parser() -> argparse.ArgumentParser:
     check.add_argument("--root", default=None)
     check.add_argument("--json", action="store_true")
 
-    env = sub.add_parser("env", help="declarative environment profiles")
-    esub = env.add_subparsers(dest="action", required=True)
+    env = sub.add_parser(
+        "env", help="Python environments: which interpreter can run what "
+                    "(docs/environments.md); `env list|show`: declarative "
+                    "environment profiles",
+        description="Without a subcommand: the project's Python interpreters, "
+                    "what each provides, and with --for the interpreters that "
+                    "can import those files, best first. Interpreters are only "
+                    "probed with `python -I -c`; project code is not run.")
+    env.add_argument("--root", dest="env_root", default=None,
+                     help="repository root")
+    env.add_argument("--for", dest="env_for", nargs="+", action="extend",
+                     default=None, metavar="PATH",
+                     help="files or directories (root-relative) to find an "
+                          "interpreter for")
+    env.add_argument("--json", dest="env_json", action="store_true",
+                     help="print JSON")
+    env.add_argument("--no-cache", dest="env_no_cache", action="store_true",
+                     help="probe every interpreter, read and write no cache")
+    esub = env.add_subparsers(dest="action", required=False)
     env_list = esub.add_parser("list", help="list configured environments")
     env_list.add_argument("--root", default=None)
     env_list.add_argument("--json", action="store_true")

@@ -87,6 +87,32 @@ journal) stay in `<run_root>/logs/`. Only workdirs are removed.
 `ok` only when the check passes on base, the patch applies, and the check fails
 after the break.
 
+`run` validates the selected tasks first, with the same interpreter, and
+refuses to start (exit 2, the failing tasks and their reasons on stderr) when
+any check does not pass on base, the patch does not apply or the check still
+passes after the break. `--skip-validate` starts anyway. A check that fails
+on base scores every arm as a failure for a reason no agent can fix.
+
+### The check interpreter
+
+`--python` is the interpreter that runs each check and that the agent's
+`python` and `python3` resolve to. Without it, the harness asks
+`core.environments.env_for` (see [environments.md](environments.md)) for the
+interpreter that can import every third-party module of the selected tasks'
+check files in `--repo`, and the module the check runs with `-m` (`pytest`).
+Candidates include the repo's `.venv`, `venv` and `.venv-*`, and the source
+repository's when `--repo` is a worktree or clone without one. If none has
+everything, the one missing the fewest modules is used and the reason says
+which are missing. The choice and why are printed and recorded in the report
+and on every run (`check_python`, `check_python_reason`; `explicit --python`
+when given). The MCP server and graph daemon still run under ozagia's own
+interpreter.
+
+Before this default existed, checks ran with ozagia's interpreter: in the
+17 Nov 2026 Ocelot eval four checks stopped at collection on `import numpy`,
+which only Ocelot's `.venv` had
+([results](results/ocelot_live_eval_2026-11-17.md)).
+
 ## Drivers
 
 | name | what it does | live |
@@ -442,8 +468,11 @@ Size: sessions = tasks × arms × repeats. The shipped set has 7 tasks, so a pil
   than a real bug. The task set is small, so it does not measure general task success.
 - Drivers' network access and tool permissions are not restricted by the harness. The
   agent runs as the operator with the workdir as its working directory.
-- The checks use the Python passed in with `--python`, and the agent can run any shell
-  command through `Bash`. A `Bash` call can change files outside the workdir.
+- The checks use the Python passed in with `--python` (or the one `env_for` picks),
+  and the agent can run any shell command through `Bash`. A `Bash` call can change
+  files outside the workdir.
+- The default interpreter is chosen from the imports of the check files in the
+  working tree of `--repo`, not at `base`.
 - `PYTHONDONTWRITEBYTECODE=1` is set for checks and drivers. Without it, a break that
   keeps the byte length of a file, such as `a + b` to `a - b`, can run stale bytecode
   from the base check when the edit lands within the same mtime second.

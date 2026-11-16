@@ -60,6 +60,7 @@ glibc) and macOS (arm64, x64). `ozagia self check --tui` verifies the install;
 | Workspace checks | `ozagia-worktree`, `ozagia-resources`, `ozagia-files`: worktree/branch drift and commit/merge/push policy, host/disk admission checks, created-file ledger and Markdown routing ([docs/worktree.md](docs/worktree.md), [docs/resources.md](docs/resources.md), [docs/files.md](docs/files.md)) | read-only; cleanup is dry-run |
 | OpenCode GUI add-in | Graph, status and test-plan side panel plus commands, backed by a server RPC over the ozagia CLIs ([docs/opencode_addin.md](docs/opencode_addin.md)) | read-only; build/typecheck verified against OpenCode 2.3 |
 | Goals | `ozagia goal`: repo-level goals whose targets and criteria are graph keys, checked against the graph, the working tree and the test record; claimed by sessions, named in the daemon's after-edit lines and the session brief; `ozagia goal from-review` turns a `review-repo` finding into a goal that is met only after a later review no longer reports it ([docs/goals.md](docs/goals.md)) | new; no live harness runs yet |
+| Python environments | `ozagia env [--for PATH]`, MCP `dev_environment`: the project's interpreters (venvs, the source repo's venv for a worktree, lock-file tools, command docs, PATH), what each can import, and which one can run given files; used for the eval's check interpreter and the review's import findings ([docs/environments.md](docs/environments.md)) | new; probes interpreters only with `python -I -c` |
 
 ## Quick start (from source)
 

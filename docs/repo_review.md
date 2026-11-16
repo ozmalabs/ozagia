@@ -221,6 +221,39 @@ sources are read; no container or unit state is queried.
   file whose every line is pinned with `==` counts as its own lock. Libraries
   often leave lock files out on purpose.
 
+The next three checks compare the third-party imports of tracked Python files
+(read with `ast`; fixture trees and generated files left out) with the Python
+manifests and with the interpreters found on this machine
+([environments.md](environments.md)). A finding's id hashes the module name
+(`undeclared_import`, `optional_only_import`) or the test file
+(`test_env_gap`). Its suggested goal has `test_passes` criteria for the tests
+of the test files involved when the graph is fresh, and no criteria
+otherwise (the goal system's `review_resolved` closes it).
+
+- **undeclared_import** (minor): a module imported (at import time or inside
+  a function) that no Python manifest declares. Imports guarded by
+  `try: ... except ImportError`, `if TYPE_CHECKING` or
+  `pytest.importorskip` are not counted. The import name is matched to
+  distribution names by normalization, a table of known aliases (`yaml` is
+  PyYAML, `PIL` is Pillow, ...) and the distributions the probed
+  interpreters install it from; a mismatch the three miss is a false
+  positive. Not checked without a tracked Python manifest.
+- **optional_only_import** (minor): a module declared only in optional
+  places (an extra, a dependency group, `requirements-<group>.txt` other than
+  base/prod/runtime-like names) and imported by a test file, or at import
+  time by a source module that is not a script. A declaration in a dev or
+  test group (`dev`, `test`, `requirements-dev.txt`, ...) covers tests. This
+  is the case of the 17 Nov 2026 Ocelot eval: `numpy` was declared only in
+  `requirements-arc.txt`.
+- **test_env_gap** (minor): no found interpreter can import a test file's
+  import-time dependencies (its module-level imports, those of the
+  first-party modules it imports, transitively, and of the `conftest.py`
+  files pytest loads). The evidence lists the three interpreters missing the
+  fewest modules. Only interpreters on this machine are probed (with
+  `python -I -c`, never importing the project), using the probe cache
+  read-only; a CI image may have what they lack. Not checked when no
+  interpreter could be probed. `data.interpreters` lists those probed.
+
 ## Packet
 
 Schema `ozagia.repo_review.packet.v1`:
