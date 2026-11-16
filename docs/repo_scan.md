@@ -22,8 +22,9 @@ Read-only inputs:
 - `.ozagia.toml` through `ozagia.config.load_project_config` (source/test
   directories, adapters, test selection policy).
 - optional state readings: `.ozagia/tests/results.json` (last known failures
-  and flaky tests), the created-file ledger (`.ozagia/files/ledger.jsonl`) and
-  review packets under `.ozagia/reviews/*.json`.
+  and flaky tests), the created-file ledger (`.ozagia/files/ledger.jsonl`),
+  review packets under `.ozagia/reviews/*.json` and an already-produced
+  security report at `.ozagia/security/latest.json`.
 
 The graph's commit nodes provide churn; `--since N` bounds the churn window and
 the age used for stale `history/` notes. `--top N` bounds the number of
@@ -70,6 +71,10 @@ unavailable graph: that is a reported state, not a tool failure.
   while changes are local, and a graph with no Test nodes.
 - `code_review` — blocking/major findings from existing review packets and
   known-failure nodes from the graph.
+- `security` — high-confidence findings from an explicit security report
+  passed to the API or found under `.ozagia/security/latest.json`. The scan
+  never runs a security tool, scanner or network call itself. Without a
+  report the report says security was not assessed rather than clean.
 
 ## Opportunity shape
 
@@ -120,7 +125,9 @@ happens only when the caller asks for it.
   points and external consumers are not visible.
 - No test is executed. A linked test may be weak, skipped or failing for
   unrelated reasons.
-- No security, licence, dependency or supply-chain analysis is performed.
+- No security, licence, dependency or supply-chain analysis is performed by
+  this scan itself. A supplied security report is ranked as advisory evidence;
+  a missing report is recorded as not assessed.
 
 A scan never edits the repository. Cleanup actions described in the report
 require explicit confirmation and, for ledger-managed files, the existing

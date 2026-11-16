@@ -34,6 +34,17 @@ PACKET_SCHEMA = "ozagia.code_review.packet.v1"
 SEVERITIES = ("blocking", "major", "minor", "note")
 SEVERITY_RANK = {name: rank for rank, name in enumerate(SEVERITIES)}
 FAIL_ON = ("blocking", "major", "never")
+SECURITY_TO_REVIEW = {
+    "critical": "blocking",
+    "blocking": "blocking",
+    "high": "major",
+    "major": "major",
+    "medium": "minor",
+    "minor": "minor",
+    "low": "note",
+    "info": "note",
+    "note": "note",
+}
 
 FINDING_TYPES = (
     "breaking_change",
@@ -1430,13 +1441,40 @@ def _plan_tests(root: Path, base_commit: str, head_commit: str,
     return plan
 
 
+def _security_section(report: Mapping[str, Any]) -> dict[str, Any]:
+    """Copy supplied security findings without running or renumbering them."""
+    raw_findings = report.get("findings")
+    if not isinstance(raw_findings, list):
+        raw_findings = []
+    findings = [dict(item) for item in raw_findings
+                if isinstance(item, Mapping)][:200]
+    summary = report.get("summary")
+    if not isinstance(summary, Mapping):
+        summary = {"total": len(findings)}
+    not_assessed = report.get("not_assessed")
+    if not isinstance(not_assessed, list):
+        not_assessed = []
+    return {
+        "provided": True,
+        "schema": report.get("schema"),
+        "findings": findings,
+        "summary": dict(summary),
+        "not_assessed": [str(value) for value in not_assessed],
+        "truth_assessed": False,
+        "note": ("security findings were supplied by the caller; this "
+                 "review did not run a scan and does not prove "
+                 "exploitability"),
+    }
+
+
 def _packet(root: Path, pre: Mapping[str, Any], graph_info: Mapping[str, Any],
             files: Sequence[dict[str, Any]], diff_info: Mapping[str, Any],
             findings: Sequence[Mapping[str, Any]], omissions: Sequence[str],
             not_assessed: Sequence[Mapping[str, Any]],
-            test_plan: Mapping[str, Any] | None = None) -> dict[str, Any]:
+            test_plan: Mapping[str, Any] | None = None,
+            security_report: Mapping[str, Any] | None = None) -> dict[str, Any]:
     range_info = dict(pre.get("range") or {})
-    return {
+    packet = {
         "schema": PACKET_SCHEMA,
         "schema_version": SCHEMA,
         "range": range_info,
@@ -1490,6 +1528,11 @@ def _packet(root: Path, pre: Mapping[str, Any], graph_info: Mapping[str, Any],
         "truth_assessed": False,
         "root": str(root),
     }
+    if security_report is not None:
+        section = _security_section(security_report)
+        packet["security"] = section
+        packet["summary"]["security_findings"] = len(section["findings"])
+    return packet
 
 
 def review_diff(root: str | Path, *, base: str, head: str = "HEAD",
@@ -1497,7 +1540,9 @@ def review_diff(root: str | Path, *, base: str, head: str = "HEAD",
                 max_file_bytes: int = DEFAULT_MAX_FILE_BYTES,
                 memory_mb: float = 2048.0, disk_mb: float = 4096.0,
                 config_dir: str | Path | None = None,
-                worktree_base: str = "main") -> dict[str, Any]:
+                worktree_base: str = "main",
+                security_report: Mapping[str, Any] | None = None
+                ) -> dict[str, Any]:
     """Review ``base..head`` deterministically and return a review packet.
 
     Raises :class:`PreflightError` when the worktree, conflicts, range or
@@ -1554,9 +1599,17 @@ def review_diff(root: str | Path, *, base: str, head: str = "HEAD",
                 test_plan.get("not_run_reason")
                 or "no test was selected and no test was executed"),
         })
+    if security_report is not None:
+        not_assessed.append({
+            "area": "security",
+            "reason": (
+                "security findings were supplied by the caller; this review "
+                "did not run a scan, and a finding is not a proof of "
+                "exploitability"),
+        })
     packet = _packet(root_path, pre, graph_info, files, diff_info,
                      _finalize_findings(findings), omissions, not_assessed,
-                     test_plan)
+                     test_plan, security_report)
     return packet
 
 
@@ -1659,7 +1712,12 @@ def run_injected_review(packet: Mapping[str, Any],
 
 
 def exit_code(packet: Mapping[str, Any], fail_on: str = "blocking") -> int:
-    """0 unless a finding is at or above ``fail_on`` (``never``: always 0)."""
+    """0 unless a finding is at or above ``fail_on`` (``never``: always 0).
+
+    When the caller supplied a security report, its findings participate:
+    critical maps to blocking, high to major, medium to minor, and low/info
+    to note. The review still does not assess exploitability.
+    """
     if fail_on not in FAIL_ON:
         raise ValueError(f"fail_on must be one of {FAIL_ON}")
     if fail_on == "never":
@@ -1668,6 +1726,14 @@ def exit_code(packet: Mapping[str, Any], fail_on: str = "blocking") -> int:
     for item in packet.get("findings") or []:
         if SEVERITY_RANK.get(str(item.get("severity")), 99) <= threshold:
             return 1
+    security = packet.get("security")
+    if isinstance(security, Mapping):
+        for item in security.get("findings") or []:
+            if not isinstance(item, Mapping):
+                continue
+            mapped = SECURITY_TO_REVIEW.get(str(item.get("severity")), "note")
+            if SEVERITY_RANK[mapped] <= threshold:
+                return 1
     return 0
 
 
@@ -1756,6 +1822,20 @@ def format_packet(packet: Mapping[str, Any]) -> str:
                          f"{item.get('confidence_note')}")
     if not findings:
         lines.append("  none")
+    security = packet.get("security")
+    if isinstance(security, Mapping):
+        supplied = security.get("findings") or []
+        lines.append(f"security: {len(supplied)} supplied finding(s); "
+                     "no security scan was run by the review")
+        for item in supplied[:10]:
+            location = item.get("file") or "(no file)"
+            if item.get("line"):
+                location += f":{item['line']}"
+            lines.append(
+                f"  [{item.get('severity')}] {item.get('id')} "
+                f"{item.get('category')} {location}: {item.get('message')}")
+        if len(supplied) > 10:
+            lines.append(f"  ... {len(supplied) - 10} more")
     omissions = packet.get("omissions") or []
     lines.append("omissions / not assessed:")
     if omissions:
