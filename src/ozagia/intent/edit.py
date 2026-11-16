@@ -20,7 +20,10 @@ edit errors (handled, `is_error`):
     [ozagia] in: <key>
 
 An empty `oldString` writes `newString` as the whole file (OpenCode's create
-or overwrite). write:
+or overwrite). With `key` (and `newString`, `base_sha256`) instead of
+`oldString`, the node's whole text is replaced (`handle_key_edit`,
+`ozagia.edit.key_edit`); a missing or stale base is a tool error with the
+node's current text and both hashes. write:
 
     Wrote file successfully.
     [ozagia] created|replaced file:<rel>[  backup: <path>]
@@ -88,6 +91,8 @@ def broken_line(ref: dict[str, Any]) -> str:
 
 def handle_edit(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
     from ozagia.edit.code_edit import CodeEditError
+    if inp.get("key") is not None:
+        return handle_key_edit(memory, inp)
     path = inp.get("path", inp.get("filePath"))
     old, new = inp.get("oldString"), inp.get("newString")
     if not isinstance(old, str) or not isinstance(new, str):
@@ -147,6 +152,88 @@ def handle_edit(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
                                *(r.get("key") for r in
                                  res.get("broken_references") or [])]))
     return {"intent": "edit", "output": "\n".join(lines), "keys": keys}
+
+
+# Lines of the current node text shown when a key edit is refused as stale.
+STALE_NODE_LINES = 400
+
+
+def _stale_error(res: dict[str, Any]) -> IntentError:
+    key = res["key"]
+    lines = [f"Edit refused: {res['error']}",
+             tag(f"{key} L{res['start_line']}-L{res['end_line']}  file sha256 "
+                 f"{res['file_sha256']}  node sha256 {res['node_sha256']}")]
+    body = split_lines(res.get("node_text") or "")
+    for i, text in enumerate(body[:STALE_NODE_LINES]):
+        lines.append(f"{res['start_line'] + i}: {text}")
+    if len(body) > STALE_NODE_LINES:
+        lines.append(tag(f"... {len(body) - STALE_NODE_LINES} more lines; "
+                         f"read {key}"))
+    return IntentError("\n".join(lines), keys=[key], intent="edit_key_stale")
+
+
+def handle_key_edit(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
+    """`edit` with `key` (and `newString`, `base_sha256`): replace the
+    node's whole text (`ozagia.edit.key_edit`). A missing or stale base is
+    refused with the node's current text and both hashes."""
+    from ozagia.edit.code_edit import CodeEditError
+    from ozagia.edit.key_edit import key_file
+    key = inp.get("key")
+    new = inp.get("newString", inp.get("new_text"))
+    if not isinstance(key, str) or not key.strip():
+        raise IntentError("key must be a node key")
+    if not isinstance(new, str):
+        raise IntentError("newString must be a string")
+    key = key.strip()
+    try:
+        rel = key_file(key)
+    except CodeEditError as e:
+        raise IntentError(str(e)) from None
+    target = _target(memory, rel)
+    path = inp.get("path", inp.get("filePath"))
+    if isinstance(path, str) and path and _target(memory, path).rel != target.rel:
+        raise IntentError(f"path {path} is not the file of {key}")
+    if not target.path.is_file():
+        raise IntentError(f"File {target.display} not found")
+    base = inp.get("base_sha256")
+    base = base if isinstance(base, str) else None
+
+    def run(apply: bool) -> dict[str, Any]:
+        try:
+            res = memory.key_edit(key, new, base_sha256=base, apply=apply)
+        except CodeEditError as e:
+            raise IntentError(str(e), keys=[key]) from None
+        if res.get("stale"):
+            raise _stale_error(res)
+        if not res.get("ok"):
+            raise _edit_error(target.path, res)
+        return res
+
+    if inp.get("_preflight"):
+        from ozagia.intent.common import read_text
+        res = run(False)
+        text = read_text(target.path)
+        m = res["matches"][0]
+        after = text[:m["start"]] + res["new_node_text"] + text[m["end"]:]
+        preflight_stop(inp, diff_metadata(target.rel, text, after))
+    res = run(True)
+    lines = [f"Edited {target.display} (node {key}, lines "
+             f"{res['start_line']}-{res['end_line']})",
+             tag("in: " + ", ".join(res["keys"])),
+             tag(f"sha256 {res['new_sha256']} (the file now; base_sha256 for "
+                 f"the next key edit)")]
+    delta = res.get("graph_delta")
+    lines.extend(delta_lines(delta))
+    for ref in res.get("broken_references") or []:
+        lines.append(broken_line(ref))
+    if res.get("broken_references_truncated"):
+        lines.append(tag("broken references truncated"))
+    if res.get("warning"):
+        lines.append(warning_line(str(res["warning"])))
+    keys = list(dict.fromkeys([*res["keys"], *delta_keys(delta),
+                               *(r.get("key") for r in
+                                 res.get("broken_references") or [])]))
+    return {"intent": "edit_key", "output": "\n".join(lines), "keys": keys}
 
 
 def _edit_error(path: Path, res: dict[str, Any]) -> IntentError:

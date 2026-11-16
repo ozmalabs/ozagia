@@ -875,16 +875,30 @@ def apply_span_edit(root: str | Path, rel: str, old_string: str,
     if old_string == new_string:
         raise CodeEditError("old_string and new_string are identical")
     is_py = PurePosixPath(src.rel).suffix.lower() == ".py"
-    if is_py:
-        before_status, _, old_tree = _parse_py(src.text)
-    else:
-        (before_status, _), old_tree = _parse_error(src.rel, src.text), None
+    old_tree = _parse_py(src.text)[2] if is_py else None
     loc = _locate(root, src, old_string, replace_all=replace_all,
                   keyer=_Keyer(root, src.rel, src.text, py_tree=old_tree))
     if not loc["ok"]:
         return {**loc, "applied": False}
-    matches = loc["matches"]
-    replacement = normalize_newlines(new_string, src.newline)
+    return apply_spans(root, src, loc["matches"],
+                       normalize_newlines(new_string, src.newline),
+                       keys=loc["keys"], write=write, memory=memory,
+                       newline_converted=loc["newline_converted"])
+
+
+def apply_spans(root: str | Path, src: SourceFile,
+                matches: list[dict[str, Any]], replacement: str, *,
+                keys: list[str], write: bool = False, memory: Any = None,
+                newline_converted: bool = False,
+                fmt: str = "span") -> dict[str, Any]:
+    """Replace each match span (`start`/`end` offsets into `src.text`, in
+    order, not overlapping) by `replacement`: the parse guard, broken
+    references, the write and the reingest of `apply_span_edit`."""
+    is_py = PurePosixPath(src.rel).suffix.lower() == ".py"
+    if is_py:
+        before_status, _, old_tree = _parse_py(src.text)
+    else:
+        (before_status, _), old_tree = _parse_error(src.rel, src.text), None
     text = src.text
     parts: list[str] = []
     cursor = 0
@@ -907,7 +921,7 @@ def apply_span_edit(root: str | Path, rel: str, old_string: str,
                 "error": (f"the edit breaks the parse of {src.rel} at line "
                           f"{after_error['line']}: {after_error['message']}"),
                 "parse_error": after_error, "parse_check": "refused",
-                "key": matches[0]["key"], "keys": loc["keys"],
+                "key": matches[0]["key"], "keys": keys,
                 "matches": matches}
     else:
         parse_check = after_status
@@ -926,11 +940,11 @@ def apply_span_edit(root: str | Path, rel: str, old_string: str,
     result: dict[str, Any] = {
         "ok": True,
         "applied": applied,
-        "format": "span",
+        "format": fmt,
         "file": src.rel,
         "matches": matches,
-        "keys": loc["keys"],
-        "newline_converted": loc["newline_converted"],
+        "keys": keys,
+        "newline_converted": newline_converted,
         "base_sha256": src.sha256,
         "new_sha256": new_sha,
         "before": {"sha256": src.sha256, "lines": len(text.splitlines())},
@@ -955,6 +969,7 @@ def apply_span_edit(root: str | Path, rel: str, old_string: str,
 __all__ = [
     "MAX_BROKEN_REFERENCES",
     "apply_span_edit",
+    "apply_spans",
     "broken_references",
     "locate",
 ]

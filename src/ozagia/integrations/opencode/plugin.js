@@ -14,6 +14,10 @@
 //     handled false         -> run the original, send {op: "after"} with its
 //                              output, append the daemon's `append` text
 //                              (also for `expired`: the daemon did nothing).
+//                              An edit whose original throws: send `after`
+//                              with the error as output (meta.builtin_error)
+//                              and throw the error with the `append` (the
+//                              nearest region of the old text) added.
 //     daemon unreachable, error response, or (read/grep/glob) timeout
 //                           -> run the original and return its output as is;
 //                              a best-effort `after` with meta.fallback records it.
@@ -349,7 +353,23 @@ function wrap(client, perm, name, tool, original, hintCache) {
       }
     }
     // handled false (also `expired`: the daemon did nothing) -> the built-in.
-    const output = asText(await original.call(tool, input, c));
+    let output;
+    try {
+      output = asText(await original.call(tool, input, c));
+    } catch (err) {
+      // A failed built-in edit (its old text is not in the file): `after`
+      // may name the nearest region, which goes with the error.
+      if (name !== "edit" || fallback !== null) throw err;
+      let append = "";
+      try {
+        const after = await client.request({ op: "after", ...base,
+          output: String((err && err.message) || err),
+          meta: { builtin_error: true } });
+        if (typeof after.append === "string") append = after.append;
+      } catch { /* the built-in's error stands on its own */ }
+      if (!append) throw err;
+      throw new Error(`${String((err && err.message) || err)}\n${append}`);
+    }
     if (fallback !== null) {
       client.request({ op: "after", ...base, output, meta: { fallback } },
                      client.timeoutMs, false).catch(() => {});

@@ -1311,7 +1311,9 @@ def graph_stats_fields(stats: Any) -> dict[str, Any]:
     codemode_tools (from the plugin's `hello`), and shell_captured /
     shell_passthrough (`stats.shell`: shell calls the daemon carried out or
     left to the built-in; absent from older daemons), structured_queries,
-    structured_outlines and jq_captures (structured data reads)."""
+    structured_outlines and jq_captures (structured data reads),
+    patch_checks, patch_misses_caught, region_replies and key_edits (patch
+    and edit miss recovery)."""
     if not isinstance(stats, dict):
         return {"plugin_loaded": None, "captured_calls": None,
                 "passthrough_calls": None, "fallbacks": None,
@@ -1319,7 +1321,9 @@ def graph_stats_fields(stats: Any) -> dict[str, Any]:
                 "codemode_tools": None, "shell_captured": None,
                 "shell_passthrough": None,
                 "structured_queries": None, "structured_outlines": None,
-                "jq_captures": None}
+                "jq_captures": None, "patch_checks": None,
+                "patch_misses_caught": None, "region_replies": None,
+                "key_edits": None}
     hellos = _count(stats.get("hellos"))
     raw = stats.get("handled")
     # The daemon reports {"true": n, "false": m}; only handled calls count.
@@ -1342,7 +1346,11 @@ def graph_stats_fields(stats: Any) -> dict[str, Any]:
             "shell_passthrough": _count(shell.get("passthrough")),
             "structured_queries": _count(stats.get("structured_queries")),
             "structured_outlines": _count(stats.get("structured_outlines")),
-            "jq_captures": _count(stats.get("jq_captures"))}
+            "jq_captures": _count(stats.get("jq_captures")),
+            "patch_checks": _count(stats.get("patch_checks")),
+            "patch_misses_caught": _count(stats.get("patch_misses_caught")),
+            "region_replies": _count(stats.get("region_replies")),
+            "key_edits": _count(stats.get("key_edits"))}
 
 
 
@@ -1577,6 +1585,14 @@ def aggregate(runs: list[dict[str, Any]], arms: Iterable[str]) -> list[dict[str,
                     int(r.get("structured_outlines") or 0) for r in mine),
                 "total_jq_captures": sum(int(r.get("jq_captures") or 0)
                                          for r in mine),
+                "total_patch_checks": sum(int(r.get("patch_checks") or 0)
+                                          for r in mine),
+                "total_patch_misses_caught": sum(
+                    int(r.get("patch_misses_caught") or 0) for r in mine),
+                "total_region_replies": sum(int(r.get("region_replies") or 0)
+                                            for r in mine),
+                "total_key_edits": sum(int(r.get("key_edits") or 0)
+                                       for r in mine),
                 "codemode_tools": sorted({t for r in mine
                                           for t in (r.get("codemode_tools") or [])}),
             })

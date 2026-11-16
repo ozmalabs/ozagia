@@ -1,0 +1,310 @@
+"""ozagia.edit.key_edit — replace the whole text of one node, named by its key.
+
+`apply_key_edit(root, key, new_text, base_sha256=...)` finds the node's span
+in the current file, checks the base hash, and replaces the span's text
+through the same pipeline as `span_edit.apply_span_edit` (parse guard,
+broken references, `ozagia.edit.txn` write with a backup, reingest with a
+`DevMemory`). Preview by default.
+
+Keys and the span each names:
+
+    sym:<rel>::<qualname>     the def/class (decorators included), whole
+    test:<rel>::<qualname>    lines; Python by its own parse, other languages
+                              by the graph node's line range (needs memory)
+    doc:<rel>#<section>       a Markdown section: its heading line to the next
+                              heading of the same or a higher level.
+                              <section> is the heading's slug (lowercase,
+                              punctuation dropped, spaces as `-`), or a path
+                              of slugs `a/b` when the slug alone is ambiguous
+    doc:<rel>, file:<rel>     the whole file
+    text:<rel>#L<a>-L<b>      lines a..b
+    json:<rel>#<pointer>      the JSON value at the pointer (RFC 6901), only
+                              the value's own text
+
+Base hash. `base_sha256` must be the file's sha256 (the bytes on disk, as
+`txn` and the region replies report it) or the sha256 of the node's current
+text (UTF-8). Either one proves the caller saw the text it replaces; the
+node hash also survives edits elsewhere in the file. A missing or stale base
+is refused with `{ok: False, stale: True}` and the node's current text,
+line range, `file_sha256` and `node_sha256`, so the caller can retry
+without another read.
+
+A line-range node replaced by text without a final newline gets one when
+the old text had one (the next line is not joined onto it). Newlines are
+converted to the file's style.
+"""
+from __future__ import annotations
+
+import hashlib
+import re
+from pathlib import PurePosixPath
+from typing import Any
+
+from ozagia.core.keys import parse_key
+from ozagia.edit.code_edit import CodeEditError
+from ozagia.edit.txn import SourceFile, normalize_newlines
+
+_MD_SUFFIXES = frozenset({".md", ".markdown"})
+_TEXT_KEY_RE = re.compile(r"^text:(?P<rel>.+)#L(?P<a>\d+)-L(?P<b>\d+)$")
+_SLUG_DROP_RE = re.compile(r"[^\w\- ]", re.UNICODE)
+KEY_KINDS = ("sym", "test", "doc", "file", "text", "json")
+
+
+def slug(title: str) -> str:
+    """A heading's slug, GitHub style: lowercase, punctuation dropped,
+    spaces as `-`."""
+    return _SLUG_DROP_RE.sub("", str(title).strip().lower()).replace(" ", "-")
+
+
+def sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _line_starts(text: str) -> list[int]:
+    out = [0]
+    i = text.find("\n")
+    while i >= 0:
+        out.append(i + 1)
+        i = text.find("\n", i + 1)
+    return out
+
+
+def _line_span(text: str, a: int, b: int) -> tuple[int, int]:
+    """Offsets of lines a..b (1-based, inclusive), the last line's newline
+    included."""
+    starts = _line_starts(text)
+    total = len(starts) - (1 if starts[-1] == len(text) else 0)
+    if a < 1 or b < a or a > max(total, 1):
+        raise CodeEditError(f"lines {a}-{b} are not in the file ({total} lines)")
+    b = min(b, total)
+    end = starts[b] if b < len(starts) else len(text)
+    return starts[a - 1], end
+
+
+# --------------------------------------------------------------------------- #
+# Markdown sections
+# --------------------------------------------------------------------------- #
+def _chains(text: str) -> list[tuple[Any, list[Any]]]:
+    """Each heading with its ancestors (outermost first)."""
+    from ozagia.edit.markdown import headings
+    hs = headings(text)
+    out = []
+    for h in hs:
+        anc = [g for g in hs if g.start < h.start and g.level < h.level
+               and h.start < g.section_end]
+        # The nearest ancestor of each level.
+        chain: list[Any] = []
+        for g in sorted(anc, key=lambda g: g.start):
+            while chain and chain[-1].level >= g.level:
+                chain.pop()
+            chain.append(g)
+        out.append((h, chain))
+    return out
+
+
+def section_key(rel: str, text: str, start: int, end: int) -> str:
+    """The `doc:<rel>#<section>` key of the innermost section holding the
+    span `start..end`, or `doc:<rel>` before the first heading."""
+    chains = _chains(text)
+    inner = None
+    for h, chain in chains:
+        if h.start <= start and end <= max(h.section_end, h.heading_end):
+            if inner is None or h.start >= inner[0].start:
+                inner = (h, chain)
+    if inner is None:
+        return f"doc:{rel}"
+    h, chain = inner
+    s = slug(h.title)
+    if sum(1 for g, _ in chains if slug(g.title) == s) == 1:
+        return f"doc:{rel}#{s}"
+    return f"doc:{rel}#" + "/".join([*(slug(g.title) for g in chain), s])
+
+
+def find_section(text: str, fragment: str) -> Any:
+    """The heading a `doc:` key's fragment names (see the module docstring)."""
+    parts = [p for p in fragment.strip("/").split("/") if p]
+    if not parts:
+        raise CodeEditError("empty section name")
+    want = [slug(p) for p in parts]
+    found = []
+    for h, chain in _chains(text):
+        if slug(h.title) != want[-1]:
+            continue
+        path = [slug(g.title) for g in chain]
+        if len(want) > 1 and path[-(len(want) - 1):] != want[:-1]:
+            continue
+        found.append((h, chain))
+    if not found:
+        known = [slug(h.title) for h, _ in _chains(text)]
+        raise CodeEditError(f"no section {fragment!r}; sections: "
+                            f"{', '.join(known[:20]) or '(none)'}")
+    if len(found) > 1:
+        where = ", ".join(
+            "/".join([*(slug(g.title) for g in c), slug(h.title)])
+            + f" (L{h.start_line})" for h, c in found)
+        raise CodeEditError(f"section {fragment!r} is ambiguous: {where}; "
+                            f"name it by its path")
+    return found[0][0]
+
+
+# --------------------------------------------------------------------------- #
+# Key -> span
+# --------------------------------------------------------------------------- #
+def key_file(key: str) -> str:
+    """The repository file a node key belongs to."""
+    if not isinstance(key, str) or ":" not in key:
+        raise CodeEditError(f"not a node key: {key!r}")
+    kind, _, rest = key.partition(":")
+    if kind not in KEY_KINDS:
+        raise CodeEditError(f"key edits take {', '.join(k + ':' for k in KEY_KINDS)} "
+                            f"keys, not {key!r}")
+    if kind in ("sym", "test"):
+        rel = rest.split("::", 1)[0]
+    elif kind in ("doc", "text", "json"):
+        rel = rest.split("#", 1)[0]
+    else:
+        rel = rest
+    if not rel:
+        raise CodeEditError(f"key {key!r} names no file")
+    return rel
+
+
+def node_span(src: SourceFile, key: str, *, memory: Any = None) -> dict[str, Any]:
+    """`{start, end, start_line, end_line, lines: bool}` of the node `key`
+    in `src` (offsets into `src.text`). `lines` says whether the span is
+    whole lines. Raises CodeEditError for a key with no node."""
+    text = src.text
+    kind = key.partition(":")[0]
+    starts = _line_starts(text)
+
+    def line_of(off: int) -> int:
+        import bisect
+        return bisect.bisect_right(starts, off)
+
+    if kind in ("file",) or (kind == "doc" and "#" not in key):
+        return {"start": 0, "end": len(text), "start_line": 1,
+                "end_line": max(1, line_of(max(len(text) - 1, 0))), "lines": True}
+    if kind == "doc":
+        if PurePosixPath(src.rel).suffix.lower() not in _MD_SUFFIXES:
+            raise CodeEditError(f"{key}: sections are for Markdown files")
+        h = find_section(text, key.split("#", 1)[1])
+        end = max(h.section_end, h.heading_end)
+        return {"start": h.start, "end": end, "start_line": h.start_line,
+                "end_line": line_of(max(end - 1, h.start)), "lines": True}
+    if kind == "text":
+        m = _TEXT_KEY_RE.match(key)
+        if not m:
+            raise CodeEditError(f"not a text key: {key!r}")
+        a, b = int(m.group("a")), int(m.group("b"))
+        s, e = _line_span(text, a, b)
+        return {"start": s, "end": e, "start_line": a,
+                "end_line": line_of(max(e - 1, s)), "lines": True}
+    if kind == "json":
+        return _json_span(src, key, line_of)
+    # sym: / test:
+    _, rel, qual = parse_key(key)
+    if PurePosixPath(src.rel).suffix.lower() == ".py":
+        from ozagia.check import _text_spans
+        spans = [sp for sp in _text_spans(text) if sp[2] == qual]
+        if not spans:
+            raise CodeEditError(f"no node {key} in {src.rel}")
+        # A test key names a test span; a sym key prefers a non-test span.
+        want_test = kind == "test"
+        spans.sort(key=lambda sp: (bool(sp[3]) != want_test, sp[0]))
+        a, b = spans[0][0], spans[0][1]
+    else:
+        nid = memory.node_by_key(key) if memory is not None else None
+        if nid is None:
+            raise CodeEditError(f"no node {key}"
+                                + ("" if memory is not None else
+                                   " (non-Python symbols need the graph)"))
+        attrs = (memory.node(nid) or {}).get("attrs") or {}
+        a = int(attrs.get("start_line") or 0)
+        b = int(attrs.get("end_line") or a)
+        if a < 1:
+            raise CodeEditError(f"node {key} has no line range")
+    s, e = _line_span(text, a, b)
+    return {"start": s, "end": e, "start_line": a,
+            "end_line": line_of(max(e - 1, s)), "lines": True}
+
+
+def _json_span(src: SourceFile, key: str, line_of: Any) -> dict[str, Any]:
+    from ozagia.edit.json_edit import _Parser
+    pointer = key.split("#", 1)[1] if "#" in key else ""
+    try:
+        node = _Parser(src.text).parse()
+    except CodeEditError as e:
+        raise CodeEditError(f"{src.rel} does not parse as JSON: {e}") from None
+    if pointer and not pointer.startswith("/"):
+        raise CodeEditError(f"JSON pointer must start with '/': {pointer!r}")
+    for raw in pointer.split("/")[1:] if pointer else []:
+        tok = raw.replace("~1", "/").replace("~0", "~")
+        if node.kind == "object":
+            hit = [m["value"] for m in node.members if str(m["key"]) == tok]
+            if not hit:
+                raise CodeEditError(f"no member {tok!r} at {key}")
+            node = hit[-1]
+        elif node.kind == "array":
+            if not tok.isdigit() or int(tok) >= len(node.items):
+                raise CodeEditError(f"no index {tok!r} at {key}")
+            node = node.items[int(tok)]
+        else:
+            raise CodeEditError(f"cannot descend into a {node.kind} at {key}")
+    return {"start": node.start, "end": node.end,
+            "start_line": line_of(node.start),
+            "end_line": line_of(max(node.end - 1, node.start)), "lines": False}
+
+
+# --------------------------------------------------------------------------- #
+# The edit
+# --------------------------------------------------------------------------- #
+def apply_key_edit(root: Any, key: str, new_text: str, *,
+                   base_sha256: str | None = None, write: bool = False,
+                   memory: Any = None) -> dict[str, Any]:
+    """Replace the text of node `key` by `new_text` (see the module
+    docstring). Returns `span_edit`'s result shape with `format: "key"`,
+    `key`, `start_line`/`end_line` (of the old node) and `node_sha256` (of
+    its old text), or `{ok: False, stale: True, ...}`."""
+    from ozagia.edit.span_edit import _Keyer, _read, apply_spans
+    if not isinstance(new_text, str):
+        raise CodeEditError("new_text must be a string")
+    key = str(key or "").strip()
+    rel = key_file(key)
+    src = _read(root, rel)
+    span = node_span(src, key, memory=memory)
+    old = src.text[span["start"]:span["end"]]
+    node_sha = sha256_text(old)
+    view = {"key": key, "file": src.rel, "start_line": span["start_line"],
+            "end_line": span["end_line"], "file_sha256": src.sha256,
+            "node_sha256": node_sha}
+    base = str(base_sha256 or "").strip()
+    if base not in (src.sha256, node_sha):
+        why = ("base_sha256 is required" if not base else
+               f"stale base: {base} is neither the file's sha256 nor the "
+               f"node's")
+        return {"ok": False, "applied": False, "stale": True, **view,
+                "error": (f"{why}; the node's current text is in node_text "
+                          f"(retry with base_sha256 {node_sha})"),
+                "node_text": old}
+    replacement = normalize_newlines(new_text, src.newline)
+    if (span["lines"] and replacement and old.endswith(("\n", "\r"))
+            and not replacement.endswith(("\n", "\r"))):
+        replacement += src.newline
+    if replacement == old:
+        raise CodeEditError("new_text is the node's current text; nothing to do")
+    s, e = span["start"], span["end"]
+    keyer = _Keyer(root, src.rel, src.text)
+    match = {"start": s, "end": e, "start_line": span["start_line"],
+             "end_line": span["end_line"],
+             **keyer.key(s, max(e, s + 1), span["start_line"], span["end_line"])}
+    match["key"] = key
+    res = apply_spans(root, src, [match], replacement, keys=[key],
+                      write=write, memory=memory, fmt="key")
+    res.update({"key": key, "start_line": span["start_line"],
+                "end_line": span["end_line"], "node_sha256": node_sha,
+                "file_sha256": src.sha256, "new_node_text": replacement})
+    return res
+
+
+__all__ = ["apply_key_edit", "find_section", "key_file", "node_span",
+           "section_key", "sha256_text", "slug"]

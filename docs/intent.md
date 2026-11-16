@@ -176,6 +176,28 @@ Edit refused: the result does not parse (invalid syntax at line 19)
 [ozagia] in: sym:pkg/mod.py::Box.m
 ```
 
+An edit with `key` (and `newString`, `base_sha256`) instead of
+`oldString` replaces the whole text of that node (`ozagia.edit.key_edit`:
+`sym:`/`test:` symbols, `doc:<file>#<section slug>` Markdown sections,
+`text:<file>#L<a>-L<b>` line ranges, `json:<file>#<pointer>` values).
+`base_sha256` is the file's sha256 or the sha256 of the node's current
+text; a missing or stale one is a tool error with the node's current text
+and both hashes:
+
+```
+Edited /repo/pkg/mod.py (node sym:pkg/mod.py::helper, lines 5-10)
+[ozagia] in: sym:pkg/mod.py::helper
+[ozagia] sha256 <new file sha> (the file now; base_sha256 for the next key edit)
+
+Edit refused: stale base: <sha> is neither the file's sha256 nor the node's; ...
+[ozagia] sym:pkg/mod.py::helper L5-L10  file sha256 <sha>  node sha256 <sha>
+5: def helper(a, b=1):
+...
+```
+
+Intents `edit_key` and `edit_key_stale`. The parse guard and broken
+references work as for an exact edit.
+
 An empty `oldString` writes `newString` as the file. `write` goes through
 `ozagia.edit.txn` (backup of an existing file; atomic create of a new one,
 parent directories made), then `reingest`:
@@ -359,6 +381,15 @@ the plugin apply the change a second time.
   back, it appends `[ozagia] touched: <keys>`. These are the key enclosing
   each `+` line, and the line before each deletion point, in the current
   file.
+- For an edit whose output reports a failure ("not found", "could not
+  find", "no match", ...) while its `oldString` (or one of `edits`) is not
+  in the file, it appends the nearest region (`ozagia.intent.patch`):
+  `[ozagia] oldString is not in <file>; nearest region L<a>-L<b> <key>
+  (similarity r), sha256 <file sha>`, the differing lines as `[ozagia]
+  -<oldString line>` / `[ozagia] +<file line>`, then the region's lines as
+  `<n>: <text>` (at most 60). Intent `after_edit_miss`, `meta.region_replies`
+  1. The OpenCode plugin sends this `after` when the built-in edit throws
+  (`meta.builtin_error`), and throws the error with the append added.
 - For a command with a pytest segment, it maps pytest's short summary
   lines (`FAILED path::name - message`, `ERROR ...`) to `[ozagia] failed
   test:<key>: <message>` for tests the graph knows. Paths are taken
@@ -389,7 +420,17 @@ op, tool, intent and handled; `passthrough` (not handled by design),
 plugin could not get answered; `expired` and failed `tool` requests are the
 daemon's view of some of the same calls), errors, hellos and their sessions, mean and max ms and
 uptime; `structured_queries`, `structured_outlines` and `jq_captures` count
-the intents `read_structured`, `read_structured_outline` and `shell_jq`.
+the intents `read_structured`, `read_structured_outline` and `shell_jq`;
+`patch_checks` and `patch_misses_caught` count `patch_check_ok` plus
+`patch_check_miss`, and `patch_check_miss`; `region_replies` sums
+`meta.region_replies` (patch hunks and edit misses); `key_edits` counts
+`edit_key`.
+
+The `patch_check` tool (`input.patch`, optional `workdir`) checks an
+apply_patch text against the current files and never writes (see
+docs/codex.md, "Patch check"). Its output is the region reply, or `the
+patch matches the current files`; intents `patch_check_ok`,
+`patch_check_miss` and `patch_check_unparsed`.
 
 `ozagia.core.memory` takes its layout from `$OZAGIA_ROOT` when imported, so
 `serve` sets it to `--root` first. `DevMemory`'s own journal goes next to a

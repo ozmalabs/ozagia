@@ -418,7 +418,7 @@ def test_install_merges_hooks_and_is_idempotent(tmp_path):
     assert data["hooks"]["PreToolUse"][0] == EXISTING_HOOKS["hooks"]["PreToolUse"][0]
     cmd = "/opt/py/bin/python -m ozagia.integrations.codex hook"
     expected = {"type": "command", "command": cmd, "timeout": hook.HOOK_TIMEOUT_S}
-    assert _ours(data, "PreToolUse") == [("^Bash$", expected)]
+    assert _ours(data, "PreToolUse") == [("^(Bash|apply_patch)$", expected)]
     assert _ours(data, "PostToolUse") == [("^(Bash|apply_patch)$", expected)]
     assert _ours(data, "SessionStart") == [(None, expected)]
 
