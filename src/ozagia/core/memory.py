@@ -80,6 +80,9 @@ DEFAULT_JOURNAL = state_path(ROOT, "journal.jsonl")
 # Files larger than this are indexed by path/name only; their content is not
 # parsed. A repo map should stay fast and should never hang on a generated blob.
 MAX_PARSE_BYTES = 2 * 1024 * 1024
+# Journal kinds that only record who edited what (`ozagia.core.owners`),
+# left out of `journal_decisions` (`dev_recent`, `recent`, the context pack).
+OWNERSHIP_KINDS = frozenset({"builtin_edit"})
 
 # Indexing layout, from the project configuration of ROOT. Module constants so
 # tests (and callers) can override them; every build uses these values.
@@ -2508,7 +2511,7 @@ class DevMemory:
                 "budget": {"mode": mode, "budget_tokens": int(budget_tokens),
                            "estimated_tokens": total_tokens,
                            "items": len(picked)},
-                "journal": self.journal_recent(5),
+                "journal": self.journal_decisions(5),
                 "snapshot": self.staleness()}
 
     def _build_commands(self) -> list[str]:
@@ -3356,7 +3359,10 @@ class DevMemory:
             fh.write(json.dumps(entry, sort_keys=True) + "\n")
         return entry
 
-    def journal_recent(self, n: int = 20) -> list[dict[str, Any]]:
+    def journal_recent(self, n: int = 20, *,
+                       exclude_kinds: Any = ()) -> list[dict[str, Any]]:
+        """The last `n` journal entries, oldest first, leaving out entries
+        whose `kind` is in `exclude_kinds`."""
         if not self.journal.exists():
             return []
         try:
@@ -3364,13 +3370,26 @@ class DevMemory:
                                            errors="replace").splitlines()
         except OSError:
             return []
-        out = []
-        for line in lines[-max(0, int(n)):]:
+        n = max(0, int(n))
+        skip = frozenset(exclude_kinds)
+        out: list[dict[str, Any]] = []
+        for line in reversed(lines):
+            if len(out) >= n:
+                break
             try:
-                out.append(json.loads(line))
+                entry = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if skip and isinstance(entry, dict) and entry.get("kind") in skip:
+                continue
+            out.append(entry)
+        out.reverse()
         return out
+
+    def journal_decisions(self, n: int = 20) -> list[dict[str, Any]]:
+        """`journal_recent` without the ownership bookkeeping
+        (`OWNERSHIP_KINDS`: built-in edits journaled for `ozagia who`)."""
+        return self.journal_recent(n, exclude_kinds=OWNERSHIP_KINDS)
 
 
 # --------------------------------------------------------------------------- #
@@ -3550,7 +3569,7 @@ def _cmd_query(args: argparse.Namespace, mem: DevMemory) -> int:
     elif cmd == "changed":
         out = mem.changed(include_all=args.all, limit=args.limit)
     elif cmd == "recent":
-        out = {"ok": True, "entries": mem.journal_recent(args.n)}
+        out = {"ok": True, "entries": mem.journal_decisions(args.n)}
     elif cmd == "record":
         out = {"ok": True, "entry": mem.journal_append(
             args.kind, args.task, args.summary,

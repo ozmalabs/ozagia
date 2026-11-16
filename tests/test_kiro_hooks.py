@@ -560,7 +560,7 @@ def test_install_v3_writes_hook_file_and_mcp(tmp_path):
     hooks = data["hooks"]
     assert [(h["trigger"], h.get("matcher")) for h in hooks] == [
         ("SessionStart", None), ("PreToolUse", "shell"), ("PreToolUse", "read"),
-        ("PostToolUse", "read"), ("PostToolUse", "write"), ("PostToolUse", "shell"),
+        ("PreToolUse", "write"), ("PostToolUse", "read"), ("PostToolUse", "write"), ("PostToolUse", "shell"),
         ("PostCompact", None)]
     for h in hooks:
         assert set(h) <= V3_FIELDS and h["trigger"] in V3_TRIGGERS | {"PostCompact"}
@@ -573,6 +573,18 @@ def test_install_v3_writes_hook_file_and_mcp(tmp_path):
     assert entry["args"] == ["-m", "ozagia.integrations.mcp.server", "--root", root,
                              "--mode", "coding"]
     assert entry["env"] == {"OZAGIA_ROOT": root}
+
+
+def test_install_routes_pre_write_in_every_form(tmp_path):
+    # Ownership warnings come from PreToolUse on writes: the hook file, the
+    # profile (array form) and the CLI 2.x object form all register it.
+    inst.install(tmp_path, python=PY, fmt="both")
+    for p in (_hook_file(tmp_path), _profile(tmp_path)):
+        pre = [(h["name"], h.get("matcher")) for h in _json(p)["hooks"]
+               if h["trigger"] in ("PreToolUse", "preToolUse")]
+        assert ("ozagia-pre-write", "write") in pre
+    assert {"matcher": "write", "command": CMD,
+            "timeout_ms": hook.HOOK_TIMEOUT_S * 1000} in inst.legacy_hooks(PY)["preToolUse"]
 
 
 def test_install_is_idempotent_and_updates_python(tmp_path):
@@ -655,7 +667,7 @@ def test_install_agent_creates_universal_profile(tmp_path):
     assert data["includeMcpJson"] is True
     assert [(h["trigger"], h.get("matcher")) for h in data["hooks"]] == [
         ("agentSpawn", None), ("preToolUse", "shell"), ("preToolUse", "read"),
-        ("postToolUse", "read"), ("postToolUse", "write"), ("postToolUse", "shell")]
+        ("preToolUse", "write"), ("postToolUse", "read"), ("postToolUse", "write"), ("postToolUse", "shell")]
     for h in data["hooks"]:
         assert h["trigger"] in LEGACY_TRIGGERS
         assert h["action"] == {"type": "command", "command": CMD}
@@ -676,7 +688,7 @@ def test_install_agent_into_object_form_profile_keeps_its_form(tmp_path):
     assert hooks["stop"] == existing["hooks"]["stop"]
     assert hooks["agentSpawn"][0] == {"command": "git status"}
     assert hooks["agentSpawn"][1] == {"command": CMD, "timeout_ms": 20000}
-    assert [e["matcher"] for e in hooks["preToolUse"]] == ["shell", "read"]
+    assert [e["matcher"] for e in hooks["preToolUse"]] == ["shell", "read", "write"]
     assert [e["matcher"] for e in hooks["postToolUse"]] == ["read", "write", "shell"]
     inst.install(tmp_path, python=PY, fmt="agent", agent="dev")
     assert _json(path) == data

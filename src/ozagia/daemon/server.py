@@ -32,9 +32,9 @@ built-in edit, write or patch reported by `after`), null otherwise; with
 
 Path resolution and ownership: `path_check`, `owner_check` and `who`
 (`ozagia.daemon.protocol`). Every request with a `session` (and `hello`)
-marks that session live (`ozagia.core.owners.Owners`); a handled edit of a
-file another live session left uncommitted gets an `[ozagia] warning:`
-line. `stats` adds `path_suggestions`, `ownership_warnings` and
+marks that session live (`ozagia.core.owners.Owners`), except a
+`session_event` `end`, which ends it; a handled edit of a file another
+live session left uncommitted gets an `[ozagia] warning:` line. `stats` adds `path_suggestions`, `ownership_warnings` and
 `live_sessions`.
 
 With `idle_timeout` (seconds), the daemon shuts down once no request has
@@ -313,7 +313,9 @@ class DaemonState:
     def dispatch(self, msg: dict[str, Any]) -> dict[str, Any]:
         from ozagia import intent
         op = msg.get("op")
-        if op not in ("ping", "stats", "shutdown"):
+        if op == "session_event" and msg.get("event") == "end":
+            self.owners.end(msg.get("harness"), msg.get("session"))
+        elif op not in ("ping", "stats", "shutdown"):
             self.owners.touch(msg.get("harness"), msg.get("session"))
         if op == "ping":
             return {"ok": True, "version": P.PROTOCOL_VERSION,
@@ -633,7 +635,8 @@ class DaemonState:
 
     def _owners_op(self, op: str, msg: dict[str, Any]) -> dict[str, Any]:
         """`path_check` {path, cwd?}: does the path exist, and if not, the
-        nearest existing paths (`ozagia.intent.paths`). `owner_check`
+        nearest existing paths (`ozagia.intent.paths`; without the graph's
+        same-name files, `graph: false`, when the graph lock is busy). `owner_check`
         {paths, cwd?} with the request's harness and session: the ownership
         warnings an edit of those files would get. `who` {path}: the
         sessions that edited it (`ozagia.core.owners.who`)."""
@@ -650,13 +653,21 @@ class DaemonState:
             if p.exists():
                 return {"ok": True, "exists": True, "line": "", "candidates": [],
                         "meta": {"intent": "path_check", "keys": []}}
-            with self._graph_lock():
-                cands = PA.candidates(self.root, path, base=cwd if isinstance(
-                    cwd, str) and os.path.isdir(cwd) else None, memory=self.memory)
+            base = cwd if isinstance(cwd, str) and os.path.isdir(cwd) else None
+            # Never wait on the graph lock (a reindex can hold it for long):
+            # when it is busy, answer from the file system only.
+            graph = self.lock.acquire(blocking=False)
+            try:
+                cands = PA.candidates(self.root, path, base=base,
+                                      memory=self.memory if graph else None)
+            finally:
+                if graph:
+                    self.lock.release()
             line = PA.suggestion_line(path, cands)
             return {"ok": True, "exists": False, "line": line,
                     "candidates": [{"path": str(c.path), "rel": c.rel,
                                     "key": c.key, "why": c.why} for c in cands],
+                    "graph": graph,
                     "meta": {"intent": "path_check",
                              "keys": [c.key for c in cands if c.key],
                              "path_suggestions": 1 if line else 0}}

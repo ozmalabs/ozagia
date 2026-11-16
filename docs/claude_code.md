@@ -110,7 +110,7 @@ The entries look like this:
     "PostToolUse": [{"matcher": "Read|Grep|Glob|Edit|MultiEdit|Write|Bash",
                      "hooks": [{"type": "command", "timeout": 20,
                                 "command": "/path/to/python -m ozagia.integrations.claude_code hook"}]}],
-    "PreToolUse": [{"matcher": "Bash|Read",
+    "PreToolUse": [{"matcher": "Bash|Read|Edit|MultiEdit|Write",
                     "hooks": [{"type": "command", "timeout": 20,
                                "command": "/path/to/python -m ozagia.integrations.claude_code hook"}]}],
     "SessionStart": [{"matcher": "startup|resume|clear|compact",

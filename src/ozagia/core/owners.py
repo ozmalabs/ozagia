@@ -9,7 +9,8 @@ harness's own tools made are journaled by `ozagia.intent.after` as
 
 A session is live when the daemon saw a request or `hello` from it in the
 last `LIVE_WINDOW_S` seconds (`Owners.touch`; at start the daemon reads
-the times back from its journal, `seen_sessions`). An MCP server session
+the times back from its journal, `seen_sessions`) and has not ended: a
+`session_event` `end` (Claude's SessionEnd) drops it (`Owners.end`). An MCP server session
 (`harness` "mcp", id `pid<N>`) is live while that process runs.
 
 Before an edit, `Owners.warnings` names each other live session whose last
@@ -17,6 +18,26 @@ edit of the file is newer than the file's last commit, while the file is
 dirty in git:
 
     [ozagia] warning: <file> has uncommitted edits by another live session (<harness> <short id>, <age>)
+
+An MCP server session is named `MCP server pid <N>`. The MCP server does
+not know which harness session drives it, so an agent that edits through
+both MCP tools and its built-in tools would be warned about itself. A
+best-effort heuristic suppresses that: a warning about an MCP session's
+edit is dropped when the requesting session itself sent the daemon a
+request within `MCP_SELF_WINDOW_S` seconds of that edit (either side).
+It can hide a real warning about another agent's MCP server whose edit
+happened to coincide with the requester's activity.
+
+When no other session is live (`Owners.seen`, and no running MCP server
+has journaled an edit), the edit journal is not read at all.
+
+Committed is judged per file, not per hunk: the edit counts as committed
+when a commit in `<head>..HEAD` (with `<head>`, recorded at edit time, an
+ancestor of HEAD) touched the file. A partial commit of the file by
+another session (`git add -p`) therefore marks a still-dirty edit as
+committed, and its warning is suppressed. After a branch switch that
+leaves `<head>` off HEAD's history the range is not trusted and the edit
+counts as uncommitted while the file is dirty.
 
 `who` answers `ozagia who <path>` and MCP `dev_who`.
 """
@@ -28,6 +49,7 @@ import os
 import subprocess
 import threading
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -37,6 +59,11 @@ JOURNAL_TAIL_BYTES = 4 * 1024 * 1024
 DAEMON_JOURNAL_TAIL_BYTES = 2 * 1024 * 1024
 GIT_TIMEOUT_S = 3
 SHORT_ID = 8
+# A warning about an MCP session's edit is dropped when the requesting
+# session sent a request within this many seconds of it (module docstring).
+MCP_SELF_WINDOW_S = 5.0
+# Request times kept per session for that check.
+REQUEST_HISTORY = 256
 _TS_FORMAT = "%Y-%m-%dT%H:%M:%S"
 
 
@@ -103,8 +130,11 @@ def edits(journal: str | Path, rel: str | None = None) -> list[dict[str, Any]]:
     """Journaled edits with a session, oldest first, of `rel` (or all):
     `{"harness", "session", "epoch", "kind", "files"}`."""
     out: list[dict[str, Any]] = []
+    # The journal is `json.dumps` output: a line about `rel` contains it
+    # JSON-encoded, so most lines are skipped without parsing.
+    needle = json.dumps(rel) if rel is not None else None
     for line in _tail_lines(Path(journal), JOURNAL_TAIL_BYTES):
-        if '"session"' not in line:
+        if '"session"' not in line or (needle is not None and needle not in line):
             continue
         try:
             e = json.loads(line)
@@ -127,8 +157,24 @@ def edits(journal: str | Path, rel: str | None = None) -> list[dict[str, Any]]:
 
 
 def seen_sessions(daemon_journal: str | Path) -> dict[tuple[str, str], float]:
+    return _daemon_sessions(daemon_journal)[0]
+
+
+def _daemon_sessions(daemon_journal: str | Path
+                     ) -> tuple[dict[tuple[str, str], float],
+                                dict[tuple[str, str], list[float]]]:
+    """`seen_sessions`, and each session's request times (oldest first)."""
+    history: dict[tuple[str, str], list[float]] = {}
+    seen = _seen_sessions(daemon_journal, history)
+    return seen, history
+
+
+def _seen_sessions(daemon_journal: str | Path,
+                   history: dict[tuple[str, str], list[float]]
+                   ) -> dict[tuple[str, str], float]:
     """(harness, session) -> the time of its last request in the daemon
-    journal."""
+    journal. A session whose last word is a `session_event` `end` is left
+    out."""
     out: dict[tuple[str, str], float] = {}
     for line in _tail_lines(Path(daemon_journal), DAEMON_JOURNAL_TAIL_BYTES):
         if '"session"' not in line:
@@ -144,7 +190,12 @@ def seen_sessions(daemon_journal: str | Path) -> dict[tuple[str, str], float]:
         if t is None:
             continue
         key = (str(e.get("harness") or "opencode"), s)
+        if e.get("op") == "session_event" and e.get("intent") == "session_end":
+            out.pop(key, None)          # an ended session is not live
+            history.pop(key, None)
+            continue
         out[key] = max(out.get(key, 0.0), t)
+        history.setdefault(key, []).append(t)
     return out
 
 
@@ -193,21 +244,50 @@ def head(root: str | Path) -> str | None:
     return out.strip() or None if out else None
 
 
+def _is_ancestor(root: Path, commit: str) -> bool | None:
+    """Whether `commit` is an ancestor of HEAD; None when git cannot say
+    (an unknown commit, no git)."""
+    try:
+        proc = subprocess.run(["git", "-C", str(root), "merge-base", "--is-ancestor",
+                               commit, "HEAD"], capture_output=True,
+                              timeout=GIT_TIMEOUT_S, stdin=subprocess.DEVNULL,
+                              check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return {0: True, 1: False}.get(proc.returncode)
+
+
 def _committed(root: Path, rel: str, edit: dict[str, Any],
                state: dict[str, Any]) -> bool:
     """Whether an edit is in git: the file is clean, or a commit after the
-    HEAD the edit was made on touched it. Without that HEAD (an older
-    entry), whether the file's last commit is not older than the edit
-    (commit times are whole seconds)."""
+    HEAD the edit was made on touched it, that HEAD being an ancestor of
+    the current one (not: uncommitted). File-granular: a partial commit of
+    the file by someone else counts (module docstring). Without that HEAD
+    (an older entry, or a commit git no longer knows), whether the file's
+    last commit is not older than the edit (commit times are whole
+    seconds)."""
     if state.get("dirty") is False:
         return True
     h = edit.get("head")
     if h:
-        out = _git(root, "rev-list", "-1", f"{h}..HEAD", "--", rel)
-        if out is not None:
-            return bool(out.strip())
+        anc = _is_ancestor(root, h)
+        if anc is False:
+            # HEAD moved off that history (a branch switch): `h..HEAD`
+            # would hold another branch's commits. Not trusted.
+            return False
+        if anc:
+            out = _git(root, "rev-list", "-1", f"{h}..HEAD", "--", rel)
+            if out is not None:
+                return bool(out.strip())
     last = state.get("last_commit")
     return last is not None and int(edit["epoch"]) <= last
+
+
+def label(harness: str, session: str) -> str:
+    """How a warning names a session: `claude abcd1234`, `MCP server pid N`."""
+    if harness == "mcp" and session.startswith("pid") and session[3:].isdigit():
+        return f"MCP server pid {session[3:]}"
+    return f"{harness} {session[:SHORT_ID]}"
 
 
 def age(seconds: float) -> str:
@@ -232,15 +312,33 @@ class Owners:
         self.root = Path(root)
         self.window_s = float(window_s)
         self._lock = threading.Lock()
-        self.seen: dict[tuple[str, str], float] = (
-            seen_sessions(daemon_journal) if daemon_journal else {})
+        seen, history = _daemon_sessions(daemon_journal) if daemon_journal else ({}, {})
+        self.seen: dict[tuple[str, str], float] = seen
+        # Recent request times per session (the MCP self-warning check).
+        self.requests: dict[tuple[str, str], deque[float]] = {
+            k: deque(v, maxlen=REQUEST_HISTORY) for k, v in history.items()}
+        # Per edit journal: the MCP session ids that journaled an edit, and
+        # the offset read up to (`_mcp_sessions`).
+        self._mcp: dict[str, set[str]] = {}
+        self._mcp_offset: dict[str, int] = {}
 
     def touch(self, harness: Any, session: Any, now: float | None = None) -> None:
         if not isinstance(session, str) or not session:
             return
+        t = time.time() if now is None else now
+        key = (str(harness or "opencode"), session)
         with self._lock:
-            self.seen[(str(harness or "opencode"), session)] = (
-                time.time() if now is None else now)
+            self.seen[key] = t
+            self.requests.setdefault(key, deque(maxlen=REQUEST_HISTORY)).append(t)
+
+    def end(self, harness: Any, session: Any) -> None:
+        """The session ended (SessionEnd): it is no longer live."""
+        if not isinstance(session, str) or not session:
+            return
+        key = (str(harness or "opencode"), session)
+        with self._lock:
+            self.seen.pop(key, None)
+            self.requests.pop(key, None)
 
     def live(self, harness: str, session: str, now: float | None = None) -> bool:
         if harness == "mcp":
@@ -255,17 +353,85 @@ class Owners:
         with self._lock:
             return sum(1 for t in self.seen.values() if now - t <= self.window_s)
 
+    def _mcp_sessions(self, journal: str | Path) -> set[str]:
+        """Ids of the MCP sessions that journaled an edit in `journal`,
+        read incrementally (only bytes appended since the last call; the
+        first call reads the tail)."""
+        path = Path(journal)
+        key = str(path)
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return set()
+        with self._lock:
+            start = self._mcp_offset.get(key)
+            found = self._mcp.setdefault(key, set())
+        skip_first = False
+        if start is None or start > size:      # first read, or rewritten
+            start = max(0, size - JOURNAL_TAIL_BYTES)
+            skip_first = start > 0
+            found.clear()
+        if start == size:
+            return set(found)
+        try:
+            with open(path, "rb") as fh:
+                fh.seek(start)
+                data = fh.read(size - start)
+        except OSError:
+            return set(found)
+        end = data.rfind(b"\n") + 1           # complete lines only
+        lines = data[:end].decode("utf-8", errors="replace").splitlines()
+        if skip_first and lines:
+            lines = lines[1:]
+        for line in lines:
+            if '"harness": "mcp"' not in line:
+                continue
+            try:
+                sess = json.loads(line).get("session")
+            except (ValueError, AttributeError):
+                continue
+            if isinstance(sess, dict) and sess.get("harness") == "mcp" and isinstance(
+                    sess.get("id"), str):
+                found.add(sess["id"])
+        with self._lock:
+            self._mcp_offset[key] = start + end
+        return set(found)
+
+    def others_live(self, journal: str | Path, me: tuple[str, str],
+                    now: float | None = None) -> bool:
+        """Whether a session other than `me` is live: one the daemon saw in
+        the window, or a running MCP server that journaled an edit."""
+        now = time.time() if now is None else now
+        with self._lock:
+            if any(k != me and now - t <= self.window_s
+                   for k, t in self.seen.items()):
+                return True
+        return any(("mcp", s) != me and _pid_alive(s)
+                   for s in self._mcp_sessions(journal))
+
+    def active_near(self, harness: str, session: str, t: float,
+                    window_s: float = MCP_SELF_WINDOW_S) -> bool:
+        """Whether (harness, session) sent a request within `window_s` of
+        `t`."""
+        with self._lock:
+            times = list(self.requests.get((harness, session), ()))
+        return any(abs(r - t) <= window_s for r in times)
+
     def warnings(self, journal: str | Path, rel: str, harness: Any, session: Any,
                  now: float | None = None) -> list[str]:
         """Warning lines for an edit of `rel` by (harness, session)."""
         now = time.time() if now is None else now
         me = (str(harness or "opencode"), session if isinstance(session, str) else "")
+        if not self.others_live(journal, me, now):
+            return []                   # the journal is not read
         last: dict[tuple[str, str], dict[str, Any]] = {}
         for e in edits(journal, rel):
             key = (e["harness"], e["session"])
             if key != me and (key not in last or e["epoch"] >= last[key]["epoch"]):
                 last[key] = e
-        others = {k: e for k, e in last.items() if self.live(*k, now=now)}
+        others = {k: e for k, e in last.items() if self.live(*k, now=now)
+                  and not (k[0] == "mcp" and me[1]
+                           and self.active_near(*me, e["epoch"]))}
         if not others:
             return []
         state = git_state(self.root, rel)
@@ -277,7 +443,7 @@ class Owners:
                 continue
             t = e["epoch"]
             lines.append(f"[ozagia] warning: {rel} has uncommitted edits by "
-                         f"another live session ({h} {s[:SHORT_ID]}, "
+                         f"another live session ({label(h, s)}, "
                          f"{age(now - t)})")
         return lines
 
@@ -341,5 +507,6 @@ def format_who(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-__all__ = ["LIVE_WINDOW_S", "Owners", "acting", "age", "edits", "format_who",
-           "git_state", "head", "mcp_session", "seen_sessions", "session_field", "who"]
+__all__ = ["LIVE_WINDOW_S", "MCP_SELF_WINDOW_S", "Owners", "acting", "age", "edits",
+           "format_who", "git_state", "head", "label", "mcp_session", "seen_sessions",
+           "session_field", "who"]

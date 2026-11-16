@@ -561,7 +561,7 @@ def test_install_merges_and_is_idempotent(tmp_path):
     expected = {"type": "command", "command": cmd, "timeout": hook.HOOK_TIMEOUT_S}
     assert _ours(data, "PostToolUse") == [("Read|Grep|Glob|Edit|MultiEdit|Write|Bash",
                                            expected)]
-    assert _ours(data, "PreToolUse") == [("Bash|Read", expected)]
+    assert _ours(data, "PreToolUse") == [("Bash|Read|Edit|MultiEdit|Write", expected)]
     assert _ours(data, "SessionStart") == [("startup|resume|clear|compact", expected)]
     assert _ours(data, "SessionEnd") == [("", expected)]
 

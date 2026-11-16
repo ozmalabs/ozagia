@@ -18,6 +18,11 @@ One line reports them (`suggestion_line`):
 
     [ozagia] no such file <path>; did you mean: <path> (<key>), ...
 
+A read or edit refused because its path, which exists, lies in a sibling
+worktree (`with_suggestions`) gets
+
+    [ozagia] <path> is in worktree <branch>; this checkout has: <path>, ...
+
 Paths inside the root are shown relative to it when the request was
 relative, else absolute; each carries its `file:` key when the graph has
 one. A path in another worktree is absolute, with `(worktree <branch>)`.
@@ -251,8 +256,11 @@ def candidates(root: str | Path, raw: Any, *, base: str | Path | None = None,
     return out
 
 
-def suggestion_line(raw: str, cands: list[Candidate]) -> str:
-    """`[ozagia] no such file <raw>; did you mean: ...`, or "" for none."""
+def suggestion_line(raw: str, cands: list[Candidate], *,
+                    lead: str | None = None) -> str:
+    """`[ozagia] no such file <raw>; did you mean: ...`, or "" for none.
+    `lead` replaces `no such file <raw>; did you mean` (a path that exists
+    but was refused, `with_suggestions`)."""
     if not cands:
         return ""
     relative = not os.path.isabs(raw)
@@ -263,7 +271,9 @@ def suggestion_line(raw: str, cands: list[Candidate]) -> str:
             parts.append(f"{shown} ({c.key})" if c.key else shown)
         else:
             parts.append(f"{c.path} ({c.why})")
-    return f"{TAG}no such file {raw}; did you mean: " + ", ".join(parts)
+    if lead is None:
+        lead = f"no such file {raw}; did you mean"
+    return f"{TAG}{lead}: " + ", ".join(parts)
 
 
 def suggest(root: str | Path, raw: Any, *, base: str | Path | None = None,
@@ -293,14 +303,40 @@ def missing_error(memory: Any, raw: Any, message: str, *,
                        meta={"path_suggestions": 1})
 
 
+def _existing_lead(root: str | Path, raw: str) -> str | None:
+    """The lead of the suggestion line for a refused `raw` that exists:
+    `<raw> is in worktree <branch>; this checkout has` (a sibling worktree)
+    or `<raw> is outside this checkout; did you mean`. None when it does
+    not exist (the usual `no such file` lead)."""
+    p = Path(os.path.expanduser(raw.strip()))
+    if not p.is_absolute():
+        p = Path(root) / p
+    if not p.exists():
+        return None
+    real = Path(os.path.realpath(p))
+    root_real = Path(os.path.realpath(root))
+    owner: tuple[Path, str | None] | None = None
+    # The deepest worktree holding the path (worktrees may nest).
+    for w, b in worktrees(root):
+        if (_rel(w, real) is not None
+                and (owner is None or len(w.parts) > len(owner[0].parts))):
+            owner = (w, b)
+    if owner is not None and owner[0] != root_real:
+        return f"{raw} is in worktree {owner[1] or owner[0].name}; this checkout has"
+    return f"{raw} is outside this checkout; did you mean"
+
+
 def with_suggestions(memory: Any, raw: Any, err: IntentError) -> IntentError:
     """`err` (a path refused as outside the root) with the suggestion line
-    when the path is missing or lies in another worktree."""
+    when the path is missing or lies in another worktree. A path that
+    exists in a sibling worktree is not called missing: the line reads
+    `<path> is in worktree <branch>; this checkout has: ...`."""
     from ozagia.intent.common import root_of
     root = root_of(memory)
     if not isinstance(raw, str) or not raw.strip():
         return err
-    line = suggestion_line(raw, candidates(root, raw, memory=memory))
+    line = suggestion_line(raw, candidates(root, raw, memory=memory),
+                           lead=_existing_lead(root, raw))
     if not line:
         return err
     return IntentError(f"{err}\n{line}", keys=err.keys, intent=err.intent,
