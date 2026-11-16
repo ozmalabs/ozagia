@@ -175,6 +175,44 @@ def normalize_image(ref: Any) -> str | None:
     return text
 
 
+def image_pinned(ref: Any) -> bool | None:
+    """Whether an image reference is pinned: it has a digest (`@sha256:...`)
+    or a tag other than `latest` (a missing tag means `latest`). None when
+    the reference cannot be told (not a string, a variable, unsafe text).
+    Shared by the repo review (`unpinned_image`) and the goal system
+    (`ops_has ... pinned`)."""
+    image = normalize_image(ref)
+    if image is None:
+        return None
+    return "@" in image or not image.endswith(":latest")
+
+
+def iter_ops_sources(rels: Iterable[str], read: Any) -> Iterable[
+        tuple[str, str, str | None, "OpsGraph | None", str | None]]:
+    """Parse the operations sources among `rels` (paths `ops_source_format`
+    recognises; others are left out), one at a time: yields `(rel, format,
+    text, graph, error)`. `read(rel)` returns the file's text or None
+    (unreadable: `error` is set, `graph` is None); a source that fails to
+    parse yields its error and no graph. Lazy, so a caller can stop between
+    files (a time budget). Used by the repo review's ops section and by the
+    goal system's `ops:` key lookup (`ozagia.core.repo_review.
+    declared_ops_nodes`)."""
+    for rel in rels:
+        fmt = ops_source_format(rel)
+        if not fmt:
+            continue
+        text = read(rel)
+        if text is None:
+            yield rel, fmt, None, None, "unreadable or too large"
+            continue
+        try:
+            graph = parse_ops_source(text, rel, fmt)
+        except Exception as exc:  # noqa: BLE001 - one bad file is reported
+            yield rel, fmt, text, None, f"{type(exc).__name__}: {exc}"
+            continue
+        yield rel, fmt, text, graph, None
+
+
 def _safe_rel(rel: str) -> bool:
     return (bool(rel) and len(rel) <= 1024 and _SAFE_PATH.fullmatch(rel) is not None
             and ".." not in PurePosixPath(rel).parts and not rel.startswith("/"))

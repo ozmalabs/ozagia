@@ -8,7 +8,8 @@
     ozagia goal claim ID --harness H --session S [--release]
     ozagia goal drop ID [--reason R]
     ozagia goal block ID --reason R | --clear
-    ozagia goal from-review PACKET FINDING_ID
+    ozagia goal from-review [PACKET] FINDING_ID   (PACKET: default the
+                                                   reviews dir's latest.json)
 
 Every command takes `--root R` and `--json`. `add`, `check` and
 `from-review` load the graph (`<state dir>/graph.json`, built first when
@@ -66,9 +67,10 @@ def add_parser(sub: Any) -> None:
     block.add_argument("--reason", default="")
     block.add_argument("--clear", action="store_true", help="unblock (back to open)")
     fr = common(gsub.add_parser("from-review", help="a goal from a repo-review finding"))
-    fr.add_argument("packet", help="ozagia.repo_review.packet.v1 JSON file under "
-                    "<state dir>/reviews/")
-    fr.add_argument("finding_id")
+    fr.add_argument("ref", nargs="+", metavar="[PACKET] FINDING_ID",
+                    help="the finding id, optionally after an ozagia.repo_review."
+                    "packet.v1 JSON file under <state dir>/reviews/ (default: "
+                    "the reviews dir's latest.json)")
 
 
 def _root(value: str | None) -> Path:
@@ -226,8 +228,11 @@ def _run(args: argparse.Namespace, root: Path) -> int:
             print(f"{goal['id']} {goal['status']}")
         return 0
     if act == "from-review":
-        packet = str(Path(args.packet).expanduser().resolve())
-        goal = G.from_review(root, _memory(root), packet, args.finding_id, by="cli")
+        if len(args.ref) > 2:
+            raise G.GoalError("from-review takes [PACKET] FINDING_ID")
+        packet = (str(Path(args.ref[0]).expanduser().resolve())
+                  if len(args.ref) == 2 else None)
+        goal = G.from_review(root, _memory(root), packet, args.ref[-1], by="cli")
         if args.json:
             _print({"ok": True, "goal": goal})
         else:

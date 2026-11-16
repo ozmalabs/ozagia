@@ -68,8 +68,8 @@ criterion (`last`).
 | `file_absent` | `key` (`file:`) | it is not |
 | `unchanged` | `key` (any key; `hash` is taken at creation) | the key's content hash still equals the stored one |
 | `lint_clean` | `key` | never: always `unknown` (see below); `goal add` warns |
-| `review_resolved` | `packet`, `finding_id` | the finding id is absent from the review packet |
-| `ops_has` | `key` (`ops:`), optional `attr`, `value` (needs `attr`) | the ops node exists; has a non-empty `attr`; whose value equals (or, for a list, contains) `value` |
+| `review_resolved` | `packet`, `finding_id` (`type`, `keys` and an `anchor` are taken from the packet) | a later review by ozagia of this root no longer reports the finding (see "Review findings" below) |
+| `ops_has` | `key` (`ops:`), optional `attr`, `value` (needs `attr`) or `pinned: true` | the ops node exists; has a non-empty `attr`; whose value equals (or, for a list, contains) `value`; with `pinned`, its image has a digest or a tag other than `latest` |
 
 Details:
 
@@ -104,9 +104,9 @@ Details:
 - **Errors.** A test that errored (setup, fixture) makes `test_fails`
   `unknown` and `test_passes` `fail`.
 - **Stale** test results: see "Freshness of test results" below.
-  `review_resolved` is `stale` when the packet's mtime is older than the
-  newest mtime among the targets' files. Stale is not met: rerun the test
-  or the review.
+  `review_resolved` is `stale` when a file the goal is about changed
+  after the review started (see "Review findings"). Stale is not met:
+  rerun the test or the review.
 - **Calls** use the syntactic symbol graph (`docs/symbol_graph.md`), built
   from the tag cache, which needs the tree-sitter extra. Resolution is by
   name and imports, with no type inference. A caller or callee missing
@@ -118,8 +118,9 @@ Details:
   file changes into its in-memory graph (`DevMemory.refresh(write=False)`;
   the snapshot on disk is not rewritten). When there is no graph (an MCP
   server without one) or the refresh raised, every kind that reads the
-  graph (test kinds, symbol kinds, calls kinds, `ops_has`, `unchanged` of
-  a non-file key) is `unknown`, with the reason. `--no-refresh` skips the
+  graph (test kinds, symbol kinds, calls kinds, `unchanged` of a non-file
+  key) is `unknown`, with the reason. `ops_has` then reads the tracked
+  operations sources instead (below). `--no-refresh` skips the
   refresh and marks each such result `"graph": "not refreshed"` in its
   evidence.
 - **Content hashes** (`unchanged`): file bytes for `file:`/`doc:` keys; the
@@ -129,20 +130,79 @@ Details:
   edit's reply and stores nothing, so there is no last lint result to read.
   `lint_clean` is accepted (its key must resolve) and always evaluates to
   `unknown` with that reason, until a lint record exists.
-- **Review packets** have the W17 schema `ozagia.repo_review.packet.v1`:
-  `schema`, `findings` with `id`, `keys` and `suggested_goal {title,
-  targets, criteria}`. A packet must be a regular file under the state
-  dir's `reviews/` directory (`.ozagia/reviews/`; symlinks are resolved
-  first, so a link to a file outside is refused) of at most 16 MB. It is
-  opened without following a final symlink and without blocking, so a
-  FIFO or a device is refused instead of hanging the server. Other paths
-  are refused at creation and give `unknown` at a check. The path is
-  stored root-relative when it is inside the root; the criterion reads
-  that file at each check. Which review run may resolve a finding is left
-  to the repo-review integration (W19).
+- **Ops nodes.** The default index has no `ops:` nodes. When the graph
+  has no node for an `ops:` key (or there is no usable graph), the key is
+  looked up in the operations sources git tracks (compose files,
+  Containerfiles, quadlets, units), parsed and resolved the way the repo
+  review's ops section parses them (`repo_review.declared_ops_nodes`, on
+  `core.ops_graph`). This applies at creation (targets, scope, criterion
+  keys) and to `ops_has` at a check; the evidence says `origin: graph` or
+  `sources`. A key naming a file (`ops:compose/deploy/compose.yaml#service/web`)
+  reads only that file; `ops:image/...` keys read every source.
+  `pinned: true` checks `attr` (default `image`, else `base_image` for a
+  Containerfile stage) with `ops_graph.image_pinned`, the predicate the
+  review's `unpinned_image` uses; it excludes `value`, and `pinned: false`
+  is refused. An image reference ozagia cannot read (a variable) is
+  `unknown`.
+- **`file:` keys** also resolve when the file is a regular file in the
+  working tree inside the root (not a symlink, not in the state dir), so a
+  committed `.env` or key file the indexer leaves out can be a target.
+- **Review packets** have the W17 schema `ozagia.repo_review.packet.v1`.
+  A packet must be a regular file under the state dir's `reviews/`
+  directory (`.ozagia/reviews/`; symlinks are resolved first, so a link to
+  a file outside is refused) of at most 16 MB. It is opened without
+  following a final symlink and without blocking, so a FIFO or a device is
+  refused instead of hanging the server.
 
 There is no shell-command criterion: commands would run outside harness
 sandboxes, the reason background jobs are opt-in.
+
+## Review findings
+
+`review_resolved` ties a goal to a finding of `ozagia review-repo`
+(`docs/repo_review.md`) and passes only on a later review.
+
+At creation, the named packet must be under `.ozagia/reviews/`, carry
+`generator: "ozagia.repo_review"` (written by `review_repo`), review this
+root, and contain the finding (in `findings`, or only its id in a
+section's `ids_by_type` when the section cap left it out). The criterion
+stores the packet path, the finding id, its `type` and `keys`, and an
+`anchor`: the packet's `generated_at`, `head_commit` and sha256. `goal_add`
+and `--criterion review_resolved:PACKET FINDING_ID` take `type` and `keys`
+from the packet; they cannot be given.
+
+At a check the criterion reads the newest packet in the reviews dir, not
+the stored path: `latest.json`, or when that is missing or unreadable the
+newest `repo_review-*.json`. Then, in order:
+
+1. the packet must be ozagia's (`generator`), for this root, with a
+   readable `generated_at`; else `unknown`;
+2. `stale` when a file of the goal's targets, scope (keys and glob
+   matches) or the finding's keys has other content now than when that
+   review started: the packet's `tree` is the same working-tree
+   fingerprint test runs carry, taken before the review reads any file,
+   and is compared the same way (see "Freshness of test results"). A
+   packet without `tree` (an older ozagia, or no git) falls back to file
+   mtimes against `generated_at`, which is weaker: a backdated mtime hides
+   an edit and scope globs are not expanded;
+3. `repo_review.finding_state(packet, id, type=..., keys=...)`: `present`
+   (the id is in a section's `ids`, capped findings included) is `fail`;
+   `not_checked` (the check behind the type did not run over its full
+   population, or skipped a file of the finding) is `unknown`;
+4. `absent` is `pass` only when the packet's `generated_at` is later than
+   the anchor's and its sha256 differs; otherwise `unknown` ("not a later
+   review").
+
+So rewriting `latest.json` by hand without the generator, for another
+root, or with the anchor's time does not resolve a finding, and a packet
+anywhere else is never read. An agent that can run `ozagia review-repo
+--save` can produce the resolving packet itself. That is intended: the
+review is deterministic, so a later packet without the finding means the
+code no longer has it. What this does not stop is an agent writing a
+complete forged packet with the generator field and a later time; the
+packet is not signed. The test record is not part of the fingerprint, so a
+`failing_test` finding stays `fail` (not `stale`) until the next review
+after the passing run.
 
 ## Creation and status
 
@@ -178,7 +238,8 @@ status does not change. A check without ids skips dropped goals.
 
 A test result holds only while nothing it depended on, as far as the goal
 says, has changed since the run started. The files compared are the
-files of the goal's targets (for an `ops:` key, the path before `#`), of
+files of the goal's targets (for an `ops:` key, its source file:
+`ops:compose/deploy/compose.yaml#service/web` -> `deploy/compose.yaml`), of
 its scope keys, the files matching its scope globs (among the files git
 tracks or sees untracked now, the files in the run's commit, and the
 files dirty at the run), and the test's file.
@@ -241,7 +302,7 @@ ozagia goal check [ID ...] [--no-refresh]
 ozagia goal claim ID --harness H --session S [--release]
 ozagia goal drop ID [--reason R]
 ozagia goal block ID --reason R | --clear
-ozagia goal from-review PACKET FINDING_ID
+ozagia goal from-review [PACKET] FINDING_ID
 ```
 
 All take `--root` and `--json`. `--criterion` is `kind:args`: arguments
@@ -273,13 +334,25 @@ value = "nginx:1.25"
 `from-review` turns a finding's `suggested_goal` into a goal (the
 finding's `keys` are the targets when the suggestion has none), adds
 `review_resolved` for the finding, and records the finding as the goal's
-`source`. A second goal for the same finding is refused while the first is
-not dropped.
+`source`. `PACKET` defaults to `.ozagia/reviews/latest.json`. A second goal
+for the same finding is refused while the first is not dropped. Every
+finding type the review produces converts (tested on a review of a fixture
+repository with all of them). A typical round:
+
+```
+ozagia review-repo --save                 # .ozagia/reviews/latest.json
+ozagia goal from-review RR-1a2b3c4d5e6f7a8b
+# ... fix it ...
+ozagia review-repo --save                 # a later review
+ozagia goal check                         # met when every criterion passes
+```
 
 ## MCP tools
 
-`goal_list`, `goal_show`, `goal_check`, `goal_add` and `goal_claim`
-(coding and combined modes). An MCP server does not know the harness's
+`goal_list`, `goal_show`, `goal_check`, `goal_add`, `goal_from_review
+{finding_id}` (from `.ozagia/reviews/latest.json`) and `goal_claim` (coding
+and combined modes). `dev_review_repo` gives each top finding a `goal`
+field: the id of the goal that tracks it, or null. An MCP server does not know the harness's
 session id, so `goal_claim` takes `harness` and `session`.
 
 ## Daemon and harnesses

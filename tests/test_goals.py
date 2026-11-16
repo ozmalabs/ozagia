@@ -597,15 +597,37 @@ def test_ops_has(repo, mem):
 # --------------------------------------------------------------------------- #
 # review packets
 # --------------------------------------------------------------------------- #
-def _packet(path: Path, findings: list[dict]) -> Path:
+_STAMP = [0]
+
+
+def _packet(path: Path, findings: list[dict], *, root: Path | None = None,
+            generator: str | None = G.REVIEW_GENERATOR) -> Path:
+    """A packet shaped like `review_repo`'s: generator, root, a later
+    `generated_at` on every call, the working tree's fingerprint now, and
+    the checks behind the finding types used here (unreferenced_symbol,
+    stale_doc_reference) marked as run."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"schema": G.PACKET_SCHEMA, "truth_assessed": False,
-                                "sections": {}, "findings": findings}))
+    _STAMP[0] += 1
+    sections = {}
+    for name, check, ftype in (("health", "unreferenced_symbols", "unreferenced_symbol"),
+                               ("docs", "links_and_code_spans", "stale_doc_reference")):
+        ids = [f["id"] for f in findings if f.get("type") == ftype]
+        sections[name] = {"checked": [check], "ids": ids,
+                          "ids_by_type": {ftype: ids} if ids else {}}
+    data = {"schema": G.PACKET_SCHEMA, "truth_assessed": False,
+            "root": str(root or path.parents[2]), "head_commit": None,
+            "generated_at": f"2026-11-16T10:00:{_STAMP[0] % 60:02d}.{_STAMP[0]:06d}Z",
+            "sections": sections, "findings": findings}
+    if generator is not None:
+        data["generator"] = generator
+    if (path.parents[2] / ".git").exists():
+        data["tree"] = FP.tree_fingerprint(path.parents[2])
+    path.write_text(json.dumps(data))
     return path
 
 
 FINDING = {
-    "id": "rr-0f3a9c", "section": "health", "type": "dead_symbol",
+    "id": "rr-0f3a9c", "section": "health", "type": "unreferenced_symbol",
     "severity": "minor", "keys": [S_LEGACY], "evidence": {"callers": 0},
     "confidence": 0.5,
     "suggested_goal": {"title": "Remove pkg.core.legacy", "targets": [S_LEGACY],
@@ -614,20 +636,96 @@ FINDING = {
 }
 
 
-def test_review_resolved_reads_the_packet(repo, mem):
-    packet = _packet(_reviews(repo) / "review.json", [FINDING])
+def test_review_resolved_reads_the_newest_packet(repo, mem):
+    packet = _packet(_reviews(repo) / "latest.json", [FINDING])
     goal = _add(repo, mem, f"review_resolved:{packet} rr-0f3a9c", targets=[S_LEGACY])
-    assert goal["criteria"][0]["args"]["packet"] == ".ozagia/reviews/review.json"
+    args = goal["criteria"][0]["args"]
+    assert args["packet"] == ".ozagia/reviews/latest.json"
+    assert args["type"] == "unreferenced_symbol" and args["keys"] == [S_LEGACY]
+    assert set(args["anchor"]) == {"generated_at", "head_commit", "sha256"}
     assert _statuses(_check(repo, mem, goal["id"])) == ["fail"]
+    # A later review without the finding resolves it.
     _packet(packet, [])
     report = _check(repo, mem, goal["id"])
-    assert _statuses(report) == ["pass"] and report["results"][0]["evidence"]["packet_sha256"]
-    _age(repo, "pkg/core.py", time.time() + 5)   # a change after the packet
-    assert _statuses(_check(repo, mem, goal["id"])) == ["stale"]
+    assert _statuses(report) == ["pass"], report
+    assert report["results"][0]["evidence"]["state"] == "absent"
+    # The newest timestamped packet counts when latest.json is gone.
     packet.unlink()
+    _packet(_reviews(repo) / "repo_review-20990101T000000Z-x.json", [FINDING])
+    assert _statuses(_check(repo, mem, goal["id"])) == ["fail"]
+    # No packet at all.
+    for p in _reviews(repo).iterdir():
+        p.unlink()
     assert _statuses(_check(repo, mem, goal["id"])) == ["unknown"]
     with pytest.raises(G.GoalError, match="cannot open"):
         _add(repo, mem, f"review_resolved:{packet} rr-0f3a9c")
+
+
+def test_review_resolved_needs_a_later_review_of_this_root(repo, mem):
+    reviews = _reviews(repo)
+    packet = _packet(reviews / "latest.json", [FINDING])
+    goal = _add(repo, mem, f"review_resolved:{packet} rr-0f3a9c", targets=[S_LEGACY])
+    anchor = goal["criteria"][0]["args"]["anchor"]
+    # The finding id must be in the named packet.
+    with pytest.raises(G.GoalError, match="not in"):
+        _add(repo, mem, f"review_resolved:{packet} rr-made-up")
+    # Not written by ozagia's review: refused at creation, unknown at check.
+    unsigned = _packet(reviews / "unsigned.json", [FINDING], generator=None)
+    with pytest.raises(G.GoalError, match="not written by ozagia's review"):
+        _add(repo, mem, f"review_resolved:{unsigned} rr-0f3a9c")
+    _packet(packet, [], generator=None)
+    report = _check(repo, mem, goal["id"])
+    assert _statuses(report) == ["unknown"]
+    assert "not written by ozagia's review" in report["results"][0]["reason"]
+    # Another root.
+    _packet(packet, [], root=Path("/somewhere/else"))
+    report = _check(repo, mem, goal["id"])
+    assert _statuses(report) == ["unknown"]
+    assert "reviews /somewhere/else" in report["results"][0]["reason"]
+    # Not later than the anchor (an older generated_at, or the same bytes).
+    _packet(packet, [])
+    raw = json.loads(packet.read_text())
+    raw["generated_at"] = anchor["generated_at"]
+    packet.write_text(json.dumps(raw))
+    report = _check(repo, mem, goal["id"])
+    assert _statuses(report) == ["unknown"] and "not a later review" in \
+        report["results"][0]["reason"]
+    # A check that did not run: not_checked -> unknown.
+    raw["generated_at"] = "2099-01-01T00:00:00.000000Z"
+    raw["sections"] = {}
+    packet.write_text(json.dumps(raw))
+    assert _statuses(_check(repo, mem, goal["id"])) == ["unknown"]
+    # The finding id among a section's ids (capped out of findings) is present.
+    raw["sections"] = {"health": {"checked": ["unreferenced_symbols"],
+                                  "ids": ["rr-0f3a9c"]}}
+    packet.write_text(json.dumps(raw))
+    assert _statuses(_check(repo, mem, goal["id"])) == ["fail"]
+
+
+def test_review_resolved_is_stale_after_a_target_edit(repo, mem):
+    packet = _packet(_reviews(repo) / "latest.json", [FINDING])
+    goal = _add(repo, mem, f"review_resolved:{packet} rr-0f3a9c", targets=[S_LEGACY])
+    # A packet with the working tree's fingerprint (as review_repo writes).
+    raw = json.loads(_packet(packet, []).read_text())
+    raw["tree"] = FP.tree_fingerprint(repo)
+    packet.write_text(json.dumps(raw))
+    report = _check(repo, mem, goal["id"])
+    assert _statuses(report) == ["pass"]
+    assert report["results"][0]["evidence"]["basis"] == "content"
+    # An edit after the review, even with the mtime set back.
+    before = (repo / "pkg" / "core.py").stat().st_mtime
+    _write(repo / "pkg" / "core.py", CORE + "\n# edited\n")
+    _age(repo, "pkg/core.py", before - 100)
+    report = _check(repo, mem, goal["id"])
+    assert _statuses(report) == ["stale"], report
+    assert report["results"][0]["evidence"]["changed_files"] == ["pkg/core.py"]
+    # Without a fingerprint: by mtime against generated_at (weaker).
+    del raw["tree"]
+    raw["generated_at"] = "2000-01-01T00:00:00.000000Z"
+    packet.write_text(json.dumps(raw))
+    report = _check(repo, mem, goal["id"])
+    assert _statuses(report) == ["stale"]
+    assert report["results"][0]["evidence"]["basis"] == "mtime"
 
 
 def test_packets_outside_the_reviews_dir_are_refused(repo, mem, tmp_path):
@@ -643,8 +741,8 @@ def test_packets_outside_the_reviews_dir_are_refused(repo, mem, tmp_path):
     link.symlink_to(outside)
     with pytest.raises(G.GoalError, match="not under the reviews directory"):
         _add(repo, mem, f"review_resolved:{link} rr-0f3a9c")
-    # A stored criterion whose packet became a link out is `unknown`.
-    good = _packet(_reviews(repo) / "good.json", [FINDING])
+    # A stored criterion whose newest packet became a link out is `unknown`.
+    good = _packet(_reviews(repo) / "latest.json", [FINDING])
     goal = _add(repo, mem, f"review_resolved:{good} rr-0f3a9c")
     good.unlink()
     good.symlink_to(outside)
@@ -985,16 +1083,18 @@ def test_brief_puts_goals_after_failing_tests_with_a_reserved_share(repo, mem):
 # from-review
 # --------------------------------------------------------------------------- #
 def test_from_review_with_a_fixture_packet(repo, mem):
-    packet = _packet(_reviews(repo) / "review.json", [FINDING, {
-        "id": "rr-other", "section": "docs", "type": "dangling_doc_ref",
+    packet = _packet(_reviews(repo) / "latest.json", [FINDING, {
+        "id": "rr-other", "section": "docs", "type": "stale_doc_reference",
         "severity": "note", "keys": [S_HELPER], "evidence": {}, "confidence": 0.9}])
-    goal = G.from_review(repo, mem, str(packet), "rr-0f3a9c")
+    # The packet defaults to the reviews dir's latest.json.
+    goal = G.from_review(repo, mem, None, "rr-0f3a9c")
     assert goal["title"] == "Remove pkg.core.legacy"
     assert goal["targets"] == [S_LEGACY]
-    assert goal["source"] == {"review_packet": ".ozagia/reviews/review.json",
+    assert goal["source"] == {"review_packet": ".ozagia/reviews/latest.json",
                               "finding_id": "rr-0f3a9c"}
     assert [c["kind"] for c in goal["criteria"]] == [
         "symbol_absent", "test_passes", "review_resolved"]
+    assert G.tracking_goals(repo) == {"rr-0f3a9c": goal["id"]}
     with pytest.raises(G.GoalError, match="already tracks finding"):
         G.from_review(repo, mem, str(packet), "rr-0f3a9c")
     with pytest.raises(G.GoalError, match="not in"):
@@ -1006,7 +1106,6 @@ def test_from_review_with_a_fixture_packet(repo, mem):
     _write(repo / "pkg" / "core.py", CORE.replace("def legacy():\n    return 0\n", ""))
     _pytest(repo, PASSED)
     _packet(packet, [])
-    _age(repo, "pkg/core.py", time.time() - 5)
     report = _check(repo, mem, goal["id"])
     assert _statuses(report) == ["pass", "pass", "pass"] and report["status"] == "met"
     bad = _reviews(repo) / "bad.json"

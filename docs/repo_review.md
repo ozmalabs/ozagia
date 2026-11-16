@@ -52,7 +52,9 @@ The MCP tool `dev_review_repo` runs the same review (arguments `sections`,
 full packet to `.ozagia/reviews/repo_review-<time>-<head>.json` and
 `.ozagia/reviews/latest.json` (atomic writes), and returns a summary: counts
 by severity and section, graph state, truncation, the top findings and the
-paths of the written packet. `compare_latest: true` compares with the
+paths of the written packet. Each top finding has a `goal` field: the id
+of the goal that tracks it (`goal_from_review {finding_id}` makes one from
+`latest.json`), or null. `compare_latest: true` compares with the
 previous `latest.json` before it is replaced. A non-finite `budget_s` is
 refused. Only the newest 20 timestamped packets are kept;
 `latest.json` and `compact.json` are never pruned.
@@ -224,7 +226,11 @@ sources are read; no container or unit state is queried.
 Schema `ozagia.repo_review.packet.v1`:
 
 ```text
-schema, schema_version (1), root, head_commit, branch, generated_at, files
+schema, schema_version (1), generator ("ozagia.repo_review"), root,
+head_commit, branch, generated_at (UTC, microseconds), files
+tree           working-tree fingerprint at the start of the review
+               (core.fingerprint: head, dirty {path: blob}, unhashed,
+               overflow, status), or null outside git
 skipped_files  {path: reason}            tracked symlinks and paths outside
                                          the root, never read
 preflight      {ok, checks}             root, HEAD, conflicts, resource admission
@@ -275,15 +281,24 @@ check:
 | failing_test | `test_passes {key}` |
 | committed_env_file, sensitive_file | `file_absent {key}` |
 | unreferenced_symbol | `symbol_absent {key}`, titled "Remove ..." |
-| unpinned_image | `ops_has {key, attr: "image", pinned: true}` |
+| unpinned_image | `ops_has {key, attr: "image" (a build stage: "base_image"), pinned: true}` |
 
 `ops_has` takes `{key, attr?, value?, pinned?}`; `pinned: true` means the
-attribute is an image reference with a tag or digest that is not `latest`.
+attribute is an image reference with a digest or a tag other than `latest`
+(`core.ops_graph.image_pinned`, the same predicate `unpinned_image` uses).
 Ops findings keep their `ops:` keys as targets; the goal system resolves
-them by parsing the tracked ops sources with `core.ops_graph`, since the
-graph built by `--index` has no `ops:` nodes. The test
+them with `declared_ops_nodes(root)`, which parses the tracked ops sources
+through the same `core.ops_graph.iter_ops_sources` loop as the ops section,
+since the graph built by `--index` has no `ops:` nodes. The test
 `test_every_suggested_goal_meets_the_contract` checks every finding type
-against a copy of this argument table.
+against a copy of this argument table, and
+`tests/test_review_goals.py` converts one finding of every type of a real
+review into a goal with `ozagia goal from-review`.
+
+The goal system resolves a finding only from a later packet that
+`review_repo` wrote (`generator`) for the same root; it compares the files
+the goal is about against the packet's `tree` to decide whether the packet
+still describes them (`docs/goals.md`, "Review findings").
 
 Matches with the same type and keys are merged into one finding (for example
 all dangerous constructs of one file), so the id stays the same when lines
@@ -324,6 +339,10 @@ same question for one finding in one packet, for the goal system's
   with `keys`, none of the files of those keys).
 - `not_checked`: anything else, including no or an unknown `type`, a stale
   graph, filename mode and a missing test record.
+
+The goal system stores the finding's `type` and `keys` when it creates a
+`review_resolved` criterion and calls `finding_state` with them, so a
+finding dropped by a section cap still counts as present.
 
 ## Limits
 

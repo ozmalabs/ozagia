@@ -961,7 +961,11 @@ _TOOLS.extend([
             "symbol_exists, symbol_absent, calls, not_calls, no_callers, "
             "file_exists, file_absent, unchanged, lint_clean, "
             "review_resolved, ops_has. Unknown keys are refused, except the "
-            "subject of symbol_exists/file_exists."),
+            "subject of symbol_exists/file_exists. ops: keys also resolve "
+            "from the tracked ops sources; ops_has takes pinned: true. "
+            "review_resolved {packet, finding_id} needs a saved review "
+            "packet under .ozagia/reviews/ that contains the finding, and "
+            "passes only on a later review (goal_from_review is simpler)."),
         "inputSchema": _schema({
             "title": {"type": "string"},
             "why": {"type": "string", "description": "Free text."},
@@ -971,6 +975,18 @@ _TOOLS.extend([
                          "items": {"type": ["string", "object"]},
                          "description": "'kind:args' strings or {kind, args} objects."},
         }, ["title", "criteria"]),
+    },
+    {
+        "name": "goal_from_review",
+        "description": (
+            "Turn a finding of the saved whole-repo review (dev_review_repo; "
+            ".ozagia/reviews/latest.json) into a goal: its suggested targets "
+            "and criteria plus review_resolved, which passes only when a later "
+            "review no longer reports the finding."),
+        "inputSchema": _schema({
+            "finding_id": {"type": "string",
+                           "description": "A finding id from dev_review_repo, e.g. RR-1a2b..."},
+        }, ["finding_id"]),
     },
     {
         "name": "goal_claim",
@@ -1139,6 +1155,7 @@ class DevMemoryServer:
             "goal_show": self._goal_show,
             "goal_check": self._goal_check,
             "goal_add": self._goal_add,
+            "goal_from_review": self._goal_from_review,
             "goal_claim": self._goal_claim,
         } if mode in {"coding", "combined"} else {})
         if self.mem is not None:
@@ -1448,8 +1465,14 @@ class DevMemoryServer:
                     "report": exc.report}
         except RR.CR.CodeReviewError as exc:
             return {"ok": False, "error": str(exc)}
-        return {"ok": True, **paths, **RR.brief(packet, max_findings=limit),
-                "compared_with": str(compare) if compare else None}
+        out = {"ok": True, **paths, **RR.brief(packet, max_findings=limit),
+               "compared_with": str(compare) if compare else None}
+        # Which top findings a goal already tracks (goal_from_review makes one).
+        from ozagia.core.goals import tracking_goals
+        tracked = tracking_goals(root)
+        for item in out["top_findings"]:
+            item["goal"] = tracked.get(str(item.get("id")))
+        return out
 
     def _who(self, a: dict[str, Any]) -> Any:
         """The sessions that edited a file (`ozagia.core.owners.who`): from
@@ -1763,6 +1786,11 @@ class DevMemoryServer:
                 if k in a}
         return self._goal_call(lambda: {"ok": True, "goal": G.add_goal(
             self._files_root(), self.mem, spec, by="mcp")})
+
+    def _goal_from_review(self, a: dict[str, Any]) -> Any:
+        from ozagia.core import goals as G
+        return self._goal_call(lambda: {"ok": True, "goal": G.from_review(
+            self._files_root(), self.mem, None, str(a["finding_id"]), by="mcp")})
 
     def _goal_claim(self, a: dict[str, Any]) -> Any:
         from ozagia.core import goals as G

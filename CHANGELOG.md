@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+- Repo review and goals together (W19): `review_resolved` reads the newest
+  packet in `.ozagia/reviews/` (`latest.json`, else the newest timestamped
+  one) and decides with `repo_review.finding_state`, using the finding's
+  `type` and `keys` stored at creation (present -> fail, not_checked ->
+  unknown). It passes only on a packet written by `review_repo` (new
+  `generator` field) for the same root, with a later `generated_at` (now
+  with microseconds) and another sha256 than the packet the goal was made
+  from, and is `stale` when a target, scope or finding file changed since
+  that review started (new packet field `tree`, the working-tree
+  fingerprint test runs use; mtime fallback for packets without it).
+  `goal_add` with `review_resolved` needs a packet that contains the
+  finding. `ops:` keys resolve from the tracked operations sources when
+  the graph has no ops nodes (`repo_review.declared_ops_nodes`, sharing
+  `ops_graph.iter_ops_sources` with the ops section), `file:` keys also
+  resolve to a regular file in the working tree, and `ops_has` takes
+  `pinned: true` (`ops_graph.image_pinned`, shared with `unpinned_image`;
+  a build stage's goal now names `base_image`). `ozagia goal from-review
+  [PACKET] FINDING_ID` defaults to `latest.json`; MCP `goal_from_review
+  {finding_id}` is new, and `dev_review_repo` names the goal tracking each
+  top finding. Fixed: the freshness files of `ops:` targets (the source
+  path, not `compose/<path>`).
+
 - Graph-addressed goals (`ozagia.core.goals`, `ozagia goal
   add|list|show|check|claim|drop|block|from-review`, MCP `goal_list`,
   `goal_show`, `goal_check`, `goal_add`, `goal_claim`): repo-level goals in

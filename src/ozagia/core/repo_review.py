@@ -26,7 +26,10 @@ the kinds the goal system understands (``CRITERIA_KINDS``), so a finding can be
 turned into a goal whose completion is checked against the graph. The goal
 system adds its own ``review_resolved`` criterion when it converts a finding;
 it asks ``finding_state`` whether the finding is still present in a later
-packet.
+packet. Each packet records who wrote it (``generator``), when
+(``generated_at``, microseconds) and the working tree it saw (``tree``, a
+``core.fingerprint`` taken before any file is read), so a goal can require a
+later review of the same files.
 
 Optional model review is a seam (``run_model_pass``): the caller injects the
 runner, and model output is kept as separate, attributed findings.
@@ -50,6 +53,9 @@ from ozagia.core import resources
 SCHEMA = 1
 PACKET_SCHEMA = "ozagia.repo_review.packet.v1"
 COMPACT_SCHEMA = "ozagia.repo_review.compact.v1"
+# Written into every packet `review_repo` builds; the goal system resolves
+# a `review_resolved` criterion only from packets that carry it.
+GENERATOR = "ozagia.repo_review"
 
 SECTIONS = ("architecture", "tests", "health", "churn", "docs", "security",
             "ops", "dependencies")
@@ -259,6 +265,28 @@ def _iso(ts: Any) -> str | None:
     if not isinstance(ts, (int, float)) or isinstance(ts, bool):
         return None
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(ts)))
+
+
+def _utc_now() -> str:
+    """Now as ISO 8601 UTC with microseconds, so two reviews in the same
+    second still order (``generated_at``)."""
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def parse_generated_at(value: Any) -> float | None:
+    """A packet's ``generated_at`` (with or without fractional seconds) as
+    a POSIX time, or None when it is missing or malformed."""
+    from datetime import datetime, timezone
+    if not isinstance(value, str) or len(value) > 40:
+        return None
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ"):
+        try:
+            return datetime.strptime(value, fmt).replace(
+                tzinfo=timezone.utc).timestamp()
+        except ValueError:
+            continue
+    return None
 
 
 def _is_test(rel: str) -> bool:
@@ -524,6 +552,32 @@ def _default_indexer(root: Path, graph_file: Path) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 
+def read_text(root: Path, rel: str, *, real_root: Path | None = None
+              ) -> tuple[str | None, str | None]:
+    """A tracked file's text and None, or None and why it was not read:
+    outside the root, a symlink (never followed), resolving outside the
+    root, missing, over ``MAX_READ_BYTES`` or binary."""
+    real_root = real_root or root.resolve()
+    path = root / rel
+    try:
+        if not _inside(rel):
+            return None, "outside the root"
+        if path.is_symlink():
+            return None, "symlink"
+        if not path.resolve().is_relative_to(real_root):
+            return None, "resolves outside the root"
+        if not path.is_file():
+            return None, "missing"
+        if path.stat().st_size > MAX_READ_BYTES:
+            return None, "over the read limit"
+        data = path.read_bytes()
+    except OSError as exc:
+        return None, f"unreadable: {type(exc).__name__}"
+    if b"\0" in data[:8192]:
+        return None, "binary"
+    return data.decode("utf-8", errors="replace"), None
+
+
 class _Context:
     """What every section reads: tracked files, file text, graph, clock."""
 
@@ -568,28 +622,7 @@ class _Context:
         ``unread``)."""
         if rel in self._text:
             return self._text[rel]
-        path = self.root / rel
-        value: str | None = None
-        reason: str | None = None
-        try:
-            if not _inside(rel):
-                reason = "outside the root"
-            elif path.is_symlink():
-                reason = "symlink"
-            elif not path.resolve().is_relative_to(self.real_root):
-                reason = "resolves outside the root"
-            elif not path.is_file():
-                reason = "missing"
-            elif path.stat().st_size > MAX_READ_BYTES:
-                reason = "over the read limit"
-            else:
-                data = path.read_bytes()
-                if b"\0" in data[:8192]:
-                    reason = "binary"
-                else:
-                    value = data.decode("utf-8", errors="replace")
-        except OSError as exc:
-            reason = f"unreadable: {type(exc).__name__}"
+        value, reason = read_text(self.root, rel, real_root=self.real_root)
         if value is None:
             self.unread[rel] = reason or "unreadable"
         if value is not None and self._cached_bytes + len(value) <= MAX_CACHE_BYTES:
@@ -1693,7 +1726,46 @@ def _security(sec: _Section) -> None:
 
 
 def _unpinned(image: str) -> bool:
-    return "@" not in image and image.endswith(":latest")
+    from ozagia.core.ops_graph import image_pinned
+    return image_pinned(image) is False
+
+
+def declared_ops_nodes(root: str | Path, rels: Iterable[str] | None = None
+                       ) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
+    """The ops nodes declared in the repository's tracked operations sources
+    (``core.ops_graph``, parsed as the ops section parses them), for callers
+    that need an ``ops:`` key when the main graph holds no ops nodes (the
+    goal system). ``rels`` limits the files read (default: every tracked
+    source; fixture trees included, since a goal may name any source).
+    Returns ``({key: attrs}, {rel: error})``; attrs carry ``kind``, ``name``,
+    ``path`` and ``line`` like the graph's ops nodes."""
+    from ozagia.core import ops_graph as OG
+    path = Path(root).resolve()
+    all_files, _skipped = _tracked_files(path)
+    tracked = set(all_files)
+    files = all_files if rels is None else [rel for rel in all_files
+                                            if rel in set(rels)]
+    nodes: dict[str, dict[str, Any]] = {}
+    errors: dict[str, str] = {}
+    combined = OG.OpsGraph()
+    for rel, _fmt, _text, graph, error in OG.iter_ops_sources(
+            files, lambda rel: read_text(path, rel, real_root=path)[0]):
+        if graph is None:
+            errors[rel] = str(error)
+            continue
+        combined.extend(graph)
+    try:
+        # Cross-file references, which also add the shared `ops:image/` nodes.
+        OG.resolve(combined, file_exists=lambda rel: rel in tracked, root=str(path))
+    except Exception as exc:  # noqa: BLE001 - the parsed nodes still count
+        errors["*"] = f"resolve: {type(exc).__name__}: {exc}"
+    for node in combined.nodes:
+        attrs = {"family": "ops", "kind": node.kind, "name": node.name,
+                 "path": node.path, **node.attrs}
+        if isinstance(node.line, int):
+            attrs["line"] = node.line
+        nodes.setdefault(node.key, attrs)
+    return nodes, errors
 
 
 def _port_scope(port: str) -> str:
@@ -1717,19 +1789,17 @@ def _ops(sec: _Section) -> None:
         sec.data["graph_ops_nodes"] = len(OG.ops_nodes(ctx.dev))
     yaml_missing = False
     services = 0
-    for rel in sources:
+    for rel, fmt, text, graph, error in OG.iter_ops_sources(
+            sources, lambda rel: sec.read(rel, *ops_checks)):
         if sec.expired():
             return
-        fmt = OG.ops_source_format(rel)
-        text = sec.read(rel, *ops_checks)
         if text is None:
             sec.skip("ops_source", f"{rel} is unreadable or too large")
             continue
-        try:
-            graph = OG.parse_ops_source(text, rel, fmt)
-        except Exception as exc:  # noqa: BLE001 - one bad file is reported
-            sec.skip("ops_source", f"{rel}: {type(exc).__name__}: {exc}")
-            sec.skip_file(ops_checks, rel, f"parse error: {type(exc).__name__}")
+        if graph is None:
+            sec.skip("ops_source", f"{rel}: {error}")
+            sec.skip_file(ops_checks, rel,
+                          f"parse error: {str(error).split(':', 1)[0]}")
             continue
         compose_specs: dict[str, Any] | None = None
         if fmt == "compose":
@@ -1744,7 +1814,8 @@ def _ops(sec: _Section) -> None:
                 compose_specs = data["services"]
         unit_entries = (OG.parse_unit_ini(text) if fmt == "quadlet" else [])
         for node in graph.nodes:
-            image = node.attrs.get("image") or node.attrs.get("base_image")
+            attr = "image" if node.attrs.get("image") else "base_image"
+            image = node.attrs.get(attr)
             if isinstance(image, str) and _unpinned(image):
                 sec.add("unpinned_image", "minor", [node.key],
                         f"{node.kind.replace('_', ' ')} {node.name} in {rel} "
@@ -1753,7 +1824,7 @@ def _ops(sec: _Section) -> None:
                         confidence="high",
                         note="an untagged reference resolves to latest",
                         criteria=[{"kind": "ops_has",
-                                   "args": {"key": node.key, "attr": "image",
+                                   "args": {"key": node.key, "attr": attr,
                                             "pinned": True}}],
                         title=f"Pin the image of {node.name} in {rel}")
             ports = [p for p in node.attrs.get("ports") or [] if isinstance(p, str)]
@@ -2228,6 +2299,12 @@ def review_repo(root: str | Path, *,
             refusal)
     path = Path(pre["root"])
     head = str(pre["head"])
+    # The working tree as the review saw it (taken before any file is
+    # read): a goal compares its files' content now against this to tell
+    # whether the packet still describes them (`core.fingerprint`).
+    from ozagia.core.fingerprint import tree_fingerprint
+    tree = tree_fingerprint(path)
+    generated_at = _utc_now()
     graph_file = _graph_file(path, graph_path)
     index_report: dict[str, Any] | None = None
     if index:
@@ -2298,10 +2375,12 @@ def review_repo(root: str | Path, *,
     packet: dict[str, Any] = {
         "schema": PACKET_SCHEMA,
         "schema_version": SCHEMA,
+        "generator": GENERATOR,
         "root": str(path),
         "head_commit": head,
         "branch": pre["branch"],
-        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "generated_at": generated_at,
+        "tree": tree,
         "preflight": {"ok": True, "checks": pre["checks"]},
         "resources": pre["resources"],
         "graph": graph_info,

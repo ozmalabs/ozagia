@@ -49,14 +49,34 @@ Criteria kinds and their args (`KINDS`). Each evaluates to
     lint_clean  {key}  ozagia keeps no lint results (`ozagia.intent.lint`
         reports findings in the edit's reply and stores nothing), so this is
         always `unknown`, with that reason; `add_goal` warns.
-    review_resolved  {packet, finding_id}  the finding id is absent from the
-        repo-review packet (`ozagia.repo_review.packet.v1`) at `packet`, a
+    review_resolved  {packet, finding_id}  given; stored with the finding's
+        `type` and `keys` and an `anchor` (the packet's `generated_at`,
+        `head_commit`, sha256), all taken from `packet` at creation: a
         regular file under `<state dir>/reviews/` of at most
-        `MAX_PACKET_BYTES`; `stale` when the packet is older than the last
-        change to the targets (mtimes).
-    ops_has  {key: ops:..., attr?, value?}  an ops-graph node, optionally with
-        a non-empty attribute, optionally equal to (or, for a list,
-        containing) `value` (a value needs an attr).
+        `MAX_PACKET_BYTES`, written by `review_repo` (`generator`
+        `ozagia.repo_review`) for this root, that contains the finding.
+        Checked against the newest packet in the reviews dir
+        (`latest.json`, else the newest `repo_review-*.json`), which must
+        also be ozagia's and for this root, by
+        `ozagia.core.repo_review.finding_state`: present -> fail,
+        not_checked -> unknown, absent -> pass only when that packet is a
+        later review than the anchor (later `generated_at`, other sha256),
+        else unknown. `stale` when a file of the goal's targets, scope or
+        the finding's keys has other content now than when that review
+        started (the packet's `tree` fingerprint, as for test runs; a
+        packet without one falls back to mtimes against `generated_at`,
+        which a backdated mtime defeats).
+    ops_has  {key: ops:..., attr?, value?, pinned?}  an ops node, optionally
+        with a non-empty attribute, optionally equal to (or, for a list,
+        containing) `value` (a value needs an attr), or with `pinned: true`
+        an image (`attr`, default `image`, else `base_image`) with a digest
+        or a tag other than latest (`ozagia.core.ops_graph.image_pinned`,
+        the repo review's predicate). The node comes from the graph, or
+        when the graph has none (the default index has no ops nodes), from
+        the tracked operations sources parsed as the repo review's ops
+        section parses them (`repo_review.declared_ops_nodes`); `ops:` keys
+        resolve the same way at creation, and `file:` keys also resolve to
+        a regular file in the working tree (a committed `.env`).
 
 Kinds that read the graph are `unknown` when there is no graph or the
 check's refresh failed; `--no-refresh` results say so in the evidence.
@@ -146,15 +166,20 @@ KINDS: dict[str, tuple[tuple[str, ...], int, dict[str, str], bool]] = {
     "unchanged": (("key",), 1, {"key": ""}, False),
     "lint_clean": (("key",), 1, {"key": ""}, False),
     "review_resolved": (("packet", "finding_id"), 2, {}, False),
-    "ops_has": (("key", "attr", "value"), 1, {"key": "ops:"}, False),
+    "ops_has": (("key", "attr", "value", "pinned"), 1, {"key": "ops:"}, False),
 }
+# `ops:` key kinds whose second segment is a source file
+# (`ops:compose/<rel>#service/<name>`, `core.ops_graph`).
+OPS_FILE_KINDS = ("compose", "containerfile", "quadlet", "unit")
+# Who writes repo-review packets (`core.repo_review.GENERATOR`).
+REVIEW_GENERATOR = "ozagia.repo_review"
 # Kinds whose evidence predates a change to the goal's targets.
 TIME_KINDS = frozenset({"test_passes", "test_fails", "review_resolved"})
 # Kinds that read the graph (`DevMemory`): `unknown` without one, or when
-# the check's refresh failed.
+# the check's refresh failed. (`ops_has` falls back to the tracked
+# operations sources, which it reads itself.)
 GRAPH_KINDS = frozenset({"test_passes", "test_fails", "symbol_exists",
-                         "symbol_absent", "calls", "not_calls", "no_callers",
-                         "ops_has"})
+                         "symbol_absent", "calls", "not_calls", "no_callers"})
 _KEY_RE = re.compile(r"^[a-z][a-z0-9_]*:")
 _GLOB_CHARS = re.compile(r"[*?\[]")
 _THREAD_LOCK = threading.Lock()
@@ -192,14 +217,16 @@ def is_key(entry: str) -> bool:
 
 def _key_path(key: str) -> str | None:
     """The root-relative file a key's content is in, for freshness: the
-    key's file (an anchor after `#` dropped), or for an `ops:` key the
-    path before its `#` (`ops:compose/compose.yaml#service/web`); None
-    when the key names no file (`ops:image/nginx`)."""
+    key's file (an anchor after `#` dropped), or for an `ops:` key its
+    source file after the kind segment (`ops:compose/deploy/compose.yaml#
+    service/web` -> `deploy/compose.yaml`); None when the key names no
+    file (`ops:image/nginx`)."""
     if not isinstance(key, str):
         return None
     if key.startswith("ops:"):
-        rest = key[len("ops:"):]
-        return rest.split("#", 1)[0] if "#" in rest else None
+        kind, _, rest = key[len("ops:"):].partition("/")
+        rel = rest.split("#", 1)[0]
+        return rel if kind in OPS_FILE_KINDS and rel else None
     rel = key_file(key)
     return rel.split("#", 1)[0] if rel else None
 
@@ -555,13 +582,62 @@ def _criterion_spec(raw: Any) -> dict[str, Any]:
     return {"kind": kind, "args": dict(args)}
 
 
-def _resolves(memory: Any, key: str) -> bool:
-    if memory is None:
+def _resolves(memory: Any, key: str, root: Path | None = None) -> bool:
+    """Whether `key` names something: a graph node, or (with `root`) an
+    `ops:` node declared in a tracked operations source
+    (`repo_review.declared_ops_nodes`; the default index has no ops nodes)
+    or, for a `file:` key, a regular file in the working tree (a committed
+    `.env` or key file the indexer leaves out)."""
+    if memory is not None:
+        try:
+            if memory.node_by_key(key) is not None:
+                return True
+        except Exception:  # noqa: BLE001 - treat as unknown
+            pass
+    if root is None or not isinstance(key, str):
         return False
+    if key.startswith("ops:"):
+        return declared_ops_node(root, key) is not None
+    if key.startswith("file:"):
+        return _working_file(root, key) is not None
+    return False
+
+
+def _working_file(root: Path, key: str) -> str | None:
+    """The root-relative path of a `file:` key when it is a regular file
+    (not a symlink) inside the root and outside the state dir."""
+    from ozagia.config import state_rel
+    rel = key_file(key)
+    if not rel or rel.startswith("/") or ".." in Path(rel).parts:
+        return None
+    state = state_rel(root)
+    if state and (rel == state or rel.startswith(state.rstrip("/") + "/")):
+        return None
+    p = root / rel
     try:
-        return memory.node_by_key(key) is not None
-    except Exception:  # noqa: BLE001 - treat as unknown
-        return False
+        if p.is_symlink() or not p.is_file():
+            return None
+        if not p.resolve().is_relative_to(root.resolve()):
+            return None
+    except OSError:
+        return None
+    return rel
+
+
+def declared_ops_node(root: Path, key: str,
+                      nodes: dict[str, dict[str, Any]] | None = None
+                      ) -> dict[str, Any] | None:
+    """The attrs of an `ops:` node declared in the tracked operations
+    sources (parsed like the repo review's ops section), or None. A key
+    that names a file (`ops:compose/<rel>#service/web`) reads only that
+    file; others (`ops:image/nginx:1.25`) read every source, unless
+    `nodes` (all declared nodes, cached by the caller) is given."""
+    if nodes is not None:
+        return nodes.get(key)
+    from ozagia.core.repo_review import declared_ops_nodes
+    rel = _key_path(key) if key.startswith("ops:") else None
+    found, _errors = declared_ops_nodes(root, [rel] if rel else None)
+    return found.get(key)
 
 
 def _root_of(memory: Any, root: str | Path | None) -> Path:
@@ -598,6 +674,13 @@ def _packet_arg(root: Path, value: str) -> str:
 def _packet_file(root: Path, value: str) -> Path:
     p = Path(value)
     return p if p.is_absolute() else root / p
+
+
+def _rel_or_abs(root: Path, path: Path) -> str:
+    try:
+        return path.relative_to(root).as_posix()
+    except ValueError:
+        return str(path)
 
 
 def _read_packet_bytes(root: Path, path: Path) -> bytes:
@@ -641,6 +724,116 @@ def _read_packet_bytes(root: Path, path: Path) -> bytes:
         os.close(fd)
 
 
+def _pinned_arg(value: Any) -> bool:
+    """`ops_has`'s `pinned`: only true is meaningful (the image has a
+    digest or a tag other than latest)."""
+    if value is True or (isinstance(value, str)
+                         and value.strip().lower() in ("true", "yes", "1")):
+        return True
+    raise GoalError(f"criterion ops_has: pinned must be true, got {value!r} (to "
+                    "require a particular tag, use ops_has:KEY image VALUE)")
+
+
+def _finding_info(packet: dict[str, Any], finding_id: str
+                  ) -> tuple[str, list[str]] | None:
+    """The type and keys of a finding in a packet: from its entry in
+    `findings`, or for a finding the section cap left out of that list,
+    from `sections[*].ids_by_type` with the keys rebuilt from `id_files`
+    (`file:` keys, which is what `finding_state` needs). None when the id
+    is not in the packet."""
+    f = _finding(packet, finding_id)
+    if f is not None and isinstance(f.get("type"), str):
+        return f["type"], [k for k in f.get("keys") or [] if isinstance(k, str)]
+    for section in (packet.get("sections") or {}).values():
+        if not isinstance(section, dict):
+            continue
+        for ftype, ids in (section.get("ids_by_type") or {}).items():
+            if isinstance(ids, list) and finding_id in ids:
+                files = (section.get("id_files") or {}).get(finding_id) or []
+                return str(ftype), [f"file:{p}" for p in files if isinstance(p, str)]
+    return None
+
+
+def _review_anchor(root: Path, packet_arg: str, finding_id: str) -> dict[str, Any]:
+    """What `review_resolved` stores at creation besides the packet path and
+    the finding id: the finding's `type` and `keys` (for
+    `repo_review.finding_state`), and the `anchor`, the packet's
+    `generated_at`, `head_commit` and sha256: the criterion passes only on
+    a later, different packet. The packet must be under the reviews dir,
+    written by `review_repo` (`generator`), for this root, and contain the
+    finding. Raises GoalError."""
+    stored = _packet_arg(root, packet_arg)
+    path = _packet_file(root, stored)
+    raw = _read_packet_bytes(root, path)
+    packet = _parse_packet(raw, path)
+    problem = _not_ours(packet, root)
+    if problem:
+        raise GoalError(f"review packet {path}: {problem}")
+    info = _finding_info(packet, finding_id)
+    if info is None:
+        raise GoalError(f"finding {finding_id} is not in {path}")
+    ftype, keys = info
+    if len(keys) > MAX_KEYS or any(len(k) > MAX_KEY_CHARS for k in keys):
+        keys = [k for k in keys if len(k) <= MAX_KEY_CHARS][:MAX_KEYS]
+    return {"packet": stored, "type": _clip(ftype, 100), "keys": keys,
+            "anchor": {"generated_at": packet.get("generated_at"),
+                       "head_commit": packet.get("head_commit"),
+                       "sha256": _sha(raw)}}
+
+
+def _not_ours(packet: dict[str, Any], root: Path) -> str | None:
+    """Why a packet cannot decide `review_resolved` for this root (not
+    written by ozagia's review, another root, no `generated_at`), or None."""
+    from ozagia.core.repo_review import parse_generated_at
+    if packet.get("generator") != REVIEW_GENERATOR:
+        return (f"not written by ozagia's review (generator "
+                f"{_clip(packet.get('generator'), 60)!r}, expected "
+                f"{REVIEW_GENERATOR!r}); run ozagia review-repo --save")
+    if str(packet.get("root") or "") != str(root):
+        return f"it reviews {_clip(packet.get('root'), 200)}, not {root}"
+    if parse_generated_at(packet.get("generated_at")) is None:
+        return "it has no readable generated_at"
+    return None
+
+
+def newest_packet(root: Path) -> tuple[Path | None, bytes | None, str | None]:
+    """The newest review packet in the reviews dir: `latest.json`, or when
+    that is missing or unreadable the newest timestamped
+    `repo_review-*.json` (by name, which starts with the UTC time). Returns
+    (path, bytes, None), or (path or None, None, why not)."""
+    from ozagia.core.repo_review import LATEST_NAME, PACKET_PREFIX
+    base = reviews_dir(root)
+    candidates = [base / LATEST_NAME]
+    try:
+        stamped = sorted((p for p in base.glob(f"{PACKET_PREFIX}*.json")),
+                         key=lambda p: p.name, reverse=True)
+    except OSError:
+        stamped = []
+    candidates += stamped[:1]
+    errors: list[str] = []
+    for path in candidates:
+        if not path.exists() and not path.is_symlink():
+            continue
+        try:
+            return path, _read_packet_bytes(root, path), None
+        except GoalError as e:
+            errors.append(str(e))
+    return None, None, ("; ".join(errors)
+                        or f"no review packet in {base}; run ozagia review-repo --save")
+
+
+def tracking_goals(root: str | Path) -> dict[str, str]:
+    """{finding id: goal id} for goals that are not dropped and came from a
+    review finding (`source.finding_id`)."""
+    out: dict[str, str] = {}
+    for g in read_goals(root):
+        src = g.get("source") or {}
+        fid = src.get("finding_id") if isinstance(src, dict) else None
+        if isinstance(fid, str) and g.get("status") != "dropped":
+            out.setdefault(fid, str(g.get("id")))
+    return out
+
+
 def validate_criterion(raw: Any, memory: Any, root: Path) -> dict[str, Any]:
     """The checked `{kind, args}` of a criterion, keys resolved (refused
     when unknown, except where the kind allows an absent subject), the
@@ -654,6 +847,9 @@ def validate_criterion(raw: Any, memory: Any, root: Path) -> dict[str, Any]:
     for name in names[:required]:
         if not isinstance(args.get(name), str) or not args[name].strip():
             raise GoalError(f"criterion {kind}: missing {name}")
+    pinned = None
+    if kind == "ops_has" and "pinned" in args:
+        pinned = _pinned_arg(args.pop("pinned"))
     out: dict[str, Any] = {}
     for name in names:
         if args.get(name) is None:
@@ -673,15 +869,18 @@ def validate_criterion(raw: Any, memory: Any, root: Path) -> dict[str, Any]:
                                 f"got {value!r}")
             if not is_key(value):
                 raise GoalError(f"criterion {kind}: {name} {value!r} is not a key")
-            if not (may_be_absent and name == "key") and not _resolves(memory, value):
+            if not (may_be_absent and name == "key") and not _resolves(memory, value, root):
                 raise GoalError(f"criterion {kind}: unknown key {value}")
         out[name] = value
     if kind == "ops_has" and out.get("value") is not None and not out.get("attr"):
         raise GoalError("criterion ops_has: a value needs an attr (ops_has:KEY "
                         "ATTR VALUE); without one only existence is checked")
+    if pinned:
+        if out.get("value") is not None:
+            raise GoalError("criterion ops_has: pinned and value exclude each other")
+        out["pinned"] = True
     if kind == "review_resolved":
-        out["packet"] = _packet_arg(root, out["packet"])
-        read_packet(root, _packet_file(root, out["packet"]))
+        out.update(_review_anchor(root, out["packet"], out["finding_id"]))
     if kind == "unchanged":
         digest, _ev = content_hash(root, memory, out["key"])
         if digest is None:
@@ -748,10 +947,10 @@ def _mtime(root: Path, rel: str) -> float | None:
 
 def last_change(root: Path, keys: Iterable[str]) -> tuple[float | None, str | None]:
     """The latest modification time of the files the keys are in, and that
-    file (None when no file exists)."""
+    file (None when no file exists; `ops:` keys count by their source)."""
     best: tuple[float | None, str | None] = (None, None)
     for key in keys:
-        rel = key_file(key)
+        rel = _key_path(key)
         if not rel:
             continue
         t = _mtime(root, rel)
@@ -816,6 +1015,8 @@ class Evaluator:
         self._sgraph: Any = None
         self._sgraph_error: str | None = None
         self._view: Any = None
+        self._ops: dict[str, dict[str, Any]] | None = None
+        self._ops_errors: dict[str, str] = {}
 
     @property
     def graph_usable(self) -> bool:
@@ -855,6 +1056,19 @@ class Evaluator:
             nid = None
         return self.memory.node(nid) if nid is not None else None
 
+    def ops_node(self, key: str) -> tuple[dict[str, Any] | None, str]:
+        """An `ops:` node's attrs and where they came from: the graph (when
+        usable and it has the node), else the tracked operations sources
+        (`repo_review.declared_ops_nodes`, parsed once per check)."""
+        if self.graph_usable:
+            node = self.node(key)
+            if node is not None:
+                return (node.get("attrs") or {}), "graph"
+        if self._ops is None:
+            from ozagia.core.repo_review import declared_ops_nodes
+            self._ops, self._ops_errors = declared_ops_nodes(self.root)
+        return self._ops.get(key), "sources"
+
     # -- one criterion ----------------------------------------------------- #
     def evaluate(self, goal: dict[str, Any], crit: dict[str, Any]) -> dict[str, Any]:
         kind = crit.get("kind")
@@ -872,13 +1086,6 @@ class Evaluator:
         if self.graph != "fresh" and kind in GRAPH_KINDS:
             res["evidence"] = {**res.get("evidence", {}), "graph": self.graph}
         return res
-
-    def _stale_after(self, goal: dict[str, Any], ts: float | None,
-                     extra: Iterable[str] = ()) -> tuple[bool, dict[str, Any]]:
-        """By mtime (review packets only; test runs use `_fresh`)."""
-        changed, rel = last_change(self.root, [*(goal.get("targets") or []), *extra])
-        ev = {"targets_changed_at": changed, "changed_file": rel}
-        return (ts is not None and changed is not None and ts < changed), ev
 
     def relevant_files(self, goal: dict[str, Any], run_tree: dict[str, Any],
                        extra: Iterable[str] = ()) -> tuple[list[str], str | None]:
@@ -1089,45 +1296,127 @@ class Evaluator:
                        "in an edit's reply (ozagia.intent.lint) and not stored")
 
     def _eval_review_resolved(self, goal: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
-        path = _packet_file(self.root, args["packet"])
+        """From the newest packet in the reviews dir (`newest_packet`), by
+        `repo_review.finding_state`: present -> fail, not_checked ->
+        unknown, absent -> pass only when that packet is a later review
+        than the one the criterion was created from (`anchor`: later
+        `generated_at`, other sha256). The packet must be written by
+        `review_repo` for this root, and `stale` when a file of the goal's
+        targets, scope or the finding's keys has other content now than when
+        the review started (the packet's `tree` fingerprint; a packet
+        without one falls back to file mtimes against `generated_at`)."""
+        from ozagia.core.repo_review import finding_state, parse_generated_at
         fid = args["finding_id"]
-        ev: dict[str, Any] = {"packet": args["packet"], "finding_id": fid}
+        anchor = args.get("anchor") if isinstance(args.get("anchor"), dict) else None
+        ev: dict[str, Any] = {"finding_id": fid, "created_from": args.get("packet")}
+        if anchor is None or not args.get("type"):
+            return _result("unknown", ev, "the criterion has no review anchor (made "
+                           "before anchoring); recreate the goal from a saved review")
+        path, raw, why = newest_packet(self.root)
+        if raw is None or path is None:
+            return _result("unknown", ev, why or "no review packet")
+        ev["packet"] = _rel_or_abs(self.root, path)
+        ev["packet_sha256"] = _sha(raw)
         try:
-            raw = _read_packet_bytes(self.root, path)
             packet = _parse_packet(raw, path)
         except GoalError as e:
             return _result("unknown", ev, str(e))
-        mtime = _mtime(path.parent, path.name)
-        ev["packet_at"] = mtime
-        ev["packet_sha256"] = _sha(raw)
-        stale, sev = self._stale_after(goal, mtime)
-        ev.update(sev)
-        if stale:
-            return _result("stale", ev, "the packet is older than the last change "
-                           f"to {sev['changed_file']}; run the repo review again")
-        present = _finding(packet, fid) is not None
-        return _result("fail" if present else "pass", ev,
-                       f"finding {fid} is {'still' if present else 'not'} in the packet")
+        problem = _not_ours(packet, self.root)
+        if problem:
+            return _result("unknown", ev, f"{ev['packet']}: {problem}")
+        ev.update({"generated_at": packet.get("generated_at"),
+                   "head_commit": packet.get("head_commit")})
+        keys = [k for k in args.get("keys") or [] if isinstance(k, str)]
+        status, sev = self._review_fresh(goal, packet, keys)
+        ev.update({k: v for k, v in sev.items() if k != "reason"})
+        if status is not None:
+            return _result(status, ev, f"{sev.get('reason')}; run ozagia review-repo "
+                           "--save again")
+        state = finding_state(packet, fid, type=args["type"], keys=keys)
+        ev["state"] = state
+        if state == "present":
+            return _result("fail", ev, f"finding {fid} is still in the review of "
+                           f"{packet.get('generated_at')}")
+        if state != "absent":
+            return _result("unknown", ev, f"the review of {packet.get('generated_at')} "
+                           f"did not check {args['type']} over its full population")
+        then = parse_generated_at(anchor.get("generated_at"))
+        now = parse_generated_at(packet.get("generated_at"))
+        if then is None or now is None or now <= then or ev["packet_sha256"] == \
+                anchor.get("sha256"):
+            return _result("unknown", ev, f"finding {fid} is absent, but the newest "
+                           "packet is not a later review than the one the goal was "
+                           "created from; run ozagia review-repo --save")
+        return _result("pass", ev, f"finding {fid} is not in the review of "
+                       f"{packet.get('generated_at')} (a later review than the "
+                       f"goal's, {anchor.get('generated_at')})")
+
+    def _review_fresh(self, goal: dict[str, Any], packet: dict[str, Any],
+                      keys: list[str]) -> tuple[str | None, dict[str, Any]]:
+        """None when the packet still describes the goal's files, else
+        (`stale` or `unknown`, evidence with a reason)."""
+        from ozagia.core.fingerprint import changed_since, clean_fingerprint
+        from ozagia.core.repo_review import parse_generated_at
+        tree = clean_fingerprint(packet.get("tree"))
+        if tree is not None:
+            files, err = self.relevant_files(goal, tree, keys)
+            ev: dict[str, Any] = {"basis": "content", "files_compared": len(files)}
+            if err:
+                return "unknown", {**ev, "reason": err}
+            changed, why = changed_since(self.view(), tree, files)
+            if why:
+                return "stale", {**ev, "changed_files": changed[:5], "reason": why}
+            if changed:
+                return "stale", {**ev, "changed_files": changed[:5],
+                                 "reason": f"{changed[0]} changed since the review "
+                                 "started" + (f" (+{len(changed) - 1} more)"
+                                              if len(changed) > 1 else "")}
+            return None, ev
+        # Weaker: a packet without a fingerprint (an older ozagia, or not a
+        # git repository). File mtimes against generated_at; a backdated
+        # mtime hides an edit, and scope globs are not expanded.
+        at = parse_generated_at(packet.get("generated_at"))
+        scope_keys = [e for e in goal.get("scope") or [] if scope_glob(e) is None]
+        changed_at, rel = last_change(self.root, [*(goal.get("targets") or []),
+                                                  *scope_keys, *keys])
+        ev = {"basis": "mtime", "targets_changed_at": changed_at, "changed_file": rel}
+        if at is not None and changed_at is not None and changed_at > at:
+            return "stale", {**ev, "reason": f"{rel} was modified after the review "
+                             "(by mtime: the packet has no tree fingerprint)"}
+        return None, ev
 
     def _eval_ops_has(self, goal: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
+        from ozagia.core.ops_graph import image_pinned
         key = args["key"]
-        node = self.node(key)
-        ev: dict[str, Any] = {"key": key, "in_graph": node is not None}
-        if node is None:
-            return _result("fail", ev, f"{key} is not in the ops graph")
-        attrs = node.get("attrs") or {}
+        attrs, origin = self.ops_node(key)
+        ev: dict[str, Any] = {"key": key, "found": attrs is not None, "origin": origin}
+        if attrs is None:
+            where = "the graph or the tracked operations sources"
+            if self._ops_errors.get(_key_path(key) or ""):
+                where += f" ({_key_path(key)}: {self._ops_errors[_key_path(key) or '']})"
+            return _result("fail", ev, f"{key} is not in {where}")
         attr = args.get("attr")
         if not attr and args.get("value") is not None:
             return _result("unknown", ev, "ops_has has a value but no attr "
                            "(refused at creation since; recreate the goal)")
+        if args.get("pinned") and not attr:
+            attr = "image" if attrs.get("image") else "base_image"
         if not attr:
-            return _result("pass", ev, f"{key} is in the ops graph")
+            return _result("pass", ev, f"{key} is declared ({origin})")
         value = attrs.get(attr)
         ev["attr"] = attr
         ev["actual"] = value if isinstance(value, (str, int, float, bool)) or value is None \
             else (value[:10] if isinstance(value, list) else str(type(value).__name__))
         if value in (None, "", [], {}):
             return _result("fail", ev, f"{key} has no {attr}")
+        if args.get("pinned"):
+            pinned = image_pinned(value) if isinstance(value, str) else None
+            if pinned is None:
+                return _result("unknown", ev, f"{key} {attr} {_clip(value, 80)!r} is "
+                               "not an image reference ozagia can read")
+            return _result("pass" if pinned else "fail", ev,
+                           f"{key} {attr} {value} is "
+                           + ("pinned" if pinned else "not pinned (no digest, tag latest)"))
         want = args.get("value")
         if want is None:
             return _result("pass", ev, f"{key} has {attr}")
@@ -1159,12 +1448,12 @@ def _str_list(value: Any, name: str) -> list[str]:
     return out
 
 
-def _check_scope_entry(entry: str, memory: Any) -> None:
+def _check_scope_entry(entry: str, memory: Any, root: Path | None = None) -> None:
     glob = scope_glob(entry)
     if glob is not None:
         check_glob(glob)
         return
-    if not _resolves(memory, entry):
+    if not _resolves(memory, entry, root):
         raise GoalError(f"scope: unknown key {entry}")
 
 
@@ -1210,10 +1499,10 @@ def add_goal(root: str | Path | None, memory: Any, spec: dict[str, Any], *,
     for t in targets:
         if not is_key(t):
             raise GoalError(f"targets: {t!r} is not a graph key (file:, sym:, test:, doc:, ops:, ...)")
-        if not _resolves(memory, t):
+        if not _resolves(memory, t, root_p):
             raise GoalError(f"targets: unknown key {t}")
     for entry in scope:
-        _check_scope_entry(entry, memory)
+        _check_scope_entry(entry, memory, root_p)
     criteria = []
     for i, raw in enumerate(raw_criteria, start=1):
         c = validate_criterion(raw, memory, root_p)
@@ -1392,20 +1681,29 @@ def block_goal(root: str | Path, goal_id: str, *, reason: str = "",
         return goal
 
 
-def from_review(root: str | Path | None, memory: Any, packet: str, finding_id: str,
-                *, by: str = "cli") -> dict[str, Any]:
+def from_review(root: str | Path | None, memory: Any, packet: str | None,
+                finding_id: str, *, by: str = "cli") -> dict[str, Any]:
     """A goal from a repo-review finding's `suggested_goal` {title, targets,
     criteria}, with `review_resolved` added as a criterion and the finding
-    as its source. Targets default to the finding's keys."""
+    as its source. `packet` defaults to the reviews dir's `latest.json`.
+    Targets default to the finding's keys. A finding the section cap left
+    out of the packet's `findings` list (only its id is kept) gets a goal
+    with only `review_resolved`, its files as targets."""
     root_p = _root_of(memory, root)
-    if not isinstance(finding_id, str) or len(finding_id) > MAX_FINDING_ID:
+    if not isinstance(finding_id, str) or not finding_id.strip() or \
+            len(finding_id) > MAX_FINDING_ID:
         raise GoalError(f"a finding id is a string of at most {MAX_FINDING_ID} "
                         "characters")
+    if packet is None:
+        from ozagia.core.repo_review import LATEST_NAME
+        packet = str(reviews_dir(root_p) / LATEST_NAME)
     stored = _packet_arg(root_p, packet)
     data = read_packet(root_p, _packet_file(root_p, stored))
     finding = _finding(data, finding_id)
-    if finding is None:
+    info = _finding_info(data, finding_id)
+    if info is None:
         raise GoalError(f"finding {finding_id} is not in {packet}")
+    finding = finding or {"type": info[0], "keys": info[1]}
     suggested = finding.get("suggested_goal")
     if not isinstance(suggested, dict):
         suggested = {}
@@ -1454,6 +1752,8 @@ def criterion_label(crit: dict[str, Any]) -> str:
         subject = str(args.get("key") or "")
         if kind == "ops_has" and args.get("attr"):
             subject += f" {args['attr']}" + (f"={args['value']}" if args.get("value") else "")
+        if kind == "ops_has" and args.get("pinned"):
+            subject += " pinned"
     return f"{crit.get('id')} {kind} {subject}".strip()
 
 
@@ -1633,5 +1933,5 @@ __all__ = ["BRIEF_CHARS", "Evaluator", "GoalError", "KINDS", "PACKET_SCHEMA",
            "edit_hints", "from_review", "get_goal", "glob_regex", "goals_path",
            "in_scope", "last_change", "list_goals", "load_goal_file",
            "load_packet", "load_store", "locked_store", "parse_criterion",
-           "read_goals", "read_packet", "reviews_dir", "scope_glob", "summary",
-           "unmet", "validate_criterion"]
+           "newest_packet", "read_goals", "read_packet", "reviews_dir",
+           "scope_glob", "summary", "tracking_goals", "unmet", "validate_criterion"]
