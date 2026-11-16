@@ -440,6 +440,21 @@ def test_patch_is_left_to_the_builtin(mem):
     assert res["handled"] is False
 
 
+def test_after_patch_refreshes_the_graph(mem, repo):
+    # Codex's apply_patch ran the built-in; `after` re-ingests what changed.
+    path = repo / "pkg" / "use.py"
+    path.write_text(path.read_text() + "\n\ndef added():\n    return run()\n")
+    patch = ("*** Begin Patch\n*** Update File: pkg/use.py\n@@\n+def added():\n"
+             "+    return run()\n*** End Patch\n")
+    res = I.after(mem, "patch", {"patch": patch}, "Success. Updated the following files:\n"
+                  "M pkg/use.py\n", harness="codex")
+    assert res["meta"]["intent"] == "after_refresh"
+    assert res["meta"]["changed_files"] == 1
+    assert "+sym:pkg/use.py::added" in res["append"]
+    assert res["append"].startswith("[ozagia] delta: 1 added")
+    assert mem.node_by_key("sym:pkg/use.py::added") is not None
+
+
 # --------------------------------------------------------------------------- #
 # shell
 # --------------------------------------------------------------------------- #
