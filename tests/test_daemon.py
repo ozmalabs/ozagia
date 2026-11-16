@@ -584,7 +584,7 @@ def test_after_records_changed_paths_as_created(tmp_path):
     assert st.stats()["file_ledger_scans"] == 1
 
 
-def test_session_end_scan_records_untracked_file(tmp_path):
+def test_session_end_without_baseline_does_not_attribute(tmp_path):
     from ozagia.core import files as F
     from ozagia.daemon.server import DaemonState
     root = _ledger_repo(tmp_path)
@@ -598,16 +598,53 @@ def test_session_end_scan_records_untracked_file(tmp_path):
     record = F.explain(root, "untracked.md")["record"]
     assert record is not None
     assert record["reason"] == "unknown"
-    assert record["created_by"]["session"] == "ses-end"
+    # No start baseline: the fallback records the file but claims no session.
+    assert record["baseline"] == "missing"
+    assert record["attribution"] is False
+    assert record["created_by"]["session"] is None
     assert record["created_by"]["tool"] == "session_event"
     stats = st.stats()
     assert stats["file_ledger_scans"] == 1 and stats["files_recorded"] == 1
-    # A start scan runs too, and dedupes the unchanged file.
+    assert stats["file_manifest_sessions"] == 1
+    assert stats["file_manifest_errors"] == 0
+    # A start baseline, then one new file: only the new file is attributed.
     msg2 = {**msg, "event": "start"}
     resp2 = st.dispatch(msg2)
+    assert resp2["ok"], resp2
     st.record(msg2, resp2, 1.0)
+    (root / "new.md").write_text("# New\n", encoding="utf-8")
+    resp3 = st.dispatch(msg)
+    st.record(msg, resp3, 1.0)
+    new_record = F.explain(root, "new.md")["record"]
+    assert new_record is not None
+    assert new_record["created_by"]["session"] == "ses-end"
+    assert new_record["attribution"] is True
+    # The pre-existing untracked file keeps its unattributed fallback row.
+    old_record = F.explain(root, "untracked.md")["record"]
+    assert old_record["created_by"]["session"] is None
     stats = st.stats()
-    assert stats["file_ledger_scans"] == 2 and stats["files_recorded"] == 1
+    assert stats["file_ledger_scans"] == 3 and stats["files_recorded"] == 2
+    assert stats["file_manifest_sessions"] == 3
+
+
+def test_session_manifest_error_is_counted(tmp_path, monkeypatch):
+    from ozagia.core import files as F
+    from ozagia.daemon.server import DaemonState
+    root = _ledger_repo(tmp_path)
+    st = DaemonState(root, None, tmp_path / "j.jsonl")
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("manifest unavailable")
+
+    monkeypatch.setattr(F, "session_snapshot", boom)
+    msg = {"op": "session_event", "event": "start", "harness": "claude",
+           "session": "ses-fail"}
+    resp = st.dispatch(msg)
+    assert resp["ok"], resp
+    stats = st.stats()
+    assert stats["file_manifest_errors"] == 1
+    assert stats["file_ledger_errors"] == 1
+    assert stats["file_manifest_sessions"] == 0
 
 
 def test_hook_session_end_scan_records_untracked_file(tmp_path):
@@ -631,11 +668,15 @@ def test_hook_session_end_scan_records_untracked_file(tmp_path):
         record = F.explain(root, "hook-note.md")["record"]
         assert record is not None
         assert record["reason"] == "unknown"
-        assert record["created_by"]["session"] == "ses-hook"
-        assert record["created_by"]["harness"] == "claude"
+        # The hook's end arrived without a start manifest: recorded, but not
+        # attributed to the session.
+        assert record["baseline"] == "missing"
+        assert record["created_by"]["session"] is None
+        assert record["created_by"]["harness"] is None
         with DaemonClient(sock, timeout=10) as c:
             stats = c.stats()["stats"]
         assert stats["file_ledger_scans"] >= 1
         assert stats["files_recorded"] >= 1
+        assert stats["file_manifest_sessions"] >= 1
     finally:
         _stop(proc)
