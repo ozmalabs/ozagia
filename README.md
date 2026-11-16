@@ -47,6 +47,7 @@ glibc) and macOS (arm64, x64). `ozagia self check --tui` verifies the install;
 | MCP server | `ozagia mcp`: any MCP client (OpenCode, Claude Code, Cursor, ...) gets the graph tools next to its own | works |
 | OpenCode plugin | captures `read`/`grep`/`glob`/`edit`/`write`/`shell` and carries out their intent on the graph daemon; `ozagia install opencode` | works (OpenCode 2.3, live smoke runs) |
 | Claude Code hooks | partial capture: graph context after each tool, git ref refusal; `ozagia install claude` | implemented, untested live |
+| Codex hooks | graph context after shell commands and patches, git ref refusal, a session brief, the MCP server and an `AGENTS.md` section; `ozagia install codex` ([docs/codex.md](docs/codex.md)) | implemented, untested live |
 | Harness | `ozagia agent`: an OpenCode session with the daemon and plugin set up and torn down for you ([docs/harness.md](docs/harness.md)); `python -m ozagia.harness.native`: a small agent loop over any OpenAI-compatible API, with or without the graph ([docs/native_loop.md](docs/native_loop.md)) | implemented; the eval's live runs use the same pieces |
 | Infrastructure | Opt-in source-only Terraform, Kubernetes and related infrastructure graph/context ([docs/iac_context.md](docs/iac_context.md)) | experimental, partial static analysis |
 

@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+- Codex integration: `ozagia install codex [--scope project|user]` adds
+  command hooks to `.codex/hooks.json` (git ref refusal before `Bash`, graph
+  context after `Bash` and `apply_patch`, a short brief at `SessionStart`),
+  the ozagia MCP server as `[mcp_servers.ozagia]` in `.codex/config.toml`
+  (only that table is touched), and a marked section in `AGENTS.md`;
+  `python -m ozagia.integrations.codex uninstall` removes all three. Codex
+  runs the hooks after you trust them in `/hooks`. See docs/codex.md.
+- `ozagia daemon ensure` starts the graph daemon detached when none answers,
+  with an idle timeout (`serve --idle-timeout S`, 30 minutes when started by
+  `ensure`). The Codex hooks call it on demand.
+- The generic parts of the Claude Code hook moved to
+  `ozagia.integrations.hookcore`.
+- Daemon stats count requests by harness (`by_harness`).
+
 ## 0.1.2 (2026-11-16)
 
 First published release. (`v0.1.0` and `v0.1.1` were tagged, but their release
