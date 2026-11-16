@@ -7,7 +7,8 @@ test record, never from an agent's own claim. Goals are repo-level, kept in
 `<state dir>/goals/goals.json`; sessions claim them.
 
 Store (schema version 1; atomic write, `fcntl` file lock on
-`goals/.lock`):
+`goals/.lock`, required: a writer that cannot take it gets a GoalError;
+at most `MAX_GOALS` goals not dropped, `MAX_DROPPED` dropped ones):
 
     {"version": 1, "next_id": <n>, "goals": [goal, ...]}
 
@@ -19,20 +20,27 @@ Store (schema version 1; atomic write, `fcntl` file lock on
     criteria:   [{id ("c<n>"), kind, args, last}]; `last` is the latest
                 result {status, evidence, reason, at}, or absent
     claimed_by: [{harness, session, at}]
-    history:    [{at, event, by, detail}], every event (`MAX_HISTORY`
-                kept; the `created` entry always)
+    history:    [{at, event, by, detail, repeat?}], every event
+                (`MAX_HISTORY` kept; the `created` entry always; a
+                `checked` like the one before it bumps that one's `repeat`)
     source:     {review_packet, finding_id} or null
 
 Criteria kinds and their args (`KINDS`). Each evaluates to
 `{status: pass|fail|stale|unknown, evidence, reason}`:
 
     test_passes / test_fails  {key: test:...}  from the root's test record
-        (`ozagia.core.working_set.recorded_outcome`) with the run time; `stale`
-        when the run is older than the last change to the goal's targets or
-        the test's file (file mtimes).
+        (`ozagia.core.working_set.recorded_outcome(..., evidence=True)`):
+        only runs the daemon captured itself count, and the run must still
+        hold: `stale` when a file among the goal's targets, its scope (keys,
+        and files matching its globs) and the test's file has other content
+        now than when the run started (`ozagia.core.fingerprint`), `unknown`
+        without a fingerprint, when the test key no longer resolves, or (for
+        test_fails) when the test errored rather than failed.
     symbol_exists / symbol_absent  {key: sym:...}  graph node present/absent.
     calls / not_calls  {caller: sym:..., callee: sym:...}  an edge of the
-        syntactic symbol graph (`ozagia.core.symbol_graph`) present/absent.
+        syntactic symbol graph (`ozagia.core.symbol_graph`) present/absent;
+        `unknown` when a symbol is missing from the symbol graph but still
+        in the graph (a file the tag parser skipped).
     no_callers  {key: sym:...}  no symbol-graph edge into the symbol.
     file_exists / file_absent  {key: file:...}  the file in the working tree.
     unchanged  {key, hash}  the key's content hash equals the hash taken at
@@ -40,19 +48,26 @@ Criteria kinds and their args (`KINDS`). Each evaluates to
         node's attrs).
     lint_clean  {key}  ozagia keeps no lint results (`ozagia.intent.lint`
         reports findings in the edit's reply and stores nothing), so this is
-        always `unknown`, with that reason.
+        always `unknown`, with that reason; `add_goal` warns.
     review_resolved  {packet, finding_id}  the finding id is absent from the
-        repo-review packet (`ozagia.repo_review.packet.v1`) at `packet`;
-        `stale` when the packet is older than the last change to the targets.
+        repo-review packet (`ozagia.repo_review.packet.v1`) at `packet`, a
+        regular file under `<state dir>/reviews/` of at most
+        `MAX_PACKET_BYTES`; `stale` when the packet is older than the last
+        change to the targets (mtimes).
     ops_has  {key: ops:..., attr?, value?}  an ops-graph node, optionally with
         a non-empty attribute, optionally equal to (or, for a list,
-        containing) `value`.
+        containing) `value` (a value needs an attr).
+
+Kinds that read the graph are `unknown` when there is no graph or the
+check's refresh failed; `--no-refresh` results say so in the evidence.
 
 There is no shell-command criterion.
 
 Creation resolves every key (targets, key entries of scope, criterion
 subjects) against the graph and refuses unknown ones, except the subject of
-`symbol_exists`/`file_exists`. Status changes only by evaluation (`met` when
+`symbol_exists`/`file_exists`; it compiles scope globs and refuses invalid
+ones, and bounds input lengths (`MAX_KEY_CHARS`, `MAX_ARG_CHARS`,
+`MAX_FINDING_ID`). Status changes only by evaluation (`met` when
 every criterion passes, from open or regressed; `regressed` when a met goal
 has a failing criterion) or by explicit commands: `drop`, `block` (with a
 reason) and `block --clear` (back to open). A blocked or dropped goal is
@@ -64,11 +79,13 @@ needed; reading goals (hints, the session brief) needs no graph.
 from __future__ import annotations
 
 import contextlib
+import functools
 import hashlib
 import json
 import os
 import re
 import shlex
+import stat
 import tempfile
 import threading
 import time
@@ -88,6 +105,22 @@ MAX_WHY = 2000
 MAX_REASON = 300
 MAX_KEYS = 100
 MAX_CRITERIA = 50
+# Input bounds: a key or scope entry, a criterion argument, a finding id.
+MAX_KEY_CHARS = 1000
+MAX_ARG_CHARS = 1000
+MAX_FINDING_ID = 200
+# Store bounds: goals not dropped (adding more is refused), and dropped
+# goals kept (the oldest are removed when a write goes over).
+MAX_GOALS = 500
+MAX_DROPPED = 200
+# Review packets: under `<state dir>/reviews/`, a regular file of at most
+# this many bytes.
+REVIEWS_DIR = "reviews"
+MAX_PACKET_BYTES = 16 * 1024 * 1024
+# How long a writer waits for the store's file lock.
+LOCK_TIMEOUT_S = 30.0
+# Files compared against a test run's fingerprint for one criterion.
+MAX_FRESH_FILES = 5000
 # Hint and brief bounds.
 HINT_GOALS = 3
 HINT_CRITERIA = 4
@@ -117,9 +150,17 @@ KINDS: dict[str, tuple[tuple[str, ...], int, dict[str, str], bool]] = {
 }
 # Kinds whose evidence predates a change to the goal's targets.
 TIME_KINDS = frozenset({"test_passes", "test_fails", "review_resolved"})
+# Kinds that read the graph (`DevMemory`): `unknown` without one, or when
+# the check's refresh failed.
+GRAPH_KINDS = frozenset({"test_passes", "test_fails", "symbol_exists",
+                         "symbol_absent", "calls", "not_calls", "no_callers",
+                         "ops_has"})
 _KEY_RE = re.compile(r"^[a-z][a-z0-9_]*:")
 _GLOB_CHARS = re.compile(r"[*?\[]")
 _THREAD_LOCK = threading.Lock()
+# `read_goals`'s cache: {store path: (stat signature, goals)}.
+_STORE_CACHE: dict[str, tuple[tuple[int, int, int, int], list[dict[str, Any]]]] = {}
+_CACHE_LOCK = threading.Lock()
 
 
 class GoalError(ValueError):
@@ -149,14 +190,30 @@ def is_key(entry: str) -> bool:
     return bool(_KEY_RE.match(entry or ""))
 
 
+def _key_path(key: str) -> str | None:
+    """The root-relative file a key's content is in, for freshness: the
+    key's file (an anchor after `#` dropped), or for an `ops:` key the
+    path before its `#` (`ops:compose/compose.yaml#service/web`); None
+    when the key names no file (`ops:image/nginx`)."""
+    if not isinstance(key, str):
+        return None
+    if key.startswith("ops:"):
+        rest = key[len("ops:"):]
+        return rest.split("#", 1)[0] if "#" in rest else None
+    rel = key_file(key)
+    return rel.split("#", 1)[0] if rel else None
+
+
 # --------------------------------------------------------------------------- #
 # path globs (scope)
 # --------------------------------------------------------------------------- #
+@functools.lru_cache(maxsize=512)
 def glob_regex(pattern: str) -> re.Pattern[str]:
     """A regex for root-relative POSIX paths: `**` any number of
     directories (a trailing `**` everything below), `*`/`?` within one
     component, `[...]` a class; a pattern ending in `/` matches everything
-    below that directory."""
+    below that directory. Raises `re.error` for an invalid class
+    (`[z-a]`); `check_glob` turns that into a GoalError."""
     pat = pattern.strip()
     while pat.startswith("./"):
         pat = pat[2:]
@@ -193,6 +250,34 @@ def glob_regex(pattern: str) -> re.Pattern[str]:
     return re.compile("".join(out) + r"\Z")
 
 
+def check_glob(pattern: str) -> None:
+    """Refuse a scope glob that does not compile."""
+    try:
+        glob_regex(pattern)
+    except re.error as e:
+        raise GoalError(f"scope: invalid glob {pattern!r}: {e}") from None
+
+
+def _glob_match(pattern: str, rel: str) -> bool:
+    """Whether `rel` matches `pattern`; an invalid glob (a store written
+    before globs were checked) matches nothing."""
+    try:
+        return bool(glob_regex(pattern).match(rel))
+    except re.error:
+        return False
+
+
+def scope_glob(entry: str) -> str | None:
+    """The path glob of a scope entry (a plain glob, or a `file:`/`doc:`
+    key with glob characters), or None for a key."""
+    if not is_key(entry):
+        return entry
+    prefix, _, rest = entry.partition(":")
+    if prefix in ("file", "doc") and _GLOB_CHARS.search(entry):
+        return rest
+    return None
+
+
 def _related(a: str, b: str) -> bool:
     """Same key, or one names a member of the other (`sym:f.py::C` and
     `sym:f.py::C.m`)."""
@@ -207,15 +292,12 @@ def in_scope(scope: list[str], rel: str, keys: Iterable[str] = ()) -> bool:
     symbol (with no known keys, the file is admitted)."""
     in_file: list[str] = []
     for entry in scope:
-        if not is_key(entry):
-            if glob_regex(entry).match(rel):
+        glob = scope_glob(entry)
+        if glob is not None:
+            if _glob_match(glob, rel):
                 return True
             continue
         prefix = entry.split(":", 1)[0]
-        if prefix in ("file", "doc") and _GLOB_CHARS.search(entry):
-            if glob_regex(entry.split(":", 1)[1]).match(rel):
-                return True
-            continue
         if key_file(entry) != rel:
             continue
         if prefix in ("file", "doc"):
@@ -273,11 +355,31 @@ def load_store(root: str | Path) -> dict[str, Any]:
 
 def read_goals(root: str | Path) -> list[dict[str, Any]]:
     """The goals, or [] when the store is missing or unreadable (for hints
-    and briefs, which never fail)."""
+    and briefs, which never fail). The parsed store is cached per path and
+    reused while the file's (mtime_ns, ctime_ns, size, inode) stay the
+    same, so the daemon's per-edit read is a `stat` in the common case.
+    The list and its goals are shared: callers must not modify them."""
+    path = goals_path(root)
     try:
-        return list(load_store(root)["goals"])
+        st = path.stat()
+    except FileNotFoundError:
+        return []
+    except OSError:
+        return []
+    sig = (st.st_mtime_ns, st.st_ctime_ns, st.st_size, st.st_ino)
+    with _CACHE_LOCK:
+        hit = _STORE_CACHE.get(str(path))
+        if hit is not None and hit[0] == sig:
+            return hit[1]
+    try:
+        goals = list(load_store(root)["goals"])
     except GoalError:
         return []
+    with _CACHE_LOCK:
+        _STORE_CACHE[str(path)] = (sig, goals)
+        while len(_STORE_CACHE) > 16:
+            _STORE_CACHE.pop(next(iter(_STORE_CACHE)))
+    return goals
 
 
 def _write_store(path: Path, data: dict[str, Any]) -> None:
@@ -300,24 +402,65 @@ def _write_store(path: Path, data: dict[str, Any]) -> None:
 def locked_store(root: str | Path) -> Iterator[dict[str, Any]]:
     """The store under the file lock (and a process lock), written back
     atomically when the block finishes without an exception; on an
-    exception nothing is written."""
+    exception nothing is written. Raises GoalError when the file lock
+    cannot be taken (no `fcntl`, a filesystem without locks, another
+    writer holding it for `LOCK_TIMEOUT_S`): the store is never written
+    unlocked."""
     path = goals_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        import fcntl
+    except ImportError:
+        raise GoalError("the goal store needs a file lock (fcntl), which this "
+                        "platform does not have") from None
+    deadline = time.monotonic() + LOCK_TIMEOUT_S
     with _THREAD_LOCK, open(path.parent / LOCK_FILE, "a+") as lk:
+        while True:
+            try:
+                fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise GoalError(f"the goal store {path} is locked by another "
+                                    f"writer (waited {LOCK_TIMEOUT_S:.0f} s)") from None
+                time.sleep(0.05)
+            except OSError as e:
+                raise GoalError(f"cannot lock the goal store {path}: {e}") from None
         try:
-            import fcntl
-            fcntl.flock(lk, fcntl.LOCK_EX)
-        except (ImportError, OSError):
-            pass
-        data = load_store(root)
-        yield data
-        _write_store(path, data)
+            data = load_store(root)
+            yield data
+            _compact(data)
+            _write_store(path, data)
+        finally:
+            with contextlib.suppress(OSError):
+                fcntl.flock(lk, fcntl.LOCK_UN)
+
+
+def _compact(data: dict[str, Any]) -> None:
+    """Keep at most `MAX_DROPPED` dropped goals (the most recently
+    updated)."""
+    dropped = [g for g in data["goals"] if g.get("status") == "dropped"]
+    if len(dropped) <= MAX_DROPPED:
+        return
+    dropped.sort(key=lambda g: g.get("updated_at") or 0)
+    gone = {id(g) for g in dropped[:len(dropped) - MAX_DROPPED]}
+    data["goals"] = [g for g in data["goals"] if id(g) not in gone]
 
 
 def _event(goal: dict[str, Any], event: str, by: str,
            detail: Any = None, at: float | None = None) -> None:
+    """Add an event to the goal's history. A `checked` event the same as
+    the last one (same `by` and counts) updates that one's time and its
+    `repeat` count instead of adding an entry."""
     at = _now() if at is None else at
     hist = goal.setdefault("history", [])
+    last = hist[-1] if hist else None
+    if (event == "checked" and isinstance(last, dict) and last.get("event") == "checked"
+            and last.get("by") == by and last.get("detail") == detail):
+        last["at"] = at
+        last["repeat"] = int(last.get("repeat") or 1) + 1
+        goal["updated_at"] = at
+        return
     hist.append({"at": at, "event": event, "by": by, "detail": detail})
     if len(hist) > MAX_HISTORY:
         head = [h for h in hist[:1] if h.get("event") == "created"]
@@ -389,6 +532,8 @@ def _criterion_spec(raw: Any) -> dict[str, Any]:
     """A criterion from a CLI string, or a mapping `{kind, args}` or
     `{kind, <param>: ...}` (TOML, MCP, review packets)."""
     if isinstance(raw, str):
+        if len(raw) > 3 * MAX_ARG_CHARS:
+            raise GoalError(f"criterion longer than {3 * MAX_ARG_CHARS} characters")
         return parse_criterion(raw)
     if not isinstance(raw, dict):
         raise GoalError(f"criterion must be a string or a table, got {raw!r}")
@@ -397,6 +542,9 @@ def _criterion_spec(raw: Any) -> dict[str, Any]:
         raise GoalError(f"criterion kind {kind!r}: expected one of {', '.join(KINDS)}")
     args = raw.get("args")
     if isinstance(args, str):
+        if len(args) > 3 * MAX_ARG_CHARS:
+            raise GoalError(f"criterion {kind}: args longer than "
+                            f"{3 * MAX_ARG_CHARS} characters")
         return parse_criterion(f"{kind}:{args}")
     if args is None:
         args = {k: v for k, v in raw.items() if k not in ("kind", "id", "last")}
@@ -422,23 +570,75 @@ def _root_of(memory: Any, root: str | Path | None) -> Path:
     return Path(memory.raw_repo_root).resolve()
 
 
+def reviews_dir(root: str | Path) -> Path:
+    """Where review packets must be: `<state dir>/reviews/`."""
+    from ozagia.config import state_path
+    return state_path(root, REVIEWS_DIR)
+
+
 def _packet_arg(root: Path, value: str) -> str:
     """A packet path as stored: root-relative when inside the root. A
     relative `value` is relative to the root (the CLI passes absolute
-    paths)."""
+    paths). The path must be a regular file under the reviews dir
+    (`reviews_dir`, symlinks resolved) of at most `MAX_PACKET_BYTES`;
+    anything else is refused."""
+    if len(value) > MAX_ARG_CHARS:
+        raise GoalError(f"review packet path longer than {MAX_ARG_CHARS} characters")
     p = Path(os.path.expanduser(value))
     if not p.is_absolute():
         p = root / p
-    p = p.resolve()
+    real = Path(os.path.realpath(p))
+    _read_packet_bytes(root, real)          # raises GoalError
     try:
-        return p.relative_to(root).as_posix()
+        return real.relative_to(root).as_posix()
     except ValueError:
-        return str(p)
+        return str(real)
 
 
 def _packet_file(root: Path, value: str) -> Path:
     p = Path(value)
     return p if p.is_absolute() else root / p
+
+
+def _read_packet_bytes(root: Path, path: Path) -> bytes:
+    """The bytes of a review packet, read safely: the path (symlinks
+    resolved) must be under the reviews dir, the file is opened without
+    following a final symlink and without blocking (a FIFO), must be a
+    regular file and at most `MAX_PACKET_BYTES`. Raises GoalError."""
+    base = os.path.realpath(reviews_dir(root))
+    real = os.path.realpath(path)
+    if os.path.commonpath([base, real]) != base or real == base:
+        raise GoalError(f"review packet {path} is not under the reviews "
+                        f"directory {base}")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(
+        os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(real, flags)
+    except OSError as e:
+        raise GoalError(f"cannot open review packet {path}: {e.strerror or e}") from None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise GoalError(f"review packet {path} is not a regular file")
+        if st.st_size > MAX_PACKET_BYTES:
+            raise GoalError(f"review packet {path} is larger than "
+                            f"{MAX_PACKET_BYTES} bytes")
+        chunks: list[bytes] = []
+        size = 0
+        while True:
+            chunk = os.read(fd, 1 << 20)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > MAX_PACKET_BYTES:
+                raise GoalError(f"review packet {path} is larger than "
+                                f"{MAX_PACKET_BYTES} bytes")
+            chunks.append(chunk)
+        return b"".join(chunks)
+    except OSError as e:
+        raise GoalError(f"cannot read review packet {path}: {e.strerror or e}") from None
+    finally:
+        os.close(fd)
 
 
 def validate_criterion(raw: Any, memory: Any, root: Path) -> dict[str, Any]:
@@ -458,7 +658,13 @@ def validate_criterion(raw: Any, memory: Any, root: Path) -> dict[str, Any]:
     for name in names:
         if args.get(name) is None:
             continue
+        if not isinstance(args[name], (str, int, float)) or isinstance(args[name], bool):
+            raise GoalError(f"criterion {kind}: {name} must be a string")
         value = str(args[name]).strip()
+        limit = MAX_FINDING_ID if name == "finding_id" else MAX_ARG_CHARS
+        if len(value) > limit:
+            raise GoalError(f"criterion {kind}: {name} is longer than {limit} "
+                            "characters")
         if name in key_params:
             prefix = key_params[name]
             value = _default_prefix(value, prefix)
@@ -470,12 +676,12 @@ def validate_criterion(raw: Any, memory: Any, root: Path) -> dict[str, Any]:
             if not (may_be_absent and name == "key") and not _resolves(memory, value):
                 raise GoalError(f"criterion {kind}: unknown key {value}")
         out[name] = value
+    if kind == "ops_has" and out.get("value") is not None and not out.get("attr"):
+        raise GoalError("criterion ops_has: a value needs an attr (ops_has:KEY "
+                        "ATTR VALUE); without one only existence is checked")
     if kind == "review_resolved":
         out["packet"] = _packet_arg(root, out["packet"])
-        packet = load_packet(_packet_file(root, out["packet"]))
-        if packet is None:
-            raise GoalError(f"criterion review_resolved: cannot read a "
-                            f"{PACKET_SCHEMA} packet at {out['packet']}")
+        read_packet(root, _packet_file(root, out["packet"]))
     if kind == "unchanged":
         digest, _ev = content_hash(root, memory, out["key"])
         if digest is None:
@@ -554,17 +760,31 @@ def last_change(root: Path, keys: Iterable[str]) -> tuple[float | None, str | No
     return best
 
 
-def load_packet(path: Path) -> dict[str, Any] | None:
-    """A repo-review packet, or None when unreadable or of another schema."""
+def read_packet(root: str | Path, path: Path) -> dict[str, Any]:
+    """A repo-review packet read safely (`_read_packet_bytes`). Raises
+    GoalError when it is not under the reviews dir, not a regular file,
+    too large, not JSON or of another schema."""
+    return _parse_packet(_read_packet_bytes(Path(root).resolve(), path), path)
+
+
+def _parse_packet(raw: bytes, path: Path) -> dict[str, Any]:
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        raise GoalError(f"review packet {path} is not JSON") from None
     if not isinstance(data, dict) or data.get("schema") != PACKET_SCHEMA:
-        return None
+        raise GoalError(f"no readable {PACKET_SCHEMA} packet at {path}")
     if not isinstance(data.get("findings"), list):
-        return None
+        raise GoalError(f"no readable {PACKET_SCHEMA} packet at {path}")
     return data
+
+
+def load_packet(root: str | Path, path: Path) -> dict[str, Any] | None:
+    """A repo-review packet (see `read_packet`), or None."""
+    try:
+        return read_packet(root, path)
+    except GoalError:
+        return None
 
 
 def _finding(packet: dict[str, Any], finding_id: str) -> dict[str, Any] | None:
@@ -578,15 +798,28 @@ def _finding(packet: dict[str, Any], finding_id: str) -> dict[str, Any] | None:
 # evaluation
 # --------------------------------------------------------------------------- #
 class Evaluator:
-    """Evaluates criteria for one check: the test record and the symbol
-    graph are loaded once, on first use."""
+    """Evaluates criteria for one check: the test record, the symbol graph
+    and the git view are loaded once, on first use.
 
-    def __init__(self, root: str | Path, memory: Any) -> None:
+    `graph` says what the graph is: `fresh` (refreshed for this check, or
+    nothing was pending), `not refreshed` (`--no-refresh`: recorded in the
+    evidence), `refresh failed: ...` or `no graph`. In the last two cases
+    every kind that reads the graph (`GRAPH_KINDS`, `unchanged` of a
+    non-file key) is `unknown`."""
+
+    def __init__(self, root: str | Path, memory: Any, *, graph: str | None = None
+                 ) -> None:
         self.root = Path(root).resolve()
         self.memory = memory
+        self.graph = graph or ("fresh" if memory is not None else "no graph")
         self._record: dict[str, Any] | None = None
         self._sgraph: Any = None
         self._sgraph_error: str | None = None
+        self._view: Any = None
+
+    @property
+    def graph_usable(self) -> bool:
+        return self.memory is not None and self.graph in ("fresh", "not refreshed")
 
     # -- shared sources ---------------------------------------------------- #
     def record(self) -> dict[str, Any]:
@@ -594,6 +827,12 @@ class Evaluator:
             from ozagia.core.working_set import load_test_record
             self._record = load_test_record(self.root)
         return self._record
+
+    def view(self) -> Any:
+        if self._view is None:
+            from ozagia.core.fingerprint import TreeView
+            self._view = TreeView(self.root)
+        return self._view
 
     def symbol_graph(self) -> tuple[dict[str, Any] | None, str | None]:
         if self._sgraph is None and self._sgraph_error is None:
@@ -622,31 +861,113 @@ class Evaluator:
         fn = getattr(self, f"_eval_{kind}", None)
         if fn is None:
             return _result("unknown", {}, f"unknown criterion kind {kind!r}")
+        args = dict(crit.get("args") or {})
+        if kind in GRAPH_KINDS and not self.graph_usable:
+            return _result("unknown", {"graph": self.graph},
+                           f"the graph is unusable for this check ({self.graph})")
         try:
-            return fn(goal, dict(crit.get("args") or {}))
+            res = fn(goal, args)
         except Exception as e:  # noqa: BLE001 - a criterion never fails a check
             return _result("unknown", {}, f"evaluation failed: {type(e).__name__}: {e}")
+        if self.graph != "fresh" and kind in GRAPH_KINDS:
+            res["evidence"] = {**res.get("evidence", {}), "graph": self.graph}
+        return res
 
     def _stale_after(self, goal: dict[str, Any], ts: float | None,
                      extra: Iterable[str] = ()) -> tuple[bool, dict[str, Any]]:
+        """By mtime (review packets only; test runs use `_fresh`)."""
         changed, rel = last_change(self.root, [*(goal.get("targets") or []), *extra])
         ev = {"targets_changed_at": changed, "changed_file": rel}
         return (ts is not None and changed is not None and ts < changed), ev
+
+    def relevant_files(self, goal: dict[str, Any], run_tree: dict[str, Any],
+                       extra: Iterable[str] = ()) -> tuple[list[str], str | None]:
+        """The files whose content a test result depends on, as far as the
+        goal says: the files of its targets, of its scope keys, the files
+        matching its scope globs (among the paths tracked or untracked now,
+        in the run's commit, or dirty at the run), and of the `extra` keys
+        (the test). A reason instead when there are too many."""
+        files: list[str] = []
+        for key in [*(goal.get("targets") or []), *extra]:
+            rel = _key_path(key)
+            if rel:
+                files.append(rel)
+        globs = []
+        for entry in goal.get("scope") or []:
+            glob = scope_glob(entry)
+            if glob is None:
+                rel = _key_path(entry)
+                if rel:
+                    files.append(rel)
+            else:
+                globs.append(glob)
+        if globs:
+            view = self.view()
+            candidates = set(view.paths())
+            candidates.update(view.tree(run_tree.get("head")) or {})
+            candidates.update(run_tree.get("dirty") or {})
+            candidates.update(run_tree.get("unhashed") or [])
+            for rel in sorted(candidates):
+                if any(_glob_match(g, rel) for g in globs):
+                    files.append(rel)
+                    if len(files) > MAX_FRESH_FILES:
+                        break
+        files = list(dict.fromkeys(files))
+        if len(files) > MAX_FRESH_FILES:
+            return files[:MAX_FRESH_FILES], (
+                f"the goal's targets and scope cover more than {MAX_FRESH_FILES} "
+                "files")
+        return files, None
+
+    def _fresh(self, goal: dict[str, Any], run: dict[str, Any], test_key: str
+               ) -> tuple[str | None, dict[str, Any]]:
+        """None when the run's evidence still holds for this goal, else the
+        status (`stale` or `unknown`) and the evidence: the content of
+        every relevant file (`relevant_files`) now must equal its content
+        when the run started (`ozagia.core.fingerprint`)."""
+        from ozagia.core.fingerprint import changed_since
+        tree = run.get("tree")
+        if not isinstance(tree, dict):
+            return "unknown", {"reason": "the run has no working-tree fingerprint "
+                               "(not a git repository, or git failed)"}
+        files, err = self.relevant_files(goal, tree, [test_key])
+        ev: dict[str, Any] = {"run_head": tree.get("head"), "files_compared": len(files)}
+        if err:
+            return "unknown", {**ev, "reason": err}
+        changed, why = changed_since(self.view(), tree, files)
+        if why:
+            return "stale", {**ev, "changed_files": changed[:5], "reason": why}
+        if changed:
+            return "stale", {**ev, "changed_files": changed[:5],
+                             "changed_count": len(changed),
+                             "reason": f"{changed[0]} changed since the run started"
+                             + (f" (+{len(changed) - 1} more)" if len(changed) > 1 else "")}
+        return None, ev
 
     def _test(self, goal: dict[str, Any], args: dict[str, Any], want: str
               ) -> dict[str, Any]:
         from ozagia.core.working_set import recorded_outcome
         key = args["key"]
-        got = recorded_outcome(self.record(), key)
-        ev: dict[str, Any] = {"key": key, "outcome": got["outcome"],
-                              "run_at": got.get("ts")}
+        ev: dict[str, Any] = {"key": key}
+        if self.node(key) is None:
+            return _result("unknown", ev, f"{key} is no longer in the graph "
+                           "(deleted or renamed?)")
+        got = recorded_outcome(self.record(), key, evidence=True)
+        run = got.get("run") or {}
+        ev.update({"outcome": got["outcome"], "run_at": got.get("ts"),
+                   "run_source": run.get("source")})
         if got["outcome"] == "unknown":
             return _result("unknown", ev, got["reason"])
-        stale, sev = self._stale_after(goal, got.get("ts"), [key])
-        ev.update(sev)
-        if stale:
-            return _result("stale", ev, f"the last run ({got['outcome']}) is older "
-                           f"than the last change to {sev['changed_file']}")
+        status, fev = self._fresh(goal, run, key)
+        ev.update({k: v for k, v in fev.items() if k != "reason"})
+        if status is not None:
+            return _result(status, ev, f"the last run ({got['outcome']}): "
+                           f"{fev.get('reason')}")
+        if got["outcome"] == "error":
+            if want == "failed":
+                return _result("unknown", ev, f"test errored, which is not a "
+                               f"failure: {got['reason']}")
+            return _result("fail", ev, f"test errored: {got['reason']}")
         ok = got["outcome"] == want
         return _result("pass" if ok else "fail", ev,
                        f"test {got['outcome']}: {got['reason']}")
@@ -690,11 +1011,17 @@ class Evaluator:
         src, tgt = self._sid(caller), self._sid(callee)
         missing = [sid for sid in (src, tgt) if sid not in graph["nodes"]]
         if missing:
-            # Both keys resolved at creation: a missing definition was removed,
-            # so there is no edge.
             ev["missing"] = missing
+            # A symbol the tag parser skipped (a syntax error, an unsupported
+            # language) is still in the graph: the edge cannot be told.
+            known = [sid for sid in missing if self.node("sym:" + sid) is not None]
+            if known:
+                ev["in_graph_only"] = known
+                return _result("unknown", ev, f"{', '.join(known)} is in the graph "
+                               "but not in the symbol graph (tag parser skipped it?)")
             return _result("fail" if want else "pass", ev,
-                           f"{', '.join(missing)} not in the symbol graph, so no edge")
+                           f"{', '.join(missing)} not in the graph or the symbol "
+                           "graph, so no edge")
         edge = next((e for e in graph["edges"] if e["src"] == src and e["tgt"] == tgt), None)
         if edge is not None:
             ev["edge"] = {k: edge[k] for k in ("resolution", "confidence", "count")}
@@ -742,6 +1069,10 @@ class Evaluator:
 
     def _eval_unchanged(self, goal: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
         key, want = args["key"], args.get("hash")
+        if not key.startswith(("file:", "doc:")) and not self.graph_usable:
+            # A symbol's span or a node's attrs come from the graph.
+            return _result("unknown", {"key": key, "graph": self.graph},
+                           f"the graph is unusable for this check ({self.graph})")
         digest, ev = content_hash(self.root, self.memory, key)
         ev = {"key": key, "hash": digest, "created_hash": want, **ev}
         if digest is None:
@@ -761,16 +1092,14 @@ class Evaluator:
         path = _packet_file(self.root, args["packet"])
         fid = args["finding_id"]
         ev: dict[str, Any] = {"packet": args["packet"], "finding_id": fid}
-        packet = load_packet(path)
-        if packet is None:
-            return _result("unknown", ev, f"no readable {PACKET_SCHEMA} packet at "
-                           f"{args['packet']}")
+        try:
+            raw = _read_packet_bytes(self.root, path)
+            packet = _parse_packet(raw, path)
+        except GoalError as e:
+            return _result("unknown", ev, str(e))
         mtime = _mtime(path.parent, path.name)
         ev["packet_at"] = mtime
-        try:
-            ev["packet_sha256"] = _sha(path.read_bytes())
-        except OSError:
-            pass
+        ev["packet_sha256"] = _sha(raw)
         stale, sev = self._stale_after(goal, mtime)
         ev.update(sev)
         if stale:
@@ -788,6 +1117,9 @@ class Evaluator:
             return _result("fail", ev, f"{key} is not in the ops graph")
         attrs = node.get("attrs") or {}
         attr = args.get("attr")
+        if not attr and args.get("value") is not None:
+            return _result("unknown", ev, "ops_has has a value but no attr "
+                           "(refused at creation since; recreate the goal)")
         if not attr:
             return _result("pass", ev, f"{key} is in the ops graph")
         value = attrs.get(attr)
@@ -818,27 +1150,41 @@ def _str_list(value: Any, name: str) -> list[str]:
         value = [value]
     if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
         raise GoalError(f"{name} must be a list of strings")
-    out = list(dict.fromkeys(v.strip() for v in value if v.strip()))
-    if len(out) > MAX_KEYS:
+    if len(value) > MAX_KEYS:
         raise GoalError(f"{name}: at most {MAX_KEYS} entries")
+    out = list(dict.fromkeys(v.strip() for v in value if v.strip()))
+    long = [v for v in out if len(v) > MAX_KEY_CHARS]
+    if long:
+        raise GoalError(f"{name}: an entry is longer than {MAX_KEY_CHARS} characters")
     return out
 
 
 def _check_scope_entry(entry: str, memory: Any) -> None:
-    if not is_key(entry):
-        return
-    prefix = entry.split(":", 1)[0]
-    if prefix in ("file", "doc") and _GLOB_CHARS.search(entry):
+    glob = scope_glob(entry)
+    if glob is not None:
+        check_glob(glob)
         return
     if not _resolves(memory, entry):
         raise GoalError(f"scope: unknown key {entry}")
 
 
+def _warnings(criteria: list[dict[str, Any]]) -> list[str]:
+    """What the caller should know about criteria that were accepted."""
+    out = []
+    for c in criteria:
+        if c["kind"] == "lint_clean":
+            out.append(f"{c['id']} lint_clean cannot currently pass (ozagia keeps "
+                       "no lint results), so this goal cannot be met until it does")
+    return out
+
+
 def add_goal(root: str | Path | None, memory: Any, spec: dict[str, Any], *,
              by: str = "cli", source: dict[str, Any] | None = None) -> dict[str, Any]:
     """Create a goal from `spec` {title, why?, targets, scope?, criteria}
-    and return it. Every key must resolve in `memory` (see the module
-    docstring); nothing is written when any does not."""
+    and return it, with `warnings` (not stored) when a criterion was
+    accepted that cannot currently pass (`lint_clean`). Every key must
+    resolve in `memory` (see the module docstring); nothing is written
+    when any does not. At most `MAX_GOALS` goals that are not dropped."""
     root_p = _root_of(memory, root)
     if not isinstance(spec, dict):
         raise GoalError("a goal spec must be a table")
@@ -846,7 +1192,7 @@ def add_goal(root: str | Path | None, memory: Any, spec: dict[str, Any], *,
     extra = sorted(set(spec) - allowed)
     if extra:
         raise GoalError(f"unknown goal field(s): {', '.join(extra)}")
-    title = _clip(spec.get("title"), MAX_TITLE)
+    title = _clip(str(spec.get("title") or "")[:4 * MAX_TITLE], MAX_TITLE)
     if not title:
         raise GoalError("a goal needs a title")
     why = str(spec.get("why") or "").strip()[:MAX_WHY]
@@ -874,6 +1220,10 @@ def add_goal(root: str | Path | None, memory: Any, spec: dict[str, Any], *,
         criteria.append({"id": f"c{i}", **c})
     now = _now()
     with locked_store(root_p) as data:
+        active = sum(1 for g in data["goals"] if g.get("status") != "dropped")
+        if active >= MAX_GOALS:
+            raise GoalError(f"the store has {active} goals that are not dropped "
+                            f"(at most {MAX_GOALS}); drop some first")
         if source and source.get("finding_id"):
             for g in data["goals"]:
                 src = g.get("source") or {}
@@ -889,7 +1239,30 @@ def add_goal(root: str | Path | None, memory: Any, spec: dict[str, Any], *,
                 "created_at": now, "updated_at": now, "checked_at": None}
         _event(goal, "created", by, {"criteria": len(criteria)}, at=now)
         data["goals"].append(goal)
-    return goal
+    warnings = _warnings(criteria)
+    return {**goal, "warnings": warnings} if warnings else goal
+
+
+def _refresh_state(memory: Any, refresh: bool) -> str:
+    """Take pending changes into the in-memory graph (the snapshot on disk
+    is not rewritten) and say how that went (see `Evaluator.graph`)."""
+    if memory is None:
+        return "no graph"
+    if not refresh:
+        return "not refreshed"
+    if not hasattr(memory, "refresh"):
+        return "fresh"
+    try:
+        if memory.pending_changes():
+            memory.refresh(write=False)
+    except Exception as e:  # noqa: BLE001 - reported as unknown results
+        return f"refresh failed: {type(e).__name__}: {_clip(e, 120)}"
+    return "fresh"
+
+
+def _same_criterion(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    return (a.get("id") == b.get("id") and a.get("kind") == b.get("kind")
+            and (a.get("args") or {}) == (b.get("args") or {}))
 
 
 def check_goals(root: str | Path | None, memory: Any, ids: Iterable[str] | None = None,
@@ -898,27 +1271,43 @@ def check_goals(root: str | Path | None, memory: Any, ids: Iterable[str] | None 
     dropped), record each result on its criterion, apply the status
     transitions, and return one report per goal: {id, status, previous,
     results: [{id, kind, status, evidence, reason}]}. With `refresh`, the
-    in-memory graph takes in pending changes first (the snapshot on disk is
-    not rewritten)."""
+    in-memory graph takes in pending changes first; a refresh that fails
+    makes the graph-backed kinds `unknown`.
+
+    The criteria are evaluated from a snapshot of the store without its
+    lock (tag-cache and symbol-graph builds can take seconds); the results
+    are then merged under the lock, by goal id and criterion id (a
+    criterion whose kind or args changed meanwhile keeps its old result),
+    and the transitions use the goal's status at that point."""
     root_p = _root_of(memory, root)
-    if refresh and memory is not None and hasattr(memory, "refresh"):
-        with contextlib.suppress(Exception):
-            if memory.pending_changes():
-                memory.refresh(write=False)
-    ev = Evaluator(root_p, memory)
-    wanted = list(ids) if ids else None
+    graph = _refresh_state(memory, refresh)
+    ev = Evaluator(root_p, memory, graph=graph)
+    wanted = list(dict.fromkeys(ids)) if ids else None
+    snapshot = load_store(root_p)
+    if wanted:
+        goals = [_find(snapshot, gid) for gid in wanted]
+    else:
+        goals = [g for g in snapshot["goals"] if g.get("status") != "dropped"]
+    evaluated: list[tuple[str, float, list[tuple[dict[str, Any], dict[str, Any]]]]] = []
+    for goal in goals:
+        at = _now()
+        evaluated.append((goal["id"], at, [(crit, ev.evaluate(goal, crit))
+                                           for crit in goal.get("criteria") or []]))
     reports = []
     with locked_store(root_p) as data:
-        if wanted:
-            goals = [_find(data, gid) for gid in wanted]
-        else:
-            goals = [g for g in data["goals"] if g.get("status") != "dropped"]
-        for goal in goals:
-            now = _now()
+        by_id = {g.get("id"): g for g in data["goals"]}
+        for gid, now, pairs in evaluated:
+            goal = by_id.get(gid)
+            if goal is None:
+                continue                      # removed meanwhile
             results = []
             for crit in goal.get("criteria") or []:
-                res = ev.evaluate(goal, crit)
-                crit["last"] = {**res, "at": now}
+                res = next((r for c, r in pairs if _same_criterion(c, crit)), None)
+                if res is None:
+                    res = _result("unknown", {}, "the criterion changed during the "
+                                  "check; check again")
+                else:
+                    crit["last"] = {**res, "at": now}
                 results.append({"id": crit["id"], "kind": crit["kind"], **res})
             prev = goal.get("status")
             statuses = [r["status"] for r in results]
@@ -937,7 +1326,8 @@ def check_goals(root: str | Path | None, memory: Any, ids: Iterable[str] | None 
                                        "failing": [r["id"] for r in results
                                                    if r["status"] == "fail"]}, at=now)
             reports.append({"id": goal["id"], "title": goal.get("title"),
-                            "status": new, "previous": prev, "results": results})
+                            "status": new, "previous": prev, "results": results,
+                            "graph": graph})
     return reports
 
 
@@ -1008,10 +1398,11 @@ def from_review(root: str | Path | None, memory: Any, packet: str, finding_id: s
     criteria}, with `review_resolved` added as a criterion and the finding
     as its source. Targets default to the finding's keys."""
     root_p = _root_of(memory, root)
+    if not isinstance(finding_id, str) or len(finding_id) > MAX_FINDING_ID:
+        raise GoalError(f"a finding id is a string of at most {MAX_FINDING_ID} "
+                        "characters")
     stored = _packet_arg(root_p, packet)
-    data = load_packet(_packet_file(root_p, stored))
-    if data is None:
-        raise GoalError(f"no readable {PACKET_SCHEMA} packet at {packet}")
+    data = read_packet(root_p, _packet_file(root_p, stored))
     finding = _finding(data, finding_id)
     if finding is None:
         raise GoalError(f"finding {finding_id} is not in {packet}")
@@ -1079,10 +1470,11 @@ def unmet(goal: dict[str, Any]) -> list[tuple[dict[str, Any], str]]:
 
 
 def claimed_by(goal: dict[str, Any], harness: str | None, session: str | None) -> bool:
-    if not session:
+    """Whether (harness, session) claimed the goal; False when either is
+    missing (a claim is always by both)."""
+    if not session or not harness:
         return False
-    return any(c.get("session") == session
-               and (harness is None or c.get("harness") == harness)
+    return any(c.get("session") == session and c.get("harness") == harness
                for c in goal.get("claimed_by") or [])
 
 
@@ -1100,7 +1492,7 @@ def summary(goal: dict[str, Any]) -> dict[str, Any]:
 
 
 def _goal_line(goal: dict[str, Any], harness: str | None, session: str | None,
-               limit: int = BRIEF_CRITERIA) -> str:
+               limit: int = BRIEF_CRITERIA, *, titles: bool = True) -> str:
     claims = goal.get("claimed_by") or []
     who = ("claimed by this session" if claimed_by(goal, harness, session)
            else f"claimed by {len(claims)} session(s)" if claims else "unclaimed")
@@ -1108,19 +1500,23 @@ def _goal_line(goal: dict[str, Any], harness: str | None, session: str | None,
     parts = [f"{criterion_label(c)} ({s})" for c, s in pending[:limit]]
     if len(pending) > limit:
         parts.append(f"+{len(pending) - limit} more")
-    line = (f"{goal.get('id')} [{goal.get('status')}, {who}] "
-            f"{_clip(goal.get('title'), 80)}: unmet " + "; ".join(parts))
+    title = f" {_clip(goal.get('title'), 80)}" if titles else ""
+    line = (f"{goal.get('id')} [{goal.get('status')}, {who}]{title}: unmet "
+            + "; ".join(parts))
     return "  " + _clip(line, LINE_CHARS - 2)
 
 
 def brief_lines(root: str | Path, *, harness: str | None = None,
                 session: str | None = None, max_chars: int = BRIEF_CHARS,
-                goals: list[dict[str, Any]] | None = None) -> list[str]:
+                goals: list[dict[str, Any]] | None = None,
+                titles: bool = True) -> list[str]:
     """Lines for the session brief and the compaction context: goals that
     are open or regressed, or claimed and not dropped or met, with unmet
     criteria (from their last check; `unchecked` before any), the session's
     claims first, at most `BRIEF_GOALS` and `max_chars` in all. [] when
-    there are none."""
+    there are none. `titles=False` leaves out the goals' titles (free text
+    whoever made the goal wrote): only ids, statuses, keys and criterion
+    labels remain (the working set's `free_text: false`)."""
     goals = read_goals(root) if goals is None else goals
     shown = [g for g in goals if unmet(g) and (
         g.get("status") in ("open", "regressed")
@@ -1134,7 +1530,7 @@ def brief_lines(root: str | Path, *, harness: str | None = None,
     lines = [head]
     size = len(head) + 1
     for i, g in enumerate(shown[:BRIEF_GOALS]):
-        line = _goal_line(g, harness, session)
+        line = _goal_line(g, harness, session, titles=titles)
         if size + len(line) + 1 > max_chars:
             rest = len(shown) - i
             more = f"  ... {rest} more goal(s): ozagia goal list"
@@ -1162,12 +1558,15 @@ def edit_hints(root: str | Path, harness: str | None, session: str | None,
       `doc:` target, or of a `sym:`/`test:` target when the edit names no
       key in that file), the goal and the criteria now affected (test and
       review criteria, which go stale, and criteria about the edited
-      files);
-    - for each claimed goal with a scope, one advisory note naming the
-      edited files outside it.
+      files), for the first `HINT_GOALS` claimed goals; a line names the
+      claimed goals beyond those when the edit touched their targets;
+    - one advisory scope note naming the edited files outside the union
+      of the scopes of every goal the session claimed (none when one of
+      them has no scope: its work is not bounded).
 
-    Never blocks anything; [] when the session claimed no goal."""
-    if not session:
+    Never blocks anything; [] when the session claimed no goal. The store
+    is read through `read_goals`'s cache."""
+    if not session or not harness:
         return []
     files = [f for f in dict.fromkeys(files) if isinstance(f, str) and f]
     keys = [k for k in dict.fromkeys(keys) if isinstance(k, str)]
@@ -1176,8 +1575,11 @@ def edit_hints(root: str | Path, harness: str | None, session: str | None,
     goals = read_goals(root) if goals is None else goals
     mine = [g for g in goals if claimed_by(g, harness, session)
             and g.get("status") != "dropped"]
+    if not mine:
+        return []
     lines: list[str] = []
-    for goal in mine[:HINT_GOALS]:
+    skipped: list[str] = []
+    for n, goal in enumerate(mine):
         touched = []
         for t in goal.get("targets") or []:
             rel = key_file(t)
@@ -1186,37 +1588,50 @@ def edit_hints(root: str | Path, harness: str | None, session: str | None,
                 touched.append(t)
             elif rel in files and (t.startswith(("file:", "doc:")) or not file_keys):
                 touched.append(t)
-        if touched:
-            affected = []
-            for c in goal.get("criteria") or []:
-                subj = [v for n, v in (c.get("args") or {}).items()
-                        if n in KINDS.get(c.get("kind"), ((), 0, {}, False))[2]]
-                if c.get("kind") in TIME_KINDS or any(key_file(s) in files for s in subj):
-                    affected.append(criterion_label(c))
-            shown = ", ".join(touched[:3]) + (f" (+{len(touched) - 3})" if len(touched) > 3 else "")
-            crit = "; ".join(affected[:HINT_CRITERIA]) + (
-                f"; +{len(affected) - HINT_CRITERIA} more" if len(affected) > HINT_CRITERIA else "")
-            line = (f"[ozagia] goal {goal['id']} \"{_clip(goal.get('title'), 60)}\": "
-                    f"this edit touched target {shown}"
-                    + (f"; criteria affected: {crit}" if crit else "")
-                    + f"; re-check with goal_check (ozagia goal check {goal['id']})")
-            lines.append(_clip(line, 400))
-        scope = goal.get("scope") or []
-        if scope:
-            outside = [f for f in files if not in_scope(scope, f, keys)]
-            if outside:
-                names = ", ".join(outside[:HINT_FILES]) + (
-                    f" (+{len(outside) - HINT_FILES})" if len(outside) > HINT_FILES else "")
-                lines.append(_clip(f"[ozagia] goal {goal['id']} scope note: {names} "
-                                   "is outside the claimed goal's scope (advisory)", 300))
+        if not touched:
+            continue
+        if n >= HINT_GOALS:
+            skipped.append(str(goal.get("id")))
+            continue
+        affected = []
+        for c in goal.get("criteria") or []:
+            subj = [v for n_, v in (c.get("args") or {}).items()
+                    if n_ in KINDS.get(c.get("kind"), ((), 0, {}, False))[2]]
+            if c.get("kind") in TIME_KINDS or any(key_file(s) in files for s in subj):
+                affected.append(criterion_label(c))
+        shown = ", ".join(touched[:3]) + (f" (+{len(touched) - 3})" if len(touched) > 3 else "")
+        crit = "; ".join(affected[:HINT_CRITERIA]) + (
+            f"; +{len(affected) - HINT_CRITERIA} more" if len(affected) > HINT_CRITERIA else "")
+        line = (f"[ozagia] goal {goal['id']} \"{_clip(goal.get('title'), 60)}\": "
+                f"this edit touched target {shown}"
+                + (f"; criteria affected: {crit}" if crit else "")
+                + f"; re-check with goal_check (ozagia goal check {goal['id']})")
+        lines.append(_clip(line, 400))
+    if skipped:
+        names = ", ".join(skipped[:5]) + (f" (+{len(skipped) - 5})" if len(skipped) > 5 else "")
+        lines.append(_clip(f"[ozagia] goals: this edit also touched targets of "
+                           f"claimed goal(s) {names}, not detailed (more than "
+                           f"{HINT_GOALS} claimed); ozagia goal list", 300))
+    if all(g.get("scope") for g in mine):
+        union = [entry for g in mine for entry in g.get("scope") or []]
+        outside = [f for f in files if not in_scope(union, f, keys)]
+        if outside:
+            ids = ", ".join(str(g.get("id")) for g in mine[:5]) + (
+                f" (+{len(mine) - 5})" if len(mine) > 5 else "")
+            names = ", ".join(outside[:HINT_FILES]) + (
+                f" (+{len(outside) - HINT_FILES})" if len(outside) > HINT_FILES else "")
+            lines.append(_clip(f"[ozagia] goal scope note: {names} is outside the "
+                               f"scope of the goals this session claimed ({ids}) "
+                               "(advisory)", 300))
     return lines
 
 
 __all__ = ["BRIEF_CHARS", "Evaluator", "GoalError", "KINDS", "PACKET_SCHEMA",
            "RESULT_STATUSES", "SCHEMA_VERSION", "STATUSES", "add_goal",
-           "block_goal", "brief_lines", "check_goals", "claim_goal",
+           "block_goal", "brief_lines", "check_glob", "check_goals", "claim_goal",
            "claimed_by", "content_hash", "criterion_label", "drop_goal",
            "edit_hints", "from_review", "get_goal", "glob_regex", "goals_path",
            "in_scope", "last_change", "list_goals", "load_goal_file",
            "load_packet", "load_store", "locked_store", "parse_criterion",
-           "read_goals", "summary", "unmet", "validate_criterion"]
+           "read_goals", "read_packet", "reviews_dir", "scope_glob", "summary",
+           "unmet", "validate_criterion"]

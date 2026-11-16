@@ -15,8 +15,13 @@
   that touches its targets, and adds an advisory note for edits outside a
   claimed goal's scope; the session brief and the compaction context list
   open and claimed goals with unmet criteria. The test record
-  (`working_set/tests.json`) now also keeps the last 50 runs (time,
-  selectors, failed keys, completeness), so a test's last pass has a time.
+  (`working_set/tests.json`) now also keeps the last 50 runs (start time,
+  selectors, failed and errored keys, completeness, source, and for a
+  pytest the daemon ran itself a working-tree fingerprint), so a test's
+  last pass has a time. Test criteria take only daemon-captured runs as
+  evidence and are `stale` when a target, scope or test file's content
+  changed since the run started (content hashes, not mtimes). Review
+  packets must be regular files under `.ozagia/reviews/` of at most 16 MB.
   See docs/goals.md.
 
 - Lint inside the edit: after a handled edit, key edit or write, and in

@@ -66,7 +66,8 @@ def add_parser(sub: Any) -> None:
     block.add_argument("--reason", default="")
     block.add_argument("--clear", action="store_true", help="unblock (back to open)")
     fr = common(gsub.add_parser("from-review", help="a goal from a repo-review finding"))
-    fr.add_argument("packet", help="ozagia.repo_review.packet.v1 JSON file")
+    fr.add_argument("packet", help="ozagia.repo_review.packet.v1 JSON file under "
+                    "<state dir>/reviews/")
     fr.add_argument("finding_id")
 
 
@@ -164,6 +165,8 @@ def _run(args: argparse.Namespace, root: Path) -> int:
             _print({"ok": True, "goal": goal})
         else:
             print(format_goal(goal, history=0))
+            for w in goal.get("warnings") or []:
+                print(f"ozagia goal: warning: {w}", file=sys.stderr)
         return 0
     if act == "list":
         goals = G.list_goals(root, status=args.status, include_dropped=args.all)

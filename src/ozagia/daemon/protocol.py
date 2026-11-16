@@ -132,7 +132,8 @@ Requests (`op`):
       failure messages, command lines or DevSession titles (the OpenCode
       plugin, which puts the text in the system prompt).
       Both texts list the open and claimed goals with unmet criteria
-      (`ozagia.core.goals`), within the same caps.
+      (`ozagia.core.goals`), within the same caps; with `free_text: false`
+      without the goals' titles.
 
     {"id": 13, "op": "goals", "harness"?: "...", "session"?: "...",
      "all"?: false}
@@ -142,9 +143,11 @@ Requests (`op`):
           "keys": [], "goals": n}}
       Read-only summary of the repo's goals as last checked (dropped ones
       only with `all`); `mine`: claimed by the request's (harness,
-      session). Evaluates nothing. After a `tool` or `after` that edited
-      files, a session that claimed a goal gets `[ozagia] goal ...` lines
-      (targets touched and criteria affected; an advisory scope note) in
+      session), false without `harness`. Evaluates nothing. After a
+      `tool` or `after` that edited files, a session that claimed a goal
+      gets `[ozagia] goal ...` lines (targets touched and criteria
+      affected; claimed goals past the hint limit named; an advisory note
+      for files outside the union of its claimed scopes) in
       `output`/`append`, counted in `meta.goal_hints`.
 
 Sessions. `tool`, `after` and `read_check` with a `session` use that
