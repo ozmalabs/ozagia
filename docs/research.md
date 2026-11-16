@@ -54,22 +54,32 @@ A harness's own web fetch fails on many paper URLs (a 403 landing page, a
 dead link, a PDF it can't read). After such a failure the hooks append
 `[ozagia] fetch failed; the research fetcher can try: research_fetch {"url":
 "..."}`; the hint is computed locally and nothing is fetched inside a hook.
-`research_fetch {url, max_chars?, offset?}` is listed in every MCP mode (not
+`research_fetch {url, max_chars?, offset?, refresh?}` is listed in every MCP mode (not
 on the `graph` surface, which keeps to its verbs) and
 needs no research session. It derives identifiers from the URL (arXiv, DOI,
 PubMed/PMC, Europe PMC, Semantic Scholar, OpenReview, `.pdf` links), lists
 open-access candidates with the providers above (arXiv PDF; Crossref/OpenAlex
 and Unpaywall for a DOI, Unpaywall only with `OZAGIA_RESEARCH_EMAIL`; Europe PMC
 full-text JATS) and the Semantic Scholar Graph API, and follows a landing
-page's `citation_pdf_url` once. Downloads use the research User-Agent, the
-SSRF guard, a 25 MB cap and a 30 s timeout, and send no cookies or
-credentials; a body that is not a PDF where a PDF is declared is rejected.
+page's `citation_pdf_url` once. Downloads use the research User-Agent and
+the SSRF guard, which checks the URL, every redirect target before it is
+requested, and the address actually connected to (so a name that resolves
+to a private address on the second lookup is refused too). Each request has
+a 25 MB cap and a 30 s deadline for the whole download, not only per socket
+read; one call has a 90 s wall-clock budget
+(`OZAGIA_RESEARCH_FETCH_BUDGET_S`), after which it stops and reports its
+attempts. No cookies or credentials are sent; a body that is not a PDF where
+a PDF is declared is rejected. The MCP server runs the call on its worker
+pool, so other tools are answered meanwhile.
 PDF text comes from the PDF pipeline below (OCR off), JATS from the TEI
 reader. The artifact and its text are cached by content hash under
 `.ozagia/research/fetch`; the answer has a stable `source:sha256:<16 hex>`
 key, metadata, and page chunks (`page`, `start`, `key`, `text`) from
 `offset`, at most `max_chars` (default 20,000), with `next_offset`. A URL
-fetched before is answered from the cache (`cache_hit: true`).
+fetched before is answered from the cache (`cache_hit: true`), with the
+provenance (`url`, `resolved_url`, `provider`, `identifiers`) of that URL
+even when another URL fetched the same document first; `refresh: true`
+resolves it again.
 `OZAGIA_RESEARCH_OFFLINE=1` turns the network off; cached copies are still
 served. The daemon's `stats` reports `fetch_fallback_hints`,
 `research_fetches` and `research_fetch_cache_hits`. Implementation:

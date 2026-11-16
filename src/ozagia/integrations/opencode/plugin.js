@@ -557,6 +557,20 @@ export function withAppend(result, append) {
   return result;
 }
 
+// The built-in's error with `append` added to its message, so its class,
+// stack and fields survive; a non-Error throw (or a read-only message)
+// becomes a new Error whose `cause` is the original.
+export function withErrorAppend(err, msg, append) {
+  const text = `${msg}\n${append}`;
+  if (err instanceof Error) {
+    try {
+      err.message = text;
+      if (err.message === text) return err;
+    } catch { /* read-only message: fall through */ }
+  }
+  return new Error(text, { cause: err });
+}
+
 function wrapAfterOnly(client, name, tool, original) {
   return async function execute(input, c) {
     const session = c && c.sessionID;
@@ -565,9 +579,11 @@ function wrapAfterOnly(client, name, tool, original) {
     const base = { harness: HARNESS, session, tool: name, input: url ? { url } : {} };
     const appendOf = async (output, meta) => {
       try {
+        // Short timeout: the hint is cheap (the daemon answers webfetch
+        // `after` without the graph lock), and the fetch result waits on it.
         const after = await client.request({ op: "after", ...base,
           output: String(output).slice(0, AFTER_ONLY_OUTPUT_CHARS),
-          ...(meta ? { meta } : {}) });
+          ...(meta ? { meta } : {}) }, HINT_TIMEOUT_MS);
         return typeof after.append === "string" ? after.append : "";
       } catch { return ""; }
     };
@@ -578,7 +594,7 @@ function wrapAfterOnly(client, name, tool, original) {
       const msg = String((err && err.message) || err);
       const append = await appendOf(msg, { builtin_error: true });
       if (!append) throw err;
-      throw new Error(`${msg}\n${append}`);
+      throw withErrorAppend(err, msg, append);
     }
     const append = await appendOf(asText(result));
     return append ? withAppend(result, append) : result;

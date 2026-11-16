@@ -52,7 +52,10 @@ const tools = {
            execute: async (input) => { calls.push(["patch", input]); return "ORIG PATCH"; } },
   webfetch: { name: "webfetch", description: "Fetch a URL.", output: { kind: "webfetch" },
               execute: async (input) => { calls.push(["webfetch", input]);
-                if (cfg.fetchThrows) throw new Error(cfg.fetchThrows);
+                if (cfg.fetchThrows) {
+                  class FetchHTTPError extends Error {}
+                  throw Object.assign(new FetchHTTPError(cfg.fetchThrows), { status: 404 });
+                }
                 return { output: cfg.fetchOutput ?? "PAGE", title: input.url, metadata: {} }; } },
 };
 const original = Object.fromEntries(Object.entries(tools).map(([k, t]) => [k, t.execute]));
@@ -86,7 +89,14 @@ const c = { sessionID: "ses_test", agent: "build", messageID: "msg_1", id: "call
             progress: () => {}, signal: undefined };
 for (const call of cfg.calls || []) {
   try { results.push({ ok: true, result: await tools[call.tool].execute(call.input, c) }); }
-  catch (err) { results.push({ ok: false, error: String(err && err.message) }); }
+  catch (err) {
+    const r = { ok: false, error: String(err && err.message) };
+    // A built-in's own error class and fields (the webfetch stub's).
+    if (err && err.status !== undefined) {
+      Object.assign(r, { cls: err.constructor.name, status: err.status });
+    }
+    results.push(r);
+  }
 }
 await new Promise((r) => setTimeout(r, cfg.settleMs || 50));
 process.stdout.write(JSON.stringify({
@@ -1103,8 +1113,10 @@ def test_webfetch_error_gets_the_hint_and_no_tool_request(tmp_path, daemon):
                                           "format": "markdown"}}
     out = _run(tmp_path, {"calls": [call],
                           "fetchThrows": "Request failed with status code: 404"}, d.path)
+    # The built-in's error itself, its message extended: class and fields kept.
     assert out["results"][0] == {
-        "ok": False, "error": "Request failed with status code: 404\n" + HINT}
+        "ok": False, "error": "Request failed with status code: 404\n" + HINT,
+        "cls": "FetchHTTPError", "status": 404}
     assert [c[0] for c in out["calls"]] == ["webfetch"]  # the built-in ran
     assert "tool" not in d.ops()                          # never handled by the daemon
     (after,) = [r for r in d.requests if r["op"] == "after"]
@@ -1130,4 +1142,23 @@ def test_webfetch_output_keeps_its_shape(tmp_path, daemon):
     # Daemon down: the built-in's result and error as they were.
     d.close()
     out = _run(tmp_path, {"calls": [call], "fetchThrows": "boom"}, d.path)
-    assert out["results"][0] == {"ok": False, "error": "boom"}
+    assert out["results"][0] == {"ok": False, "error": "boom", "cls": "FetchHTTPError",
+                                 "status": 404}
+
+
+@needs_node
+def test_webfetch_after_uses_the_short_hint_timeout(tmp_path, daemon):
+    budgets = []
+
+    def script(req):
+        if req["op"] == "after":
+            budgets.append(req["deadline_ms"] - time.time() * 1000)
+            return {"ok": True, "append": ""}
+        return _standard(req)
+    d = daemon(script)
+    call = {"tool": "webfetch", "input": {"url": "https://x.org/a"}}
+    out = _run(tmp_path, {"calls": [call]}, d.path)
+    assert out["results"][0]["ok"] is True
+    # HINT_TIMEOUT_MS (6 s), not the 30 s request default.
+    (budget,) = budgets
+    assert 0 < budget <= 6000

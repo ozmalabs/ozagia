@@ -256,6 +256,37 @@ def test_post_webfetch_maps_to_webfetch(repo, daemon):
     assert req["output"] == "Request failed with status code 404"
 
 
+def test_post_webfetch_real_response_object_is_flattened(repo, daemon):
+    """Claude's WebFetch `tool_response` is an object; a non-2xx `code`
+    leads, then `result`, so the failure checks see them."""
+    stub = daemon()
+    url = "https://www.nature.com/articles/s41586-020-0000-0"
+    response = {"bytes": 1234, "code": 404, "codeText": "Not Found",
+                "result": "The page could not be found.", "durationMs": 210,
+                "url": url}
+    proc = run_hook(post(repo, "WebFetch", {"url": url, "prompt": "summarise"}, response),
+                    sock=stub.sock)
+    assert proc.returncode == 0, proc.stderr
+    (req,) = stub.requests
+    assert req["output"] == "HTTP 404 Not Found\nThe page could not be found."
+    from ozagia.research.fallback import after_lines
+    lines, reason = after_lines(req["input"], req["output"])
+    assert reason == "http 404" and lines and "research_fetch" in lines[0]
+    # A 200 sends only the result text.
+    stub.requests.clear()
+    ok = {**response, "code": 200, "codeText": "OK", "result": "A summary."}
+    run_hook(post(repo, "WebFetch", {"url": url, "prompt": "p"}, ok), sock=stub.sock)
+    assert stub.requests[0]["output"] == "A summary."
+
+
+def test_webfetch_text_shapes():
+    from ozagia.integrations.claude_code.hook import webfetch_text
+    assert webfetch_text("plain") == "plain"
+    assert webfetch_text({"code": 403, "result": ""}) == "HTTP 403"
+    assert webfetch_text({"code": 200, "result": "%PDF-1.7 x"}) == "%PDF-1.7 x"
+    assert webfetch_text({"stdout": "x"}) == "x"     # not the WebFetch shape
+
+
 def test_post_failure_webfetch_sends_the_error(repo, daemon):
     stub = daemon()
     url = "https://doi.org/10.1234/abc"

@@ -3,8 +3,10 @@
 Failed web fetches get a `research_fetch` hint from `after` (no network), and
 `research_fetch` resolves an open-access copy. Downloads go to a local HTTP
 server: a fetcher rewrites `https://<host>/<path>` to
-`http://127.0.0.1:<port>/<host>/<path>` and calls the real `http_get` (with
-the private-host guard lifted for the test only). Nothing reaches the network.
+`http://127.0.0.1:<port>/<host>/<path>` and calls the real `http_get`, with
+`fetch._host_is_private` patched so that the literal `127.0.0.1` counts as
+public (and every other loopback name, such as `localhost`, stays private).
+Nothing reaches the network.
 """
 from __future__ import annotations
 
@@ -12,6 +14,7 @@ import json
 import shutil
 import socket
 import threading
+import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -69,6 +72,10 @@ class Site:
 
     def __init__(self) -> None:
         self.routes: dict[str, tuple[int, str, bytes]] = {}
+        # `redirects[key] = location`: a 302 to `location`.
+        self.redirects: dict[str, str] = {}
+        # `trickle[key] = seconds`: a PDF body sent one byte per `seconds`.
+        self.trickle: dict[str, float] = {}
         self.requests: list[dict] = []
         site = self
 
@@ -76,6 +83,25 @@ class Site:
             def do_GET(self):  # noqa: N802 - http.server API
                 key = self.path.lstrip("/")
                 site.requests.append({"path": key, "headers": dict(self.headers.items())})
+                if key in site.redirects:
+                    self.send_response(302)
+                    self.send_header("Location", site.redirects[key])
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                if key in site.trickle:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/pdf")
+                    self.send_header("Content-Length", "100000")
+                    self.end_headers()
+                    try:
+                        for _ in range(100000):
+                            self.wfile.write(b"%")
+                            self.wfile.flush()
+                            time.sleep(site.trickle[key])
+                    except OSError:
+                        pass
+                    return
                 status, ctype, body = site.routes.get(key, (404, "text/plain", b"not found"))
                 self.send_response(status)
                 self.send_header("Content-Type", ctype)
@@ -97,7 +123,7 @@ class Site:
                 + (f"?{parts.query}" if parts.query else ""))
 
     def fetcher(self, url, **kwargs):
-        got = F.http_get(self.local(url), allow_private=True, **kwargs)
+        got = F.http_get(self.local(url), **kwargs)
         if got["final_url"] == self.local(url):
             got["final_url"] = url   # as the real host would report it
         return got
@@ -111,7 +137,14 @@ class Site:
 
 
 @pytest.fixture
-def site():
+def public_loopback(monkeypatch):
+    """`127.0.0.1` counts as public; every other host is checked as usual."""
+    real = F._host_is_private
+    monkeypatch.setattr(F, "_host_is_private", lambda host: host != "127.0.0.1" and real(host))
+
+
+@pytest.fixture
+def site(public_loopback):
     s = Site()
     yield s
     s.close()
@@ -130,7 +163,7 @@ def no_network(monkeypatch):
         raise AssertionError("network access attempted")
     monkeypatch.setattr(socket, "create_connection", refuse)
     monkeypatch.setattr(urllib.request, "urlopen", refuse)
-    monkeypatch.setattr(F, "urlopen", refuse)
+    monkeypatch.setattr(F, "_open", refuse)
     monkeypatch.setattr(F, "http_get", refuse)
 
 
@@ -181,6 +214,11 @@ def test_hint_only_for_paper_like_urls_or_pdf_failures():
         [], "http 404")
     # A PDF the tool can't read gets one wherever it is.
     assert FB.after_lines({"url": "https://example.org/x"}, "%PDF-1.5 ...")[0]
+    # Other binary bodies (a zip, a mis-decoded page) only on paper URLs.
+    blob = "PK\x03\x04" + "\x01\x02\ufffd" * 300
+    assert FB.after_lines({"url": "https://example.org/a.zip"}, blob) == (
+        [], "binary content")
+    assert FB.after_lines({"url": "https://arxiv.org/abs/2401.12345"}, blob)[0]
     # A page that loaded gets none.
     assert FB.after_lines({"url": "https://arxiv.org/abs/2401.12345"}, "Abstract: ...") == (
         [], None)
@@ -338,9 +376,127 @@ def test_offline_mode(tmp_path, site, monkeypatch):
 
 def test_default_fetcher_refuses_private_hosts(tmp_path, site):
     with pytest.raises(FB.FetchFallbackError, match="private address"):
-        FB.fetch_fallback(f"http://127.0.0.1:{site.port}/x.pdf", root=tmp_path,
+        FB.fetch_fallback(f"http://localhost:{site.port}/x.pdf", root=tmp_path,
                           pdf_extractor=fake_pdf)
     assert site.requests == []
+
+
+def test_http_get_has_no_allow_private_switch():
+    import inspect
+    assert "allow_private" not in inspect.signature(F.http_get).parameters
+    assert "allow_private" not in inspect.signature(F.validate_url).parameters
+
+
+def test_redirect_to_a_private_host_is_never_requested(tmp_path, site):
+    # A public page redirecting to a private one (cloud metadata, say).
+    site.redirects["example.org/r.pdf"] = (
+        f"http://localhost:{site.port}/latest/meta-data/")
+    with pytest.raises(F.FetchError, match="private address"):
+        site.fetcher("https://example.org/r.pdf")
+    assert site.paths() == ["example.org/r.pdf"]          # the hop was not sent
+    with pytest.raises(FB.FetchFallbackError, match="private address"):
+        FB.fetch_fallback("https://example.org/r.pdf", root=tmp_path,
+                          fetcher=site.fetcher, pdf_extractor=fake_pdf)
+    assert "latest/meta-data/" not in site.paths()
+
+
+def test_redirect_to_a_public_host_is_followed(tmp_path, site):
+    site.routes["example.org/p.pdf"] = (200, "application/pdf", make_pdf("x"))
+    site.redirects["example.org/old.pdf"] = site.local("https://example.org/p.pdf")
+    got = FB.fetch_fallback("https://example.org/old.pdf", root=tmp_path,
+                            fetcher=site.fetcher, pdf_extractor=fake_pdf)
+    assert got["ok"] and site.paths() == ["example.org/old.pdf", "example.org/p.pdf"]
+
+
+def test_connected_peer_is_checked(site, monkeypatch):
+    """A name that passed the check but connects to a private address (DNS
+    rebinding between the two lookups) is refused before any request."""
+    monkeypatch.setattr(F, "_host_is_private", lambda host: host != "localhost")
+    with pytest.raises(F.FetchError, match="connected to a private address"):
+        F.http_get(f"http://localhost:{site.port}/example.org/p.pdf")
+    assert site.requests == []
+
+
+def test_trickling_download_hits_its_deadline(site):
+    site.trickle["example.org/slow.pdf"] = 0.05
+    t0 = time.monotonic()
+    with pytest.raises(F.FetchError, match="time limit"):
+        site.fetcher("https://example.org/slow.pdf", timeout=5, deadline=0.6)
+    assert time.monotonic() - t0 < 3
+
+
+def test_call_budget_stops_the_walk(tmp_path, site):
+    site.trickle["arxiv.org/pdf/2401.12345"] = 0.05
+    t0 = time.monotonic()
+    with pytest.raises(FB.FetchFallbackError, match="time (limit|budget)"):
+        FB.fetch_fallback("https://arxiv.org/abs/2401.12345", root=tmp_path,
+                          fetcher=site.fetcher, pdf_extractor=fake_pdf, budget=0.8)
+    assert time.monotonic() - t0 < 4
+
+
+def test_budget_from_the_environment(monkeypatch):
+    assert FB._budget(None) == FB.DEFAULT_BUDGET_S == 90.0
+    monkeypatch.setenv(FB.ENV_BUDGET, "12.5")
+    assert FB._budget(None) == 12.5
+    assert FB._budget(3) == 3
+    monkeypatch.setenv(FB.ENV_BUDGET, "junk")
+    assert FB._budget(None) == FB.DEFAULT_BUDGET_S
+
+
+def test_each_request_gets_a_deadline_within_the_budget(tmp_path):
+    seen = []
+
+    def fetcher(url, **kwargs):
+        seen.append(kwargs)
+        return {"content": b"%PDF-1.4 x", "media_type": "application/pdf",
+                "final_url": url, "headers": {}}
+    FB.fetch_fallback("https://example.org/p.pdf", root=tmp_path, fetcher=fetcher,
+                      pdf_extractor=fake_pdf, budget=10, timeout=30)
+    (kw,) = seen
+    assert 0 < kw["deadline"] <= 10 and 0 < kw["timeout"] <= 10
+
+
+def test_cache_hit_through_a_second_url_reports_that_url(tmp_path, site):
+    pdf = make_pdf("same")
+    site.routes["example.org/a.pdf"] = (200, "application/pdf", pdf)
+    site.routes["mirror.example/b.pdf"] = (200, "application/pdf", pdf)
+    a = FB.fetch_fallback("https://example.org/a.pdf", root=tmp_path,
+                          fetcher=site.fetcher, pdf_extractor=fake_pdf, max_chars=5)
+    b = FB.fetch_fallback("https://mirror.example/b.pdf", root=tmp_path,
+                          fetcher=site.fetcher, pdf_extractor=fake_pdf, max_chars=5)
+    assert a["sha256"] == b["sha256"] and b["cache_hit"] is False
+    assert b["url"] == "https://mirror.example/b.pdf"
+    assert b["resolved_url"] == "https://mirror.example/b.pdf"
+    again = FB.fetch_fallback("https://mirror.example/b.pdf", root=tmp_path,
+                              fetcher=site.fetcher, max_chars=5)
+    assert again["cache_hit"] is True
+    assert again["url"] == again["resolved_url"] == "https://mirror.example/b.pdf"
+    assert again["provider"] == "direct"
+    assert '"url": "https://mirror.example/b.pdf"' in again["more"]
+    first = FB.fetch_fallback("https://example.org/a.pdf", root=tmp_path,
+                              fetcher=site.fetcher, max_chars=5)
+    assert first["url"] == first["resolved_url"] == "https://example.org/a.pdf"
+
+
+def test_refresh_bypasses_the_cache(tmp_path, site, monkeypatch):
+    url = "https://example.org/p.pdf"
+    site.routes["example.org/p.pdf"] = (200, "application/pdf", make_pdf("old"))
+    old = FB.fetch_fallback(url, root=tmp_path, fetcher=site.fetcher,
+                            pdf_extractor=lambda d, **k: {"pages": [{"number": 1, "text": "old"}]})
+    site.routes["example.org/p.pdf"] = (200, "application/pdf", make_pdf("new"))
+    new_text = {"pages": [{"number": 1, "text": "new"}]}
+    hit = FB.fetch_fallback(url, root=tmp_path, fetcher=site.fetcher)
+    assert hit["cache_hit"] is True and hit["sha256"] == old["sha256"]
+    fresh = FB.fetch_fallback(url, root=tmp_path, fetcher=site.fetcher, refresh=True,
+                              pdf_extractor=lambda d, **k: new_text)
+    assert fresh["cache_hit"] is False and fresh["sha256"] != old["sha256"]
+    assert fresh["chunks"][0]["text"] == "new"
+    # The refreshed resolution is what the cache now serves.
+    assert FB.fetch_fallback(url, root=tmp_path, fetcher=site.fetcher)["sha256"] == (
+        fresh["sha256"])
+    monkeypatch.setenv(FB.ENV_OFFLINE, "1")
+    with pytest.raises(FB.FetchFallbackError, match="not refreshed"):
+        FB.fetch_fallback(url, root=tmp_path, fetcher=site.fetcher, refresh=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -357,7 +513,8 @@ def test_mcp_research_fetch(tmp_path, monkeypatch, site):
     tools = {t["name"]: t for t in server.handle(
         {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})["result"]["tools"]}
     schema = tools["research_fetch"]["inputSchema"]
-    assert set(schema["properties"]) == {"url", "max_chars", "offset"}
+    assert set(schema["properties"]) == {"url", "max_chars", "offset", "refresh"}
+    assert schema["properties"]["refresh"]["type"] == "boolean"
     assert schema["required"] == ["url"]
     # Offline and not cached: a tool error naming the switch.
     monkeypatch.setenv(FB.ENV_OFFLINE, "1")
@@ -374,6 +531,56 @@ def test_mcp_research_fetch(tmp_path, monkeypatch, site):
     body = json.loads(resp["result"]["content"][0]["text"])
     assert body["cache_hit"] is True and body["chunks"][0]["text"] == "page one"
     assert body["next_offset"] == 8
+
+
+def test_research_fetch_runs_on_the_worker_pool(tmp_path, monkeypatch):
+    """A slow research_fetch does not hold up the next message."""
+    import io
+    import sys
+    from types import SimpleNamespace
+
+    from ozagia.integrations.mcp import server as S
+    assert S._is_job_call({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                           "params": {"name": "research_fetch", "arguments": {}}})
+    srv = S.DevMemoryServer(None, mode="research", workspace=str(tmp_path))
+    stdout = io.BytesIO()
+
+    def slow(args):
+        # Waits until the ping after it has been answered.
+        deadline = time.monotonic() + 10
+        while b'"id": 9' not in stdout.getvalue() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        return {"ok": True}
+    srv._handlers["research_fetch"] = slow
+    payload = (json.dumps({"jsonrpc": "2.0", "id": 8, "method": "tools/call",
+                           "params": {"name": "research_fetch",
+                                      "arguments": {"url": "https://x.org/a.pdf"}}})
+               + "\n" + json.dumps({"jsonrpc": "2.0", "id": 9, "method": "ping"}) + "\n")
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(buffer=io.BytesIO(payload.encode())))
+    monkeypatch.setattr(sys, "stdout", SimpleNamespace(buffer=stdout))
+    assert S.serve(srv) == 0
+    ids = [json.loads(line)["id"] for line in stdout.getvalue().splitlines() if line.strip()]
+    assert ids == [9, 8]
+
+
+def test_daemon_webfetch_after_skips_the_graph_lock(tmp_path, no_network):
+    from ozagia.daemon.server import DaemonState, _lock_free
+    assert _lock_free("after", "webfetch", {"url": "u"})
+    assert not _lock_free("tool", "webfetch", {"url": "u"})
+    st = DaemonState(tmp_path, object(), tmp_path / "j.jsonl")
+    st.lock.acquire()                 # another op holds the graph lock
+    out: list = []
+    try:
+        th = threading.Thread(target=lambda: out.append(st.dispatch({
+            "op": "after", "tool": "webfetch", "harness": "opencode", "session": "s1",
+            "input": {"url": "https://arxiv.org/abs/2401.12345"},
+            "output": "Request failed with status code: 404"})), daemon=True)
+        th.start()
+        th.join(timeout=5)
+        assert out, "webfetch after waited on the graph lock"
+    finally:
+        st.lock.release()
+    assert "research_fetch" in out[0]["append"]
 
 
 def test_research_fetch_is_registered_in_every_mode(tmp_path):

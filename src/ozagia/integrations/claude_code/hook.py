@@ -167,6 +167,26 @@ def _pre_output(decision: str, reason: str) -> dict[str, Any]:
                                    "permissionDecisionReason": reason}}
 
 
+def webfetch_text(tool_response: Any) -> str:
+    """A `WebFetch` result as the text `after` checks. Claude reports it as
+    an object (`bytes`, `code`, `codeText`, `result`, `durationMs`, `url`):
+    a non-2xx `code` becomes a leading `HTTP <code> <codeText>` line, then
+    `result` as is (a JSON dump would hide both from the failure checks).
+    Anything else goes through `response_text`."""
+    if not isinstance(tool_response, dict) or not (
+            "result" in tool_response or "code" in tool_response):
+        return response_text(tool_response)
+    lines = []
+    code = tool_response.get("code")
+    if isinstance(code, int) and not isinstance(code, bool) and not 200 <= code < 300:
+        text = tool_response.get("codeText")
+        lines.append(f"HTTP {code}" + (f" {text}" if isinstance(text, str) and text else ""))
+    result = tool_response.get("result")
+    if isinstance(result, str) and result:
+        lines.append(result)
+    return "\n".join(lines)
+
+
 def handle(payload: dict[str, Any], root: Path) -> dict[str, Any] | None:
     """The hook's JSON answer for one event, or None to print nothing."""
     event = payload.get("hook_event_name")
@@ -261,9 +281,11 @@ def handle(payload: dict[str, Any], root: Path) -> dict[str, Any] | None:
         if mapped is None:
             return None
         tool, inp = mapped
+        tool_response = payload.get("tool_response")
+        output = (webfetch_text(tool_response) if tool_name == "WebFetch"
+                  else response_text(tool_response))
         msg = {"id": 1, "op": "after", "harness": HARNESS, "session": session,
-               "tool": tool, "input": inp,
-               "output": response_text(payload.get("tool_response"))}
+               "tool": tool, "input": inp, "output": output}
         if sub:
             msg["sub"] = sub
         shown = delivered_lines(tool_name, payload.get("tool_response"))

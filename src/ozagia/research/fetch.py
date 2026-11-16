@@ -8,6 +8,7 @@ recorded as Sources; nothing here claims that a paper supports a statement.
 from __future__ import annotations
 
 import hashlib
+import http.client
 import ipaddress
 import json
 import os
@@ -18,7 +19,8 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Mapping
 from urllib.parse import quote, urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import (HTTPHandler, HTTPRedirectHandler, HTTPSHandler, Request,
+                            build_opener)
 
 from ozagia.research import references as refs
 from ozagia.research.graph import ResearchError
@@ -53,11 +55,8 @@ def _host_is_private(host: str) -> bool:
     return False
 
 
-def validate_url(url: str, *, allowed_hosts: set[str] | None = None,
-                 allow_private: bool = False) -> str:
-    """Reject non-HTTP, credentialed and private-network URLs (SSRF guard).
-    `allow_private` is for tests against a local server only; no tool
-    argument sets it."""
+def validate_url(url: str, *, allowed_hosts: set[str] | None = None) -> str:
+    """Reject non-HTTP, credentialed and private-network URLs (SSRF guard)."""
     if not isinstance(url, str) or not url.strip():
         raise FetchError("fetch URL must be a non-empty string")
     parts = urlsplit(url.strip())
@@ -72,9 +71,106 @@ def validate_url(url: str, *, allowed_hosts: set[str] | None = None,
         item.casefold() for item in allowed_hosts
     }:
         raise FetchError(f"fetch host {host!r} is not allowlisted")
-    if not allow_private and _host_is_private(host):
+    if _host_is_private(host):
         raise FetchError(f"fetch host {host!r} resolves to a private address")
     return parts.geturl()
+
+
+class _GuardedRedirect(HTTPRedirectHandler):
+    """Validates each redirect target with `validate_url` before following
+    it, so no request reaches a private or non-allowlisted hop."""
+
+    def __init__(self, allowed_hosts: set[str] | None) -> None:
+        super().__init__()
+        self.allowed_hosts = allowed_hosts
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
+        validate_url(newurl, allowed_hosts=self.allowed_hosts)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _peer_checked(conn_class: type) -> Callable[..., Any]:
+    """A connection factory for `do_open` whose TCP connect checks the
+    connected peer address (`_host_is_private`) before anything is sent,
+    which closes the DNS-rebinding window between `validate_url`'s lookup
+    and the connection's own. Proxied requests skip the check: their peer
+    is the configured proxy."""
+
+    def factory(host: str, **kwargs: Any) -> Any:
+        conn = conn_class(host, **kwargs)
+
+        def connect(address: Any, *args: Any, **kw: Any) -> socket.socket:
+            sock = socket.create_connection(address, *args, **kw)
+            if getattr(conn, "_tunnel_host", None):
+                return sock
+            try:
+                peer = str(sock.getpeername()[0]).split("%", 1)[0]
+                private = _host_is_private(peer)
+            except BaseException:
+                sock.close()
+                raise
+            if private:
+                sock.close()
+                raise FetchError(f"fetch host {address[0]!r} connected to a private "
+                                 f"address ({peer})")
+            return sock
+
+        conn._create_connection = connect
+        return conn
+
+    return factory
+
+
+class _GuardedHTTP(HTTPHandler):
+    def http_open(self, req):  # type: ignore[override]
+        if req.has_proxy():
+            return self.do_open(http.client.HTTPConnection, req)
+        return self.do_open(_peer_checked(http.client.HTTPConnection), req)
+
+
+class _GuardedHTTPS(HTTPSHandler):
+    def https_open(self, req):  # type: ignore[override]
+        context = getattr(self, "_context", None)
+        if req.has_proxy():
+            return self.do_open(http.client.HTTPSConnection, req, context=context)
+        return self.do_open(_peer_checked(http.client.HTTPSConnection), req,
+                            context=context)
+
+
+def _open(request: Request, *, timeout: float, allowed_hosts: set[str] | None) -> Any:
+    opener = build_opener(_GuardedRedirect(allowed_hosts), _GuardedHTTP(), _GuardedHTTPS())
+    return opener.open(request, timeout=timeout)
+
+
+def _read(response: Any, max_bytes: int, end: float | None) -> bytes:
+    """The body, at most `max_bytes + 1` bytes, read in pieces so that `end`
+    (a `time.monotonic()` deadline) bounds the whole read and a server that
+    trickles bytes cannot hold it open."""
+    chunks: list[bytes] = []
+    size = 0
+    sock = getattr(getattr(response, "fp", None), "raw", None)
+    sock = getattr(sock, "_sock", None)
+    while size <= max_bytes:
+        if end is not None:
+            remaining = end - time.monotonic()
+            if remaining <= 0:
+                raise FetchError("download exceeded its time limit")
+            if sock is not None:
+                try:
+                    sock.settimeout(max(0.01, remaining))
+                except OSError:
+                    pass
+        try:
+            chunk = response.read1(min(65536, max_bytes + 1 - size))
+        except TimeoutError:
+            if end is not None and end - time.monotonic() <= 0.05:
+                raise FetchError("download exceeded its time limit") from None
+            raise
+        if not chunk:
+            break
+        chunks.append(chunk)
+        size += len(chunk)
+    return b"".join(chunks)
 
 
 def http_get(
@@ -83,16 +179,22 @@ def http_get(
     timeout: float = 20.0,
     max_bytes: int = MAX_FETCH_BYTES,
     allowed_hosts: set[str] | None = None,
-    allow_private: bool = False,
+    deadline: float | None = None,
 ) -> dict[str, Any]:
-    """Fetch a URL with a size cap and a post-redirect SSRF check. The
-    request carries `USER_AGENT` and no cookies or credentials."""
-    safe_url = validate_url(url, allowed_hosts=allowed_hosts, allow_private=allow_private)
+    """Fetch a URL with a size cap and the SSRF guard on the URL, every
+    redirect hop (before it is requested) and the connected peer address.
+    `timeout` applies to each socket operation; `deadline`, in seconds, if
+    given, bounds the whole request including the body. The request carries
+    `USER_AGENT` and no cookies or credentials."""
+    end = time.monotonic() + float(deadline) if deadline is not None else None
+    safe_url = validate_url(url, allowed_hosts=allowed_hosts)
     request = Request(safe_url, headers={"User-Agent": USER_AGENT, "Accept": "*/*"})
+    if end is not None:
+        timeout = max(0.01, min(float(timeout), end - time.monotonic()))
     try:
-        with urlopen(request, timeout=timeout) as response:
+        with _open(request, timeout=timeout, allowed_hosts=allowed_hosts) as response:
             final_url = response.geturl()
-            validate_url(final_url, allowed_hosts=allowed_hosts, allow_private=allow_private)
+            validate_url(final_url, allowed_hosts=allowed_hosts)
             declared = response.headers.get("Content-Length")
             try:
                 declared_bytes = int(declared) if declared is not None else None
@@ -100,7 +202,7 @@ def http_get(
                 declared_bytes = None
             if declared_bytes is not None and declared_bytes > max_bytes:
                 raise FetchError(f"response exceeds {max_bytes} bytes")
-            content = response.read(max_bytes + 1)
+            content = _read(response, max_bytes, end)
             if len(content) > max_bytes:
                 raise FetchError(f"response exceeds {max_bytes} bytes")
             return {
@@ -112,6 +214,9 @@ def http_get(
     except FetchError:
         raise
     except Exception as exc:  # noqa: BLE001 - reported as a typed fetch error
+        reason = getattr(exc, "reason", None)
+        if isinstance(reason, FetchError):
+            raise reason from exc
         raise FetchError(f"fetch failed for {safe_url}: {exc}") from exc
 
 

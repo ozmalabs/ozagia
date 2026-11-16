@@ -629,7 +629,7 @@ the plugin apply the change a second time.
 - For a web fetch (`webfetch`, input `{url}`; OpenCode `webfetch`, Claude
   `WebFetch`, Kiro `web_fetch`) whose output (or error) shows a failure
   (a 4xx/5xx status, an unsupported content type, a PDF or binary body) of
-  a paper-like URL, or a PDF body anywhere, it appends `[ozagia] fetch
+  a paper-like URL, or a PDF body on any URL, it appends `[ozagia] fetch
   failed; the research fetcher can try: research_fetch {"url": ...}`
   (intent `after_fetch_failed`, `meta.fetch_fallback_hints: 1`,
   `meta.fetch_failure`). It never fetches; see docs/research.md, "Fetch

@@ -270,7 +270,11 @@ def _lock_free(op: Any, tool: Any, inp: Any) -> bool:
     """A captured pytest reads no graph state, so it skips the lock; so does
     a captured `ruff check`, which takes the lock itself (`_lock`) only for
     its node keys. So does a compound command with a pytest step: it takes
-    the lock itself for the steps that read the graph."""
+    the lock itself for the steps that read the graph. So does `after` of a
+    web fetch (`webfetch`): its hint is a local check of the URL and output
+    (`ozagia.research.fallback.after_lines`) and reads no graph state."""
+    if op == "after" and tool == "webfetch":
+        return True
     if op != "tool" or tool != "shell" or not isinstance(inp, dict):
         return False
     from ozagia.intent.shell import classify, compound_steps

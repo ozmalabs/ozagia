@@ -15,14 +15,16 @@ read. Two pieces here:
   candidates with the documented providers of `ozagia.research.fetch`
   (arXiv, Crossref/OpenAlex, Unpaywall when an email is configured, Europe
   PMC) and the Semantic Scholar Graph API, follows `citation_pdf_url` on a
-  landing page once, downloads with a size cap, a timeout and a content-type
-  check, extracts text with `ozagia.research.pdf` (or JATS XML with
+  landing page once, downloads with a size cap, a per-request deadline, an
+  overall time budget and a content-type check, extracts text with `ozagia.research.pdf` (or JATS XML with
   `ozagia.research.tei`), caches the artifact and its text by content hash
   under `<state dir>/research/fetch`, and returns the text page by page with
   a stable `source:` key.
 
 Requests go through `fetch.http_get`: its User-Agent, its SSRF guard (no
-private hosts, no credentials in URLs), no cookies and no auth headers.
+private hosts, no credentials in URLs, checked on every redirect hop before
+it is requested and on the connected address), no cookies and no auth
+headers.
 Robots and terms are handled as the rest of `ozagia.research.fetch` handles
 them: documented APIs and open-access copies only, no paywall bypass.
 `OZAGIA_RESEARCH_OFFLINE=1` turns the network off; cached copies are still
@@ -49,7 +51,11 @@ ENV_OFFLINE = "OZAGIA_RESEARCH_OFFLINE"
 # Unpaywall needs a contact email; without one it is skipped.
 ENV_EMAIL = "OZAGIA_RESEARCH_EMAIL"
 DEFAULT_MAX_BYTES = 25_000_000
+# Each request (a download or a metadata lookup) as a whole, and the
+# wall-clock budget of one `fetch_fallback` call (`$OZAGIA_RESEARCH_FETCH_BUDGET_S`).
 DEFAULT_TIMEOUT_S = 30.0
+DEFAULT_BUDGET_S = 90.0
+ENV_BUDGET = "OZAGIA_RESEARCH_FETCH_BUDGET_S"
 DEFAULT_MAX_CHARS = 20_000
 MAX_CHARS_LIMIT = 100_000
 # Downloads tried for one URL at most (candidates and landing-page links).
@@ -274,7 +280,7 @@ def hint_line(url: str) -> str:
 def after_lines(inp: Mapping[str, Any], output: Any) -> tuple[list[str], str | None]:
     """The hint lines for a web fetch (`webfetch`) that ran, and the failure
     reason: one line when its output shows a failure and the URL is
-    paper-like (or the failure is a PDF or binary body). Local only: it
+    paper-like, or on any URL when the body is a PDF. Local only: it
     never fetches."""
     url = inp.get("url") if isinstance(inp, Mapping) else None
     if not isinstance(url, str) or not url.strip():
@@ -288,7 +294,7 @@ def after_lines(inp: Mapping[str, Any], output: Any) -> tuple[list[str], str | N
     reason = failure_reason(output)
     if reason is None:
         return [], None
-    if not (paper_like(url) or reason in ("pdf binary", "binary content")):
+    if not (paper_like(url) or reason == "pdf binary"):
         return [], reason
     return [hint_line(url)], reason
 
@@ -365,10 +371,17 @@ def source_key(digest: str) -> str:
     return f"source:sha256:{digest[:16]}"
 
 
+# Fields of an answer that belong to the requesting URL, not to the
+# document: kept in the `urls/` record and laid over the text entry.
+URL_FIELDS = ("url", "resolved_url", "provider", "license", "version",
+              "retrieved_at", "identifiers")
+
+
 class FetchCache:
     """`<state dir>/research/fetch`: `objects/<aa>/<sha256><ext>` (the
     artifact), `text/<sha256>.json` (its extracted text and metadata) and
-    `urls/<sha256(url)>.json` (which artifact a URL resolved to)."""
+    `urls/<sha256(url)>.json` (which artifact a URL resolved to, and how:
+    URL_FIELDS for that URL)."""
 
     def __init__(self, root: str | Path):
         self.dir = cache_dir(root)
@@ -385,9 +398,13 @@ class FetchCache:
             digest = ref.get("sha256") if isinstance(ref, dict) else None
             if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
                 return None
-            return self.text(digest)
+            entry = self.text(digest)
         except (OSError, ValueError):
             return None
+        if entry is None:
+            return None
+        meta = ref.get("meta") if isinstance(ref.get("meta"), dict) else {}
+        return {**entry, **{k: meta[k] for k in URL_FIELDS if k in meta}, "url": url}
 
     def text(self, digest: str) -> dict[str, Any] | None:
         try:
@@ -406,9 +423,12 @@ class FetchCache:
         _atomic_write(self._text_path(digest),
                       json.dumps(entry, ensure_ascii=False).encode("utf-8"))
 
-    def index(self, url: str, digest: str) -> None:
+    def index(self, url: str, digest: str, meta: Mapping[str, Any] | None = None) -> None:
+        record: dict[str, Any] = {"url": url, "sha256": digest}
+        if meta:
+            record["meta"] = {k: meta[k] for k in URL_FIELDS if k in meta}
         _atomic_write(self._url_path(url), json.dumps(
-            {"url": url, "sha256": digest}, ensure_ascii=False).encode("utf-8"))
+            record, ensure_ascii=False).encode("utf-8"))
 
 
 # --------------------------------------------------------------------------- #
@@ -483,10 +503,13 @@ def _media(value: Any) -> str:
 class _Run:
     def __init__(self, url: str, *, fetcher: Callable[..., Any], email: str | None,
                  max_bytes: int, timeout: float,
-                 pdf_extractor: Callable[..., Any] | None, cache: FetchCache) -> None:
+                 pdf_extractor: Callable[..., Any] | None, cache: FetchCache,
+                 budget: float = DEFAULT_BUDGET_S) -> None:
         self.url = url
         self.cache = cache
-        self.fetcher = fetcher
+        self.budget = budget
+        self.deadline = time.monotonic() + budget
+        self._fetch = fetcher
         self.email = email
         self.max_bytes = max_bytes
         self.timeout = timeout
@@ -498,6 +521,20 @@ class _Run:
         self.queue: deque[dict[str, Any]] = deque()
         self.metadata: dict[str, Any] = {"identifiers": {
             k: v for k, v in self.ids.items() if k != "pdf"}}
+
+    def remaining(self) -> float:
+        return self.deadline - time.monotonic()
+
+    def fetcher(self, url: str, **kwargs: Any) -> Any:
+        """The run's fetcher: each request is bounded as a whole (`deadline`)
+        by its own timeout and by what is left of the run's budget."""
+        left = self.remaining()
+        if left <= 0:
+            raise FetchFallbackError(f"time budget of {self.budget:g} s exhausted")
+        timeout = float(kwargs.get("timeout") or self.timeout)
+        kwargs["timeout"] = min(timeout, left)
+        kwargs["deadline"] = min(float(kwargs.get("deadline") or timeout), left)
+        return self._fetch(url, **kwargs)
 
     # -- candidates ------------------------------------------------------- #
     def _stages(self) -> Iterator[Callable[[], list[dict[str, Any]]]]:
@@ -613,6 +650,10 @@ class _Run:
         stages = self._stages()
         downloads = 0
         while True:
+            if self.remaining() <= 0:
+                self.attempts.append(
+                    {"error": f"time budget of {self.budget:g} s exhausted"})
+                break
             if not self.queue:
                 stage = next(stages, None)
                 if stage is None:
@@ -711,10 +752,17 @@ class _Run:
                   media: str, ext: str) -> dict[str, Any]:
         digest = hashlib.sha256(content).hexdigest()
         cache = self.cache
+        meta = {"url": self.url, "resolved_url": final_url,
+                "provider": cand["provider"], "license": cand.get("license"),
+                "version": cand.get("version"),
+                "retrieved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "identifiers": dict(self.metadata["identifiers"])}
         cached = cache.text(digest)
         if cached is not None:
-            cache.index(self.url, digest)
-            return {**cached, "url": self.url, "attempts": self.attempts}
+            # The same document reached through another URL (or refreshed):
+            # its text is reused, the provenance is this URL's.
+            cache.index(self.url, digest, meta)
+            return {**cached, **meta, "attempts": self.attempts}
         pages = self._extract(content, media)
         if not any(p["text"].strip() for p in pages):
             raise FetchFallbackError("the document has no extractable text")
@@ -722,22 +770,16 @@ class _Run:
         title = self.metadata.get("title")
         entry = {
             "source": source_key(digest),
-            "url": self.url,
-            "resolved_url": final_url,
-            "provider": cand["provider"],
+            **meta,
             "media_type": media,
             "sha256": digest,
             "size": len(content),
             "cache_relative": path.relative_to(cache.dir).as_posix(),
-            "retrieved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "license": cand.get("license"),
-            "version": cand.get("version"),
             "title": title if isinstance(title, str) else "",
-            "identifiers": dict(self.metadata["identifiers"]),
             "pages": pages,
         }
         cache.store_text(digest, entry)
-        cache.index(self.url, digest)
+        cache.index(self.url, digest, meta)
         return {**entry, "attempts": self.attempts}
 
 
@@ -780,14 +822,19 @@ def fetch_fallback(
     email: str | None = None,
     max_bytes: int = DEFAULT_MAX_BYTES,
     timeout: float = DEFAULT_TIMEOUT_S,
+    budget: float | None = None,
+    refresh: bool = False,
 ) -> dict[str, Any]:
     """Fetch an open-access copy of the paper `url` names and return its
     text from character `offset`, at most `max_chars` (see the module doc).
 
     A URL fetched before is answered from the cache with `cache_hit: true`
-    and no network access. Raises `FetchFallbackError` when nothing readable
-    was found (the message lists each attempt) or when offline without a
-    cached copy."""
+    and no network access, unless `refresh` asks for a new resolution.
+    `timeout` bounds each request as a whole; `budget` (default
+    `$OZAGIA_RESEARCH_FETCH_BUDGET_S`, else DEFAULT_BUDGET_S) bounds the
+    call. Raises `FetchFallbackError` when nothing readable was found (the
+    message lists each attempt), when the budget ran out first, or when
+    offline without a cached copy (or with `refresh`)."""
     if not isinstance(url, str) or not url.strip():
         raise FetchFallbackError("url must be a non-empty string")
     url = url.strip()
@@ -796,25 +843,39 @@ def fetch_fallback(
     offset = max(0, int(offset or 0))
     max_chars = max(1, min(int(max_chars or DEFAULT_MAX_CHARS), MAX_CHARS_LIMIT))
     cache = FetchCache(root)
-    cached = cache.lookup(url)
+    cached = None if refresh else cache.lookup(url)
     if cached is not None:
         _bump(root, research_fetches=1, research_fetch_cache_hits=1)
         return _answer(cached, offset, max_chars, cache_hit=True, attempts=[])
     if offline():
         _bump(root, research_fetches=1)
         raise FetchFallbackError(
-            f"research network access is off ({ENV_OFFLINE}=1) and {url} is not cached")
+            f"research network access is off ({ENV_OFFLINE}=1) and {url} is "
+            + ("not refreshed" if refresh else "not cached"))
     if fetcher is None:
         from ozagia.research.fetch import http_get
         fetcher = http_get
     run = _Run(url, fetcher=fetcher,
                email=email or os.environ.get(ENV_EMAIL) or None,
                max_bytes=int(max_bytes), timeout=float(timeout),
-               pdf_extractor=pdf_extractor, cache=cache)
+               pdf_extractor=pdf_extractor, cache=cache,
+               budget=_budget(budget))
     _bump(root, research_fetches=1)
     entry = run.run()
     attempts = entry.pop("attempts", [])
     return _answer(entry, offset, max_chars, cache_hit=False, attempts=attempts)
+
+
+def _budget(value: float | None) -> float:
+    """The call's time budget in seconds: `value`, else `$OZAGIA_RESEARCH_FETCH_BUDGET_S`,
+    else DEFAULT_BUDGET_S."""
+    if value is None:
+        raw = os.environ.get(ENV_BUDGET, "").strip()
+        try:
+            value = float(raw) if raw else DEFAULT_BUDGET_S
+        except ValueError:
+            value = DEFAULT_BUDGET_S
+    return value if value > 0 else DEFAULT_BUDGET_S
 
 
 def _answer(entry: Mapping[str, Any], offset: int, max_chars: int, *,
@@ -846,7 +907,8 @@ TOOL_SPEC: dict[str, Any] = {
         "Europe PMC, Semantic Scholar, OpenReview, citation_pdf_url on a landing "
         "page), downloads with a size cap, extracts PDF or JATS text, caches it "
         "by content hash and returns it page by page with a stable source: key. "
-        "Pass offset=next_offset for the next part. Open access only; network "
+        "Pass offset=next_offset for the next part, refresh=true to resolve again "
+        "instead of using the cache. Open access only; network "
         "is off with OZAGIA_RESEARCH_OFFLINE=1 (cached copies are still served)."),
     "inputSchema": {
         "type": "object",
@@ -857,6 +919,9 @@ TOOL_SPEC: dict[str, Any] = {
                                          f"at most {MAX_CHARS_LIMIT})."},
             "offset": {"type": "integer",
                        "description": "Character offset into the document text (default 0)."},
+            "refresh": {"type": "boolean",
+                        "description": "Resolve the URL again instead of answering from "
+                                       "the cache (default false)."},
         },
         "required": ["url"],
         "additionalProperties": False,
@@ -870,10 +935,10 @@ def research_fetch_tool(args: Mapping[str, Any], *, root: str | Path,
     return fetch_fallback(str(args.get("url") or ""), root=root,
                           offset=int(args.get("offset") or 0),
                           max_chars=int(args.get("max_chars") or DEFAULT_MAX_CHARS),
-                          **kwargs)
+                          refresh=bool(args.get("refresh")), **kwargs)
 
 
-__all__ = ["COUNTERS", "ENV_EMAIL", "ENV_OFFLINE", "FetchCache", "FetchFallbackError",
+__all__ = ["COUNTERS", "ENV_BUDGET", "ENV_EMAIL", "ENV_OFFLINE", "FetchCache", "FetchFallbackError",
            "TOOL_SPEC", "after_lines", "cache_dir", "failure_reason", "fetch_fallback",
            "hint_line", "landing_links", "offline", "paper_ids", "paper_like",
            "read_counters", "research_fetch_tool", "source_key"]
