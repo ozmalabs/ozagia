@@ -1,0 +1,5 @@
+[Container]
+Image=postgres:16
+Pod=shop.pod
+Volume=shop-data.volume:/var/lib/postgresql/data
+Environment="POSTGRES_PASSWORD=CANARY_QUADLET_SECRET"

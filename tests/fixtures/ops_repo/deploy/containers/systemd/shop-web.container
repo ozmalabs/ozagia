@@ -1,0 +1,17 @@
+[Unit]
+Description=Shop web
+Requires=shop-db.service
+After=shop-db.service network-online.target
+
+[Container]
+Image=shop-web:1.2
+Pod=shop.pod
+Network=shop.network
+Volume=shop-data.volume:/var/lib/app
+PublishPort=8080:80
+EnvironmentFile=../../web.env
+Environment=TOKEN=CANARY_QUADLET_SECRET MODE=prod
+ContainerName=shop-web
+
+[Install]
+WantedBy=default.target

@@ -24,7 +24,9 @@ from ozagia.harness.session import GraphSession, SessionError
 
 SRC = Path(__file__).resolve().parents[1] / "src"
 PLUGIN_REL = Path(".opencode") / "plugins" / "ozagia.js"
-EXCLUDES = ["/.opencode/plugins/ozagia.js", "/.ozagia/"]
+BRAND_REL = Path(".opencode") / "plugins" / "ozagia" / "tui.js"
+EXCLUDES = ["/.opencode/plugins/ozagia.js",
+            "/.opencode/plugins/ozagia/tui.js", "/.ozagia/"]
 
 MOD = "def add(a, b):\n    return a + b\n"
 TEST = "from pkg.mod import add\n\n\ndef test_add():\n    assert add(1, 2) == 3\n"
@@ -164,8 +166,9 @@ def test_run_agent_end_to_end(repo, stub, tmp_path):
     # The plugin's exclude line goes with the plugin (review fix 14); the
     # state dir's stays while the state dir does.
     assert _exclude_lines(repo).count(EXCLUDES[0]) == 0
-    assert _exclude_lines(repo).count(EXCLUDES[1]) == 1
-    assert res["exclude_removed"] == [EXCLUDES[0]]
+    assert _exclude_lines(repo).count(EXCLUDES[1]) == 0
+    assert _exclude_lines(repo).count(EXCLUDES[2]) == 1
+    assert res["exclude_removed"] == EXCLUDES[:2]
     assert _git(repo, "status", "--porcelain") == ""
 
 
@@ -173,10 +176,11 @@ def test_second_run_is_idempotent_and_refreshes(repo, stub, tmp_path):
     first = _run(repo, tmp_path)
     assert sorted(first["exclude"]["added"]) == sorted(EXCLUDES)
     second = _run(repo, tmp_path)
-    assert second["exclude"]["added"] == [EXCLUDES[0]]
+    assert second["exclude"]["added"] == EXCLUDES[:2]
     assert second["prep"]["action"] == "fresh"
     assert _exclude_lines(repo).count(EXCLUDES[0]) == 0
-    assert _exclude_lines(repo).count(EXCLUDES[1]) == 1
+    assert _exclude_lines(repo).count(EXCLUDES[1]) == 0
+    assert _exclude_lines(repo).count(EXCLUDES[2]) == 1
     (repo / "pkg" / "mod.py").write_text(MOD + "\n\ndef sub(a, b):\n    return a - b\n")
     third = _run(repo, tmp_path)
     assert third["prep"]["action"] == "refreshed"
@@ -188,12 +192,14 @@ def test_git_exclude_appends_only_missing_lines(repo):
     path = repo / ".git" / "info" / "exclude"
     path.write_text("*.log\n/.ozagia/", encoding="utf-8")  # no trailing newline
     out = git_exclude(repo)
-    assert out["added"] == ["/.opencode/plugins/ozagia.js"]
-    assert path.read_text().splitlines() == ["*.log", "/.ozagia/",
-                                              "/.opencode/plugins/ozagia.js"]
+    assert out["added"] == EXCLUDES[:2]
+    assert path.read_text().splitlines() == [
+        "*.log", "/.ozagia/", *EXCLUDES[:2]]
     assert git_exclude(repo)["added"] == []
     sub = repo / "pkg"
-    assert git_exclude(sub)["added"] == ["/pkg/.opencode/plugins/ozagia.js", "/pkg/.ozagia/"]
+    assert git_exclude(sub)["added"] == [
+        "/pkg/.opencode/plugins/ozagia.js",
+        "/pkg/.opencode/plugins/ozagia/tui.js", "/pkg/.ozagia/"]
 
 
 def test_git_exclude_outside_git_is_none(tmp_path):

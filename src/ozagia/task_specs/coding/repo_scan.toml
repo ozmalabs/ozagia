@@ -1,0 +1,114 @@
+id = "repo_scan"
+version = 1
+title = "Repository scan"
+objective = "Scan the graph and tests for bounded opportunities, each with expected effect, effort, risk and evidence."
+inputs = []
+tools = ["glob", "grep", "read", "graph_search"]
+write_scope = []
+requires_graph = true
+stop = ["gate_failed", "budget_exhausted", "resource_limit", "no_progress", "repeated_state"]
+output = "repo_scan.v1"
+
+[worktree]
+base = "main"
+require_clean = false
+require_up_to_date = false
+
+[resources]
+memory_mb = 2048
+disk_mb = 1024
+pids = 128
+wall_s = 600
+
+[budget]
+tokens = 50000
+model_calls = 0
+cost_usd = 0.0
+wall_s = 600
+
+[gates]
+before = ["resources_fit", "snapshot_fresh"]
+after = ["schema_valid", "evidence_present"]
+
+[approval]
+mutate = "deny"
+network = "deny"
+
+[output_schema]
+type = "object"
+required = ["opportunities", "not_assessed"]
+additionalProperties = false
+
+[output_schema.properties.opportunities]
+type = "array"
+
+[output_schema.properties.opportunities.items]
+type = "object"
+required = ["title", "kind", "expected_effect", "effort", "risk", "evidence"]
+additionalProperties = false
+
+[output_schema.properties.opportunities.items.properties.title]
+type = "string"
+minLength = 1
+
+[output_schema.properties.opportunities.items.properties.kind]
+type = "string"
+enum = ["missing_test", "hotspot", "duplicate_logic", "slow_path", "weak_boundary", "orphaned_file", "stale_docs", "other"]
+
+[output_schema.properties.opportunities.items.properties.expected_effect]
+type = "string"
+minLength = 1
+
+[output_schema.properties.opportunities.items.properties.effort]
+type = "string"
+enum = ["S", "M", "L"]
+
+[output_schema.properties.opportunities.items.properties.risk]
+type = "string"
+enum = ["low", "medium", "high"]
+
+[output_schema.properties.opportunities.items.properties.evidence]
+type = "string"
+minLength = 1
+
+[output_schema.properties.not_assessed]
+type = "array"
+
+[output_schema.properties.not_assessed.items]
+type = "string"
+
+[[steps]]
+id = "map-tree"
+tool = "glob"
+goal = "Map source, test and documentation files without reading their contents."
+paths = ["."]
+
+[steps.budget]
+tokens = 8000
+
+[[steps]]
+id = "find-markers"
+tool = "grep"
+goal = "Find hotspots, missing-test conventions, TODOs and duplicate blocks."
+paths = ["."]
+
+[steps.budget]
+tokens = 14000
+
+[[steps]]
+id = "graph-opportunities"
+tool = "graph_search"
+goal = "Rank candidates by graph degree, missing tests and weak boundaries."
+paths = ["."]
+
+[steps.budget]
+tokens = 16000
+
+[[steps]]
+id = "report"
+tool = "read"
+goal = "Assemble opportunities with effect, effort, risk, evidence and omissions."
+paths = ["."]
+
+[steps.budget]
+tokens = 8000

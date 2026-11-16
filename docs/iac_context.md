@@ -53,6 +53,12 @@ Name and address matching uses identifier components and exact/qualified forms,
 not arbitrary substrings, and a bare path coincidence is not enough to emit a
 hint.
 
+Compose files, Containerfiles/Dockerfiles, podman quadlets and systemd units
+are covered by the same adapter as the `ops` family: see
+[ops_graph.md](ops_graph.md) for their node keys, the `infra_ops` tool and the
+`[ozagia] ops:` lines after `podman logs`, `journalctl -u` and similar
+commands.
+
 ## Configured IaC roots, environments and services
 
 All of the following configuration is optional and declarative. Paths and
