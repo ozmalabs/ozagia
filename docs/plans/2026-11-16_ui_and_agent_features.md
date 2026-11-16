@@ -1751,6 +1751,19 @@ Status: all are merged: `repo-scan` as `64dc640`, `addin-extensions` as
 `0b71bb3`, `standalone-console` as `72698dc`, `upstream` as `79c3b3e`,
 `security-scan` as `f1254eb`, and `library-hints` as `d270f20`.
 
+### Parallel wave 6 (2026-11-16)
+
+Three agents start from `0051899`:
+
+| Worktree | Branch | Scope |
+| --- | --- | --- |
+| `~/ozmadev/ozagia-wt/ocelot-code` | `feat/ocelot-code` | Optional Ocelot structural clustering for code-review and repo-scan findings |
+| `~/ozmadev/ozagia-wt/module-build` | `feat/module-build` | Preview-first module scaffolding from a repo-scan opportunity |
+| `~/ozmadev/ozagia-wt/plumbing` | `feat/plumbing` | Models/test settings integration, captured-pytest policy, doctor sources, `ozagia config` |
+
+The same review/merge/full-suite gate applies. The live OpenCode Desktop
+smoke test still needs a host with the desktop app.
+
 ### Library-first workstream (2026-11-16)
 
 One additional agent starts from `79c3b3e`:
