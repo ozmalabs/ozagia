@@ -92,8 +92,8 @@ clears or drops them, `read_check` answers a hook's PreToolUse.
 Working set (`ozagia.core.working_set`): after each `tool`/`after` answer
 the daemon notes in the session state's `work` what it edited (handled
 `edit`/`write`/key edits; `after_refresh` of a built-in edit, write or
-patch with its `meta.edited_files`, of a shell command with
-`meta.changed_paths`) and
+patch with its `meta.edited_files` or patch text, of a shell command with
+`meta.changed_paths` or its command-derived paths) and
 which tests a pytest run failed (also in the root's test record in the
 state dir); the ledger copies reads into it. The `working_set` op renders
 it; `stats` adds `working_sets_served`, `working_set_chars` and
@@ -102,8 +102,11 @@ it; `stats` adds `working_sets_served`, `working_set_chars` and
 Created-file ledger (`ozagia.core.files`): a handled `write` (or `edit`
 that creates the file) records it from the intent layer, with the reserved
 `_reason` as its reason; `after` for `edit`, `write`, `patch` and `shell`
-records newly created files among `meta.changed_paths` (and, for edit and
-write, the file they name) with one bounded `git status` pathspec scan;
+records newly created files among `meta.changed_paths`/`edited_files` (and,
+for edit and write, the file they name). A `patch`'s patch text and a
+`shell` command's write targets are derived too when the meta lists are
+absent or incomplete (`ozagia.intent.call_paths`), merged, deduplicated and
+capped; one bounded `git status` pathspec scan runs for those paths only;
 `session_event` `start` writes a bounded manifest of tracked and untracked
 files under `.ozagia/files/sessions/`; `end` diffs against it and records only
 new/changed files (moves and deletes keep metadata tombstones), so files that
@@ -117,7 +120,8 @@ off. `stats` adds `files_recorded`, `file_ledger_scans`,
 Library-first hints (`ozagia.core.library_hints`): a handled `edit` or `write`
 computes hints for new/changed symbols; a built-in `edit`, `write` or `patch`
 reported by `after` gets bounded `[ozagia] library hint:` lines when the same
-file was not just annotated by a handled call. `stats` adds `library_hints`,
+file was not just annotated by a handled call (a patch's files come from
+`meta.edited_files` or its parsed patch text). `stats` adds `library_hints`,
 `library_hint_files` and `library_hints_suppressed` (from handled calls) and
 `library_hints_builtin` / `library_hint_builtin_files` (from `after`). Hints
 are advisory text only and are never applied.
@@ -773,20 +777,25 @@ class DaemonState:
                     files.append(W.key_file(str(inp.get("key") or "")))
             elif op == "after" and it == "after_refresh":
                 # A built-in edit, write or patch: the files this call
-                # changed (`meta.edited_files`, session-scoped). A shell
-                # command: the changed files it may have written
-                # (`meta.changed_paths`, recently written ones only). Not
-                # every pending change in the root: other sessions and the
-                # user's editor change files too.
+                # changed (`meta.edited_files`, session-scoped), plus the
+                # files its patch text names when the meta list is absent or
+                # incomplete. A shell command: the changed files it may have
+                # written (`meta.changed_paths`, recently written ones only),
+                # plus the paths its command line itself names. Not every
+                # pending change in the root: other sessions and the user's
+                # editor change files too.
                 edited = True
                 if tool in ("edit", "write", "patch"):
                     files.extend(p for p in meta.get("edited_files") or []
                                  if isinstance(p, str))
+                    if tool == "patch":
+                        files.extend(self._derived_paths("patch", inp))
                 elif tool == "shell":
                     files.extend(p for p in meta.get("changed_paths") or []
                                  if isinstance(p, str))
+                    files.extend(self._derived_paths("shell", inp))
             if edited:
-                named = [f for f in files if f]
+                named = list(dict.fromkeys(f for f in files if f))
                 if op == "after":
                     # The refresh's delta covers every pending file: keep
                     # the keys of the files this call changed.
@@ -924,24 +933,52 @@ class DaemonState:
             self.file_manifest_sessions += 1
             self.files_recorded += len(recorded)
 
+    def _derived_paths(self, tool: str, inp: Any,
+                       limit: int = FILE_LEDGER_PATHS) -> list[str]:
+        """Paths a built-in `patch` or `shell` call names in its patch text or
+        command (`ozagia.intent.call_paths`), root-relative. The harness may
+        not report them in `meta`, or may name only some; deriving is bounded
+        and read-only. Never raises."""
+        try:
+            if tool not in ("patch", "shell") or not isinstance(inp, dict):
+                return []
+            from ozagia.intent.call_paths import command_paths, patch_paths
+            wd = inp.get("workdir")
+            cwd = wd if isinstance(wd, str) and wd else "."
+            if tool == "patch":
+                return patch_paths(inp, root=self.root, cwd=cwd, limit=limit)
+            command = inp.get("command")
+            if not isinstance(command, str) or not command.strip():
+                return []
+            return command_paths(command, root=self.root, cwd=cwd,
+                                 limit=limit)
+        except Exception:  # noqa: BLE001 - bookkeeping only
+            return []
+
     def _files_observe(self, op: str, tool: str, inp: Any, msg: dict[str, Any],
                        body: dict[str, Any]) -> None:
         """Record files a built-in `edit`, `write`, `patch` or `shell` call
-        created: the `after` answer's `meta.changed_paths`, plus the file an
-        edit or write names. One bounded `git status` pathspec run, only for
-        the paths named (never a whole-repository scan). Never raises."""
+        created: the `after` answer's `meta.changed_paths`/`edited_files`, the
+        file an edit or write names, and the paths a `patch` or `shell` call
+        itself names (merged when the meta list is absent or incomplete). One
+        bounded `git status` pathspec run, only for the paths named (never a
+        whole-repository scan). Never raises."""
         if op != "after" or tool not in FILE_LEDGER_TOOLS:
             return
         if not isinstance(inp, dict) or not self._file_ledger_enabled(msg):
             return
         meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
-        changed = meta.get("changed_paths")
-        paths: list[str] = ([p for p in changed if isinstance(p, str)]
-                            if isinstance(changed, list) else [])
+        paths: list[str] = []
+        for key in ("changed_paths", "edited_files"):
+            changed = meta.get(key)
+            if isinstance(changed, list):
+                paths.extend(p for p in changed if isinstance(p, str))
         if tool in ("edit", "write"):
             rel = self._ws_rel(inp.get("path", inp.get("filePath")))
             if rel:
                 paths.append(rel)
+        elif tool in ("patch", "shell"):
+            paths.extend(self._derived_paths(tool, inp, FILE_LEDGER_PATHS))
         paths = list(dict.fromkeys(paths))[:FILE_LEDGER_PATHS]
         if not paths:
             return
@@ -1026,22 +1063,10 @@ class DaemonState:
             rel = self._ws_rel(inp.get("path", inp.get("filePath")))
             if rel:
                 raw.append(rel)
-        elif tool == "patch" and not raw and isinstance(inp, dict):
-            # Without `meta.edited_files` (no session), the patch text still
-            # names the files; a parse failure only means no hint.
-            try:
-                from ozagia.intent.patch import parse_patch, patch_text
-                text = patch_text(inp)
-                parsed = parse_patch(text) if text else None
-                base = inp.get("workdir")
-                for op in (parsed.ops if parsed else []):
-                    for value in (op.path, op.move_to):
-                        if isinstance(value, str) and value:
-                            rel = self._ws_rel(value, base=base)
-                            if rel:
-                                raw.append(rel)
-            except Exception:  # noqa: BLE001 - hints are advisory
-                pass
+        elif tool == "patch":
+            # The patch text names every file and move target, even when
+            # `meta.edited_files` is absent or incomplete (`intent.patch`).
+            raw.extend(self._derived_paths("patch", inp, LIBRARY_HINT_FILES))
         out: list[str] = []
         for rel in raw:
             if rel not in out:

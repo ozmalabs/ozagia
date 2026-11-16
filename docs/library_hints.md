@@ -169,9 +169,11 @@ A hint failure never fails the edit. `off` and
 
 Built-in edits, writes and patches are covered by the daemon's `after` path.
 For `after` of `edit`, `write` or `patch`, the daemon takes the changed paths
-(`meta.edited_files`, the path the tool names, or the patch's files), skips a
-file it just annotated for the same session and unchanged content, and appends
-at most `hints.max_per_edit` `[ozagia] library hint:` lines. The answer carries:
+(`meta.edited_files`, the path the tool names, or the patch's files) and
+merges the paths the patch text parses to when the meta list is absent or
+incomplete (`ozagia.intent.call_paths.patch_paths`). It skips a file it just
+annotated for the same session and unchanged content, and appends at most
+`hints.max_per_edit` `[ozagia] library hint:` lines. The answer carries:
 
 - `meta.library_hints_builtin`: hints shown after the built-in call;
 - `meta.library_hint_builtin_files`: files that produced one;
@@ -180,7 +182,9 @@ at most `hints.max_per_edit` `[ozagia] library hint:` lines. The answer carries:
 A failure in the hint layer is logged and never fails the tool. A failed
 built-in edit (`builtin_error`) and an edit miss get no hints, and `off` /
 `$OZAGIA_LIBRARY_HINTS=0` short-circuit before any read. Hints from a handled
-call are not repeated by a later `after` for the same unchanged file.
+call are not repeated by a later `after` for the same unchanged file. Shell is
+not a library-hint tool: command-derived shell paths feed the created-file
+ledger and the working set, never the hint layer.
 
 `ozagia daemon` sums the handled counters into `stats.library_hints`,
 `stats.library_hint_files` and `stats.library_hints_suppressed`, and the
