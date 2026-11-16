@@ -254,6 +254,9 @@ results including cache state, tool/model versions, dataset and limitations.
 
 ## Implementation progress
 
+Follow-up recommendations from real SRE/IaC sessions are planned in
+[the SRE/IaC extension plan](2026-11-16_sre_iac_extensions.md).
+
 An experimental opt-in adapter now indexes bounded, partial static source
 facts for Terraform/OpenTofu, Kubernetes, Helm/Kustomize, CloudFormation, ARM
 JSON and GitOps. Infrastructure locate, context, dependencies, impact and
