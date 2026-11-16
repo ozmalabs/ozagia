@@ -83,13 +83,33 @@ unit's directory), `env_file`, `mounts` (compose bind mounts, quadlet
 
 Environment and build-argument values are never stored: `ENV`, `ARG`,
 `Environment=`, compose `environment:` and env files give names only, and env
-files are linked by path and never read. Commands keep only their program
-(`ExecStart`'s binary, `ENTRYPOINT`'s first word), never arguments. Every
+files are linked by path and never read: build-file reads refuse them, and
+their refresh stamps keep size and mtime only, no content hash. Commands keep
+only their program (`ExecStart`'s binary, `ENTRYPOINT`'s first word), never
+arguments; leading `NAME=value` assignments and an `env` wrapper are skipped,
+and a program word containing `=` is dropped. Every
 retained string is bounded to 256 characters and replaced with `[REDACTED]`
 when it looks like a credential (token prefixes such as `ghp_`/`sk-`/`xox?-`,
 AWS key IDs, `Bearer`, private keys, `user:pass@` URLs, `password=...`,
-JWTs, long mixed-case opaque strings); `${VAR:-default}` keeps only `${VAR}`.
+JWTs, long mixed-case opaque strings; a run with `/` is tested per path
+segment, so mixed-case paths and image names are kept); `${VAR:-default}`
+keeps only `${VAR}`.
 Ops sources and `.env`/`*.env` files are left out of automatic snippets.
+
+## Bounds
+
+Ops sources have their own discovery budget, 2,000 files
+(`infra_discovery.MAX_OPS_FILES`) and 8 MiB (`adapter.MAX_OPS_SOURCE_BYTES`),
+separate from the 5,000 files and 16 MiB of the other IaC sources, so a tree
+of units or Dockerfiles cannot push Terraform or Kubernetes sources out.
+Per-file parses are cached by content digest like the other IaC kinds; only
+cross-file resolution runs on every pass. A source that fails to parse
+becomes a diagnostic and the others still index. Compose lines over 4 KiB are
+skipped by the line scanner, Containerfile instructions over 64 KiB are
+skipped with a diagnostic, and the YAML loader allows aliases but stops after
+250,000 constructed nodes or merged pairs. Build files a compose
+`dockerfile:` names are read only when the memory skip configuration allows
+the path.
 
 ## Queries
 
@@ -119,14 +139,17 @@ the nodes it is about, as a pytest summary gets `test:` keys:
 
 | Command | Matches |
 |---|---|
-| `podman logs N`, `docker logs N`, `podman container logs N` | `container_name` (compose, quadlet `ContainerName=` or the default `systemd-<name>`), compose's `<project>-<service>-<n>`, else a service or quadlet name |
-| `docker compose logs [svc...]`, `podman compose`, `docker-compose`, `podman-compose` | services of the compose file named by `-f`, else in the working directory; no service: the compose project |
+| `podman logs N`, `docker logs N`, `podman container logs N` | `container_name` (compose, quadlet `ContainerName=` or the default `systemd-<name>`) or compose's `<project>-<service>-<n>`; a bare service name matches nothing. `-n` is `--tail` for docker and `--names` (no value) for podman |
+| `docker compose logs [svc...]`, `podman compose`, `docker-compose`, `podman-compose` | services of the compose file named by `-f`, else of the nearest compose project in the working directory or its parents (as compose looks); nothing when the working directory is outside the repository; no service: the compose project |
 | `journalctl -u U` (`--unit`, `--user-unit`, `-fu U`, globs) | units named `U` (`U.service` without a suffix, templates `a@b.service` → `a@.service`) and quadlets generating `U` |
 | `systemctl status U...` | as `journalctl -u` |
 
 ```
-[ozagia] ops:unit/deploy/systemd/backup.service: systemd service backup.service (deploy/systemd/backup.service:1); runs file:scripts/backup.py
+[ozagia] ops:unit/deploy/systemd/backup.service: systemd service backup.service, declared at deploy/systemd/backup.service:1; runs file:scripts/backup.py
 ```
+
+Lines say `declared`: they describe source declarations, not live container
+or unit state (unlike runtime's `[ozagia] service <name>: running` lines).
 
 These commands are never captured or answered; the built-in runs them and
 only its output is annotated. Lines are capped at eight per command.

@@ -20,6 +20,10 @@ from ozagia.config import (
 )
 
 MAX_FILES = 5000
+# Operations sources (compose files, Containerfiles, quadlets, systemd units)
+# have their own discovery budget, so a tree of units or Dockerfiles cannot
+# push Terraform or Kubernetes sources out of `MAX_FILES`.
+MAX_OPS_FILES = 2000
 MAX_FILE_BYTES = 1024 * 1024
 _EXTRA_SKIP = frozenset({".terraform", ".terragrunt-cache", ".pulumi", ".kube"})
 DEFAULT_SKIP_GLOBS = DEFAULT_IAC_SKIP_GLOBS
@@ -136,14 +140,18 @@ def env_file_name(name: str) -> bool:
     return value.startswith(".env") or value.endswith(".env")
 
 
-def iter_candidate_paths(root: str | Path, *, max_files: int = MAX_FILES
+def iter_candidate_paths(root: str | Path, *, max_files: int = MAX_FILES,
+                         max_ops_files: int = MAX_OPS_FILES
                          ) -> Iterator[tuple[str, str]]:
-    """List eligible paths without opening their contents."""
+    """List eligible paths without opening their contents. Operations
+    sources (kind `ops`) count against `max_ops_files`, every other kind
+    against `max_files`; the walk stops when both are spent."""
     base = Path(root).resolve()
     cfg = load_project_config(base)
     state = state_rel(base)
     patterns = cfg.iac_skip_globs
     count = 0
+    ops_count = 0
     for current, dirs, files in os.walk(base, followlinks=False):
         directory = Path(current)
         rel_dir = directory.relative_to(base).as_posix()
@@ -160,9 +168,16 @@ def iter_candidate_paths(root: str | Path, *, max_files: int = MAX_FILES
             kind = source_kind(rel)
             if not kind:
                 continue
-            count += 1
-            if count > max(0, max_files):
-                return
+            if kind == "ops":
+                ops_count += 1
+                over = ops_count > max(0, max_ops_files)
+            else:
+                count += 1
+                over = count > max(0, max_files)
+            if over:
+                if count >= max(0, max_files) and ops_count >= max(0, max_ops_files):
+                    return
+                continue
             path = directory / name
             if not path.is_symlink():
                 yield path.relative_to(base).as_posix(), kind

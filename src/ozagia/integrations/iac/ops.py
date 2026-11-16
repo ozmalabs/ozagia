@@ -14,7 +14,12 @@ from __future__ import annotations
 from pathlib import PurePosixPath
 from typing import Any
 
-from ozagia.core.infra_discovery import MAX_FILE_BYTES, is_skipped_path, read_source
+from ozagia.core.infra_discovery import (
+    MAX_FILE_BYTES,
+    env_file_name,
+    is_skipped_path,
+    read_source,
+)
 from ozagia.core.ops_graph import (
     EXTRACTOR_VERSION,
     OpsGraph,
@@ -36,8 +41,8 @@ _SCALAR_ATTRS = ("image", "container_name", "build_context", "entrypoint",
                  "from_stage", "base_image")
 
 
-def _regular_file(root: Any, rel: str) -> bool:
-    if is_skipped_path(root, rel):
+def _regular_file(root: Any, rel: str, skipped: Any = None) -> bool:
+    if is_skipped_path(root, rel) or (skipped is not None and skipped(rel)):
         return False
     current = root
     for part in PurePosixPath(rel).parts:
@@ -54,22 +59,37 @@ def _file_id(ctx: Any, rel: str) -> int:
     return fid if fid is not None else ctx.file_node(rel, indexed=False)
 
 
-def build_ops_graph(root: Any, sources: dict[str, str]) -> OpsGraph:
-    """Parse and resolve `sources` (root-relative path -> text)."""
+def build_ops_graph(root: Any, sources: dict[str, str], *,
+                    skipped: Any = None, parse: Any = None) -> OpsGraph:
+    """Parse and resolve `sources` (root-relative path -> text). One source
+    that fails to parse becomes a diagnostic; the others still index.
+    `skipped(rel)` is the caller's skip policy (memory skip config, state
+    directory) for build files and linked files; `parse(rel, text)` parses
+    one source (default `parse_ops_source`; the adapter passes a cached
+    one, whose results must not be mutated)."""
     graph = OpsGraph()
     for rel, text in sorted(sources.items()):
-        graph.extend(parse_ops_source(text, rel))
+        try:
+            parsed = parse(rel, text) if parse else parse_ops_source(text, rel)
+        except Exception:  # noqa: BLE001 - one bad file, a diagnostic
+            graph.diagnostics.append((rel, "operations source could not be parsed"))
+            continue
+        graph.extend(parsed)
 
     def read_build_file(rel: str) -> str | None:
+        # Env files are linked by path, never read.
+        if env_file_name(rel) or not _regular_file(root, rel, skipped):
+            return None
         return read_source(root, rel, max_bytes=MAX_FILE_BYTES)
 
-    return resolve(graph, file_exists=lambda rel: _regular_file(root, rel),
+    return resolve(graph, file_exists=lambda rel: _regular_file(root, rel, skipped),
                    root=str(root.resolve()), read_containerfile=read_build_file)
 
 
-def emit_ops(ctx: Any, sources: dict[str, str]) -> list[tuple[str, str]]:
+def emit_ops(ctx: Any, sources: dict[str, str], *,
+             parse: Any = None) -> list[tuple[str, str]]:
     """Add the ops graph of `sources` to the build; return diagnostics."""
-    graph = build_ops_graph(ctx.root, sources)
+    graph = build_ops_graph(ctx.root, sources, skipped=ctx.skipped, parse=parse)
     ids: dict[str, int] = {}
     for node in graph.nodes:
         attrs: dict[str, Any] = {

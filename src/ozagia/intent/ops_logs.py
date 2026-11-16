@@ -27,7 +27,10 @@ _ENGINE_GLOBAL_VALUE = frozenset({
     "--storage-driver", "--cgroup-manager", "--tlscacert", "--tlscert",
     "--tlskey", "--module",
 })
-_LOGS_VALUE = frozenset({"--since", "--until", "--tail", "-n", "--index"})
+# `logs` options that take a value. `-n` is docker's `--tail`, but podman's
+# (and podman-compose's) `--names`, a boolean.
+_LOGS_VALUE_DOCKER = frozenset({"--since", "--until", "--tail", "-n", "--index"})
+_LOGS_VALUE_PODMAN = frozenset({"--since", "--until", "--tail", "--index"})
 _COMPOSE_VALUE = frozenset({
     "-f", "--file", "-p", "--project-name", "--project-directory",
     "--env-file", "--profile", "--ansi", "--progress", "--parallel",
@@ -61,7 +64,7 @@ def _positionals(args: list[str], value_opts: frozenset[str]) -> list[str]:
     return out
 
 
-def _compose(args: list[str]) -> tuple[str, Any] | None:
+def _compose(args: list[str], logs_value: frozenset[str]) -> tuple[str, Any] | None:
     """`("compose", (files, services))` for `... logs [svc...]`."""
     files: list[str] = []
     i = 0
@@ -79,7 +82,7 @@ def _compose(args: list[str]) -> tuple[str, Any] | None:
         elif not a.startswith("-"):
             if a != "logs":
                 return None
-            return "compose", (files, _positionals(args[i + 1:], _LOGS_VALUE))
+            return "compose", (files, _positionals(args[i + 1:], logs_value))
         i += 1
     return None
 
@@ -92,9 +95,11 @@ def log_requests(argv: list[str]) -> list[tuple[str, Any]]:
     base = os.path.basename(argv[0])
     rest = argv[1:]
     if base in ("docker-compose", "podman-compose"):
-        found = _compose(rest)
+        found = _compose(rest, _LOGS_VALUE_PODMAN if base == "podman-compose"
+                         else _LOGS_VALUE_DOCKER)
         return [found] if found else []
     if base in ("podman", "docker"):
+        logs_value = _LOGS_VALUE_PODMAN if base == "podman" else _LOGS_VALUE_DOCKER
         i = 0
         while i < len(rest) and rest[i].startswith("-"):
             i += 2 if (rest[i] in _ENGINE_GLOBAL_VALUE and "=" not in rest[i]) else 1
@@ -102,13 +107,13 @@ def log_requests(argv: list[str]) -> list[tuple[str, Any]]:
         if not words:
             return []
         if words[0] == "compose":
-            found = _compose(words[1:])
+            found = _compose(words[1:], logs_value)
             return [found] if found else []
         if words[0] in ("container", "pod") and len(words) > 1:
             words = words[1:]
         if words[0] != "logs":
             return []
-        return [("container", n) for n in _positionals(words[1:], _LOGS_VALUE)]
+        return [("container", n) for n in _positionals(words[1:], logs_value)]
     if base == "journalctl":
         units: list[str] = []
         i = 0
@@ -199,26 +204,36 @@ def _match(nodes: list[tuple[int, str, dict[str, Any]]], kind: str, value: Any,
                 found.append(x)
         if found:
             return found
-        return [x for x in nodes if (
-            attrs := x[2]).get("kind") in ("compose_service", "quadlet_container")
-            and (attrs.get("name") == name
-                 or PurePosixPath(str(attrs.get("name", ""))).stem == name)]
+        # No bare-service-name fallback: compose names containers
+        # `<project>-<svc>-<n>` or `container_name`, both matched above.
+        return []
     files, services = value
     wd_rel = _rel_dir(root, wd)
-    paths: set[str] = set()
-    for f in files:
-        if wd_rel is None:
-            continue
-        rel = os.path.normpath(os.path.join(wd_rel, f))
-        if not rel.startswith(".."):
-            paths.add(PurePosixPath(rel).as_posix())
+    if wd_rel is None:
+        # Outside the repository: no compose project here is meant.
+        return []
     projects = [x for x in nodes if x[2].get("kind") == "compose_project"]
-    if paths:
+    if files:
+        paths: set[str] = set()
+        for f in files:
+            rel = os.path.normpath(os.path.join(wd_rel, f))
+            if not rel.startswith(".."):
+                paths.add(PurePosixPath(rel).as_posix())
         projects = [x for x in projects if x[2].get("path") in paths]
-    elif wd_rel is not None:
-        here = [x for x in projects
-                if PurePosixPath(str(x[2].get("path"))).parent.as_posix() == wd_rel]
-        projects = here or projects
+    else:
+        # Compose looks in the working directory, then its parents (never
+        # child directories); the nearest directory with a project wins.
+        by_dir: dict[str, list[tuple[int, str, dict[str, Any]]]] = {}
+        for x in projects:
+            by_dir.setdefault(PurePosixPath(str(x[2].get("path"))).parent.as_posix(),
+                              []).append(x)
+        current = PurePosixPath(wd_rel)
+        projects = []
+        while True:
+            projects = by_dir.get(current.as_posix(), [])
+            if projects or current.as_posix() == ".":
+                break
+            current = current.parent
     chosen = {str(x[2].get("path")) for x in projects}
     if not services:
         return projects
