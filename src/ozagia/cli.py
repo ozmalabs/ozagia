@@ -10,7 +10,7 @@
     ozagia mcp ...                                (ozagia.integrations.mcp.server)
     ozagia eval ...                               (python -m ozagia.eval.agent)
     ozagia check ...                              (python -m ozagia.check)
-    ozagia install opencode|claude [--workdir W] [...]
+    ozagia install opencode|claude|codex [--workdir W] [...]
     ozagia self info|check|upgrade|uninstall ... (ozagia.selfinstall)
     ozagia [DIR]                                  the TUI on DIR (default: the
                                                   repository of the cwd), as
@@ -159,11 +159,17 @@ def _cmd_agent(args: argparse.Namespace) -> int:
     return code if isinstance(code, int) and code >= 0 else 1
 
 
+# install target -> the integration module whose `__main__.main` installs it.
+INSTALL_TARGETS: dict[str, str] = {
+    "opencode": "ozagia.integrations.opencode",
+    "claude": "ozagia.integrations.claude_code",
+    "codex": "ozagia.integrations.codex",
+}
+
+
 def _cmd_install(args: argparse.Namespace, extra: list[str]) -> int:
-    if args.target == "opencode":
-        from ozagia.integrations.opencode.__main__ import main
-    else:
-        from ozagia.integrations.claude_code.__main__ import main
+    import importlib
+    main = importlib.import_module(INSTALL_TARGETS[args.target] + ".__main__").main
     return main(["install", "--workdir", args.workdir, *extra])
 
 
@@ -222,9 +228,11 @@ def build_parser() -> argparse.ArgumentParser:
         sub.add_parser(name, help=text, add_help=False)
 
     ins = sub.add_parser("install", help="install an integration into a workdir",
-                         description="Install the OpenCode plugin or the Claude Code hooks. "
-                                     "Other options go to the integration's installer.")
-    ins.add_argument("target", choices=("opencode", "claude"))
+                         description="Install the OpenCode plugin, the Claude Code hooks "
+                                     "or the Codex hooks and MCP server. Other options "
+                                     "go to the integration's installer (for codex: "
+                                     "--scope project|user, --python P).")
+    ins.add_argument("target", choices=tuple(INSTALL_TARGETS))
     ins.add_argument("--workdir", default=".", help="project directory (default: .)")
     return p
 

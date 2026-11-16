@@ -32,7 +32,8 @@ def repo(tmp_path: Path, monkeypatch) -> Path:
 
 @pytest.mark.parametrize("argv", [
     ["--help"], ["index", "--help"], ["agent", "--help"], ["install", "--help"],
-    ["daemon", "--help"], ["daemon", "serve", "--help"], ["mcp", "--help"],
+    ["daemon", "--help"], ["daemon", "serve", "--help"],
+    ["daemon", "ensure", "--help"], ["mcp", "--help"],
     ["eval", "--help"], ["check", "--help"],
 ])
 def test_help_exits_zero(argv, capsys):
@@ -109,6 +110,33 @@ def test_install_opencode_and_claude(tmp_path, capsys):
     assert cli.main(["install", "claude", "--workdir", str(tmp_path),
                      "--settings", "project"]) == 0
     assert (tmp_path / ".claude" / "settings.json").is_file()
+
+
+def test_install_codex(tmp_path, capsys):
+    assert cli.main(["install", "codex", "--workdir", str(tmp_path),
+                     "--python", "/opt/py/bin/python"]) == 0
+    out = capsys.readouterr().out
+    assert "/hooks" in out and "trust" in out
+    hooks = json.loads((tmp_path / ".codex" / "hooks.json").read_text())
+    assert set(hooks["hooks"]) == {"SessionStart", "PreToolUse", "PostToolUse"}
+    assert "[mcp_servers.ozagia]" in (tmp_path / ".codex" / "config.toml").read_text()
+    assert "<!-- ozagia:begin -->" in (tmp_path / "AGENTS.md").read_text()
+
+
+def test_install_codex_refuses_malformed_hooks(tmp_path, capsys):
+    (tmp_path / ".codex").mkdir()
+    (tmp_path / ".codex" / "hooks.json").write_text("{nope")
+    assert cli.main(["install", "codex", "--workdir", str(tmp_path)]) == 1
+    assert "not valid JSON" in capsys.readouterr().err
+    assert not (tmp_path / ".codex" / "config.toml").exists()
+
+
+def test_install_targets_cover_the_parser_choices():
+    parser = cli.build_parser()
+    ins = next(a for a in parser._subparsers._group_actions[0].choices["install"]._actions
+               if a.dest == "target")
+    assert tuple(ins.choices) == ("opencode", "claude", "codex")
+    assert set(cli.INSTALL_TARGETS) == set(ins.choices)
 
 
 def test_agent_maps_options_to_run_agent(repo, tmp_path, monkeypatch):
