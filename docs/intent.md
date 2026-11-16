@@ -323,7 +323,8 @@ op, tool, intent and handled; `passthrough` (not handled by design),
 `unknown_outcomes`, `fallbacks` (= `plugin_fallbacks`: one per call the
 plugin could not get answered; `expired` and failed `tool` requests are the
 daemon's view of some of the same calls), errors, hellos and their sessions, mean and max ms and
-uptime.
+uptime; `structured_queries`, `structured_outlines` and `jq_captures` count
+the intents `read_structured`, `read_structured_outline` and `shell_jq`.
 
 `ozagia.core.memory` takes its layout from `$OZAGIA_ROOT` when imported, so
 `serve` sets it to `--root` first. `DevMemory`'s own journal goes next to a

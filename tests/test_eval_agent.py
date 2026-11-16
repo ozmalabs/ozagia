@@ -1011,17 +1011,24 @@ def test_graph_stats_fields_read_counts():
                                            "passthrough_calls": None, "fallbacks": None,
                                            "preflights": None,
                                            "permission_assert": None,
-                                           "codemode_tools": None}
+                                           "codemode_tools": None,
+                                           "structured_queries": None,
+                                           "structured_outlines": None,
+                                           "jq_captures": None}
     # The daemon's shape: handled {"true": captured, "false": passthrough and
     # expired}; fallbacks = plugin fallbacks + expired + failed (review fix 4).
     assert ae.graph_stats_fields({"hellos": 2, "handled": {"true": 3, "false": 4},
                                   "passthrough": 3, "expired": 1,
                                   "plugin_fallbacks": 2, "fallbacks": 3,
                                   "preflights": 2, "permission_assert": True,
-                                  "codemode_tools": ["read"]}) == {
+                                  "codemode_tools": ["read"],
+                                  "structured_queries": 4,
+                                  "structured_outlines": 1,
+                                  "jq_captures": 2}) == {
         "plugin_loaded": True, "captured_calls": 3, "passthrough_calls": 3,
         "fallbacks": 3, "preflights": 2, "permission_assert": True,
-        "codemode_tools": ["read"]}
+        "codemode_tools": ["read"], "structured_queries": 4,
+        "structured_outlines": 1, "jq_captures": 2}
     assert ae.graph_stats_fields({"hellos": 1, "handled": 2})["captured_calls"] == 2
     assert ae.graph_stats_fields({"hellos": 0, "by_handled": {"true": 5}})[
         "captured_calls"] == 5

@@ -451,3 +451,17 @@ def test_daemon_exits_when_its_parent_dies(tmp_path):
     finally:
         if parent.poll() is None:
             parent.kill()
+
+
+def test_daemon_stats_count_structured_reads(tmp_path):
+    from ozagia.daemon.server import DaemonState
+    st = DaemonState(tmp_path, None, tmp_path / "j.jsonl")
+    for intent in ("shell_jq", "shell_jq", "read_structured",
+                   "read_structured_outline", "read_file"):
+        st.record({"op": "tool", "tool": "x"},
+                  {"ok": True, "handled": True, "meta": {"intent": intent}},
+                  1.0)
+    stats = st.stats()
+    assert stats["jq_captures"] == 2
+    assert stats["structured_queries"] == 1
+    assert stats["structured_outlines"] == 1
