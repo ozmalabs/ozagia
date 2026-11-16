@@ -33,7 +33,8 @@ import hashlib
 import json
 import re
 import shlex
-from dataclasses import asdict, dataclass, field
+from collections import deque
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import PurePosixPath
 from typing import Any, Iterable
 
@@ -69,22 +70,43 @@ _SECRET_SHAPES = (
     re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"),
 )
 _OPAQUE = re.compile(r"[A-Za-z0-9+/_=-]{32,}")
+# Longest compose line the line scanner looks at; longer lines are skipped.
+MAX_SCAN_LINE = 4096
+# Longest Containerfile logical line (continuations joined) that is parsed.
+MAX_LOGICAL_LINE = 64 * 1024
+# Composed/constructed YAML nodes and merged mapping pairs per compose file.
+MAX_YAML_NODES = 250_000
+_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+# Inside a path segment: a digit between letters or alternating case, which
+# random base64 (an AWS secret key with `/`) has and path words rarely do.
+_RANDOM_SEGMENT = re.compile(r"[A-Za-z][0-9]+[A-Za-z]|[a-z][A-Z][a-z]?[A-Z]")
 
 
 # --------------------------------------------------------------------------
 # Safety helpers
 
 
+def _mixed(run: str) -> bool:
+    return (any(c.isupper() for c in run) and any(c.islower() for c in run)
+            and any(c.isdigit() for c in run))
+
+
 def looks_secret(value: str) -> bool:
     """A string matches a common credential shape (token prefixes, AWS key
     IDs, bearer tokens, private keys, URL credentials, ``password=...``,
-    JWTs, or a long mixed-case opaque run)."""
+    JWTs, or a long mixed-case opaque run). A run with ``/`` is tested per
+    path segment, so mixed-case paths and image names are kept, unless it
+    carries base64 padding or ``+`` or a segment looks random."""
     if any(p.search(value) for p in _SECRET_SHAPES):
         return True
     for run in _OPAQUE.findall(value):
-        if (any(c.isupper() for c in run) and any(c.islower() for c in run)
-                and any(c.isdigit() for c in run)):
+        if not _mixed(run):
+            continue
+        if "/" not in run or "+" in run or run.endswith("="):
             return True
+        for seg in run.split("/"):
+            if (len(seg) >= 32 and _mixed(seg)) or _RANDOM_SEGMENT.search(seg):
+                return True
     return False
 
 
@@ -284,8 +306,10 @@ def _scan_compose(text: str) -> tuple[dict[str, dict[str, Any]], dict[str, int]]
     child_indent: int | None = None
     current: str | None = None
     field_indent: int | None = None
-    key_re = re.compile(r"""^(\s*)(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9_.-]+))\s*:(?:\s+(.*?))?\s*$""")
+    key_re = re.compile(r"""^(\s*)(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9_.-]+))\s*:(?:\s+(.*))?$""")
     for lineno, raw in enumerate(text.splitlines(), 1):
+        if len(raw) > MAX_SCAN_LINE:
+            continue
         stripped = raw.strip()
         if not stripped or stripped.startswith("#") or stripped in ("---", "..."):
             continue
@@ -318,14 +342,47 @@ def _scan_compose(text: str) -> tuple[dict[str, dict[str, Any]], dict[str, int]]
     return services, top
 
 
+class _YamlBudget(Exception):
+    pass
+
+
 def _load_yaml(text: str) -> Any:
-    """`(value, error)`: PyYAML safe load, or an error message."""
+    """`(value, error)`: a bounded PyYAML safe load, or an error message.
+    Aliases stay allowed (compose anchors such as `x-common: &common`), but
+    constructed nodes and merged (`<<:`) mapping pairs count against
+    `MAX_YAML_NODES`, so alias and merge-key expansion is bounded."""
     try:
         import yaml  # type: ignore[import-not-found]
     except ImportError:
         return None, "YAML parser unavailable; install the iac-yaml extra"
+    base = getattr(yaml, "CSafeLoader", None) or yaml.SafeLoader
+
+    class Loader(base):  # type: ignore[misc, valid-type]
+        def __init__(self, stream: str) -> None:
+            super().__init__(stream)
+            self.ops_budget = MAX_YAML_NODES
+
+        def _spend(self, count: int) -> None:
+            self.ops_budget -= count
+            if self.ops_budget < 0:
+                raise _YamlBudget()
+
+        def construct_object(self, node: Any, deep: bool = False) -> Any:
+            self._spend(1)
+            return super().construct_object(node, deep=deep)
+
+        def flatten_mapping(self, node: Any) -> None:
+            super().flatten_mapping(node)
+            self._spend(len(node.value))
+
     try:
-        return yaml.safe_load(text), None
+        loader = Loader(text)
+        try:
+            return loader.get_single_data(), None
+        finally:
+            loader.dispose()
+    except _YamlBudget:
+        return None, "YAML node limit exceeded"
     except Exception:  # noqa: BLE001 - any parser error is a diagnostic
         return None, "invalid or unsupported YAML"
 
@@ -517,6 +574,8 @@ def parse_compose(text: str, rel: str) -> OpsGraph:
         net_names = list(nets)[:MAX_ITEMS] if isinstance(nets, dict) else _list(nets)
         attached: list[str] = []
         for net in net_names:
+            if not isinstance(net, str):
+                continue
             nkey = add_resource("network", net, net in networks)
             if nkey:
                 attached.append(net)
@@ -559,17 +618,33 @@ def parse_compose(text: str, rel: str) -> OpsGraph:
     return graph
 
 
+def _program(words: list[Any]) -> str | None:
+    """The program of a command's words, never its arguments. Leading
+    `NAME=value` assignments (`DB_PASS=x ./run`) and an `env` wrapper with
+    its options are skipped; a remaining word with `=` is dropped."""
+    i = 0
+    if words and words[0] == "env":
+        i = 1
+        while i < len(words) and isinstance(words[i], str) and words[i].startswith("-"):
+            i += 2 if words[i] in ("-u", "--unset", "-C", "--chdir") else 1
+    while i < len(words) and isinstance(words[i], str) and _ASSIGNMENT.match(words[i]):
+        i += 1
+    if i >= len(words) or not isinstance(words[i], str) or "=" in words[i]:
+        return None
+    return clean(words[i])
+
+
 def _first_word(value: Any) -> str | None:
     """The program of a command (exec list or shell string), never its
     arguments."""
     if isinstance(value, list):
-        return clean(value[0]) if value and isinstance(value[0], str) else None
+        return _program(value[:MAX_ITEMS])
     if isinstance(value, str):
         try:
             words = shlex.split(value)
         except ValueError:
             words = value.split()
-        return clean(words[0]) if words else None
+        return _program(words[:MAX_ITEMS])
     return None
 
 
@@ -655,7 +730,7 @@ def parse_containerfile(text: str, rel: str) -> OpsGraph:
     def stage_ref(ref: str) -> str | None:
         if ref.lower() in by_name:
             return by_name[ref.lower()]
-        if ref.isdigit() and int(ref) < len(stages):
+        if ref.isascii() and ref.isdigit() and int(ref) < len(stages):
             return stages[int(ref)].key
         return None
 
@@ -666,6 +741,9 @@ def parse_containerfile(text: str, rel: str) -> OpsGraph:
                 bucket.append(value)
 
     for lineno, line in _logical_lines(text)[:4000]:
+        if len(line) > MAX_LOGICAL_LINE:
+            graph.diagnostics.append((rel, f"Containerfile line {lineno}: instruction too long; skipped"))
+            continue
         head, _, args = line.partition(" ")
         op = head.upper()
         if op == "FROM":
@@ -717,11 +795,17 @@ def parse_containerfile(text: str, rel: str) -> OpsGraph:
                                                      "image", image,
                                                      f"{op} --from", base))
         elif op == "RUN":
-            for m in re.finditer(r"--mount=\S*?\bfrom=([^,\s]+)", args):
-                target = stage_ref(m.group(1))
-                if target:
-                    graph.edges.append(OpsEdge(current.key, target,
-                                               "mounts_from", "RUN --mount"))
+            for word in args.split():
+                if not word.startswith("--mount="):
+                    continue
+                for opt in word[len("--mount="):].split(","):
+                    name, sep, value = opt.partition("=")
+                    if not sep or name.strip().lower() != "from":
+                        continue
+                    target = stage_ref(value.strip())
+                    if target:
+                        graph.edges.append(OpsEdge(current.key, target,
+                                                   "mounts_from", "RUN --mount"))
         elif op == "EXPOSE":
             add_list(current, "expose", _cleaned(_words(args)))
         elif op == "ENTRYPOINT":
@@ -875,7 +959,7 @@ def parse_unit(text: str, rel: str) -> OpsGraph:
             command = value.lstrip("-@:+!|")
             words = _words(command)
             if words:
-                program = clean(words[0])
+                program = _program(words[:MAX_ITEMS])
                 if program:
                     bucket = node.attrs.setdefault(
                         "exec" if k == "ExecStart" else "exec_other", [])
@@ -1136,10 +1220,10 @@ def resolve(graph: OpsGraph, *, file_exists: Any, root: str | None = None,
                 return option
         return None
 
-    pending = list(graph.refs)
+    pending = deque(graph.refs)
     extra_nodes: list[OpsNode] = []
     while pending:
-        ref = pending.pop(0)
+        ref = pending.popleft()
         source = by_key.get(ref.source)
         if ref.target_type == "image":
             node = image_node(ref.target, source.path if source else "")
@@ -1165,7 +1249,11 @@ def resolve(graph: OpsGraph, *, file_exists: Any, root: str | None = None,
                     text = read_containerfile(option)
                     if text is None:
                         continue
-                    parsed = parse_containerfile(text, option)
+                    try:
+                        parsed = parse_containerfile(text, option)
+                    except Exception:  # noqa: BLE001 - one bad file, a diagnostic
+                        graph.diagnostics.append((option, "build file could not be parsed"))
+                        continue
                     for n in parsed.nodes:
                         by_key[n.key] = n
                     extra_nodes.extend(parsed.nodes)
@@ -1211,9 +1299,10 @@ def resolve(graph: OpsGraph, *, file_exists: Any, root: str | None = None,
                 link = (source.key, ref.relation, rel)
                 if link not in links:
                     links.append(link)
-    for n in graph.nodes + extra_nodes:
-        n.attrs.pop("_wd", None)
-    graph.nodes = graph.nodes + extra_nodes + sorted(images.values(), key=lambda n: n.key)
+    # Per-file graphs may be cached and shared: never mutate their nodes.
+    nodes = [replace(n, attrs={k: v for k, v in n.attrs.items() if k != "_wd"})
+             if "_wd" in n.attrs else n for n in graph.nodes + extra_nodes]
+    graph.nodes = nodes + sorted(images.values(), key=lambda n: n.key)
     keys = {n.key for n in graph.nodes}
     graph.edges = [e for e in edges if e.source in keys and e.target in keys]
     graph.file_links = links
@@ -1241,12 +1330,14 @@ def ops_nodes(memory: Any) -> list[tuple[int, str, dict[str, Any]]]:
 
 
 def describe(key: str, attrs: dict[str, Any]) -> str:
-    """One short line naming an ops node: kind, name and citation."""
+    """One short line naming an ops node: kind, name and citation, marked
+    `declared` (a source declaration, not live container or unit state)."""
     kind = str(attrs.get("kind") or "").replace("_", " ")
     path = str(attrs.get("path") or "")
     line = attrs.get("line")
     cite = f"{path}:{line}" if isinstance(line, int) and path else path
-    return f"{key}: {kind} {attrs.get('name', '')}" + (f" ({cite})" if cite else "")
+    return (f"{key}: {kind} {attrs.get('name', '')}, declared"
+            + (f" at {cite}" if cite else ""))
 
 
 def _resolve_targets(memory: Any, target: str) -> list[tuple[int, str, dict[str, Any]]]:
