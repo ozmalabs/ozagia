@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Deterministic failure classes (`ozagia.core.failures`): `harness`,
+  `timeout`, `environment`, `collection`, `assertion`, `error`, `passed`
+  (and `unknown`), by ordered rules with the matched evidence. The agent
+  eval classifies each check and the agent's last pytest in the transcript;
+  runs whose check is `harness` or `environment` are invalid and left out
+  of success counts and rates, with their own report section. A captured
+  pytest that did not pass gets an `[ozagia] failure class` line (the
+  missing module for `environment`); the test record keeps the class, and
+  goal test criteria give `unknown` for environment and harness runs.
 - Ocelot test-impact and architecture-pattern candidates:
   `ocelot_code.change_shape` records changed files, graph symbols, edge
   types, test links, import/package directories and a stable digest;

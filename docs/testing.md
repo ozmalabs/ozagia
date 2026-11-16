@@ -107,6 +107,62 @@ the selector. A malformed `.ozagia.toml` or an invalid `testing.captured`
 falls back to `all`; a captured command is never silently made partial by a
 broken config.
 
+## Failure classes
+
+`ozagia.core.failures.classify(returncode, timed_out, stdout, stderr, *,
+command, first_party, interpreter, root)` gives a pytest (or other command)
+result one class, with the lines that matched as `evidence` and a one-line
+`detail`. It runs nothing and reads at most the first 16,000 and last
+48,000 characters of each stream. The rules, first match wins:
+
+| Class | Matches |
+| --- | --- |
+| `harness` | The runner itself failed: `FileNotFoundError`/`PermissionError` or `command not found` naming the command's program or the interpreter, `can't open file`, exit 126 or 127, a missing working directory. |
+| `timeout` | The run timed out, whatever it printed. |
+| `passed` | Exit 0 (checked here, before the rules below). |
+| `environment` | `ModuleNotFoundError`/`ImportError` for a module that is not first-party (`module` names it), `No module named pytest`, `unrecognized arguments` (a plugin that is not installed), a missing shared library or executable. |
+| `collection` | An import error of a first-party module, a syntax error during collection, `fixture 'x' not found`, `found no collectors` / `not found` for a node id, no tests collected, any other collection error. |
+| `assertion` | Failed tests with assertion output (`E   assert`, `AssertionError`, `Failed:`). |
+| `error` | Failed or errored tests without assertion output, `INTERNALERROR`, any other non-zero exit. |
+| `passed` | Exit code unknown, and a pytest summary with passes only. |
+| `unknown` | No exit code and nothing the rules read. |
+
+So `ModuleNotFoundError: No module named 'numpy'` with `found no
+collectors` for the node ids in that file is `environment`: the import
+error is the cause, the missing collectors follow from it. A first-party
+`ImportError` is `collection`, unless a third-party one is also present.
+
+First-party names: the caller passes them (`first_party`); the daemon and
+the eval harness pass `first_party_names(root, import_roots)`, the
+top-level modules and packages (directories holding `.py` files) in the
+root and in each configured import root (`src` by default when it exists).
+Without `first_party`, they come from `root`; without a root, from the
+relative paths of the output's traceback frames (`tests/test_x.py:6:`
+gives `tests`, `src/pkg/a.py` gives `pkg`). A module that is not
+first-party is third-party; a stdlib module the interpreter lacks counts
+as third-party too.
+
+For `environment`, the result names the `module`, the `interpreter` and,
+when `ozagia.core.environments.who_has(root, module)` (W20) is importable,
+the interpreters that have the module (`available_in`, the one that ran
+excluded). Without W20, or when it raises, that detail is left out.
+
+A captured pytest that did not pass gets a line right after its head:
+
+```
+[ozagia] pytest interrupted: exit 2, 0.23 s, 0 passed, 0 failed, 0 error, 0 skipped, 1 collection errors
+[ozagia] failure class environment, module numpy: missing module numpy (third-party) under /usr/bin/python3; available in /repo/.venv/bin/python
+```
+
+The test record (`<state dir>/working_set/tests.json`) keeps, for
+captured and compound runs, `failure_class` and `failure_module` (read
+from that line, or `passed` for a head with status passed), and no other
+output text. Records written before have neither field and load as before.
+Goal criteria `test_passes`/`test_fails` give `unknown` with the class and
+module when the deciding run's class is `environment` or `harness`, or
+`collection` of a module that is not first-party; a pass still decides
+(see `docs/goals.md`).
+
 ## Planning
 
 ```python
@@ -333,6 +389,6 @@ python -m ozagia.ocelot_code_cli impact --root . \
 ```bash
 PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_testing.py \
   tests/test_tasks.py tests/test_code_review.py tests/test_settings.py \
-  tests/test_affected_tests.py
+  tests/test_affected_tests.py tests/test_failures.py
 .venv/bin/ruff check src tests
 ```

@@ -4,9 +4,16 @@ pytest output: pytest's own output tail (verbatim, `ozagia.check`'s last
 `OUTPUT_TAIL_LINES` lines), then
 
     [ozagia] pytest <status>: exit <code>, <s> s, <p> passed, <f> failed, <e> error, <k> skipped
+    [ozagia] failure class <class>[, module <name>]: <detail>
     [ozagia] failed test:<rel>::<qual>[<param>]: <message>
     [ozagia]   frame sym:<rel>::<qual> <file>:<line>
     [ozagia] collection error file:<rel>: <message>
+
+The `failure class` line (`failure_line`, `ozagia.core.failures`) follows
+the head of a run that did not pass: `environment`, `collection`,
+`assertion`, `error`, `timeout` or `harness`; for `environment` the missing
+module, the interpreter and, when `ozagia.core.environments` provides
+`who_has`, the interpreters that have the module.
 
 With `[tests] select = "affected"` or `[tests] cache = true`
 (`ozagia.intent.affected`), a pytest with no test selector may run only the
@@ -144,6 +151,41 @@ def _verbosity(extra: list[str]) -> list[str]:
     return kept
 
 
+def failure_line(root: Path, res: dict[str, Any], python: str,
+                 ozagia_lines: list[str]) -> str | None:
+    """The `failure class ...` note after a captured pytest's head line
+    (`ozagia.core.failures`), or None for a pass: `failure class
+    <class>[, module <name>]: <detail>`. The classifier reads pytest's
+    output tail, the raw collection-error messages and the `[ozagia]`
+    lines; first-party names come from the root and its import roots.
+    Never raises (no line then)."""
+    if res.get("exit_code") == 0 and not res.get("timed_out"):
+        return None
+    try:
+        from ozagia.core import failures as F
+        try:
+            from ozagia.config import load_project_config
+            import_roots = load_project_config(root).import_roots
+        except Exception:  # noqa: BLE001 - the root alone then
+            import_roots = ()
+        text = "\n".join([str(res.get("output_tail") or ""),
+                          *(str(e.get("message") or "")
+                            for e in res.get("collection_errors") or []),
+                          *ozagia_lines])
+        got = F.classify(res.get("exit_code"), bool(res.get("timed_out")), text,
+                         str(res.get("error") or ""), command=res.get("command"),
+                         first_party=F.first_party_names(root, import_roots),
+                         interpreter=python, root=root)
+    except Exception:  # noqa: BLE001 - an annotation only
+        return None
+    if got["class"] in ("passed", "unknown"):
+        return None
+    module = got.get("module")
+    return (f"failure class {got['class']}"
+            + (f", module {module}" if module else "")
+            + f": {one_line(got['detail'], 400)}")
+
+
 def run_pytest(memory: Any, cls: dict[str, Any], inp: dict[str, Any],
                wd: Path) -> dict[str, Any]:
     from ozagia.check import OUTPUT_TAIL_LINES, run_tests
@@ -223,6 +265,7 @@ def run_pytest(memory: Any, cls: dict[str, Any], inp: dict[str, Any],
     if res["collection_errors"]:
         head += f", {len(res['collection_errors'])} collection errors"
     lines.append(tag(head))
+    note_at = len(lines)
     lines.extend(sel_head)
     if res.get("error"):
         lines.append(tag(f"error: {res['error']}"))
@@ -251,6 +294,9 @@ def run_pytest(memory: Any, cls: dict[str, Any], inp: dict[str, Any],
                          f"{one_line(t['message'])}"))
         frames(t)
     lines.extend(sel_tail)
+    note = failure_line(root, res, python, lines[note_at - 1:])
+    if note:
+        lines.insert(note_at, tag(note))
     out_res: dict[str, Any] = {
         "intent": "shell_pytest", "output": "\n".join(lines),
         "keys": list(dict.fromkeys(keys)), "exit_code": res["exit_code"]}

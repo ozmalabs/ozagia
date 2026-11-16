@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -1347,3 +1348,122 @@ def test_graph_stats_fields_and_aggregate_read_working_set_counters():
              "working_set_chars": None}]
     row = ae.aggregate(runs, ["graph_intent"])[0]
     assert (row["total_working_sets_served"], row["total_working_set_chars"]) == (3, 4100)
+
+
+# ===================================================================================== #
+# failure classes: invalid runs, the agent's last pytest
+# ===================================================================================== #
+FAILURE_FIX = ROOT / "tests" / "fixtures" / "failures"
+
+
+def test_check_classes_and_invalid_runs_end_to_end(tmp_path, monkeypatch):
+    monkeypatch.setitem(sys.modules, "ozagia.core.environments", None)
+    repo = tmp_path / "repo"
+    (repo / "pkg").mkdir(parents=True)
+    (repo / "tests").mkdir()
+    (repo / "pkg" / "mod.py").write_text(MOD_SRC, encoding="utf-8")
+    (repo / "tests" / "test_mod.py").write_text(TEST_SRC, encoding="utf-8")
+    (repo / "tests" / "test_env.py").write_text(
+        "import w21_absent_mod\nfrom pkg.mod import add\n\n\n"
+        "def test_add():\n    assert add(1, 2) == 3\n", encoding="utf-8")
+    _git(repo, "init", "-q")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "base")
+    base = _git(repo, "rev-parse", "HEAD")
+    sign = _task("add-sign", BREAK_SIGN)
+    env = _task("add-env", BREAK_SIGN, node="tests/test_env.py::test_add")
+    tdir = _tasks_dir(tmp_path, [(sign, BREAK_SIGN), (env, BREAK_SIGN)])
+    report = run_eval(repo, [sign, env], ["baseline"], NoopDriver(), base,
+                      tasks_dir=tdir, python=_python(), run_root=tmp_path / "runs")
+    by_task = {r["task"]: r for r in report["runs"]}
+    assert by_task["add-sign"]["failure_class"] == "assertion"
+    assert by_task["add-sign"]["valid"] is True
+    bad = by_task["add-env"]
+    assert bad["failure_class"] == "environment" and bad["valid"] is False
+    assert bad["failure_module"] == "w21_absent_mod"
+    assert "missing module w21_absent_mod" in bad["invalid_reason"]
+    assert any("No module named 'w21_absent_mod'" in e for e in bad["failure_evidence"])
+    assert bad["agent_test_class"] is None          # noop runs no pytest
+    (row,) = report["summary"]
+    assert (row["runs"], row["valid_runs"], row["invalid_runs"]) == (2, 1, 1)
+    assert (row["successes"], row["success_rate"]) == (0, 0.0)
+    assert report["per_task"]["add-env"]["baseline"] == {
+        "outcomes": [], "successes": 0, "repeats": 0, "invalid": 1}
+    md = render_markdown(report)
+    assert "## Invalid runs" in md
+    assert "| add-env | baseline | 1 | environment | check environment: missing " \
+           "module w21_absent_mod (third-party) under " in md
+    assert "| baseline | 2 | 1 | 1 | 0 | 0.0 |" in md
+    assert "| add-env | 0/0 (1 invalid) |" in md
+
+
+def test_run_check_reports_a_missing_interpreter_as_harness(tmp_path):
+    res = ae.run_check(tmp_path, {"argv": ["-c", "pass"], "timeout_s": 5},
+                       str(tmp_path / "no-python"), tmp_path / "check.log")
+    assert res["passed"] is False and res["returncode"] is None
+    assert res["failure"]["class"] == "harness"
+    assert ae.check_validity(res["failure"])[0] is False
+
+
+def test_success_rates_count_valid_runs_only():
+    runs = [
+        {**_run("t1", "baseline", 1, True), "valid": True, "failure_class": "passed"},
+        {**_run("t2", "baseline", 1, False), "valid": False,
+         "failure_class": "environment", "invalid_reason": "check environment: x"},
+        {**_run("t3", "baseline", 1, False), "valid": False,
+         "failure_class": "harness", "invalid_reason": "check harness: y"},
+        _run("t4", "baseline", 1, False),        # recorded before failure classes
+    ]
+    (row,) = aggregate(runs, ["baseline"])
+    assert (row["runs"], row["valid_runs"], row["invalid_runs"]) == (4, 2, 2)
+    assert row["successes"] == 1 and row["success_rate"] == pytest.approx(0.5)
+    (row,) = aggregate(runs[1:3], ["baseline"])
+    assert row["successes"] == 0 and row["success_rate"] is None
+
+
+def test_agent_last_pytest_from_the_transcript(tmp_path):
+    log = tmp_path / "log"
+    log.mkdir()
+    (log / "driver.stdout.txt").write_text(
+        (FAILURE_FIX / "driver_graph_intent.jsonl").read_text(encoding="utf-8"))
+    got = ae.agent_test_fields(log)
+    assert got["agent_test_class"] == "passed"
+    assert got["agent_test_summary"] == ("pytest passed: exit 0, 0.959 s, 4 passed, "
+                                         "0 failed, 0 error, 0 skipped")
+    # Its first pytest (before the fix) failed an assertion.
+    events = (FAILURE_FIX / "driver_graph_intent.jsonl").read_text().splitlines()
+    (log / "driver.stdout.txt").write_text(events[1] + "\n")
+    got = ae.agent_test_fields(log)
+    assert got["agent_test_class"] == "assertion"
+    assert got["agent_test_summary"].startswith("pytest failed: exit 1")
+    # Baseline: no daemon head, a piped command (the exit is tail's): the
+    # summary line decides.
+    (log / "driver.stdout.txt").write_text(
+        (FAILURE_FIX / "driver_baseline.jsonl").read_text(encoding="utf-8"))
+    got = ae.agent_test_fields(log)
+    assert got == {"agent_test_class": "passed", "agent_test_summary": "20 passed in 0.89s",
+                   "agent_test_evidence": ["20 passed in 0.89s"]}
+    (log / "driver.stdout.txt").write_text('{"type": "text", "part": {"text": "hi"}}\n')
+    assert ae.agent_test_fields(log) == {"agent_test_class": None,
+                                         "agent_test_summary": None}
+
+
+def test_report_shows_agent_green_check_red():
+    runs = [{**_run("learner", "graph_intent", 1, False), "valid": False,
+             "failure_class": "environment", "invalid_reason": "check environment: numpy",
+             "agent_test_class": "passed", "agent_test_summary": "4 passed in 0.72s"},
+            {**_run("sign", "graph_intent", 1, True), "valid": True,
+             "failure_class": "passed", "agent_test_class": "assertion",
+             "agent_test_summary": "1 failed, 1 passed in 0.42s"}]
+    report = {"driver": "opencode", "base": "abc", "arms": ["graph_intent"],
+              "repeats": 1, "tasks": ["learner", "sign"], "runs": runs,
+              "summary": aggregate(runs, ["graph_intent"]),
+              "per_task": paired(runs, ["graph_intent"])}
+    md = render_markdown(report)
+    assert "## Agent tests and check" in md
+    assert ("| learner | graph_intent | 1 | passed | 4 passed in 0.72s | environment | "
+            "agent saw green, check saw red |") in md
+    assert "| sign | graph_intent | 1 | assertion | 1 failed, 1 passed in 0.42s | " \
+           "passed | agent saw red, check saw green |" in md
+    assert ae.agent_check_note({"agent_test_class": "passed",
+                                "failure_class": "passed"}) == ""

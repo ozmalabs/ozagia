@@ -13,6 +13,11 @@ Each task is a break/fix case (see docs/features/AGENT_E2E_EVAL.md):
   3. The task's break patch is applied. The check must now FAIL.
   4. For a run, the driver (the agent under test) gets the task prompt in the
      broken worktree. The check then decides success.
+  5. The check's result is classified (`ozagia.core.failures`). A run whose
+     check failed as `harness` or `environment` is invalid: it says nothing
+     about the agent, and is left out of success counts and rates. The
+     agent's own last pytest in the transcript is classified too, so "agent
+     saw green, check saw red" shows in the report.
 
 Drivers:
   noop    does nothing. Expected success 0%. Negative control.
@@ -63,6 +68,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Iterable
 from ozagia.config import STATE_DIRNAME, config_path, repo_root
+from ozagia.core import failures as F
 from ozagia.daemon.protocol import ENV_SOCK
 from ozagia.integrations.opencode import install as opencode_plugin
 from ozagia.intent.shell import GIT_REF_MOVING
@@ -359,25 +365,154 @@ def spawn_group(argv: list[str], *, cwd: str | Path, env: dict[str, str],
             "seconds": round(time.monotonic() - started, 3)}
 
 
+def _first_party(root: Path) -> set[str]:
+    """The project's top-level module names (`failures.first_party_names`
+    with the import roots of its configuration)."""
+    try:
+        from ozagia.config import load_project_config
+        roots = load_project_config(root).import_roots
+    except Exception:  # noqa: BLE001 - the root alone then
+        roots = ()
+    return F.first_party_names(root, roots)
+
+
+def failure_fields(result: dict[str, Any], prefix: str = "failure") -> dict[str, Any]:
+    """The run-record fields of a classification: `<prefix>_class`,
+    `<prefix>_evidence`, `<prefix>_detail` and, when known,
+    `<prefix>_module`."""
+    out = {f"{prefix}_class": result.get("class"),
+           f"{prefix}_evidence": list(result.get("evidence") or []),
+           f"{prefix}_detail": result.get("detail")}
+    if result.get("module"):
+        out[f"{prefix}_module"] = result["module"]
+    if result.get("available_in"):
+        out[f"{prefix}_available_in"] = list(result["available_in"])
+    return out
+
+
+# The daemon's captured head line in a tool output.
+_OZAGIA_HEAD_RE = re.compile(r"^\[ozagia\] pytest \w+(?: \([^)]*\))?: exit (-?\d+)")
+_PYTEST_SUMMARY_RE = re.compile(
+    r"\d+ (?:passed|failed|errors?|skipped|deselected|xfailed|xpassed)\b.* in [\d.]+s\b")
+AGENT_SUMMARY_CHARS = 160
+
+
+def last_agent_pytest(stdout: str) -> dict[str, Any] | None:
+    """The agent's last completed shell call that ran pytest, from
+    OpenCode's JSON events (`tool_use` with tool `shell` or `bash` and
+    `pytest` in `input.command`): `{"command", "output", "returncode"}`.
+    The exit code is the daemon's (`[ozagia] pytest ...: exit N`) when the
+    call was captured, else the tool's own `metadata.exit` for a command
+    with no pipe (with one, the exit is the last command's), else None.
+    None when no such call is found (other drivers' output included)."""
+    last: dict[str, Any] | None = None
+    for line in (stdout or "").splitlines():
+        line = line.strip()
+        if not line.startswith("{") or '"tool_use"' not in line:
+            continue
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        part = event.get("part") if isinstance(event.get("part"), dict) else {}
+        if event.get("type") != "tool_use" or part.get("tool") not in ("shell", "bash"):
+            continue
+        state = part.get("state") if isinstance(part.get("state"), dict) else {}
+        inp = state.get("input") if isinstance(state.get("input"), dict) else {}
+        command = inp.get("command")
+        if not isinstance(command, str) or "pytest" not in command:
+            continue
+        if state.get("status") not in (None, "completed", "error"):
+            continue
+        output = state.get("output") if isinstance(state.get("output"), str) else ""
+        rc: int | None = None
+        heads = [m for m in (_OZAGIA_HEAD_RE.match(x.strip())
+                             for x in output.splitlines()) if m]
+        if heads:
+            rc = int(heads[-1].group(1))
+        elif "|" not in command:
+            meta = state.get("metadata") if isinstance(state.get("metadata"), dict) else {}
+            inner = meta.get("metadata") if isinstance(meta.get("metadata"), dict) else meta
+            exit_code = inner.get("exit")
+            if isinstance(exit_code, int) and not isinstance(exit_code, bool):
+                rc = exit_code
+        last = {"command": command, "output": output, "returncode": rc}
+    return last
+
+
+def agent_test_fields(log_dir: Path, workdir: Path | None = None,
+                      first_party: set[str] | None = None) -> dict[str, Any]:
+    """`agent_test_class` and `agent_test_summary` for the agent's last
+    pytest in `log_dir/driver.stdout.txt` (`last_agent_pytest`), both None
+    when there is none. The summary is the daemon's head line or pytest's
+    summary line (no paths), at most `AGENT_SUMMARY_CHARS`."""
+    try:
+        text = (log_dir / "driver.stdout.txt").read_text(encoding="utf-8",
+                                                          errors="replace")
+    except OSError:
+        text = ""
+    got = last_agent_pytest(text)
+    if got is None:
+        return {"agent_test_class": None, "agent_test_summary": None}
+    res = F.classify(got["returncode"], False, got["output"], "",
+                     command=got["command"], first_party=first_party)
+    rows = [x.strip() for x in got["output"].splitlines()]
+    summary = next((x[len("[ozagia] "):] for x in reversed(rows)
+                    if _OZAGIA_HEAD_RE.match(x)), None)
+    if summary is None:
+        summary = next((x.strip("= ") for x in reversed(rows)
+                        if _PYTEST_SUMMARY_RE.search(x)), None)
+    if summary is None:
+        summary = res.get("detail")
+    summary = str(summary or "")
+    if len(summary) > AGENT_SUMMARY_CHARS:
+        summary = summary[:AGENT_SUMMARY_CHARS - 3] + "..."
+    return {"agent_test_class": res["class"], "agent_test_summary": summary,
+            "agent_test_evidence": list(res.get("evidence") or [])}
+
+
+def check_validity(failure: dict[str, Any]) -> tuple[bool, str | None]:
+    """Whether a run is valid (its check's class says something about the
+    agent's work), and the reason when not."""
+    cls = failure.get("class")
+    if cls in F.NOT_EVIDENCE:
+        return False, f"check {cls}: {failure.get('detail')}"
+    return True, None
+
+
 def run_check(workdir: Path, check: dict[str, Any], python: str,
               log_path: Path) -> dict[str, Any]:
+    """Run the task check with `python` and classify its result
+    (`ozagia.core.failures`): `failure` holds the class, evidence and
+    detail. A runner that cannot start (a missing interpreter or workdir)
+    is a `harness` failure, not an exception."""
     argv = [a.replace("{workdir}", str(workdir)) for a in check["argv"]]
     cmd = [python, *argv]
     timeout = int(check["timeout_s"])
     # No .pyc files: a break that keeps the byte length (a + b -> a - b) within the
     # same mtime second would otherwise run stale bytecode from the base check.
     env = dict(os.environ, COLUMNS="250", PYTHONDONTWRITEBYTECODE="1")
-    res = spawn_group(cmd, cwd=workdir, env=env, timeout_s=timeout)
+    started = time.monotonic()
+    try:
+        res = spawn_group(cmd, cwd=workdir, env=env, timeout_s=timeout)
+    except OSError as e:
+        res = {"returncode": None, "timed_out": False, "stdout": "",
+               "stderr": f"{type(e).__name__}: [Errno {e.errno}] {e.strerror}: "
+                         f"'{e.filename}'",
+               "seconds": round(time.monotonic() - started, 3)}
     out, err = res["stdout"], res["stderr"]
     returncode, timed_out = res["returncode"], res["timed_out"]
     seconds = res["seconds"]
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_text(f"$ {' '.join(cmd)}\n\n{out}\n--- stderr ---\n{err}\n",
                         encoding="utf-8")
+    failure = F.classify(returncode, timed_out, out, err, command=cmd,
+                         first_party=_first_party(workdir) if workdir.is_dir() else None,
+                         interpreter=python, root=workdir)
     return {"passed": (not timed_out) and returncode == 0,
             "returncode": returncode, "timed_out": timed_out,
             "seconds": seconds, "log": str(log_path),
-            "tail": _tail(out + "\n" + err, 12)}
+            "tail": _tail(out + "\n" + err, 12), "failure": failure}
 
 
 # --------------------------------------------------------------------------- #
@@ -406,12 +541,16 @@ def validate_task(repo: str | Path, task: dict[str, Any], base: str, *,
         fail_after_break = broken_check is not None and not broken_check["passed"]
         ok = bool(pass_on_base and applied["ok"] and fail_after_break)
         details: dict[str, Any] = {
-            "base_check": {k: base_check[k] for k in ("returncode", "seconds", "log")},
+            "base_check": {**{k: base_check[k] for k in ("returncode", "seconds", "log")},
+                           "failure_class": base_check["failure"]["class"],
+                           "failure_detail": base_check["failure"]["detail"]},
             "break_apply": applied,
         }
         if broken_check is not None:
-            details["broken_check"] = {k: broken_check[k]
-                                       for k in ("returncode", "seconds", "log")}
+            details["broken_check"] = {
+                **{k: broken_check[k] for k in ("returncode", "seconds", "log")},
+                "failure_class": broken_check["failure"]["class"],
+                "failure_detail": broken_check["failure"]["detail"]}
         if not ok:
             details["reason"] = _validation_reason(pass_on_base, applied["ok"],
                                                    fail_after_break)
@@ -1485,8 +1624,13 @@ def run_one(repo: str | Path, task: dict[str, Any], arm: str, repeat: int,
         files_changed = changed_since(before, after)
         check = run_check(workdir, task["check"], python, log_dir / "check.log")
         expected = [f.replace("\\", "/") for f in task["expected_files"]]
+        valid, invalid_reason = check_validity(check["failure"])
         record.update(
             success=check["passed"],
+            valid=valid,
+            invalid_reason=invalid_reason,
+            **failure_fields(check["failure"]),
+            **agent_test_fields(log_dir, workdir, _first_party(workdir)),
             check_returncode=check["returncode"],
             check_s=check["seconds"],
             exit_code=result["exit_code"],
@@ -1594,17 +1738,30 @@ def _mean(values: Iterable[Any], digits: int = 3) -> float | None:
     return round(sum(known) / len(known), digits) if known else None
 
 
+def _valid(run: dict[str, Any]) -> bool:
+    """A run counts for success unless its check was classified invalid
+    (`harness`, `environment`); runs recorded before classes count."""
+    return run.get("valid") is not False
+
+
 def aggregate(runs: list[dict[str, Any]], arms: Iterable[str]) -> list[dict[str, Any]]:
+    """Per arm: `runs` counts every run, `valid_runs` and `invalid_runs`
+    split them by the check's failure class, and `successes` and
+    `success_rate` count valid runs only. The other means cover every
+    run."""
     rows = []
     for arm in arms:
         mine = [r for r in runs if r["arm"] == arm]
         n = len(mine)
-        successes = sum(1 for r in mine if r.get("success") is True)
+        valid = [r for r in mine if _valid(r)]
+        successes = sum(1 for r in valid if r.get("success") is True)
         rows.append({
             "arm": arm,
             "runs": n,
+            "valid_runs": len(valid),
+            "invalid_runs": n - len(valid),
             "successes": successes,
-            "success_rate": round(successes / n, 4) if n else None,
+            "success_rate": round(successes / len(valid), 4) if valid else None,
             "mean_wall_s": _mean(r.get("wall_s") for r in mine),
             "mean_prep_s": _mean((r.get("prep_s") for r in mine), 1),
             "prep_failures": sum(1 for r in mine if r.get("prep_ok") is False),
@@ -1673,18 +1830,20 @@ def aggregate(runs: list[dict[str, Any]], arms: Iterable[str]) -> list[dict[str,
 
 
 def paired(runs: list[dict[str, Any]], arms: Iterable[str]) -> dict[str, Any]:
-    """Per task, the success outcome of each repeat, for each arm."""
+    """Per task, the success outcome of each valid repeat, for each arm,
+    and the number of invalid repeats (left out of `outcomes`)."""
     arms = list(arms)
     out: dict[str, Any] = {}
     for tid in sorted({r["task"] for r in runs}):
         row: dict[str, Any] = {}
         for arm in arms:
-            outcomes = [r.get("success") is True for r in sorted(
-                (r for r in runs if r["task"] == tid and r["arm"] == arm),
-                key=lambda r: r["repeat"])]
+            mine = sorted((r for r in runs if r["task"] == tid and r["arm"] == arm),
+                          key=lambda r: r["repeat"])
+            outcomes = [r.get("success") is True for r in mine if _valid(r)]
             row[arm] = {"outcomes": outcomes,
                         "successes": sum(outcomes),
-                        "repeats": len(outcomes)}
+                        "repeats": len(outcomes),
+                        "invalid": len(mine) - len(outcomes)}
         out[tid] = row
     return out
 
@@ -1708,21 +1867,26 @@ def render_markdown(report: dict[str, Any]) -> str:
         "",
         "## Per arm",
         "",
-        "| arm | runs | success | success rate | mean wall s | mean prep s | "
+        "| arm | runs | valid runs | invalid runs | success | success rate | "
+        "mean wall s | mean prep s | "
         "prep failures | driver errors | mean tokens in | "
         "mean tokens out | mean cost USD | mean tool calls | mean MCP calls | "
         "localization rate |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for row in report["summary"]:
         lines.append("| " + " | ".join(_cell(v) for v in (
-            row["arm"], row["runs"], row["successes"], row["success_rate"],
+            row["arm"], row["runs"], row.get("valid_runs", row["runs"]),
+            row.get("invalid_runs", 0), row["successes"], row["success_rate"],
             row["mean_wall_s"], row["mean_prep_s"], row["prep_failures"],
             row.get("driver_errors", 0),
             row["mean_tokens_in"], row["mean_tokens_out"],
             row["mean_cost_usd"], row.get("mean_tool_calls"),
             row.get("mean_mcp_calls"), row["localization_rate"])) + " |")
-    lines += ["", "Token, cost and tool columns are blank where the driver reports no "
+    lines += ["", "Success and success rate count valid runs only: a run whose "
+              "check failed as `harness` or `environment` (see Invalid runs) "
+              "is invalid. Token, cost and tool columns cover every run and are "
+              "blank where the driver reports no "
               "value. MCP calls count calls to the ozagia MCP server. "
               "Prep (dev_memory snapshot and tag cache) runs before the driver timer; "
               "mean prep s is 0 for baseline."]
@@ -1751,13 +1915,67 @@ def render_markdown(report: dict[str, Any]) -> str:
         if reachable:
             lines += ["", "Warning: replaced tools not registered `codemode: false` "
                       f"(Code Mode could call their built-ins): {', '.join(reachable)}."]
+    lines += _invalid_section(report.get("runs") or [])
+    lines += _agent_test_section(report.get("runs") or [])
     lines += ["", "## Per task (paired)", ""]
     header = "| task | " + " | ".join(report["arms"]) + " |"
     lines += [header, "|---" * (len(report["arms"]) + 1) + "|"]
     for tid, row in report["per_task"].items():
-        cells = [f"{row[a]['successes']}/{row[a]['repeats']}" for a in report["arms"]]
+        cells = [f"{row[a]['successes']}/{row[a]['repeats']}"
+                 + (f" ({row[a]['invalid']} invalid)" if row[a].get("invalid") else "")
+                 for a in report["arms"]]
         lines.append(f"| {_cell(tid)} | " + " | ".join(cells) + " |")
     return "\n".join(lines) + "\n"
+
+
+def _invalid_section(runs: list[dict[str, Any]]) -> list[str]:
+    """The report's list of invalid runs and why, or nothing."""
+    bad = [r for r in runs if not _valid(r)]
+    if not bad:
+        return []
+    lines = ["", "## Invalid runs", "",
+             "Runs whose check failed for a reason outside the agent's work "
+             "(`ozagia.core.failures`): left out of success counts and rates, "
+             "kept in the JSON.", "",
+             "| task | arm | repeat | check class | reason |", "|---|---|---|---|---|"]
+    for r in bad:
+        lines.append("| " + " | ".join(_cell(v) for v in (
+            r.get("task"), r.get("arm"), r.get("repeat"), r.get("failure_class"),
+            r.get("invalid_reason"))) + " |")
+    return lines
+
+
+def agent_check_note(run: dict[str, Any]) -> str:
+    """`agent saw green, check saw red` (or the reverse) when the agent's
+    last pytest and the check disagree, else ""."""
+    agent, check = run.get("agent_test_class"), run.get("failure_class")
+    if agent is None or check is None:
+        return ""
+    if agent == "passed" and check != "passed":
+        return "agent saw green, check saw red"
+    if agent != "passed" and check == "passed":
+        return "agent saw red, check saw green"
+    return ""
+
+
+def _agent_test_section(runs: list[dict[str, Any]]) -> list[str]:
+    """The agent's last pytest next to the check's result, per run that
+    has either class, or nothing."""
+    rows = [r for r in runs if r.get("agent_test_class") or r.get("failure_class")]
+    if not rows:
+        return []
+    lines = ["", "## Agent tests and check", "",
+             "The agent's last pytest in its transcript (class and summary) "
+             "next to the check's class. The two can differ: another "
+             "interpreter, other tests, edits after the agent's last run.", "",
+             "| task | arm | repeat | agent last pytest | agent summary | check | note |",
+             "|---|---|---|---|---|---|---|"]
+    for r in rows:
+        lines.append("| " + " | ".join(_cell(v) for v in (
+            r.get("task"), r.get("arm"), r.get("repeat"),
+            r.get("agent_test_class") or "none", r.get("agent_test_summary"),
+            r.get("failure_class"), agent_check_note(r))) + " |")
+    return lines
 
 
 def _cell(value: Any) -> str:
@@ -1790,9 +2008,14 @@ def _cmd_validate(args: argparse.Namespace) -> int:
                           python=args.python, run_root=_run_root(args),
                           keep=args.keep)
     for r in report["results"]:
+        base_fc = (r["details"].get("base_check") or {}).get("failure_class")
+        why = r["details"].get("reason")
+        if not r["ok"] and not r["pass_on_base"] and base_fc:
+            why = f"{why}; base check {base_fc}: " \
+                  f"{r['details']['base_check'].get('failure_detail')}"
         print(f"{'ok  ' if r['ok'] else 'FAIL'} {r['id']}: pass_on_base={r['pass_on_base']} "
               f"fail_after_break={r['fail_after_break']} "
-              + ("" if r["ok"] else f"({r['details'].get('reason')})"))
+              + ("" if r["ok"] else f"({why})"))
     _write(args.out_json, json.dumps(report, indent=2, sort_keys=True) + "\n")
     return 0 if report["ok"] else 1
 

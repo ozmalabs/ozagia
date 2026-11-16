@@ -1218,6 +1218,13 @@ class Evaluator:
         run = got.get("run") or {}
         ev.update({"outcome": got["outcome"], "run_at": got.get("ts"),
                    "run_source": run.get("source")})
+        not_evidence = self._not_evidence(run)
+        if run.get("failure_class"):
+            ev["failure_class"] = run["failure_class"]
+        if run.get("failure_module"):
+            ev["failure_module"] = run["failure_module"]
+        if not_evidence and got["outcome"] != "passed":
+            return _result("unknown", ev, not_evidence)
         if got["outcome"] == "unknown":
             return _result("unknown", ev, got["reason"])
         status, fev = self._fresh(goal, run, key)
@@ -1233,6 +1240,29 @@ class Evaluator:
         ok = got["outcome"] == want
         return _result("pass" if ok else "fail", ev,
                        f"test {got['outcome']}: {got['reason']}")
+
+    def _not_evidence(self, run: dict[str, Any]) -> str | None:
+        """Why the deciding run says nothing about the code, or None: its
+        failure class is `environment` or `harness` (`ozagia.core.failures`),
+        or `collection` of a module that is not first-party. A pass is
+        still a pass (`_test` keeps it)."""
+        cls = run.get("failure_class")
+        module = run.get("failure_module")
+        if cls == "collection" and isinstance(module, str):
+            from ozagia.core.failures import first_party_names
+            from ozagia.config import load_project_config
+            try:
+                roots = load_project_config(self.root).import_roots
+            except Exception:  # noqa: BLE001 - the root alone then
+                roots = ()
+            if module.split(".")[0] in first_party_names(self.root, roots):
+                return None
+        elif cls not in ("environment", "harness"):
+            return None
+        return (f"the deciding run's failure class is {cls}"
+                + (f" (module {module})" if module else "")
+                + ": it says nothing about the code under test; fix the "
+                "environment and rerun the test")
 
     def _eval_test_passes(self, goal: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
         return self._test(goal, args, "passed")

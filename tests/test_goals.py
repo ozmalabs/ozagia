@@ -1301,3 +1301,60 @@ def test_mcp_goal_tools(repo, mem):
     reply = server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
                            "params": {"name": "goal_claim", "arguments": {"id": "g1"}}})
     assert "error" in reply or reply["result"].get("isError")
+
+
+# --------------------------------------------------------------------------- #
+# failure classes (`ozagia.core.failures`): runs that say nothing about the code
+# --------------------------------------------------------------------------- #
+ENV_ERROR = ("[ozagia] pytest interrupted: exit 2, 0.1 s, 0 passed, 0 failed, 0 error, "
+             "0 skipped, 1 collection errors\n"
+             "[ozagia] failure class environment, module numpy: missing module numpy "
+             "(third-party) under /usr/bin/python3\n"
+             "[ozagia] collection error file:tests/test_core.py: ModuleNotFoundError\n")
+ENV_IN_BODY = ("[ozagia] pytest failed: exit 1, 0.1 s, 1 passed, 1 failed, 0 error, "
+               "0 skipped\n"
+               "[ozagia] failure class environment, module yaml: missing module yaml "
+               "(third-party)\n"
+               "[ozagia] failed test:tests/test_core.py::test_run: ModuleNotFoundError\n")
+
+
+def test_environment_runs_give_unknown_with_class_and_module(repo, mem):
+    goal = _add(repo, mem, f"test_passes:{T_RUN}", f"test_fails:{T_RUN}")
+    _pytest(repo, ENV_ERROR)
+    report = _check(repo, mem, goal["id"])
+    assert _statuses(report) == ["unknown", "unknown"]
+    for res in report["results"]:
+        assert "failure class is environment (module numpy)" in res["reason"]
+        assert res["evidence"]["failure_class"] == "environment"
+        assert res["evidence"]["failure_module"] == "numpy"
+    # A test that failed because its body could not import a module is not
+    # a failure of the code either.
+    _pytest(repo, ENV_IN_BODY)
+    report = _check(repo, mem, goal["id"])
+    assert _statuses(report) == ["unknown", "unknown"]
+    assert "(module yaml)" in report["results"][1]["reason"]
+    # A passing run decides again.
+    _pytest(repo, PASSED)
+    report = _check(repo, mem, goal["id"])
+    assert _statuses(report) == ["pass", "fail"]
+    assert report["results"][0]["evidence"]["failure_class"] == "passed"
+
+
+def test_harness_and_third_party_collection_runs_give_unknown(repo, mem):
+    goal = _add(repo, mem, f"test_fails:{T_RUN}")
+    harness = FAILED.replace("exit 1, 0.1 s, 1 passed, 1 failed, 0 error, 0 skipped\n",
+                             "exit 1, 0.1 s, 1 passed, 1 failed, 0 error, 0 skipped\n"
+                             "[ozagia] failure class harness: the runner was not found\n")
+    _pytest(repo, harness)
+    report = _check(repo, mem, goal["id"])
+    assert _statuses(report) == ["unknown"]
+    assert "failure class is harness" in report["results"][0]["reason"]
+    third = FAILED.replace("0 skipped\n", "0 skipped\n[ozagia] failure class collection, "
+                           "module requests: import error\n", 1)
+    _pytest(repo, third)
+    assert _statuses(_check(repo, mem, goal["id"])) == ["unknown"]
+    # A collection failure of a first-party module still decides as before.
+    first = FAILED.replace("0 skipped\n", "0 skipped\n[ozagia] failure class collection, "
+                           "module pkg.core: import error\n", 1)
+    _pytest(repo, first)
+    assert _statuses(_check(repo, mem, goal["id"])) == ["pass"]

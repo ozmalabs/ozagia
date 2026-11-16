@@ -47,7 +47,9 @@ open and claimed goals with unmet criteria (`ozagia.core.goals`).
 The test record also keeps the last `MAX_RECORD_RUNS` runs (start time,
 the selectors they ran as paths or node ids, the test keys they failed and
 those that errored, whether they completed, were filtered or stopped
-early, their `source`, and for a pytest the daemon ran itself the working
+early, their `source`, for a pytest the daemon ran its failure class
+and module (`ozagia.core.failures`; no output text), and for a pytest
+the daemon ran itself the working
 tree's fingerprint at its start), so `recorded_outcome` can say when a
 test last passed or failed (goal criteria `test_passes`/`test_fails`, which
 take only `captured` runs as evidence). Per-run lists are capped
@@ -134,6 +136,9 @@ _RAW_FAIL_RE = re.compile(
     r"^(FAILED|ERROR) (\S+?\.py)::(\S+?)(\[[^\]]*\])?(?: - (.*))?$")
 # The captured run's head line: `[ozagia] pytest failed: exit 1, ...`.
 _CAPTURED_RE = re.compile(r"^\[ozagia\] pytest (\w+)(?: \([^)]*\))?: exit (-?\d+|None)")
+# The class line after a captured run's head (`ozagia.intent.run.failure_line`).
+_CLASS_RE = re.compile(
+    r"^\[ozagia\] failure class (\w+)(?:, module ([A-Za-z_][\w.]{0,99}))?(?::|$)")
 # A captured run's own error (no report, a crash of the runner).
 ERROR_TAG = "[ozagia] error:"
 # A captured run that affected-test selection cut to a subset.
@@ -201,7 +206,11 @@ class TestRun:
     for goal criteria), `compound` (a captured compound command with a
     pytest step), else `reported` (output a harness handed over). `tree`:
     the working tree's fingerprint at the start of a captured run
-    (`ozagia.core.fingerprint`), and then `ts` is the start time."""
+    (`ozagia.core.fingerprint`), and then `ts` is the start time.
+    `failure_class` (captured and compound runs): the class the daemon's
+    `[ozagia] failure class` line names (`ozagia.core.failures`), or
+    `passed` for a head with status passed and no such line; None when
+    unknown. `failure_module`: the module that line names."""
     __test__ = False
     command: str
     prefix: list[str]
@@ -213,6 +222,8 @@ class TestRun:
     ts: float = field(default_factory=_now)
     source: str = "reported"
     tree: dict[str, Any] | None = None
+    failure_class: str | None = None
+    failure_module: str | None = None
 
 
 def pytest_head(heads: Iterable[list[str]]) -> tuple[list[str], list[str]] | None:
@@ -472,11 +483,14 @@ def pytest_run(command: str, heads: Iterable[list[str]], text: str, *,
         filtered = filtered or e_filtered or e_positional > 0
         stops = stops or e_stops
         info = info or e_info
+    failure_class = failure_module = None
     if source == "captured":
         lines = (text or "").splitlines()
         at = max((i for i, x in enumerate(lines)
                   if _CAPTURED_HEAD_RE.match(x.strip())), default=None)
         text = "\n".join(lines[at:]) if at is not None else ""
+    if source in ("captured", "compound"):
+        failure_class, failure_module = _failure_class(text)
     failures = parse_failures(text, wd, root_p)
     complete, count = _completed(text)
     if complete and count > _failure_count(failures):
@@ -491,7 +505,31 @@ def pytest_run(command: str, heads: Iterable[list[str]], text: str, *,
     return TestRun(command=command, prefix=_rerun_prefix(prefix, wd, root_p),
                    selectors=selectors, failures=failures,
                    complete=complete, filtered=filtered, stops=stops,
-                   source=source)
+                   source=source, failure_class=failure_class,
+                   failure_module=failure_module)
+
+
+def _failure_class(text: str) -> tuple[str | None, str | None]:
+    """The failure class and module of the daemon's (last) captured pytest
+    in `text`: the `[ozagia] failure class` line right after its head line
+    (with the affected-test lines between them), `passed` for a head with
+    status passed and no such line, else (None, None)."""
+    from ozagia.core.failures import CLASSES
+    lines = [x.strip() for x in (text or "").splitlines()]
+    at = max((i for i, x in enumerate(lines) if _CAPTURED_HEAD_RE.match(x)),
+             default=None)
+    if at is None:
+        return None, None
+    for x in lines[at + 1:]:
+        m = _CLASS_RE.match(x)
+        if m and m.group(1) in CLASSES:
+            return m.group(1), m.group(2)
+        if not x.startswith("[ozagia] ") or _CAPTURED_HEAD_RE.match(x):
+            break
+    head = _CAPTURED_RE.match(lines[at])
+    if head and head.group(1) == "passed":
+        return "passed", None
+    return None, None
 
 
 def _nodeid(key: str) -> tuple[str, str]:
@@ -859,6 +897,8 @@ MAX_RUN_KEY_CHARS = 300
 # A run's selector is kept only when it looks like a path or node id.
 _SAFE_SELECTOR = re.compile(r"[A-Za-z0-9_./@+\-\[\]:]{1,300}")
 RUN_SOURCES = ("captured", "compound", "reported")
+# A run's failure module is kept only when it is a dotted module name.
+_MODULE_NAME = re.compile(r"[A-Za-z_][\w.]{0,99}")
 
 
 def _run_keys(value: Any) -> tuple[list[str], bool]:
@@ -876,9 +916,11 @@ def _record_run(run: Any) -> dict[str, Any] | None:
     """A run as the record keeps it: its time (the start, for a captured
     run with a fingerprint), the selectors it ran (paths and node ids
     only), the test keys it failed and those that errored, whether it
-    completed, was filtered or stopped early, its `source` and, for a
-    captured run, the working tree's fingerprint at its start
-    (`ozagia.core.fingerprint`). No command line, no messages.
+    completed, was filtered or stopped early, its `source`, for a captured
+    or compound run its `failure_class` and `failure_module` (when known;
+    records written before them have neither) and, for a captured run, the
+    working tree's fingerprint at its start (`ozagia.core.fingerprint`).
+    No command line, no messages.
 
     A selector that is not kept (not path-like, too long, over
     `MAX_RUN_KEYS`) makes the run `filtered`: an empty or shorter list
@@ -908,6 +950,13 @@ def _record_run(run: Any) -> dict[str, Any] | None:
                            "errors": errors, "complete": complete,
                            "filtered": filtered, "stops": run.get("stops") is True,
                            "source": source}
+    if source in ("captured", "compound"):
+        from ozagia.core.failures import CLASSES
+        if run.get("failure_class") in CLASSES:
+            out["failure_class"] = run["failure_class"]
+            mod = run.get("failure_module")
+            if isinstance(mod, str) and _MODULE_NAME.fullmatch(mod):
+                out["failure_module"] = mod
     if source == "captured" and run.get("tree") is not None:
         from ozagia.core.fingerprint import clean_fingerprint
         tree = clean_fingerprint(run.get("tree"))
@@ -924,7 +973,8 @@ def run_record(run: TestRun) -> dict[str, Any]:
                         "failed": failed, "errors": errors,
                         "complete": run.complete, "filtered": run.filtered,
                         "stops": run.stops, "source": run.source,
-                        "tree": run.tree}) or {}
+                        "tree": run.tree, "failure_class": run.failure_class,
+                        "failure_module": run.failure_module}) or {}
 
 
 def recorded_outcome(record: dict[str, Any], key: str, *,
