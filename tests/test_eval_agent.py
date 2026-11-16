@@ -1034,6 +1034,17 @@ def test_graph_stats_fields_read_counts():
         "captured_calls"] == 5
 
 
+def test_aggregate_totals_structured_reads():
+    runs = [{"arm": "graph_intent", "daemon_ok": True, "structured_queries": 2,
+             "structured_outlines": 3, "jq_captures": 1},
+            {"arm": "graph_intent", "daemon_ok": True, "structured_queries": None,
+             "structured_outlines": 4, "jq_captures": None}]
+    row = ae.aggregate(runs, ["graph_intent"])[0]
+    assert row["total_structured_queries"] == 2
+    assert row["total_structured_outlines"] == 7
+    assert row["total_jq_captures"] == 1
+
+
 def test_opencode_graph_intent_config_and_socket_env(tmp_path, monkeypatch):
     monkeypatch.setenv(LIVE_ENV, "1")
     driver = make_driver("opencode", live=True)

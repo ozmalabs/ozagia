@@ -227,6 +227,10 @@ def run_jq(memory: Any, cls: dict[str, Any], path: Path) -> dict[str, Any]:
     from ozagia.core import structured as S
     if not path.is_file():
         raise Unhandled(f"not a regular file: {path}")
+    # No jq: the shell says `command not found`, and the agent should see
+    # that rather than learn to rely on a jq this machine lacks.
+    if J.jq_version() is None:
+        raise Unhandled("jq is not installed")
     try:
         if path.stat().st_size > S.MAX_QUERY_BYTES:
             raise Unhandled(f"{path} is larger than {S.MAX_QUERY_BYTES} bytes")

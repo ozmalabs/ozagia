@@ -26,11 +26,19 @@ indent by default, `compact` as `-c`, `raw` as `-r`, `sort_keys` as `-S`.
 jq 1.7+ prints a number literal as written unless it has an exponent
 (`1e3` prints `1E+3`); `numbers="literal"` follows that and refuses
 exponents. jq 1.6 prints numbers as doubles; `numbers="integers"` accepts
-only integers below 1e17 and refuses the rest.
+only integers below 2**53 (exact as doubles) and refuses the rest. An
+integer literal longer than 20 digits is never converted (Python's `int()`
+refuses over 4,300 digits); it is printed as written or refused.
 
 `load` reads the text as jq would see it: a BOM, a lone surrogate
-escape, `NaN`/`Infinity`, several JSON values or an empty input are
-`Refused`.
+escape, `NaN`/`Infinity`, several JSON values, an empty input or input
+nested deeper than jq 1.7's parser allows (`MAX_DEPTH`) are `Refused`.
+
+`number_policy()` picks the number output from the `jq` on PATH: jq 1.7
+and 1.8 print literals (1.8.1 checked against the same differential
+cases), older and newer versions get `integers`, the output every version
+shares. jq 1.8 raised the parse depth limit to 10000; the 256 limit is
+kept for every version, which only hands more inputs to the real jq.
 """
 from __future__ import annotations
 
@@ -44,6 +52,12 @@ MAX_STAGES = 6
 # Largest output written; above it the real jq runs.
 MAX_OUTPUT_BYTES = 1024 * 1024
 MAX_RESULTS = 100_000
+# jq 1.7's parser stack limit: each open array or object takes one slot and
+# an object's key takes one more while its value is parsed; opening a
+# container that would make the stack deeper than this is a parse error.
+MAX_DEPTH = 256
+# An integer literal with more digits than this is not converted to int.
+_INT_DIGITS = 20
 BUILTINS = frozenset({"keys", "length", "type"})
 _IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _INT_RE = re.compile(r"-?(?:0|[1-9][0-9]*)")
@@ -262,9 +276,9 @@ def _builtin(v: Any, name: str) -> Any:
             return len(v)
         # A number's length is its absolute value as a double: exact (and
         # printed as an integer) for integers below 2**53.
-        if isinstance(v, Num) and re.fullmatch(r"-?[0-9]+", v.text) \
-                and abs(int(v.text)) < 2 ** 53:
-            return abs(int(v.text))
+        n = _small_int(v.text) if isinstance(v, Num) else None
+        if n is not None:
+            return abs(n)
         raise Refused(f"length of {_type(v)} {getattr(v, 'text', '')} is "
                       f"not reproduced")
     raise Refused(f"unknown builtin {name}")
@@ -290,6 +304,15 @@ def run(value: Any, program: list[tuple]) -> list[Any]:
     return vals
 
 
+def _small_int(text: str) -> int | None:
+    """The integer literal `text` if its magnitude is below 2**53 (exact as
+    a double), else None. Long literals are not converted."""
+    if len(text) > _INT_DIGITS + 1 or not re.fullmatch(r"-?[0-9]+", text):
+        return None
+    n = int(text)
+    return n if abs(n) < 2 ** 53 else None
+
+
 # --------------------------------------------------------------------------- #
 # output
 # --------------------------------------------------------------------------- #
@@ -301,8 +324,9 @@ def _number(v: Any, numbers: str) -> str:
         if "e" in text or "E" in text:
             raise Refused(f"number {text} is printed in jq's own notation")
         return text
-    if re.fullmatch(r"-?[0-9]+", text) and text != "-0" and abs(int(text)) < 10 ** 17:
-        return str(int(text))
+    n = _small_int(text) if text != "-0" else None
+    if n is not None:
+        return str(n)
     raise Refused(f"number {text} is printed as a double by this jq")
 
 
@@ -379,13 +403,74 @@ def load(text: str) -> Any:
     def constant(name: str) -> Any:
         raise Refused(f"{name} is not JSON")
 
+    dup = []
+
+    def pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
+        d = dict(items)
+        if len(d) != len(items):
+            dup.append(True)
+        return d
+
     try:
-        return json.loads(text, parse_int=Num, parse_float=Num,
-                          parse_constant=constant)
+        value = json.loads(text, parse_int=Num, parse_float=Num,
+                           parse_constant=constant, object_pairs_hook=pairs)
     except json.JSONDecodeError as e:
         raise Refused(f"not one JSON value: {e}") from None
     except RecursionError:
         raise Refused("input nested too deeply") from None
+    # A duplicate key drops a value, which may be the deep one: scan the text.
+    if not (_text_depth_ok(text) if dup else _depth_ok(value)):
+        raise Refused(f"input is nested deeper than jq's parse limit "
+                      f"({MAX_DEPTH})")
+    return value
+
+
+def _depth_ok(value: Any) -> bool:
+    """Whether jq's parser stack stays within MAX_DEPTH for `value`: a
+    container opens at the stack size of its parent plus one (array) or
+    two (object: the key)."""
+    todo = [(value, 0)]
+    while todo:
+        x, d = todo.pop()
+        if d >= MAX_DEPTH:
+            return False
+        if type(x) is list:
+            todo.extend((c, d + 1) for c in x if type(c) in (list, dict))
+        elif type(x) is dict:
+            todo.extend((c, d + 2) for c in x.values()
+                        if type(c) in (list, dict))
+    return True
+
+
+_DEPTH_TOKEN_RE = re.compile(r'"(?:[^"\\]|\\.)*"|[\[\]{}:,]')
+
+
+def _text_depth_ok(text: str) -> bool:
+    """`_depth_ok` on the text of valid JSON (slower; sees every value of
+    a duplicate key)."""
+    d = 0
+    stack: list[int] = []  # 0 array, 1 object, 2 object inside a value
+    for m in _DEPTH_TOKEN_RE.finditer(text):
+        c = m.group()
+        if c[0] == '"':
+            continue
+        if c in "[{":
+            if d >= MAX_DEPTH:
+                return False
+            stack.append(1 if c == "{" else 0)
+            d += 1
+        elif c == ":":
+            stack[-1] = 2
+            d += 1
+        elif c == ",":
+            if stack and stack[-1] == 2:
+                stack[-1] = 1
+                d -= 1
+        else:
+            if stack and stack.pop() == 2:
+                d -= 1
+            d -= 1
+    return True
 
 
 def run_text(text: str, program: list[tuple], *, raw: bool = False,
@@ -395,37 +480,48 @@ def run_text(text: str, program: list[tuple], *, raw: bool = False,
                   sort_keys=sort_keys, numbers=numbers)
 
 
-_VERSION: dict[str, Any] = {}
+_VERSION: dict[tuple, tuple[int, int] | None] = {}
 
 
 def jq_version() -> tuple[int, int] | None:
-    """(major, minor) of the `jq` on PATH (cached), or None."""
-    if "v" in _VERSION:
-        return _VERSION["v"]
+    """(major, minor) of the `jq` on the daemon's PATH, or None when there
+    is none. Cached by PATH, the binary's path and its mtime, so installing
+    or upgrading jq is seen on the next call."""
+    import os
     import shutil
     import subprocess
-    got = None
     exe = shutil.which("jq")
-    if exe:
-        try:
-            proc = subprocess.run([exe, "--version"], capture_output=True,
-                                  text=True, timeout=5,
-                                  stdin=subprocess.DEVNULL, check=False)
-            m = re.search(r"(\d+)\.(\d+)", proc.stdout or "")
-            if m:
-                got = (int(m.group(1)), int(m.group(2)))
-        except (OSError, subprocess.SubprocessError):
-            got = None
-    _VERSION["v"] = got
+    if exe is None:
+        return None
+    try:
+        st = os.stat(exe)
+    except OSError:
+        return None
+    ck = (os.environ.get("PATH", ""), exe, st.st_mtime_ns, st.st_size)
+    if ck in _VERSION:
+        return _VERSION[ck]
+    got = None
+    try:
+        proc = subprocess.run([exe, "--version"], capture_output=True,
+                              text=True, timeout=5,
+                              stdin=subprocess.DEVNULL, check=False)
+        m = re.search(r"(\d+)\.(\d+)", proc.stdout or "")
+        if m:
+            got = (int(m.group(1)), int(m.group(2)))
+    except (OSError, subprocess.SubprocessError):
+        got = None
+    _VERSION.clear()
+    _VERSION[ck] = got
     return got
 
 
 def number_policy() -> str:
-    """`literal` for jq 1.7+ (or no jq on PATH), `integers` for older."""
+    """`literal` for jq 1.7 and 1.8 (checked), `integers` (the output every
+    version shares) for older or newer versions and when jq is absent."""
     v = jq_version()
-    return "integers" if v is not None and v < (1, 7) else "literal"
+    return "literal" if v is not None and (1, 7) <= v <= (1, 8) else "integers"
 
 
-__all__ = ["BUILTINS", "Refused", "Unsupported", "jq_version", "load",
-           "number_policy", "parse", "pointer_of", "render", "run",
+__all__ = ["BUILTINS", "MAX_DEPTH", "Refused", "Unsupported", "jq_version",
+           "load", "number_policy", "parse", "pointer_of", "render", "run",
            "run_text"]

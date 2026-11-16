@@ -8,6 +8,10 @@ returns the body of the protocol's `tool` response:
     {"handled": True, "output": "<error text>", "is_error": True, "meta": {...}}
     {"handled": False, "reason": "<why>", "meta": {...}}
 
+A handled answer of a non-mutating tool (read, grep, glob), error or not,
+also carries `permission` (`permission_request`), which the plugin asks for
+before it shows the output.
+
 `after(memory, tool, input, output)` runs after a built-in (or any) call and
 returns `{"append": "<text or empty>", "meta": {...}}`. `meta` always has
 `intent` (a short name), `keys` (node keys involved) and `ms`.
@@ -168,6 +172,13 @@ def handle(memory: Any, tool: str, input: dict[str, Any], *,
         meta.update(intent=res["intent"], keys=list(res.get("keys") or []))
     except IntentError as e:
         body = {"handled": True, "output": str(e), "is_error": True}
+        # A read-only tool's error is shown after the same permission as its
+        # answer (the plugin runs the built-in when an answer has none).
+        if tool not in MUTATING_TOOLS:
+            try:
+                body["permission"] = permission_request(memory, tool, input)
+            except Exception:  # noqa: BLE001 - no request: the built-in runs
+                body["permission"] = None
         meta.update(intent=e.intent or f"{tool}_error", keys=e.keys)
     except Unhandled as e:
         body = {"handled": False, "reason": str(e)}

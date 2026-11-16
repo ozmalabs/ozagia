@@ -918,7 +918,7 @@ class DevMemoryServer:
                 return {"ok": False, "error": f"{rel}: not a .json, .yaml, "
                                               f".yml or .toml file; give format"}
         try:
-            res = structured_query(self.mem, f"{rel}#{pointer}", fmt=fmt,
+            res = structured_query(self.mem, rel, pointer=pointer, fmt=fmt,
                                    offset=a.get("offset"),
                                    limit=a.get("limit"), index_base=0)
         except IntentError as e:

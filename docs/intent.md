@@ -82,7 +82,10 @@ Read json /repo/data/run.json#/runs: array, 30 items, line 5
 - JSON numbers print as written (`1.50`). Lines come from the span parser
   of `edit.json_edit` for JSON files up to 1 MB.
 - A missing file, a bad pointer (with the nearest keys, `difflib`) and a
-  parse error (with line and column) are tool errors.
+  parse error (with line and column) are tool errors. Like every read
+  answer (node-key errors too), they carry the read permission for the
+  file, so the OpenCode plugin asks for it and shows the error instead of
+  running the built-in read on the literal `json:...` path.
 - YAML needs PyYAML (the `iac-yaml` extra); without it a YAML query is a
   tool error that says so. A multi-document YAML file is the list of its
   documents. TOML uses `tomllib` (read-only); dates print as ISO strings.
@@ -93,12 +96,19 @@ Outline. A read with no `offset` and no `limit` of a `.json`, `.yaml`,
 `.yml` or `.toml` file over 2000 lines or 64 kB returns the outline
 instead of the text: the file header, `[ozagia] json:<rel>#`, the root's
 type and size, each top-level key with type, size, preview and line, one
-level below it (up to 8 keys, or an array's first item), and a last line
-saying how to query a path or read the text (pass `offset`/`limit`). The
+level below it (up to 8 keys, or an array's first item), a line saying
+how to query a path or read the text (pass `offset`/`limit`), then the
+head of the text: lines 1-200 in read format (at most 32 kB, a line over
+2000 characters cut with a note), so a read before an edit still sees the
+start of the file. For YAML the note says the outline omits comments and
+shows anchors, aliases and merge keys resolved; for TOML that it omits
+comments (comments at the head are in the text that follows). The
 limits are `[reads] structured_outline_lines` and
-`structured_outline_bytes` in `.ozagia.toml` (0 turns one off). A file
-that does not parse (or YAML without PyYAML) is read as text. Shell reads
-(`cat`, `head`, ...) and edits are unchanged.
+`structured_outline_bytes` in `.ozagia.toml` (0 turns one off). Files over
+8 MB (2 MB for YAML when PyYAML has no libyaml `CSafeLoader`) are read as
+text, as before, so the parse stays well inside the plugin's read timeout.
+A file that does not parse (or YAML without PyYAML) is read as text. Shell
+reads (`cat`, `head`, ...) and edits are unchanged.
 
 Directory:
 
@@ -190,7 +200,7 @@ or environment prefixes. The classes are:
 | pytest | `pytest`, `py.test`, `python[3] -m pytest`, `<path>/python -m pytest` | `ozagia.check.run_tests` with the named interpreter (a pytest script's `#!` line), the selectors made root-relative, the other flags, `timeout`/1000 s (default 120). Refused flags (cache, `--pdb`, `--junitxml`, ...) and ambiguous options fall back. |
 | read | `cat F`, `head [-n N] F`, `tail [-n N\|+N] F`, `sed -n 'A[,B]p' F` | read of that range (no 2000-line cap) |
 | grep | `grep [-rRnHiFE] [--include G] PAT [PATH]`, `rg [-nHiF] [-g G] PAT [PATH]`, `git grep [-niFE] PAT [PATH]` | grep; `-i` is case-insensitive. A basic regex is converted to the Rust/Python dialect (`\|` `\(` `\{` become operators, `+ ? \| { } ( )` literals); one with back-references, `\<`, `\>` or POSIX classes falls back. |
-| jq | `jq [-r] [-c] [-S] [-M] FILTER FILE` (flags before the filter, also clustered as `-rc`), `cat FILE \| jq ...`, `jq ... < FILE`, `< FILE jq ...`, and after `cd DIR &&`. FILTER is a pipeline (up to 6 stages) of paths (`.`, `.a`, `.a.b`, `."key with space"`, `.["k"]`, `.[N]`, `.[-N]`, `.[N:M]`, `.[]`, `.a[]`) and `keys`, `length`, `type` (`ozagia.core.jq`) | jq's exact stdout, read-only (no graph refresh). Left to the real jq: any other filter or option (reason `jq filter '...' is not mapped` / `jq option X is not mapped`), several or no files, a result jq reports as an error (`.a` of an array, `.[]` of null, `keys` of a string, ...), a number with an exponent (jq 1.7 rewrites it), with jq older than 1.7 any number that is not an integer below 1e17, a computed non-integer (`length` of 2.5), a BOM, NaN, a lone surrogate escape, several JSON values, output over 1 MB. |
+| jq | `jq [-r] [-c] [-S] [-M] FILTER FILE` (flags before the filter, also clustered as `-rc`), `cat FILE \| jq ...`, `jq ... < FILE`, `< FILE jq ...`, and after `cd DIR &&`. FILTER is a pipeline (up to 6 stages) of paths (`.`, `.a`, `.a.b`, `."key with space"`, `.["k"]`, `.[N]`, `.[-N]`, `.[N:M]`, `.[]`, `.a[]`) and `keys`, `length`, `type` (`ozagia.core.jq`) | jq's exact stdout, read-only (no graph refresh). Left to the real jq: any other filter or option (reason `jq filter '...' is not mapped` / `jq option X is not mapped`), several or no files, a result jq reports as an error (`.a` of an array, `.[]` of null, `keys` of a string, ...), a number with an exponent (jq 1.7 rewrites it), with jq other than 1.7 or 1.8 any number that is not an integer below 2^53 (jq 1.6 prints doubles; versions after 1.8 are unchecked), an integer literal over 20 digits that would need converting, a computed non-integer (`length` of 2.5), a BOM, NaN, a lone surrogate escape, several JSON values, input nested deeper than jq 1.7's parser limit (256 slots: one per array, two per object member; jq 1.8 allows 10000, the 256 limit is kept), output over 1 MB, and any `jq` command when no `jq` is on the daemon's `PATH` (reason `jq is not installed`, so the shell says `command not found`). The `jq` version is re-read when `PATH` or the binary changes. |
 | compound | see below | the steps, in order |
 | git_refs | `git commit\|push\|stash\|branch\|checkout\|switch\|reset\|rebase\|merge\|tag\|worktree\|cherry-pick\|revert\|am\|pull\|fetch\|bisect\|...` (`intent.shell.GIT_REF_MOVING`, shared with the Claude Code hook and `eval.agent.OPENCODE_GIT_DENY`), anywhere in the command: in any segment, after `VAR=value` prefixes, shell keywords and group openers (`{ ! if then do else elif while until`), through wrapper commands (`env [-i] [-u N] [-S '...']`, `command`, `builtin`, `exec`, `nice`, `timeout`, `nohup`, `setsid`, `stdbuf`, `ionice`, `chrt`, `taskset`, `sudo`, `doas`, `time`, `xargs`, `watch`, `flock`, `runuser`, `strace`, `ltrace`, `busybox`, `unbuffer`, `eval`, `function NAME { ... }`, `coproc`, `find -exec\|-execdir\|-ok\|-okdir`, `su\|script\|flock -c '<script>'`, repeated, with clustered options such as `sudo -iu root`), as `/path/to/git`, through `git -c alias.<x>=<ref-moving>`, inside a backtick or `$(...)` substitution, and inside `sh\|bash\|zsh\|dash\|ksh\|fish\|... -c '<script>'` (classified once more; a script nested deeper is refused when it names `git` and then a ref-moving subcommand) | tool error `Refused by ozagia: <command> changes git refs`. Listing forms (`git branch`, `git tag -l`, `git stash list`, `git worktree list`, `git bisect log`) are read-only. |
 | git_read, other, complex | everything else | `handled: false` |

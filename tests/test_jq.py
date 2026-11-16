@@ -138,7 +138,10 @@ def test_number_literals_follow_jq_17(text, out):
 
 @pytest.mark.parametrize("text,out", [
     ("1.0", None), ("-0", None), ("100000000000000000", None),
-    ("99999999999999999", "99999999999999999\n"), ("[3, -4]", "[3,-4]\n"),
+    # jq 1.6 holds numbers as doubles: 2**53 + 1 prints as 2**53.
+    ("9007199254740993", None), ("9007199254740992", None),
+    ("9007199254740991", "9007199254740991\n"),
+    ("-9007199254740991", "-9007199254740991\n"), ("[3, -4]", "[3,-4]\n"),
 ])
 def test_older_jq_only_gets_integers(text, out):
     if out is None:
@@ -150,12 +153,93 @@ def test_older_jq_only_gets_integers(text, out):
 
 
 def test_number_policy_follows_jq_version(monkeypatch):
-    monkeypatch.setattr(J, "_VERSION", {"v": (1, 6)})
-    assert J.number_policy() == "integers"
-    monkeypatch.setattr(J, "_VERSION", {"v": (1, 7)})
-    assert J.number_policy() == "literal"
-    monkeypatch.setattr(J, "_VERSION", {"v": None})
-    assert J.number_policy() == "literal"
+    for version, policy in (((1, 5), "integers"), ((1, 6), "integers"),
+                            ((1, 7), "literal"), ((1, 8), "literal"),
+                            ((1, 9), "integers"), ((2, 0), "integers"),
+                            (None, "integers")):
+        monkeypatch.setattr(J, "jq_version", lambda v=version: v)
+        assert J.number_policy() == policy, version
+
+
+def _fake_jq(bindir: Path, version: str) -> Path:
+    exe = bindir / "jq"
+    exe.write_text(f"#!/bin/sh\necho jq-{version}\n")
+    exe.chmod(0o755)
+    return exe
+
+
+def test_jq_version_is_rechecked(tmp_path, monkeypatch):
+    monkeypatch.setenv("PATH", str(tmp_path))
+    assert J.jq_version() is None
+    exe = _fake_jq(tmp_path, "1.6")
+    assert J.jq_version() == (1, 6)
+    exe.write_text("#!/bin/sh\necho jq-1.7.1\n")
+    import os
+    st = exe.stat()
+    os.utime(exe, ns=(st.st_atime_ns, st.st_mtime_ns + 10 ** 9))
+    assert J.jq_version() == (1, 7)
+    exe.unlink()
+    assert J.jq_version() is None
+
+
+def _nest(n_arrays: int, inner: str = "1") -> str:
+    return "[" * n_arrays + inner + "]" * n_arrays
+
+
+def _nest_obj(n: int, inner: str = "1") -> str:
+    return '{"a":' * n + inner + "}" * n
+
+
+# Probed against jq 1.7: an array opens one parser slot, an object one plus
+# one for the key while its value is parsed.
+DEPTH_OK = [_nest(256), _nest(256, ""), _nest_obj(128), _nest_obj(127, "{}"),
+            _nest(255, '{"a":1}'), _nest(255, "{}")]
+DEPTH_REFUSED = [_nest(257), _nest(257, ""), _nest(600), _nest_obj(129),
+                 _nest_obj(128, "{}"), _nest_obj(128, "[]"),
+                 _nest(254, '{"a":[]}'),
+                 # the deep value hidden behind a duplicate key
+                 '{"a": %s, "a": 1}' % _nest(300)]
+
+
+@pytest.mark.parametrize("text", DEPTH_OK)
+def test_depth_within_jq_limit_is_read(text):
+    assert J.run_text(text, J.parse("type")) in ('"array"\n', '"object"\n')
+
+
+@pytest.mark.parametrize("text", DEPTH_REFUSED)
+def test_depth_over_jq_limit_is_refused(text):
+    with pytest.raises(J.Refused, match="nested deeper"):
+        J.run_text(text, J.parse("length"))
+
+
+@needs_jq
+@pytest.mark.parametrize("text", DEPTH_OK + DEPTH_REFUSED)
+def test_depth_limit_matches_real_jq(tmp_path, text):
+    path = tmp_path / "deep.json"
+    path.write_text(text)
+    want = _jq(["-c"], "type", path)
+    try:
+        got = J.run_text(text, J.parse("type"), compact=True)
+    except J.Refused:
+        return  # the real jq runs (jq 1.8 reads deeper than 1.7)
+    assert want.returncode == 0 and want.stdout == got
+
+
+HUGE = "1" * 5000
+
+
+@pytest.mark.parametrize("text,filt,numbers,out", [
+    (HUGE, ".", "literal", HUGE + "\n"),
+    (HUGE, "length", "literal", None),
+    (HUGE, ".", "integers", None),
+    ("[-%s]" % HUGE, ".[0] | length", "literal", None),
+])
+def test_huge_integer_literals(text, filt, numbers, out):
+    if out is None:
+        with pytest.raises(J.Refused):
+            J.run_text(text, J.parse(filt), numbers=numbers)
+    else:
+        assert J.run_text(text, J.parse(filt), numbers=numbers) == out
 
 
 @pytest.mark.parametrize("filt,program", [
@@ -316,7 +400,8 @@ def test_shell_jq_output_is_jqs(mem, command):
     assert res["output"] == want.stdout
 
 
-def test_shell_jq_keys_and_passthrough(mem):
+def test_shell_jq_keys_and_passthrough(mem, monkeypatch):
+    monkeypatch.setattr(J, "jq_version", lambda: (1, 7))
     res = I.handle(mem, "shell", {"command": "jq '.a.b[2]' data/obj.json"})
     assert res["meta"]["keys"] == ["json:data/obj.json#/a/b/2"]
     # A jq error, an exponent and a missing file are left to the real jq.
@@ -327,3 +412,21 @@ def test_shell_jq_keys_and_passthrough(mem):
     res = I.handle(mem, "shell", {"command": "jq . /etc/hostname"})
     assert res["handled"] is False
 
+
+
+def test_shell_jq_without_jq_is_passthrough(mem, monkeypatch):
+    monkeypatch.setattr(J, "jq_version", lambda: None)
+    res = I.handle(mem, "shell", {"command": "jq .a data/obj.json"})
+    assert res["handled"] is False
+    assert res["reason"] == "jq is not installed"
+    assert res["meta"]["intent"] == "shell_passthrough"
+
+
+def test_shell_jq_huge_literal_is_passthrough(mem, monkeypatch):
+    monkeypatch.setattr(J, "jq_version", lambda: (1, 7))
+    root = Path(mem.raw_repo_root)
+    (root / "data" / "huge.json").write_text("[%s]" % HUGE)
+    res = I.handle(mem, "shell", {"command": "jq '.[0] | length' data/huge.json"})
+    assert res["handled"] is False, res
+    assert res["meta"]["intent"] == "shell_passthrough"
+    assert not res["meta"].get("error")

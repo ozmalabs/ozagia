@@ -797,3 +797,39 @@ def test_permission_metadata_is_passed_to_assert(tmp_path, daemon):
     d = daemon(script)
     out = _run(tmp_path, {"calls": [EDIT], "permission": "allow"}, d.path)
     assert out["asserts"][0]["metadata"] == meta
+
+
+@needs_node
+def test_read_only_error_is_shown_after_the_permission(tmp_path, daemon):
+    # The daemon's own answer to a structured read with a bad key.
+    from ozagia import intent as I
+    from ozagia.core.memory import DevMemory, build_index
+    root = tmp_path / "repo"
+    (root / "data").mkdir(parents=True)
+    (root / "data" / "run.json").write_text('{"name": "x"}\n')
+    build_index(root, tmp_path / "g.json", include_docs="none", include_git=False)
+    mem = DevMemory(tmp_path / "g.json", tmp_path / "j.jsonl", root=root)
+    inp = {"path": "json:data/run.json#/nmae"}
+    body = I.handle(mem, "read", inp)
+    assert body["is_error"] and body["permission"]["resources"] == ["data/run.json"]
+    answer = json.loads(json.dumps(body))
+
+    def script(req):
+        if req["op"] == "tool":
+            return {"ok": True, **answer}
+        return _standard(req)
+
+    d = daemon(script)
+    call = {"tool": "read", "input": inp}
+    out = _run(tmp_path, {"calls": [call], "permission": "allow"}, d.path)
+    res = out["results"][0]
+    assert res["ok"] is False and "nearest: name" in res["error"], res
+    assert out["calls"] == []            # the built-in read did not run
+    assert out["asserts"][0]["resources"] == ["data/run.json"]
+    out = _run(tmp_path, {"calls": [call], "permission": "deny"}, d.path)
+    assert out["results"][0] == {"ok": False, "error": "Permission denied: read"}
+    # Without a permission the plugin cannot ask and hands the call to the
+    # built-in, which is why the daemon attaches it to errors.
+    answer.pop("permission")
+    out = _run(tmp_path, {"calls": [call], "permission": "allow"}, d.path)
+    assert out["calls"] == [["read", inp]]

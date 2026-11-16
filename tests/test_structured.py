@@ -280,7 +280,14 @@ def test_outline_for_large_structured_files(mem, repo):
     assert "[ozagia] json:big.json#" in out
     assert any(ln.startswith('- "rows": array, 800 items') for ln in out)
     assert any(ln.startswith('    "tags": array, 2 items') for ln in out)
-    assert "json:big.json#/<key>" in out[-1]
+    note = [ln for ln in out if ln.startswith("[ozagia] an outline instead")]
+    assert len(note) == 1 and "json:big.json#/<key>" in note[0]
+    assert "Lines 1-200 follow" in note[0] and "comments" not in note[0]
+    # The head of the text follows the outline, so a read before an edit
+    # still sees it.
+    head = out[out.index(note[0]) + 1:]
+    text = (repo / "big.json").read_text().splitlines()
+    assert head == [f"{i}: {ln}" for i, ln in enumerate(text[:200], 1)]
     # A range reads the text, as before.
     res = I.handle(mem, "read", {"path": "big.json", "offset": 1, "limit": 3})
     assert res["meta"]["intent"] == "read_file"
@@ -305,6 +312,53 @@ def test_outline_threshold_is_configurable(mem, repo):
     clear_config_cache()
     res = I.handle(mem, "read", {"path": "big.json"})
     assert res["meta"]["intent"] == "read_file"
+
+
+def test_outline_head_is_capped(mem, repo):
+    # One minified line: the head is that line, cut.
+    _write(repo / "min.json", json.dumps({"rows": ["x" * 50] * 3000}))
+    res = I.handle(mem, "read", {"path": "min.json"})
+    assert res["meta"]["intent"] == "read_structured_outline"
+    out = res["output"].splitlines()
+    assert "Lines 1-1 follow" in res["output"]
+    assert out[-1].startswith('1: {"rows": ["xxx')
+    assert "[ozagia] line cut at 2000 of" in out[-1]
+    assert len(res["output"]) < 16 * 1024
+
+
+@pytest.mark.parametrize("name,text,note", [
+    ("values.yaml", "# replicas: how many pods\n" + "\n".join(
+        f"k{i}: &a{i} {i}" for i in range(2500)) + "\n",
+     "omits comments and shows anchors, aliases and merge keys resolved"),
+    ("big.toml", "# the project\n" + "\n".join(
+        f"k{i} = {i}  # n" for i in range(2500)) + "\n", "omits comments"),
+])
+def test_outline_says_what_yaml_and_toml_lose(mem, repo, name, text, note):
+    if name.endswith(".yaml"):
+        pytest.importorskip("yaml")
+    _write(repo / name, text)
+    res = I.handle(mem, "read", {"path": name})
+    assert res["meta"]["intent"] == "read_structured_outline", res
+    assert note in res["output"]
+    # The comment at the head is in the text that follows the outline.
+    assert "\n1: # " in res["output"]
+
+
+def test_outline_size_ceiling_reads_the_text(mem, repo, monkeypatch):
+    from ozagia.intent import read as R
+    monkeypatch.setattr(R, "OUTLINE_MAX_BYTES", 10_000)
+    res = I.handle(mem, "read", {"path": "big.json"})
+    assert res["meta"]["intent"] == "read_file"
+    assert res["output"].splitlines()[1] == "1: {"
+
+
+def test_outline_ceiling_is_lower_for_pure_python_yaml(monkeypatch):
+    yaml = pytest.importorskip("yaml")
+    from ozagia.intent import read as R
+    monkeypatch.delattr(yaml, "CSafeLoader", raising=False)
+    assert R._outline_ceiling("yaml") == R.OUTLINE_MAX_BYTES_PURE_YAML
+    assert R._outline_ceiling("json") == R.OUTLINE_MAX_BYTES == 8 * 1024 * 1024
+    assert R.OUTLINE_MAX_BYTES_PURE_YAML == 2 * 1024 * 1024
 
 
 def test_outline_threshold_config_is_validated(repo):
@@ -370,3 +424,25 @@ def test_mcp_dev_query(mem):
 def test_read_form_permission_names_the_file(mem):
     res = I.handle(mem, "read", {"path": "json:data/run.json#/runs"})
     assert res["permission"]["resources"] == ["data/run.json"]
+
+
+def test_read_errors_carry_the_permission(mem):
+    # Without it the plugin would run the built-in read on the literal path.
+    for path, resource in (("json:data/run.json#/nmae", "data/run.json"),
+                           ("json:bad.json#", "bad.json"),
+                           ("json:missing.json#/a", "missing.json"),
+                           ("sym:pkg/__init__.py::nope", "sym:pkg/__init__.py::nope")):
+        res = I.handle(mem, "read", {"path": path})
+        assert res["handled"] and res["is_error"], (path, res)
+        assert res["permission"] == {"action": "read", "resources": [resource],
+                                     "save": ["*"]}, path
+
+
+def test_mcp_dev_query_path_with_hash(mem, repo):
+    _write(repo / "dir#1" / "a.json", json.dumps({"x": {"y": 2}}))
+    server = DevMemoryServer(mem)
+    got = _mcp(server, {"path": "dir#1/a.json", "pointer": "/x/y"})
+    assert got["ok"] is True, got
+    assert got["path"] == "dir#1/a.json" and got["text"].splitlines()[-1] == "2"
+    got = _mcp(server, {"path": "dir#1/a.json"})
+    assert got["ok"] is True and got["type"] == "object"

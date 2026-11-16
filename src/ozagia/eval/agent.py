@@ -1557,6 +1557,8 @@ def aggregate(runs: list[dict[str, Any]], arms: Iterable[str]) -> list[dict[str,
                 "daemon_failures": sum(1 for r in mine if r.get("daemon_ok") is False),
                 "total_structured_queries": sum(int(r.get("structured_queries") or 0)
                                                 for r in mine),
+                "total_structured_outlines": sum(
+                    int(r.get("structured_outlines") or 0) for r in mine),
                 "total_jq_captures": sum(int(r.get("jq_captures") or 0)
                                          for r in mine),
                 "codemode_tools": sorted({t for r in mine

@@ -56,6 +56,16 @@ DEFAULT_LIMIT = 2000
 # outline (`[reads] structured_outline_lines` / `structured_outline_bytes`).
 OUTLINE_LINES = 2000
 OUTLINE_BYTES = 64 * 1024
+# Above these sizes a plain read is the text, as before: parsing every
+# unranged read must stay well inside the plugin's read timeout. YAML
+# without libyaml (pure-Python PyYAML) gets the lower ceiling.
+OUTLINE_MAX_BYTES = 8 * 1024 * 1024
+OUTLINE_MAX_BYTES_PURE_YAML = 2 * 1024 * 1024
+# The outline is followed by the head of the text (so a read before an
+# edit still sees it): up to this many lines and bytes, long lines cut.
+OUTLINE_HEAD_LINES = 200
+OUTLINE_HEAD_BYTES = 32 * 1024
+OUTLINE_HEAD_LINE_CHARS = 2000
 _TEXT_KEY_RE = re.compile(r"^text:(?P<rel>.+)#L(?P<a>\d+)-L(?P<b>\d+)$")
 
 
@@ -249,14 +259,15 @@ def render_dir(memory: Any, target: Target, *, offset: int | None,
 
 def structured_query(memory: Any, key: str, *, offset: Any = None,
                      limit: Any = None, index_base: int = 0,
-                     fmt: str | None = None) -> dict[str, Any]:
-    """A `json:`/`yaml:`/`toml:` key (or, with `fmt`, a plain path and
-    pointer) as text: see `ozagia.core.structured.query`. `offset` counts
-    from `index_base` (1 for the read tool, whose offsets are 1-based).
-    Raises IntentError for a missing file, a bad pointer or a parse
-    error."""
+                     fmt: str | None = None,
+                     pointer: str = "") -> dict[str, Any]:
+    """A `json:`/`yaml:`/`toml:` key (or, with `fmt`, `key` is a plain path,
+    taken whole, and `pointer` the pointer) as text: see
+    `ozagia.core.structured.query`. `offset` counts from `index_base` (1
+    for the read tool, whose offsets are 1-based). Raises IntentError for a
+    missing file, a bad pointer or a parse error."""
     from ozagia.core import structured as S
-    parsed = S.parse_key(key) if fmt is None else (fmt, *key.partition("#")[::2])
+    parsed = S.parse_key(key) if fmt is None else (fmt, key, pointer)
     if parsed is None:
         raise IntentError(f"not a structured key: {key}")
     fmt, rel, pointer = parsed
@@ -337,7 +348,7 @@ def structured_outline(memory: Any, target: Target) -> dict[str, Any] | None:
         size = target.path.stat().st_size
     except OSError:
         return None
-    if size > S.MAX_QUERY_BYTES:
+    if size > _outline_ceiling(fmt):
         return None
     over_bytes = max_bytes > 0 and size > max_bytes
     if not over_bytes and max_lines <= 0:
@@ -352,8 +363,8 @@ def structured_outline(memory: Any, target: Target) -> dict[str, Any] | None:
         return None
     try:
         text = data.decode("utf-8")
-        doc = S.load_text(fmt, target.rel, text[1:] if text.startswith("\ufeff")
-                          else text)
+        text = text[1:] if text.startswith("\ufeff") else text
+        doc = S.load_text(fmt, target.rel, text)
         body = S.outline(doc)
     except (S.QueryError, UnicodeDecodeError, RecursionError):
         return None
@@ -371,12 +382,50 @@ def structured_outline(memory: Any, target: Target) -> dict[str, Any] | None:
     limits = " or ".join(
         x for x in ((f"{max_lines} lines" if max_lines > 0 else ""),
                     (f"{max_bytes} bytes" if max_bytes > 0 else "")) if x)
+    lost = ""
+    if fmt == "yaml":
+        lost = (" The outline omits comments and shows anchors, aliases and "
+                "merge keys resolved.")
+    elif fmt == "toml":
+        lost = " The outline omits comments."
+    head = _head_lines(text)
     out.lines.append(tag(
-        f"an outline instead of the text: the file is over {limits}. Read a "
-        f"path with {fmt}:{target.rel}#/<key>/<index>, or pass offset/limit "
-        f"for the text"))
+        f"an outline instead of the whole text: the file is over {limits}."
+        f"{lost} Read a path with {fmt}:{target.rel}#/<key>/<index>, or pass "
+        f"offset/limit for the text. Lines 1-{len(head)} follow"))
+    out.lines.extend(head)
     return {"intent": "read_structured_outline",
             "output": "\n".join(out.lines), "keys": out.keys}
+
+
+def _outline_ceiling(fmt: str) -> int:
+    if fmt == "yaml":
+        try:
+            import yaml  # type: ignore[import-not-found]
+        except ImportError:
+            return 0
+        if getattr(yaml, "CSafeLoader", None) is None:
+            return OUTLINE_MAX_BYTES_PURE_YAML
+    return OUTLINE_MAX_BYTES
+
+
+def _head_lines(text: str) -> list[str]:
+    """The first lines of `text` in read format (`<n>: <line>`), within
+    OUTLINE_HEAD_LINES and OUTLINE_HEAD_BYTES; a line over
+    OUTLINE_HEAD_LINE_CHARS is cut with a note."""
+    out: list[str] = []
+    size = 0
+    for i, line in enumerate(split_lines(text)[:OUTLINE_HEAD_LINES], 1):
+        if len(line) > OUTLINE_HEAD_LINE_CHARS:
+            line = (line[:OUTLINE_HEAD_LINE_CHARS] + " "
+                    + tag(f"line cut at {OUTLINE_HEAD_LINE_CHARS} of "
+                          f"{len(line)} characters"))
+        row = f"{i}: {line}"
+        size += len(row) + 1
+        if out and size > OUTLINE_HEAD_BYTES:
+            break
+        out.append(row)
+    return out
 
 
 def handle_read(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
