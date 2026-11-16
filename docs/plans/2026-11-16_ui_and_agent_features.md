@@ -1240,6 +1240,20 @@ Not yet: `ozagia-view`/apertures, `ozagia-status`, resource enforcement/OOM,
 file-ledger integration into edit/hooks, cleanup apply/trash, settings registry
 and the UI hosts.
 
+### Parallel workstreams (2026-11-16)
+
+Four agents are running from base `865b0ed`, each in its own worktree:
+
+| Worktree | Branch | Scope |
+| --- | --- | --- |
+| `~/ozmadev/ozagia-wt/view-apertures` | `feat/view-apertures` | Aperture schema, view model, static HTML, `view_cli` |
+| `~/ozmadev/ozagia-wt/settings-registry` | `feat/settings-registry` | Typed settings registry, `ozagia/` config, `settings_cli` |
+| `~/ozmadev/ozagia-wt/status-snapshot` | `feat/status-snapshot` | Read-only composed status, `status_cli` |
+| `~/ozmadev/ozagia-wt/file-ledger` | `feat/file-ledger` | Ledger capture in edits/hooks/sessions |
+
+The supervisor reviews each branch, runs targeted tests and ruff, merges one
+branch at a time, then runs the full suite from the main checkout.
+
 ## Open decisions
 
 1. **Config directory (resolved).** `ozagia/` is versioned project config;
