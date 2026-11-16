@@ -16,7 +16,8 @@ tui="--tui"
 [ "${2:-}" = "--no-tui" ] && tui=""
 here="$(cd "$(dirname "$0")/../.." && pwd)"
 name="$(basename "$bundle")"
-work="$(mktemp -d "${TMPDIR:-/tmp}/ozagia_smoke.XXXXXX")"
+tmpdir="${TMPDIR:-/tmp}"
+work="$(cd "$(mktemp -d "${tmpdir%/}/ozagia_smoke.XXXXXX")" && pwd -P)"
 trap 'rm -rf "$work"' EXIT
 
 version="$(tar -xzOf "$bundle" "${name%.tar.gz}/manifest.json" \

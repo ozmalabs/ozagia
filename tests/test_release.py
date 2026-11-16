@@ -203,9 +203,13 @@ def test_self_check_reports_a_missing_opencode(monkeypatch):
 def test_uninstall_strips_only_the_installer_lines(tmp_path):
     bin_dir = str(tmp_path / ".ozagia" / "bin")
     rc = tmp_path / ".bashrc"
-    rc.write_text(f"alias x=y\n\n# ozagia\nexport PATH={bin_dir}:$PATH\n# other\n")
+    # As written from a HOME with `//` (macOS TMPDIR ends in a slash).
+    written = str(tmp_path) + "//.ozagia/bin"
+    rc.write_text(f"alias x=y\n\n# ozagia\nexport PATH={written}:$PATH\n# other\n"
+                  f"# ozagia\nexport PATH=/elsewhere/bin:$PATH\n")
     assert selfinstall._strip_path_lines(rc, bin_dir)
-    assert rc.read_text() == "alias x=y\n# other\n"
+    assert rc.read_text() == ("alias x=y\n# other\n# ozagia\n"
+                              "export PATH=/elsewhere/bin:$PATH\n")
     assert not selfinstall._strip_path_lines(rc, bin_dir)
 
 

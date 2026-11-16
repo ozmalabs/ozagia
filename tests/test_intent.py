@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -274,6 +275,7 @@ def _grep_matches(output: str) -> list[str]:
     return [ln for ln in output.split("\n") if ln.startswith("  Line ")]
 
 
+@pytest.mark.skipif(shutil.which("rg") is None, reason="needs ripgrep for the expected count")
 def test_grep_groups_matches_under_keys(mem, repo):
     out = _ok(mem, "grep", pattern="helper")
     lines = out.split("\n")

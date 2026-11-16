@@ -18,6 +18,8 @@ jobs:
           # Some tests compare against older module versions from history.
           fetch-depth: 0
       - uses: astral-sh/setup-uv@v6
+      - name: ripgrep (the grep handler and its tests use it)
+        run: sudo apt-get update -q && sudo apt-get install -y -q ripgrep
       - name: Install
         run: |
           uv venv --python ${{ matrix.python }} .venv

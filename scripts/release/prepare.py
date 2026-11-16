@@ -102,7 +102,11 @@ def main(argv: list[str] | None = None) -> int:
     new_py = re.sub(r'^version = "[^"]+"', f'version = "{version}"',
                     PYPROJECT.read_text(encoding="utf-8"), count=1, flags=re.M)
     print(f"version {cur} -> {version}, tag {tag}, branch {branch}")
-    print("changelog entry:\n" + entry)
+    if "## Unreleased" in text:
+        print("changelog: the '## Unreleased' section becomes "
+              f"'## {version} ({time.strftime('%Y-%m-%d')})'")
+    else:
+        print("changelog entry (no '## Unreleased' section):\n" + entry)
     if args.dry_run:
         return 0
     PYPROJECT.write_text(new_py, encoding="utf-8")

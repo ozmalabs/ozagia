@@ -253,8 +253,24 @@ def _rc_files() -> list[Path]:
             zd / ".zshenv", xdg / "fish" / "config.fish"]
 
 
+def _path_in(line: str) -> str | None:
+    """The directory an installer PATH line adds (`export PATH=<dir>:$PATH`
+    or `fish_add_path <dir>`), or None."""
+    line = line.strip()
+    if line.startswith("export PATH=") and line.endswith(":$PATH"):
+        return line[len("export PATH="):-len(":$PATH")]
+    if line.startswith("fish_add_path "):
+        return line[len("fish_add_path "):].strip()
+    return None
+
+
+def _same_dir(a: str, b: str) -> bool:
+    return os.path.realpath(os.path.normpath(a)) == os.path.realpath(os.path.normpath(b))
+
+
 def _strip_path_lines(path: Path, bin_dir: str) -> bool:
-    """Remove the installer's `# ozagia` + PATH line pair from `path`."""
+    """Remove the installer's `# ozagia` + PATH line pair for `bin_dir` from
+    `path` (paths compared resolved: `//`, symlinks such as macOS's /var)."""
     try:
         lines = path.read_text(encoding="utf-8").split("\n")
     except OSError:
@@ -263,9 +279,8 @@ def _strip_path_lines(path: Path, bin_dir: str) -> bool:
     changed = False
     i = 0
     while i < len(lines):
-        if (lines[i] == "# ozagia" and i + 1 < len(lines)
-                and bin_dir in lines[i + 1] and ("PATH" in lines[i + 1]
-                                                  or "fish_add_path" in lines[i + 1])):
+        added = _path_in(lines[i + 1]) if i + 1 < len(lines) else None
+        if lines[i] == "# ozagia" and added and _same_dir(added, bin_dir):
             if out and out[-1] == "":
                 out.pop()
             i += 2
