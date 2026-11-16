@@ -612,6 +612,165 @@ def test_after_records_changed_paths_as_created(tmp_path):
     assert st.stats()["file_ledger_scans"] == 1
 
 
+def test_after_builtin_shell_derives_ledger_paths(tmp_path):
+    from ozagia.core import files as F
+    from ozagia.daemon.server import DaemonState
+    root = _ledger_repo(tmp_path)
+    (root / "shell-note.md").write_text("# Shell\n", encoding="utf-8")
+    st = DaemonState(root, None, tmp_path / "j.jsonl")
+    msg = {"op": "after", "tool": "shell", "harness": "claude",
+           "session": "ses-shell",
+           "input": {"command": "touch shell-note.md", "workdir": str(root)},
+           "output": "", "meta": {}}
+    resp = st.dispatch(msg)
+    assert resp["ok"], resp
+    record = F.explain(root, "shell-note.md")["record"]
+    assert record is not None
+    assert record["created_by"]["session"] == "ses-shell"
+    assert record["created_by"]["tool"] == "shell"
+    stats = st.stats()
+    assert stats["file_ledger_scans"] == 1 and stats["files_recorded"] == 1
+
+
+def test_after_builtin_patch_derives_ledger_paths(tmp_path):
+    from ozagia.core import files as F
+    from ozagia.daemon.server import DaemonState
+    root = _ledger_repo(tmp_path)
+    (root / "patch-note.py").write_text("x = 1\n", encoding="utf-8")
+    patch = ("*** Begin Patch\n"
+             "*** Add File: patch-note.py\n"
+             "+x = 1\n"
+             "*** End Patch\n")
+    st = DaemonState(root, None, tmp_path / "j.jsonl")
+    msg = {"op": "after", "tool": "patch", "harness": "claude",
+           "session": "ses-patch-ledger",
+           "input": {"patch": patch}, "output": "", "meta": {}}
+    resp = st.dispatch(msg)
+    assert resp["ok"], resp
+    record = F.explain(root, "patch-note.py")["record"]
+    assert record is not None
+    assert record["created_by"]["session"] == "ses-patch-ledger"
+    assert record["created_by"]["tool"] == "patch"
+    stats = st.stats()
+    assert stats["file_ledger_scans"] == 1 and stats["files_recorded"] == 1
+
+
+def test_after_builtin_shell_outside_path_and_cap(tmp_path, monkeypatch):
+    from ozagia.core import files as F
+    from ozagia.daemon.server import DaemonState
+    root = _ledger_repo(tmp_path)
+    st = DaemonState(root, None, tmp_path / "j.jsonl")
+    outside = tmp_path / "outside.md"
+    outside.write_text("# Outside\n", encoding="utf-8")
+    msg = {"op": "after", "tool": "shell", "harness": "claude",
+           "session": "ses-outside",
+           "input": {"command": f"touch {outside}", "workdir": str(root)},
+           "output": "", "meta": {}}
+    resp = st.dispatch(msg)
+    assert resp["ok"], resp
+    assert st.stats()["file_ledger_scans"] == 0
+    assert F.explain(root, "outside.md")["record"] is None
+
+    captured: list[str] = []
+
+    def fake_scan(_root, **kwargs):
+        captured.extend(kwargs.get("paths") or [])
+        return []
+
+    monkeypatch.setattr(F, "scan_new_files", fake_scan)
+    names = " ".join(f"f{i}.md" for i in range(30))
+    resp2 = st.dispatch({**msg, "input": {"command": f"touch {names}",
+                                          "workdir": str(root)}})
+    assert resp2["ok"], resp2
+    assert len(captured) == 20
+    assert captured == [f"f{i}.md" for i in range(20)]
+
+
+def test_files_observe_merges_meta_and_command_paths(tmp_path):
+    from ozagia.core import files as F
+    from ozagia.daemon.server import DaemonState
+    root = _ledger_repo(tmp_path)
+    (root / "a.md").write_text("# A\n", encoding="utf-8")
+    (root / "b.md").write_text("# B\n", encoding="utf-8")
+    st = DaemonState(root, None, tmp_path / "j.jsonl")
+    st._files_observe(
+        "after", "shell",
+        {"command": "touch a.md b.md", "workdir": str(root)},
+        {"session": "ses-merge", "harness": "claude"},
+        {"meta": {"changed_paths": ["a.md"]}})
+    assert F.explain(root, "a.md")["record"] is not None
+    assert F.explain(root, "b.md")["record"] is not None
+    assert st.stats()["files_recorded"] == 2
+
+
+def test_after_refresh_notes_derived_shell_and_patch_paths(tmp_path):
+    from ozagia.core.memory import DevMemory, build_index
+    from ozagia.daemon.server import DaemonState
+    root = _ledger_repo(tmp_path)
+    dump = tmp_path / "graph.json"
+    build_index(root, dump, include_docs="features", include_git=False)
+    mem = DevMemory(dump, tmp_path / "state" / "journal.jsonl", root=root)
+    st = DaemonState(root, mem, tmp_path / "j.jsonl")
+    base = {"harness": "claude", "session": "ses-derived"}
+    # `pkg/a.py` is recent, so the intent layer names it in changed_paths;
+    # `pkg/b.py` is older and only the command line names it.
+    (root / "pkg" / "a.py").write_text("a = 1\n", encoding="utf-8")
+    (root / "pkg" / "b.py").write_text("b = 2\n", encoding="utf-8")
+    os.utime(root / "pkg" / "b.py", (1, 1))
+    resp = st.dispatch({**base, "op": "after", "tool": "shell",
+                        "input": {"command": "touch pkg/a.py pkg/b.py",
+                                  "workdir": str(root)},
+                        "output": ""})
+    assert resp["ok"], resp
+    assert resp["meta"]["intent"] == "after_refresh"
+    assert resp["meta"]["changed_paths"] == ["pkg/a.py"]
+    (state,) = st.sessions.states("claude", "ses-derived")
+    assert set(state.work.view().files) == {"pkg/a.py", "pkg/b.py"}
+    # A built-in patch: the patch text names both files even without any
+    # `meta.edited_files` (a daemon without a graph still notes the derived
+    # paths in the session's working set).
+    (root / "one.py").write_text("one = 1\n", encoding="utf-8")
+    (root / "two.py").write_text("two = 2\n", encoding="utf-8")
+    patch = ("*** Begin Patch\n"
+             "*** Update File: one.py\n"
+             "@@\n"
+             "-one = 1\n"
+             "+one = 3\n"
+             "*** Update File: two.py\n"
+             "@@\n"
+             "-two = 2\n"
+             "+two = 4\n"
+             "*** End Patch\n")
+    st2 = DaemonState(root, None, tmp_path / "j2.jsonl")
+    state2 = st2.session_state({"harness": "claude",
+                                "session": "ses-patch-derived"})
+    st2._observe("after", "patch", {"patch": patch}, {},
+                 {"meta": {"intent": "after_refresh"}}, state2)
+    assert set(state2.work.view().files) == {"one.py", "two.py"}
+
+
+def test_library_after_paths_uses_patch_paths(tmp_path):
+    from ozagia.daemon.server import DaemonState
+    root = _ledger_repo(tmp_path)
+    st = DaemonState(root, None, tmp_path / "j.jsonl")
+    patch = ("*** Begin Patch\n"
+             "*** Update File: one.py\n"
+             "@@\n"
+             "-one = 1\n"
+             "+one = 2\n"
+             "*** Update File: two.py\n"
+             "@@\n"
+             "-two = 1\n"
+             "+two = 2\n"
+             "*** End Patch\n")
+    assert st._library_after_paths(
+        "patch", {"patch": patch}, {"edited_files": ["one.py"]}) == [
+            "one.py", "two.py"]
+    # Shell hints are not a supported tool: no derivation.
+    assert st._library_after_paths("shell", {"command": "touch x.py"},
+                                   {}) == []
+
+
 def test_session_end_without_baseline_does_not_attribute(tmp_path):
     from ozagia.core import files as F
     from ozagia.daemon.server import DaemonState
