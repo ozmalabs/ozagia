@@ -1,0 +1,127 @@
+# Advisory repository scan
+
+`ozagia.core.repo_scan` and `python -m ozagia.repo_scan_cli` rank development
+opportunities from an **existing** graph snapshot, bounded git reads,
+filesystem measurements and a few read-only state files.
+
+This is stage one of plan item 15. It is deliberately advisory: a scan does not
+build or refresh the index, edit a file, run a test, call a model, use the
+network or claim that a finding is correct. Stage two (building a module) is a
+separate, person-approved bounded task with a preview, tests and a rollback
+path.
+
+## Inputs
+
+Read-only inputs:
+
+- `<root>/.ozagia/graph.json` (or `OZAGIA_STATE_DIR`), loaded once. The scan
+  never writes, rebuilds or refreshes it.
+- bounded `git` calls: `rev-parse HEAD` and `git status --porcelain -uall`.
+- bounded filesystem walks of the configured source directories, `history/`
+  and known cache/build directories. Symlinks are not followed.
+- `.ozagia.toml` through `ozagia.config.load_project_config` (source/test
+  directories, adapters, test selection policy).
+- optional state readings: `.ozagia/tests/results.json` (last known failures
+  and flaky tests), the created-file ledger (`.ozagia/files/ledger.jsonl`) and
+  review packets under `.ozagia/reviews/*.json`.
+
+The graph's commit nodes provide churn; `--since N` bounds the churn window and
+the age used for stale `history/` notes. `--top N` bounds the number of
+opportunities in the report. Per-category caps apply before the global cap.
+
+### Graph states
+
+| state | meaning | scan status |
+| --- | --- | --- |
+| missing | no snapshot at the expected path | `unavailable` |
+| unreadable / invalid | file exists but cannot be parsed or has no node/edge lists | `degraded` |
+| stale | snapshot root or HEAD differs from the checkout | `degraded` |
+| unknown | root/HEAD/working-tree freshness cannot be verified | `degraded` |
+| empty | the snapshot contains no non-Repo nodes | `degraded` |
+| fresh | root and HEAD match and the working tree is clean | `ok` |
+
+Filesystem and configuration checks still run when the graph is missing or
+stale. Graph-derived categories are omitted or have their confidence reduced,
+and the report records that in `not_assessed`. The CLI exits 0 for an
+unavailable graph: that is a reported state, not a tool failure.
+
+## Categories
+
+- `missing_tests` — source files with no test linked by
+  `Test -tests_module|mentions_file-> File`. Changed files rank first.
+- `hotspots` — large symbols, many symbols, high import degree, recent churn
+  or large file size. These are syntactic proxies; no profiler runs.
+- `duplicate_modules` — identical source files by recorded SHA-256, and
+  near-duplicates by token-shingle Jaccard similarity.
+- `duplicate_docs` — identical or near-identical Markdown, including
+  `history/` notes.
+- `weak_boundaries` — files with high import fan-in or fan-out.
+- `orphaned_files` — source files no indexed file imports (excluding tests,
+  package markers and conventional entrypoints), plus created-file ledger
+  entries with no recorded reference.
+- `stale_history` — files under `history/` older than the scan window.
+- `generated_clutter` — measured cache/build/environment directories and
+  `.coverage`; cleanup always requires confirmation.
+- `unindexed_languages` — source files in languages the built-in index does
+  not parse (the built-in index covers Python, Rust and Lua).
+- `missing_adapters` — no `[adapters]` module despite unindexed languages, or
+  a configured adapter that contributed no nodes / left files unindexed.
+- `test_policy` — recorded failing or flaky tests, `[tests] select = "all"`
+  while changes are local, and a graph with no Test nodes.
+- `code_review` — blocking/major findings from existing review packets and
+  known-failure nodes from the graph.
+
+## Opportunity shape
+
+Each opportunity has:
+
+- `id` — stable for the same evidence (for example `hotspot:src/app.py` or a
+  content digest for a duplicate pair);
+- `category`, `title`, `rank`, `score`;
+- `evidence` — structured entries of kind `file` (with optional line),
+  `graph_key`, `command` or `metric`;
+- `expected_effect`, `effort` (`S`/`M`/`L`), `risk`, `confidence`;
+- `proposed_module` and `action`;
+- `not_assessed` — what the signal does not establish.
+
+Ordering is deterministic: score descending, then category order, then id.
+The report includes `summary`, `omitted.by_category`, `omitted.total`, the
+per-category cap and the global cap. Re-running a scan on an unchanged
+checkout produces byte-identical JSON.
+
+## CLI
+
+```bash
+PYTHONPATH=src python -m ozagia.repo_scan_cli scan --root . --since 30 --top 25
+PYTHONPATH=src python -m ozagia.repo_scan_cli scan --root . --json --out /tmp/scan.json
+PYTHONPATH=src python -m ozagia.repo_scan_cli list-categories
+```
+
+Exit codes: `0` for a completed scan (including an unavailable graph) and
+`list-categories`; `2` for usage or IO errors. `--out` is the only write and
+happens only when the caller asks for it.
+
+## Limits
+
+- The graph is a snapshot. A stale or missing graph is reported, never
+  repaired.
+- Churn is limited to the commit nodes the snapshot contains (the builder's
+  history limit) and the `--since` window.
+- Filesystem walks, graph size, status entries, reads, duplicate candidates
+  and review packets all have hard bounds. Truncation is reported in
+  `warnings` and can lower confidence.
+- Generated-directory sizes are measured with a bounded walk; a truncated
+  measurement is an undercount, not exact per-process attribution.
+- Duplicate detection is textual; it does not prove semantic equivalence.
+- Retrieval, agent and performance eval result files under `evaluation/` are
+  not interpreted; run those eval commands separately and compare their own
+  reports.
+- The import graph is syntactic. Dynamic imports, plugins, subprocess entry
+  points and external consumers are not visible.
+- No test is executed. A linked test may be weak, skipped or failing for
+  unrelated reasons.
+- No security, licence, dependency or supply-chain analysis is performed.
+
+A scan never edits the repository. Cleanup actions described in the report
+require explicit confirmation and, for ledger-managed files, the existing
+trash/restore path.
