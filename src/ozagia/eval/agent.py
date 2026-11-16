@@ -1297,6 +1297,10 @@ def _count(value: Any) -> int | None:
     return None
 
 
+def _rate(part: int, whole: int) -> float | None:
+    return round(part / whole, 4) if whole else None
+
+
 def graph_stats_fields(stats: Any) -> dict[str, Any]:
     """Run-record fields from the daemon's `stats`: plugin_loaded
     (hellos > 0), captured_calls (tool calls the daemon handled; an expired
@@ -1304,12 +1308,15 @@ def graph_stats_fields(stats: Any) -> dict[str, Any]:
     design), fallbacks (`stats.fallbacks`: one per call the plugin could not
     get answered; see `ozagia.daemon.server`), preflights (permission
     checks before a handled edit, write or shell), permission_assert and
-    codemode_tools (from the plugin's `hello`)."""
+    codemode_tools (from the plugin's `hello`), and shell_captured /
+    shell_passthrough (`stats.shell`: shell calls the daemon carried out or
+    left to the built-in; absent from older daemons)."""
     if not isinstance(stats, dict):
         return {"plugin_loaded": None, "captured_calls": None,
                 "passthrough_calls": None, "fallbacks": None,
                 "preflights": None, "permission_assert": None,
-                "codemode_tools": None}
+                "codemode_tools": None, "shell_captured": None,
+                "shell_passthrough": None}
     hellos = _count(stats.get("hellos"))
     raw = stats.get("handled")
     # The daemon reports {"true": n, "false": m}; only handled calls count.
@@ -1317,6 +1324,7 @@ def graph_stats_fields(stats: Any) -> dict[str, Any]:
     if handled is None and isinstance(stats.get("by_handled"), dict):
         handled = _count(stats["by_handled"].get("true"))
     codemode = stats.get("codemode_tools")
+    shell = stats.get("shell") if isinstance(stats.get("shell"), dict) else {}
     return {"plugin_loaded": None if hellos is None else hellos > 0,
             "captured_calls": handled,
             "passthrough_calls": _count(stats.get("passthrough")),
@@ -1326,7 +1334,9 @@ def graph_stats_fields(stats: Any) -> dict[str, Any]:
             "preflights": _count(stats.get("preflights")),
             "permission_assert": stats.get("permission_assert"),
             # Replaced tools OpenCode could also reach through Code Mode.
-            "codemode_tools": list(codemode) if isinstance(codemode, list) else None}
+            "codemode_tools": list(codemode) if isinstance(codemode, list) else None,
+            "shell_captured": _count(shell.get("captured")),
+            "shell_passthrough": _count(shell.get("passthrough"))}
 
 
 def run_one(repo: str | Path, task: dict[str, Any], arm: str, repeat: int,
@@ -1544,6 +1554,11 @@ def aggregate(runs: list[dict[str, Any]], arms: Iterable[str]) -> list[dict[str,
                 "mean_passthrough_calls": _mean((r.get("passthrough_calls")
                                                  for r in mine), 1),
                 "total_fallbacks": sum(int(r.get("fallbacks") or 0) for r in mine),
+                # Shell calls captured over shell calls answered, all runs.
+                "shell_capture_rate": _rate(
+                    sum(int(r.get("shell_captured") or 0) for r in mine),
+                    sum(int(r.get("shell_captured") or 0)
+                        + int(r.get("shell_passthrough") or 0) for r in mine)),
                 # Only runs that started a daemon have a plugin to load.
                 "plugin_load_failures": sum(1 for r in mine
                                             if r.get("daemon_ok") is not None

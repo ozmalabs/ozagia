@@ -451,3 +451,29 @@ def test_daemon_exits_when_its_parent_dies(tmp_path):
     finally:
         if parent.poll() is None:
             parent.kill()
+
+
+def test_shell_capture_counters(tmp_path):
+    from ozagia.daemon.server import DaemonState
+    state = DaemonState(tmp_path, None, tmp_path / "j.jsonl")
+
+    def shell(resp):
+        state.record({"op": "tool", "tool": "shell", "input": {}},
+                     {"ok": True, **resp}, 1.0)
+    shell({"handled": True, "meta": {"intent": "shell_read"}})
+    shell({"handled": True, "meta": {"intent": "shell_compound"}})
+    shell({"handled": True, "is_error": True, "meta": {"intent": "shell_refused"}})
+    shell({"handled": False, "reason": "nl option -w3 is not mapped",
+           "meta": {"intent": "shell_passthrough"}})
+    shell({"handled": False, "reason": "nl option -w3 is not mapped",
+           "meta": {"intent": "shell_passthrough"}})
+    shell({"handled": False, "reason": "expired", "expired": True, "meta": {}})
+    shell({"handled": False, "preflight": True, "meta": {}})
+    state.record({"op": "tool", "tool": "read"},
+                 {"ok": True, "handled": False, "meta": {}}, 1.0)
+    got = state.stats()["shell"]
+    assert {k: got[k] for k in ("captured", "refused", "passthrough")} == {
+        "captured": 2, "refused": 1, "passthrough": 2}
+    assert got["capture_rate"] == 0.5
+    assert got["by_intent"] == {"shell_read": 1, "shell_compound": 1}
+    assert got["passthrough_reasons"] == {"nl option -w3 is not mapped": 2}
