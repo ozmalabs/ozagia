@@ -140,6 +140,7 @@ Effort: S = 1-3 days, M = 1-2 weeks, L = 3-6 weeks of focused agent work.
 | 14 | Process/connection management actions | 3 | M | Medium | 4, 6, 8; runtime (landed), W11 | 4 |
 | 15 | Scan repo and build modules (advisory first) | 4 | L | High | 4, 5, 7, 10, 11 | 4 |
 | 15a | Security and antipattern scan (graph + tools) | 5 | M | Medium | 5, 7, 15 | 5-6 |
+| 15b | Library-first hints and NIH capture | 4 | S-M | Low-medium | 5, 7, 15; edit graph | 5-6 |
 | 16 | Ocelot pinned installer and default auto-detect | 3 | S-M | Medium | 2 | 4 |
 | 17 | Ocelot enhancements for coding and other tasks | 3 | M | Medium | 7, 15 | 4 |
 | 18 | Standalone console | 3 | L | Medium | 1, 6, 8, 9 | 5 |
@@ -1275,6 +1276,111 @@ max_findings = 200
 installation, no hosted vulnerability database, and no claim that a clean scan
 means the code is secure.
 
+### 15b. Library-first hints and NIH capture
+
+Models often write a new helper before checking whether the standard library
+or a well-supported package already does it. This layer detects the most
+common “reinvented wheel” patterns in newly written code, hints at a
+well-supported alternative, and records that the hint was shown so the
+behaviour can be measured.
+
+It is a hint, not a refactor: no code is rewritten, no package is installed,
+no model is called and no network is used.
+
+**Detection inputs:**
+
+- new or changed symbols from the edit/diff (not every existing file);
+- the body and imports of the new symbol, via the graph and a bounded read;
+- the language/ecosystem from the file suffix and manifests
+  (`pyproject.toml`, `package.json`, `Cargo.toml`, lockfiles);
+- installed distributions (`importlib.metadata`) and declared dependencies;
+- a versioned, curated capability registry.
+
+**Capability registry** (examples; data, not inference):
+
+| Capability | Python | JavaScript/TypeScript | Rust |
+| --- | --- | --- | --- |
+| retry/backoff | `tenacity`, `backoff`; no stdlib primitive | `p-retry`; no standard one | `backoff`, `tokio-retry` |
+| HTTP client | `httpx`, `requests`; `urllib` | `axios`, `undici`; built-in `fetch` | `reqwest` |
+| validation/schema | `pydantic`, `jsonschema` | `zod`, `ajv` | `serde`, `validator` |
+| CLI parsing | `argparse` (stdlib), `click`, `typer` | `commander`, `yargs` | `clap` |
+| YAML/TOML | `PyYAML`, `tomllib` (stdlib) | `yaml`, built-in JSON | `serde_yaml`, `toml` |
+| date/time parsing | `datetime` + `zoneinfo` (stdlib), `dateutil` | `date-fns`, `luxon` | `chrono`, `time` |
+| caching | `functools.lru_cache` (stdlib), `cachetools` | `lru-cache` | `moka`, `cached` |
+| glob/diff/patch | `pathlib`, `fnmatch`, `difflib` (stdlib) | `picomatch`, `diff` | `globset`, `similar` |
+| IDs/slugs | `secrets`, `uuid` (stdlib), `python-slugify` | `nanoid`, `slugify` | `uuid`, `slug` |
+| rate limiting | `limits`, `slowapi` | `rate-limiter-flexible` | `governor` |
+| semver | `semver`, `packaging` | `semver` | `semver` |
+| circuit breaker | `pybreaker` | `opossum` | `recloser` |
+
+**Evidence and confidence:**
+
+- symbol name and body patterns (retry loop, manual YAML/JSON parsing,
+  hand-written CLI parser, date parser, cache, deep merge, semver, HTTP
+  wrapper, slug/UUID, rate limiter);
+- whether the suggested package is already a dependency or stdlib
+  (strongest), installed but undeclared, or merely a known package (weakest);
+- no hint when the code already imports the suggested library, when the
+  symbol is a thin wrapper around it, or when the match is only the name;
+- a hint names the package, why it matches, whether it is already available,
+  and a confidence level. It is one short line, not a lecture.
+
+Example output:
+
+```text
+[ozagia] library hint: new `_retry` loop resembles tenacity (already a
+dependency); stdlib has no retry primitive. Evidence: 3 attempts, sleep,
+backoff. Confidence: medium.
+```
+
+**Capture and settings:**
+
+```toml
+[hints]
+library = "gentle"        # off | gentle | strict
+max_per_edit = 2
+ecosystems = ["python", "javascript", "rust"]
+record = true
+```
+
+- Events go to `.ozagia/library_hints/events.jsonl`: timestamp, session,
+  file, symbol, capability, suggested package, availability, confidence,
+  shown/suppressed, rule version. No code, prompts or file contents.
+- Daemon counters: `library_hints`, `library_hint_files`,
+  `library_hints_suppressed`. The hint is appended to the `after` text for a
+  handled edit/write; opt-out via config or `OZAGIA_LIBRARY_HINTS=0`.
+- Strict mode also checks edits to existing symbols; gentle only new/changed
+  symbols. Suppression is recorded, so the value can be measured later.
+
+**Integration:**
+
+- code review: a `reuse_library` section with evidence and confidence; never
+  blocks by itself.
+- repo scan: a `library_reuse` category ranking repeated hand-rolled
+  capabilities.
+- bounded tasks: an optional `library_hints` flag and a `hints` event; no
+  automatic refactor.
+- UI: a hint list in the status/code-review panel later.
+
+**CLI:** `python -m ozagia.library_hints_cli detect --root R --diff BASE..HEAD
+[--json]`, `explain SYMBOL`, `feedback HINT_ID accepted|ignored` (feedback is
+local-only and optional).
+
+**Acceptance:**
+
+- a new retry loop produces a tenacity hint, with “already a dependency”
+  when true and “known package” when not;
+- code that already imports/uses the package produces no hint;
+- a stdlib alternative (argparse, lru_cache, difflib, datetime) is suggested
+  before a third-party one where it fits;
+- at most `max_per_edit` hints; no code contents or prompts in the event log;
+- `off` produces no hints and no events; `strict` checks existing symbols;
+- hints are advisory and never rewrite code or install anything.
+
+**Non-goals:** no automatic refactor, no dependency installation, no network
+lookup, no claim that a library is better in every context, and no model
+judgement of “duplicate code”.
+
 ### 16. Ocelot distribution
 
 Do not silently download code on first run. Preferred order:
@@ -1578,8 +1684,18 @@ One additional agent starts from `64dc640`:
 | --- | --- | --- |
 | `~/ozmadev/ozagia-wt/security-scan` | `feat/security-scan` | Graph-derived OWASP/bad-practice findings plus explicit offline tool adapters |
 
-Status: `repo-scan` and `addin-extensions` are merged; `standalone-console`,
-`upstream` and `security-scan` are running.
+Status: `repo-scan`, `addin-extensions` and `upstream` are merged;
+`standalone-console` and `security-scan` are running.
+
+### Library-first workstream (2026-11-16)
+
+One additional agent starts from `79c3b3e`:
+
+| Worktree | Branch | Scope |
+| --- | --- | --- |
+| `~/ozmadev/ozagia-wt/library-hints` | `feat/library-hints` | Detect hand-rolled capabilities and hint at stdlib/known libraries, with local capture |
+
+Status: running.
 
 ## Open decisions
 
