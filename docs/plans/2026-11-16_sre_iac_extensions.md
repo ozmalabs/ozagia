@@ -427,6 +427,12 @@ duplicate it. The remaining offline workstreams are implemented:
 - **Offline validation/preflight:** `dev_aws_cli_check`, AWS CLI shell hints,
   and a dry-run emulator plan. Execution requires an injected runner and two
   explicit opt-ins; this branch does not run an emulator.
+- **Relay/tunnel foundation:** composable `Relay` chains, arbitrary backend
+  registry, policy gates, ephemeral backend instances, local loopback TCP
+  forwarding and dry-run SSH/SSM plans. Live SSH/SSM should delegate to
+  OpenSSH and the AWS Session Manager plugin; the build-versus-integrate review
+  is in [the relay library evaluation](../research/relay_libraries.md).
+  The relay is not yet wired into the CLI/MCP live gates.
 
 Validation on this branch: full suite `1779 passed, 39 skipped` (the optional
 `ruamel.yaml` round-trip cases are included locally); `ruff check src tests`
