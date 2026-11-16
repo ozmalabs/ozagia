@@ -1,0 +1,11 @@
+[Unit]
+Description=Nightly backup
+Wants=shop-web.service
+After=shop-web.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/shop/backup.env
+Environment="AWS_SECRET_ACCESS_KEY=CANARY_UNIT_SECRET" REGION=eu
+ExecStart=/usr/bin/python3 @ROOT@/scripts/backup.py --password=CANARY_UNIT_SECRET
+ExecStartPost=/bin/sh scripts/notify.sh

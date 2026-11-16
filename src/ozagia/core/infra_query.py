@@ -32,10 +32,13 @@ _FAMILY_HINTS = (
     ("kubernetes", re.compile(
         r"\b(?:kubernetes|k8s|kubectl|helm|kustomize|manifest|namespace|"
         r"pod|serviceaccount|ingress|workload)\b")),
+    ("ops", re.compile(
+        r"\b(?:compose|docker|podman|quadlet|systemd|systemctl|journalctl|"
+        r"containerfile|dockerfile)\b|\.(?:service|timer|socket|container)\b")),
 )
 _FAMILY_ORDER = {
     "kubernetes": 0, "terraform": 1, "deployment": 2, "cloudformation": 3,
-    "arm": 4, "pulumi": 5, "gitops": 6,
+    "arm": 4, "pulumi": 5, "gitops": 6, "ops": 7,
 }
 
 

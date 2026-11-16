@@ -105,14 +105,21 @@ def is_skipped_path(root: str | Path, rel: str) -> bool:
 
 
 def source_kind(name: str) -> str | None:
-    """Classify only source formats; state and variable files never qualify."""
-    value = name.lower()
+    """Classify only source formats; state and variable files never qualify.
+
+    `name` is a file name or a root-relative path; the path matters only for
+    quadlets (`ozagia.core.ops_graph.ops_source_format`). Operations sources
+    (compose files, Containerfiles, quadlets, systemd units) are `ops`."""
+    from ozagia.core.ops_graph import ops_source_format
+    value = Path(name).name.lower()
     if (value in {"plan.json", "tfplan.json", "terraform-plan.json"}
             or (value.startswith("pulumi.") and value.endswith((".yaml", ".yml"))
                 and value not in {"pulumi.yaml", "pulumi.yml"})
             or value.startswith((".env", "kubeconfig", "terraform.tfstate"))
             or ".tfstate" in value or value.endswith((".tfvars", ".tfvars.json", ".pem", ".key"))):
         return None
+    if ops_source_format(name):
+        return "ops"
     if value.endswith((".tf", ".tf.json", ".tofu", ".tofu.json")):
         return "terraform"
     if value.endswith((".bicep", ".arm")):
@@ -120,6 +127,13 @@ def source_kind(name: str) -> str | None:
     if value.endswith((".yaml", ".yml", ".json")):
         return "manifest"
     return None
+
+
+def env_file_name(name: str) -> bool:
+    """A file name that holds environment values (`.env`, `.env.prod`,
+    `app.env`): never read, and kept out of automatic snippets."""
+    value = Path(name).name.lower()
+    return value.startswith(".env") or value.endswith(".env")
 
 
 def iter_candidate_paths(root: str | Path, *, max_files: int = MAX_FILES
@@ -143,7 +157,7 @@ def iter_candidate_paths(root: str | Path, *, max_files: int = MAX_FILES
             rel = name if rel_dir == "." else f"{rel_dir}/{name}"
             if _matches_skip(rel, patterns):
                 continue
-            kind = source_kind(name)
+            kind = source_kind(rel)
             if not kind:
                 continue
             count += 1

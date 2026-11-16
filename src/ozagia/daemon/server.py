@@ -152,7 +152,7 @@ FILE_LEDGER_PATHS = 20
 ENV_FILE_LEDGER = "OZAGIA_FILE_LEDGER"
 # `meta` counters the daemon sums into its stats.
 META_COUNTERS = ("path_suggestions", "ownership_warnings", "files_recorded",
-                 "file_ledger_errors")
+                 "file_ledger_errors", "ops_after_annotations")
 # Keys kept per journal record.
 JOURNAL_KEYS = 20
 # Distinct shell passthrough reasons kept, and shown in `stats`.
@@ -351,6 +351,9 @@ class DaemonState:
         self.owners = Owners(root, daemon_journal=journal)
         self.path_suggestions = 0
         self.ownership_warnings = 0
+        # Ops graph (`ozagia.core.ops_graph`): `[ozagia] ops:` lines added
+        # after container/unit log and status commands.
+        self.ops_after_annotations = 0
         # Created-file ledger (`ozagia.core.files`): rows appended from
         # handled writes and `after`/`session_event` scans, scans run, and
         # ledger/git failures (the tool call itself never fails for them).
@@ -1045,6 +1048,13 @@ class DaemonState:
         finally:
             self.lock.release()
 
+    def _ops_nodes(self) -> int:
+        try:
+            from ozagia.core.ops_graph import ops_nodes
+            return len(ops_nodes(self.memory))
+        except Exception:  # noqa: BLE001 - stats must not fail
+            return 0
+
     def stats(self) -> dict[str, Any]:
         job_stats = self.jobs.stats()
         with self._stats_lock:
@@ -1109,6 +1119,12 @@ class DaemonState:
                 # uncommitted edits, and the sessions live now.
                 "path_suggestions": self.path_suggestions,
                 "ownership_warnings": self.ownership_warnings,
+                # Operations graph (`ozagia.core.ops_graph`, opt-in with the
+                # IaC adapter): ops nodes in the graph, and `[ozagia] ops:`
+                # lines added after podman/docker/compose logs, journalctl
+                # and systemctl status.
+                "ops_nodes": self._ops_nodes(),
+                "ops_after_annotations": self.ops_after_annotations,
                 "live_sessions": self.owners.live_sessions(),
                 # Created-file ledger (`ozagia.core.files`): rows recorded
                 # (handled writes, `after` scans, session start/end scans),

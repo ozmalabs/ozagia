@@ -634,7 +634,7 @@ def _needs_adapter_pass(txn: _Txn, files: list[str], inputs: list[Any]) -> bool:
     if iac_enabled:
         # The IaC indexer reads every IaC source from disk itself.
         from ozagia.core.infra_discovery import source_kind
-        if any(source_kind(Path(rel).name) for rel in files):
+        if any(source_kind(rel) for rel in files):
             return True
     globs = [g for i in inputs for g in i.watch]
     regexes = AS.text_regexes(inputs)
