@@ -1874,6 +1874,19 @@ Status: all four branches merged — `review-runners` as `552f3d5` (`895ddfe`),
 targeted suite and a full suite on its own tree; the merged tree passed the
 final suite (`4313 passed, 21 skipped`) and ruff. Wave 10 is complete.
 
+### Parallel wave 11 (2026-11-17)
+
+Two agents start from `a0a1913`:
+
+| Worktree | Branch | Scope |
+| --- | --- | --- |
+| `~/ozmadev/ozagia-wt/addin-mutations` | `feat/addin-mutations` | Preview-first `actionApply` and `taskRun` RPCs, GUI confirmation, redacted tokens and local task executor |
+| `~/ozmadev/ozagia-wt/runtime-config` | `feat/runtime-config` | `[environments]`, `[services]`, `[relays]`, `[runtime]` from `ozagia/config.toml` with legacy precedence |
+
+The same review/merge/full-suite gate applies. The live Desktop smoke test,
+live model/provider adapters and live security-tool matrix/DAST remain
+host/provider-dependent.
+
 ### Library-first workstream (2026-11-16)
 
 One additional agent starts from `79c3b3e`:
