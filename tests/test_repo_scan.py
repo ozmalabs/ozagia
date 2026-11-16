@@ -577,3 +577,71 @@ def test_ocelot_section_is_optional_and_reports_unavailable(
                  for finding in cluster["findings"]}
     assert clustered == selected
     assert "ocelot: not_installed" in RS.format_report(report)
+
+
+def test_ocelot_patterns_section_is_optional_and_candidate(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = _make_repo(tmp_path)
+    report = RS.scan(repo, top=100)
+    assert "ocelot" not in report
+
+    def _not_installed(_root: Any = None) -> dict[str, Any]:
+        return {
+            "state": "not_installed",
+            "path": None,
+            "version": None,
+            "source": None,
+            "manifest": None,
+            "manifest_path": None,
+            "install_root": "/nonexistent/ozagia/ocelot",
+            "invalid_installs": [],
+            "note": "Ocelot is not installed.",
+        }
+
+    monkeypatch.setattr(
+        RS.ocelot_code.ocelot_installer, "resolve", _not_installed)
+    report = RS.scan(repo, top=100, ocelot_patterns=True)
+    section = report["ocelot"]
+    assert section["state"] == "not_requested"
+    assert section["clusters"] == []
+    patterns = section["patterns"]
+    assert patterns["state"] == "not_installed"
+    assert patterns["candidate"] is True
+    assert patterns["truth_assessed"] is False
+    assert patterns["patterns"]
+    assert all(cluster["truth_assessed"] is False
+               for cluster in patterns["patterns"])
+    assert report["summary"]["ocelot_patterns"] == len(patterns["patterns"])
+    assert any("candidate clusters" in item
+               for item in report["not_assessed"])
+    assert "ocelot patterns:" in RS.format_report(report)
+
+
+def test_cli_ocelot_patterns_flag(tmp_path: Path,
+                                  monkeypatch: pytest.MonkeyPatch,
+                                  capsys) -> None:
+    repo = _make_repo(tmp_path)
+
+    def _not_installed(_root: Any = None) -> dict[str, Any]:
+        return {
+            "state": "not_installed",
+            "path": None,
+            "version": None,
+            "source": None,
+            "manifest": None,
+            "manifest_path": None,
+            "install_root": "/nonexistent/ozagia/ocelot",
+            "invalid_installs": [],
+            "note": "Ocelot is not installed.",
+        }
+
+    monkeypatch.setattr(
+        RS.ocelot_code.ocelot_installer, "resolve", _not_installed)
+    code = CLI.main([
+        "scan", "--root", str(repo), "--json", "--top", "100",
+        "--ocelot-patterns"])
+    captured = capsys.readouterr()
+    assert code == 0
+    report = json.loads(captured.out)
+    assert report["ocelot"]["patterns"]["candidate"] is True
+    assert report["ocelot"]["truth_assessed"] is False

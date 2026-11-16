@@ -2054,40 +2054,61 @@ _DETECTORS = (
 def _ocelot_section(opportunities: Sequence[Mapping[str, Any]], *, root: Path,
                     ocelot: Any, ocelot_root: str | Path | None,
                     ocelot_mode: str, ocelot_timeout: int,
-                    clusterer: Any) -> dict[str, Any] | None:
+                    clusterer: Any, ocelot_patterns: Any = False,
+                    patterns_clusterer: Any = None) -> dict[str, Any] | None:
     """Cluster duplicate, weak-boundary and security opportunities."""
     if callable(ocelot) and clusterer is None:
         clusterer = ocelot
         ocelot = True
-    if not ocelot and clusterer is None:
+    if callable(ocelot_patterns) and patterns_clusterer is None:
+        patterns_clusterer = ocelot_patterns
+        ocelot_patterns = True
+    pattern_requested = bool(ocelot_patterns) or patterns_clusterer is not None
+    if not ocelot and clusterer is None and not pattern_requested:
         return None
-    selected = [dict(item) for item in opportunities
-                if str(item.get("category")) in ocelot_code.SCAN_CATEGORIES]
-    if not selected:
-        return {
-            "schema": ocelot_code.SCHEMA,
-            "requested": True,
-            "available": False,
-            "state": "no_findings",
-            "mode": ocelot_mode,
-            "actual_mode": None,
-            "engine": "exact",
-            "ocelot": None,
-            "clusters": [],
-            "ocelot_clusters": [],
-            "analogies": [],
-            "finding_count": 0,
-            "cluster_count": 0,
-            "truncated": False,
-            "omitted_findings": 0,
-            "truth_assessed": False,
-            "error": None,
-            "note": ("no duplicate, weak-boundary or security opportunities "
-                     "were shown; Ocelot was not called"),
-        }
-    return ocelot_code.cluster_section(
-        selected, root=root, ocelot_root=ocelot_root, mode=ocelot_mode,
-        timeout=ocelot_timeout, clusterer=clusterer)
+
+    section: dict[str, Any]
+    if ocelot or clusterer is not None:
+        selected = [dict(item) for item in opportunities
+                    if str(item.get("category")) in ocelot_code.SCAN_CATEGORIES]
+        if not selected:
+            section = {
+                "schema": ocelot_code.SCHEMA,
+                "requested": True,
+                "available": False,
+                "state": "no_findings",
+                "mode": ocelot_mode,
+                "actual_mode": None,
+                "engine": "exact",
+                "ocelot": None,
+                "clusters": [],
+                "ocelot_clusters": [],
+                "analogies": [],
+                "finding_count": 0,
+                "cluster_count": 0,
+                "truncated": False,
+                "omitted_findings": 0,
+                "truth_assessed": False,
+                "error": None,
+                "note": ("no duplicate, weak-boundary or security opportunities "
+                         "were shown; Ocelot was not called"),
+            }
+        else:
+            section = ocelot_code.cluster_section(
+                selected, root=root, ocelot_root=ocelot_root,
+                mode=ocelot_mode, timeout=ocelot_timeout,
+                clusterer=clusterer)
+    else:
+        section = ocelot_code.empty_cluster_section(
+            mode=ocelot_mode,
+            note=("finding clustering was not requested; only the requested "
+                  "pattern section was computed"))
+    if pattern_requested:
+        section["patterns"] = ocelot_code.pattern_section(
+            [dict(item) for item in opportunities], root=root,
+            ocelot_root=ocelot_root, mode=ocelot_mode,
+            timeout=ocelot_timeout, clusterer=patterns_clusterer)
+    return section
 
 
 def _global_not_assessed(ctx: _ScanContext) -> list[str]:
@@ -2179,6 +2200,21 @@ def format_report(report: Mapping[str, Any]) -> str:
             f"{len(ocelot.get('clusters') or [])} cluster(s), "
             f"{len(ocelot.get('analogies') or [])} analogies; "
             "candidate only, truth not assessed")
+        patterns = ocelot.get("patterns")
+        if isinstance(patterns, Mapping):
+            found = patterns.get("patterns") or []
+            lines.append(
+                f"ocelot patterns: {patterns.get('state')} "
+                f"({patterns.get('engine')}), {len(found)} candidate "
+                "pattern(s); not a verdict")
+            for pattern in found:
+                if not isinstance(pattern, Mapping):
+                    continue
+                lines.append(
+                    f"  {pattern.get('pattern_id')} "
+                    f"[{pattern.get('family')}] "
+                    f"{pattern.get('file_count', 0)} file(s), "
+                    f"origin {pattern.get('origin')}; candidate only")
     by_category = summary.get("by_category") or {}
     if by_category:
         lines.append("by category: " + ", ".join(
@@ -2235,7 +2271,9 @@ def scan(root: str | Path = ".", *, graph_path: str | Path | None = None,
          ocelot_root: str | Path | None = None,
          ocelot_mode: str = "auto",
          ocelot_timeout: int = ocelot_code.DEFAULT_TIMEOUT,
-         ocelot_clusterer: Any = None) -> dict[str, Any]:
+         ocelot_clusterer: Any = None,
+         ocelot_patterns: Any = False,
+         ocelot_patterns_clusterer: Any = None) -> dict[str, Any]:
     """Scan one checkout read-only and return a deterministic report.
 
     `since_days` bounds the churn window and the stale-note age. `top` bounds
@@ -2395,17 +2433,35 @@ def scan(root: str | Path = ".", *, graph_path: str | Path | None = None,
     ocelot_section = _ocelot_section(
         shown, root=root_path, ocelot=ocelot, ocelot_root=ocelot_root,
         ocelot_mode=ocelot_mode, ocelot_timeout=ocelot_timeout,
-        clusterer=ocelot_clusterer)
+        clusterer=ocelot_clusterer, ocelot_patterns=ocelot_patterns,
+        patterns_clusterer=ocelot_patterns_clusterer)
     if ocelot_section is not None:
         report["ocelot"] = ocelot_section
         report["summary"]["ocelot_clusters"] = len(
             ocelot_section.get("clusters") or [])
         report["summary"]["ocelot_state"] = ocelot_section.get("state")
-        if ocelot_section.get("state") not in {"ready", "no_findings"}:
+        clustering_requested = bool(ocelot) or ocelot_clusterer is not None
+        if (clustering_requested
+                and ocelot_section.get("state") not in {"ready",
+                                                        "no_findings"}):
             report["warnings"].append(
                 "Ocelot clustering was requested but is "
                 f"{ocelot_section.get('state')}; exact fallback clusters are "
                 "reported and no install was attempted.")
+        patterns = ocelot_section.get("patterns")
+        if isinstance(patterns, Mapping):
+            report["summary"]["ocelot_patterns"] = len(
+                patterns.get("patterns") or [])
+            report["summary"]["ocelot_patterns_state"] = patterns.get("state")
+            report["not_assessed"].append(
+                "architecture patterns are candidate clusters; they do not "
+                "establish an anti-pattern, a defect or intent, and pattern "
+                "completeness was not assessed")
+            if patterns.get("state") not in {"ready", "no_shapes"}:
+                report["warnings"].append(
+                    "Ocelot pattern clustering was requested but is "
+                    f"{patterns.get('state')}; exact signature/overlap "
+                    "patterns are reported and no install was attempted.")
     return report
 
 

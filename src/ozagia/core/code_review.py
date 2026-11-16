@@ -1487,6 +1487,61 @@ def _ocelot_section(findings: Sequence[Mapping[str, Any]], *, root: Path,
         timeout=ocelot_timeout, clusterer=clusterer)
 
 
+def _ocelot_impact_section(root: Path, changed: Sequence[str], *,
+                           graph_path: str | Path | None,
+                           test_plan: Mapping[str, Any] | None,
+                           requested: Any, ocelot_root: str | Path | None,
+                           ocelot_mode: str, ocelot_timeout: int,
+                           clusterer: Any) -> dict[str, Any] | None:
+    """The optional ``ocelot.impact`` section. No test is executed."""
+    if callable(requested) and clusterer is None:
+        clusterer = requested
+        requested = True
+    if not requested and clusterer is None:
+        return None
+    try:
+        shape = ocelot_code.change_shape(
+            root, changed=sorted(changed), graph_path=graph_path)
+    except Exception as exc:  # noqa: BLE001 - a review must report, not crash
+        return ocelot_code.impact_error_section(exc, mode=ocelot_mode)
+    if isinstance(test_plan, Mapping):
+        selected = sorted(str(path) for path
+                          in (test_plan.get("selected_files") or [])
+                          if isinstance(path, str))
+        shape["planned_tests"] = selected
+        shape["test_plan"] = {
+            "schema": test_plan.get("schema"),
+            "mode": test_plan.get("mode"),
+            "selected_files": selected,
+            "fallback_used": bool(test_plan.get("fallback_used")),
+            "refused": bool(test_plan.get("refused")),
+            "executed": False,
+            "truth_assessed": False,
+            "claim": "test selection only; no test was executed",
+        }
+    return ocelot_code.impact_section(
+        [shape], ocelot_root=ocelot_root, mode=ocelot_mode,
+        timeout=ocelot_timeout, clusterer=clusterer, root=root)
+
+
+def _ocelot_patterns_section(root: Path, changed: Sequence[str], *,
+                             graph_path: str | Path | None,
+                             requested: Any,
+                             ocelot_root: str | Path | None,
+                             ocelot_mode: str, ocelot_timeout: int,
+                             clusterer: Any) -> dict[str, Any] | None:
+    """The optional ``ocelot.patterns`` section. Candidate patterns only."""
+    if callable(requested) and clusterer is None:
+        clusterer = requested
+        requested = True
+    if not requested and clusterer is None:
+        return None
+    return ocelot_code.pattern_section(
+        sorted(changed), root=root, graph_path=graph_path,
+        ocelot_root=ocelot_root, mode=ocelot_mode,
+        timeout=ocelot_timeout, clusterer=clusterer)
+
+
 def _packet(root: Path, pre: Mapping[str, Any], graph_info: Mapping[str, Any],
             files: Sequence[dict[str, Any]], diff_info: Mapping[str, Any],
             findings: Sequence[Mapping[str, Any]], omissions: Sequence[str],
@@ -1558,6 +1613,16 @@ def _packet(root: Path, pre: Mapping[str, Any], graph_info: Mapping[str, Any],
         packet["summary"]["ocelot_clusters"] = len(
             ocelot_section.get("clusters") or [])
         packet["summary"]["ocelot_state"] = ocelot_section.get("state")
+        impact = ocelot_section.get("impact")
+        if isinstance(impact, Mapping):
+            packet["summary"]["ocelot_impact_clusters"] = len(
+                impact.get("clusters") or [])
+            packet["summary"]["ocelot_impact_state"] = impact.get("state")
+        patterns = ocelot_section.get("patterns")
+        if isinstance(patterns, Mapping):
+            packet["summary"]["ocelot_patterns"] = len(
+                patterns.get("patterns") or [])
+            packet["summary"]["ocelot_patterns_state"] = patterns.get("state")
     return packet
 
 
@@ -1572,7 +1637,11 @@ def review_diff(root: str | Path, *, base: str, head: str = "HEAD",
                 ocelot_root: str | Path | None = None,
                 ocelot_mode: str = "auto",
                 ocelot_timeout: int = ocelot_code.DEFAULT_TIMEOUT,
-                ocelot_clusterer: OcelotClusterer | None = None
+                ocelot_clusterer: OcelotClusterer | None = None,
+                ocelot_impact: Any = False,
+                ocelot_patterns: Any = False,
+                ocelot_impact_clusterer: Any = None,
+                ocelot_patterns_clusterer: Any = None
                 ) -> dict[str, Any]:
     """Review ``base..head`` deterministically and return a review packet.
 
@@ -1660,6 +1729,50 @@ def review_diff(root: str | Path, *, base: str, head: str = "HEAD",
                 f"Ocelot structural clustering was requested but is {state}; "
                 "exact clusters by issue family and target were reported. No "
                 "install or download was attempted.")
+    impact_section = _ocelot_impact_section(
+        root_path, sorted(changed_paths), graph_path=graph_file,
+        test_plan=test_plan, requested=ocelot_impact,
+        ocelot_root=ocelot_root, ocelot_mode=ocelot_mode,
+        ocelot_timeout=ocelot_timeout,
+        clusterer=ocelot_impact_clusterer)
+    patterns_section = _ocelot_patterns_section(
+        root_path, sorted(changed_paths), graph_path=graph_file,
+        requested=ocelot_patterns, ocelot_root=ocelot_root,
+        ocelot_mode=ocelot_mode, ocelot_timeout=ocelot_timeout,
+        clusterer=ocelot_patterns_clusterer)
+    if impact_section is not None or patterns_section is not None:
+        if ocelot_section is None:
+            ocelot_section = ocelot_code.empty_cluster_section(
+                mode=ocelot_mode,
+                note=("finding clustering was not requested; only the "
+                      "requested impact/pattern sections were computed"))
+        if impact_section is not None:
+            ocelot_section["impact"] = impact_section
+            not_assessed.append({
+                "area": "ocelot-impact",
+                "reason": (
+                    "structural test-impact analogy is a candidate; the "
+                    "suggested test set is not complete and no test was run"),
+            })
+            if str(impact_section.get("state")) not in {"ready", "no_shapes"}:
+                omissions.append(
+                    "Ocelot impact clustering was requested but is "
+                    f"{impact_section.get('state')}; exact digest/overlap "
+                    "clusters were reported and no install was attempted.")
+        if patterns_section is not None:
+            ocelot_section["patterns"] = patterns_section
+            not_assessed.append({
+                "area": "ocelot-patterns",
+                "reason": (
+                    "architecture patterns are candidate clusters; they do "
+                    "not establish an anti-pattern, a defect or intent"),
+            })
+            if str(patterns_section.get("state")) not in {"ready", "no_shapes"}:
+                omissions.append(
+                    "Ocelot pattern clustering was requested but is "
+                    f"{patterns_section.get('state')}; exact signature/"
+                    "overlap patterns were reported and no install was "
+                    "attempted.")
     packet = _packet(root_path, pre, graph_info, files, diff_info,
                      final_findings, omissions, not_assessed,
                      test_plan, security_report, ocelot_section)
@@ -1865,6 +1978,38 @@ def format_packet(packet: Mapping[str, Any]) -> str:
             f"ocelot: {ocelot.get('state')} ({ocelot.get('engine')}), "
             f"{len(clusters)} cluster(s), {len(analogies)} analogies; "
             "candidate only, truth not assessed")
+        impact = ocelot.get("impact")
+        if isinstance(impact, Mapping):
+            impact_clusters = impact.get("clusters") or []
+            lines.append(
+                f"ocelot impact: {impact.get('state')} "
+                f"({impact.get('engine')}), {len(impact_clusters)} "
+                "cluster(s); candidate test sets, no test was run")
+            for cluster in impact_clusters:
+                if not isinstance(cluster, Mapping):
+                    continue
+                tests = cluster.get("candidate_tests") or []
+                lines.append(
+                    f"  {cluster.get('cluster_id')} "
+                    f"[{cluster.get('family')}] "
+                    f"{len(cluster.get('shape_ids') or [])} shape(s), "
+                    f"tests: {', '.join(tests[:8]) if tests else '-'}; "
+                    "not complete")
+        patterns = ocelot.get("patterns")
+        if isinstance(patterns, Mapping):
+            found = patterns.get("patterns") or []
+            lines.append(
+                f"ocelot patterns: {patterns.get('state')} "
+                f"({patterns.get('engine')}), {len(found)} candidate "
+                "pattern(s); not a verdict")
+            for pattern in found:
+                if not isinstance(pattern, Mapping):
+                    continue
+                lines.append(
+                    f"  {pattern.get('pattern_id')} "
+                    f"[{pattern.get('family')}] "
+                    f"{pattern.get('file_count', 0)} file(s), "
+                    f"origin {pattern.get('origin')}; candidate only")
     findings = packet.get("findings") or []
     lines.append(f"findings: {len(findings)}")
     for item in findings:

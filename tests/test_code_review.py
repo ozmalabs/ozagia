@@ -676,3 +676,83 @@ def test_cli_ocelot_flags(review_repo, capsys):
     assert packet["ocelot"]["state"] == "unavailable"
     assert packet["ocelot"]["mode"] == "inprocess"
     assert packet["truth_assessed"] is False
+
+
+def test_ocelot_impact_and_patterns_sections_are_optional(review_repo,
+                                                          tmp_path):
+    missing = tmp_path / "missing-ocelot"
+    packet = R.review_range(
+        review_repo["repo"], review_repo["range"], max_file_bytes=1024,
+        ocelot_impact=True, ocelot_patterns=True, ocelot_root=missing)
+    section = packet["ocelot"]
+    assert section["state"] == "not_requested"
+    assert section["clusters"] == []
+    impact = section["impact"]
+    assert impact["state"] == "unavailable"
+    assert impact["truth_assessed"] is False
+    assert impact["test_set_complete"] is False
+    assert impact["clusters"]
+    assert impact["clusters"][0]["truth_assessed"] is False
+    patterns = section["patterns"]
+    assert patterns["state"] == "unavailable"
+    assert patterns["candidate"] is True
+    assert patterns["truth_assessed"] is False
+    assert patterns["patterns"]
+    assert packet["summary"]["ocelot_impact_clusters"] == len(
+        impact["clusters"])
+    assert packet["summary"]["ocelot_patterns"] == len(patterns["patterns"])
+    assert any("impact" in line for line in packet["omissions"])
+    assert any("pattern" in line for line in packet["omissions"])
+    text = R.format_packet(packet)
+    assert "ocelot impact:" in text
+    assert "ocelot patterns:" in text
+    assert packet["truth_assessed"] is False
+
+
+def test_injected_impact_and_pattern_clusterers_cannot_claim_truth(
+        review_repo):
+    def impact_clusterer(shapes, **_kwargs):
+        assert shapes
+        return {
+            "available": True,
+            "state": "ready",
+            "engine": "fake-impact",
+            "analogies": [],
+            "truth_assessed": True,
+        }
+
+    def pattern_clusterer(shapes, **_kwargs):
+        assert shapes
+        return {
+            "available": True,
+            "state": "ready",
+            "engine": "fake-patterns",
+            "clusters": [],
+            "truth_assessed": True,
+        }
+
+    packet = R.review_range(
+        review_repo["repo"], review_repo["range"], max_file_bytes=1024,
+        ocelot_impact=impact_clusterer,
+        ocelot_patterns=pattern_clusterer)
+    section = packet["ocelot"]
+    assert section["impact"]["engine"] == "fake-impact"
+    assert section["patterns"]["engine"] == "fake-patterns"
+    assert section["impact"]["truth_assessed"] is False
+    assert section["patterns"]["truth_assessed"] is False
+    assert packet["truth_assessed"] is False
+
+
+def test_cli_ocelot_impact_and_pattern_flags(review_repo, capsys):
+    code = CLI.main([
+        "--root", str(review_repo["repo"]), "--range", review_repo["range"],
+        "--json", "--fail-on", "never", "--ocelot-impact",
+        "--ocelot-patterns",
+        "--ocelot-root", str(review_repo["repo"] / "missing-ocelot"),
+    ])
+    captured = capsys.readouterr()
+    assert code == 0
+    packet = json.loads(captured.out)
+    assert "impact" in packet["ocelot"]
+    assert "patterns" in packet["ocelot"]
+    assert packet["ocelot"]["truth_assessed"] is False

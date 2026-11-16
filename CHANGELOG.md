@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Ocelot test-impact and architecture-pattern candidates:
+  `ocelot_code.change_shape` records changed files, graph symbols, edge
+  types, test links, import/package directories and a stable digest;
+  `test_impact_clusters` groups similar shapes into candidate test sets
+  (exact digest/overlap, optional Ocelot analogy, injected clusterer) and
+  `architecture_patterns` groups scan opportunities or graph file shapes into
+  candidate patterns. Both report `truth_assessed: false`, never claim
+  completeness, and never execute tests. Code review adds opt-in
+  `ocelot.impact`/`ocelot.patterns` sections (`--ocelot-impact`,
+  `--ocelot-patterns`), repo scan adds opt-in `ocelot.patterns`
+  (`--ocelot-patterns`), and `ozagia.ocelot_code_cli` gains `impact` and
+  `patterns` commands. Missing or failing Ocelot is reported with an exact
+  fallback; no install, network or model call.
+
 - Config migration and opt-in Git hooks: `ozagia config migrate [--root R]
   [--dry-run|--apply --confirm TOKEN]` copies the supported `.ozagia.toml`
   sections (index, memory, adapters, reads, tests, jobs, lint, security,

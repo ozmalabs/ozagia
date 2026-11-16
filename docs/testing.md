@@ -269,6 +269,45 @@ It does not run tests. When the plan selects test files, the packet's
 `[testing.tasks] code_review = "none"` to record that review does not need a
 test selection.
 
+## Test-impact analogies
+
+`ozagia.core.ocelot_code` can attach an optional `ocelot.impact` section to a
+review packet when `ocelot_impact=True` is requested. It builds a change shape
+from the reviewed files and the plan above, then groups similar shapes into
+candidate test sets. The section reuses the plan; it never re-plans or runs a
+test.
+
+The same shape can be built directly:
+
+```python
+from ozagia.core import ocelot_code as OC
+
+shape = OC.change_shape(
+    root,
+    diff="main..HEAD",       # or changed=["src/app.py"]
+    with_test_plan=True,     # attaches core.testing.plan
+)
+result = OC.test_impact_clusters([shape])
+```
+
+`with_test_plan=True` stores a compact plan in `shape["test_plan"]` and its
+selected files in `shape["planned_tests"]`. `test_impact_clusters` reports
+`candidate_tests` and `planned_tests` per cluster, plus
+`test_set_complete: false`, `tests_executed: false` and
+`truth_assessed: false`. It records `not_assessed` saying that a similar test
+set is not complete and a passing subset would not prove correctness.
+
+Similarity is exact structural digest, structural overlap, or an optional
+Ocelot analogy when a checkout resolves. Groups never cross shape families
+(source, test, docs, config, mixed), so a test-only change is not claimed to
+have the same impact as a source change. When Ocelot is missing, exact
+digest/overlap clusters are still returned; `state` and `error` report why.
+
+```bash
+python -m ozagia.ocelot_code_cli impact --root . \
+  --diff main..HEAD --test-plan --json
+```
+
 ## Limits
 
 - The plan selects files, not individual pytest outcomes for graph-linked
@@ -282,6 +321,9 @@ test selection.
   heuristic, not language-specific import resolution.
 - Graph relationships are only as good as the snapshot. A graph without Test
   nodes or import edges falls back rather than guessing.
+- Test-impact analogies are candidates from structural similarity, not a
+  completeness proof. They reuse a plan and never execute it; a different
+  change with the same tests is not evidence those tests are sufficient.
 - No model, network, graph build or test execution happens here.
 - `timeout_s` is recorded for the caller that executes the plan; planning
   itself is bounded by file/graph limits and never sleeps.
