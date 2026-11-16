@@ -1241,22 +1241,36 @@ The read-only part of 1a landed as new files:
 - `core/settings.py`, `settings_cli.py`: typed registry, user/repo/env
   precedence, validation, atomic preview-first writes and the versioned
   `ozagia/config.toml` (`feat/settings-registry`, merged as `11b33ef`).
-- `tests/test_worktree.py`, `tests/test_resources.py`, `tests/test_files.py`,
-  `tests/test_status.py`, `tests/test_view.py`, `tests/test_settings.py`;
-  `docs/worktree.md`, `docs/resources.md`, `docs/files.md`, `docs/status.md`,
-  `docs/view.md`, `docs/settings.md`; console scripts for view, status,
-  settings, worktree, resources and files in `pyproject.toml`.
+- `core/code_review.py`, `code_review_cli.py`: deterministic graph-aware
+  review packets; worktree/resource preflight; typed findings; graph
+  freshness; optional injected-review seam (`feat/code-review`, merged as
+  `20570d7`).
+- `core/tasks.py`, `tasks_cli.py`: bounded task specs, preflight, gates,
+  budgets, evidence logs and artifact manifests; three example specs
+  (`feat/bounded-tasks`, merged as `2d38853`).
+- `core/resources.py`, `daemon/jobs.py`, `daemon/server.py`: job limits,
+  admission before spawn, rlimit + verified-group watchdog, own OOM, log and
+  session feedback (`feat/resource-enforcement`, merged as `2337d28`).
+- `integrations/ocelot/`: explicit pinned resolver/installer with checksum,
+  SSRF/path-traversal guard and manifest verification (`feat/ocelot-installer`,
+  merged as `11c1b60`).
+- Tests for all of the above; docs `worktree.md`, `resources.md`, `files.md`,
+  `status.md`, `view.md`, `settings.md`, `code_review.md`, `tasks.md`,
+  `ocelot.md`; console scripts for view, status, settings, tasks, review,
+  Ocelot, worktree, resources and files in `pyproject.toml`.
 
-Checks after all four merges: `3343 passed, 21 skipped`;
+Checks after both waves: `3469 passed, 21 skipped`;
 `ruff check src tests` passes. A concurrent TUI-brand merge added
 `.opencode/plugins/ozagia/tui.js`; the harness exclude patterns and tests were
 updated for it, and the full suite is green.
 
-Not yet: resource enforcement/OOM, cleanup apply/trash, command-derived path
-extraction for `patch`/`shell`, a true before/after session manifest (the
-current scan attributes pre-existing untracked files to the session with
-`reason: unknown`), `ozagia config` CLI/`config.py` integration, migration from
-`.ozagia.toml`, doctor source reporting, and the UI hosts.
+Not yet: cgroups and exact per-job disk accounting; cleanup apply/trash;
+command-derived path extraction for `patch`/`shell`; a true before/after
+session manifest (the current scan attributes pre-existing untracked files to
+the session with `reason: unknown`); live/multi-model review and Ocelot
+reconciliation in the code-review harness; model/tool adapters and the task
+class library; `ozagia config` CLI/`config.py` integration, migration from
+`.ozagia.toml`, doctor source reporting; and the UI hosts.
 
 ### Parallel workstreams (2026-11-16)
 
@@ -1285,7 +1299,9 @@ Four more agents start from `ab17a1a`:
 | `~/ozmadev/ozagia-wt/bounded-tasks` | `feat/bounded-tasks` | Bounded task specification, runner, gates, budgets and evidence |
 | `~/ozmadev/ozagia-wt/ocelot-installer` | `feat/ocelot-installer` | Pinned, checksummed, explicit Ocelot install and resolution |
 
-The same review/merge/full-suite gate applies.
+Status: all four are merged: `bounded-tasks` as `2d38853`, `ocelot-installer`
+as `11c1b60`, `code-review` as `20570d7`, and `resource-enforcement` as
+`2337d28`. The final full suite is `3469 passed, 21 skipped`; ruff passes.
 
 ## Open decisions
 
