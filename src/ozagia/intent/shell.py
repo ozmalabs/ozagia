@@ -19,13 +19,22 @@ Classes (`result["class"]`):
                   pytest. Fields: `python` (the interpreter token, or None
                   for a pytest script), `script` (the pytest script token),
                   `selectors`, `extra_args`.
-    read          cat F | head [-n N] F | tail [-n N|+N] F | sed -n 'A[,B]p' F.
-                  Fields: `file`, `range` (`("all",)`, `("head", n)`,
-                  `("tail", n)`, `("from", n)`, `("lines", a, b|None)`).
-    grep          grep [-rRnHiFE] [--include G] PAT [PATH], rg [-nHiF]
-                  [-g G] PAT [PATH], git grep [-niFE] PAT [PATH]. Fields:
-                  `pattern`, `path` (None: the working directory), `include`,
-                  `literal`, `ignore_case`, `recursive`, `tool`.
+    read          cat F | head [-n N] F | tail [-n N|+N] F | tail -c [+]N F |
+                  sed -n 'A[,B]p' F | nl [-ba|-bt] F. Fields: `file`,
+                  `range` (`("all",)`, `("head", n)`, `("tail", n)`,
+                  `("from", n)`, `("lines", a, b|None)`, `("bytes_tail", n)`,
+                  `("bytes_from", n)`), `tool`, and for nl `number` ("a"|"t").
+    grep          grep [-rRnHiFE] [-A|-B|-C N|-N] [--include G] PAT [PATH...],
+                  rg [-nNHiF] [-A|-B|-C N] [-g G]... [-t T] [-T T] PAT
+                  [PATH...], git grep [-niFE] PAT [PATH]. Fields: `pattern`,
+                  `paths` (`path`: the first, None for the working
+                  directory), `globs` (`include`: the first), `types`,
+                  `literal`, `ignore_case`, `recursive`, `tool`,
+                  `line_numbers`, `with_filename` (None: decided by the
+                  paths), `before`, `after`, `separators`, `hidden`.
+    files         rg --files [PATH...] [-g G]... [-t T] [-T T] [--hidden]
+                  [--no-ignore[-vcs]] [-u|-uu|-uuu]: run by rg itself.
+                  Fields: `paths`, `options`.
     git_refs      a git command that moves refs (`GIT_REF_MOVING`: commit,
                   push, stash, bisect, ...). Fields: `subcommand` (the
                   alias name for an alias, "git" for a deeply nested
@@ -35,10 +44,20 @@ Classes (`result["class"]`):
     git_read      a read-only git command (diff, show, status, log, blame,
                   and the listing forms above). Fields: `subcommand`.
     ls            `ls [PATH]`, captured as a sorted visible-name listing.
-    find          `find [PATH] -name GLOB [-type f]`, a constrained name search.
+    find          `find [PATH...] [-maxdepth N] [-mindepth N] [EXPR]` with
+                  -name -iname -path -ipath -type f|d|l -newer F -print
+                  -prune -true -false ! -not -a -o ( ): `expr` (a tree),
+                  `prints`, `paths`, `maxdepth`, `mindepth`, `newer`.
     complex       not a simple command (see above).
-    other         anything else (including wc, nl, unsupported find/ls, sed -i,
+    other         anything else (including wc, unsupported find/ls, sed -i,
                   python -c, scripts).
+
+A read-only class (read, grep, files, find, git_read) may follow harmless
+`VAR=x` prefixes (LC_*, LANG, NO_COLOR, TERM, PAGER, GIT_PAGER, COLUMNS;
+`env` holds them; a locale variable is refused for grep and git grep, whose
+regex semantics it changes, and for find -iname/-ipath), and read, grep,
+files, find, ls and git_read may run inside `timeout [-s SIG] [-k D] N`
+(`timeout` holds the seconds, `inner` the command).
 
 Every result has `class` and `reason` (why it is not mapped, or "").
 """
@@ -285,7 +304,7 @@ def _cd_read_wrapper(command: str) -> dict[str, Any] | None:
     if len(cd) != 2 or cd[0] != "cd" or cd[1] in ("", "-"):
         return None
     got = classify(right, _filters=False)
-    if got["class"] not in ("read", "grep", "ls", "find"):
+    if got["class"] not in ("read", "grep", "ls", "find", "files"):
         return None
     return {**got, "cd": cd[1]}
 
@@ -605,6 +624,7 @@ def _positive(text: str) -> int | None:
 def _head_tail(cmd: str, args: list[str]) -> dict[str, Any]:
     n: int | None = 10
     plus = False
+    unit = ""                      # "" lines, "c" bytes (tail -c)
     files: list[str] = []
     i = 0
     while i < len(args):
@@ -613,6 +633,7 @@ def _head_tail(cmd: str, args: list[str]) -> dict[str, Any]:
             files.extend(args[i + 1:])
             break
         value = None
+        this = "n"
         if a == "-n" and i + 1 < len(args):
             value, i = args[i + 1], i + 1
         elif a.startswith("--lines="):
@@ -621,11 +642,20 @@ def _head_tail(cmd: str, args: list[str]) -> dict[str, Any]:
             value = a[2:]
         elif a.startswith("-") and a[1:].isdigit():
             value = a[1:]
+        elif cmd == "tail" and a == "-c" and i + 1 < len(args):
+            value, i, this = args[i + 1], i + 1, "c"
+        elif cmd == "tail" and a.startswith("--bytes="):
+            value, this = a.split("=", 1)[1], "c"
+        elif cmd == "tail" and a.startswith("-c") and len(a) > 2:
+            value, this = a[2:], "c"
         elif a.startswith("-") and a != "-":
             return _result("other", f"{cmd} option {a} is not mapped")
         else:
             files.append(a)
         if value is not None:
+            if unit and unit != this:
+                return _result("other", f"{cmd} -n with -c is not mapped")
+            unit = this
             if cmd == "tail" and value.startswith("+"):
                 plus, value = True, value[1:]
             n = _positive(value)
@@ -634,11 +664,46 @@ def _head_tail(cmd: str, args: list[str]) -> dict[str, Any]:
         i += 1
     if len(files) != 1:
         return _result("other", f"{cmd} of {len(files)} files is not mapped")
-    if cmd == "head":
-        rng: tuple = ("head", n)
+    if unit == "c":
+        rng: tuple = ("bytes_from", n) if plus else ("bytes_tail", n)
+    elif cmd == "head":
+        rng = ("head", n)
     else:
         rng = ("from", n) if plus else ("tail", n)
     return _result("read", file=files[0], range=rng, tool=cmd)
+
+
+def _nl(args: list[str]) -> dict[str, Any]:
+    """`nl [-ba|-bt] FILE`: a read numbered as nl numbers it (width 6, a
+    tab; `-bt`, the default, leaves empty lines unnumbered)."""
+    style = "t"
+    files: list[str] = []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            files.extend(args[i + 1:])
+            break
+        value = None
+        if a == "-b" and i + 1 < len(args):
+            value, i = args[i + 1], i + 1
+        elif a.startswith("-b") and len(a) > 2:
+            value = a[2:]
+        elif a.startswith("--body-numbering="):
+            value = a.split("=", 1)[1]
+        elif a.startswith("-") and a != "-":
+            return _result("other", f"nl option {a} is not mapped")
+        else:
+            files.append(a)
+        if value is not None:
+            if value not in ("a", "t"):
+                return _result("other", f"nl -b{value} is not mapped")
+            style = value
+        i += 1
+    if len(files) != 1 or files[0] == "-":
+        return _result("other", f"nl of {len(files)} files is not mapped")
+    return _result("read", file=files[0], range=("all",), tool="nl",
+                   number=style)
 
 
 def _read_like(tokens: list[str]) -> dict[str, Any] | None:
@@ -660,7 +725,9 @@ def _read_like(tokens: list[str]) -> dict[str, Any] | None:
                     return _result("read", file=args[2],
                                    range=("lines", a, end), tool="sed")
         return _result("other", "sed form is not mapped")
-    if cmd in ("wc", "nl"):
+    if cmd == "nl":
+        return _nl(args)
+    if cmd == "wc":
         return _result("other", f"{cmd} is not mapped")
     if cmd == "ls":
         # Keep this deliberately small: ls formatting and option semantics
@@ -671,25 +738,205 @@ def _read_like(tokens: list[str]) -> dict[str, Any] | None:
     return None
 
 
-def _find(args: list[str]) -> dict[str, Any]:
-    """A conservative find subset: one root and one -name glob, files only."""
-    path = "."
-    pattern = None
-    file_only = False
-    i = 0
-    if i < len(args) and not args[0].startswith("-"):
-        path, i = args[0], 1
-    while i < len(args):
-        if args[i] == "-name" and i + 1 < len(args) and pattern is None:
-            pattern, i = args[i + 1], i + 2
-        elif args[i] == "-type" and i + 1 < len(args) and args[i + 1] == "f" and not file_only:
-            file_only, i = True, i + 2
+class _FindRefused(Exception):
+    pass
+
+
+def find_glob_regex(pattern: str, *, icase: bool = False) -> str | None:
+    """A find glob (`fnmatch` without FNM_PATHNAME or FNM_PERIOD: `*` and
+    `?` match `/` and a leading dot) as a Python regex for `re.fullmatch`,
+    or None when it uses something without a checked equivalent: POSIX
+    classes (`[[:alpha:]]`), a range other than within a-z, A-Z or 0-9, a
+    trailing backslash, or a non-ASCII pattern with `-iname`/`-ipath`."""
+    if icase and not pattern.isascii():
+        return None
+    out: list[str] = []
+    i, n = 0, len(pattern)
+    while i < n:
+        c = pattern[i]
+        if c == "\\":
+            if i + 1 >= n:
+                return None
+            out.append(re.escape(pattern[i + 1]))
+            i += 2
+            continue
+        if c == "*":
+            out.append(".*")
+        elif c == "?":
+            out.append(".")
+        elif c == "[":
+            j = i + 1
+            neg = j < n and pattern[j] in "!^"
+            j += 1 if neg else 0
+            items: list[str] = []
+            first = True
+            while j < n and (pattern[j] != "]" or first):
+                ch = pattern[j]
+                if ch == "[" and pattern[j + 1:j + 2] in (":", "=", "."):
+                    return None
+                if ch == "\\":
+                    if j + 1 >= n:
+                        return None
+                    ch = pattern[j + 1]
+                    j += 1
+                if (pattern[j + 1:j + 2] == "-" and j + 2 < n
+                        and pattern[j + 2] != "]"):
+                    hi = pattern[j + 2]
+                    if not any(lo_ <= ch <= hi <= hi_ for lo_, hi_ in
+                               (("a", "z"), ("A", "Z"), ("0", "9"))):
+                        return None
+                    items.append(re.escape(ch) + "-" + re.escape(hi))
+                    j += 3
+                else:
+                    items.append(re.escape(ch))
+                    j += 1
+                first = False
+            if j >= n:                     # no closing bracket: a literal [
+                out.append(re.escape("["))
+                i += 1
+                continue
+            out.append("[" + ("^" if neg else "") + "".join(items) + "]")
+            i = j
         else:
-            return _result("other", "find expression is not mapped")
-    if (pattern is None or not pattern or not file_only
-            or re.fullmatch(r"[A-Za-z0-9._*?-]+", pattern) is None):
-        return _result("other", "find capture requires -type f and one safe -name pattern")
-    return _result("find", path=path, pattern=pattern, file_only=file_only)
+            out.append(re.escape(c))
+        i += 1
+    return ("(?i)" if icase else "") + "(?s:" + "".join(out) + ")"
+
+
+def _one_char_glob(pattern: str) -> bool:
+    """Whether a find glob has a `?` or a bracket set, which match one
+    character: one byte in a C locale, one code point in a UTF-8 one."""
+    i = 0
+    while i < len(pattern):
+        if pattern[i] == "\\":
+            i += 2
+            continue
+        if pattern[i] in "?[":
+            return True
+        i += 1
+    return False
+
+
+_FIND_GLOBS = {"-name": False, "-iname": True, "-path": False, "-ipath": True,
+               "-wholename": False, "-iwholename": True}
+
+
+def _find(args: list[str]) -> dict[str, Any]:
+    """`find [-P] [PATH...] [-maxdepth N] [-mindepth N] [EXPR]` where EXPR
+    uses `-name -iname -path -ipath -type f|d|l -newer FILE -print -prune
+    -true -false`, `!`/`-not`, `-a`/`-and`, `-o`/`-or` and `( )`. The
+    expression is kept as a tree (`expr`) and evaluated by
+    `intent.shellfs.run_find`; anything else is not mapped."""
+    i = 0
+    while i < len(args) and args[i] in ("-P",):
+        i += 1
+    if i < len(args) and args[i] in ("-H", "-L", "-D", "-O"):
+        return _result("other", f"find option {args[i]} is not mapped")
+    paths: list[str] = []
+    while (i < len(args) and not args[i].startswith("-")
+           and args[i] not in ("(", ")", "!", ",")):
+        paths.append(args[i])
+        i += 1
+    depth: dict[str, int | None] = {"-maxdepth": None, "-mindepth": None}
+    while i < len(args) and args[i] in depth:
+        if i + 1 >= len(args) or not args[i + 1].isdigit():
+            return _result("other", f"find {args[i]} needs a number")
+        depth[args[i]] = int(args[i + 1])
+        i += 2
+    toks = args[i:]
+    pos = 0
+    newer: list[str] = []
+
+    def peek() -> str | None:
+        return toks[pos] if pos < len(toks) else None
+
+    def take() -> str:
+        nonlocal pos
+        pos += 1
+        return toks[pos - 1]
+
+    def primary() -> tuple:
+        tok = take()
+        if tok in _FIND_GLOBS:
+            if peek() is None:
+                raise _FindRefused(f"find {tok} needs a pattern")
+            pat = take()
+            if tok in ("-name", "-iname") and "/" in pat:
+                raise _FindRefused(f"find {tok} with a slash is not mapped")
+            rx = find_glob_regex(pat, icase=_FIND_GLOBS[tok])
+            if rx is None:
+                raise _FindRefused(f"find {tok} pattern {pat!r} is not mapped")
+            field = "name" if tok in ("-name", "-iname") else "path"
+            # How the glob depends on the name's encoding (shellfs).
+            enc = ("icase" if _FIND_GLOBS[tok] else
+                   "one" if _one_char_glob(pat) else "")
+            return (field, rx, enc)
+        if tok == "-type":
+            t = take() if peek() is not None else ""
+            if t not in ("f", "d", "l"):
+                raise _FindRefused(f"find -type {t} is not mapped")
+            return ("type", t)
+        if tok == "-newer":
+            if peek() is None:
+                raise _FindRefused("find -newer needs a file")
+            ref = take()
+            newer.append(ref)
+            return ("newer", ref)
+        if tok in ("-print", "-prune"):
+            return (tok[1:],)
+        if tok in ("-true", "-false"):
+            return ("const", tok == "-true")
+        if tok in depth:
+            raise _FindRefused(f"find {tok} after a test is not mapped")
+        raise _FindRefused(f"find {tok} is not mapped")
+
+    def unary() -> tuple:
+        tok = peek()
+        if tok in ("!", "-not"):
+            take()
+            if peek() is None:
+                raise _FindRefused(f"find {tok} without an expression")
+            return ("not", unary())
+        if tok == "(":
+            take()
+            e = or_expr()
+            if peek() != ")":
+                raise _FindRefused("find: unbalanced parenthesis")
+            take()
+            return e
+        if tok is None or tok in (")", "-o", "-or", "-a", "-and"):
+            raise _FindRefused(f"find: expected an expression before {tok}")
+        return primary()
+
+    def and_expr() -> tuple:
+        left = unary()
+        while peek() is not None and peek() not in ("-o", "-or", ")"):
+            if peek() in ("-a", "-and"):
+                take()
+            left = ("and", left, unary())
+        return left
+
+    def or_expr() -> tuple:
+        left = and_expr()
+        while peek() in ("-o", "-or"):
+            take()
+            left = ("or", left, and_expr())
+        return left
+
+    try:
+        expr: tuple = ("const", True) if not toks else or_expr()
+        if pos != len(toks):
+            raise _FindRefused(f"find {toks[pos]} is not mapped")
+    except _FindRefused as e:
+        return _result("other", str(e))
+
+    def has_print(e: tuple) -> bool:
+        return e[0] == "print" or any(isinstance(x, tuple) and has_print(x)
+                                      for x in e[1:])
+    return _result("find", path=paths[0] if paths else ".",
+                   paths=paths or ["."], expr=expr, prints=has_print(expr),
+                   maxdepth=depth["-maxdepth"], mindepth=depth["-mindepth"],
+                   newer=newer)
 
 
 def bre_to_ere(pattern: str) -> str | None:
@@ -753,55 +1000,114 @@ def _ere_safe(pattern: str) -> bool:
     return not re.search(r"\\[<>0-9`']", pattern)
 
 
+_GREP_FLAGS = {"grep": set("rRnHiFE"), "rg": set("nNHiF"), "git grep": set("niFE")}
+# Short options that take a value (attached or as the next word).
+_GREP_VALUES = {"grep": set("eABC"), "rg": set("eABCgtT"), "git grep": set("e")}
+_GREP_LONG_FLAGS = {"--recursive": "r", "--line-number": "n", "--ignore-case": "i",
+                    "--fixed-strings": "F", "--extended-regexp": "E",
+                    "--with-filename": "H", "--no-line-number": "N"}
+_GREP_LONG_VALUES = {"--regexp": "e", "--after-context": "A",
+                     "--before-context": "B", "--context": "C",
+                     "--include": "include", "--glob": "g", "--type": "t",
+                     "--type-not": "T"}
+_GREP_LONG_OK = {"grep": {"--regexp", "--after-context", "--before-context",
+                          "--context", "--include"},
+                 "rg": {"--regexp", "--after-context", "--before-context",
+                        "--context", "--glob", "--type", "--type-not"},
+                 "git grep": {"--regexp"}}
+
+
 def _grep(args: list[str], *, tool: str) -> dict[str, Any]:
+    """grep, rg and git grep searches. Several paths, `-A/-B/-C N` (and
+    grep's `-N`), rg's `-g/--glob` (negated too: rg evaluates them), and
+    rg's `-t/-T TYPE` are kept as fields for the runner."""
     flags: set[str] = set()
     pattern: str | None = None
-    include: str | None = None
+    globs: list[str] = []
+    types: list[tuple[str, str]] = []
+    ctx: dict[str, int] = {}
     positional: list[str] = []
-    allowed = {"grep": set("rRnHiFE"), "rg": set("nHiF"),
-               "git grep": set("niFE")}[tool]
-    longs = {"--recursive": "r", "--line-number": "n", "--ignore-case": "i",
-             "--fixed-strings": "F", "--extended-regexp": "E",
-             "--with-filename": "H"}
+    allowed = _GREP_FLAGS[tool]
+    values = _GREP_VALUES[tool]
+
+    def value(opt: str, val: str) -> str | None:
+        """Store one option value; the reason it is not mapped, or None."""
+        nonlocal pattern
+        if opt == "e":
+            if pattern is not None:
+                return f"{tool} with several patterns is not mapped"
+            pattern = val
+        elif opt in ("A", "B", "C"):
+            if not val.isdigit():
+                return f"{tool} context {val!r} is not mapped"
+            ctx[opt] = int(val)
+        elif opt in ("g", "include"):
+            if opt == "include" and ("/" in val or val.startswith("!")):
+                return f"grep --include={val} is not mapped"
+            globs.append(val)
+        elif opt in ("t", "T"):
+            types.append((f"-{opt}", val))
+        return None
+
     i = 0
     while i < len(args):
         a = args[i]
         if a == "--":
             positional.extend(args[i + 1:])
             break
-        if a == "-e" and i + 1 < len(args) and pattern is None:
-            pattern, i = args[i + 1], i + 2
-            continue
-        glob_opt = {"grep": ("--include",), "rg": ("-g", "--glob"),
-                    "git grep": ()}[tool]
-        name, eq, value = a.partition("=")
-        if name in glob_opt and include is None:
-            if eq:
-                include = value
-            elif i + 1 < len(args):
-                include, i = args[i + 1], i + 1
+        name, eq, val = a.partition("=")
+        if a.startswith("--"):
+            if name in _GREP_LONG_VALUES and name in _GREP_LONG_OK[tool]:
+                if not eq:
+                    if i + 1 >= len(args):
+                        return _result("other", f"{a} needs a value")
+                    val, i = args[i + 1], i + 1
+                why = value(_GREP_LONG_VALUES[name], val)
+                if why:
+                    return _result("other", why)
+            elif a in _GREP_LONG_FLAGS and _GREP_LONG_FLAGS[a] in allowed:
+                flags.add(_GREP_LONG_FLAGS[a])
+            elif tool == "rg" and a == "--hidden":
+                return _result("other", "rg --hidden search is not mapped")
             else:
-                return _result("other", f"{a} needs a value")
-            if include.startswith("!"):
-                return _result("other", "negated glob is not mapped")
+                return _result("other", f"{tool} option {name} is not mapped")
             i += 1
             continue
-        if a in longs and longs[a] in allowed:
-            flags.add(longs[a])
-        elif a.startswith("-") and not a.startswith("--") and len(a) > 1:
-            if not set(a[1:]) <= allowed:
-                return _result("other", f"{tool} option {a} is not mapped")
-            flags |= set(a[1:])
-        elif a.startswith("-") and a != "-":
-            return _result("other", f"{tool} option {a} is not mapped")
-        else:
-            positional.append(a)
+        if a.startswith("-") and len(a) > 1:
+            if tool == "grep" and a[1:].isdigit():
+                ctx["C"] = int(a[1:])     # grep -2: two lines of context
+                i += 1
+                continue
+            j = 1
+            while j < len(a):
+                c = a[j]
+                if c in values:
+                    rest = a[j + 1:]
+                    if tool == "rg" and rest.startswith("="):
+                        # rg (lexopt) drops one `=` before an attached
+                        # value (`-g=*.py`); grep (getopt) keeps it.
+                        rest = rest[1:]
+                    elif not rest:
+                        if i + 1 >= len(args):
+                            return _result("other", f"{a} needs a value")
+                        rest, i = args[i + 1], i + 1
+                    why = value(c, rest)
+                    if why:
+                        return _result("other", why)
+                    break
+                if c not in allowed:
+                    return _result("other", f"{tool} option {a} is not mapped")
+                flags.add(c)
+                j += 1
+            i += 1
+            continue
+        positional.append(a)
         i += 1
     if pattern is None:
         if not positional:
             return _result("other", f"{tool} without a pattern")
         pattern, positional = positional[0], positional[1:]
-    if len(positional) > 1:
+    if len(positional) > 1 and tool == "git grep":
         return _result("other", f"{tool} over several paths is not mapped")
     literal = "F" in flags
     if not literal and tool != "rg":
@@ -814,14 +1120,76 @@ def _grep(args: list[str], *, tool: str) -> dict[str, Any]:
                 return _result("other", "regex dialect differs from ripgrep")
             pattern = converted
     recursive = tool != "grep" or bool(flags & {"r", "R"})
-    path = positional[0] if positional else None
-    if path is None and not recursive:
+    if not positional and not recursive:
         return _result("other", "grep without a path reads stdin")
-    return _result("grep", pattern=pattern, path=path, include=include,
+    if "-" in positional:
+        return _result("other", f"{tool} of stdin is not mapped")
+    if ctx and tool == "git grep":
+        return _result("other", "git grep context is not mapped")
+    # -A/-B override -C whatever their order (grep and rg alike).
+    before = ctx.get("B", ctx.get("C", 0))
+    after = ctx.get("A", ctx.get("C", 0))
+    # grep prints `--` between groups once any context option is given
+    # (even 0); rg only when there are context lines.
+    separators = bool(ctx) if tool == "grep" else bool(before or after)
+    return _result("grep", pattern=pattern,
+                   path=positional[0] if positional else None,
+                   paths=positional, include=globs[0] if globs else None,
+                   globs=globs, types=types,
                    literal=literal, ignore_case="i" in flags,
                    recursive=recursive, tool=tool,
-                   line_numbers="n" in flags or tool == "rg",
-                   with_filename="H" in flags or recursive)
+                   line_numbers="n" in flags and "N" not in flags,
+                   with_filename=True if ("H" in flags or tool == "git grep")
+                   else None,
+                   before=before, after=after, separators=separators,
+                   hidden=tool != "rg")
+
+
+_RG_FILES_FLAGS = {"--files", "--hidden", "-.", "--no-ignore", "--no-ignore-vcs",
+                   "-u", "-uu", "-uuu"}
+_RG_FILES_VALUES = {"-g": "-g", "--glob": "-g", "-t": "-t", "--type": "-t",
+                    "-T": "-T", "--type-not": "-T"}
+
+
+def _rg_files(args: list[str]) -> dict[str, Any]:
+    """`rg --files [PATH...] [-g GLOB]... [-t TYPE] [-T TYPE] [--hidden]
+    [--no-ignore[-vcs]] [-u|-uu]`: a file listing, run by rg itself (so
+    its ignore rules are exact), sorted by path."""
+    opts: list[str] = []
+    paths: list[str] = []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            paths.extend(args[i + 1:])
+            break
+        name, eq, val = a.partition("=") if a.startswith("--") else (a, "", "")
+        if a in _RG_FILES_FLAGS:
+            if a != "--files":
+                opts.append(a)
+        elif name in _RG_FILES_VALUES and (eq or name.startswith("--")
+                                           or len(a) == 2):
+            if not eq:
+                if i + 1 >= len(args):
+                    return _result("other", f"{a} needs a value")
+                val, i = args[i + 1], i + 1
+            opts += [_RG_FILES_VALUES[name], val]
+        elif a[:2] in ("-g", "-t", "-T") and len(a) > 2 and not a.startswith("--"):
+            # rg drops one `=` before an attached value (`-g=*.py`).
+            opts += [a[:2], a[3:] if a[2] == "=" else a[2:]]
+        elif a in ("--sort", "--sort=path") or a == "--sort-files":
+            if a == "--sort":
+                if i + 1 >= len(args) or args[i + 1] != "path":
+                    return _result("other", "rg --sort other than path is not mapped")
+                i += 1
+        elif a.startswith("-") and a != "-":
+            return _result("other", f"rg option {name} with --files is not mapped")
+        else:
+            paths.append(a)
+        i += 1
+    if "-" in paths:
+        return _result("other", "rg --files of stdin is not mapped")
+    return _result("files", paths=paths, options=opts, tool="rg")
 
 
 def _simple(tokens: list[str]) -> dict[str, Any]:
@@ -835,6 +1203,8 @@ def _simple(tokens: list[str]) -> dict[str, Any]:
         if len(tokens) >= 3 and tokens[1] == "-m" and tokens[2] == "pytest":
             return _pytest(tokens[3:], python=cmd, script=None)
         return _result("other", "python command")
+    if cmd == "rg" and "--files" in tokens[1:]:
+        return _rg_files(tokens[1:])
     if cmd in ("grep", "rg"):
         return _grep(tokens[1:], tool=cmd)
     read = _read_like(tokens)
@@ -842,7 +1212,96 @@ def _simple(tokens: list[str]) -> dict[str, Any]:
         return read
     if cmd == "find":
         return _find(tokens[1:])
+    if cmd == "timeout":
+        secs, rest, why = timeout_args(tokens)
+        if why:
+            return _result("other", why)
+        got = _simple(rest)
+        if got["class"] not in TIMEOUT_CLASSES:
+            return _result("other", got.get("reason")
+                           or f"timeout around {got['class']} is not mapped")
+        return {**got, "timeout": secs, "inner": rest}
     return _result("other", f"{cmd} is not mapped")
+
+
+# Environment variables a read-only captured command may be prefixed with.
+# None of them changes what the emulated commands print, with the
+# exceptions `env_reason` refuses; a git or ls step gets them in its
+# environment.
+_HARMLESS_ENV_RE = re.compile(
+    r"^(?:LC_[A-Z_]+|LANG|NO_COLOR|TERM|PAGER|GIT_PAGER|COLUMNS)$")
+# Classes that may run inside `timeout N` (read-only; pytest is not).
+TIMEOUT_CLASSES = frozenset({"read", "grep", "files", "find", "ls", "git_read"})
+ENV_CLASSES = frozenset({"read", "grep", "files", "find", "git_read", "ls"})
+_DURATION_RE = re.compile(r"^(\d+(?:\.\d+)?)([smhd]?)$")
+
+
+def timeout_args(argv: list[str]) -> tuple[float | None, list[str], str]:
+    """`timeout [-s SIG] [-k DUR] [--preserve-status] [--foreground] [-v]
+    DURATION CMD...` as (seconds, CMD..., ""), or (None, [], why)."""
+    i = 1
+    while i < len(argv) and argv[i].startswith("-"):
+        a = argv[i]
+        if a in ("-s", "--signal", "-k", "--kill-after"):
+            i += 2
+        elif (a.startswith(("--signal=", "--kill-after=")) or
+              (a[:2] in ("-s", "-k") and len(a) > 2)):
+            i += 1
+        elif a in ("--preserve-status", "--foreground", "-v", "--verbose"):
+            i += 1
+        elif a == "--":
+            i += 1
+            break
+        else:
+            return None, [], f"timeout option {a} is not mapped"
+    if i >= len(argv):
+        return None, [], "timeout without a duration"
+    m = _DURATION_RE.match(argv[i])
+    if not m:
+        return None, [], f"timeout duration {argv[i]!r} is not mapped"
+    secs = float(m.group(1)) * {"": 1, "s": 1, "m": 60, "h": 3600,
+                                "d": 86400}[m.group(2)]
+    rest = argv[i + 1:]
+    if not rest:
+        return None, [], "timeout without a command"
+    if secs <= 0:
+        return None, [], "timeout 0 is not mapped"
+    return secs, rest, ""
+
+
+def env_reason(cls: dict[str, Any], env: dict[str, str]) -> str | None:
+    """Why `VAR=x ... <cmd>` may not be captured as `cls`, or None."""
+    bad = [k for k in env if not _HARMLESS_ENV_RE.match(k)]
+    if bad:
+        return f"environment assignment {bad[0]} is not mapped"
+    if cls["class"] not in ENV_CLASSES:
+        return "environment assignment prefix"
+    locale = [k for k in env if k.startswith("LC_") or k == "LANG"]
+    if locale and cls["class"] == "grep" and cls.get("tool") != "rg":
+        return f"{locale[0]} changes {cls.get('tool')}'s regex semantics"
+    if locale and cls["class"] == "find" and "(?i)" in repr(cls.get("expr")):
+        return f"{locale[0]} changes find's case folding"
+    return None
+
+
+def _env_simple(tokens: list[str]) -> dict[str, Any] | None:
+    """`VAR=x ... <read-only command>` with harmless variables only, as the
+    command's class with `env`; None when another rule applies."""
+    env: dict[str, str] = {}
+    i = 0
+    while i < len(tokens) and _ENV_ASSIGN_RE.match(tokens[i]):
+        name, _, value = tokens[i].partition("=")
+        env[name] = value
+        i += 1
+    if i >= len(tokens) or not all(_HARMLESS_ENV_RE.match(k) for k in env):
+        return None
+    got = _simple(tokens[i:])
+    if got["class"] not in ENV_CLASSES or got["class"] == "ls":
+        return None
+    why = env_reason(got, env)
+    if why:
+        return _result("other", why)
+    return {**got, "env": env}
 
 
 def _strip_output_filter(command: str) -> tuple[str, tuple | None]:
@@ -913,6 +1372,9 @@ def classify(command: str, *, _filters: bool = True,
         return _result("complex", why)
     tokens = segments[0]
     if _ENV_ASSIGN_RE.match(tokens[0]):
+        got = _env_simple(tokens)
+        if got is not None:
+            return got
         why = "environment assignment prefix"
         if _compound and not _nested:
             plan, not_why = plan_compound(command)
@@ -926,9 +1388,9 @@ def classify(command: str, *, _filters: bool = True,
 # --------------------------------------------------------------------------- #
 # compound commands
 # --------------------------------------------------------------------------- #
-# Step kinds the intent layer carries out inside a compound command. The
-# first four use the graph; a compound needs at least one of them.
-GRAPH_STEPS = frozenset({"pytest", "read", "grep", "git_read"})
+# Step kinds the intent layer carries out inside a compound command from the
+# graph or the file system; a compound needs at least one of them.
+GRAPH_STEPS = frozenset({"pytest", "read", "grep", "git_read", "find", "files"})
 _PLAIN_STEPS = frozenset({"cd", "echo", "pwd", "ls"})
 # git options a captured git step refuses: they write files or run programs.
 _GIT_STEP_REFUSED = ("--output", "--ext-diff", "--textconv", "--open-files-in-pager",
@@ -1096,12 +1558,115 @@ def _grep_filter(args: list[str]) -> tuple | None:
     return ("grep", rx, "v" in flags, before, after)
 
 
+def _cut_fields(spec: str) -> tuple | None:
+    """A cut field list (`N`, `N,M`, `N-M`, `N-`, `-M`, comma-separated)
+    as sorted, merged (start, end|None) ranges, or None."""
+    out: list[tuple[int, int | None]] = []
+    for part in spec.split(","):
+        m = re.fullmatch(r"(\d*)-(\d*)|(\d+)", part)
+        if not m or part == "-":
+            return None
+        if m.group(3):
+            a = b = int(m.group(3))
+        else:
+            a = int(m.group(1)) if m.group(1) else 1
+            b = int(m.group(2)) if m.group(2) else None
+        if a < 1 or (b is not None and b < a):
+            return None
+        out.append((a, b))
+    return tuple(sorted(out, key=lambda r: r[0]))
+
+
+def _transform_filter(words: list[str]) -> tuple | None:
+    """`wc -l|-c|-w`, `sort [-u] [-n] [-r]`, `uniq [-c]` and `cut -d X -f
+    LIST [-s]` reading stdin, or None."""
+    cmd, args = words[0], words[1:]
+    if cmd == "wc":
+        modes = {"-l": "l", "--lines": "l", "-c": "c", "--bytes": "c",
+                 "-w": "w", "--words": "w"}
+        if len(args) == 1 and args[0] in modes:
+            return ("wc", modes[args[0]])
+        return None
+    if cmd == "sort":
+        opts: set[str] = set()
+        longs = {"--unique": "u", "--numeric-sort": "n", "--reverse": "r"}
+        for a in args:
+            if a in longs:
+                opts.add(longs[a])
+            elif a.startswith("-") and len(a) > 1 and set(a[1:]) <= set("unr"):
+                opts |= set(a[1:])
+            else:
+                return None
+        return ("sort", "n" in opts, "r" in opts, "u" in opts)
+    if cmd == "uniq":
+        if not args:
+            return ("uniq", False)
+        if args in (["-c"], ["--count"]):
+            return ("uniq", True)
+        return None
+    if cmd == "cut":
+        delim, fields, only = "\t", None, False
+        i = 0
+        while i < len(args):
+            a = args[i]
+            val = None
+            if a in ("-d", "-f") and i + 1 < len(args):
+                val, i = args[i + 1], i + 1
+                key = a[1]
+            elif a.startswith(("-d", "-f")) and len(a) > 2:
+                key, val = a[1], a[2:]
+            elif a.startswith(("--delimiter=", "--fields=")):
+                key, val = a[2], a.split("=", 1)[1]
+            elif a in ("-s", "--only-delimited"):
+                only = True
+                i += 1
+                continue
+            else:
+                return None
+            if key == "d":
+                if len(val) != 1 or not val.isascii() or val == "\n":
+                    return None
+                delim = val
+            else:
+                fields = _cut_fields(val)
+                if fields is None:
+                    return None
+            i += 1
+        if fields is None:
+            return None
+        return ("cut", delim, fields, only)
+    return None
+
+
+# Filters that rewrite the text instead of selecting lines of it.
+TRANSFORMS = frozenset({"wc", "sort", "uniq", "cut"})
+
+
 def _filter(words: list[str]) -> tuple | None:
     """A pipeline stage that only filters lines of its stdin: `tail -N` /
     `tail -n +N` / `head -N` / `sed -n 'A[,B]p'` as a read range
-    (("tail"|"from"|"head", N) or ("lines", A, B)), or `grep` (see
-    `_grep_filter`). None for anything else."""
+    (("tail"|"from"|"head", N) or ("lines", A, B)), `grep` (see
+    `_grep_filter`), or one that rewrites them (`_transform_filter`:
+    ("wc"|"sort"|"uniq"|"cut", ...)). A `sort` or `wc` stage may have
+    harmless `VAR=x` prefixes (`LC_ALL=C sort`); the filter tuple then ends
+    with them as a dict. None for anything else."""
+    env: dict[str, str] = {}
+    while words and _ENV_ASSIGN_RE.match(words[0]):
+        name, _, value = words[0].partition("=")
+        if not _HARMLESS_ENV_RE.match(name):
+            return None
+        env[name] = value
+        words = words[1:]
     if not words:
+        return None
+    if words[0] in TRANSFORMS:
+        got = _transform_filter(words)
+        if got is None:
+            return None
+        if got[0] in ("sort", "wc"):
+            return got + (env,)
+        return got
+    if env:
         return None
     if words[0] == "grep":
         return _grep_filter(words[1:])
@@ -1117,7 +1682,8 @@ def _filter(words: list[str]) -> tuple | None:
     if words[0] not in ("tail", "head"):
         return None
     got = _read_like(words + ["-"])
-    if got is None or got["class"] != "read" or got["file"] != "-":
+    if (got is None or got["class"] != "read" or got["file"] != "-"
+            or got["range"][0].startswith("bytes")):
         return None
     return got["range"]
 
@@ -1152,24 +1718,52 @@ def _plan_step(words: list[tuple[str, str, str]], *, leading: bool
         words = words[1:]
     if not words:
         return None, "environment assignment without a command"
+    secs: float | None = None
+    if words[0][2] == "timeout" and words[0][1] == "timeout":
+        secs, rest, why = timeout_args([w[2] for w in words])
+        if why:
+            return None, why
+        words = words[len(words) - len(rest):]
     raw = " ".join(w[1] for w in words)
     argv = [w[2] for w in words]
-    why = _scan(raw) or _scan(" ".join(env.values()).replace("=", " "))
-    if why is not None:
-        return None, f"{argv[0]}: {why}"
     cmd = argv[0]
-    if env:
-        got = classify(raw, _filters=False, _compound=False)
-        if got["class"] != "pytest":
-            return None, "environment assignment prefix"
-        return {"kind": "pytest", "argv": argv, "raw": raw,
-                "cls": {**got, "env": env}}, ""
-    if cmd == "cd":
+    if cmd == "cd" and not env and secs is None:
         if not leading:
             return None, "cd after another step"
         if len(argv) != 2 or argv[1] in ("-", ""):
             return None, "cd form is not mapped"
+        word = words[1][1]
+        if word == "~" or word.startswith("~/"):
+            # `cd ~` / `cd ~/x`: resolved against HOME when it runs, and
+            # captured only when that is inside the root.
+            if _scan(word[1:]) is not None:
+                return None, "cd: tilde path with an expansion"
+            return {"kind": "cd", "argv": argv, "raw": raw,
+                    "dir": "~" + word[1:], "tilde": True}, ""
+        why = _scan(raw)
+        if why is not None:
+            return None, f"cd: {why}"
         return {"kind": "cd", "argv": argv, "raw": raw, "dir": argv[1]}, ""
+    why = _scan(raw) or _scan(" ".join(env.values()).replace("=", " "))
+    if why is not None:
+        return None, f"{argv[0]}: {why}"
+    if env:
+        got = classify(raw, _filters=False, _compound=False)
+        if got["class"] == "pytest" and secs is None:
+            return {"kind": "pytest", "argv": argv, "raw": raw,
+                    "cls": {**got, "env": env}}, ""
+        if cmd == "ls":
+            got = {"class": "ls"}
+        why = env_reason(got, env) if got["class"] != "git_refs" else "git_refs"
+        if why:
+            return None, why
+    if secs is not None and cmd in ("cd", "echo", "pwd"):
+        return None, f"timeout around {cmd} is not mapped"
+    extra: dict[str, Any] = {}
+    if env:
+        extra["env"] = env
+    if secs is not None:
+        extra["timeout"] = secs
     if cmd == "echo":
         args = argv[1:]
         newline = True
@@ -1186,70 +1780,104 @@ def _plan_step(words: list[tuple[str, str, str]], *, leading: bool
         return {"kind": "pwd", "argv": argv, "raw": raw}, ""
     if cmd == "ls":
         return {"kind": "ls", "argv": argv, "raw": raw,
-                "paths": [a for a in argv[1:] if not a.startswith("-")]}, ""
+                "paths": [a for a in argv[1:] if not a.startswith("-")],
+                **extra}, ""
     got = classify(raw, _filters=False, _compound=False)
     kind = got["class"]
     if kind == "git_read":
         why = _git_step_ok(argv)
         if why:
             return None, why
-    elif kind not in ("pytest", "read", "grep"):
+    elif kind not in ("pytest", "read", "grep", "find", "files"):
         return None, got.get("reason") or kind
-    return {"kind": kind, "argv": argv, "raw": raw, "cls": got}, ""
+    if kind == "pytest" and secs is not None:
+        return None, "timeout around pytest is not mapped"
+    return {"kind": kind, "argv": argv, "raw": raw, "cls": got, **extra}, ""
 
 
-def plan_compound(command: str) -> tuple[dict[str, Any] | None, str]:
-    """A command line the intent layer can carry out step by step, as
-    `{"steps": [...], "ops": [...]}`, or (None, why not).
-
-    The grammar is a sequence of pipelines joined by `&&`, `||`, `;` or a
-    newline. A pipeline is one step, then any number of `| tail|head -N`
-    filters, with an optional `2>&1` or `2>/dev/null` (and `>/dev/null`).
-    A step is a pytest, read, grep or read-only git command, `echo` with
-    literal words, `pwd`, `ls`, or a leading `cd DIR`. At least one step
-    must be pytest, read, grep or git (`GRAPH_STEPS`). Subshells, `&`,
-    heredocs, other redirects, substitutions, globs and any other command
-    make it (None, reason).
-
-    Each step is `{"kind", "argv", "raw", "filters": [range...],
-    "stderr": "merge"|"null"|None, "stdout_null": bool}` plus, for the
-    classified kinds, `cls` (the step's own `classify` result)."""
-    toks, why = _lex(command)
-    if toks is None:
-        return None, why
-    pipelines: list[list[list[tuple]]] = [[[]]]
-    redirs: list[list[list[tuple[str, str]]]] = [[[]]]
+def _split_seq(toks: list[tuple[str, str, str]], i: int, depth: int
+               ) -> tuple[list[tuple], list[str], int, str]:
+    """The items of a sequence starting at `toks[i]`, up to a closing `)`
+    (depth > 0) or the end: ("pipe", [[words]...], [[redirs]...]),
+    ("group", items, ops) for `( ... )`, or ("empty",). Returns (items,
+    ops, index of the `)` or the end, why not)."""
+    items: list[tuple] = []
     ops: list[str] = []
-    i = 0
-    while i < len(toks):
+    cur: tuple | None = None
+    n = len(toks)
+    while i < n:
         kind, text, _val = toks[i]
+        if kind == "op" and text == "(":
+            if cur is not None:
+                return [], [], i, "operator ( is not mapped"
+            if depth >= 1:
+                return [], [], i, "nested subshell is not mapped"
+            sub, subops, i, why = _split_seq(toks, i + 1, depth + 1)
+            if why:
+                return [], [], i, why
+            if i >= n or toks[i][1] != ")":
+                return [], [], i, "unbalanced parenthesis"
+            cur = ("group", sub, subops)
+            i += 1
+            continue
+        if kind == "op" and text == ")":
+            if depth == 0:
+                return [], [], i, "unbalanced parenthesis"
+            break
+        if cur is not None and cur[0] == "group" and not (
+                kind == "op" and text in _SEQ_OPS):
+            return [], [], i, "pipeline or redirect after a subshell is not mapped"
+        if kind in ("word", "redir") and cur is None:
+            cur = ("pipe", [[]], [[]])
         if kind == "word":
-            pipelines[-1][-1].append(toks[i])
+            cur[1][-1].append(toks[i])
         elif kind == "redir":
-            if i + 1 >= len(toks) or toks[i + 1][0] != "word":
-                return None, f"redirect {text} without a target"
-            redirs[-1][-1].append((text, toks[i + 1][2]))
+            if i + 1 >= n or toks[i + 1][0] != "word":
+                return [], [], i, f"redirect {text} without a target"
+            cur[2][-1].append((text, toks[i + 1][2]))
             i += 1
         elif text in ("|", "|&"):
+            if cur is None:
+                return [], [], i, "empty command"
             if text == "|&":
-                redirs[-1][-1].append(("2>&", "1"))
-            pipelines[-1].append([])
-            redirs[-1].append([])
+                cur[2][-1].append(("2>&", "1"))
+            cur[1].append([])
+            cur[2].append([])
         elif text in _SEQ_OPS:
+            items.append(cur or ("empty",))
             ops.append(text)
-            pipelines.append([[]])
-            redirs.append([[]])
+            cur = None
         else:
-            return None, f"operator {text} is not mapped"
+            return [], [], i, f"operator {text} is not mapped"
         i += 1
+    items.append(cur or ("empty",))
     # A trailing `;` or newline ends the last command.
-    while ops and ops[-1] == ";" and pipelines[-1] == [[]]:
+    while ops and ops[-1] == ";" and items[-1] == ("empty",):
         ops.pop()
-        pipelines.pop()
-        redirs.pop()
+        items.pop()
+    return items, ops, i, ""
+
+
+def _build_steps(items: list[tuple], ops: list[str]
+                 ) -> tuple[list[dict[str, Any]] | None, str]:
     steps: list[dict[str, Any]] = []
     leading = True
-    for pipe, reds in zip(pipelines, redirs):
+    for item in items:
+        if item[0] == "empty":
+            return None, "empty command"
+        if item[0] == "group":
+            sub, why = _build_steps(item[1], item[2])
+            if sub is None:
+                return None, why
+            raw = sub[0]["raw"]
+            for op, s in zip(item[2], sub[1:]):
+                raw += f" {op} {s['raw']}"
+            steps.append({"kind": "group", "argv": ["("], "raw": f"( {raw} )",
+                          "steps": sub, "ops": list(item[2]), "filters": [],
+                          "stderr": None, "stdout_null": False})
+            leading = False
+            continue
+        pipe, reds = item[1], item[2]
         if any(not cmd for cmd in pipe):
             return None, "empty command"
         step, why = _plan_step(pipe[0], leading=leading)
@@ -1264,6 +1892,11 @@ def plan_compound(command: str) -> tuple[dict[str, Any] | None, str]:
             if got is None:
                 return None, f"pipeline into {cmd[0][2]} is not mapped"
             filters.append(got)
+        if any(f[0] in TRANSFORMS for f in filters):
+            if step["kind"] == "pytest":
+                return None, "pytest piped into wc, sort, uniq or cut is not mapped"
+            if step["kind"] == "grep" and step["cls"].get("tool") == "git grep":
+                return None, "git grep piped into wc, sort, uniq or cut is not mapped"
         # Where fd 1 and fd 2 of the step end up, applying the redirects
         # in order as bash does: "out" (the pipeline / the output), "err"
         # (the output, past any filter), "null".
@@ -1285,8 +1918,53 @@ def plan_compound(command: str) -> tuple[dict[str, Any] | None, str]:
         stdout_null = fd1 == "null"
         steps.append({**step, "filters": filters, "stderr": stderr,
                       "stdout_null": stdout_null})
-    if not any(s["kind"] in GRAPH_STEPS for s in steps):
-        return None, "no pytest, read, grep or git step"
+    return steps, ""
+
+
+def compound_steps(plan: dict[str, Any]) -> list[dict[str, Any]]:
+    """The steps of a compound plan (or a `compound` classification),
+    with the steps inside subshells, in order."""
+    out: list[dict[str, Any]] = []
+    for s in plan.get("steps") or []:
+        if s["kind"] == "group":
+            out.extend(compound_steps(s))
+        else:
+            out.append(s)
+    return out
+
+
+def plan_compound(command: str) -> tuple[dict[str, Any] | None, str]:
+    """A command line the intent layer can carry out step by step, as
+    `{"steps": [...], "ops": [...]}`, or (None, why not).
+
+    The grammar is a sequence of items joined by `&&`, `||`, `;` or a
+    newline. An item is a pipeline or a subshell `( SEQUENCE )` (one level,
+    no pipe or redirect after it); a subshell's `cd` ends with it. A
+    pipeline is one step, then any number of filters (`shell._filter`),
+    with an optional `2>&1` or `2>/dev/null` (and `>/dev/null`). A step is
+    a pytest, read, grep, find, `rg --files` or read-only git command,
+    `echo` with literal words, `pwd`, `ls`, or a leading `cd DIR` (also
+    `cd ~` and `cd ~/DIR`). At least one step must be one of
+    `GRAPH_STEPS`. `&`, heredocs, other redirects, substitutions, globs and
+    any other command make it (None, reason).
+
+    Each step is `{"kind", "argv", "raw", "filters": [range...],
+    "stderr": "merge"|"null"|None, "stdout_null": bool}` plus, for the
+    classified kinds, `cls` (the step's own `classify` result), `env`
+    (harmless `VAR=x` prefixes) and `timeout` (seconds of a `timeout N`
+    wrapper). A subshell is a step of kind "group" with its own `steps`
+    and `ops`."""
+    toks, why = _lex(command)
+    if toks is None:
+        return None, why
+    items, ops, _i, why = _split_seq(toks, 0, 0)
+    if why:
+        return None, why
+    steps, why = _build_steps(items, ops)
+    if steps is None:
+        return None, why
+    if not any(s["kind"] in GRAPH_STEPS for s in compound_steps({"steps": steps})):
+        return None, "no pytest, read, grep, find or git step"
     return {"steps": steps, "ops": ops}, ""
 
 

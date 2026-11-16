@@ -236,9 +236,10 @@ def _may_change_files(tool: str, input: dict[str, Any]) -> tuple[bool, dict]:
         return False, {}
     cls = classify(str(input.get("command") or ""))
     if cls["class"] == "compound":
-        return any(s["kind"] == "pytest" for s in cls["steps"]), cls
-    return cls["class"] not in ("read", "grep", "ls", "find", "git_read",
-                                "git_refs"), cls
+        from ozagia.intent.shell import compound_steps
+        return any(s["kind"] == "pytest" for s in compound_steps(cls)), cls
+    return cls["class"] not in ("read", "grep", "ls", "find", "files",
+                                "git_read", "git_refs"), cls
 
 
 # pytest's short summary lines: `FAILED tests/x.py::test_y[p] - message`.

@@ -1011,7 +1011,9 @@ def test_graph_stats_fields_read_counts():
                                            "passthrough_calls": None, "fallbacks": None,
                                            "preflights": None,
                                            "permission_assert": None,
-                                           "codemode_tools": None}
+                                           "codemode_tools": None,
+                                           "shell_captured": None,
+                                           "shell_passthrough": None}
     # The daemon's shape: handled {"true": captured, "false": passthrough and
     # expired}; fallbacks = plugin fallbacks + expired + failed (review fix 4).
     assert ae.graph_stats_fields({"hellos": 2, "handled": {"true": 3, "false": 4},
@@ -1021,7 +1023,11 @@ def test_graph_stats_fields_read_counts():
                                   "codemode_tools": ["read"]}) == {
         "plugin_loaded": True, "captured_calls": 3, "passthrough_calls": 3,
         "fallbacks": 3, "preflights": 2, "permission_assert": True,
-        "codemode_tools": ["read"]}
+        "codemode_tools": ["read"], "shell_captured": None,
+        "shell_passthrough": None}
+    got = ae.graph_stats_fields({"hellos": 1, "shell": {"captured": 4,
+                                                        "passthrough": 1}})
+    assert (got["shell_captured"], got["shell_passthrough"]) == (4, 1)
     assert ae.graph_stats_fields({"hellos": 1, "handled": 2})["captured_calls"] == 2
     assert ae.graph_stats_fields({"hellos": 0, "by_handled": {"true": 5}})[
         "captured_calls"] == 5

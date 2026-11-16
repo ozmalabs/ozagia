@@ -142,26 +142,41 @@ Wrote file successfully.
 simple command, or a compound command made of simple steps.
 
 A simple command has no operators, redirects, substitutions, variable or
-tilde expansion, unquoted globs (except in `--include=`/`--glob=`), newlines
-or environment prefixes. The classes are:
+tilde expansion, unquoted globs (except in `--include=`/`--glob=`) or
+newlines. A read, grep, files or find command may have `VAR=x` prefixes
+of harmless variables only (`LC_*`, `LANG`, `NO_COLOR`, `TERM`, `PAGER`,
+`GIT_PAGER`, `COLUMNS`): they do not change what the capture prints, and
+a locale variable falls back for grep and git grep (it changes their regex
+semantics) and for find `-iname`/`-ipath` (case folding). rg ignores the
+locale. Any other prefix falls back, except on pytest. A read-only command
+(read, grep, files, find, ls, git) may run inside `timeout [-s SIG] [-k D]
+[--preserve-status] [--foreground] N[smhd]`; pytest inside `timeout` falls
+back. The classes are:
 
 | class | commands | what happens |
 |---|---|---|
 | pytest | `pytest`, `py.test`, `python[3] -m pytest`, `<path>/python -m pytest` | `ozagia.check.run_tests` with the named interpreter (a pytest script's `#!` line), the selectors made root-relative, the other flags, `timeout`/1000 s (default 120). Refused flags (cache, `--pdb`, `--junitxml`, ...) and ambiguous options fall back. |
-| read | `cat F`, `head [-n N] F`, `tail [-n N\|+N] F`, `sed -n 'A[,B]p' F` | read of that range (no 2000-line cap) |
-| grep | `grep [-rRnHiFE] [--include G] PAT [PATH]`, `rg [-nHiF] [-g G] PAT [PATH]`, `git grep [-niFE] PAT [PATH]` | grep; `-i` is case-insensitive. A basic regex is converted to the Rust/Python dialect (`\|` `\(` `\{` become operators, `+ ? \| { } ( )` literals); one with back-references, `\<`, `\>` or POSIX classes falls back. |
+| read | `cat F`, `head [-n N] F`, `tail [-n N\|+N] F`, `sed -n 'A[,B]p' F`, `nl [-ba\|-bt] F`, `tail -c [+]N F` | read of that range (no 2000-line cap). `nl` lines are numbered as nl prints them (`%6d` and a tab; with `-bt`, the default, an empty line is 7 spaces and takes no number); a file with a byte order mark, a carriage return or an nl section delimiter line (`\:`, `\:\:`, `\:\:\:`) falls back. `tail -c` shows the bytes verbatim after `Read file <abs>, bytes a-b of n`, then `[ozagia] lines in: <keys>`; bytes that start inside a UTF-8 character fall back. |
+| grep | `grep [-rRnHiFE] [-A\|-B\|-C N\|-N] [--include G] PAT [PATH...]`, `rg [-nNHiF] [-A\|-B\|-C N] [-g G]... [-t T] [-T T] PAT [PATH...]`, `git grep [-niFE] PAT [PATH]` | grep; `-i` is case-insensitive. A basic regex is converted to the Rust/Python dialect (`\|` `\(` `\{` become operators, `+ ? \| { } ( )` literals); one with back-references, `\<`, `\>` or POSIX classes falls back. Several paths are searched in the order given (matches by path and line within each); overlapping paths, grep `--include` with a file operand (grep filters it, rg does not) and `rg --hidden` fall back. `-A/-B/-C` add context lines (`  Line n- text`) and a `  --` line between groups of one file; `-A`/`-B` override `-C` whatever the order, as in both tools. rg searches as rg does (hidden and ignored files skipped; `-g`, negated `-g !G`, `-t` and `-T` passed to rg). grep and git grep are searched with rg too (hidden files included, `.gitignore` respected: this differs from grep for ignored files, and from git grep for untracked ones). |
+| files | `rg --files [PATH...] [-g G]... [-t T] [-T T] [--hidden] [--no-ignore[-vcs]] [-u\|-uu\|-uuu] [--sort path]` | runs rg itself (paths inside the root), sorted by path; rg's own order is that of its parallel walk, so this is one of the orders it can print. Intent `shell_files`. |
+| find | `find [-P] [PATH...] [-maxdepth N] [-mindepth N] [EXPR]` with `-name -iname -path -ipath -type f\|d\|l -newer F -print -prune -true -false`, `!`/`-not`, `-a`, `-o`, `\( \)` | evaluated as GNU find without `-L`: directory order (`os.scandir`), the start path first, symlinks not followed, the implicit `-print` when there is no `-print`, paths printed as find prints them. A glob range is accepted only inside a-z, A-Z or 0-9; POSIX classes, `-maxdepth` after a test (find warns on stderr), any other primary or action, a symlink start path, more than 20000 entries and a directory with more than 10000 entries (gnulib fts sorts those by inode) fall back. A `?` or bracket glob tested on a non-ASCII name falls back unless the locale (`LC_ALL`, `LC_CTYPE`, `LANG` from the prefix or the daemon's environment) is UTF-8 and the name is UTF-8 (in a C locale fnmatch matches one byte), and `-iname`/`-ipath` on a non-ASCII name falls back. `.git` and the state directory are walked like any directory. |
 | compound | see below | the steps, in order |
 | git_refs | `git commit\|push\|stash\|branch\|checkout\|switch\|reset\|rebase\|merge\|tag\|worktree\|cherry-pick\|revert\|am\|pull\|fetch\|bisect\|...` (`intent.shell.GIT_REF_MOVING`, shared with the Claude Code hook and `eval.agent.OPENCODE_GIT_DENY`), anywhere in the command: in any segment, after `VAR=value` prefixes, shell keywords and group openers (`{ ! if then do else elif while until`), through wrapper commands (`env [-i] [-u N] [-S '...']`, `command`, `builtin`, `exec`, `nice`, `timeout`, `nohup`, `setsid`, `stdbuf`, `ionice`, `chrt`, `taskset`, `sudo`, `doas`, `time`, `xargs`, `watch`, `flock`, `runuser`, `strace`, `ltrace`, `busybox`, `unbuffer`, `eval`, `function NAME { ... }`, `coproc`, `find -exec\|-execdir\|-ok\|-okdir`, `su\|script\|flock -c '<script>'`, repeated, with clustered options such as `sudo -iu root`), as `/path/to/git`, through `git -c alias.<x>=<ref-moving>`, inside a backtick or `$(...)` substitution, and inside `sh\|bash\|zsh\|dash\|ksh\|fish\|... -c '<script>'` (classified once more; a script nested deeper is refused when it names `git` and then a ref-moving subcommand) | tool error `Refused by ozagia: <command> changes git refs`. Listing forms (`git branch`, `git tag -l`, `git stash list`, `git worktree list`, `git bisect log`) are read-only. |
 | git_read, other, complex | everything else | `handled: false` |
 
 A compound command (`shell.plan_compound`, run by `intent.compound`) is a
-sequence of pipelines joined by `&&`, `||`, `;` or newlines. Each pipeline
-is one step, then any number of filters (`| tail -N`, `| tail -n +N`,
-`| head -N`, `| sed -n 'A[,B]p'`, `| grep [-viEFw] [-A|-B|-C N] PAT`), with
-optional `2>&1`, `2>/dev/null` and `>/dev/null`. The steps are:
+sequence of pipelines and subshells joined by `&&`, `||`, `;` or newlines.
+A subshell `( SEQUENCE )` (one level, no pipe or redirect after it) runs
+its own sequence: a `cd` inside it ends with it, and its status is that of
+its last command. Each pipeline is one step, then any number of filters
+(`| tail -N`, `| tail -n +N`, `| head -N`, `| sed -n 'A[,B]p'`,
+`| grep [-viEFw] [-A|-B|-C N] PAT`, `| wc -l|-c|-w`, `| sort [-u] [-n]
+[-r]`, `| uniq [-c]`, `| cut [-d X] -f LIST [-s]`), with optional `2>&1`,
+`2>/dev/null` and `>/dev/null`. The steps are:
 
-- pytest, read and grep, as above; pytest may have `VAR=value` prefixes
-  (they extend the test environment);
+- pytest, read, grep, files and find, as above; pytest may have any
+  `VAR=value` prefixes (they extend the test environment), the others
+  the harmless ones and `timeout N`;
 - read-only git (`diff`, `show`, `status`, `log`, `blame` and the listing
   forms; `--no-pager` and `-C <dir inside the root>` allowed). It runs as an
   argv without a shell, with `GIT_OPTIONAL_LOCKS=0` and `GIT_PAGER=cat`.
@@ -169,11 +184,16 @@ optional `2>&1`, `2>/dev/null` and `>/dev/null`. The steps are:
   run programs (`--output`, `--ext-diff`, `--textconv`), options that read
   files git does not track (`--no-index`, `--contents`, `-O`,
   `--ignore-revs-file`), and any other global option;
-- `echo` with literal words, `pwd`, `ls` (paths inside the root);
-- `cd DIR` before any other step, inside the root; later steps run there.
+- `echo` with literal words, `pwd`, `ls` (paths inside the root; harmless
+  prefixes go to its environment, as they do for git);
+- `cd DIR` before any other step of its sequence, inside the root; later
+  steps run there. `cd ~` and `cd ~/DIR` use `HOME` (the daemon's, or the
+  native loop's `_test_env`) and are captured when that is inside the
+  root.
 
-At least one step must be pytest, read, grep or git. Anything else falls
-back as a whole: heredocs, subshells, `&`, other redirects, substitutions,
+At least one step must be pytest, read, grep, files, find or git. Anything
+else falls back as a whole: heredocs, nested subshells, `&`, other
+redirects, substitutions,
 globs, `python -c`, and an unmapped command or filter. So does any problem
 found before the first step runs (a directory or file outside the root, a
 missing file, an interpreter not on PATH). A step that fails once running
@@ -187,15 +207,50 @@ back.
 
 Statuses follow bash: `&&` and `||` short-circuit and `;` continues. A
 pipeline's status is that of its last command: 0 after a `head`/`tail`/
-`sed` filter, and for a `grep` filter 1 when no line is left. pytest takes
-its exit code, grep is 1 when nothing matches, and git takes its own code.
-One timeout covers the whole command (`input.timeout`, else 120 s).
+`sed`/`wc`/`sort`/`uniq`/`cut` filter, and for a `grep` filter 1 when no
+line is left. pytest takes its exit code, grep is 1 when nothing matches,
+git and `rg --files` take their own code, and find is 0.
+One timeout covers the whole command (`input.timeout`, else 120 s). A
+step's own `timeout N` limits a git, ls or `rg --files` subprocess to N
+seconds (status 124; the partial output of a killed command is not
+reproduced), and gives status 124 and no output to an emulated step that
+took longer than N.
+
+The daemon counts shell calls in `stats.shell` (captured, refused,
+passthrough, `capture_rate`, the captured intents and the most common
+passthrough reasons); the agent eval records `shell_captured` and
+`shell_passthrough` per run and `shell_capture_rate` per arm.
 
 The output is each step's output in order:
 
 - pytest, read and grep give their usual lines (below);
 - `git diff` and `git show` add `[ozagia] touched: <keys>`;
 - a final status other than 0 adds `[ozagia] exit <n>`.
+
+Filters follow the text as bash passes it: a last line without a newline
+stays so through `head`, `tail` and `sed`, so `wc -l` and `wc -c` count as
+wc does; grep, sort, uniq and cut end every line. `sort` compares bytes
+and is captured only when `LC_COLLATE` (and for `-n`, `LC_NUMERIC`) is C,
+POSIX or C.UTF-8, from a `LC_ALL=C sort` prefix or the daemon's
+environment; other locales collate differently, so the command falls
+back. `sort -n` reads a leading number after blanks (`-`, digits, a `.`
+fraction; anything else is 0) and orders equal numbers by bytes unless
+`-u`; `-r` reverses both; `-u` keeps the first line of each run of equal
+keys. `uniq` compares bytes and `uniq -c` prints `%7d `. `cut -f` prints
+fields in file order and a line without the delimiter whole (dropped with
+`-s`); the delimiter is one ASCII character. `wc -w` splits at ASCII white
+space, and in a UTF-8 locale also at the Unicode spaces glibc and
+coreutils count. A pipeline through wc, sort, uniq or cut shows the
+command's own text (grep as `path:n:text`, context `path-n-text`, `--`
+separators; rg's line numbers only with `-n`, as when its output is not a
+terminal) and no graph lines. pytest and git grep piped into them fall
+back, and so does `grep -r` over a directory (grep also searches ignored,
+`.git`, binary and large files). In this mode rg searches files of any
+size, and a line that is not UTF-8, ends with a carriage return or is a
+binary-file notice makes the command fall back; the search runs before the
+first step, and after a pytest step it falls back. `grep -r` over a
+directory piped into `head`, `tail`, `sed` or a `grep` with context also
+falls back: grep prints files in readdir order, the capture by path.
 
 Filters apply to a step's own text, never to its `[ozagia]` lines. A read
 or grep step is filtered at the source:

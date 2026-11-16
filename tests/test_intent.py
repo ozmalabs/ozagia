@@ -486,7 +486,7 @@ CLASSIFY = [
     ("sed -n '3,$p' a.py", "read"),
     ("sed -i 's/a/b/' a.py", "other"),
     ("wc -l a.py", "other"),
-    ("nl a.py", "other"),
+    ("nl a.py", "read"),
     ("grep -rn foo .", "grep"),
     ("grep -rni foo src", "grep"),
     ("grep -n foo a.py", "grep"),
@@ -497,10 +497,10 @@ CLASSIFY = [
     ("grep foo", "other"),
     ("grep -rnw foo .", "other"),
     ("grep -rn foo --include=*.py .", "grep"),
-    ("grep -rn foo a b", "other"),
+    ("grep -rn foo a b", "grep"),
     ("rg foo", "grep"),
     ("rg -i Foo src", "grep"),
-    ("rg -t py foo", "other"),
+    ("rg -t py foo", "grep"),
     ("git grep -n foo", "grep"),
     ("git diff", "git_read"),
     ("git diff HEAD~1 -- pkg", "git_read"),
@@ -526,8 +526,8 @@ CLASSIFY = [
     ("ls -la", "other"),
     ("find . -type f -name '*.py'", "find"),
     ("find src -type f -name '*.py'", "find"),
-    ("find . -type f -name '[ab].py'", "other"),
-    ("find . -type f -name 'a\\*.py'", "other"),
+    ("find . -type f -name '[ab].py'", "find"),
+    ("find . -type f -name 'a\\*.py'", "find"),
     ("find . -exec rm {} \\;", "complex"),
     ("cd src && pytest", "compound"),
     ("cd pkg && cat mod.py", "read"),
@@ -573,6 +573,99 @@ CLASSIFY = [
     ("bash -c 'git status'", "other"),
     ("echo '$(git stash)'", "other"),
     ("git -c user.name=x log", "git_read"),
+    # W2: more shell capture
+    ("rg foo pkg tests", "grep"),
+    ("rg -n foo pkg/mod.py README.md", "grep"),
+    ("grep -rn foo pkg tests README.md", "grep"),
+    ("git grep foo a b", "other"),                 # git grep: one path
+    ("rg -C 2 foo pkg", "grep"),
+    ("rg -A1 -B2 foo", "grep"),
+    ("rg --context=3 foo", "grep"),
+    ("grep -rnC2 foo .", "grep"),
+    ("grep -n -2 foo a.py", "grep"),
+    ("grep -A x foo a.py", "other"),
+    ("git grep -C2 foo", "other"),
+    ("rg -g '*.py' -g '!test_*' foo", "grep"),
+    ("rg --glob=*.py foo", "grep"),
+    ("rg -t py -T md foo src", "grep"),
+    ("rg --hidden foo", "other"),
+    ("rg -e a -e b", "other"),
+    ("rg foo -", "other"),
+    ("grep -rn --include=src/*.py foo .", "other"),
+    ("rg --files", "files"),
+    ("rg --files pkg tests -g '*.py'", "files"),
+    ("rg --files -t py --hidden", "files"),
+    ("rg --files -uu --sort path", "files"),
+    ("rg --files -L", "other"),
+    ("rg --files --null", "other"),
+    ("rg --files --sort modified", "other"),
+    ("cd pkg && rg --files", "files"),
+    ("nl -ba a.py", "read"),
+    ("nl -b a a.py", "read"),
+    ("nl --body-numbering=t a.py", "read"),
+    ("nl -bn a.py", "other"),
+    ("nl -w3 a.py", "other"),
+    ("nl a b", "other"),
+    ("tail -c 100 a.py", "read"),
+    ("tail -c +5 a.py", "read"),
+    ("tail --bytes=20 a.py", "read"),
+    ("tail -c 1K a.py", "other"),
+    ("tail -n 2 -c 5 a.py", "other"),
+    ("head -c 5 a.py", "other"),
+    ("LC_ALL=C rg foo", "grep"),
+    ("NO_COLOR=1 TERM=dumb cat a.py", "read"),
+    ("LANG=C nl -ba a.py", "read"),
+    ("COLUMNS=80 rg --files", "files"),
+    ("LC_ALL=C grep -rn foo .", "other"),          # locale changes grep
+    ("LC_ALL=C find . -iname '*.PY'", "other"),    # and find -iname
+    ("LC_ALL=C find . -name '*.py'", "find"),
+    ("FOO=1 rg foo", "complex"),
+    ("LC_ALL=C pytest", "compound"),
+    ("timeout 10 rg foo", "grep"),
+    ("timeout -s KILL 5 cat a.py", "read"),
+    ("timeout --signal=TERM -k 2 1.5m nl -ba a.py", "read"),
+    ("timeout 5 find . -name '*.py'", "find"),
+    ("timeout 5 pytest", "other"),
+    ("timeout 5 python x.py", "other"),
+    ("timeout 5", "other"),
+    ("timeout 5 git push", "git_refs"),
+    ("timeout 5 git log -1", "git_read"),
+    ("find . -maxdepth 2 -type f -name '*.py'", "find"),
+    ("find src tests -type d", "find"),
+    ("find . -mindepth 1 -maxdepth 1", "find"),
+    ("find . -name '*.py' -not -path './.git/*'", "find"),
+    ("find . ! -name '*.pyc' -type f", "find"),
+    ("find . -path ./node_modules -prune -o -name '*.js' -print", "find"),
+    ("find . \\( -name '*.md' -o -name '*.rst' \\) -print", "find"),
+    ("find . -iname 'readme*'", "find"),
+    ("find . -newer setup.py -type f", "find"),
+    ("find . -type l", "find"),
+    ("find .", "find"),
+    ("find . -name '*.py' -maxdepth 1", "other"),  # global option after a test
+    ("find . -type f -size +1k", "other"),
+    ("find . -name '*.py' -print0", "other"),
+    ("find . -name '*.py' -delete", "other"),
+    ("find -L . -name x", "other"),
+    ("find . -name 'a/b'", "other"),
+    ("find . -name '[[:alpha:]]*'", "other"),
+    ("find . -type f,d", "other"),
+    ("(cd pkg && rg foo)", "compound"),
+    ("(cd pkg; cat mod.py)", "compound"),
+    ("( cd pkg && git status ) && echo x", "compound"),
+    ("cd ~ && rg foo", "compound"),
+    ("cd ~/proj && cat a.py", "compound"),
+    ("cd ~bob && cat a.py", "complex"),
+    ("rg foo | wc -l", "compound"),
+    ("rg -n foo | cut -d: -f1 | sort -u", "compound"),
+    ("cat a.py | sort -rn | uniq -c", "compound"),
+    ("find . -name '*.py' | wc -l", "compound"),
+    ("rg --files | grep test", "compound"),
+    ("nl -ba a.py | sed -n '3,9p'", "compound"),
+    ("cat a.py | sort -k2", "complex"),
+    ("cat a.py | cut -c1-5", "complex"),
+    ("cat a.py | uniq -d", "complex"),
+    ("cat a.py | wc", "complex"),
+    ("pytest | wc -l", "complex"),
 ]
 
 
@@ -686,12 +779,11 @@ def test_shell_ls_refuses_truncated_or_unreadable_directory(mem, repo, monkeypat
 
 
 def test_shell_find_permission_errors_fall_back(mem, repo, monkeypatch):
-    from ozagia.intent import run
+    from ozagia.intent import shellfs
 
-    def denied_walk(path, *, followlinks, onerror):
-        onerror(PermissionError(str(path)))
-        yield  # pragma: no cover
-    monkeypatch.setattr(run.os, "walk", denied_walk)
+    def denied_scandir(path):
+        raise PermissionError(str(path))
+    monkeypatch.setattr(shellfs.os, "scandir", denied_scandir)
     assert _call(mem, "shell", command="find pkg -type f -name '*.py'")["handled"] is False
     for cmd in ("git status", "python -c 'print(1)'", "pwd && ls"):
         assert _call(mem, "shell", command=cmd)["handled"] is False, cmd
@@ -789,7 +881,7 @@ def test_pytest_with_an_output_filter_is_still_pytest(command, filt):
 
 
 @pytest.mark.parametrize("command", ["pytest > out.txt", "pytest | wc -l",
-                                     "cat a | sort", "pytest &"])
+                                     "cat a | tee x", "pytest &"])
 def test_other_pipelines_stay_complex(command):
     from ozagia.intent.shell import classify
     assert classify(command)["class"] == "complex"

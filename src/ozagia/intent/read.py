@@ -112,9 +112,41 @@ def _headers(memory: Any, rel: str, text: str, a: int, b: int,
     return at
 
 
+def nl_lines(lines: list[str], style: str) -> list[str]:
+    """`lines` as `nl -b<style>` prints them: a 6-wide number and a tab;
+    with `-bt`, an empty line gets 7 spaces and no number."""
+    out: list[str] = []
+    count = 0
+    for line in lines:
+        if style == "t" and line == "":
+            out.append(" " * 7)
+            continue
+        count += 1
+        out.append(f"{count:6d}\t{line}")
+    return out
+
+
+def nl_check(path: Path) -> None:
+    """Unhandled for a file nl would print differently from its lines: a
+    byte order mark, a carriage return, or a section delimiter line
+    (`\\:`, `\\:\\:`, `\\:\\:\\:`)."""
+    try:
+        data = path.read_bytes()
+    except OSError as e:
+        raise Unhandled(f"cannot read {path}: {e}") from None
+    if data.startswith(b"\xef\xbb\xbf"):
+        raise Unhandled("nl of a file with a byte order mark is not mapped")
+    if b"\r" in data:
+        raise Unhandled("nl of a file with carriage returns is not mapped")
+    if re.search(rb"(?m)^(?:\\:){1,3}$", data):
+        raise Unhandled("nl section delimiter lines are not mapped")
+
+
 def render_file(memory: Any, target: Target, *, offset: int | None,
-                limit: int | None, cap: bool = True) -> _Rendered:
-    """A file range in read format. `cap=False` reads to the end by default."""
+                limit: int | None, cap: bool = True,
+                numbering: str | None = None) -> _Rendered:
+    """A file range in read format. `cap=False` reads to the end by default.
+    `numbering` "a"/"t" numbers the lines as `nl -ba`/`nl -bt` does."""
     text = read_text(target.path)
     lines = split_lines(text)
     total = len(lines)
@@ -136,9 +168,11 @@ def render_file(memory: Any, target: Target, *, offset: int | None,
             out.key(dk)
             out.lines.append(tag(dk))
     at = _headers(memory, rel, text, a, b, info, out) if total else {}
+    shown = nl_lines(lines, numbering) if numbering else None
     for i in range(a, b + 1):
         out.lines.extend(at.get(i, ()))
-        out.lines.append(f"{i}: {lines[i - 1]}")
+        out.lines.append(shown[i - 1] if shown is not None
+                         else f"{i}: {lines[i - 1]}")
     return out
 
 
@@ -258,11 +292,17 @@ def handle_read(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
     return {"intent": intent, "output": "\n".join(out.lines), "keys": out.keys}
 
 
-def read_range(memory: Any, path: Path, rng: tuple) -> dict[str, Any]:
-    """A shell read (`cat`, `head`, `tail`, `sed -n`) as a read."""
+def read_range(memory: Any, path: Path, rng: tuple, *,
+               numbering: str | None = None) -> dict[str, Any]:
+    """A shell read (`cat`, `head`, `tail`, `sed -n`, `nl`) as a read;
+    `tail -c` ranges go to `read_bytes`."""
+    if rng[0] in ("bytes_tail", "bytes_from"):
+        return read_bytes(memory, path, rng)
     target = resolve(root_of(memory), str(path))
     if not target.path.is_file():
         raise Unhandled(f"not a regular file: {path}")
+    if numbering:
+        nl_check(target.path)
     text = read_text(target.path)
     total = len(split_lines(text))
     kind = rng[0]
@@ -280,7 +320,64 @@ def read_range(memory: Any, path: Path, rng: tuple) -> dict[str, Any]:
     if total and offset > total:
         raise Unhandled("range starts after the end of the file")
     out = render_file(memory, target, offset=offset, limit=max(limit, 1),
-                      cap=False)
+                      cap=False, numbering=numbering)
+    return {"intent": "shell_read", "output": "\n".join(out.lines),
+            "keys": out.keys}
+
+
+def byte_slice(path: Path, rng: tuple) -> tuple[bytes, int, int]:
+    """The bytes `tail -c N` (`bytes_tail`) or `tail -c +N` (`bytes_from`)
+    prints, its 0-based start and the file size. Unhandled for a binary or
+    oversized file."""
+    from ozagia.intent.common import BINARY_SNIFF_BYTES, MAX_READ_BYTES
+    try:
+        size = path.stat().st_size
+        if size > MAX_READ_BYTES:
+            raise Unhandled(f"{path} is larger than {MAX_READ_BYTES} bytes")
+        data = path.read_bytes()
+    except OSError as e:
+        raise Unhandled(f"cannot read {path}: {e}") from None
+    if b"\0" in data[:BINARY_SNIFF_BYTES]:
+        raise Unhandled(f"{path} is binary")
+    total = len(data)
+    start = max(0, total - rng[1]) if rng[0] == "bytes_tail" else min(
+        total, rng[1] - 1)
+    return data[start:], start, total
+
+
+def read_bytes(memory: Any, path: Path, rng: tuple) -> dict[str, Any]:
+    """`tail -c`: the bytes verbatim after a `Read file <abs>, bytes a-b of
+    n` line and the file header, then `[ozagia] lines in: <keys>` for the
+    lines they come from. Unhandled when the bytes start inside a UTF-8
+    character."""
+    from ozagia.intent.common import Keyer
+    root = root_of(memory)
+    target = resolve(root, str(path))
+    if not target.path.is_file():
+        raise Unhandled(f"not a regular file: {path}")
+    chunk, start, total = byte_slice(target.path, rng)
+    try:
+        text = chunk.decode("utf-8")
+    except UnicodeDecodeError:
+        raise Unhandled("tail -c starts inside a UTF-8 character") from None
+    out = _Rendered()
+    out.lines.append(f"Read file {target.display}, "
+                     + (f"bytes {start + 1}-{total} of {total}" if chunk
+                        else f"0 bytes of {total}"))
+    info = file_summary(memory, target.rel)
+    if info is not None:
+        out.key(file_key(target.rel))
+        out.lines.append(file_header(memory, target.rel, info))
+    if chunk:
+        data = target.path.read_bytes()
+        first = data[:start].count(b"\n") + 1
+        last = data.count(b"\n") + (0 if data.endswith(b"\n") else 1)
+        keyer = Keyer(memory, target.rel)
+        keys = list(dict.fromkeys(keyer.key(n) for n in range(first, last + 1)))
+        for k in keys:
+            out.key(k)
+        out.lines.append(text[:-1] if text.endswith("\n") else text)
+        out.lines.append(tag("lines in: " + ", ".join(keys[:20])))
     return {"intent": "shell_read", "output": "\n".join(out.lines),
             "keys": out.keys}
 

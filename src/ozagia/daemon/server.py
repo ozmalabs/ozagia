@@ -41,7 +41,13 @@ daemon failed or timed out; `unknown_outcomes` of them carry
 "unknown_outcome"); `fallbacks` = `plugin_fallbacks`, once per call: every
 plugin fallback (daemon error, timeout, `ok: false`, unknown outcome) sends
 exactly one such `after`. `expired` and `tool_failures` are the daemon-side
-view of some of the same calls and are reported separately.
+view of some of the same calls and are reported separately. `shell` counts
+the `shell` tool calls the daemon answered (not expired, not preflights):
+`captured` (handled), `refused` (ref-moving git) and `passthrough`, with
+`capture_rate` = captured / (captured + passthrough), `by_intent` for the
+captured ones, and the 30 most common `passthrough_reasons` (the
+classifier's `... is not mapped` reasons; 200 distinct ones are kept, the
+rest count as "(other)").
 
 The socket is created mode 0600. A socket file left at the path by a daemon
 that no longer answers `ping` is replaced; a live daemon or a non-socket
@@ -52,6 +58,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import signal
 import socketserver
 import stat
@@ -66,6 +73,36 @@ from ozagia.daemon import protocol as P
 JOURNAL_NAME = "daemon_journal.jsonl"
 # Keys kept per journal record.
 JOURNAL_KEYS = 20
+# Distinct shell passthrough reasons kept, and shown in `stats`.
+SHELL_REASONS = 200
+SHELL_REASONS_SHOWN = 30
+
+# Passthrough reasons that name a file or directory, rewritten to one key
+# each so paths do not fill the reason table: (pattern, replacement), in
+# order.
+_REASON_PATHS = [
+    (re.compile(r"^(cannot read|cannot stat|find -newer|find traversal failed|"
+                r"ls directory cannot be read)\b.*", re.S), r"\1 <path>"),
+    (re.compile(r"^(no such file|no such path|not a directory|not a regular "
+                r"file|find root does not exist): .*", re.S), r"\1: <path>"),
+    (re.compile(r"^(cd:|git -C|workdir) .*?( is not a directory|: not a "
+                r"directory| is outside the project root)$", re.S),
+     r"\1 <path>\2"),
+    (re.compile(r"^.*?( is binary| is larger than \d+ bytes| is not UTF-8|"
+                r" is outside the project root| has no interpreter line|"
+                r" is not on PATH| is not an executable)$", re.S),
+     r"<path>\1"),
+    (re.compile(r"^\S+(: interpreter( line)? ).*", re.S), r"<path>\1..."),
+]
+
+
+def shell_reason_key(reason: str) -> str:
+    """A passthrough reason with any file path in it replaced by `<path>`,
+    for counting."""
+    for rx, repl in _REASON_PATHS:
+        if rx.match(reason):
+            return rx.sub(repl, reason, count=1)
+    return reason
 STALE_PING_TIMEOUT_S = 1.0
 # How often a daemon started with `parent_pid` checks that its parent lives.
 PARENT_POLL_S = 2.0
@@ -141,10 +178,10 @@ def _lock_free(op: Any, tool: Any, inp: Any) -> bool:
     (`_lock`) for the steps that read the graph."""
     if op != "tool" or tool != "shell" or not isinstance(inp, dict):
         return False
-    from ozagia.intent.shell import classify
+    from ozagia.intent.shell import classify, compound_steps
     cls = classify(str(inp.get("command") or ""))
     if cls["class"] == "compound":
-        return any(s["kind"] == "pytest" for s in cls["steps"])
+        return any(s["kind"] == "pytest" for s in compound_steps(cls))
     return cls["class"] == "pytest"
 
 
@@ -180,6 +217,12 @@ class DaemonState:
         self.unknown_outcomes = 0  # ... whose fallback is "unknown_outcome"
         self.tool_failures = 0   # tool: ok false
         self.preflights = 0      # tool: preflight answered "permission required"
+        # shell tool calls: captured (handled), refused (git refs) and
+        # passthrough, with the passthrough reasons, so an eval can measure
+        # the shell capture rate.
+        self.shell = {"captured": 0, "refused": 0, "passthrough": 0}
+        self.shell_intents: dict[str, int] = {}
+        self.shell_reasons: dict[str, int] = {}
         self.hellos: list[dict[str, Any]] = []
         self.ms_total = 0.0
         self.ms_max = 0.0
@@ -340,6 +383,25 @@ class DaemonState:
                     self.passthrough += 1
                 elif resp.get("late"):
                     self.late += 1
+            if (op == "tool" and tool == "shell" and resp.get("ok")
+                    and not expired and not resp.get("preflight")):
+                it = str(meta.get("intent") or "")
+                if not handled:
+                    self.shell["passthrough"] += 1
+                    reason = shell_reason_key(
+                        str(resp.get("reason") or ""))[:120]
+                    if (reason in self.shell_reasons
+                            or len(self.shell_reasons) < SHELL_REASONS):
+                        self.shell_reasons[reason] = (
+                            self.shell_reasons.get(reason, 0) + 1)
+                    else:
+                        self.shell_reasons["(other)"] = (
+                            self.shell_reasons.get("(other)", 0) + 1)
+                elif it == "shell_refused":
+                    self.shell["refused"] += 1
+                else:
+                    self.shell["captured"] += 1
+                    self.shell_intents[it] = self.shell_intents.get(it, 0) + 1
             if op == "after":
                 if expired:
                     self.after_expired += 1
@@ -390,6 +452,18 @@ class DaemonState:
                 "hello_sessions": [h.get("session") for h in self.hellos
                                    if h.get("session")],
                 "preflights": self.preflights,
+                "shell": {
+                    **self.shell,
+                    "capture_rate": (
+                        round(self.shell["captured"]
+                              / (self.shell["captured"] + self.shell["passthrough"]), 4)
+                        if self.shell["captured"] + self.shell["passthrough"]
+                        else None),
+                    "by_intent": dict(self.shell_intents),
+                    "passthrough_reasons": dict(sorted(
+                        self.shell_reasons.items(),
+                        key=lambda kv: (-kv[1], kv[0]))[:SHELL_REASONS_SHOWN]),
+                },
                 "permission_assert": _last(self.hellos, "permission_assert"),
                 "codemode_tools": sorted({
                     name for h in self.hellos

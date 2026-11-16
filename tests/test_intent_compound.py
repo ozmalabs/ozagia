@@ -76,6 +76,18 @@ def test_wrappers_without_ref_moving_git_are_not_refused(command):
     ("git show HEAD:a.py | sed -n '3,9p'", ["git_read"], []),
     ("PYTHONPATH=lib python -m pytest t.py -q", ["pytest"], []),
     ("cd a && cd b && cat x.py\n", ["cd", "cd", "read"], ["&&", "&&"]),
+    # W2
+    ("(cd pkg && rg foo)", ["group"], []),
+    ("(cd pkg; cat a.py) && (cd b && git diff); pwd", ["group", "group", "pwd"],
+     ["&&", ";"]),
+    ("cd ~/x && rg foo", ["cd", "grep"], ["&&"]),
+    ("LC_ALL=C rg -n foo | LC_ALL=C sort -u | wc -l", ["grep"], []),
+    ("NO_COLOR=1 git log -1 && TERM=dumb ls", ["git_read", "ls"], ["&&"]),
+    ("timeout 5 git diff --stat; timeout 9 rg foo", ["git_read", "grep"], [";"]),
+    ("find . -name '*.py' | wc -l", ["find"], []),
+    ("rg --files -g '*.md' | sort", ["files"], []),
+    ("nl -ba a.py | sed -n '3,5p'", ["read"], []),
+    ("rg -n foo | cut -d: -f1 | sort | uniq -c | sort -rn | head", ["grep"], []),
 ])
 def test_plan_compound(command, kinds, ops):
     plan, why = plan_compound(command)
@@ -85,19 +97,60 @@ def test_plan_compound(command, kinds, ops):
     assert classify(command)["class"] == "compound"
 
 
+def test_plan_compound_fields():
+    plan, _ = plan_compound("(cd pkg && LC_ALL=C rg -n foo | wc -l) || "
+                            "timeout -s KILL 5 git log -1 | LC_ALL=C sort -rn")
+    group, git = plan["steps"]
+    cd, rg = group["steps"]
+    assert cd["dir"] == "pkg" and group["ops"] == ["&&"]
+    assert rg["env"] == {"LC_ALL": "C"} and rg["filters"] == [("wc", "l", {})]
+    assert git["argv"] == ["git", "log", "-1"] and git["timeout"] == 5
+    assert git["filters"] == [("sort", True, True, False, {"LC_ALL": "C"})]
+    plan, _ = plan_compound("cd ~ && cat a | cut -d: -f2,4- -s")
+    assert plan["steps"][0]["tilde"] and plan["steps"][0]["dir"] == "~"
+    assert plan["steps"][1]["filters"] == [("cut", ":", ((2, 2), (4, None)), True)]
+
+
 @pytest.mark.parametrize("command,why", [
     ("cat <<EOF\nx\nEOF", "heredoc"),
-    ("(cd a && pytest)", "operator ( is not mapped"),
+    ("(cd a && pytest) | tail -3", "pipeline or redirect after a subshell is not mapped"),
+    ("((cat a.py))", "nested subshell is not mapped"),
+    ("(cat a.py", "unbalanced parenthesis"),
+    ("cat a.py)", "unbalanced parenthesis"),
     ("pytest &", "operator & is not mapped"),
     ("pytest > out.txt", "redirect >out.txt is not mapped"),
     ("python -c 'print(1)' && cat a.py", "python command"),
-    ("pwd && ls", "no pytest, read, grep or git step"),
-    ("cat a.py | wc -l", "pipeline into wc is not mapped"),
+    ("pwd && ls", "no pytest, read, grep, find or git step"),
+    ("cat a.py | wc", "pipeline into wc is not mapped"),
+    ("cat a.py | tee x", "pipeline into tee is not mapped"),
     ("git diff --output=x.patch && cat a.py", "git option --output is not mapped"),
     ("git -c core.pager=x diff && cat a.py", "git option -c is not mapped"),
     ("cat a.py && cd b", "cd after another step"),
-    ("FOO=1 cat a.py && echo", "environment assignment prefix"),
+    ("FOO=1 cat a.py && echo", "environment assignment FOO is not mapped"),
     ("cat $HOME/a.py && echo", "cat: substitution"),
+    # W2
+    ("pytest | wc -l", "pytest piped into wc, sort, uniq or cut is not mapped"),
+    ("git grep foo | sort", "git grep piped into wc, sort, uniq or cut is not mapped"),
+    ("cat a.py | sort -k2", "pipeline into sort is not mapped"),
+    ("cat a.py | cut -d '::' -f1", "pipeline into cut is not mapped"),
+    ("cat a.py | cut -d: -f0", "pipeline into cut is not mapped"),
+    ("cat a.py | cut -d: -f3-1", "pipeline into cut is not mapped"),
+    ("cat a.py | uniq -u", "pipeline into uniq is not mapped"),
+    ("cat a.py | FOO=1 sort", "pipeline into FOO=1 is not mapped"),
+    ("cat a.py | LC_ALL=C grep x", "pipeline into LC_ALL=C is not mapped"),
+    ("cat a.py | tail -c 5", "pipeline into tail is not mapped"),
+    ("timeout 5 pytest -q && cat a.py", "timeout around pytest is not mapped"),
+    ("timeout 5 echo x && cat a.py", "timeout around echo is not mapped"),
+    ("timeout x cat a.py; echo", "timeout duration 'x' is not mapped"),
+    ("FOO=1 rg x && echo", "environment assignment FOO is not mapped"),
+    ("LC_ALL=C grep -rn x . && echo", "LC_ALL changes grep's regex semantics"),
+    ("LC_ALL=C echo x && cat a.py", "environment assignment prefix"),
+    ("cd ~bob && cat a.py", "cd: tilde expansion"),
+    ("(cd a && rg x) 2>&1", "pipeline or redirect after a subshell is not mapped"),
+    ("echo x && (pwd)", "no pytest, read, grep, find or git step"),
+    ("find . -name x -exec cat '{}' \\; | head", "find -exec is not mapped"),
+    ("rg --files -L && echo", "rg option -L with --files is not mapped"),
+    ("rg --hidden x && echo", "rg --hidden search is not mapped"),
 ])
 def test_plan_compound_refuses(command, why):
     plan, got = plan_compound(command)
@@ -190,10 +243,13 @@ def test_filtered_read_shows_bash_lines_and_keys(mem, repo):
 
 
 def test_grep_filter_keeps_graph_lines(mem):
-    res = _call(mem, "shell", command="grep -rn helper pkg | head -1")
+    res = _call(mem, "shell", command="grep -n helper pkg/mod.py pkg/use.py | head -1")
     assert res["handled"], res
     assert res["output"].count("  Line ") == 1
     assert "[ozagia] sym:" in res["output"]
+    # grep -r prints a directory's files in readdir order, the capture by path.
+    res = _call(mem, "shell", command="grep -rn helper pkg | head -1")
+    assert res["handled"] is False and "grep -r over a directory" in res["reason"]
 
 
 def test_cd_sets_the_directory_of_later_steps(mem, repo):
