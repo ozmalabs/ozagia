@@ -268,7 +268,7 @@ from ozagia.config import state_path
 PROTOCOL_VERSION = 1
 ENV_SOCK = "OZAGIA_DAEMON_SOCK"
 SOCK_NAME = "daemon.sock"
-TOOLS = ("read", "grep", "glob", "edit", "write", "patch", "shell")
+TOOLS = ("read", "grep", "glob", "edit", "write", "patch", "shell", "replace")
 HARNESSES = ("opencode", "claude", "codex", "kiro", "native")
 # The largest request or response line a peer must accept, in bytes.
 MAX_MESSAGE_BYTES = 16 * 1024 * 1024

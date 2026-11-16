@@ -1039,7 +1039,8 @@ def test_graph_stats_fields_read_counts():
                                            **{k: None for k in
                                               ae.TEST_SELECTION_FIELDS},
                                            "working_sets_served": None,
-                                           "working_set_chars": None}
+                                           "working_set_chars": None,
+                                           **{k: None for k in ae.REPLACE_FIELDS}}
     # The daemon's shape: handled {"true": captured, "false": passthrough and
     # expired}; fallbacks = plugin fallbacks + expired + failed (review fix 4).
     assert ae.graph_stats_fields({"hellos": 2, "handled": {"true": 3, "false": 4},
@@ -1068,7 +1069,8 @@ def test_graph_stats_fields_read_counts():
         "lint_runs": None, "lint_findings": None, "lint_timeouts": None,
         "ruff_captures": None,
         **{k: None for k in ae.TEST_SELECTION_FIELDS},
-        "working_sets_served": None, "working_set_chars": None}
+        "working_sets_served": None, "working_set_chars": None,
+        **{k: None for k in ae.REPLACE_FIELDS}}
     got = ae.graph_stats_fields({"hellos": 1, "shell": {"captured": 4,
                                                         "passthrough": 1}})
     assert (got["shell_captured"], got["shell_passthrough"]) == (4, 1)

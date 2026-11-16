@@ -141,6 +141,18 @@ def test_edit_reports_findings_on_changed_lines_only(mem, repo):
 
 
 @needs_ruff
+def test_replace_reports_findings_on_changed_lines(mem, repo):
+    res = I.handle(mem, "replace", {"pattern": "    return a\n",
+                                    "replacement": "    return a + undefined_b\n",
+                                    "glob": "pkg/*.py"})
+    assert res["handled"] is True and res["is_error"] is False, res
+    assert _lint_lines(res["output"]) == [
+        "[ozagia] lint F821 L9 sym:pkg/mod.py::target: "
+        "Undefined name `undefined_b`"]
+    assert res["meta"]["lint_runs"] == 1 and res["meta"]["lint_findings"] == 1
+
+
+@needs_ruff
 def test_ruff_on_path_and_clean_edit(mem, repo, monkeypatch):
     monkeypatch.setenv("PATH", f"{Path(RUFF).parent}:/usr/bin:/bin")
     res = _edit(mem, repo, "    return a\n", "    return a * 2\n")

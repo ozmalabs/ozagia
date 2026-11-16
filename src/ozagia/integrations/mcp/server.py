@@ -345,6 +345,60 @@ _TOOLS: list[dict[str, Any]] = [
         }, ["key", "new_text"]),
     },
     {
+        "name": "dev_replace",
+        "description": (
+            "Replace a pattern across files (use it instead of a script that "
+            "rewrites files). Literal by default; regex=true takes a Python re "
+            "pattern and a replacement with \\1 / \\g<name> groups. Scope by "
+            "globs and/or node keys (sym:, doc:<file>#<section>, "
+            "text:<file>#L<a>-L<b>: only matches inside those spans). "
+            "Preview by default: per-file match counts, enclosing keys, a "
+            "short diff, `shas` and `plan_id`. Apply with apply=true and the "
+            "preview's base_shas (or plan_id): a file changed since the "
+            "preview, a match count other than `expect`, or a file the "
+            "replace would stop parsing refuses the whole batch. Each file "
+            "is written with a backup; one journal entry; the graph is "
+            "updated. .git, the state dir, binary, oversized and "
+            ".gitignored files are never touched."),
+        "inputSchema": _schema({
+            "pattern": {"type": "string",
+                        "description": "Literal text, or a regex with regex=true."},
+            "replacement": {"type": "string",
+                            "description": "Replacement (regex groups allowed "
+                                           "with regex=true)."},
+            "regex": {"type": "boolean", "default": False},
+            "flags": {"type": "string",
+                      "description": "Regex flags as letters (i, m, s, x, a) "
+                                     "or names (IGNORECASE,MULTILINE)."},
+            "globs": {"type": "array", "items": {"type": "string"},
+                      "description": "Root-relative globs (** crosses dirs; "
+                                     "a glob without / matches base names)."},
+            "keys": {"type": "array", "items": {"type": "string"},
+                     "description": "Node keys whose spans restrict the matches."},
+            "max_files": {"type": "integer",
+                          "description": "Refuse when more files match "
+                                         "(default 200)."},
+            "max_matches": {"type": "integer",
+                            "description": "Refuse when there are more matches "
+                                           "(default 5000)."},
+            "expect": {"type": "integer",
+                       "description": "Refuse unless the total match count "
+                                      "is exactly this."},
+            "apply": {"type": "boolean", "default": False},
+            "base_shas": {"type": "object",
+                          "description": "The preview's `shas` (file -> sha256): "
+                                         "apply refuses files changed since."},
+            "plan_id": {"type": "string",
+                        "description": "The preview's plan_id: apply refuses "
+                                       "any difference from the preview."},
+            "allow_parse_errors": {"type": "boolean", "default": False},
+            "gitignore": {"type": "boolean", "default": True,
+                          "description": "false: also files .gitignore excludes."},
+            "task": {"type": "string",
+                     "description": "Optional journal task label."},
+        }, ["pattern", "replacement"]),
+    },
+    {
         "name": "dev_tests",
         "description": (
             "Tests covering a file, symbol or seed. Use before changing a "
@@ -931,6 +985,7 @@ class DevMemoryServer:
             "dev_edit": self._edit,
             "dev_span_edit": self._span_edit,
             "dev_key_edit": self._key_edit,
+            "dev_replace": self._replace,
             "dev_tests": self._tests,
             "dev_seed": self._seed,
             "dev_rule": self._rule,
@@ -1198,6 +1253,24 @@ class DevMemoryServer:
                                      base_sha256=a.get("base_sha256") or None,
                                      apply=a.get("apply", False),
                                      task=a.get("task"))
+
+    def _replace(self, a: dict[str, Any]) -> Any:
+        from ozagia.intent.replace import lint_replace
+        with self._acting():
+            res = self.mem.replace(
+                a["pattern"], a["replacement"], regex=a.get("regex", False),
+                flags=a.get("flags"), globs=a.get("globs"), keys=a.get("keys"),
+                max_files=a.get("max_files"), max_matches=a.get("max_matches"),
+                expect=a.get("expect"), gitignore=a.get("gitignore", True),
+                apply=a.get("apply", False), base_shas=a.get("base_shas"),
+                plan_id=a.get("plan_id") or None,
+                allow_parse_errors=a.get("allow_parse_errors", False),
+                task=a.get("task"))
+        if res.get("applied"):
+            lines, meta = lint_replace(self.mem, res)
+            res["lint"] = lines
+            res.update(meta)
+        return res
 
     def _who(self, a: dict[str, Any]) -> Any:
         """The sessions that edited a file (`ozagia.core.owners.who`): from

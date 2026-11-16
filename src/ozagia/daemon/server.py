@@ -141,7 +141,7 @@ JOURNAL_NAME = "daemon_journal.jsonl"
 EDIT_INTENTS = frozenset({"edit", "write", "edit_key"})
 # Tools whose `tool`/`after` may lint (`ozagia.intent.lint`): they get
 # `_unlock` and `_reply_deadline`.
-LINTED_TOOLS = frozenset({"edit", "write", "patch"})
+LINTED_TOOLS = frozenset({"edit", "write", "patch", "replace"})
 # Built-in tools whose `after` can have created files (file ledger).
 FILE_LEDGER_TOOLS = frozenset({"edit", "write", "patch", "shell"})
 # Files a session start/end scan records at most, and paths an `after` scan
@@ -161,6 +161,9 @@ SHELL_REASONS = 200
 TEST_COUNTERS = ("affected_runs", "tests_skipped_unaffected", "cached_passes",
                  "full_runs_forced")
 SHELL_REASONS_SHOWN = 30
+# `meta` counters of the `replace` tool (`ozagia.intent.replace`): previews,
+# applies, and files the applies wrote.
+REPLACE_COUNTERS = ("replace_previews", "replace_applies", "replace_files")
 
 # Passthrough reasons that name a file or directory, rewritten to one key
 # each so paths do not fill the reason table: (pattern, replacement), in
@@ -320,6 +323,8 @@ class DaemonState:
         # Lint inside the edit (`ozagia.intent.lint`): linter runs, findings
         # reported on changed lines, linter runs cut off by the timeout.
         self.lint = {"lint_runs": 0, "lint_findings": 0, "lint_timeouts": 0}
+        # Multi-file replace (`ozagia.intent.replace`).
+        self.replace = {k: 0 for k in REPLACE_COUNTERS}
         # shell tool calls: captured (handled), refused (git refs) and
         # passthrough, with the passthrough reasons, so an eval can measure
         # the shell capture rate.
@@ -937,6 +942,10 @@ class DaemonState:
                 n = meta.get(name)
                 if isinstance(n, int) and not isinstance(n, bool) and n > 0:
                     self.lint[name] += n
+            for name in self.replace:
+                n = meta.get(name)
+                if isinstance(n, int) and not isinstance(n, bool) and n > 0:
+                    self.replace[name] += n
             if handled is not None:
                 self.handled["true" if handled else "false"] += 1
             if meta.get("repeat") in ("stub", "note"):
@@ -1118,6 +1127,8 @@ class DaemonState:
                 "file_ledger_errors": self.file_ledger_errors,
                 # Lint inside the edit, and captured `ruff check` calls.
                 **self.lint,
+                # Multi-file replace: previews, applies, files written.
+                **self.replace,
                 "ruff_captures": self.by_intent.get("shell_ruff", 0),
                 # Background jobs (`ozagia.daemon.jobs`): started, waits and
                 # the seconds spent in them, and waits that returned new

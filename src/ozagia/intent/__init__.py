@@ -72,6 +72,7 @@ from ozagia.intent.common import (
 from ozagia.intent.edit import handle_edit, handle_write
 from ozagia.intent.patch import edit_miss_lines, handle_patch_check
 from ozagia.intent.read import handle_read
+from ozagia.intent.replace import handle_replace
 from ozagia.intent.run import handle_shell
 from ozagia.intent.search import handle_glob, handle_grep
 from ozagia.intent.shell import classify
@@ -88,11 +89,13 @@ HANDLERS: dict[str, Callable[[Any, dict[str, Any]], dict[str, Any]]] = {
     "edit": handle_edit,
     "write": handle_write,
     "shell": handle_shell,
+    # One pattern across files (`ozagia.intent.replace`).
+    "replace": handle_replace,
     # A check only: never writes (the Codex hook's PreToolUse on apply_patch).
     "patch_check": handle_patch_check,
 }
 # Tools whose built-in run can change files.
-_WRITING_TOOLS = frozenset({"edit", "write", "patch"})
+_WRITING_TOOLS = frozenset({"edit", "write", "patch", "replace"})
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
 
@@ -102,15 +105,15 @@ def _ms(t0: float) -> float:
 
 # Tools whose handled call changes files or runs commands: a preflight runs
 # their handler up to that point (see `handle`).
-MUTATING_TOOLS = frozenset({"edit", "write", "shell"})
+MUTATING_TOOLS = frozenset({"edit", "write", "shell", "replace"})
 
 
 def permission_request(memory: Any, tool: str, inp: dict[str, Any]
                        ) -> dict[str, Any] | None:
     """The permission the harness's own tool would ask for this call, in
     OpenCode 2.3's terms: `{"action", "resources", "save"}`. read, edit,
-    write: the path relative to the root (`read`, `edit`). grep, glob: the
-    pattern. shell: one resource per simple command (`shell`, without
+    write: the path relative to the root (`read`, `edit`). replace: `edit`
+    with the files it would change. grep, glob: the pattern. shell: one resource per simple command (`shell`, without
     `cd`), and as `save` the same commands. None when there is nothing to
     ask (an unknown tool or input)."""
     import os
@@ -143,6 +146,13 @@ def permission_request(memory: Any, tool: str, inp: dict[str, Any]
             res = "."
         return {"action": "read" if tool == "read" else "edit",
                 "resources": [res], "save": ["*"]}
+    if tool == "replace":
+        from ozagia.intent.replace import preview_files
+        try:
+            files = preview_files(memory, inp)
+        except Exception:  # noqa: BLE001 - nothing to ask
+            return None
+        return {"action": "edit", "resources": files, "save": ["*"]}
     if tool in ("grep", "glob"):
         pattern = inp.get("pattern")
         if not isinstance(pattern, str):
@@ -263,6 +273,13 @@ def handle(memory: Any, tool: str, input: dict[str, Any], *,
         from ozagia.core.owners import acting
         with acting(memory, harness, session):
             res = handler(memory, input)
+        if tool == "replace" and owners is not None:
+            for rel in res.get("edited_files") or []:
+                try:
+                    warned.extend(owners.warnings(memory.journal, rel,
+                                                  harness, session))
+                except Exception:  # noqa: BLE001 - a warning is advisory
+                    pass
         if created_rel is not None and res.get("intent") in ("write", "edit_write"):
             try:
                 from ozagia.core import files as F
@@ -286,6 +303,8 @@ def handle(memory: Any, tool: str, input: dict[str, Any], *,
             meta["ownership_warnings"] = len(warned)
         if edit_rel:
             meta["edited_files"] = [edit_rel]
+        elif res.get("edited_files"):
+            meta["edited_files"] = list(res["edited_files"])
         if res.get("bytes_saved"):
             meta["bytes_saved"] = int(res["bytes_saved"])
         if state is not None and not preflight:
@@ -293,7 +312,8 @@ def handle(memory: Any, tool: str, input: dict[str, Any], *,
             if spec is not None:
                 output += _ledger_note(state, spec, prior, res, meta)
         body = {"handled": True, "output": output, "is_error": False,
-                "permission": permission_request(memory, tool, input)}
+                "permission": (res["permission"] if "permission" in res
+                               else permission_request(memory, tool, input))}
         meta.update(intent=res["intent"], keys=list(res.get("keys") or []))
         if isinstance(res.get("meta"), dict):
             meta.update(res["meta"])
