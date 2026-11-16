@@ -1303,6 +1303,19 @@ Status: all four are merged: `bounded-tasks` as `2d38853`, `ocelot-installer`
 as `11c1b60`, `code-review` as `20570d7`, and `resource-enforcement` as
 `2337d28`. The final full suite is `3469 passed, 21 skipped`; ruff passes.
 
+### Parallel wave 3 (2026-11-16)
+
+Four agents start from `e5676cd`:
+
+| Worktree | Branch | Scope |
+| --- | --- | --- |
+| `~/ozmadev/ozagia-wt/research-ui` | `feat/research-ui` | Research library/evidence/screening/citation views over existing services |
+| `~/ozmadev/ozagia-wt/task-library` | `feat/task-library` | Versioned task-class catalogue on top of `core/tasks.py` |
+| `~/ozmadev/ozagia-wt/model-registry` | `feat/model-registry` | Available-model registry, per-task defaults and source reporting |
+| `~/ozmadev/ozagia-wt/log-inspect` | `feat/log-inspect` | Bounded, redacted local log inspection and proposed improvements |
+
+The same review/merge/full-suite gate applies.
+
 ## Open decisions
 
 1. **Config directory (resolved).** `ozagia/` is versioned project config;
