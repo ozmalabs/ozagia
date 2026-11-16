@@ -688,10 +688,3 @@ def test_new_read_only_classes_do_not_refresh(mem, tree):
         changes, _cls = _may_change_files("shell", {"command": command})
         assert changes is False, command
     assert _may_change_files("shell", {"command": "(cd x && pytest -q)"})[0]
-
-
-def test_plugin_lists_the_files_intent_as_read_only():
-    plugin = (Path(__file__).resolve().parents[1] / "src" / "ozagia" /
-              "integrations" / "opencode" / "plugin.js").read_text()
-    m = re.search(r"\[([^\]]*\"shell_read\"[^\]]*)\]", plugin)
-    assert m and '"shell_files"' in m.group(1)

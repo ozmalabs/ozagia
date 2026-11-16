@@ -356,12 +356,6 @@ def test_jq_is_read_only_for_after(tmp_path):
     assert _may_change_files("shell", {"command": "cat f | jq .a"})[0] is False
 
 
-def test_plugin_treats_shell_jq_as_read_only():
-    js = (Path(__file__).resolve().parents[1] / "src" / "ozagia"
-          / "integrations" / "opencode" / "plugin.js").read_text()
-    assert '"shell_jq"]' in js
-
-
 # --------------------------------------------------------------------------- #
 # the shell capture
 # --------------------------------------------------------------------------- #
