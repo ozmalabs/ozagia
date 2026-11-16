@@ -364,6 +364,7 @@ def test_cargo_edition(tmp_path):
 # --------------------------------------------------------------------------- #
 # rustfmt
 # --------------------------------------------------------------------------- #
+RUSTFMT_TIMEOUT = "[lint]\ntimeout_s = 10\n"
 LIB_RS = """pub fn kept( ){ }
 
 pub fn target() -> i32 {
@@ -375,7 +376,10 @@ pub fn target() -> i32 {
 @needs_rustfmt
 def test_rustfmt_reports_changed_hunks_only(tmp_path, layout):
     root = _repo(tmp_path, {"Cargo.toml": '[package]\nname = "t"\nversion = "0.1.0"\n'
-                            'edition = "2021"\n', "src/lib.rs": LIB_RS})
+                            'edition = "2021"\n',
+                            # rustfmt's first start on a cold CI runner can
+                            # pass the 3 s default; 10 s is the cap.
+                            ".ozagia.toml": RUSTFMT_TIMEOUT, "src/lib.rs": LIB_RS})
     mem = _mem(root, tmp_path)
     path = root / "src" / "lib.rs"
     res = I.handle(mem, "edit", {"filePath": str(path), "oldString": "    1\n",
@@ -746,6 +750,9 @@ def test_multiline_finding_counts_when_any_line_changed(tmp_path, layout):
 def test_rustfmt_checks_only_the_crate_root_not_child_modules(tmp_path, layout):
     root = _repo(tmp_path, {"Cargo.toml": '[package]\nname = "t"\nversion = "0.1.0"\n'
                             'edition = "2021"\n',
+                            # rustfmt's first start on a cold CI runner can
+                            # pass the 3 s default; 10 s is the cap.
+                            ".ozagia.toml": RUSTFMT_TIMEOUT,
                             "src/lib.rs": "mod child;\n" + LIB_RS,
                             # Does not parse: checking it would fail the run.
                             "src/child.rs": "fn broken( {\n"})
