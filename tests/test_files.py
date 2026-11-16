@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -515,4 +516,248 @@ def test_files_cli_cleanup_trash_restore(tmp_path: Path, capsys) -> None:
     assert note.is_file()
     # Apply without the one-time token is refused.
     code = files_cli.main(["cleanup", "--apply", "--root", str(root)])
+    assert code == 2
+
+
+# -- trash retention and explicit purge ------------------------------------- #
+def _trash_files(root: Path, monkeypatch, trash_id: str,
+                 *paths: str) -> dict:
+    """Create one trash run with real cleanup manifests."""
+    for rel in paths:
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"# {rel}\n", encoding="utf-8")
+        F.record_file(root, rel, reason="one-off note")
+    monkeypatch.setattr(F, "_trash_run_id", lambda: trash_id)
+    plan = F.cleanup_plan(root, older_than_days=0)
+    applied = F.cleanup_apply(root, confirmation=plan["confirmation"])
+    assert applied["ok"] is True
+    assert applied["trash_id"] == trash_id
+    return applied
+
+
+def _set_trash_age(root: Path, trash_id: str, days: int) -> None:
+    path = root / ".ozagia" / "trash" / trash_id / "manifest.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest["created_at"] = (
+        datetime.now(timezone.utc) - timedelta(days=days)
+    ).isoformat(timespec="seconds")
+    path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8")
+
+
+def test_trash_purge_dry_run_token_expiry_and_replay(tmp_path: Path,
+                                                     monkeypatch) -> None:
+    root = _repo(tmp_path)
+    old = _trash_files(root, monkeypatch, "20260101T000000000000Z", "old.md")
+    recent = _trash_files(root, monkeypatch, "20260102T000000000000Z",
+                          "recent.md")
+    _set_trash_age(root, old["trash_id"], 40)
+    _set_trash_age(root, recent["trash_id"], 1)
+    old_path = root / old["applied"][0]["trash_path"]
+    recent_path = root / recent["applied"][0]["trash_path"]
+
+    plan = F.trash_purge(root, older_than_days=30)
+    assert plan["dry_run"] is True
+    assert plan["older_than_days"] == 30
+    assert plan["retention_days"] == F.DEFAULT_TRASH_RETENTION_DAYS
+    assert [run["trash_id"] for run in plan["candidates"]] == [old["trash_id"]]
+    assert plan["counts"]["entries"] == 1
+    assert any(item["trash_id"] == recent["trash_id"]
+               and "day(s) old" in item["reason"]
+               for item in plan["skipped"])
+    # A dry run never deletes anything, including with no token at all.
+    assert old_path.is_file() and recent_path.is_file()
+    assert not (root / ".ozagia" / "trash" / "audit.jsonl").exists()
+
+    expired = F.trash_purge(root, older_than_days=30, ttl_s=0)
+    with pytest.raises(F.FileLedgerError, match="expired"):
+        F.trash_purge(root, confirmation=expired["confirmation"])
+    with pytest.raises(F.FileLedgerError, match="invalid"):
+        F.trash_purge(root, confirmation="not a token")
+    assert old_path.is_file() and recent_path.is_file()
+
+    plan = F.trash_purge(root, older_than_days=30)
+    result = F.trash_purge(root, confirmation=plan["confirmation"])
+    assert result["ok"] is True
+    assert result["counts"]["purged"] == 1
+    assert result["counts"]["refused"] == 0
+    assert result["counts"]["bytes"] == old["applied"][0]["size"]
+    assert not old_path.exists()
+    assert recent_path.is_file()
+    assert not old_path.parent.exists()
+    assert plan["candidates"][0]["remove_run"] is True
+    with pytest.raises(F.FileLedgerError, match="already used"):
+        F.trash_purge(root, confirmation=plan["confirmation"])
+
+    audit = root / ".ozagia" / "trash" / "audit.jsonl"
+    rows = [json.loads(line) for line in
+            audit.read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 1
+    assert rows[0]["kind"] == "trash_purge"
+    assert rows[0]["path"] == "old.md"
+    assert rows[0]["trash_id"] == old["trash_id"]
+    assert rows[0]["older_than_days"] == 30
+    assert "# old.md" not in audit.read_text(encoding="utf-8")
+
+
+def test_trash_purge_uses_retention_setting(tmp_path: Path,
+                                            monkeypatch) -> None:
+    root = _repo(tmp_path)
+    old = _trash_files(root, monkeypatch, "20260103T000000000000Z", "old.md")
+    recent = _trash_files(root, monkeypatch, "20260104T000000000000Z",
+                          "recent.md")
+    _set_trash_age(root, old["trash_id"], 4)
+    _set_trash_age(root, recent["trash_id"], 1)
+    config = root / "ozagia"
+    config.mkdir()
+    (config / "config.toml").write_text(
+        "[files]\nretention_days = 2\n", encoding="utf-8")
+
+    assert F.trash_retention_days(root) == 2
+    listing = F.list_trash(root)
+    assert listing["retention_days"] == 2
+    states = {run["trash_id"]: run for run in listing["trash"]}
+    assert states[old["trash_id"]]["retention_state"] == "expired"
+    assert states[old["trash_id"]]["age_days"] == 4
+    assert states[old["trash_id"]]["purgeable"] is True
+    assert states[recent["trash_id"]]["retention_state"] == "retained"
+    assert states[recent["trash_id"]]["purgeable"] is False
+
+    plan = F.trash_purge(root)
+    assert plan["older_than_days"] == 2
+    assert [run["trash_id"] for run in plan["candidates"]] == [old["trash_id"]]
+    # An explicit age overrides the setting.
+    plan = F.trash_purge(root, older_than_days=0)
+    assert {run["trash_id"] for run in plan["candidates"]} == {
+        old["trash_id"], recent["trash_id"]}
+
+
+def test_trash_purge_leaves_restored_files_and_entries(tmp_path: Path,
+                                                       monkeypatch) -> None:
+    root = _repo(tmp_path)
+    applied = _trash_files(root, monkeypatch, "20260105T000000000000Z",
+                           "restored.md", "remaining.md")
+    _set_trash_age(root, applied["trash_id"], 40)
+    restored = F.restore(root, applied["trash_id"], paths=["restored.md"])
+    assert restored["ok"] is True
+    assert (root / "restored.md").read_text(encoding="utf-8") == "# restored.md\n"
+
+    plan = F.trash_purge(root, older_than_days=30)
+    assert len(plan["candidates"]) == 1
+    run = plan["candidates"][0]
+    assert run["restored"] == 1
+    assert [entry["path"] for entry in run["entries"]] == ["remaining.md"]
+    result = F.trash_purge(root, confirmation=plan["confirmation"])
+    assert result["counts"]["purged"] == 1
+    assert (root / "restored.md").read_text(encoding="utf-8") == "# restored.md\n"
+    assert not (root / applied["applied"][1]["trash_path"]).exists()
+
+    manifest = json.loads(
+        (root / applied["applied"][0]["trash_path"]).parent.joinpath(
+            "manifest.json").read_text(encoding="utf-8"))
+    entries = {entry["path"]: entry for entry in manifest["entries"]}
+    assert entries["restored.md"]["restored_at"]
+    assert "purged_at" not in entries["restored.md"]
+    assert entries["remaining.md"]["purged_at"]
+    assert entries["remaining.md"]["decision"] == "purged"
+
+    listing = F.list_trash(root)
+    run = listing["trash"][0]
+    assert run["restored"] == 1 and run["purged"] == 1
+    assert run["remaining_bytes"] == 0
+    audit = root / ".ozagia" / "trash" / "audit.jsonl"
+    rows = [json.loads(line) for line in
+            audit.read_text(encoding="utf-8").splitlines()]
+    assert [row["path"] for row in rows] == ["remaining.md"]
+
+
+def test_trash_purge_refuses_escape_symlink_and_unknown(tmp_path: Path,
+                                                        monkeypatch) -> None:
+    root = _repo(tmp_path)
+    applied = _trash_files(root, monkeypatch, "20260106T000000000000Z",
+                           "safe.md")
+    _set_trash_age(root, applied["trash_id"], 40)
+    run_dir = root / ".ozagia" / "trash" / applied["trash_id"]
+    old_path = root / applied["applied"][0]["trash_path"]
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    secret = outside / "secret.txt"
+    secret.write_text("outside\n", encoding="utf-8")
+    (run_dir / "link.md").symlink_to(root / "README.md")
+    manifest_path = run_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["entries"].extend([
+        {"path": "link.md", "trash_path":
+            f".ozagia/trash/{applied['trash_id']}/link.md", "size": 7},
+        {"path": "README.md", "trash_path":
+            f".ozagia/trash/{applied['trash_id']}/../../../README.md",
+         "size": 7},
+        {"path": ".git/config", "trash_path":
+            f".ozagia/trash/{applied['trash_id']}/config", "size": 0},
+        {"path": "secret.txt", "trash_path": str(secret),
+         "size": secret.stat().st_size},
+    ])
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    (root / ".ozagia" / "trash" / "evil").symlink_to(outside,
+                                                     target_is_directory=True)
+
+    plan = F.trash_purge(root, older_than_days=30)
+    assert [entry["path"] for entry in plan["candidates"][0]["entries"]] == [
+        "safe.md"]
+    result = F.trash_purge(root, confirmation=plan["confirmation"])
+    assert result["counts"]["purged"] == 1
+    assert not old_path.exists()
+    assert (root / "README.md").is_file()
+    assert (root / ".git" / "config").is_file()
+    assert secret.read_text(encoding="utf-8") == "outside\n"
+    assert (run_dir / "link.md").is_symlink()
+
+    # A trash root that is itself a symlink is refused, not followed.
+    trash = root / ".ozagia" / "trash"
+    real = tmp_path / "real-trash"
+    trash.rename(real)
+    trash.symlink_to(real, target_is_directory=True)
+    with pytest.raises(F.FileLedgerError, match="symlink"):
+        F.trash_purge(root, older_than_days=0)
+
+
+def test_files_cli_trash_purge(tmp_path: Path, monkeypatch,
+                               capsys) -> None:
+    root = _repo(tmp_path)
+    applied = _trash_files(root, monkeypatch, "20260107T000000000000Z",
+                           "notes.md")
+    _set_trash_age(root, applied["trash_id"], 40)
+    trashed = root / applied["applied"][0]["trash_path"]
+
+    code = files_cli.main([
+        "trash", "purge", "--root", str(root), "--json"])
+    assert code == 0
+    plan = json.loads(capsys.readouterr().out)
+    assert plan["dry_run"] is True
+    assert plan["counts"]["entries"] == 1
+    assert trashed.is_file()
+    token = plan["confirmation"]
+
+    code = files_cli.main(["trash", "list", "--root", str(root)])
+    assert code == 0
+    text = capsys.readouterr().out
+    assert "retention=expired" in text
+    assert "in trash" in text
+
+    code = files_cli.main([
+        "trash", "purge", "--confirm", token, "--root", str(root), "--json"])
+    assert code == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["counts"]["purged"] == 1
+    assert not trashed.exists()
+    assert not trashed.parent.exists()
+    assert (root / ".ozagia" / "trash" / "audit.jsonl").is_file()
+
+    code = files_cli.main(["trash", "list", "--root", str(root)])
+    assert code == 0
+    assert capsys.readouterr().out.strip() == "trash is empty"
+
+    code = files_cli.main([
+        "trash", "purge", "--confirm", token, "--root", str(root), "--json"])
     assert code == 2

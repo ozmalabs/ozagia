@@ -62,12 +62,22 @@ def build_parser() -> argparse.ArgumentParser:
     cleanup.add_argument("--root", default=None)
     cleanup.add_argument("--json", action="store_true")
 
-    trash = sub.add_parser("trash", help="list trash runs (nothing is purged)")
+    trash = sub.add_parser("trash", help="list trash runs or purge old ones")
     trash_sub = trash.add_subparsers(dest="trash_command", required=True)
     trash_list = trash_sub.add_parser("list", help="list trash runs and files")
     trash_list.add_argument("--limit", type=int, default=F.MAX_TRASH_RUNS)
     trash_list.add_argument("--root", default=None)
     trash_list.add_argument("--json", action="store_true")
+    trash_purge = trash_sub.add_parser(
+        "purge", help="dry-run purge of old runs, or apply a token")
+    trash_purge.add_argument(
+        "--older-than-days", type=int, default=None,
+        help="only runs this old (default: files.retention_days)")
+    trash_purge.add_argument(
+        "--confirm", default=None,
+        help="one-time token from the dry-run purge plan")
+    trash_purge.add_argument("--root", default=None)
+    trash_purge.add_argument("--json", action="store_true")
 
     restore = sub.add_parser("restore", help="restore files from a trash run")
     restore.add_argument("trash_id", help="trash id, directory or manifest path")
@@ -152,6 +162,15 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 print(F.format_trash(listing))
             return 0
+        if args.command == "trash" and args.trash_command == "purge":
+            result = F.trash_purge(
+                root, older_than_days=args.older_than_days,
+                confirmation=args.confirm or "")
+            if args.json:
+                _print_json(result)
+            else:
+                print(F.format_trash_purge(result))
+            return 0 if result.get("ok") else 1
         if args.command == "restore":
             result = F.restore(root, args.trash_id,
                                paths=args.paths or None)
