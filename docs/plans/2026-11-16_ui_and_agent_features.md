@@ -1655,6 +1655,16 @@ The read-only part of 1a landed as new files:
   preservation (`feat/config-hooks`, merged as `2e0b359`).
 - Add-in task catalogue: 13 task classes, validation, detail and preview
   command copy; 20 Node tests (`feat/addin-tasks`, merged as `9957764`).
+- Integration actions: preview/apply install, uninstall and verify for
+  OpenCode/Claude/Codex/Kiro through the existing installers
+  (`feat/action-integrations`, merged as `d39c455`).
+- Trash retention and explicit purge: dry-run/token-gated, only under
+  `.ozagia/trash`, no automatic purge (`feat/cleanup-retention`, merged as
+  `72347d3`).
+- Ocelot test-impact and architecture-pattern candidates: change-shape
+  digests, exact/overlap/Ocelot clustering, optional code-review/repo-scan
+  sections, explicit no-completeness claims (`feat/ocelot-impact`, merged as
+  `3577c67`).
 - Tests for all of the above; docs `worktree.md`, `resources.md`, `files.md`,
   `status.md`, `view.md`, `settings.md`, `code_review.md`, `tasks.md`,
   `task_library.md`, `research_ui.md`, `log_inspect.md`, `models.md`,
@@ -1666,7 +1676,7 @@ The read-only part of 1a landed as new files:
   library hints, Ocelot code, hooks, review, Ocelot, worktree, resources and
   files in `pyproject.toml`.
 
-Checks after all seven waves: `4134 passed, 21 skipped`;
+Checks after all eight waves: `4180 passed, 21 skipped`;
 `ruff check src tests` passes. The OpenCode add-in additionally passes
 `npm run typecheck`, `node --test` (20/20) and `npm run build` (one CJS
 bundle) against OpenCode 2.3.0. A concurrent TUI-brand merge added
@@ -1674,12 +1684,11 @@ bundle) against OpenCode 2.3.0. A concurrent TUI-brand merge added
 updated for it.
 
 Not yet: the live OpenCode Desktop smoke test; add-in apply/mutation controls
-and an executable task launcher; Ocelot test-impact/architecture-pattern
-clustering; exact per-job disk accounting; command-derived path extraction for
-`patch`/`shell`; live/multi-model review; model/tool adapters and an injected
-test runner; rewiring legacy loaders to `ozagia/config.toml`; action apply UI
-and integration install/uninstall; live security-tool matrix/DAST; library
-hints in code review/repo scan and non-handled edits; and trash purge/retention.
+and an executable task launcher; exact per-job disk accounting; command-derived
+path extraction for `patch`/`shell`; live/multi-model review; model/tool
+adapters and an injected test runner; rewiring legacy loaders to
+`ozagia/config.toml`; action apply UI; live security-tool matrix/DAST; library
+hints in code review/repo scan and non-handled edits.
 
 ### Parallel workstreams (2026-11-16)
 
@@ -1810,7 +1819,9 @@ Three agents start from `b8c77a1`:
 | `~/ozmadev/ozagia-wt/action-integrations` | `feat/action-integrations` | Preview/apply integration install and uninstall |
 | `~/ozmadev/ozagia-wt/cleanup-retention` | `feat/cleanup-retention` | Trash retention and explicit purge |
 
-The same review/merge/full-suite gate applies.
+Status: all merged: `action-integrations` as `d39c455`, `cleanup-retention`
+as `72347d3`, and `ocelot-impact` as `3577c67`. The final full suite is
+`4180 passed, 21 skipped`; ruff passes.
 
 ### Library-first workstream (2026-11-16)
 
