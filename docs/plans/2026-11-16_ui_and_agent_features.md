@@ -1823,6 +1823,19 @@ Status: all merged: `action-integrations` as `d39c455`, `cleanup-retention`
 as `72347d3`, and `ocelot-impact` as `3577c67`. The final full suite is
 `4180 passed, 21 skipped`; ruff passes.
 
+### Parallel wave 9 (2026-11-17)
+
+Three agents start from the current main:
+
+| Worktree | Branch | Scope |
+| --- | --- | --- |
+| `~/ozmadev/ozagia-wt/config-rewire` | `feat/config-rewire` | Load supported `ozagia/config.toml` values into `ProjectConfig` without breaking `.ozagia.toml` |
+| `~/ozmadev/ozagia-wt/hints-integration` | `feat/hints-integration` | Library hints in code review, repo scan and built-in edits |
+| `~/ozmadev/ozagia-wt/task-executor` | `feat/task-executor` | Safe local executor for bounded read/grep/glob/graph/test steps |
+
+The same review/merge/full-suite gate applies. The live Desktop smoke test and
+model-provider adapters remain host/provider-dependent.
+
 ### Library-first workstream (2026-11-16)
 
 One additional agent starts from `79c3b3e`:
