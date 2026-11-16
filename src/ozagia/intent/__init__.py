@@ -678,6 +678,19 @@ def after(memory: Any, tool: str, input: dict[str, Any], output: Any, *,
                 lines.extend(failed)
                 meta["keys"].extend(k for k in fkeys if k not in meta["keys"])
                 meta["intent"] = "after_pytest_summary"
+        if tool == "shell" and isinstance(output, str):
+            # Container and unit logs/status: name the ops graph nodes
+            # (`ozagia.intent.ops_logs`). Never captured, only annotated.
+            try:
+                from ozagia.intent.ops_logs import ops_log_lines
+                olines, okeys = ops_log_lines(
+                    memory, str(inp.get("command") or ""), _cd_dir(inp))
+            except Exception:  # noqa: BLE001 - an optional addition
+                olines, okeys = [], []
+            if olines:
+                lines.extend(olines)
+                meta["keys"].extend(k for k in okeys if k not in meta["keys"])
+                meta["ops_after_annotations"] = len(olines)
         if tool == "edit" and isinstance(output, str):
             # A built-in edit whose old text is not in the file: the nearest
             # region, so the next try needs no re-read.

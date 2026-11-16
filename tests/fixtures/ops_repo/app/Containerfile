@@ -1,0 +1,16 @@
+# syntax=docker/dockerfile:1
+ARG PY=3.13
+FROM python:3.13-slim AS build
+ARG PIP_TOKEN=CANARY_ARG_SECRET
+ENV PIP_NO_CACHE_DIR=1 SECRET_KEY=CANARY_ENV_SECRET
+RUN pip install --upgrade pip \
+    && echo done
+RUN <<SCRIPT
+FROM fake:image
+SCRIPT
+FROM build AS runtime
+COPY --from=build /app /app
+COPY --from=docker.io/library/busybox:1.36 /bin/sh /bin/sh
+EXPOSE 80/tcp 443
+ENTRYPOINT ["/app/entry.sh", "--token", "Zx9Kq2Lm8Pw4Rt6Yv1Nb3Hc5Jd7Fg0SaQe"]
+CMD ["serve"]

@@ -1,0 +1,3 @@
+FROM python:3.13-slim
+ENV LEGACY_SECRET CANARY_ENV_SECRET
+CMD python -m worker

@@ -1339,7 +1339,9 @@ def graph_stats_fields(stats: Any) -> dict[str, Any]:
     selection, `ozagia.intent.affected`), path_suggestions and
     ownership_warnings (missing paths answered with candidates,
     `ozagia.intent.paths`; warnings about another live session's
-    uncommitted edits, `ozagia.core.owners`), and working_sets_served and
+    uncommitted edits, `ozagia.core.owners`), ops_nodes and
+    ops_after_annotations (the operations graph, `ozagia.core.ops_graph`,
+    and `[ozagia] ops:` lines after log/status commands), and working_sets_served and
     working_set_chars (`WORKING_SET_FIELDS`, working sets handed back after
     compactions, `ozagia.core.working_set`), and replace_previews,
     replace_applies and replace_files (`REPLACE_FIELDS`, multi-file
@@ -1356,6 +1358,7 @@ def graph_stats_fields(stats: Any) -> dict[str, Any]:
                 "region_replies": None, "key_edits": None, "jobs_started": None, "job_waits": None,
                 "job_wait_seconds": None, "polls_avoided": None,
                 "path_suggestions": None, "ownership_warnings": None,
+                "ops_nodes": None, "ops_after_annotations": None,
                 **{k: None for k in LINT_FIELDS},
                 **{k: None for k in TEST_SELECTION_FIELDS},
                 **{k: None for k in WORKING_SET_FIELDS},
@@ -1397,6 +1400,8 @@ def graph_stats_fields(stats: Any) -> dict[str, Any]:
             "polls_avoided": _count(stats.get("polls_avoided")),
             "path_suggestions": _count(stats.get("path_suggestions")),
             "ownership_warnings": _count(stats.get("ownership_warnings")),
+            "ops_nodes": _count(stats.get("ops_nodes")),
+            "ops_after_annotations": _count(stats.get("ops_after_annotations")),
             **{k: _count(stats.get(k)) for k in LINT_FIELDS},
             **{k: _count(stats.get(k)) for k in TEST_SELECTION_FIELDS},
             **{k: _count(stats.get(k)) for k in WORKING_SET_FIELDS},
@@ -1656,6 +1661,8 @@ def aggregate(runs: list[dict[str, Any]], arms: Iterable[str]) -> list[dict[str,
                     int(r.get("path_suggestions") or 0) for r in mine),
                 "total_ownership_warnings": sum(
                     int(r.get("ownership_warnings") or 0) for r in mine),
+                "total_ops_after_annotations": sum(
+                    int(r.get("ops_after_annotations") or 0) for r in mine),
                 **{f"total_{k}": sum(int(r.get(k) or 0) for r in mine)
                    for k in (*LINT_FIELDS, *TEST_SELECTION_FIELDS,
                              *WORKING_SET_FIELDS, *REPLACE_FIELDS)},

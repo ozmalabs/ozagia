@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from ozagia.config import clear_config_cache
+from ozagia.core import resources as R
 from ozagia.daemon import jobs as J
 from ozagia.daemon.client import DaemonClient
 from ozagia.daemon.protocol import socket_path
@@ -392,6 +393,113 @@ def test_shell_hints(table):
 
 
 # --------------------------------------------------------------------------- #
+# resource limits and enforcement
+# --------------------------------------------------------------------------- #
+def test_job_records_limits_and_a_short_job_is_not_killed(table):
+    t = table()
+    job = t.start(argv=["sleep", "0.8"])
+    assert job["enforcement"] == "rlimit+watch"
+    assert job["limits"] == {"memory_mb": 2048.0, "pids": 256,
+                             "disk_mb": 4096.0, "wall_s": None,
+                             "file_mb": None}
+    for key in ("limits", "peak_memory_mb", "resource_events",
+                "enforcement", "admission"):
+        assert key in job
+    got = t.wait(job["id"], deadline_s=10)
+    assert got["status"] == "exited" and got["exit_code"] == 0
+    assert got["resource_events"] == []
+    assert isinstance(got["peak_memory_mb"], (int, float))
+    assert got["peak_memory_mb"] > 0
+    listed = t.dispatch("job_list", {})
+    row = next(r for r in listed["jobs"] if r["id"] == job["id"])
+    assert row["limits"]["memory_mb"] == 2048
+    assert row["resource_events"] == []
+    logged = t.log(job["id"], reader="resource-reader")
+    assert logged["limits"]["memory_mb"] == 2048
+    assert logged["peak_memory_mb"] == got["peak_memory_mb"]
+
+
+def test_wall_limit_kills_the_job_and_logs_the_event(table):
+    t = table()
+    policy = R._deep_merge(R.DEFAULT_POLICY, {
+        "sample_s": 0.05, "reserve_disk_gb": 0, "reserve_disk_pct": 0})
+    job = t.start(argv=["sleep", "30"], limits=R.ResourceLimits(wall_s=0.35),
+                  policy=policy)
+    assert job["enforcement"] == "rlimit+watch"
+    assert job["limits"]["wall_s"] == 0.35
+    got = t.wait(job["id"], deadline_s=15)
+    assert got["met"] and got["status"] == "killed"
+    assert got["signal"] == "SIGTERM"
+    assert got["resource_events"]
+    event = got["resource_events"][0]
+    assert event["kind"] == "wall" and event["action"] == "sigterm"
+    lines = got["output"].splitlines()
+    assert any(line.startswith("[ozagia] resource:") for line in lines)
+    assert any("wall-time limit" in line and "SIGTERM" in line
+               for line in lines if line.startswith("[ozagia] resource:"))
+    stats = t.stats()
+    assert stats["jobs_resource_killed"] == 1
+    assert stats["resource_events"] == 1
+    assert stats["resource_peak_mb"] >= 0
+    # A later log read starts at the beginning for a new reader.
+    logged = t.log(job["id"], reader="after-kill")
+    assert "[ozagia] resource:" in logged["output"]
+    assert logged["resource_events"][0]["kind"] == "wall"
+
+
+def test_admission_refusal_is_structured_and_starts_nothing(
+        table, repo, monkeypatch):
+    denied = {
+        "ok": False, "reason": "memory.request",
+        "requested": {"memory_mb": 4096.0, "disk_mb": 4096.0},
+        "available": {"memory_mb": 1200.0, "disk_free_gb": 12.0},
+        "shortfall": {"memory_mb": 2896.0, "disk_mb": 0.0},
+        "retry_after_s": 90, "suggestions": ["stop job j-11"],
+    }
+    monkeypatch.setattr(R, "check_admission", lambda *a, **k: dict(denied))
+    t = table()
+    with pytest.raises(J.ResourceRefused) as info:
+        t.start(argv=["sleep", "30"])
+    assert info.value.report["reason"] == "memory.request"
+    assert t.jobs == {} and t.stats()["jobs_started"] == 0
+    assert not (repo / ".ozagia" / "jobs").exists()
+    reply = t.dispatch("job_start", {"argv": ["true"]})
+    assert reply["ok"] is False and reply["resource_refused"] is True
+    assert reply["reason"] == "memory.request"
+    assert reply["retry_after_s"] == 90
+    assert reply["shortfall"]["memory_mb"] == 2896.0
+    assert reply["suggestions"] == ["stop job j-11"]
+    assert reply["admission"]["available"]["memory_mb"] == 1200.0
+
+
+def test_resources_disabled_means_no_enforcement(table):
+    t = table()
+    job = t.start(argv=["sleep", "0.3"],
+                  limits=R.ResourceLimits(memory_mb=1),
+                  policy={"enabled": False})
+    assert job["enforcement"] == "off"
+    assert job["admission"] is None
+    got = t.wait(job["id"], deadline_s=10)
+    assert got["status"] == "exited" and got["exit_code"] == 0
+    assert got["resource_events"] == []
+
+
+def test_watchdog_path_never_signals_an_unverified_group(table, monkeypatch):
+    calls: list[tuple[int, int]] = []
+    monkeypatch.setattr(J, "_killpg",
+                        lambda pgid, sig: calls.append((pgid, sig)))
+    t = table()
+    event = {"kind": "memory", "limit_mb": 1.0, "observed_mb": 2.0}
+    rec = {"id": "j-stale", "owned": False, "status": "running",
+           "pgid": 999999, "proc_start": "1", "log": "", "resource_events": []}
+    t.jobs[rec["id"]] = rec
+    t._resource_breach(rec["id"], event)
+    assert calls == []
+    assert event["action"] == "not_signalled"
+    assert rec["resource_events"][-1]["verified"] is False
+
+
+# --------------------------------------------------------------------------- #
 # the daemon state
 # --------------------------------------------------------------------------- #
 class _FakeMemory:
@@ -445,6 +553,22 @@ def test_dispatch_ps_capture_hints_and_stats(repo):
         assert stats["jobs"]["sleep_hints"] == 1 and stats["jobs"]["jobs_running"] == 0
         for key in ("waits", "wait_seconds", "polls_avoided"):
             assert key in stats
+    finally:
+        state.jobs.shutdown(grace_s=0.5)
+
+
+def test_daemon_stats_expose_resource_counters(repo):
+    state = DaemonState(repo, _FakeMemory(), repo / "j.jsonl")
+    state.jobs.base_env = PATH_ENV
+    try:
+        job = state.dispatch({"op": "job_start", "argv": ["sleep", "0.2"]})["job"]
+        state.dispatch({"op": "job_wait", "job": job["id"], "deadline_s": 10})
+        stats = state.stats()
+        for key in ("jobs_resource_killed", "resource_events",
+                    "resource_peak_mb"):
+            assert key in stats
+            assert key in stats["jobs"]
+        assert stats["resource_events"] == 0
     finally:
         state.jobs.shutdown(grace_s=0.5)
 

@@ -133,6 +133,7 @@ Effort: S = 1-3 days, M = 1-2 weeks, L = 3-6 weeks of focused agent work.
 | 8 | OpenCode add-in MVP (graph panel, status, settings, commands) | 4 | M | Medium | 1-6; host confirmation | 2 |
 | 9 | Research UI exposure (references, fetch, screening, evidence, review) | 4 | S-M | Low | 1, 6 | 2 |
 | 10 | Bounded task mode (scope, budgets, gates, evidence) | 5 | L | Medium | 2, 3, 4, 5; W8-W11 merged | 3 |
+| 10a | Test management + affected-test policy | 5 | M | Low-medium | 3, 4, 10; graph | 3 |
 | 11 | Task class library (research, coding, ops) | 4 | M | Low | 2, 10 | 3 |
 | 12 | Model registry, per-task defaults, optional classifier | 3 | M | Low | 2, 11 | 3 |
 | 13 | Inspect agent logs and propose improvements | 3 | M | Medium-high | 10, 11 | 4 |
@@ -987,6 +988,90 @@ to the task record. Every declared artifact has a ledger row and retention
 policy. The same inputs, model version and seed produce the same step sequence
 and artifact hashes (model output may differ; it is recorded, not asserted).
 
+### 10a. Test management and affected-test policy
+
+Agentic work wastes time running suites that cannot be affected by the
+change. The graph already knows changed files, symbols, callers, covering
+tests and import relationships. This item turns that into an explicit,
+configurable test policy for bounded tasks, code review and captured pytest.
+
+Modes, from least to most:
+
+| Mode | What runs |
+| --- | --- |
+| `none` | No tests. Allowed for docs-only or review-only tasks; recorded as a decision. |
+| `smoke` | The graph-linked tests for changed files, capped by `max_tests`. |
+| `affected` | Graph-linked tests plus changed tests, failed-last-run tests and tests of changed packages. |
+| `package` | All tests in the changed files' packages/modules, still capped. |
+| `all` | The command as typed. |
+
+Policy precedence: task spec > task class > path override > repository
+config > default. The default for bounded tasks is `affected`; captured
+interactive pytest keeps its current `[tests] select` default (`all`) so a
+typed `pytest` is not silently partial.
+
+```toml
+[testing]
+mode = "affected"
+fallback = "all"          # all | refuse | affected_with_warning
+max_tests = 50
+timeout_s = 300
+captured = "all"          # interactive shell default
+[testing.tasks]
+code_review = "none"
+diff_review = "affected"
+test_triage = "affected"
+repo_scan = "smoke"
+[testing.paths]
+"docs/**" = "none"
+"src/**" = "affected"
+```
+
+Planning is deterministic:
+
+- changed files from the task input or `git diff base..head`, plus
+  untracked/created files when the task owns them;
+- graph edges (`File -has_test-> Test`, `tests_module`, `mentions_file`),
+  transitive imports and the `covering_tests` query;
+- changed test files always run; tests that failed in the last known run
+  always run; flaky tests are never silently skipped;
+- docs/config-only changes may be `none`; a changed file with no test link
+  uses `fallback` (`all` by default, or `refuse` for strict tasks);
+- a missing/stale graph is not trusted: report it and fall back, never claim
+  affected coverage.
+
+The plan reports `mode`, selected tests, counts, omitted tests, fallback
+reason, graph freshness and `not_assessed`. A subset run is never described
+as a full pass.
+
+Integration:
+
+- `core/tasks.py`: a `test_policy` field and a `test` step that receives the
+  plan; `none` skips test steps and records why; budget/time limits apply.
+- `core/code_review.py`: packet includes the planned tests and the reason a
+  test was not run; an optional injected runner may execute the plan later.
+- captured pytest: keep `ozagia.intent.affected` as the executor; add the
+  `[testing] captured` default and per-task/path policy where a caller
+  supplies them. No change to the interactive default.
+- status/view: show the policy and last plan; no test result is invented.
+
+Acceptance:
+
+- a changed `src/app.py` linked to `tests/test_app.py` selects that test;
+- a docs-only change selects `none` where configured;
+- an unlinked changed file produces the configured fallback, not an empty
+  green result;
+- `max_tests` and `timeout_s` cap the plan and report omissions;
+- task-class and path overrides win in the documented order;
+- a missing/stale graph is reported and falls back;
+- failed/flaky tests are never skipped;
+- the selected tests can be printed by a CLI (`python -m ozagia.testing_cli
+  plan ... --json`) and are recorded in task/code-review evidence.
+
+Non-goals: no claim that a subset proves correctness; no automatic full
+suite after a subset; no Rust `cargo test` selection until the graph has
+crate/test-target nodes; no model calls in planning.
+
 ### 11. Task class library
 
 Start with classes that are useful and safe:
@@ -1238,20 +1323,39 @@ The read-only part of 1a landed as new files:
 - `core/apertures.py`, `core/view.py`, `view_html.py`, `view_cli.py`: data
   apertures, deterministic view models, self-contained HTML and a read-only
   CLI (`feat/view-apertures`, merged as `e139994`).
-- `tests/test_worktree.py`, `tests/test_resources.py`, `tests/test_files.py`,
-  `tests/test_status.py`, `tests/test_view.py`; `docs/worktree.md`,
-  `docs/resources.md`, `docs/files.md`, `docs/status.md`, `docs/view.md`;
-  console scripts for view, status, worktree, resources and files in
-  `pyproject.toml`.
+- `core/settings.py`, `settings_cli.py`: typed registry, user/repo/env
+  precedence, validation, atomic preview-first writes and the versioned
+  `ozagia/config.toml` (`feat/settings-registry`, merged as `11b33ef`).
+- `core/code_review.py`, `code_review_cli.py`: deterministic graph-aware
+  review packets; worktree/resource preflight; typed findings; graph
+  freshness; optional injected-review seam (`feat/code-review`, merged as
+  `20570d7`).
+- `core/tasks.py`, `tasks_cli.py`: bounded task specs, preflight, gates,
+  budgets, evidence logs and artifact manifests; three example specs
+  (`feat/bounded-tasks`, merged as `2d38853`).
+- `core/resources.py`, `daemon/jobs.py`, `daemon/server.py`: job limits,
+  admission before spawn, rlimit + verified-group watchdog, own OOM, log and
+  session feedback (`feat/resource-enforcement`, merged as `2337d28`).
+- `integrations/ocelot/`: explicit pinned resolver/installer with checksum,
+  SSRF/path-traversal guard and manifest verification (`feat/ocelot-installer`,
+  merged as `11c1b60`).
+- Tests for all of the above; docs `worktree.md`, `resources.md`, `files.md`,
+  `status.md`, `view.md`, `settings.md`, `code_review.md`, `tasks.md`,
+  `ocelot.md`; console scripts for view, status, settings, tasks, review,
+  Ocelot, worktree, resources and files in `pyproject.toml`.
 
-Checks after the view and file-ledger merges: `3285 passed, 21 skipped`;
-`ruff check src tests` passes. The earlier `PostCompact` merge failure was
-transient and is resolved.
+Checks after both waves: `3469 passed, 21 skipped`;
+`ruff check src tests` passes. A concurrent TUI-brand merge added
+`.opencode/plugins/ozagia/tui.js`; the harness exclude patterns and tests were
+updated for it, and the full suite is green.
 
-Not yet: resource enforcement/OOM, cleanup apply/trash, command-derived path
-extraction for `patch`/`shell`, a true before/after session manifest (the
-current scan attributes pre-existing untracked files to the session with
-`reason: unknown`), settings registry and the UI hosts.
+Not yet: cgroups and exact per-job disk accounting; cleanup apply/trash;
+command-derived path extraction for `patch`/`shell`; a true before/after
+session manifest (the current scan attributes pre-existing untracked files to
+the session with `reason: unknown`); live/multi-model review and Ocelot
+reconciliation in the code-review harness; model/tool adapters and the task
+class library; `ozagia config` CLI/`config.py` integration, migration from
+`.ozagia.toml`, doctor source reporting; and the UI hosts.
 
 ### Parallel workstreams (2026-11-16)
 
@@ -1264,10 +1368,39 @@ Four agents are running from base `865b0ed`, each in its own worktree:
 | `~/ozmadev/ozagia-wt/status-snapshot` | `feat/status-snapshot` | Read-only composed status, `status_cli` |
 | `~/ozmadev/ozagia-wt/file-ledger` | `feat/file-ledger` | Ledger capture in edits/hooks/sessions |
 
-Status: `status-snapshot` is merged as `96a6a22`, `view-apertures` as
-`e139994`, and `file-ledger` as `01807a9`; `settings-registry` is still
-running. The supervisor reviews each branch, runs targeted tests and ruff,
-merges one branch at a time, then runs the full suite from the main checkout.
+Status: all four are merged: `status-snapshot` as `96a6a22`, `view-apertures`
+as `e139994`, `file-ledger` as `01807a9`, and `settings-registry` as `11b33ef`.
+The supervisor reviewed each branch, ran targeted tests and ruff, merged one
+branch at a time, then ran the full suite from the main checkout.
+
+### Parallel wave 2 (2026-11-16)
+
+Four more agents start from `ab17a1a`:
+
+| Worktree | Branch | Scope |
+| --- | --- | --- |
+| `~/ozmadev/ozagia-wt/code-review` | `feat/code-review` | Deterministic code-review packet: diff, graph impact, tests, findings |
+| `~/ozmadev/ozagia-wt/resource-enforcement` | `feat/resource-enforcement` | Job resource limits, watchdog/own OOM and session feedback |
+| `~/ozmadev/ozagia-wt/bounded-tasks` | `feat/bounded-tasks` | Bounded task specification, runner, gates, budgets and evidence |
+| `~/ozmadev/ozagia-wt/ocelot-installer` | `feat/ocelot-installer` | Pinned, checksummed, explicit Ocelot install and resolution |
+
+Status: all four are merged: `bounded-tasks` as `2d38853`, `ocelot-installer`
+as `11c1b60`, `code-review` as `20570d7`, and `resource-enforcement` as
+`2337d28`. The final full suite is `3469 passed, 21 skipped`; ruff passes.
+
+### Parallel wave 3 (2026-11-16)
+
+Four agents start from `e5676cd`:
+
+| Worktree | Branch | Scope |
+| --- | --- | --- |
+| `~/ozmadev/ozagia-wt/research-ui` | `feat/research-ui` | Research library/evidence/screening/citation views over existing services |
+| `~/ozmadev/ozagia-wt/task-library` | `feat/task-library` | Versioned task-class catalogue on top of `core/tasks.py` |
+| `~/ozmadev/ozagia-wt/model-registry` | `feat/model-registry` | Available-model registry, per-task defaults and source reporting |
+| `~/ozmadev/ozagia-wt/log-inspect` | `feat/log-inspect` | Bounded, redacted local log inspection and proposed improvements |
+| `~/ozmadev/ozagia-wt/test-policy` | `feat/test-policy` | Graph-based affected-test planning and configurable test depth |
+
+The same review/merge/full-suite gate applies.
 
 ## Open decisions
 

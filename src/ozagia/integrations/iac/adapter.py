@@ -125,6 +125,7 @@ def index(ctx: Any) -> None:
     manifests: dict[str, str] = {}
     terraform_by_dir: dict[str, dict[str, str]] = {}
     terraform_paths: list[str] = []
+    ops_sources: dict[str, str] = {}
     # One bounded walk: register every candidate even when a source cannot be
     # read or the cumulative content budget is reached, otherwise every refresh
     # would repeatedly treat those paths as newly discovered.
@@ -147,7 +148,9 @@ def index(ctx: Any) -> None:
             budget_exceeded = True
             continue
         digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
-        if kind == "terraform":
+        if kind == "ops":
+            ops_sources[rel] = text
+        elif kind == "terraform":
             terraform_paths.append(rel)
             scope = PurePosixPath(rel).parent.as_posix()
             dialect = ("opentofu" if rel.lower().endswith((".tofu", ".tofu.json"))
@@ -482,6 +485,9 @@ def index(ctx: Any) -> None:
                 environment_by_node[node.key] = None
                 ambiguous_environment_nodes.add(node.key)
 
+    from ozagia.integrations.iac.ops import emit_ops
+    diagnostics.extend(emit_ops(ctx, ops_sources))
+
     skip_info = skipped_summary(ctx.root)
     ids: dict[str, int] = {}
     for node, family in all_nodes:
@@ -669,6 +675,8 @@ def register(registry: Any) -> None:
                 "note": "Static, partial source analysis; not deployed state."}
 
     registry.add_graph_query("infra.status", status)
+    from ozagia.integrations.iac.ops import register_ops
+    register_ops(registry)
     def parse_findings(_memory: Any, args: dict[str, Any]) -> dict[str, Any]:
         imported = import_sarif(str(args.get("sarif", "")))
         return {"findings": [asdict(finding) for finding in imported.findings],

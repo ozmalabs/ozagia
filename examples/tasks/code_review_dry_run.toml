@@ -1,0 +1,92 @@
+id = "code_review"
+version = 1
+title = "Code review (dry run)"
+objective = "Review a diff for correctness, test coverage and contract risk without writing to the repository."
+inputs = ["diff"]
+tools = ["read", "grep", "graph_search"]
+write_scope = []
+requires_graph = true
+stop = ["gate_failed", "budget_exhausted", "resource_limit", "no_progress", "repeated_state"]
+output = "review_packet.v1"
+
+[worktree]
+base = "main"
+require_clean = true
+require_up_to_date = false
+
+[resources]
+memory_mb = 1024
+disk_mb = 512
+pids = 64
+wall_s = 300
+
+[budget]
+tokens = 40000
+model_calls = 0
+cost_usd = 0.0
+wall_s = 300
+
+[gates]
+before = ["worktree_expected", "branch_expected", "drift_clear", "resources_fit", "snapshot_fresh"]
+after = ["schema_valid", "evidence_present", "policy_commit"]
+
+[approval]
+mutate = "deny"
+network = "deny"
+
+[output_schema]
+type = "object"
+required = ["summary", "findings", "not_assessed"]
+additionalProperties = false
+
+[output_schema.properties.summary]
+type = "string"
+minLength = 1
+
+[output_schema.properties.findings]
+type = "array"
+
+[output_schema.properties.findings.items]
+type = "object"
+required = ["file", "severity"]
+additionalProperties = false
+
+[output_schema.properties.findings.items.properties.file]
+type = "string"
+
+[output_schema.properties.findings.items.properties.severity]
+type = "string"
+enum = ["info", "warn", "error"]
+
+[output_schema.properties.not_assessed]
+type = "array"
+
+[output_schema.properties.not_assessed.items]
+type = "string"
+
+[[steps]]
+id = "collect-diff"
+tool = "grep"
+goal = "Find the changed files and the symbols they touch."
+paths = ["."]
+
+[steps.budget]
+tokens = 8000
+
+[[steps]]
+id = "graph-impact"
+tool = "graph_search"
+goal = "Find callers, callees and covering tests for the changed symbols."
+paths = ["."]
+
+[steps.budget]
+tokens = 12000
+
+[[steps]]
+id = "report"
+tool = "read"
+goal = "Assemble the review packet and list what was not assessed."
+paths = ["."]
+
+[steps.budget]
+tokens = 8000

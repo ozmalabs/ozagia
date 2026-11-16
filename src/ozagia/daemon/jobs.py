@@ -48,6 +48,20 @@ process in it started no earlier than the job's leader (`/proc/<pid>/stat`
 field 22) and the pgid's own pid, if alive, is the leader that started then
 (`_group_ours`).
 
+Resource limits (`core.resources`): `start` takes limits from
+`[resources.limits]` (or explicit `limits=`/`policy=` arguments), runs the
+memory/disk admission check before spawning, applies child rlimits
+(`RLIMIT_AS`, optional `RLIMIT_FSIZE`) and starts a watchdog after the
+spawn. The watchdog samples the verified process group and the cwd
+filesystem; on a breach it SIGTERMs the group, waits
+`RESOURCE_KILL_GRACE_S`, then SIGKILLs it. The group is verified again
+before any signal, and an unverified/stale group is never signalled. The
+job record carries `limits`, `enforcement` (`rlimit+watch` or `off`),
+`admission`, `peak_memory_mb` and `resource_events`; the log gets
+`[ozagia] resource:` lines. `[resources] enabled = false` or
+`watchdog = "off"` opts out (the latter keeps admission). cgroups are out of
+scope for this layer.
+
 Logs are not truncated while a job runs. Every read is capped instead: a
 read returns at most `TAIL_LINES` lines and `TAIL_BYTES` bytes, the newest
 ones, and says how many it skipped. Log files are read and matched without
@@ -88,6 +102,7 @@ enabled).
 """
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
@@ -99,7 +114,9 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
+
+from ozagia.core import resources as R
 
 MAX_JOBS = 50
 MAX_RUNNING = 16
@@ -109,6 +126,7 @@ WAIT_DEFAULT_S = 45.0
 WAIT_MAX_S = 3600.0
 STOP_GRACE_S = 3.0
 SHUTDOWN_GRACE_S = 2.0
+RESOURCE_KILL_GRACE_S = 3.0
 POLL_S = 0.2
 # Bytes of new log text one poll of a `log:` wait scans.
 SCAN_CHUNK = 1 << 20
@@ -122,6 +140,8 @@ MAX_COMMAND_CHARS = 16000
 MAX_READERS = 1000
 TABLE_NAME = "jobs.json"
 JOBS_DIR = "jobs"
+RESOURCE_LOG_PREFIX = "[ozagia] resource:"
+MAX_RESOURCE_EVENTS = 50
 # `sleep N` at least this long, while a job runs, gets the job_wait hint.
 SLEEP_HINT_S = 20.0
 # Each kind of hint is shown at most this often per session.
@@ -135,6 +155,30 @@ _SIGNALS = {"TERM": signal.SIGTERM, "KILL": signal.SIGKILL, "INT": signal.SIGINT
 
 class JobError(ValueError):
     """A bad job request (unknown job, bad input, cwd outside the root)."""
+
+
+class ResourceRefused(JobError):
+    """Admission refused a job before it was started (structured report)."""
+
+    def __init__(self, report: Mapping[str, Any]) -> None:
+        self.report = dict(report)
+        reason = report.get("reason") or "insufficient_resources"
+        requested = report.get("requested") or {}
+        shortfall = report.get("shortfall") or {}
+        memory = requested.get("memory_mb")
+        disk = requested.get("disk_mb")
+        detail = []
+        if memory is not None:
+            detail.append(f"memory {memory:.0f} MiB")
+        if disk is not None:
+            detail.append(f"disk {disk:.0f} MiB")
+        request = ", ".join(detail) or "request"
+        super().__init__(
+            f"refused: {reason}: {request} does not fit; "
+            f"shortfall memory {shortfall.get('memory_mb', 0):.0f} MiB, "
+            f"disk {shortfall.get('disk_mb', 0):.0f} MiB"
+            + (f"; retry_after_s {report['retry_after_s']}"
+               if report.get("retry_after_s") else ""))
 
 
 def _now() -> float:
@@ -328,18 +372,23 @@ class JobTable:
 
     def __init__(self, root: str | Path, jobs_dir: str | Path | None = None, *,
                  base_env: dict[str, str] | None = None,
-                 enabled: bool | None = None) -> None:
+                 enabled: bool | None = None,
+                 resource_policy: Mapping[str, Any] | None = None) -> None:
         from ozagia.config import state_path
         self.root = Path(root).resolve()
         self.dir = Path(jobs_dir) if jobs_dir else state_path(self.root, JOBS_DIR)
         self.base_env = base_env
         # None: `jobs_enabled(root)` decides at each start.
         self.enabled = enabled
+        # A loaded `[resources]` policy, or None to load it per start.
+        self.resource_policy = (dict(resource_policy)
+                                if resource_policy is not None else None)
         self.cond = threading.Condition()
         self.jobs: dict[str, dict[str, Any]] = {}     # id -> record, oldest first
         # Owned jobs whose leader is not reaped yet (its pgid is reserved).
         self._procs: dict[str, subprocess.Popen] = {}
         self._reapers: dict[str, threading.Thread] = {}
+        self._watchdogs: dict[str, R.ResourceWatchdog] = {}
         self.cursors: dict[tuple[str, str], int] = {}
         self.events: list[dict[str, Any]] = []       # job ends, for job_events
         self.event_seq = 0                           # the last event's `seq`
@@ -351,7 +400,9 @@ class JobTable:
         self.counts = {"jobs_started": 0, "waits": 0, "wait_seconds": 0.0,
                        "polls_avoided": 0, "job_stops": 0, "ps_captures": 0,
                        "sleep_hints": 0, "background_hints": 0, "job_events": 0,
-                       "jobs_refused": 0, "stopped_on_load": 0}
+                       "jobs_refused": 0, "stopped_on_load": 0,
+                       "jobs_resource_killed": 0, "resource_events": 0,
+                       "resource_peak_mb": 0.0, "resource_refusals": 0}
         self._load()
 
     def is_enabled(self) -> bool:
@@ -447,6 +498,7 @@ class JobTable:
             over -= 1
             del self.jobs[jid]
             self._reapers.pop(jid, None)
+            self._watchdogs.pop(jid, None)
             for key in [k for k in self.cursors if k[0] == jid]:
                 del self.cursors[key]
             try:
@@ -515,7 +567,10 @@ class JobTable:
         out = {k: rec.get(k) for k in (
             "id", "command", "argv", "cwd", "env_keys", "pid", "pgid", "status",
             "exit_code", "signal", "started", "ended", "detach", "session",
-            "harness", "log")}
+            "harness", "log", "enforcement", "admission")}
+        out["limits"] = rec.get("limits")
+        out["peak_memory_mb"] = rec.get("peak_memory_mb")
+        out["resource_events"] = list(rec.get("resource_events") or [])
         out["elapsed_s"] = _elapsed(rec)
         out["log_bytes"] = size
         if rec.get("leader_exited") and rec.get("status") == "running":
@@ -548,9 +603,148 @@ class JobTable:
             raise JobError(f"cwd {cwd} is not a directory")
         return real
 
+    # -- resources ----------------------------------------------------------- #
+    def _policy_for(self, policy: Mapping[str, Any] | None) -> dict[str, Any]:
+        if policy is not None:
+            return R._deep_merge(R.DEFAULT_POLICY, dict(policy))
+        if self.resource_policy is not None:
+            return R._deep_merge(R.DEFAULT_POLICY, dict(self.resource_policy))
+        return R.load_policy(self.root)
+
+    @staticmethod
+    def _admission_summary(report: Mapping[str, Any] | None) -> dict[str, Any] | None:
+        if report is None:
+            return None
+        return {k: report.get(k) for k in (
+            "ok", "reason", "shortfall", "retry_after_s", "suggestions",
+            "requested", "available", "disabled")}
+
+    @staticmethod
+    def _disk_reserve_gb(policy: Mapping[str, Any],
+                         admission: Mapping[str, Any] | None,
+                         path: Path) -> float:
+        try:
+            reserve = float(policy.get("reserve_disk_gb") or 0.0)
+        except (TypeError, ValueError):
+            reserve = 0.0
+        try:
+            pct = float(policy.get("reserve_disk_pct") or 0.0)
+        except (TypeError, ValueError):
+            pct = 0.0
+        total = ((admission or {}).get("available") or {}).get("disk_total_gb")
+        if pct > 0 and not isinstance(total, (int, float)):
+            total = R.disk_usage(path).get("total_gb")
+        if pct > 0 and isinstance(total, (int, float)):
+            reserve = max(reserve, float(total) * pct / 100)
+        return max(0.0, reserve)
+
+    @staticmethod
+    def _child_preexec(limits: R.ResourceLimits):
+        if os.name != "posix":
+            return None
+        # RLIMIT_NPROC is per UID: applying the job's pids limit there would
+        # also count unrelated processes of the same user. The watchdog
+        # enforces the job's process-group count instead.
+        return functools.partial(R.apply_child_limits, limits,
+                                 apply_nproc=False)
+
+    def _verified_group(self, rec: dict[str, Any] | None) -> bool:
+        """Whether the record's group is still this job's (call with `cond`)."""
+        if (rec is None or not rec.get("owned")
+                or rec.get("status") != "running" or rec.get("group_gone")
+                or rec.get("id") not in self._procs):
+            return False
+        return _group_ours(rec.get("pgid"), rec.get("proc_start"))
+
+    def _record_resource_sample(self, jid: str,
+                                sample: Mapping[str, Any]) -> None:
+        peak = sample.get("peak_memory_mb")
+        if not isinstance(peak, (int, float)):
+            return
+        with self.cond:
+            rec = self.jobs.get(jid)
+            if rec is None:
+                return
+            old = rec.get("peak_memory_mb")
+            value = round(max(float(old or 0.0), float(peak)), 2)
+            rec["peak_memory_mb"] = value
+            self.counts["resource_peak_mb"] = max(
+                float(self.counts.get("resource_peak_mb") or 0.0), value)
+
+    @staticmethod
+    def _append_log_line(rec: Mapping[str, Any], line: str) -> None:
+        """Append one `[ozagia]` line to the job log, at a line boundary."""
+        path = Path(str(rec.get("log") or ""))
+        if not path.name:
+            return
+        try:
+            prefix = b""
+            try:
+                if path.stat().st_size:
+                    with open(path, "rb") as handle:
+                        handle.seek(-1, os.SEEK_END)
+                        if handle.read(1) != b"\n":
+                            prefix = b"\n"
+            except OSError:
+                pass
+            with open(path, "ab") as handle:
+                handle.write(prefix + line.encode("utf-8", "replace") + b"\n")
+        except OSError as exc:
+            print(f"job log write failed for {rec.get('id')}: {exc}",
+                  file=sys.stderr, flush=True)
+
+    def _resource_breach(self, jid: str, event: dict[str, Any]) -> None:
+        """The watchdog's killer: SIGTERM, grace, SIGKILL a verified group."""
+        with self.cond:
+            rec = self.jobs.get(jid)
+            if not self._verified_group(rec):
+                if rec is not None:
+                    event.update(verified=False, action="not_signalled")
+                    rec.setdefault("resource_events", []).append(dict(event))
+                    del rec["resource_events"][:-MAX_RESOURCE_EVENTS]
+                    self.counts["resource_events"] += 1
+                    self._append_log_line(
+                        rec, f"{RESOURCE_LOG_PREFIX} refusing to signal job "
+                             f"{jid}: its process group is not verified")
+                return
+            assert rec is not None
+            recorded = dict(event)
+            rec.setdefault("resource_events", []).append(recorded)
+            del rec["resource_events"][:-MAX_RESOURCE_EVENTS]
+            self.counts["resource_events"] += 1
+            self.counts["jobs_resource_killed"] += 1
+            body = R.describe_resource_event(event)
+            self._append_log_line(
+                rec, f"{RESOURCE_LOG_PREFIX} job {jid}: {body}; "
+                     "stopping its verified process group (SIGTERM)")
+            pgid = rec.get("pgid")
+            self._signal(rec, signal.SIGTERM)
+            t0 = time.monotonic()
+            while (_group_members(pgid)
+                   and time.monotonic() - t0 < RESOURCE_KILL_GRACE_S):
+                self.cond.wait(0.05)
+            if _group_members(pgid):
+                self._signal(rec, signal.SIGKILL)
+                action = "sigkill"
+                self._append_log_line(
+                    rec, f"{RESOURCE_LOG_PREFIX} job {jid} still running "
+                         f"{RESOURCE_KILL_GRACE_S:.0f} s after SIGTERM; sent "
+                         "SIGKILL")
+            else:
+                action = "sigterm"
+            recorded.update(action=action, job=jid)
+            event["action"] = action
+            event.setdefault("job", jid)
+            peak = rec.get("peak_memory_mb")
+            self._append_log_line(
+                rec, f"{RESOURCE_LOG_PREFIX} job {jid} stopped after a "
+                     f"resource limit ({body}; peak memory "
+                     f"{R.format_memory(peak)})")
+
     def start(self, *, command: Any = None, argv: Any = None, cwd: Any = None,
               env: Any = None, detach: bool = False, session: Any = None,
-              harness: Any = None) -> dict[str, Any]:
+              harness: Any = None, limits: R.ResourceLimits | Mapping[str, Any] | None = None,
+              policy: Mapping[str, Any] | None = None) -> dict[str, Any]:
         if not self.is_enabled():
             with self.cond:
                 self.counts["jobs_refused"] += 1
@@ -590,6 +784,43 @@ class JobTable:
                            "variables (GIT_CONFIG_*, GIT_DIR, ...) can change "
                            "what git commands do, so jobs cannot set them")
         wd = self._cwd(cwd)
+        policy_data = self._policy_for(policy)
+        if limits is not None and not isinstance(
+                limits, (R.ResourceLimits, Mapping)):
+            raise JobError("limits must be ResourceLimits or a mapping")
+        try:
+            if limits is None:
+                chosen = R.limits_from_policy(policy_data, "job")
+            elif isinstance(limits, R.ResourceLimits):
+                chosen = limits
+            else:
+                chosen = R.ResourceLimits.from_mapping(limits)
+        except ValueError as exc:
+            raise JobError(f"bad resource limits: {exc}") from None
+        resources_enabled = bool(policy_data.get("enabled", True))
+        mode = str(policy_data.get("watchdog") or "auto").strip().lower()
+        enforcing = bool(resources_enabled and mode != "off" and chosen.enabled)
+        admission: dict[str, Any] | None = None
+        if resources_enabled and (chosen.memory_mb is not None
+                                  or chosen.disk_mb is not None):
+            admission = R.check_admission(
+                self.root, kind="job",
+                memory_mb=chosen.memory_mb or 0.0,
+                disk_mb=chosen.disk_mb or 0.0, path=wd, policy=policy_data)
+            if not admission.get("ok"):
+                with self.cond:
+                    self.counts["jobs_refused"] += 1
+                    self.counts["resource_refusals"] += 1
+                raise ResourceRefused(admission)
+        try:
+            sample_s = float(policy_data.get("sample_s") or 2.0)
+        except (TypeError, ValueError):
+            sample_s = 2.0
+        sample_s = max(0.05, min(sample_s, 60.0))
+        reserve_gb = (self._disk_reserve_gb(policy_data, admission, wd)
+                      if enforcing else 0.0)
+        mechanism = R.ENFORCEMENT_MECHANISM if enforcing else "off"
+        preexec = self._child_preexec(chosen) if enforcing else None
         if self.base_env is not None:
             base = dict(self.base_env)
         else:
@@ -607,14 +838,25 @@ class JobTable:
             self.next_id += 1
             self.dir.mkdir(parents=True, exist_ok=True)
             log = self.dir / f"{jid}.log"
+            extra: dict[str, Any] = {}
+            if preexec is not None:
+                extra["preexec_fn"] = preexec
             try:
                 with open(log, "wb") as fh, open(os.devnull, "rb") as devnull:
                     proc = subprocess.Popen(
                         args, cwd=str(wd), env=full_env, stdin=devnull,
                         stdout=fh, stderr=subprocess.STDOUT,
-                        start_new_session=True, close_fds=True)
+                        start_new_session=True, close_fds=True, **extra)
             except OSError as e:
                 raise JobError(f"cannot start {text!r}: {e}") from None
+            initial_peak: float | None = None
+            if enforcing:
+                try:
+                    first = R.process_group_usage(proc.pid)
+                    if first.get("process_count"):
+                        initial_peak = float(first.get("memory_mb") or 0.0)
+                except Exception:  # noqa: BLE001 - observation is best-effort
+                    initial_peak = 0.0
             rel = os.path.relpath(wd, self.root)
             rec = {"id": jid, "command": text,
                    "argv": list(argv) if argv is not None else None,
@@ -625,16 +867,42 @@ class JobTable:
                    "ended": None, "detach": bool(detach), "log": str(log),
                    "session": session if isinstance(session, str) else None,
                    "harness": harness if isinstance(harness, str) else None,
+                   "limits": chosen.to_dict(), "enforcement": mechanism,
+                   "peak_memory_mb": initial_peak, "resource_events": [],
+                   "admission": self._admission_summary(admission),
                    "owned": True}
             self.jobs[jid] = rec
             self._procs[jid] = proc
             self.counts["jobs_started"] += 1
+            if initial_peak is not None:
+                self.counts["resource_peak_mb"] = max(
+                    float(self.counts.get("resource_peak_mb") or 0.0),
+                    initial_peak)
             self._evict()
             self._save()
             t = threading.Thread(target=self._reap, args=(jid, proc),
                                  name=f"ozagia-job-{jid}", daemon=True)
             self._reapers[jid] = t
             t.start()
+            if enforcing:
+                def verify(job_id: str = jid) -> bool:
+                    with self.cond:
+                        return self._verified_group(self.jobs.get(job_id))
+
+                def on_sample(sample: Mapping[str, Any],
+                              job_id: str = jid) -> None:
+                    self._record_resource_sample(job_id, sample)
+
+                def killer(event: dict[str, Any],
+                           job_id: str = jid) -> None:
+                    self._resource_breach(job_id, event)
+
+                watchdog = R.ResourceWatchdog(
+                    chosen, pgid=proc.pid, verify=verify, killer=killer,
+                    path=wd, interval_s=sample_s, reserve_disk_gb=reserve_gb,
+                    on_sample=on_sample)
+                self._watchdogs[jid] = watchdog
+                watchdog.start()
             return self.public(rec)
 
     def _reap(self, jid: str, proc: subprocess.Popen) -> None:
@@ -653,6 +921,9 @@ class JobTable:
             self.cond.notify_all()
         while info is not None and _group_members(proc.pid):
             time.sleep(GROUP_POLL_S)
+        watchdog = self._watchdogs.pop(jid, None)
+        if watchdog is not None:
+            watchdog.stop()
         with self.cond:
             code = proc.wait()          # the group is empty: free the pgid
             self._procs.pop(jid, None)
@@ -878,6 +1149,11 @@ class JobTable:
             out.update({"job": subject["id"], "status": pub["status"],
                         "exit_code": pub["exit_code"], "signal": pub["signal"],
                         "elapsed_s": pub["elapsed_s"], "command": pub["command"],
+                        "limits": pub.get("limits"),
+                        "peak_memory_mb": pub.get("peak_memory_mb"),
+                        "resource_events": pub.get("resource_events") or [],
+                        "enforcement": pub.get("enforcement"),
+                        "admission": pub.get("admission"),
                         **got})
             for k in ("leader_exited", "group_alive"):
                 if k in pub:
@@ -1055,6 +1331,16 @@ class JobTable:
             if op == "job_events":
                 return self.wait_events(reader=reader, after_seq=msg.get("after_seq"),
                                         deadline_s=msg.get("deadline_s"))
+        except ResourceRefused as e:
+            report = e.report
+            return {"ok": False, "error": str(e), "resource_refused": True,
+                    "reason": report.get("reason"),
+                    "requested": report.get("requested"),
+                    "available": report.get("available"),
+                    "shortfall": report.get("shortfall"),
+                    "retry_after_s": report.get("retry_after_s"),
+                    "suggestions": report.get("suggestions") or [],
+                    "admission": report}
         except JobError as e:
             return {"ok": False, "error": str(e)}
         return {"ok": False, "error": f"unknown op {op!r}"}
@@ -1358,6 +1644,7 @@ def capture_ps(command: str, jobs: list[dict[str, Any]]) -> str | None:
     return None
 
 
-__all__ = ["JobError", "JobTable", "MAX_JOBS", "OPS", "WAIT_DEFAULT_S",
-           "background_start", "capture_ps", "disabled_message", "jobs_enabled",
-           "parse_until", "sleep_seconds"]
+__all__ = ["JobError", "JobTable", "MAX_JOBS", "OPS", "ResourceRefused",
+           "WAIT_DEFAULT_S", "background_start", "capture_ps",
+           "disabled_message", "jobs_enabled", "parse_until",
+           "sleep_seconds"]

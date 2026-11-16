@@ -1862,8 +1862,8 @@ class DevMemory:
             from ozagia.adapters import registry
             if any(getattr(fn, "__module__", "") == "ozagia.integrations.iac.adapter"
                    for fn in registry(self.raw_repo_root).indexers):
-                from ozagia.core.infra_discovery import source_kind
-                if source_kind(Path(str(rel)).name):
+                from ozagia.core.infra_discovery import env_file_name, source_kind
+                if source_kind(str(rel)) or env_file_name(str(rel)):
                     return {"path": str(rel), "lines": "", "text": "",
                             "note": "Infrastructure source omitted from automatic snippets"}
         text = self._read(str(rel))

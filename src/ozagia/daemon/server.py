@@ -152,7 +152,7 @@ FILE_LEDGER_PATHS = 20
 ENV_FILE_LEDGER = "OZAGIA_FILE_LEDGER"
 # `meta` counters the daemon sums into its stats.
 META_COUNTERS = ("path_suggestions", "ownership_warnings", "files_recorded",
-                 "file_ledger_errors")
+                 "file_ledger_errors", "ops_after_annotations")
 # Keys kept per journal record.
 JOURNAL_KEYS = 20
 # Distinct shell passthrough reasons kept, and shown in `stats`.
@@ -344,7 +344,12 @@ class DaemonState:
         self.ms_max = 0.0
         self.ms_count = 0
         self.server: socketserver.BaseServer | None = None
-        self.jobs = J.JobTable(root, base_env=test_env)
+        from ozagia.core import resources as R
+        # Observation, admission and the first enforcement layer share one
+        # loaded policy for the daemon's lifetime (a config edit needs a
+        # restart, like the other daemon-loaded settings).
+        self.jobs = J.JobTable(root, base_env=test_env,
+                               resource_policy=R.load_policy(root))
         from ozagia.core.working_set import TestRecord
         # The root's failing tests across sessions (`working_set` with
         # `since`), persisted in the state dir.
@@ -356,6 +361,9 @@ class DaemonState:
         self.owners = Owners(root, daemon_journal=journal)
         self.path_suggestions = 0
         self.ownership_warnings = 0
+        # Ops graph (`ozagia.core.ops_graph`): `[ozagia] ops:` lines added
+        # after container/unit log and status commands.
+        self.ops_after_annotations = 0
         # Created-file ledger (`ozagia.core.files`): rows appended from
         # handled writes and `after`/`session_event` scans, scans run, and
         # ledger/git failures (the tool call itself never fails for them).
@@ -1054,6 +1062,13 @@ class DaemonState:
         finally:
             self.lock.release()
 
+    def _ops_nodes(self) -> int:
+        try:
+            from ozagia.core.ops_graph import ops_nodes
+            return len(ops_nodes(self.memory))
+        except Exception:  # noqa: BLE001 - stats must not fail
+            return 0
+
     def stats(self) -> dict[str, Any]:
         job_stats = self.jobs.stats()
         with self._stats_lock:
@@ -1118,6 +1133,12 @@ class DaemonState:
                 # uncommitted edits, and the sessions live now.
                 "path_suggestions": self.path_suggestions,
                 "ownership_warnings": self.ownership_warnings,
+                # Operations graph (`ozagia.core.ops_graph`, opt-in with the
+                # IaC adapter): ops nodes in the graph, and `[ozagia] ops:`
+                # lines added after podman/docker/compose logs, journalctl
+                # and systemctl status.
+                "ops_nodes": self._ops_nodes(),
+                "ops_after_annotations": self.ops_after_annotations,
                 "live_sessions": self.owners.live_sessions(),
                 # Created-file ledger (`ozagia.core.files`): rows recorded
                 # (handled writes, `after` scans, session start/end scans),
@@ -1135,7 +1156,10 @@ class DaemonState:
                 # output or the job's end (each one a poll the agent did not
                 # make); `jobs` has the rest of the job counters.
                 **{k: job_stats[k] for k in ("jobs_started", "waits",
-                                            "wait_seconds", "polls_avoided")},
+                                            "wait_seconds", "polls_avoided",
+                                            "jobs_resource_killed",
+                                            "resource_events",
+                                            "resource_peak_mb")},
                 "jobs": job_stats,
                 # The working set (`ozagia.core.working_set`): working sets
                 # handed back after a compaction (or to dev_working_set),

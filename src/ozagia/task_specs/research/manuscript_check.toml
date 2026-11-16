@@ -1,0 +1,128 @@
+id = "manuscript_check"
+version = 1
+title = "Manuscript check"
+objective = "Check a manuscript for unresolved citations, unsupported claims and structural issues, with locators for every finding."
+inputs = ["manuscript_path", "references_path"]
+tools = ["read", "grep"]
+write_scope = []
+requires_graph = false
+stop = ["gate_failed", "budget_exhausted", "resource_limit", "no_progress", "repeated_state"]
+output = "manuscript_check.v1"
+
+[worktree]
+base = "main"
+require_clean = false
+require_up_to_date = false
+
+[resources]
+memory_mb = 1024
+disk_mb = 512
+pids = 64
+wall_s = 300
+
+[budget]
+tokens = 30000
+model_calls = 0
+cost_usd = 0.0
+wall_s = 300
+
+[gates]
+before = ["resources_fit"]
+after = ["schema_valid", "evidence_present"]
+
+[approval]
+mutate = "deny"
+network = "deny"
+
+[output_schema]
+type = "object"
+required = ["unresolved_citations", "claim_checks", "issues", "not_assessed"]
+additionalProperties = false
+
+[output_schema.properties.unresolved_citations]
+type = "array"
+
+[output_schema.properties.unresolved_citations.items]
+type = "object"
+required = ["citekey", "locator", "reason"]
+additionalProperties = false
+
+[output_schema.properties.unresolved_citations.items.properties.citekey]
+type = "string"
+minLength = 1
+
+[output_schema.properties.unresolved_citations.items.properties.locator]
+type = "string"
+minLength = 1
+
+[output_schema.properties.unresolved_citations.items.properties.reason]
+type = "string"
+minLength = 1
+
+[output_schema.properties.claim_checks]
+type = "array"
+
+[output_schema.properties.claim_checks.items]
+type = "object"
+required = ["claim", "status", "locator"]
+additionalProperties = false
+
+[output_schema.properties.claim_checks.items.properties.claim]
+type = "string"
+minLength = 1
+
+[output_schema.properties.claim_checks.items.properties.status]
+type = "string"
+enum = ["supported", "unsupported", "unknown"]
+
+[output_schema.properties.claim_checks.items.properties.locator]
+type = "string"
+minLength = 1
+
+[output_schema.properties.issues]
+type = "array"
+
+[output_schema.properties.issues.items]
+type = "string"
+
+[output_schema.properties.not_assessed]
+type = "array"
+
+[output_schema.properties.not_assessed.items]
+type = "string"
+
+[[steps]]
+id = "read-manuscript"
+tool = "read"
+goal = "Read the manuscript and collect citation markers and claim sentences."
+paths = ["."]
+
+[steps.budget]
+tokens = 10000
+
+[[steps]]
+id = "check-references"
+tool = "grep"
+goal = "Match citation markers against the reference export and record unresolved keys."
+paths = ["."]
+
+[steps.budget]
+tokens = 12000
+
+[[steps]]
+id = "check-claims"
+tool = "grep"
+goal = "Find claim sentences without a resolvable evidence locator."
+paths = ["."]
+
+[steps.budget]
+tokens = 6000
+
+[[steps]]
+id = "assemble"
+tool = "read"
+goal = "Assemble unresolved citations, claim checks, issues and omissions."
+paths = ["."]
+
+[steps.budget]
+tokens = 2000
