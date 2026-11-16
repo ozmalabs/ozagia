@@ -592,9 +592,9 @@ def test_mcp_reports_an_unreachable_daemon(repo):
 
 
 def _cli(root: Path, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run([sys.executable, "-m", "ozagia", "job", *args, "--root", str(root)]
+    return subprocess.run([sys.executable, "-m", "ozagia", "bg", *args, "--root", str(root)]
                           if args[0] != "run" else
-                          [sys.executable, "-m", "ozagia", "job", "run", "--root", str(root),
+                          [sys.executable, "-m", "ozagia", "bg", "run", "--root", str(root),
                            *args[1:]],
                           env=_env(), capture_output=True, text=True, timeout=60,
                           cwd=str(root))
@@ -628,7 +628,7 @@ def test_cli_round_trip(live):
 def test_cli_without_a_daemon(tmp_path):
     plain = tmp_path / "plain"
     plain.mkdir()
-    r = subprocess.run([sys.executable, "-m", "ozagia", "job", "list", "--root", str(plain)],
+    r = subprocess.run([sys.executable, "-m", "ozagia", "bg", "list", "--root", str(plain)],
                        env=_env(), capture_output=True, text=True, timeout=60)
     assert r.returncode == 2 and "no ozagia daemon answers" in r.stderr
     assert not (plain / ".ozagia").exists()
@@ -1054,7 +1054,7 @@ def test_cli_readers_are_per_shell(live):
     root = live["root"]
     r = _cli(root, "run", "--", "echo hello")
     jid = r.stdout.split()[0]
-    cmd = shlex.join([sys.executable, "-m", "ozagia", "job", "wait", jid,
+    cmd = shlex.join([sys.executable, "-m", "ozagia", "bg", "wait", jid,
                       "--root", str(root), "--deadline", "10"])
     # (`; true`: bash would exec a last simple command in its own place.)
     outs = [subprocess.run(["bash", "-c", f"{cmd}; true"], env=_env(), capture_output=True,

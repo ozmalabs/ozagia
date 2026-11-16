@@ -223,7 +223,7 @@ The MCP server is a separate process: it reaches the daemon over the socket
 and starts it when nothing answers (as the hooks do, waiting up to 10 s).
 When no daemon can be reached, the tool returns an error that says so and
 how to start one (`ozagia daemon ensure --root <project>`). The same jobs are
-there from the shell: `ozagia job run|wait|list|log|stop`.
+there from the shell: `ozagia bg run|wait|list|log|stop`.
 
 The daemon does not stop on its idle timeout while a job runs. When it
 stops, it stops its jobs (SIGTERM to each process group, SIGKILL after 2 s),

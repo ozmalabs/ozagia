@@ -7,7 +7,7 @@
                  [--clone [--base REV]] [--keep-plugin] [--timeout S]
                  [--python P] [--runs-dir D] [-- <extra opencode args>]
     ozagia daemon serve|ensure|ping|stats|shutdown ... (python -m ozagia.daemon)
-    ozagia job run|wait|list|log|stop ...         (ozagia.daemon.jobcli)
+    ozagia bg run|wait|list|log|stop ...          (ozagia.daemon.jobcli)
     ozagia mcp ...                                (ozagia.integrations.mcp.server)
     ozagia eval ...                               (python -m ozagia.eval.agent)
     ozagia check ...                              (python -m ozagia.check)
@@ -29,7 +29,7 @@
     ozagia preflight plan ...                     (dry-run emulator plan)
     ozagia --version
 
-`daemon`, `job`, `mcp`, `eval` and `check` pass every argument after their name to
+`daemon`, `bg`, `mcp`, `eval` and `check` pass every argument after their name to
 those modules' `main`, unchanged. See docs/harness.md.
 """
 from __future__ import annotations
@@ -56,7 +56,7 @@ def _daemon_main(argv: list[str]) -> int:
     return main(argv)
 
 
-def _job_main(argv: list[str]) -> int:
+def _bg_main(argv: list[str]) -> int:
     from ozagia.daemon.jobcli import main
     return main(argv)
 
@@ -85,8 +85,8 @@ def _self_main(argv: list[str]) -> int:
 DELEGATES: dict[str, tuple[str, str]] = {
     "daemon": ("_daemon_main", "the graph daemon: serve|ensure|ping|stats|shutdown "
                                "(python -m ozagia.daemon)"),
-    "job": ("_job_main", "background jobs in the daemon: run|wait|list|log|stop "
-                         "(ozagia.daemon.jobcli)"),
+    "bg": ("_bg_main", "background jobs in the daemon: run|wait|list|log|stop "
+                       "(ozagia.daemon.jobcli)"),
     "mcp": ("_mcp_main", "the MCP server (ozagia.integrations.mcp.server)"),
     "eval": ("_eval_main", "the break/fix agent eval (python -m ozagia.eval.agent)"),
     "check": ("_check_main", "run tests, report graph keys (python -m ozagia.check)"),

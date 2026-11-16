@@ -11,7 +11,7 @@ OpenCode session with the graph in its path. Code: `src/ozagia/cli.py`,
 | `ozagia index [--root R] [--rebuild] [--dump F] [--json]` | Builds the snapshot (`<state dir>/graph.json`) if missing; if present and stale, refreshes it. Prints the action (`built`, `refreshed`, `fresh`), node and edge counts and seconds. `--rebuild` builds from scratch. |
 | `ozagia agent [options] [-- <opencode args>]` | An OpenCode session on the repository with the graph daemon and the plugin. See below. |
 | `ozagia daemon serve\|ping\|stats\|shutdown ...` | `python -m ozagia.daemon`, arguments unchanged. |
-| `ozagia job run\|wait\|list\|log\|stop ...` | Background jobs in the daemon (`ozagia.daemon.jobcli`; see `ozagia.daemon.jobs`). Starts the daemon if none answers. |
+| `ozagia bg run\|wait\|list\|log\|stop ...` | Background jobs in the daemon (`ozagia.daemon.jobcli`; see `ozagia.daemon.jobs`). Starts the daemon if none answers. |
 | `ozagia mcp ...` | The MCP server (`ozagia.integrations.mcp.server`). |
 | `ozagia eval ...` | The break/fix agent eval (`python -m ozagia.eval.agent`). |
 | `ozagia check ...` | Run tests and report graph keys (`python -m ozagia.check`). |

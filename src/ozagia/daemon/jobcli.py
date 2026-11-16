@@ -1,10 +1,10 @@
-"""Background jobs from outside the daemon: `ozagia job ...` and the MCP tools.
+"""Background jobs from outside the daemon: `ozagia bg ...` and the MCP tools.
 
-    ozagia job run [--root R] [--cwd D] [--env K=V]... [--detach] -- CMD [ARG...]
-    ozagia job wait [JOB|any] [--until exit|file:P|log:RX] [--deadline S] [--cursor N]
-    ozagia job list
-    ozagia job log JOB [--cursor N] [--tail N]
-    ozagia job stop JOB [--signal TERM|KILL|INT|HUP] [--grace S]
+    ozagia bg run [--root R] [--cwd D] [--env K=V]... [--detach] -- CMD [ARG...]
+    ozagia bg wait [JOB|any] [--until exit|file:P|log:RX] [--deadline S] [--cursor N]
+    ozagia bg list
+    ozagia bg log JOB [--cursor N] [--tail N]
+    ozagia bg stop JOB [--signal TERM|KILL|INT|HUP] [--grace S]
 
 Every command takes `--root` (default: the repository of the cwd) and
 `--json` (print the daemon's reply). `run` with one word after `--` runs it
@@ -124,7 +124,7 @@ def _env_pairs(values: list[str]) -> dict[str, str]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(prog="ozagia job",
+    ap = argparse.ArgumentParser(prog="ozagia bg",
                                  description="Background jobs in the ozagia daemon.")
     sub = ap.add_subparsers(dest="cmd", required=True)
     common = argparse.ArgumentParser(add_help=False)
