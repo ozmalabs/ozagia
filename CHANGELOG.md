@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- Graph-addressed goals (`ozagia.core.goals`, `ozagia goal
+  add|list|show|check|claim|drop|block|from-review`, MCP `goal_list`,
+  `goal_show`, `goal_check`, `goal_add`, `goal_claim`): repo-level goals in
+  `.ozagia/goals/goals.json` whose targets, scope and criteria are graph
+  keys, resolved at creation. Criteria (`test_passes`, `test_fails`,
+  `symbol_exists`, `symbol_absent`, `calls`, `not_calls`, `no_callers`,
+  `file_exists`, `file_absent`, `unchanged`, `lint_clean`,
+  `review_resolved`, `ops_has`) are evaluated from the graph, the working
+  tree and the test record, each to pass/fail/stale/unknown with evidence.
+  The daemon has a read-only `goals` op, names a claimed goal after an edit
+  that touches its targets, and adds an advisory note for edits outside a
+  claimed goal's scope; the session brief and the compaction context list
+  open and claimed goals with unmet criteria. The test record
+  (`working_set/tests.json`) now also keeps the last 50 runs (time,
+  selectors, failed keys, completeness), so a test's last pass has a time.
+  See docs/goals.md.
+
 - Lint inside the edit: after a handled edit, key edit or write, and in
   `after` for a built-in edit, write or Codex patch, the configured linter
   (ruff when the project configures it, `rustfmt --check` for Rust crates)

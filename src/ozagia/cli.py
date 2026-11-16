@@ -28,6 +28,9 @@
     ozagia tunnel start|stop|status|list ...      (tunnel config vs live state)
     ozagia preflight plan ...                     (dry-run emulator plan)
     ozagia who PATH [--root R] [--json]           (sessions that edited PATH)
+    ozagia goal add|list|show|check|claim|drop|block|from-review ...
+                                                  (graph-addressed goals;
+                                                  ozagia.goals_cli)
     ozagia replace PATTERN REPLACEMENT [--glob G ...] [--key K ...] [--regex]
                    [--flags F] [--expect N] [--apply --plan-id ID] ...
                                                   (one pattern across files;
@@ -1106,6 +1109,9 @@ def build_parser() -> argparse.ArgumentParser:
     tunnel_stop.add_argument("--root", default=None)
     tunnel_stop.add_argument("--json", action="store_true")
 
+    from ozagia.goals_cli import add_parser as _goal_parser
+    _goal_parser(sub)
+
     who = sub.add_parser("who", help="sessions that edited a file, and whether "
                                      "their edits are committed")
     who.add_argument("path", help="file (relative to the cwd, or absolute)")
@@ -1166,7 +1172,7 @@ def _opencode_exe(value: str | None) -> str:
     return value or os.environ.get("OZAGIA_OPENCODE") or "opencode"
 
 
-_COMMANDS = frozenset({"index", "agent", "install", "who", "replace",
+_COMMANDS = frozenset({"index", "agent", "install", "who", "replace", "goal",
                        *DELEGATES})
 # Agent options that may lead a bare `ozagia ...` (the TUI).
 _AGENT_FLAGS = frozenset({"--research", "--mcp", "--model", "-m", "--workdir",
@@ -1237,6 +1243,9 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_preflight(args)
     if args.command == "who":
         return _cmd_who(args)
+    if args.command == "goal":
+        from ozagia.goals_cli import run as _goal_run
+        return _goal_run(args)
     if args.command == "replace":
         return _cmd_replace(args)
     parser.error(f"unknown command {args.command}")  # pragma: no cover

@@ -41,6 +41,14 @@ failing in the root's record (`load_test_record`, kept in
 test ids, outcomes, times and the rerun prefix, never failure messages or
 command lines), each with the time of the first run that failed it,
 running jobs, and the MCP tools to prefer, at most `BRIEF_MAX_CHARS`.
+The brief, and the working set text the daemon renders, also list the
+open and claimed goals with unmet criteria (`ozagia.core.goals`).
+
+The test record also keeps the last `MAX_RECORD_RUNS` runs (time, the
+selectors they ran as paths or node ids, the test keys they failed, and
+whether they completed, were filtered or stopped early), so
+`recorded_outcome` can say when a test last passed or failed (goal criteria
+`test_passes`/`test_fails`).
 
 A pytest run clears a failing test only when nothing is in doubt: it
 finished (a captured run with status `passed`/`failed`, no collection
@@ -631,11 +639,14 @@ def working_set_text(view: View, *, harness: str | None = None,
                      plan: str | None = None,
                      key_exists: Callable[[str], bool] | None = None,
                      max_chars: int = TEXT_MAX_CHARS,
-                     free_text: bool = True) -> str:
+                     free_text: bool = True,
+                     goal_lines: list[str] | None = None) -> str:
     """The working set as text for the model, or "" when there is nothing
     to give back (no edits, tests, reads, jobs or plan). `free_text=False`
     keeps only paths, keys, test ids and job ids: no failure messages, no
-    command lines (pass a `plan` built the same way)."""
+    command lines (pass a `plan` built the same way). `goal_lines`
+    (`ozagia.core.goals.brief_lines`: a title line, then one line per goal)
+    go after the plan; they alone do not make the text non-empty."""
     keys = [k for k in view.keys if key_exists is None or _exists(key_exists, k)]
     by_file: dict[str, list[str]] = {}
     for k in keys:
@@ -673,6 +684,7 @@ def working_set_text(view: View, *, harness: str | None = None,
         (test_title, tl),
         ("running jobs:", jl),
         ("plan:", [f"  {plan}"] if plan else []),
+        (goal_lines[0] if goal_lines else "goals:", list(goal_lines or [])[1:]),
         ("edited (most recent first; read a key instead of the whole file):", edited),
         ("recently read (re-read a range only if the summary lacks it):", reads),
     ]
@@ -705,6 +717,76 @@ def _record_path(root: str | Path) -> Path:
 # (they go to later sessions, possibly of another harness).
 _RECORD_TEST_FIELDS = ("outcome", "params", "ts", "since")
 _RECORD_LAST_FIELDS = ("ts", "failed", "complete")
+# Recent runs kept in the record (newest last), for `recorded_outcome`: when a
+# test last ran, and whether it passed (`ozagia.core.goals`).
+MAX_RECORD_RUNS = 50
+# A run's selector is kept only when it looks like a path or node id.
+_SAFE_SELECTOR = re.compile(r"[A-Za-z0-9_./@+\-\[\]:]{1,300}")
+
+
+def _record_run(run: Any) -> dict[str, Any] | None:
+    """A run as the record keeps it: its time, the selectors it ran (paths
+    and node ids only), the test keys it failed, and whether it completed,
+    was filtered or stopped early. No command line, no messages."""
+    if not isinstance(run, dict):
+        return None
+    ts = run.get("ts")
+    if isinstance(ts, bool) or not isinstance(ts, (int, float)):
+        return None
+    sels = run.get("selectors")
+    failed = run.get("failed")
+    return {"ts": float(ts),
+            "selectors": [s for s in sels if isinstance(s, str)
+                          and _SAFE_SELECTOR.fullmatch(s)]
+            if isinstance(sels, list) else [],
+            "failed": sorted(k for k in failed if isinstance(k, str)
+                             and k.startswith("test:"))
+            if isinstance(failed, list) else [],
+            "complete": run.get("complete") is True,
+            "filtered": run.get("filtered") is True,
+            "stops": run.get("stops") is True}
+
+
+def run_record(run: TestRun) -> dict[str, Any]:
+    """The record's entry for a pytest run (see `_record_run`)."""
+    return _record_run({"ts": run.ts, "selectors": list(run.selectors),
+                        "failed": list(run.failures), "complete": run.complete,
+                        "filtered": run.filtered, "stops": run.stops}) or {}
+
+
+def recorded_outcome(record: dict[str, Any], key: str) -> dict[str, Any]:
+    """What the record says about test `key`: `{"outcome": "passed" |
+    "failed" | "unknown", "ts": run time or None, "reason"}`.
+
+    The newest run that failed the test, or that selected it, completed,
+    was not filtered and did not stop early, decides; an older failure
+    still in the failing set (a run evicted from `runs`) counts when no
+    run decides."""
+    best: dict[str, Any] | None = None
+    for run in reversed(record.get("runs") or []):
+        if key in (run.get("failed") or []):
+            best = {"outcome": "failed", "ts": run.get("ts"),
+                    "reason": "the newest run that selected it failed it"}
+            break
+        if not _selected(key, run.get("selectors") or []):
+            continue
+        if (run.get("complete") and not run.get("filtered")
+                and not (run.get("stops") and run.get("failed"))):
+            best = {"outcome": "passed", "ts": run.get("ts"),
+                    "reason": "the newest complete run that selected it did "
+                              "not fail it"}
+            break
+    failing = (record.get("tests") or {}).get(key)
+    if isinstance(failing, dict):
+        fts = failing.get("ts")
+        if best is None or (isinstance(fts, (int, float))
+                            and fts >= float(best.get("ts") or 0)):
+            return {"outcome": "failed", "ts": fts,
+                    "reason": "in the record's failing tests"}
+    if best is not None:
+        return best
+    return {"outcome": "unknown", "ts": None,
+            "reason": "no recorded complete pytest run selected this test"}
 
 
 def _record_test(rec: dict[str, Any]) -> dict[str, Any]:
@@ -731,18 +813,23 @@ def load_test_record(root: str | Path) -> dict[str, Any]:
     try:
         data = json.loads(_record_path(root).read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return {"tests": {}, "last": None}
+        return {"tests": {}, "last": None, "runs": []}
     if not isinstance(data, dict) or not isinstance(data.get("tests"), dict):
-        return {"tests": {}, "last": None}
+        return {"tests": {}, "last": None, "runs": []}
     tests = {k: _record_test(v) for k, v in data["tests"].items()
              if isinstance(k, str) and k.startswith("test:") and isinstance(v, dict)}
-    return {"tests": tests, "last": _record_last(data.get("last"))}
+    raw_runs = data.get("runs") if isinstance(data.get("runs"), list) else []
+    runs = [r for r in (_record_run(x) for x in raw_runs) if r]
+    return {"tests": tests, "last": _record_last(data.get("last")),
+            "runs": runs[-MAX_RECORD_RUNS:]}
 
 
 def save_test_record(root: str | Path, record: dict[str, Any]) -> None:
     path = _record_path(root)
+    runs = [r for r in (_record_run(x) for x in record.get("runs") or []) if r]
     data = {"tests": {k: _record_test(v) for k, v in record.get("tests", {}).items()},
-            "last": _record_last(record.get("last"))}
+            "last": _record_last(record.get("last")),
+            "runs": runs[-MAX_RECORD_RUNS:]}
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(prefix="tests.", suffix=".tmp", dir=path.parent)
@@ -766,22 +853,23 @@ class TestRecord:
         self.tests: OrderedDict[str, dict[str, Any]] = OrderedDict(
             sorted(rec["tests"].items(), key=lambda kv: kv[1].get("ts", 0)))
         self.last = rec["last"]
+        self.runs: list[dict[str, Any]] = list(rec.get("runs") or [])
 
     def apply(self, run: TestRun) -> None:
+        """Apply `run` to the failing tests and add it to the recent runs;
+        the record is written every time (each run is a new entry)."""
         with self.lock:
-            before = {k: dict(v) for k, v in self.tests.items()}
             apply_test_run(self.tests, run)
             for key in list(self.tests):
                 self.tests[key] = _record_test(self.tests[key])
-            changed = before != {k: dict(v) for k, v in self.tests.items()}
-            last = {"ts": run.ts, "failed": len(run.failures),
-                    "complete": run.complete}
-            if changed or self.last is None or self.last.get("failed") != last["failed"]:
-                self.last = last
-                save_test_record(self.root, {"tests": dict(self.tests),
-                                             "last": self.last})
-            else:
-                self.last = last
+            self.last = {"ts": run.ts, "failed": len(run.failures),
+                         "complete": run.complete}
+            entry = run_record(run)
+            if entry:
+                self.runs.append(entry)
+                del self.runs[:-MAX_RECORD_RUNS]
+            save_test_record(self.root, {"tests": dict(self.tests),
+                                         "last": self.last, "runs": self.runs})
 
     def view(self) -> tuple[list[tuple[str, dict[str, Any]]], dict[str, Any] | None]:
         with self.lock:
@@ -853,14 +941,24 @@ def session_brief(root: str | Path, max_chars: int = BRIEF_MAX_CHARS, *,
                   tests: list[tuple[str, dict[str, Any]]] | None = None,
                   last_test: dict[str, Any] | None = None,
                   jobs: list[dict[str, Any]] | None = None,
-                  jobs_enabled: bool | None = None) -> str:
+                  jobs_enabled: bool | None = None,
+                  goal_lines: list[str] | None = None) -> str:
     """Dirty files, the last commits, the tests still failing in the root's
     test record (each with the time of the first run that failed it),
-    running jobs, and the MCP tools to prefer. `tests` defaults to the
-    persisted record (`load_test_record`); `last_test` is accepted and
-    unused (each test carries its own time)."""
+    running jobs, and the MCP tools to prefer. Open and claimed goals with
+    unmet criteria (`ozagia.core.goals.brief_lines`, at most a third of
+    `max_chars`) come right after the header; `goal_lines` replaces them.
+    `tests` defaults to the persisted record (`load_test_record`);
+    `last_test` is accepted and unused (each test carries its own time)."""
     root = Path(root)
     lines = [BRIEF_HEADER]
+    if goal_lines is None:
+        try:
+            from ozagia.core.goals import BRIEF_CHARS, brief_lines
+            goal_lines = brief_lines(root, max_chars=min(BRIEF_CHARS, max_chars // 3))
+        except Exception:  # noqa: BLE001 - the brief goes without goals
+            goal_lines = []
+    lines.extend(goal_lines)
     branch = _git(root, "rev-parse", "--abbrev-ref", "HEAD")
     status = _git(root, "status", "--porcelain=v1", "--untracked-files=normal")
     if status is not None:
@@ -909,4 +1007,5 @@ __all__ = ["BRIEF_HEADER", "BRIEF_MAX_CHARS", "HEADER", "JOBS_LINE", "MAX_FILES"
            "TestRun", "View", "WorkingSet", "apply_test_run", "devsession_line",
            "job_lines", "key_file", "load_test_record", "merge_views",
            "failing_lines", "parse_failures", "pytest_head", "rerun_command",
-           "session_brief", "pytest_run", "text_meta", "working_set_text"]
+           "run_record", "session_brief", "pytest_run", "recorded_outcome",
+           "text_meta", "working_set_text"]
