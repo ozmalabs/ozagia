@@ -1,6 +1,7 @@
-"""What every harness's command hook shares (Claude Code, Codex).
+"""What every harness's command hook shares (Claude Code, Codex, Kiro).
 
-A command hook reads one event as JSON on stdin and answers on stdout. The
+A command hook reads one event as JSON on stdin and answers on stdout (or,
+to block a tool in Kiro, on stderr with exit code 2). The
 pieces here do not depend on a harness's tool names or output envelope:
 
 - `daemon_request`: one protocol request over the daemon's Unix socket.
@@ -14,7 +15,9 @@ pieces here do not depend on a harness's tool names or output envelope:
   nothing and exiting 0, each failure logged as one JSON line (`ts`,
   `event`, `tool`, `session`, `error`) in the state dir. Set the alarm a
   few seconds below the harness's handler timeout, so the hook stops
-  itself before the harness kills it.
+  itself before the harness kills it. A handler answers with a dict
+  (printed as JSON), a str (printed as it is) or a `HookBlock` (message on
+  stderr, its exit code returned).
 - `root_for`: the repository a hook event is about (its `cwd`).
 - `git_ref_moving`: the ref-moving git subcommand in a shell command
   (`ozagia.intent.shell.classify` is `git_refs`), and `git_refusal_reason`.
@@ -31,6 +34,7 @@ import socket
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, TextIO
@@ -50,6 +54,8 @@ SNAPSHOT_NAME = "graph.json"
 GIT_TIMEOUT_S = 3
 
 KEY_PREFIXES = ("sym:", "test:", "doc:", "text:")
+# Structured-data reads (`ozagia.core.structured`): `json:<rel>#<pointer>`.
+STRUCTURED_KEY_PREFIXES = ("json:", "yaml:", "toml:")
 # Harnesses may make file paths absolute before hooks run, so a key the model
 # passed as a path may arrive as `<cwd>/sym:...`.
 _KEY_IN_PATH = re.compile(r"(?:^|/)((?:sym|test|doc|text):.+)$")
@@ -91,13 +97,22 @@ def git_refusal_reason(sub: str) -> str:
             "commits, branches and stashes to the user.")
 
 
-def node_key(file_path: Any) -> str | None:
-    """The node key a file path names, or None for a real path."""
+def _key_in_path(prefixes: tuple[str, ...]) -> re.Pattern[str]:
+    if prefixes == KEY_PREFIXES:
+        return _KEY_IN_PATH
+    names = "|".join(re.escape(p.rstrip(":")) for p in prefixes)
+    return re.compile(rf"(?:^|/)((?:{names}):.+)$")
+
+
+def node_key(file_path: Any, prefixes: tuple[str, ...] = KEY_PREFIXES) -> str | None:
+    """The node key a file path names, or None for a real path. `prefixes`
+    are the key kinds to recognise (default `KEY_PREFIXES`; add
+    `STRUCTURED_KEY_PREFIXES` for `json:`/`yaml:`/`toml:` reads)."""
     if not isinstance(file_path, str) or not file_path:
         return None
-    if file_path.startswith(KEY_PREFIXES):
+    if file_path.startswith(prefixes):
         return file_path
-    m = _KEY_IN_PATH.search(file_path)
+    m = _key_in_path(prefixes).search(file_path)
     if m and not os.path.exists(file_path):
         return m.group(1)
     return None
@@ -279,10 +294,18 @@ def log_failure(root: Path | None, log_name: str, payload: Any,
         pass
 
 
-Handler = Callable[[dict[str, Any], Path], "dict[str, Any] | None"]
+Handler = Callable[[dict[str, Any], Path], "dict[str, Any] | str | HookBlock | None"]
 
 # The SIGALRM handler `run_hook` installed, while it runs.
 _alarm_handler: Any = None
+
+
+@dataclass(frozen=True)
+class HookBlock:
+    """A handler's answer for a harness that blocks on an exit code (Kiro):
+    `run_hook` writes `message` to stderr and returns `exit_code`."""
+    message: str
+    exit_code: int = 2
 
 
 def rearm_alarm(seconds: int) -> bool:
@@ -297,16 +320,27 @@ def rearm_alarm(seconds: int) -> bool:
 
 
 def run_hook(handle: Handler, *, log_name: str, timeout_s: int,
-             stdin: TextIO | None = None, stdout: TextIO | None = None) -> int:
-    """Read one event, print `handle(payload, root)` as JSON when it is not
-    None, and return 0. Any error, including running past `timeout_s`,
-    prints nothing and is logged (`AutostartRefused` is not)."""
+             stdin: TextIO | None = None, stdout: TextIO | None = None,
+             stderr: TextIO | None = None) -> int:
+    """Read one event and answer with `handle(payload, root)`:
+
+    - a dict is printed to stdout as one line of JSON (Claude Code, Codex);
+    - a str is printed to stdout as it is (plain-text harnesses);
+    - a `HookBlock` writes its message to stderr, and its exit code is
+      returned (Kiro blocks a tool on exit 2);
+    - None prints nothing.
+
+    Otherwise the return value is 0. Any error, including running past
+    `timeout_s`, prints nothing, returns 0 and is logged
+    (`AutostartRefused` is not)."""
     global _alarm_handler
     stdin = stdin or sys.stdin
     stdout = stdout or sys.stdout
+    stderr = stderr or sys.stderr
     payload: Any = None
     root: Path | None = None
     use_alarm = hasattr(signal, "SIGALRM")
+    code = 0
 
     def on_alarm(signum: int, frame: Any) -> None:
         raise HookTimeout(f"hook exceeded {timeout_s} s")
@@ -322,7 +356,15 @@ def run_hook(handle: Handler, *, log_name: str, timeout_s: int,
             raise ValueError("hook input is not a JSON object")
         root = root_for(payload)
         out = handle(payload, root)
-        if out is not None:
+        if isinstance(out, HookBlock):
+            stderr.write(out.message if out.message.endswith("\n") else out.message + "\n")
+            stderr.flush()
+            code = out.exit_code
+        elif isinstance(out, str):
+            if out:
+                stdout.write(out if out.endswith("\n") else out + "\n")
+                stdout.flush()
+        elif out is not None:
             stdout.write(json.dumps(out, ensure_ascii=False) + "\n")
             stdout.flush()
     except AutostartRefused:
@@ -335,11 +377,12 @@ def run_hook(handle: Handler, *, log_name: str, timeout_s: int,
             _alarm_handler = None
             if previous is not None:
                 signal.signal(signal.SIGALRM, previous)
-    return 0
+    return code
 
 
-__all__ = ["AUTOSTART_BUDGET_S", "DAEMON_TIMEOUT_S", "AutostartRefused", "HookError",
-           "HookTimeout", "KEY_PREFIXES", "REF_MOVING_GIT", "autostart_allowed",
+__all__ = ["AUTOSTART_BUDGET_S", "DAEMON_TIMEOUT_S", "AutostartRefused", "HookBlock",
+           "HookError", "HookTimeout", "KEY_PREFIXES", "REF_MOVING_GIT",
+           "STRUCTURED_KEY_PREFIXES", "autostart_allowed",
            "autostart_enabled", "daemon_request", "daemon_request_autostart",
            "ensure_daemon", "git_ref_moving", "git_refusal_reason", "in_work_tree",
            "log_failure", "node_key", "rearm_alarm", "response_text", "root_for",

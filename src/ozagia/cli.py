@@ -10,7 +10,7 @@
     ozagia mcp ...                                (ozagia.integrations.mcp.server)
     ozagia eval ...                               (python -m ozagia.eval.agent)
     ozagia check ...                              (python -m ozagia.check)
-    ozagia install opencode|claude|codex [--workdir W] [...]
+    ozagia install opencode|claude|codex|kiro [--workdir W] [...]
     ozagia self info|check|upgrade|uninstall ... (ozagia.selfinstall)
     ozagia [DIR]                                  the TUI on DIR (default: the
                                                   repository of the cwd), as
@@ -164,6 +164,7 @@ INSTALL_TARGETS: dict[str, str] = {
     "opencode": "ozagia.integrations.opencode",
     "claude": "ozagia.integrations.claude_code",
     "codex": "ozagia.integrations.codex",
+    "kiro": "ozagia.integrations.kiro",
 }
 
 
@@ -228,10 +229,11 @@ def build_parser() -> argparse.ArgumentParser:
         sub.add_parser(name, help=text, add_help=False)
 
     ins = sub.add_parser("install", help="install an integration into a workdir",
-                         description="Install the OpenCode plugin, the Claude Code hooks "
-                                     "or the Codex hooks and MCP server. Other options "
-                                     "go to the integration's installer (for codex: "
-                                     "--scope project|user, --python P).")
+                         description="Install the OpenCode plugin, the Claude Code hooks, "
+                                     "or the Codex or Kiro hooks and MCP server. Other "
+                                     "options go to the integration's installer (for "
+                                     "codex: --scope project|user, --python P; for kiro "
+                                     "also --format v3|agent|both, --agent NAME).")
     ins.add_argument("target", choices=tuple(INSTALL_TARGETS))
     ins.add_argument("--workdir", default=".", help="project directory (default: .)")
     return p

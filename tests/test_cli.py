@@ -135,7 +135,7 @@ def test_install_targets_cover_the_parser_choices():
     parser = cli.build_parser()
     ins = next(a for a in parser._subparsers._group_actions[0].choices["install"]._actions
                if a.dest == "target")
-    assert tuple(ins.choices) == ("opencode", "claude", "codex")
+    assert tuple(ins.choices) == ("opencode", "claude", "codex", "kiro")
     assert set(cli.INSTALL_TARGETS) == set(ins.choices)
 
 

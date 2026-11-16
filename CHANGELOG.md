@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- Kiro CLI integration: `ozagia install kiro [--scope project|user]
+  [--format v3|agent|both]` writes command hooks to `.kiro/hooks/ozagia.json`
+  (the default; what kiro-cli 2.37's V3 engine loads) and/or an agent
+  profile `.kiro/agents/ozagia.json` (every engine, with
+  `--agent ozagia`), and the ozagia MCP server in `.kiro/settings/mcp.json`;
+  `python -m ozagia.integrations.kiro uninstall` removes them. The hooks
+  refuse ref-moving git commands (exit 2), answer reads of node keys
+  (`sym:`, `json:`, ...) from the graph, refresh the graph after edits and
+  shell commands, and print a brief at session start. kiro-cli 2.37 does
+  not pass PostToolUse output to the model. See docs/kiro.md;
+  `scripts/kiro_probe_hook.py` records what a live session sends.
+- `hookcore.run_hook` also takes plain-text answers and `HookBlock` (stderr
+  and exit 2); `hookcore.node_key` takes the key prefixes to recognise
+  (`STRUCTURED_KEY_PREFIXES` for `json:`/`yaml:`/`toml:`). Claude Code and
+  Codex hooks are unchanged.
+
 - Codex integration: `ozagia install codex [--scope project|user]` adds
   command hooks to `.codex/hooks.json` (git ref refusal before `Bash`, graph
   context after `Bash` and `apply_patch`, a short brief at `SessionStart`),
