@@ -1851,6 +1851,20 @@ doctor text summary still prints only the active path (the structured section
 has the full source report); `adapters.registry` reload caching keys on the
 active config path only.
 
+### Parallel wave 10 (2026-11-17)
+
+Four agents start from `345aecf`:
+
+| Worktree | Branch | Scope |
+| --- | --- | --- |
+| `~/ozmadev/ozagia-wt/disk-accounting` | `feat/disk-accounting` | Exact per-job disk write attribution (cgroup `io.stat`, `/proc/<pid>/io`, watchdog and job records) |
+| `~/ozmadev/ozagia-wt/call-paths` | `feat/call-paths` | Command-derived paths for `patch`/`shell` in the file ledger, refresh and hints |
+| `~/ozmadev/ozagia-wt/review-runners` | `feat/review-runners` | Injected multi-reviewer reconciliation and injected test runner |
+| `~/ozmadev/ozagia-wt/config-remainder` | `feat/config-remainder` | `[security]` from the versioned config, doctor text, adapter cache |
+
+The same review/merge/full-suite gate applies. Live model/provider adapters and
+the live Desktop smoke test remain host/provider-dependent.
+
 ### Library-first workstream (2026-11-16)
 
 One additional agent starts from `79c3b3e`:
