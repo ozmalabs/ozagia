@@ -339,7 +339,12 @@ class DaemonState:
         self.ms_max = 0.0
         self.ms_count = 0
         self.server: socketserver.BaseServer | None = None
-        self.jobs = J.JobTable(root, base_env=test_env)
+        from ozagia.core import resources as R
+        # Observation, admission and the first enforcement layer share one
+        # loaded policy for the daemon's lifetime (a config edit needs a
+        # restart, like the other daemon-loaded settings).
+        self.jobs = J.JobTable(root, base_env=test_env,
+                               resource_policy=R.load_policy(root))
         from ozagia.core.working_set import TestRecord
         # The root's failing tests across sessions (`working_set` with
         # `since`), persisted in the state dir.
@@ -1124,7 +1129,10 @@ class DaemonState:
                 # output or the job's end (each one a poll the agent did not
                 # make); `jobs` has the rest of the job counters.
                 **{k: job_stats[k] for k in ("jobs_started", "waits",
-                                            "wait_seconds", "polls_avoided")},
+                                            "wait_seconds", "polls_avoided",
+                                            "jobs_resource_killed",
+                                            "resource_events",
+                                            "resource_peak_mb")},
                 "jobs": job_stats,
                 # The working set (`ozagia.core.working_set`): working sets
                 # handed back after a compaction (or to dev_working_set),
