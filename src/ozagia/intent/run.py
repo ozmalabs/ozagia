@@ -21,6 +21,7 @@ from typing import Any
 from ozagia.intent.common import (
     IntentError,
     Unhandled,
+    preflight_stop,
     one_line,
     root_of,
     tag,
@@ -135,7 +136,7 @@ def _verbosity(extra: list[str]) -> list[str]:
 
 def run_pytest(memory: Any, cls: dict[str, Any], inp: dict[str, Any],
                wd: Path) -> dict[str, Any]:
-    from ozagia.check import run_tests
+    from ozagia.check import OUTPUT_TAIL_LINES, run_tests
     root = root_of(memory)
     python = _python_for(cls, wd)
     if wd != root and cls.get("path_options"):
@@ -159,8 +160,17 @@ def run_pytest(memory: Any, cls: dict[str, Any], inp: dict[str, Any],
     if isinstance(remaining, (int, float)) and not isinstance(remaining, bool):
         timeout_s = max(MIN_TIMEOUT_S, min(timeout_s, float(remaining)))
     env = inp.get("_test_env")
+    if isinstance(cls.get("env"), dict) and cls["env"]:
+        if wd != root:
+            raise Unhandled("environment assignments with a workdir other "
+                            "than the root")
+        base_env = env if isinstance(env, dict) else dict(os.environ)
+        env = {**base_env, **cls["env"]}
+    preflight_stop(inp)
     res = run_tests(root, selectors, python=python, timeout_s=timeout_s,
                     extra_args=_verbosity(list(cls["extra_args"])),
+                    tail_lines=int(OUTPUT_TAIL_LINES if cls.get("tail_lines") is None
+                                   else cls["tail_lines"]),
                     **({"env": env, "inherit": False}
                        if isinstance(env, dict) else {}))
     c = res["counts"]
@@ -205,7 +215,7 @@ def run_pytest(memory: Any, cls: dict[str, Any], inp: dict[str, Any],
                          f"{one_line(t['message'])}"))
         frames(t)
     return {"intent": "shell_pytest", "output": "\n".join(lines),
-            "keys": list(dict.fromkeys(keys))}
+            "keys": list(dict.fromkeys(keys)), "exit_code": res["exit_code"]}
 
 
 def handle_shell(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
@@ -218,10 +228,14 @@ def handle_shell(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
     kind = cls["class"]
     if kind == "git_refs":
         raise IntentError(refusal(command), intent="shell_refused")
-    if kind not in ("pytest", "read", "grep", "ls", "find"):
-        raise Unhandled(cls.get("reason") or kind)
+    if kind not in ("pytest", "read", "grep", "ls", "find", "compound"):
+        raise Unhandled(cls.get("compound_reason") or cls.get("reason")
+                        or kind)
     root = root_of(memory)
     wd = _workdir(root, inp.get("workdir"))
+    if kind == "compound":
+        from ozagia.intent.compound import run_compound
+        return run_compound(memory, cls, inp, wd)
     if "cd" in cls:
         p = Path(cls["cd"])
         wd = _workdir(root, p if p.is_absolute() else wd / p)
@@ -230,7 +244,9 @@ def handle_shell(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
     if kind == "read":
         p = Path(cls["file"])
         p = _inside(root, p if p.is_absolute() else wd / p)
-        return read_range(memory, p, cls["range"])
+        res = read_range(memory, p, cls["range"])
+        preflight_stop(inp)
+        return res
     if kind == "ls":
         p = Path(cls["path"])
         candidate = p if p.is_absolute() else wd / p
@@ -245,6 +261,7 @@ def handle_shell(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
             raise Unhandled(f"ls directory cannot be read: {e}") from None
         if len(names) > 2000:
             raise Unhandled("ls output exceeds capture limit")
+        preflight_stop(inp)
         return {"intent": "shell_ls", "output": "\n".join(names), "keys": []}
     if kind == "find":
         import fnmatch
@@ -292,6 +309,7 @@ def handle_shell(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
                             raise Unhandled("find result exceeds capture limit")
         except OSError as e:
             raise Unhandled(f"find traversal failed: {e}") from None
+        preflight_stop(inp)
         return {"intent": "shell_find", "output": "\n".join(found),
                 "keys": []}
     base = wd
@@ -303,6 +321,7 @@ def handle_shell(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
         path = str(p)
     else:
         path = str(wd)
+    preflight_stop(inp)
     try:
         res = handle_grep(memory, {"pattern": cls["pattern"], "path": path,
                                    "include": cls["include"],

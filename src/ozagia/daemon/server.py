@@ -112,6 +112,14 @@ def captured_test_env(environ: dict[str, str] | None = None) -> dict[str, str]:
             if not k.startswith("OZAGIA_") and k not in _TOOL_ONLY_ENV}
 
 
+def _last(hellos: list[dict[str, Any]], field: str) -> Any:
+    """`field` of the last hello that has it, or None."""
+    for h in reversed(hellos):
+        if h.get(field) is not None:
+            return h[field]
+    return None
+
+
 def _expired(msg: dict[str, Any]) -> bool:
     deadline = msg.get("deadline_ms")
     if isinstance(deadline, bool) or not isinstance(deadline, (int, float)):
@@ -120,11 +128,16 @@ def _expired(msg: dict[str, Any]) -> bool:
 
 
 def _lock_free(op: Any, tool: Any, inp: Any) -> bool:
-    """A captured pytest: it reads no graph state, so it skips the lock."""
+    """A captured pytest reads no graph state, so it skips the lock. So
+    does a compound command with a pytest step: it takes the lock itself
+    (`_lock`) for the steps that read the graph."""
     if op != "tool" or tool != "shell" or not isinstance(inp, dict):
         return False
     from ozagia.intent.shell import classify
-    return classify(str(inp.get("command") or ""))["class"] == "pytest"
+    cls = classify(str(inp.get("command") or ""))
+    if cls["class"] == "compound":
+        return any(s["kind"] == "pytest" for s in cls["steps"])
+    return cls["class"] == "pytest"
 
 
 class DaemonState:
@@ -152,6 +165,7 @@ class DaemonState:
         self.plugin_fallbacks = 0  # after with meta.fallback
         self.unknown_outcomes = 0  # ... whose fallback is "unknown_outcome"
         self.tool_failures = 0   # tool: ok false
+        self.preflights = 0      # tool: preflight answered "permission required"
         self.hellos: list[dict[str, Any]] = []
         self.ms_total = 0.0
         self.ms_max = 0.0
@@ -166,11 +180,14 @@ class DaemonState:
             return {"ok": True, "version": P.PROTOCOL_VERSION,
                     "root": str(self.root), "pid": os.getpid()}
         if op == "hello":
+            tools = msg.get("tools") if isinstance(msg.get("tools"), dict) else None
             with self._stats_lock:
                 self.hellos.append({
                     "ts": time.time(), "harness": msg.get("harness"),
                     "plugin": msg.get("plugin"), "version": msg.get("version"),
-                    "session": msg.get("session")})
+                    "session": msg.get("session"), "phase": msg.get("phase"),
+                    "tools": tools,
+                    "permission_assert": msg.get("permission_assert")})
             return {"ok": True}
         if op == "stats":
             return {"ok": True, "stats": self.stats()}
@@ -228,8 +245,10 @@ class DaemonState:
                     inp["_test_env"] = dict(self.test_env)
             harness = str(msg.get("harness") or "opencode")
             session = msg.get("session")
-            lock = (contextlib.nullcontext() if _lock_free(op, tool, inp)
-                    else self.lock)
+            free = _lock_free(op, tool, inp)
+            if free and isinstance(inp, dict):
+                inp["_lock"] = self.lock
+            lock = contextlib.nullcontext() if free else self.lock
             with lock:
                 if _expired(msg):
                     if op == "tool":
@@ -242,7 +261,8 @@ class DaemonState:
                                      "ms": 0.0}}
                 if op == "tool":
                     body = intent.handle(self.memory, tool, inp,
-                                         harness=harness, session=session)
+                                         harness=harness, session=session,
+                                         preflight=msg.get("preflight") is True)
                 else:
                     body = intent.after(self.memory, tool, inp,
                                         msg.get("output"), harness=harness,
@@ -279,6 +299,8 @@ class DaemonState:
                     self.tool_failures += 1
                 elif expired:
                     self.expired += 1
+                elif resp.get("preflight"):
+                    self.preflights += 1
                 elif not handled:
                     self.passthrough += 1
                 elif resp.get("late"):
@@ -328,7 +350,14 @@ class DaemonState:
                 "errors": self.errors,
                 "tool_errors": self.tool_errors,
                 "hellos": len(self.hellos),
-                "hello_sessions": [h.get("session") for h in self.hellos],
+                "hello_sessions": [h.get("session") for h in self.hellos
+                                   if h.get("session")],
+                "preflights": self.preflights,
+                "permission_assert": _last(self.hellos, "permission_assert"),
+                "codemode_tools": sorted({
+                    name for h in self.hellos
+                    for name, info in (h.get("tools") or {}).items()
+                    if isinstance(info, dict) and info.get("codemode") is not False}),
                 "mean_ms": (round(self.ms_total / self.ms_count, 1)
                             if self.ms_count else 0.0),
                 "max_ms": round(self.ms_max, 1),

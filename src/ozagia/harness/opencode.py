@@ -157,14 +157,37 @@ def git_unexclude(info: dict[str, Any] | None) -> list[str]:
     return removed
 
 
-def write_opencode_config(path: Path, *, model: str | None = None) -> Path:
-    """The OPENCODE_CONFIG for one session: the eval's bash permission policy."""
+MCP_MODES = ("coding", "research", "combined")
+
+
+def mcp_server_entry(root: Path, mode: str, *, tool_python: str = sys.executable
+                     ) -> dict[str, Any]:
+    """OpenCode's `mcp` entry for the ozagia MCP server on `root` in `mode`
+    (coding, research or combined; see ozagia.integrations.mcp.server)."""
+    if mode not in MCP_MODES:
+        raise AgentError(f"MCP mode must be one of {', '.join(MCP_MODES)}, got {mode!r}")
+    env = {"OZAGIA_ROOT": str(root)}
+    if os.path.abspath(tool_python) == os.path.abspath(sys.executable):
+        import ozagia
+        env["PYTHONPATH"] = str(Path(ozagia.__file__).resolve().parents[1])
+    return {"type": "local", "enabled": True,
+            "command": [tool_python, "-m", "ozagia.integrations.mcp.server",
+                        "--root", str(root), "--mode", mode],
+            "environment": env}
+
+
+def write_opencode_config(path: Path, *, model: str | None = None,
+                          mcp: dict[str, Any] | None = None) -> Path:
+    """The OPENCODE_CONFIG for one session: the eval's bash permission
+    policy, and with `mcp` the ozagia MCP server (`mcp_server_entry`)."""
     doc: dict[str, Any] = {
         "$schema": "https://opencode.ai/config.json",
         "permission": {"bash": {"*": "allow", **{p: "deny" for p in ea.OPENCODE_GIT_DENY}}},
     }
     if model:
         doc["model"] = model
+    if mcp is not None:
+        doc["mcp"] = {"ozagia": mcp}
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return path
@@ -261,13 +284,17 @@ def run_agent(workdir: str | Path, *, prompt: str | None = None, model: str | No
               timeout_s: float | None = None, extra_args: Sequence[str] = (),
               run_python: str | None = None, tool_python: str = sys.executable,
               build: str = "auto", runs_dir: str | Path | None = None,
-              quiet: bool = False) -> dict[str, Any]:
+              quiet: bool = False, mcp_mode: str | None = None) -> dict[str, Any]:
     """Run one OpenCode session on `workdir` with the graph daemon and plugin
     (see the module docstring). Returns {exit_code, seconds, timed_out,
     transcript_path, stdout_path, stderr_path, daemon_stats, plugin_loaded,
     captured_calls, fallbacks, workdir, clone, run_root, log_dir, sock, prep,
-    build_s, ready_s, interactive, ...}. `interactive` None means "no prompt"."""
+    build_s, ready_s, interactive, ...}. `interactive` None means "no prompt".
+    `mcp_mode` (coding, research, combined) also gives the session the ozagia
+    MCP server in that mode, e.g. the research tools."""
     exe = find_opencode(opencode)
+    if mcp_mode is not None and mcp_mode not in MCP_MODES:
+        raise AgentError(f"MCP mode must be one of {', '.join(MCP_MODES)}, got {mcp_mode!r}")
     if interactive is None:
         interactive = prompt is None
     if not interactive and not prompt:
@@ -305,8 +332,10 @@ def run_agent(workdir: str | Path, *, prompt: str | None = None, model: str | No
                 raise AgentError(str(exc)) from exc
             res["workdir"] = str(work)
         res["exclude"] = git_exclude(work)
-        config = write_opencode_config(log_dir / "opencode_config.json",
-                                       model=model if interactive else None)
+        config = write_opencode_config(
+            log_dir / "opencode_config.json", model=model if interactive else None,
+            mcp=(mcp_server_entry(work, mcp_mode, tool_python=tool_python)
+                 if mcp_mode else None))
         session = GraphSession(work, tool_python=tool_python, run_python=run_python,
                                build=build, log_dir=log_dir, config=config_path(source))
         try:

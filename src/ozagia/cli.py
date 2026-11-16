@@ -3,6 +3,7 @@
     ozagia doctor [--root R] [--json]
     ozagia index [--root R] [--rebuild]
     ozagia agent [--workdir W] [--prompt TEXT | --prompt-file F] [--model M]
+                 [--mcp coding|research|combined | --research]
                  [--clone [--base REV]] [--keep-plugin] [--timeout S]
                  [--python P] [--runs-dir D] [-- <extra opencode args>]
     ozagia daemon serve|ping|stats|shutdown ...   (python -m ozagia.daemon)
@@ -10,6 +11,10 @@
     ozagia eval ...                               (python -m ozagia.eval.agent)
     ozagia check ...                              (python -m ozagia.check)
     ozagia install opencode|claude [--workdir W] [...]
+    ozagia self info|check|upgrade|uninstall ... (ozagia.selfinstall)
+    ozagia [DIR]                                  the TUI on DIR (default: the
+                                                  repository of the cwd), as
+                                                  `ozagia agent --workdir DIR`
     ozagia --version
 
 `daemon`, `mcp`, `eval` and `check` pass every argument after their name to
@@ -54,6 +59,11 @@ def _check_main(argv: list[str]) -> int:
     return main(argv)
 
 
+def _self_main(argv: list[str]) -> int:
+    from ozagia.selfinstall import main
+    return main(argv)
+
+
 # name -> (main(argv) -> int, help). Looked up at call time so tests can patch.
 DELEGATES: dict[str, tuple[str, str]] = {
     "daemon": ("_daemon_main", "the graph daemon: serve|ping|stats|shutdown "
@@ -61,6 +71,7 @@ DELEGATES: dict[str, tuple[str, str]] = {
     "mcp": ("_mcp_main", "the MCP server (ozagia.integrations.mcp.server)"),
     "eval": ("_eval_main", "the break/fix agent eval (python -m ozagia.eval.agent)"),
     "check": ("_check_main", "run tests, report graph keys (python -m ozagia.check)"),
+    "self": ("_self_main", "the installed ozagia: info|check|upgrade|uninstall"),
 }
 
 
@@ -133,8 +144,8 @@ def _cmd_agent(args: argparse.Namespace) -> int:
         res = run_agent(_root(args.workdir), prompt=prompt, model=args.model,
                         clone=args.clone, base=args.base, keep_plugin=args.keep_plugin,
                         timeout_s=args.timeout, extra_args=args.extra,
-                        run_python=args.python, opencode=args.opencode,
-                        runs_dir=args.runs_dir)
+                        run_python=args.python, opencode=_opencode_exe(args.opencode),
+                        runs_dir=args.runs_dir, mcp_mode=args.mcp)
     except (AgentError, SessionError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -195,7 +206,15 @@ def build_parser() -> argparse.ArgumentParser:
                     help="seconds before the session is killed (default: none)")
     ag.add_argument("--python", default=None,
                     help="interpreter that `python` names in the agent's shell commands")
-    ag.add_argument("--opencode", default="opencode", help="opencode executable")
+    ag.add_argument("--opencode", default=None,
+                    help="opencode executable (default: $OZAGIA_OPENCODE, which the "
+                         "installer sets to its pinned OpenCode; `system` or unset: "
+                         "`opencode` on PATH)")
+    ag.add_argument("--mcp", default=None, choices=("coding", "research", "combined"),
+                    help="also give the session the ozagia MCP server in this mode "
+                         "(research: the research tools; combined: coding and research)")
+    ag.add_argument("--research", dest="mcp", action="store_const", const="combined",
+                    help="same as --mcp combined")
     ag.add_argument("--runs-dir", default=None,
                     help="where run roots (logs, clones) go (default: <tmp>/ozagia_agent)")
 
@@ -210,8 +229,36 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _opencode_exe(value: str | None) -> str:
+    import os
+    if value == "system":
+        return "opencode"
+    return value or os.environ.get("OZAGIA_OPENCODE") or "opencode"
+
+
+_COMMANDS = frozenset({"index", "agent", "install", *DELEGATES})
+# Agent options that may lead a bare `ozagia ...` (the TUI).
+_AGENT_FLAGS = frozenset({"--research", "--mcp", "--model", "-m", "--workdir",
+                          "--root", "--clone", "--prompt", "--prompt-file"})
+
+
+def _default_agent(argv: list[str]) -> list[str]:
+    """`ozagia` alone, or `ozagia DIR [agent options]`, is the TUI (as
+    `opencode` and `opencode DIR` are)."""
+    if not argv:
+        return ["agent"]
+    head = argv[0]
+    if head in _AGENT_FLAGS:
+        return ["agent", *argv]           # `ozagia --research`, `ozagia -m M`
+    if head in _COMMANDS or head.startswith("-"):
+        return argv
+    if Path(head).is_dir():
+        return ["agent", "--workdir", head, *argv[1:]]
+    return argv
+
+
 def main(argv: list[str] | None = None) -> int:
-    argv = list(sys.argv[1:] if argv is None else argv)
+    argv = _default_agent(list(sys.argv[1:] if argv is None else argv))
     if argv and argv[0] in DELEGATES:
         return _delegate(argv[0])(argv[1:])
     extra: list[str] = []

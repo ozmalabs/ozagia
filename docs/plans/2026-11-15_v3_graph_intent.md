@@ -59,6 +59,12 @@ Not yet verified: whether a built-in called from inside Code Mode `execute`
 (`tools.read(...)`) goes through the replaced `execute`. The W2-B smoke test
 checks this.
 
+Resolved in v4 (`docs/plans/2026-11-16_v4_open_issues.md`): in 2.3.0 every
+built-in is registered `codemode: false`, so Code Mode's catalog (built from
+the registry after transforms) never contains one, and `execute` cannot call
+it. The plugin reports each replaced tool's `codemode` option in its
+`hello`, and the eval warns if one is not `false`.
+
 ## Intent mapping
 
 The plugin is thin. It forwards `{tool, input, session}` over a Unix socket to

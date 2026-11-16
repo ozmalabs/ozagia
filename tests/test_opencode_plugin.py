@@ -41,6 +41,7 @@ const tools = {
   grep: { name: "grep", description: "Search.", output: { kind: "grep" },
           execute: async (input) => { calls.push(["grep", input]); return { output: { matches: 2 } }; } },
   edit: { name: "edit", description: "Edit a file.", output: schema,
+          options: { codemode: false, permission: "edit" },
           execute: async (input) => { calls.push(["edit", input]); return "ORIG EDIT"; } },
   shell: { name: "shell", description: "Run a command.", output: { kind: "shell" },
            execute: async (input) => { calls.push(["shell", input]);
@@ -54,7 +55,23 @@ const reg = {
   update: (name, fn) => { const t = { ...tools[name] }; const r = fn(t); tools[name] = r || t; },
 };
 const plugin = cfg.timeoutMs ? mod.createPlugin({ requestTimeoutMs: cfg.timeoutMs }) : mod.default;
-await plugin.setup({ tool: { transform: (fn) => fn(reg), hook: () => {} } });
+const asserts = [];
+const permission = cfg.permission === undefined ? undefined : {
+  assert: async (req) => {
+    asserts.push(req);
+    if (cfg.permission === "deny") {
+      throw Object.assign(new Error("Permission denied: " + req.action),
+                          { _tag: "Permission.BlockedError" });
+    }
+    if (cfg.permission === "declined") {
+      throw Object.assign(new Error(""), { _tag: "Permission.DeclinedError" });
+    }
+    if (cfg.permission === "broken") throw new Error("ParseError: Expected string");
+    if (cfg.permission === "transport") throw new Error("connection rejected by peer");
+  },
+};
+await plugin.setup({ tool: { transform: (fn) => fn(reg), hook: () => {} },
+                     ...(permission ? { permission } : {}) });
 const results = [];
 const c = { sessionID: "ses_test", agent: "build", messageID: "msg_1", id: "call_1",
             progress: () => {}, signal: undefined };
@@ -65,7 +82,7 @@ for (const call of cfg.calls || []) {
 await new Promise((r) => setTimeout(r, cfg.settleMs || 50));
 process.stdout.write(JSON.stringify({
   id: mod.default.id, has_setup: typeof mod.default.setup === "function",
-  results, calls,
+  results, calls, asserts,
   replaced: Object.keys(tools).filter((k) => tools[k].execute !== original[k]),
   schema_swapped: Object.fromEntries(Object.keys(tools).map((k) => [k, tools[k].output === schema])),
   descriptions: Object.fromEntries(Object.keys(tools).map((k) => [k, tools[k].description])),
@@ -344,12 +361,17 @@ def test_hello_is_sent_once_on_its_own_connection(tmp_path, daemon):
     out = _run(tmp_path, {"calls": [READ, READ, {"tool": "grep", "input": {"pattern": "x"}}]},
                d.path)
     assert all(r["ok"] for r in out["results"])
-    assert sorted(d.ops()) == ["hello", "tool", "tool", "tool"]
-    hello = [r for r in d.requests if r["op"] == "hello"][0]
-    assert hello["harness"] == "opencode" and hello["plugin"] == "ozagia"
-    assert hello["version"] and hello["session"] == "ses_test"
+    assert sorted(d.ops()) == ["hello", "hello", "tool", "tool", "tool"]
+    setup, session = [r for r in d.requests if r["op"] == "hello"]
+    assert setup["phase"] == "setup" and "session" not in setup
+    assert session["phase"] == "session" and session["session"] == "ses_test"
+    for hello in (setup, session):
+        assert hello["harness"] == "opencode" and hello["plugin"] == "ozagia"
+        assert hello["version"] and hello["permission_assert"] is False
+    assert session["tools"]["edit"] == {"codemode": False}
+    assert session["tools"]["read"] == {"codemode": None}
     # review fix 1b: one connection per request, hello on its own.
-    assert d.connections == 4
+    assert d.connections == 5
 
 
 @needs_node
@@ -446,7 +468,8 @@ def test_registry_patch_untouched_schema_swapped_and_notes_added(tmp_path, daemo
     assert "sym:<file>::<name>" in desc["read"] and "[ozagia]" in desc["read"]
     for name in ("grep", "edit", "shell"):
         assert "[ozagia]" in desc[name] and desc[name].count("\n\n") == 1
-    assert d.requests == []  # setup does not connect
+    # setup connects once, for its hello
+    assert [(r["op"], r.get("phase")) for r in d.requests] == [("hello", "setup")]
 
 
 # --------------------------------------------------------------------------- #
@@ -622,7 +645,8 @@ def test_real_daemon_edit_runs_once_while_pytest_is_in_flight(tmp_path, sockdir)
             stats = json.loads(s.makefile("rb").readline())["stats"]
         assert stats["handled"]["true"] == 2 and stats["expired"] == 1
         assert stats["passthrough"] == 1  # the warm-up miss
-        assert stats["hellos"] == 1
+        assert stats["hellos"] == 2   # setup and the session
+        assert stats["hello_sessions"] == ["ses_e2e"]
     finally:
         if proc.poll() is None:
             proc.terminate()
@@ -630,3 +654,146 @@ def test_real_daemon_edit_runs_once_while_pytest_is_in_flight(tmp_path, sockdir)
                 proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 proc.kill()
+
+
+# --------------------------------------------------------------------------- #
+# permissions (ctx.permission.assert)
+# --------------------------------------------------------------------------- #
+EDIT = {"tool": "edit", "input": {"path": "pkg/mod.py", "oldString": "a", "newString": "b"}}
+EDIT_PERM = {"action": "edit", "resources": ["pkg/mod.py"], "save": ["*"]}
+
+
+def _preflighting(req):
+    """A daemon that answers a preflight with the edit permission and the
+    real call as handled."""
+    if req["op"] == "tool" and req.get("preflight"):
+        return {"ok": True, "handled": False, "preflight": True,
+                "reason": "permission required", "permission": EDIT_PERM}
+    if req["op"] == "tool":
+        return {"ok": True, "handled": True, "output": "Edited",
+                "permission": EDIT_PERM}
+    return _standard(req)
+
+
+@needs_node
+def test_mutating_call_asks_permission_before_the_daemon_runs_it(tmp_path, daemon):
+    d = daemon(_preflighting)
+    out = _run(tmp_path, {"calls": [EDIT], "permission": "allow"}, d.path)
+    assert out["results"][0]["ok"] is True
+    assert out["results"][0]["result"]["output"] == "Edited"
+    tools = [r for r in d.requests if r["op"] == "tool"]
+    assert [t.get("preflight") for t in tools] == [True, None]
+    assert out["asserts"] == [{
+        "sessionID": "ses_test", "agent": "build", "action": "edit",
+        "resources": ["pkg/mod.py"], "save": ["*"],
+        "source": {"type": "tool", "messageID": "msg_1", "id": "call_1"}}]
+    assert out["calls"] == []
+    hello = [r for r in d.requests if r["op"] == "hello"][0]
+    assert hello["permission_assert"] is True
+
+
+@needs_node
+def test_refused_permission_is_the_tool_error_and_nothing_runs(tmp_path, daemon):
+    d = daemon(_preflighting)
+    out = _run(tmp_path, {"calls": [EDIT], "permission": "deny"}, d.path)
+    assert out["results"][0] == {"ok": False, "error": "Permission denied: edit"}
+    tools = [r for r in d.requests if r["op"] == "tool"]
+    assert [t.get("preflight") for t in tools] == [True]  # never sent for real
+    assert out["calls"] == []                             # nor run by the built-in
+
+
+@needs_node
+def test_broken_permission_api_hands_the_call_to_the_builtin(tmp_path, daemon):
+    d = daemon(_preflighting)
+    out = _run(tmp_path, {"calls": [EDIT], "permission": "broken", "settleMs": 200},
+               d.path)
+    assert out["results"][0]["ok"] is True
+    assert out["calls"] == [["edit", EDIT["input"]]]
+    tools = [r for r in d.requests if r["op"] == "tool"]
+    assert [t.get("preflight") for t in tools] == [True]
+    after = [r for r in d.requests if r["op"] == "after"][0]
+    assert after["meta"]["fallback"].startswith("permission: ParseError")
+
+
+@needs_node
+def test_passthrough_preflight_does_not_ask(tmp_path, daemon):
+    def script(req):
+        if req["op"] == "tool":
+            return {"ok": True, "handled": False, "reason": "not mapped"}
+        return _standard(req)
+
+    d = daemon(script)
+    out = _run(tmp_path, {"calls": [EDIT], "permission": "deny"}, d.path)
+    assert out["results"][0]["ok"] is True   # the built-in asks for itself
+    assert out["asserts"] == []
+    assert out["calls"] == [["edit", EDIT["input"]]]
+
+
+@needs_node
+def test_read_output_is_shown_only_after_the_permission(tmp_path, daemon):
+    def script(req):
+        if req["op"] == "tool":
+            assert not req.get("preflight")
+            return {"ok": True, "handled": True, "output": "SECRET",
+                    "permission": {"action": "read", "resources": [".env"],
+                                   "save": ["*"]}}
+        return _standard(req)
+
+    d = daemon(script)
+    out = _run(tmp_path, {"calls": [READ], "permission": "deny"}, d.path)
+    assert out["results"][0] == {"ok": False, "error": "Permission denied: read"}
+    out = _run(tmp_path, {"calls": [READ], "permission": "allow"}, d.path)
+    assert out["results"][0]["result"]["output"] == "SECRET"
+    assert out["asserts"][0]["action"] == "read"
+    assert out["asserts"][0]["resources"] == [".env"]
+
+
+@needs_node
+def test_without_the_permission_api_there_is_no_preflight(tmp_path, daemon):
+    d = daemon(_preflighting)
+    out = _run(tmp_path, {"calls": [EDIT]}, d.path)
+    assert out["results"][0]["result"]["output"] == "Edited"
+    tools = [r for r in d.requests if r["op"] == "tool"]
+    assert [t.get("preflight") for t in tools] == [None]
+
+
+@needs_node
+@pytest.mark.parametrize("kind,refused", [("declined", True), ("transport", False)])
+def test_only_permission_errors_count_as_refusals(tmp_path, daemon, kind, refused):
+    d = daemon(_preflighting)
+    out = _run(tmp_path, {"calls": [EDIT], "permission": kind, "settleMs": 200}, d.path)
+    if refused:
+        assert out["results"][0]["ok"] is False and out["calls"] == []
+    else:   # the permission API failed: the built-in runs and asks itself
+        assert out["results"][0]["ok"] is True
+        assert out["calls"] == [["edit", EDIT["input"]]]
+
+
+@needs_node
+def test_preflight_without_a_permission_request_goes_to_the_builtin(tmp_path, daemon):
+    def script(req):
+        if req["op"] == "tool" and req.get("preflight"):
+            return {"ok": True, "handled": False, "preflight": True,
+                    "reason": "permission required", "permission": None}
+        return _preflighting(req)
+
+    d = daemon(script)
+    out = _run(tmp_path, {"calls": [EDIT], "permission": "allow", "settleMs": 200},
+               d.path)
+    assert out["calls"] == [["edit", EDIT["input"]]]
+    assert [t.get("preflight") for t in d.requests if t["op"] == "tool"] == [True]
+
+
+@needs_node
+def test_permission_metadata_is_passed_to_assert(tmp_path, daemon):
+    meta = {"files": [{"file": "pkg/mod.py", "patch": "--- a\n+++ b\n"}]}
+
+    def script(req):
+        if req["op"] == "tool" and req.get("preflight"):
+            return {"ok": True, "handled": False, "preflight": True,
+                    "permission": {**EDIT_PERM, "metadata": meta}}
+        return _preflighting(req)
+
+    d = daemon(script)
+    out = _run(tmp_path, {"calls": [EDIT], "permission": "allow"}, d.path)
+    assert out["asserts"][0]["metadata"] == meta

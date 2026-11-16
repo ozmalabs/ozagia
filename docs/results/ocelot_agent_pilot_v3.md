@@ -54,6 +54,14 @@ In v2 the plugin and daemon had 0 fallbacks, 0 plugin-load failures and
   18 were `ls` and 8 were git reads. The intent layer maps only simple
   commands, so these go to the built-in.
 
+## Correction: MCP calls
+
+The reports' `mean MCP calls` column reads 0.0 for dev_memory in both
+pilots. The counter only knew the `tools["ozagia"].x(...)` form of a Code
+Mode call, and the model wrote `tools.ozagia.x(...)`. Recounted with the
+fixed counter (`eval.agent._MCP_CODE_CALL_RE`, v4): v1 made 0 MCP calls
+in 21 dev_memory runs, and v2 made 8 in 24 (0.33 per run).
+
 ## Not measured
 
 - Claude Code hooks (Claude Code was logged out).

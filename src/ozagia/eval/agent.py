@@ -571,9 +571,11 @@ DRIVER_ENV = "OZAGIA_EVAL_DRIVER"
 
 
 # OpenCode 2.3 Code Mode runs MCP tools inside its `execute` tool, as
-# `tools["ozagia"].dev_code_search(...)`. Each such call is one MCP call.
-_MCP_CODE_CALL_RE = re.compile(r"""tools\[\s*["']""" + re.escape(MCP_SERVER_NAME)
-                               + r"""["']\s*\]\s*\.\s*\w+\s*\(""")
+# `tools.ozagia.dev_code_search(...)` or `tools["ozagia"].dev_code_search(...)`.
+# Each such call is one MCP call.
+_MCP_CODE_CALL_RE = re.compile(
+    r"""tools\s*(?:\[\s*["']""" + re.escape(MCP_SERVER_NAME) + r"""["']\s*\]|\.\s*"""
+    + re.escape(MCP_SERVER_NAME) + r""")\s*\.\s*\w+\s*\(""")
 
 
 def _parse_opencode_events(stdout: str) -> dict[str, Any]:
@@ -1038,11 +1040,19 @@ _PREP_CODE = (
 )
 
 
-def _tool_env(workdir: Path, config: Path | None) -> dict[str, str]:
-    """Environment for ozagia subprocesses acting on `workdir` (prep, daemon)."""
+def _tool_env(workdir: Path, config: Path | None, *,
+              tool_python: str | None = None) -> dict[str, str]:
+    """Environment for ozagia subprocesses acting on `workdir` (prep, daemon).
+
+    The caller's PYTHONPATH is dropped (a target's path must not break the
+    tool). When `tool_python` is this interpreter, PYTHONPATH is the
+    directory this ozagia package was imported from, so the subprocess runs
+    the same ozagia code as the eval (as `harness.session.tool_env` does)."""
     env = dict(os.environ, OZAGIA_ROOT=str(workdir), PYTHONDONTWRITEBYTECODE="1",
                COLUMNS="250")
     env.pop("PYTHONPATH", None)
+    if tool_python and os.path.abspath(tool_python) == os.path.abspath(sys.executable):
+        env["PYTHONPATH"] = str(_ozagia_src())
     if config is not None:
         env["OZAGIA_CONFIG"] = str(config)
     else:
@@ -1062,7 +1072,7 @@ def prepare_dev_memory(workdir: Path, tool_python: str,
     still decides, so a broken index shows up as a result, not a silent skip.
     """
     log_dir.mkdir(parents=True, exist_ok=True)
-    env = _tool_env(workdir, config)
+    env = _tool_env(workdir, config, tool_python=tool_python)
     res = spawn_group([tool_python, "-c", _PREP_CODE, str(workdir),
                        str(log_dir / "dev_graph.json")],
                       cwd=workdir, env=env, timeout_s=PREP_TIMEOUT_S)
@@ -1202,7 +1212,8 @@ def start_daemon(workdir: Path, tool_python: str, log_dir: Path, *,
     log_dir.mkdir(parents=True, exist_ok=True)
     sock = _daemon_sock_path()
     argv = daemon_command(tool_python, workdir, log_dir, sock)
-    env = dict(_tool_env(workdir, config), PWD=str(Path(workdir).resolve()))
+    env = dict(_tool_env(workdir, config, tool_python=tool_python),
+               PWD=str(Path(workdir).resolve()))
     if run_python:
         # `python` in the agent's commands is the run's interpreter.
         env["PATH"] = os.pathsep.join(
@@ -1290,22 +1301,32 @@ def graph_stats_fields(stats: Any) -> dict[str, Any]:
     """Run-record fields from the daemon's `stats`: plugin_loaded
     (hellos > 0), captured_calls (tool calls the daemon handled; an expired
     request is never handled), passthrough_calls (left to the built-in by
-    design) and fallbacks (`stats.fallbacks`: the plugin's fallback `after`s
-    plus expired requests plus failed tool requests; see
-    `ozagia.daemon.server`)."""
+    design), fallbacks (`stats.fallbacks`: one per call the plugin could not
+    get answered; see `ozagia.daemon.server`), preflights (permission
+    checks before a handled edit, write or shell), permission_assert and
+    codemode_tools (from the plugin's `hello`)."""
     if not isinstance(stats, dict):
         return {"plugin_loaded": None, "captured_calls": None,
-                "passthrough_calls": None, "fallbacks": None}
+                "passthrough_calls": None, "fallbacks": None,
+                "preflights": None, "permission_assert": None,
+                "codemode_tools": None}
     hellos = _count(stats.get("hellos"))
     raw = stats.get("handled")
     # The daemon reports {"true": n, "false": m}; only handled calls count.
     handled = (_count(raw.get("true")) if isinstance(raw, dict) else _count(raw))
     if handled is None and isinstance(stats.get("by_handled"), dict):
         handled = _count(stats["by_handled"].get("true"))
+    codemode = stats.get("codemode_tools")
     return {"plugin_loaded": None if hellos is None else hellos > 0,
             "captured_calls": handled,
             "passthrough_calls": _count(stats.get("passthrough")),
-            "fallbacks": _count(stats.get("fallbacks"))}
+            "fallbacks": _count(stats.get("fallbacks")),
+            # Permission checks before handled mutating calls, and whether
+            # the harness offered the permission API.
+            "preflights": _count(stats.get("preflights")),
+            "permission_assert": stats.get("permission_assert"),
+            # Replaced tools OpenCode could also reach through Code Mode.
+            "codemode_tools": list(codemode) if isinstance(codemode, list) else None}
 
 
 def run_one(repo: str | Path, task: dict[str, Any], arm: str, repeat: int,
@@ -1528,6 +1549,8 @@ def aggregate(runs: list[dict[str, Any]], arms: Iterable[str]) -> list[dict[str,
                                             if r.get("daemon_ok") is not None
                                             and r.get("plugin_loaded") is not True),
                 "daemon_failures": sum(1 for r in mine if r.get("daemon_ok") is False),
+                "codemode_tools": sorted({t for r in mine
+                                          for t in (r.get("codemode_tools") or [])}),
             })
     return rows
 
@@ -1606,6 +1629,11 @@ def render_markdown(report: dict[str, Any]) -> str:
                   "intent-layer "
                   "exceptions. A plugin-load failure is a run whose daemon "
                   "recorded no `hello` (or gave no stats)."]
+        reachable = sorted({t for row in graph_rows
+                            for t in (row.get("codemode_tools") or [])})
+        if reachable:
+            lines += ["", "Warning: replaced tools not registered `codemode: false` "
+                      f"(Code Mode could call their built-ins): {', '.join(reachable)}."]
     lines += ["", "## Per task (paired)", ""]
     header = "| task | " + " | ".join(report["arms"]) + " |"
     lines += [header, "|---" * (len(report["arms"]) + 1) + "|"]

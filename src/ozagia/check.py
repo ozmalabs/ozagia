@@ -416,11 +416,32 @@ def _kill_group(pgid: int, sig: int) -> None:
         pass
 
 
+# The most pytest output lines `run_tests(tail_lines=0)` keeps.
+MAX_OUTPUT_LINES = 50000
+
+
+def _output_lines(output: str, tail_lines: int) -> str:
+    rows = output.splitlines()
+    if tail_lines > 0:
+        return "\n".join(rows[-tail_lines:])
+    if len(rows) <= MAX_OUTPUT_LINES:
+        return "\n".join(rows)
+    half = MAX_OUTPUT_LINES // 2
+    return "\n".join([*rows[:half],
+                      f"... ({len(rows) - 2 * half} lines not kept) ...",
+                      *rows[-half:]])
+
+
 def run_tests(root: str | Path, selectors: list[str], *,
               python: str | None = None, timeout_s: float = 300,
               env: dict | None = None, inherit: bool = True,
-              extra_args: Iterable[str] = ()) -> dict[str, Any]:
+              extra_args: Iterable[str] = (),
+              tail_lines: int = OUTPUT_TAIL_LINES) -> dict[str, Any]:
     """Run pytest on `selectors` in `root` and return the results as keys.
+
+    `output_tail` is the last `tail_lines` lines of pytest's output; with
+    `tail_lines=0` it is the whole output up to `MAX_OUTPUT_LINES` (beyond
+    that its first and last halves, with a marker line between them).
 
     The environment is this process's, updated with `env`; with
     `inherit=False` it is `env` alone (an empty one without it). Either way
@@ -492,7 +513,7 @@ def run_tests(root: str | Path, selectors: list[str], *,
         "counts": counts,
         "tests": parsed["tests"],
         "collection_errors": parsed["collection_errors"],
-        "output_tail": "\n".join(output.splitlines()[-OUTPUT_TAIL_LINES:]),
+        "output_tail": _output_lines(output, int(tail_lines)),
         "command": cmd,
     }
     if status == "no_tests_collected":

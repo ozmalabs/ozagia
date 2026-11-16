@@ -40,7 +40,9 @@ from ozagia.intent.common import (
     delta_keys,
     delta_lines,
     in_state_dir,
+    diff_metadata,
     one_line,
+    preflight_stop,
     resolve,
     root_of,
     split_lines,
@@ -91,7 +93,8 @@ def handle_edit(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(old, str) or not isinstance(new, str):
         raise IntentError("oldString and newString must be strings")
     if old == "":
-        res = handle_write(memory, {"path": path, "content": new})
+        res = handle_write(memory, {"path": path, "content": new,
+                                    "_preflight": inp.get("_preflight")})
         res["intent"] = "edit_write"
         return res
     target = _target(memory, path)
@@ -99,6 +102,22 @@ def handle_edit(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
         raise IntentError(f"File {target.display} not found")
     if old == new:
         raise IntentError(IDENTICAL)
+    if inp.get("_preflight"):
+        try:
+            res = memory.span_edit(target.rel, old, new,
+                                   replace_all=bool(inp.get("replaceAll")),
+                                   apply=False)
+        except CodeEditError as e:
+            msg = str(e)
+            if any(s in msg for s in _UNHANDLED_ERRORS):
+                raise Unhandled(msg) from None
+            raise IntentError(msg) from None
+        if not res.get("ok"):
+            raise _edit_error(target.path, res)
+        text = target.path.read_text(encoding="utf-8", errors="replace")
+        after = (text.replace(old, new) if inp.get("replaceAll")
+                 else text.replace(old, new, 1))
+        preflight_stop(inp, diff_metadata(target.rel, text, after))
     try:
         res = memory.span_edit(target.rel, old, new,
                                replace_all=bool(inp.get("replaceAll")),
@@ -205,6 +224,9 @@ def handle_write(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
             src = read_source(root, target.rel, suffixes=(suffix,),
                               max_bytes=MAX_SOURCE_BYTES,
                               error_cls=CodeEditError)
+            if inp.get("_preflight"):
+                before = target.path.read_text(encoding="utf-8", errors="replace")
+                preflight_stop(inp, diff_metadata(target.rel, before, content))
             backup = write_source(root, src, content, error_cls=CodeEditError)
         except CodeEditError as e:
             msg = str(e)
@@ -212,6 +234,7 @@ def handle_write(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
                 raise Unhandled(msg) from None
             raise IntentError(msg) from None
     else:
+        preflight_stop(inp, diff_metadata(target.rel, None, content))
         _create(target.path, content)
     # The file is written: from here on a failure is reported as a warning
     # line, never raised (a raise would make the plugin write it again).

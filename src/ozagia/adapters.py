@@ -20,12 +20,31 @@ Extension points:
 - `add_edit_engine(name, ops, apply)`: a Python edit engine. A script with
   `engine: <name>`, or one using any op in `ops`, goes to
   `apply(root, script, write=...)` instead of the built-in Python adapter.
-- `add_indexer(fn)`: called once per graph build as `fn(ctx)`, where `ctx` is
-  an `IndexContext`, after the built-in file, test and doc indexers and before
-  the git history and failure baseline. The indexer adds project-specific
-  nodes and edges through `ctx.builder` (`node`, `edge`, `find`, `find_nodes`,
-  `attrs`) and
-  `ctx.file_node(rel)`.
+- `add_indexer(fn, *, watch=(), texts=None)`: called once per graph build
+  as `fn(ctx)`, where `ctx` is an `IndexContext`, after the built-in file,
+  test and doc indexers and before the git history and failure baseline. The
+  indexer adds project-specific nodes and edges through `ctx.builder`
+  (`node`, `edge`, `find`, `find_nodes`, `attrs`) and `ctx.file_node(rel)`. A reingest
+  (`ozagia.core.reingest`) runs the indexers again (an adapter pass) when
+  a reingested file is one they depend on, which they declare:
+  - `watch`: globs (root-relative, `**` allowed) of the files the indexer
+    reads from disk itself. New, changed and deleted matches are pending
+    changes, count in the tree digest, and run the pass.
+  - `texts`: which indexed source, test and doc texts (`ctx.sources`,
+    `ctx.tests`, `ctx.docs`) the indexer's output depends on. `None` (the
+    default): any, so a reingest of any indexed file runs the pass.
+    `False`: none. A regex (string or compiled): the indexer depends on a
+    file only through the distinct strings the regex matches in it, and on
+    the set of nodes (`IndexedTests.tests`) of a file with a match. The
+    pass runs for a file whose distinct matches changed, or a matching file
+    that gained a node; moving a match within a file does not run it.
+  Core node keys an indexer looks up with `ctx.builder.find` are recorded:
+  a reingest that adds or removes one runs the pass. An indexer that
+  chooses nodes any other way (iterating every Test, `ctx.tests` of
+  unmatched files) must leave `texts` as None.
+  Attributes an indexer sets on core nodes (`ctx.builder.attrs` on a
+  Symbol, Test, Doc or File node) are recorded and survive a reingest that
+  replaces the node's parsed attributes.
 - `add_graph_query(name, fn)`: a named read-only query, exposed by
   `DevMemory.adapter_query(name, **kwargs)` as `fn(memory, **kwargs)`.
 - `add_mcp_tool(spec, handler)`: an extra MCP tool. `spec` is an MCP tool
@@ -38,6 +57,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import re
 import sys
 from dataclasses import dataclass, field
 from importlib.metadata import entry_points
@@ -88,11 +108,22 @@ class IndexContext:
     options: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class IndexerInputs:
+    """What one indexer depends on (see `Registry.add_indexer`): `watch`
+    globs, and `texts`: None (any indexed text), False (none) or a compiled
+    regex (texts it matches)."""
+    watch: tuple[str, ...] = ()
+    texts: Any = None
+
+
 @dataclass
 class Registry:
     edit_engines: dict[str, tuple[frozenset[str], Callable[..., Any]]] = field(
         default_factory=dict)
     indexers: list[Callable[[IndexContext], Any]] = field(default_factory=list)
+    # Parallel to `indexers`: what each one depends on.
+    indexer_inputs: list[IndexerInputs] = field(default_factory=list)
     graph_queries: dict[str, Callable[..., Any]] = field(default_factory=dict)
     mcp_tools: dict[str, tuple[dict[str, Any], Callable[..., Any]]] = field(
         default_factory=dict)
@@ -103,8 +134,24 @@ class Registry:
                         apply: Callable[..., Any]) -> None:
         self.edit_engines[str(name).lower()] = (frozenset(ops), apply)
 
-    def add_indexer(self, fn: Callable[[IndexContext], Any]) -> None:
+    def add_indexer(self, fn: Callable[[IndexContext], Any], *,
+                    watch: Iterable[str] = (), texts: Any = None) -> None:
+        if isinstance(watch, str):
+            watch = (watch,)
+        globs = tuple(str(g) for g in watch)
+        if texts is True:
+            texts = None
+        elif isinstance(texts, str):
+            texts = re.compile(texts)
+        elif texts not in (None, False) and not hasattr(texts, "search"):
+            raise ValueError("texts must be None, False, a regex or a string")
         self.indexers.append(fn)
+        self.indexer_inputs.append(IndexerInputs(globs, texts))
+
+    @property
+    def watch_globs(self) -> list[str]:
+        """Every indexer's `watch` globs, in order, without repeats."""
+        return list(dict.fromkeys(g for i in self.indexer_inputs for g in i.watch))
 
     def add_graph_query(self, name: str, fn: Callable[..., Any]) -> None:
         self.graph_queries[str(name)] = fn

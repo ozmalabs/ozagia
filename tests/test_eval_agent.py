@@ -760,13 +760,15 @@ def test_opencode_parser_counts_code_mode_mcp_calls():
         tool("execute", 'const a = await tools["ozagia"].dev_code_search({q: 1});\n'
                         "return tools['ozagia'].dev_impact({});"),
         tool("ozagia_dev_context"),
+        # The form the v2 pilot's model wrote (review: it counted 0 before).
+        tool("execute", "return await tools.ozagia.dev_brief({task: 'x'})"),
         json.dumps({"type": "step_finish", "part": {"cost": 0, "tokens": {"input": 1,
                                                                         "output": 1}}}),
     ])
     out = ae._parse_opencode_events(stream)
-    assert out["tool_calls"] == 4
-    assert out["mcp_calls"] == 3
-    assert out["tools_by_name"] == {"execute": 2, "ozagia_dev_context": 1,
+    assert out["tool_calls"] == 5
+    assert out["mcp_calls"] == 4
+    assert out["tools_by_name"] == {"execute": 3, "ozagia_dev_context": 1,
                                     "read": 1}
 
 
@@ -1006,14 +1008,20 @@ def test_graph_intent_noop_run_aggregates_and_renders(fixture):
 
 def test_graph_stats_fields_read_counts():
     assert ae.graph_stats_fields(None) == {"plugin_loaded": None, "captured_calls": None,
-                                           "passthrough_calls": None, "fallbacks": None}
+                                           "passthrough_calls": None, "fallbacks": None,
+                                           "preflights": None,
+                                           "permission_assert": None,
+                                           "codemode_tools": None}
     # The daemon's shape: handled {"true": captured, "false": passthrough and
     # expired}; fallbacks = plugin fallbacks + expired + failed (review fix 4).
     assert ae.graph_stats_fields({"hellos": 2, "handled": {"true": 3, "false": 4},
                                   "passthrough": 3, "expired": 1,
-                                  "plugin_fallbacks": 2, "fallbacks": 3}) == {
+                                  "plugin_fallbacks": 2, "fallbacks": 3,
+                                  "preflights": 2, "permission_assert": True,
+                                  "codemode_tools": ["read"]}) == {
         "plugin_loaded": True, "captured_calls": 3, "passthrough_calls": 3,
-        "fallbacks": 3}
+        "fallbacks": 3, "preflights": 2, "permission_assert": True,
+        "codemode_tools": ["read"]}
     assert ae.graph_stats_fields({"hellos": 1, "handled": 2})["captured_calls"] == 2
     assert ae.graph_stats_fields({"hellos": 0, "by_handled": {"true": 5}})[
         "captured_calls"] == 5
@@ -1212,3 +1220,14 @@ def test_native_driver_records_a_loop_error(fixture, native_env, monkeypatch):
                          run_root=fixture["run_root"], timeout_s=60, keep=False)
     assert rec["success"] is False and rec["exit_code"] == 1
     assert "HTTP 400" in rec["driver_error"] and rec["stopped"] == "error"
+
+
+def test_tool_env_runs_the_same_ozagia_code(tmp_path, monkeypatch):
+    """The daemon and prep subprocesses import the ozagia the eval runs
+    (the v4 pilot ran an old daemon next to a new plugin without this)."""
+    import sys
+    monkeypatch.setenv("PYTHONPATH", "/somewhere/else")
+    env = ae._tool_env(tmp_path, None, tool_python=sys.executable)
+    assert env["PYTHONPATH"] == str(ae._ozagia_src())
+    env = ae._tool_env(tmp_path, None, tool_python="/other/python")
+    assert "PYTHONPATH" not in env

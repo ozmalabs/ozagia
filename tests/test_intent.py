@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -274,6 +275,7 @@ def _grep_matches(output: str) -> list[str]:
     return [ln for ln in output.split("\n") if ln.startswith("  Line ")]
 
 
+@pytest.mark.skipif(shutil.which("rg") is None, reason="needs ripgrep for the expected count")
 def test_grep_groups_matches_under_keys(mem, repo):
     out = _ok(mem, "grep", pattern="helper")
     lines = out.split("\n")
@@ -475,7 +477,8 @@ CLASSIFY = [
     ("grep -n foo a.py", "grep"),
     ("grep -rnF 'a.b(' .", "grep"),
     ("grep -rnE 'foo|bar' src", "grep"),
-    ("grep -rn 'foo\\|bar' .", "other"),
+    ("grep -rn 'foo\\|bar' .", "grep"),        # BRE alternation, converted
+    ("grep -rn 'a\\1' .", "other"),             # a back-reference has no equivalent
     ("grep foo", "other"),
     ("grep -rnw foo .", "other"),
     ("grep -rn foo --include=*.py .", "grep"),
@@ -511,17 +514,18 @@ CLASSIFY = [
     ("find . -type f -name '[ab].py'", "other"),
     ("find . -type f -name 'a\\*.py'", "other"),
     ("find . -exec rm {} \\;", "complex"),
-    ("cd src && pytest", "complex"),
+    ("cd src && pytest", "compound"),
     ("cd pkg && cat mod.py", "read"),
     ("cd 'pkg' && grep -rn helper .", "grep"),
     ("cd $DIR && cat a.py", "complex"),
     ("cd pkg && python gen.py", "complex"),
     ("cd missing && ls", "ls"),
-    ("cd pkg && cat mod.py | head -3", "complex"),
-    ("FOO=1 pytest", "complex"),
-    ("pytest | tail", "complex"),
+    ("cd pkg && cat mod.py | head -3", "compound"),
+    ("FOO=1 pytest", "compound"),         # an env prefix on pytest is captured
+    ("FOO=1 cat a", "complex"),
+    ("pytest | tail", "compound"),
     ("pytest > out.txt", "complex"),
-    ("pytest; echo done", "complex"),
+    ("pytest; echo done", "compound"),
     ("echo $(git rev-parse HEAD)", "complex"),
     ("cat `ls`", "complex"),
     ("cat $FILE", "complex"),
@@ -674,7 +678,7 @@ def test_shell_find_permission_errors_fall_back(mem, repo, monkeypatch):
         yield  # pragma: no cover
     monkeypatch.setattr(run.os, "walk", denied_walk)
     assert _call(mem, "shell", command="find pkg -type f -name '*.py'")["handled"] is False
-    for cmd in ("git status", "python -c 'print(1)'", "pytest | tail"):
+    for cmd in ("git status", "python -c 'print(1)'", "pwd && ls"):
         assert _call(mem, "shell", command=cmd)["handled"] is False, cmd
 
 
@@ -769,8 +773,8 @@ def test_pytest_with_an_output_filter_is_still_pytest(command, filt):
     assert got["class"] == "pytest" and got["output_filter"] == filt
 
 
-@pytest.mark.parametrize("command", ["pytest | grep x", "cat a | tail -3",
-                                     "pytest > out.txt", "pytest | tail -n 3 | head -1"])
+@pytest.mark.parametrize("command", ["pytest > out.txt", "pytest | wc -l",
+                                     "cat a | sort", "pytest &"])
 def test_other_pipelines_stay_complex(command):
     from ozagia.intent.shell import classify
     assert classify(command)["class"] == "complex"

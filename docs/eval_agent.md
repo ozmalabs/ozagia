@@ -325,6 +325,9 @@ Run record fields for this arm:
 | `plugin_loaded` | `stats.hellos > 0`: the plugin connected at least once. `None` without stats |
 | `captured_calls` | tool calls the daemon handled (`stats.handled.true`; a request that expired before it ran is never handled) |
 | `passthrough_calls` | `stats.passthrough`: tool calls the daemon left to the built-in by design (not mapped), not counting expired ones |
+| `preflights` | `stats.preflights`: edit, write and shell calls the daemon would carry out and for which the plugin asked OpenCode's permission first (`docs/intent.md`, Permissions) |
+| `permission_assert` | whether the plugin found `ctx.permission.assert` (from its `hello`) |
+| `codemode_tools` | replaced tools whose `options.codemode` is not `false`, so Code Mode's `execute` could call their built-in (from the plugin's `hello`; empty on 2.3.0, where every built-in is `codemode: false`). The report warns when any run has one. |
 | `fallbacks` | `stats.fallbacks` = `plugin_fallbacks`: the plugin's `after` reports with `meta.fallback` (daemon error, timeout, `ok: false`, or an edit/write/shell whose outcome is unknown), one per call. `daemon_stats` also has `expired` (requests dropped by their `deadline_ms`) and failed `tool` requests, the daemon's view of some of the same calls. |
 
 The per-arm summary adds `mean_captured_calls`, `mean_passthrough_calls`, `total_fallbacks`,
@@ -367,8 +370,10 @@ OpenCode's background service. The service imports a directory's plugins
 asynchronously after the first request for it: the first calls print "No plugins
 found", later ones a table `ID VERSION SOURCE` with one row per plugin file, whose
 ID is the module's `id` (`-` when the file did not import or has no plugin shape).
-`--standalone` printed "No plugins found" every time on 2.3.0, so `check` polls the
-background service until the plugin's row appears or the timeout passes. A row with
+`opencode plugin list --standalone` printed "No plugins found" every time on 2.3.0,
+so `check` polls the background service until the plugin's row appears or the
+timeout passes. (A private server does load the plugin: `run --standalone` and the
+TUI with `--standalone` both send its setup `hello`.) A row with
 ID `ozagia` proves the file imported with the right shape; it does not run `setup`.
 `check` also imports the plugin in Node and runs `setup` against a stub registry,
 checking that the six tools were replaced and took the string schema. OpenCode

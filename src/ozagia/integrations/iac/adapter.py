@@ -273,7 +273,9 @@ def register(registry: Any) -> None:
         result["freshness"] = freshness
         return result
 
-    registry.add_indexer(index)
+    # Reads IaC sources from disk (reingest runs it for IaC files and the
+    # files it used); no indexed source, test or doc text.
+    registry.add_indexer(index, texts=False)
     registry.add_graph_query("infra.context", _context)
     def status(memory: Any, **_args: Any) -> dict[str, Any]:
         type_index = getattr(memory, "nodes_of_type", None)
