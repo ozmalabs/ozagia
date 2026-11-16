@@ -301,6 +301,10 @@ def _select(lines: list[str], filters: list[tuple]) -> tuple[list[int], int]:
     return idx, status
 
 
+# Filters that keep lines by their position.
+_LINE_SELECTING = frozenset({"head", "tail", "from", "lines"})
+
+
 def _transforms(filters: list[tuple]) -> bool:
     from ozagia.intent.shell import TRANSFORMS
     return any(f[0] in TRANSFORMS for f in filters)
@@ -477,7 +481,7 @@ def _prepare(memory: Any, step: dict[str, Any], inp: dict[str, Any],
             prepare_find,
             run_find,
         )
-        prepared = prepare_find(root, wd, cls)
+        prepared = prepare_find(root, wd, cls, {**base_env, **step_env})
         cap = FIND_MAX_VISITS if filters else FIND_MAX_OUTPUT
 
         def find_text() -> str:
@@ -562,15 +566,39 @@ def _prepare(memory: Any, step: dict[str, Any], inp: dict[str, Any],
         resolved = shell_grep_resolve(root, cls, wd)
         line_opts = {"with_filename": resolved["with_filename"],
                      "line_numbers": bool(cls.get("line_numbers"))}
+        if (cls.get("tool") == "grep"
+                and any(r.is_dir() for _w, r in resolved["targets"])):
+            # grep -r searches what the capture leaves out (ignored, hidden
+            # under .git, binary and large files) and prints files in
+            # readdir order; the capture's records are a subset, by path.
+            if raw:
+                raise Unhandled("grep -r over a directory piped into wc, sort, "
+                                "uniq or cut is not mapped")
+            if any(f[0] in _LINE_SELECTING or (f[0] == "grep" and (f[3] or f[4]))
+                   for f in filters):
+                raise Unhandled("grep -r over a directory piped into head, "
+                                "tail or sed is not mapped")
+        early: tuple | None = None
+        if raw:
+            # Run now, so a line the capture cannot print exactly (binary,
+            # not UTF-8, a carriage return) makes the command passthrough.
+            if pytest_first:
+                raise Unhandled(f"{cls['tool']} after a pytest step piped into "
+                                "wc, sort, uniq or cut is not mapped")
+            try:
+                with lock:
+                    recs = shell_grep_records(memory, cls, wd, resolved, raw=True)
+                early = ("".join(grep_raw_line(r, **line_opts) + "\n"
+                                 for r in recs), [], 0 if recs else 1, [])
+            except IntentError as e:
+                early = (f"{cls['tool']}: {e}", [], 2, [])
 
         def run_grep(_t: float) -> tuple:
+            if early is not None:
+                return early
             try:
                 with lock:
                     recs = shell_grep_records(memory, cls, wd, resolved)
-                    if raw:
-                        text = "".join(grep_raw_line(r, **line_opts) + "\n"
-                                       for r in recs)
-                        return text, [], 0 if recs else 1, []
                     status = 0 if recs else 1
                     if filters:
                         raws = [grep_raw_line(r, **line_opts) for r in recs]

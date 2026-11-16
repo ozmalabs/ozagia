@@ -243,10 +243,13 @@ def test_filtered_read_shows_bash_lines_and_keys(mem, repo):
 
 
 def test_grep_filter_keeps_graph_lines(mem):
-    res = _call(mem, "shell", command="grep -rn helper pkg | head -1")
+    res = _call(mem, "shell", command="grep -n helper pkg/mod.py pkg/use.py | head -1")
     assert res["handled"], res
     assert res["output"].count("  Line ") == 1
     assert "[ozagia] sym:" in res["output"]
+    # grep -r prints a directory's files in readdir order, the capture by path.
+    res = _call(mem, "shell", command="grep -rn helper pkg | head -1")
+    assert res["handled"] is False and "grep -r over a directory" in res["reason"]
 
 
 def test_cd_sets_the_directory_of_later_steps(mem, repo):

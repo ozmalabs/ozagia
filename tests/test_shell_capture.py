@@ -128,7 +128,6 @@ def _same(mem, tree: Path, command: str, **inp) -> dict:
     "rg -n helper ./pkg | LC_ALL=C sort",
     "rg foo | LC_ALL=C sort",
     "rg foo . | LC_ALL=C sort",
-    "grep -rn helper pkg tests | LC_ALL=C sort",
     "grep -n helper pkg/use.py pkg/mod.py | LC_ALL=C sort",
     "grep -rn helper pkg/mod.py | cut -f1-",
     "rg -n -g '*.py' -g '!use.py' helper | LC_ALL=C sort",
@@ -204,6 +203,89 @@ def test_grep_status_and_refusals(mem, tree):
     ]:
         res = _call(mem, "shell", command=command)
         assert res["handled"] is False and why in res["reason"], (command, res)
+
+
+def _big(tree: Path, name: str, size: int, line: bytes = b"foo big\n") -> None:
+    (tree / name).write_bytes(line + b"x" * (size - 2 * len(line)) + b"\n" + line)
+
+
+def test_grep_r_over_a_directory_into_transforms_falls_back(mem, tree):
+    """grep -r searches ignored, binary, large and .git files the capture
+    leaves out, so its counts differ: the capture refuses them."""
+    _need("rg")
+    _big(tree, "huge.txt", 3 * 1024 * 1024)
+    (tree / "bin.dat").write_bytes(b"foo\0bar\n")
+    for command in ("grep -rn foo . | wc -l", "grep -r foo pkg tests | LC_ALL=C sort",
+                    "grep -rn foo | cut -d: -f1 | uniq -c", "cd pkg && grep -rc x . | wc -l"):
+        res = _call(mem, "shell", command=command)
+        assert res["handled"] is False, (command, res)
+    # The capture's records would have counted fewer lines than grep.
+    real = int(_bash(tree, "grep -rn foo . 2>/dev/null | wc -l")[1])
+    graph = _call(mem, "shell", command="grep -rn foo .")["output"].count("  Line ")
+    assert real > graph
+    _same(mem, tree, "grep -n foo ctx.txt other.txt | wc -l")
+
+
+@pytest.mark.parametrize("command", [
+    "rg foo | wc -l",
+    "rg -n foo . | LC_ALL=C sort",
+    "rg foo huge.txt | wc -l",
+    "rg -n foo | cut -d: -f1 | LC_ALL=C sort | uniq -c",
+])
+def test_rg_raw_counts_large_files_like_rg(mem, tree, command):
+    _need("rg")
+    _big(tree, "huge.txt", 3 * 1024 * 1024)
+    _same(mem, tree, command)
+
+
+@pytest.mark.parametrize("command", [
+    "rg -n a crlf.txt | wc -c",
+    "rg a crlf.txt | cut -f1-",
+    "rg -n x lat1.txt | wc -c",
+    "rg -C1 zz ctxcr.txt | wc -c",
+    "rg foo bin.dat | wc -l",
+    "rg -n a | LC_ALL=C sort",
+])
+def test_rg_raw_falls_back_on_bytes_it_would_change(mem, tree, command):
+    _need("rg")
+    (tree / "crlf.txt").write_bytes(b"a\r\n")
+    (tree / "lat1.txt").write_bytes(b"x\xe9y\n")
+    (tree / "ctxcr.txt").write_bytes(b"one\r\nzz\n")
+    (tree / "bin.dat").write_bytes(b"foo\0bar\n")
+    res = _call(mem, "shell", command=command)
+    assert res["handled"] is False, (command, res)
+    # Without raw mode the same search keeps its graph format.
+    assert _call(mem, "shell", command=command.split(" |")[0])["handled"]
+
+
+def test_grep_r_over_a_directory_with_line_selection_falls_back(mem, tree):
+    _need("rg")
+    for command in ("grep -rn foo . | head -3", "grep -rn foo pkg ctx.txt | tail -n 2",
+                    "grep -rn foo | sed -n '2,3p'", "grep -r foo . | grep -A1 line"):
+        res = _call(mem, "shell", command=command)
+        assert res["handled"] is False, (command, res)
+        assert "grep -r over a directory" in res["reason"]
+    for command in ("grep -n foo ctx.txt other.txt | head -3",
+                    "grep -rn foo . | grep line", "rg -n foo | head -3"):
+        assert _call(mem, "shell", command=command)["handled"], command
+
+
+@pytest.mark.parametrize("command", [
+    "rg --files -g='*.py' | wc -l",
+    "rg --files -t=py | LC_ALL=C sort",
+    "rg --files -T=py | LC_ALL=C sort",
+    "rg -n -g='*.py' helper | LC_ALL=C sort",
+    "rg -n -t=py helper | LC_ALL=C sort",
+    "rg -T=py foo | LC_ALL=C sort",
+    "rg -e=foo ctx.txt | cut -f1-",
+    "rg -ne=foo ctx.txt | cut -f1-",
+    "rg -C=1 foo other.txt | cut -f1-",
+    "grep -e=foo ctx.txt | wc -l",
+])
+def test_rg_attached_values_drop_one_equals_sign(mem, tree, command):
+    _need("rg")
+    _ti._write(tree / "eq.txt", "=foo\n")
+    _same(mem, tree, command)
 
 
 def test_rg_search_skips_hidden_and_ignored_files_like_rg(mem, tree):
@@ -487,6 +569,54 @@ def test_find_newer_and_symlinks(mem, tree):
         _same(mem, tree, command)
 
 
+def _env(**kw: str) -> dict[str, str]:
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith("LC_") and k != "LANG"}
+    return {**env, **kw}
+
+
+def test_find_one_character_globs_and_the_locale(mem, tree):
+    _need("find")
+    _ti._write(tree / "pkg" / "\u00e9.py", "x = 1\n")
+    _ti._write(tree / "pkg" / "\u00c9x.txt", "x\n")
+    utf8 = _env(LC_ALL="C.UTF-8")
+    for command, env in [("LC_ALL=C find pkg -name '?.py'", utf8),
+                         ("find pkg -name '?.py'", _env(LANG="C")),
+                         ("find pkg -name '?.py'", _env()),
+                         ("find pkg -name '[!a-z].py'", _env(LC_CTYPE="POSIX")),
+                         ("find pkg -path 'pkg/?.py'", _env(LANG="C")),
+                         ("find pkg -name 'm?d.py'", _env(LANG="C")),
+                         ("find pkg -iname '*x.txt'", utf8)]:
+        res = _call(mem, "shell", command=command, _test_env=env)
+        assert res["handled"] is False, (command, env.get("LANG"), res)
+    # The same globs in a UTF-8 locale, and globs without `?`/brackets in
+    # a C locale, are what find prints.
+    for command, env in [("find pkg -name '?.py'", utf8),
+                         ("find pkg -name '[!a-z].py'", utf8),
+                         ("LC_ALL=C.UTF-8 find pkg -name '?.py'", _env(LANG="C")),
+                         ("LC_ALL=C find pkg -name '*.py' | LC_ALL=C sort", utf8),
+                         ("find pkg -name '\u00e9*'", _env(LANG="C")),
+                         ("find tests -name 't?st_*'", _env(LANG="C"))]:
+        _same(mem, tree, command, _test_env=env)
+
+
+def test_find_refuses_a_directory_fts_orders_by_inode(mem, tree):
+    from ozagia.intent.shellfs import FIND_MAX_DIR_ENTRIES
+    _need("find")
+    big = tree / "big"
+    big.mkdir()
+    for i in range(FIND_MAX_DIR_ENTRIES):
+        (big / f"f{i}").touch()
+    _same(mem, tree, "find big -name 'f99*'")
+    (big / "one-more").touch()
+    res = _call(mem, "shell", command="find big -name 'f99*'")
+    assert res["handled"] is False and "more than 10000 entries" in res["reason"]
+    res = _call(mem, "shell", command="find . -name x | wc -l")
+    assert res["handled"] is False, res
+    # -maxdepth 0 never reads the directory.
+    _same(mem, tree, "find big -maxdepth 0")
+
+
 def test_find_refusals(mem, tree):
     (tree / "pkg-link").symlink_to(tree / "pkg", target_is_directory=True)
     for command, why in [
@@ -497,6 +627,49 @@ def test_find_refusals(mem, tree):
     ]:
         res = _call(mem, "shell", command=command)
         assert res["handled"] is False and why in res["reason"], (command, res)
+
+
+# --------------------------------------------------------------------------- #
+# ref-moving git under the new wrappers
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("command,sub", [
+    ("( git push )", "push"),
+    ("(git push)", "push"),
+    ("( cd x && git commit )", "commit"),
+    ("( cd x && git commit -m y ) && cat a.py", "commit"),
+    ("LC_ALL=C git push", "push"),
+    ("LC_ALL=C timeout 5 git stash", "stash"),
+    ("timeout -s KILL 5 git push", "push"),
+    ("timeout -sKILL 5 git push", "push"),
+    ("timeout -k1s 5 git push", "push"),
+    ("timeout 5 env git push", "push"),
+    ("( timeout 5 git push )", "push"),
+    ("cd ~ && git push", "push"),
+])
+def test_ref_moving_git_inside_wrappers_and_subshells_is_refused(mem, tree,
+                                                                 command, sub):
+    got = classify(command)
+    assert got["class"] == "git_refs" and got["subcommand"] == sub, got
+    res = _call(mem, "shell", command=command)
+    assert res["meta"]["intent"] == "shell_refused", res
+
+
+def test_passthrough_reasons_are_counted_without_paths():
+    from ozagia.daemon.server import shell_reason_key
+    for reason, key in [
+        ("/r/bin.dat is binary", "<path> is binary"),
+        ("no such path: nosuch.txt", "no such path: <path>"),
+        ("/etc is outside the project root", "<path> is outside the project root"),
+        ("cd: a b is not a directory", "cd: <path> is not a directory"),
+        ("git -C sub: not a directory", "git -C <path>: not a directory"),
+        ("cannot read /x: [Errno 13] denied", "cannot read <path>"),
+        ("find root does not exist: x", "find root does not exist: <path>"),
+        ("/r/big.txt is larger than 2097152 bytes",
+         "<path> is larger than 2097152 bytes"),
+        ("pipeline into awk is not mapped", "pipeline into awk is not mapped"),
+        ("rg is not installed", "rg is not installed"),
+    ]:
+        assert shell_reason_key(reason) == key, reason
 
 
 # --------------------------------------------------------------------------- #

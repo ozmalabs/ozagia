@@ -399,18 +399,39 @@ def _display(written: str | None, real: Path, wd: Path, abs_p: str) -> str:
     return written + ("" if written.endswith("/") else "/") + rel
 
 
+def _raw_text(raw: bytes, where: str) -> str:
+    """A line as the command prints it, for raw mode: Unhandled when it
+    is not UTF-8 or ends with a carriage return (the graph search replaces
+    and strips those, so counts and bytes would differ)."""
+    try:
+        line = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise Unhandled(f"a line of {where} is not UTF-8") from None
+    if line.endswith("\r"):
+        raise Unhandled(f"a line of {where} ends with a carriage return")
+    return line
+
+
 def _shell_matches(root: Path, cls: dict[str, Any], wd: Path,
-                   resolved: dict[str, Any]) -> list[tuple[str, str, int, str]]:
+                   resolved: dict[str, Any], *, raw: bool = False
+                   ) -> list[tuple[str, str, int, str]]:
     """(abs path, display path, line, text) of every match, in operand
-    order, then by display path and line."""
+    order, then by display path and line. With `raw` (the text is shown as
+    the command's own output) rg searches files of any size, and a line rg
+    prints that is not a match (a binary file notice), is not UTF-8 or ends
+    with a carriage return makes it Unhandled."""
     rg = rg_binary()
+    if raw and not rg:
+        raise Unhandled("grep text without rg installed is not mapped")
     sd, excl = _state_excludes(root)
     out: list[tuple[str, str, int, str]] = []
     for written, real in resolved["targets"]:
         found: list[tuple[str, str, int, str]] = []
         if rg:
             cmd = [rg, "-n", "-H", "--no-heading", "--null", "--color", "never",
-                   "--no-messages", "--max-filesize", str(MAX_READ_BYTES), *excl]
+                   "--no-messages", *excl]
+            if not raw:
+                cmd += ["--max-filesize", str(MAX_READ_BYTES)]
             if cls.get("hidden", True):
                 cmd += ["--hidden", "--glob", "!.git"]
             if cls["literal"]:
@@ -427,18 +448,27 @@ def _shell_matches(root: Path, cls: dict[str, Any], wd: Path,
             proc = subprocess.run(cmd, capture_output=True, cwd=str(wd),
                                   timeout=SEARCH_TIMEOUT_S,
                                   stdin=subprocess.DEVNULL)
-            for raw in proc.stdout.split(b"\n"):
-                path_b, sep, rest = raw.partition(b"\0")
+            data = proc.stdout
+            if data.endswith(b"\n"):
+                data = data[:-1]
+            for out_line in data.split(b"\n") if data else []:
+                path_b, sep, rest = out_line.partition(b"\0")
                 num, _, text = rest.partition(b":")
                 if not sep or not num.isdigit():
+                    if raw:
+                        raise Unhandled("rg printed a line that is not a match "
+                                        "(a binary file?)")
                     continue
                 disp = os.fsdecode(path_b)
                 abs_p = os.path.abspath(os.path.join(wd, disp))
                 if _under(Path(abs_p), sd):
                     continue
-                line = text.decode("utf-8", errors="replace")
-                found.append((abs_p, disp, int(num),
-                              line[:-1] if line.endswith("\r") else line))
+                if raw:
+                    line = _raw_text(text, "a matching file")
+                else:
+                    line = text.decode("utf-8", errors="replace")
+                    line = line[:-1] if line.endswith("\r") else line
+                found.append((abs_p, disp, int(num), line))
             if proc.returncode == 2 and not found:
                 msg = proc.stderr.decode("utf-8", errors="replace").strip()
                 if msg:
@@ -458,7 +488,7 @@ def _shell_matches(root: Path, cls: dict[str, Any], wd: Path,
     return out
 
 
-def _file_lines(path: str) -> list[str]:
+def _file_lines(path: str, *, raw: bool = False) -> list[str]:
     try:
         data = Path(path).read_bytes()
     except OSError as e:
@@ -467,20 +497,25 @@ def _file_lines(path: str) -> list[str]:
     if parts and parts[-1] == b"":
         parts.pop()
     out = []
-    for raw in parts:
-        line = raw.decode("utf-8", errors="replace")
+    for part in parts:
+        if raw:
+            out.append(_raw_text(part, "a file with context lines"))
+            continue
+        line = part.decode("utf-8", errors="replace")
         out.append(line[:-1] if line.endswith("\r") else line)
     return out
 
 
 def shell_grep_records(memory: Any, cls: dict[str, Any], wd: Path,
-                       resolved: dict[str, Any]) -> list[Record]:
+                       resolved: dict[str, Any], *, raw: bool = False
+                       ) -> list[Record]:
     """The lines a captured grep prints, as records: matches, the `-A/-B/-C`
     context around them (overlapping and adjacent windows merge), and a
     `--` record before each group after the first when the tool prints
-    separators (`cls["separators"]`)."""
+    separators (`cls["separators"]`). `raw`: the records become the
+    command's own text (see `_shell_matches`)."""
     root = root_of(memory)
-    matches = _shell_matches(root, cls, wd, resolved)
+    matches = _shell_matches(root, cls, wd, resolved, raw=raw)
     before, after = int(cls.get("before") or 0), int(cls.get("after") or 0)
     sep = bool(cls.get("separators"))
     by_file: dict[str, list[tuple[str, int, str]]] = {}
@@ -490,7 +525,7 @@ def shell_grep_records(memory: Any, cls: dict[str, Any], wd: Path,
     for disp, found in by_file.items():
         abs_p = found[0][0]
         texts = {n: t for _a, n, t in found}
-        lines = _file_lines(abs_p) if (before or after) else []
+        lines = _file_lines(abs_p, raw=raw) if (before or after) else []
         total = max(len(lines), max(texts))
         groups: list[list[int]] = []
         for n in sorted(texts):

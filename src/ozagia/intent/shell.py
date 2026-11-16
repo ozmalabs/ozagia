@@ -803,6 +803,20 @@ def find_glob_regex(pattern: str, *, icase: bool = False) -> str | None:
     return ("(?i)" if icase else "") + "(?s:" + "".join(out) + ")"
 
 
+def _one_char_glob(pattern: str) -> bool:
+    """Whether a find glob has a `?` or a bracket set, which match one
+    character: one byte in a C locale, one code point in a UTF-8 one."""
+    i = 0
+    while i < len(pattern):
+        if pattern[i] == "\\":
+            i += 2
+            continue
+        if pattern[i] in "?[":
+            return True
+        i += 1
+    return False
+
+
 _FIND_GLOBS = {"-name": False, "-iname": True, "-path": False, "-ipath": True,
                "-wholename": False, "-iwholename": True}
 
@@ -853,7 +867,10 @@ def _find(args: list[str]) -> dict[str, Any]:
             if rx is None:
                 raise _FindRefused(f"find {tok} pattern {pat!r} is not mapped")
             field = "name" if tok in ("-name", "-iname") else "path"
-            return (field, rx)
+            # How the glob depends on the name's encoding (shellfs).
+            enc = ("icase" if _FIND_GLOBS[tok] else
+                   "one" if _one_char_glob(pat) else "")
+            return (field, rx, enc)
         if tok == "-type":
             t = take() if peek() is not None else ""
             if t not in ("f", "d", "l"):
@@ -1066,7 +1083,11 @@ def _grep(args: list[str], *, tool: str) -> dict[str, Any]:
                 c = a[j]
                 if c in values:
                     rest = a[j + 1:]
-                    if not rest:
+                    if tool == "rg" and rest.startswith("="):
+                        # rg (lexopt) drops one `=` before an attached
+                        # value (`-g=*.py`); grep (getopt) keeps it.
+                        rest = rest[1:]
+                    elif not rest:
                         if i + 1 >= len(args):
                             return _result("other", f"{a} needs a value")
                         rest, i = args[i + 1], i + 1
@@ -1154,7 +1175,8 @@ def _rg_files(args: list[str]) -> dict[str, Any]:
                 val, i = args[i + 1], i + 1
             opts += [_RG_FILES_VALUES[name], val]
         elif a[:2] in ("-g", "-t", "-T") and len(a) > 2 and not a.startswith("--"):
-            opts += [a[:2], a[2:]]
+            # rg drops one `=` before an attached value (`-g=*.py`).
+            opts += [a[:2], a[3:] if a[2] == "=" else a[2:]]
         elif a in ("--sort", "--sort=path") or a == "--sort-files":
             if a == "--sort":
                 if i + 1 >= len(args) or args[i + 1] != "path":

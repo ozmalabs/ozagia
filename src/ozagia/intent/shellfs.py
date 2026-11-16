@@ -16,7 +16,10 @@
 
 Both raise `Unhandled` for anything the capture cannot reproduce (a start
 path that is a symlink or outside the root, a missing path, a permission
-error, more than `FIND_MAX_VISITS` entries).
+error, more than `FIND_MAX_VISITS` entries, a directory with more than
+`FIND_MAX_DIR_ENTRIES` entries, whose order gnulib fts sorts by inode, or
+a `?`/bracket glob tested on a non-ASCII name outside a UTF-8 locale,
+where fnmatch matches one byte instead of one character).
 """
 from __future__ import annotations
 
@@ -30,6 +33,9 @@ from typing import Any
 from ozagia.intent.common import Unhandled
 
 FIND_MAX_VISITS = 20000
+# gnulib fts sorts the entries of a larger directory by inode number
+# (_FTS_INODE_SORT_DIR_ENTRIES_THRESHOLD), so readdir order no longer holds.
+FIND_MAX_DIR_ENTRIES = 10000
 # Lines a find step may print when nothing filters it.
 FIND_MAX_OUTPUT = 1000
 
@@ -46,10 +52,19 @@ def _rx(pattern: str) -> re.Pattern[str]:
     return re.compile(pattern)
 
 
-def prepare_find(root: Path, wd: Path, cls: dict[str, Any]
-                 ) -> dict[str, Any]:
+def _utf8_ctype(env: dict[str, str]) -> bool:
+    name = (env.get("LC_ALL") or env.get("LC_CTYPE") or env.get("LANG")
+            or "POSIX").lower()
+    return name.endswith((".utf-8", ".utf8"))
+
+
+def prepare_find(root: Path, wd: Path, cls: dict[str, Any],
+                 env: dict[str, str] | None = None) -> dict[str, Any]:
     """The start paths and `-newer` reference times of a find class, checked
-    before anything runs."""
+    before anything runs, and whether find's locale is UTF-8 (`env`, the
+    environment find runs in, default os.environ, then the class's own
+    `VAR=x` prefixes)."""
+    fenv = {**(os.environ if env is None else env), **(cls.get("env") or {})}
     starts: list[tuple[str, Path]] = []
     for p in cls["paths"]:
         q = Path(p)
@@ -71,7 +86,29 @@ def prepare_find(root: Path, wd: Path, cls: dict[str, Any]
             refs[ref] = real.stat().st_mtime_ns
         except OSError as e:
             raise Unhandled(f"find -newer {ref}: {e}") from None
-    return {"starts": starts, "refs": refs}
+    return {"starts": starts, "refs": refs, "utf8": _utf8_ctype(fenv)}
+
+
+def _glob_subject(e: tuple, text: str, state: dict[str, bool]) -> str:
+    """`text` for a glob test, Unhandled when the glob could treat it
+    differently from fnmatch: a `?`/bracket glob on a non-ASCII name outside
+    a UTF-8 locale (one byte each) or on a name that is not UTF-8, and
+    `-iname`/`-ipath` on any non-ASCII name (Python folds case beyond
+    towlower, e.g. `k` matches the Kelvin sign)."""
+    enc = e[2] if len(e) > 2 else ""
+    if enc and not text.isascii():
+        if enc == "icase":
+            raise Unhandled("find -iname/-ipath on a non-ASCII name is not "
+                            "mapped")
+        if not state["utf8"]:
+            raise Unhandled("find ? or [...] glob on a non-ASCII name outside "
+                            "a UTF-8 locale is not mapped")
+        try:
+            text.encode("utf-8")
+        except UnicodeEncodeError:
+            raise Unhandled("find ? or [...] glob on a name that is not "
+                            "UTF-8 is not mapped") from None
+    return text
 
 
 def _matches(e: tuple, disp: str, name: str, st: os.stat_result,
@@ -87,9 +124,9 @@ def _matches(e: tuple, disp: str, name: str, st: os.stat_result,
     if kind == "not":
         return not _matches(e[1], disp, name, st, refs, out, state)
     if kind == "name":
-        return _rx(e[1]).fullmatch(name) is not None
+        return _rx(e[1]).fullmatch(_glob_subject(e, name, state)) is not None
     if kind == "path":
-        return _rx(e[1]).fullmatch(disp) is not None
+        return _rx(e[1]).fullmatch(_glob_subject(e, disp, state)) is not None
     if kind == "type":
         test = {"f": stat.S_ISREG, "d": stat.S_ISDIR, "l": stat.S_ISLNK}[e[1]]
         return test(st.st_mode)
@@ -122,7 +159,7 @@ def run_find(cls: dict[str, Any], prepared: dict[str, Any], *,
         visits += 1
         if visits > FIND_MAX_VISITS:
             raise Unhandled("find traversal exceeds capture limit")
-        state = {"prune": False}
+        state = {"prune": False, "utf8": prepared.get("utf8", True)}
         if mindepth is None or depth >= mindepth:
             if _matches(expr, disp, name, st, refs, out, state) and implicit:
                 out.append(disp)
@@ -136,6 +173,10 @@ def run_find(cls: dict[str, Any], prepared: dict[str, Any], *,
                 entries = list(it)
         except OSError as e:
             raise Unhandled(f"find traversal failed: {e}") from None
+        if len(entries) > FIND_MAX_DIR_ENTRIES:
+            raise Unhandled(f"find of a directory with more than "
+                            f"{FIND_MAX_DIR_ENTRIES} entries is not mapped "
+                            "(fts orders it by inode)")
         for ent in entries:
             child = disp + ent.name if disp.endswith("/") else f"{disp}/{ent.name}"
             try:
@@ -169,5 +210,5 @@ def rg_files_argv(rg: str, root: Path, wd: Path, cls: dict[str, Any]
     return argv
 
 
-__all__ = ["FIND_MAX_OUTPUT", "FIND_MAX_VISITS", "prepare_find",
+__all__ = ["FIND_MAX_DIR_ENTRIES", "FIND_MAX_OUTPUT", "FIND_MAX_VISITS", "prepare_find",
            "rg_files_argv", "run_find"]

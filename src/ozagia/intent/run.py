@@ -275,7 +275,9 @@ def handle_shell(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
         return {"intent": "shell_ls", "output": "\n".join(names), "keys": []}
     if kind == "find":
         from ozagia.intent.shellfs import prepare_find, run_find
-        found = run_find(cls, prepare_find(root, wd, cls))
+        env = inp.get("_test_env")
+        found = run_find(cls, prepare_find(
+            root, wd, cls, env if isinstance(env, dict) else None))
         preflight_stop(inp)
         return {"intent": "shell_find", "output": "\n".join(found),
                 "keys": []}

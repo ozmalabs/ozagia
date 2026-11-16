@@ -52,6 +52,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import signal
 import socketserver
 import stat
@@ -69,6 +70,33 @@ JOURNAL_KEYS = 20
 # Distinct shell passthrough reasons kept, and shown in `stats`.
 SHELL_REASONS = 200
 SHELL_REASONS_SHOWN = 30
+
+# Passthrough reasons that name a file or directory, rewritten to one key
+# each so paths do not fill the reason table: (pattern, replacement), in
+# order.
+_REASON_PATHS = [
+    (re.compile(r"^(cannot read|cannot stat|find -newer|find traversal failed|"
+                r"ls directory cannot be read)\b.*", re.S), r"\1 <path>"),
+    (re.compile(r"^(no such file|no such path|not a directory|not a regular "
+                r"file|find root does not exist): .*", re.S), r"\1: <path>"),
+    (re.compile(r"^(cd:|git -C|workdir) .*?( is not a directory|: not a "
+                r"directory| is outside the project root)$", re.S),
+     r"\1 <path>\2"),
+    (re.compile(r"^.*?( is binary| is larger than \d+ bytes| is not UTF-8|"
+                r" is outside the project root| has no interpreter line|"
+                r" is not on PATH| is not an executable)$", re.S),
+     r"<path>\1"),
+    (re.compile(r"^\S+(: interpreter( line)? ).*", re.S), r"<path>\1..."),
+]
+
+
+def shell_reason_key(reason: str) -> str:
+    """A passthrough reason with any file path in it replaced by `<path>`,
+    for counting."""
+    for rx, repl in _REASON_PATHS:
+        if rx.match(reason):
+            return rx.sub(repl, reason, count=1)
+    return reason
 STALE_PING_TIMEOUT_S = 1.0
 # How often a daemon started with `parent_pid` checks that its parent lives.
 PARENT_POLL_S = 2.0
@@ -325,7 +353,8 @@ class DaemonState:
                 it = str(meta.get("intent") or "")
                 if not handled:
                     self.shell["passthrough"] += 1
-                    reason = str(resp.get("reason") or "")[:120]
+                    reason = shell_reason_key(
+                        str(resp.get("reason") or ""))[:120]
                     if (reason in self.shell_reasons
                             or len(self.shell_reasons) < SHELL_REASONS):
                         self.shell_reasons[reason] = (
