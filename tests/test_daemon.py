@@ -494,3 +494,148 @@ def test_daemon_stats_count_structured_reads(tmp_path):
     assert stats["jq_captures"] == 2
     assert stats["structured_queries"] == 1
     assert stats["structured_outlines"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# created-file ledger integration (`ozagia.core.files`)
+# --------------------------------------------------------------------------- #
+def _ledger_repo(tmp_path: Path) -> Path:
+    root = tmp_path / "repo"
+    (root / "pkg").mkdir(parents=True)
+    (root / "pkg" / "mod.py").write_text(MOD, encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(root), "-c", "user.name=Test",
+                    "-c", "user.email=test@example.com", "commit", "-q",
+                    "-m", "initial"], check=True)
+    return root
+
+
+def test_handled_write_records_created_file(tmp_path):
+    from ozagia.core import files as F
+    from ozagia.core.memory import DevMemory, build_index
+    from ozagia.daemon.server import DaemonState
+    root = _ledger_repo(tmp_path)
+    dump = tmp_path / "graph.json"
+    build_index(root, dump, include_docs="features", include_git=False)
+    mem = DevMemory(dump, tmp_path / "state" / "journal.jsonl", root=root)
+    st = DaemonState(root, mem, tmp_path / "j.jsonl")
+    msg = {"op": "tool", "tool": "write", "harness": "claude",
+           "session": "ses-write",
+           "input": {"path": "notes.md", "content": "# Notes\n\nsecret\n",
+                     "_reason": "one-off note"}}
+    resp = st.dispatch(msg)
+    assert resp["ok"] and resp["handled"] and not resp["is_error"], resp
+    st.record(msg, resp, 1.0)
+    record = F.explain(root, "notes.md")["record"]
+    assert record is not None
+    assert record["reason"] == "one-off note"
+    assert record["created_by"]["session"] == "ses-write"
+    assert record["created_by"]["harness"] == "claude"
+    assert record["created_by"]["tool"] == "write"
+    assert "secret" not in F.ledger_path(root).read_text(encoding="utf-8")
+    stats = st.stats()
+    assert stats["files_recorded"] == 1 and stats["file_ledger_errors"] == 0
+    # Replacing an existing file is not recorded as a creation.
+    msg2 = {**msg, "input": {"path": "notes.md", "content": "# Notes 2\n"}}
+    resp2 = st.dispatch(msg2)
+    assert resp2["ok"] and resp2["handled"], resp2
+    st.record(msg2, resp2, 1.0)
+    assert F.new_file_count(root)["count"] == 1
+    assert st.stats()["files_recorded"] == 1
+    # An edit with an empty oldString creates the file: recorded too.
+    msg3 = {**msg, "tool": "edit",
+            "input": {"path": "edit-note.md", "oldString": "",
+                      "newString": "# Edit\n", "_reason": "edit note"}}
+    resp3 = st.dispatch(msg3)
+    assert resp3["ok"] and resp3["handled"], resp3
+    st.record(msg3, resp3, 1.0)
+    record = F.explain(root, "edit-note.md")["record"]
+    assert record is not None and record["reason"] == "edit note"
+    assert st.stats()["files_recorded"] == 2
+
+
+def test_after_records_changed_paths_as_created(tmp_path):
+    from ozagia.core import files as F
+    from ozagia.daemon.server import DaemonState
+    root = _ledger_repo(tmp_path)
+    (root / "after-note.md").write_text("# After\n", encoding="utf-8")
+    st = DaemonState(root, None, tmp_path / "j.jsonl")
+    msg = {"op": "after", "tool": "write", "harness": "claude",
+           "session": "ses-after",
+           "input": {"path": "after-note.md", "_reason": "after note"},
+           "output": "", "meta": {}}
+    resp = st.dispatch(msg)
+    assert resp["ok"], resp
+    st.record(msg, resp, 1.0)
+    record = F.explain(root, "after-note.md")["record"]
+    assert record is not None
+    assert record["reason"] == "after note"
+    assert record["created_by"]["session"] == "ses-after"
+    stats = st.stats()
+    assert stats["file_ledger_scans"] == 1 and stats["files_recorded"] == 1
+    # Turned off per request.
+    (root / "skipped-note.md").write_text("# Skipped\n", encoding="utf-8")
+    msg2 = {**msg, "file_ledger": False,
+            "input": {"path": "skipped-note.md"}}
+    resp2 = st.dispatch(msg2)
+    st.record(msg2, resp2, 1.0)
+    assert F.explain(root, "skipped-note.md")["record"] is None
+    assert st.stats()["file_ledger_scans"] == 1
+
+
+def test_session_end_scan_records_untracked_file(tmp_path):
+    from ozagia.core import files as F
+    from ozagia.daemon.server import DaemonState
+    root = _ledger_repo(tmp_path)
+    (root / "untracked.md").write_text("# Untracked\n", encoding="utf-8")
+    st = DaemonState(root, None, tmp_path / "j.jsonl")
+    msg = {"op": "session_event", "event": "end", "harness": "claude",
+           "session": "ses-end"}
+    resp = st.dispatch(msg)
+    assert resp["ok"], resp
+    st.record(msg, resp, 1.0)
+    record = F.explain(root, "untracked.md")["record"]
+    assert record is not None
+    assert record["reason"] == "unknown"
+    assert record["created_by"]["session"] == "ses-end"
+    assert record["created_by"]["tool"] == "session_event"
+    stats = st.stats()
+    assert stats["file_ledger_scans"] == 1 and stats["files_recorded"] == 1
+    # A start scan runs too, and dedupes the unchanged file.
+    msg2 = {**msg, "event": "start"}
+    resp2 = st.dispatch(msg2)
+    st.record(msg2, resp2, 1.0)
+    stats = st.stats()
+    assert stats["file_ledger_scans"] == 2 and stats["files_recorded"] == 1
+
+
+def test_hook_session_end_scan_records_untracked_file(tmp_path):
+    from ozagia.core import files as F
+    root = _ledger_repo(tmp_path)
+    sock = tmp_path / "hook.sock"
+    dump = tmp_path / "graph.json"
+    journal = tmp_path / "journal.jsonl"
+    proc = _start(root, sock, dump, journal)
+    try:
+        (root / "hook-note.md").write_text("# Hook note\n", encoding="utf-8")
+        env = _env()
+        env["OZAGIA_DAEMON_SOCK"] = str(sock)
+        payload = {"session_id": "ses-hook", "cwd": str(root),
+                   "hook_event_name": "SessionEnd", "reason": "other"}
+        done = subprocess.run(
+            [sys.executable, "-m", "ozagia.integrations.claude_code", "hook"],
+            input=json.dumps(payload), capture_output=True, text=True, env=env,
+            cwd=str(root), timeout=30)
+        assert done.returncode == 0, done.stderr
+        record = F.explain(root, "hook-note.md")["record"]
+        assert record is not None
+        assert record["reason"] == "unknown"
+        assert record["created_by"]["session"] == "ses-hook"
+        assert record["created_by"]["harness"] == "claude"
+        with DaemonClient(sock, timeout=10) as c:
+            stats = c.stats()["stats"]
+        assert stats["file_ledger_scans"] >= 1
+        assert stats["files_recorded"] >= 1
+    finally:
+        _stop(proc)

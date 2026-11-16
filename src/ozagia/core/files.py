@@ -26,6 +26,17 @@ MAX_LEDGER_KEEP = 5000
 MAX_HASH_BYTES = 8 * 1024 * 1024
 MAX_SCAN_FILES = 2000
 MAX_SCAN_BYTES = 8 * 1024 * 1024
+# A scan records at most this many new files (one `git status` run).
+MAX_SCAN_RECORDS = 500
+# A scan looks at at most this many status entries, so already-recorded
+# files do not stop a later scan from reaching new ones.
+MAX_SCAN_CANDIDATES = 5000
+# `record_paths` examines at most this many paths per call.
+MAX_RECORD_PATHS = 200
+# The reason is a short label, never a prompt or file content.
+MAX_REASON_CHARS = 200
+# Created_by strings (session, harness, task, tool) are labels too.
+MAX_LABEL_CHARS = 200
 HISTORY_DIR = "history"
 SCRATCH_DIR = ".ozagia/scratch"
 ROOT_ALLOW = frozenset({
@@ -184,6 +195,18 @@ def _jaccard(left: set[str], right: set[str]) -> float:
     if not left or not right:
         return 0.0
     return len(left & right) / len(left | right)
+
+
+def _clean_reason(value: Any) -> str:
+    text = " ".join(str(value or "").split())
+    return text[:MAX_REASON_CHARS] or "unknown"
+
+
+def _label(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = " ".join(value.split())
+    return text[:MAX_LABEL_CHARS] or None
 
 
 def _existing_markdown(root: Path) -> Iterable[Path]:
@@ -456,14 +479,21 @@ def explain(root: str | Path, path: str | Path) -> dict[str, Any]:
     return current
 
 
-def _created_paths(root: Path) -> list[tuple[str, str | None]]:
-    proc = _git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+def _created_paths(root: Path, *, paths: Sequence[str] | None = None,
+                   limit: int | None = None) -> list[tuple[str, str | None]]:
+    args = ["status", "--porcelain=v1", "-z", "--untracked-files=all"]
+    wanted = [p for p in paths or [] if p]
+    if wanted:
+        args.extend(["--", *wanted])
+    proc = _git(root, args)
     if proc.returncode != 0:
         raise FileLedgerError((proc.stderr or proc.stdout or "git status failed").strip()[:500])
     parts = proc.stdout.split("\0")
     created: list[tuple[str, str | None]] = []
     index = 0
     while index < len(parts):
+        if limit is not None and len(created) >= max(0, int(limit)):
+            break
         record = parts[index]
         index += 1
         if len(record) < 4 or record[2] != " ":
@@ -479,14 +509,150 @@ def _created_paths(root: Path) -> list[tuple[str, str | None]]:
     return created
 
 
-def scan_new_files(root: str | Path, *, session: str | None = None,
-                   task: str | None = None, reason: str = "unknown",
-                   tool: str = "scan") -> list[dict[str, Any]]:
-    """Record currently untracked/added files. Does not modify the repository."""
+def _route_content(full: Path, size: int) -> str:
+    """A Markdown file's text for routing, bounded; "" when unreadable."""
+    if not full.is_file():
+        return ""
+    try:
+        if size <= 1024 * 1024:
+            return full.read_text(encoding="utf-8", errors="replace")
+        with full.open("r", encoding="utf-8", errors="replace") as handle:
+            return handle.read(64 * 1024)
+    except OSError:
+        return ""
+
+
+def _record_item(root_path: Path, rel: str, *, digest: str | None, size: int,
+                 session: str | None, harness: str | None, task: str | None,
+                 tool: str | None, reason: str,
+                 moved_from: str | None = None) -> dict[str, Any]:
+    """One ledger record for `rel`: metadata only, never file content."""
+    route: dict[str, Any] = {}
+    if rel.lower().endswith(".md"):
+        route = markdown_route(rel, _route_content(root_path / rel, size),
+                               root=root_path,
+                               context={"session": session},
+                               check_duplicates=False)
+        classification = str(route.get("kind") or "note")
+    else:
+        classification = _classify(rel)
+    if classification in {"root", "plan", "result", "research", "docs",
+                          "history"}:
+        cleanup_policy = "keep"
+    elif classification == "scratch":
+        cleanup_policy = "delete_after"
+    else:
+        cleanup_policy = "ask"
+    return {
+        "schema": SCHEMA,
+        "path": rel,
+        "worktree": str(root_path),
+        "hash": digest,
+        "size": size,
+        "created_at": _now(),
+        "created_by": {
+            "session": _label(session), "harness": _label(harness),
+            "task": _label(task), "tool": _label(tool), "command": None,
+        },
+        "reason": _clean_reason(reason),
+        "classification": classification,
+        "status": "active",
+        "references": [],
+        "duplicate_of": route.get("duplicate_of"),
+        "moved_from": moved_from,
+        "cleanup": {"policy": cleanup_policy, "after": None},
+    }
+
+
+def _record_paths(root: str | Path, paths: Iterable[str | Path], *,
+                  session: str | None = None, harness: str | None = None,
+                  task: str | None = None, tool: str | None = None,
+                  reason: str = "unknown",
+                  limit: int = MAX_RECORD_PATHS) -> list[dict[str, Any]]:
+    """Record existing files among `paths`; skip duplicates (same path and
+    hash), ignored trees and paths outside the root."""
     root_path = Path(root).resolve()
     latest = latest_records(root_path)
     recorded: list[dict[str, Any]] = []
-    for rel, moved_from in _created_paths(root_path):
+    seen: set[str] = set()
+    for index, raw in enumerate(paths):
+        if index >= max(0, int(limit)):
+            break
+        rel = _relative(root_path, raw)
+        if rel is None or _skip(rel) or rel in seen:
+            continue
+        seen.add(rel)
+        full = root_path / rel
+        if not full.is_file():
+            continue
+        digest, size = _hash_file(full)
+        previous = latest.get(rel)
+        if (previous and previous.get("hash") == digest
+                and previous.get("status") == "active"):
+            continue
+        item = _record_item(root_path, rel, digest=digest, size=size,
+                            session=session, harness=harness, task=task,
+                            tool=tool, reason=reason)
+        recorded.append(append_record(root_path, item))
+        latest[rel] = item
+    return recorded
+
+
+def record_file(root: str | Path, rel: str | Path, *, session: str | None = None,
+                harness: str | None = None, task: str | None = None,
+                tool: str | None = None, reason: str = "unknown",
+                ) -> dict[str, Any] | None:
+    """Record one file in the ledger (metadata only, never its content).
+
+    `rel` is relative to `root` (an absolute path inside `root` works too).
+    A file already recorded with the same path and hash (and still active)
+    is not recorded again: the return value is then None. Ignored trees
+    (`.git`, `.ozagia`, caches) and paths outside the root are skipped.
+    """
+    got = _record_paths(root, [rel], session=session, harness=harness,
+                        task=task, tool=tool, reason=reason, limit=1)
+    return got[0] if got else None
+
+
+def record_paths(root: str | Path, paths: Iterable[str | Path], *,
+                 session: str | None = None, harness: str | None = None,
+                 task: str | None = None, tool: str | None = None,
+                 reason: str = "unknown",
+                 limit: int = MAX_RECORD_PATHS) -> list[dict[str, Any]]:
+    """`record_file` for several paths, reading the ledger once.
+
+    Returns only the records appended (deduplicated and skipped paths are
+    absent)."""
+    return _record_paths(root, paths, session=session, harness=harness,
+                         task=task, tool=tool, reason=reason, limit=limit)
+
+
+def scan_new_files(root: str | Path, *, session: str | None = None,
+                   task: str | None = None, reason: str = "unknown",
+                   tool: str = "scan", harness: str | None = None,
+                   paths: Sequence[str] | None = None,
+                   limit: int = MAX_SCAN_RECORDS) -> list[dict[str, Any]]:
+    """Record currently untracked/added files. Does not modify the repository.
+
+    With `paths`, only those paths are checked (one bounded `git status`
+    pathspec run): this is how a built-in edit's `meta.changed_paths` are
+    recorded without scanning the whole repository. At most `limit` files
+    are recorded per call."""
+    root_path = Path(root).resolve()
+    rel_paths: list[str] = []
+    if paths is not None:
+        for p in paths:
+            rel = _relative(root_path, p)
+            if rel is not None and not _skip(rel):
+                rel_paths.append(rel)
+        if not rel_paths:
+            return []
+    latest = latest_records(root_path)
+    recorded: list[dict[str, Any]] = []
+    for rel, moved_from in _created_paths(root_path, paths=rel_paths or None,
+                                          limit=MAX_SCAN_CANDIDATES):
+        if len(recorded) >= max(0, int(limit)):
+            break
         if _skip(rel):
             continue
         full = root_path / rel
@@ -494,50 +660,9 @@ def scan_new_files(root: str | Path, *, session: str | None = None,
         previous = latest.get(rel)
         if previous and previous.get("hash") == digest and previous.get("status") == "active":
             continue
-        route_content = ""
-        if rel.lower().endswith(".md") and full.is_file():
-            try:
-                if size <= 1024 * 1024:
-                    route_content = full.read_text(encoding="utf-8",
-                                                   errors="replace")
-                else:
-                    with full.open("r", encoding="utf-8", errors="replace") as handle:
-                        route_content = handle.read(64 * 1024)
-            except OSError:
-                route_content = ""
-        route = markdown_route(rel, route_content, root=root_path,
-                               context={"session": session},
-                               check_duplicates=False)
-        classification = route.get("kind") if rel.lower().endswith(".md") else _classify(rel)
-        if classification == "note":
-            classification = "note"
-        if classification in {"root", "plan", "result", "research", "docs"}:
-            cleanup_policy = "keep"
-        elif classification == "history":
-            cleanup_policy = "keep"
-        elif classification == "scratch":
-            cleanup_policy = "delete_after"
-        else:
-            cleanup_policy = "ask"
-        item = {
-            "schema": SCHEMA,
-            "path": rel,
-            "worktree": str(root_path),
-            "hash": digest,
-            "size": size,
-            "created_at": _now(),
-            "created_by": {
-                "session": session, "harness": None, "task": task,
-                "tool": tool, "command": None,
-            },
-            "reason": reason,
-            "classification": classification,
-            "status": "active",
-            "references": [],
-            "duplicate_of": route.get("duplicate_of"),
-            "moved_from": moved_from,
-            "cleanup": {"policy": cleanup_policy, "after": None},
-        }
+        item = _record_item(root_path, rel, digest=digest, size=size,
+                            session=session, harness=harness, task=task,
+                            tool=tool, reason=reason, moved_from=moved_from)
         recorded.append(append_record(root_path, item))
         latest[rel] = item
     return recorded
@@ -655,5 +780,5 @@ __all__ = [
     "FileLedgerError", "append_record", "cleanup_candidates", "explain",
     "format_cleanup", "format_explain", "format_list", "ledger_path",
     "list_files", "markdown_route", "new_file_count", "orphans",
-    "scan_new_files",
+    "record_file", "record_paths", "scan_new_files",
 ]

@@ -365,6 +365,8 @@ def session_event(root: Path, harness: str, session: Any, event: str,
     """Tell the daemon about a compaction, start or end of a session
     (`session_event`, with `compaction_hook: true` for compact and start:
     the hook that sends them is installed), so its ledger is cleared.
+    The daemon also runs one bounded created-file scan for `start` and
+    `end` (`ozagia.core.files`, `reason: unknown`).
     When no daemon answers, a compact or start leaves a marker in the
     state dir and the session's next ledger request carries
     `reset_pending` (`ledger_request`); an end removes the marker."""
