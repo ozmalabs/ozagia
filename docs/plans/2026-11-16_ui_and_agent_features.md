@@ -1229,16 +1229,20 @@ The read-only part of 1a landed as new files:
   and admission checks. It reports and refuses; it does not kill.
 - `core/files.py`, `files_cli.py`, `ozagia-files`: ledger scan, explain,
   orphans, dry-run cleanup, Markdown routing and front-matter classification.
-- `tests/test_worktree.py`, `tests/test_resources.py`, `tests/test_files.py`;
-  `docs/worktree.md`, `docs/resources.md`, `docs/files.md`; console scripts in
-  `pyproject.toml`.
+- `core/status.py`, `status_cli.py`: composed read-only workspace, resources,
+  files, runtime, daemon, doctor and config status (`feat/status-snapshot`,
+  merged as `96a6a22`).
+- `tests/test_worktree.py`, `tests/test_resources.py`, `tests/test_files.py`,
+  `tests/test_status.py`; `docs/worktree.md`, `docs/resources.md`,
+  `docs/files.md`, `docs/status.md`; console scripts in `pyproject.toml`.
 
-Checks: `3221 passed, 21 skipped`; `ruff check src tests` passes. The earlier
-`PostCompact` merge failure was transient and is resolved.
+Checks after the status merge: `3241 passed, 21 skipped`;
+`ruff check src tests` passes. The earlier `PostCompact` merge failure was
+transient and is resolved.
 
-Not yet: `ozagia-view`/apertures, `ozagia-status`, resource enforcement/OOM,
-file-ledger integration into edit/hooks, cleanup apply/trash, settings registry
-and the UI hosts.
+Not yet: `ozagia-view`/apertures, resource enforcement/OOM, file-ledger
+integration into edit/hooks, cleanup apply/trash, settings registry and the UI
+hosts.
 
 ### Parallel workstreams (2026-11-16)
 
@@ -1251,8 +1255,10 @@ Four agents are running from base `865b0ed`, each in its own worktree:
 | `~/ozmadev/ozagia-wt/status-snapshot` | `feat/status-snapshot` | Read-only composed status, `status_cli` |
 | `~/ozmadev/ozagia-wt/file-ledger` | `feat/file-ledger` | Ledger capture in edits/hooks/sessions |
 
-The supervisor reviews each branch, runs targeted tests and ruff, merges one
-branch at a time, then runs the full suite from the main checkout.
+Status: `status-snapshot` is merged as `96a6a22`; `view-apertures`,
+`settings-registry` and `file-ledger` are still running. The supervisor
+reviews each branch, runs targeted tests and ruff, merges one branch at a time,
+then runs the full suite from the main checkout.
 
 ## Open decisions
 
