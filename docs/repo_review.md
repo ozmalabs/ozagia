@@ -22,7 +22,7 @@ A finding is evidence for a person or an agent to check, not a verdict:
 ozagia review-repo [--root R] [--json] [--out FILE]
                    [--section NAME ...] [--compare PREVIOUS.json]
                    [--fail-on blocking|major|never] [--index]
-                   [--graph PATH] [--budget-s 60] [--model-pass]
+                   [--graph PATH] [--budget-s 60] [--save] [--model-pass]
 ```
 
 - Output is text by default; `--json` prints the packet. `--out` also writes
@@ -39,6 +39,11 @@ ozagia review-repo [--root R] [--json] [--out FILE]
 - `--index` builds or refreshes the graph snapshot first, the same build as
   `ozagia index`. This writes only to the state directory.
 - `--budget-s` bounds the wall-clock time of the sections (default 60 s).
+  It must be a finite number >= 0; `nan` or `inf` exits 2.
+- `--save` also writes the packet the way the MCP tool does (below): a
+  timestamped packet under `.ozagia/reviews/` and `latest.json`, both
+  atomic. The path is printed after the output (on stderr with `--json`, so
+  stdout stays one JSON document).
 - `--model-pass` writes a compact packet to `.ozagia/reviews/compact.json`
   for model reviewers. The CLI never calls a model; see "Model pass".
 
@@ -48,7 +53,9 @@ full packet to `.ozagia/reviews/repo_review-<time>-<head>.json` and
 `.ozagia/reviews/latest.json` (atomic writes), and returns a summary: counts
 by severity and section, graph state, truncation, the top findings and the
 paths of the written packet. `compare_latest: true` compares with the
-previous `latest.json` before it is replaced.
+previous `latest.json` before it is replaced. A non-finite `budget_s` is
+refused. Only the newest 20 timestamped packets are kept;
+`latest.json` and `compact.json` are never pruned.
 
 ## The graph
 
@@ -63,7 +70,7 @@ index`) rebuilds the graph; an indexing failure is recorded in
 | needs a fresh graph | runs without it |
 |---|---|
 | import and package cycles, hubs, layering | failing tests from the record |
-| untested modules from test edges (otherwise test file names, Python only, low confidence) | large files, TODO density |
+| untested modules from test edges plus test names and imports (otherwise names and imports only, Python only, low confidence) | large files, TODO density |
 | untested public functions | churn hotspots (test gap by file name) |
 | large functions, unreferenced symbols | docs, security, ops, dependencies |
 
@@ -80,8 +87,11 @@ Every section lists the checks it ran (`checked`) and the ones it did not
 - **package_cycle** (major): cycles between top-level packages. A package is
   the first directory below the directory that the modules of a top-level
   tree share (for modules src/pkg/a/x.py and src/pkg/b/y.py, the packages
-  are src/pkg/a and src/pkg/b); a module directly in that directory is its
-  own package.
+  are src/pkg/a and src/pkg/b). A module directly in that directory belongs
+  to no package, so its cycles are reported only as import cycles. The id
+  is a hash of the package names, so it stays the same when the import
+  links between the packages change; the link files are the keys and
+  evidence.
 - **hub_module** (note): the ten files with the highest PageRank over the
   import graph are listed in `data.hubs`; a hub imported by 10 or more modules
   is a finding.
@@ -97,10 +107,17 @@ Every section lists the checks it ran (`checked`) and the ones it did not
 ### tests
 
 - **failing_test** (major): tests failing in the test record of earlier
-  pytest runs. The review does not run tests.
-- **untested_module** (minor): a source module with symbols and no
-  `tests_module`, `mentions_file` or `has_test` edge. Without a fresh graph,
-  only `test_<name>.py` and `<name>_test.py` names are compared.
+  pytest runs. The review does not run tests. Without a readable record
+  (`.ozagia/working_set/tests.json`) the check is listed in `not_checked`.
+- **untested_module** (minor): a source module with symbols that has no
+  `tests_module`, `mentions_file` or `has_test` edge, no tracked
+  `test_<name>.py` or `<name>_test.py`, and no tracked Python test that
+  imports it by its dotted name (`import pkg.mod`, `from pkg import mod`,
+  `from pkg.mod import f`). The three sources are combined because the
+  graph has no edge for some import forms. Confidence is medium with a
+  fresh graph. Without one, the population is tracked Python files only and
+  only names and imports are compared (low confidence); the check records
+  `modes: {untested_modules: graph|filename}`.
 - **untested_symbol** (note): a public top-level function of a tested module
   whose name appears in none of its covering test files. A test can still
   exercise it indirectly.
@@ -129,7 +146,8 @@ not expected to have tests.
 
 - **churn_untested** (major): one of the ten files changed in the most
   commits over the last 90 days (at least 3 commits) that is a source module
-  with no test.
+  with no test, found the same way as for `untested_module` (mode recorded
+  as `modes.hotspots`).
 - **many_sessions** (note): a file edited by three or more agent sessions in
   the edit journal tail (`core.owners`). Without a journal this check is not
   run.
@@ -139,8 +157,10 @@ not expected to have tests.
 - **stale_doc_reference** (minor): in tracked Markdown and reStructuredText
   files, a relative link, a code span naming a path, a `path.py::name` span,
   or a `pkg.module.name` span that does not resolve. Paths must be tracked
-  files or directories, from the doc's directory or the root. One finding per
-  doc lists the failing references.
+  files or directories, from the doc's directory or the root, and must stay
+  inside the root. For `path.py::name` the name is looked up in the in-root
+  file the path resolved to. One finding per doc lists the failing
+  references.
 - Not checked: fenced and indented code blocks, URLs, code spans whose first
   path component is not in the repository (`.codex/config.toml`), directory
   spans, and docs under `plans/`, `attempts/`, `history/`, `archive/`,
@@ -151,15 +171,21 @@ not expected to have tests.
 Security hygiene only, not a security audit: no secret scanning of file
 contents, no dependency advisories, no data-flow analysis.
 
-- **committed_env_file** (major): a tracked `.env` or `.env.*` file, except
-  templates (`.example`, `.sample`, `.template`, `.dist`, ...).
+- **committed_env_file** (major): a tracked `.env`, `.env.*` or `*.env`
+  file (`prod.env`), except templates: a name ending in `.example`,
+  `.sample`, `.template`, `.dist`, ..., or with such a part (`example.env`).
 - **sensitive_file** (major): a tracked file named like a key or credential
   (`id_rsa`, `id_ed25519`, `.npmrc`, `credentials.json`, `*.pem`, `*.key`,
   `*.p12`, ...). A `.pem` may be a public certificate.
 - **dangerous_construct** (minor): the `code_review` token table
   (`eval(`, `exec(`, `os.system(`, `shell=True`, `pickle.loads(`,
   `marshal.loads(`, `yaml.load(`) matched at word boundaries in source lines
-  that are not comments. One finding per file.
+  that are not comments. One finding per file. A `yaml.load(` call with an
+  explicit `Loader=` argument is not flagged unless the loader is
+  `yaml.Loader`, `yaml.UnsafeLoader` or `yaml.FullLoader`.
+- Files in fixture, test-data and example trees (`fixtures/`, `testdata/`,
+  `examples/`, ...) are not checked; the excluded files are listed in
+  `not_checked`.
 - `data.sensitive_paths` lists source paths with security words (`auth`,
   `secret`, `tls`, ...) as review focus, not as findings.
 
@@ -179,6 +205,8 @@ sources are read; no container or unit state is queried.
   quadlet without `HealthCmd=`. The image may define its own `HEALTHCHECK`.
 - Compose restart and health checks need PyYAML (the `iac-yaml` extra);
   without it they are listed in `not_checked`.
+- Sources in fixture and example trees are not read; they are listed in
+  `not_checked` (`ops_source`).
 
 ### dependencies
 
@@ -197,6 +225,8 @@ Schema `ozagia.repo_review.packet.v1`:
 
 ```text
 schema, schema_version (1), root, head_commit, branch, generated_at, files
+skipped_files  {path: reason}            tracked symlinks and paths outside
+                                         the root, never read
 preflight      {ok, checks}             root, HEAD, conflicts, resource admission
 resources      admission report (core.resources, key "repo_review")
 graph          {path, available, freshness, usable, snapshot_head,
@@ -204,7 +234,9 @@ graph          {path, available, freshness, usable, snapshot_head,
 sections_requested  [names]
 sections       {name: {status ok|truncated|skipped, checked, not_checked,
                 truncated, truncated_reason budget|cap, findings, found,
-                dropped {type: n}, ids, ids_by_type, data, elapsed_s}}
+                dropped {type: n}, ids, ids_by_type, id_files {id: [files]},
+                modes {check: graph|filename},
+                skipped_files {check: {file: reason}}, data, elapsed_s}}
 findings       [finding]                 sorted by severity, section, type
 summary        {findings, blocking, major, minor, note, by_section}
 checked        ["section.check", ...]
@@ -213,7 +245,8 @@ truncated      {any, sections {name: reason}}
 budget         {budget_s, elapsed_s, exhausted}
 limits         thresholds and caps used
 comparison     null or {new, resolved, unchanged, resolved_findings,
-                not_compared, previous_head, previous}
+                not_compared, held, root_mismatch, previous_root,
+                previous_head, previous_generated_at, previous}
 model_review   {status not_run|prepared|injected, ...}
 security_note, truth_assessed (false)
 ```
@@ -232,11 +265,25 @@ source           "deterministic"
 suggested_goal   {title, targets (= keys), criteria [{kind, args}]}
 ```
 
-Criteria use the goal system's kinds. Every suggested goal has
-`review_resolved {finding_id}`; some add a direct check:
-`test_passes {key}` for a failing test, `file_absent {key}` for a committed
-`.env` or key file, `no_callers {key}` for an unreferenced symbol, and
-`ops_has {key, attr: "image", pinned: true}` for an unpinned image.
+Criteria use the goal system's kinds and argument shapes. A suggested goal
+never contains `review_resolved`: the goal system adds it when it converts a
+finding, and checks it with `finding_state` (below). Some goals add a direct
+check:
+
+| finding | criterion |
+|---|---|
+| failing_test | `test_passes {key}` |
+| committed_env_file, sensitive_file | `file_absent {key}` |
+| unreferenced_symbol | `symbol_absent {key}`, titled "Remove ..." |
+| unpinned_image | `ops_has {key, attr: "image", pinned: true}` |
+
+`ops_has` takes `{key, attr?, value?, pinned?}`; `pinned: true` means the
+attribute is an image reference with a tag or digest that is not `latest`.
+Ops findings keep their `ops:` keys as targets; the goal system resolves
+them by parsing the tracked ops sources with `core.ops_graph`, since the
+graph built by `--index` has no `ops:` nodes. The test
+`test_every_suggested_goal_meets_the_contract` checks every finding type
+against a copy of this argument table.
 
 Matches with the same type and keys are merged into one finding (for example
 all dangerous constructs of one file), so the id stays the same when lines
@@ -245,12 +292,38 @@ move.
 ## Comparing packets
 
 `--compare previous.json` (or `compare_packets(current, previous)`) reports
-finding ids that are new, resolved or unchanged. A finding type is compared
-only when the check that produces it ran to completion in both packets; when a
-check was skipped in either (a stale graph, a section left out, the budget),
-its type is listed in `not_compared` instead of reporting its findings as
-resolved. Sections keep the ids of findings dropped by the cap, so a capped
-section still compares fully.
+finding ids that are new, resolved or unchanged. An id is reported as
+resolved only when the check that produces it covered the same population
+in both packets:
+
+- The check ran to completion in both packets. A check skipped in either (a
+  stale graph, a section left out, the budget, a missing test record) puts
+  its type in `not_compared`.
+- The check ran in the same mode. `untested_modules` and `hotspots` record
+  `graph` or `filename` in `sections.<name>.modes`; a change puts the type
+  in `not_compared`.
+- None of the finding's files (`id_files`) was skipped by the current run:
+  too large, binary, unreadable or unparseable files are recorded per check
+  in `skipped_files`, and tracked symlinks in the packet's
+  `skipped_files`. Such ids are listed in `held` with the reason.
+- Both packets are for the same root. Otherwise every type is in
+  `not_compared` and `root_mismatch` is true.
+
+Sections keep the ids of findings dropped by the cap, so a capped section
+still compares fully.
+
+### finding_state
+
+`finding_state(packet, finding_id, *, type=None, keys=None)` answers the
+same question for one finding in one packet, for the goal system's
+`review_resolved` criterion:
+
+- `present`: the id is in some section's `ids` (capped findings included).
+- `absent`: `type` is given, its check is in the section's `checked`, the
+  check's mode (if any) is `graph`, and the check skipped no files (or,
+  with `keys`, none of the files of those keys).
+- `not_checked`: anything else, including no or an unknown `type`, a stale
+  graph, filename mode and a missing test record.
 
 ## Limits
 
@@ -263,7 +336,11 @@ section still compares fully.
 - The budget is checked between files and checks. A section cut short has
   `truncated_reason: "budget"`, and a section that did not start is
   `skipped`.
-- Files over 1 MB or with NUL bytes are not read.
+- Files over 1 MB or with NUL bytes are not read, and neither are tracked
+  symlinks or paths that resolve outside the root (a symlink's target can
+  be any file on the host). They are recorded in `skipped_files`.
+- `--index` runs the graph build after admission; the build's own
+  footprint is not covered by the 512 MB estimate.
 
 ## Model pass
 

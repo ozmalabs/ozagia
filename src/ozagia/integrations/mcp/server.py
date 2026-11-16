@@ -30,6 +30,7 @@ import argparse
 import atexit
 import importlib
 import json
+import math
 import os
 import re
 import signal
@@ -1343,7 +1344,13 @@ class DevMemoryServer:
         saved under the state dir and a budgeted summary returned."""
         from ozagia.core import repo_review as RR
         root = Path(self.mem.raw_repo_root if self.mem else self.workspace).resolve()
-        budget = min(max(float(a.get("budget_s", 30)), 0.0), 300.0)
+        try:
+            budget = float(a.get("budget_s", 30))
+        except (TypeError, ValueError):
+            budget = float("nan")
+        if not math.isfinite(budget):
+            return {"ok": False, "error": "budget_s must be a finite number"}
+        budget = min(max(budget, 0.0), 300.0)
         limit = min(max(int(a.get("max_findings", 10)), 0), 50)
         compare = None
         if a.get("compare_latest"):

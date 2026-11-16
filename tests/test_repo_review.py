@@ -154,7 +154,9 @@ def test_packet_shape_and_ids(repo: Path) -> None:
     assert list(packet["sections"]) == list(RR.SECTIONS)
     json.dumps(packet)  # JSON-safe
     for finding in packet["findings"]:
-        assert finding["id"] == RR.finding_id(finding["type"], finding["keys"])
+        if finding["type"] != "package_cycle":
+            assert finding["id"] == RR.finding_id(finding["type"],
+                                                  finding["keys"])
         assert RR.FINDING_TYPES[finding["type"]] == finding["section"]
         assert finding["check"] == RR.FINDING_CHECKS[finding["type"]]
         assert finding["severity"] in RR.SEVERITIES
@@ -162,8 +164,8 @@ def test_packet_shape_and_ids(repo: Path) -> None:
         goal = finding["suggested_goal"]
         assert goal["targets"] == finding["keys"]
         assert {c["kind"] for c in goal["criteria"]} <= set(RR.CRITERIA_KINDS)
-        assert {"kind": "review_resolved",
-                "args": {"finding_id": finding["id"]}} in goal["criteria"]
+        # The goal system adds review_resolved itself.
+        assert "review_resolved" not in {c["kind"] for c in goal["criteria"]}
     assert set(RR.FINDING_TYPES) == set(RR.FINDING_CHECKS)
     # Ids are stable across runs.
     again = RR.review_repo(repo)
@@ -191,7 +193,7 @@ def test_tests_section(repo: Path) -> None:
     untested = _keys(packet, "untested_module")
     assert "file:src/pkg/c.py" in untested
     assert "file:src/pkg/a/mod_a.py" not in untested
-    assert all(f["confidence"] == "high" for f in _of(packet, "untested_module"))
+    assert all(f["confidence"] == "medium" for f in _of(packet, "untested_module"))
     failing = _of(packet, "failing_test")
     assert [f["keys"] for f in failing] == [["test:tests/test_a.py::test_fa"]]
     assert {"kind": "test_passes",
@@ -498,3 +500,433 @@ def test_mcp_dev_review_repo(repo: Path) -> None:
     assert second["compared_with"] == first["latest"]
     assert second["comparison"]["new"] == 0
     assert second["comparison"]["resolved"] == 0
+
+
+# --------------------------------------------------------------------------- #
+# the suggested-goal contract with the goal system
+# --------------------------------------------------------------------------- #
+
+# A local copy of the goal system's argument table for the criteria kinds a
+# suggested goal may use: kind -> (allowed args, required args, key prefix).
+# `review_resolved` is not allowed: the goal system adds it itself when it
+# converts a finding.
+GOAL_CRITERIA = {
+    "test_passes": ({"key"}, {"key"}, "test:"),
+    "test_fails": ({"key"}, {"key"}, "test:"),
+    "symbol_exists": ({"key"}, {"key"}, "sym:"),
+    "symbol_absent": ({"key"}, {"key"}, "sym:"),
+    "file_exists": ({"key"}, {"key"}, "file:"),
+    "file_absent": ({"key"}, {"key"}, "file:"),
+    "ops_has": ({"key", "attr", "value", "pinned"}, {"key"}, "ops:"),
+}
+TARGET_PREFIXES = ("file:", "sym:", "test:", "ops:")
+
+
+def _contract_errors(finding: dict[str, Any]) -> list[str]:
+    goal = finding["suggested_goal"]
+    errors = []
+    if not goal["title"]:
+        errors.append("no title")
+    for key in goal["targets"]:
+        if not key.startswith(TARGET_PREFIXES):
+            errors.append(f"target {key} is not a graph key")
+    for criterion in goal["criteria"]:
+        kind, args = criterion.get("kind"), criterion.get("args")
+        if kind not in GOAL_CRITERIA:
+            errors.append(f"kind {kind} is not in the contract")
+            continue
+        allowed, required, prefix = GOAL_CRITERIA[kind]
+        if not isinstance(args, dict):
+            errors.append(f"{kind}: args are not an object")
+            continue
+        if set(args) - allowed:
+            errors.append(f"{kind}: unknown args {sorted(set(args) - allowed)}")
+        if required - set(args):
+            errors.append(f"{kind}: missing {sorted(required - set(args))}")
+        if not str(args.get("key", "")).startswith(prefix):
+            errors.append(f"{kind}: key {args.get('key')} is not {prefix}")
+        if "pinned" in args and not isinstance(args["pinned"], bool):
+            errors.append(f"{kind}: pinned is not a boolean")
+    return errors
+
+
+def _rich_repo(repo: Path) -> None:
+    """Extend the fixture so every finding type occurs."""
+    _write(repo, "src/pkg/hub/__init__.py", "")
+    _write(repo, "src/pkg/hub/core.py", "def hub_fn():\n    return 0\n")
+    for number in range(11):
+        _write(repo, f"src/pkg/hub/user{number}.py",
+               "from pkg.hub.core import hub_fn\n\n\n"
+               f"def use{number}():\n    return hub_fn()\n")
+    body = "".join(f"    v{n} = {n}\n" for n in range(110))
+    _write(repo, "src/pkg/big.py",
+           "".join(f"X{n} = {n}\n" for n in range(1000))
+           + "\n\ndef long_one():\n" + body + "    return v0\n"
+           + "".join(f"# TODO item {n}\n" for n in range(5)))
+    # A cycle between two modules of one directory.
+    _write(repo, "src/pkg/cyc_p.py", "from pkg.cyc_q import qf\n\n\n"
+                                     "def pf():\n    return qf\n")
+    _write(repo, "src/pkg/cyc_q.py", "from pkg.cyc_p import pf\n\n\n"
+                                     "def qf():\n    return pf\n")
+    _write(repo, "tests/test_big.py",
+           "from pkg.big import long_one\n\n\ndef test_big():\n"
+           "    assert long_one() == 0\n")
+    _commit(repo, "rich")
+    for number in range(3):
+        _write(repo, "src/pkg/c.py", f"def lonely():\n    return {number + 4}\n")
+        _commit(repo, f"churn {number}")
+    journal = repo / ".ozagia" / "journal.jsonl"
+    now = time.time()
+    journal.write_text("".join(
+        json.dumps({"session": {"id": f"s{n}", "harness": "opencode"},
+                    "files": ["src/pkg/c.py"], "epoch": now - n,
+                    "kind": "edit"}) + "\n" for n in range(3)), encoding="utf-8")
+    _graph(repo)
+
+
+def test_every_suggested_goal_meets_the_contract(repo: Path) -> None:
+    _rich_repo(repo)
+    packet = RR.review_repo(repo, max_findings_per_section=500)
+    seen = {f["type"] for f in packet["findings"]}
+    assert seen == set(RR.FINDING_TYPES), set(RR.FINDING_TYPES) - seen
+    for finding in packet["findings"]:
+        assert _contract_errors(finding) == [], (finding["type"], finding)
+        kinds = {c["kind"] for c in finding["suggested_goal"]["criteria"]}
+        assert "review_resolved" not in kinds
+    dead = _of(packet, "unreferenced_symbol")[0]
+    assert dead["suggested_goal"]["title"].startswith("Remove")
+    assert dead["suggested_goal"]["criteria"] == [
+        {"kind": "symbol_absent", "args": {"key": dead["keys"][0]}}]
+    image = _of(packet, "unpinned_image")[0]
+    assert image["suggested_goal"]["targets"][0].startswith("ops:")
+    assert image["suggested_goal"]["criteria"] == [
+        {"kind": "ops_has", "args": {"key": image["keys"][0], "attr": "image",
+                                     "pinned": True}}]
+    # The packet keeps what the goal system reads.
+    assert packet["root"] and packet["head_commit"] and packet["generated_at"]
+
+
+def test_section_refuses_review_resolved(repo: Path) -> None:
+    files, _skipped = RR._tracked_files(repo)
+    ctx = RR._Context(repo, "HEAD", files, {}, None, None, layers=(),
+                      deadline=1e18, clock=time.monotonic, churn_days=90,
+                      cap=50)
+    sec = RR._Section("tests", ctx)
+    with pytest.raises(ValueError):
+        sec.add("untested_module", "minor", ["file:x.py"], "m",
+                criteria=[{"kind": "review_resolved",
+                           "args": {"finding_id": "RR-1"}}])
+
+
+# --------------------------------------------------------------------------- #
+# reading files
+# --------------------------------------------------------------------------- #
+
+
+def test_tracked_symlinks_are_not_followed(repo: Path, tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.md").write_text(
+        "[x](sk-live-SECRETVALUE.md) and `src/pkg/leaked_TOKEN_abc123.py`\n",
+        encoding="utf-8")
+    (repo / "docs" / "notes.md").symlink_to(outside / "secret.md")
+    (repo / "docs" / "inner.md").symlink_to(repo / "docs" / "guide.md")
+    _commit(repo, "links")
+    packet = RR.review_repo(repo)
+    text = json.dumps(packet)
+    assert "SECRETVALUE" not in text and "leaked_TOKEN" not in text
+    assert packet["skipped_files"] == {"docs/inner.md": "symlink",
+                                       "docs/notes.md": "symlink"}
+    assert any(item["check"] == "skipped_files"
+               for item in packet["not_checked"])
+    assert "file:docs/notes.md" not in _keys(packet, "stale_doc_reference")
+
+
+def test_doc_span_relative_to_doc_reads_in_root_file(repo: Path,
+                                                     tmp_path: Path) -> None:
+    _write(repo, "docs/span.md",
+           "See `../src/pkg/c.py::lonely` and `../src/pkg/c.py::nothing`.\n")
+    _commit(repo, "span doc")
+    # Files above the root with the opposite contents: if the check read
+    # root/../src/pkg/c.py, both answers would flip.
+    _write(tmp_path, "src/pkg/c.py", "def nothing():\n    return 0\n")
+    packet = RR.review_repo(repo, sections=["docs"])
+    span = [f for f in _of(packet, "stale_doc_reference")
+            if f["keys"] == ["file:docs/span.md"]]
+    assert len(span) == 1
+    evidence = " ".join(span[0]["evidence"])
+    assert "symbol nothing" in evidence
+    assert "lonely" not in evidence
+
+
+# --------------------------------------------------------------------------- #
+# test detection
+# --------------------------------------------------------------------------- #
+
+
+def test_untested_module_unions_graph_names_and_imports(repo: Path) -> None:
+    _write(repo, "src/pkg/e.py", "def e_fn():\n    return 1\n")
+    _write(repo, "src/pkg/f.py", "def f_fn():\n    return 1\n")
+    # e.py is only imported as a module from its package; f.py only has a
+    # test named after it.
+    _write(repo, "tests/test_misc.py", "from pkg import e\n\n\n"
+                                       "def test_e():\n    assert e.e_fn()\n")
+    _write(repo, "tests/test_f.py", "def test_nothing():\n    assert True\n")
+    _commit(repo, "more modules")
+    _graph(repo)
+    packet = RR.review_repo(repo, sections=["tests"])
+    assert packet["sections"]["tests"]["modes"] == {"untested_modules": "graph"}
+    untested = _keys(packet, "untested_module")
+    assert "file:src/pkg/e.py" not in untested
+    assert "file:src/pkg/f.py" not in untested
+    assert "file:src/pkg/c.py" in untested
+    assert all(f["confidence"] != "high" for f in _of(packet, "untested_module"))
+
+
+def test_imported_modules() -> None:
+    names = RR._imported_modules(
+        "import a.b as c, d\nfrom x.y import (z,  # note\n    w as v)\n"
+        "from . import rel\n")
+    assert {"a.b", "d", "x.y", "x.y.z", "x.y.w"} <= names
+    assert not any(n.startswith(".") for n in names)
+
+
+# --------------------------------------------------------------------------- #
+# compare across changed populations
+# --------------------------------------------------------------------------- #
+
+
+def test_compare_refuses_across_mode_change(repo: Path, tmp_path: Path) -> None:
+    first = RR.review_repo(repo, sections=["tests"])
+    assert _of(first, "untested_module")
+    second = RR.review_repo(repo, sections=["tests"],
+                            graph_path=tmp_path / "missing.json")
+    assert second["sections"]["tests"]["modes"] == {
+        "untested_modules": "filename"}
+    comparison = RR.compare_packets(second, first)
+    ids = {f["id"] for f in _of(first, "untested_module")}
+    assert not ids & set(comparison["resolved"])
+    reasons = {i["type"]: i["reason"] for i in comparison["not_compared"]}
+    assert "mode" in reasons["untested_module"]
+
+
+def test_compare_holds_findings_of_skipped_files(repo: Path) -> None:
+    _write(repo, "src/pkg/big.py", "".join(f"X{n} = {n}\n" for n in range(1001)))
+    _commit(repo, "big")
+    first = RR.review_repo(repo, sections=["health", "docs"])
+    big = _of(first, "large_file")[0]["id"]
+    guide = [f["id"] for f in _of(first, "stale_doc_reference")
+             if f["keys"] == ["file:docs/guide.md"]][0]
+    # The file grows past the read limit and the doc becomes binary.
+    _write(repo, "src/pkg/big.py", "X = 1\n" + "#" * (RR.MAX_READ_BYTES + 10))
+    (repo / "docs" / "guide.md").write_bytes(b"# Guide\0\n")
+    _commit(repo, "unreadable")
+    second = RR.review_repo(repo, sections=["health", "docs"], compare=first)
+    comparison = second["comparison"]
+    assert big not in comparison["resolved"]
+    assert guide not in comparison["resolved"]
+    held = {i["id"] for i in comparison["held"]}
+    assert {big, guide} <= held
+    skipped = second["sections"]["health"]["skipped_files"]
+    assert skipped["large_files"]["src/pkg/big.py"] == "over the read limit"
+    assert second["sections"]["docs"]["skipped_files"][
+        "links_and_code_spans"]["docs/guide.md"] == "binary"
+    assert RR.finding_state(second, big, type="large_file") == "not_checked"
+    assert RR.finding_state(second, big, type="large_file",
+                            keys=["file:src/pkg/big.py"]) == "not_checked"
+    assert RR.finding_state(second, big, type="large_file",
+                            keys=["file:src/pkg/other.py"]) == "absent"
+
+
+def test_compare_without_test_record(repo: Path) -> None:
+    first = RR.review_repo(repo, sections=["tests"])
+    failing = _of(first, "failing_test")[0]["id"]
+    (repo / ".ozagia" / "working_set" / "tests.json").unlink()
+    second = RR.review_repo(repo, sections=["tests"], compare=first)
+    assert "tests.failing_tests" not in second["checked"]
+    assert failing not in second["comparison"]["resolved"]
+    assert "failing_test" in {i["type"]
+                              for i in second["comparison"]["not_compared"]}
+    assert RR.finding_state(second, failing, type="failing_test") == "not_checked"
+
+
+def test_compare_refuses_other_root(repo: Path) -> None:
+    first = RR.review_repo(repo)
+    other = {**first, "root": "/somewhere/else"}
+    comparison = RR.compare_packets({**first, "sections": {}}, other)
+    assert comparison["root_mismatch"] is True
+    assert comparison["resolved"] == [] and comparison["new"] == []
+    assert {i["type"] for i in comparison["not_compared"]} == set(RR.FINDING_TYPES)
+
+
+# --------------------------------------------------------------------------- #
+# architecture
+# --------------------------------------------------------------------------- #
+
+
+def test_package_cycle_id_follows_packages(repo: Path) -> None:
+    first = _of(RR.review_repo(repo, sections=["architecture"]), "package_cycle")
+    expected = RR.finding_id("package_cycle", ["package:src/pkg/a",
+                                               "package:src/pkg/b"])
+    assert [f["id"] for f in first] == [expected]
+    _write(repo, "src/pkg/a/extra.py", "from pkg.b.mod_b import fb\n\n\n"
+                                       "def ex():\n    return fb()\n")
+    # Two modules directly in src/pkg import each other: an import cycle,
+    # not a package cycle.
+    _write(repo, "src/pkg/p.py", "from pkg.q import qf\n\n\ndef pf():\n"
+                                 "    return qf\n")
+    _write(repo, "src/pkg/q.py", "from pkg.p import pf\n\n\ndef qf():\n"
+                                 "    return pf\n")
+    _commit(repo, "more links")
+    _graph(repo)
+    packet = RR.review_repo(repo, sections=["architecture"])
+    second = _of(packet, "package_cycle")
+    assert [f["id"] for f in second] == [expected]
+    assert "file:src/pkg/a/extra.py" in second[0]["keys"]
+    cycles = [set(f["keys"]) for f in _of(packet, "import_cycle")]
+    assert {"file:src/pkg/p.py", "file:src/pkg/q.py"} in cycles
+
+
+# --------------------------------------------------------------------------- #
+# security and ops
+# --------------------------------------------------------------------------- #
+
+
+def test_fixture_trees_are_excluded_from_security_and_ops(repo: Path) -> None:
+    _write(repo, "tests/fixtures/x/service-account.json", "{}\n")
+    _write(repo, "tests/fixtures/x/.env", "A=1\n")
+    _write(repo, "examples/evil.py", "def f(s):\n    return eval(s)\n")
+    _write(repo, "tests/fixtures/ops/compose.yaml",
+           "services:\n  app:\n    image: redis\n    ports:\n      - \"80:80\"\n")
+    _commit(repo, "fixtures")
+    packet = RR.review_repo(repo, sections=["security", "ops"])
+    keys = {k for f in packet["findings"] for k in f["keys"]}
+    assert not any("fixtures" in k or "examples" in k for k in keys)
+    notes = {(i["check"], i["reason"]) for i in packet["not_checked"]
+             if i["section"] in ("security", "ops")}
+    assert any(check == "sensitive_names" and "service-account.json" in reason
+               for check, reason in notes)
+    assert any(check == "dangerous_constructs" and "evil.py" in reason
+               for check, reason in notes)
+    assert any(check == "ops_source" and "compose.yaml" in reason
+               for check, reason in notes)
+
+
+def test_yaml_load_with_explicit_loader(repo: Path) -> None:
+    _write(repo, "src/pkg/loaders.py",
+           "import yaml\n\n\n"
+           "def safe(t):\n    return yaml.load(t, Loader=yaml.SafeLoader)\n\n\n"
+           "def custom(t):\n    return yaml.load(\n        t,\n"
+           "        Loader=MyLoader)\n")
+    _write(repo, "src/pkg/unsafe.py",
+           "import yaml\n\n\n"
+           "def bare(t):\n    return yaml.load(t)\n\n\n"
+           "def full(t):\n    return yaml.load(t,\n"
+           "                     Loader=yaml.Loader)\n")
+    _commit(repo, "yaml")
+    packet = RR.review_repo(repo, sections=["security"])
+    danger = {f["keys"][0]: f for f in _of(packet, "dangerous_construct")}
+    assert "file:src/pkg/loaders.py" not in danger
+    evidence = danger["file:src/pkg/unsafe.py"]["evidence"]
+    assert [e.split(":")[0] for e in evidence] == ["line 5", "line 9"]
+
+
+def test_env_file_names() -> None:
+    for name in (".env", ".env.local", "prod.env", "app.env"):
+        assert RR._env_file(name), name
+    for name in (".env.example", "example.env", "prod.env.sample",
+                 "template.env", "env.py", ".envrc"):
+        assert not RR._env_file(name), name
+
+
+# --------------------------------------------------------------------------- #
+# budget, finding_state, saving
+# --------------------------------------------------------------------------- #
+
+
+def test_non_finite_budget_is_rejected(repo: Path,
+                                       capsys: pytest.CaptureFixture[str]) -> None:
+    for value in (float("nan"), float("inf")):
+        with pytest.raises(RR.RepoReviewError):
+            RR.review_repo(repo, budget_s=value)
+    assert cli.main(["review-repo", "--root", str(repo),
+                     "--budget-s", "nan"]) == 2
+    assert "finite" in capsys.readouterr().err
+    from ozagia.integrations.mcp.server import DevMemoryServer
+    mem = DevMemory(repo / ".ozagia" / "graph.json",
+                    repo / ".ozagia" / "journal.jsonl", root=repo)
+    resp = DevMemoryServer(mem).handle({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "dev_review_repo",
+                   "arguments": {"budget_s": float("nan")}}})
+    body = json.loads(resp["result"]["content"][0]["text"])
+    assert body["ok"] is False and "finite" in body["error"]
+    assert not (repo / ".ozagia" / "reviews").exists()
+
+
+def test_finding_state(repo: Path, tmp_path: Path) -> None:
+    packet = RR.review_repo(repo, sections=["security", "health"],
+                            max_findings_per_section=1)
+    section = packet["sections"]["security"]
+    capped = [i for i in section["ids"]
+              if i not in {f["id"] for f in packet["findings"]}]
+    assert capped
+    assert RR.finding_state(packet, capped[0]) == "present"
+    env = RR.finding_id("committed_env_file", ["file:.env"])
+    assert RR.finding_state(packet, env, type="committed_env_file") == "present"
+
+    _git(repo, "rm", "-q", ".env")
+    _commit(repo, "drop env")
+    later = RR.review_repo(repo, sections=["security"])
+    assert RR.finding_state(later, env, type="committed_env_file") == "absent"
+    # Without a type, an absent id cannot be tied to a check.
+    assert RR.finding_state(later, env) == "not_checked"
+    assert RR.finding_state(later, env, type="no_such_type") == "not_checked"
+    # A section that did not run.
+    dead = RR.finding_id("unreferenced_symbol", ["sym:src/pkg/c.py::lonely"])
+    assert RR.finding_state(later, dead, type="unreferenced_symbol") == \
+        "not_checked"
+    # A stale graph leaves graph checks unchecked; filename mode is not the
+    # full population of untested_modules.
+    stale = RR.review_repo(repo, sections=["health", "tests"])
+    assert stale["graph"]["usable"] is False
+    assert RR.finding_state(stale, "RR-0", type="unreferenced_symbol") == \
+        "not_checked"
+    assert RR.finding_state(stale, "RR-0", type="untested_module") == \
+        "not_checked"
+    _graph(repo)
+    fresh = RR.review_repo(repo, sections=["health", "tests"])
+    assert RR.finding_state(fresh, "RR-0", type="untested_module") == "absent"
+
+
+def test_save_prunes_old_packets(repo: Path) -> None:
+    directory = RR.reviews_dir(repo)
+    directory.mkdir(parents=True)
+    for number in range(25):
+        (directory / f"repo_review-2020010{number:02d}T000000Z-abc.json"
+         ).write_text("{}", encoding="utf-8")
+    (directory / "compact.json").write_text("{}", encoding="utf-8")
+    packet = RR.review_repo(repo, sections=["dependencies"])
+    paths = RR.save_packet(repo, packet)
+    names = sorted(p.name for p in directory.glob("repo_review-*.json"))
+    assert len(names) == RR.MAX_SAVED_PACKETS
+    assert Path(paths["path"]).name in names
+    assert "repo_review-202001000T000000Z-abc.json" not in names
+    assert (directory / "latest.json").is_file()
+    assert (directory / "compact.json").is_file()
+
+
+def test_cli_save(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    assert cli.main(["review-repo", "--root", str(repo), "--section",
+                     "dependencies", "--json", "--save"]) == 0
+    out = capsys.readouterr()
+    packet = json.loads(out.out)
+    assert out.err.startswith("saved: ")
+    saved = Path(out.err.split()[1])
+    assert saved.parent == repo.resolve() / ".ozagia" / "reviews"
+    assert json.loads(saved.read_text(encoding="utf-8")) == packet
+    latest = saved.parent / "latest.json"
+    assert json.loads(latest.read_text(encoding="utf-8")) == packet
+    assert cli.main(["review-repo", "--root", str(repo), "--section",
+                     "dependencies", "--save"]) == 0
+    assert "saved: " in capsys.readouterr().out

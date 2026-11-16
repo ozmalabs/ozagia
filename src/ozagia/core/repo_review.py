@@ -14,14 +14,19 @@ in ``packet["graph"]`` and the checks that need it are listed in
 the graph first (the only write, and only to the state directory).
 
 Every finding has a stable id: a hash of its type and its graph keys
-(``file:``, ``sym:``, ``test:``, ``ops:`` keys, see ``core.keys``). Two packets
+(``file:``, ``sym:``, ``test:``, ``ops:`` keys, see ``core.keys``; a package
+cycle hashes its package names). Two packets
 can therefore be compared (``compare_packets``): ids only in the new packet
-are new, ids only in the old one are resolved. A finding is evidence for a
+are new, ids only in the old one are resolved when the check covered the
+same population in both. A finding is evidence for a
 human or an agent to check; ``truth_assessed`` is always false.
 
 Each finding carries a ``suggested_goal`` with machine-checkable criteria in
 the kinds the goal system understands (``CRITERIA_KINDS``), so a finding can be
-turned into a goal whose completion is checked against the graph.
+turned into a goal whose completion is checked against the graph. The goal
+system adds its own ``review_resolved`` criterion when it converts a finding;
+it asks ``finding_state`` whether the finding is still present in a later
+packet.
 
 Optional model review is a seam (``run_model_pass``): the caller injects the
 runner, and model output is kept as separate, attributed findings.
@@ -30,6 +35,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import time
@@ -135,6 +141,8 @@ MANY_SESSIONS = 3
 
 REVIEWS_DIR = "reviews"
 LATEST_NAME = "latest.json"
+PACKET_PREFIX = "repo_review-"
+MAX_SAVED_PACKETS = 20
 COMPACT_NAME = "compact.json"
 COMPACT_MAX_FINDINGS = 60
 
@@ -173,6 +181,9 @@ _KNOWN_SUFFIXES = (CR.SOURCE_SUFFIXES | CR.CONFIG_SUFFIXES | DOC_SUFFIXES
 
 ENV_TEMPLATE_SUFFIXES = (".example", ".sample", ".template", ".dist",
                          ".defaults", ".tmpl", ".in")
+# A dotted part of an env file name that marks it as a template
+# (`example.env`, `prod.env.sample`).
+ENV_TEMPLATE_WORDS = frozenset(s.lstrip(".") for s in ENV_TEMPLATE_SUFFIXES)
 SECRET_NAMES = frozenset({
     "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", ".pypirc", ".npmrc",
     ".netrc", ".htpasswd", "credentials.json", "secrets.yaml", "secrets.yml",
@@ -186,6 +197,14 @@ DANGEROUS_PATTERNS = tuple(
     (re.compile((r"(?<![\w.])" if token[0].isalpha() else "")
                 + re.escape(token)), label)
     for token, label in CR.DANGEROUS_TOKENS)
+
+# `yaml.load(..., Loader=X)` is flagged only when X is a loader that builds
+# arbitrary objects; a custom or safe loader is an explicit choice.
+_YAML_LOAD = "unsafe YAML load"
+_LOADER_ARG = re.compile(r"\bLoader\s*=\s*([\w.]+)")
+UNSAFE_YAML_LOADERS = frozenset({"yaml.Loader", "yaml.UnsafeLoader",
+                                 "yaml.FullLoader", "UnsafeLoader",
+                                 "FullLoader"})
 
 LOCK_FILES = {
     "python": ("uv.lock", "poetry.lock", "pdm.lock", "Pipfile.lock",
@@ -257,6 +276,66 @@ def _entrypoint(rel: str) -> bool:
     if path.name in ENTRYPOINT_NAMES or rel.startswith(ENTRYPOINT_PREFIXES):
         return True
     return any(part.casefold() in FIXTURE_PARTS for part in path.parts[:-1])
+
+
+def _fixture(rel: str) -> bool:
+    """A file in a fixture, test-data or example tree."""
+    return any(part.casefold() in FIXTURE_PARTS
+               for part in PurePosixPath(rel).parts[:-1])
+
+
+_OPS_FILE_KINDS = ("compose", "containerfile", "quadlet", "unit")
+
+
+def _key_files(keys: Iterable[str]) -> list[str]:
+    """The files that graph keys live in, including the source file of an
+    ``ops:<kind>/<rel>[#...]`` key."""
+    out: list[str] = []
+    for key in keys:
+        key = str(key)
+        if key.startswith("ops:"):
+            kind, _sep, rest = key[len("ops:"):].partition("/")
+            rel = rest.split("#", 1)[0]
+            path = rel if kind in _OPS_FILE_KINDS and rel else None
+        else:
+            path = CR._file_from_key(key)
+        if path and path not in out:
+            out.append(path)
+    return out
+
+
+def _excluded_note(files: Sequence[str]) -> str:
+    shown = ", ".join(files[:10]) + (" ..." if len(files) > 10 else "")
+    return (f"{len(files)} file(s) in fixture or example trees were not "
+            f"checked: {shown}")
+
+
+_IMPORT_RE = re.compile(
+    r"^[ \t]*(?:from[ \t]+([\w.]+)[ \t]+import[ \t]+(\([^)]*\)|[^\n#;]+)"
+    r"|import[ \t]+([^\n#;]+))", re.M)
+
+
+def _imported_modules(text: str) -> set[str]:
+    """Dotted names a Python file imports: `import a.b` gives a.b, and
+    `from a import b` gives a and a.b (b may be a module)."""
+    out: set[str] = set()
+    for match in _IMPORT_RE.finditer(text):
+        base, names, plain = match.groups()
+        if plain is not None:
+            for item in plain.split(","):
+                word = item.strip().split(" ", 1)[0]
+                if word and not word.startswith("."):
+                    out.add(word)
+            continue
+        if not base or base.startswith("."):
+            continue
+        out.add(base)
+        names = re.sub(r"#[^\n]*", "", names)
+        for item in names.strip("()").replace("\n", " ").split(","):
+            word = item.strip().split(" ", 1)[0]
+            if IDENT.fullmatch(word):
+                out.add(f"{base}.{word}")
+    return out
 
 
 def _git_text(root: Path, args: Sequence[str], *,
@@ -467,6 +546,12 @@ class _Context:
         self.cap = cap
         self._text: dict[str, str | None] = {}
         self._cached_bytes = 0
+        self.real_root = root.resolve()
+        # rel -> why the file could not be read.
+        self.unread: dict[str, str] = {}
+        self._modules: dict[str, str] | None = None
+        self._imports: dict[str, set[str]] | None = None
+        self._names_by_file: dict[str, set[str]] | None = None
         self.tests = sorted(rel for rel in files if _is_test(rel))
         self.tracked_dirs = {parent.as_posix() for rel in files
                              for parent in PurePosixPath(rel).parents
@@ -478,24 +563,69 @@ class _Context:
         return self.clock() >= self.deadline
 
     def text(self, rel: str) -> str | None:
-        """The file's text, or None when it is missing, binary or too big."""
+        """The file's text, or None when it is missing, binary, too big, a
+        symlink or resolves outside the root (the reason is kept in
+        ``unread``)."""
         if rel in self._text:
             return self._text[rel]
         path = self.root / rel
         value: str | None = None
+        reason: str | None = None
         try:
-            if path.is_file() and path.stat().st_size <= MAX_READ_BYTES:
+            if not _inside(rel):
+                reason = "outside the root"
+            elif path.is_symlink():
+                reason = "symlink"
+            elif not path.resolve().is_relative_to(self.real_root):
+                reason = "resolves outside the root"
+            elif not path.is_file():
+                reason = "missing"
+            elif path.stat().st_size > MAX_READ_BYTES:
+                reason = "over the read limit"
+            else:
                 data = path.read_bytes()
-                if b"\0" not in data[:8192]:
+                if b"\0" in data[:8192]:
+                    reason = "binary"
+                else:
                     value = data.decode("utf-8", errors="replace")
-        except OSError:
-            value = None
+        except OSError as exc:
+            reason = f"unreadable: {type(exc).__name__}"
+        if value is None:
+            self.unread[rel] = reason or "unreadable"
         if value is not None and self._cached_bytes + len(value) <= MAX_CACHE_BYTES:
             self._text[rel] = value
             self._cached_bytes += len(value)
         elif value is None:
             self._text[rel] = None
         return value
+
+    def module_names(self) -> dict[str, str]:
+        """Dotted module name -> file, for tracked Python sources."""
+        if self._modules is None:
+            self._modules = _module_index(self)
+        return self._modules
+
+    def _test_imports(self) -> dict[str, set[str]]:
+        """Test file -> the dotted module names it imports (Python only)."""
+        if self._imports is None:
+            self._imports = {}
+            for rel in self.tests:
+                if not rel.endswith(".py"):
+                    continue
+                self._imports[rel] = _imported_modules(self.text(rel) or "")
+        return self._imports
+
+    def importing_tests(self, rel: str) -> list[str]:
+        """Test files that import the module `rel` by its dotted name."""
+        if self._names_by_file is None:
+            self._names_by_file = defaultdict(set)
+            for name, path in self.module_names().items():
+                self._names_by_file[path].add(name)
+        names = self._names_by_file.get(rel)
+        if not names:
+            return []
+        return sorted(test for test, imported in self._test_imports().items()
+                      if imported & names)
 
     # graph views --------------------------------------------------------- #
 
@@ -515,16 +645,27 @@ class _Context:
         return out
 
     def tests_for(self, rel: str) -> tuple[list[dict[str, Any]], str]:
-        """Covering tests and how they were found (`graph` or `filename`)."""
+        """Covering tests and the mode of the lookup: ``graph`` when the
+        file is in a fresh graph (test edges, then test file names and test
+        imports), else ``filename`` (test file names and imports only).
+        Each test says how it was found (``via``)."""
+        out: dict[str, dict[str, Any]] = {}
+        mode = "filename"
         if self.index is not None and self.graph_nid(rel) is not None:
-            out = []
+            mode = "graph"
             for nid in (self.index.get("tests_by_file") or {}).get(rel, []):
                 entry = self.index["nodes"].get(nid) or {}
                 attrs = entry.get("attrs") or {}
-                out.append({"key": entry.get("key"), "file": attrs.get("file")})
-            return out, "graph"
-        return ([{"key": None, "file": path}
-                 for path in CR._fallback_tests(rel, self.tests)], "filename")
+                name = str(attrs.get("file") or entry.get("key"))
+                out.setdefault(name, {"key": entry.get("key"),
+                                      "file": attrs.get("file"),
+                                      "via": "graph"})
+        for path in CR._fallback_tests(rel, self.tests):
+            out.setdefault(path, {"key": None, "file": path, "via": "filename"})
+        if rel.endswith(".py"):
+            for path in self.importing_tests(rel):
+                out.setdefault(path, {"key": None, "file": path, "via": "import"})
+        return [out[name] for name in sorted(out)], mode
 
     def source_modules(self) -> list[str]:
         """Tracked source modules a test is expected for."""
@@ -569,9 +710,15 @@ class _Section:
         self.name = name
         self.ctx = ctx
         self.found: dict[str, dict[str, Any]] = {}
+        # id -> the files of all its keys (also of keys cut by MAX_KEYS).
+        self.files_of: dict[str, list[str]] = {}
         self.checked: list[str] = []
         self.not_checked: list[dict[str, str]] = []
         self.data: dict[str, Any] = {}
+        self.modes: dict[str, str] = {}
+        # check -> {file: reason} for files the check could not read or
+        # parse; their findings are not reported as resolved by --compare.
+        self.skipped_files: dict[str, dict[str, str]] = {}
         self.truncated: str | None = None
         self.started = ctx.clock()
 
@@ -583,6 +730,23 @@ class _Section:
         self.not_checked.append({"section": self.name, "check": check,
                                  "reason": reason})
 
+    def mode(self, check: str, mode: str) -> None:
+        """How a check found its population (`graph`, `filename`)."""
+        self.modes[check] = mode
+
+    def skip_file(self, checks: str | Iterable[str], rel: str,
+                  reason: str) -> None:
+        for check in [checks] if isinstance(checks, str) else checks:
+            self.skipped_files.setdefault(check, {})[rel] = reason
+
+    def read(self, rel: str, *checks: str) -> str | None:
+        """The file's text; an unreadable file is recorded as skipped for
+        `checks`."""
+        text = self.ctx.text(rel)
+        if text is None and checks:
+            self.skip_file(checks, rel, self.ctx.unread.get(rel, "unreadable"))
+        return text
+
     def expired(self) -> bool:
         if self.ctx.expired():
             self.truncated = "budget"
@@ -593,14 +757,18 @@ class _Section:
             message: str, *, evidence: Iterable[str] = (),
             confidence: str = "medium", note: str = "",
             criteria: Iterable[Mapping[str, Any]] = (),
-            title: str | None = None) -> dict[str, Any]:
+            title: str | None = None,
+            id_keys: Iterable[str] | None = None) -> dict[str, Any]:
+        """Record a finding. The id hashes the type and ``id_keys`` (default:
+        the keys, capped at MAX_KEYS); the capped keys are the targets."""
         if FINDING_TYPES.get(ftype) != self.name:
             raise ValueError(f"finding type {ftype!r} is not in section "
                              f"{self.name!r}")
         if severity not in SEVERITY_RANK:
             raise ValueError(f"unknown severity {severity!r}")
-        key_list = sorted({str(k) for k in keys if k})[:MAX_KEYS]
-        fid = finding_id(ftype, key_list)
+        all_keys = sorted({str(k) for k in keys if k})
+        key_list = all_keys[:MAX_KEYS]
+        fid = finding_id(ftype, key_list if id_keys is None else id_keys)
         evidence = [str(item) for item in evidence]
         existing = self.found.get(fid)
         if existing is not None:
@@ -614,9 +782,9 @@ class _Section:
         for item in goal_criteria:
             if item.get("kind") not in CRITERIA_KINDS:
                 raise ValueError(f"unknown criterion kind {item.get('kind')!r}")
-        goal_criteria.append({"kind": "review_resolved",
-                              "args": {"finding_id": fid}})
-        files = [f for f in (_key_file(k) for k in key_list) if f]
+            if item.get("kind") == "review_resolved":
+                raise ValueError("review_resolved is added by the goal system")
+        files = _key_files(key_list)
         finding = {
             "id": fid,
             "section": self.name,
@@ -638,6 +806,7 @@ class _Section:
             },
         }
         self.found[fid] = finding
+        self.files_of[fid] = _key_files(all_keys)
         return finding
 
     def finish(self) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -667,6 +836,14 @@ class _Section:
             "ids_by_type": {
                 ftype: sorted(f["id"] for f in ordered if f["type"] == ftype)
                 for ftype in sorted({f["type"] for f in ordered})},
+            # The files each id is about, so --compare can hold back ids
+            # whose files a later run could not read.
+            "id_files": {fid: self.files_of.get(fid, [])
+                         for fid in sorted(f["id"] for f in ordered)},
+            "modes": dict(sorted(self.modes.items())),
+            "skipped_files": {check: dict(sorted(files.items()))
+                              for check, files in sorted(
+                                  self.skipped_files.items())},
             "data": self.data,
             "elapsed_s": round(max(0.0, self.ctx.clock() - self.started), 3),
         }
@@ -690,13 +867,14 @@ def _common_dir(paths: Sequence[str]) -> str:
     return "/".join(common)
 
 
-def _package(rel: str, common: str) -> str:
+def _package(rel: str, common: str) -> str | None:
     """The top-level package of a module: the first directory below the
-    directory all modules share, or the module itself when it sits there."""
+    directory all modules share. A module directly in that directory is in
+    no package (its cycles are import cycles)."""
     rest = rel[len(common) + 1:] if common else rel
     head, sep, _tail = rest.partition("/")
     if not sep:
-        head = PurePosixPath(head).stem
+        return None
     return f"{common}/{head}" if common else head
 
 
@@ -758,9 +936,9 @@ def _architecture(sec: _Section) -> None:
     pkg_pairs: dict[tuple[str, str], list[tuple[str, str]]] = defaultdict(list)
     for src, tgt, _ in edges:
         a, b = pkg_of[src], pkg_of[tgt]
-        if a != b:
+        if a is not None and b is not None and a != b:
             pkg_pairs[(a, b)].append((src, tgt))
-    packages = sorted(set(pkg_of.values()))
+    packages = sorted({p for p in pkg_of.values() if p is not None})
     pkg_edges = [(a, b, 1.0) for a, b in sorted(pkg_pairs)]
     sec.data["packages"] = len(packages)
     sec.data["package_roots"] = sorted(c or "." for c in commons.values())
@@ -769,13 +947,16 @@ def _architecture(sec: _Section) -> None:
         via = [(pair, link) for pair, links in sorted(pkg_pairs.items())
                if pair[0] in members and pair[1] in members for link in links]
         keys = sorted({_file_key(f) for _pair, link in via for f in link})
+        # The id follows the packages, not the import links between them.
         sec.add("package_cycle", "major", keys,
                 f"packages {', '.join(comp)} depend on each other",
+                id_keys=[f"package:{name}" for name in comp],
                 evidence=[f"{a} -> {b}: {s} imports {t}"
                           for (a, b), (s, t) in via],
                 confidence="high",
                 note="package = first directory below the directory the "
-                     "modules of its top-level tree share",
+                     "modules of its top-level tree share; modules directly "
+                     "in that directory belong to no package",
                 title=f"Remove the dependency cycle between packages "
                       f"{', '.join(comp)}")
     sec.ran("package_cycles")
@@ -825,10 +1006,34 @@ def _architecture(sec: _Section) -> None:
 # --------------------------------------------------------------------------- #
 
 
+def _test_record(root: Path) -> dict[str, Any] | None:
+    """The test record, or None when it is missing or unreadable (then no
+    failing test can be reported as resolved)."""
+    from ozagia.core import working_set as WS
+    path = WS._record_path(root)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("tests"), dict):
+        return None
+    return WS.load_test_record(root)
+
+
 def _tests(sec: _Section) -> None:
-    from ozagia.core.working_set import load_test_record
+    _failing_tests(sec)
+    _untested(sec)
+
+
+def _failing_tests(sec: _Section) -> None:
+    from ozagia.core import working_set as WS
     ctx = sec.ctx
-    record = load_test_record(ctx.root)
+    record = _test_record(ctx.root)
+    if record is None:
+        sec.skip("failing_tests", f"no readable test record at "
+                                  f"{WS._record_path(ctx.root)}")
+        sec.data["test_record"] = None
+        return
     stale = 0
     for key, rec in sorted((record.get("tests") or {}).items()):
         test_file = _key_file(key)
@@ -855,11 +1060,14 @@ def _tests(sec: _Section) -> None:
     }
     sec.ran("failing_tests")
 
+
+def _untested(sec: _Section) -> None:
+    ctx = sec.ctx
     mode = "graph" if ctx.index is not None else "filename"
     if ctx.index is None:
         sec.skip("untested_modules.graph",
-                 ctx.graph_reason + "; test file names were compared instead "
-                 "(Python only)")
+                 ctx.graph_reason + "; test file names and test imports were "
+                 "compared instead (Python only)")
     per_package: dict[str, dict[str, int]] = defaultdict(
         lambda: {"source_files": 0, "tested_files": 0})
     covered: dict[str, list[dict[str, Any]]] = {}
@@ -873,22 +1081,26 @@ def _tests(sec: _Section) -> None:
             per_package[package]["tested_files"] += 1
             covered[rel] = tests
             continue
+        stem = PurePosixPath(rel).stem
+        evidence = [f"no test_{stem}.py or {stem}_test.py is tracked"]
+        if rel.endswith(".py"):
+            evidence.append("no tracked test imports the module")
         if how == "graph":
-            confidence, note = "high", (
-                "a fresh graph records no tests_module, mentions_file or "
-                "has_test edge to this file")
-            evidence = ["no test edge to the file in the graph"]
+            evidence.insert(0, "no test edge to the file in the graph")
+            confidence, note = "medium", (
+                "no test edge in a fresh graph, no test named after the file "
+                "and no test import of it; a test may still exercise it "
+                "indirectly")
         else:
             confidence, note = "low", (
-                "no usable graph; only test file names were compared, so a "
-                "test may cover it under another name")
-            evidence = [f"no test_{PurePosixPath(rel).stem}.py or "
-                        f"{PurePosixPath(rel).stem}_test.py is tracked"]
+                "no usable graph; only test file names and test imports were "
+                "compared, so a test may cover it under another name")
         sec.add("untested_module", "minor", [_file_key(rel)],
                 f"{rel} has no test", evidence=evidence,
                 confidence=confidence, note=note,
                 title=f"Add a test that imports {rel}")
     sec.ran("untested_modules")
+    sec.mode("untested_modules", mode)
     sec.data["mode"] = mode
     sec.data["packages"] = {
         pkg: {**counts, "ratio": round(counts["tested_files"]
@@ -959,7 +1171,7 @@ def _health(sec: _Section) -> None:
         kind = CR._classify_path(rel)
         if kind not in ("source", "test") or CR._is_generated(rel, ()):
             continue
-        text = ctx.text(rel)
+        text = sec.read(rel, "large_files", "todo_density")
         if text is None:
             continue
         lines = text.count("\n") + (0 if text.endswith("\n") or not text else 1)
@@ -1058,9 +1270,9 @@ def _health(sec: _Section) -> None:
                 note="name matching, not call resolution; getattr with a "
                      "computed name, plugins and external callers are not "
                      "seen",
-                criteria=[{"kind": "no_callers",
+                criteria=[{"kind": "symbol_absent",
                            "args": {"key": str(attrs.get("key"))}}],
-                title=f"Remove or use {qualname}")
+                title=f"Remove {qualname} from {rel}")
     sec.data["unreferenced_excluded"] = dict(sorted(excluded.items()))
     for reason, count in sorted(excluded.items()):
         sec.skip("unreferenced_symbols",
@@ -1104,6 +1316,7 @@ def _churn(sec: _Section) -> None:
     sec.data["hotspots"] = [{"file": rel, "commits": n}
                             for n, rel in hot[:CHURN_TOP]]
     modules = set(ctx.source_modules())
+    sec.mode("hotspots", "graph" if ctx.index is not None else "filename")
     for n, rel in hot[:CHURN_TOP]:
         if rel not in modules:
             continue
@@ -1116,9 +1329,11 @@ def _churn(sec: _Section) -> None:
                 evidence=[f"commits={n} since {ctx.churn_days} days ago",
                           f"tests found by {how}: none"],
                 confidence="medium" if how == "graph" else "low",
-                note="churn from git log; the test gap from the graph"
+                note="churn from git log; the test gap from graph edges, "
+                     "test file names and test imports"
                      if how == "graph" else
-                     "churn from git log; test gap from file names only",
+                     "churn from git log; test gap from test file names and "
+                     "imports only",
                 title=f"Add tests for frequently changed {rel}")
     sec.ran("hotspots")
     if sec.expired():
@@ -1174,17 +1389,22 @@ def _inside(rel: str) -> bool:
     return not (os.path.isabs(norm) or norm == ".." or norm.startswith("../"))
 
 
-def _exists(ctx: _Context, base: str, target: str) -> bool:
-    """`target` is a tracked file or directory, from the doc's directory or
-    the root. Untracked local files do not count: the reference would not
-    resolve in another clone."""
+def _resolve(ctx: _Context, base: str, target: str) -> str | None:
+    """The tracked file or directory `target` names, from the doc's
+    directory or the root, as a normalised path inside the root. Untracked
+    local files do not count: the reference would not resolve in another
+    clone."""
     for start in ([base, ""] if base else [""]):
         rel = os.path.normpath(os.path.join(start, target)) if start else \
             os.path.normpath(target)
         if _inside(rel) and (rel in ctx.tracked or rel in ctx.tracked_dirs
                              or rel == "."):
-            return True
-    return False
+            return rel
+    return None
+
+
+def _exists(ctx: _Context, base: str, target: str) -> bool:
+    return _resolve(ctx, base, target) is not None
 
 
 def _module_index(ctx: _Context) -> dict[str, str]:
@@ -1224,8 +1444,8 @@ def _stale_dotted(ctx: _Context, span: str,
         name = parts[cut]
         if ".".join(parts[:cut + 1]) in modules:
             return None
-        text = ctx.text(rel) or ""
-        if name in set(IDENT.findall(text)):
+        text = ctx.text(rel)
+        if text is None or name in set(IDENT.findall(text)):
             return None
         return f"{module} ({rel}) has no name {name!r}"
     return None
@@ -1284,12 +1504,14 @@ def _check_target(ctx: _Context, doc: str, kind: str, value: str,
         first = PurePosixPath(path.removeprefix("./")).parts[0]
         if not _exists(ctx, base, first):
             return None
-        if not _exists(ctx, base, path):
+        resolved = _resolve(ctx, base, path)
+        if resolved is None:
             return f"path {path}"
-        if qual and path.endswith(".py"):
-            text = ctx.text(path) or ""
+        if qual and resolved.endswith(".py"):
+            # Read the in-root file the span resolved to, not the raw span.
+            text = ctx.text(resolved)
             name = qual.split(".")[0]
-            if name not in set(IDENT.findall(text)):
+            if text is not None and name not in set(IDENT.findall(text)):
                 return f"symbol {qual} in {path}"
         return None
     if (_DOTTED_SPAN.fullmatch(value)
@@ -1305,12 +1527,12 @@ def _docs(sec: _Section) -> None:
         sec.skip("history_docs",
                  f"{len(history)} plan/changelog doc(s) record past or planned "
                  "paths and were not checked")
-    modules = _module_index(ctx)
+    modules = ctx.module_names()
     refs = 0
     for doc in docs:
         if sec.expired():
             return
-        text = ctx.text(doc)
+        text = sec.read(doc, "links_and_code_spans")
         if text is None:
             continue
         for line, kind, value in _doc_targets(text):
@@ -1336,13 +1558,19 @@ def _docs(sec: _Section) -> None:
 
 
 def _env_file(name: str) -> bool:
+    """`.env`, `.env.<x>` and `<x>.env`, except templates (`.env.example`,
+    `example.env`, `prod.env.sample`)."""
     if name == ".env":
         return True
-    return name.startswith(".env.") and not name.endswith(ENV_TEMPLATE_SUFFIXES)
+    if not (name.startswith(".env.") or name.endswith(".env")):
+        return False
+    if name.endswith(ENV_TEMPLATE_SUFFIXES):
+        return False
+    return not any(part in ENV_TEMPLATE_WORDS for part in name.split("."))
 
 
 def _secret_name(name: str) -> bool:
-    if name.startswith(".env"):
+    if name.startswith(".env") or name.endswith(".env"):
         return False
     return (name in SECRET_NAMES or name in CR.SENSITIVE_NAMES
             or name.endswith(SECRET_SUFFIXES))
@@ -1360,11 +1588,40 @@ def _enclosing_symbol(ctx: _Context, rel: str, line: int) -> str | None:
     return best[1] if best else None
 
 
+def _call_args(text: str, start: int, limit: int = 2000) -> str:
+    """The text from `start` (just after an opening parenthesis) to its
+    closing parenthesis, at most `limit` characters."""
+    depth = 1
+    for pos in range(start, min(len(text), start + limit)):
+        ch = text[pos]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return text[start:pos]
+    return text[start:start + limit]
+
+
+def _safe_yaml_load(text: str, offset: int) -> bool:
+    """A `yaml.load(` call at `offset` passes an explicit Loader= that is not
+    one of the object-building loaders."""
+    args = _call_args(text, offset)
+    match = _LOADER_ARG.search(args)
+    return bool(match) and match.group(1) not in UNSAFE_YAML_LOADERS
+
+
 def _security(sec: _Section) -> None:
     ctx = sec.ctx
     sec.data["note"] = SECURITY_NOTE
     sensitive_paths: list[str] = []
+    fixtures = [rel for rel in ctx.files if _fixture(rel)]
+    if fixtures:
+        sec.skip("sensitive_names", _excluded_note(fixtures))
+    fixture_set = set(fixtures)
     for rel in ctx.files:
+        if rel in fixture_set:
+            continue
         name = PurePosixPath(rel).name.casefold()
         if _env_file(name):
             sec.add("committed_env_file", "major", [_file_key(rel)],
@@ -1390,20 +1647,30 @@ def _security(sec: _Section) -> None:
     sec.ran("sensitive_names")
 
     constructs = 0
+    source_fixtures = [rel for rel in fixtures if _is_source(rel)]
+    if source_fixtures:
+        sec.skip("dangerous_constructs", _excluded_note(source_fixtures))
     for rel in ctx.files:
         if sec.expired():
             return
-        if not _is_source(rel) or CR._is_generated(rel, ()):
+        if (rel in fixture_set or not _is_source(rel)
+                or CR._is_generated(rel, ())):
             continue
-        text = ctx.text(rel)
+        text = sec.read(rel, "dangerous_constructs")
         if not text:
             continue
-        for number, line in enumerate(text.splitlines(), 1):
+        offset = 0
+        for number, line in enumerate(text.splitlines(keepends=True), 1):
+            line_start, offset = offset, offset + len(line)
             stripped = line.lstrip()
             if stripped.startswith(("#", "//")):
                 continue
             for pattern, label in DANGEROUS_PATTERNS:
-                if not pattern.search(line):
+                match = pattern.search(line)
+                if not match:
+                    continue
+                if label == _YAML_LOAD and _safe_yaml_load(
+                        text, line_start + match.end()):
                     continue
                 constructs += 1
                 where = _enclosing_symbol(ctx, rel, number)
@@ -1439,7 +1706,12 @@ def _port_scope(port: str) -> str:
 def _ops(sec: _Section) -> None:
     from ozagia.core import ops_graph as OG
     ctx = sec.ctx
-    sources = [rel for rel in ctx.files if OG.ops_source_format(rel)]
+    ops_checks = ("image_pinning", "published_ports", "restart_and_healthcheck")
+    found = [rel for rel in ctx.files if OG.ops_source_format(rel)]
+    excluded = [rel for rel in found if _fixture(rel)]
+    sources = [rel for rel in found if not _fixture(rel)]
+    if excluded:
+        sec.skip("ops_source", _excluded_note(excluded))
     sec.data["sources"] = len(sources)
     if ctx.dev is not None and ctx.index is not None:
         sec.data["graph_ops_nodes"] = len(OG.ops_nodes(ctx.dev))
@@ -1449,7 +1721,7 @@ def _ops(sec: _Section) -> None:
         if sec.expired():
             return
         fmt = OG.ops_source_format(rel)
-        text = ctx.text(rel)
+        text = sec.read(rel, *ops_checks)
         if text is None:
             sec.skip("ops_source", f"{rel} is unreadable or too large")
             continue
@@ -1457,6 +1729,7 @@ def _ops(sec: _Section) -> None:
             graph = OG.parse_ops_source(text, rel, fmt)
         except Exception as exc:  # noqa: BLE001 - one bad file is reported
             sec.skip("ops_source", f"{rel}: {type(exc).__name__}: {exc}")
+            sec.skip_file(ops_checks, rel, f"parse error: {type(exc).__name__}")
             continue
         compose_specs: dict[str, Any] | None = None
         if fmt == "compose":
@@ -1465,6 +1738,8 @@ def _ops(sec: _Section) -> None:
                 yaml_missing = yaml_missing or "unavailable" in error
                 if "unavailable" not in error:
                     sec.skip("restart_and_healthcheck", f"{rel}: {error}")
+                    sec.skip_file("restart_and_healthcheck", rel,
+                                  "YAML error")
             elif isinstance(data, dict) and isinstance(data.get("services"), dict):
                 compose_specs = data["services"]
         unit_entries = (OG.parse_unit_ini(text) if fmt == "quadlet" else [])
@@ -1630,10 +1905,12 @@ def _dependencies(sec: _Section) -> None:
             continue
         if any(part in CR.GENERATED_PARTS for part in PurePosixPath(rel).parts[:-1]):
             continue
-        text = ctx.text(rel)
+        text = sec.read(rel, "manifests", "lock_files")
         parsed = _manifest(rel, text or "") if text is not None else None
         if parsed is None:
             sec.skip("manifest", f"{rel} could not be parsed")
+            if text is not None:
+                sec.skip_file(("manifests", "lock_files"), rel, "parse error")
             continue
         ecosystem, deps, own_lock = parsed
         lock = rel if own_lock else _lock_for(ctx, rel, ecosystem)
@@ -1684,20 +1961,81 @@ def load_packet(path: str | Path) -> dict[str, Any]:
     return data
 
 
-def _type_ids(packet: Mapping[str, Any], ftype: str) -> list[str] | None:
-    """The ids of one finding type, or None when its check did not run to
-    completion in the packet."""
+# Checks whose population depends on the graph: `graph` covers every graph
+# file with symbols, `filename` only tracked Python files.
+FULL_MODE = "graph"
+
+
+def _check_state(packet: Mapping[str, Any],
+                 ftype: str) -> dict[str, Any] | None:
+    """What a packet knows about the check behind `ftype`: its ids, mode,
+    skipped files and the files of each id. None when the check did not run
+    to completion in the packet."""
     section_name = FINDING_TYPES[ftype]
+    check = FINDING_CHECKS[ftype]
     section = (packet.get("sections") or {}).get(section_name)
     if not isinstance(section, Mapping):
         return None
-    if FINDING_CHECKS[ftype] not in (section.get("checked") or []):
+    if check not in (section.get("checked") or []):
         return None
     by_type = section.get("ids_by_type")
     if isinstance(by_type, Mapping):
-        return [str(i) for i in by_type.get(ftype) or []]
-    return [str(f.get("id")) for f in packet.get("findings") or []
-            if isinstance(f, Mapping) and f.get("type") == ftype]
+        ids = [str(i) for i in by_type.get(ftype) or []]
+    else:
+        ids = [str(f.get("id")) for f in packet.get("findings") or []
+               if isinstance(f, Mapping) and f.get("type") == ftype]
+    skipped = set(((section.get("skipped_files") or {}).get(check) or {}))
+    skipped |= set(packet.get("skipped_files") or {})
+    id_files = section.get("id_files")
+    files: dict[str, list[str]] = {}
+    if isinstance(id_files, Mapping):
+        files = {str(k): [str(f) for f in v or []] for k, v in id_files.items()}
+    for finding in packet.get("findings") or []:
+        if isinstance(finding, Mapping) and str(finding.get("id")) not in files:
+            files[str(finding.get("id"))] = _key_files(finding.get("keys") or [])
+    return {"check": check, "ids": ids,
+            "mode": (section.get("modes") or {}).get(check),
+            "skipped": skipped, "files": files}
+
+
+def _type_ids(packet: Mapping[str, Any], ftype: str) -> list[str] | None:
+    """The ids of one finding type, or None when its check did not run to
+    completion in the packet."""
+    state = _check_state(packet, ftype)
+    return None if state is None else state["ids"]
+
+
+def finding_state(packet: Mapping[str, Any], finding_id: str, *,
+                  type: str | None = None,  # noqa: A002 - the goal system's name
+                  keys: Iterable[str] | None = None) -> str:
+    """Whether a finding is ``present``, ``absent`` or ``not_checked`` in a
+    packet, by the rules ``compare_packets`` uses.
+
+    Present: the id is in a section's ``ids`` (capped findings included).
+    Absent: the check that produces ``type`` ran to completion over its full
+    population: it is in ``checked``, its mode (for graph-dependent checks)
+    is ``graph``, and it skipped no file the finding is about (with
+    ``keys``) or no file at all (without). A missing test record leaves
+    ``failing_tests`` unchecked. Anything else, including an unknown
+    ``type``, is not_checked.
+    """
+    fid = str(finding_id)
+    for section in (packet.get("sections") or {}).values():
+        if isinstance(section, Mapping) and fid in (section.get("ids") or []):
+            return "present"
+    if type not in FINDING_TYPES:
+        return "not_checked"
+    state = _check_state(packet, type)
+    if state is None:
+        return "not_checked"
+    if state["mode"] is not None and state["mode"] != FULL_MODE:
+        return "not_checked"
+    if state["skipped"]:
+        if keys is None:
+            return "not_checked"
+        if set(_key_files(keys)) & state["skipped"]:
+            return "not_checked"
+    return "absent"
 
 
 def compare_packets(current: Mapping[str, Any],
@@ -1705,37 +2043,63 @@ def compare_packets(current: Mapping[str, Any],
     """New, resolved and unchanged finding ids between two packets.
 
     A finding type is compared only when the check that produces it ran to
-    completion in both packets (a missing or stale graph, a section left
-    out, or the time budget can stop a check). The others are listed in
-    ``not_compared``, so their findings are not reported as resolved.
+    completion in both packets over the same population: same root, same
+    mode (graph or file names) and, for a resolved id, no file of the
+    finding skipped by the current run (unreadable, too large, binary, a
+    symlink or unparseable). The others are listed in ``not_compared`` or
+    ``held``, so their findings are not reported as resolved.
     """
     new: list[str] = []
     resolved: list[str] = []
     unchanged: list[str] = []
     not_compared: list[dict[str, str]] = []
+    held: list[dict[str, str]] = []
+    root_now, root_before = current.get("root"), previous.get("root")
+    root_mismatch = bool(root_now and root_before and root_now != root_before)
     for ftype in FINDING_TYPES:
-        now = _type_ids(current, ftype)
-        before = _type_ids(previous, ftype)
+        entry = {"section": FINDING_TYPES[ftype], "type": ftype,
+                 "check": FINDING_CHECKS[ftype]}
+        if root_mismatch:
+            not_compared.append({**entry, "reason": (
+                f"the previous packet is for {root_before}, not {root_now}")})
+            continue
+        now = _check_state(current, ftype)
+        before = _check_state(previous, ftype)
         if now is None and before is None:
             continue
         if now is None or before is None:
-            not_compared.append({
-                "section": FINDING_TYPES[ftype], "type": ftype,
-                "check": FINDING_CHECKS[ftype],
-                "reason": ("check did not run to completion in the current "
-                           "packet" if now is None else
-                           "check did not run to completion in the previous "
-                           "packet")})
+            not_compared.append({**entry, "reason": (
+                "check did not run to completion in the current packet"
+                if now is None else
+                "check did not run to completion in the previous packet")})
             continue
-        a, b = set(now), set(before)
+        if now["mode"] != before["mode"]:
+            not_compared.append({**entry, "reason": (
+                f"the check ran in {before['mode'] or 'default'} mode before "
+                f"and in {now['mode'] or 'default'} mode now")})
+            continue
+        a, b = set(now["ids"]), set(before["ids"])
         new += sorted(a - b)
-        resolved += sorted(b - a)
         unchanged += sorted(a & b)
+        for fid in sorted(b - a):
+            files = before["files"].get(fid)
+            if files is None and now["skipped"]:
+                reason = ("the current run skipped files and the finding's "
+                          "files are not recorded")
+            elif files and set(files) & now["skipped"]:
+                reason = ("the current run could not read "
+                          + ", ".join(sorted(set(files) & now["skipped"])[:5]))
+            else:
+                resolved.append(fid)
+                continue
+            held.append({"id": fid, "type": ftype, "reason": reason})
     previous_findings = {str(f.get("id")): f for f in previous.get("findings") or []
                          if isinstance(f, Mapping)}
     return {
+        "previous_root": root_before,
         "previous_head": previous.get("head_commit"),
         "previous_generated_at": previous.get("generated_at"),
+        "root_mismatch": root_mismatch,
         "new": sorted(new),
         "resolved": sorted(resolved),
         "unchanged": sorted(unchanged),
@@ -1744,6 +2108,7 @@ def compare_packets(current: Mapping[str, Any],
              for k in ("id", "section", "type", "severity", "message", "keys")}
             for i in sorted(resolved) if i in previous_findings][:MAX_DATA_ITEMS],
         "not_compared": not_compared,
+        "held": held,
     }
 
 
@@ -1752,19 +2117,34 @@ def compare_packets(current: Mapping[str, Any],
 # --------------------------------------------------------------------------- #
 
 
-def _tracked_files(root: Path) -> list[str]:
+def _tracked_files(root: Path) -> tuple[list[str], dict[str, str]]:
+    """Tracked regular files inside the root, and the tracked paths left out
+    because they are symlinks or resolve outside the root (path -> reason).
+    A symlink is never followed: its target may be any file on the host."""
     from ozagia.config import state_rel
     out = _git_text(root, ["ls-files", "-z", "--cached"]).split("\0")
     state = state_rel(root)
-    files = []
+    real_root = root.resolve()
+    files: list[str] = []
+    skipped: dict[str, str] = {}
     for rel in sorted(set(out)):
         if not rel:
             continue
         if state and (rel == state or rel.startswith(state + "/")):
             continue
-        if (root / rel).is_file():
-            files.append(rel)
-    return files
+        path = root / rel
+        try:
+            if path.is_symlink():
+                skipped[rel] = "symlink"
+                continue
+            if not path.resolve().is_relative_to(real_root):
+                skipped[rel] = "resolves outside the root"
+                continue
+            if path.is_file():
+                files.append(rel)
+        except OSError as exc:
+            skipped[rel] = f"unreadable: {type(exc).__name__}"
+    return files, skipped
 
 
 def _sections_arg(sections: Iterable[str] | str | None) -> list[str]:
@@ -1817,8 +2197,11 @@ def review_repo(root: str | Path, *,
     (default: the same build as ``ozagia index``). Raises PreflightError when
     preflight refuses the run. No model is called.
     """
-    if budget_s is None or budget_s < 0:
-        raise RepoReviewError("budget_s must be >= 0")
+    for name, value in (("budget_s", budget_s), ("memory_mb", memory_mb),
+                        ("disk_mb", disk_mb)):
+        if (not isinstance(value, (int, float)) or isinstance(value, bool)
+                or not math.isfinite(value) or value < 0):
+            raise RepoReviewError(f"{name} must be a finite number >= 0")
     if churn_days < 1:
         raise RepoReviewError("churn_days must be >= 1")
     if max_findings_per_section < 1:
@@ -1863,7 +2246,7 @@ def review_repo(root: str | Path, *,
         config_error = None
     except Exception as exc:  # noqa: BLE001 - review the rest
         layers, config_error = (), f"{type(exc).__name__}: {exc}"
-    files = _tracked_files(path)
+    files, skipped_files = _tracked_files(path)
     ctx = _Context(path, head, files, graph_info, dev, graph_index,
                    layers=layers, deadline=started + float(budget_s),
                    clock=clock, churn_days=int(churn_days),
@@ -1893,6 +2276,13 @@ def review_repo(root: str | Path, *,
         not_checked.extend(out["not_checked"])
         if out["truncated_reason"]:
             truncated[name] = out["truncated_reason"]
+    if skipped_files:
+        shown = ", ".join(list(skipped_files)[:10])
+        not_checked.append({
+            "section": "*", "check": "skipped_files",
+            "reason": f"{len(skipped_files)} tracked path(s) were not read "
+                      f"(symlinks or paths outside the root): {shown}"
+                      + (" ..." if len(skipped_files) > 10 else "")})
     not_checked.extend([
         {"section": "*", "check": "tests_run",
          "reason": "no tests were run; failing tests come from the record"},
@@ -1934,6 +2324,8 @@ def review_repo(root: str | Path, *,
             "churn_min_commits": CHURN_MIN_COMMITS,
         },
         "files": len(files),
+        # Tracked paths no section read (symlinks, paths outside the root).
+        "skipped_files": dict(sorted(skipped_files.items())),
         "comparison": None,
         "model_review": {"status": "not_run", "reason": "no model was called",
                          "truth_assessed": False},
@@ -2071,9 +2463,27 @@ def reviews_dir(root: str | Path) -> Path:
     return state_path(Path(root).resolve(), REVIEWS_DIR)
 
 
+def prune_packets(directory: Path, keep: int = MAX_SAVED_PACKETS) -> list[str]:
+    """Delete all but the newest `keep` timestamped packets in `directory`
+    (``latest.json`` and ``compact.json`` are kept). Returns the deleted
+    paths."""
+    packets = sorted((p for p in directory.glob(f"{PACKET_PREFIX}*.json")
+                      if p.is_file() and not p.is_symlink()),
+                     key=lambda p: p.name, reverse=True)
+    removed = []
+    for path in packets[max(0, int(keep)):]:
+        try:
+            path.unlink()
+            removed.append(str(path))
+        except OSError:
+            continue
+    return removed
+
+
 def save_packet(root: str | Path, packet: Mapping[str, Any]) -> dict[str, str]:
     """Write the packet under ``<state dir>/reviews/`` (atomic): a
-    timestamped file and ``latest.json``. Returns both paths."""
+    timestamped file and ``latest.json``, then keep only the newest
+    MAX_SAVED_PACKETS timestamped packets. Returns both paths."""
     directory = reviews_dir(root)
     try:
         directory.mkdir(parents=True, exist_ok=True)
@@ -2082,10 +2492,11 @@ def save_packet(root: str | Path, packet: Mapping[str, Any]) -> dict[str, str]:
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     head = str(packet.get("head_commit") or "nohead")[:12]
     text = packet_json(packet)
-    path = directory / f"repo_review-{stamp}-{head}.json"
+    path = directory / f"{PACKET_PREFIX}{stamp}-{head}.json"
     atomic_write(path, text)
     latest = directory / LATEST_NAME
     atomic_write(latest, text)
+    prune_packets(directory)
     return {"path": str(path), "latest": str(latest)}
 
 
@@ -2191,6 +2602,7 @@ __all__ = [
     "FINDING_TYPES", "PACKET_SCHEMA", "PreflightError", "RepoReviewError",
     "SCHEMA", "SECTIONS", "SEVERITIES", "atomic_write", "brief",
     "compact_packet", "compare_packets", "exit_code", "finding_id",
+    "finding_state", "prune_packets",
     "format_packet", "format_refusal", "load_packet", "packet_json",
     "preflight", "review_repo", "reviews_dir", "run_model_pass",
     "save_compact", "save_packet", "validate_model_output",

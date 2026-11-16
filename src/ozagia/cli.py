@@ -34,7 +34,7 @@
                                                   preview unless --apply)
     ozagia review-repo [--root R] [--json] [--out F] [--section S ...]
                        [--compare PACKET] [--fail-on blocking|major|never]
-                       [--index] [--budget-s S] [--model-pass]
+                       [--index] [--budget-s S] [--save] [--model-pass]
                                                   (deterministic whole-repo
                                                   review, docs/repo_review.md)
     ozagia --version
@@ -911,6 +911,13 @@ def _cmd_review_repo(args: argparse.Namespace) -> int:
     except (RR.RepoReviewError, RR.CR.CodeReviewError, OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    saved = None
+    if args.save:
+        try:
+            saved = RR.save_packet(root, packet)
+        except (RR.RepoReviewError, RR.CR.CodeReviewError, OSError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
     text = RR.packet_json(packet) if args.json else RR.format_packet(packet)
     if args.out:
         try:
@@ -920,6 +927,10 @@ def _cmd_review_repo(args: argparse.Namespace) -> int:
             print(f"error: {exc}", file=sys.stderr)
             return 2
     print(text, end="")
+    if saved:
+        # Keep --json stdout a single JSON document.
+        print(f"saved: {saved['path']} (latest: {saved['latest']})",
+              file=sys.stderr if args.json else sys.stdout)
     return RR.exit_code(packet, args.fail_on)
 
 
@@ -1219,6 +1230,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="graph snapshot (default: <state dir>/graph.json)")
     rr.add_argument("--budget-s", type=float, default=60.0,
                     help="wall-clock budget for the sections (default: 60)")
+    rr.add_argument("--save", action="store_true",
+                    help="also save the packet under <state dir>/reviews/ and "
+                         "as latest.json (atomic), as the MCP tool does")
     rr.add_argument("--model-pass", action="store_true",
                     help="also write a compact packet for model reviewers under "
                          "<state dir>/reviews/ (no model is called)")
