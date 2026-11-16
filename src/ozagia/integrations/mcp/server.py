@@ -351,15 +351,21 @@ _TOOLS: list[dict[str, Any]] = [
             "rewrites files). Literal by default; regex=true takes a Python re "
             "pattern and a replacement with \\1 / \\g<name> groups. Scope by "
             "globs and/or node keys (sym:, doc:<file>#<section>, "
-            "text:<file>#L<a>-L<b>: only matches inside those spans). "
-            "Preview by default: per-file match counts, enclosing keys, a "
-            "short diff, `shas` and `plan_id`. Apply with apply=true and the "
-            "preview's base_shas (or plan_id): a file changed since the "
-            "preview, a match count other than `expect`, or a file the "
-            "replace would stop parsing refuses the whole batch. Each file "
-            "is written with a backup; one journal entry; the graph is "
-            "updated. .git, the state dir, binary, oversized and "
-            ".gitignored files are never touched."),
+            "text:<file>#L<a>-L<b>: only matches inside those spans); by "
+            "default only text files (known text suffixes, no dotfiles such "
+            "as .env; any_suffix=true for every file). Preview by default: "
+            "per-file match counts, enclosing keys, a short diff, `shas` and "
+            "`plan_id`. Apply with apply=true and the preview's plan_id "
+            "(required; base_shas alone is not enough): a plan that changed "
+            "since the preview (the request, a file's bytes, the set of "
+            "files), a match count other than `expect`, a cap, the scan's "
+            "deadline, or a file the replace would stop parsing refuses the "
+            "whole batch before any write. Each file is written with a "
+            "backup; if a write fails, the files written before it are "
+            "restored, and `partial` is set only when a restore fails. One "
+            "journal entry; the graph is updated. .git, the state dir, "
+            "symlinks, binary and oversized files are never touched; "
+            "gitignore=false also scans files .gitignore excludes."),
         "inputSchema": _schema({
             "pattern": {"type": "string",
                         "description": "Literal text, or a regex with regex=true."},
@@ -384,16 +390,22 @@ _TOOLS: list[dict[str, Any]] = [
             "expect": {"type": "integer",
                        "description": "Refuse unless the total match count "
                                       "is exactly this."},
-            "apply": {"type": "boolean", "default": False},
+            "apply": {"type": "boolean", "default": False,
+                      "description": "Write the change; needs plan_id."},
             "base_shas": {"type": "object",
-                          "description": "The preview's `shas` (file -> sha256): "
+                          "description": "Optional, with plan_id: the "
+                                         "preview's `shas` (file -> sha256); "
                                          "apply refuses files changed since."},
             "plan_id": {"type": "string",
-                        "description": "The preview's plan_id: apply refuses "
-                                       "any difference from the preview."},
+                        "description": "The preview's plan_id (required to "
+                                       "apply): apply refuses any difference "
+                                       "from the preview."},
             "allow_parse_errors": {"type": "boolean", "default": False},
             "gitignore": {"type": "boolean", "default": True,
                           "description": "false: also files .gitignore excludes."},
+            "any_suffix": {"type": "boolean", "default": False,
+                           "description": "true: every file, not only text "
+                                          "suffixes; dotfiles included."},
             "task": {"type": "string",
                      "description": "Optional journal task label."},
         }, ["pattern", "replacement"]),
@@ -1256,12 +1268,19 @@ class DevMemoryServer:
 
     def _replace(self, a: dict[str, Any]) -> Any:
         from ozagia.intent.replace import lint_replace
+        if a.get("apply") is True and not (isinstance(a.get("plan_id"), str)
+                                           and a["plan_id"]):
+            return {"ok": False, "applied": False,
+                    "error": "apply needs the preview's plan_id (base_shas "
+                             "alone does not bind the request); preview "
+                             "first, then apply with its plan_id"}
         with self._acting():
             res = self.mem.replace(
                 a["pattern"], a["replacement"], regex=a.get("regex", False),
                 flags=a.get("flags"), globs=a.get("globs"), keys=a.get("keys"),
                 max_files=a.get("max_files"), max_matches=a.get("max_matches"),
                 expect=a.get("expect"), gitignore=a.get("gitignore", True),
+                any_suffix=a.get("any_suffix", False),
                 apply=a.get("apply", False), base_shas=a.get("base_shas"),
                 plan_id=a.get("plan_id") or None,
                 allow_parse_errors=a.get("allow_parse_errors", False),

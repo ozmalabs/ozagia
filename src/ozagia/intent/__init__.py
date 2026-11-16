@@ -147,12 +147,10 @@ def permission_request(memory: Any, tool: str, inp: dict[str, Any]
         return {"action": "read" if tool == "read" else "edit",
                 "resources": [res], "save": ["*"]}
     if tool == "replace":
+        # A scan error propagates: no request is not "nothing to ask".
         from ozagia.intent.replace import preview_files
-        try:
-            files = preview_files(memory, inp)
-        except Exception:  # noqa: BLE001 - nothing to ask
-            return None
-        return {"action": "edit", "resources": files, "save": ["*"]}
+        return {"action": "read" if inp.get("preview") is True else "edit",
+                "resources": preview_files(memory, inp), "save": ["*"]}
     if tool in ("grep", "glob"):
         pattern = inp.get("pattern")
         if not isinstance(pattern, str):
@@ -174,7 +172,8 @@ def permission_request(memory: Any, tool: str, inp: dict[str, Any]
 def handle(memory: Any, tool: str, input: dict[str, Any], *,
            harness: str = "opencode", session: str | None = None,
            preflight: bool = False, state: Any = None,
-           owners: Any = None) -> dict[str, Any]:
+           owners: Any = None,
+           granted_plan_id: str | None = None) -> dict[str, Any]:
     """Carry out one captured tool call (see the module docstring).
 
     With `preflight`, a mutating tool's handler (edit, write, shell) runs
@@ -199,7 +198,13 @@ def handle(memory: Any, tool: str, input: dict[str, Any], *,
     session edited and left uncommitted gets an `[ozagia] warning:` line
     (`meta.ownership_warnings`). A read or edit of a missing path answers
     with the nearest existing paths when there are any
-    (`ozagia.intent.paths`, `meta.path_suggestions`)."""
+    (`ozagia.intent.paths`, `meta.path_suggestions`).
+
+    A `replace` preflight's permission carries the scan's `plan_id` in its
+    metadata; `granted_plan_id` is that plan, for the call that follows the
+    granted permission: the replace refuses unless its plan is still the
+    same (`ozagia.intent.replace`). A `replace` with `preview: true` writes
+    nothing and is not preflighted."""
     t0 = time.perf_counter()
     meta: dict[str, Any] = {"intent": str(tool), "keys": []}
     # Created-file ledger counters (`ozagia.core.files`), merged into `meta`.
@@ -233,15 +238,19 @@ def handle(memory: Any, tool: str, input: dict[str, Any], *,
             raise Unhandled(f"{tool} is left to the built-in")
         if not isinstance(input, dict):
             raise IntentError("tool input must be an object")
-        if preflight and tool in MUTATING_TOOLS:
+        no_write = tool == "replace" and input.get("preview") is True
+        if preflight and tool in MUTATING_TOOLS and not no_write:
             extra: dict[str, Any] | None = None
+            perm = None
             try:
                 handler(memory, {**input, "_preflight": True})
             except Preflight as p:  # (a handler that returns also stops here)
                 extra = p.metadata
+                perm = p.permission
             meta["intent"] = f"{tool}_preflight"
             meta["ms"] = _ms(t0)
-            perm = permission_request(memory, tool, input)
+            if perm is None:
+                perm = permission_request(memory, tool, input)
             if perm is not None and extra:
                 perm["metadata"] = extra
             return {"handled": False, "preflight": True,
@@ -271,8 +280,11 @@ def handle(memory: Any, tool: str, input: dict[str, Any], *,
             except Exception:  # noqa: BLE001 - a warning is advisory
                 warned = []
         from ozagia.core.owners import acting
+        call_input = input
+        if tool == "replace" and granted_plan_id and not preflight:
+            call_input = {**input, "_granted_plan_id": str(granted_plan_id)}
         with acting(memory, harness, session):
-            res = handler(memory, input)
+            res = handler(memory, call_input)
         if tool == "replace" and owners is not None:
             for rel in res.get("edited_files") or []:
                 try:

@@ -3294,8 +3294,10 @@ class DevMemory:
                 flags: Any = None, globs: Any = None, keys: Any = None,
                 max_files: int | None = None, max_matches: int | None = None,
                 expect: int | None = None, gitignore: Any = True,
-                apply: Any = False, base_shas: dict[str, str] | None = None,
+                any_suffix: Any = False, apply: Any = False,
+                base_shas: dict[str, str] | None = None,
                 plan_id: str | None = None, allow_parse_errors: Any = False,
+                timeout_s: float | None = None,
                 task: str | None = None) -> dict[str, Any]:
         """Replace `pattern` by `replacement` across files and journal it.
 
@@ -3311,10 +3313,11 @@ class DevMemory:
             regex=_strict_bool(regex, "regex"), flags=flags, globs=globs,
             keys=keys, max_files=max_files, max_matches=max_matches,
             expect=expect, gitignore=_strict_bool(gitignore, "gitignore"),
+            any_suffix=_strict_bool(any_suffix, "any_suffix"),
             write=write, base_shas=base_shas, plan_id=plan_id,
             allow_parse_errors=_strict_bool(allow_parse_errors,
                                             "allow_parse_errors"),
-            memory=self)
+            timeout_s=timeout_s, memory=self)
         counters = self.replace_counters
         if not write:
             counters["replace_previews"] += 1
@@ -3327,7 +3330,7 @@ class DevMemory:
                     "replace",
                     task or f"replace in {len(written)} file(s)",
                     f"{'regex' if result.get('regex') else 'literal'} "
-                    f"{pattern!r} -> {replacement!r}: {result['total']} "
+                    f"{pattern!r} -> {replacement!r}: {result['written_matches']} "
                     f"match(es) in {len(written)} file(s)",
                     files=written,
                     pattern=pattern,

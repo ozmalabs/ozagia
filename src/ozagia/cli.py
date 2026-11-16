@@ -29,7 +29,7 @@
     ozagia preflight plan ...                     (dry-run emulator plan)
     ozagia who PATH [--root R] [--json]           (sessions that edited PATH)
     ozagia replace PATTERN REPLACEMENT [--glob G ...] [--key K ...] [--regex]
-                   [--flags F] [--expect N] [--apply [--plan-id ID]] ...
+                   [--flags F] [--expect N] [--apply --plan-id ID] ...
                                                   (one pattern across files;
                                                   preview unless --apply)
     ozagia --version
@@ -815,6 +815,10 @@ def _cmd_replace(args: argparse.Namespace) -> int:
     from ozagia.edit.code_edit import CodeEditError
     from ozagia.intent.replace import file_lines, lint_replace
     root = _root(args.root)
+    if args.apply and not args.plan_id:
+        print("error: --apply needs --plan-id (the preview's plan_id); run "
+              "without --apply first", file=sys.stderr)
+        return 2
     try:
         mem = _replace_memory(root)
         res = mem.replace(
@@ -822,7 +826,7 @@ def _cmd_replace(args: argparse.Namespace) -> int:
             flags=args.flags, globs=args.glob, keys=args.key,
             max_files=args.max_files, max_matches=args.max_matches,
             expect=args.expect, gitignore=not args.no_gitignore,
-            apply=args.apply, plan_id=args.plan_id,
+            any_suffix=args.any_suffix, apply=args.apply, plan_id=args.plan_id,
             allow_parse_errors=args.allow_parse_errors, task=args.task)
     except (CodeEditError, ValueError, FileNotFoundError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -842,7 +846,10 @@ def _cmd_replace(args: argparse.Namespace) -> int:
         return 1
     if res.get("applied"):
         k = len(res.get("written") or [])
-        print(f"replaced {n} match{'es' if n != 1 else ''} in {k} "
+        w = int(res.get("written_matches") or 0)
+        if res.get("partial") or res.get("error"):
+            print(f"partially applied: {res.get('error')}", file=sys.stderr)
+        print(f"replaced {w} match{'es' if w != 1 else ''} in {k} "
               f"file{'s' if k != 1 else ''}")
         for line in file_lines(res):
             print(line)
@@ -851,10 +858,7 @@ def _cmd_replace(args: argparse.Namespace) -> int:
                 print(f"backup {f['file']}: {f['backup']}")
         for line in res.get("lint") or []:
             print(line)
-        if res.get("error"):
-            print(f"warning: {res['error']}", file=sys.stderr)
-            return 1
-        return 0
+        return 1 if res.get("partial") or res.get("error") else 0
     k = res.get("files_changed", 0)
     print(f"preview: {n} match{'es' if n != 1 else ''} in {k} "
           f"file{'s' if k != 1 else ''}; nothing written")
@@ -1128,9 +1132,13 @@ def build_parser() -> argparse.ArgumentParser:
                     help="refuse unless there are exactly N matches")
     rp.add_argument("--max-files", type=int, default=None)
     rp.add_argument("--max-matches", type=int, default=None)
-    rp.add_argument("--apply", action="store_true", help="write the change")
+    rp.add_argument("--apply", action="store_true",
+                    help="write the change (needs --plan-id)")
     rp.add_argument("--plan-id", default=None,
-                    help="with --apply: refuse unless the plan is the preview's")
+                    help="the preview's plan_id; --apply refuses unless the "
+                         "plan is still the preview's")
+    rp.add_argument("--any-suffix", action="store_true",
+                    help="every file, not only text suffixes (dotfiles too)")
     rp.add_argument("--allow-parse-errors", action="store_true")
     rp.add_argument("--no-gitignore", action="store_true",
                     help="also files .gitignore excludes")

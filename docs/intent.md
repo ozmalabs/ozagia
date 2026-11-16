@@ -405,9 +405,12 @@ One pattern replaced across files (`ozagia.intent.replace`, engine
 (`"ims"` or names), `glob`/`globs`, `key`/`keys` (node keys whose spans
 restrict the matches), `max_files` (default 200), `max_matches` (default
 5000), `expect` (the exact total), `allow_parse_errors`, `gitignore`
-(default true), `base_shas`/`plan_id` (from a preview) and `preview`.
-`.git`, the state dir, symlinks, binary, non-UTF-8 and oversized files are
-never scanned or written.
+(default true), `any_suffix`, `base_shas`/`plan_id` (from a preview) and
+`preview`. By default only text files are scanned (known text suffixes,
+`ozagia.edit.replace.TEXT_SUFFIXES`, and no dotfiles such as `.env`);
+`any_suffix: true` scans every file. `.git`, the state dir, symlinks, paths
+reached through a directory symlink, binary, non-UTF-8 and oversized files
+are never scanned or written.
 
     Replaced <n> matches in <k> files
     [ozagia] <rel>: <m> matches in <keys>
@@ -415,21 +418,36 @@ never scanned or written.
     [ozagia] delta: ...
     [ozagia] lint <rule> L<n> <key>: <message>
 
-With `preview: true` the reply is `Preview: <n> matches in <k> files;
-nothing written`, the per-file lines, each file's unified diff (capped) and
-`[ozagia] plan_id <id>`. A cap, an `expect` mismatch, a stale `base_shas`
-or `plan_id`, or a file that parsed and would not (Python, JSON, Rust, Lua)
-refuses the whole batch before any write (`Replace refused: <reason>`).
+The scan runs in a worker process with the request's remaining deadline
+(10 s without one) and stops at the first cap exceeded, so a pattern that
+backtracks without end is abandoned (`Replace refused: the scan took
+longer than ...`). With `preview: true` the reply is `Preview: <n> matches
+in <k> files; nothing written`, the per-file lines, each file's unified
+diff (capped) and `[ozagia] plan_id <id>`; a preview is not preflighted
+and its permission is `read`. A cap, the deadline, an `expect` mismatch, a
+stale `plan_id` or `base_shas` (bytes only: it does not bind the request),
+or a file that parsed and would not (Python, JSON, Rust, Lua) refuses the
+whole batch before any write (`Replace refused: <reason>`). If a write
+then fails, the files written before it are restored from their backups
+and the call is refused; only when a restore fails is the reply an error
+that leads with `Replace partially applied:` and names the files left
+written.
+
 The permission is `edit` with the files the call changes; a preflight
-stops after the preview with each file's diff as metadata. An applied call
-writes each file through `edit/txn.py` with a backup, reingests the files
-once, journals one `replace` entry listing them, and names them in
-`meta.edited_files`; an ownership warning is added for each file another
-live session left uncommitted. `meta` has `replace_previews`, or
-`replace_applies` and `replace_files`; the daemon's stats total them. The
-same engine is the MCP tool `dev_replace` (preview unless `apply`) and
-`ozagia replace PATTERN REPLACEMENT [--glob G] [--key K] [--regex]
-[--expect N] [--apply [--plan-id ID]]`.
+stops after the scan with each file's diff and the `plan_id` as metadata.
+The daemon binds the following call to that plan (or to a `granted`
+permission the caller sends back): if the plan changed, for instance
+because another file now matches, the call is refused, so the written
+files never exceed the granted ones. An applied call writes each file
+through `edit/txn.py` with a backup, reingests the files once, journals
+one `replace` entry listing them (with the matches in those files), and
+names them in `meta.edited_files`; an ownership warning is added for each
+file another live session left uncommitted. `meta` has
+`replace_previews`, or `replace_applies` and `replace_files`; the daemon's
+stats total them. The same engine is the MCP tool `dev_replace` (preview
+unless `apply`, which requires the preview's `plan_id`) and `ozagia replace
+PATTERN REPLACEMENT [--glob G] [--key K] [--regex] [--any-suffix]
+[--expect N] [--apply --plan-id ID]`.
 
 ## shell
 

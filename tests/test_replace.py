@@ -216,8 +216,13 @@ def test_skips_binary_git_state_gitignored_and_large(repo: Path) -> None:
     assert "blob.bin" not in files and "build/out.py" not in files
     assert not any(f.startswith((".git/", ".ozagia/")) for f in files)
     assert "big.txt" not in files
-    assert res["skipped"].get("binary") == 1
+    # Default scope: text suffixes, no dotfiles (blob.bin, .gitignore).
+    assert res["skipped"].get("not a text suffix") == 1
+    assert res["skipped"].get("dotfile") == 1
     assert res["skipped"].get("too large") == 1
+    res = R.replace(repo, "helper", "h", max_files=50, any_suffix=True)
+    assert res["skipped"].get("binary") == 1
+    assert "blob.bin" not in set(_by_file(res))
     # Without .gitignore the ignored file is a candidate; .git and the state
     # dir never are.
     res = R.replace(repo, "helper", "h", gitignore=False, max_files=50)
@@ -340,7 +345,8 @@ def test_apply_backups_journal_and_delta(repo: Path, mem: DevMemory) -> None:
                                     "replace_files": 2}
 
 
-def test_mid_batch_write_failure_reports_partial(repo: Path, monkeypatch) -> None:
+def test_mid_batch_write_failure_restores_the_batch(repo: Path,
+                                                   monkeypatch) -> None:
     from ozagia.edit import txn
     real = txn._current_bytes
 
@@ -350,10 +356,167 @@ def test_mid_batch_write_failure_reports_partial(repo: Path, monkeypatch) -> Non
         return real(path)
     monkeypatch.setattr(txn, "_current_bytes", flaky)
     res = R.replace(repo, "helper", "assist", globs=["pkg/*.py"], write=True)
+    assert res["ok"] is False and not res.get("partial")
+    assert res["applied"] is False and res["written"] == []
+    assert res["restored"] == ["pkg/mod.py"]
+    assert "pkg/use.py" in res["error"] and "nothing written" in res["error"]
+    assert (repo / "pkg/mod.py").read_text() == MOD
+    assert (repo / "pkg/use.py").read_text() == USE
+
+
+def _break_after_first_write(monkeypatch, repo: Path) -> None:
+    """The second write fails; meanwhile someone edits the first file, so
+    its restore must not run."""
+    real = R.write_source
+    calls = {"n": 0}
+
+    def write(root, src, new_text, *, error_cls):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            (repo / "pkg/mod.py").write_text("someone else\n")
+            raise error_cls("stale base: file changed on disk")
+        return real(root, src, new_text, error_cls=error_cls)
+    monkeypatch.setattr(R, "write_source", write)
+
+
+def test_failed_restore_reports_partial(repo: Path, monkeypatch) -> None:
+    _break_after_first_write(monkeypatch, repo)
+    res = R.replace(repo, "helper", "assist", globs=["pkg/*.py"], write=True)
     assert res["ok"] is False and res["partial"] is True
     assert res["written"] == ["pkg/mod.py"]
-    assert "pkg/use.py" in res["error"]
-    assert "helper" in (repo / "pkg/use.py").read_text()
+    assert res["restore_failed"] == ["pkg/mod.py"]
+    assert res["written_matches"] == 2
+    assert (repo / "pkg/mod.py").read_text() == "someone else\n"
+    assert (repo / "pkg/use.py").read_text() == USE
+
+
+# --------------------------------------------------------------------------- #
+# Paths through symlinks, base_shas, scope
+# --------------------------------------------------------------------------- #
+def test_directory_symlink_into_git_or_state_is_never_written(repo: Path) -> None:
+    _write(repo / "a" / "config", "needle\n")
+    _write(repo / "s" / "journal.jsonl", "needle\n")
+    _git(repo, "add", "a/config", "s/journal.jsonl")
+    (repo / ".ozagia").mkdir(exist_ok=True)
+    _write(repo / ".ozagia" / "journal.jsonl", "needle\n")
+    with open(repo / ".git" / "config", "a") as fh:
+        fh.write("# needle\n")
+    for d, target in (("a", ".git"), ("s", ".ozagia")):
+        for f in (repo / d).iterdir():
+            f.unlink()
+        (repo / d).rmdir()
+        os.symlink(target, repo / d)
+    git_config = (repo / ".git" / "config").read_text()
+    res = R.replace(repo, "needle", "PWNED", any_suffix=True, write=True)
+    assert res["skipped"].get("symlinked path") == 2
+    assert "PWNED" not in (repo / ".git" / "config").read_text()
+    assert (repo / ".git" / "config").read_text() == git_config
+    assert (repo / ".ozagia" / "journal.jsonl").read_text() == "needle\n"
+
+
+def test_aliased_paths_are_one_file(repo: Path) -> None:
+    _write(repo / "src" / "x.txt", "needle\n")
+    _write(repo / "docs" / "x.txt", "needle\n")
+    _git(repo, "add", "src/x.txt", "docs/x.txt")
+    (repo / "docs" / "x.txt").unlink()
+    (repo / "docs").rmdir()
+    os.symlink("src", repo / "docs")
+    res = R.replace(repo, "needle", "pin", globs=["*.txt"], write=True)
+    assert res["ok"] and not res.get("partial"), res
+    assert res["written"] == ["src/x.txt"]
+    assert res["skipped"].get("symlinked path") == 1
+    assert (repo / "src" / "x.txt").read_text() == "pin\n"
+
+
+def test_base_shas_never_reads_unknown_paths(repo: Path, tmp_path: Path) -> None:
+    import hashlib
+    import time
+    secret = tmp_path / "secret.txt"
+    secret.write_text("top secret\n")
+    sha = hashlib.sha256(secret.read_bytes()).hexdigest()
+    prev = R.replace(repo, "helper(", "assist(", globs=["*.py"])
+    for key in ("../secret.txt", str(secret), "/dev/zero"):
+        shas = {**prev["shas"], key: sha}
+        t0 = time.monotonic()
+        res = R.replace(repo, "helper(", "assist(", globs=["*.py"],
+                        write=True, base_shas=shas)
+        assert time.monotonic() - t0 < 10
+        assert res["ok"] is False and key in res["stale"]
+    assert "helper(1)" in (repo / "pkg/use.py").read_text()
+
+
+def test_plan_id_binds_the_request(repo: Path) -> None:
+    prev = R.replace(repo, "helper(", "safe(", globs=["*.py"])
+    res = R.replace(repo, "helper(", "rm_rf(", globs=["*.py"], write=True,
+                    base_shas=prev["shas"], plan_id=prev["plan_id"])
+    assert res["ok"] is False and "stale preview" in res["error"]
+    assert "rm_rf" not in (repo / "pkg/use.py").read_text()
+
+
+def test_default_scope_is_text_files_without_dotfiles(repo: Path) -> None:
+    _write(repo / ".env", "TOKEN=helper\n")
+    _write(repo / "deploy" / "web.env", "X=helper\n")
+    _write(repo / "Makefile", "all: helper\n")
+    res = R.replace(repo, "helper", "h", max_files=50)
+    files = set(_by_file(res))
+    assert not files & {".env", "deploy/web.env", "Makefile"}
+    assert {"notes.txt", "README.md", "data.json"} <= files
+    with pytest.raises(CodeEditError, match="any_suffix"):
+        R.replace(repo, "helper", "h", keys=["text:.env#L1-L1"])
+    res = R.replace(repo, "helper", "h", max_files=50, any_suffix=True)
+    assert {".env", "deploy/web.env", "Makefile"} <= set(_by_file(res))
+
+
+# --------------------------------------------------------------------------- #
+# Cost: deadline, early caps, linear bookkeeping, one scan per call
+# --------------------------------------------------------------------------- #
+def test_catastrophic_regex_is_abandoned_at_the_deadline(repo: Path) -> None:
+    import time
+    _write(repo / "evil.txt", "a" * 40 + "b\n")
+    t0 = time.monotonic()
+    res = R.replace(repo, r"(a+)+$", "x", regex=True, globs=["evil.txt"],
+                    timeout_s=1, write=True)
+    assert time.monotonic() - t0 < 6
+    assert res["ok"] is False and res["timed_out"] is True
+    assert "nothing written" in res["error"]
+    assert (repo / "evil.txt").read_text() == "a" * 40 + "b\n"
+
+
+def test_zero_width_pattern_stops_at_the_cap(repo: Path) -> None:
+    import time
+    _write(repo / "wide.txt", "y" * 200_000)
+    t0 = time.monotonic()
+    res = R.replace(repo, "x*", "-", regex=True, globs=["wide.txt"])
+    assert time.monotonic() - t0 < 8
+    assert res["ok"] is False and res["over_cap"] == "matches"
+    t0 = time.monotonic()
+    res = R.replace(repo, "y", "z", globs=["wide.txt"], max_matches=200_000)
+    assert res["ok"] and res["total"] == 200_000
+    assert len(res["files"][0]["lines"]) == 1
+    assert time.monotonic() - t0 < 8
+
+
+def test_file_entry_lines_are_counted_in_one_pass(repo: Path) -> None:
+    _write(repo / "many.txt", "".join(f"row {i} helper\n" for i in range(3000)))
+    res = R.replace(repo, "helper", "h", globs=["many.txt"])
+    (f,) = res["files"]
+    assert f["matches"] == 3000
+    assert f["lines"] == list(range(1, R.LINES_PER_FILE + 1))
+
+
+def test_key_spans_come_from_the_scanned_bytes(repo: Path, mem: DevMemory,
+                                              monkeypatch) -> None:
+    real = R._run_scan
+
+    def touched(req, timeout):
+        (repo / "pkg/mod.py").write_text("# moved\n" + MOD)
+        return real(req, timeout)
+    monkeypatch.setattr(R, "_run_scan", touched)
+    res = R.replace(repo, "helper", "assist", keys=["sym:pkg/mod.py::other"],
+                    write=True, memory=mem)
+    assert res["ok"] is False and res["stale"] == ["pkg/mod.py"]
+    assert "changed during the scan" in res["error"]
+    assert "assist" not in (repo / "pkg/mod.py").read_text()
 
 
 # --------------------------------------------------------------------------- #
@@ -370,8 +533,10 @@ def test_intent_replace_permission_preflight_and_apply(repo: Path,
     assert pre["permission"]["resources"] == ["pkg/mod.py", "pkg/use.py"]
     files = pre["permission"]["metadata"]["files"]
     assert [f["file"] for f in files] == ["pkg/mod.py", "pkg/use.py"]
+    plan = pre["permission"]["metadata"]["plan_id"]
+    assert len(plan) == 16
     assert "helper(1)" in (repo / "pkg/use.py").read_text()
-    res = handle(mem, "replace", inp)
+    res = handle(mem, "replace", inp, granted_plan_id=plan)
     assert res["handled"] and not res["is_error"], res
     assert res["output"].startswith("Replaced 4 matches in 2 files")
     assert "[ozagia] pkg/use.py: 2 matches in sym:pkg/use.py::run" in res["output"]
@@ -397,6 +562,114 @@ def test_intent_replace_preview_and_refusal(repo: Path, mem: DevMemory) -> None:
     pre = handle(mem, "replace", {"pattern": "helper", "replacement": "he lper",
                                   "globs": ["pkg/mod.py"]}, preflight=True)
     assert pre["handled"] and pre["is_error"] and "parse" in pre["output"]
+
+
+def test_intent_apply_cannot_exceed_the_granted_files(repo: Path,
+                                                      mem: DevMemory) -> None:
+    inp = {"pattern": "helper(", "replacement": "assist(", "glob": "*.py"}
+    pre = handle(mem, "replace", inp, preflight=True)
+    plan = pre["permission"]["metadata"]["plan_id"]
+    _write(repo / "pkg/new.py", "x = helper(3)\n")
+    res = handle(mem, "replace", inp, granted_plan_id=plan)
+    assert res["handled"] and res["is_error"]
+    assert "stale preview" in res["output"]
+    assert (repo / "pkg/new.py").read_text() == "x = helper(3)\n"
+    assert "helper(1)" in (repo / "pkg/use.py").read_text()
+    # An input plan_id other than the granted one is refused too.
+    res = handle(mem, "replace", {**inp, "plan_id": "0" * 16},
+                 granted_plan_id=plan)
+    assert res["is_error"] and "granted plan" in res["output"]
+
+
+def test_intent_preflight_scans_once(repo: Path, mem: DevMemory,
+                                     monkeypatch) -> None:
+    real = R._run_scan
+    calls = []
+
+    def counted(req, timeout):
+        calls.append(timeout)
+        return real(req, timeout)
+    monkeypatch.setattr(R, "_run_scan", counted)
+    inp = {"pattern": "helper(", "replacement": "assist(", "glob": "*.py",
+           "_reply_deadline": __import__("time").monotonic() + 3}
+    pre = handle(mem, "replace", inp, preflight=True)
+    assert pre["preflight"] and len(calls) == 1
+    assert 0.5 <= calls[0] <= 3
+    res = handle(mem, "replace", inp,
+                 granted_plan_id=pre["permission"]["metadata"]["plan_id"])
+    assert not res["is_error"] and len(calls) == 2
+
+
+def test_intent_preview_is_not_preflighted(repo: Path, mem: DevMemory) -> None:
+    inp = {"pattern": "helper", "replacement": "h", "globs": ["README.md"],
+           "preview": True}
+    res = handle(mem, "replace", inp, preflight=True)
+    assert res["handled"] is True and not res.get("preflight")
+    assert not res["is_error"] and res["output"].startswith("Preview:")
+    assert res["permission"] == {"action": "read", "resources": ["README.md"],
+                                 "save": ["*"]}
+    assert "helper" in (repo / "README.md").read_text()
+
+
+def test_intent_partial_apply_is_an_error(repo: Path, mem: DevMemory,
+                                          monkeypatch) -> None:
+    _break_after_first_write(monkeypatch, repo)
+    res = handle(mem, "replace", {"pattern": "helper", "replacement": "assist",
+                                  "glob": "pkg/*.py"})
+    assert res["handled"] and res["is_error"]
+    assert res["output"].startswith("Replace partially applied:")
+    assert "left written (2 matches): pkg/mod.py" in res["output"]
+    assert res["meta"]["intent"] == "replace_partial"
+    assert res["meta"]["edited_files"] == ["pkg/mod.py"]
+    (entry,) = [e for e in _journal(mem) if e["kind"] == "replace"]
+    assert ": 2 match(es) in 1 file(s)" in entry["summary"]
+    assert entry["files"] == ["pkg/mod.py"] and entry["partial"] is True
+
+
+def test_intent_restored_batch_is_a_refusal(repo: Path, mem: DevMemory,
+                                            monkeypatch) -> None:
+    from ozagia.edit import txn
+    real = txn._current_bytes
+    monkeypatch.setattr(txn, "_current_bytes",
+                        lambda p: b"x" if p.name == "use.py" else real(p))
+    res = handle(mem, "replace", {"pattern": "helper", "replacement": "assist",
+                                  "glob": "pkg/*.py"})
+    assert res["is_error"] and res["output"].startswith("Replace refused:")
+    assert "restored 1 file(s)" in res["output"]
+    assert (repo / "pkg/mod.py").read_text() == MOD
+
+
+def test_daemon_binds_replace_to_its_preflight(repo: Path, mem: DevMemory,
+                                               tmp_path: Path) -> None:
+    from ozagia.daemon.server import DaemonState
+    st = DaemonState(repo, mem, tmp_path / "j.jsonl")
+    msg = {"op": "tool", "tool": "replace", "harness": "opencode",
+           "session": "s1",
+           "input": {"pattern": "helper(", "replacement": "assist(",
+                     "glob": "*.py"}}
+    pre = st.dispatch({**msg, "preflight": True})
+    assert pre["preflight"] and pre["permission"]["resources"] == [
+        "pkg/mod.py", "pkg/use.py"]
+    _write(repo / "pkg/new.py", "x = helper(3)\n")
+    res = st.dispatch(msg)
+    assert res["handled"] and res["is_error"] and "stale" in res["output"]
+    assert (repo / "pkg/new.py").read_text() == "x = helper(3)\n"
+    # A fresh preflight grants the new set; the apply then writes it.
+    pre = st.dispatch({**msg, "preflight": True})
+    assert "pkg/new.py" in pre["permission"]["resources"]
+    res = st.dispatch(msg)
+    assert res["handled"] and not res["is_error"], res
+    assert res["meta"]["edited_files"] == ["pkg/mod.py", "pkg/new.py",
+                                           "pkg/use.py"]
+    # A granted permission sent back by the caller binds the call as well.
+    _write(repo / "pkg/more.py", "y = assist(4)\n")
+    msg2 = {**msg, "input": {"pattern": "assist(", "replacement": "aid(",
+                             "glob": "*.py"}}
+    pre = st.dispatch({**msg2, "preflight": True})
+    _write(repo / "pkg/late.py", "z = assist(5)\n")
+    res = st.dispatch({**msg2, "granted": pre["permission"]})
+    assert res["is_error"] and "stale" in res["output"]
+    assert "assist" in (repo / "pkg/late.py").read_text()
 
 
 def test_daemon_counts_replace(repo: Path, mem: DevMemory, tmp_path: Path) -> None:
@@ -447,8 +720,28 @@ def test_mcp_dev_replace_preview_then_apply(repo: Path, mem: DevMemory) -> None:
     stale = _mcp(server, "dev_replace", {"pattern": "assist(",
                                          "replacement": "x(", "globs": ["*.py"],
                                          "apply": True,
-                                         "base_shas": prev["shas"]})
+                                         "plan_id": prev["plan_id"]})
     assert stale["ok"] is False and "stale" in stale["error"]
+
+
+def test_mcp_apply_needs_plan_id(repo: Path, mem: DevMemory) -> None:
+    server = DevMemoryServer(mem)
+    args = {"pattern": "helper(", "replacement": "assist(", "globs": ["*.py"]}
+    prev = _mcp(server, "dev_replace", args)
+    for extra in ({}, {"base_shas": prev["shas"]}):
+        res = _mcp(server, "dev_replace", {**args, "apply": True, **extra})
+        assert res["ok"] is False and "plan_id" in res["error"]
+    # base_shas of a preview of another replacement never authorises it.
+    res = _mcp(server, "dev_replace", {**args, "replacement": "rm_rf(",
+                                       "apply": True,
+                                       "base_shas": prev["shas"]})
+    assert res["ok"] is False and "plan_id" in res["error"]
+    assert "helper(1)" in (repo / "pkg/use.py").read_text()
+    desc = next(t for t in server._tools if t["name"] == "dev_replace")
+    text = desc["description"]
+    assert "gitignored files are never touched" not in text
+    assert "(required; base_shas alone is not enough)" in text
+    assert "restored" in text and "partial" in text
 
 
 def test_cli_replace_preview_and_apply(repo: Path, capsys, monkeypatch) -> None:
@@ -458,12 +751,20 @@ def test_cli_replace_preview_and_apply(repo: Path, capsys, monkeypatch) -> None:
     out = capsys.readouterr().out
     assert rc == 0 and out.startswith("preview: 4 matches in 2 files")
     assert "plan_id" in out and "helper(1)" in (repo / "pkg/use.py").read_text()
+    # --apply without --plan-id is refused before any scan.
     rc = cli.main(["replace", "helper(", "assist(", "--glob", "*.py",
-                   "--root", str(repo), "--apply", "--expect", "2"])
-    assert rc == 1 and "expected 2" in capsys.readouterr().err
-    rc = cli.main(["replace", r"helper\((\d)\)", r"assist(\1)", "--regex",
-                   "--glob", "pkg/use.py", "--root", str(repo), "--apply",
-                   "--expect", "2", "--json"])
+                   "--root", str(repo), "--apply"])
+    assert rc == 2 and "--plan-id" in capsys.readouterr().err
+    args = ["replace", r"helper\((\d)\)", r"assist(\1)", "--regex",
+            "--glob", "pkg/use.py", "--root", str(repo)]
+    rc = cli.main([*args, "--json"])
+    plan = json.loads(capsys.readouterr().out)["plan_id"]
+    rc = cli.main([*args, "--apply", "--plan-id", plan, "--expect", "1"])
+    assert rc == 1 and "expected 1" in capsys.readouterr().err
+    rc = cli.main([*args, "--apply", "--plan-id", "0" * 16])
+    assert rc == 1 and "stale preview" in capsys.readouterr().err
+    rc = cli.main([*args, "--apply", "--plan-id", plan, "--expect", "2",
+                   "--json"])
     res = json.loads(capsys.readouterr().out)
     assert rc == 0 and res["applied"] and res["written"] == ["pkg/use.py"]
     assert "assist(1) + assist(2)" in (repo / "pkg/use.py").read_text()
@@ -491,3 +792,14 @@ def test_ownership_warning_for_another_live_sessions_file(repo, mem, monkeypatch
     assert res["handled"] and not res["is_error"]
     assert "pkg/use.py has uncommitted edits" in res["output"]
     assert res["meta"]["ownership_warnings"] == 1
+
+
+def test_scan_worker_never_imports_from_the_repo(repo: Path) -> None:
+    marker = repo / "pwned.marker"
+    for rel in ("ozagia/__init__.py", "ozagia/edit/__init__.py"):
+        _write(repo / rel, "")
+    _write(repo / "ozagia/edit/replace_worker.py",
+           f"open({str(marker)!r}, 'w').write('x')\n")
+    res = R.replace(repo, "helper(", "assist(", globs=["pkg/*.py"])
+    assert res["ok"] and res["total"] == 4
+    assert not marker.exists()

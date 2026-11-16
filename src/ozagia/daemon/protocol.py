@@ -39,6 +39,13 @@ Requests (`op`):
       a tool error gets its usual answer (it changes nothing). Other tools
       ignore `preflight`; the plugin asks for their `permission` after the
       answer and before showing the output.
+      For `replace` the preflight's `permission.metadata.plan_id` names the
+      scan that was shown. The daemon remembers it for the session and the
+      same input, and binds the next call to it: if the plan has changed
+      (another file matches, a file's bytes changed) the call is refused,
+      so the written files never exceed `permission.resources`. A caller
+      may also send the granted permission back as `"granted": {...}`.
+      A `replace` with `preview: true` is not preflighted.
 
     {"id": 3, "op": "after", "harness": "opencode", "session": "...",
      "tool": "shell", "input": {...}, "output": "<the built-in's output>"}

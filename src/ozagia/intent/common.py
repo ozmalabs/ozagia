@@ -44,17 +44,22 @@ class Preflight(Exception):
     """Raised by a handler whose input has `_preflight` set, at the point
     where it would first change something or run a command: the call
     would be carried out (see `ozagia.intent.handle`). `metadata` goes with
-    the permission request (an edit's diff)."""
+    the permission request (an edit's diff). `permission`, when given, is
+    the request itself (the handler already knows what it would change),
+    so `handle` need not work it out again."""
 
-    def __init__(self, metadata: dict | None = None) -> None:
+    def __init__(self, metadata: dict | None = None,
+                 permission: dict | None = None) -> None:
         super().__init__("preflight")
         self.metadata = metadata
+        self.permission = permission
 
 
-def preflight_stop(inp: dict, metadata: dict | None = None) -> None:
+def preflight_stop(inp: dict, metadata: dict | None = None, *,
+                   permission: dict | None = None) -> None:
     """Stop here when `inp` is a preflight (see `Preflight`)."""
     if inp.get("_preflight"):
-        raise Preflight(metadata)
+        raise Preflight(metadata, permission)
 
 
 def diff_metadata(rel: str, before: str | None, after: str) -> dict:

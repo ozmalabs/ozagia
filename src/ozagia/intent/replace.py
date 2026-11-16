@@ -2,10 +2,18 @@
 
 Input: `pattern`, `replacement`, and optionally `regex`, `flags`, `glob` /
 `globs`, `key` / `keys`, `max_files`, `max_matches`, `expect`,
-`allow_parse_errors`, `gitignore`, `base_shas`, `plan_id`, and `preview`
-(show the change, write nothing). The call's permission is `edit` with the
-files it changes (`permission_request`); a preflight stops after the
-preview with each file's diff as the permission metadata.
+`allow_parse_errors`, `gitignore`, `any_suffix`, `base_shas`, `plan_id`,
+and `preview` (show the change, write nothing). The scan's deadline is the
+request's remaining time (`_reply_deadline`), else
+`ozagia.edit.replace.SCAN_TIMEOUT_S`.
+
+Permission. An apply asks `edit` for the files it changes: a preflight
+stops after the scan with `{action: "edit", resources: <files>, metadata:
+{files: <diffs>, plan_id}}`. The apply that follows is bound to that plan
+(`_granted_plan_id`, set by the daemon): a plan that changed since (another
+file now matches, a file's bytes changed) refuses the call, so the written
+files never exceed the granted ones. A preview writes nothing: it is not
+preflighted, and its permission is `read` on the same files.
 
 Applied:
 
@@ -19,10 +27,13 @@ Preview (`preview: true`):
     Preview: <n> match(es) in <k> file(s); nothing written
     [ozagia] <rel>: <m> match(es) in <keys>
     <the file's unified diff, capped>
-    [ozagia] plan_id <id> (pass it, or base_shas, to apply exactly this)
+    [ozagia] plan_id <id> (pass it to apply exactly this)
 
-A refusal (expect mismatch, a cap, a stale preview, a parse the replace
-would break) is a tool error with the reason and the per-file lines.
+A refusal (expect mismatch, a cap, the scan deadline, a stale preview or
+plan, a parse the replace would break, a failed write whose batch was
+restored) is a tool error with the reason and the per-file lines. A write
+that failed and could not be fully restored is a tool error that leads
+with `Replace partially applied:` and names the files left written.
 """
 from __future__ import annotations
 
@@ -61,6 +72,15 @@ def _int(inp: dict[str, Any], name: str) -> int | None:
     return v
 
 
+def _timeout(inp: dict[str, Any]) -> float | None:
+    """Seconds left before the request's reply deadline, or None."""
+    import time
+    at = inp.get("_reply_deadline")
+    if isinstance(at, bool) or not isinstance(at, (int, float)):
+        return None
+    return at - time.monotonic()
+
+
 def request(inp: dict[str, Any]) -> dict[str, Any]:
     """The `ozagia.edit.replace.replace` keyword arguments of an input."""
     pattern, replacement = inp.get("pattern"), inp.get("replacement")
@@ -78,6 +98,8 @@ def request(inp: dict[str, Any]) -> dict[str, Any]:
         "max_matches": _int(inp, "max_matches"),
         "expect": _int(inp, "expect"),
         "gitignore": inp.get("gitignore") is not False,
+        "any_suffix": inp.get("any_suffix") is True,
+        "timeout_s": _timeout(inp),
         "allow_parse_errors": bool(inp.get("allow_parse_errors")),
         "base_shas": shas if isinstance(shas, dict) else None,
         "plan_id": inp.get("plan_id") if isinstance(inp.get("plan_id"), str)
@@ -152,7 +174,16 @@ def _metadata(res: dict[str, Any]) -> dict[str, Any]:
                        "status": "modified",
                        "additions": f.get("additions", 0),
                        "deletions": f.get("deletions", 0)}
-                      for f in res.get("files") or [] if not f.get("unchanged")]}
+                      for f in res.get("files") or [] if not f.get("unchanged")],
+            "plan_id": res.get("plan_id")}
+
+
+def _refusal(res: dict[str, Any]) -> IntentError:
+    lines = [f"Replace refused: {res.get('error')}", *file_lines(res)]
+    return IntentError("\n".join(lines),
+                       keys=[k for f in res.get("files") or []
+                             for k in f.get("keys") or []],
+                       intent="replace_refused")
 
 
 def _run(memory: Any, kw: dict[str, Any], *, apply: bool) -> dict[str, Any]:
@@ -164,59 +195,84 @@ def _run(memory: Any, kw: dict[str, Any], *, apply: bool) -> dict[str, Any]:
     except (CodeEditError, ValueError) as e:
         raise IntentError(str(e)) from None
     if not res.get("ok") and not res.get("applied"):
-        lines = [f"Replace refused: {res.get('error')}", *file_lines(res)]
-        raise IntentError("\n".join(lines),
-                          keys=[k for f in res.get("files") or []
-                                for k in f.get("keys") or []],
-                          intent="replace_refused")
+        raise _refusal(res)
     return res
+
+
+def _preview_reply(res: dict[str, Any], kw: dict[str, Any]) -> dict[str, Any]:
+    n, k = res["total"], res["files_changed"]
+    lines = [f"Preview: {n} match{'es' if n != 1 else ''} in {k} "
+             f"file{'s' if k != 1 else ''}; nothing written",
+             *file_lines(res)]
+    if res.get("parse_refused") and not kw["allow_parse_errors"]:
+        lines.append(tag(f"an apply would be refused: it breaks the parse "
+                         f"of {', '.join(res['parse_refused'])} (set "
+                         f"allow_parse_errors to write anyway)"))
+    budget = PREVIEW_DIFF_LINES
+    for f in res["files"]:
+        body = (f.get("diff") or "").splitlines()
+        if not body or budget <= 0:
+            continue
+        lines.extend(body[:budget])
+        if f.get("diff_truncated") or len(body) > budget:
+            lines.append(tag(f"diff of {f['file']} truncated"))
+        budget -= len(body)
+    lines.append(tag(f"plan_id {res['plan_id']} (pass it to apply exactly "
+                     f"this)"))
+    keys = list(dict.fromkeys(k for f in res["files"]
+                              for k in f.get("keys") or []))
+    return {"intent": "replace_preview", "output": "\n".join(lines),
+            "keys": keys, "meta": {"replace_previews": 1},
+            "edited_files": [],
+            "permission": {"action": "read", "resources": list(res["shas"]),
+                           "save": ["*"]}}
 
 
 def handle_replace(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
     kw = request(inp)
-    if inp.get("preview") or inp.get("_preflight"):
+    if inp.get("preview"):
+        # Writes nothing: no preflight, no edit permission.
         res = _run(memory, kw, apply=False)
         if not res.get("shas"):
             raise IntentError("Replace refused: no file would change")
-        if inp.get("_preflight"):
-            if res.get("parse_refused") and not kw["allow_parse_errors"]:
-                raise IntentError("\n".join([
-                    f"Replace refused: it breaks the parse of "
-                    f"{', '.join(res['parse_refused'])}; set "
-                    f"allow_parse_errors to write anyway", *file_lines(res)]),
-                    intent="replace_refused")
-            preflight_stop(inp, _metadata(res))
-        n, k = res["total"], res["files_changed"]
-        lines = [f"Preview: {n} match{'es' if n != 1 else ''} in {k} "
-                 f"file{'s' if k != 1 else ''}; nothing written",
-                 *file_lines(res)]
+        return _preview_reply(res, kw)
+    if inp.get("_preflight"):
+        res = _run(memory, kw, apply=False)
+        if not res.get("shas"):
+            raise IntentError("Replace refused: no file would change")
         if res.get("parse_refused") and not kw["allow_parse_errors"]:
-            lines.append(tag(f"an apply would be refused: it breaks the parse "
-                             f"of {', '.join(res['parse_refused'])} (set "
-                             f"allow_parse_errors to write anyway)"))
-        budget = PREVIEW_DIFF_LINES
-        for f in res["files"]:
-            body = (f.get("diff") or "").splitlines()
-            if not body or budget <= 0:
-                continue
-            lines.extend(body[:budget])
-            if f.get("diff_truncated") or len(body) > budget:
-                lines.append(tag(f"diff of {f['file']} truncated"))
-            budget -= len(body)
-        lines.append(tag(f"plan_id {res['plan_id']} (pass it, or base_shas, "
-                         f"to apply exactly this)"))
-        keys = list(dict.fromkeys(k for f in res["files"]
-                                  for k in f.get("keys") or []))
-        return {"intent": "replace_preview", "output": "\n".join(lines),
-                "keys": keys, "meta": {"replace_previews": 1},
-                "edited_files": []}
+            raise IntentError("\n".join([
+                f"Replace refused: it breaks the parse of "
+                f"{', '.join(res['parse_refused'])}; set "
+                f"allow_parse_errors to write anyway", *file_lines(res)]),
+                intent="replace_refused")
+        if kw["plan_id"] and kw["plan_id"] != res["plan_id"]:
+            raise IntentError(
+                f"Replace refused: stale preview: plan {kw['plan_id']} is now "
+                f"{res['plan_id']} (the files or the request changed); "
+                f"preview again", intent="replace_refused")
+        preflight_stop(inp, _metadata(res),
+                       permission={"action": "edit",
+                                   "resources": list(res["shas"]),
+                                   "save": ["*"]})
+    granted = inp.get("_granted_plan_id")
+    if isinstance(granted, str) and granted:
+        if kw["plan_id"] and kw["plan_id"] != granted:
+            raise IntentError(
+                f"Replace refused: plan_id {kw['plan_id']} is not the "
+                f"granted plan {granted}; preview again",
+                intent="replace_refused")
+        kw["plan_id"] = granted
     res = _run(memory, kw, apply=True)
     written = list(res.get("written") or [])
-    n, k = res["total"], len(written)
-    lines = [f"Replaced {n} match{'es' if n != 1 else ''} in {k} "
-             f"file{'s' if k != 1 else ''}", *file_lines(res)]
-    if res.get("error"):
-        lines.append(tag(f"warning: {res['error']}"))
+    n, k = int(res.get("written_matches") or 0), len(written)
+    head = (f"Replaced {n} match{'es' if n != 1 else ''} in {k} "
+            f"file{'s' if k != 1 else ''}")
+    partial = bool(res.get("partial")) or not res.get("ok")
+    lines = ([f"Replace partially applied: {res.get('error')}",
+              tag(f"left written ({n} match{'es' if n != 1 else ''}): "
+                  f"{', '.join(written)}")] if partial else [head])
+    lines.extend(file_lines(res))
     if res.get("warning"):
         lines.append(tag(f"warning: {res['warning']}"))
     delta = res.get("graph_delta")
@@ -228,6 +284,11 @@ def handle_replace(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
                                *delta_keys(delta)]))
     meta: dict[str, Any] = {"replace_applies": 1, "replace_files": k,
                             **lint_meta}
+    if partial:
+        raise IntentError("\n".join(lines), keys=keys,
+                          intent="replace_partial",
+                          meta={**meta, "edited_files": written,
+                                "replace_partial": 1})
     return {"intent": "replace", "output": "\n".join(lines), "keys": keys,
             "meta": meta, "edited_files": written,
             "permission": {"action": "edit", "resources": written,
