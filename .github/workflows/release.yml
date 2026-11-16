@@ -111,16 +111,17 @@ jobs:
           path: artifacts
       - name: Collect assets
         run: |
-          mkdir release
-          cp artifacts/dist/* artifacts/bundle-*/*.tar.gz release/
-          cp install release/install
-          (cd release && sha256sum * > SHA256SUMS && cat SHA256SUMS)
+          # (not release/: that directory holds pins.json)
+          mkdir out
+          cp artifacts/dist/* artifacts/bundle-*/*.tar.gz out/
+          cp install out/install
+          (cd out && sha256sum * > SHA256SUMS && cat SHA256SUMS)
       - name: Release notes
         run: python3 scripts/release/notes.py "${GITHUB_REF_NAME#v}" > notes.md
       - name: Create draft release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" release/* \
+          gh release create "${GITHUB_REF_NAME}" out/* \
             --draft --title "ozagia ${GITHUB_REF_NAME}" --notes-file notes.md \
             $(case "${GITHUB_REF_NAME}" in *a[0-9]*|*b[0-9]*|*rc[0-9]*) echo --prerelease ;; esac)
