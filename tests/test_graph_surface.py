@@ -29,7 +29,8 @@ from ozagia.integrations.mcp.server import DevMemoryServer, main
 FULL_SURFACE_TOOLS = [
     "dev_context", "dev_brief", "dev_repo_map", "dev_impact",
     "dev_architecture", "dev_code_search", "dev_scip", "dev_search",
-    "dev_file", "dev_symbol", "dev_outline", "dev_ast", "dev_edit",
+    "dev_file", "dev_symbol", "dev_outline", "dev_query", "dev_ast",
+    "dev_edit",
     "dev_span_edit", "dev_tests", "dev_seed", "dev_rule", "dev_node",
     "dev_neighbours", "dev_stats", "dev_changed", "dev_refresh", "dev_record",
     "dev_session_start", "dev_session_record", "dev_session_state",

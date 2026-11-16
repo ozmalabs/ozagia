@@ -44,6 +44,12 @@ one, every key has the generic default below. All keys are optional:
     modules = []                  # "module:attr" adapters, imported with the
                                   # directory of this config file on sys.path
 
+    [reads]
+    structured_outline_lines = 2000   # a read with no range of a .json,
+    structured_outline_bytes = 65536  # .yaml, .yml or .toml file over either
+                                      # limit returns its outline; 0 turns a
+                                      # limit off
+
 Directory entries are paths relative to the root ("." is the root itself).
 """
 from __future__ import annotations
@@ -140,6 +146,8 @@ class ProjectConfig:
     changed_exclude: tuple[str, ...]
     entrypoint_prefixes: tuple[str, ...]
     adapters: tuple[str, ...]
+    structured_outline_lines: int = 2000
+    structured_outline_bytes: int = 64 * 1024
 
     @property
     def adapter_base(self) -> Path | None:
@@ -153,6 +161,7 @@ _KEYS = {
               "path_prefixes", "changed_exclude", "entrypoint_prefixes"},
     "memory": {"skip_dirs"},
     "adapters": {"modules"},
+    "reads": {"structured_outline_lines", "structured_outline_bytes"},
 }
 
 
@@ -247,6 +256,14 @@ def _parse(root: Path, source: Path | None, data: dict[str, Any]) -> ProjectConf
             raise ConfigError(f"{where}: path_prefixes entries are single path "
                               f"components, got {p!r}")
     modules = _str_list(adapters, "modules", f"{where} [adapters]") or []
+    reads = data.get("reads", {})
+
+    def count(key: str, default: int) -> int:
+        value = reads.get(key, default)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ConfigError(f"{where}: [reads] {key} must be a "
+                              f"non-negative integer")
+        return value
     return ProjectConfig(
         root=root,
         source=source,
@@ -267,6 +284,8 @@ def _parse(root: Path, source: Path | None, data: dict[str, Any]) -> ProjectConf
         entrypoint_prefixes=strings("entrypoint_prefixes",
                                     ["scripts/", "tools/", "bin/"]),
         adapters=tuple(m.strip() for m in modules if m.strip()),
+        structured_outline_lines=count("structured_outline_lines", 2000),
+        structured_outline_bytes=count("structured_outline_bytes", 64 * 1024),
     )
 
 

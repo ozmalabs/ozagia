@@ -60,6 +60,46 @@ Read file /repo/pkg/mod.py, lines 1-20
   node's line range with its header. An unknown key is a tool error that
   lists the nearest keys of the file.
 
+Structured data (`ozagia.core.structured`). A `path` of the form
+`json:<rel>#<pointer>`, `yaml:<rel>#<pointer>` or `toml:<rel>#<pointer>`
+(an RFC 6901 JSON pointer; `#` alone or nothing is the root; `~1` is `/`
+and `~0` is `~` in a key) reads the node at the pointer:
+
+```
+Read json /repo/data/run.json#/runs: array, 30 items, line 5
+[ozagia] json:data/run.json#/runs
+[2] {"id":2,"ok":true}  (line 14)
+[3] {"id":3,"ok":false}  (line 18)
+[ozagia] items 2-3 of 30 (0-based index); offset 5 shows the next ones
+[ozagia] query a member: json:data/run.json#/runs/<index>
+```
+
+- An object lists its keys with type, size and a short preview (default 50
+  keys), an array its items (default 20), a scalar its value. `offset` and
+  `limit` page the keys or items; the read tool's `offset` is 1-based
+  (offset 1 is index 0), `dev_query`'s is the 0-based index. Output is
+  capped at 8 kB (`OUTPUT_CAP`) with a truncation line.
+- JSON numbers print as written (`1.50`). Lines come from the span parser
+  of `edit.json_edit` for JSON files up to 1 MB.
+- A missing file, a bad pointer (with the nearest keys, `difflib`) and a
+  parse error (with line and column) are tool errors.
+- YAML needs PyYAML (the `iac-yaml` extra); without it a YAML query is a
+  tool error that says so. A multi-document YAML file is the list of its
+  documents. TOML uses `tomllib` (read-only); dates print as ISO strings.
+- The same query is the MCP tool `dev_query {path, pointer?, format?,
+  offset?, limit?}`; `path` may also be a `json:`/`yaml:`/`toml:` key.
+
+Outline. A read with no `offset` and no `limit` of a `.json`, `.yaml`,
+`.yml` or `.toml` file over 2000 lines or 64 kB returns the outline
+instead of the text: the file header, `[ozagia] json:<rel>#`, the root's
+type and size, each top-level key with type, size, preview and line, one
+level below it (up to 8 keys, or an array's first item), and a last line
+saying how to query a path or read the text (pass `offset`/`limit`). The
+limits are `[reads] structured_outline_lines` and
+`structured_outline_bytes` in `.ozagia.toml` (0 turns one off). A file
+that does not parse (or YAML without PyYAML) is read as text. Shell reads
+(`cat`, `head`, ...) and edits are unchanged.
+
 Directory:
 
 ```
