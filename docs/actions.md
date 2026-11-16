@@ -165,10 +165,12 @@ python -m ozagia.actions_cli preview integration.uninstall --name kiro \
 ```
 
 Uninstall removes only ozagia's hooks, MCP entry and generated section/profile.
-Other keys, hooks, servers and file content are left alone. A file that holds
-nothing else afterwards can be deleted by the installer. An absent integration
-is a no-op. This action is marked destructive because it edits the tool's live
-configuration, but it never removes a user's unrelated settings.
+Other keys, hooks, servers and file content are left alone. Kiro uninstall
+targets the `ozagia` agent profile that install writes, not unrelated profiles.
+A file that holds nothing else afterwards can be deleted by the installer. An
+absent integration is a no-op. This action is marked destructive because it
+edits the tool's live configuration, but it never removes a user's unrelated
+settings.
 
 ### Verify
 
