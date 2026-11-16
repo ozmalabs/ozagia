@@ -65,3 +65,6 @@ def test_small_offline_benchmark_schema_safety_and_refresh(
     assert report["incremental_refresh"]["added_terraform"][
         "expected_file_indexed"
     ] is True
+    assert report["query_cache"]["hits"] >= 4
+    assert report["query_cache"]["entries"] <= report["query_cache"]["max_entries"]
+    assert report["repeated_context_seconds"] >= 0

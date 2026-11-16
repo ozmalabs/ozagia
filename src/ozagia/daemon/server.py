@@ -197,6 +197,9 @@ class DaemonState:
         self.journal = journal
         self.test_env = test_env
         self.lock = threading.Lock()          # serialises handle/after
+        self.lock_wait_total_ms = 0.0
+        self.lock_wait_max_ms = 0.0
+        self.lock_wait_count = 0
         self._stats_lock = threading.Lock()
         self.started = time.time()
         self.by_op: dict[str, int] = {}
@@ -261,7 +264,7 @@ class DaemonState:
                            or not isinstance(item.get("text"), str)
                            or len(item["text"]) > 2000 for item in history)):
                 return {"ok": False, "error": "history must contain at most six bounded user/assistant messages"}
-            with self.lock:
+            with self._graph_lock():
                 if _expired(msg):
                     return {"ok": True, "context": "", "expired": True,
                             "meta": {"intent": "hint_expired", "keys": []}}
@@ -305,7 +308,7 @@ class DaemonState:
             free = _lock_free(op, tool, inp)
             if free and isinstance(inp, dict):
                 inp["_lock"] = self.lock
-            lock = contextlib.nullcontext() if free else self.lock
+            lock = contextlib.nullcontext() if free else self._graph_lock()
             with lock:
                 if _expired(msg):
                     if op == "tool":
@@ -429,6 +432,21 @@ class DaemonState:
             except OSError as e:
                 print(f"journal write failed: {e}", file=sys.stderr, flush=True)
 
+    @contextlib.contextmanager
+    def _graph_lock(self):
+        """Acquire the graph lock and record how long a request waited."""
+        started = time.perf_counter()
+        self.lock.acquire()
+        wait_ms = (time.perf_counter() - started) * 1000.0
+        with self._stats_lock:
+            self.lock_wait_total_ms += wait_ms
+            self.lock_wait_max_ms = max(self.lock_wait_max_ms, wait_ms)
+            self.lock_wait_count += 1
+        try:
+            yield
+        finally:
+            self.lock.release()
+
     def stats(self) -> dict[str, Any]:
         with self._stats_lock:
             return {
@@ -478,6 +496,11 @@ class DaemonState:
                 "mean_ms": (round(self.ms_total / self.ms_count, 1)
                             if self.ms_count else 0.0),
                 "max_ms": round(self.ms_max, 1),
+                "lock_wait_ms_mean": (round(self.lock_wait_total_ms
+                                            / self.lock_wait_count, 2)
+                                      if self.lock_wait_count else 0.0),
+                "lock_wait_ms_max": round(self.lock_wait_max_ms, 2),
+                "lock_wait_count": self.lock_wait_count,
                 "journal": str(self.journal),
             }
 

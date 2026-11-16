@@ -121,3 +121,32 @@ def test_build_context_exposes_paths_and_conservative_token_budget():
     assert len(result["context"]) <= 80
     assert result["freshness"] == "fresh"
 
+
+def test_build_context_adds_matching_runtime_config_without_claiming_connection(tmp_path):
+    (tmp_path / ".ozagia.toml").write_text(
+        """
+[relays.local]
+specs = [{ kind = "local" }]
+allowed_kinds = ["local"]
+
+[runtime.tunnels.payments-db]
+relay = "local"
+target = "127.0.0.1:5432"
+description = "Payments database"
+""", encoding="utf-8")
+
+    class RuntimeMemory(Memory):
+        root = tmp_path
+
+    mem = RuntimeMemory({})
+    result = build_context(mem, "check payments database", budget_tokens=200)
+    assert "payments-db" in result["context"]
+    assert "configured, not connected" in result["context"]
+    assert result["runtime"]["items"][0]["state"] == "configured"
+    assert result["runtime"]["items"][0]["running"] is False
+    assert result["allocation"]["runtime_chars"] > 0
+    assert not (tmp_path / ".ozagia" / "runtime").exists()
+
+    generic = build_context(mem, "check the service status", budget_tokens=200)
+    assert "payments-db" not in generic["context"]
+

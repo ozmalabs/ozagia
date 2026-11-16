@@ -34,7 +34,8 @@ glibc) and macOS (arm64, x64). `ozagia self check --tui` verifies the install;
   graph code search, symbol-level callers, callees and impact, architecture
   summary. Optional language-server refinement (pyright, rust-analyzer).
 - **Graph-addressed edits**: Python symbol and AST ops, Rust/Lua CST ops,
-  Markdown section ops, JSON path ops. Preview by default, base hash check,
+  Markdown section ops, JSON path ops, HCL block/attribute ops and optional
+  comment-preserving YAML path ops. Preview by default, base hash check,
   atomic write, backup. A diff is output only, never input.
 - **Evals**: a leakage-checked retrieval eval, a break/fix agent eval with
   selectable agent backends (OpenCode, Claude Code), and an index bench.
@@ -50,6 +51,7 @@ glibc) and macOS (arm64, x64). `ozagia self check --tui` verifies the install;
 | Codex hooks | graph context after shell commands and patches, git ref refusal, a session brief, the MCP server and an `AGENTS.md` section; `ozagia install codex` ([docs/codex.md](docs/codex.md)) | implemented, untested live |
 | Harness | `ozagia agent`: an OpenCode session with the daemon and plugin set up and torn down for you ([docs/harness.md](docs/harness.md)); `python -m ozagia.harness.native`: a small agent loop over any OpenAI-compatible API, with or without the graph ([docs/native_loop.md](docs/native_loop.md)) | implemented; the eval's live runs use the same pieces |
 | Infrastructure | Opt-in source-only Terraform, Kubernetes and related infrastructure graph/context ([docs/iac_context.md](docs/iac_context.md)) | experimental, partial static analysis |
+| SRE/IaC operations | Opt-in job waiting, nested command/network relays, ops receipts, supplied live-state snapshots, offline IaC checks and dry-run preflight ([docs/sre_operations.md](docs/sre_operations.md), [docs/relay.md](docs/relay.md)) | experimental; live paths default off |
 
 ## Quick start (from source)
 

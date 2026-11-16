@@ -6,12 +6,22 @@ graph and to proactive context.
 It provides partial static analysis, not deployment state, validation, plan
 execution, security scanning, or a complete dependency graph. HCL extraction
 uses a limited conservative parser; it masks heredoc bodies, resolves
-statically named local module directories, and records provider aliases and
-Terraform address aliases, but dynamic expressions, remote modules and unusual
-syntax remain unresolved. JSON support is structural. Kubernetes selector
+statically named local module directories, links parent module-output
+references to child outputs, records provider aliases and Terraform address
+aliases, and recognizes `moved`, `import`, `removed`, `check` and `ephemeral`
+blocks plus `count`/`for_each` instance modes. Interpolation expressions inside
+quoted strings or heredocs are retained as references while literal template
+text is not. Terraform JSON extraction reads explicit `${...}` expressions and
+supports the same resource/meta groups, but dynamic expressions, remote modules
+and unusual syntax remain unresolved. Mixed `.tf` and `.tofu` files in one
+module scope are both indexed and produce an explicit diagnostic because
+documented OpenTofu dialect precedence is not evaluated.
+Kubernetes selector
 relationships are inferred only when both manifests specify the same namespace;
 RBAC `roleRef` and ServiceAccount subject links resolve only across known
-namespaces and roles, and User/Group subjects stay unresolved. Bicep compilation
+namespaces and roles, and User/Group subjects stay unresolved. Custom resources
+link to a uniquely declared CRD only when group, kind and scope agree; unknown
+or ambiguous CRD declarations stay unresolved. Bicep compilation
 is not performed. A standalone CDK assembly reader accepts supplied artifacts;
 it does not synthesize or automatically load an app. See the
 [HCL parser evaluation](research/hcl_parser_evaluation.md) for why an external
@@ -30,7 +40,8 @@ the adapter. The `infra_context`, `infra_locate`, `infra_dependencies`, and
 `infra_impact` MCP tools are then available; graph queries use corresponding
 `infra.context`, `infra.locate`, `infra.dependencies`, and `infra.impact` names.
 Use `infra_status` (or `infra.status`) to inspect extraction diagnostics,
-resource counts by family, edge counts and extractor versions.
+resource counts by family, edge counts, extractor versions and query-cache
+hits, misses and entries.
 The `infra_import_sarif` tool accepts a supplied SARIF 2.1 report and returns
 limited finding metadata without running a scanner or storing the report.
 `infra_import_cdk` accepts a supplied CDK assembly manifest and optional
@@ -41,6 +52,77 @@ provenance; it never synthesizes the app, runs CDK, or loads assets.
 Name and address matching uses identifier components and exact/qualified forms,
 not arbitrary substrings, and a bare path coincidence is not enough to emit a
 hint.
+
+## Configured IaC roots, environments and services
+
+All of the following configuration is optional and declarative. Paths and
+globs are repository-relative; values are bounded structural names, not
+credentials.
+
+```toml
+[iac]
+roots = ["envs/prod", "envs/iam"]
+skip_globs = ["generated/**"]
+
+[[iac.remote_states]]
+consumer = "envs/prod"
+name = "iam"                 # data "terraform_remote_state" label
+producer = "envs/iam"
+
+[environments.pprd]
+paths = ["envs/pprd"]
+namespaces = ["pprd"]
+account_alias = "production-preview"
+region = "us-east-1"
+cluster = "pprd-cluster"
+risk = "high"
+pipelines = ["deploy-pprd"]
+
+[services.api]
+chart = "charts/api"
+values_globs = ["charts/api/values.pprd.yaml"]
+buildspec = "buildspec.yml"
+pipeline = "pipelines/api.yaml"
+namespace = "pprd"
+environment = "pprd"
+paths = ["envs/pprd"]
+```
+
+Configured Terraform roots take precedence. Without them, root detection is
+conservative: lockfile directories are roots, and otherwise the highest
+Terraform/OpenTofu source directories without a parent root are roots. Nested
+modules are not roots. A remote-state declaration retains only backend type,
+workspace and statically literal allowlisted identity fields (`bucket`, `key`,
+`region`). It never reads state, contacts a backend, or stores arbitrary
+backend config values. A remote-state edge is created only for a unique static
+backend/key match or an exact `consumer`/`name`/`producer` mapping. Missing,
+dynamic and ambiguous mappings remain unresolved and appear in diagnostics.
+Output references point to the remote-state declaration; output values are
+never fetched or evaluated.
+
+IaC discovery skips `.terraform`, `.terragrunt-cache`, `.pulumi`, `.kube` and
+backup/generated names matching `*.backup.last`, `*.backup`, `*.bak` and
+`*.orig`. `[iac].skip_globs` extends these defaults. `infra.status` reports a
+bounded count and repository-relative paths for skipped entries, not their
+contents.
+
+Configured environments create queryable environment facts. Their `paths` and
+`namespaces` attach an `environment` facet to matching source nodes; explicit
+service mappings can also attach that facet. Environment names and configured
+metadata are not treated as generic substring matches, so a local or resource
+merely named `dev` does not satisfy a request for the configured `dev`
+environment.
+
+Configured services link only to unique matching chart/path declarations,
+matching values files, explicitly scoped deployment/service-account/ingress or
+Kustomize nodes, and existing configured buildspec/pipeline files. Missing,
+ambiguous, skipped and nonexistent targets are diagnosed rather than guessed;
+the adapter does not infer services from arbitrary values or create files for
+expected-but-absent paths.
+
+Helm files under a discovered chart's `templates/` directory, and sources with
+Go-template markers, are retained as template source with chart links. They
+are not parsed as Kubernetes YAML, rendered, evaluated or run with Helm.
 Context can also be included by the OpenCode proactive hook when its snapshot
 is fresh and a query matches infrastructure identifiers. Code results and
 infrastructure facts share one character budget, with infrastructure limited to
@@ -71,7 +153,10 @@ labels the report as synthetic. A bounded, process-local cache of parsed
 per-file graphs (keyed by root, path, dialect and content digest) makes a
 same-process refresh reuse unchanged files; it never stores source text. A new
 process, or a changed file, parses again. Infrastructure queries use a token
-index rebuilt only when the graph changes; context scoring still grows with the
-number of matching declarations. Measured numbers are in
+index rebuilt only when the graph changes and a bounded per-graph-version query
+cache. Cache keys are digests, so prompt/history text is not retained; the
+adapter's freshness check still runs before a cached result is served. Context
+scoring still grows with the number of matching declarations. Measured numbers
+are in
 [the 2026-11-16 benchmark](results/iac_bench_2026-11-16.md); they are not
 production latency or model-token evidence.

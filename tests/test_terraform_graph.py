@@ -1,8 +1,12 @@
+import json
+
 from ozagia.core.terraform_graph import (
     discover_terraform_files,
     index_terraform_text,
     merge_terraform_graphs,
+    resolve_terraform_roots,
 )
+from ozagia.config import RemoteStateConfig
 
 
 def test_extracts_declarations_and_explicit_reference_without_values():
@@ -15,7 +19,11 @@ output "id" { value = aws_vpc.main.id }
     graph = index_terraform_text("env/main.tf", source)
     assert {node.address for node in graph.nodes} == {"region", "aws_vpc.main", "id"}
     assert any(edge.evidence == "aws_vpc.main.id" for edge in graph.edges)
-    assert any(edge.evidence == "var.region" for edge in graph.unresolved)
+    variable_edge = next(edge for edge in graph.edges
+                         if edge.evidence == "var.region")
+    variable = next(node for node in graph.nodes if node.address == "region")
+    assert variable_edge.target == variable.key
+    assert not any(edge.evidence == "var.region" for edge in graph.unresolved)
     serialized = repr(graph)
     assert "CANARY_SECRET" not in serialized
     assert all(node.confidence == "low" for node in graph.nodes)
@@ -217,6 +225,168 @@ def test_file_discovery_skips_hidden_and_state_files(tmp_path):
     assert discover_terraform_files(tmp_path) == ("main.tf",)
 
 
+def test_template_interpolations_in_strings_and_heredocs_are_references():
+    graph = index_terraform_text(
+        "main.tf",
+        '''variable "region" {}
+resource "aws_vpc" "main" {}
+resource "aws_instance" "web" {
+  user_data = "echo ${var.region} ${aws_vpc.main.id}"
+  description = "$${not.a.reference}"
+  # ${aws_vpc.commented.id}
+  notes = <<EOF
+token ${aws_vpc.main.id}
+literal CANARY_SECRET
+EOF
+}
+''',
+    )
+    evidence = {edge.evidence for edge in graph.edges}
+    assert {"var.region", "aws_vpc.main.id"} <= evidence
+    assert "not.a.reference" not in evidence
+    assert "aws_vpc.commented.id" not in evidence
+    assert "CANARY_SECRET" not in repr(graph)
+
+
+def test_locals_do_not_treat_nested_object_keys_as_declarations():
+    graph = index_terraform_text(
+        "main.tf",
+        '''locals {
+  config = {
+    nested_key = "CANARY_SECRET"
+    deeper = { another = var.region }
+  }
+  region = var.region
+}
+''',
+    )
+    assert [node.address for node in graph.nodes] == ["config", "region"]
+    assert "CANARY_SECRET" not in repr(graph)
+
+
+def test_meta_blocks_ephemeral_resources_and_instance_modes():
+    graph = index_terraform_text(
+        "main.tf",
+        '''moved {
+  from = aws_vpc.old
+  to   = aws_vpc.new
+}
+import {
+  to = aws_vpc.main
+  id = "vpc-123"
+}
+removed {
+  from = aws_vpc.retired
+}
+check "health" {
+  assert {
+    condition = var.healthy
+  }
+}
+ephemeral "random_password" "db" {
+  length = 16
+}
+output "password" {
+  value = ephemeral.random_password.db.result
+}
+resource "aws_vpc" "main" {
+  count = 2
+}
+resource "aws_subnet" "private" {
+  for_each = var.subnets
+  vpc_id   = aws_vpc.main.id
+}
+''',
+    )
+    by_kind: dict[str, set[str]] = {}
+    for node in graph.nodes:
+        by_kind.setdefault(node.kind, set()).add(node.address)
+    assert by_kind["moved"] == {"moved@1"}
+    assert by_kind["import"] == {"import@5"}
+    assert by_kind["removed"] == {"removed@9"}
+    assert by_kind["check"] == {"health"}
+    assert by_kind["ephemeral"] == {"ephemeral.random_password.db"}
+    assert any(edge.relation == "references" and edge.evidence == "aws_vpc.main"
+               for edge in graph.edges)
+    assert any(edge.evidence == "ephemeral.random_password.db.result"
+               for edge in graph.edges)
+    modes = {node.address: node.instance_mode for node in graph.nodes}
+    assert modes["aws_vpc.main"] == "count"
+    assert modes["aws_subnet.private"] == "for_each"
+    assert modes["ephemeral.random_password.db"] is None
+
+
+def test_nested_count_is_not_a_top_level_instance_mode():
+    graph = index_terraform_text(
+        "main.tf",
+        '''resource "aws_vpc" "main" {
+  tags = {
+    count = 3
+  }
+}
+''',
+    )
+    assert graph.nodes[0].instance_mode is None
+
+
+def test_json_expression_references_ephemeral_and_meta_blocks():
+    graph = index_terraform_text(
+        "main.tf.json",
+        json.dumps({
+            "resource": {
+                "aws_vpc": {"main": {"cidr_block": "10.0.0.0/16"}},
+                "aws_subnet": {"private": {
+                    "vpc_id": "${aws_vpc.main.id}",
+                    "count": 2,
+                }},
+            },
+            "ephemeral": {"random_password": {"db": {"length": 16}}},
+            "output": {"id": {"value": "${ephemeral.random_password.db.result}"}},
+            "moved": [{"from": "${aws_vpc.old.id}", "to": "${aws_vpc.main.id}"}],
+            "import": [{"to": "${aws_vpc.main}", "id": "vpc-123"}],
+            "removed": [{"from": "${aws_vpc.removed}"}],
+            "check": {"health": {"assert": [{"condition": "${var.healthy}"}]}},
+            "variable": {"healthy": {"default": "CANARY_SECRET"}},
+        }),
+    )
+    addresses = {(node.kind, node.address) for node in graph.nodes}
+    assert ("ephemeral", "ephemeral.random_password.db") in addresses
+    assert ("moved", "moved@0") in addresses
+    assert ("import", "import@0") in addresses
+    assert ("removed", "removed@0") in addresses
+    assert ("check", "health") in addresses
+    assert any(edge.evidence == "aws_vpc.main.id" for edge in graph.edges)
+    assert any(edge.evidence == "ephemeral.random_password.db.result"
+               for edge in graph.edges)
+    assert any(node.address == "aws_subnet.private" and node.instance_mode == "count"
+               for node in graph.nodes)
+    assert "CANARY_SECRET" not in repr(graph)
+
+
+def test_module_output_reference_links_to_child_output():
+    parent = index_terraform_text(
+        "main.tf",
+        '''module "net" { source = "./modules/net" }
+output "vpc" { value = module.net.vpc_id }
+''',
+        module_scope=".",
+    )
+    child = index_terraform_text(
+        "modules/net/main.tf",
+        'output "vpc_id" { value = "vpc-123" }\n',
+        module_scope="modules/net",
+    )
+    merged = merge_terraform_graphs((parent, child))
+    child_output = next(node for node in child.nodes if node.kind == "output")
+    edge = next(edge for edge in merged.edges if edge.relation == "module_output")
+    assert edge.target == child_output.key
+    assert edge.evidence == "module.net.vpc_id"
+    assert edge.scope == "modules/net"
+    module_node = next(node for node in parent.nodes if node.kind == "module")
+    assert any(edge.relation == "references" and edge.target == module_node.key
+               for edge in merged.edges)
+
+
 def test_merge_resolves_provider_agnostic_cross_file_references_without_values():
     network = index_terraform_text(
         "infra/network.tf",
@@ -416,3 +586,192 @@ def test_local_module_source_does_not_cross_dialects():
         edge.evidence == "local module source has no statically discovered declarations"
         for edge in merged.unresolved
     )
+
+
+def _remote_state_fixture():
+    consumer = index_terraform_text(
+        "envs/app/main.tf",
+        '''data "terraform_remote_state" "iam" {
+  backend = "s3"
+  workspace = "default"
+  config = {
+    bucket = "state-bucket"
+    key = "iam/terraform.tfstate"
+    region = "us-east-1"
+    access_key = "CANARY_SECRET"
+  }
+}
+output "vpc" {
+  value = data.terraform_remote_state.iam.outputs.vpc_id
+}
+''',
+        module_scope="envs/app",
+    )
+    producer = index_terraform_text(
+        "envs/iam/main.tf",
+        '''terraform {
+  backend "s3" {
+    bucket = "state-bucket"
+    key = "iam/terraform.tfstate"
+    region = "us-east-1"
+    secret_key = "CANARY_SECRET"
+  }
+}
+resource "aws_iam_role" "role" {}
+''',
+        module_scope="envs/iam",
+    )
+    return consumer, producer
+
+
+def test_remote_state_parses_output_reference_and_unique_static_root_match():
+    consumer, producer = _remote_state_fixture()
+    merged = merge_terraform_graphs((consumer, producer))
+    graph = resolve_terraform_roots(
+        merged, ["envs/app/main.tf", "envs/iam/main.tf"],
+        explicit_roots=["envs/app", "envs/iam"],
+    )
+    remote = next(node for node in graph.nodes
+                  if node.address == "data.terraform_remote_state.iam")
+    output = next(node for node in graph.nodes
+                  if node.kind == "output" and node.address == "vpc")
+    root = next(node for node in graph.nodes
+                if node.kind == "root" and node.address == "envs/iam")
+    assert any(edge.source == output.key and edge.target == remote.key
+               and edge.evidence.endswith(".outputs.vpc_id")
+               for edge in graph.edges)
+    link = next(edge for edge in graph.edges if edge.relation == "remote_state")
+    assert (link.source, link.target) == (remote.key, root.key)
+    assert link.provenance == "inferred"
+    assert link.confidence == "medium"
+    assert link.evidence == "unique static backend/key match"
+    assert remote.remote_backend_type == "s3"
+    assert remote.remote_key == "iam/terraform.tfstate"
+    assert "CANARY_SECRET" not in repr(graph)
+
+
+def test_remote_state_explicit_mapping_resolves_even_dynamic_backend():
+    consumer = index_terraform_text(
+        "envs/app/main.tf",
+        '''data "terraform_remote_state" "iam" {
+  backend = var.backend
+  config = { key = local.state_key }
+}
+''',
+        module_scope="envs/app",
+    )
+    producer = index_terraform_text(
+        "envs/iam/main.tf",
+        'resource "aws_iam_role" "role" {}',
+        module_scope="envs/iam",
+    )
+    merged = merge_terraform_graphs((consumer, producer))
+    graph = resolve_terraform_roots(
+        merged, ["envs/app/main.tf", "envs/iam/main.tf"],
+        explicit_roots=["envs/app", "envs/iam"],
+        remote_states=(RemoteStateConfig("envs/app", "iam", "envs/iam"),),
+    )
+    edge = next(edge for edge in graph.edges if edge.relation == "remote_state")
+    assert edge.provenance == "declared"
+    assert edge.confidence == "high"
+    assert edge.evidence == "project config"
+    assert not any(edge.relation == "remote_state" for edge in graph.unresolved)
+
+
+def test_remote_state_ambiguous_static_match_and_dynamic_state_stay_unresolved():
+    consumer = index_terraform_text(
+        "envs/app/main.tf",
+        '''data "terraform_remote_state" "iam" {
+  backend = "s3"
+  config = { bucket = "state-bucket" key = "iam.tfstate" }
+}
+data "terraform_remote_state" "dynamic" {
+  backend = var.backend
+  config = { key = local.state_key }
+}
+data "terraform_remote_state" "dynamic_bucket" {
+  backend = "s3"
+  config = { bucket = var.bucket, key = "iam.tfstate" }
+}
+''',
+        module_scope="envs/app",
+    )
+    producer_a = index_terraform_text(
+        "envs/iam-a/main.tf",
+        'terraform { backend "s3" { bucket = "state-bucket" key = "iam.tfstate" } }',
+        module_scope="envs/iam-a",
+    )
+    producer_b = index_terraform_text(
+        "envs/iam-b/main.tf",
+        'terraform { backend "s3" { bucket = "state-bucket" key = "iam.tfstate" } }',
+        module_scope="envs/iam-b",
+    )
+    graph = resolve_terraform_roots(
+        merge_terraform_graphs((consumer, producer_a, producer_b)),
+        ["envs/app/main.tf", "envs/iam-a/main.tf", "envs/iam-b/main.tf"],
+        explicit_roots=["envs/app", "envs/iam-a", "envs/iam-b"],
+    )
+    reasons = {edge.evidence for edge in graph.unresolved
+               if edge.relation == "remote_state"}
+    assert "static backend/key match is ambiguous" in reasons
+    assert "remote-state backend identity is dynamic or incomplete" in reasons
+    dynamic_bucket = next(
+        node for node in graph.nodes
+        if node.address == "data.terraform_remote_state.dynamic_bucket")
+    assert dynamic_bucket.remote_dynamic
+    assert not any(edge.relation == "remote_state" for edge in graph.edges)
+
+
+def test_terraform_json_remote_state_retains_only_static_identity_fields():
+    graph = index_terraform_text(
+        "main.tf.json",
+        json.dumps({
+            "data": {"terraform_remote_state": {"iam": {
+                "backend": "s3", "workspace": "default",
+                "config": {
+                    "bucket": "state-bucket",
+                    "key": "iam.tfstate",
+                    "region": "us-east-1",
+                    "access_key": "CANARY_SECRET",
+                    "arbitrary": "UNSAFE_CONFIG_VALUE",
+                },
+            }}},
+        }),
+    )
+    remote = graph.nodes[0]
+    assert remote.address == "data.terraform_remote_state.iam"
+    assert remote.remote_backend_type == "s3"
+    assert remote.remote_workspace == "default"
+    assert remote.remote_bucket == "state-bucket"
+    assert remote.remote_key == "iam.tfstate"
+    assert remote.remote_region == "us-east-1"
+    assert "CANARY_SECRET" not in repr(graph)
+    assert "UNSAFE_CONFIG_VALUE" not in repr(graph)
+
+
+def test_root_fallback_uses_top_level_sources_and_lockfile_markers():
+    top = index_terraform_text(
+        "main.tf", 'resource "aws_vpc" "root" {}', module_scope=".")
+    child = index_terraform_text(
+        "modules/net/main.tf", 'resource "aws_vpc" "module" {}',
+        module_scope="modules/net")
+    graph = resolve_terraform_roots(
+        merge_terraform_graphs((top, child)),
+        ["main.tf", "modules/net/main.tf"],
+    )
+    assert [node.path for node in graph.nodes if node.kind == "root"] == ["."]
+
+    prod = index_terraform_text(
+        "envs/prod/main.tf", 'resource "aws_vpc" "prod" {}',
+        module_scope="envs/prod")
+    iam = index_terraform_text(
+        "envs/iam/main.tf", 'resource "aws_iam_role" "iam" {}',
+        module_scope="envs/iam")
+    locked = resolve_terraform_roots(
+        merge_terraform_graphs((prod, iam)),
+        ["envs/prod/main.tf", "envs/iam/main.tf"],
+        lock_dirs=["envs/prod", "envs/iam"],
+    )
+    assert {node.path for node in locked.nodes if node.kind == "root"} == {
+        "envs/prod", "envs/iam",
+    }

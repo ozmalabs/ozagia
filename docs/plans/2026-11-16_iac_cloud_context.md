@@ -254,6 +254,9 @@ results including cache state, tool/model versions, dataset and limitations.
 
 ## Implementation progress
 
+Follow-up recommendations from real SRE/IaC sessions are planned in
+[the SRE/IaC extension plan](2026-11-16_sre_iac_extensions.md).
+
 An experimental opt-in adapter now indexes bounded, partial static source
 facts for Terraform/OpenTofu, Kubernetes, Helm/Kustomize, CloudFormation, ARM
 JSON and GitOps. Infrastructure locate, context, dependencies, impact and
@@ -262,21 +265,31 @@ one proactive-context character budget with code results. Context ranking uses
 the current request as a stronger hint than bounded history, reports ambiguity
 and a reason when it declines to emit, and distinguishes a characters/4
 estimate from a real tokenizer count. The HCL extractor masks heredocs, resolves
-statically named local module directories, records provider aliases and exposes
-Terraform address aliases (`var.*`, `module.*`, `local.*`, `output.*`,
-`provider.*`); external HCL grammars were evaluated and not adopted because the
-candidate did not expose public source spans (see
-[the evaluation](../research/hcl_parser_evaluation.md)). Kubernetes extraction
-includes bounded RBAC role and ServiceAccount-subject links; external
-User/Group subjects and unknown namespaces remain unresolved.
+statically named local module directories, links module-output references to
+child outputs, records provider aliases, recognizes `moved`, `import`,
+`removed`, `check` and `ephemeral` blocks and `count`/`for_each` instance modes,
+and exposes Terraform address aliases (`var.*`, `module.*`, `local.*`,
+`output.*`, `provider.*`). Interpolation expressions inside quoted strings and
+heredocs become references without retaining literal template text, and
+`var.*` references resolve to variable declarations. Terraform JSON extraction
+reads explicit `${...}` expressions and the same resource/meta groups. Mixed
+`.tf`/`.tofu` module scopes are reported rather than silently merged. External HCL grammars were
+evaluated and not adopted because the candidate did not expose public source
+spans (see [the evaluation](../research/hcl_parser_evaluation.md)). Kubernetes
+extraction includes bounded RBAC role and ServiceAccount-subject links plus
+custom-resource-to-CRD links when group, kind and scope agree; external
+User/Group subjects, unknown namespaces and ambiguous CRDs remain unresolved.
 
 The new-file refresh path, exact deletion/rename reingest and a synthetic
 end-to-end retrieval evaluation at two budgets are tested. A bounded
 process-local parse cache reuses unchanged per-file graphs on same-process
 refresh (keyed by root, path, dialect and content digest; no source text is
 stored), and a per-memory token index serves locate/dependency/context candidate
-lookups without scanning every node. A deterministic synthetic
-cold/warm/incremental benchmark measures
+lookups without scanning every node. A bounded per-graph-version query cache
+stores locate/context/traverse results by digest key and invalidates on graph
+mutation;
+`infra.status` and the benchmark report cache hits, misses and entries. A
+deterministic synthetic cold/warm/incremental benchmark measures
 enabled-versus-disabled build overhead, snapshot size, peak memory, query
 percentiles and canary absence ([results](../results/iac_bench_2026-11-16.md)).
 A CDK assembly reader is available as an explicit artifact API and as the
@@ -289,8 +302,9 @@ local module resolution links directory declarations rather than evaluating
 module instances, the extractors do not cover every format or semantic
 relationship, there is no approved live cloud integration or matched model
 comparison, and production precision, large-repository overhead and total token
-savings are not established. Query-result caching, daemon lock-wait metrics and
-a task-level model comparison are not implemented. The synthetic benchmark
+savings are not established. A task-level model comparison is not implemented.
+The daemon now reports graph-lock wait mean/max/count alongside its request
+timings. The synthetic benchmark
 shows measurable adapter build overhead and refresh cost; do not present it as
 an acceleration claim. The feature remains opt-in. Do not treat the phase
 labels above as completed acceptance gates.
