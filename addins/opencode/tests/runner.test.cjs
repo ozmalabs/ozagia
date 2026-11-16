@@ -9,9 +9,13 @@ const { loadTs } = require("./load-ts.cjs")
 
 const runner = loadTs(path.join(__dirname, "..", "src", "runner.ts"))
 const {
+  ACTION_NAMES,
   InputError,
+  actionPreviewSpec,
+  actionsListSpec,
   aperturesSpec,
   optionalDepth,
+  optionalInteger,
   optionalNumber,
   policyCheckSpec,
   redact,
@@ -19,6 +23,8 @@ const {
   resourcesCheckSpec,
   runOzagia,
   safeTail,
+  settingsSchemaSpec,
+  settingsValuesSpec,
   statusSpec,
   testingPlanSpec,
   text,
@@ -245,6 +251,206 @@ test("research builder validates the investigation id and view", () => {
   assert.throws(() => researchViewSpec(ROOT, { investigation: "research-1", view: "unknown" }), InputError)
 })
 
+test("settings and action catalogue builders", () => {
+  assert.deepEqual(settingsSchemaSpec(), {
+    module: "ozagia.settings_cli",
+    args: ["schema", "--json"],
+    display: "ozagia.settings_cli schema --json",
+  })
+  assert.deepEqual(settingsValuesSpec(ROOT), {
+    module: "ozagia.settings_cli",
+    args: ["values", "--root", ROOT, "--json"],
+    display: "ozagia.settings_cli values --json",
+  })
+  assert.deepEqual(actionsListSpec(), {
+    module: "ozagia.actions_cli",
+    args: ["list", "--json"],
+    display: "ozagia.actions_cli list --json",
+  })
+})
+
+test("action preview builder covers fixed and optional arguments", () => {
+  assert.deepEqual(actionPreviewSpec(ROOT, { action: "daemon.status" }).args, [
+    "preview",
+    "daemon.status",
+    "--root",
+    ROOT,
+    "--json",
+  ])
+
+  assert.deepEqual(
+    actionPreviewSpec(ROOT, { action: "service.start", name: "api" }).args,
+    ["preview", "service.start", "--root", ROOT, "--name", "api", "--json"],
+  )
+
+  const logs = actionPreviewSpec(ROOT, {
+    action: "service.logs",
+    name: "api",
+    maxBytes: 8192,
+  })
+  assert.deepEqual(logs.args, [
+    "preview",
+    "service.logs",
+    "--root",
+    ROOT,
+    "--name",
+    "api",
+    "--max-bytes",
+    "8192",
+    "--json",
+  ])
+
+  const daemon = actionPreviewSpec(ROOT, {
+    action: "daemon.restart",
+    wait: 30,
+    idleTimeout: 0,
+  })
+  assert.deepEqual(daemon.args, [
+    "preview",
+    "daemon.restart",
+    "--root",
+    ROOT,
+    "--wait",
+    "30",
+    "--idle-timeout",
+    "0",
+    "--json",
+  ])
+
+  const tunnel = actionPreviewSpec(ROOT, {
+    action: "tunnel.start",
+    name: "database",
+    live: true,
+    network: true,
+  })
+  assert.deepEqual(tunnel.args, [
+    "preview",
+    "tunnel.start",
+    "--root",
+    ROOT,
+    "--name",
+    "database",
+    "--allow-live",
+    "--allow-network",
+    "--json",
+  ])
+  assert.equal(tunnel.display, "ozagia.actions_cli preview tunnel.start --json")
+
+  assert.deepEqual(
+    actionPreviewSpec(ROOT, {
+      action: "tunnel.start",
+      name: "database",
+      live: false,
+      network: false,
+    }).args,
+    ["preview", "tunnel.start", "--root", ROOT, "--name", "database", "--json"],
+  )
+
+  assert.deepEqual(
+    actionPreviewSpec(ROOT, {
+      action: "integration.status",
+      name: "codex",
+      scope: "user",
+    }).args,
+    [
+      "preview",
+      "integration.status",
+      "--root",
+      ROOT,
+      "--name",
+      "codex",
+      "--scope",
+      "user",
+      "--json",
+    ],
+  )
+
+  assert.deepEqual(
+    actionPreviewSpec(ROOT, { action: "integration.status" }).args,
+    ["preview", "integration.status", "--root", ROOT, "--json"],
+  )
+})
+
+test("action preview builder rejects unsupported and unbounded input", () => {
+  assert.ok(ACTION_NAMES.includes("tunnel.start"))
+  assert.throws(() => actionPreviewSpec(ROOT, {}), InputError)
+  assert.throws(() => actionPreviewSpec(ROOT, { action: "service.delete" }), InputError)
+  assert.throws(
+    () => actionPreviewSpec(ROOT, { action: "service.start" }),
+    /name is required/,
+  )
+  assert.throws(
+    () => actionPreviewSpec(ROOT, { action: "service.start", name: "api\nrm -rf /" }),
+    /control characters/,
+  )
+  assert.throws(
+    () => actionPreviewSpec(ROOT, { action: "service.start", name: "x".repeat(129) }),
+    InputError,
+  )
+  assert.throws(
+    () => actionPreviewSpec(ROOT, { action: "daemon.status", name: "api" }),
+    /not supported/,
+  )
+  assert.throws(
+    () => actionPreviewSpec(ROOT, { action: "daemon.status", live: true }),
+    /not supported/,
+  )
+  assert.throws(
+    () => actionPreviewSpec(ROOT, { action: "service.logs", name: "api", maxBytes: -1 }),
+    InputError,
+  )
+  assert.throws(
+    () => actionPreviewSpec(ROOT, { action: "service.logs", name: "api", maxBytes: 65537 }),
+    InputError,
+  )
+  assert.throws(
+    () => actionPreviewSpec(ROOT, { action: "service.logs", name: "api", maxBytes: 1.5 }),
+    InputError,
+  )
+  assert.throws(
+    () => actionPreviewSpec(ROOT, { action: "integration.status", scope: "global" }),
+    InputError,
+  )
+  assert.throws(
+    () => actionPreviewSpec(ROOT, {
+      action: "integration.status",
+      name: "vim",
+    }),
+    InputError,
+  )
+  assert.throws(
+    () => actionPreviewSpec(ROOT, { action: "daemon.ensure", wait: -1 }),
+    InputError,
+  )
+  assert.throws(
+    () => actionPreviewSpec(ROOT, { action: "daemon.ensure", wait: 601 }),
+    InputError,
+  )
+  assert.throws(
+    () => actionPreviewSpec(ROOT, { action: "daemon.ensure", idleTimeout: 86401 }),
+    InputError,
+  )
+
+  for (const action of ACTION_NAMES) {
+    const input = { action }
+    if (
+      [
+        "service.status",
+        "service.start",
+        "service.run",
+        "service.stop",
+        "service.restart",
+        "service.logs",
+        "tunnel.status",
+        "tunnel.start",
+      ].includes(action)
+    ) {
+      input.name = "api"
+    }
+    assert.equal(actionPreviewSpec(ROOT, input).args[1], action)
+  }
+})
+
 test("shared bounds and types", () => {
   assert.equal(text("  /repo  ", "root", 10), "/repo")
   assert.throws(() => text("", "root", 10), InputError)
@@ -255,6 +461,11 @@ test("shared bounds and types", () => {
   assert.throws(() => optionalDepth(1.1), InputError)
   assert.equal(optionalNumber(0, "memoryMb", 10), 0)
   assert.throws(() => optionalNumber("4", "memoryMb", 10), InputError)
+  assert.equal(optionalInteger(0, "maxBytes", 0, 10), 0)
+  assert.equal(optionalInteger(10, "maxBytes", 0, 10), 10)
+  assert.throws(() => optionalInteger(11, "maxBytes", 0, 10), InputError)
+  assert.throws(() => optionalInteger(1.5, "maxBytes", 0, 10), InputError)
+  assert.throws(() => optionalInteger("4", "maxBytes", 0, 10), InputError)
 })
 
 test("redaction removes obvious tokens and keeps the tail", () => {

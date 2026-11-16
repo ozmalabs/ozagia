@@ -319,3 +319,123 @@ export interface TestPlan {
   not_assessed?: string[]
   warnings?: string[]
 }
+
+export interface ResearchColumn {
+  key: string
+  label: string
+}
+
+export interface ResearchNodeRef {
+  id: string
+  type: string
+  label: string
+}
+
+export interface ResearchView {
+  schema?: number
+  schema_name?: string
+  view?: string
+  title?: string
+  investigation_id?: string | null
+  columns?: ResearchColumn[]
+  nodes?: ResearchNodeRef[]
+  rows?: Array<Record<string, unknown>>
+  summary?: Record<string, unknown>
+  provenance?: {
+    derived?: boolean
+    generator?: string
+    view_schema?: number
+    graph_schema?: number | string | null
+    investigation?: string | null
+    source?: string | null
+    root?: string | null
+    record_counts?: Record<string, Record<string, number>>
+    truth_assessed?: boolean
+    [key: string]: unknown
+  }
+  omitted?: {
+    rows?: number
+    reason?: string
+    limit?: number
+    graph?: { nodes?: number; edges?: number; reason?: string; [key: string]: unknown } | null
+    [key: string]: unknown
+  }
+  not_assessed?: string[]
+  truth_assessed?: boolean
+  note?: string
+  graph?: unknown
+  [key: string]: unknown
+}
+
+export interface SettingSchemaEntry {
+  key: string
+  group?: string
+  type?: string
+  default?: unknown
+  scope?: string
+  description?: string
+  validation?: string
+  restart_required?: boolean
+  section?: string
+  name?: string
+  aliases?: string[]
+  env?: string | null
+}
+
+export interface SettingValueEntry {
+  key: string
+  value?: unknown
+  source?: string
+  type?: string
+  scope?: string
+  default?: unknown
+  description?: string
+  validation?: string
+  restart_required?: boolean
+  section?: string
+}
+
+export interface SettingsSchemaReport {
+  schema?: number
+  settings?: SettingSchemaEntry[]
+}
+
+export interface SettingsValuesReport {
+  schema?: number
+  root?: string
+  locations?: Record<string, unknown>
+  settings?: Record<string, SettingValueEntry>
+}
+
+export interface ActionSummary {
+  name: string
+  description?: string
+  mutating?: boolean
+  destructive?: boolean
+  live_gated?: boolean
+}
+
+export interface ActionPreview {
+  schema?: number
+  action?: string
+  mode?: string
+  state?: string
+  ok?: boolean
+  operation?: string
+  manager_call?: string | null
+  argv?: string[]
+  expected_effect?: string
+  preconditions?: string[]
+  risks?: string[]
+  current?: unknown
+  current_state?: string
+  applicable?: boolean
+  confirmation?: string | null
+  result?: unknown
+  error?: string | null
+  live?: boolean
+  gated?: boolean
+  notes?: string[]
+  audit?: string | null
+  audit_error?: string | null
+}

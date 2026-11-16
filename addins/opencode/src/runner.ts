@@ -52,6 +52,10 @@ const MAX_MESSAGE = 1000
 const MAX_CHANGED = 500
 const MAX_DEPTH = 32
 const MAX_MB = 10_000_000
+const MAX_ACTION_NAME = 128
+const MAX_ACTION_LOG_BYTES = 64 * 1024
+const MAX_ACTION_WAIT_S = 600
+const MAX_ACTION_IDLE_TIMEOUT_S = 86_400
 const DEFAULT_MAX_BUFFER = 8 * 1024 * 1024
 const STDERR_TAIL = 64 * 1024
 const ERROR_TAIL = 500
@@ -62,6 +66,69 @@ const INVESTIGATION_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/
 const RESEARCH_VIEWS = ["library", "fetch", "screening", "evidence", "consensus", "citation"] as const
 const POLICY_KINDS = ["commit", "merge", "push"] as const
 const RESOURCE_KINDS = ["job", "task", "worktree"] as const
+const ACTION_SCOPES = ["project", "user"] as const
+const INTEGRATION_NAMES = ["opencode", "claude", "codex", "kiro"] as const
+
+/**
+ * The action names `ozagia.actions_cli list` publishes. Kept as a static
+ * allowlist so a caller cannot pass an arbitrary positional argument. Keep it
+ * in step with `ACTION_NAMES` in `rpc.ts` and `core/actions.py`.
+ */
+export const ACTION_NAMES = [
+  "daemon.status",
+  "daemon.ensure",
+  "daemon.stop",
+  "daemon.restart",
+  "service.list",
+  "service.status",
+  "service.start",
+  "service.run",
+  "service.stop",
+  "service.restart",
+  "service.logs",
+  "tunnel.list",
+  "tunnel.status",
+  "tunnel.start",
+  "integration.status",
+] as const
+
+export type ActionName = (typeof ACTION_NAMES)[number]
+
+type ActionArgument = "name" | "live" | "network" | "maxBytes" | "scope" | "wait" | "idleTimeout"
+
+/**
+ * Which preview arguments each action accepts. Mirrors
+ * `ozagia.core.actions._canonical` so an unsupported flag fails here instead of
+ * spawning the CLI only to return an error.
+ */
+const ACTION_ARGUMENTS: Record<ActionName, readonly ActionArgument[]> = {
+  "daemon.status": [],
+  "daemon.ensure": ["wait", "idleTimeout"],
+  "daemon.stop": [],
+  "daemon.restart": ["wait", "idleTimeout"],
+  "service.list": [],
+  "service.status": ["name"],
+  "service.start": ["name"],
+  "service.run": ["name"],
+  "service.stop": ["name"],
+  "service.restart": ["name"],
+  "service.logs": ["name", "maxBytes"],
+  "tunnel.list": [],
+  "tunnel.status": ["name"],
+  "tunnel.start": ["name", "live", "network"],
+  "integration.status": ["name", "scope"],
+}
+
+const ACTIONS_REQUIRING_NAME: ReadonlySet<ActionName> = new Set([
+  "service.status",
+  "service.start",
+  "service.run",
+  "service.stop",
+  "service.restart",
+  "service.logs",
+  "tunnel.status",
+  "tunnel.start",
+])
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -99,6 +166,32 @@ export function optionalNumber(value: unknown, field: string, max: number): numb
   }
   if (value < 0 || value > max) throw new InputError(`${field} must be between 0 and ${max}`)
   return value
+}
+
+export function optionalInteger(
+  value: unknown,
+  field: string,
+  min: number,
+  max: number,
+): number | undefined {
+  if (value === undefined || value === null) return undefined
+  if (typeof value !== "number" || !Number.isInteger(value)) {
+    throw new InputError(`${field} must be an integer`)
+  }
+  if (value < min || value > max) {
+    throw new InputError(`${field} must be between ${min} and ${max}`)
+  }
+  return value
+}
+
+/** An action target label: bounded text without control characters. */
+export function actionName(value: unknown, field = "name"): string | undefined {
+  const name = optionalText(value, field, MAX_ACTION_NAME)
+  if (name === undefined) return undefined
+  if (/[\u0000-\u001f\u007f]/.test(name)) {
+    throw new InputError(`${field} contains control characters`)
+  }
+  return name
 }
 
 export function optionalDepth(value: unknown): number | undefined {
@@ -286,6 +379,120 @@ export function researchViewSpec(root: string, input: ResearchInput): CommandSpe
     display: `ozagia.research_ui_cli --investigation ${investigation} --view ${view} --format json`,
   }
 }
+
+export function settingsSchemaSpec(): CommandSpec {
+  return {
+    module: "ozagia.settings_cli",
+    args: ["schema", "--json"],
+    display: "ozagia.settings_cli schema --json",
+  }
+}
+
+export function settingsValuesSpec(root: string): CommandSpec {
+  return {
+    module: "ozagia.settings_cli",
+    args: ["values", "--root", root, "--json"],
+    display: "ozagia.settings_cli values --json",
+  }
+}
+
+export function actionsListSpec(): CommandSpec {
+  return {
+    module: "ozagia.actions_cli",
+    args: ["list", "--json"],
+    display: "ozagia.actions_cli list --json",
+  }
+}
+
+export interface ActionPreviewInput {
+  action?: unknown
+  name?: unknown
+  live?: unknown
+  network?: unknown
+  maxBytes?: unknown
+  scope?: unknown
+  wait?: unknown
+  idleTimeout?: unknown
+}
+
+function supplied(value: unknown): boolean {
+  if (value === undefined || value === null) return false
+  if (typeof value === "string" && !value.trim()) return false
+  return true
+}
+
+/**
+ * Build a read-only `actions_cli preview` invocation.
+ *
+ * The argument set is checked against the action's documented arguments before
+ * anything is spawned. The one-time confirmation token that preview returns is
+ * display data: this add-in has no apply RPC.
+ */
+export function actionPreviewSpec(root: string, input: ActionPreviewInput): CommandSpec {
+  const action = oneOf(input.action, "action", ACTION_NAMES)
+  const allowed = ACTION_ARGUMENTS[action]
+
+  const fields: Array<[ActionArgument, unknown]> = [
+    ["name", input.name],
+    ["live", input.live],
+    ["network", input.network],
+    ["maxBytes", input.maxBytes],
+    ["scope", input.scope],
+    ["wait", input.wait],
+    ["idleTimeout", input.idleTimeout],
+  ]
+  for (const [field, value] of fields) {
+    if (supplied(value) && !allowed.includes(field)) {
+      throw new InputError(`${field} is not supported by ${action}`)
+    }
+  }
+
+  let name: string | undefined
+  if (allowed.includes("name")) {
+    name = actionName(input.name)
+    if (name === undefined && ACTIONS_REQUIRING_NAME.has(action)) {
+      throw new InputError(`name is required for ${action}`)
+    }
+    if (action === "integration.status" && name !== undefined) {
+      name = oneOf(name, "name", INTEGRATION_NAMES)
+    }
+  }
+
+  const live = allowed.includes("live") ? optionalBoolean(input.live, "live") : undefined
+  const network = allowed.includes("network")
+    ? optionalBoolean(input.network, "network")
+    : undefined
+  const maxBytes = allowed.includes("maxBytes")
+    ? optionalInteger(input.maxBytes, "maxBytes", 0, MAX_ACTION_LOG_BYTES)
+    : undefined
+  const scope =
+    allowed.includes("scope") && supplied(input.scope)
+      ? oneOf(input.scope, "scope", ACTION_SCOPES)
+      : undefined
+  const wait = allowed.includes("wait")
+    ? optionalNumber(input.wait, "wait", MAX_ACTION_WAIT_S)
+    : undefined
+  const idleTimeout = allowed.includes("idleTimeout")
+    ? optionalNumber(input.idleTimeout, "idleTimeout", MAX_ACTION_IDLE_TIMEOUT_S)
+    : undefined
+
+  const args = ["preview", action, "--root", root]
+  if (name !== undefined) args.push("--name", name)
+  if (live) args.push("--allow-live")
+  if (network) args.push("--allow-network")
+  if (maxBytes !== undefined) args.push("--max-bytes", String(maxBytes))
+  if (scope !== undefined) args.push("--scope", scope)
+  if (wait !== undefined) args.push("--wait", String(wait))
+  if (idleTimeout !== undefined) args.push("--idle-timeout", String(idleTimeout))
+  args.push("--json")
+
+  return {
+    module: "ozagia.actions_cli",
+    args,
+    display: `ozagia.actions_cli preview ${action} --json`,
+  }
+}
+
 
 // ---------------------------------------------------------------------------
 // Process execution and error reporting

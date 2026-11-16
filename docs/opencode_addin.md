@@ -1,8 +1,8 @@
 # OpenCode add-in
 
-**Status:** wave 4, first interactive UI host. Read-only. The package lives in
-[`addins/opencode/`](../addins/opencode/); this page records its design, the CLI
-mapping, the GUI surface and the API gaps found while building it.
+**Status:** read-only add-in extension (plan item 8 follow-on). The package lives
+in [`addins/opencode/`](../addins/opencode/); this page records its design, the
+CLI mapping, the GUI surface and the API gaps found while building it.
 
 The plan item is [item 8, OpenCode add-in MVP](plans/2026-11-16_ui_and_agent_features.md).
 It reuses the presentation layer from items 1 and 6: the same apertures, view
@@ -10,8 +10,9 @@ model and status snapshot that the CLI and static HTML export use. The add-in
 does not import Python and does not duplicate graph queries in TypeScript.
 
 ```text
-ozagia CLI JSON  ->  server part (RPC)  ->  GUI Solid panel
-python -m ...        spawn, validate        graph / status / testing
+ozagia CLI JSON  ->  server part (RPC)  ->  GUI Solid panel / settings page
+python -m ...        spawn, validate        graph / status / testing /
+                                             research / actions / settings
 ```
 
 ## Package and loading
@@ -114,7 +115,11 @@ schema and these methods:
 | `policyCheck()` | `{kind, message?, target?, force?, tags?}` | `python -m ozagia.worktree_cli policy --for KIND --root ROOT --json` | `kind` is `commit`, `merge` or `push`. |
 | `resourcesCheck()` | `{kind?, memoryMb?, diskMb?, path?}` | `python -m ozagia.resources_cli check --for KIND --root ROOT --json` | `kind` defaults to `job`; admission only. |
 | `testingPlan()` | `{base?, head?, task?, changed?}` | `python -m ozagia.testing_cli plan --root ROOT --json` | `changed` is a string or string array; repeats `--changed`. |
-| `researchView()` | `{investigation, view}` | `python -m ozagia.research_ui_cli --root ROOT --investigation ID --view VIEW --format json` | Read-only research projection; no UI tab yet. |
+| `researchView()` | `{investigation, view}` | `python -m ozagia.research_ui_cli --root ROOT --investigation ID --view VIEW --format json` | Read-only research projection; backs the Research tab. |
+| `settingsSchema()` | `{}` | `python -m ozagia.settings_cli schema --json` | Registry entries with type, default, scope, validation and env names. |
+| `settingsValues()` | `{}` | `python -m ozagia.settings_cli values --root ROOT --json` | Effective values, sources and file locations. |
+| `actionsList()` | `{}` | `python -m ozagia.actions_cli list --json` | Action catalogue with mutating/destructive/live-gated flags. |
+| `actionPreview()` | `{action, name?, live?, network?, maxBytes?, scope?, wait?, idleTimeout?}` | `python -m ozagia.actions_cli preview ACTION --root ROOT ... --json` | Preview only; returns the operation, argv, risks and token. No `actionApply` exists. |
 
 Input rules:
 
@@ -123,13 +128,20 @@ Input rules:
   kinds are enums;
 - every string has a maximum length; changed-file lists are capped at 500;
   depth is an integer 0–32; memory/disk values are finite and non-negative;
+- `actionPreview` validates the action against the fifteen published names and
+  rejects an argument the chosen action does not accept (for example `live` on
+  `daemon.status`, or `scope` on `service.start`). `name` is required for
+  service and tunnel actions and is bounded to 128 characters with no control
+  characters; `maxBytes` is an integer 0–65536; `wait` is 0–600 s and
+  `idleTimeout` is 0–86400 s;
 - the handler repeats the validation in TypeScript, so a caller that bypasses
   the JSON-schema validator still gets `{ ok: false, error: { code:
   "invalid_input" } }` rather than an unbounded argv.
 
 `command` in the envelope is a short display string such as
 `python3 -m ozagia.view_cli --aperture architecture --format json`. Free-form
-values (paths, commit messages, changed files) are not echoed there.
+values (paths, commit messages, changed files, action target names) are not
+echoed there.
 
 ### Root selection
 
@@ -147,14 +159,18 @@ per-session gap in the first slice.
 - `Style` with a small prefixed stylesheet (`ozagia-*`), so the panel does not
   depend on host internals;
 - one `Panel` with id `ozagia`, region `side`, width 430, a mobile menu view and
-  tabs `graph`, `status`, `testing`;
-- five `Command`s: open graph, open status, open testing, check worktree, plan
-  tests.
+  tabs `graph`, `status`, `testing`, `research`, `actions`;
+- one `SettingsPage` with id `ozagia-settings` and the host's
+  `SettingsLayout`, `SettingsSection` and `SettingsRow` components;
+- eight `Command`s: open graph, status, testing, research, actions and settings,
+  check worktree and plan tests.
 
-The graph tab is pinned and is the panel's fallback. Status and testing are
-listed when their stored tab ids are open; their commands call
-`ctx.layout.open(`${ctx.id}:${tab}`, session, { background: true })`. Commands
-are disabled when no session is routed. No command mutates anything.
+The graph tab is pinned and is the panel's fallback. Status, testing, research
+and actions are listed when their stored tab ids are open; their commands call
+`ctx.layout.open(`${ctx.id}:${tab}`, session, { background: true })`. The
+settings command calls `ctx.layout.settings("ozagia-settings")`; it does not
+need a routed session. Panel commands are disabled when no session is routed.
+No command mutates anything.
 
 Labels are rendered as Solid text/attributes. There is no `innerHTML`; recorded
 node/edge labels, findings, file paths and error text are escaped by the
@@ -220,21 +236,86 @@ shows:
 The panel states plainly that planning executes nothing and assesses no truth.
 A plan is evidence, not a test result.
 
+### Research
+
+Inputs are an investigation id and one of the six recorded views (`library`,
+`fetch`, `screening`, `evidence`, `consensus`, `citation`). Load view calls
+`researchView` once and renders:
+
+- the view title, investigation id and truth-assessed flag;
+- summary counts and names, including `row_count`;
+- the primary row table with the view's ordered columns;
+- provenance: generator, source graph path, root, graph/view schema, derived
+  flag and record counts by node and edge type;
+- omitted rows and the row-cap limit, plus the graph projection's own omissions
+  when present;
+- the explicit `not_assessed` list and the view's read-only note.
+
+A missing investigation, missing graph or malformed state is shown as the CLI's
+error plus a "check the id or state directory" message. The tab never creates an
+investigation, builds a graph or renders a missing record as a successful empty
+view. The table shows the first 100 returned rows for DOM size; the returned-row
+count and omitted-row count are reported separately.
+
+### Settings
+
+The contributed **ozagia settings** page calls both `settingsSchema` and
+`settingsValues` once. It merges them by key and renders the host's settings
+components:
+
+- a read-only status row and the effective root/repo-config path;
+- one section per registry group (`index`, `resources`, `worktrees`, `markdown`,
+  `files`, `models`, `tasks`, `review`, `testing`, `ui`), with open-ended
+  `testing.tasks.*` and `testing.paths.*` entries grouped under `testing`;
+- one row per key with the current value, its source badge (`default`, `user`,
+  `repo`, `env` or `override`), type, scope, default, description and restart
+  flag.
+
+There is no editable control and no `settings_cli set` call. A failed read shows
+the structured error and a retry; a successful empty read shows an explicit
+empty state. Write previews and applies remain CLI-only.
+
+### Actions
+
+The Actions tab reads `actionsList` and shows every action with `read-only`,
+`mutating`, `destructive` and `live-gated` badges. Selecting an action shows only
+its documented arguments: target name, integration name/scope, service-log byte
+cap, daemon wait/idle timeout, and the tunnel live/network gates. Preview calls
+`actionPreview` and renders:
+
+- operation, expected effect, current state and manager call;
+- the exact argv as a JSON array (no shell);
+- preconditions, risks and notes;
+- the one-time confirmation token, clearly labelled display-only.
+
+The tab has no Apply button and the RPC has no `actionApply` method. Applying
+requires the separate `actions_cli apply` command after a person reviews the
+operation, argv and risks. A preview writes one pending token under
+`.ozagia/actions/pending` (mode `0600`, ten-minute TTL); it starts, stops,
+signals and connects nothing.
+
 ## Read-only guarantees
 
-This slice is intentionally narrower than the plan item. It does **not**:
+This slice is intentionally narrower than the full plan item. It does **not**:
 
 - commit, merge, push, stage, edit, create or delete files;
-- start, stop, signal or autostart a daemon, service, tunnel or job;
+- apply a process/connection action, or start, stop, signal or autostart a
+  daemon, service, tunnel or job (the Actions tab only previews);
+- write a setting, or call `settings_cli set` (the Settings page only reads);
 - download artifacts, install Ocelot, fetch references or call a model;
-- build or refresh the graph snapshot;
+- build or refresh the graph snapshot or a research investigation;
 - run tests or apply a test plan;
-- write into the repository or its state directory.
+- write repository files. A preview's pending token is the only state-dir write,
+  and it is bounded, `0600` and expires.
 
-The graph and status panels read existing JSON. The worktree/policy/resource
-commands on the RPC are checks, not actions. The CLI paths themselves are
-read-only by design (see [view](view.md), [status](status.md),
-[worktree](worktree.md), [resources](resources.md) and [testing](testing.md)).
+The graph, status, testing and research panels read existing JSON. The
+worktree/policy/resource commands on the RPC are checks, not actions. The action
+preview is the landed `core.actions` preview: it reads runtime state and returns
+a token, but never constructs a manager that could mutate state. The CLI paths
+themselves are read-only by design (see [view](view.md), [status](status.md),
+[worktree](worktree.md), [resources](resources.md), [testing](testing.md),
+[settings](settings.md), [actions](actions.md) and
+[research UI](research_ui.md)).
 
 ## Build and tests
 
@@ -248,11 +329,12 @@ npm run build
 
 - `npm run typecheck` runs `tsc --noEmit` over `src` and `vite.config.ts`.
 - `npm test` runs `node --test tests/*.test.cjs`. The suite covers every
-  argument builder, optional flags, bounds and enum rejection, `changed`
-  repetition, credential redaction/tail capping, and the subprocess wrapper
-  (JSON parse, exit 1, redacted exit errors, timeout, cancellation and stdout
-  cap). It is offline and does not load `@opencode/plugin`; `tests/load-ts.cjs`
-  transpiles `src/runner.ts` with the installed TypeScript package.
+  argument builder, optional flags, bounds and enum rejection, action/argument
+  matching, `changed` repetition, credential redaction/tail capping, and the
+  subprocess wrapper (JSON parse, exit 1, redacted exit errors, timeout,
+  cancellation and stdout cap). It is offline and does not load
+  `@opencode/plugin`; `tests/load-ts.cjs` transpiles `src/runner.ts` with the
+  installed TypeScript package.
 - `npm run build` uses `gui()` from `@opencode/plugin/gui/vite` and emits one
   CommonJS file at `dist/gui-experimental.cjs`. The bundle keeps `solid-js`,
   `solid-js/web`, `@opencode/plugin/gui` and `@opencode/plugin/rpc` external and
@@ -264,15 +346,16 @@ directory plugin loads without a build. `node_modules/` is ignored.
 Local verification on 2026-11-16 (Node 20.5.1, npm 9.8.0, Vite 7.3.8):
 
 - `npm run typecheck`: passed.
-- `npm test`: 14 tests passed, 0 failed, offline.
-- `npm run build`: one `dist/gui-experimental.cjs` (about 49 kB, 12.1 kB gzip).
+- `node --test tests/*.test.cjs`: 17 tests passed, 0 failed, offline.
+- `npm run build`: one `dist/gui-experimental.cjs` (79.70 kB, 18.25 kB gzip).
 - A direct runner smoke test against this worktree returned valid JSON for
-  `status`, `apertures`, `worktreeCheck`, `policyCheck`, `resourcesCheck` and
-  `testingPlan`; `view` and `researchView` correctly returned structured errors
-  for a missing graph and a missing investigation.
-- The server registration was exercised with a mock `ctx.rpc.register`; all
-  eight handlers were present and an invalid aperture returned
-  `invalid_input`.
+  `settingsSchema`, `settingsValues`, `actionsList` and `actionPreview`;
+  `researchView` correctly returned a structured missing-investigation error.
+  Earlier checks covered `status`, `apertures`, `worktreeCheck`, `policyCheck`,
+  `resourcesCheck` and `testingPlan`.
+- The server registration was exercised with a mock `ctx.rpc.register` in the
+  earlier slice; the new handlers use the same wrapper and the pure builders
+  tested by the Node suite.
 - Vite printed its engine warning because this host has Node 20.5.1 (Vite 7
   asks for 20.19+ or 22.12+); the build still completed.
 
@@ -282,29 +365,34 @@ Built and typechecked against `@opencode/plugin` 2.3.0 (the current latest at th
 time of writing). The GUI SDK is explicitly experimental. The following are
 known gaps or host dependencies, not hidden behaviour:
 
-1. **No live host test in this worktree.** The build, typecheck and server
-   registration were exercised locally; the GUI cannot be mounted without
-   OpenCode Desktop. Verify `@opencode/plugin` compatibility with the installed
-   Desktop version before relying on the panel.
+1. **No live host test in this worktree.** The build, typecheck and runner smoke
+   tests were exercised locally; the GUI cannot be mounted without OpenCode
+   Desktop. Verify `@opencode/plugin` compatibility with the installed Desktop
+   version before relying on the panel.
 2. **Browser tabs.** The GUI docs describe windows and the desktop main process;
    GitHub-style browser-tab support depends on the host version. This package
-   uses only window APIs (`Panel`, `Command`, `Style`, `ctx.layout`, `ctx.toast`,
-   `ctx.client`), so it should work wherever those are provided.
+   uses only window APIs (`Panel`, `SettingsPage`, `Command`, `Style`,
+   `ctx.layout`, `ctx.toast`, `ctx.client`, `ctx.ui`), so it should work wherever
+   those are provided.
 3. **Panel layout breadth.** The panel is a side panel with a pinned graph tab
-   and command-opened status/testing tabs. It is not yet a settings page or a
-   slot-based embedded view.
+   and command-opened status/testing/research/actions tabs. The settings page is
+   a separate Settings contribution. There is no slot-based embedded view.
 4. **Per-session root.** As above, the root is per plugin/server instance, not
    per routed session. `options.root` is the override.
-5. **Settings page and mutations.** The plan item lists a settings page and
-   more commands ("Check policy", "Explain resources", "Review this diff",
-   "Show impact", "Open evidence", "Start bounded task", "Reindex"). This slice
-   implements graph/status/testing and the worktree/test-plan commands only;
-   actions follow the reviewed action layer.
-6. **Research UI.** The `researchView` RPC exists and is read-only, but no GUI
-   tab renders it yet. It is available for a later view.
-7. **Node version.** Vite 7 warns on Node 20.5.1 and recommends 20.19+/22.12+.
+5. **No mutation surface.** There is no setting write, action apply, service
+   start/stop, tunnel start, review run, bounded task or reindex RPC. The plan
+   item lists those commands, but they remain behind their existing CLI layers
+   and confirmation flows. In particular, `actionPreview` returns a token and
+   the add-in deliberately has no `actionApply`.
+6. **Research writes.** The Research tab is a projection only. Reference merge,
+   screening revision, adjudication, fetch apply and manuscript controls are not
+   exposed.
+7. **Settings search.** The page uses the host settings components and renders
+   one section per registry group, but its per-key rows are not added to the
+   settings search index; the page-level entry is.
+8. **Node version.** Vite 7 warns on Node 20.5.1 and recommends 20.19+/22.12+.
    The build succeeds; use a supported Node when possible.
-8. **Output schema.** The envelope uses a permissive JSON-object schema by
+9. **Output schema.** The envelope uses a permissive JSON-object schema by
    design, so the host validates transport shape but not every CLI payload
    field. The GUI narrows defensively and renders section errors instead of
    assuming a report.
@@ -316,4 +404,5 @@ known gaps or host dependencies, not hidden behaviour:
   [RPC](https://opencode.ai/docs/build/plugins/rpc/),
   [server](https://opencode.ai/docs/build/plugins/server/).
 - ozagia: [status](status.md), [view](view.md), [worktree](worktree.md),
-  [resources](resources.md), [testing](testing.md), [research UI](research_ui.md).
+  [resources](resources.md), [testing](testing.md), [settings](settings.md),
+  [actions](actions.md), [research UI](research_ui.md).

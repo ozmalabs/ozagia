@@ -112,6 +112,40 @@ const RESEARCH_INPUT = {
   additionalProperties: false,
 } as const
 
+export const ACTION_NAMES = [
+  "daemon.status",
+  "daemon.ensure",
+  "daemon.stop",
+  "daemon.restart",
+  "service.list",
+  "service.status",
+  "service.start",
+  "service.run",
+  "service.stop",
+  "service.restart",
+  "service.logs",
+  "tunnel.list",
+  "tunnel.status",
+  "tunnel.start",
+  "integration.status",
+] as const
+
+const ACTION_PREVIEW_INPUT = {
+  type: "object",
+  properties: {
+    action: { type: "string", enum: ACTION_NAMES },
+    name: { type: "string", minLength: 1, maxLength: 128 },
+    live: { type: "boolean" },
+    network: { type: "boolean" },
+    maxBytes: { type: "integer", minimum: 0, maximum: 65536 },
+    scope: { type: "string", enum: ["project", "user"] },
+    wait: { type: "number", minimum: 0, maximum: 600 },
+    idleTimeout: { type: "number", minimum: 0, maximum: 86400 },
+  },
+  required: ["action"],
+  additionalProperties: false,
+} as const
+
 export const Ozagia = Rpc.define({
   id: "ozagia",
   methods: {
@@ -123,6 +157,10 @@ export const Ozagia = Rpc.define({
     resourcesCheck: { input: RESOURCES_INPUT, output: ENVELOPE_OUTPUT },
     testingPlan: { input: TESTING_INPUT, output: ENVELOPE_OUTPUT },
     researchView: { input: RESEARCH_INPUT, output: ENVELOPE_OUTPUT },
+    settingsSchema: { input: EMPTY_INPUT, output: ENVELOPE_OUTPUT },
+    settingsValues: { input: EMPTY_INPUT, output: ENVELOPE_OUTPUT },
+    actionsList: { input: EMPTY_INPUT, output: ENVELOPE_OUTPUT },
+    actionPreview: { input: ACTION_PREVIEW_INPUT, output: ENVELOPE_OUTPUT },
   },
   events: {},
 })
