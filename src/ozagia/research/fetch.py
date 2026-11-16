@@ -53,8 +53,11 @@ def _host_is_private(host: str) -> bool:
     return False
 
 
-def validate_url(url: str, *, allowed_hosts: set[str] | None = None) -> str:
-    """Reject non-HTTP, credentialed and private-network URLs (SSRF guard)."""
+def validate_url(url: str, *, allowed_hosts: set[str] | None = None,
+                 allow_private: bool = False) -> str:
+    """Reject non-HTTP, credentialed and private-network URLs (SSRF guard).
+    `allow_private` is for tests against a local server only; no tool
+    argument sets it."""
     if not isinstance(url, str) or not url.strip():
         raise FetchError("fetch URL must be a non-empty string")
     parts = urlsplit(url.strip())
@@ -69,7 +72,7 @@ def validate_url(url: str, *, allowed_hosts: set[str] | None = None) -> str:
         item.casefold() for item in allowed_hosts
     }:
         raise FetchError(f"fetch host {host!r} is not allowlisted")
-    if _host_is_private(host):
+    if not allow_private and _host_is_private(host):
         raise FetchError(f"fetch host {host!r} resolves to a private address")
     return parts.geturl()
 
@@ -80,14 +83,16 @@ def http_get(
     timeout: float = 20.0,
     max_bytes: int = MAX_FETCH_BYTES,
     allowed_hosts: set[str] | None = None,
+    allow_private: bool = False,
 ) -> dict[str, Any]:
-    """Fetch a URL with a size cap and a post-redirect SSRF check."""
-    safe_url = validate_url(url, allowed_hosts=allowed_hosts)
+    """Fetch a URL with a size cap and a post-redirect SSRF check. The
+    request carries `USER_AGENT` and no cookies or credentials."""
+    safe_url = validate_url(url, allowed_hosts=allowed_hosts, allow_private=allow_private)
     request = Request(safe_url, headers={"User-Agent": USER_AGENT, "Accept": "*/*"})
     try:
         with urlopen(request, timeout=timeout) as response:
             final_url = response.geturl()
-            validate_url(final_url, allowed_hosts=allowed_hosts)
+            validate_url(final_url, allowed_hosts=allowed_hosts, allow_private=allow_private)
             declared = response.headers.get("Content-Length")
             try:
                 declared_bytes = int(declared) if declared is not None else None

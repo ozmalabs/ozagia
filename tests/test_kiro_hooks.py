@@ -324,6 +324,8 @@ POST_CASES = [
     ("grep", {"pattern": "def", "path": "src", "include": "*.py"},
      "grep", lambda r: {"pattern": "def", "path": "src", "include": "*.py", "literal": False}),
     ("glob", {"pattern": "**/*.py"}, "glob", lambda r: {"pattern": "**/*.py"}),
+    ("web_fetch", {"url": "https://arxiv.org/abs/2401.12345", "mode": "truncated"},
+     "webfetch", lambda r: {"url": "https://arxiv.org/abs/2401.12345"}),
 ]
 
 
@@ -369,7 +371,7 @@ def test_post_empty_append_prints_nothing(repo, daemon):
     ("read_files", {"paths": ["src/a.py", "src/b.py"]}),
     ("execute_bash", {"cmd": "no command field"}),
     ("fs_write", {"command": "rename", "path": "x"}),
-    ("web_fetch", {"url": "https://example.com"}),
+    ("web_fetch", {"mode": "truncated"}),
 ])
 def test_post_unmapped_sends_nothing(repo, daemon, tool, tool_input):
     stub = daemon()
@@ -561,7 +563,7 @@ def test_install_v3_writes_hook_file_and_mcp(tmp_path):
     assert [(h["trigger"], h.get("matcher")) for h in hooks] == [
         ("SessionStart", None), ("PreToolUse", "shell"), ("PreToolUse", "read"),
         ("PreToolUse", "write"), ("PostToolUse", "read"), ("PostToolUse", "write"), ("PostToolUse", "shell"),
-        ("PostCompact", None)]
+        ("PostToolUse", "web_fetch"), ("PostCompact", None)]
     for h in hooks:
         assert set(h) <= V3_FIELDS and h["trigger"] in V3_TRIGGERS | {"PostCompact"}
         assert h["action"] == {"type": "command", "command": CMD}
@@ -667,7 +669,8 @@ def test_install_agent_creates_universal_profile(tmp_path):
     assert data["includeMcpJson"] is True
     assert [(h["trigger"], h.get("matcher")) for h in data["hooks"]] == [
         ("agentSpawn", None), ("preToolUse", "shell"), ("preToolUse", "read"),
-        ("preToolUse", "write"), ("postToolUse", "read"), ("postToolUse", "write"), ("postToolUse", "shell")]
+        ("preToolUse", "write"), ("postToolUse", "read"), ("postToolUse", "write"), ("postToolUse", "shell"),
+        ("postToolUse", "web_fetch")]
     for h in data["hooks"]:
         assert h["trigger"] in LEGACY_TRIGGERS
         assert h["action"] == {"type": "command", "command": CMD}
@@ -689,7 +692,8 @@ def test_install_agent_into_object_form_profile_keeps_its_form(tmp_path):
     assert hooks["agentSpawn"][0] == {"command": "git status"}
     assert hooks["agentSpawn"][1] == {"command": CMD, "timeout_ms": 20000}
     assert [e["matcher"] for e in hooks["preToolUse"]] == ["shell", "read", "write"]
-    assert [e["matcher"] for e in hooks["postToolUse"]] == ["read", "write", "shell"]
+    assert [e["matcher"] for e in hooks["postToolUse"]] == ["read", "write", "shell",
+                                                           "web_fetch"]
     inst.install(tmp_path, python=PY, fmt="agent", agent="dev")
     assert _json(path) == data
     assert inst.uninstall(tmp_path, agent="dev") == [path, _mcp(tmp_path)]

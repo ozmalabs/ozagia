@@ -181,7 +181,8 @@ def test_research_mode_exposes_only_lazy_research_tools(monkeypatch) -> None:
     names = {t["name"] for t in server.handle(
         {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
     )["result"]["tools"]}
-    assert names == {"research_ping"}
+    # research_fetch (`ozagia.research.fallback`) is in every mode.
+    assert names == {"research_ping", "research_fetch"}
     response = server.handle(_call("research_ping", {"value": "x"}))
     assert response["result"]["isError"] is False
     assert calls == [("research_ping", {"value": "x"}, "/work/repo")]

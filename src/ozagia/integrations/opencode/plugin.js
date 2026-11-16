@@ -4,7 +4,8 @@
 // Behaviour
 // - Without $OZAGIA_DAEMON_SOCK the plugin does nothing: no tool is replaced.
 // - Otherwise read, grep, glob, edit, write and shell (those that exist) get a
-//   new execute; patch and every other tool are untouched. Each replaced tool
+//   new execute; webfetch gets an after-only execute (see AFTER_ONLY); patch
+//   and every other tool are untouched. Each replaced tool
 //   keeps its original execute, takes the string output schema of `edit` (the
 //   built-ins validate their output against their own schema), and gets one
 //   sentence added to its description about `[ozagia]` context lines.
@@ -534,6 +535,56 @@ function wrap(client, perm, name, tool, original, hintCache) {
   };
 }
 
+// Tools wrapped for `after` only: the built-in always runs, and its output
+// (or its error) goes to the daemon, whose `append` is added. webfetch: a
+// failed fetch of a paper gets a research_fetch hint
+// (`ozagia.research.fallback`); the plugin never fetches anything itself.
+const AFTER_ONLY = ["webfetch"];
+// The output `after` gets of an after-only tool: enough for its checks.
+const AFTER_ONLY_OUTPUT_CHARS = 4096;
+
+// `result` with `append` added, keeping the result's shape; unchanged when
+// there is no text field to add it to.
+export function withAppend(result, append) {
+  if (typeof result === "string") return result + "\n" + append;
+  if (result && typeof result.output === "string") {
+    const out = { ...result, output: result.output + "\n" + append };
+    if (Array.isArray(result.content)) {
+      out.content = [...result.content, { type: "text", text: append }];
+    }
+    return out;
+  }
+  return result;
+}
+
+function wrapAfterOnly(client, name, tool, original) {
+  return async function execute(input, c) {
+    const session = c && c.sessionID;
+    if (session && client.session !== session) client.session = session;
+    const url = input && typeof input.url === "string" ? input.url : undefined;
+    const base = { harness: HARNESS, session, tool: name, input: url ? { url } : {} };
+    const appendOf = async (output, meta) => {
+      try {
+        const after = await client.request({ op: "after", ...base,
+          output: String(output).slice(0, AFTER_ONLY_OUTPUT_CHARS),
+          ...(meta ? { meta } : {}) });
+        return typeof after.append === "string" ? after.append : "";
+      } catch { return ""; }
+    };
+    let result;
+    try {
+      result = await original.call(tool, input, c);
+    } catch (err) {
+      const msg = String((err && err.message) || err);
+      const append = await appendOf(msg, { builtin_error: true });
+      if (!append) throw err;
+      throw new Error(`${msg}\n${append}`);
+    }
+    const append = await appendOf(asText(result));
+    return append ? withAppend(result, append) : result;
+  };
+}
+
 // The synthetic message for a finished job.
 export function jobEndText(ev) {
   const cmd = String(ev.command || "").slice(0, 200);
@@ -628,6 +679,17 @@ export function createPlugin(options = {}) {
                 t.execute = wrap(client, perm, name, tool, original, hintCache);
                 t.output = stringSchema;
                 t.description = (description ? description + "\n\n" : "") + NOTES[name];
+                return t;
+              });
+            } catch { /* leave this tool as it was */ }
+          }
+          for (const name of AFTER_ONLY) {
+            try {
+              const tool = reg.get(name);
+              if (!tool || typeof tool.execute !== "function") continue;
+              const original = tool.execute;
+              reg.update(name, (t) => {
+                t.execute = wrapAfterOnly(client, name, tool, original);
                 return t;
               });
             } catch { /* leave this tool as it was */ }

@@ -103,6 +103,9 @@ GREP_TOOLS = frozenset({"grep_search", "grep"})
 GLOB_TOOLS = frozenset({"glob"})
 # A path substring search; sent as the glob `**/*<query>*`.
 FILE_SEARCH_TOOLS = frozenset({"file_search"})
+# Web fetch (`{url, mode?, searchPhrase?}`): `after` only, for the
+# research_fetch hint after a failed fetch of a paper.
+WEB_FETCH_TOOLS = frozenset({"web_fetch", "webFetch"})
 
 
 # --------------------------------------------------------------------------- #
@@ -262,6 +265,9 @@ def map_tool(tool_name: str, tool_input: Any,
     if tool_name in FILE_SEARCH_TOOLS:
         query = _str(ti.get("query"))
         return ("glob", {"pattern": f"**/*{query}*"}) if query else None
+    if tool_name in WEB_FETCH_TOOLS:
+        url = _str(ti.get("url"))
+        return ("webfetch", {"url": url}) if url else None
     return None
 
 

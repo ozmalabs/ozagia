@@ -152,7 +152,7 @@ FILE_LEDGER_PATHS = 20
 ENV_FILE_LEDGER = "OZAGIA_FILE_LEDGER"
 # `meta` counters the daemon sums into its stats.
 META_COUNTERS = ("path_suggestions", "ownership_warnings", "files_recorded",
-                 "file_ledger_errors")
+                 "file_ledger_errors", "fetch_fallback_hints")
 # Keys kept per journal record.
 JOURNAL_KEYS = 20
 # Distinct shell passthrough reasons kept, and shown in `stats`.
@@ -279,6 +279,15 @@ def _lock_free(op: Any, tool: Any, inp: Any) -> bool:
     return cls["class"] in ("pytest", "ruff")
 
 
+def _research_fetch_counters(root: Path) -> dict[str, int]:
+    """`research_fetches` and `research_fetch_cache_hits` of `root`."""
+    try:
+        from ozagia.research.fallback import read_counters
+        return read_counters(root)
+    except Exception:  # noqa: BLE001 - stats never fail for a counter
+        return {"research_fetches": 0, "research_fetch_cache_hits": 0}
+
+
 class DaemonState:
     """What the request handlers share: the graph, the lock, the counters."""
 
@@ -351,6 +360,8 @@ class DaemonState:
         self.owners = Owners(root, daemon_journal=journal)
         self.path_suggestions = 0
         self.ownership_warnings = 0
+        # `[ozagia]` lines naming `research_fetch` after a failed web fetch.
+        self.fetch_fallback_hints = 0
         # Created-file ledger (`ozagia.core.files`): rows appended from
         # handled writes and `after`/`session_event` scans, scans run, and
         # ledger/git failures (the tool call itself never fails for them).
@@ -1110,6 +1121,11 @@ class DaemonState:
                 "path_suggestions": self.path_suggestions,
                 "ownership_warnings": self.ownership_warnings,
                 "live_sessions": self.owners.live_sessions(),
+                # Fetch fallback (`ozagia.research.fallback`): research_fetch
+                # hints after failed web fetches, and the research_fetch
+                # calls (persisted by the MCP tool) and their cache hits.
+                "fetch_fallback_hints": self.fetch_fallback_hints,
+                **_research_fetch_counters(self.root),
                 # Created-file ledger (`ozagia.core.files`): rows recorded
                 # (handled writes, `after` scans, session start/end scans),
                 # scans run, and ledger/git failures.

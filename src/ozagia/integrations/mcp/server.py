@@ -975,6 +975,22 @@ class DevMemoryServer:
             self._load_research_tools()
         if mode == "combined":
             self._load_research_dev_context()
+        self._load_research_fetch_tool()
+
+    def _load_research_fetch_tool(self) -> None:
+        """`research_fetch` (`ozagia.research.fallback`) in every mode of the
+        full surface (the graph surface keeps to its verbs): the `[ozagia]`
+        hint after a failed web fetch names it. It needs no
+        research session; it touches the network only when called."""
+        from ozagia.research import fallback
+        spec = fallback.TOOL_SPEC
+        name = spec["name"]
+        if name in self._handlers:
+            return
+        root = self.workspace
+        self._handlers[name] = lambda args: fallback.research_fetch_tool(args, root=root)
+        self._tools.append(spec)
+        self._schemas[name] = spec["inputSchema"]
 
     def _load_research_tools(self) -> None:
         """Load the optional research package only for a research mode."""

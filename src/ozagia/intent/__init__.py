@@ -15,6 +15,9 @@ before it shows the output.
 `after(memory, tool, input, output)` runs after a built-in (or any) call and
 returns `{"append": "<text or empty>", "meta": {...}}`. `meta` always has
 `intent` (a short name), `keys` (node keys involved) and `ms`. After a
+failed web fetch (`webfetch`, input `{url}`) of a paper-like URL it appends
+one `research_fetch` hint line (`ozagia.research.fallback`; no network) and
+has `fetch_fallback_hints: 1`. After a
 built-in edit, write or patch it also has the lint lines of the changed
 lines (`ozagia.intent.lint`) and `lint_runs`, `lint_findings` and
 `lint_timeouts` when a linter ran.
@@ -638,6 +641,17 @@ def after(memory: Any, tool: str, input: dict[str, Any], output: Any, *,
             if tool in ("read", "shell") and state.policy != "off":
                 lines.extend(_after_ledger(memory, state, tool, inp, meta,
                                            output, delivered))
+        if tool == "webfetch":
+            # A failed web fetch of a paper: name the research fetcher. Local
+            # only; the hint never fetches (`ozagia.research.fallback`).
+            from ozagia.research.fallback import after_lines as fetch_hint
+            hint, reason = fetch_hint(inp, output)
+            if reason:
+                meta["fetch_failure"] = reason
+            if hint:
+                lines.extend(hint)
+                meta["fetch_fallback_hints"] = len(hint)
+                meta["intent"] = "after_fetch_failed"
         changes, cls = _may_change_files(tool, inp)
         heads: list[list[str]] = []
         if cls.get("class") in ("complex", "compound") and isinstance(output, str):

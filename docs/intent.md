@@ -626,6 +626,14 @@ the plugin apply the change a second time.
   `after_read`; `after_read_unconfirmed` when nothing matched and nothing
   was recorded); a repeat or overlap appends its note line (see read).
 
+- For a web fetch (`webfetch`, input `{url}`; OpenCode `webfetch`, Claude
+  `WebFetch`, Kiro `web_fetch`) whose output (or error) shows a failure
+  (a 4xx/5xx status, an unsupported content type, a PDF or binary body) of
+  a paper-like URL, or a PDF body anywhere, it appends `[ozagia] fetch
+  failed; the research fetcher can try: research_fetch {"url": ...}`
+  (intent `after_fetch_failed`, `meta.fetch_fallback_hints: 1`,
+  `meta.fetch_failure`). It never fetches; see docs/research.md, "Fetch
+  fallback".
 - For a built-in read or edit of a path that does not exist, and for the
   paths of "No such file or directory" lines in a shell output (`cat`,
   `sed`, `head`, `nl`, `ls`, `rg`, `cd`, Python), it appends the missing
@@ -736,6 +744,11 @@ patch matches the current files`; intents `patch_check_ok`,
 Path resolution and ownership add `path_suggestions` (answers that named
 existing paths for a missing one), `ownership_warnings` and
 `live_sessions`.
+
+The fetch fallback adds `fetch_fallback_hints` (`research_fetch` hints after
+failed web fetches), and `research_fetches` and `research_fetch_cache_hits`
+(calls of the `research_fetch` MCP tool and those answered from its cache,
+kept in `.ozagia/research/fetch/counters.json`).
 
 Background jobs add `jobs_started`, `waits`, `wait_seconds` and `polls_avoided` (waits that
 returned new output or the job's end) count background jobs, and `jobs`

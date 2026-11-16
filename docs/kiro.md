@@ -137,13 +137,14 @@ The hook file:
     {"name": "ozagia-post-read",  "trigger": "PostToolUse", "matcher": "read",  ...},
     {"name": "ozagia-post-write", "trigger": "PostToolUse", "matcher": "write", ...},
     {"name": "ozagia-post-shell", "trigger": "PostToolUse", "matcher": "shell", ...},
+    {"name": "ozagia-post-web-fetch", "trigger": "PostToolUse", "matcher": "web_fetch", ...},
     {"name": "ozagia-post-compact", "trigger": "PostCompact", ...}
   ]
 }
 ```
 
 `ozagia-post-compact` is skipped by the 2.37 V3 loader (it does not know
-the trigger) and runs on CLI 3.1.0 and later. The profile has the first six
+the trigger) and runs on CLI 3.1.0 and later. The profile has the first seven
 hooks with the triggers `agentSpawn`,
 `preToolUse` and `postToolUse`. The matchers are Kiro's tool categories:
 in V3 they match a tool's tags (`read`: file reads, grep, file search,
@@ -214,7 +215,8 @@ counting tool names and argument names (no content) in
 | `grep_search` (`query`, `includePattern?`, ...) / `grep` (`pattern`, `path?`, `include?`) | `grep` (`pattern`, `path`, `include`, `literal: false`) |
 | `glob` (`pattern`, `path?`) | `glob` |
 | `file_search` (`query`, a path substring) | `glob` (`**/*<query>*`, an approximation) |
-| `delete_file`, `web_fetch`, MCP tools, anything else | not sent |
+| `web_fetch` (`url`, `mode?`, `searchPhrase?`) | `webfetch` (`url`): `after` only; a failed fetch of a paper gets a `research_fetch` hint (docs/research.md, "Fetch fallback"). Hook `ozagia-post-web-fetch`, matcher `web_fetch`. |
+| `delete_file`, MCP tools, anything else | not sent |
 
 `tool_response` is a string in V3 (the tool's result message); an object
 with a `result` list or string is flattened, and other shapes as for
