@@ -93,7 +93,11 @@ else "default"), whose log position `job_wait` and `job_log` use:
       The shell capture of `pgrep`/`ps -p` about a job (null: not one), for
       hooks that answer before the command runs (Codex PreToolUse).
 
-A bad job request is `{"ok": false, "error": "..."}`. A `job_wait` holds its
+A bad job request is `{"ok": false, "error": "..."}`; so is `job_start`
+while the project does not enable jobs (`ozagia.daemon.jobs.jobs_enabled`),
+with an error that says how to. A job record may carry `leader_exited` and
+`group_alive` (the command exited, other processes of its group run; the
+job is still `running`) and `stopped_on_load`. A `job_wait` holds its
 connection until it returns: give the client a timeout of `deadline_s` plus
 a margin.
 

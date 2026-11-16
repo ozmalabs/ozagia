@@ -34,6 +34,7 @@ import os
 import re
 import signal
 import sys
+import threading
 import traceback
 from pathlib import Path
 from typing import Any, Callable
@@ -617,9 +618,19 @@ _TOOLS.extend([
 # Background jobs (`ozagia.daemon.jobs`), run by the daemon this server
 # reaches over its socket. A wait returns before an MCP client's tool timeout
 # (Codex: `tool_timeout_sec`, 60 s by default): at most MCP_WAIT_MAX_S
-# (`$OZAGIA_MCP_WAIT_MAX_S`), by default 45 s.
+# (`$OZAGIA_MCP_WAIT_MAX_S`), by default 45 s; job_stop's grace_s is at most
+# MCP_STOP_GRACE_MAX_S. Job tool calls run on worker threads (`serve`), so a
+# wait does not hold up other tool calls. Starting jobs is opt-in per project
+# (`[jobs] enabled = true`); they run outside the client's sandbox.
 MCP_WAIT_DEFAULT_S = 45.0
 MCP_WAIT_MAX_S = 50.0
+MCP_STOP_GRACE_MAX_S = 10.0
+MCP_JOB_WORKERS = 4
+_UNSANDBOXED = (
+    " Jobs run in the ozagia daemon with its privileges and environment, "
+    "outside the Codex sandbox, approval prompts and shell environment "
+    "policy (and OpenCode's permission checks). Starting them is off unless "
+    "the project enables it ([jobs] enabled = true in .ozagia.toml).")
 _JOB_REF = {"type": "string",
             "description": "A job id from job_start or job_list (e.g. \"j3\")."}
 _TOOLS.extend([
@@ -631,7 +642,7 @@ _TOOLS.extend([
             "stderr in a log. Use it instead of `cmd &`, nohup, or a shell "
             "session you poll; then job_wait for its exit or a log line. "
             "Give command (a shell string) or argv. Jobs are stopped when the "
-            "ozagia daemon exits unless detach is true."),
+            "ozagia daemon exits unless detach is true." + _UNSANDBOXED),
         "inputSchema": _schema({
             "command": {"type": "string",
                         "description": "Shell command line, run with bash -c."},
@@ -656,7 +667,7 @@ _TOOLS.extend([
             "it again: each call continues where the last one stopped."),
         "inputSchema": _schema({
             "job": {"type": "string", "default": "any",
-                    "description": "Job id, or \"any\" for the first running job to finish."},
+                    "description": "Job id, or \"any\" for the first running job to finish (with until file:<path> and no job, waits for the file alone)."},
             "until": {"type": "string", "default": "exit",
                       "description": "exit | file:<path> | log:<regex>."},
             "deadline_s": {"type": "number", "default": MCP_WAIT_DEFAULT_S,
@@ -689,7 +700,8 @@ _TOOLS.extend([
             "job": _JOB_REF,
             "signal": {"type": "string", "enum": ["TERM", "INT", "HUP", "KILL"],
                        "default": "TERM"},
-            "grace_s": {"type": "number", "default": 3},
+            "grace_s": {"type": "number", "default": 3,
+                        "description": f"Seconds before SIGKILL (at most {MCP_STOP_GRACE_MAX_S:g})."},
         }, ["job"]),
     },
 ])
@@ -1233,7 +1245,10 @@ class DevMemoryServer:
         except ValueError:
             cap = MCP_WAIT_MAX_S
         deadline = min(max(float(a.get("deadline_s", MCP_WAIT_DEFAULT_S)), 0.0), cap)
-        return self._job("job_wait", {**a, "job": a.get("job") or "any",
+        job = a.get("job")
+        if not job and not str(a.get("until") or "").startswith("file:"):
+            job = "any"
+        return self._job("job_wait", {**a, "job": job or None,
                                       "deadline_s": deadline})
 
     def _job_list(self, _a: dict[str, Any]) -> Any:
@@ -1243,6 +1258,9 @@ class DevMemoryServer:
         return self._job("job_log", a)
 
     def _job_stop(self, a: dict[str, Any]) -> Any:
+        grace = a.get("grace_s")
+        if isinstance(grace, (int, float)) and not isinstance(grace, bool):
+            a = {**a, "grace_s": min(max(float(grace), 0.0), MCP_STOP_GRACE_MAX_S)}
         return self._job("job_stop", a)
 
     # -- JSON-RPC ---------------------------------------------------------- #
@@ -1422,9 +1440,41 @@ def _respond(server: DevMemoryServer, msg: Any) -> dict[str, Any] | None:
     return server.handle(msg)
 
 
+def _is_job_call(msg: Any) -> bool:
+    """A `tools/call` of a job tool (it only talks to the daemon, so it can
+    run on a worker thread)."""
+    if not isinstance(msg, dict) or msg.get("method") != "tools/call" or "id" not in msg:
+        return False
+    params = msg.get("params")
+    return (isinstance(params, dict) and isinstance(params.get("name"), str)
+            and params["name"].startswith("job_"))
+
+
 def serve(server: DevMemoryServer) -> int:
+    """Read messages from stdin and write the replies to stdout. Job tool
+    calls (`job_wait` may block for up to MCP_WAIT_MAX_S) run on a pool of
+    MCP_JOB_WORKERS threads, so the next messages are answered meanwhile;
+    their replies may come out of order (JSON-RPC matches them by `id`).
+    Every other message is handled in order on this thread. Replies are
+    written whole, under a lock."""
+    from concurrent.futures import ThreadPoolExecutor
     inp = sys.stdin.buffer
     out = sys.stdout.buffer
+    write_lock = threading.Lock()
+
+    def write(msg: Any, framing: str) -> None:
+        with write_lock:
+            _write_message(out, msg, framing)
+
+    def job_call(msg: dict[str, Any], framing: str) -> None:
+        response = _respond(server, msg)
+        if response is not None:
+            try:
+                write(response, framing)
+            except (OSError, ValueError):
+                pass                      # the client went away
+    pool = ThreadPoolExecutor(max_workers=MCP_JOB_WORKERS,
+                              thread_name_prefix="ozagia-mcp-job")
     # Only protocol messages reach stdout. `out` was captured above; any
     # stray print from a handler goes to stderr for the duration of serve().
     saved_stdout = sys.stdout
@@ -1434,26 +1484,29 @@ def serve(server: DevMemoryServer) -> int:
             try:
                 msg, framing = _read_message(inp)
             except _ParseFailure as e:
-                _write_message(out, server._err(
-                    None, _E_PARSE, f"parse error: {e}"), e.framing)
+                write(server._err(None, _E_PARSE, f"parse error: {e}"), e.framing)
                 continue
             if msg is _EOF:
                 break
             if isinstance(msg, list):
                 if not msg:
-                    _write_message(out, server._err(
-                        None, _E_INVALID_REQUEST,
-                        "invalid request: empty batch"), framing)
+                    write(server._err(None, _E_INVALID_REQUEST,
+                                      "invalid request: empty batch"), framing)
                     continue
                 replies = [r for r in (_respond(server, m) for m in msg)
                            if r is not None]
                 if replies:
-                    _write_message(out, replies, framing)
+                    write(replies, framing)
+                continue
+            if _is_job_call(msg):
+                pool.submit(job_call, msg, framing)
                 continue
             response = _respond(server, msg)
             if response is not None:
-                _write_message(out, response, framing)
+                write(response, framing)
+        pool.shutdown(wait=True)
     finally:
+        pool.shutdown(wait=False, cancel_futures=True)
         sys.stdout = saved_stdout
     return 0
 

@@ -50,6 +50,13 @@ one, every key has the generic default below. All keys are optional:
                                       # limit returns its outline; 0 turns a
                                       # limit off
 
+    [jobs]
+    enabled = false               # allow job_start (background jobs in the
+                                  # daemon; see ozagia.daemon.jobs). Jobs run
+                                  # with the daemon's privileges, outside any
+                                  # harness sandbox. $OZAGIA_JOBS=1 in the
+                                  # daemon's environment also enables them.
+
 Directory entries are paths relative to the root ("." is the root itself).
 """
 from __future__ import annotations
@@ -148,6 +155,7 @@ class ProjectConfig:
     adapters: tuple[str, ...]
     structured_outline_lines: int = 2000
     structured_outline_bytes: int = 64 * 1024
+    jobs_enabled: bool = False
 
     @property
     def adapter_base(self) -> Path | None:
@@ -162,6 +170,7 @@ _KEYS = {
     "memory": {"skip_dirs"},
     "adapters": {"modules"},
     "reads": {"structured_outline_lines", "structured_outline_bytes"},
+    "jobs": {"enabled"},
 }
 
 
@@ -264,6 +273,9 @@ def _parse(root: Path, source: Path | None, data: dict[str, Any]) -> ProjectConf
             raise ConfigError(f"{where}: [reads] {key} must be a "
                               f"non-negative integer")
         return value
+    jobs_enabled = data.get("jobs", {}).get("enabled", False)
+    if not isinstance(jobs_enabled, bool):
+        raise ConfigError(f"{where}: [jobs] enabled must be true or false")
     return ProjectConfig(
         root=root,
         source=source,
@@ -286,6 +298,7 @@ def _parse(root: Path, source: Path | None, data: dict[str, Any]) -> ProjectConf
         adapters=tuple(m.strip() for m in modules if m.strip()),
         structured_outline_lines=count("structured_outline_lines", 2000),
         structured_outline_bytes=count("structured_outline_bytes", 64 * 1024),
+        jobs_enabled=jobs_enabled,
     )
 
 

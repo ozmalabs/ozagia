@@ -9,10 +9,13 @@
 Every command takes `--root` (default: the repository of the cwd) and
 `--json` (print the daemon's reply). `run` with one word after `--` runs it
 as a shell command (`bash -c`), with several as an argv. `wait` and `log`
-print the new log lines; their read position is the CLI's own (reader
-"cli"). `wait` exits 0 when the condition held, 1 at the deadline, and
+print the new log lines; their read position belongs to the shell the
+command runs from (reader `cli:<parent pid>:<tty>`, `cli_reader`), so two
+terminals do not take each other's lines; `--cursor N` reads from byte N
+instead. `wait` exits 0 when the condition held, 1 at the deadline, and
 every command exits 2 when the daemon is unreachable or refuses the
-request.
+request (`run` too when jobs are off for the project: see
+`ozagia.daemon.jobs`).
 
 The jobs live in the daemon (`ozagia.daemon.jobs`); `request` reaches it
 over its socket and starts it when nothing answers
@@ -24,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -96,6 +100,19 @@ def _status_line(r: dict[str, Any]) -> str:
     return "[ozagia] " + ", ".join(bits)
 
 
+def cli_reader() -> str:
+    """The CLI's reader name: the parent process (the shell) and the
+    terminal, so each shell keeps its own place in a job's log."""
+    tty = "-"
+    for fd in (0, 1, 2):
+        try:
+            tty = os.ttyname(fd)
+            break
+        except OSError:
+            continue
+    return f"cli:{os.getppid()}:{tty}"
+
+
 def _env_pairs(values: list[str]) -> dict[str, str]:
     out = {}
     for v in values:
@@ -155,13 +172,13 @@ def main(argv: list[str] | None = None) -> int:
     elif args.cmd == "wait":
         op = "job_wait"
         fields = {"job": args.job, "until": args.until, "deadline_s": args.deadline,
-                  "cursor": args.cursor, "reader": "cli"}
+                  "cursor": args.cursor, "reader": cli_reader()}
     elif args.cmd == "list":
         op, fields = "job_list", {}
     elif args.cmd == "log":
         op = "job_log"
         fields = {"job": args.job, "cursor": args.cursor, "tail": args.tail,
-                  "reader": "cli"}
+                  "reader": cli_reader()}
     else:
         op = "job_stop"
         fields = {"job": args.job, "signal": args.signal, "grace_s": args.grace}
@@ -189,4 +206,4 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-__all__ = ["JobUnavailable", "main", "request"]
+__all__ = ["JobUnavailable", "cli_reader", "main", "request"]

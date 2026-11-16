@@ -9,8 +9,9 @@
   the graph tools (`dev_symbol`, `dev_node`, `dev_outline`, `dev_impact`,
   `dev_context`, ...) next to Codex's own.
 - **An `AGENTS.md` section** telling the agent to prefer those tools for
-  reading by key, outlines and impact, and to run long commands as
-  background jobs (`job_start`, `job_wait`) instead of polling them.
+  reading by key, outlines and impact, and, when the project enables
+  background jobs (`--jobs`), to run long commands as jobs (`job_start`,
+  `job_wait`) instead of polling them.
 
 Codex keeps running its own tools. The hooks add context to their results;
 they never replace a result.
@@ -31,6 +32,7 @@ checked with `codex mcp get ozagia --json` on Codex 0.169.0, which reads
 
 ```
 ozagia install codex --workdir <project>            # project scope (default)
+ozagia install codex --workdir <project> --jobs     # and enable background jobs
 ozagia install codex --workdir <project> --scope user
 ```
 
@@ -44,6 +46,15 @@ ozagia install codex --workdir <project> --scope user
   serves the Git repository of its working directory.
 - `--python P` is the interpreter that runs the hook and the MCP server
   (default: the one running the command).
+- `--jobs` (project scope only) enables background jobs for the project:
+  it appends `[jobs]` / `enabled = true` (with a comment saying who added
+  it) to `<project>/.ozagia.toml`, and the AGENTS.md section gets the jobs
+  paragraph. A `[jobs]` table already there is left as it is if it enables
+  jobs, and refused if it does not. Jobs run outside the Codex sandbox and
+  approvals (see [Background jobs](#background-jobs)); do not use `--jobs`
+  where that matters. The AGENTS.md section and the session brief mention
+  jobs only while the project enables them, so a reinstall without `--jobs`
+  keeps the paragraph as long as `.ozagia.toml` enables jobs.
 
 What install does to each file:
 
@@ -150,7 +161,25 @@ In Codex history, 44,938 of 51,005 `write_stdin` calls were empty polls of
 a running command, next to 5,914 `wait`, 1,020 `sleep` and 6,099 `ps`/`pgrep`
 calls. Each poll is a model call. The MCP tools `job_start`, `job_wait`,
 `job_list`, `job_log` and `job_stop` replace them (see
-`ozagia.daemon.jobs`):
+`ozagia.daemon.jobs`).
+
+**Jobs are not sandboxed, and they are off by default.** A job runs in the
+ozagia daemon with the daemon's privileges and environment, outside the
+Codex sandbox (including its read-only `.git`), its approval prompts and
+its `shell_environment_policy`. The MCP tool descriptions, the AGENTS.md
+paragraph and the session brief say so. `job_start` is refused, with a
+message that says this and how to enable jobs, unless the project has
+`[jobs] enabled = true` in `.ozagia.toml` (`--jobs` above) or the daemon
+was started with `OZAGIA_JOBS=1` in its environment (`OZAGIA_JOBS=0` turns
+jobs off whatever the file says). `job_list`, `job_wait`, `job_log` and
+`job_stop` work either way. The checks on what a job may run are
+best-effort parsing, not a boundary: ref-moving git commands are refused as
+in the shell; so is a command the shell check cannot follow (pipes,
+substitutions, loops) when it mentions git anywhere or feeds text to a
+shell (`| bash`, `sh <<< ...`), and an `env` with any `GIT_*` key
+(`GIT_CONFIG_*` can alias a commit, `GIT_DIR` can point anywhere). The
+`cwd` check limits where a job starts, not what it touches.
+
 
 - `job_start {"command": "npm run dev"}` (or `argv`, `cwd` inside the
   project, `env`, `detach`) runs the command in the daemon, in its own
@@ -164,10 +193,24 @@ calls. Each poll is a model call. The MCP tools `job_start`, `job_wait`,
   the elapsed time, and only the log lines this MCP server has not read yet
   (the newest 200 lines / 16 kB of them), with a `cursor`. If the job is
   still running the reply says so; the agent calls `job_wait` again and
-  gets the next lines. `job: "any"` waits for the first running job to end.
+  gets the next lines. `job: "any"` waits for the first running job to end;
+  with `until: "file:<path>"` and no `job`, the wait is for the file alone.
 - `job_log` reads new lines without waiting (`cursor: 0`: the end of the
   whole log); `job_list` lists the last 50 jobs; `job_stop` signals the
-  job's process group (SIGTERM, then SIGKILL after `grace_s`).
+  job's process group (SIGTERM, then SIGKILL after `grace_s`, at most 10 s
+  over MCP).
+
+A job is running until its whole process group is gone: when the command
+(the group leader) exits but something it started in the background keeps
+running (`./start.sh` that runs the server with `&`), the job stays
+`running` with `leader_exited` and `group_alive` true, and `job_wait`
+waits for the rest. Signals go to the group only while it is still the
+job's (the daemon reaps the leader only once the group is empty, so the
+group id cannot be reused before that), and never after the group was
+found empty.
+
+The MCP server runs job tool calls on worker threads (4), so a `job_wait`
+does not hold up other tool calls; their replies may arrive out of order.
 
 The MCP server is a separate process: it reaches the daemon over the socket
 and starts it when nothing answers (as the hooks do, waiting up to 10 s).
@@ -178,7 +221,12 @@ there from the shell: `ozagia job run|wait|list|log|stop`.
 The daemon does not stop on its idle timeout while a job runs. When it
 stops, it stops its jobs (SIGTERM to each process group, SIGKILL after 2 s),
 except jobs started with `detach: true`, which it leaves running and names
-in `<state dir>/daemon.log`; the next daemon lists them as `detached`.
+in `<state dir>/daemon.log`; the next daemon lists them as `detached` and
+can stop them. `detach` is the explicit opt-out from "jobs end with the
+daemon". A daemon killed without its shutdown (SIGKILL, OOM) cannot stop
+its jobs; the next daemon stops the ones not started with `detach` when it
+starts (`gone`, `stopped_on_load`), checking each process's start time so a
+reused pid is left alone.
 
 The hooks help too:
 
@@ -190,7 +238,8 @@ The hooks help too:
 - `PostToolUse` `Bash`: a `sleep N` of 20 s or more while a job runs gets a
   `[ozagia]` line pointing to `job_wait`; a command that starts something in
   the background (`... &`, `nohup`, `setsid`) gets one pointing to
-  `job_start`. Each hint is shown at most 3 times per session.
+  `job_start` (only when jobs are enabled). Each hint is shown at most 3
+  times per session.
 
 ## What each hook does
 
@@ -228,7 +277,8 @@ python -m ozagia.integrations.codex uninstall --workdir <project> [--scope user]
 
 This removes ozagia's handlers from `hooks.json`, the `[mcp_servers.ozagia]`
 table (with the blank line install put before it) from `config.toml`, and
-the marked section from `AGENTS.md`. Everything else stays. A file left with
+the marked section from `AGENTS.md`, and the `[jobs]` block `--jobs` added
+to `.ozagia.toml` if it is there as install wrote it. Everything else stays. A file left with
 nothing in it is deleted. The daemon stops on its own after the idle
 timeout, or with `ozagia daemon shutdown --root <project>`.
 
@@ -246,7 +296,8 @@ timeout, or with `ozagia daemon shutdown --root <project>`.
   `additionalContextLimit`; the brief is far below the limit, and the
   daemon's `append` normally is.
 - The git refusal is best-effort parsing; use Codex's sandbox and approval
-  settings for a hard rule.
+  settings for a hard rule. Those settings do not apply to background jobs,
+  which is why jobs are opt-in.
 - The user-scope MCP server serves the repository of its working directory.
   Whether Codex starts MCP servers in the session's directory has not been
   checked live.

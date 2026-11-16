@@ -18,6 +18,15 @@ and `<workdir>/AGENTS.md`) or for the user (`scope="user"`, under
 - `AGENTS.md`: a section between `<!-- ozagia:begin -->` and
   `<!-- ozagia:end -->` telling the agent which ozagia tools to prefer.
 
+Background jobs (`ozagia.daemon.jobs`) run in the daemon, outside the Codex
+sandbox and approvals, so they are opt-in: `install(..., jobs=True)`
+(`ozagia install codex --jobs`, project scope only) also adds `[jobs]
+enabled = true` to `<workdir>/.ozagia.toml` (`JOBS_TOML`, appended; a
+`[jobs]` table that is already there is left alone, and one that does not
+enable jobs is refused), and the AGENTS.md section gets the jobs paragraph
+(`AGENTS_JOBS`) only when the project enables jobs. `uninstall` removes the
+`JOBS_TOML` block if it is there as install wrote it.
+
 When install has to add that newline (to `config.toml` or `AGENTS.md`), it
 says so in a marker line inside its own table or section (`NO_EOL_TOML`,
 `NO_EOL_MD`), and uninstall takes the newline away again. So install and
@@ -59,7 +68,7 @@ END = "<!-- ozagia:end -->"
 # The marker lines for "install added a newline after the user's last line".
 NO_EOL_TOML = "# (ozagia added the newline after the last line above; uninstall removes it)"
 NO_EOL_MD = "<!-- ozagia: added the newline after the last line above -->"
-AGENTS_SECTION = f"""{BEGIN}
+_AGENTS_TEMPLATE = f"""{BEGIN}
 ## ozagia
 
 This project has the ozagia code graph, served by the `ozagia` MCP server.
@@ -71,6 +80,13 @@ Prefer its tools to reading whole files and repeating greps:
 - Check what depends on a module with `dev_impact` before changing it.
 - Start a task with `dev_context`.
 
+{{jobs}}Shell commands and patches work as usual; ozagia adds graph context to their
+results (node keys, failing tests, the graph delta after a patch). Git
+commands that move refs (commit, push, checkout, reset, stash, ...) are
+refused; leave them to the user.
+{END}
+"""
+AGENTS_JOBS = """\
 Long-running commands (servers, builds, slow test runs): start them with
 `job_start` (a command or argv; output goes to a log) and wait with
 `job_wait` (`until`: `exit`, `log:<regex>` or `file:<path>`). It blocks
@@ -78,13 +94,19 @@ until then or its deadline (45 s) and returns only the log lines you have
 not seen; if the job is still running, call it again. Do not poll a running
 command with empty `write_stdin` calls, `sleep` loops or `ps`/`pgrep`.
 `job_log` reads new output, `job_list` lists jobs, `job_stop` stops one.
+Jobs run in the ozagia daemon, outside the Codex sandbox and approval
+prompts, with the daemon's privileges: use them only for commands you
+would run in the shell anyway.
 
-Shell commands and patches work as usual; ozagia adds graph context to their
-results (node keys, failing tests, the graph delta after a patch). Git
-commands that move refs (commit, push, checkout, reset, stash, ...) are
-refused; leave them to the user.
-{END}
 """
+JOBS_TOML = """\
+[jobs]
+# Added by `ozagia install codex --jobs`: background jobs (job_start) run in
+# the ozagia daemon, outside the Codex sandbox and approvals.
+enabled = true
+"""
+# The section without jobs (`agents_section(jobs=True)` has them).
+AGENTS_SECTION = _AGENTS_TEMPLATE.replace("{jobs}", "", 1)
 TRUST_STEPS = """\
 Next steps:
   1. Codex runs these hooks only after you review and trust them: start Codex
@@ -465,24 +487,63 @@ def _section_span(text: str) -> tuple[int, int] | None:
     return a, b
 
 
-def _agents_section(no_eol: bool) -> str:
+def agents_section(jobs: bool = False) -> str:
+    """The AGENTS.md section, with the jobs paragraph when `jobs`."""
+    return _AGENTS_TEMPLATE.replace("{jobs}", AGENTS_JOBS if jobs else "", 1)
+
+
+def _agents_section(no_eol: bool, jobs: bool = False) -> str:
+    section = agents_section(jobs)
     if not no_eol:
-        return AGENTS_SECTION
-    return AGENTS_SECTION.replace(BEGIN + "\n", f"{BEGIN}\n{NO_EOL_MD}\n", 1)
+        return section
+    return section.replace(BEGIN + "\n", f"{BEGIN}\n{NO_EOL_MD}\n", 1)
 
 
-def merge_agents(text: str | None) -> str:
+def merge_agents(text: str | None, jobs: bool = False) -> str:
     text = text or ""
     span = _section_span(text)
     if span is not None:
         no_eol = NO_EOL_MD in text[span[0]:span[1]]
-        return text[:span[0]] + _agents_section(no_eol) + text[span[1]:]
+        return text[:span[0]] + _agents_section(no_eol, jobs) + text[span[1]:]
     if not text.strip():
-        return AGENTS_SECTION
+        return agents_section(jobs)
     no_eol = not text.endswith("\n")
     if no_eol:
         text += "\n"
-    return text + "\n" + _agents_section(no_eol)
+    return text + "\n" + _agents_section(no_eol, jobs)
+
+
+# --------------------------------------------------------------------------- #
+# .ozagia.toml: [jobs] enabled
+# --------------------------------------------------------------------------- #
+def merge_jobs_toml(path: Path, text: str | None) -> str:
+    """`text` (the project's .ozagia.toml, or None) with jobs enabled."""
+    text = text or ""
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as e:
+        raise SettingsError(f"{path} does not parse: {e}") from None
+    table = data.get("jobs")
+    if table is not None:
+        if isinstance(table, dict) and table.get("enabled") is True:
+            return text
+        raise SettingsError(f"{path} has a [jobs] table that does not enable "
+                            "jobs; set `enabled = true` in it yourself")
+    if not text.strip():
+        return JOBS_TOML
+    sep = "\n" if text.endswith("\n") else "\n\n"
+    return text + sep + JOBS_TOML
+
+
+def unmerge_jobs_toml(text: str) -> str | None:
+    """`text` without the block `merge_jobs_toml` added, or None."""
+    at = text.find(JOBS_TOML)
+    if at < 0:
+        return None
+    head, tail = text[:at], text[at + len(JOBS_TOML):]
+    if head.endswith("\n\n"):
+        head = head[:-1]
+    return head + tail
 
 
 def unmerge_agents(text: str) -> str | None:
@@ -501,18 +562,37 @@ def unmerge_agents(text: str) -> str | None:
 # --------------------------------------------------------------------------- #
 # install / uninstall
 # --------------------------------------------------------------------------- #
+def _project_jobs(workdir: str | Path) -> bool:
+    from ozagia.config import CONFIG_FILENAME, ConfigError, load_project_config
+    if not (Path(workdir) / CONFIG_FILENAME).is_file():
+        return False
+    try:
+        return load_project_config(workdir).jobs_enabled
+    except ConfigError:
+        return False
+
+
 def install(workdir: str | Path, *, scope: str = "project",
-            python: str = sys.executable, home: str | Path | None = None
-            ) -> dict[str, Path]:
+            python: str = sys.executable, home: str | Path | None = None,
+            jobs: bool = False) -> dict[str, Path]:
     """Add the hooks, the MCP server and the AGENTS.md section. Idempotent.
-    Every file is checked before any is written."""
+    Every file is checked before any is written. `jobs`: also enable
+    background jobs for the project (see the module docstring)."""
+    from ozagia.config import CONFIG_FILENAME
     p = paths(workdir, scope, home)
+    if jobs and scope != "project":
+        raise SettingsError("--jobs needs --scope project: jobs are enabled per "
+                            f"project, in <project>/{CONFIG_FILENAME}")
     hooks_text = _dump_hooks(merge_hooks(_load_hooks(p["hooks"]), python))
     config_text = merge_config(p["config"], _read(p["config"]) or "",
                                mcp_entry(workdir, scope, python))
-    agents_text = merge_agents(_read(p["agents"]))
-    for key, text in (("hooks", hooks_text), ("config", config_text),
-                      ("agents", agents_text)):
+    writes = [("hooks", hooks_text), ("config", config_text)]
+    if jobs:
+        p["jobs"] = Path(workdir).resolve() / CONFIG_FILENAME
+        writes.append(("jobs", merge_jobs_toml(p["jobs"], _read(p["jobs"]))))
+    with_jobs = jobs or (scope == "project" and _project_jobs(workdir))
+    writes.append(("agents", merge_agents(_read(p["agents"]), with_jobs)))
+    for key, text in writes:
         if _read(p[key]) != text:
             _atomic_write(p[key], text)
     return p
@@ -545,6 +625,14 @@ def uninstall(workdir: str | Path, *, scope: str = "project",
         new = unmerge_agents(text)
         if new is not None:
             changes.append((p["agents"], new))
+    if scope == "project":
+        from ozagia.config import CONFIG_FILENAME
+        jobs_path = Path(workdir).resolve() / CONFIG_FILENAME
+        text = _read(jobs_path)
+        if text is not None:
+            new = unmerge_jobs_toml(text)
+            if new is not None:
+                changes.append((jobs_path, new))
     for path, new in changes:
         _write_or_delete(path, new)
     return [path for path, _ in changes]

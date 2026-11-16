@@ -32,10 +32,13 @@ seconds at most).
 
 Background jobs (`ozagia.daemon.jobs`): the ops `job_start`, `job_wait`,
 `job_list`, `job_log`, `job_stop`, `job_events` and `job_ps` go to the job table and
-take no graph lock (a `job_wait` blocks only its own connection). When the
-daemon exits, for whatever reason, it stops every job it started (SIGTERM
-to the job's process group, SIGKILL after `jobs.SHUTDOWN_GRACE_S`) except
-those started with `detach`, which it leaves running and names in its log.
+take no graph lock (a `job_wait` blocks only its own connection).
+`job_start` is refused unless the project enables jobs (`jobs.jobs_enabled`).
+When the daemon exits through its shutdown path, it stops every job it
+started (SIGTERM to the job's process group, SIGKILL after
+`jobs.SHUTDOWN_GRACE_S`) except those started with `detach`, which it leaves
+running and names in its log; jobs a killed daemon left running are stopped
+by the next one when it loads the table.
 A captured `shell` that is a `pgrep`/`ps -p` form about a job's process is
 answered from /proc and the job table (`jobs.capture_ps`, intent
 `shell_ps`), and `after` for `shell` adds the job hints

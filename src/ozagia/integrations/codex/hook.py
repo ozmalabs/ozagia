@@ -64,9 +64,13 @@ BRIEF_ALARM_S = 3
 MCP_TOOLS_LINE = (
     "Prefer the ozagia MCP tools to reading whole files: dev_symbol / dev_node "
     "(one symbol by key, sym:path::name), dev_outline, dev_impact before "
-    "changing a shared module, dev_context to start a task. Long commands: "
-    "job_start, then job_wait (blocks until exit or a log line, returns only "
-    "new output) instead of polling write_stdin, sleep or ps.")
+    "changing a shared module, dev_context to start a task.")
+# Added to the brief only when the project enables jobs (`[jobs] enabled`).
+JOBS_LINE = (
+    "Long commands: job_start, then job_wait (blocks until exit or a log line, "
+    "returns only new output) instead of polling write_stdin, sleep or ps. "
+    "Jobs run outside the Codex sandbox and approvals, with the ozagia "
+    "daemon's privileges.")
 
 
 # --------------------------------------------------------------------------- #
@@ -135,13 +139,15 @@ def session_brief(root: Path, max_chars: int = BRIEF_MAX_CHARS) -> str:
     if log and log.strip():
         lines.append("recent commits:")
         lines.extend(f"  {x[:120]}" for x in log.splitlines() if x.strip())
-    lines.append(MCP_TOOLS_LINE)
+    from ozagia.daemon.jobs import jobs_enabled
+    tools = MCP_TOOLS_LINE + (" " + JOBS_LINE if jobs_enabled(root) else "")
+    lines.append(tools)
     text = "\n".join(lines)
     if len(text) <= max_chars:
         return text
     # Keep the tools line; cut the middle.
-    keep = max_chars - len(MCP_TOOLS_LINE) - len("\n...\n")
-    return text[:max(keep, 0)].rstrip() + "\n...\n" + MCP_TOOLS_LINE
+    keep = max_chars - len(tools) - len("\n...\n")
+    return text[:max(keep, 0)].rstrip() + "\n...\n" + tools
 
 
 # --------------------------------------------------------------------------- #

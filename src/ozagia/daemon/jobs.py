@@ -7,49 +7,84 @@ hooks, the MCP server and the CLI share, and `wait` blocks server-side until
 the job exits, a file appears or a log line matches, then returns only the
 output that is new to the caller.
 
+Opt-in. A job runs with the daemon's privileges and environment, outside any
+harness sandbox, approval prompt or permission preflight. So `job_start` is
+refused unless the project enables jobs (`jobs_enabled`): `[jobs] enabled =
+true` in the project configuration (`ozagia.config`; `ozagia install codex
+--jobs` writes it), or `$OZAGIA_JOBS=1` in the daemon's environment
+(`$OZAGIA_JOBS=0` turns them off whatever the file says). Listing, waiting
+for, reading and stopping jobs that exist work either way.
+
 A job (`JobTable.start`): an argv list, or a command string run by `bash -c`
 (`/bin/sh -c` without bash), in `cwd` (inside the root; default the root),
 with the daemon's test environment (`server.captured_test_env`) plus `env`
 additions. It starts in a new session, so its own process group (pgid =
 pid), with stdin from /dev/null and stdout and stderr appended to
-`<state dir>/jobs/<id>.log`. A ref-moving git command is refused, as in the
-shell capture. At most `MAX_RUNNING` jobs run at once; the table keeps the
-last `MAX_JOBS` jobs (finished ones beyond that are dropped with their logs),
-and is written to `<state dir>/jobs/jobs.json` on every change.
+`<state dir>/jobs/<id>.log`. Refused, as best-effort checks (the command
+text is parsed, not sandboxed): a ref-moving git command (as in the shell
+capture); a command the shell classifier calls `complex` that mentions git
+anywhere or pipes or feeds text into a shell (`| bash`, `sh <<< ...`); and
+`env` keys starting with `GIT_` (`GIT_CONFIG_*`, `GIT_DIR`, ...). At most
+`MAX_RUNNING` jobs run at once; the table keeps the last `MAX_JOBS` jobs
+(finished ones beyond that are dropped with their logs, unless processes
+of the job still run), and is written to `<state dir>/jobs/jobs.json` on
+every change.
 
 Status: `running`, `exited` (exit code), `killed` (by a signal; `signal`
 names it), and for jobs a previous daemon left running (see shutdown):
-`detached` (still alive; no exit code can be had) or `gone`.
+`detached` (still alive; no exit code can be had) or `gone`. Status follows
+the whole process group: a job whose leader has exited while other
+processes of its group run (`bash -c 'server & ...'`) stays `running`, with
+`leader_exited` and `group_alive` true, until the group is empty; its exit
+code is then the leader's. Waits, the `MAX_RUNNING` limit and the daemon's
+idle timeout count it as running.
+
+Signals go to the job's process group only while it is known to be the
+job's. The daemon does not reap a job's leader until the group is empty, so
+the pgid cannot be reused while it signals it; once the group is found
+empty it is marked `group_gone` and never signalled again. For a job of an
+earlier daemon (not its child), a group is the job's only while some
+process in it started no earlier than the job's leader (`/proc/<pid>/stat`
+field 22) and the pgid's own pid, if alive, is the leader that started then
+(`_group_ours`).
 
 Logs are not truncated while a job runs. Every read is capped instead: a
 read returns at most `TAIL_LINES` lines and `TAIL_BYTES` bytes, the newest
-ones, and says how many it skipped.
+ones, and says how many it skipped. Log files are read and matched without
+holding the table lock.
 
 Cursors. Every reader (the protocol's `session`, or `reader`; default
 "default") has a byte offset per job. `wait` and `log` return the lines from
 that offset (or from an explicit `cursor`) to the end of the log, and move
-the offset to the end. A partial last line of a running job is kept for the
-next read unless it is the only new text.
+the offset to the end (never back, unless `cursor` is given). A partial last
+line of a running job is kept for the next read unless it is the only new
+text.
 
 `wait(job | "any", until, deadline_s)`: `until` is `exit` (default),
 `file:<path>` (exists; relative to the job's cwd, or the root) or
-`log:<regex>` (a new line of the job's log matches). It returns when the
+`log:<regex>` (a new line of the job's log matches; the first
+`MATCH_LINE_BYTES` bytes of each line are matched). It returns when the
 condition holds, when the job exits (for file and log), or at the deadline
 (default `WAIT_DEFAULT_S`, at most `WAIT_MAX_S`), with `met`, the status,
 `exit_code`, `elapsed_s` (since the job started), `waited_s`, the new
 `output` and the `cursor`. `job: "any"` waits on the jobs running when the
 call starts (log too); for `file:` the job may be left out.
 
-Shutdown (`JobTable.shutdown`, when the daemon exits for any reason): each
-running job's process group gets SIGTERM, then SIGKILL after
-`SHUTDOWN_GRACE_S`, except jobs started with `detach`, which are left
-running, logged to stderr (the daemon log) and kept in `jobs.json`; the next
-daemon lists them as `detached` (it can stop them, not reap them).
+Shutdown (`JobTable.shutdown`, when the daemon exits cleanly): each running
+job's process group gets SIGTERM, then SIGKILL after `SHUTDOWN_GRACE_S`,
+except jobs started with `detach`, which are left running, logged to stderr
+(the daemon log) and kept in `jobs.json`; the next daemon lists them as
+`detached` (it can stop them, not reap them). `detach` is an explicit
+opt-out of "jobs do not outlive the daemon". A daemon that dies without
+its shutdown (SIGKILL, OOM) leaves its jobs running; the next daemon stops
+the ones not started with `detach` when it loads the table (status `gone`,
+`stopped_on_load`).
 
 `capture_ps(command, ...)` answers `pgrep` and `ps -p` commands about job
 processes (see its docstring); `shell_hints(command, ...)` gives the
 `[ozagia]` lines for a shell command's `after`: `sleep N` while a job runs,
-and background starts (`... &`, `nohup`, `setsid`).
+and background starts (`... &`, `nohup`, `setsid`; only when jobs are
+enabled).
 """
 from __future__ import annotations
 
@@ -77,6 +112,11 @@ SHUTDOWN_GRACE_S = 2.0
 POLL_S = 0.2
 # Bytes of new log text one poll of a `log:` wait scans.
 SCAN_CHUNK = 1 << 20
+# A `log:` regex sees at most this many bytes of each line.
+MATCH_LINE_BYTES = 4096
+# How often a job whose leader exited is checked for an empty group.
+GROUP_POLL_S = 0.2
+ENV_JOBS = "OZAGIA_JOBS"
 MAX_ENV = 64
 MAX_COMMAND_CHARS = 16000
 MAX_READERS = 1000
@@ -128,16 +168,109 @@ def _alive(pid: int | None, start: str | None) -> bool:
     return start is None or st[21] == start
 
 
-def _group_alive(pgid: int | None) -> bool:
+def _start_int(start: Any) -> int | None:
+    try:
+        return int(start)
+    except (TypeError, ValueError):
+        return None
+
+
+def _group_members(pgid: int | None) -> list[tuple[int, int]]:
+    """(pid, start time) of the live (not zombie) processes in group `pgid`."""
     if not pgid:
-        return False
+        return []
     try:
         os.killpg(pgid, 0)
     except ProcessLookupError:
-        return False
+        return []
     except PermissionError:
+        pass
+    out = []
+    want = str(pgid)
+    for name in os.listdir("/proc"):
+        if not name.isdigit():
+            continue
+        st = _proc_stat(int(name))
+        if (st is None or len(st) < 22 or st[4] != want
+                or st[2] in ("Z", "X")):
+            continue
+        start = _start_int(st[21])
+        if start is not None:
+            out.append((int(name), start))
+    return out
+
+
+def _group_ours(pgid: int | None, start: Any) -> bool:
+    """Whether group `pgid` still holds processes of the job whose leader
+    (pid `pgid`) started at `start` (`/proc` stat field 22): some member
+    started no earlier, and pid `pgid`, if alive, is that leader. A pgid
+    reused by a new session fails the second test (its founder has pid
+    `pgid` and a later start time)."""
+    begin = _start_int(start)
+    if not pgid or begin is None:
+        return False
+    members = _group_members(pgid)
+    if not members:
+        return False
+    lead = _proc_stat(pgid)
+    if (lead is not None and len(lead) > 21 and lead[2] not in ("Z", "X")
+            and _start_int(lead[21]) != begin):
+        return False
+    return any(t >= begin for _pid, t in members)
+
+
+def jobs_enabled(root: str | Path) -> bool:
+    """Whether `job_start` is allowed for `root` (see the module docstring)."""
+    env = os.environ.get(ENV_JOBS, "").strip().lower()
+    if env in ("1", "true", "yes", "on"):
         return True
-    return True
+    if env in ("0", "false", "no", "off"):
+        return False
+    from ozagia.config import ConfigError, load_project_config
+    try:
+        return load_project_config(root).jobs_enabled
+    except ConfigError:
+        return False
+
+
+def disabled_message(root: str | Path) -> str:
+    return (
+        "background jobs are off for this project. A job runs with the ozagia "
+        "daemon's privileges and environment, outside the harness sandbox and "
+        "its approval prompts (Codex, OpenCode), so starting jobs is opt-in: "
+        f"add `[jobs]` with `enabled = true` to {Path(root) / '.ozagia.toml'} "
+        "(`ozagia install codex --jobs` does that), or start the daemon with "
+        f"{ENV_JOBS}=1 in its environment. Existing jobs can still be listed, "
+        "waited for, read and stopped")
+
+
+_SHELLS = r"(?:ba|da|z|k|fi|c|tc|mk)?sh"
+_PIPE_TO_SHELL = re.compile(
+    r"\|&?\s*(?:\S*/)?(?:(?:env|exec|command|sudo|nohup)\s+)*(?:\S*/)?"
+    + _SHELLS + r"\b")
+_HERE_TO_SHELL = re.compile(r"(?:^|[\s;&|(/])" + _SHELLS + r"\b[^;&|\n]*<<")
+_MENTIONS_GIT = re.compile(r"\bgit\b")
+
+
+def _refusal(text: str) -> str | None:
+    """Why the job command `text` is refused, or None (see the module
+    docstring; best-effort parsing)."""
+    from ozagia.intent.shell import classify
+    got = classify(text)
+    if got["class"] == "git_refs":
+        return (f"refused: `git {got.get('subcommand')}` moves refs; leave "
+                "commits, branches and stashes to the user")
+    if got["class"] == "complex":
+        if _MENTIONS_GIT.search(text):
+            return ("refused: the command mentions git in a form the shell "
+                    "check cannot follow (pipes, substitutions, loops, "
+                    "variable assignments); run git commands directly, and "
+                    "leave ref-moving ones to the user")
+        if _PIPE_TO_SHELL.search(text) or _HERE_TO_SHELL.search(text):
+            return ("refused: the command feeds text to a shell (`| bash`, "
+                    "`sh <<< ...`), which the check cannot see into; run the "
+                    "commands themselves")
+    return None
 
 
 def _killpg(pgid: int | None, sig: int) -> None:
@@ -194,13 +327,17 @@ class JobTable:
     """The daemon's jobs (see the module docstring). Thread-safe."""
 
     def __init__(self, root: str | Path, jobs_dir: str | Path | None = None, *,
-                 base_env: dict[str, str] | None = None) -> None:
+                 base_env: dict[str, str] | None = None,
+                 enabled: bool | None = None) -> None:
         from ozagia.config import state_path
         self.root = Path(root).resolve()
         self.dir = Path(jobs_dir) if jobs_dir else state_path(self.root, JOBS_DIR)
         self.base_env = base_env
+        # None: `jobs_enabled(root)` decides at each start.
+        self.enabled = enabled
         self.cond = threading.Condition()
         self.jobs: dict[str, dict[str, Any]] = {}     # id -> record, oldest first
+        # Owned jobs whose leader is not reaped yet (its pgid is reserved).
         self._procs: dict[str, subprocess.Popen] = {}
         self._reapers: dict[str, threading.Thread] = {}
         self.cursors: dict[tuple[str, str], int] = {}
@@ -213,8 +350,12 @@ class JobTable:
         self.closed = False
         self.counts = {"jobs_started": 0, "waits": 0, "wait_seconds": 0.0,
                        "polls_avoided": 0, "job_stops": 0, "ps_captures": 0,
-                       "sleep_hints": 0, "background_hints": 0, "job_events": 0}
+                       "sleep_hints": 0, "background_hints": 0, "job_events": 0,
+                       "jobs_refused": 0, "stopped_on_load": 0}
         self._load()
+
+    def is_enabled(self) -> bool:
+        return self.enabled if self.enabled is not None else jobs_enabled(self.root)
 
     # -- persistence --------------------------------------------------------- #
     def _load(self) -> None:
@@ -228,17 +369,51 @@ class JobTable:
         n = data.get("next")
         if isinstance(n, int) and n > 0:
             self.next_id = n
+        now = _now()
+        orphans: list[dict[str, Any]] = []
         for rec in data.get("jobs") or []:
             if not isinstance(rec, dict) or not isinstance(rec.get("id"), str):
                 continue
+            rec["owned"] = False
             if rec.get("status") in ("running", "detached"):
-                if _alive(rec.get("pid"), rec.get("proc_start")):
+                if not self._live(rec):
+                    rec["status"] = "gone"
+                    rec["group_gone"] = True
+                elif rec.get("detach"):
                     rec["status"] = "detached"
                 else:
-                    rec["status"] = "gone"
-                    rec.setdefault("ended", None)
-            rec["owned"] = False
+                    # The previous daemon died without its shutdown.
+                    orphans.append(rec)
+            if rec.get("status") == "gone" and not rec.get("ended"):
+                rec["ended"] = now
             self.jobs[rec["id"]] = rec
+        if orphans:
+            self._stop_orphans(orphans)
+            self._save()
+
+    def _stop_orphans(self, recs: list[dict[str, Any]]) -> None:
+        """Stop jobs an earlier daemon started without `detach` and left
+        running (it died without its shutdown)."""
+        for r in recs:
+            self._signal(r, signal.SIGTERM)
+        t0 = time.monotonic()
+        while (any(self._live(r) for r in recs)
+               and time.monotonic() - t0 < SHUTDOWN_GRACE_S):
+            time.sleep(0.05)
+        for r in recs:
+            if self._live(r):
+                self._signal(r, signal.SIGKILL)
+        t1 = time.monotonic()
+        while any(self._live(r) for r in recs) and time.monotonic() - t1 < 2.0:
+            time.sleep(0.05)
+        now = _now()
+        for r in recs:
+            r.update(status="gone", ended=r.get("ended") or now,
+                     stopped_on_load=True, group_gone=not self._live(r))
+            self.counts["stopped_on_load"] += 1
+            print(f"stopped job {r['id']} (pid {r.get('pid')}) left running by "
+                  f"an earlier daemon: {str(r.get('command'))[:200]}",
+                  file=sys.stderr, flush=True)
 
     def _save(self) -> None:
         """Write the table (call with `cond` held)."""
@@ -255,14 +430,22 @@ class JobTable:
             print(f"job table write failed: {e}", file=sys.stderr, flush=True)
 
     def _evict(self) -> None:
-        """Drop the oldest finished jobs beyond MAX_JOBS (with `cond` held)."""
+        """Drop the oldest finished jobs beyond MAX_JOBS (with `cond` held).
+        A job with processes still running is kept, so shutdown and
+        job_stop can still reach them."""
         over = len(self.jobs) - MAX_JOBS
         if over <= 0:
             return
-        for jid in [j for j, r in self.jobs.items()
-                    if r.get("status") not in ("running", "detached")][:over]:
-            rec = self.jobs.pop(jid)
-            self._procs.pop(jid, None)
+        done = [j for j, r in self.jobs.items()
+                if r.get("status") not in ("running", "detached")]
+        for jid in done:
+            if over <= 0:
+                break
+            rec = self.jobs[jid]
+            if jid in self._procs or self._live(rec):
+                continue
+            over -= 1
+            del self.jobs[jid]
             self._reapers.pop(jid, None)
             for key in [k for k in self.cursors if k[0] == jid]:
                 del self.cursors[key]
@@ -270,6 +453,38 @@ class JobTable:
                 Path(rec["log"]).unlink()
             except (OSError, KeyError, TypeError):
                 pass
+
+    # -- process groups ------------------------------------------------------ #
+    def _live(self, rec: dict[str, Any]) -> bool:
+        """Whether processes of the job still run. An owned job: its status
+        (it is `running` until the group is empty). Another daemon's: its
+        leader, or its group (`_group_ours`) unless found empty before."""
+        if rec.get("owned"):
+            return rec.get("status") == "running"
+        start = rec.get("proc_start")
+        if start is not None and _alive(rec.get("pid"), start):
+            return True
+        if rec.get("group_gone"):
+            return False
+        if _group_ours(rec.get("pgid"), start):
+            return True
+        rec["group_gone"] = True
+        return False
+
+    def _signal(self, rec: dict[str, Any], sig: int) -> bool:
+        """Send `sig` to the job's process group if it is still the job's
+        (see the module docstring). Returns whether it was sent."""
+        if rec.get("group_gone"):
+            return False
+        pgid = rec.get("pgid")
+        if rec.get("owned") and rec.get("id") in self._procs:
+            _killpg(pgid, sig)        # the unreaped leader holds the pgid
+            return True
+        if not rec.get("owned") and _group_ours(pgid, rec.get("proc_start")):
+            _killpg(pgid, sig)
+            return True
+        rec["group_gone"] = True
+        return False
 
     # -- queries ------------------------------------------------------------- #
     def running_count(self) -> int:
@@ -303,6 +518,11 @@ class JobTable:
             "harness", "log")}
         out["elapsed_s"] = _elapsed(rec)
         out["log_bytes"] = size
+        if rec.get("leader_exited") and rec.get("status") == "running":
+            out["leader_exited"] = True
+            out["group_alive"] = True
+        if rec.get("stopped_on_load"):
+            out["stopped_on_load"] = True
         return out
 
     def flat(self, rec: dict[str, Any]) -> dict[str, Any]:
@@ -331,6 +551,10 @@ class JobTable:
     def start(self, *, command: Any = None, argv: Any = None, cwd: Any = None,
               env: Any = None, detach: bool = False, session: Any = None,
               harness: Any = None) -> dict[str, Any]:
+        if not self.is_enabled():
+            with self.cond:
+                self.counts["jobs_refused"] += 1
+            raise JobError(disabled_message(self.root))
         if (command is None) == (argv is None):
             raise JobError("give exactly one of command (a shell string) and "
                            "argv (a list of strings)")
@@ -347,17 +571,24 @@ class JobTable:
             args = [_shell(), "-c", command]
         if len(text) > MAX_COMMAND_CHARS:
             raise JobError(f"command is longer than {MAX_COMMAND_CHARS} characters")
-        from ozagia.intent.shell import classify
-        got = classify(text)
-        if got["class"] == "git_refs":
-            raise JobError(f"refused: `git {got.get('subcommand')}` moves refs; "
-                           "leave commits, branches and stashes to the user")
+        why = _refusal(text)
+        if why is not None:
+            with self.cond:
+                self.counts["jobs_refused"] += 1
+            raise JobError(why)
         if env is None:
             env = {}
         if (not isinstance(env, dict) or len(env) > MAX_ENV
                 or not all(isinstance(k, str) and _ENV_KEY.match(k)
                            and isinstance(v, str) for k, v in env.items())):
             raise JobError(f"env must map at most {MAX_ENV} variable names to strings")
+        gitty = sorted(k for k in env if k.upper().startswith("GIT_"))
+        if gitty:
+            with self.cond:
+                self.counts["jobs_refused"] += 1
+            raise JobError(f"refused: env sets {', '.join(gitty)}; GIT_* "
+                           "variables (GIT_CONFIG_*, GIT_DIR, ...) can change "
+                           "what git commands do, so jobs cannot set them")
         wd = self._cwd(cwd)
         if self.base_env is not None:
             base = dict(self.base_env)
@@ -407,11 +638,29 @@ class JobTable:
             return self.public(rec)
 
     def _reap(self, jid: str, proc: subprocess.Popen) -> None:
-        code = proc.wait()
+        """Wait for the leader to exit, without reaping it, then for its
+        process group to empty; then reap it and record the end. The
+        unreaped (zombie) leader keeps the pgid from being reused while
+        `_signal` may still send to it."""
+        try:
+            info = os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOWAIT)
+        except ChildProcessError:
+            info = None
         with self.cond:
             rec = self.jobs.get(jid)
             if rec is not None:
+                rec["leader_exited"] = True
+            self.cond.notify_all()
+        while info is not None and _group_members(proc.pid):
+            time.sleep(GROUP_POLL_S)
+        with self.cond:
+            code = proc.wait()          # the group is empty: free the pgid
+            self._procs.pop(jid, None)
+            rec = self.jobs.get(jid)
+            if rec is not None:
                 rec["ended"] = _now()
+                rec["group_gone"] = True
+                rec.pop("leader_exited", None)
                 if code < 0:
                     rec["status"] = "killed"
                     try:
@@ -424,21 +673,23 @@ class JobTable:
                     rec["exit_code"] = code
                 self.event_seq += 1
                 self.events.append({
-                    "seq": self.event_seq, "job": jid, "command": rec["command"], "status": rec["status"],
-                    "exit_code": rec["exit_code"], "signal": rec["signal"],
-                    "elapsed_s": _elapsed(rec), "session": rec.get("session"),
-                    "harness": rec.get("harness")})
+                    "seq": self.event_seq, "job": jid, "command": rec["command"],
+                    "status": rec["status"], "exit_code": rec["exit_code"],
+                    "signal": rec["signal"], "elapsed_s": _elapsed(rec),
+                    "session": rec.get("session"), "harness": rec.get("harness")})
                 del self.events[:-200]
                 self._save()
             self.last_end = time.monotonic()
             self.cond.notify_all()
 
     # -- logs ---------------------------------------------------------------- #
-    def read_new(self, rec: dict[str, Any], start: int, *,
+    @staticmethod
+    def read_new(log_path: Any, start: int, running: bool, *,
                  tail_lines: int = TAIL_LINES, tail_bytes: int = TAIL_BYTES
                  ) -> dict[str, Any]:
-        """The log text from byte `start` to the end, tail-capped."""
-        path = Path(rec.get("log") or "")
+        """The log text from byte `start` to the end, tail-capped. Reads the
+        file only: call it without `cond` held."""
+        path = Path(log_path or "")
         try:
             size = path.stat().st_size
         except OSError:
@@ -459,8 +710,7 @@ class JobTable:
             cut = data.index(b"\n") + 1
             data = data[cut:]
             skipped += cut
-        if (rec.get("status") in ("running", "detached") and data
-                and not data.endswith(b"\n") and b"\n" in data):
+        if running and data and not data.endswith(b"\n") and b"\n" in data:
             keep = data.rindex(b"\n") + 1
             end -= len(data) - keep
             data = data[:keep]
@@ -477,8 +727,14 @@ class JobTable:
             return explicit
         return self.cursors.get((jid, reader), 0)
 
-    def _set_cursor(self, jid: str, reader: str, value: int) -> None:
-        self.cursors.pop((jid, reader), None)
+    def _set_cursor(self, jid: str, reader: str, value: int,
+                    explicit: bool = False) -> None:
+        """Move `reader`'s offset to `value`: forward only, unless the read
+        named its own `cursor` (two reads of one reader at once both end at
+        the end of what they returned; the offset is the furthest)."""
+        old = self.cursors.pop((jid, reader), None)
+        if old is not None and not explicit:
+            value = max(old, value)
         self.cursors[(jid, reader)] = value
         while len(self.cursors) > MAX_READERS:
             del self.cursors[next(iter(self.cursors))]
@@ -488,21 +744,28 @@ class JobTable:
         tail_lines = min(_int_arg(tail, "tail", TAIL_LINES) or TAIL_LINES, 2000)
         with self.cond:
             rec = self.get(jid)
+            self._done(rec)
             start = self._cursor(rec["id"], reader, cursor)
-            got = self.read_new(rec, start, tail_lines=tail_lines,
-                                tail_bytes=max(TAIL_BYTES, tail_lines * 160))
-            self._set_cursor(rec["id"], reader, got["cursor"])
+            path, running = rec.get("log"), rec.get("status") in ("running", "detached")
+        got = self.read_new(path, start, running, tail_lines=tail_lines,
+                            tail_bytes=max(TAIL_BYTES, tail_lines * 160))
+        with self.cond:
+            self._set_cursor(rec["id"], reader, got["cursor"], cursor is not None)
             return {**self.flat(rec), **got}
 
     # -- wait ---------------------------------------------------------------- #
     def _done(self, rec: dict[str, Any]) -> bool:
+        """Whether the job has ended (with `cond` held). A detached job that
+        is found to have ended becomes `gone`."""
         st = rec.get("status")
         if st == "detached":
-            if not _alive(rec.get("pid"), rec.get("proc_start")):
-                rec["status"] = "gone"
-                rec["ended"] = _now()
-                return True
-            return False
+            if self._live(rec):
+                return False
+            rec["status"] = "gone"
+            rec["ended"] = _now()
+            rec["group_gone"] = True
+            self._save()
+            return True
         return st != "running"
 
     def wait(self, job: Any = None, *, until: Any = None, deadline_s: Any = None,
@@ -516,7 +779,7 @@ class JobTable:
             if job == "any":
                 targets = [r for r in self.jobs.values()
                            if r.get("status") in ("running", "detached")]
-                if not targets:
+                if not targets and kind != "file":
                     self.counts["waits"] += 1
                     return {"ok": True, "job": None, "met": kind == "exit",
                             "status": "no_running_jobs", "waited_s": 0.0,
@@ -528,8 +791,6 @@ class JobTable:
             starts = {r["id"]: self._cursor(r["id"], reader,
                                              cursor if len(targets) == 1 else None)
                       for r in targets}
-            scan = dict(starts)
-            partial = {r["id"]: b"" for r in targets}
             fpath: Path | None = None
             if kind == "file":
                 p = Path(os.path.expanduser(value))
@@ -538,65 +799,89 @@ class JobTable:
                             else self.root)
                     p = base / p
                 fpath = p
-            subject = targets[0] if len(targets) == 1 else None
-            met = False
-            match = None
-            while True:
-                if kind == "exit":
-                    ended = [r for r in targets if self._done(r)]
-                    if ended:
-                        subject, met = ended[0], True
-                elif kind == "file":
-                    assert fpath is not None
-                    if fpath.exists():
-                        met = True
-                else:
-                    for r in targets:
-                        hit, scan[r["id"]], partial[r["id"]] = self._scan(
-                            r, scan[r["id"]], partial[r["id"]], value)
-                        if hit is not None:
-                            subject, met, match = r, True, hit
-                            break
-                if met:
-                    break
+        # The log files are read and matched outside `cond`; `scan` and
+        # `partial` belong to this call, and a record's `log` never changes.
+        logs = {r["id"]: r.get("log") for r in targets}
+        scan = dict(starts)
+        partial = {r["id"]: b"" for r in targets}
+        subject = targets[0] if len(targets) == 1 else None
+        met = False
+        match = None
+
+        def scan_one(r: dict[str, Any], final: bool = False) -> str | None:
+            jid = r["id"]
+            hit, scan[jid], partial[jid] = self._scan(
+                logs[jid], scan[jid], partial[jid], value, final=final)
+            return hit
+
+        while True:
+            if kind == "file":
+                assert fpath is not None
+                met = fpath.exists()
+            elif kind == "log":
+                for r in targets:
+                    hit = scan_one(r)
+                    if hit is not None:
+                        subject, met, match = r, True, hit
+                        break
+            if met:
+                break
+            with self.cond:
                 ended = [r for r in targets if self._done(r)]
-                if kind != "exit" and ended:
-                    if kind == "log":     # lines written just before the exit
-                        r = ended[0]
-                        hit, scan[r["id"]], partial[r["id"]] = self._scan(
-                            r, scan[r["id"]], partial[r["id"]], value, final=True)
-                        if hit is not None:
-                            subject, met, match = r, True, hit
-                            break
+                if kind == "exit" and ended:
+                    subject, met = ended[0], True
+                    break
+                if ended:
                     subject = ended[0]
-                    break
-                left = deadline - (time.monotonic() - t0)
-                if left <= 0 or self.closed:
-                    break
-                self.cond.wait(min(POLL_S, left))
-            waited = round(time.monotonic() - t0, 2)
-            self.counts["waits"] += 1
-            self.counts["wait_seconds"] = round(self.counts["wait_seconds"] + waited, 2)
-            out: dict[str, Any] = {"ok": True, "until": until or "exit",
-                                   "met": met, "waited_s": waited,
-                                   "deadline_s": deadline}
-            if match is not None:
-                out["match"] = match
-            if fpath is not None:
-                out["file"] = str(fpath)
-            if subject is None:
-                out.update(job=None, status="waiting" if not met else "met",
-                           output="")
+                    final = kind == "log"
+                    if kind == "file":     # created just before the exit
+                        assert fpath is not None
+                        met = fpath.exists()
+                else:
+                    final = None
+                    left = deadline - (time.monotonic() - t0)
+                    if left <= 0 or self.closed:
+                        break
+                    self.cond.wait(min(POLL_S, left))
+            if final is not None:
+                if final:       # lines written just before the exit
+                    hit = scan_one(subject, final=True)
+                    if hit is not None:
+                        met, match = True, hit
+                break
+        waited = round(time.monotonic() - t0, 2)
+        out: dict[str, Any] = {"ok": True, "until": until or "exit",
+                               "met": met, "waited_s": waited,
+                               "deadline_s": deadline}
+        if match is not None:
+            out["match"] = match
+        if fpath is not None:
+            out["file"] = str(fpath)
+        if subject is None:
+            with self.cond:
+                self.counts["waits"] += 1
+                self.counts["wait_seconds"] = round(
+                    self.counts["wait_seconds"] + waited, 2)
                 if met:
                     self.counts["polls_avoided"] += 1
-                return out
-            got = self.read_new(subject, starts[subject["id"]])
-            self._set_cursor(subject["id"], reader, got["cursor"])
+            out.update(job=None, status="met" if met else "waiting", output="")
+            return out
+        with self.cond:
+            running = subject.get("status") in ("running", "detached")
+        got = self.read_new(logs[subject["id"]], starts[subject["id"]], running)
+        with self.cond:
+            self.counts["waits"] += 1
+            self.counts["wait_seconds"] = round(self.counts["wait_seconds"] + waited, 2)
+            self._set_cursor(subject["id"], reader, got["cursor"],
+                             cursor is not None and len(targets) == 1)
             pub = self.public(subject)
             out.update({"job": subject["id"], "status": pub["status"],
                         "exit_code": pub["exit_code"], "signal": pub["signal"],
                         "elapsed_s": pub["elapsed_s"], "command": pub["command"],
                         **got})
+            for k in ("leader_exited", "group_alive"):
+                if k in pub:
+                    out[k] = pub[k]
             if len(targets) > 1:
                 out["others"] = [{"job": r["id"], "status": r.get("status")}
                                  for r in targets if r is not subject]
@@ -608,10 +893,13 @@ class JobTable:
                                "next output")
             return out
 
-    def _scan(self, rec: dict[str, Any], offset: int, partial: bytes,
-              rx: re.Pattern, final: bool = False) -> tuple[str | None, int, bytes]:
-        """Search the log text after `offset` for a line matching `rx`."""
-        path = Path(rec.get("log") or "")
+    @staticmethod
+    def _scan(log_path: Any, offset: int, partial: bytes, rx: re.Pattern,
+              final: bool = False) -> tuple[str | None, int, bytes]:
+        """Search the log text after `offset` for a line matching `rx` (its
+        first MATCH_LINE_BYTES bytes). Reads the file only: call it without
+        `cond` held."""
+        path = Path(log_path or "")
         try:
             with open(path, "rb") as fh:
                 fh.seek(offset)
@@ -626,7 +914,7 @@ class JobTable:
             lines.append(rest)
             rest = b""
         for raw in lines:
-            text = raw.decode("utf-8", errors="replace")
+            text = raw[:MATCH_LINE_BYTES].decode("utf-8", errors="replace")
             if rx.search(text):
                 return text[:500], offset, rest
         return None, offset, rest[-65536:]
@@ -661,34 +949,35 @@ class JobTable:
 
     # -- stop ---------------------------------------------------------------- #
     def stop(self, jid: Any, *, sig: Any = "TERM", grace_s: Any = None) -> dict[str, Any]:
+        """Signal the job's process group, then SIGKILL it after `grace_s`.
+        Works on a job of an earlier daemon (`detached`, or `gone` with
+        processes left in its group) while its group is still the job's."""
         name = str(sig or "TERM").upper().removeprefix("SIG")
         if name not in _SIGNALS:
             raise JobError(f"signal must be one of {', '.join(_SIGNALS)}")
         grace = STOP_GRACE_S if grace_s is None else _deadline(grace_s)
         with self.cond:
             rec = self.get(jid)
-            if rec.get("status") == "detached":
-                if _alive(rec.get("pid"), rec.get("proc_start")):
-                    _killpg(rec.get("pgid"), _SIGNALS[name])
-            elif rec.get("status") == "running":
-                _killpg(rec.get("pgid"), _SIGNALS[name])
-            else:
-                _killpg(rec.get("pgid") if rec.get("owned") else None, signal.SIGKILL)
+            self._done(rec)
+            if not self._live(rec):
+                if rec.get("status") == "gone":
+                    self._save()
                 return {"ok": True, **self.flat(rec),
                         "note": f"job {rec['id']} had already ended"}
             self.counts["job_stops"] += 1
+            self._signal(rec, _SIGNALS[name])
             t0 = time.monotonic()
-            while not self._done(rec) and time.monotonic() - t0 < grace:
+            while self._live(rec) and time.monotonic() - t0 < grace:
                 self.cond.wait(0.05)
-            if not self._done(rec) and name != "KILL":
-                _killpg(rec.get("pgid"), signal.SIGKILL)
-                t1 = time.monotonic()
-                while not self._done(rec) and time.monotonic() - t1 < 2.0:
-                    self.cond.wait(0.05)
-            # Members of the group that outlived the leader.
-            if rec.get("owned") and _group_alive(rec.get("pgid")):
-                _killpg(rec.get("pgid"), signal.SIGKILL)
-            if rec.get("status") == "detached" and self._done(rec):
+            if self._live(rec) and name != "KILL":
+                self._signal(rec, signal.SIGKILL)
+            t1 = time.monotonic()
+            while self._live(rec) and time.monotonic() - t1 < 2.0:
+                self.cond.wait(0.05)
+            if not rec.get("owned") and not self._live(rec):
+                if rec.get("status") == "detached":
+                    rec["status"] = "gone"
+                rec["ended"] = rec.get("ended") or _now()
                 self._save()
             return {"ok": True, **self.flat(rec)}
 
@@ -700,20 +989,19 @@ class JobTable:
             self.closed = True
             self.cond.notify_all()
             doomed = [r for r in self.jobs.values()
-                      if r.get("owned") and not r.get("detach")]
+                      if r.get("owned") and not r.get("detach")
+                      and r.get("status") == "running"]
             for r in doomed:
-                if r.get("status") == "running" or _group_alive(r.get("pgid")):
-                    _killpg(r.get("pgid"), signal.SIGTERM)
+                self._signal(r, signal.SIGTERM)
             t0 = time.monotonic()
             while (any(r.get("status") == "running" for r in doomed)
                    and time.monotonic() - t0 < grace_s):
                 self.cond.wait(0.05)
             for r in doomed:
-                if r.get("status") == "running" or _group_alive(r.get("pgid")):
-                    _killpg(r.get("pgid"), signal.SIGKILL)
-                    if r.get("status") == "running":
-                        notes.append(f"killed job {r['id']} (pid {r['pid']}): "
-                                     f"{r['command'][:200]}")
+                if r.get("status") == "running":
+                    self._signal(r, signal.SIGKILL)
+                    notes.append(f"killed job {r['id']} (pid {r['pid']}): "
+                                 f"{r['command'][:200]}")
             t1 = time.monotonic()
             while (any(r.get("status") == "running" for r in doomed)
                    and time.monotonic() - t1 < 2.0):
@@ -821,7 +1109,8 @@ class JobTable:
                     "\"until\": \"exit\"} returns as soon as the job exits "
                     "(or until \"log:<regex>\" / \"file:<path>\"), with only the "
                     "new log lines, instead of sleeping a fixed time")
-        if background_start(command) and self.hint_ok(session, "background"):
+        if (background_start(command) and self.is_enabled()
+                and self.hint_ok(session, "background")):
             lines.append(
                 "[ozagia] for a long-running command, job_start {\"command\": "
                 "\"...\"} runs it in the background with its output in a log; "
@@ -1033,7 +1322,11 @@ def capture_ps(command: str, jobs: list[dict[str, Any]]) -> str | None:
             if not field.endswith("=") or field[:-1] not in _PS_FIELDS:
                 return None
             field = field[:-1]
-        by_pid = {int(r["pid"]): r for r in jobs if r.get("pid")}
+        # Only jobs whose leader runs: an ended job's pid may belong to
+        # another process now, which real ps would list.
+        by_pid = {int(r["pid"]): r for r in jobs
+                  if r.get("pid") and r.get("status") in ("running", "detached")
+                  and not r.get("leader_exited")}
         pids = sorted({int(p) for p in pids_text.split(",")})
         if not all(p in by_pid for p in pids):
             return None
@@ -1066,4 +1359,5 @@ def capture_ps(command: str, jobs: list[dict[str, Any]]) -> str | None:
 
 
 __all__ = ["JobError", "JobTable", "MAX_JOBS", "OPS", "WAIT_DEFAULT_S",
-           "background_start", "capture_ps", "parse_until", "sleep_seconds"]
+           "background_start", "capture_ps", "disabled_message", "jobs_enabled",
+           "parse_until", "sleep_seconds"]

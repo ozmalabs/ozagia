@@ -239,7 +239,7 @@ def build_parser() -> argparse.ArgumentParser:
                          description="Install the OpenCode plugin, the Claude Code hooks "
                                      "or the Codex hooks and MCP server. Other options "
                                      "go to the integration's installer (for codex: "
-                                     "--scope project|user, --python P).")
+                                     "--scope project|user, --python P, --jobs).")
     ins.add_argument("target", choices=tuple(INSTALL_TARGETS))
     ins.add_argument("--workdir", default=".", help="project directory (default: .)")
     return p

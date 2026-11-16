@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import select
+import shlex
 import shutil
 import signal
 import subprocess
@@ -16,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from ozagia.config import clear_config_cache
 from ozagia.daemon import jobs as J
 from ozagia.daemon.client import DaemonClient
 from ozagia.daemon.protocol import socket_path
@@ -43,10 +45,18 @@ def _repo(path: Path) -> Path:
 
 
 @pytest.fixture
-def repo(tmp_path, monkeypatch):
+def bare_repo(tmp_path, monkeypatch):
+    """A repository without a configuration: jobs are off."""
     for k in [k for k in os.environ if k.startswith("OZAGIA_")]:
         monkeypatch.delenv(k)
     return _repo(tmp_path / "repo")
+
+
+@pytest.fixture
+def repo(bare_repo):
+    """A repository that enables jobs (`[jobs] enabled = true`)."""
+    (bare_repo / ".ozagia.toml").write_text("[jobs]\nenabled = true\n")
+    return bare_repo
 
 
 @pytest.fixture
@@ -325,11 +335,21 @@ def test_ps_and_pgrep_match_the_real_commands(table):
                 f"ps -p {pid} -o stat=", "pgrep -v sleep", "pgrep -la sleep"]:
         assert t.capture_ps(cmd) is None, cmd
     t.stop(job["id"], grace_s=1)
-    # An ended job: ps prints its header only, pgrep nothing.
-    out = t.capture_ps(f"ps -p {pid}").splitlines()
-    assert out[0] == "    PID TTY          TIME CMD"
-    assert "killed by SIGTERM" in out[1] and "job_log" in out[1]
+    # An ended job's pid may be another process's by now: ps runs as usual.
+    assert t.capture_ps(f"ps -p {pid}") is None
+    # pgrep -f names the ended job (and lists no process).
     assert t.capture_ps("pgrep -f 'sleep 41.25'").startswith("[ozagia] job")
+
+
+def test_ps_for_a_reused_pid_of_an_ended_job_runs_as_usual():
+    """Issue 10: an ended job whose pid now belongs to a live process."""
+    me = os.getpid()
+    ended = {"id": "j1", "pid": me, "pgid": me, "status": "exited", "exit_code": 0,
+             "command": "true", "started": 1.0, "ended": 2.0,
+             "proc_start": J._proc_start(me)}
+    assert J.capture_ps(f"ps -p {me}", [ended]) is None
+    running = {**ended, "status": "running", "ended": None}
+    assert J.capture_ps(f"ps -p {me}", [running]).startswith("    PID TTY")
 
 
 def test_capture_needs_jobs():
@@ -641,7 +661,438 @@ def test_codex_hook_ps_without_a_daemon_starts_nothing(repo):
     assert not socket_path(repo).exists()
 
 
-def test_agents_section_names_the_job_tools():
-    from ozagia.integrations.codex.install import AGENTS_SECTION
-    for word in ("job_start", "job_wait", "write_stdin", "sleep"):
-        assert word in AGENTS_SECTION
+def test_agents_section_names_the_job_tools_only_with_jobs():
+    from ozagia.integrations.codex.install import AGENTS_SECTION, agents_section
+    with_jobs = agents_section(jobs=True)
+    for word in ("job_start", "job_wait", "write_stdin", "sleep",
+                 "outside the Codex sandbox"):
+        assert word in with_jobs
+    assert AGENTS_SECTION == agents_section() and "job_" not in AGENTS_SECTION
+
+
+# --------------------------------------------------------------------------- #
+# review fixes: opt-in, refusals, process-group safety, lock, MCP, CLI
+# --------------------------------------------------------------------------- #
+def test_jobs_are_opt_in(bare_repo, monkeypatch):
+    t = J.JobTable(bare_repo, base_env=PATH_ENV)
+    try:
+        with pytest.raises(J.JobError) as e:
+            t.start(command="true")
+        text = str(e.value)
+        for word in (".ozagia.toml", "enabled = true", "OZAGIA_JOBS=1",
+                     "outside the harness sandbox", "daemon's privileges"):
+            assert word in text, word
+        reply = t.dispatch("job_start", {"command": "true"})
+        assert not reply["ok"] and "background jobs are off" in reply["error"]
+        # The other ops still work.
+        assert t.dispatch("job_list", {}) == {"ok": True, "jobs": [], "running": 0}
+        assert t.wait(None, until="file:nope", deadline_s=0)["met"] is False
+        assert t.stats()["jobs_refused"] == 2
+        # No background hint points to job_start while jobs are off.
+        assert t.shell_hints("./server &", "s") == []
+        monkeypatch.setenv("OZAGIA_JOBS", "1")
+        job = t.start(command="true")
+        assert t.wait(job["id"], deadline_s=10)["status"] == "exited"
+        assert t.shell_hints("./server &", "s")
+        # OZAGIA_JOBS=0 wins over the file.
+        (bare_repo / ".ozagia.toml").write_text("[jobs]\nenabled = true\n")
+        clear_config_cache()
+        monkeypatch.setenv("OZAGIA_JOBS", "0")
+        assert not J.jobs_enabled(bare_repo)
+        monkeypatch.delenv("OZAGIA_JOBS")
+        assert J.jobs_enabled(bare_repo)
+        (bare_repo / ".ozagia.toml").write_text("[jobs]\nenabled = 1\n")
+        clear_config_cache()      # the cache keys on mtime, which may not move
+        assert not J.jobs_enabled(bare_repo)          # malformed: off
+    finally:
+        t.shutdown(grace_s=0.5)
+
+
+def test_git_through_env_and_shell_forms_is_refused(table, repo):
+    t = table()
+    alias = {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "alias.x",
+             "GIT_CONFIG_VALUE_0": "commit"}
+    for kw, why in [
+            ({"command": "git x -am m", "env": alias}, "GIT_CONFIG_COUNT"),
+            ({"argv": ["git", "status"], "env": {"GIT_DIR": "/tmp/x"}}, "GIT_DIR"),
+            ({"command": "true", "env": {"GIT_SSH_COMMAND": "x"}}, "GIT_"),
+            ({"command": "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.x "
+                         "GIT_CONFIG_VALUE_0=commit git x"}, "mentions git"),
+            ({"command": "echo git commit -am x | bash"}, "mentions git"),
+            ({"command": "bash <<< 'git commit -am x'"}, "mentions git"),
+            ({"command": "echo 'echo hi' | sh"}, "feeds text to a shell"),
+            ({"command": "curl -s x | /bin/bash -s"}, "feeds text to a shell"),
+            ({"command": "zsh <<< 'echo hi'"}, "feeds text to a shell"),
+            ({"command": "bash -c 'git commit -m x'"}, "moves refs"),
+            ({"command": "/usr/bin/env git reset --hard"}, "moves refs")]:
+        with pytest.raises(J.JobError, match=why):
+            t.start(**kw)
+    assert t.jobs == {}
+    # Nothing was committed.
+    assert subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                          capture_output=True).returncode != 0
+    # Pipes that do not feed a shell, and git in a simple form, still run.
+    for cmd in ["seq 3 | tail -1", "git status --short"]:
+        job = t.start(command=cmd)
+        assert t.wait(job["id"], deadline_s=10)["exit_code"] == 0
+
+
+def _kills(monkeypatch) -> list[tuple[int, int]]:
+    calls: list[tuple[int, int]] = []
+    real = J._killpg
+
+    def spy(pgid, sig):
+        calls.append((pgid, sig))
+        real(pgid, sig)
+    monkeypatch.setattr(J, "_killpg", spy)
+    return calls
+
+
+def test_an_ended_jobs_group_is_never_signalled(table, monkeypatch):
+    """Issue 2: job_stop on a long-ended job, and shutdown, send nothing."""
+    t = table()
+    job = t.start(command="true")
+    assert t.wait(job["id"], deadline_s=10)["status"] == "exited"
+    assert t.jobs[job["id"]]["group_gone"] is True
+    calls = _kills(monkeypatch)
+    assert "already ended" in t.stop(job["id"], sig="KILL")["note"]
+    t.shutdown(grace_s=0.2)
+    assert calls == []
+
+
+def _spawn_group(command: str) -> subprocess.Popen:
+    return subprocess.Popen(["bash", "-c", command], start_new_session=True,
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+
+
+def _wait_members(pgid: int, n: int) -> list[tuple[int, int]]:
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        got = J._group_members(pgid)
+        if len(got) >= n:
+            return got
+        time.sleep(0.05)
+    raise AssertionError(f"group {pgid} has {J._group_members(pgid)}")
+
+
+def test_group_ours_checks_start_times():
+    proc = _spawn_group("exec sleep 30")
+    try:
+        _wait_members(proc.pid, 1)
+        start = J._proc_start(proc.pid)
+        assert J._group_ours(proc.pid, start)
+        # A job that started earlier than this group's founder: the pgid
+        # was reused.
+        assert not J._group_ours(proc.pid, str(int(start) - 100))
+        assert not J._group_ours(proc.pid, None)
+    finally:
+        proc.kill()
+        proc.wait()
+    assert not J._group_ours(proc.pid, start)
+    # The leader is gone and a member lives: ours only if the member started
+    # no earlier than the job.
+    proc = _spawn_group("sleep 30 & exit 0")
+    proc.wait()
+    try:
+        (member, mstart), = _wait_members(proc.pid, 1)
+        assert J._group_ours(proc.pid, str(mstart - 5))
+        assert not J._group_ours(proc.pid, str(mstart + 100))
+    finally:
+        J._killpg(proc.pid, signal.SIGKILL)
+
+
+def _write_table(table_dir: Path, recs: list[dict]) -> None:
+    table_dir.mkdir(parents=True, exist_ok=True)
+    (table_dir / J.TABLE_NAME).write_text(json.dumps({"next": 9, "jobs": recs}))
+
+
+def _rec(jid: str, pid: int, start: str | None, **kw) -> dict:
+    return {"id": jid, "command": "sleep 30", "pid": pid, "pgid": pid,
+            "proc_start": start, "status": "running", "exit_code": None,
+            "signal": None, "started": time.time() - 60, "ended": None,
+            "detach": False, "log": "/nonexistent.log", **kw}
+
+
+def test_load_checks_pid_reuse_and_sets_ended(repo, table, monkeypatch):
+    """Issues 6, 8 and the detached pid-reuse guard: a recorded pid that is
+    now another process (start time differs) is `gone`, never signalled."""
+    me = os.getpid()
+    _write_table(repo / ".ozagia" / "jobs", [
+        _rec("j1", me, "1", detach=True), _rec("j2", me, "1"),
+        _rec("j3", me, None, status="gone")])
+    calls = _kills(monkeypatch)
+    before = time.time()
+    t = table()
+    for jid in ("j1", "j2", "j3"):
+        rec = t.jobs[jid]
+        assert rec["status"] == "gone", jid
+        assert rec["ended"] >= before, jid        # not None: elapsed stops
+    assert t.public(t.jobs["j1"])["elapsed_s"] == t.public(t.jobs["j1"])["elapsed_s"]
+    assert "already ended" in t.stop("j1")["note"]
+    assert calls == []
+
+
+def test_load_stops_jobs_a_crashed_daemon_left_running(repo, table, capsys):
+    """Issue 6: non-detached jobs of a daemon that died are stopped on load;
+    detached ones are kept; a `gone` job with a live group can be stopped."""
+    orphan = _spawn_group("exec sleep 30")
+    kept = _spawn_group("exec sleep 30")
+    leaderless = _spawn_group("sleep 30 & exit 0")
+    leaderless.wait()
+    try:
+        _wait_members(orphan.pid, 1)
+        _wait_members(kept.pid, 1)
+        (member, _), = _wait_members(leaderless.pid, 1)
+        _write_table(repo / ".ozagia" / "jobs", [
+            _rec("j1", orphan.pid, J._proc_start(orphan.pid)),
+            _rec("j2", kept.pid, J._proc_start(kept.pid), detach=True),
+            _rec("j3", leaderless.pid, str(int(J._proc_start(member)) - 1),
+                 status="gone", ended=time.time())])
+        t = table()
+        assert orphan.wait(timeout=10) == -signal.SIGTERM
+        rec = t.jobs["j1"]
+        assert rec["status"] == "gone" and rec["stopped_on_load"]
+        assert t.public(rec)["stopped_on_load"] is True
+        assert "left running by an earlier daemon" in capsys.readouterr().err
+        assert t.stats()["stopped_on_load"] == 1
+        assert t.jobs["j2"]["status"] == "detached" and kept.poll() is None
+        assert t.stop("j2", grace_s=2)["status"] == "gone"
+        assert kept.wait(timeout=10) == -signal.SIGTERM
+        # The gone job's surviving group member is reachable.
+        assert J._alive(member, None)
+        t.stop("j3", grace_s=2)
+        assert _gone(member) and t.jobs["j3"]["group_gone"]
+    finally:
+        for p in (orphan, kept):
+            if p.poll() is None:
+                p.kill()
+                p.wait()
+        J._killpg(leaderless.pid, signal.SIGKILL)
+
+
+def test_status_follows_the_whole_group(table):
+    """Issue 5: the leader exits while a member of its group runs."""
+    t = table()
+    job = t.start(command="sleep 1.2 & echo started")
+    got = t.wait(job["id"], until="log:started", deadline_s=10)
+    assert got["met"]
+    time.sleep(0.3)
+    pub = t.public(t.jobs[job["id"]])
+    assert pub["status"] == "running" and pub["leader_exited"] and pub["group_alive"]
+    assert t.running_count() == 1
+    got = t.wait(job["id"], deadline_s=0.2)
+    assert not got["met"] and got["group_alive"]
+    got = t.wait(job["id"], deadline_s=10)
+    assert got["met"] and got["status"] == "exited" and got["exit_code"] == 0
+    assert "group_alive" not in got and t.running_count() == 0
+    assert _group_pids(job["pgid"]) == []
+    # Stopping such a job reaches the survivors.
+    job = t.start(command="sleep 30 & echo started")
+    t.wait(job["id"], until="log:started", deadline_s=10)
+    deadline = time.monotonic() + 5
+    while not t.jobs[job["id"]].get("leader_exited") and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert t.stop(job["id"], grace_s=2)["status"] == "exited"
+    assert _group_pids(job["pgid"]) == []
+
+
+def test_eviction_keeps_jobs_whose_group_lives(repo, table, monkeypatch):
+    """Issue 9."""
+    leaderless = _spawn_group("sleep 30 & exit 0")
+    leaderless.wait()
+    try:
+        (member, mstart), = _wait_members(leaderless.pid, 1)
+        _write_table(repo / ".ozagia" / "jobs", [
+            _rec("j1", leaderless.pid, str(mstart - 1), status="gone",
+                 ended=time.time())])
+        monkeypatch.setattr(J, "MAX_JOBS", 2)
+        t = table()
+        for _ in range(3):
+            job = t.start(command="true")
+            t.wait(job["id"], deadline_s=10)
+        assert "j1" in t.jobs and len(t.jobs) == 2
+        t.stop("j1", grace_s=1)
+        job = t.start(command="true")
+        t.wait(job["id"], deadline_s=10)
+        assert "j1" not in t.jobs
+    finally:
+        J._killpg(leaderless.pid, signal.SIGKILL)
+
+
+def test_log_wait_does_not_hold_the_table_lock(table, monkeypatch):
+    """Issue 3: a slow scan leaves the other ops free; long lines are cut
+    before the regex sees them."""
+    t = table()
+    job = t.start(command="echo a; sleep 30")
+    real = J.JobTable._scan
+
+    def slow(*a, **kw):
+        time.sleep(0.5)
+        return real(*a, **kw)
+    monkeypatch.setattr(J.JobTable, "_scan", staticmethod(slow))
+    th = threading.Thread(target=t.wait, args=(job["id"],),
+                          kwargs={"until": "log:never", "deadline_s": 2})
+    th.start()
+    time.sleep(0.2)
+    for _ in range(5):
+        t0 = time.monotonic()
+        t.running_count()
+        t.dispatch("job_list", {})
+        t.shell_hints("sleep 60", "s")
+        assert time.monotonic() - t0 < 0.2
+        time.sleep(0.1)
+    th.join()
+    monkeypatch.setattr(J.JobTable, "_scan", staticmethod(real))
+    t.stop(job["id"], grace_s=1)
+    long = t.start(command=f"printf '%0{J.MATCH_LINE_BYTES + 10}d' 0; echo X; echo ok")
+    got = t.wait(long["id"], until="log:X$", deadline_s=10)
+    assert not got["met"] and got["status"] == "exited"
+    long = t.start(command="printf 'x%.0s' $(seq 100); echo X")
+    assert t.wait(long["id"], until="log:X$", deadline_s=10)["met"]
+
+
+def test_concurrent_waits_on_one_reader(table):
+    t = table()
+    job = t.start(command="sleep 0.3; echo one; echo two; sleep 30")
+    out: list[dict] = []
+    ths = [threading.Thread(target=lambda: out.append(
+        t.wait(job["id"], until="log:two", deadline_s=10, reader="r")))
+        for _ in range(2)]
+    for th in ths:
+        th.start()
+    for th in ths:
+        th.join()
+    assert [o["met"] for o in out] == [True, True]
+    assert all(o["output"] == "one\ntwo" for o in out)
+    # The reader's offset is at the end: nothing is returned twice again.
+    assert t.log(job["id"], reader="r")["output"] == ""
+    assert t.cursors[(job["id"], "r")] == len(b"one\ntwo\n")
+    t.stop(job["id"], grace_s=1)
+
+
+def test_mcp_job_wait_and_stop_arguments():
+    """Issues 7 and 4: a file wait without a job passes none; job_stop's
+    grace is capped."""
+    from types import SimpleNamespace
+
+    from ozagia.integrations.mcp import server as M
+    sent: list[tuple[str, dict]] = []
+    fake = SimpleNamespace(_job=lambda op, f: sent.append((op, f)) or {})
+    M.DevMemoryServer._job_wait(fake, {"until": "file:out.txt"})
+    M.DevMemoryServer._job_wait(fake, {"until": "exit"})
+    M.DevMemoryServer._job_wait(fake, {"job": "j2", "until": "file:x"})
+    M.DevMemoryServer._job_stop(fake, {"job": "j1", "grace_s": 500})
+    assert [f.get("job") for _op, f in sent[:3]] == [None, "any", "j2"]
+    assert sent[3][1]["grace_s"] == M.MCP_STOP_GRACE_MAX_S
+
+
+def test_mcp_job_calls_do_not_block_other_calls(live):
+    mcp = _Mcp(live["root"])
+    try:
+        (live["root"] / "here.txt").write_text("x")
+        # A file wait with no job (and no job running) checks the file.
+        err, got = mcp.call("job_wait", until="file:here.txt", deadline_s=5)
+        assert not err and got["met"] and got["job"] is None
+        err, job = mcp.call("job_start", argv=["sleep", "30"])
+        jid = job["job"]["id"]
+        tools = {t["name"]: t for t in mcp.rpc("tools/list", {})["result"]["tools"]}
+        assert "outside the Codex sandbox" in tools["job_start"]["description"]
+        # A 3 s wait, then a ping: the ping's answer comes first.
+        assert mcp.proc.stdin and mcp.proc.stdout
+        mcp.proc.stdin.write(json.dumps({
+            "jsonrpc": "2.0", "id": 100, "method": "tools/call",
+            "params": {"name": "job_wait", "arguments": {"job": jid, "deadline_s": 3}}})
+            + "\n" + json.dumps({"jsonrpc": "2.0", "id": 101, "method": "ping"}) + "\n")
+        mcp.proc.stdin.flush()
+        t0 = time.monotonic()
+        first = json.loads(mcp.proc.stdout.readline())
+        assert first["id"] == 101 and time.monotonic() - t0 < 2
+        second = json.loads(mcp.proc.stdout.readline())
+        assert second["id"] == 100 and not second["result"]["isError"]
+        err, got = mcp.call("job_stop", job=jid, grace_s=1)
+        assert not err and got["status"] == "killed"
+    finally:
+        mcp.close()
+
+
+@pytest.fixture
+def live_off(bare_repo):
+    proc = _serve(bare_repo)
+    yield {"root": bare_repo, "proc": proc, "sock": socket_path(bare_repo)}
+    try:
+        with DaemonClient(socket_path(bare_repo), timeout=10) as c:
+            c.shutdown()
+        proc.wait(timeout=15)
+    except Exception:
+        proc.kill()
+        proc.wait(timeout=5)
+
+
+def test_job_start_is_refused_over_protocol_mcp_and_cli_when_off(live_off):
+    root = live_off["root"]
+    with DaemonClient(live_off["sock"], timeout=10) as c:
+        r = c.request("job_start", command="true")
+        assert not r["ok"] and "background jobs are off" in r["error"]
+        assert c.request("job_list")["ok"]
+    r = _cli(root, "run", "--", "true")
+    assert r.returncode == 2 and "background jobs are off" in r.stderr
+    assert "outside the harness sandbox" in r.stderr
+    mcp = _Mcp(root)
+    try:
+        err, got = mcp.call("job_start", command="true")
+        assert err and "background jobs are off" in got
+        err, got = mcp.call("job_list")
+        assert not err and got["jobs"] == []
+    finally:
+        mcp.close()
+
+
+def test_cli_readers_are_per_shell(live):
+    from ozagia.daemon.jobcli import cli_reader
+    assert cli_reader().startswith(f"cli:{os.getppid()}:")
+    root = live["root"]
+    r = _cli(root, "run", "--", "echo hello")
+    jid = r.stdout.split()[0]
+    cmd = shlex.join([sys.executable, "-m", "ozagia", "job", "wait", jid,
+                      "--root", str(root), "--deadline", "10"])
+    # (`; true`: bash would exec a last simple command in its own place.)
+    outs = [subprocess.run(["bash", "-c", f"{cmd}; true"], env=_env(), capture_output=True,
+                           text=True, timeout=60).stdout for _ in range(2)]
+    # Two shells: each gets the line once.
+    assert all(o.splitlines()[0] == "hello" for o in outs), outs
+    again = subprocess.run(["bash", "-c", f"{cmd}; {cmd}; true"], env=_env(),
+                           capture_output=True, text=True, timeout=60).stdout
+    assert again.count("hello") == 1       # one shell: read once
+
+
+def test_codex_brief_and_install_mention_jobs_only_when_enabled(bare_repo, tmp_path):
+    from ozagia.integrations.codex import hook
+    from ozagia.integrations.codex import install as inst
+    assert hook.JOBS_LINE not in hook.session_brief(bare_repo)
+    work = tmp_path / "proj"
+    work.mkdir()
+    inst.install(work, python="py")
+    assert "job_start" not in (work / "AGENTS.md").read_text()
+    assert not (work / ".ozagia.toml").exists()
+    (work / ".ozagia.toml").write_text("[reads]\nstructured_outline_lines = 10")
+    got = inst.install(work, python="py", jobs=True)
+    assert got["jobs"] == work.resolve() / ".ozagia.toml"
+    text = (work / ".ozagia.toml").read_text()
+    assert text.startswith("[reads]\nstructured_outline_lines = 10\n\n[jobs]")
+    assert J.jobs_enabled(work)
+    agents = (work / "AGENTS.md").read_text()
+    assert "job_start" in agents and "outside the Codex sandbox" in agents
+    assert hook.JOBS_LINE in hook.session_brief(work)
+    # Reinstalling without --jobs keeps the paragraph while the file enables jobs.
+    inst.install(work, python="py")
+    assert "job_start" in (work / "AGENTS.md").read_text()
+    inst.uninstall(work)
+    assert (work / ".ozagia.toml").read_text() == "[reads]\nstructured_outline_lines = 10\n"
+    clear_config_cache()
+    assert not J.jobs_enabled(work)
+    with pytest.raises(inst.SettingsError, match="--scope project"):
+        inst.install(work, scope="user", home=tmp_path / "codex", jobs=True)
+    (work / ".ozagia.toml").write_text("[jobs]\nenabled = false\n")
+    with pytest.raises(inst.SettingsError, match="does not enable"):
+        inst.install(work, python="py", jobs=True)
