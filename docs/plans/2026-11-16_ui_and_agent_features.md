@@ -1238,20 +1238,39 @@ The read-only part of 1a landed as new files:
 - `core/apertures.py`, `core/view.py`, `view_html.py`, `view_cli.py`: data
   apertures, deterministic view models, self-contained HTML and a read-only
   CLI (`feat/view-apertures`, merged as `e139994`).
-- `tests/test_worktree.py`, `tests/test_resources.py`, `tests/test_files.py`,
-  `tests/test_status.py`, `tests/test_view.py`; `docs/worktree.md`,
-  `docs/resources.md`, `docs/files.md`, `docs/status.md`, `docs/view.md`;
-  console scripts for view, status, worktree, resources and files in
-  `pyproject.toml`.
+- `core/settings.py`, `settings_cli.py`: typed registry, user/repo/env
+  precedence, validation, atomic preview-first writes and the versioned
+  `ozagia/config.toml` (`feat/settings-registry`, merged as `11b33ef`).
+- `core/code_review.py`, `code_review_cli.py`: deterministic graph-aware
+  review packets; worktree/resource preflight; typed findings; graph
+  freshness; optional injected-review seam (`feat/code-review`, merged as
+  `20570d7`).
+- `core/tasks.py`, `tasks_cli.py`: bounded task specs, preflight, gates,
+  budgets, evidence logs and artifact manifests; three example specs
+  (`feat/bounded-tasks`, merged as `2d38853`).
+- `core/resources.py`, `daemon/jobs.py`, `daemon/server.py`: job limits,
+  admission before spawn, rlimit + verified-group watchdog, own OOM, log and
+  session feedback (`feat/resource-enforcement`, merged as `2337d28`).
+- `integrations/ocelot/`: explicit pinned resolver/installer with checksum,
+  SSRF/path-traversal guard and manifest verification (`feat/ocelot-installer`,
+  merged as `11c1b60`).
+- Tests for all of the above; docs `worktree.md`, `resources.md`, `files.md`,
+  `status.md`, `view.md`, `settings.md`, `code_review.md`, `tasks.md`,
+  `ocelot.md`; console scripts for view, status, settings, tasks, review,
+  Ocelot, worktree, resources and files in `pyproject.toml`.
 
-Checks after the view and file-ledger merges: `3285 passed, 21 skipped`;
-`ruff check src tests` passes. The earlier `PostCompact` merge failure was
-transient and is resolved.
+Checks after both waves: `3469 passed, 21 skipped`;
+`ruff check src tests` passes. A concurrent TUI-brand merge added
+`.opencode/plugins/ozagia/tui.js`; the harness exclude patterns and tests were
+updated for it, and the full suite is green.
 
-Not yet: resource enforcement/OOM, cleanup apply/trash, command-derived path
-extraction for `patch`/`shell`, a true before/after session manifest (the
-current scan attributes pre-existing untracked files to the session with
-`reason: unknown`), settings registry and the UI hosts.
+Not yet: cgroups and exact per-job disk accounting; cleanup apply/trash;
+command-derived path extraction for `patch`/`shell`; a true before/after
+session manifest (the current scan attributes pre-existing untracked files to
+the session with `reason: unknown`); live/multi-model review and Ocelot
+reconciliation in the code-review harness; model/tool adapters and the task
+class library; `ozagia config` CLI/`config.py` integration, migration from
+`.ozagia.toml`, doctor source reporting; and the UI hosts.
 
 ### Parallel workstreams (2026-11-16)
 
@@ -1264,10 +1283,38 @@ Four agents are running from base `865b0ed`, each in its own worktree:
 | `~/ozmadev/ozagia-wt/status-snapshot` | `feat/status-snapshot` | Read-only composed status, `status_cli` |
 | `~/ozmadev/ozagia-wt/file-ledger` | `feat/file-ledger` | Ledger capture in edits/hooks/sessions |
 
-Status: `status-snapshot` is merged as `96a6a22`, `view-apertures` as
-`e139994`, and `file-ledger` as `01807a9`; `settings-registry` is still
-running. The supervisor reviews each branch, runs targeted tests and ruff,
-merges one branch at a time, then runs the full suite from the main checkout.
+Status: all four are merged: `status-snapshot` as `96a6a22`, `view-apertures`
+as `e139994`, `file-ledger` as `01807a9`, and `settings-registry` as `11b33ef`.
+The supervisor reviewed each branch, ran targeted tests and ruff, merged one
+branch at a time, then ran the full suite from the main checkout.
+
+### Parallel wave 2 (2026-11-16)
+
+Four more agents start from `ab17a1a`:
+
+| Worktree | Branch | Scope |
+| --- | --- | --- |
+| `~/ozmadev/ozagia-wt/code-review` | `feat/code-review` | Deterministic code-review packet: diff, graph impact, tests, findings |
+| `~/ozmadev/ozagia-wt/resource-enforcement` | `feat/resource-enforcement` | Job resource limits, watchdog/own OOM and session feedback |
+| `~/ozmadev/ozagia-wt/bounded-tasks` | `feat/bounded-tasks` | Bounded task specification, runner, gates, budgets and evidence |
+| `~/ozmadev/ozagia-wt/ocelot-installer` | `feat/ocelot-installer` | Pinned, checksummed, explicit Ocelot install and resolution |
+
+Status: all four are merged: `bounded-tasks` as `2d38853`, `ocelot-installer`
+as `11c1b60`, `code-review` as `20570d7`, and `resource-enforcement` as
+`2337d28`. The final full suite is `3469 passed, 21 skipped`; ruff passes.
+
+### Parallel wave 3 (2026-11-16)
+
+Four agents start from `e5676cd`:
+
+| Worktree | Branch | Scope |
+| --- | --- | --- |
+| `~/ozmadev/ozagia-wt/research-ui` | `feat/research-ui` | Research library/evidence/screening/citation views over existing services |
+| `~/ozmadev/ozagia-wt/task-library` | `feat/task-library` | Versioned task-class catalogue on top of `core/tasks.py` |
+| `~/ozmadev/ozagia-wt/model-registry` | `feat/model-registry` | Available-model registry, per-task defaults and source reporting |
+| `~/ozmadev/ozagia-wt/log-inspect` | `feat/log-inspect` | Bounded, redacted local log inspection and proposed improvements |
+
+The same review/merge/full-suite gate applies.
 
 ## Open decisions
 

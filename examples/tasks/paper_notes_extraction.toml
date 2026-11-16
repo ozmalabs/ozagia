@@ -1,0 +1,85 @@
+id = "paper_notes"
+version = 1
+title = "Paper notes extraction"
+objective = "Extract claims, methods and open questions from a notes file without writing to the repository."
+inputs = ["notes_path"]
+tools = ["read", "grep"]
+write_scope = []
+requires_graph = false
+stop = ["gate_failed", "budget_exhausted", "resource_limit", "no_progress", "repeated_state"]
+output = "paper_notes.v1"
+
+[worktree]
+base = "main"
+require_clean = false
+require_up_to_date = false
+
+[resources]
+memory_mb = 512
+disk_mb = 256
+pids = 32
+wall_s = 120
+
+[budget]
+tokens = 20000
+model_calls = 0
+cost_usd = 0.0
+wall_s = 120
+
+[gates]
+before = ["resources_fit"]
+after = ["schema_valid", "evidence_present"]
+
+[approval]
+mutate = "deny"
+network = "deny"
+
+[output_schema]
+type = "object"
+required = ["claims", "methods", "open_questions"]
+additionalProperties = false
+
+[output_schema.properties.claims]
+type = "array"
+
+[output_schema.properties.claims.items]
+type = "object"
+required = ["text", "locator"]
+
+[output_schema.properties.claims.items.properties.text]
+type = "string"
+minLength = 1
+
+[output_schema.properties.claims.items.properties.locator]
+type = "string"
+minLength = 1
+
+[output_schema.properties.methods]
+type = "array"
+
+[output_schema.properties.methods.items]
+type = "string"
+
+[output_schema.properties.open_questions]
+type = "array"
+
+[output_schema.properties.open_questions.items]
+type = "string"
+
+[[steps]]
+id = "read-notes"
+tool = "read"
+goal = "Read the requested notes file."
+paths = ["."]
+
+[steps.budget]
+tokens = 10000
+
+[[steps]]
+id = "extract"
+tool = "grep"
+goal = "Locate claims, methods and open-question headings with line locators."
+paths = ["."]
+
+[steps.budget]
+tokens = 8000
