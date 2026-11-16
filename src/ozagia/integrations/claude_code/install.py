@@ -22,7 +22,8 @@ MODULE = "ozagia.integrations.claude_code"
 HOOK_SUFFIX = f"-m {MODULE} hook"
 SETTINGS_FILES = {"local": "settings.local.json", "project": "settings.json"}
 MATCHERS = {
-    "PostToolUse": "Read|Grep|Glob|Edit|MultiEdit|Write|Bash",
+    "PostToolUse": "Read|Grep|Glob|Edit|MultiEdit|Write|Bash|WebFetch",
+    "PostToolUseFailure": "WebFetch",
     "PreToolUse": "Bash|Read|Edit|MultiEdit|Write",
     "SessionStart": "startup|resume|clear|compact",
     "SessionEnd": "",

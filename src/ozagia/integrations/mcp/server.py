@@ -1042,6 +1042,22 @@ class DevMemoryServer:
             self._load_research_tools()
         if mode == "combined":
             self._load_research_dev_context()
+        self._load_research_fetch_tool()
+
+    def _load_research_fetch_tool(self) -> None:
+        """`research_fetch` (`ozagia.research.fallback`) in every mode of the
+        full surface (the graph surface keeps to its verbs): the `[ozagia]`
+        hint after a failed web fetch names it. It needs no
+        research session; it touches the network only when called."""
+        from ozagia.research import fallback
+        spec = fallback.TOOL_SPEC
+        name = spec["name"]
+        if name in self._handlers:
+            return
+        root = self.workspace
+        self._handlers[name] = lambda args: fallback.research_fetch_tool(args, root=root)
+        self._tools.append(spec)
+        self._schemas[name] = spec["inputSchema"]
 
     def _load_research_tools(self) -> None:
         """Load the optional research package only for a research mode."""
@@ -1748,19 +1764,27 @@ def _respond(server: DevMemoryServer, msg: Any) -> dict[str, Any] | None:
     return server.handle(msg)
 
 
+# Tools besides `job_*` that run on the worker pool: they may take long and
+# share no state with the other handlers.
+POOLED_TOOLS = frozenset({"research_fetch"})
+
+
 def _is_job_call(msg: Any) -> bool:
-    """A `tools/call` of a job tool (it only talks to the daemon, so it can
-    run on a worker thread)."""
+    """A `tools/call` that runs on a worker thread: a job tool (it only talks
+    to the daemon) or one of POOLED_TOOLS (`research_fetch` downloads for up
+    to its time budget)."""
     if not isinstance(msg, dict) or msg.get("method") != "tools/call" or "id" not in msg:
         return False
     params = msg.get("params")
-    return (isinstance(params, dict) and isinstance(params.get("name"), str)
-            and params["name"].startswith("job_"))
+    if not isinstance(params, dict) or not isinstance(params.get("name"), str):
+        return False
+    return params["name"].startswith("job_") or params["name"] in POOLED_TOOLS
 
 
 def serve(server: DevMemoryServer) -> int:
     """Read messages from stdin and write the replies to stdout. Job tool
-    calls (`job_wait` may block for up to MCP_WAIT_MAX_S) run on a pool of
+    calls (`job_wait` may block for up to MCP_WAIT_MAX_S) and POOLED_TOOLS
+    calls (`research_fetch`) run on a pool of
     MCP_JOB_WORKERS threads, so the next messages are answered meanwhile;
     their replies may come out of order (JSON-RPC matches them by `id`).
     Every other message is handled in order on this thread. Replies are

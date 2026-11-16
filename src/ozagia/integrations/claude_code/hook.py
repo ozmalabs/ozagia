@@ -29,6 +29,10 @@ the version implemented against).
 - `PreToolUse` for `Edit`, `MultiEdit` and `Write`: the warnings about
   another live session's uncommitted edits of the file (`owner_check`) as
   `additionalContext`. Never denies.
+- `PostToolUse` and `PostToolUseFailure` for `WebFetch` (neutral
+  `webfetch`, input `{url}`): `after` with the result or the error; when it
+  shows a failed fetch of a paper the daemon appends a `research_fetch`
+  hint, returned as `additionalContext`. The hook never fetches.
 - `SessionStart`: `session_event` `compact` (source "compact") or `start`
   (startup, resume, clear), with `compaction_hook: true`, which clears the
   session's read ledger and confirms that compaction is reported;
@@ -140,6 +144,10 @@ def map_tool(tool_name: str, tool_input: dict[str, Any],
         _put(out, "path", ti, "file_path")
         _put(out, "content", ti, "content")
         return "write", out
+    if tool_name == "WebFetch":
+        # `after` only: a failed fetch of a paper gets a research_fetch hint.
+        _put(out, "url", ti, "url")
+        return "webfetch", out
     if tool_name == "Bash":
         _put(out, "command", ti, "command")
         if cwd:
@@ -157,6 +165,26 @@ def _pre_output(decision: str, reason: str) -> dict[str, Any]:
     return {"hookSpecificOutput": {"hookEventName": "PreToolUse",
                                    "permissionDecision": decision,
                                    "permissionDecisionReason": reason}}
+
+
+def webfetch_text(tool_response: Any) -> str:
+    """A `WebFetch` result as the text `after` checks. Claude reports it as
+    an object (`bytes`, `code`, `codeText`, `result`, `durationMs`, `url`):
+    a non-2xx `code` becomes a leading `HTTP <code> <codeText>` line, then
+    `result` as is (a JSON dump would hide both from the failure checks).
+    Anything else goes through `response_text`."""
+    if not isinstance(tool_response, dict) or not (
+            "result" in tool_response or "code" in tool_response):
+        return response_text(tool_response)
+    lines = []
+    code = tool_response.get("code")
+    if isinstance(code, int) and not isinstance(code, bool) and not 200 <= code < 300:
+        text = tool_response.get("codeText")
+        lines.append(f"HTTP {code}" + (f" {text}" if isinstance(text, str) and text else ""))
+    result = tool_response.get("result")
+    if isinstance(result, str) and result:
+        lines.append(result)
+    return "\n".join(lines)
 
 
 def handle(payload: dict[str, Any], root: Path) -> dict[str, Any] | None:
@@ -229,14 +257,35 @@ def handle(payload: dict[str, Any], root: Path) -> dict[str, Any] | None:
         return {"hookSpecificOutput": {"hookEventName": "PreToolUse",
                                        "additionalContext": "\n".join(warnings)}}
 
+    if event == "PostToolUseFailure" and tool_name == "WebFetch":
+        # A WebFetch that raised (404, 403, a type it can't read): its error
+        # is the output `after` checks.
+        mapped = map_tool(tool_name, tool_input, cwd)
+        if mapped is None:
+            return None
+        msg = {"id": 1, "op": "after", "harness": HARNESS, "session": session,
+               "tool": mapped[0], "input": mapped[1],
+               "output": str(payload.get("error") or ""),
+               "meta": {"builtin_error": True}}
+        if sub:
+            msg["sub"] = sub
+        resp = daemon_request(protocol.socket_path(root), msg)
+        append = resp.get("append")
+        if not isinstance(append, str) or not append:
+            return None
+        return {"hookSpecificOutput": {"hookEventName": "PostToolUseFailure",
+                                       "additionalContext": append}}
+
     if event == "PostToolUse":
         mapped = map_tool(tool_name, tool_input, cwd)
         if mapped is None:
             return None
         tool, inp = mapped
+        tool_response = payload.get("tool_response")
+        output = (webfetch_text(tool_response) if tool_name == "WebFetch"
+                  else response_text(tool_response))
         msg = {"id": 1, "op": "after", "harness": HARNESS, "session": session,
-               "tool": tool, "input": inp,
-               "output": response_text(payload.get("tool_response"))}
+               "tool": tool, "input": inp, "output": output}
         if sub:
             msg["sub"] = sub
         shown = delivered_lines(tool_name, payload.get("tool_response"))

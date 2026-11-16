@@ -154,7 +154,8 @@ FILE_LEDGER_PATHS = 20
 ENV_FILE_LEDGER = "OZAGIA_FILE_LEDGER"
 # `meta` counters the daemon sums into its stats.
 META_COUNTERS = ("path_suggestions", "ownership_warnings", "files_recorded",
-                 "file_ledger_errors", "ops_after_annotations")
+                 "file_ledger_errors", "fetch_fallback_hints",
+                 "ops_after_annotations")
 # Keys kept per journal record.
 JOURNAL_KEYS = 20
 # Distinct shell passthrough reasons kept, and shown in `stats`.
@@ -274,7 +275,11 @@ def _lock_free(op: Any, tool: Any, inp: Any) -> bool:
     """A captured pytest reads no graph state, so it skips the lock; so does
     a captured `ruff check`, which takes the lock itself (`_lock`) only for
     its node keys. So does a compound command with a pytest step: it takes
-    the lock itself for the steps that read the graph."""
+    the lock itself for the steps that read the graph. So does `after` of a
+    web fetch (`webfetch`): its hint is a local check of the URL and output
+    (`ozagia.research.fallback.after_lines`) and reads no graph state."""
+    if op == "after" and tool == "webfetch":
+        return True
     if op != "tool" or tool != "shell" or not isinstance(inp, dict):
         return False
     from ozagia.intent.shell import classify, compound_steps
@@ -282,6 +287,15 @@ def _lock_free(op: Any, tool: Any, inp: Any) -> bool:
     if cls["class"] == "compound":
         return any(s["kind"] == "pytest" for s in compound_steps(cls))
     return cls["class"] in ("pytest", "ruff")
+
+
+def _research_fetch_counters(root: Path) -> dict[str, int]:
+    """`research_fetches` and `research_fetch_cache_hits` of `root`."""
+    try:
+        from ozagia.research.fallback import read_counters
+        return read_counters(root)
+    except Exception:  # noqa: BLE001 - stats never fail for a counter
+        return {"research_fetches": 0, "research_fetch_cache_hits": 0}
 
 
 class DaemonState:
@@ -366,6 +380,8 @@ class DaemonState:
         # The plan of each `replace` preflight, by (harness, session,
         # input digest), until the call it permitted (`_granted_plan`).
         self.replace_plans: dict[tuple[str, Any, str], str] = {}
+        # `[ozagia]` lines naming `research_fetch` after a failed web fetch.
+        self.fetch_fallback_hints = 0
         # Ops graph (`ozagia.core.ops_graph`): `[ozagia] ops:` lines added
         # after container/unit log and status commands.
         self.ops_after_annotations = 0
@@ -1195,6 +1211,11 @@ class DaemonState:
                 "ops_nodes": self._ops_nodes(),
                 "ops_after_annotations": self.ops_after_annotations,
                 "live_sessions": self.owners.live_sessions(),
+                # Fetch fallback (`ozagia.research.fallback`): research_fetch
+                # hints after failed web fetches, and the research_fetch
+                # calls (persisted by the MCP tool) and their cache hits.
+                "fetch_fallback_hints": self.fetch_fallback_hints,
+                **_research_fetch_counters(self.root),
                 # Created-file ledger (`ozagia.core.files`): rows recorded
                 # (handled writes, `after` scans, session start/end scans),
                 # scans run, and ledger/git failures.
