@@ -1689,11 +1689,10 @@ bundle) against OpenCode 2.3.0. A concurrent TUI-brand merge added
 updated for it.
 
 Not yet: the live OpenCode Desktop smoke test; add-in apply/mutation controls
-and an executable task launcher; command-derived path extraction for
-`patch`/`shell`; live/multi-model review; model/tool adapters and an injected
-test runner; rewiring legacy loaders to `ozagia/config.toml`; action apply UI;
-live security-tool matrix/DAST; library hints in code review/repo scan and
-non-handled edits.
+and an executable task launcher; live model/provider adapters for review and
+generation (the injected multi-reviewer and test-runner seams exist);
+`[environments]`, `[services]`, `[relays]` and `[runtime]` as legacy project
+models; action apply UI; live security-tool matrix/DAST.
 
 ### Parallel workstreams (2026-11-16)
 
@@ -1845,17 +1844,15 @@ Status: `hints-integration` merged as `3648304` (`fed25bd`); `config-rewire`
 merged as `a9b95a3` (`504cff0`); `task-executor` merged as `33bfcfa`
 (`93f1f69`). Each passed its targeted suite and a full suite on its own tree;
 the merged tree passed the final suite (`4241 passed, 21 skipped`) and ruff.
-Wave 9 is complete; the live Desktop smoke test and model-provider adapters
-remain host/provider-dependent. Next tractable follow-ups are command-derived
-path extraction for `patch`/`shell`, and live or multi-model review with an
-injected test runner; exact per-job disk accounting is the wave 10
-`feat/disk-accounting` workstream.
+Wave 9 is complete. Wave 10 completed its follow-ups: command-derived
+`patch`/`shell` paths, exact per-job disk write attribution, injected
+multi-reviewer/test-runner seams, and the remaining config migration gaps.
+Live Desktop and live model-provider adapters remain host/provider-dependent.
 
-Known follow-ups from the config migration: `[security]` in
-`ozagia/config.toml` is reported as unmapped until its loader moves; the
-doctor text summary still prints only the active path (the structured section
-has the full source report); `adapters.registry` reload caching keys on the
-active config path only.
+The config migration follow-ups are closed: `[security]` loads from both
+files with legacy precedence, doctor prints both paths/precedence/unmapped
+counts, and the adapter cache is keyed on both files. `[environments]`,
+`[services]`, `[relays]` and `[runtime]` remain legacy project models.
 
 ### Parallel wave 10 (2026-11-17)
 
@@ -1870,6 +1867,12 @@ Four agents start from `345aecf`:
 
 The same review/merge/full-suite gate applies. Live model/provider adapters and
 the live Desktop smoke test remain host/provider-dependent.
+
+Status: all four branches merged — `review-runners` as `552f3d5` (`895ddfe`),
+`disk-accounting` as `0f8cefc` (`625c043`), `config-remainder` as `608107e`
+(`cd3e5d0`) and `call-paths` as `260c28b` (`68c220f`). Each passed its
+targeted suite and a full suite on its own tree; the merged tree passed the
+final suite (`4313 passed, 21 skipped`) and ruff. Wave 10 is complete.
 
 ### Library-first workstream (2026-11-16)
 
