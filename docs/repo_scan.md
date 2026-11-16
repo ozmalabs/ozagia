@@ -106,7 +106,15 @@ target; different families or targets are never merged.
 Ocelot is optional and read-only. A missing or failing checkout is reported as
 `not_installed`, `unavailable` or `error` with exact fallback clusters, plus a
 warning; the scan is not failed and nothing is installed or downloaded. The
-scan's graph/security status is unchanged. See `docs/ocelot_code.md`.
+scan's graph/security status is unchanged.
+
+When `ocelot_patterns=True` or `--ocelot-patterns` is supplied, the report also
+gains `ocelot.patterns`: candidate architecture patterns over the opportunities
+shown. This is independent of finding clustering and is off by default. Every
+pattern has `candidate: true` and `truth_assessed: false`; a pattern is not an
+anti-pattern or defect verdict and completeness is not assessed. An unavailable
+checkout is reported with exact signature/overlap patterns, not installed. See
+`docs/ocelot_code.md`.
 
 ## CLI
 
@@ -114,13 +122,15 @@ scan's graph/security status is unchanged. See `docs/ocelot_code.md`.
 PYTHONPATH=src python -m ozagia.repo_scan_cli scan --root . --since 30 --top 25
 PYTHONPATH=src python -m ozagia.repo_scan_cli scan --root . --json --out /tmp/scan.json
 PYTHONPATH=src python -m ozagia.repo_scan_cli scan --root . --ocelot
+PYTHONPATH=src python -m ozagia.repo_scan_cli scan --root . --ocelot-patterns
 PYTHONPATH=src python -m ozagia.repo_scan_cli list-categories
 ```
 
 `--ocelot` (with optional `--ocelot-root`, `--ocelot-mode` and
 `--ocelot-timeout`) adds structural clusters for the duplicate, weak-boundary
-and security opportunities that are shown. It is off by default; an
-unavailable checkout is reported, not installed, and never fails the scan. See
+and security opportunities that are shown. `--ocelot-patterns` adds candidate
+architecture patterns; both flags are off by default. An unavailable checkout
+is reported, not installed, and never fails the scan. See
 `docs/ocelot_code.md`.
 
 Exit codes: `0` for a completed scan (including an unavailable graph) and

@@ -45,6 +45,12 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Ocelot worker transport (default: auto)")
     parser.add_argument("--ocelot-timeout", type=int, default=120,
                         help="Ocelot worker timeout in seconds (default: 120)")
+    parser.add_argument("--ocelot-impact", action="store_true",
+                        help="add the optional ocelot.impact change-shape "
+                             "section (candidate test sets only)")
+    parser.add_argument("--ocelot-patterns", action="store_true",
+                        help="add the optional ocelot.patterns candidate "
+                             "architecture-pattern section")
     return parser
 
 
@@ -71,6 +77,8 @@ def main(argv: list[str] | None = None) -> int:
         "ocelot_root": args.ocelot_root,
         "ocelot_mode": args.ocelot_mode,
         "ocelot_timeout": args.ocelot_timeout,
+        "ocelot_impact": args.ocelot_impact,
+        "ocelot_patterns": args.ocelot_patterns,
     }
     if args.max_file_bytes is not None:
         kwargs["max_file_bytes"] = args.max_file_bytes

@@ -17,6 +17,7 @@ python -m ozagia.code_review_cli \
   --range HEAD~1..HEAD \
   [--graph .ozagia/graph.json] \
   [--ocelot [--ocelot-root PATH] [--ocelot-mode auto|inprocess|subprocess]] \
+  [--ocelot-impact] [--ocelot-patterns] \
   [--json] \
   [--out review-packet.json] \
   [--fail-on blocking|major|never]
@@ -46,6 +47,8 @@ Operational flags:
 --ocelot-root PATH     explicit Ocelot checkout (default: resolve one)
 --ocelot-mode MODE     auto, inprocess or subprocess (default auto)
 --ocelot-timeout S     worker timeout in seconds (default 120)
+--ocelot-impact        optional ocelot.impact candidate test sets (default off)
+--ocelot-patterns      optional ocelot.patterns candidate patterns (default off)
 ```
 
 Python API:
@@ -58,6 +61,8 @@ packet = R.review_diff(root, base="HEAD~1", head="HEAD",
                        graph_path=".ozagia/graph.json")
 packet = R.review_range(root, "main..HEAD", ocelot=True,
                         ocelot_root="/path/to/ocelot", ocelot_mode="auto")
+packet = R.review_range(root, "main..HEAD", ocelot_impact=True,
+                        ocelot_patterns=True)
 status = R.exit_code(packet, "blocking")
 ```
 
@@ -199,7 +204,10 @@ Important fields:
 ```
 
 `security` is present only when the caller supplies a security report;
-`ocelot` is present only when clustering is requested.
+`ocelot` is present only when clustering, impact or patterns is requested. When
+only impact/patterns are requested, the `ocelot` section is a container with
+`state: "not_requested"` and empty finding clusters; the requested parts are
+nested under `ocelot.impact` and `ocelot.patterns`.
 
 ## Optional security findings
 
@@ -261,6 +269,33 @@ section never adds findings or changes `exit_code`.
 
 See `docs/ocelot_code.md` for the payload, family mapping and fallback states.
 
+### Optional impact and pattern sections
+
+Two more sections are available only when requested, through
+`ocelot_impact=True` / `ocelot_patterns=True` (or a callable injected through
+the same argument). They are off by default:
+
+```python
+packet = R.review_range(
+    root, "main..HEAD",
+    ocelot_impact=True, ocelot_patterns=True,
+    ocelot_impact_clusterer=None, ocelot_patterns_clusterer=None,
+)
+```
+
+`ocelot.impact` builds one change shape from the reviewed changed files and
+the packet's existing `test_plan`, then groups similar shapes into candidate
+test sets. `ocelot.patterns` builds file shapes from the changed files and
+groups them into candidate architecture patterns. Both sections use the exact
+fallback when Ocelot is missing and report an error without failing the
+review. No test is executed.
+
+Every impact cluster has `truth_assessed: false` and
+`test_set_complete: false`; the section has `tests_executed: false`. A
+candidate test set is not a completeness or coverage claim. Every pattern has
+`candidate: true` and `truth_assessed: false`; it is not an anti-pattern or
+defect verdict. See `docs/ocelot_code.md` for the shapes and clustering rules.
+
 ## Test plan
 
 The packet includes a deterministic `test_plan` from
@@ -304,6 +339,8 @@ Not in this slice:
 - live or optional model calls, or multi-model agreement (optional Ocelot
   structural clustering is available separately and never changes the
   findings or their truth status);
+- proven test impact or architecture-pattern verdicts. Optional Ocelot impact
+  and pattern sections return candidate clusters only, and no test runs;
 - running tests, builds, linters or type checkers (a test plan is recorded,
   but nothing is executed; only resource admission is checked);
 - semantic signature/behaviour compatibility, duplicate-logic detection, or

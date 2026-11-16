@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +11,7 @@ import pytest
 
 from ozagia import ocelot_code_cli as CLI
 from ozagia.core import ocelot_code as OC
+from ozagia.core.memory import _tree_digest
 
 
 def _review_finding(ident: str, ftype: str, file: str, *,
@@ -428,3 +431,459 @@ def test_real_ocelot_clusters_same_shape_findings(tmp_path):
     assert ("a", "b") in groups
     assert ("c",) in groups
     assert result["truth_assessed"] is False
+
+
+# --------------------------------------------------------------------------- #
+# change shapes and test-impact clusters
+# --------------------------------------------------------------------------- #
+def _git(repo: Path, *args: str, check: bool = True) -> str:
+    env = dict(os.environ)
+    for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+                 "GIT_OBJECT_DIRECTORY"):
+        env.pop(name, None)
+    env.update({
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_AUTHOR_NAME": "Shape Tester",
+        "GIT_AUTHOR_EMAIL": "shape@example.com",
+        "GIT_COMMITTER_NAME": "Shape Tester",
+        "GIT_COMMITTER_EMAIL": "shape@example.com",
+    })
+    proc = subprocess.run(
+        ["git", "-C", str(repo), *args], capture_output=True, text=True,
+        env=env, check=False)
+    if check and proc.returncode != 0:
+        raise AssertionError(f"git {' '.join(args)} failed: {proc.stderr}")
+    return proc.stdout
+
+
+def _write_file(root: Path, rel: str, text: str) -> Path:
+    path = root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def _commit(repo: Path, message: str) -> str:
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", message)
+    return _git(repo, "rev-parse", "HEAD").strip()
+
+
+def _write_shape_graph(root: Path, head: str) -> Path:
+    graph_path = root / ".ozagia" / "graph.json"
+    graph_path.parent.mkdir(parents=True, exist_ok=True)
+    digest, error = _tree_digest(root, dump=graph_path)
+    assert error is None and digest
+    nodes = [
+        {"id": 0, "type": "Repo", "key": "repo:",
+         "attrs": {"root": str(root.resolve()), "head": head,
+                   "tree_digest": digest}},
+        {"id": 1, "type": "File", "key": "file:src/app.py",
+         "attrs": {"path": "src/app.py"}},
+        {"id": 2, "type": "Symbol", "key": "sym:src/app.py::f",
+         "attrs": {"file": "src/app.py", "qualname": "f",
+                   "start_line": 1, "end_line": 2}},
+        {"id": 3, "type": "Symbol", "key": "sym:src/app.py::g",
+         "attrs": {"file": "src/app.py", "qualname": "g",
+                   "start_line": 4, "end_line": 5}},
+        {"id": 4, "type": "File", "key": "file:src/other.py",
+         "attrs": {"path": "src/other.py"}},
+        {"id": 5, "type": "Symbol", "key": "sym:src/other.py::h",
+         "attrs": {"file": "src/other.py", "qualname": "h",
+                   "start_line": 1, "end_line": 2}},
+        {"id": 6, "type": "Test", "key": "test:tests/test_app.py::test_f",
+         "attrs": {"file": "tests/test_app.py", "qualname": "test_f"}},
+        {"id": 7, "type": "File", "key": "file:tests/test_app.py",
+         "attrs": {"path": "tests/test_app.py"}},
+        {"id": 8, "type": "File", "key": "file:README.md",
+         "attrs": {"path": "README.md"}},
+    ]
+    edges = [
+        {"src": 1, "type": "defines", "tgt": 2},
+        {"src": 1, "type": "defines", "tgt": 3},
+        {"src": 4, "type": "defines", "tgt": 5},
+        {"src": 1, "type": "imports", "tgt": 4},
+        {"src": 4, "type": "imports", "tgt": 1},
+        {"src": 6, "type": "tests_module", "tgt": 1},
+        {"src": 1, "type": "has_test", "tgt": 6},
+        {"src": 7, "type": "defines", "tgt": 6},
+    ]
+    graph_path.write_text(json.dumps({
+        "version": 2, "nodes": nodes, "edges": edges, "next_id": 9,
+        "build": {}, "files": {},
+    }), encoding="utf-8")
+    return graph_path
+
+
+@pytest.fixture
+def shape_repo(tmp_path: Path) -> dict[str, Any]:
+    root = tmp_path / "repo"
+    root.mkdir()
+    _write_file(root, ".gitignore", ".ozagia/\n")
+    _write_file(root, "src/app.py", "def f():\n    return 1\n")
+    _write_file(root, "src/other.py", "def h():\n    return 2\n")
+    _write_file(root, "tests/test_app.py",
+                "def test_f():\n    assert True\n")
+    _write_file(root, "README.md", "# Fixture\n")
+    _git(root, "init", "-q", "-b", "main")
+    _git(root, "config", "user.name", "Shape Tester")
+    _git(root, "config", "user.email", "shape@example.com")
+    _git(root, "config", "commit.gpgsign", "false")
+    base = _commit(root, "base")
+    _write_file(root, "src/app.py",
+                "def f():\n    return 2\n\n\ndef g():\n    return 3\n")
+    head = _commit(root, "head")
+    graph = _write_shape_graph(root, head)
+    return {"root": root, "base": base, "head": head, "graph": graph}
+
+
+def _minimal_shape(shape_id: str, files: list[str], *,
+                   family: str = "source") -> dict[str, Any]:
+    kinds = {path: family for path in files}
+    return {
+        "shape_id": shape_id,
+        "changed_files": files,
+        "changed_kinds": kinds,
+        "family": family,
+        "package_dirs": sorted({str(Path(path).parent).replace("\\", "/")
+                                for path in files} - {"."}),
+        "suffixes": sorted({Path(path).suffix for path in files}),
+    }
+
+
+def test_change_shape_is_deterministic_and_carries_graph_evidence(
+        shape_repo) -> None:
+    root = shape_repo["root"]
+    first = OC.change_shape(root, changed=["src/app.py"])
+    second = OC.change_shape(root, changed=["src/app.py"])
+    assert first["digest"] == second["digest"]
+    assert first["shape_id"] == second["shape_id"]
+    assert first["graph"]["usable"] is True
+    assert first["family"] == "source"
+    assert first["changed_kinds"] == {"src/app.py": "source"}
+    assert [row["qualname"] for row in first["symbols"]] == ["f", "g"]
+    assert {"defines", "imports", "has_test", "tests_module"} <= set(
+        first["edge_types"])
+    assert first["package_dirs"] == ["src"]
+    assert first["import_dirs"] == ["src"]
+    assert first["test_files"] == ["tests/test_app.py"]
+    link = first["test_links"][0]
+    assert link["source"] == "graph"
+    assert link["node_ids"] == ["test:tests/test_app.py::test_f"]
+    assert first["truth_assessed"] is False
+
+
+def test_change_shape_separates_families_and_digests(shape_repo) -> None:
+    root = shape_repo["root"]
+    source = OC.change_shape(root, changed=["src/app.py"])
+    test = OC.change_shape(root, changed=["tests/test_app.py"])
+    docs = OC.change_shape(root, changed=["README.md"])
+    assert len({source["digest"], test["digest"], docs["digest"]}) == 3
+    assert (source["family"], test["family"], docs["family"]) == (
+        "source", "test", "docs")
+    assert test["test_links"][0]["source"] == "changed_test"
+    assert docs["test_files"] == []
+
+
+def test_change_shape_accepts_a_diff_range_and_attaches_a_test_plan(
+        shape_repo) -> None:
+    shape = OC.change_shape(
+        shape_repo["root"], diff=f"{shape_repo['base']}..{shape_repo['head']}",
+        with_test_plan=True)
+    assert shape["changed_files"] == ["src/app.py"]
+    assert shape["range"]["source"] == "diff"
+    assert shape["test_plan"]["available"] is True
+    assert shape["test_plan"]["executed"] is False
+    assert shape["planned_tests"] == ["tests/test_app.py"]
+
+
+def test_change_shape_without_graph_uses_filename_test_links(
+        tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    _write_file(root, "src/app.py", "x = 1\n")
+    _write_file(root, "tests/test_app.py", "def test_x(): pass\n")
+    shape = OC.change_shape(root, changed=["src/app.py"])
+    assert shape["graph"]["freshness"] == "missing"
+    assert shape["symbols"] == []
+    assert shape["edge_types"] == []
+    assert shape["test_links"][0]["source"] == "filename"
+    assert shape["test_files"] == ["tests/test_app.py"]
+    assert any("not assessed" in item for item in shape["not_assessed"])
+
+
+def test_change_shape_rejects_ambiguous_or_bad_ranges(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    with pytest.raises(OC.OcelotCodeError):
+        OC.change_shape(root, diff="main..HEAD", changed=["src/app.py"])
+    with pytest.raises(OC.OcelotCodeError):
+        OC.change_shape(root, diff="main")
+    with pytest.raises(OC.OcelotCodeError):
+        OC.change_shape(tmp_path / "missing")
+
+
+def test_test_impact_clusters_exact_fallback_and_no_completeness_claim(
+        monkeypatch, shape_repo) -> None:
+    monkeypatch.setattr(OC.ocelot_installer, "resolve", _not_installed)
+    source = OC.change_shape(shape_repo["root"], changed=["src/app.py"])
+    copy = {**source, "shape_id": "shape-copy"}
+    test = OC.change_shape(
+        shape_repo["root"], changed=["tests/test_app.py"],)
+    result = OC.test_impact_clusters(
+        [source, copy, test], ocelot_root=shape_repo["root"] / "missing")
+    assert result["state"] == "unavailable"
+    assert result["engine"] == "exact"
+    assert result["truth_assessed"] is False
+    assert result["test_set_complete"] is False
+    assert result["tests_executed"] is False
+    assert "complete" in result["claim"]
+    clusters = {tuple(cluster["shape_ids"]): cluster
+                for cluster in result["clusters"]}
+    assert (source["shape_id"], "shape-copy") in clusters
+    assert (test["shape_id"],) in clusters
+    merged = clusters[(source["shape_id"], "shape-copy")]
+    assert merged["family"] == "source"
+    assert merged["origin"] == "exact"
+    assert merged["candidate_tests"] == ["tests/test_app.py"]
+    assert merged["test_set_complete"] is False
+    assert (test["shape_id"],) not in clusters[(source["shape_id"],
+                                               "shape-copy")]["shape_ids"]
+
+
+def test_test_impact_clusters_overlap_groups_similar_source_shapes(
+        monkeypatch) -> None:
+    monkeypatch.setattr(OC.ocelot_installer, "resolve", _not_installed)
+    left = _minimal_shape("a", ["src/app.py"])
+    right = _minimal_shape("b", ["src/other.py"])
+    result = OC.test_impact_clusters(
+        [left, right], ocelot_root="/nonexistent", min_overlap=0.25)
+    assert result["state"] == "unavailable"
+    assert [cluster["shape_ids"] for cluster in result["clusters"]] == [["a", "b"]]
+    cluster = result["clusters"][0]
+    assert cluster["origin"] == "overlap"
+    assert cluster["confidence"] == "medium"
+    assert "shared package_dirs" in " ".join(cluster["evidence"])
+
+
+def test_test_impact_clusters_fake_clusterer_filters_cross_family() -> None:
+    calls: list[list[str]] = []
+
+    def _clusterer(shapes, *, ocelot_root, mode):
+        calls.append([shape["shape_id"] for shape in shapes])
+        return {
+            "engine": "fake-ocelot",
+            "state": "ready",
+            "available": True,
+            "analogies": [
+                {"source_shape": "a", "target_shape": "b", "order_n": 3},
+                {"source_shape": "a", "target_shape": "c", "order_n": 2},
+                {"source_shape": "a", "target_shape": "missing"},
+            ],
+        }
+
+    left = _minimal_shape("a", ["src/a.py"])
+    right = _minimal_shape("b", ["lib/b.py"])
+    test = _minimal_shape("c", ["tests/test_c.py"], family="test")
+    result = OC.test_impact_clusters(
+        [left, right, test], clusterer=_clusterer)
+    assert calls == [["a", "b", "c"]]
+    assert result["engine"] == "fake-ocelot"
+    assert result["truth_assessed"] is False
+    clusters = {tuple(cluster["shape_ids"]) for cluster in result["clusters"]}
+    assert ("a", "b") in clusters
+    assert ("c",) in clusters
+    assert not any("c" in cluster and "a" in cluster for cluster in clusters)
+    assert [(item["source_shape"], item["target_shape"])
+            for item in result["analogies"]] == [("a", "b")]
+
+
+def test_test_impact_clusters_failure_is_reported() -> None:
+    def _broken(*_args, **_kwargs):
+        raise RuntimeError("bad clusterer")
+
+    result = OC.test_impact_clusters(
+        [_minimal_shape("a", ["src/a.py"])], clusterer=_broken)
+    assert result["state"] == "error"
+    assert "bad clusterer" in result["error"]
+    assert result["truth_assessed"] is False
+    assert result["clusters"][0]["shape_ids"] == ["a"]
+
+
+def test_test_impact_clusters_empty_input_does_not_resolve(monkeypatch) -> None:
+    def _unexpected(*_args, **_kwargs):
+        raise AssertionError("Ocelot must not be called without shapes")
+
+    monkeypatch.setattr(OC.ocelot_installer, "resolve", _unexpected)
+    result = OC.test_impact_clusters([])
+    assert result["state"] == "no_shapes"
+    assert result["clusters"] == []
+    assert result["shape_count"] == 0
+
+
+# --------------------------------------------------------------------------- #
+# architecture patterns
+# --------------------------------------------------------------------------- #
+def _opportunity(ident: str, category: str, files: list[str]) -> dict[str, Any]:
+    return {
+        "id": ident,
+        "category": category,
+        "title": f"{category} candidate",
+        "risk": "medium",
+        "proposed_module": files[0],
+        "evidence": [{"kind": "file", "path": path} for path in files],
+    }
+
+
+def test_architecture_patterns_groups_opportunities_without_cross_family(
+        monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(OC.ocelot_installer, "resolve", _not_installed)
+    items = [
+        _opportunity("dup-a", "duplicate_modules", ["src/a.py"]),
+        _opportunity("dup-b", "duplicate_modules", ["src/b.py"]),
+        _opportunity("weak", "weak_boundaries", ["src/c.py"]),
+        _opportunity("docs", "duplicate_docs", ["docs/a.md"]),
+    ]
+    result = OC.architecture_patterns(
+        items, root=tmp_path, ocelot_root=tmp_path / "missing")
+    assert result["state"] == "unavailable"
+    assert result["truth_assessed"] is False
+    assert result["candidate"] is True
+    assert "not a verdict" in result["claim"]
+    families = {cluster["family"]: cluster for cluster in result["patterns"]}
+    assert "opportunity:duplicate_modules" in families
+    assert families["opportunity:duplicate_modules"]["shape_ids"] == [
+        "dup-a", "dup-b"]
+    assert families["opportunity:weak_boundaries"]["shape_ids"] == ["weak"]
+    assert families["opportunity:duplicate_docs"]["shape_ids"] == ["docs"]
+    assert all(cluster["truth_assessed"] is False
+               for cluster in result["patterns"])
+
+
+def test_architecture_patterns_graph_file_shapes(monkeypatch,
+                                                 shape_repo) -> None:
+    monkeypatch.setattr(OC.ocelot_installer, "resolve", _not_installed)
+    result = OC.architecture_patterns(
+        None, root=shape_repo["root"], ocelot_root="/nonexistent")
+    assert result["graph"]["usable"] is True
+    assert result["state"] == "unavailable"
+    assert result["pattern_count"] >= 1
+    source = next(cluster for cluster in result["patterns"]
+                  if "src/app.py" in cluster["files"])
+    assert source["family"] == "file:source"
+    assert "f" in source["symbols"] or "g" in source["symbols"]
+    assert source["truth_assessed"] is False
+
+
+def test_architecture_patterns_fake_clusterer_and_cross_family_filter() -> None:
+    def _clusterer(shapes, *, ocelot_root, mode):
+        return {
+            "engine": "fake-patterns",
+            "analogies": [
+                {"source_shape": "file:src/a.py",
+                 "target_shape": "file:src/b.py"},
+                {"source_shape": "file:src/a.py",
+                 "target_shape": "file:tests/test_a.py"},
+            ],
+        }
+
+    result = OC.architecture_patterns(
+        ["src/a.py", "src/b.py", "tests/test_a.py"], clusterer=_clusterer)
+    assert result["engine"] == "fake-patterns"
+    clusters = {tuple(cluster["shape_ids"]) for cluster in result["patterns"]}
+    assert ("file:src/a.py", "file:src/b.py") in clusters
+    assert ("file:tests/test_a.py",) in clusters
+    assert result["truth_assessed"] is False
+    assert all(cluster["candidate"] is True
+               for cluster in result["patterns"])
+
+
+def test_architecture_patterns_report_mapping_and_root_output(
+        monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(OC.ocelot_installer, "resolve", _not_installed)
+    report = {
+        "root": str(tmp_path),
+        "opportunities": [
+            _opportunity("one", "duplicate_modules", ["src/a.py"]),
+            _opportunity("two", "duplicate_modules", ["src/b.py"]),
+        ],
+    }
+    result = OC.architecture_patterns(report, ocelot_root="/nonexistent")
+    assert result["shape_count"] == 2
+    assert result["patterns"][0]["shape_ids"] == ["one", "two"]
+
+
+# --------------------------------------------------------------------------- #
+# CLI: impact and patterns
+# --------------------------------------------------------------------------- #
+def test_cli_impact_json(monkeypatch, shape_repo, capsys) -> None:
+    monkeypatch.setattr(OC.ocelot_installer, "resolve", _not_installed)
+    code = CLI.main([
+        "impact", "--root", str(shape_repo["root"]),
+        "--diff", f"{shape_repo['base']}..{shape_repo['head']}", "--json"])
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["schema"] == OC.IMPACT_SCHEMA
+    assert payload["state"] == "not_installed"
+    assert payload["truth_assessed"] is False
+    assert payload["test_set_complete"] is False
+    assert payload["clusters"][0]["candidate_tests"] == ["tests/test_app.py"]
+
+
+def test_cli_impact_text_and_usage_errors(monkeypatch, tmp_path, capsys) -> None:
+    monkeypatch.setattr(OC.ocelot_installer, "resolve", _not_installed)
+    root = tmp_path / "repo"
+    root.mkdir()
+    _write_file(root, "src/app.py", "x = 1\n")
+    code = CLI.main(["impact", "--root", str(root),
+                     "--changed", "src/app.py"])
+    text = capsys.readouterr().out
+    assert code == 0
+    assert "Ocelot test-impact clusters" in text
+    assert "test_set_complete: false" in text
+    assert "truth_assessed: false" in text
+
+    assert CLI.main(["impact", "--root", str(root)]) == 2
+    assert "needs --diff" in capsys.readouterr().err
+
+
+def test_cli_patterns_report_and_root(monkeypatch, shape_repo, tmp_path,
+                                      capsys) -> None:
+    monkeypatch.setattr(OC.ocelot_installer, "resolve", _not_installed)
+    report = {
+        "root": str(shape_repo["root"]),
+        "opportunities": [
+            _opportunity("dup-a", "duplicate_modules", ["src/app.py"]),
+            _opportunity("dup-b", "duplicate_modules", ["src/other.py"]),
+        ],
+    }
+    path = tmp_path / "scan.json"
+    path.write_text(json.dumps(report), encoding="utf-8")
+    assert CLI.main(["patterns", "--report", str(path), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["schema"] == OC.PATTERN_SCHEMA
+    assert payload["truth_assessed"] is False
+    assert payload["candidate"] is True
+    assert payload["patterns"][0]["shape_ids"] == ["dup-a", "dup-b"]
+
+    assert CLI.main([
+        "patterns", "--root", str(shape_repo["root"]),
+        "--graph", str(shape_repo["graph"]), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["shape_count"] >= 3
+    assert payload["patterns"]
+    assert "candidate" in payload["claim"]
+
+
+def test_cli_patterns_input_errors(tmp_path, capsys) -> None:
+    missing = tmp_path / "missing.json"
+    assert CLI.main(["patterns", "--report", str(missing)]) == 2
+    assert "cannot read report" in capsys.readouterr().err
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json", encoding="utf-8")
+    assert CLI.main(["patterns", "--report", str(bad)]) == 2
+    assert "not valid JSON" in capsys.readouterr().err
+    shape = tmp_path / "shape.json"
+    shape.write_text('{"other": []}', encoding="utf-8")
+    assert CLI.main(["patterns", "--report", str(shape)]) == 2
+    assert "no opportunities/items/files" in capsys.readouterr().err
