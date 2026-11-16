@@ -1449,6 +1449,20 @@ as `f052248`. The add-in is read-only in this slice: the panel renders graph
 views, status, worktree, resource and test-plan data. Mutating actions remain
 preview-first in the CLI; the panel does not execute them yet.
 
+### Parallel wave 5 (2026-11-16)
+
+Four agents start from `75a39dd`:
+
+| Worktree | Branch | Scope |
+| --- | --- | --- |
+| `~/ozmadev/ozagia-wt/repo-scan` | `feat/repo-scan` | Advisory graph/history/test scan and ranked opportunities |
+| `~/ozmadev/ozagia-wt/standalone-console` | `feat/standalone-console` | Loopback-only read-only web console over the existing APIs |
+| `~/ozmadev/ozagia-wt/addin-extensions` | `feat/addin-extensions` | Settings page, research tab and read-only action previews in the add-in |
+| `~/ozmadev/ozagia-wt/upstream` | `feat/upstream` | Consent-based, redacted local field-improvement bundles |
+
+The same review/merge/full-suite gate applies; Ocelot coding enhancements and
+the live Desktop smoke test remain for the following wave.
+
 ## Open decisions
 
 1. **Config directory (resolved).** `ozagia/` is versioned project config;
