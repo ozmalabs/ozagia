@@ -39,7 +39,8 @@ FULL_SURFACE_TOOLS = [
     "dev_callers", "dev_callees", "dev_symbol_impact", "dev_rename_preview",
     "dev_diagnostics", "dev_hover", "dev_document_symbols",
     "dev_symbol_callers", "dev_symbol_callees", "dev_symbol_graph_impact",
-    "dev_symbol_resolve", "dev_graph_query",
+    "dev_symbol_resolve", "job_start", "job_wait", "job_list", "job_log",
+    "job_stop", "dev_graph_query",
 ]
 VERBS = ["find", "node", "expand", "impact", "edit", "create", "check", "note"]
 

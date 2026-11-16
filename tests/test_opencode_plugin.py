@@ -72,8 +72,11 @@ const permission = cfg.permission === undefined ? undefined : {
     if (cfg.permission === "transport") throw new Error("connection rejected by peer");
   },
 };
+const synthetic = [];
+const session = cfg.synthetic ? { synthetic: async (x) => { synthetic.push(x); } } : undefined;
 await plugin.setup({ tool: { transform: (fn) => fn(reg), hook: () => {} },
-                     ...(permission ? { permission } : {}) });
+                     ...(permission ? { permission } : {}),
+                     ...(session ? { session } : {}) });
 const results = [];
 const c = { sessionID: "ses_test", agent: "build", messageID: "msg_1", id: "call_1",
             progress: () => {}, signal: undefined };
@@ -84,7 +87,7 @@ for (const call of cfg.calls || []) {
 await new Promise((r) => setTimeout(r, cfg.settleMs || 50));
 process.stdout.write(JSON.stringify({
   id: mod.default.id, has_setup: typeof mod.default.setup === "function",
-  results, calls, asserts,
+  results, calls, asserts, synthetic,
   replaced: Object.keys(tools).filter((k) => tools[k].execute !== original[k]),
   schema_swapped: Object.fromEntries(Object.keys(tools).map((k) => [k, tools[k].output === schema])),
   descriptions: Object.fromEntries(Object.keys(tools).map((k) => [k, tools[k].description])),
@@ -896,3 +899,60 @@ def test_read_only_error_is_shown_after_the_permission(tmp_path, daemon):
     answer.pop("permission")
     out = _run(tmp_path, {"calls": [call], "permission": "allow"}, d.path)
     assert out["calls"] == [["read", inp]]
+
+
+# --------------------------------------------------------------------------- #
+# background job announcements (session.synthetic)
+# --------------------------------------------------------------------------- #
+def _jobs_script(events):
+    sent = []
+
+    def script(req):
+        if req["op"] == "hello":
+            return {"ok": True}
+        if req["op"] == "tool":
+            return {"ok": True, "handled": True, "output": "GRAPH",
+                    "meta": {"intent": "read_file", "jobs_running": 1, "job_seq": 4}}
+        if req["op"] == "job_events":
+            if not sent:
+                sent.append(1)
+                return {"ok": True, "_delay": 0.1, "events": events, "running": 0,
+                        "seq": 6}
+            return {"ok": True, "events": [], "running": 0, "seq": 6}
+        return {"ok": False, "error": "unknown op"}
+    return script
+
+
+@needs_node
+def test_job_ends_are_announced_through_session_synthetic(tmp_path, daemon):
+    events = [{"seq": 5, "job": "j2", "command": "make build", "status": "exited",
+               "exit_code": 0, "signal": None, "elapsed_s": 3.5, "session": None,
+               "harness": "mcp"},
+              {"seq": 6, "job": "j3", "command": "srv", "status": "killed",
+               "exit_code": 143, "signal": "SIGTERM", "elapsed_s": 9.0,
+               "session": "ses_other", "harness": "opencode"}]
+    d = daemon(_jobs_script(events))
+    out = _run(tmp_path, {"calls": [READ], "synthetic": True, "settleMs": 600}, d.path)
+    assert out["results"][0]["ok"]
+    waits = [r for r in d.requests if r["op"] == "job_events"]
+    assert len(waits) == 1 and waits[0]["after_seq"] == 4
+    assert [(m["sessionID"], m["delivery"]) for m in out["synthetic"]] == [
+        ("ses_test", "queue"), ("ses_other", "queue")]
+    assert out["synthetic"][0]["text"] == (
+        "[ozagia] background job j2 (`make build`) exited 0 after 3.5 s; "
+        'job_log {"job": "j2"} shows its output.')
+    assert "was killed by SIGTERM" in out["synthetic"][1]["text"]
+
+
+@needs_node
+def test_no_watch_without_running_jobs(tmp_path, daemon):
+    d = daemon(_standard)
+    out = _run(tmp_path, {"calls": [READ], "synthetic": True}, d.path)
+    assert out["synthetic"] == [] and "job_events" not in d.ops()
+
+
+@needs_node
+def test_no_watch_without_session_synthetic(tmp_path, daemon):
+    d = daemon(_jobs_script([]))
+    out = _run(tmp_path, {"calls": [READ]}, d.path)
+    assert out["results"][0]["ok"] and "job_events" not in d.ops()

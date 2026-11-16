@@ -562,7 +562,7 @@ used dropped), 256 files per session and 32 ranges per file. A
 `session_event` (`compact`, `start`, `end`) clears or drops every ledger of
 a (harness, session).
 
-The patch checks add `patch_checks` and `patch_misses_caught` count `patch_check_ok` plus
+For the patch checks, `patch_checks` and `patch_misses_caught` count `patch_check_ok` plus
 `patch_check_miss`, and `patch_check_miss`; `region_replies` sums
 `meta.region_replies` (patch hunks and edit misses); `key_edits` counts
 `edit_key`.
@@ -572,6 +572,32 @@ apply_patch text against the current files and never writes (see
 docs/codex.md, "Patch check"). Its output is the region reply, or `the
 patch matches the current files`; intents `patch_check_ok`,
 `patch_check_miss` and `patch_check_unparsed`.
+
+Background jobs add `jobs_started`, `waits`, `wait_seconds` and `polls_avoided` (waits that
+returned new output or the job's end) count background jobs, and `jobs`
+has the rest of their counters (`jobs_running`, `job_stops`, `ps_captures`,
+`sleep_hints`, `background_hints`, `job_events`).
+
+Background jobs (`ozagia.daemon.jobs`, ops `job_start`, `job_wait`,
+`job_list`, `job_log`, `job_stop`, `job_events` in `ozagia.daemon.protocol`)
+live in the daemon. Starting them is opt-in per project (`[jobs] enabled =
+true` in `.ozagia.toml`, or `OZAGIA_JOBS=1` in the daemon's environment),
+since a job runs with the daemon's privileges outside any harness sandbox.
+The idle timeout does not fire while one runs (a job runs until its whole
+process group has exited). On exit the daemon stops its jobs (SIGTERM to
+each process group, SIGKILL after 2 s) except those started with `detach`,
+which it leaves running and logs; a daemon that died without that leaves
+them to the next one, which stops the non-detached ones when it starts.
+In `shell`, a `pgrep [-f] [-a|-l] PAT` whose pattern matches a job's
+command (or, without `-f`, a running job's process name), or a `ps -p
+PID[,PID] [-o pid=|args=|cmd=|command=|comm=]` where every PID is a job's,
+is answered from /proc as pgrep or ps prints it, plus one `[ozagia] job
+...` line per job (intent `shell_ps`); every other `ps`/`pgrep` runs as
+usual. `after` for `shell` adds an `[ozagia]` line pointing to `job_wait`
+for a `sleep N` (N ≥ 20 s) while a job runs, and, when jobs are enabled,
+one pointing to `job_start` for a background start (`&`, `nohup`, `setsid`,
+`disown`), each at most 3 times per session. A `ps -p` about an ended job's
+pid runs as usual (the pid may be another process's by now).
 
 `ozagia.core.memory` takes its layout from `$OZAGIA_ROOT` when imported, so
 `serve` sets it to `--root` first. `DevMemory`'s own journal goes next to a

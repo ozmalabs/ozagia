@@ -48,6 +48,14 @@
 // - Timeouts: 30 s per request; a shell request gets the command's own
 //   timeout (input.timeout, ms; 120 s when unset, the built-in's default)
 //   plus 30 s.
+// - Job announcements. When a daemon answer says background jobs run
+//   (meta.jobs_running, from `ozagia.daemon.jobs`) and OpenCode offers
+//   ctx.session.synthetic, the plugin watches for job ends ({op:
+//   "job_events"}, one long request at a time on an unref'd connection,
+//   so it never holds OpenCode open) and queues one synthetic message per
+//   finished job in the job's session (or the last session that used a
+//   tool): "[ozagia] job j1 (`cmd`) exited 0 after 42 s ...". The watch
+//   stops when no job runs.
 // - setup never throws.
 // - Read ledger (ozagia.intent.ledger). The default repeat policy is
 //   `note`; under an opt-in `stub` a handled read that repeats an unchanged
@@ -80,6 +88,8 @@ const HINT_MAX_HISTORY = 4;
 const HINT_CACHE_TTL_MS = 10000;
 const HINT_HISTORY_REFRESH_MS = 10000;
 const HINT_MARKER = "[ozagia task context]";
+const JOB_EVENTS_DEADLINE_S = 300;
+const JOB_EVENTS_MARGIN_MS = 15000;
 const CONTEXT_NOTE = "Lines starting with [ozagia] are graph context, not part of the tool's own output.";
 const NOTES = {
   read: "Paths may also be graph node keys (sym:<file>::<name>, test:..., doc:...); "
@@ -365,7 +375,9 @@ function wrap(client, perm, name, tool, original, hintCache) {
     let fallback = null;
     const send = async (extra) => {
       try {
-        return await client.request({ op: "tool", ...base, ...extra }, timeout);
+        const got = await client.request({ op: "tool", ...base, ...extra }, timeout);
+        noteJobs(client, got);
+        return got;
       } catch (err) {
         fallback = String((err && err.message) || err);
         if (err && err.sent && MUTATING.has(name) && !extra.preflight) {
@@ -442,12 +454,61 @@ function wrap(client, perm, name, tool, original, hintCache) {
     }
     try {
       const after = await client.request({ op: "after", ...base, output });
+      noteJobs(client, after);
       if (typeof after.append === "string" && after.append) {
         return textResult(output + "\n" + after.append);
       }
     } catch { /* the built-in's output stands on its own */ }
     return textResult(output);
   };
+}
+
+// The synthetic message for a finished job.
+export function jobEndText(ev) {
+  const cmd = String(ev.command || "").slice(0, 200);
+  const how = ev.signal ? `was killed by ${ev.signal}` : `exited ${ev.exit_code}`;
+  return `[ozagia] background job ${ev.job} (\`${cmd}\`) ${how} after ${ev.elapsed_s} s; `
+    + `job_log {"job": "${ev.job}"} shows its output.`;
+}
+
+// Watch for job ends while jobs run (see the header). `seq` is the event
+// sequence number to watch from.
+function watchJobs(client, session, seq) {
+  if (!session || typeof session.synthetic !== "function") return;
+  if (typeof seq === "number" && (client.jobSeq === undefined || seq < client.jobSeq)) {
+    client.jobSeq = seq;
+  }
+  if (client.watchingJobs) return;
+  client.watchingJobs = true;
+  const reader = `opencode-plugin:${process.pid}`;
+  (async () => {
+    try {
+      for (;;) {
+        const res = await client.request(
+          { op: "job_events", reader, after_seq: client.jobSeq,
+            deadline_s: client.jobEventsDeadlineS ?? JOB_EVENTS_DEADLINE_S },
+          (client.jobEventsDeadlineS ?? JOB_EVENTS_DEADLINE_S) * 1000 + JOB_EVENTS_MARGIN_MS,
+          false, false);
+        if (typeof res.seq === "number") client.jobSeq = res.seq;
+        for (const ev of Array.isArray(res.events) ? res.events : []) {
+          const sessionID = ev.harness === HARNESS && ev.session ? ev.session : client.session;
+          if (!sessionID) continue;
+          try {
+            await session.synthetic({ sessionID, text: jobEndText(ev),
+                                      description: "ozagia: background job finished",
+                                      delivery: "queue" });
+          } catch { /* an announcement is best effort */ }
+        }
+        if (!res.running) break;
+      }
+    } catch { /* the daemon is gone or slow: no announcements */ }
+    finally { client.watchingJobs = false; }
+  })();
+}
+
+function noteJobs(client, res) {
+  const meta = res && res.meta;
+  if (meta && meta.jobs_running > 0 && client.onJobs) client.onJobs(meta.job_seq);
 }
 
 export function createPlugin(options = {}) {
@@ -460,6 +521,8 @@ export function createPlugin(options = {}) {
         const sockPath = process.env.OZAGIA_DAEMON_SOCK;
         if (!sockPath || !ctx) return;
         const client = new DaemonClient(sockPath, timeoutMs);
+        if (options.jobEventsDeadlineS) client.jobEventsDeadlineS = options.jobEventsDeadlineS;
+        client.onJobs = (seq) => watchJobs(client, ctx.session, seq);
         const hintCache = new Map();
         if (ctx.session && typeof ctx.session.hook === "function") {
           try { await ctx.session.hook("context", contextHook(client, hintCache,

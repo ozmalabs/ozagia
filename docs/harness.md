@@ -11,6 +11,7 @@ OpenCode session with the graph in its path. Code: `src/ozagia/cli.py`,
 | `ozagia index [--root R] [--rebuild] [--dump F] [--json]` | Builds the snapshot (`<state dir>/graph.json`) if missing; if present and stale, refreshes it. Prints the action (`built`, `refreshed`, `fresh`), node and edge counts and seconds. `--rebuild` builds from scratch. |
 | `ozagia agent [options] [-- <opencode args>]` | An OpenCode session on the repository with the graph daemon and the plugin. See below. |
 | `ozagia daemon serve\|ping\|stats\|shutdown ...` | `python -m ozagia.daemon`, arguments unchanged. |
+| `ozagia job run\|wait\|list\|log\|stop ...` | Background jobs in the daemon (`ozagia.daemon.jobcli`; see `ozagia.daemon.jobs`). Starts the daemon if none answers. |
 | `ozagia mcp ...` | The MCP server (`ozagia.integrations.mcp.server`). |
 | `ozagia eval ...` | The break/fix agent eval (`python -m ozagia.eval.agent`). |
 | `ozagia check ...` | Run tests and report graph keys (`python -m ozagia.check`). |
@@ -177,3 +178,11 @@ shim and the process-group kill from `eval.agent`.
 - An adapter indexer that leaves `texts` at its default (None) runs again
   on every reingest of an indexed file; declare `watch` and `texts` to
   avoid that (see `ozagia.adapters`).
+- Background job announcements: while a daemon answer says jobs run
+  (`meta.jobs_running`), the plugin waits for job ends (`job_events`) and
+  queues one message per finished job with `ctx.session.synthetic`
+  (`delivery: "queue"`), in the job's OpenCode session or the last session
+  that used a tool. `session.synthetic` is in the plugin session API of
+  `@opencode/plugin` 2.1.2 (`SessionDomain`); the announcement has been
+  tested only against a stub `ctx`, not in a live OpenCode 2.3 session.
+  Without `session.synthetic` the plugin announces nothing.

@@ -62,6 +62,13 @@ one, every key has the generic default below. All keys are optional:
     repeat_by_harness = {opencode = "stub"}  # per-harness override
                                       # (wins over `repeat`)
 
+    [jobs]
+    enabled = false               # allow job_start (background jobs in the
+                                  # daemon; see ozagia.daemon.jobs). Jobs run
+                                  # with the daemon's privileges, outside any
+                                  # harness sandbox. $OZAGIA_JOBS=1 in the
+                                  # daemon's environment also enables them.
+
 Directory entries are paths relative to the root ("." is the root itself).
 """
 from __future__ import annotations
@@ -165,6 +172,7 @@ class ProjectConfig:
     # None: each harness's default (`ozagia.intent.ledger.HARNESS_REPEAT`, `note`).
     repeat: str | None = None
     repeat_by_harness: tuple[tuple[str, str], ...] = ()
+    jobs_enabled: bool = False
 
     @property
     def adapter_base(self) -> Path | None:
@@ -181,6 +189,7 @@ _KEYS = {
     "reads": {"structured_outline_lines", "structured_outline_bytes",
               "outline_lines", "outline_bytes", "repeat",
               "repeat_by_harness"},
+    "jobs": {"enabled"},
 }
 REPEAT_POLICIES = ("stub", "note", "off")
 
@@ -298,6 +307,9 @@ def _parse(root: Path, source: Path | None, data: dict[str, Any]) -> ProjectConf
     repeat_by_harness = tuple(sorted(
         (str(h), policy(v, f"repeat_by_harness.{h}"))
         for h, v in by_harness.items()))
+    jobs_enabled = data.get("jobs", {}).get("enabled", False)
+    if not isinstance(jobs_enabled, bool):
+        raise ConfigError(f"{where}: [jobs] enabled must be true or false")
     return ProjectConfig(
         root=root,
         source=source,
@@ -324,6 +336,7 @@ def _parse(root: Path, source: Path | None, data: dict[str, Any]) -> ProjectConf
         outline_bytes=count("outline_bytes", 40 * 1024),
         repeat=repeat,
         repeat_by_harness=repeat_by_harness,
+        jobs_enabled=jobs_enabled,
     )
 
 

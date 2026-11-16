@@ -34,6 +34,7 @@ import os
 import re
 import signal
 import sys
+import threading
 import traceback
 from pathlib import Path
 from typing import Any, Callable
@@ -641,6 +642,98 @@ _TOOLS.extend([
 ])
 
 
+# Background jobs (`ozagia.daemon.jobs`), run by the daemon this server
+# reaches over its socket. A wait returns before an MCP client's tool timeout
+# (Codex: `tool_timeout_sec`, 60 s by default): at most MCP_WAIT_MAX_S
+# (`$OZAGIA_MCP_WAIT_MAX_S`), by default 45 s; job_stop's grace_s is at most
+# MCP_STOP_GRACE_MAX_S. Job tool calls run on worker threads (`serve`), so a
+# wait does not hold up other tool calls. Starting jobs is opt-in per project
+# (`[jobs] enabled = true`); they run outside the client's sandbox.
+MCP_WAIT_DEFAULT_S = 45.0
+MCP_WAIT_MAX_S = 50.0
+MCP_STOP_GRACE_MAX_S = 10.0
+MCP_JOB_WORKERS = 4
+_UNSANDBOXED = (
+    " Jobs run in the ozagia daemon with its privileges and environment, "
+    "outside the Codex sandbox, approval prompts and shell environment "
+    "policy (and OpenCode's permission checks). Starting them is off unless "
+    "the project enables it ([jobs] enabled = true in .ozagia.toml).")
+_JOB_REF = {"type": "string",
+            "description": "A job id from job_start or job_list (e.g. \"j3\")."}
+_TOOLS.extend([
+    {
+        "name": "job_start",
+        "description": (
+            "Start a long-running command (a server, a build, a slow test run) "
+            "in the background, in its own process group, with stdout and "
+            "stderr in a log. Use it instead of `cmd &`, nohup, or a shell "
+            "session you poll; then job_wait for its exit or a log line. "
+            "Give command (a shell string) or argv. Jobs are stopped when the "
+            "ozagia daemon exits unless detach is true." + _UNSANDBOXED),
+        "inputSchema": _schema({
+            "command": {"type": "string",
+                        "description": "Shell command line, run with bash -c."},
+            "argv": {"type": "array", "items": {"type": "string"},
+                     "description": "Program and arguments, run without a shell."},
+            "cwd": {"type": "string",
+                    "description": "Working directory inside the project (default: its root)."},
+            "env": {"type": "object", "additionalProperties": {"type": "string"},
+                    "description": "Environment variables to add."},
+            "detach": {"type": "boolean", "default": False,
+                       "description": "Leave it running when the daemon exits."},
+        }),
+    },
+    {
+        "name": "job_wait",
+        "description": (
+            "Block until a job exits, a file exists, or a new log line matches "
+            "a regex, or until the deadline; returns the status, the exit "
+            "code, and only the log lines you have not seen yet (the newest "
+            "200 lines / 16 kB at most). Use it instead of sleep loops, ps or "
+            "polling a shell. If it returns with the job still running, call "
+            "it again: each call continues where the last one stopped."),
+        "inputSchema": _schema({
+            "job": {"type": "string", "default": "any",
+                    "description": "Job id, or \"any\" for the first running job to finish (with until file:<path> and no job, waits for the file alone)."},
+            "until": {"type": "string", "default": "exit",
+                      "description": "exit | file:<path> | log:<regex>."},
+            "deadline_s": {"type": "number", "default": MCP_WAIT_DEFAULT_S,
+                           "description": f"Seconds to wait (at most {MCP_WAIT_MAX_S:g})."},
+            "cursor": {"type": "integer",
+                       "description": "Byte offset in the log to read from (default: where your last read ended)."},
+        }),
+    },
+    {
+        "name": "job_list",
+        "description": "List background jobs (newest first): id, command, status, exit code, pid, elapsed seconds, log path.",
+        "inputSchema": _schema({}),
+    },
+    {
+        "name": "job_log",
+        "description": (
+            "Read a job's log lines you have not seen yet (or from cursor; "
+            "cursor 0 gives the last lines of the whole log), without waiting."),
+        "inputSchema": _schema({
+            "job": _JOB_REF,
+            "cursor": {"type": "integer", "description": "Byte offset to read from."},
+            "tail": {"type": "integer", "default": 200,
+                     "description": "Most lines to return (the newest)."},
+        }, ["job"]),
+    },
+    {
+        "name": "job_stop",
+        "description": "Stop a job: the signal to its whole process group, then SIGKILL after grace_s.",
+        "inputSchema": _schema({
+            "job": _JOB_REF,
+            "signal": {"type": "string", "enum": ["TERM", "INT", "HUP", "KILL"],
+                       "default": "TERM"},
+            "grace_s": {"type": "number", "default": 3,
+                        "description": f"Seconds before SIGKILL (at most {MCP_STOP_GRACE_MAX_S:g})."},
+        }, ["job"]),
+    },
+])
+
+
 # --------------------------------------------------------------------------- #
 # dispatch
 # --------------------------------------------------------------------------- #
@@ -776,6 +869,11 @@ class DevMemoryServer:
             "dev_symbol_callees": self._symbol_callees,
             "dev_symbol_graph_impact": self._symbol_graph_impact,
             "dev_symbol_resolve": self._symbol_resolve,
+            "job_start": self._job_start,
+            "job_wait": self._job_wait,
+            "job_list": self._job_list,
+            "job_log": self._job_log,
+            "job_stop": self._job_stop,
         } if mode in {"coding", "combined"} else {})
         if self.mem is not None:
             present = {n.get("type") for n in self.mem.nodes.values()}
@@ -1161,6 +1259,44 @@ class DevMemoryServer:
     def _recent(self, a: dict[str, Any]) -> Any:
         return {"ok": True, "entries": self.mem.journal_recent(a.get("n", 20))}
 
+    # -- background jobs (in the daemon) ----------------------------------- #
+    def _job(self, op: str, fields: dict[str, Any]) -> Any:
+        from ozagia.daemon.jobcli import JobUnavailable, request
+        try:
+            reply = request(self.workspace, op, {**fields, "harness": "mcp",
+                                                 "reader": f"mcp:{os.getpid()}"})
+        except JobUnavailable as e:
+            raise RuntimeError(str(e)) from None
+        reply.pop("id", None)
+        return reply
+
+    def _job_start(self, a: dict[str, Any]) -> Any:
+        return self._job("job_start", {"session": f"mcp:{os.getpid()}", **a})
+
+    def _job_wait(self, a: dict[str, Any]) -> Any:
+        try:
+            cap = float(os.environ.get("OZAGIA_MCP_WAIT_MAX_S") or MCP_WAIT_MAX_S)
+        except ValueError:
+            cap = MCP_WAIT_MAX_S
+        deadline = min(max(float(a.get("deadline_s", MCP_WAIT_DEFAULT_S)), 0.0), cap)
+        job = a.get("job")
+        if not job and not str(a.get("until") or "").startswith("file:"):
+            job = "any"
+        return self._job("job_wait", {**a, "job": job or None,
+                                      "deadline_s": deadline})
+
+    def _job_list(self, _a: dict[str, Any]) -> Any:
+        return self._job("job_list", {})
+
+    def _job_log(self, a: dict[str, Any]) -> Any:
+        return self._job("job_log", a)
+
+    def _job_stop(self, a: dict[str, Any]) -> Any:
+        grace = a.get("grace_s")
+        if isinstance(grace, (int, float)) and not isinstance(grace, bool):
+            a = {**a, "grace_s": min(max(float(grace), 0.0), MCP_STOP_GRACE_MAX_S)}
+        return self._job("job_stop", a)
+
     # -- JSON-RPC ---------------------------------------------------------- #
     def handle(self, msg: Any) -> dict[str, Any] | None:
         """Answer one JSON-RPC message. Never raises.
@@ -1338,9 +1474,41 @@ def _respond(server: DevMemoryServer, msg: Any) -> dict[str, Any] | None:
     return server.handle(msg)
 
 
+def _is_job_call(msg: Any) -> bool:
+    """A `tools/call` of a job tool (it only talks to the daemon, so it can
+    run on a worker thread)."""
+    if not isinstance(msg, dict) or msg.get("method") != "tools/call" or "id" not in msg:
+        return False
+    params = msg.get("params")
+    return (isinstance(params, dict) and isinstance(params.get("name"), str)
+            and params["name"].startswith("job_"))
+
+
 def serve(server: DevMemoryServer) -> int:
+    """Read messages from stdin and write the replies to stdout. Job tool
+    calls (`job_wait` may block for up to MCP_WAIT_MAX_S) run on a pool of
+    MCP_JOB_WORKERS threads, so the next messages are answered meanwhile;
+    their replies may come out of order (JSON-RPC matches them by `id`).
+    Every other message is handled in order on this thread. Replies are
+    written whole, under a lock."""
+    from concurrent.futures import ThreadPoolExecutor
     inp = sys.stdin.buffer
     out = sys.stdout.buffer
+    write_lock = threading.Lock()
+
+    def write(msg: Any, framing: str) -> None:
+        with write_lock:
+            _write_message(out, msg, framing)
+
+    def job_call(msg: dict[str, Any], framing: str) -> None:
+        response = _respond(server, msg)
+        if response is not None:
+            try:
+                write(response, framing)
+            except (OSError, ValueError):
+                pass                      # the client went away
+    pool = ThreadPoolExecutor(max_workers=MCP_JOB_WORKERS,
+                              thread_name_prefix="ozagia-mcp-job")
     # Only protocol messages reach stdout. `out` was captured above; any
     # stray print from a handler goes to stderr for the duration of serve().
     saved_stdout = sys.stdout
@@ -1350,26 +1518,29 @@ def serve(server: DevMemoryServer) -> int:
             try:
                 msg, framing = _read_message(inp)
             except _ParseFailure as e:
-                _write_message(out, server._err(
-                    None, _E_PARSE, f"parse error: {e}"), e.framing)
+                write(server._err(None, _E_PARSE, f"parse error: {e}"), e.framing)
                 continue
             if msg is _EOF:
                 break
             if isinstance(msg, list):
                 if not msg:
-                    _write_message(out, server._err(
-                        None, _E_INVALID_REQUEST,
-                        "invalid request: empty batch"), framing)
+                    write(server._err(None, _E_INVALID_REQUEST,
+                                      "invalid request: empty batch"), framing)
                     continue
                 replies = [r for r in (_respond(server, m) for m in msg)
                            if r is not None]
                 if replies:
-                    _write_message(out, replies, framing)
+                    write(replies, framing)
+                continue
+            if _is_job_call(msg):
+                pool.submit(job_call, msg, framing)
                 continue
             response = _respond(server, msg)
             if response is not None:
-                _write_message(out, response, framing)
+                write(response, framing)
+        pool.shutdown(wait=True)
     finally:
+        pool.shutdown(wait=False, cancel_futures=True)
         sys.stdout = saved_stdout
     return 0
 

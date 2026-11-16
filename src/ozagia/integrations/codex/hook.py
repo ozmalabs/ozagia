@@ -24,6 +24,11 @@ reference (https://learn.chatgpt.com/docs/hooks, see docs/codex.md).
   that matches never waits for the daemon. A patch that does not parse, one
   with `*** Environment ID:` (for another environment's files), or any
   checker error, prints nothing.
+- `PreToolUse` for `Bash`, a `pgrep` or `ps -p` command: when a daemon
+  answers and the command is about one of its background jobs
+  (`ozagia.daemon.jobs.capture_ps`), deny it with the answer (the
+  processes, and the job's status) as the reason. No daemon is started
+  for this.
 - `PostToolUse` for `Bash`: send `after` as `shell` ({command, workdir})
   with the command's output, and return the daemon's `append` as
   `additionalContext` (with the ledger's `unchanged since read N` note).
@@ -71,6 +76,8 @@ HOOK_ALARM_S = 15
 # One daemon request: with AUTOSTART_BUDGET_S (3 s) and the root lookup it
 # stays under HOOK_ALARM_S.
 DAEMON_TIMEOUT_S = 10
+# A PreToolUse `ps`/`pgrep` check asks a running daemon for this long.
+PS_TIMEOUT_S = 3
 LOG_NAME = "codex_hook.log"
 HARNESS = "codex"
 # The SessionStart brief stays under this many characters.
@@ -93,10 +100,15 @@ PATCH_DAEMON_TIMEOUT_S = 1.5
 PATCH_REPLY_MAX_CHARS = 7000
 
 MCP_TOOLS_LINE = (
-    "Prefer the ozagia MCP tools over reading whole files: dev_symbol / "
-    "dev_node to read one symbol by key (sym:path::name), dev_outline for a "
-    "file's outline, dev_impact before changing a widely used module, and "
-    "dev_context to start a task.")
+    "Prefer the ozagia MCP tools to reading whole files: dev_symbol / dev_node "
+    "(one symbol by key, sym:path::name), dev_outline, dev_impact before "
+    "changing a shared module, dev_context to start a task.")
+# Added to the brief only when the project enables jobs (`[jobs] enabled`).
+JOBS_LINE = (
+    "Long commands: job_start, then job_wait (blocks until exit or a log line, "
+    "returns only new output) instead of polling write_stdin, sleep or ps. "
+    "Jobs run outside the Codex sandbox and approvals, with the ozagia "
+    "daemon's privileges.")
 
 
 # --------------------------------------------------------------------------- #
@@ -165,13 +177,15 @@ def session_brief(root: Path, max_chars: int = BRIEF_MAX_CHARS) -> str:
     if log and log.strip():
         lines.append("recent commits:")
         lines.extend(f"  {x[:120]}" for x in log.splitlines() if x.strip())
-    lines.append(MCP_TOOLS_LINE)
+    from ozagia.daemon.jobs import jobs_enabled
+    tools = MCP_TOOLS_LINE + (" " + JOBS_LINE if jobs_enabled(root) else "")
+    lines.append(tools)
     text = "\n".join(lines)
     if len(text) <= max_chars:
         return text
     # Keep the tools line; cut the middle.
-    keep = max_chars - len(MCP_TOOLS_LINE) - len("\n...\n")
-    return text[:max(keep, 0)].rstrip() + "\n...\n" + MCP_TOOLS_LINE
+    keep = max_chars - len(tools) - len("\n...\n")
+    return text[:max(keep, 0)].rstrip() + "\n...\n" + tools
 
 
 # --------------------------------------------------------------------------- #
@@ -250,6 +264,26 @@ def session_sub(payload: dict[str, Any]) -> str:
     return "|".join(p for p in parts if isinstance(p, str) and p)
 
 
+def job_ps_answer(root: Path, command: str, session: str = "") -> str | None:
+    """The daemon's answer to a `pgrep`/`ps -p` command about one of its
+    jobs, as a deny reason, or None (no such form, no daemon, not a job)."""
+    head = command.lstrip().split(None, 1)[:1]
+    if head not in (["ps"], ["pgrep"]):
+        return None
+    from ozagia.daemon import protocol
+    try:
+        resp = hookcore.daemon_request(protocol.socket_path(root), {
+            "id": 1, "op": "job_ps", "harness": HARNESS, "session": session,
+            "command": command}, PS_TIMEOUT_S)
+    except (OSError, ValueError, hookcore.HookError):
+        return None
+    out = resp.get("output")
+    if not isinstance(out, str):
+        return None
+    return ("[ozagia] answered from the ozagia job table instead of running "
+            f"`{command.strip()[:200]}` (same output):\n{out}")
+
+
 def handle(payload: dict[str, Any], root: Path) -> dict[str, Any] | None:
     """The hook's JSON answer for one event, or None to print nothing."""
     event = payload.get("hook_event_name")
@@ -296,6 +330,9 @@ def handle(payload: dict[str, Any], root: Path) -> dict[str, Any] | None:
         sub_cmd = hookcore.git_ref_moving(command)
         if sub_cmd is not None:
             return _deny(hookcore.git_refusal_reason(sub_cmd))
+        answer = job_ps_answer(root, command, session)
+        if answer is not None:
+            return _deny(answer)
         mapped = map_tool(tool_name, tool_input, cwd if isinstance(cwd, str) else None)
         if mapped is None:
             return None
@@ -322,12 +359,6 @@ def handle(payload: dict[str, Any], root: Path) -> dict[str, Any] | None:
             return None
         return _context("PostToolUse", append)
     return None
-
-
-def _deny(reason: str) -> dict[str, Any]:
-    return {"hookSpecificOutput": {"hookEventName": "PreToolUse",
-                                   "permissionDecision": "deny",
-                                   "permissionDecisionReason": reason}}
 
 
 def main(stdin: TextIO | None = None, stdout: TextIO | None = None) -> int:

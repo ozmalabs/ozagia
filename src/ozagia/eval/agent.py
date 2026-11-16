@@ -1321,7 +1321,8 @@ def graph_stats_fields(stats: Any) -> dict[str, Any]:
     read ledger's repeats_seen, stubs_served, notes_served, outlines_served
     and bytes_saved (`ozagia.intent.ledger`), and patch_checks,
     patch_misses_caught, region_replies and key_edits (patch and edit miss
-    recovery)."""
+    recovery), and jobs_started, job_waits, job_wait_seconds and
+    polls_avoided (background jobs, `ozagia.daemon.jobs`)."""
     if not isinstance(stats, dict):
         return {"plugin_loaded": None, "captured_calls": None,
                 "passthrough_calls": None, "fallbacks": None,
@@ -1331,7 +1332,8 @@ def graph_stats_fields(stats: Any) -> dict[str, Any]:
                 "structured_queries": None, "structured_outlines": None,
                 "jq_captures": None, **{k: None for k in READ_LEDGER_FIELDS},
                 "patch_checks": None, "patch_misses_caught": None,
-                "region_replies": None, "key_edits": None}
+                "region_replies": None, "key_edits": None, "jobs_started": None, "job_waits": None,
+                "job_wait_seconds": None, "polls_avoided": None}
     hellos = _count(stats.get("hellos"))
     raw = stats.get("handled")
     # The daemon reports {"true": n, "false": m}; only handled calls count.
@@ -1359,7 +1361,14 @@ def graph_stats_fields(stats: Any) -> dict[str, Any]:
             "patch_checks": _count(stats.get("patch_checks")),
             "patch_misses_caught": _count(stats.get("patch_misses_caught")),
             "region_replies": _count(stats.get("region_replies")),
-            "key_edits": _count(stats.get("key_edits"))}
+            "key_edits": _count(stats.get("key_edits")),
+            "jobs_started": _count(stats.get("jobs_started")),
+            "job_waits": _count(stats.get("waits")),
+            "job_wait_seconds": (round(float(stats["wait_seconds"]), 1)
+                                 if isinstance(stats.get("wait_seconds"), (int, float))
+                                 and not isinstance(stats.get("wait_seconds"), bool)
+                                 else None),
+            "polls_avoided": _count(stats.get("polls_avoided"))}
 
 
 
@@ -1604,6 +1613,13 @@ def aggregate(runs: list[dict[str, Any]], arms: Iterable[str]) -> list[dict[str,
                                             for r in mine),
                 "total_key_edits": sum(int(r.get("key_edits") or 0)
                                        for r in mine),
+                "total_jobs_started": sum(int(r.get("jobs_started") or 0)
+                                          for r in mine),
+                "total_job_waits": sum(int(r.get("job_waits") or 0) for r in mine),
+                "total_job_wait_seconds": round(sum(
+                    float(r.get("job_wait_seconds") or 0) for r in mine), 1),
+                "total_polls_avoided": sum(int(r.get("polls_avoided") or 0)
+                                           for r in mine),
                 "codemode_tools": sorted({t for r in mine
                                           for t in (r.get("codemode_tools") or [])}),
             })

@@ -25,13 +25,23 @@ def main(argv: list[str] | None = None) -> int:
             p.add_argument("--python", default=sys.executable,
                            help="Python that runs the hook and the MCP server "
                                 "(default: this one)")
+            p.add_argument("--jobs", action="store_true",
+                           help="enable background jobs (job_start) for the "
+                                "project: adds [jobs] enabled = true to "
+                                "<workdir>/.ozagia.toml and the jobs paragraph "
+                                "to AGENTS.md. Jobs run outside the Codex "
+                                "sandbox and approvals")
     args = ap.parse_args(argv)
     if args.cmd == "hook":
         return hook_mod.main()
     try:
         if args.cmd == "install":
-            got = install_mod.install(args.workdir, scope=args.scope, python=args.python)
+            got = install_mod.install(args.workdir, scope=args.scope,
+                                      python=args.python, jobs=args.jobs)
             print(f"installed ozagia hooks in {got['hooks']}")
+            if "jobs" in got:
+                print(f"enabled background jobs in {got['jobs']} (they run "
+                      "outside the Codex sandbox and approvals)")
             print(f"installed the ozagia MCP server in {got['config']}")
             print(f"added the ozagia section to {got['agents']}")
             print(install_mod.TRUST_STEPS)

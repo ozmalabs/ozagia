@@ -7,6 +7,7 @@
                  [--clone [--base REV]] [--keep-plugin] [--timeout S]
                  [--python P] [--runs-dir D] [-- <extra opencode args>]
     ozagia daemon serve|ensure|ping|stats|shutdown ... (python -m ozagia.daemon)
+    ozagia job run|wait|list|log|stop ...         (ozagia.daemon.jobcli)
     ozagia mcp ...                                (ozagia.integrations.mcp.server)
     ozagia eval ...                               (python -m ozagia.eval.agent)
     ozagia check ...                              (python -m ozagia.check)
@@ -17,7 +18,7 @@
                                                   `ozagia agent --workdir DIR`
     ozagia --version
 
-`daemon`, `mcp`, `eval` and `check` pass every argument after their name to
+`daemon`, `job`, `mcp`, `eval` and `check` pass every argument after their name to
 those modules' `main`, unchanged. See docs/harness.md.
 """
 from __future__ import annotations
@@ -41,6 +42,11 @@ def _version() -> str:
 
 def _daemon_main(argv: list[str]) -> int:
     from ozagia.daemon.__main__ import main
+    return main(argv)
+
+
+def _job_main(argv: list[str]) -> int:
+    from ozagia.daemon.jobcli import main
     return main(argv)
 
 
@@ -68,6 +74,8 @@ def _self_main(argv: list[str]) -> int:
 DELEGATES: dict[str, tuple[str, str]] = {
     "daemon": ("_daemon_main", "the graph daemon: serve|ensure|ping|stats|shutdown "
                                "(python -m ozagia.daemon)"),
+    "job": ("_job_main", "background jobs in the daemon: run|wait|list|log|stop "
+                         "(ozagia.daemon.jobcli)"),
     "mcp": ("_mcp_main", "the MCP server (ozagia.integrations.mcp.server)"),
     "eval": ("_eval_main", "the break/fix agent eval (python -m ozagia.eval.agent)"),
     "check": ("_check_main", "run tests, report graph keys (python -m ozagia.check)"),
@@ -232,7 +240,7 @@ def build_parser() -> argparse.ArgumentParser:
                          description="Install the OpenCode plugin, the Claude Code hooks, "
                                      "or the Codex or Kiro hooks and MCP server. Other "
                                      "options go to the integration's installer (for "
-                                     "codex: --scope project|user, --python P; for kiro "
+                                     "codex: --scope project|user, --python P, --jobs; for kiro "
                                      "also --format v3|agent|both, --agent NAME).")
     ins.add_argument("target", choices=tuple(INSTALL_TARGETS))
     ins.add_argument("--workdir", default=".", help="project directory (default: .)")
