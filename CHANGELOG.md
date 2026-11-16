@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.2 (2026-11-16)
 
 First published release. (`v0.1.0` and `v0.1.1` were tagged, but their release
 builds failed and they were never published.)
