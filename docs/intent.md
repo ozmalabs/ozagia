@@ -397,6 +397,24 @@ the other lines, at most 10, then a count of the rest:
   `meta` has `lint_runs`, `lint_findings` and `lint_timeouts` when a linter
   ran; the daemon's stats total them.
 
+### Library hints
+
+After a successful handled edit, key edit or write of a supported code file,
+`ozagia.core.library_hints` reads the text before and after the call, looks
+only at new or changed symbols (or every symbol in `strict` mode), and appends
+at most `hints.max_per_edit` one-line hints:
+
+```
+[ozagia] library hint: `pkg/mod.py::_retry` retry/backoff resembles tenacity (already a dependency). Evidence: bounded attempts, sleep, backoff, name `_retry`. Confidence: medium.
+```
+
+`meta.library_hints`, `meta.library_hint_files` and
+`meta.library_hints_suppressed` carry the counters. Hints are advisory: they
+never rewrite code, install a package, call a model or use the network, and a
+hint failure never fails the edit. `off`, `hints.ecosystems = []` or
+`$OZAGIA_LIBRARY_HINTS=0` produces no hint and no event. See
+`docs/library_hints.md`.
+
 ## shell
 
 `ozagia.intent.shell.classify(command)` (pure: it reads no files) maps a

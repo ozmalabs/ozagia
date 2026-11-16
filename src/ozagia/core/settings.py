@@ -46,6 +46,10 @@ that names the variable):
     OZAGIA_TESTING_MAX_TESTS        testing.max_tests
     OZAGIA_TESTING_TIMEOUT_S        testing.timeout_s
     OZAGIA_TESTING_CAPTURED         testing.captured
+    OZAGIA_HINTS_LIBRARY            hints.library
+    OZAGIA_HINTS_MAX_PER_EDIT       hints.max_per_edit
+    OZAGIA_HINTS_RECORD             hints.record
+    OZAGIA_HINTS_ECOSYSTEMS         hints.ecosystems
     OZAGIA_UI_THEME                 ui.theme
 
 TOML layout
@@ -78,6 +82,12 @@ The canonical layout follows the setting keys. The ``resources`` and
 
     [markdown]
     history = "history"
+
+    [hints]
+    library = "gentle"
+    max_per_edit = 2
+    record = true
+    ecosystems = ["python", "javascript", "rust"]
 
 The flat forms ``[resources] job_memory_mb = 2048`` and ``[worktrees]
 root = "../ozagia-wt"`` are accepted as aliases when reading. Writes update an
@@ -142,6 +152,10 @@ ENV_SETTINGS: dict[str, str] = {
     "OZAGIA_TESTING_MAX_TESTS": "testing.max_tests",
     "OZAGIA_TESTING_TIMEOUT_S": "testing.timeout_s",
     "OZAGIA_TESTING_CAPTURED": "testing.captured",
+    "OZAGIA_HINTS_LIBRARY": "hints.library",
+    "OZAGIA_HINTS_MAX_PER_EDIT": "hints.max_per_edit",
+    "OZAGIA_HINTS_RECORD": "hints.record",
+    "OZAGIA_HINTS_ECOSYSTEMS": "hints.ecosystems",
     "OZAGIA_UI_THEME": "ui.theme",
 }
 
@@ -294,6 +308,24 @@ def _check_bool(value: Any) -> bool:
     if not isinstance(value, bool):
         raise ValueError("must be true or false")
     return value
+
+
+_HINT_ECOSYSTEMS = ("python", "javascript", "rust")
+
+
+def _check_ecosystems(value: Any) -> list[str]:
+    items = _list(value)
+    if len(items) > 3:
+        raise ValueError("must contain at most 3 ecosystems")
+    result = []
+    for item in items:
+        name = _text(item, max_len=32).lower()
+        if name == "typescript":
+            name = "javascript"
+        if name not in _HINT_ECOSYSTEMS:
+            raise ValueError("must be one of python, javascript or rust")
+        result.append(name)
+    return _dedupe(result)
 
 
 _MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+~-]{0,199}\Z")
@@ -734,6 +766,37 @@ _SETTINGS: tuple[Setting, ...] = (
         section="ui", name="theme",
         validation="one of auto, light or dark",
         check=_choice("auto", "light", "dark"),
+    ),
+    Setting(
+        "hints.library", "string", "gentle", "both",
+        "Library-first hints after an edit: off, gentle (new/changed "
+        "symbols) or strict (also existing symbols in the edited files).",
+        section="hints", name="library",
+        validation="one of off, gentle or strict",
+        check=_choice("off", "gentle", "strict"),
+    ),
+    Setting(
+        "hints.max_per_edit", "integer", 2, "both",
+        "Maximum library hints shown per edited file.",
+        section="hints", name="max_per_edit",
+        validation="an integer between 0 and 20",
+        check=_integer_between(0, 20),
+    ),
+    Setting(
+        "hints.record", "boolean", True, "both",
+        "Record shown and suppressed library hints in the state directory.",
+        section="hints", name="record",
+        validation="true or false",
+        check=_check_bool,
+    ),
+    Setting(
+        "hints.ecosystems", "string_list",
+        ("python", "javascript", "rust"), "both",
+        "Ecosystems inspected for library hints; TypeScript counts as "
+        "javascript.",
+        section="hints", name="ecosystems",
+        validation="python, javascript or rust (may be empty)",
+        check=_check_ecosystems,
     ),
 )
 

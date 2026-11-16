@@ -90,6 +90,10 @@ restricted by file scope.
 | `OZAGIA_TESTING_MAX_TESTS` | `testing.max_tests` |
 | `OZAGIA_TESTING_TIMEOUT_S` | `testing.timeout_s` |
 | `OZAGIA_TESTING_CAPTURED` | `testing.captured` |
+| `OZAGIA_HINTS_LIBRARY` | `hints.library` |
+| `OZAGIA_HINTS_MAX_PER_EDIT` | `hints.max_per_edit` |
+| `OZAGIA_HINTS_RECORD` | `hints.record` |
+| `OZAGIA_HINTS_ECOSYSTEMS` | `hints.ecosystems` |
 | `OZAGIA_UI_THEME` | `ui.theme` |
 
 Environment values are parsed with the setting's type. An invalid value is an
@@ -200,6 +204,22 @@ An empty model id means "use the host default" (`default`) or "no fallback"
 unless a repository opts into a subset. `testing.timeout_s` is recorded for a
 caller that executes the plan; the planner never runs tests.
 
+### hints
+
+| Key | Type | Default | Scope | Restart |
+| --- | --- | --- | --- | --- |
+| `hints.library` | string | `"gentle"` | both | no |
+| `hints.max_per_edit` | integer | `2` | both | no |
+| `hints.record` | boolean | `true` | both | no |
+| `hints.ecosystems` | string_list | `["python", "javascript", "rust"]` | both | no |
+
+`hints.library` is `off`, `gentle` (new/changed symbols only) or `strict`
+(also existing symbols in explicitly edited files). `hints.max_per_edit` is
+the per-file cap (0-20). `hints.ecosystems` accepts `python`, `javascript`
+(including TypeScript) and `rust`; an empty list disables detection.
+`$OZAGIA_LIBRARY_HINTS=0` is a hard local opt-out
+and is not a registry setting. See `docs/library_hints.md`.
+
 Two open-ended tables hold per-task and per-path overrides:
 
 ```toml
@@ -298,6 +318,12 @@ code_review = "none"
 
 [testing.paths]
 "docs/**" = "none"
+
+[hints]
+library = "gentle"
+max_per_edit = 2
+record = true
+ecosystems = ["python", "javascript", "rust"]
 
 [ui]
 default_aperture = "architecture"
@@ -412,6 +438,9 @@ This module is deliberately standalone until the existing loaders are wired:
   The interactive captured-pytest selector in `ozagia.intent.affected` still
   reads `[tests] select` and `[tests] cache` from `.ozagia.toml`; this slice
   records `testing.captured` but does not change the interactive default.
+- `ozagia.core.library_hints` reads the `hints` group on each handled edit and
+  write (with `$OZAGIA_LIBRARY_HINTS=0` as a hard local opt-out); the daemon
+  sums its `meta` counters.
 - `ozagia doctor` does not yet report registry sources.
 - There is no migration command from `.ozagia.toml` to `ozagia/config.toml` in
   this slice.

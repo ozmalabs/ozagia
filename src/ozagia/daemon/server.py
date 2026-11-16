@@ -110,6 +110,11 @@ skips the `after` and session scans; `$OZAGIA_FILE_LEDGER=0` turns them
 off. `stats` adds `files_recorded`, `file_ledger_scans` and
 `file_ledger_errors`.
 
+Library-first hints (`ozagia.core.library_hints`): a handled `edit` or `write`
+computes hints for new/changed symbols; `stats` adds `library_hints`,
+`library_hint_files` and `library_hints_suppressed`, summed from the answers'
+`meta`. Hints are advisory text only and are never applied.
+
 Test selection (`ozagia.intent.affected`): `stats` adds `affected_runs`,
 `tests_skipped_unaffected`, `cached_passes` and `full_runs_forced`, summed
 from the answers' `meta.tests`.
@@ -152,7 +157,9 @@ FILE_LEDGER_PATHS = 20
 ENV_FILE_LEDGER = "OZAGIA_FILE_LEDGER"
 # `meta` counters the daemon sums into its stats.
 META_COUNTERS = ("path_suggestions", "ownership_warnings", "files_recorded",
-                 "file_ledger_errors", "ops_after_annotations")
+                 "file_ledger_errors", "ops_after_annotations",
+                 "library_hints", "library_hint_files",
+                 "library_hints_suppressed")
 # Keys kept per journal record.
 JOURNAL_KEYS = 20
 # Distinct shell passthrough reasons kept, and shown in `stats`.
@@ -365,6 +372,11 @@ class DaemonState:
         self.files_recorded = 0
         self.file_ledger_scans = 0
         self.file_ledger_errors = 0
+        # Library-first hints (`ozagia.core.library_hints`): hints shown,
+        # edited files that produced one, and candidates suppressed.
+        self.library_hints = 0
+        self.library_hint_files = 0
+        self.library_hints_suppressed = 0
 
     # -- requests ------------------------------------------------------------ #
     def dispatch(self, msg: dict[str, Any]) -> dict[str, Any]:
@@ -1137,6 +1149,11 @@ class DaemonState:
                 "files_recorded": self.files_recorded,
                 "file_ledger_scans": self.file_ledger_scans,
                 "file_ledger_errors": self.file_ledger_errors,
+                # Library-first hints (`ozagia.core.library_hints`): shown,
+                # edited files with a hint, and suppressed candidates.
+                "library_hints": self.library_hints,
+                "library_hint_files": self.library_hint_files,
+                "library_hints_suppressed": self.library_hints_suppressed,
                 # Lint inside the edit, and captured `ruff check` calls.
                 **self.lint,
                 "ruff_captures": self.by_intent.get("shell_ruff", 0),
