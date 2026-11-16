@@ -145,6 +145,33 @@ def test_default_config_runs_everything_and_writes_nothing(tmp_path, layout):
     assert not (root / ".ozagia" / "tests").exists()
 
 
+def test_testing_captured_sets_the_interactive_default(tmp_path, layout):
+    root, mem = _make(tmp_path, None, {
+        "ozagia/config.toml": '[testing]\ncaptured = "affected"\n'})
+    res = _run(mem)
+    assert ("[ozagia] ran all tests: no fully green run of this suite "
+            "recorded yet") in _ozagia(res)
+
+    _write(root / "pkg/other.py", "def three():\n    return 3  # edited\n")
+    res = _run(mem)
+    assert any(ln.startswith("[ozagia] ran 1 affected tests of 3;")
+               for ln in _ozagia(res))
+
+    # The environment opt-out still runs the command as typed.
+    res = _run(mem, f"OZAGIA_TESTS_ALL=1 {CMD}")
+    assert "[ozagia] ran all tests: OZAGIA_TESTS_ALL=1" in _ozagia(res)
+
+
+def test_tests_select_wins_over_testing_captured(tmp_path, layout):
+    root, mem = _make(tmp_path, AFFECTED, {
+        "ozagia/config.toml": '[testing]\ncaptured = "all"\n'})
+    _run(mem)
+    _write(root / "pkg/other.py", "def three():\n    return 3  # edited\n")
+    res = _run(mem)
+    assert any(ln.startswith("[ozagia] ran 1 affected tests of 3;")
+               for ln in _ozagia(res))
+
+
 # --------------------------------------------------------------------------- #
 # selection
 # --------------------------------------------------------------------------- #

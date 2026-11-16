@@ -27,6 +27,8 @@
     ozagia process start|run -- ARGV ...          (explicit local processes)
     ozagia tunnel start|stop|status|list ...      (tunnel config vs live state)
     ozagia preflight plan ...                     (dry-run emulator plan)
+    ozagia config schema|get|values|set ...        (settings registry; see
+                                                   docs/settings.md)
     ozagia who PATH [--root R] [--json]           (sessions that edited PATH)
     ozagia --version
 
@@ -82,6 +84,11 @@ def _self_main(argv: list[str]) -> int:
     return main(argv)
 
 
+def _settings_main(argv: list[str]) -> int:
+    from ozagia.settings_cli import main
+    return main(argv, prog=f"{PROG} config")
+
+
 # name -> (main(argv) -> int, help). Looked up at call time so tests can patch.
 DELEGATES: dict[str, tuple[str, str]] = {
     "daemon": ("_daemon_main", "the graph daemon: serve|ensure|ping|stats|shutdown "
@@ -92,6 +99,8 @@ DELEGATES: dict[str, tuple[str, str]] = {
     "eval": ("_eval_main", "the break/fix agent eval (python -m ozagia.eval.agent)"),
     "check": ("_check_main", "run tests, report graph keys (python -m ozagia.check)"),
     "self": ("_self_main", "the installed ozagia: info|check|upgrade|uninstall"),
+    "config": ("_settings_main", "inspect settings and preview config writes "
+                                "(schema|get|values|set)"),
 }
 
 
@@ -117,6 +126,16 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         print(f"Snapshot: {report['snapshot']['state']} ({report['snapshot']['path']})")
         config = report["config"]
         print(f"Config: {'valid' if config['valid'] else 'invalid'} ({config['path']})")
+        settings = report.get("settings") or {}
+        if settings:
+            if settings.get("valid"):
+                counts = ", ".join(
+                    f"{name}={count}" for name, count
+                    in (settings.get("source_counts") or {}).items())
+                print(f"Settings: valid ({settings.get('keys', 0)} keys"
+                      + (f"; sources: {counts}" if counts else "") + ")")
+            else:
+                print(f"Settings: invalid ({settings.get('error')})")
         for language, status in report["parsers"].items():
             if not status["available"]:
                 print(f"Parser {language}: unavailable ({status['error']})")

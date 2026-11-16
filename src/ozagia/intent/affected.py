@@ -6,11 +6,20 @@ Both are off by default and turned on in the project configuration:
     select = "affected"   # default "all"
     cache = true          # default false
 
-`select = "all"` is the default because changing what a command runs is
+`select` keeps its original meaning: `all` runs what the command names and
+`affected` runs only the linked tests. When `[tests] select` is not set, the
+interactive default comes from the typed settings registry
+(`testing.captured`, default `all`). An explicit `[tests] select` wins over
+`testing.captured`, because it is the more specific setting and its meaning
+does not change. `testing.captured = "off"` (or `"none"`) disables selection;
+`smoke` runs the affected subset and `package` runs all, because the affected
+selector is narrower; see :func:`ozagia.core.testing.captured_select`.
+
+Selection stays off by default because changing what a command runs is
 surprising: an agent that types `pytest -q` expects the whole suite, and a
-partial run reported as a pass could hide a regression. With the default
-and `cache = false` a captured pytest runs exactly as before and this module
-writes nothing.
+partial run reported as a pass could hide a regression. With `all` and
+`cache = false` a captured pytest runs exactly as before and this module
+writes nothing. `OZAGIA_TESTS_ALL=1` always runs the command as typed.
 
 Which commands: a captured pytest (alone or as a compound step) with no test
 selector, or whose selectors are all directories (`pytest`, `pytest -q`,
@@ -114,6 +123,7 @@ import re
 import subprocess
 import threading
 import time
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterator
@@ -235,13 +245,49 @@ def _config_reason(root: Path) -> str | None:
     return None
 
 
+def _explicit_tests_select(cfg: Any) -> str | None:
+    """``[tests] select`` when the project file sets it explicitly, else None."""
+    source = getattr(cfg, "source", None)
+    if source is None:
+        return None
+    try:
+        data = tomllib.loads(Path(source).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return None
+    tests = data.get("tests")
+    if isinstance(tests, dict) and "select" in tests:
+        return cfg.tests_select
+    return None
+
+
+def _captured_default(root: Path) -> str:
+    """``testing.captured`` from the registry, or the safe ``all`` default."""
+    try:
+        from ozagia.core import settings as S
+        return str(S.get(root, "testing.captured")["value"])
+    except (S.SettingsError, OSError, ValueError):
+        return "all"
+
+
 def _settings(root: Path) -> tuple[str, bool]:
+    """(captured selector, cache) for a captured pytest.
+
+    Precedence: an explicit ``[tests] select`` in the project config, then
+    ``testing.captured`` from the settings registry, then ``all``. The
+    selector is one of the two the executor implements: ``all`` or
+    ``affected``. ``OZAGIA_TESTS_ALL=1`` is handled by :func:`plan` and still
+    runs the command as typed.
+    """
     from ozagia.config import ConfigError, load_project_config
+    from ozagia.core.testing import captured_select
     try:
         cfg = load_project_config(root)
     except ConfigError:
         return "all", False
-    return cfg.tests_select, cfg.tests_cache
+    select = _explicit_tests_select(cfg)
+    if select is None:
+        select = captured_select(_captured_default(root))
+    return select, cfg.tests_cache
 
 
 # --------------------------------------------------------------------------- #

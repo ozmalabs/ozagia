@@ -73,6 +73,20 @@ DEFAULT_MAX_TESTS = 50
 DEFAULT_TIMEOUT_S = 300
 DEFAULT_CAPTURED = "all"
 
+#: How the interactive captured-pytest executor (:mod:`ozagia.intent.affected`)
+#: maps a configured mode. It implements `all` and `affected`; `none`/`off`
+#: disables selection and runs the command as typed. `smoke` uses the affected
+#: subset, which is over-inclusion; `package` is broader than the implemented
+#: selector, so it runs all. An unimplemented mode is never reported as
+#: honoured, and a mode never runs fewer tests than it requested.
+CAPTURED_SELECT = {
+    "none": "all",
+    "smoke": "affected",
+    "affected": "affected",
+    "package": "all",
+    "all": "all",
+}
+
 GIT_TIMEOUT_S = 20
 MAX_LISTED = 200
 MAX_TEST_FILES = 50_000
@@ -187,6 +201,23 @@ def _fallback(value: Any, *, where: str) -> str:
         raise TestPolicyError(
             f"{where}: must be one of {', '.join(FALLBACKS)}, got {value!r}")
     return value
+
+
+def captured_select(mode: str) -> str:
+    """The captured-pytest selector for a configured mode.
+
+    ``off`` is accepted as an alias for ``none``. The result is always one of
+    the two selectors the existing executor implements: ``all`` or
+    ``affected``.
+    """
+    text = mode.strip().lower() if isinstance(mode, str) else mode
+    if text == "off":
+        text = "none"
+    if text not in CAPTURED_SELECT:
+        raise TestPolicyError(
+            f"captured mode must be one of {', '.join(MODES)} or 'off', "
+            f"got {mode!r}")
+    return CAPTURED_SELECT[text]
 
 
 def _int_setting(value: Any, *, where: str, low: int, high: int) -> int:
@@ -1102,6 +1133,7 @@ def plan(root: str | Path, *, base: str = "HEAD", head: str | None = None,
 
 
 __all__ = [
+    "CAPTURED_SELECT",
     "DEFAULT_CAPTURED",
     "DEFAULT_FALLBACK",
     "DEFAULT_MAX_TESTS",
@@ -1112,6 +1144,7 @@ __all__ = [
     "SCHEMA",
     "TestPolicy",
     "TestPolicyError",
+    "captured_select",
     "changed_files",
     "load_policy",
     "plan",

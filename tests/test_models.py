@@ -13,6 +13,7 @@ import pytest
 
 from ozagia import models_cli
 from ozagia.core import models as M
+from ozagia.core import settings as S
 
 
 @pytest.fixture(autouse=True)
@@ -271,6 +272,47 @@ models = ["vllm/seven"]
     assert settings.task_source("diff_review") == "override"
     assert settings.task_model("paper_triage") == "user/three"
     assert settings.local_providers == ("lmstudio", "ollama")
+
+
+def test_settings_model_overrides_match_the_direct_reader(
+        tmp_path: Path, monkeypatch) -> None:
+    root = _root(tmp_path)
+    user = _user_config(tmp_path, """
+[models.tasks]
+paper_triage = "user/three"
+diff_review = "user/four"
+
+[models.local]
+providers = ["ollama"]
+""")
+    monkeypatch.setenv("OZAGIA_USER_CONFIG", str(user))
+    _config(root, """
+[models.tasks]
+diff_review = "repo/five"
+reference_screen = "repo/six"
+
+[models.local]
+models = ["vllm/seven"]
+""")
+    settings = M.load_settings(root)
+    overrides = S.model_overrides(root)
+    assert overrides["tasks"] == dict(settings.tasks)
+    assert tuple(overrides["local"]["providers"]) == settings.local_providers
+    assert tuple(overrides["local"]["models"]) == settings.local_models
+    # The settings registry accepts and reports the same dynamic entries.
+    assert S.get(root, "models.tasks.diff_review")["value"] == "repo/five"
+    assert S.get(root, "models.tasks.diff_review")["source"] == "repo"
+    assert S.get(root, "models.tasks.paper_triage")["source"] == "user"
+    assert S.get(root, "models.local.providers")["value"] == ["ollama"]
+    assert S.get(root, "models.local.models")["value"] == ["vllm/seven"]
+
+
+def test_settings_accepts_the_by_task_class_alias(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    _config(root, '[models.by_task_class]\ndiff_review = "local/qwen"\n')
+    assert M.load_settings(root).task_model("diff_review") == "local/qwen"
+    assert S.get(root, "models.tasks.diff_review")["value"] == "local/qwen"
+    assert S.model_overrides(root)["tasks"] == {"diff_review": "local/qwen"}
 
 
 @pytest.mark.parametrize(("text", "needle"), [

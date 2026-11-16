@@ -433,6 +433,65 @@ def test_settings_testing_keys_and_dynamic_tables(repo) -> None:
                     dry_run=False)
 
 
+@pytest.mark.parametrize(("mode", "select"), [
+    ("off", "all"),
+    ("none", "all"),
+    ("smoke", "affected"),
+    ("affected", "affected"),
+    ("package", "all"),
+    ("all", "all"),
+])
+def test_captured_select_modes(mode: str, select: str) -> None:
+    assert T.captured_select(mode) == select
+
+
+def test_captured_select_rejects_unknown_modes() -> None:
+    with pytest.raises(T.TestPolicyError, match="captured mode"):
+        T.captured_select("sometimes")
+
+
+def test_captured_policy_precedence_and_off_alias(tmp_path: Path) -> None:
+    from ozagia.config import clear_config_cache
+    from ozagia.intent import affected as A
+
+    root = tmp_path / "captured"
+    root.mkdir()
+    _repo_config(root, '[testing]\ncaptured = "affected"\n')
+    assert A._settings(root) == ("affected", False)
+    assert S.get(root, "testing.captured")["source"] == "repo"
+
+    # `off` is stored as the canonical `none`, which disables selection.
+    S.set_value(root, "testing.captured", "off", dry_run=False)
+    assert S.get(root, "testing.captured")["value"] == "none"
+    assert A._settings(root) == ("all", False)
+
+    # An explicit [tests] select keeps its meaning and wins.
+    _write(root, ".ozagia.toml", '[tests]\nselect = "affected"\ncache = true\n')
+    _repo_config(root, '[testing]\ncaptured = "all"\n')
+    clear_config_cache()
+    assert A._settings(root) == ("affected", True)
+
+    _write(root, ".ozagia.toml", '[tests]\nselect = "all"\n')
+    _repo_config(root, '[testing]\ncaptured = "affected"\n')
+    clear_config_cache()
+    assert A._settings(root) == ("all", False)
+
+    # No explicit select: the registry value is the interactive default.
+    (root / ".ozagia.toml").unlink()
+    _repo_config(root, '[testing]\ncaptured = "smoke"\n')
+    clear_config_cache()
+    assert A._settings(root) == ("affected", False)
+    _repo_config(root, '[testing]\ncaptured = "package"\n')
+    clear_config_cache()
+    assert A._settings(root) == ("all", False)
+
+    # A broken project config keeps the historical safe default.
+    (root / ".ozagia.toml").write_text("[tests]\nselect = \"bad\"\n")
+    clear_config_cache()
+    assert A._settings(root) == ("all", False)
+    clear_config_cache()
+
+
 # --------------------------------------------------------------------------- #
 # task integration
 # --------------------------------------------------------------------------- #

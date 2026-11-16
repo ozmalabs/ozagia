@@ -169,9 +169,22 @@ again before the value takes effect.
 | `models.default` | string | `""` | both | no |
 | `models.fallback` | string | `""` | both | no |
 | `models.local_only` | boolean | `false` | both | no |
+| `models.tasks.<class>` | string | none | both | no |
+| `models.local.providers` | string_list | `[]` | both | no |
+| `models.local.models` | string_list | `[]` | both | no |
 
 An empty model id means "use the host default" (`default`) or "no fallback"
 (`fallback`). Model ids are bounded `provider/model`-style strings.
+
+`[models.tasks]` and `[models.local]` are dynamic tables: every task class or
+local list that is present becomes its own setting in `values()` and can be
+read or previewed with `get`/`set`. They have no built-in default and therefore
+do not appear in `schema`. `[models.by_task_class]` is accepted as an alias for
+`[models.tasks]`; defining both in one file is an error. Repository entries
+override user entries for the same task class; local providers and models are
+unioned across layers. `ozagia.core.models` reads the same tables through its
+own loader; `settings.model_overrides(root)` returns its effective
+`tasks`/`local` maps for callers that need the registry's view.
 
 ### tasks
 
@@ -198,10 +211,13 @@ An empty model id means "use the host default" (`default`) or "no fallback"
 | `testing.captured` | string | `"all"` | both | no |
 
 `testing.mode` and `testing.captured` are one of `none`, `smoke`, `affected`,
-`package` or `all`. `testing.fallback` is one of `all`, `refuse` or
+`package` or `all`. `testing.captured` also accepts `off` as an alias for
+`none`. `testing.fallback` is one of `all`, `refuse` or
 `affected_with_warning`. `testing.mode` is the default for bounded tasks;
 `testing.captured` is the interactive captured-pytest default and stays `all`
-unless a repository opts into a subset. `testing.timeout_s` is recorded for a
+unless a repository opts into a subset. An explicit `[tests] select` in
+`.ozagia.toml` still wins over `testing.captured`; see `docs/testing.md` for
+the precedence and the executor mapping. `testing.timeout_s` is recorded for a
 caller that executes the plan; the planner never runs tests.
 
 ### hints
@@ -298,6 +314,13 @@ default = ""
 fallback = ""
 local_only = false
 
+[models.tasks]
+diff_review = "openai/gpt-5-mini"
+
+[models.local]
+providers = ["ollama", "lmstudio"]
+models = ["vllm/private"]
+
 [tasks]
 default_budget_tokens = 40000
 max_wall_s = 900
@@ -349,36 +372,40 @@ definitions.
 
 ## Commands
 
-Use the module entry point. It stands in for the planned `ozagia config`
-command until `cli.py` is wired, and no console script is installed yet:
+`ozagia config` delegates to `ozagia.settings_cli`; the module entry point
+and the `ozagia-settings` console script remain available:
 
 ```text
-python -m ozagia.settings_cli schema [--json]
-python -m ozagia.settings_cli get KEY [--root R] [--json]
-python -m ozagia.settings_cli values [--root R] [--json]
-python -m ozagia.settings_cli set KEY VALUE --scope repo|user [--root R] [--dry-run] [--json]
+ozagia config schema [--json]
+ozagia config get KEY [--root R] [--json]
+ozagia config values [--root R] [--json]
+ozagia config set KEY VALUE --scope repo|user [--root R] [--dry-run] [--json]
 ```
 
 Examples:
 
 ```bash
-# The registry, including defaults, scopes, validations and aliases.
-python -m ozagia.settings_cli schema --json
+# The fixed registry: defaults, scopes, validations and aliases.
+ozagia config schema --json
 
-# Every effective value and its source.
-python -m ozagia.settings_cli values --root .
+# Every effective value and its source, including [models.tasks] entries.
+ozagia config values --root .
 
 # One setting, with its source and default.
-python -m ozagia.settings_cli get resources.job_memory_mb --root .
+ozagia config get resources.job_memory_mb --root .
 
 # Preview a user preference; nothing is written.
-python -m ozagia.settings_cli set ui.theme dark --scope user --dry-run
+ozagia config set ui.theme dark --scope user --dry-run
 
 # Apply a repository-only index setting; lists are comma-separated or JSON.
-python -m ozagia.settings_cli set index.test_dirs tests,spec --root .
+ozagia config set index.test_dirs tests,spec --root .
 
 # Preview a resource limit without creating ozagia/.
-python -m ozagia.settings_cli set resources.job_pids 512 --root . --dry-run
+ozagia config set resources.job_pids 512 --root . --dry-run
+
+# Preview a per-task model pin and a local-provider list.
+ozagia config set models.tasks.diff_review openai/gpt-5-mini --root . --dry-run
+ozagia config set models.local.providers ollama,lmstudio --root . --dry-run
 ```
 
 Exit status is `0` on success and `2` for a validation, configuration or IO
@@ -435,19 +462,29 @@ This module is deliberately standalone until the existing loaders are wired:
   mapping) is separate from the registry's `worktrees` group (resource
   placement policy), which is stored under `[resources.worktrees]`.
 - `ozagia.core.testing` reads the `testing` group and its open-ended tables.
-  The interactive captured-pytest selector in `ozagia.intent.affected` still
-  reads `[tests] select` and `[tests] cache` from `.ozagia.toml`; this slice
-  records `testing.captured` but does not change the interactive default.
+  The interactive captured-pytest selector in `ozagia.intent.affected` reads
+  `[tests] select`/`[tests] cache` from `.ozagia.toml` first; when `select` is
+  not set it uses `testing.captured`. `OZAGIA_TESTS_ALL=1` still runs the
+  command as typed.
+- `ozagia.core.models` reads `[models]` directly, including the same
+  `[models.tasks]`/`[models.by_task_class]` and `[models.local]` tables the
+  registry now validates. `settings.model_overrides(root)` returns the same
+  effective task and locality maps for other callers.
 - `ozagia.core.library_hints` reads the `hints` group on each handled edit and
   write (with `$OZAGIA_LIBRARY_HINTS=0` as a hard local opt-out); the daemon
   sums its `meta` counters.
-- `ozagia doctor` does not yet report registry sources.
+- `ozagia doctor` reports a `settings` section: the active user/repository/
+  state paths, registry validity and the first error, per-source counts, and a
+  bounded list of non-default keys. A broken settings file is reported there
+  and does not change doctor's exit status, which still follows the root and
+  `.ozagia.toml` validity.
 - There is no migration command from `.ozagia.toml` to `ozagia/config.toml` in
   this slice.
 
 ## Tests
 
 ```bash
-PYTHONPATH=src python -m pytest -q tests/test_settings.py
+PYTHONPATH=src python -m pytest -q tests/test_settings.py tests/test_models.py \
+  tests/test_testing.py tests/test_doctor.py tests/test_cli.py
 ruff check src tests
 ```

@@ -34,7 +34,7 @@ def repo(tmp_path: Path, monkeypatch) -> Path:
     ["--help"], ["index", "--help"], ["agent", "--help"], ["install", "--help"],
     ["daemon", "--help"], ["daemon", "serve", "--help"],
     ["daemon", "ensure", "--help"], ["mcp", "--help"],
-    ["eval", "--help"], ["check", "--help"],
+    ["eval", "--help"], ["check", "--help"], ["config", "--help"],
 ])
 def test_help_exits_zero(argv, capsys):
     with pytest.raises(SystemExit) as exc:
@@ -75,6 +75,43 @@ def test_index_builds_then_refreshes(repo, capsys):
 
     assert cli.main(["index", "--root", str(repo), "--rebuild"]) == 0
     assert capsys.readouterr().out.startswith("built ")
+
+
+def test_config_delegates_to_the_settings_cli(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("OZAGIA_USER_CONFIG", raising=False)
+    root = tmp_path / "repo"
+    root.mkdir()
+
+    assert cli.main(["config", "schema", "--json"]) == 0
+    schema = json.loads(capsys.readouterr().out)
+    assert any(item["key"] == "ui.theme" for item in schema["settings"])
+
+    assert cli.main(["config", "values", "--root", str(root), "--json"]) == 0
+    values = json.loads(capsys.readouterr().out)
+    assert values["settings"]["ui.theme"]["source"] == "default"
+
+    assert cli.main(["config", "get", "ui.theme", "--root", str(root)]) == 0
+    out = capsys.readouterr().out
+    assert 'ui.theme = "auto"' in out and "(default)" in out
+
+    assert cli.main([
+        "config", "set", "ui.theme", "dark", "--root", str(root),
+        "--dry-run", "--json"]) == 0
+    preview = json.loads(capsys.readouterr().out)
+    assert preview["dry_run"] is True
+    assert preview["applied"] is False
+    assert 'theme = "dark"' in preview["diff"]
+    assert not (root / "ozagia").exists()
+
+    assert cli.main([
+        "config", "set", "models.tasks.diff_review", "local/qwen",
+        "--root", str(root), "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert 'diff_review = "local/qwen"' in out
+    assert not (root / "ozagia").exists()
 
 
 def test_index_error_is_reported(tmp_path, capsys, monkeypatch):

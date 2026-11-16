@@ -7,6 +7,70 @@ from typing import Any
 
 from ozagia.config import ConfigError, config_path, load_project_config, state_path
 
+#: Bound the per-key settings detail in the doctor report.
+SETTINGS_NON_DEFAULT_LIMIT = 50
+
+
+def _settings_report(root: Path) -> dict[str, Any]:
+    """Registry paths, validity and a bounded per-key source summary.
+
+    A broken settings file is reported here, not raised: ``doctor`` must keep
+    diagnosing the rest of the workspace.
+    """
+    from ozagia.core import settings as settings_registry
+
+    report: dict[str, Any] = {
+        "valid": False,
+        "keys": 0,
+        "registry": {"valid": False, "keys": 0, "error": None},
+        "locations": {},
+        "source_counts": {},
+        "non_default": [],
+        "non_default_truncated": False,
+        "error": None,
+        "errors": [],
+    }
+    try:
+        report["locations"] = settings_registry.locations(root)
+    except (settings_registry.SettingsError, OSError, ValueError) as exc:
+        report["errors"].append(str(exc))
+
+    registry_error: str | None = None
+    try:
+        registry = settings_registry.schema()
+    except Exception as exc:  # noqa: BLE001 - report, never fail doctor
+        registry_error = str(exc)
+        report["errors"].append(registry_error)
+    else:
+        report["registry"] = {
+            "valid": True, "keys": len(registry), "error": None}
+    if registry_error is not None:
+        report["registry"] = {
+            "valid": False, "keys": 0, "error": registry_error}
+
+    try:
+        values = settings_registry.values(root)
+    except (settings_registry.SettingsError, OSError, ValueError) as exc:
+        report["error"] = str(exc)
+        if str(exc) not in report["errors"]:
+            report["errors"].append(str(exc))
+        return report
+
+    counts: dict[str, int] = {}
+    non_default: list[dict[str, str]] = []
+    for key, item in values.items():
+        source = str(item.get("source") or "unknown")
+        counts[source] = counts.get(source, 0) + 1
+        if source != "default":
+            non_default.append({"key": key, "source": source})
+    report["valid"] = bool(report["registry"]["valid"])
+    report["keys"] = len(values)
+    report["source_counts"] = dict(sorted(counts.items()))
+    report["non_default"] = non_default[:SETTINGS_NON_DEFAULT_LIMIT]
+    report["non_default_truncated"] = (
+        len(non_default) > SETTINGS_NON_DEFAULT_LIMIT)
+    return report
+
 
 def diagnose(root: str | Path) -> dict[str, Any]:
     """Inspect local configuration and snapshot without building or starting servers."""
@@ -22,6 +86,17 @@ def diagnose(root: str | Path) -> dict[str, Any]:
     except (ConfigError, OSError) as exc:
         result["config"] = {"path": cfg_label, "present": cfg_present,
                             "valid": False, "error": str(exc)}
+
+    try:
+        result["settings"] = _settings_report(root)
+    except Exception as exc:  # noqa: BLE001 - one section must not stop doctor
+        result["settings"] = {
+            "valid": False, "keys": 0,
+            "registry": {"valid": False, "keys": 0, "error": str(exc)},
+            "locations": {}, "source_counts": {}, "non_default": [],
+            "non_default_truncated": False,
+            "error": str(exc), "errors": [str(exc)],
+        }
 
     dump = state_path(root, "graph.json")
     result["snapshot"] = {"path": str(dump), "state": "missing"}
