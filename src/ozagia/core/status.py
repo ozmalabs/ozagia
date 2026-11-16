@@ -1,0 +1,510 @@
+"""One read-only status snapshot for a repository.
+
+This module composes checks that already exist: worktree/branch checks, host
+resources, the created-file ledger, runtime services and tunnels, the graph
+daemon, diagnostics and project configuration. It is not a second service
+manager and it never builds an index, starts a daemon or process, opens a
+tunnel or writes to the repository or its state directory.
+
+Absence and ignorance are distinct. A missing daemon is ``absent`` (a known
+fact: nothing is listening); a daemon that does not answer in time is
+``unknown``. The same rule holds for the file ledger, project configuration
+and graph snapshot. A component is never reported as an empty object without a
+state that says why.
+"""
+from __future__ import annotations
+
+from collections.abc import Mapping
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from ozagia.config import (
+    ConfigError,
+    config_path,
+    load_project_config,
+)
+from ozagia.core.files import (
+    FileLedgerError,
+    ledger_path,
+    list_files,
+    new_file_count,
+    orphans,
+)
+from ozagia.core.resources import status as resources_status
+from ozagia.core.runtime import runtime_line, runtime_status
+from ozagia.core.worktree import WorktreeError, check as worktree_check
+from ozagia.daemon import protocol
+from ozagia.daemon.client import (
+    DaemonClient,
+    DaemonError,
+    DaemonTimeout,
+    DaemonUnavailable,
+)
+from ozagia.doctor import diagnose
+
+SCHEMA = 1
+DAEMON_TIMEOUT_S = 2.0
+MAX_DAEMON_TIMEOUT_S = 30.0
+MIN_DAEMON_TIMEOUT_S = 0.05
+FILE_LIMIT = 200
+TEXT_WORKTREE_LIMIT = 10
+TEXT_RUNTIME_LIMIT = 10
+TEXT_FINDING_LIMIT = 5
+SNAPSHOT_STATES = ("missing", "stale", "invalid", "unknown")
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _issue(component: str, code: str, message: str) -> dict[str, str]:
+    return {"component": component, "code": code, "message": message}
+
+
+def _section(state: str, report: Any = None, *, error: str | None = None,
+             **extra: Any) -> dict[str, Any]:
+    """One component envelope: a state, an error and its unmodified report."""
+    return {"state": state, "error": error, "report": report, **extra}
+
+
+def _timeout(value: float) -> float:
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        seconds = DAEMON_TIMEOUT_S
+    if seconds != seconds:  # NaN
+        seconds = DAEMON_TIMEOUT_S
+    return min(MAX_DAEMON_TIMEOUT_S, max(MIN_DAEMON_TIMEOUT_S, seconds))
+
+
+def _present(path: Path | None) -> bool:
+    if path is None:
+        return False
+    try:
+        return path.is_file()
+    except OSError:
+        return False
+
+
+def _config_status(
+    root: Path,
+) -> tuple[dict[str, Any], Any | None]:
+    """Load project configuration, keeping invalid config a hard error."""
+    path: Path | None = None
+    try:
+        path = config_path(root)
+        project = load_project_config(root)
+    except (ConfigError, OSError) as exc:
+        return (
+            _section(
+                "invalid", None, error=str(exc),
+                path=str(path) if path is not None else None,
+                present=_present(path),
+            ),
+            None,
+        )
+    report = {
+        "source": str(project.source) if project.source is not None else None,
+        "adapters": list(project.adapters),
+        "source_dirs": list(project.source_dirs),
+        "test_dirs": list(project.test_dirs),
+        "jobs_enabled": project.jobs_enabled,
+        "runtime_services": [item.name for item in project.runtime_services],
+        "runtime_tunnels": [item.name for item in project.runtime_tunnels],
+    }
+    return (
+        _section(
+            "configured" if path is not None else "defaults", report,
+            path=str(path) if path is not None else None,
+            present=_present(path),
+        ),
+        project,
+    )
+
+
+def _workspace_status(
+    root: Path, degraded: list[dict[str, str]],
+) -> dict[str, Any]:
+    try:
+        report = worktree_check(root)
+    except (WorktreeError, OSError) as exc:
+        degraded.append(_issue(
+            "workspace", "workspace.unavailable",
+            f"worktree check failed: {exc}"))
+        return _section("unavailable", error=str(exc))
+    return _section("ok", report)
+
+
+def _resources_status(
+    root: Path, *, path: str | Path | None, top: int,
+    degraded: list[dict[str, str]],
+) -> dict[str, Any]:
+    try:
+        report = resources_status(root, path=path, top=top)
+    except (OSError, ValueError) as exc:
+        degraded.append(_issue(
+            "resources", "resources.unavailable",
+            f"resource observation failed: {exc}"))
+        return _section("unavailable", error=str(exc))
+    return _section("ok", report)
+
+
+def _files_status(
+    root: Path, degraded: list[dict[str, str]],
+) -> dict[str, Any]:
+    try:
+        ledger = ledger_path(root)
+        records = list_files(root, limit=FILE_LIMIT)
+        orphan_records = orphans(root)
+        new = new_file_count(root)
+    except (FileLedgerError, OSError) as exc:
+        degraded.append(_issue(
+            "files", "files.unavailable",
+            f"created-file ledger could not be read: {exc}"))
+        return _section("unavailable", error=str(exc))
+    report = {
+        "ledger": {"path": str(ledger), "present": _present(ledger)},
+        "records": records,
+        "orphans": orphan_records,
+        "new": new,
+        "counts": {
+            "records": len(records),
+            "orphans": len(orphan_records),
+            "new": new.get("count", 0),
+        },
+    }
+    return _section("ok", report)
+
+
+def _runtime_status(
+    root: Path, project: Any | None, degraded: list[dict[str, str]],
+) -> dict[str, Any]:
+    try:
+        report = runtime_status(project if project is not None else root)
+    except Exception as exc:  # noqa: BLE001 - one component must not stop the snapshot
+        degraded.append(_issue(
+            "runtime", "runtime.unavailable",
+            f"runtime status could not be composed: {exc}"))
+        return _section("unavailable", error=str(exc))
+    return _section("ok", report)
+
+
+def _daemon_status(
+    root: Path, *, timeout: float, degraded: list[dict[str, str]],
+) -> dict[str, Any]:
+    """Ping an existing daemon; never start or autostart one."""
+    limit = _timeout(timeout)
+    report: dict[str, Any] = {
+        "socket": None,
+        "timeout_s": limit,
+        "ping": None,
+        "stats": None,
+        "stats_error": None,
+    }
+    try:
+        sock = protocol.socket_path(root)
+    except (OSError, ValueError) as exc:
+        degraded.append(_issue(
+            "daemon", "daemon.unknown",
+            f"daemon socket path could not be resolved: {exc}"))
+        return _section("unknown", report, error=str(exc))
+    report["socket"] = str(sock)
+    try:
+        with DaemonClient(sock, timeout=limit) as client:
+            try:
+                ping = client.ping(timeout=limit)
+            except DaemonUnavailable as exc:
+                degraded.append(_issue(
+                    "daemon", "daemon.absent",
+                    f"no graph daemon is listening on {sock}: {exc}"))
+                return _section("absent", report, error=str(exc))
+            except DaemonTimeout as exc:
+                degraded.append(_issue(
+                    "daemon", "daemon.unknown",
+                    f"graph daemon did not answer within {limit:g}s: {exc}"))
+                return _section("unknown", report, error=str(exc))
+            except DaemonError as exc:
+                degraded.append(_issue(
+                    "daemon", "daemon.unknown",
+                    f"graph daemon could not be queried: {exc}"))
+                return _section("unknown", report, error=str(exc))
+            if ping.get("ok") is False:
+                error = str(ping.get("error") or "daemon ping failed")
+                degraded.append(_issue(
+                    "daemon", "daemon.unknown",
+                    f"graph daemon ping failed: {error}"))
+                return _section("unknown", report, error=error)
+            report["ping"] = ping
+            report["version"] = ping.get("version")
+            report["daemon_root"] = ping.get("root")
+            report["pid"] = ping.get("pid")
+            try:
+                stats_reply = client.stats()
+            except DaemonTimeout as exc:
+                report["stats_error"] = str(exc)
+                degraded.append(_issue(
+                    "daemon", "daemon.stats",
+                    f"graph daemon pinged but stats timed out: {exc}"))
+            except DaemonError as exc:
+                report["stats_error"] = str(exc)
+                degraded.append(_issue(
+                    "daemon", "daemon.stats",
+                    f"graph daemon pinged but stats failed: {exc}"))
+            else:
+                if stats_reply.get("ok") is False:
+                    report["stats_error"] = str(
+                        stats_reply.get("error") or "daemon stats failed")
+                    degraded.append(_issue(
+                        "daemon", "daemon.stats",
+                        f"graph daemon stats failed: {report['stats_error']}"))
+                else:
+                    stats = stats_reply.get("stats")
+                    if isinstance(stats, dict):
+                        report["stats"] = stats
+                        report["uptime_s"] = stats.get("uptime_s")
+                        report["idle_timeout_s"] = stats.get("idle_timeout_s")
+                    else:
+                        report["stats_error"] = "reply has no stats object"
+                        degraded.append(_issue(
+                            "daemon", "daemon.stats",
+                            "graph daemon stats reply has no stats object"))
+    except Exception as exc:  # noqa: BLE001 - one component must not stop the snapshot
+        degraded.append(_issue(
+            "daemon", "daemon.unknown",
+            f"graph daemon state could not be determined: {exc}"))
+        return _section("unknown", report, error=str(exc))
+    return _section("running", report)
+
+
+def _doctor_status(
+    root: Path, degraded: list[dict[str, str]],
+) -> dict[str, Any]:
+    try:
+        report = diagnose(root)
+    except Exception as exc:  # noqa: BLE001 - diagnostics are one component
+        degraded.append(_issue(
+            "doctor", "doctor.unavailable",
+            f"diagnostics could not run: {exc}"))
+        return _section("unavailable", error=str(exc))
+    snapshot = report.get("snapshot")
+    snapshot = snapshot if isinstance(snapshot, Mapping) else {}
+    snapshot_state = snapshot.get("state")
+    if snapshot_state == "fresh":
+        return _section("ok", report)
+    if snapshot_state not in SNAPSHOT_STATES:
+        snapshot_state = "unknown"
+    messages = {
+        "missing": "no graph snapshot; run `ozagia index` to build one",
+        "stale": "graph snapshot is stale; rebuild before trusting graph results",
+        "invalid": f"graph snapshot is invalid: {snapshot.get('error') or 'unknown reason'}",
+        "unknown": "graph snapshot freshness could not be verified",
+    }
+    degraded.append(_issue(
+        "doctor", f"snapshot.{snapshot_state}", messages[snapshot_state]))
+    return _section("degraded", report)
+
+
+def status(
+    root: str | Path,
+    *,
+    path: str | Path | None = None,
+    top: int = 10,
+    timeout: float = DAEMON_TIMEOUT_S,
+) -> dict[str, Any]:
+    """Compose the read-only status snapshot for ``root``.
+
+    Every component is optional to the composition: a failure is recorded in
+    ``degraded`` and the report keeps its explicit state. Only a missing root
+    or invalid project configuration is a hard error (``ok`` false).
+    """
+    root_path = Path(root).resolve()
+    checked_at = _now()
+    errors: list[dict[str, str]] = []
+    degraded: list[dict[str, str]] = []
+
+    if not root_path.is_dir():
+        errors.append(_issue(
+            "root", "root.missing",
+            f"repository root does not exist: {root_path}"))
+
+    config, project = _config_status(root_path)
+    if config.get("state") == "invalid":
+        errors.append(_issue(
+            "config", "config.invalid",
+            f"project configuration is invalid: {config.get('error')}"))
+
+    workspace = _workspace_status(root_path, degraded)
+    resources = _resources_status(root_path, path=path, top=top,
+                                  degraded=degraded)
+    files = _files_status(root_path, degraded)
+    runtime = _runtime_status(root_path, project, degraded)
+    daemon = _daemon_status(root_path, timeout=timeout, degraded=degraded)
+    doctor = _doctor_status(root_path, degraded)
+
+    return {
+        "schema": SCHEMA,
+        "checked_at": checked_at,
+        "root": str(root_path),
+        "ok": not errors,
+        "errors": errors,
+        "degraded": degraded,
+        "workspace": workspace,
+        "resources": resources,
+        "files": files,
+        "runtime": runtime,
+        "daemon": daemon,
+        "doctor": doctor,
+        "config": config,
+    }
+
+
+def _text(value: Any, suffix: str = "") -> str:
+    if value is None:
+        return "unknown"
+    return f"{value}{suffix}"
+
+
+def format_status(report: Mapping[str, Any]) -> str:
+    """A short text summary; the JSON report keeps every detail."""
+    lines: list[str] = []
+    errors = report.get("errors") or []
+    degraded = report.get("degraded") or []
+    head = "ok" if report.get("ok") else "errors"
+    if degraded:
+        head += f", {len(degraded)} degraded"
+    lines.append(f"{head}: {report.get('root')}")
+    lines.append(f"checked: {_text(report.get('checked_at'))}")
+
+    workspace = report.get("workspace") or {}
+    workspace_report = workspace.get("report")
+    if isinstance(workspace_report, Mapping):
+        worktrees = workspace_report.get("worktrees") or []
+        findings = workspace_report.get("findings") or []
+        error_findings = [item for item in findings
+                          if item.get("level") == "error"]
+        lines.append(
+            f"workspace: {len(worktrees)} worktree(s), "
+            f"{len(error_findings)} error finding(s)")
+        for item in worktrees[:TEXT_WORKTREE_LIMIT]:
+            dirty = item.get("dirty") or {}
+            changed = sum(int(dirty.get(key, 0)) for key in
+                          ("staged", "unstaged", "untracked", "conflicted"))
+            base = item.get("base") or {}
+            drift = ""
+            if base.get("ahead") is not None or base.get("behind") is not None:
+                drift = (f"  ahead={_text(base.get('ahead'))}"
+                         f" behind={_text(base.get('behind'))}")
+            lines.append(
+                f"  {item.get('path')}  {item.get('branch') or '(detached)'}  "
+                f"dirty={changed}{drift}")
+        shown = 0
+        for finding in findings:
+            if finding.get("level") == "info":
+                continue
+            lines.append(f"  {finding.get('level')}: "
+                         f"{finding.get('worktree')}: "
+                         f"{finding.get('message')}")
+            shown += 1
+            if shown >= TEXT_FINDING_LIMIT:
+                break
+    else:
+        lines.append(f"workspace: {workspace.get('state')} "
+                     f"({_text(workspace.get('error'))})")
+
+    resources = report.get("resources") or {}
+    resources_report = resources.get("report")
+    if isinstance(resources_report, Mapping):
+        host = resources_report.get("host") or {}
+        memory = host.get("memory") or {}
+        load = host.get("load") or {}
+        lines.append(
+            "resources: "
+            f"load={_text(load.get('1m'))}/{_text(load.get('5m'))}/"
+            f"{_text(load.get('15m'))}  "
+            f"memory={_text(memory.get('available_mb'))} MiB available of "
+            f"{_text(memory.get('total_mb'))} MiB "
+            f"({_text(memory.get('used_pct'))}% used)")
+        for disk in (resources_report.get("disks") or [])[:5]:
+            lines.append(
+                f"  disk {disk.get('mount') or disk.get('path')}: "
+                f"{_text(disk.get('free_gb'))} GiB free "
+                f"({_text(disk.get('free_pct'))}%), "
+                f"fstype={_text(disk.get('fstype'))}"
+                + (" tmpfs" if disk.get("is_tmpfs") else ""))
+    else:
+        lines.append(f"resources: {resources.get('state')} "
+                     f"({_text(resources.get('error'))})")
+
+    files = report.get("files") or {}
+    files_report = files.get("report")
+    if isinstance(files_report, Mapping):
+        counts = files_report.get("counts") or {}
+        ledger = files_report.get("ledger") or {}
+        new = files_report.get("new") or {}
+        lines.append(
+            f"files: {counts.get('records', 0)} record(s), "
+            f"{counts.get('orphans', 0)} orphan(s), "
+            f"{counts.get('new', 0)} new in "
+            f"{_text(new.get('since_hours'), 'h')}; "
+            f"ledger {'present' if ledger.get('present') else 'absent'}")
+    else:
+        lines.append(f"files: {files.get('state')} "
+                     f"({_text(files.get('error'))})")
+
+    daemon = report.get("daemon") or {}
+    daemon_report = daemon.get("report") if isinstance(
+        daemon.get("report"), Mapping) else {}
+    socket = daemon_report.get("socket")
+    if daemon.get("state") == "running":
+        lines.append(
+            f"daemon: running pid={_text(daemon_report.get('pid'))} "
+            f"uptime={_text(daemon_report.get('uptime_s'), 's')} "
+            f"socket={_text(socket)}")
+        if daemon_report.get("stats_error"):
+            lines.append(f"  stats: unknown ({daemon_report['stats_error']})")
+    else:
+        lines.append(
+            f"daemon: {daemon.get('state')} socket={_text(socket)} "
+            f"({_text(daemon.get('error'))})")
+
+    runtime = report.get("runtime") or {}
+    runtime_report = runtime.get("report")
+    if isinstance(runtime_report, Mapping):
+        items = runtime_report.get("items") or []
+        lines.append(
+            f"runtime: {len(runtime_report.get('services') or [])} service(s), "
+            f"{len(runtime_report.get('tunnels') or [])} tunnel(s), "
+            f"{len(runtime_report.get('processes') or [])} process(es)")
+        for item in items[:TEXT_RUNTIME_LIMIT]:
+            lines.append("  " + runtime_line(item))
+        if len(items) > TEXT_RUNTIME_LIMIT:
+            lines.append(f"  ... {len(items) - TEXT_RUNTIME_LIMIT} more")
+    else:
+        lines.append(f"runtime: {runtime.get('state')} "
+                     f"({_text(runtime.get('error'))})")
+
+    doctor = report.get("doctor") or {}
+    doctor_report = doctor.get("report")
+    if isinstance(doctor_report, Mapping):
+        snapshot = doctor_report.get("snapshot") or {}
+        lines.append(f"snapshot: {_text(snapshot.get('state'))} "
+                     f"({_text(snapshot.get('path'))})")
+    else:
+        lines.append(f"doctor: {doctor.get('state')} "
+                     f"({_text(doctor.get('error'))})")
+
+    config = report.get("config") or {}
+    config_path_text = config.get("path") or "no configuration file"
+    lines.append(f"config: {_text(config.get('state'))} ({config_path_text})")
+
+    for issue in degraded:
+        lines.append(f"degraded: {issue.get('component')}: "
+                     f"{issue.get('code')}: {issue.get('message')}")
+    for issue in errors:
+        lines.append(f"error: {issue.get('component')}: "
+                     f"{issue.get('code')}: {issue.get('message')}")
+    return "\n".join(lines)
+
+
+__all__ = ["SCHEMA", "format_status", "status"]
