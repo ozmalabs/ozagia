@@ -38,6 +38,11 @@ receives), and never appear in outputs:
     _test_env               the environment (dict) for a captured pytest. It
                             replaces the inherited environment, so the tests
                             see what the agent's own shell would.
+    _reason                 why a handled `write` (or `edit` that creates the
+                            file) created it: a short label recorded in the
+                            created-file ledger (`ozagia.core.files`). The
+                            daemon keeps this one reserved field; anything
+                            longer than one bounded line is truncated.
 """
 from __future__ import annotations
 
@@ -177,6 +182,8 @@ def handle(memory: Any, tool: str, input: dict[str, Any], *,
     (`ozagia.intent.paths`, `meta.path_suggestions`)."""
     t0 = time.perf_counter()
     meta: dict[str, Any] = {"intent": str(tool), "keys": []}
+    # Created-file ledger counters (`ozagia.core.files`), merged into `meta`.
+    ledger_meta: dict[str, int] = {}
     body: dict[str, Any]
     spec = prior = None
     if (state is not None and not preflight and tool in ("read", "shell")
@@ -226,6 +233,16 @@ def handle(memory: Any, tool: str, input: dict[str, Any], *,
             partial = partial_view(memory, state, input)
         edit_rel = (_edit_rel(memory, tool, input)
                     if tool in ("edit", "write") else None)
+        # The ledger records a file as created only when it did not exist
+        # before this call; an edit of an existing file is not a creation.
+        created_rel = None
+        if edit_rel is not None and not preflight:
+            from ozagia.intent.common import root_of
+            try:
+                if not (root_of(memory) / edit_rel).exists():
+                    created_rel = edit_rel
+            except OSError:
+                created_rel = None
         warned: list[str] = []
         if owners is not None and edit_rel:
             try:
@@ -236,6 +253,21 @@ def handle(memory: Any, tool: str, input: dict[str, Any], *,
         from ozagia.core.owners import acting
         with acting(memory, harness, session):
             res = handler(memory, input)
+        if created_rel is not None and res.get("intent") in ("write", "edit_write"):
+            try:
+                from ozagia.core import files as F
+                from ozagia.intent.common import root_of
+                reason = input.get("_reason") if isinstance(input, dict) else None
+                if not isinstance(reason, str) or not reason.strip():
+                    reason = "unknown"
+                item = F.record_file(root_of(memory), created_rel,
+                                     session=session, harness=harness,
+                                     tool=tool, reason=reason)
+            except Exception:  # noqa: BLE001 - the file is written
+                ledger_meta["file_ledger_errors"] = 1
+            else:
+                if item is not None:
+                    ledger_meta["files_recorded"] = 1
         output = res["output"]
         if partial:
             output += "\n" + partial
@@ -279,6 +311,7 @@ def handle(memory: Any, tool: str, input: dict[str, Any], *,
         body = {"handled": False, "reason": f"{type(e).__name__}: {e}"}
         meta.update(intent=f"{tool}_exception", error=True)
     meta["ms"] = _ms(t0)
+    meta.update(ledger_meta)
     body["meta"] = meta
     return body
 

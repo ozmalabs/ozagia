@@ -31,6 +31,11 @@ node's current text and both hashes. write:
     Wrote file successfully.
     [ozagia] created|replaced file:<rel>[  backup: <path>]
     [ozagia] delta: ...
+
+A `write` (or an `edit` with an empty `oldString`) that creates the file is
+also recorded in the created-file ledger (`ozagia.core.files`) when the call
+runs through `ozagia.intent.handle`: session, harness, tool and the reserved
+`_reason` label. An edit of an existing file is not recorded as a creation.
 """
 from __future__ import annotations
 

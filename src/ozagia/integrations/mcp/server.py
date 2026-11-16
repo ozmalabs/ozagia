@@ -780,6 +780,41 @@ _TOOLS.append({
 })
 
 
+# The created-file ledger (`ozagia.core.files`): read-only over
+# `.ozagia/files/ledger.jsonl`. It records metadata, never file content.
+_TOOLS.extend([
+    {
+        "name": "dev_files_list",
+        "description": (
+            "List the created-file ledger: files ozagia attributed to a "
+            "session (handled writes, edits and after-call scans, plus session "
+            "start/end scans) with path, hash, size, session, harness, tool, "
+            "reason, classification and cleanup policy. No file contents or "
+            "prompts are stored. Deduplicated by path and hash."),
+        "inputSchema": _schema({
+            "classification": {"type": "string",
+                               "description": "Only this classification (docs, plan, result, note, history, scratch, source, test, ...)."},
+            "status": {"type": "string", "default": "active",
+                       "description": "Only this status (default: active)."},
+            "limit": {"type": "integer", "default": 100,
+                      "description": "Most rows to return (at most 1000)."},
+        }),
+    },
+    {
+        "name": "dev_files_explain",
+        "description": (
+            "Explain one file's ledger record: its creator (session, harness, "
+            "task, tool), reason, classification, references, cleanup policy, "
+            "whether it changed since it was recorded, and for Markdown its "
+            "routing suggestion (ozagia.core.files.markdown_route)."),
+        "inputSchema": _schema({
+            "path": {"type": "string",
+                     "description": "Repo-relative or absolute file path."},
+        }, ["path"]),
+    },
+])
+
+
 # --------------------------------------------------------------------------- #
 # dispatch
 # --------------------------------------------------------------------------- #
@@ -922,6 +957,8 @@ class DevMemoryServer:
             "job_log": self._job_log,
             "job_stop": self._job_stop,
             "dev_working_set": self._working_set,
+            "dev_files_list": self._files_list,
+            "dev_files_explain": self._files_explain,
         } if mode in {"coding", "combined"} else {})
         if self.mem is not None:
             present = {n.get("type") for n in self.mem.nodes.values()}
@@ -1418,6 +1455,28 @@ class DevMemoryServer:
                              "seen no edits, test runs or reads for it (it "
                              "keeps them only while it runs).")
         return reply
+
+    # -- created-file ledger (`ozagia.core.files`) -------------------------- #
+    def _files_root(self) -> Path:
+        return Path(self.mem.raw_repo_root if self.mem is not None
+                    else self.workspace).resolve()
+
+    def _files_list(self, a: dict[str, Any]) -> Any:
+        from ozagia.core import files as F
+        classification = a.get("classification") or None
+        records = F.list_files(self._files_root(),
+                               classification=classification,
+                               status=a.get("status", "active"),
+                               limit=a.get("limit", 100))
+        return {"ok": True, "files": records, "count": len(records)}
+
+    def _files_explain(self, a: dict[str, Any]) -> Any:
+        from ozagia.core import files as F
+        try:
+            report = F.explain(self._files_root(), str(a["path"]))
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+        return {"ok": True, **report}
 
     # -- JSON-RPC ---------------------------------------------------------- #
     def handle(self, msg: Any) -> dict[str, Any] | None:
