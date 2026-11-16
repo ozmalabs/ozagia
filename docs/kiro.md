@@ -107,9 +107,14 @@ order), and writes each changed file atomically with 2-space indentation.
 A file that is not valid JSON or has the wrong shape (`hooks` not a list in
 the hook file, a `version` other than `"v1"`, `mcpServers` not an object,
 profile `hooks` neither a list nor an object of lists) is refused with an
-error and nothing is written. Running install again changes nothing, or only
-what differs (a new `--python`). Install touches only the formats you ask
-for; uninstall removes all of them.
+error and nothing is written. If a write fails partway (a permission
+error, a full disk), the files already written get their old content back
+and the error is reported. A file that is a symlink (for example a
+dotfiles-managed `~/.kiro/settings/mcp.json`) is written through the link,
+so its target changes and the link stays. Running install again changes
+nothing, or only what differs (a new `--python`); keys you added to the
+`ozagia` MCP entry (`autoApprove`, `disabled`, `timeout`) are kept. Install
+touches only the formats you ask for; uninstall removes all of them.
 
 The hook file:
 
@@ -227,13 +232,16 @@ most 3 s and a daemon request has 10 s; if the alarm fires while
 python -m ozagia.integrations.kiro uninstall --workdir <project> [--scope user] [--agent NAME]
 ```
 
-This removes ozagia's hooks from the hook file and the agent profile
-(whichever exist) and the `ozagia` server from `mcp.json`. Everything else
-stays. A hook file left with no hooks, a profile that is then exactly what
+This removes ozagia's hooks from the hook file and the agent profiles
+(whichever exist) and the `ozagia` server from `mcp.json`. Without
+`--agent` it looks at every `.kiro/agents/*.json` (so a profile from
+`install --agent NAME` is cleaned too; a profile it cannot parse is
+skipped); with `--agent NAME` only at that one. Everything else stays. A hook file left with no hooks, a profile that is then exactly what
 install created, and an `mcp.json` with no other server or key are deleted.
 (If Kiro changed the profile, for example `/upgrade-agent` adding
 `kiroUpgrade`, the profile is kept without ozagia's hooks.) Directories
-are left in place.
+are left in place. A symlinked file is never deleted; it keeps what is
+left after ozagia's entries are removed.
 
 ## Limits
 
@@ -289,7 +297,11 @@ python3 scripts/kiro_probe_hook.py show --workdir /tmp/kiro-probe
 python3 scripts/kiro_probe_hook.py uninstall --workdir /tmp/kiro-probe
 ```
 
-`install` writes `.kiro/hooks/ozagia-probe.json` (V3; `SessionStart`,
+`install` copies the script to `/tmp/kiro-probe/.ozagia/kiro_probe_hook.py`
+and every hook runs that copy with `|| true` appended, so a probe hook
+always exits 0 even if this checkout goes away (Python exits 2 when its
+script is missing, and exit 2 on `PreToolUse` would block every tool). It
+writes `.kiro/hooks/ozagia-probe.json` (V3; `SessionStart`,
 `UserPromptSubmit`, `PreToolUse` and `PostToolUse` on `*`, `Stop`, and
 `PreCompact`/`PostCompact`, which 2.37 skips) and
 `.kiro/agents/ozagia-probe.json` (the CLI 2.x triggers). The records go to

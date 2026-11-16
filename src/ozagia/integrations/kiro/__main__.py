@@ -19,9 +19,14 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--workdir", default=".", help="project directory (default: .)")
         p.add_argument("--scope", choices=install_mod.SCOPES, default="project",
                        help="project: <workdir>/.kiro (default); user: ~/.kiro")
-        p.add_argument("--agent", default=install_mod.DEFAULT_AGENT,
-                       help="agent profile for --format agent|both: "
-                            ".kiro/agents/<AGENT>.json (default: ozagia)")
+        if name == "install":
+            p.add_argument("--agent", default=install_mod.DEFAULT_AGENT,
+                           help="agent profile for --format agent|both: "
+                                ".kiro/agents/<AGENT>.json (default: ozagia)")
+        else:
+            p.add_argument("--agent", default=None,
+                           help="only this agent profile, .kiro/agents/<AGENT>.json "
+                                "(default: every .kiro/agents/*.json)")
         if name == "install":
             p.add_argument("--format", dest="fmt", choices=install_mod.FORMATS,
                            default=install_mod.DEFAULT_FORMAT,

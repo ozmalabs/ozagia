@@ -32,9 +32,13 @@ Every file is JSON, read and checked before anything is written, merged
 (ozagia's entries are those whose command ends with this package's `hook`
 subcommand, and the `ozagia` MCP server), and written atomically. A file
 that is not valid JSON or has the wrong shape is refused and nothing is
-written. `uninstall` removes ozagia's entries and deletes a file left with
-nothing else in it (the hook file, a profile that is exactly what install
-created, an `mcp.json` with no other server or key).
+written. If a write fails partway, the files already written get their old
+content back. A symlinked file is written through the link. Re-installing
+keeps keys the user added to the `ozagia` MCP entry. `uninstall` removes
+ozagia's entries (from every `agents/*.json` unless `agent` is given) and
+deletes a file left with nothing else in it (the hook file, a profile that
+is exactly what install created, an `mcp.json` with no other server or
+key); a symlinked one is kept with what is left.
 
 Kiro runs workspace hooks only in a trusted workspace (V3 asks on first
 launch; `--trust-workspace` skips the question for one launch);
@@ -117,6 +121,9 @@ def paths(workdir: str | Path, scope: str = "project", home: str | Path | None =
 
 
 def _atomic_write(path: Path, text: str) -> None:
+    """Replace `path`'s content with `text` atomically. A symlink is written
+    through: its target gets the new content and the link stays."""
+    path = path.resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
     try:
@@ -126,6 +133,31 @@ def _atomic_write(path: Path, text: str) -> None:
         os.replace(tmp, path)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+def _apply(changes: list[tuple[Path, str | None]]) -> None:
+    """Write each `(path, text)` (None: delete the file) in order. If one
+    fails, the files already changed get their old content back (or are
+    removed again if they did not exist) and the error is raised."""
+    done: list[tuple[Path, bytes | None]] = []
+    try:
+        for path, text in changes:
+            old = path.read_bytes() if path.exists() else None
+            if text is None:
+                path.unlink()
+            else:
+                _atomic_write(path, text)
+            done.append((path, old))
+    except BaseException:
+        for path, old in reversed(done):
+            try:
+                if old is None:
+                    path.resolve().unlink(missing_ok=True)
+                else:
+                    _atomic_write(path, old.decode("utf-8"))
+            except OSError:
+                pass
         raise
 
 
@@ -336,7 +368,9 @@ def _servers(path: Path, data: dict[str, Any]) -> dict[str, Any]:
 def merge_mcp(path: Path, data: dict[str, Any] | None, entry: dict[str, Any]) -> dict[str, Any]:
     data = dict(data or {})
     servers = dict(_servers(path, data))
-    servers[MCP_NAME] = entry
+    old = servers.get(MCP_NAME)
+    # Keep keys the user added to the entry (autoApprove, disabled, timeout).
+    servers[MCP_NAME] = {**old, **entry} if isinstance(old, dict) else entry
     data["mcpServers"] = servers
     return data
 
@@ -376,31 +410,57 @@ def install(workdir: str | Path, *, scope: str = "project", python: str = sys.ex
         plan["agent"] = _dump(merge_profile(p["agent"], _load(p["agent"]), python, agent))
     plan["mcp"] = _dump(merge_mcp(p["mcp"], _load(p["mcp"]),
                                   mcp_entry(workdir, scope, python)))
-    for key, text in plan.items():
-        path = p[key]
-        if not path.exists() or path.read_text(encoding="utf-8") != text:
-            _atomic_write(path, text)
+    _apply([(p[key], text) for key, text in plan.items()
+            if not p[key].exists() or p[key].read_text(encoding="utf-8") != text])
     return {key: p[key] for key in plan}
 
 
-def uninstall(workdir: str | Path, *, scope: str = "project", agent: str = DEFAULT_AGENT,
+def _emptied(key: str, data: dict[str, Any]) -> dict[str, Any]:
+    """What is left of `data` without ozagia, for a file uninstall would
+    delete but keeps because it is a symlink."""
+    if key == "hooks":
+        return {**data, "hooks": []}
+    if key == "mcp":
+        return {**data, "mcpServers": {}}
+    return {k: v for k, v in data.items() if k != "hooks"}
+
+
+def uninstall(workdir: str | Path, *, scope: str = "project", agent: str | None = None,
               home: str | Path | None = None) -> list[Path]:
-    """Remove ozagia's hooks (hook file and agent profile, whichever are
-    there) and its MCP server. Returns the files that changed."""
-    p = paths(workdir, scope, home, agent)
-    changes: list[tuple[Path, dict[str, Any]]] = []
-    for key, unmerge in (("hooks", lambda path, d: unmerge_hook_file(path, d)),
-                         ("agent", lambda path, d: unmerge_profile(path, d, agent)),
-                         ("mcp", lambda path, d: unmerge_mcp(path, d))):
-        data = _load(p[key])
-        if data is None:
+    """Remove ozagia's hooks (hook file and agent profiles, whichever are
+    there) and its MCP server. With `agent`, only `agents/<agent>.json` is
+    looked at; without, every `agents/*.json` (one that cannot be read is
+    skipped). A file left with nothing else is deleted, unless it is a
+    symlink: then what is left is written through the link. Returns the
+    files that changed."""
+    p = paths(workdir, scope, home, agent or DEFAULT_AGENT)
+    targets: list[tuple[str, Path, str, bool]] = [("hooks", p["hooks"], "", False)]
+    if agent:
+        targets.append(("agent", p["agent"], agent, False))
+    else:
+        targets += [("agent", f, f.stem, True)
+                    for f in sorted(p["agent"].parent.glob("*.json"))]
+    targets.append(("mcp", p["mcp"], "", False))
+    changes: list[tuple[Path, str | None]] = []
+    for key, path, name, optional in targets:
+        try:
+            data = _load(path)
+            if data is None:
+                continue
+            if key == "hooks":
+                new = unmerge_hook_file(path, data)
+            elif key == "agent":
+                new = unmerge_profile(path, data, name)
+            else:
+                new = unmerge_mcp(path, data)
+        except (SettingsError, UnicodeDecodeError):
+            if optional:
+                continue
+            raise
+        if new is None:
             continue
-        new = unmerge(p[key], data)
-        if new is not None:
-            changes.append((p[key], new))
-    for path, new in changes:
-        if new:
-            _atomic_write(path, _dump(new))
-        else:
-            path.unlink()
+        if not new and path.is_symlink():
+            new = _emptied(key, data)
+        changes.append((path, _dump(new) if new else None))
+    _apply(changes)
     return [path for path, _ in changes]

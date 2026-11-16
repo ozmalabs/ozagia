@@ -286,15 +286,16 @@ def compaction_context(event: str, payload: dict[str, Any], root: Path) -> str |
 
 
 def _pre_read(tool_name: str, tool_input: dict[str, Any], root: Path,
-              session: str) -> hookcore.HookBlock | None:
+              session: str, cwd: str | None = None) -> hookcore.HookBlock | None:
     reqs = read_requests(tool_input)
     if not reqs or len(reqs) > MAX_KEY_READS:
         return None
-    keys = [hookcore.node_key(r["path"], KEY_PREFIXES) for r in reqs]
+    keys = [hookcore.node_key(r["path"], KEY_PREFIXES, cwd) for r in reqs]
     if any(k is None for k in keys):
         return None
     parts: list[str] = []
     handled = False
+    answered = False
     for req, key in zip(reqs, keys):
         inp = {**req, "path": key}
         resp = hookcore.daemon_request_autostart(root, {
@@ -305,13 +306,19 @@ def _pre_read(tool_name: str, tool_input: dict[str, Any], root: Path,
                          f"{resp.get('reason') or 'not handled'}")
             continue
         handled = True
+        answered = answered or not resp.get("is_error")
         label = "ozagia read error for" if resp.get("is_error") else "Node"
         parts.append(f"{label} {key}:\n{resp.get('output') or ''}")
     if not handled:
         return None
-    head = (f"ozagia answered this {tool_name} from the code graph, so the "
-            "built-in tool did not run. This is the result; do not retry the "
-            "call.")
+    if answered:
+        head = (f"ozagia answered this {tool_name} from the code graph, so the "
+                "built-in tool did not run. This is the result; do not retry the "
+                "call.")
+    else:
+        head = (f"ozagia could not answer this {tool_name} from the code graph, so "
+                "the built-in tool did not run. Check the key (the error below may "
+                "suggest one); if you meant a file, read it by its real path.")
     return hookcore.HookBlock(head + "\n\n" + "\n\n".join(parts))
 
 
@@ -343,7 +350,7 @@ def handle(payload: dict[str, Any], root: Path) -> str | hookcore.HookBlock | No
             return None if sub is None else hookcore.HookBlock(
                 hookcore.git_refusal_reason(sub))
         if tool_name in READ_TOOLS:
-            return _pre_read(tool_name, tool_input, root, session)
+            return _pre_read(tool_name, tool_input, root, session, cwd)
         return None
 
     if event == "PostToolUse":

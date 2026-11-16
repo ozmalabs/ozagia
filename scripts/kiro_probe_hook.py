@@ -13,10 +13,14 @@ reaches the model on PostToolUse. This script answers them without ozagia.
     python3 scripts/kiro_probe_hook.py show --workdir /tmp/kiro-probe
     python3 scripts/kiro_probe_hook.py uninstall --workdir /tmp/kiro-probe
 
-`install` writes `.kiro/hooks/ozagia-probe.json` (V3) and
+`install` copies this script to `<workspace>/.ozagia/kiro_probe_hook.py`
+and writes `.kiro/hooks/ozagia-probe.json` (V3) and
 `.kiro/agents/ozagia-probe.json` (every engine, with that agent) into the
-given workspace, both running `<this python> <this script> hook`. Use a
-scratch directory, not a real project, and trust it when Kiro asks.
+given workspace, both running `<this python> <the copy> hook || true`. The
+copy and the `|| true` keep the hook at exit 0 even if this checkout moves
+or the interpreter fails (Kiro blocks a tool on exit 2, which is what
+Python exits with when it cannot open its script). Use a scratch directory,
+not a real project, and trust it when Kiro asks.
 
 `hook` (what Kiro runs) reads stdin and writes one JSON file per event to
 `$OZAGIA_KIRO_PROBE_DIR`, default `<event cwd>/.ozagia/kiro_probe/`: the raw
@@ -77,15 +81,21 @@ def cmd_hook(echo: bool) -> int:
     return 0
 
 
-def _command(echo: bool) -> str:
-    parts = [sys.executable, str(Path(__file__).resolve()), "hook"]
+def script_copy(workdir: str) -> Path:
+    """Where install copies this script in the workspace."""
+    return Path(workdir).resolve() / ".ozagia" / "kiro_probe_hook.py"
+
+
+def _command(echo: bool, script: Path) -> str:
+    parts = [sys.executable, str(script), "hook"]
     if echo:
         parts.append("--echo")
-    return " ".join(shlex.quote(x) for x in parts)
+    # Never exit non-zero: exit 2 on PreToolUse would block every tool.
+    return " ".join(shlex.quote(x) for x in parts) + " || true"
 
 
-def configs(echo: bool) -> tuple[dict, dict]:
-    command = _command(echo)
+def configs(echo: bool, script: Path) -> tuple[dict, dict]:
+    command = _command(echo, script)
 
     def doc(trigger: str, matcher: str | None = None) -> dict:
         d: dict = {"name": f"{NAME}-{trigger}", "trigger": trigger}
@@ -112,7 +122,11 @@ def _paths(workdir: str) -> tuple[Path, Path]:
 
 
 def cmd_install(workdir: str, echo: bool) -> int:
-    hook_file, profile = configs(echo)
+    script = script_copy(workdir)
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_bytes(Path(__file__).read_bytes())
+    print(f"wrote {script}")
+    hook_file, profile = configs(echo, script)
     for path, data in zip(_paths(workdir), (hook_file, profile)):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
@@ -121,7 +135,7 @@ def cmd_install(workdir: str, echo: bool) -> int:
 
 
 def cmd_uninstall(workdir: str) -> int:
-    for path in _paths(workdir):
+    for path in (*_paths(workdir), script_copy(workdir)):
         if path.exists():
             path.unlink()
             print(f"removed {path}")

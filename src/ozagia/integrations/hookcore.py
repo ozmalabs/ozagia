@@ -104,17 +104,24 @@ def _key_in_path(prefixes: tuple[str, ...]) -> re.Pattern[str]:
     return re.compile(rf"(?:^|/)((?:{names}):.+)$")
 
 
-def node_key(file_path: Any, prefixes: tuple[str, ...] = KEY_PREFIXES) -> str | None:
+def node_key(file_path: Any, prefixes: tuple[str, ...] = KEY_PREFIXES,
+             cwd: str | None = None) -> str | None:
     """The node key a file path names, or None for a real path. `prefixes`
     are the key kinds to recognise (default `KEY_PREFIXES`; add
-    `STRUCTURED_KEY_PREFIXES` for `json:`/`yaml:`/`toml:` reads)."""
+    `STRUCTURED_KEY_PREFIXES` for `json:`/`yaml:`/`toml:` reads). A path
+    with a key inside it is a real path if the file exists; a relative one
+    is looked up under `cwd` (the event's working directory) when given,
+    else under the process's."""
     if not isinstance(file_path, str) or not file_path:
         return None
     if file_path.startswith(prefixes):
         return file_path
     m = _key_in_path(prefixes).search(file_path)
-    if m and not os.path.exists(file_path):
-        return m.group(1)
+    if m:
+        where = (os.path.join(cwd, file_path)
+                 if cwd and not os.path.isabs(file_path) else file_path)
+        if not os.path.exists(where):
+            return m.group(1)
     return None
 
 

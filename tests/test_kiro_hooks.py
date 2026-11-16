@@ -241,6 +241,37 @@ def test_pre_read_error_is_labelled(repo, daemon):
     proc = run_hook(pre(repo, "read_file", {"path": "sym:src/a.py::zz"}), sock=stub.sock)
     assert proc.returncode == 2
     assert "ozagia read error for sym:src/a.py::zz:\nno node" in proc.stderr
+    assert "could not answer this read_file" in proc.stderr
+    assert "do not retry" not in proc.stderr
+
+
+def test_pre_read_partial_error_still_says_answered(repo, daemon):
+    def reply(req):
+        bad = req["input"]["path"].endswith("zz")
+        return {"ok": True, "handled": True, "is_error": bad, "output": "x"}
+    stub = daemon(reply)
+    proc = run_hook(pre(repo, "read_files", {"paths": ["sym:src/a.py::f", "sym:src/a.py::zz"]}),
+                    sock=stub.sock)
+    assert proc.returncode == 2 and "do not retry" in proc.stderr
+
+
+def test_pre_read_real_file_with_key_like_name_uses_event_cwd(repo, daemon, tmp_path):
+    # A real relative path with a `text:` segment; the hook process runs in
+    # another directory than the event's cwd, so only the event cwd finds it.
+    (repo / "notes").mkdir()
+    (repo / "notes" / "text:todo.md").write_text("todo\n", encoding="utf-8")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    stub = daemon()
+    proc = run_hook(pre(repo, "read_file", {"path": "notes/text:todo.md"}),
+                    sock=stub.sock, cwd=elsewhere)
+    assert proc.returncode == 0 and proc.stdout == "" and proc.stderr == ""
+    assert stub.requests == []
+    # The same path names a key when the file is not there.
+    proc = run_hook(pre(repo, "read_file", {"path": "notes/text:gone.md"}),
+                    sock=stub.sock, cwd=elsewhere)
+    assert proc.returncode == 2
+    assert stub.requests[0]["input"] == {"path": "text:gone.md"}
 
 
 def test_pre_read_daemon_failure_fails_open(repo, daemon):
@@ -450,10 +481,24 @@ def test_run_hook_answers(repo):
     assert _run(lambda p, r: None, p) == (0, "", "")
 
 
-def test_run_hook_error_after_block_fails_open(repo):
+def test_run_hook_error_fails_open(repo):
     def boom(p, r):
         raise RuntimeError("x")
     assert _run(boom, event(repo, "X")) == (0, "", "")
+
+
+class _BrokenStream(io.StringIO):
+    def write(self, s):
+        raise OSError("stderr closed")
+
+
+def test_run_hook_error_after_block_fails_open(repo):
+    # The handler blocks, but writing the block to stderr fails: no block.
+    out = io.StringIO()
+    rc = hookcore.run_hook(lambda p, r: hookcore.HookBlock("no"), log_name="t.log",
+                           timeout_s=5, stdin=io.StringIO(json.dumps(event(repo, "X"))),
+                           stdout=out, stderr=_BrokenStream())
+    assert rc == 0 and out.getvalue() == ""
 
 
 def test_node_key_prefixes():
@@ -462,6 +507,15 @@ def test_node_key_prefixes():
     assert hookcore.node_key("/nope/toml:p.toml#/a", hook.KEY_PREFIXES) == "toml:p.toml#/a"
     assert hookcore.node_key("/nope/sym:a.py::f") == "sym:a.py::f"
     assert hookcore.node_key("src/a.py", hook.KEY_PREFIXES) is None
+
+
+def test_node_key_checks_relative_paths_under_cwd(tmp_path, monkeypatch):
+    (tmp_path / "d").mkdir()
+    (tmp_path / "d" / "sym:x.py").write_text("")
+    monkeypatch.chdir("/")
+    assert hookcore.node_key("d/sym:x.py") == "sym:x.py"  # process cwd: no file
+    assert hookcore.node_key("d/sym:x.py", cwd=str(tmp_path)) is None
+    assert hookcore.node_key(str(tmp_path / "d" / "sym:x.py"), cwd="/") is None
 
 
 # --------------------------------------------------------------------------- #
@@ -669,6 +723,115 @@ def test_bad_agent_names_refused(tmp_path, agent):
         inst.install(tmp_path, python=PY, fmt="agent", agent=agent)
 
 
+def test_install_writes_through_symlinks(tmp_path):
+    dot = tmp_path / "dotfiles" / "mcp.json"
+    dot.parent.mkdir()
+    dot.write_text(json.dumps({"mcpServers": {"other": {"command": "x"}}}))
+    _mcp(tmp_path).parent.mkdir(parents=True)
+    _mcp(tmp_path).symlink_to(dot)
+    inst.install(tmp_path, python=PY)
+    assert _mcp(tmp_path).is_symlink()
+    assert set(_json(dot)["mcpServers"]) == {"other", "ozagia"}
+    inst.uninstall(tmp_path)
+    assert _mcp(tmp_path).is_symlink() and set(_json(dot)["mcpServers"]) == {"other"}
+
+
+def test_uninstall_keeps_an_emptied_symlink(tmp_path):
+    dot = tmp_path / "dotfiles" / "mcp.json"
+    dot.parent.mkdir()
+    dot.write_text("{}")
+    _mcp(tmp_path).parent.mkdir(parents=True)
+    _mcp(tmp_path).symlink_to(dot)
+    inst.install(tmp_path, python=PY)
+    inst.uninstall(tmp_path)
+    assert _mcp(tmp_path).is_symlink() and _json(dot) == {"mcpServers": {}}
+
+
+def test_reinstall_keeps_user_keys_on_the_mcp_entry(tmp_path):
+    inst.install(tmp_path, python=PY)
+    data = _json(_mcp(tmp_path))
+    data["mcpServers"]["ozagia"].update(autoApprove=["read"], disabled=True)
+    _mcp(tmp_path).write_text(json.dumps(data))
+    inst.install(tmp_path, python="/other/python")
+    entry = _json(_mcp(tmp_path))["mcpServers"]["ozagia"]
+    assert entry["autoApprove"] == ["read"] and entry["disabled"] is True
+    assert entry["command"] == "/other/python"
+
+
+def test_install_rolls_back_on_a_failed_write(tmp_path, monkeypatch):
+    inst.install(tmp_path, python=PY, fmt="agent")
+    before = _profile(tmp_path).read_text()
+    real = inst._atomic_write
+
+    def failing(path, text):
+        if path.name == "mcp.json":
+            raise PermissionError("settings is read-only")
+        real(path, text)
+    monkeypatch.setattr(inst, "_atomic_write", failing)
+    with pytest.raises(PermissionError):
+        inst.install(tmp_path, python="/other/python", fmt="both")
+    monkeypatch.setattr(inst, "_atomic_write", real)
+    assert not _hook_file(tmp_path).exists()  # created, then removed again
+    assert _profile(tmp_path).read_text() == before  # changed, then restored
+    assert _json(_mcp(tmp_path))["mcpServers"]["ozagia"]["command"] == PY
+
+
+def test_uninstall_without_agent_scans_every_profile(tmp_path):
+    inst.install(tmp_path, python=PY, fmt="agent", agent="dev")
+    other = _profile(tmp_path, "mine")
+    other.write_text(json.dumps({"name": "mine", "hooks": [{"command": "true"}]}))
+    _profile(tmp_path, "broken").write_text("{bad")
+    assert sorted(inst.uninstall(tmp_path)) == sorted([_profile(tmp_path, "dev"),
+                                                       _mcp(tmp_path)])
+    assert not _profile(tmp_path, "dev").exists()
+    assert _json(other)["hooks"] == [{"command": "true"}]
+
+
+def test_uninstall_with_agent_looks_only_there(tmp_path):
+    inst.install(tmp_path, python=PY, fmt="agent", agent="dev")
+    inst.install(tmp_path, python=PY, fmt="agent", agent="ops")
+    inst.uninstall(tmp_path, agent="dev")
+    assert not _profile(tmp_path, "dev").exists() and _profile(tmp_path, "ops").exists()
+
+
+# --------------------------------------------------------------------------- #
+# probe hook
+# --------------------------------------------------------------------------- #
+PROBE = REPO / "scripts" / "kiro_probe_hook.py"
+
+
+def test_probe_hook_never_exits_non_zero(tmp_path):
+    work = tmp_path / "probe"
+    work.mkdir()
+    r = subprocess.run([sys.executable, str(PROBE), "install", "--workdir", str(work)],
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+    hooks = _json(work / ".kiro" / "hooks" / "ozagia-probe.json")["hooks"]
+    profile = _json(work / ".kiro" / "agents" / "ozagia-probe.json")["hooks"]
+    commands = {h["action"]["command"] for h in hooks + profile}
+    (command,) = commands
+    copy = work / ".ozagia" / "kiro_probe_hook.py"
+    assert copy.exists() and str(copy) in command and str(PROBE) not in command
+    assert command.endswith(" || true")
+    records = tmp_path / "records"
+    env = {**os.environ, "OZAGIA_KIRO_PROBE_DIR": str(records)}
+    ev = json.dumps({"hook_event_name": "PreToolUse", "cwd": str(work),
+                     "tool_name": "read_file"})
+    r = subprocess.run(["sh", "-c", command], input=ev, capture_output=True,
+                       text=True, env=env, timeout=60, cwd=work)
+    assert r.returncode == 0 and r.stdout == ""
+    assert len(list(records.glob("*.json"))) == 1
+    copy.unlink()  # the script is gone: python exits 2, the hook still 0
+    r = subprocess.run(["sh", "-c", command], input=ev, capture_output=True,
+                       text=True, env=env, timeout=60, cwd=work)
+    assert r.returncode == 0
+    copy.write_text("")
+    r = subprocess.run([sys.executable, str(PROBE), "uninstall", "--workdir", str(work)],
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0 and not copy.exists()
+    assert not (work / ".kiro" / "hooks" / "ozagia-probe.json").exists()
+
+
 # --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
@@ -703,9 +866,12 @@ def test_ozagia_install_kiro(tmp_path, capsys):
 # kiro-cli's own validator (skipped without kiro-cli)
 # --------------------------------------------------------------------------- #
 def _validate(path: Path) -> str:
+    """`kiro-cli agent validate` on `path`, run in the file's tmp directory
+    so it does not read a real workspace's `.kiro/`. It still uses the real
+    HOME, because it needs the user's kiro-cli login."""
     r = subprocess.run(["kiro-cli", "agent", "validate", "--path", str(path)],
                        capture_output=True, text=True, timeout=60,
-                       stdin=subprocess.DEVNULL)
+                       stdin=subprocess.DEVNULL, cwd=path.parent)
     text = r.stdout + r.stderr
     if "not logged in" in text:
         pytest.skip("kiro-cli is not logged in")
