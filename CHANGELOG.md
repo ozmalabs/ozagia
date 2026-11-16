@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Lint inside the edit: after a handled edit, key edit or write, and in
+  `after` for a built-in edit, write or Codex patch, the configured linter
+  (ruff when the project configures it, `rustfmt --check` for Rust crates)
+  runs on the changed files with a 3 s budget, and its findings on the
+  changed lines come back as `[ozagia] lint <rule> L<n> <key>: <message>`
+  lines (at most 10). Configure with `[lint] enabled`, `timeout_s`,
+  `python`, `rust`. Linters never modify files. `ruff check [PATH...]
+  [--select X] [--output-format concise|full]` (also `.venv/bin/ruff`) is a
+  captured shell class: ruff's own output plus the node key of each
+  finding. New stats: `lint_runs`, `lint_findings`, `lint_timeouts`,
+  `ruff_captures`. See docs/intent.md.
+
 - Kiro CLI integration: `ozagia install kiro [--scope project|user]
   [--format v3|agent|both]` writes command hooks to `.kiro/hooks/ozagia.json`
   (the default; what kiro-cli 2.37's V3 engine loads) and/or an agent

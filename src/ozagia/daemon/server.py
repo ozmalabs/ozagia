@@ -246,7 +246,9 @@ class DaemonState:
         # Region replies: the current text of the nearest region sent for a
         # patch hunk or an edit whose old text is not in the file.
         self.region_replies = 0
-        # shell tool calls: captured (handled), refused (git refs) and
+        # Lint inside the edit (`ozagia.intent.lint`): linter runs, findings
+        # reported on changed lines, linter runs cut off by the timeout.
+        self.lint = {"lint_runs": 0, "lint_findings": 0, "lint_timeouts": 0}        # shell tool calls: captured (handled), refused (git refs) and
         # passthrough, with the passthrough reasons, so an eval can measure
         # the shell capture rate.
         self.shell = {"captured": 0, "refused": 0, "passthrough": 0}
@@ -510,6 +512,10 @@ class DaemonState:
             rr = meta.get("region_replies")
             if isinstance(rr, int) and not isinstance(rr, bool) and rr > 0:
                 self.region_replies += rr
+            for name in self.lint:
+                n = meta.get(name)
+                if isinstance(n, int) and not isinstance(n, bool) and n > 0:
+                    self.lint[name] += n
             if handled is not None:
                 self.handled["true" if handled else "false"] += 1
             if meta.get("repeat") in ("stub", "note"):
@@ -653,6 +659,9 @@ class DaemonState:
                 "patch_misses_caught": self.by_intent.get("patch_check_miss", 0),
                 "region_replies": self.region_replies,
                 "key_edits": self.by_intent.get("edit_key", 0),
+                # Lint inside the edit, and captured `ruff check` calls.
+                **self.lint,
+                "ruff_captures": self.by_intent.get("shell_ruff", 0),
                 # Background jobs (`ozagia.daemon.jobs`): started, waits and
                 # the seconds spent in them, and waits that returned new
                 # output or the job's end (each one a poll the agent did not

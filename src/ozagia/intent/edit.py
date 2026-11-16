@@ -6,7 +6,10 @@ edit success:
     [ozagia] in: <enclosing keys>
     [ozagia] delta: <a> added, <r> removed, <c> changed, edges +<x> -<y>: <keys>
     [ozagia] broken: <kind> <key> <file>:<line> <name> — <problem>
+    [ozagia] lint <rule> L<n> <key>: <message>
 
+The lint lines are the configured linter's findings on the changed lines
+(`ozagia.intent.lint`); an edit, key edit and write all end with them.
 edit errors (handled, `is_error`):
 
     oldString not found in content
@@ -89,6 +92,39 @@ def broken_line(ref: dict[str, Any]) -> str:
                f"{one_line(why)}")
 
 
+def _before(memory: Any, target: Any) -> str | None:
+    """The file's text before an edit, when a linter will look at it."""
+    try:
+        from ozagia.intent.lint import applies
+        if not applies(memory, target.rel):
+            return None
+        return target.path.read_text(encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001 - no lint then
+        return None
+
+
+def _lint(memory: Any, target: Any, before: str | None, *, created: bool = False
+          ) -> tuple[list[str], dict[str, int]]:
+    """Lint lines for the lines the edit changed (`ozagia.intent.lint`);
+    never raises."""
+    if before is None and not created:
+        return [], {}
+    try:
+        from ozagia.intent.lint import (
+            applies,
+            changed_lines,
+            lint_changes,
+            lint_meta,
+        )
+        if created and not applies(memory, target.rel):
+            return [], {}
+        after = target.path.read_text(encoding="utf-8", errors="replace")
+        got = lint_changes(memory, {target.rel: changed_lines(before, after)})
+        return list(got["lines"]), lint_meta(got)
+    except Exception:  # noqa: BLE001 - lint never fails the edit
+        return [], {}
+
+
 def handle_edit(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
     from ozagia.edit.code_edit import CodeEditError
     if inp.get("key") is not None:
@@ -123,6 +159,7 @@ def handle_edit(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
         after = (text.replace(old, new) if inp.get("replaceAll")
                  else text.replace(old, new, 1))
         preflight_stop(inp, diff_metadata(target.rel, text, after))
+    before = _before(memory, target)
     try:
         res = memory.span_edit(target.rel, old, new,
                                replace_all=bool(inp.get("replaceAll")),
@@ -148,10 +185,15 @@ def handle_edit(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
                          "the parse was not checked"))
     if res.get("warning"):
         lines.append(warning_line(str(res["warning"])))
+    lint_lines, lint_meta = _lint(memory, target, before)
+    lines.extend(lint_lines)
     keys = list(dict.fromkeys([*res["keys"], *delta_keys(delta),
                                *(r.get("key") for r in
                                  res.get("broken_references") or [])]))
-    return {"intent": "edit", "output": "\n".join(lines), "keys": keys}
+    out = {"intent": "edit", "output": "\n".join(lines), "keys": keys}
+    if lint_meta:
+        out["meta"] = lint_meta
+    return out
 
 
 # Lines of the current node text shown when a key edit is refused as stale.
@@ -216,6 +258,7 @@ def handle_key_edit(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
         m = res["matches"][0]
         after = text[:m["start"]] + res["new_node_text"] + text[m["end"]:]
         preflight_stop(inp, diff_metadata(target.rel, text, after))
+    before = _before(memory, target)
     res = run(True)
     lines = [f"Edited {target.display} (node {key}, lines "
              f"{res['start_line']}-{res['end_line']})",
@@ -231,10 +274,15 @@ def handle_key_edit(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
         lines.append(tag("broken references truncated"))
     if res.get("warning"):
         lines.append(warning_line(str(res["warning"])))
+    lint_lines, lint_meta = _lint(memory, target, before)
+    lines.extend(lint_lines)
     keys = list(dict.fromkeys([*res["keys"], *delta_keys(delta),
                                *(r.get("key") for r in
                                  res.get("broken_references") or [])]))
-    return {"intent": "edit_key", "output": "\n".join(lines), "keys": keys}
+    out = {"intent": "edit_key", "output": "\n".join(lines), "keys": keys}
+    if lint_meta:
+        out["meta"] = lint_meta
+    return out
 
 
 def _edit_error(path: Path, res: dict[str, Any]) -> IntentError:
@@ -306,6 +354,7 @@ def handle_write(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
     root = root_of(memory)
     backup = None
     existed = target.path.exists()
+    before = _before(memory, target) if existed else None
     if existed:
         suffix = PurePosixPath(target.rel).suffix.lower()
         try:
@@ -345,10 +394,14 @@ def handle_write(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
     head = f"{'replaced' if existed else 'created'} {fk}"
     if backup:
         head += f"  backup: {backup}"
+    lint_lines, lint_meta = _lint(memory, target, before, created=not existed)
     lines = ["Wrote file successfully.", tag(head), *delta_lines(delta),
-             *(warning_line(w) for w in warnings)]
+             *(warning_line(w) for w in warnings), *lint_lines]
     keys = list(dict.fromkeys([fk, *delta_keys(delta)]))
-    return {"intent": "write", "output": "\n".join(lines), "keys": keys}
+    out = {"intent": "write", "output": "\n".join(lines), "keys": keys}
+    if lint_meta:
+        out["meta"] = lint_meta
+    return out
 
 
 __all__ = ["IDENTICAL", "MULTIPLE", "NOT_FOUND", "broken_line", "handle_edit",
