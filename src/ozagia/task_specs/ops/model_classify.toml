@@ -1,0 +1,92 @@
+id = "model_classify"
+version = 1
+title = "Model classification"
+objective = "Recommend a model for a task class from the local model registry and task metadata, with confidence and a reason."
+inputs = ["task_class", "privacy", "input_size"]
+tools = ["read", "grep"]
+write_scope = []
+requires_graph = false
+stop = ["gate_failed", "budget_exhausted", "resource_limit", "no_progress", "repeated_state"]
+output = "model_choice.v1"
+
+[worktree]
+base = "main"
+require_clean = false
+require_up_to_date = false
+
+[resources]
+memory_mb = 512
+disk_mb = 256
+pids = 32
+wall_s = 120
+
+[budget]
+tokens = 12000
+model_calls = 0
+cost_usd = 0.0
+wall_s = 120
+
+[gates]
+before = ["resources_fit"]
+after = ["schema_valid", "evidence_present"]
+
+[approval]
+mutate = "deny"
+network = "deny"
+
+[output_schema]
+type = "object"
+required = ["model", "confidence", "reason", "alternatives", "not_assessed"]
+additionalProperties = false
+
+[output_schema.properties.model]
+type = "string"
+minLength = 1
+
+[output_schema.properties.confidence]
+type = "number"
+minimum = 0.0
+maximum = 1.0
+
+[output_schema.properties.reason]
+type = "string"
+minLength = 1
+
+[output_schema.properties.alternatives]
+type = "array"
+
+[output_schema.properties.alternatives.items]
+type = "string"
+
+[output_schema.properties.not_assessed]
+type = "array"
+
+[output_schema.properties.not_assessed.items]
+type = "string"
+
+[[steps]]
+id = "read-registry"
+tool = "read"
+goal = "Read the local model registry and its defaults, if present."
+paths = ["."]
+
+[steps.budget]
+tokens = 5000
+
+[[steps]]
+id = "read-task"
+tool = "grep"
+goal = "Read the task class declaration and its budget, tools and privacy needs."
+paths = ["."]
+
+[steps.budget]
+tokens = 4000
+
+[[steps]]
+id = "classify"
+tool = "read"
+goal = "Choose a model, record confidence, alternatives and what was not assessed."
+paths = ["."]
+
+[steps.budget]
+tokens = 3000
