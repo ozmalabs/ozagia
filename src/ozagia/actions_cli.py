@@ -40,6 +40,8 @@ def _add_options(parser: argparse.ArgumentParser) -> None:
                         help="bounded service log bytes (service.logs)")
     parser.add_argument("--scope", choices=("project", "user"), default=None,
                         help="integration install scope (default: project)")
+    parser.add_argument("--python", default=None,
+                        help="Python that runs hooks/MCP (integration.install)")
     parser.add_argument("--wait", type=float, default=None,
                         help="daemon ensure wait seconds")
     parser.add_argument("--idle-timeout", type=float, default=None,
@@ -79,6 +81,8 @@ def _action_kwargs(namespace: argparse.Namespace) -> dict[str, Any]:
         values["max_bytes"] = namespace.max_bytes
     if namespace.scope is not None:
         values["scope"] = namespace.scope
+    if namespace.python is not None:
+        values["python"] = namespace.python
     if namespace.wait is not None:
         values["wait_s"] = namespace.wait
     if namespace.idle_timeout is not None:
@@ -111,6 +115,14 @@ def _print_preview(result: ActionResult) -> None:
     if result.argv:
         print(f"argv: {shlex.join(result.argv)}")
     print(f"expected: {result.expected_effect}")
+    if result.scope:
+        print(f"scope: {result.scope}")
+    if result.installer:
+        print(f"installer: {result.installer}")
+    if result.python:
+        print(f"python: {result.python}")
+    for target in result.targets:
+        print(f"target: {target}")
     if result.current_state:
         print(f"current: {result.current_state}")
     if not result.applicable:
@@ -146,6 +158,15 @@ def _print_apply(result: ActionResult) -> None:
     elif isinstance(payload, dict) and isinstance(payload.get("tunnels"), list):
         for item in payload["tunnels"]:
             print(f"  {item.get('name')}: {item.get('state')}")
+    elif isinstance(payload, dict) and "available" in payload:
+        print(f"  verify: {'available' if payload.get('available') else 'unavailable'}")
+        for key in ("reason", "error"):
+            if payload.get(key):
+                print(f"  {key}: {payload[key]}")
+    elif isinstance(payload, dict) and "installer" in payload:
+        print(f"  installer: {payload.get('installer')} (exit {payload.get('exit')})")
+        for target in payload.get("targets") or []:
+            print(f"  target: {target}")
     elif isinstance(payload, dict) and "state" not in payload:
         print(json.dumps(payload, indent=2, sort_keys=True))
     if result.audit_error:
