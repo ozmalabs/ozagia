@@ -911,6 +911,82 @@ _TOOLS.append({
                          "description": "Top findings to return (at most 50)."},
     }),
 })
+# Goals (`ozagia.core.goals`): repo-level records in `.ozagia/goals/`, whose
+# targets and criteria are graph keys; criteria are checked against the
+# graph, the working tree and the test record.
+_TOOLS.extend([
+    {
+        "name": "goal_list",
+        "description": (
+            "List this repository's goals (graph-addressed work items): id, "
+            "title, status (open, met, regressed, blocked, dropped), who "
+            "claimed them, targets and the criteria not passing at the last "
+            "check. Read-only; goal_check re-evaluates."),
+        "inputSchema": _schema({
+            "status": {"type": "string",
+                       "enum": ["open", "met", "regressed", "blocked", "dropped"],
+                       "description": "Only goals with this status."},
+            "all": {"type": "boolean", "default": False,
+                    "description": "Include dropped goals."},
+        }),
+    },
+    {
+        "name": "goal_show",
+        "description": (
+            "One goal in full: targets, scope, each criterion with its last "
+            "result and evidence, claims and history."),
+        "inputSchema": _schema({
+            "id": {"type": "string", "description": "Goal id, e.g. g1."},
+        }, ["id"]),
+    },
+    {
+        "name": "goal_check",
+        "description": (
+            "Evaluate goals' criteria from the graph, the working tree and the "
+            "test record (never from the agent's claim), record the results, "
+            "and move a goal to met when every criterion passes or to "
+            "regressed when a met goal fails. A test result older than the "
+            "last change to the goal's targets is stale: rerun the test."),
+        "inputSchema": _schema({
+            "ids": {"type": "array", "items": {"type": "string"},
+                    "description": "Goal ids (default: every goal not dropped)."},
+        }),
+    },
+    {
+        "name": "goal_add",
+        "description": (
+            "Create a goal. targets are graph keys (file:, sym:, test:, doc:, "
+            "ops:); scope keys or path globs; criteria strings 'kind:args' or "
+            "objects {kind, args}. Kinds: test_passes, test_fails, "
+            "symbol_exists, symbol_absent, calls, not_calls, no_callers, "
+            "file_exists, file_absent, unchanged, lint_clean, "
+            "review_resolved, ops_has. Unknown keys are refused, except the "
+            "subject of symbol_exists/file_exists."),
+        "inputSchema": _schema({
+            "title": {"type": "string"},
+            "why": {"type": "string", "description": "Free text."},
+            "targets": {"type": "array", "items": {"type": "string"}},
+            "scope": {"type": "array", "items": {"type": "string"}},
+            "criteria": {"type": "array",
+                         "items": {"type": ["string", "object"]},
+                         "description": "'kind:args' strings or {kind, args} objects."},
+        }, ["title", "criteria"]),
+    },
+    {
+        "name": "goal_claim",
+        "description": (
+            "Claim a goal for your harness session (or release it). After an "
+            "edit, the daemon then names the goal when the edit touches its "
+            "targets and notes edits outside its scope (advisory)."),
+        "inputSchema": _schema({
+            "id": {"type": "string"},
+            "harness": {"type": "string",
+                        "description": "opencode, claude, codex or kiro."},
+            "session": {"type": "string", "description": "Your session id."},
+            "release": {"type": "boolean", "default": False},
+        }, ["id", "harness", "session"]),
+    },
+])
 
 
 # --------------------------------------------------------------------------- #
@@ -1059,6 +1135,11 @@ class DevMemoryServer:
             "dev_files_list": self._files_list,
             "dev_files_explain": self._files_explain,
             "dev_review_repo": self._review_repo,
+            "goal_list": self._goal_list,
+            "goal_show": self._goal_show,
+            "goal_check": self._goal_check,
+            "goal_add": self._goal_add,
+            "goal_claim": self._goal_claim,
         } if mode in {"coding", "combined"} else {})
         if self.mem is not None:
             present = {n.get("type") for n in self.mem.nodes.values()}
@@ -1649,6 +1730,45 @@ class DevMemoryServer:
         except ValueError as e:
             return {"ok": False, "error": str(e)}
         return {"ok": True, **report}
+
+    # -- goals (`ozagia.core.goals`) ---------------------------------------- #
+    def _goal_call(self, fn: Callable[[], Any]) -> Any:
+        from ozagia.core.goals import GoalError
+        try:
+            return fn()
+        except GoalError as e:
+            return {"ok": False, "error": str(e)}
+
+    def _goal_list(self, a: dict[str, Any]) -> Any:
+        from ozagia.core import goals as G
+        return self._goal_call(lambda: {"ok": True, "goals": [
+            G.summary(g) for g in G.list_goals(
+                self._files_root(), status=a.get("status"),
+                include_dropped=a.get("all") is True)]})
+
+    def _goal_show(self, a: dict[str, Any]) -> Any:
+        from ozagia.core import goals as G
+        return self._goal_call(lambda: {"ok": True, "goal": G.get_goal(
+            self._files_root(), str(a["id"]))})
+
+    def _goal_check(self, a: dict[str, Any]) -> Any:
+        from ozagia.core import goals as G
+        ids = [str(x) for x in a.get("ids") or []]
+        return self._goal_call(lambda: {"ok": True, "goals": G.check_goals(
+            self._files_root(), self.mem, ids or None, by="mcp")})
+
+    def _goal_add(self, a: dict[str, Any]) -> Any:
+        from ozagia.core import goals as G
+        spec = {k: a[k] for k in ("title", "why", "targets", "scope", "criteria")
+                if k in a}
+        return self._goal_call(lambda: {"ok": True, "goal": G.add_goal(
+            self._files_root(), self.mem, spec, by="mcp")})
+
+    def _goal_claim(self, a: dict[str, Any]) -> Any:
+        from ozagia.core import goals as G
+        return self._goal_call(lambda: {"ok": True, "goal": G.summary(G.claim_goal(
+            self._files_root(), str(a["id"]), str(a["harness"]), str(a["session"]),
+            release=a.get("release") is True, by="mcp"))})
 
     # -- JSON-RPC ---------------------------------------------------------- #
     def handle(self, msg: Any) -> dict[str, Any] | None:

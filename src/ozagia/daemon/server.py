@@ -110,6 +110,19 @@ skips the `after` and session scans; `$OZAGIA_FILE_LEDGER=0` turns them
 off. `stats` adds `files_recorded`, `file_ledger_scans` and
 `file_ledger_errors`.
 
+Goals (`ozagia.core.goals`): the read-only `goals` op summarises the
+store as last checked. After a `tool`/`after` answer that edited files,
+a session that claimed a goal (by harness and session) gets `[ozagia]
+goal ...` lines: the goal whose targets the edit touched with the
+criteria now affected, and an advisory note for files outside the union of
+the session's claimed scopes (never a block). The brief and the working set
+text list the open and claimed goals with unmet criteria (without titles
+for `free_text: false`; read before the graph lock is taken). Before a
+`tool` shell call that classifies as pytest, the daemon takes the working
+tree's fingerprint (`ozagia.core.fingerprint`) and records the run as
+`captured` with it; `after` runs are `reported`, which goal criteria do
+not take as evidence. `stats` adds `goal_hints`.
+
 Test selection (`ozagia.intent.affected`): `stats` adds `affected_runs`,
 `tests_skipped_unaffected`, `cached_passes` and `full_runs_forced`, summed
 from the answers' `meta.tests`.
@@ -167,6 +180,8 @@ SHELL_REASONS_SHOWN = 30
 # `meta` counters of the `replace` tool (`ozagia.intent.replace`): previews,
 # applies, and files the applies wrote.
 REPLACE_COUNTERS = ("replace_previews", "replace_applies", "replace_files")
+# The `goals` op's text (`ozagia.core.goals.brief_lines`) stays under this.
+W_GOALS_CHARS = 2000
 
 # Passthrough reasons that name a file or directory, rewritten to one key
 # each so paths do not fill the reason table: (pattern, replacement), in
@@ -391,6 +406,8 @@ class DaemonState:
         self.files_recorded = 0
         self.file_ledger_scans = 0
         self.file_ledger_errors = 0
+        # Goal lines added after edits (`ozagia.core.goals.edit_hints`).
+        self.goal_hints = 0
 
     # -- requests ------------------------------------------------------------ #
     def dispatch(self, msg: dict[str, Any]) -> dict[str, Any]:
@@ -456,6 +473,8 @@ class DaemonState:
             return self.jobs.dispatch(op, msg)
         if op == "working_set":
             return self.working_set(msg)
+        if op == "goals":
+            return self.goals(msg)
         if op == "hint":
             prompt = msg.get("prompt")
             history = msg.get("history", [])
@@ -518,6 +537,7 @@ class DaemonState:
                 if captured is not None:
                     return captured
             state = self.session_state(msg)
+            started = self._pytest_start(op, tool, inp)
             free = _lock_free(op, tool, inp)
             if free and isinstance(inp, dict):
                 inp["_lock"] = self.lock
@@ -566,7 +586,9 @@ class DaemonState:
                 if hints:
                     body = {**body, "append": "\n".join(
                         [x for x in [body.get("append") or ""] if x] + hints)}
-            self._observe(op, tool, inp, msg, body, state)
+            edited = self._observe(op, tool, inp, msg, body, state, started)
+            if edited is not None:
+                body = self._goal_hints(op, body, harness, session, *edited)
             self._files_observe(op, tool, inp, msg, body)
             return {"ok": True, **self._job_meta(body)}
         return {"ok": False, "error": f"unknown op {op!r}"}
@@ -652,16 +674,47 @@ class DaemonState:
         rel = os.path.relpath(full, self.root).replace(os.sep, "/")
         return None if rel.startswith("..") or rel == "." else rel
 
+    def _pytest_start(self, op: str, tool: str, inp: Any
+                      ) -> tuple[float, dict[str, Any] | None] | None:
+        """For a `tool` shell call the daemon may run as a captured pytest:
+        the start time and the working tree's fingerprint now
+        (`ozagia.core.fingerprint`), stored with the run so goal criteria
+        can tell whether a file changed since it started. None otherwise.
+        Never raises."""
+        if op != "tool" or tool != "shell" or not isinstance(inp, dict):
+            return None
+        command = inp.get("command")
+        if not isinstance(command, str) or "pytest" not in command:
+            return None
+        try:
+            from ozagia.intent.shell import classify
+            if classify(command).get("class") != "pytest":
+                return None
+            from ozagia.core.fingerprint import tree_fingerprint
+            at = time.time()
+            return at, tree_fingerprint(self.root)
+        except Exception as e:  # noqa: BLE001 - bookkeeping only
+            print(f"pytest fingerprint failed: {type(e).__name__}: {e}",
+                  file=sys.stderr, flush=True)
+            return None
+
     def _observe(self, op: str, tool: str, inp: Any, msg: dict[str, Any],
-                 body: dict[str, Any], state: Any) -> None:
+                 body: dict[str, Any], state: Any,
+                 started: tuple[float, dict[str, Any] | None] | None = None
+                 ) -> tuple[list[str], list[str]] | None:
         """Note in the session's working set what a `tool`/`after` answer
         shows it edited (handled edits and writes, `after` refreshes) and
         which tests a pytest run failed (also in the root's test record).
-        Never raises."""
+        A pytest the daemon ran itself (`shell_pytest`) is recorded as
+        `captured`, with `started` (its start time and fingerprint); a
+        captured compound command as `compound`; output an `after` hands
+        over as `reported` (`ozagia.core.working_set.TestRun`). Returns the
+        (files, keys) the answer shows edited, or None. Never raises."""
+        result: tuple[list[str], list[str]] | None = None
         try:
             from ozagia.core import working_set as W
             if not isinstance(inp, dict):
-                return
+                return None
             meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
             it = meta.get("intent")
             keys = [k for k in meta.get("keys") or [] if isinstance(k, str)]
@@ -688,35 +741,93 @@ class DaemonState:
                 elif tool == "shell":
                     files.extend(p for p in meta.get("changed_paths") or []
                                  if isinstance(p, str))
-            if work is not None and edited:
+            if edited:
                 named = [f for f in files if f]
                 if op == "after":
                     # The refresh's delta covers every pending file: keep
                     # the keys of the files this call changed.
                     keys = [k for k in keys if W.key_file(k) in named]
-                work.note_edit(named, keys)
+                if work is not None:
+                    work.note_edit(named, keys)
+                result = (named, keys)
             command = inp.get("command")
             if tool != "shell" or not isinstance(command, str) or "pytest" not in command:
-                return
+                return result
             if op == "tool":
                 if not body.get("handled"):
-                    return
+                    return result
                 text = str(body.get("output") or "")
             else:
                 out = msg.get("output")
                 text = (out if isinstance(out, str) else "") + "\n" + str(
                     body.get("append") or "")
             from ozagia.intent.shell import command_heads
+            source = "reported"
+            if op == "tool":
+                source = "captured" if it == "shell_pytest" else "compound"
+            env = inp.get("_test_env") if isinstance(inp.get("_test_env"), dict) \
+                else dict(os.environ)
             run = W.pytest_run(command, command_heads(command), text,
-                               workdir=inp.get("workdir"), root=self.root)
+                               workdir=inp.get("workdir"), root=self.root,
+                               source=source, env=env)
             if run is None:
-                return
+                return result
+            if run.source == "captured" and started is not None:
+                run.ts, run.tree = started
             if work is not None:
                 work.note_tests(run)
             self.test_record.apply(run)
         except Exception as e:  # noqa: BLE001 - bookkeeping only
             print(f"working set update failed: {type(e).__name__}: {e}",
                   file=sys.stderr, flush=True)
+        return result
+
+    # -- goals (`ozagia.core.goals`) ---------------------------------------- #
+    def _goal_hints(self, op: str, body: dict[str, Any], harness: str,
+                    session: Any, files: list[str], keys: list[str]
+                    ) -> dict[str, Any]:
+        """`body` with the goal lines for an edit by (harness, session):
+        the claimed goals whose targets it touched and the criteria now
+        affected, and an advisory note for files outside a claimed goal's
+        scope (`goals.edit_hints`). Added to `output` (tool) or `append`
+        (after); `meta.goal_hints` counts them. Never blocks or raises."""
+        if not isinstance(session, str) or not session or not files:
+            return body
+        try:
+            from ozagia.core import goals as G
+            lines = G.edit_hints(self.root, harness, session, files, keys)
+        except Exception as e:  # noqa: BLE001 - advisory only
+            print(f"goal hints failed: {type(e).__name__}: {e}",
+                  file=sys.stderr, flush=True)
+            return body
+        if not lines:
+            return body
+        field = "output" if op == "tool" else "append"
+        text = "\n".join([x for x in [str(body.get(field) or "")] if x] + lines)
+        meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
+        with self._stats_lock:
+            self.goal_hints += len(lines)
+        return {**body, field: text, "meta": {**meta, "goal_hints": len(lines)}}
+
+    def goals(self, msg: dict[str, Any]) -> dict[str, Any]:
+        """The `goals` op (read-only): a summary of each goal not dropped
+        (`all: true`: dropped ones too) from the store as last checked, with
+        `mine` for the goals the request's (harness, session) claimed. It
+        evaluates nothing; `ozagia goal check` or `goal_check` does."""
+        from ozagia.core import goals as G
+        harness = msg.get("harness") if isinstance(msg.get("harness"), str) else None
+        session = msg.get("session") if isinstance(msg.get("session"), str) else None
+        try:
+            goals = G.list_goals(self.root, include_dropped=msg.get("all") is True)
+        except G.GoalError as e:
+            return {"ok": False, "error": str(e)}
+        out = [{**G.summary(g), "mine": G.claimed_by(g, harness, session)}
+               for g in goals]
+        return {"ok": True, "goals": out,
+                "text": "\n".join(G.brief_lines(self.root, harness=harness,
+                                                session=session, goals=goals,
+                                                max_chars=W_GOALS_CHARS)),
+                "meta": {"intent": "goals", "keys": [], "goals": len(out)}}
 
     # -- the created-file ledger (`ozagia.core.files`) ---------------------- #
     def _file_ledger_enabled(self, msg: dict[str, Any]) -> bool:
@@ -803,6 +914,19 @@ class DaemonState:
         except Exception:  # noqa: BLE001 - the text goes without jobs
             return []
 
+    def _goal_lines(self, harness: str | None, session: str | None,
+                    max_chars: int, *, titles: bool = True) -> list[str]:
+        """Goal lines for the brief and the working set text (the session's
+        claims first; without titles for `free_text: false`), or []
+        (`ozagia.core.goals.brief_lines`, through its store cache)."""
+        try:
+            from ozagia.core import goals as G
+            return G.brief_lines(self.root, harness=harness, session=session,
+                                 max_chars=min(G.BRIEF_CHARS, max_chars),
+                                 titles=titles)
+        except Exception:  # noqa: BLE001 - the text goes without goals
+            return []
+
     def working_set(self, msg: dict[str, Any]) -> dict[str, Any]:
         """The `working_set` op: the session's working set as text, or with
         `since: true` the session-start brief (`ozagia.core.working_set`).
@@ -824,7 +948,10 @@ class DaemonState:
         if since:
             tests, last = self.test_record.view()
             text = W.session_brief(self.root, cap, tests=tests, last_test=last,
-                                   jobs=self._running_jobs())
+                                   jobs=self._running_jobs(),
+                                   goal_lines=self._goal_lines(
+                                       harness, session,
+                                       cap // W.BRIEF_GOAL_SHARE))
             with self._stats_lock:
                 self.working["session_briefs_served"] += 1
             return {"ok": True, "text": text,
@@ -850,12 +977,15 @@ class DaemonState:
                 if not key.startswith(("sym:", "test:")):
                     return True
                 return self.memory.node_by_key(key) is not None
+            # The goal store is read before the graph lock is taken.
+            goal_lines = self._goal_lines(harness, session, cap // 4,
+                                          titles=free_text)
             with self._graph_lock():
                 text = W.working_set_text(
                     view, harness=harness, session=session,
                     compactions=max(st.compactions for st in states),
                     jobs=jobs, plan=plan, key_exists=exists, max_chars=cap,
-                    free_text=free_text)
+                    free_text=free_text, goal_lines=goal_lines)
         if text:
             with self._stats_lock:
                 self.working["working_sets_served"] += 1
@@ -1222,6 +1352,8 @@ class DaemonState:
                 "files_recorded": self.files_recorded,
                 "file_ledger_scans": self.file_ledger_scans,
                 "file_ledger_errors": self.file_ledger_errors,
+                # Goal lines added after edits (`ozagia.core.goals`).
+                "goal_hints": self.goal_hints,
                 # Lint inside the edit, and captured `ruff check` calls.
                 **self.lint,
                 # Multi-file replace: previews, applies, files written.

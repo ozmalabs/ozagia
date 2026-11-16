@@ -41,13 +41,28 @@ failing in the root's record (`load_test_record`, kept in
 test ids, outcomes, times and the rerun prefix, never failure messages or
 command lines), each with the time of the first run that failed it,
 running jobs, and the MCP tools to prefer, at most `BRIEF_MAX_CHARS`.
+The brief, and the working set text the daemon renders, also list the
+open and claimed goals with unmet criteria (`ozagia.core.goals`).
+
+The test record also keeps the last `MAX_RECORD_RUNS` runs (start time,
+the selectors they ran as paths or node ids, the test keys they failed and
+those that errored, whether they completed, were filtered or stopped
+early, their `source`, and for a pytest the daemon ran itself the working
+tree's fingerprint at its start), so `recorded_outcome` can say when a
+test last passed or failed (goal criteria `test_passes`/`test_fails`, which
+take only `captured` runs as evidence). Per-run lists are capped
+(`MAX_RUN_KEYS`); a selector that is not kept makes the run filtered.
 
 A pytest run clears a failing test only when nothing is in doubt: it
 finished (a captured run with status `passed`/`failed`, no collection
 errors, no `[ozagia] error:`; a raw run with a summary), its summary
 counts no more failures and errors than the text names, it selected the
 test (no positional argument: the workdir), and no option filtered the
-selection (`-k`, `-m`, also with the value attached) or stopped it early.
+selection (`-k`, `-m`, also with the value attached; `--ignore`,
+`--ignore-glob`, `--deselect`, `-o`/`-c` config overrides, and the same in
+`PYTEST_ADDOPTS` or the project's `addopts`) or stopped it early, and none
+made pytest run no test (`--version`, `--help`, `--co`, `--fixtures`,
+`--setup-plan`, ...).
 
 Standard library only; callers pass in what needs the graph (`key_exists`)
 or the shell parser (`command_heads`).
@@ -81,6 +96,8 @@ BRIEF_DIRTY_FILES = 15
 BRIEF_COMMITS = 3
 BRIEF_TESTS = 5
 BRIEF_JOBS = 5
+# The goal lines' reserved share of the brief: at most 1/N of its cap.
+BRIEF_GOAL_SHARE = 3
 GIT_TIMEOUT_S = 3
 HEADER = "[ozagia] working set"
 BRIEF_HEADER = "[ozagia] session brief"
@@ -116,7 +133,7 @@ _FAIL_RE = re.compile(
 _RAW_FAIL_RE = re.compile(
     r"^(FAILED|ERROR) (\S+?\.py)::(\S+?)(\[[^\]]*\])?(?: - (.*))?$")
 # The captured run's head line: `[ozagia] pytest failed: exit 1, ...`.
-_CAPTURED_RE = re.compile(r"^\[ozagia\] pytest (\w+): exit (-?\d+|None)")
+_CAPTURED_RE = re.compile(r"^\[ozagia\] pytest (\w+)(?: \([^)]*\))?: exit (-?\d+|None)")
 # A captured run's own error (no report, a crash of the runner).
 ERROR_TAG = "[ozagia] error:"
 # A captured run that affected-test selection cut to a subset.
@@ -133,13 +150,26 @@ _VALUE_OPTS = frozenset({
     "--deselect", "--ignore", "--ignore-glob", "--rootdir", "--confcutdir",
     "--junitxml", "--durations", "--timeout", "--basetemp", "--cov",
     "--cov-report", "--log-level", "--capture", "--import-mode", "--dist",
-    "--numprocesses", "--count", "--reruns", "--color"})
-# Options that select tests by something other than a path: a test the run
+    "--numprocesses", "--count", "--reruns", "--color", "--config-file",
+    "--override-ini"})
+# Options that select tests by something other than a path, or change what
+# the paths mean (`--ignore`, a config override, `--pyargs`): a test the run
 # did not fail may not have been selected.
 _FILTER_OPTS = frozenset({"-k", "-m", "--deselect", "--lf", "--last-failed",
-                          "--ff", "--failed-first"})
+                          "--ff", "--failed-first", "--ignore", "--ignore-glob",
+                          "-o", "--override-ini", "-c", "--config-file",
+                          "--pyargs", "--rootdir", "--confcutdir",
+                          "--sw", "--stepwise", "--sw-skip", "--stepwise-skip"})
 # Options that stop a run early: after a failure, later tests did not run.
 _STOP_OPTS = frozenset({"-x", "--exitfirst", "--maxfail", "--sw", "--stepwise"})
+# Options with which pytest runs no test at all (it reports, lists or plans).
+_INFO_OPTS = frozenset({"--version", "-V", "--help", "-h", "--co",
+                        "--collect-only", "--collectonly", "--fixtures",
+                        "--funcargs", "--fixtures-per-test", "--setup-plan",
+                        "--setup-only", "--markers"})
+# Commands besides pytest itself that may share a captured pytest's command
+# line (`cd DIR && pytest`, `pytest | tail -n 30`).
+_HARMLESS_HEADS = frozenset({"cd", "tail", "head"})
 
 
 def _now() -> float:
@@ -166,7 +196,12 @@ class TestRun:
     reported a summary, so a selected test it did not fail passed, unless
     `filtered` (`-k`, `-m`, `--deselect`, `--lf`: not every test under the
     selectors ran) or `stops` (`-x`, `--maxfail`: after a failure the rest
-    did not run)."""
+    did not run). `source`: `captured` when the daemon ran this pytest
+    itself (a `shell_pytest` answer: the only runs that count as evidence
+    for goal criteria), `compound` (a captured compound command with a
+    pytest step), else `reported` (output a harness handed over). `tree`:
+    the working tree's fingerprint at the start of a captured run
+    (`ozagia.core.fingerprint`), and then `ts` is the start time."""
     __test__ = False
     command: str
     prefix: list[str]
@@ -176,6 +211,8 @@ class TestRun:
     filtered: bool = False
     stops: bool = False
     ts: float = field(default_factory=_now)
+    source: str = "reported"
+    tree: dict[str, Any] | None = None
 
 
 def pytest_head(heads: Iterable[list[str]]) -> tuple[list[str], list[str]] | None:
@@ -210,6 +247,34 @@ def _short_opts(a: str) -> tuple[set[str], bool]:
 def _rel_to_root(path: str | Path, root: Path) -> str | None:
     rel = os.path.relpath(os.path.normpath(str(path)), str(root)).replace(os.sep, "/")
     return None if rel == ".." or rel.startswith("../") else rel
+
+
+def _scan_opts(args: list[str]) -> tuple[bool, bool, bool, int]:
+    """Whether `args` hold options that filter the selection, stop the run
+    early, or make pytest run no test (`--version`, `--co`, ...), and the
+    number of positional arguments."""
+    filtered = stops = info = False
+    positional = 0
+    skip = False
+    for a in args:
+        if skip:
+            skip = False
+            continue
+        if a.startswith("--"):
+            name = a.split("=", 1)[0]
+            filtered = filtered or name in _FILTER_OPTS
+            stops = stops or name in _STOP_OPTS
+            info = info or name in _INFO_OPTS
+            skip = name in _VALUE_OPTS and "=" not in a
+            continue
+        if a.startswith("-") and len(a) > 1:
+            names, skip = _short_opts(a)
+            filtered = filtered or bool(names & _FILTER_OPTS)
+            stops = stops or bool(names & _STOP_OPTS)
+            info = info or bool(names & _INFO_OPTS)
+            continue
+        positional += 1
+    return filtered, stops, info, positional
 
 
 def _selectors(args: list[str], wd: Path, root: Path
@@ -320,19 +385,70 @@ def _failure_count(failures: dict[str, dict[str, Any]]) -> int:
     return sum(max(1, len(rec.get("params") or [])) for rec in failures.values())
 
 
+def _config_addopts(root: Path) -> list[str]:
+    """The `addopts` of the project's pytest configuration files at the
+    root (`pytest.ini`, `.pytest.ini`, `tox.ini`, `setup.cfg`,
+    `pyproject.toml`), as tokens; [] when there are none."""
+    import configparser
+    out: list[str] = []
+    for name, section in (("pytest.ini", "pytest"), (".pytest.ini", "pytest"),
+                          ("tox.ini", "pytest"), ("setup.cfg", "tool:pytest")):
+        p = root / name
+        if not p.is_file():
+            continue
+        cp = configparser.ConfigParser(interpolation=None)
+        cp.read(p, encoding="utf-8")
+        out.extend(shlex.split(cp.get(section, "addopts", fallback="")))
+    p = root / "pyproject.toml"
+    if p.is_file():
+        import tomllib
+        data = tomllib.loads(p.read_text(encoding="utf-8"))
+        tool = data.get("tool") if isinstance(data.get("tool"), dict) else {}
+        pt = tool.get("pytest") if isinstance(tool.get("pytest"), dict) else {}
+        for table in (pt.get("ini_options"), pt):
+            value = table.get("addopts") if isinstance(table, dict) else None
+            if isinstance(value, str):
+                out.extend(shlex.split(value))
+            elif isinstance(value, list):
+                out.extend(str(v) for v in value)
+    return out
+
+
+# A captured run's head line (`ozagia.intent.run.run_pytest`), with or
+# without the affected-test scope (`pytest passed (affected ...): exit 0`).
+_CAPTURED_HEAD_RE = re.compile(r"^\[ozagia\] pytest \w+(?: \([^)]*\))?: exit ")
+
+
 def pytest_run(command: str, heads: Iterable[list[str]], text: str, *,
-             workdir: str | Path | None, root: str | Path) -> TestRun | None:
+               workdir: str | Path | None, root: str | Path,
+               source: str = "reported", env: dict[str, str] | None = None
+               ) -> TestRun | None:
     """The pytest run a shell command made, from its command line (`heads`:
     `ozagia.intent.shell.command_heads(command)`) and its text (the
     captured output, or the built-in's output plus the daemon's `append`),
     or None when it ran no pytest. Every doubt makes the run incomplete
     (it then clears no failing test): a run that did not finish, a summary
     with more failures and errors than the text names, a selection outside
-    the root."""
+    the root, an option with which pytest runs no test (`--version`,
+    `--co`, `--fixtures`, ...).
+
+    `source` (see `TestRun`): for `captured`, only the text from the
+    daemon's own (last) head line on is read, so what pytest printed
+    before it, a test's own output included, cannot forge a result; a
+    command line with commands other than pytest, `cd`, `tail` and `head`
+    makes it `compound`. Options in `PYTEST_ADDOPTS` (on the command line
+    or in `env`) or in the project's `addopts` that filter the selection,
+    or positional arguments there, mark the run filtered."""
+    heads = [list(h) for h in heads if h]
     got = pytest_head(heads)
     if got is None:
         return None
     prefix, args = got
+    pytest_heads = [h for h in heads if pytest_head([h]) is not None]
+    others = [h for h in heads if h not in pytest_heads
+              and os.path.basename(h[0]) not in _HARMLESS_HEADS]
+    if source == "captured" and (others or len(pytest_heads) > 1):
+        source = "compound"
     root_p = Path(root)
     wd = Path(workdir) if workdir else root_p
     if not wd.is_absolute():
@@ -341,10 +457,32 @@ def pytest_run(command: str, heads: Iterable[list[str]], text: str, *,
     if m and "$" not in m.group(1) and "~" not in m.group(1):
         wd = wd / m.group(1).strip("'\"")
     selectors, filtered, stops = _selectors(args, wd, root_p)
+    info = _scan_opts(args)[2]
+    extra: list[str] = []
+    if "PYTEST_ADDOPTS" in (command or ""):
+        filtered = True
+    try:
+        if env and env.get("PYTEST_ADDOPTS"):
+            extra.extend(shlex.split(env["PYTEST_ADDOPTS"]))
+        extra.extend(_config_addopts(root_p))
+    except Exception:  # noqa: BLE001 - options that cannot be read may filter
+        filtered = True
+    if extra:
+        e_filtered, e_stops, e_info, e_positional = _scan_opts(extra)
+        filtered = filtered or e_filtered or e_positional > 0
+        stops = stops or e_stops
+        info = info or e_info
+    if source == "captured":
+        lines = (text or "").splitlines()
+        at = max((i for i, x in enumerate(lines)
+                  if _CAPTURED_HEAD_RE.match(x.strip())), default=None)
+        text = "\n".join(lines[at:]) if at is not None else ""
     failures = parse_failures(text, wd, root_p)
     complete, count = _completed(text)
     if complete and count > _failure_count(failures):
         complete = False        # failures the text does not name: unknown
+    if info:
+        complete = False        # pytest ran no test
     if selectors is None:
         complete, selectors = False, []
     # Affected-test selection (`ozagia.intent.affected`) ran a subset.
@@ -352,7 +490,8 @@ def pytest_run(command: str, heads: Iterable[list[str]], text: str, *,
         filtered = True
     return TestRun(command=command, prefix=_rerun_prefix(prefix, wd, root_p),
                    selectors=selectors, failures=failures,
-                   complete=complete, filtered=filtered, stops=stops)
+                   complete=complete, filtered=filtered, stops=stops,
+                   source=source)
 
 
 def _nodeid(key: str) -> tuple[str, str]:
@@ -631,11 +770,14 @@ def working_set_text(view: View, *, harness: str | None = None,
                      plan: str | None = None,
                      key_exists: Callable[[str], bool] | None = None,
                      max_chars: int = TEXT_MAX_CHARS,
-                     free_text: bool = True) -> str:
+                     free_text: bool = True,
+                     goal_lines: list[str] | None = None) -> str:
     """The working set as text for the model, or "" when there is nothing
     to give back (no edits, tests, reads, jobs or plan). `free_text=False`
     keeps only paths, keys, test ids and job ids: no failure messages, no
-    command lines (pass a `plan` built the same way)."""
+    command lines (pass a `plan` built the same way). `goal_lines`
+    (`ozagia.core.goals.brief_lines`: a title line, then one line per goal)
+    go after the plan; they alone do not make the text non-empty."""
     keys = [k for k in view.keys if key_exists is None or _exists(key_exists, k)]
     by_file: dict[str, list[str]] = {}
     for k in keys:
@@ -673,6 +815,7 @@ def working_set_text(view: View, *, harness: str | None = None,
         (test_title, tl),
         ("running jobs:", jl),
         ("plan:", [f"  {plan}"] if plan else []),
+        (goal_lines[0] if goal_lines else "goals:", list(goal_lines or [])[1:]),
         ("edited (most recent first; read a key instead of the whole file):", edited),
         ("recently read (re-read a range only if the summary lacks it):", reads),
     ]
@@ -705,6 +848,145 @@ def _record_path(root: str | Path) -> Path:
 # (they go to later sessions, possibly of another harness).
 _RECORD_TEST_FIELDS = ("outcome", "params", "ts", "since")
 _RECORD_LAST_FIELDS = ("ts", "failed", "complete")
+# Recent runs kept in the record (newest last), for `recorded_outcome`: when a
+# test last ran, and whether it passed (`ozagia.core.goals`).
+MAX_RECORD_RUNS = 50
+# Per run: selectors, failed and errored test keys kept. A run with more
+# selectors is kept as filtered (it decides no pass); one with more failed
+# or errored tests as incomplete (a dropped failure must not read as a pass).
+MAX_RUN_KEYS = 200
+MAX_RUN_KEY_CHARS = 300
+# A run's selector is kept only when it looks like a path or node id.
+_SAFE_SELECTOR = re.compile(r"[A-Za-z0-9_./@+\-\[\]:]{1,300}")
+RUN_SOURCES = ("captured", "compound", "reported")
+
+
+def _run_keys(value: Any) -> tuple[list[str], bool]:
+    """Test keys of a run's `failed`/`errors` list, sorted and capped, and
+    whether any was dropped."""
+    if not isinstance(value, list):
+        return [], value is not None
+    keys = sorted({k for k in value if isinstance(k, str) and k.startswith("test:")
+                   and len(k) <= MAX_RUN_KEY_CHARS})
+    dropped = len(keys) != len(set(map(str, value))) or len(keys) > MAX_RUN_KEYS
+    return keys[:MAX_RUN_KEYS], dropped
+
+
+def _record_run(run: Any) -> dict[str, Any] | None:
+    """A run as the record keeps it: its time (the start, for a captured
+    run with a fingerprint), the selectors it ran (paths and node ids
+    only), the test keys it failed and those that errored, whether it
+    completed, was filtered or stopped early, its `source` and, for a
+    captured run, the working tree's fingerprint at its start
+    (`ozagia.core.fingerprint`). No command line, no messages.
+
+    A selector that is not kept (not path-like, too long, over
+    `MAX_RUN_KEYS`) makes the run `filtered`: an empty or shorter list
+    must not widen or narrow what it is taken to have run. Failed or
+    errored keys over the caps make it incomplete."""
+    if not isinstance(run, dict):
+        return None
+    ts = run.get("ts")
+    if isinstance(ts, bool) or not isinstance(ts, (int, float)):
+        return None
+    sels = run.get("selectors")
+    filtered = run.get("filtered") is True
+    complete = run.get("complete") is True
+    if isinstance(sels, list):
+        kept = [s for s in sels if isinstance(s, str) and _SAFE_SELECTOR.fullmatch(s)]
+        if len(kept) != len(sels) or len(kept) > MAX_RUN_KEYS:
+            filtered = True
+        kept = kept[:MAX_RUN_KEYS]
+    else:
+        kept, filtered = [], filtered or sels is not None
+    failed, f_drop = _run_keys(run.get("failed"))
+    errors, e_drop = _run_keys(run.get("errors"))
+    if f_drop or e_drop:
+        complete = False
+    source = run.get("source") if run.get("source") in RUN_SOURCES else "reported"
+    out: dict[str, Any] = {"ts": float(ts), "selectors": kept, "failed": failed,
+                           "errors": errors, "complete": complete,
+                           "filtered": filtered, "stops": run.get("stops") is True,
+                           "source": source}
+    if source == "captured" and run.get("tree") is not None:
+        from ozagia.core.fingerprint import clean_fingerprint
+        tree = clean_fingerprint(run.get("tree"))
+        if tree is not None:
+            out["tree"] = tree
+    return out
+
+
+def run_record(run: TestRun) -> dict[str, Any]:
+    """The record's entry for a pytest run (see `_record_run`)."""
+    failed = [k for k, v in run.failures.items() if v.get("outcome") != "error"]
+    errors = [k for k, v in run.failures.items() if v.get("outcome") == "error"]
+    return _record_run({"ts": run.ts, "selectors": list(run.selectors),
+                        "failed": failed, "errors": errors,
+                        "complete": run.complete, "filtered": run.filtered,
+                        "stops": run.stops, "source": run.source,
+                        "tree": run.tree}) or {}
+
+
+def recorded_outcome(record: dict[str, Any], key: str, *,
+                     evidence: bool = False) -> dict[str, Any]:
+    """What the record says about test `key`: `{"outcome": "passed" |
+    "failed" | "error" | "unknown", "ts": run time or None, "reason",
+    "run": the deciding run or None}`.
+
+    The newest run that failed the test (or had it error), or that
+    selected it, completed, was not filtered and did not stop early,
+    decides; an older failure still in the failing set (a run evicted
+    from `runs`) counts when no run decides.
+
+    With `evidence` (goal criteria), only `captured` runs count, the
+    failing set is not consulted (it also holds reported runs), and when
+    the newest captured run that selected the test unfiltered did not
+    finish (a collection or import error, a timeout, `--co`), the outcome
+    is `unknown`."""
+    best: dict[str, Any] | None = None
+    for run in reversed(record.get("runs") or []):
+        if evidence and run.get("source") != "captured":
+            continue
+        if key in (run.get("errors") or []):
+            best = {"outcome": "error", "ts": run.get("ts"), "run": run,
+                    "reason": "the newest run that selected it had it error "
+                              "(setup, fixture or collection), not fail"}
+            break
+        if key in (run.get("failed") or []):
+            best = {"outcome": "failed", "ts": run.get("ts"), "run": run,
+                    "reason": "the newest run that selected it failed it"}
+            break
+        if not _selected(key, run.get("selectors") or []):
+            continue
+        failures = run.get("failed") or run.get("errors")
+        if (run.get("complete") and not run.get("filtered")
+                and not (run.get("stops") and failures)):
+            best = {"outcome": "passed", "ts": run.get("ts"), "run": run,
+                    "reason": "the newest complete run that selected it did "
+                              "not fail it"}
+            break
+        if evidence and not run.get("complete") and not run.get("filtered"):
+            return {"outcome": "unknown", "ts": run.get("ts"), "run": run,
+                    "reason": "the newest captured run that selected it did not "
+                              "finish (collection or import error, timeout, or "
+                              "an option with which pytest runs no test)"}
+    if evidence:
+        if best is not None:
+            return best
+        return {"outcome": "unknown", "ts": None, "run": None,
+                "reason": "no complete pytest run that ozagia captured "
+                          "selected this test"}
+    failing = (record.get("tests") or {}).get(key)
+    if isinstance(failing, dict):
+        fts = failing.get("ts")
+        if best is None or (isinstance(fts, (int, float))
+                            and fts >= float(best.get("ts") or 0)):
+            return {"outcome": "failed", "ts": fts, "run": None,
+                    "reason": "in the record's failing tests"}
+    if best is not None:
+        return best
+    return {"outcome": "unknown", "ts": None, "run": None,
+            "reason": "no recorded complete pytest run selected this test"}
 
 
 def _record_test(rec: dict[str, Any]) -> dict[str, Any]:
@@ -731,18 +1013,23 @@ def load_test_record(root: str | Path) -> dict[str, Any]:
     try:
         data = json.loads(_record_path(root).read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return {"tests": {}, "last": None}
+        return {"tests": {}, "last": None, "runs": []}
     if not isinstance(data, dict) or not isinstance(data.get("tests"), dict):
-        return {"tests": {}, "last": None}
+        return {"tests": {}, "last": None, "runs": []}
     tests = {k: _record_test(v) for k, v in data["tests"].items()
              if isinstance(k, str) and k.startswith("test:") and isinstance(v, dict)}
-    return {"tests": tests, "last": _record_last(data.get("last"))}
+    raw_runs = data.get("runs") if isinstance(data.get("runs"), list) else []
+    runs = [r for r in (_record_run(x) for x in raw_runs) if r]
+    return {"tests": tests, "last": _record_last(data.get("last")),
+            "runs": runs[-MAX_RECORD_RUNS:]}
 
 
 def save_test_record(root: str | Path, record: dict[str, Any]) -> None:
     path = _record_path(root)
+    runs = [r for r in (_record_run(x) for x in record.get("runs") or []) if r]
     data = {"tests": {k: _record_test(v) for k, v in record.get("tests", {}).items()},
-            "last": _record_last(record.get("last"))}
+            "last": _record_last(record.get("last")),
+            "runs": runs[-MAX_RECORD_RUNS:]}
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(prefix="tests.", suffix=".tmp", dir=path.parent)
@@ -766,22 +1053,23 @@ class TestRecord:
         self.tests: OrderedDict[str, dict[str, Any]] = OrderedDict(
             sorted(rec["tests"].items(), key=lambda kv: kv[1].get("ts", 0)))
         self.last = rec["last"]
+        self.runs: list[dict[str, Any]] = list(rec.get("runs") or [])
 
     def apply(self, run: TestRun) -> None:
+        """Apply `run` to the failing tests and add it to the recent runs;
+        the record is written every time (each run is a new entry)."""
         with self.lock:
-            before = {k: dict(v) for k, v in self.tests.items()}
             apply_test_run(self.tests, run)
             for key in list(self.tests):
                 self.tests[key] = _record_test(self.tests[key])
-            changed = before != {k: dict(v) for k, v in self.tests.items()}
-            last = {"ts": run.ts, "failed": len(run.failures),
-                    "complete": run.complete}
-            if changed or self.last is None or self.last.get("failed") != last["failed"]:
-                self.last = last
-                save_test_record(self.root, {"tests": dict(self.tests),
-                                             "last": self.last})
-            else:
-                self.last = last
+            self.last = {"ts": run.ts, "failed": len(run.failures),
+                         "complete": run.complete}
+            entry = run_record(run)
+            if entry:
+                self.runs.append(entry)
+                del self.runs[:-MAX_RECORD_RUNS]
+            save_test_record(self.root, {"tests": dict(self.tests),
+                                         "last": self.last, "runs": self.runs})
 
     def view(self) -> tuple[list[tuple[str, dict[str, Any]]], dict[str, Any] | None]:
         with self.lock:
@@ -853,13 +1141,38 @@ def session_brief(root: str | Path, max_chars: int = BRIEF_MAX_CHARS, *,
                   tests: list[tuple[str, dict[str, Any]]] | None = None,
                   last_test: dict[str, Any] | None = None,
                   jobs: list[dict[str, Any]] | None = None,
-                  jobs_enabled: bool | None = None) -> str:
+                  jobs_enabled: bool | None = None,
+                  goal_lines: list[str] | None = None) -> str:
     """Dirty files, the last commits, the tests still failing in the root's
     test record (each with the time of the first run that failed it),
-    running jobs, and the MCP tools to prefer. `tests` defaults to the
+    then the open and claimed goals with unmet criteria
+    (`ozagia.core.goals.brief_lines`; `goal_lines` replaces them), running
+    jobs, and the MCP tools to prefer.
+
+    Over `max_chars`, the tools line and the goal lines (their reserved
+    share: at most `max_chars // BRIEF_GOAL_SHARE`) are kept, and the
+    text before them (header, git, failing tests) is cut at its end;
+    running jobs follow when room is left. `tests` defaults to the
     persisted record (`load_test_record`); `last_test` is accepted and
     unused (each test carries its own time)."""
     root = Path(root)
+    share = max_chars // BRIEF_GOAL_SHARE
+    if goal_lines is None:
+        try:
+            from ozagia.core.goals import BRIEF_CHARS, brief_lines
+            goal_lines = brief_lines(root, max_chars=min(BRIEF_CHARS, share))
+        except Exception:  # noqa: BLE001 - the brief goes without goals
+            goal_lines = []
+    # Lines past the reserved share are left out (whole lines).
+    goal_block: list[str] = []
+    size = 0
+    for line in goal_lines:
+        if size + len(line) + 1 > share:
+            break
+        goal_block.append(line)
+        size += len(line) + 1
+    if len(goal_block) < 2:
+        goal_block = []
     lines = [BRIEF_HEADER]
     branch = _git(root, "rev-parse", "--abbrev-ref", "HEAD")
     status = _git(root, "status", "--porcelain=v1", "--untracked-files=normal")
@@ -887,20 +1200,31 @@ def session_brief(root: str | Path, max_chars: int = BRIEF_MAX_CHARS, *,
         lines.append("failing tests (ozagia's record of earlier pytest runs in "
                      "this root; rerun to confirm):")
         lines.extend(failing_lines(tests, BRIEF_TESTS))
+    job_block: list[str] = []
     if jobs:
-        lines.append("running jobs:")
-        lines.extend(job_lines(jobs, None, BRIEF_JOBS))
+        job_block = ["running jobs:", *job_lines(jobs, None, BRIEF_JOBS)]
     if jobs_enabled is None:
         from ozagia.daemon.jobs import jobs_enabled as _enabled
         jobs_enabled = _enabled(root)
     tools = MCP_TOOLS_LINE + (" " + JOBS_LINE if jobs_enabled else "")
-    lines.append(tools)
-    text = "\n".join(lines)
+    text = "\n".join([*lines, *goal_block, *job_block, tools])
     if len(text) <= max_chars:
         return text
-    # Keep the tools line; cut the middle.
-    keep = max_chars - len(tools) - len("\n...\n")
-    return text[:max(keep, 0)].rstrip() + "\n...\n" + tools
+    # Keep the goals' reserved share and the tools line; cut the text
+    # before them at its end; jobs only when they still fit.
+    goals_text = "".join(x + "\n" for x in goal_block)
+    jobs_text = "".join(x + "\n" for x in job_block)
+    sep = "\n...\n"
+    keep = max_chars - len(tools) - len(goals_text) - len(jobs_text) - len(sep)
+    if keep < min(200, max_chars // 4):
+        jobs_text = ""
+        keep = max_chars - len(tools) - len(goals_text) - len(sep)
+    if keep < 0:
+        goals_text = ""
+        keep = max_chars - len(tools) - len(sep)
+    head_text = "\n".join(lines)
+    return (head_text[:max(keep, 0)].rstrip() + sep + goals_text + jobs_text
+            + tools)[:max_chars]
 
 
 __all__ = ["BRIEF_HEADER", "BRIEF_MAX_CHARS", "HEADER", "JOBS_LINE", "MAX_FILES",
@@ -909,4 +1233,5 @@ __all__ = ["BRIEF_HEADER", "BRIEF_MAX_CHARS", "HEADER", "JOBS_LINE", "MAX_FILES"
            "TestRun", "View", "WorkingSet", "apply_test_run", "devsession_line",
            "job_lines", "key_file", "load_test_record", "merge_views",
            "failing_lines", "parse_failures", "pytest_head", "rerun_command",
-           "session_brief", "pytest_run", "text_meta", "working_set_text"]
+           "run_record", "session_brief", "pytest_run", "recorded_outcome",
+           "text_meta", "working_set_text"]
