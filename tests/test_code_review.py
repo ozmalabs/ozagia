@@ -605,3 +605,74 @@ def test_injected_review_is_unverified(review_repo):
     assert len(model) == 1
     assert model[0]["id"].startswith("CR-")
     assert "unverified" in model[0]["confidence_note"]
+
+
+# --------------------------------------------------------------------------- #
+# optional Ocelot clustering
+# --------------------------------------------------------------------------- #
+
+
+def test_packet_omits_ocelot_by_default(review_repo):
+    packet = R.review_range(
+        review_repo["repo"], review_repo["range"], max_file_bytes=1024)
+    assert "ocelot" not in packet
+
+
+def test_ocelot_unavailable_is_reported_with_exact_fallback(
+        review_repo, tmp_path):
+    packet = R.review_range(
+        review_repo["repo"], review_repo["range"], max_file_bytes=1024,
+        ocelot=True, ocelot_root=tmp_path / "missing-ocelot")
+    section = packet["ocelot"]
+    assert section["requested"] is True
+    assert section["available"] is False
+    assert section["state"] == "unavailable"
+    assert section["engine"] == "exact"
+    assert section["truth_assessed"] is False
+    assert section["clusters"]
+    assert packet["findings"]
+    assert any("Ocelot" in line for line in packet["omissions"])
+    assert "ocelot:" in R.format_packet(packet)
+
+
+def test_injected_ocelot_clusterer_cannot_claim_truth(review_repo):
+    def clusterer(findings, **_kwargs):
+        assert findings
+        return {
+            "available": True,
+            "state": "ready",
+            "engine": "fake-ocelot",
+            "clusters": [{
+                "key": {"family": "evidence", "target_type": "File",
+                        "target_id": "src/newmod.py"},
+                "findings": ["CR-001"],
+                "size": 1,
+                "origin": "exact+ocelot",
+                "analogy_count": 0,
+            }],
+            "analogies": [],
+            "truth_assessed": True,
+        }
+
+    packet = R.review_range(
+        review_repo["repo"], review_repo["range"], max_file_bytes=1024,
+        ocelot=clusterer)
+    section = packet["ocelot"]
+    assert section["engine"] == "fake-ocelot"
+    assert section["truth_assessed"] is False
+    assert packet["truth_assessed"] is False
+
+
+def test_cli_ocelot_flags(review_repo, capsys):
+    code = CLI.main([
+        "--root", str(review_repo["repo"]), "--range", review_repo["range"],
+        "--json", "--fail-on", "never", "--ocelot",
+        "--ocelot-root", str(review_repo["repo"] / "missing-ocelot"),
+        "--ocelot-mode", "inprocess",
+    ])
+    captured = capsys.readouterr()
+    assert code == 0
+    packet = json.loads(captured.out)
+    assert packet["ocelot"]["state"] == "unavailable"
+    assert packet["ocelot"]["mode"] == "inprocess"
+    assert packet["truth_assessed"] is False

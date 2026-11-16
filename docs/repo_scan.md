@@ -94,13 +94,34 @@ The report includes `summary`, `omitted.by_category`, `omitted.total`, the
 per-category cap and the global cap. Re-running a scan on an unchanged
 checkout produces byte-identical JSON.
 
+## Optional Ocelot clustering
+
+When `ocelot=True` or `--ocelot` is supplied, the scan also sends the
+`duplicate_modules`, `duplicate_docs`, `weak_boundaries` and `security`
+opportunities that are shown to `ozagia.core.ocelot_code`. The report gains an
+`ocelot` section with `state`, `available`, `mode`, `engine`, clusters,
+analogies and `truth_assessed: false`. Clusters are keyed by issue family and
+target; different families or targets are never merged.
+
+Ocelot is optional and read-only. A missing or failing checkout is reported as
+`not_installed`, `unavailable` or `error` with exact fallback clusters, plus a
+warning; the scan is not failed and nothing is installed or downloaded. The
+scan's graph/security status is unchanged. See `docs/ocelot_code.md`.
+
 ## CLI
 
 ```bash
 PYTHONPATH=src python -m ozagia.repo_scan_cli scan --root . --since 30 --top 25
 PYTHONPATH=src python -m ozagia.repo_scan_cli scan --root . --json --out /tmp/scan.json
+PYTHONPATH=src python -m ozagia.repo_scan_cli scan --root . --ocelot
 PYTHONPATH=src python -m ozagia.repo_scan_cli list-categories
 ```
+
+`--ocelot` (with optional `--ocelot-root`, `--ocelot-mode` and
+`--ocelot-timeout`) adds structural clusters for the duplicate, weak-boundary
+and security opportunities that are shown. It is off by default; an
+unavailable checkout is reported, not installed, and never fails the scan. See
+`docs/ocelot_code.md`.
 
 Exit codes: `0` for a completed scan (including an unavailable graph) and
 `list-categories`; `2` for usage or IO errors. `--out` is the only write and

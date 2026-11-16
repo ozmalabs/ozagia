@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from ozagia.config import load_project_config, state_path, state_rel
+from ozagia.core import ocelot_code
 
 SCHEMA = "ozagia.repo_scan.report.v1"
 SCHEMA_VERSION = 1
@@ -2050,6 +2051,45 @@ _DETECTORS = (
 )
 
 
+def _ocelot_section(opportunities: Sequence[Mapping[str, Any]], *, root: Path,
+                    ocelot: Any, ocelot_root: str | Path | None,
+                    ocelot_mode: str, ocelot_timeout: int,
+                    clusterer: Any) -> dict[str, Any] | None:
+    """Cluster duplicate, weak-boundary and security opportunities."""
+    if callable(ocelot) and clusterer is None:
+        clusterer = ocelot
+        ocelot = True
+    if not ocelot and clusterer is None:
+        return None
+    selected = [dict(item) for item in opportunities
+                if str(item.get("category")) in ocelot_code.SCAN_CATEGORIES]
+    if not selected:
+        return {
+            "schema": ocelot_code.SCHEMA,
+            "requested": True,
+            "available": False,
+            "state": "no_findings",
+            "mode": ocelot_mode,
+            "actual_mode": None,
+            "engine": "exact",
+            "ocelot": None,
+            "clusters": [],
+            "ocelot_clusters": [],
+            "analogies": [],
+            "finding_count": 0,
+            "cluster_count": 0,
+            "truncated": False,
+            "omitted_findings": 0,
+            "truth_assessed": False,
+            "error": None,
+            "note": ("no duplicate, weak-boundary or security opportunities "
+                     "were shown; Ocelot was not called"),
+        }
+    return ocelot_code.cluster_section(
+        selected, root=root, ocelot_root=ocelot_root, mode=ocelot_mode,
+        timeout=ocelot_timeout, clusterer=clusterer)
+
+
 def _global_not_assessed(ctx: _ScanContext) -> list[str]:
     items = [
         "correctness and completeness: the scan ranks candidates, it does "
@@ -2132,6 +2172,13 @@ def format_report(report: Mapping[str, Any]) -> str:
         lines.append(
             f"security report: {security.get('findings', 0)} supplied "
             f"finding(s) from {security.get('source')} (not rerun)")
+    ocelot = report.get("ocelot")
+    if isinstance(ocelot, Mapping):
+        lines.append(
+            f"ocelot: {ocelot.get('state')} ({ocelot.get('engine')}), "
+            f"{len(ocelot.get('clusters') or [])} cluster(s), "
+            f"{len(ocelot.get('analogies') or [])} analogies; "
+            "candidate only, truth not assessed")
     by_category = summary.get("by_category") or {}
     if by_category:
         lines.append("by category: " + ", ".join(
@@ -2183,7 +2230,12 @@ def format_categories() -> str:
 def scan(root: str | Path = ".", *, graph_path: str | Path | None = None,
          since_days: int = DEFAULT_SINCE_DAYS, top: int = DEFAULT_TOP,
          per_category: int = DEFAULT_PER_CATEGORY,
-         security_report: Mapping[str, Any] | None = None) -> dict[str, Any]:
+         security_report: Mapping[str, Any] | None = None,
+         ocelot: Any = False,
+         ocelot_root: str | Path | None = None,
+         ocelot_mode: str = "auto",
+         ocelot_timeout: int = ocelot_code.DEFAULT_TIMEOUT,
+         ocelot_clusterer: Any = None) -> dict[str, Any]:
     """Scan one checkout read-only and return a deterministic report.
 
     `since_days` bounds the churn window and the stale-note age. `top` bounds
@@ -2340,6 +2392,20 @@ def scan(root: str | Path = ".", *, graph_path: str | Path | None = None,
         "not_assessed": _global_not_assessed(ctx),
         "warnings": list(dict.fromkeys(warnings)),
     }
+    ocelot_section = _ocelot_section(
+        shown, root=root_path, ocelot=ocelot, ocelot_root=ocelot_root,
+        ocelot_mode=ocelot_mode, ocelot_timeout=ocelot_timeout,
+        clusterer=ocelot_clusterer)
+    if ocelot_section is not None:
+        report["ocelot"] = ocelot_section
+        report["summary"]["ocelot_clusters"] = len(
+            ocelot_section.get("clusters") or [])
+        report["summary"]["ocelot_state"] = ocelot_section.get("state")
+        if ocelot_section.get("state") not in {"ready", "no_findings"}:
+            report["warnings"].append(
+                "Ocelot clustering was requested but is "
+                f"{ocelot_section.get('state')}; exact fallback clusters are "
+                "reported and no install was attempted.")
     return report
 
 

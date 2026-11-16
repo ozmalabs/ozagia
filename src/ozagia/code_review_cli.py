@@ -35,6 +35,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--worktree-base", default="main",
                         help="branch expected for the main worktree "
                              "(default: main)")
+    parser.add_argument("--ocelot", action="store_true",
+                        help="add optional Ocelot structural clusters "
+                             "(default: off; no install or download)")
+    parser.add_argument("--ocelot-root", default=None,
+                        help="explicit Ocelot checkout (default: resolve one)")
+    parser.add_argument("--ocelot-mode", default="auto",
+                        choices=("auto", "inprocess", "subprocess"),
+                        help="Ocelot worker transport (default: auto)")
+    parser.add_argument("--ocelot-timeout", type=int, default=120,
+                        help="Ocelot worker timeout in seconds (default: 120)")
     return parser
 
 
@@ -48,11 +58,19 @@ def _emit_refusal(report: dict, as_json: bool) -> None:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     root = Path(args.root) if args.root else Path.cwd()
+    if args.ocelot_timeout < 1:
+        print("error: --ocelot-timeout must be a positive integer",
+              file=sys.stderr)
+        return 2
     kwargs = {
         "graph_path": args.graph,
         "memory_mb": 2048.0 if args.memory_mb is None else args.memory_mb,
         "disk_mb": 4096.0 if args.disk_mb is None else args.disk_mb,
         "worktree_base": args.worktree_base,
+        "ocelot": args.ocelot,
+        "ocelot_root": args.ocelot_root,
+        "ocelot_mode": args.ocelot_mode,
+        "ocelot_timeout": args.ocelot_timeout,
     }
     if args.max_file_bytes is not None:
         kwargs["max_file_bytes"] = args.max_file_bytes
