@@ -228,8 +228,10 @@ unknown ids, bad domains and IO failures.
   or file writer is supplied by the caller. Prompt references and per-step
   prompt files are not part of this release.
 - **Runner and UI integration.** `TaskRunner` already accepts any spec path;
-  the library does not start runs, schedule them or render their evidence.
-  Browsing and launching from the console or an editor panel is still to come.
+  the library does not start runs, schedule them or render their evidence. The
+  OpenCode add-in now browses the catalogue and copies a preview run command
+  ([opencode_addin.md](opencode_addin.md)), but starting, watching and exporting
+  runs is still to come.
 - **New classes and domains.** Repository files currently override built-ins
   only. Allowing new ids needs an explicit domain declaration and a catalog
   entry; the strict unknown-override error is deliberate for now.

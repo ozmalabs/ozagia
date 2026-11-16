@@ -17,7 +17,7 @@ import { OzagiaPanel } from "./gui/panel"
 import { OzagiaSettings } from "./gui/settings"
 import { panelCss } from "./gui/styles"
 
-type TabId = "graph" | "status" | "testing" | "research" | "actions"
+type TabId = "graph" | "status" | "testing" | "research" | "actions" | "tasks"
 
 export default Plugin.define({
   ...definition,
@@ -43,6 +43,7 @@ export default Plugin.define({
     const testingTab = tab("testing", "tab.testing")
     const researchTab = tab("research", "tab.research")
     const actionsTab = tab("actions", "tab.actions")
+    const tasksTab = tab("tasks", "tab.tasks")
 
     ctx.add(Panel, {
       id: "ozagia",
@@ -62,6 +63,7 @@ export default Plugin.define({
         ...(input.open.includes("testing") ? [testingTab] : []),
         ...(input.open.includes("research") ? [researchTab] : []),
         ...(input.open.includes("actions") ? [actionsTab] : []),
+        ...(input.open.includes("tasks") ? [tasksTab] : []),
       ],
       render: (props: PanelProps) => (
         <OzagiaPanel
@@ -119,6 +121,7 @@ export default Plugin.define({
     ctx.add(Command, openCommand("testing", "open-testing", "command.openTesting"))
     ctx.add(Command, openCommand("research", "open-research", "command.openResearch"))
     ctx.add(Command, openCommand("actions", "open-actions", "command.openActions"))
+    ctx.add(Command, openCommand("tasks", "open-tasks", "command.openTasks"))
 
     ctx.add(Command, (): CommandItem => ({
       id: "open-settings",

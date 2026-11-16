@@ -5,6 +5,7 @@ import { ActionsTab } from "./actions"
 import { GraphTab } from "./graph"
 import { ResearchTab } from "./research"
 import { StatusTab } from "./status"
+import { TasksTab } from "./tasks"
 import { TestingTab } from "./testing"
 
 export function OzagiaPanel(props: {
@@ -29,6 +30,9 @@ export function OzagiaPanel(props: {
         </Match>
         <Match when={props.tab().id === "actions"}>
           <ActionsTab />
+        </Match>
+        <Match when={props.tab().id === "tasks"}>
+          <TasksTab />
         </Match>
       </Switch>
     </div>
