@@ -1,0 +1,577 @@
+"""Tests for the deterministic, graph-aware code-review harness."""
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from ozagia import code_review_cli as CLI
+from ozagia.core import code_review as R
+from ozagia.core.memory import _tree_digest
+
+
+# --------------------------------------------------------------------------- #
+# helpers
+# --------------------------------------------------------------------------- #
+
+
+def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+    env = dict(os.environ)
+    for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+                 "GIT_OBJECT_DIRECTORY"):
+        env.pop(name, None)
+    env.update({
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_AUTHOR_NAME": "Review Tester",
+        "GIT_AUTHOR_EMAIL": "review@example.com",
+        "GIT_COMMITTER_NAME": "Review Tester",
+        "GIT_COMMITTER_EMAIL": "review@example.com",
+    })
+    proc = subprocess.run(
+        ["git", "-C", str(repo), *args],
+        capture_output=True, text=True, env=env, check=False,
+    )
+    if check and proc.returncode != 0:
+        raise AssertionError(
+            f"git {' '.join(args)} failed: {proc.stderr or proc.stdout}")
+    return proc
+
+
+def _init_repo(path: Path) -> Path:
+    path.mkdir(parents=True)
+    _git(path, "init", "-q", "-b", "main")
+    _git(path, "config", "user.name", "Review Tester")
+    _git(path, "config", "user.email", "review@example.com")
+    _git(path, "config", "commit.gpgsign", "false")
+    (path / ".gitignore").write_text(".ozagia/\n", encoding="utf-8")
+    (path / "ozagia").mkdir()
+    (path / "ozagia" / "resources.toml").write_text(
+        "enabled = false\n", encoding="utf-8")
+    return path
+
+
+def _commit(repo: Path, message: str) -> str:
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", message)
+    return _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+
+@pytest.fixture
+def review_repo(tmp_path: Path) -> dict[str, Any]:
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "src").mkdir()
+    (repo / "tests").mkdir()
+    (repo / "assets").mkdir()
+    (repo / "data").mkdir()
+    (repo / "src" / "app.py").write_text(
+        "def f(x):\n"
+        "    return x + 1\n",
+        encoding="utf-8",
+    )
+    (repo / "src" / "user.py").write_text(
+        "from app import f\n"
+        "\n"
+        "def g():\n"
+        "    return f(1)\n",
+        encoding="utf-8",
+    )
+    (repo / "src" / "legacy.py").write_text("legacy = True\n", encoding="utf-8")
+    (repo / "tests" / "test_app.py").write_text(
+        "from app import f\n"
+        "\n"
+        "def test_f():\n"
+        "    assert f(1) == 2\n",
+        encoding="utf-8",
+    )
+    (repo / "README.md").write_text("# fixture\n", encoding="utf-8")
+    base = _commit(repo, "base")
+
+    (repo / "src" / "app.py").write_text(
+        "def f(x):\n"
+        "    return x + 2\n"
+        "\n"
+        "def h():\n"
+        "    return f(2)\n",
+        encoding="utf-8",
+    )
+    (repo / "src" / "newmod.py").write_text(
+        "def brand_new(x):\n"
+        "    return x * 3\n",
+        encoding="utf-8",
+    )
+    (repo / "src" / "conflict.py").write_text(
+        "<<<<<<< HEAD\n"
+        "x = 1\n"
+        "=======\n"
+        "y = 2\n"
+        ">>>>>>> other\n",
+        encoding="utf-8",
+    )
+    (repo / "src" / "space.py").write_text(
+        "def broken():\n"
+        "    return 1   \n",
+        encoding="utf-8",
+    )
+    (repo / "src" / "auth.py").write_text(
+        "def login(token):\n"
+        "    return token\n",
+        encoding="utf-8",
+    )
+    (repo / "package-lock.json").write_text(
+        '{"lockfileVersion": 3}\n', encoding="utf-8")
+    (repo / "src" / "auto.py").write_text(
+        "# Code generated. DO NOT EDIT.\n"
+        "VALUE = 1\n",
+        encoding="utf-8",
+    )
+    (repo / "assets" / "logo.bin").write_bytes(b"\x00\x01\x02binary\n")
+    (repo / "data" / "blob.dat").write_bytes(b"x" * 2048)
+    (repo / "src" / "legacy.py").unlink()
+    head = _commit(repo, "head")
+    return {"repo": repo, "base": base, "head": head,
+            "range": f"{base}..{head}"}
+
+
+def _graph_payload(repo: Path, head: str, *,
+                   snapshot_head: str | None = None) -> dict[str, Any]:
+    graph_path = repo / ".ozagia" / "graph.json"
+    graph_path.parent.mkdir(parents=True, exist_ok=True)
+    digest, error = _tree_digest(repo, dump=graph_path)
+    assert error is None
+    assert digest
+    nodes = [
+        {"id": 0, "type": "Repo", "key": "repo:",
+         "attrs": {"root": str(repo.resolve()),
+                   "head": snapshot_head or head,
+                   "tree_digest": digest}},
+        {"id": 1, "type": "File", "key": "file:src/app.py",
+         "attrs": {"path": "src/app.py"}},
+        {"id": 2, "type": "Symbol", "key": "sym:src/app.py::f",
+         "attrs": {"file": "src/app.py", "qualname": "f", "name": "f",
+                   "start_line": 1, "end_line": 2}},
+        {"id": 3, "type": "Symbol", "key": "sym:src/app.py::h",
+         "attrs": {"file": "src/app.py", "qualname": "h", "name": "h",
+                   "start_line": 4, "end_line": 5}},
+        {"id": 4, "type": "File", "key": "file:src/user.py",
+         "attrs": {"path": "src/user.py"}},
+        {"id": 5, "type": "Symbol", "key": "sym:src/user.py::g",
+         "attrs": {"file": "src/user.py", "qualname": "g", "name": "g",
+                   "start_line": 3, "end_line": 4}},
+        {"id": 6, "type": "File", "key": "file:tests/test_app.py",
+         "attrs": {"path": "tests/test_app.py"}},
+        {"id": 7, "type": "Test", "key": "test:tests/test_app.py::test_f",
+         "attrs": {"file": "tests/test_app.py", "qualname": "test_f",
+                   "start_line": 3, "end_line": 4}},
+        {"id": 8, "type": "File", "key": "file:src/newmod.py",
+         "attrs": {"path": "src/newmod.py"}},
+        {"id": 9, "type": "Symbol", "key": "sym:src/newmod.py::brand_new",
+         "attrs": {"file": "src/newmod.py", "qualname": "brand_new",
+                   "name": "brand_new", "start_line": 1, "end_line": 2}},
+    ]
+    edges = [
+        {"src": 1, "type": "defines", "tgt": 2},
+        {"src": 1, "type": "defines", "tgt": 3},
+        {"src": 4, "type": "defines", "tgt": 5},
+        {"src": 5, "type": "calls", "tgt": 2},
+        {"src": 6, "type": "defines", "tgt": 7},
+        {"src": 6, "type": "has_test", "tgt": 7},
+        {"src": 7, "type": "tests_module", "tgt": 1},
+        {"src": 8, "type": "defines", "tgt": 9},
+    ]
+    return {
+        "version": 2,
+        "nodes": nodes,
+        "edges": edges,
+        "next_id": 10,
+        "build": {},
+        "files": {},
+    }
+
+
+def _write_graph(repo: Path, head: str, *,
+                 snapshot_head: str | None = None) -> Path:
+    path = repo / ".ozagia" / "graph.json"
+    path.write_text(
+        json.dumps(_graph_payload(repo, head, snapshot_head=snapshot_head)),
+        encoding="utf-8")
+    return path
+
+
+def _file(packet: dict[str, Any], path: str) -> dict[str, Any]:
+    return next(item for item in packet["files"] if item["path"] == path)
+
+
+def _findings(packet: dict[str, Any], *, ftype: str | None = None,
+              file: str | None = None) -> list[dict[str, Any]]:
+    out = []
+    for item in packet["findings"]:
+        if ftype is not None and item["type"] != ftype:
+            continue
+        if file is not None and item["file"] != file:
+            continue
+        out.append(item)
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# no graph: file-level diff checks
+# --------------------------------------------------------------------------- #
+
+
+def test_packet_without_graph_uses_file_level_checks(review_repo):
+    packet = R.review_range(
+        review_repo["repo"], review_repo["range"], max_file_bytes=1024)
+
+    assert packet["schema"] == R.PACKET_SCHEMA
+    assert packet["base_commit"] == review_repo["base"]
+    assert packet["head_commit"] == review_repo["head"]
+    assert packet["truth_assessed"] is False
+    assert packet["model_review"]["status"] == "not_run"
+    assert packet["preflight"]["ok"] is True
+    assert packet["graph"]["freshness"] == "missing"
+    assert packet["graph"]["usable"] is False
+    assert packet["worktree"]["path"] == str(review_repo["repo"].resolve())
+
+    assert _findings(packet, ftype="breaking_change", file="src/legacy.py")
+    assert _findings(packet, ftype="unhandled_error", file="src/conflict.py")
+    assert _findings(packet, ftype="unknown", file="assets/logo.bin")
+    assert _findings(packet, ftype="scope_creep", file="package-lock.json")
+    assert _findings(packet, ftype="scope_creep", file="src/auto.py")
+    assert _findings(packet, ftype="security_sensitive", file="src/auth.py")
+    assert _findings(packet, ftype="performance_risk", file="data/blob.dat")
+    assert _findings(packet, ftype="missing_test", file="src/newmod.py")
+    # The unchanged test file tests/test_app.py is a file-level match.
+    assert not _findings(packet, ftype="missing_test", file="src/app.py")
+    whitespace = _findings(packet, ftype="unknown", file="src/space.py")
+    assert any("whitespace" in item["message"] for item in whitespace)
+
+    conflict = _findings(packet, ftype="unhandled_error", file="src/conflict.py")
+    assert conflict[0]["severity"] == "blocking"
+    assert conflict[0]["line"] == 1
+    assert all(item["graph_keys"] == [] for item in packet["findings"])
+    assert packet["omissions"]
+
+    legacy = _file(packet, "src/legacy.py")
+    assert legacy["deleted"] is True
+    assert _file(packet, "assets/logo.bin")["binary"] is True
+    assert _file(packet, "package-lock.json")["generated"] is True
+    assert _file(packet, "src/auto.py")["generated"] is True
+    assert _file(packet, "data/blob.dat")["large"] is True
+
+    for item in packet["findings"]:
+        required = {"id", "type", "severity", "file", "line", "message",
+                    "evidence", "graph_keys", "confidence",
+                    "confidence_note"}
+        assert required <= set(item)
+        assert item["type"] in R.FINDING_TYPES
+        assert item["severity"] in R.SEVERITIES
+
+    assert R.exit_code(packet) == 1
+    assert R.exit_code(packet, "never") == 0
+    assert R.exit_code(packet, "major") == 1
+
+
+# --------------------------------------------------------------------------- #
+# graph present
+# --------------------------------------------------------------------------- #
+
+
+def test_fresh_graph_maps_symbols_callers_and_tests(review_repo):
+    _write_graph(review_repo["repo"], review_repo["head"])
+    packet = R.review_range(
+        review_repo["repo"], review_repo["range"], max_file_bytes=1024)
+
+    graph = packet["graph"]
+    assert graph["freshness"] == "fresh"
+    assert graph["usable"] is True
+    assert graph["call_edges"] == 1
+    assert graph["snapshot_head"] == review_repo["head"]
+
+    app = _file(packet, "src/app.py")
+    assert "file:src/app.py" in app["graph_keys"]
+    assert any(symbol["key"] == "sym:src/app.py::f"
+               for symbol in app["symbols"])
+    assert any(test["key"] == "test:tests/test_app.py::test_f"
+               for test in app["covering_tests"])
+    assert any(test["source"] == "graph" for test in app["covering_tests"])
+
+    stale = _findings(packet, ftype="stale_reference", file="src/app.py")
+    assert len(stale) == 1
+    assert "sym:src/app.py::f" in stale[0]["graph_keys"]
+    assert "sym:src/user.py::g" in stale[0]["graph_keys"]
+    assert stale[0]["confidence"] == "medium"
+    assert "src/user.py" in " ".join(stale[0]["evidence"])
+
+    missing = _findings(packet, ftype="missing_test", file="src/newmod.py")
+    assert len(missing) == 1
+    assert "file:src/newmod.py" in missing[0]["graph_keys"]
+    assert "sym:src/newmod.py::brand_new" in missing[0]["graph_keys"]
+
+    assert not _findings(packet, ftype="missing_test", file="src/app.py")
+    assert packet["truth_assessed"] is False
+
+
+def test_stale_graph_is_reported_and_not_used(review_repo):
+    _write_graph(review_repo["repo"], review_repo["head"],
+                 snapshot_head=review_repo["base"])
+    packet = R.review_range(
+        review_repo["repo"], review_repo["range"], max_file_bytes=1024)
+
+    graph = packet["graph"]
+    assert graph["freshness"] == "stale"
+    assert graph["usable"] is False
+    assert "does not match" in graph["reason"]
+
+    stale = _findings(packet, ftype="stale_reference", file=None)
+    assert len(stale) == 1
+    assert "stale" in stale[0]["message"]
+    assert not _findings(packet, ftype="stale_reference", file="src/app.py")
+    assert all(item["graph_keys"] == []
+               for item in _findings(packet, ftype="missing_test"))
+    assert any("Graph evidence was not used" in line
+               for line in packet["omissions"])
+
+
+def test_missing_graph_path_is_an_error(review_repo):
+    with pytest.raises(R.CodeReviewError):
+        R.review_range(
+            review_repo["repo"], review_repo["range"],
+            graph_path=review_repo["repo"] / "missing.json")
+
+
+def test_patch_parser_keeps_added_plus_lines_in_the_hunk():
+    text = (
+        "diff --git a/src/plus.py b/src/plus.py\n"
+        "--- /dev/null\n"
+        "+++ b/src/plus.py\n"
+        "@@ -0,0 +1,3 @@\n"
+        "++ plus content\n"
+        "+eval(value)\n"
+        "+line\n"
+    )
+    parsed = R._parse_patch(text)
+    assert parsed["first_added"] == {"src/plus.py": 1}
+    assert parsed["dangerous"] == [
+        {"file": "src/plus.py", "line": 2, "label": "dynamic eval"}]
+
+
+# --------------------------------------------------------------------------- #
+# preflight refusals and input errors
+# --------------------------------------------------------------------------- #
+
+
+def test_range_and_root_errors(review_repo):
+    for spec in ("HEAD", "a...b", "", "..HEAD", "HEAD.."):
+        with pytest.raises(R.CodeReviewError):
+            R.parse_range(spec)
+    base, head = R.parse_range(f"{review_repo['base']}..HEAD")
+    assert base == review_repo["base"]
+    assert head == "HEAD"
+
+    with pytest.raises(R.CodeReviewError):
+        R.review_range(review_repo["repo"], "not-a-revision..HEAD")
+    with pytest.raises(R.CodeReviewError):
+        R.review_range(review_repo["repo"] / "missing", "HEAD~1..HEAD")
+    with pytest.raises(R.CodeReviewError):
+        R.review_range(review_repo["repo"] / "src", "HEAD~1..HEAD")
+    with pytest.raises(R.PreflightError):
+        R.review_diff(
+            review_repo["repo"], base=review_repo["head"],
+            head=review_repo["base"])
+
+
+def test_wrong_branch_refuses(review_repo):
+    (review_repo["repo"] / "ozagia" / "worktrees.toml").write_text(
+        "[worktrees.review]\n"
+        'path = "."\n'
+        'branch = "feat/other"\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(R.PreflightError) as caught:
+        R.review_range(review_repo["repo"], review_repo["range"])
+    report = caught.value.report
+    assert report["refused"] is True
+    assert report["reason"] == "worktree.expected_branch"
+    assert report["truth_assessed"] is False
+    assert any(
+        item["id"] == "worktree.expected_branch" and item["level"] == "error"
+        for item in report["preflight"]["checks"])
+
+
+def test_unresolved_conflicts_refuse(tmp_path):
+    repo = _init_repo(tmp_path / "merge")
+    (repo / "src").mkdir()
+    (repo / "src" / "app.py").write_text("line = 0\n", encoding="utf-8")
+    base = _commit(repo, "base")
+    _git(repo, "checkout", "-q", "-b", "other")
+    (repo / "src" / "app.py").write_text("line = 2\n", encoding="utf-8")
+    _commit(repo, "other")
+    _git(repo, "checkout", "-q", "main")
+    (repo / "src" / "app.py").write_text("line = 1\n", encoding="utf-8")
+    _commit(repo, "main")
+    merged = _git(repo, "merge", "other", check=False)
+    assert merged.returncode != 0
+
+    with pytest.raises(R.PreflightError) as caught:
+        R.review_diff(repo, base=base, head="HEAD")
+    checks = caught.value.report["preflight"]["checks"]
+    assert any(item["id"] == "worktree.conflicts" and item["level"] == "error"
+               for item in checks)
+    assert any(item["id"] == "worktree.operation" and item["level"] == "error"
+               for item in checks)
+
+
+def test_resource_shortfall_refuses(review_repo, monkeypatch):
+    def refused(*_args, **_kwargs):
+        return {
+            "ok": False,
+            "reason": "insufficient_memory",
+            "requested": {"memory_mb": 4096, "disk_mb": 0},
+            "shortfall": {"memory_mb": 3000, "disk_mb": 0},
+            "suggestions": ["stop job j-1", "retry in about 90 s"],
+            "checks": [],
+        }
+
+    monkeypatch.setattr(R.resources, "check_admission", refused)
+    with pytest.raises(R.PreflightError) as caught:
+        R.review_range(review_repo["repo"], review_repo["range"])
+    report = caught.value.report
+    assert report["reason"] == "resources.admission"
+    assert report["resources"]["ok"] is False
+    assert report["resources"]["shortfall"]["memory_mb"] == 3000
+    assert any(
+        item["id"] == "resources.admission" and item["level"] == "error"
+        for item in report["preflight"]["checks"])
+
+
+# --------------------------------------------------------------------------- #
+# CLI
+# --------------------------------------------------------------------------- #
+
+
+def test_cli_json_packet_and_exit_codes(review_repo, capsys):
+    repo = review_repo["repo"]
+    args = ["--root", str(repo), "--range", review_repo["range"], "--json"]
+
+    code = CLI.main([*args, "--fail-on", "never"])
+    captured = capsys.readouterr()
+    packet = json.loads(captured.out)
+    assert code == 0
+    assert packet["schema"] == R.PACKET_SCHEMA
+    assert packet["truth_assessed"] is False
+    assert packet["findings"]
+
+    code = CLI.main(args)
+    capsys.readouterr()
+    assert code == 1
+
+    code = CLI.main(["--root", str(repo), "--range", review_repo["range"],
+                     "--fail-on", "never"])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "truth_assessed: false" in captured.out
+    assert "findings:" in captured.out
+
+
+def test_cli_out_is_atomic(review_repo, tmp_path, capsys):
+    out = tmp_path / "packet.json"
+    code = CLI.main([
+        "--root", str(review_repo["repo"]), "--range", review_repo["range"],
+        "--json", "--fail-on", "never", "--out", str(out),
+    ])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert json.loads(out.read_text(encoding="utf-8"))["schema"] == \
+        R.PACKET_SCHEMA
+    assert captured.out.strip() == out.read_text(encoding="utf-8").strip()
+    assert not list(tmp_path.glob(".packet.json.*.tmp"))
+
+
+def test_cli_usage_and_refusal_errors(review_repo, tmp_path, capsys):
+    repo = review_repo["repo"]
+    code = CLI.main(["--root", str(repo), "--range", "bad"])
+    captured = capsys.readouterr()
+    assert code == 2
+    assert "error:" in captured.err
+
+    code = CLI.main([
+        "--root", str(repo), "--range", review_repo["range"],
+        "--graph", str(tmp_path / "missing.json"),
+    ])
+    capsys.readouterr()
+    assert code == 2
+
+    code = CLI.main([
+        "--root", str(tmp_path / "not-a-repo"), "--range",
+        review_repo["range"],
+    ])
+    capsys.readouterr()
+    assert code == 2
+
+    (repo / "ozagia" / "worktrees.toml").write_text(
+        "[worktrees.review]\n"
+        'path = "."\n'
+        'branch = "feat/other"\n',
+        encoding="utf-8",
+    )
+    code = CLI.main([
+        "--root", str(repo), "--range", review_repo["range"], "--json",
+    ])
+    captured = capsys.readouterr()
+    assert code == 2
+    refusal = json.loads(captured.out)
+    assert refusal["refused"] is True
+    assert refusal["reason"] == "worktree.expected_branch"
+
+
+# --------------------------------------------------------------------------- #
+# optional injected review
+# --------------------------------------------------------------------------- #
+
+
+def test_review_does_not_use_network(review_repo, monkeypatch):
+    import socket
+
+    def blocked(*_args, **_kwargs):
+        raise AssertionError("network access attempted")
+
+    monkeypatch.setattr(socket, "create_connection", blocked)
+    monkeypatch.setattr(socket.socket, "connect", blocked, raising=False)
+    packet = R.review_range(
+        review_repo["repo"], review_repo["range"], max_file_bytes=1024)
+    assert packet["model_review"]["status"] == "not_run"
+    assert packet["truth_assessed"] is False
+
+
+def test_injected_review_is_unverified(review_repo):
+    packet = R.review_range(
+        review_repo["repo"], review_repo["range"], max_file_bytes=1024)
+    before = len(packet["findings"])
+    seen: list[dict[str, Any]] = []
+
+    def runner(value):
+        seen.append(dict(value))
+        return [{
+            "type": "missing_test",
+            "severity": "major",
+            "file": "src/newmod.py",
+            "line": 1,
+            "message": "injected reviewer thinks a test is missing",
+            "evidence": ["injected prompt output"],
+        }]
+
+    result = R.run_injected_review(packet, runner)
+    assert seen and seen[0]["truth_assessed"] is False
+    assert len(packet["findings"]) == before
+    assert result["truth_assessed"] is False
+    assert result["model_review"]["status"] == "injected"
+    assert result["model_review"]["findings"] == 1
+    model = [item for item in result["findings"]
+             if item.get("source") == "model"]
+    assert len(model) == 1
+    assert model[0]["id"].startswith("CR-")
+    assert "unverified" in model[0]["confidence_note"]
