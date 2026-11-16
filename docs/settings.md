@@ -91,10 +91,13 @@ legacy file leaves unset, key by key. `ozagia.config.config_path()` returns
 the legacy file when present, else `ozagia/config.toml`;
 `ozagia.config.config_sources()` reports both paths, which one is active
 (`legacy` or `repo`), their precedence and the files that supplied the loaded
-configuration. `ozagia doctor` reports the same information in its `config`
-section (JSON and the Python API; the text summary keeps its existing
-path/valid line) and lists the first 20 keys from the registry file that the
-project loader did not map.
+configuration. `ozagia.config.load_config_section(root, section)` returns one
+named table merged the same way, with the source of every key and both paths;
+it is uncached, so an edit is visible on the next call. `ozagia doctor`
+reports the same information in its `config` section (JSON and the Python
+API). The text summary names both paths, the active source, the precedence
+and a bounded unmapped count; when the list is truncated it shows
+`20 of 25…` without printing key names or values.
 
 `$OZAGIA_CONFIG` may name either file. When it names the versioned file of the
 same root it keeps the registry schema; when it names a config from another
@@ -122,18 +125,23 @@ descriptions. `testing.captured` is reduced to the two selectors the captured
 executor implements: `affected` and `smoke` mean `affected`; `none`, `off`,
 `package` and `all` mean `all`.
 
-Everything else stays with its own module: `security.*` belongs to
-`ozagia.core.security` (which still reads `[security]` from `.ozagia.toml`),
+`[security]` is consumed by `ozagia.core.security` from either file (legacy
+wins per key) through `ozagia.config.load_config_section`; its supported keys
+are not reported as unmapped. Everything else stays with its own module:
 `hints.*` is read by `ozagia.core.library_hints`, `models.*` by
 `ozagia.core.models`, and the `ui`, `resources`, `worktrees`, `markdown`,
 `files` and `tasks` groups by their modules. The project loader reports those
 keys in `ProjectConfig.unmapped` (and doctor lists them) instead of silently
-ignoring or copying them. The same applies to legacy sections owned by another
-module, such as `[security]`: they are reported and left in place.
+ignoring or copying them. The same applies to other legacy sections owned by
+another module, such as `[hints]`: they are reported and left in place.
+Unknown and nested `[security]` keys are reported the same way, while the
+supported security keys are accepted from either file.
 
 Invalid values in `ozagia/config.toml` are a `ConfigError` that names the file,
 for example `/repo/ozagia/config.toml: source_dirs entry '../outside' must be
-inside the root`.
+inside the root`. This includes a supported `[security]` key with the wrong
+type. A malformed legacy file stays forgiving for `ozagia.core.security`
+(defaults and no crash); see `docs/security.md`.
 
 Example: keep the legacy graph scope and move the rest of the project config
 into the versioned file.
@@ -163,6 +171,10 @@ python = "ruff"
 [jobs]
 enabled = true
 
+[security]
+block_secrets = false
+secret_allowlist = ["path:tests/fixtures/**"]
+
 [iac]
 roots = ["infra"]
 
@@ -176,8 +188,11 @@ library = "strict"
 `load_project_config()` uses `src` from the legacy file, `tests`/`spec`,
 `docs`, the memory skip, testing, lint, jobs, IaC and review values from the
 versioned file, and reports `hints` in `unmapped` (the hints module reads it).
-`config_path()` returns `.ozagia.toml`; `config_sources()` reports both files
-with `precedence == ("legacy", "repo")`.
+`ozagia.core.security.load_config()` reads `block_secrets` and
+`secret_allowlist` from the versioned `[security]` table because the legacy
+file does not define them. `config_path()` returns `.ozagia.toml`;
+`config_sources()` reports both files with
+`precedence == ("legacy", "repo")`.
 
 ### Environment overrides
 
@@ -243,7 +258,10 @@ from the other index settings when they are not set explicitly.
 
 `adapters.modules` holds `module:attr` names. Reading the setting never
 imports them; the existing adapter loader still imports only when a caller
-asks it to.
+asks it to. `ozagia.adapters.registry` reloads when either configuration file
+changes (path, `mtime_ns`, size and content digest of the legacy file and
+`ozagia/config.toml`, plus `$OZAGIA_ADAPTERS`), so editing the non-active file
+takes effect on the next call. `reload=True` still forces a rebuild.
 
 ### reads
 
@@ -385,6 +403,19 @@ start anything.
 installed or run by setting it. `security.fail_on` is `blocking`, `high`,
 `medium`, `low` or `never`. `security.secret_allowlist` accepts `path:`,
 `rule:` and `sha256:` entries and never contains the secret value.
+
+`ozagia.core.security` reads `[security]` from both files with
+`ozagia.config.load_config_section`: the legacy `.ozagia.toml`/state/env file
+wins for every key it defines and `ozagia/config.toml` fills the rest.
+`load_config()` returns the effective values plus `sources` (per key), `files`
+(both paths), and `error`/`errors` (`legacy_error` and `repo_error` name the
+offending file). A malformed legacy file stays forgiving: its values are
+skipped and the defaults or the valid versioned values apply. A malformed or
+invalid versioned file is reported instead of silently ignored, and
+`load_config_strict()` raises `ConfigError`; the normal scan still completes
+and includes the error in `config.error`, `config.errors` and its warnings.
+`max_findings` is capped at 1000 by the security loader even though the
+registry accepts up to 10000.
 
 ### iac
 
@@ -700,9 +731,9 @@ step and is safe only after checking the migration report:
 
 - `[environments]`, `[services]`, `[relays]` and `[runtime]` are still legacy
   project models and are not part of the registry yet.
-- `ozagia.core.security` still reads `[security]` from `.ozagia.toml` directly;
-  deleting the file would drop the commit/push secret policy until that loader
-  moves to the registry.
+- `ozagia.core.security` reads `[security]` from both files with legacy
+  precedence, so the migrated `[security]` table keeps working after the legacy
+  file is removed.
 - Any `unmapped` or `unknown` entry stays in `.ozagia.toml` by design.
 
 When both files define a supported key, the legacy value wins and the
@@ -725,10 +756,11 @@ Example JSON shape:
 The migration is not a replacement for the existing loaders, but the project
 loader now reads the migrated file: `ozagia.config` merges
 `ozagia/config.toml` under `.ozagia.toml` for the graph, index, memory,
-adapters, reads, tests, lint, jobs, IaC and review. The legacy file is kept and
-keeps priority so behaviour does not change during the transition; security,
-hints, models and the legacy project-model sections still need their existing
-files and loaders.
+adapters, reads, tests, lint, jobs, IaC and review, and
+`ozagia.core.security` reads `[security]` from both with legacy precedence. The
+legacy file is kept and keeps priority so behaviour does not change during the
+transition; hints, models and the legacy project-model sections still need
+their existing files and loaders.
 
 ## JSON shapes
 
@@ -771,9 +803,10 @@ moved yet:
 
 - `.ozagia.toml` and `ozagia/config.toml` are both read by
   `ozagia.config.load_project_config` for the index, memory, adapters, reads,
-  jobs, tests, lint, IaC and review layers. The legacy file keeps priority for
-  every key it defines; the registry file supplies the remaining supported
-  keys. `ozagia config migrate` copies the registry subset into
+  jobs, tests, lint, IaC and review layers, and by
+  `ozagia.core.security.load_config` for `[security]`. The legacy file keeps
+  priority for every key it defines; the registry file supplies the remaining
+  supported keys. `ozagia config migrate` copies the registry subset into
   `ozagia/config.toml` and keeps the legacy file.
 - `ozagia.core.resources` still reads `ozagia/resources.toml` or `[resources]`
   from `ozagia/config.toml`. The canonical registry locations match its nested
@@ -796,17 +829,21 @@ moved yet:
 - `ozagia.core.library_hints` reads the `hints` group on each handled edit and
   write (with `$OZAGIA_LIBRARY_HINTS=0` as a hard local opt-out); the daemon
   sums its `meta` counters.
-- `ozagia.core.security` still reads `[security]` from `.ozagia.toml`. The
-  registry validates and migrates the same keys into `ozagia/config.toml`,
-  and the legacy file is kept, so the commit/push gate keeps using the
-  existing loader until it is switched to the registry.
+- `ozagia.core.security` reads `[security]` from both `.ozagia.toml` and
+  `ozagia/config.toml` through `ozagia.config.load_config_section`, with the
+  legacy file winning per key. A malformed legacy file is forgiving; an
+  invalid versioned file is reported (`load_config`) or raised
+  (`load_config_strict`), so the commit/push gate and scans never silently
+  ignore a broken versioned `[security]` table.
 - `ozagia doctor` reports a `settings` section: the active user/repository/
   state paths, registry validity and the first error, per-source counts, and a
   bounded list of non-default keys. Its `config` section reports the legacy
   and versioned project-config paths, the active source and precedence, and the
-  first 20 versioned-config keys the project loader did not map. A broken
-  settings file is reported there and does not change doctor's exit status,
-  which still follows the root and project-config validity.
+  first 20 versioned-config keys the project loader did not map. The text
+  `Config:` line names both paths, the active source, precedence and a bounded
+  unmapped count (`20 of 25…` when truncated). A broken settings file is
+  reported there and does not change doctor's exit status, which still follows
+  the root and project-config validity.
 - `ozagia config migrate` handles the legacy `.ozagia.toml` file. It is
   preview-first (dry run by default), applies only with the preview token,
   never deletes the legacy file and reports unknown, unmapped, conflicting
@@ -818,7 +855,7 @@ moved yet:
 ```bash
 PYTHONPATH=src python -m pytest -q tests/test_config.py \
   tests/test_settings.py tests/test_models.py tests/test_testing.py \
-  tests/test_doctor.py tests/test_affected_tests.py tests/test_cli.py \
-  tests/test_hooks.py
+  tests/test_doctor.py tests/test_security.py tests/test_adapters.py \
+  tests/test_affected_tests.py tests/test_cli.py tests/test_hooks.py
 ruff check src tests
 ```

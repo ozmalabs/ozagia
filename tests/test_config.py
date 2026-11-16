@@ -16,6 +16,7 @@ from ozagia.config import (
     clear_config_cache,
     config_path,
     config_sources,
+    load_config_section,
     load_project_config,
     repo_config_path,
     state_path,
@@ -171,6 +172,69 @@ def test_config_sources_report_both_files_and_the_active_one(
     sources = config_sources(state_root)
     assert sources.active == state and sources.active_kind == "legacy"
     assert sources.legacy_kind == "state"
+
+
+def test_load_config_section_merges_by_key_with_per_key_sources(
+        tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    legacy = _write(root / ".ozagia.toml", """
+[security]
+enabled = false
+fail_on = "low"
+""")
+    repo = _write_repo_config(root, """
+[security]
+enabled = true
+block_secrets = false
+tools = ["bandit"]
+""")
+    section = load_config_section(root, "security")
+    assert section.name == "security"
+    assert section.values == {
+        "enabled": False, "fail_on": "low",
+        "block_secrets": False, "tools": ["bandit"],
+    }
+    assert section.sources == {
+        "enabled": "legacy", "fail_on": "legacy",
+        "block_secrets": "repo", "tools": "repo",
+    }
+    assert section.source_of("enabled") == "legacy"
+    assert section.source_of("missing") is None
+    assert section.legacy == legacy.resolve()
+    assert section.repo == repo.resolve()
+    assert section.values_by_source == {
+        "repo": {"enabled": True, "block_secrets": False,
+                 "tools": ["bandit"]},
+        "legacy": {"enabled": False, "fail_on": "low"},
+    }
+    assert section.errors == ()
+
+    # Read-only and uncached: an edit is visible on the next call.
+    legacy.write_text('[security]\nenabled = true\n', encoding="utf-8")
+    again = load_config_section(root, "security")
+    assert again.values["enabled"] is True
+    assert again.sources["enabled"] == "legacy"
+
+
+def test_load_config_section_reports_malformed_files_without_raising(
+        tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    legacy = _write(root / ".ozagia.toml", "[security]\nenabled = false\n")
+    repo = _write_repo_config(root, "[security\n")
+    section = load_config_section(root, "security")
+    assert section.values == {"enabled": False}
+    assert section.sources == {"enabled": "legacy"}
+    assert [error.kind for error in section.errors] == ["repo"]
+    assert section.errors[0].path == repo.resolve()
+    assert "Expected" in section.errors[0].message
+
+    repo.write_text("[security]\nblock_secrets = false\n", encoding="utf-8")
+    legacy.write_text("[security\n", encoding="utf-8")
+    section = load_config_section(root, "security")
+    assert section.values == {"block_secrets": False}
+    assert [error.kind for error in section.errors] == ["legacy"]
 
 
 def test_env_config_at_the_versioned_path_keeps_the_registry_schema(
@@ -436,8 +500,9 @@ skip_globs = ["*.backup"]
         False, 5.0, "off")
     assert cfg.review_layers == ("src/core", "src/api")
     assert cfg.iac_roots == ("infra",)
-    assert cfg.unmapped == ((
-        "security", "owned by ozagia.core.security (still reads .ozagia.toml)"),)
+    # `[security]` is consumed by ozagia.core.security from either file, so
+    # its supported keys are no longer reported as unmapped.
+    assert cfg.unmapped == ()
 
     # The migration output is also the whole config when the legacy file goes.
     legacy.unlink()
@@ -516,16 +581,19 @@ paths = ["envs/dev"]
     cfg = load_project_config(tmp_path)
     keys = {key for key, _ in cfg.unmapped}
     assert {
-        "security", "hints", "models", "ui", "testing.mode",
+        "hints", "models", "ui", "testing.mode",
         "review.min_reviewers", "index.color", "iac.remote_states",
         "environments",
     } <= keys
+    # `[security]` is read by its own module from both files now.
+    assert "security" not in keys
+    assert not {key for key in keys if key.startswith("security.")}
     # Unmapped values are reported, never applied to ProjectConfig.
     assert cfg.jobs_enabled is False
     assert cfg.review_layers == ()
 
 
-def test_legacy_owned_sections_are_reported_not_rejected(
+def test_legacy_security_keys_are_supported_and_unknown_ones_reported(
         tmp_path: Path) -> None:
     _write(tmp_path / ".ozagia.toml", """
 [index]
@@ -533,11 +601,48 @@ source_dirs = ["src"]
 
 [security]
 block_secrets = false
+not_a_setting = true
+
+[security.nested]
+key = "value"
 """)
     cfg = load_project_config(tmp_path)
     assert cfg.source_dirs == ("src",)
-    assert cfg.unmapped == ((
-        "security", "owned by ozagia.core.security (still reads .ozagia.toml)"),)
+    assert cfg.unmapped == (
+        ("security.nested", "nested table is not mapped"),
+        ("security.not_a_setting", "not a supported security setting"),
+    )
+
+
+def test_versioned_security_keys_are_validated_but_not_mapped(
+        tmp_path: Path) -> None:
+    _write_repo_config(tmp_path, """
+[security]
+enabled = false
+tools = ["bandit"]
+allow_network = true
+fail_on = "low"
+exclude = ["vendor/**"]
+max_findings = 500
+block_secrets = false
+secret_allowlist = ["rule:generic_high_entropy"]
+
+[security.extra]
+key = "value"
+""")
+    cfg = load_project_config(tmp_path)
+    # The supported keys belong to ozagia.core.security, not ProjectConfig.
+    assert {key for key, _ in cfg.unmapped} == {"security.extra"}
+
+    _write_repo_config(tmp_path, """
+[security]
+enabled = "yes"
+""")
+    clear_config_cache()
+    with pytest.raises(ConfigError) as excinfo:
+        load_project_config(tmp_path)
+    assert "[security] enabled" in str(excinfo.value)
+    assert "true or false" in str(excinfo.value)
 
 
 def test_cache_invalidation_includes_content_digests_for_both_files(

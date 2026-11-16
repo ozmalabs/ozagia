@@ -170,6 +170,32 @@ def test_doctor_reports_both_config_paths_precedence_and_unmapped(
     assert config["unmapped_truncated"] is False
     assert CONFIG_UNMAPPED_LIMIT >= 1
 
+    # Text mode names both files, the active one, precedence and the count.
+    assert cli.main(["doctor", "--root", str(tmp_path)]) == 0
+    text = capsys.readouterr().out
+    assert f"legacy={legacy.resolve()}" in text
+    assert f"repo={repo.resolve()}" in text
+    assert "active=legacy" in text
+    assert "precedence=legacy > repo" in text
+    assert "unmapped=1" in text
+    assert "strict" not in text and "vendor" not in text
+
+
+def test_doctor_text_reports_a_missing_repo_config(
+        tmp_path, monkeypatch, capsys):
+    _isolate_settings(tmp_path, monkeypatch)
+    legacy = tmp_path / ".ozagia.toml"
+    legacy.write_text('[index]\nsource_dirs = ["src"]\n', encoding="utf-8")
+    repo = tmp_path / "ozagia" / "config.toml"
+
+    assert cli.main(["doctor", "--root", str(tmp_path)]) == 0
+    text = capsys.readouterr().out
+    assert f"legacy={legacy.resolve()}" in text
+    assert f"repo={repo.resolve()} (missing)" in text
+    assert "active=legacy" in text
+    assert "precedence=legacy" in text
+    assert "unmapped=0" in text
+
 
 def test_doctor_active_source_is_the_versioned_config_without_a_legacy_file(
         tmp_path, monkeypatch, capsys):
@@ -205,6 +231,15 @@ def test_doctor_bounds_the_unmapped_config_keys(
     assert len(config["unmapped"]) == CONFIG_UNMAPPED_LIMIT
     assert config["unmapped_count"] == CONFIG_UNMAPPED_LIMIT + 5
     assert config["unmapped_truncated"] is True
+
+    assert cli.main(["doctor", "--root", str(tmp_path)]) == 0
+    text = capsys.readouterr().out
+    assert (f"unmapped={CONFIG_UNMAPPED_LIMIT} of "
+            f"{CONFIG_UNMAPPED_LIMIT + 5}…") in text
+    # The Config line is bounded: no unmapped key names or values are dumped.
+    config_line = next(line for line in text.splitlines()
+                       if line.startswith("Config:"))
+    assert "unknown_0" not in config_line
 
 
 def test_doctor_reports_an_invalid_versioned_config(tmp_path, monkeypatch,

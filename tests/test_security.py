@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 
 from ozagia import security_cli as CLI
+from ozagia.config import ConfigError
 from ozagia.core import code_review as CR
 from ozagia.core import repo_scan as RS
 from ozagia.core import security as S
@@ -161,6 +162,280 @@ def _finding(report: dict[str, Any], rule: str) -> dict[str, Any]:
 
 def _all_text(report: dict[str, Any]) -> str:
     return S.report_json(report) + S.format_report(report)
+
+
+# --------------------------------------------------------------------------- #
+# configuration: legacy and versioned [security]
+# --------------------------------------------------------------------------- #
+def _isolate_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in ("OZAGIA_CONFIG", "OZAGIA_ROOT", "OZAGIA_STATE_DIR"):
+        monkeypatch.delenv(name, raising=False)
+
+
+def _security_repo_config(root: Path, text: str) -> Path:
+    path = root / "ozagia" / "config.toml"
+    _write(path, text)
+    return path
+
+
+def _security_legacy_config(root: Path, text: str) -> Path:
+    path = root / ".ozagia.toml"
+    _write(path, text)
+    return path
+
+
+def test_security_config_defaults_without_a_file(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _isolate_config(monkeypatch)
+    config = S.load_config(tmp_path)
+    assert {
+        "enabled": config["enabled"],
+        "tools": config["tools"],
+        "allow_network": config["allow_network"],
+        "fail_on": config["fail_on"],
+        "exclude": config["exclude"],
+        "max_findings": config["max_findings"],
+        "block_secrets": config["block_secrets"],
+        "secret_allowlist": config["secret_allowlist"],
+    } == {
+        "enabled": True,
+        "tools": [],
+        "allow_network": False,
+        "fail_on": "high",
+        "exclude": list(S.DEFAULT_EXCLUDES),
+        "max_findings": S.DEFAULT_MAX_FINDINGS,
+        "block_secrets": True,
+        "secret_allowlist": [],
+    }
+    assert set(config["sources"].values()) == {"default"}
+    assert config["files"]["legacy"] is None
+    assert config["files"]["repo"] == str(
+        (tmp_path / "ozagia" / "config.toml").resolve())
+    assert config["error"] is None and config["errors"] == []
+
+
+def test_security_config_reads_the_versioned_file_only(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _isolate_config(monkeypatch)
+    path = _security_repo_config(tmp_path, """
+[security]
+enabled = false
+tools = ["bandit", "gitleaks"]
+allow_network = true
+fail_on = "medium"
+exclude = ["vendor/**", "generated/**"]
+max_findings = 5000
+block_secrets = false
+secret_allowlist = ["path:tests/fixtures/**", "rule:generic_high_entropy"]
+""")
+    config = S.load_config(tmp_path)
+    assert config["enabled"] is False
+    assert config["tools"] == ["bandit", "gitleaks"]
+    assert config["allow_network"] is True
+    assert config["fail_on"] == "medium"
+    assert config["exclude"] == ["vendor/**", "generated/**"]
+    # The versioned value is validated then capped like the legacy loader.
+    assert config["max_findings"] == S.MAX_FINDINGS
+    assert config["block_secrets"] is False
+    assert config["secret_allowlist"] == [
+        "path:tests/fixtures/**", "rule:generic_high_entropy"]
+    assert config["sources"] == {key: "repo" for key in S.SECURITY_KEYS}
+    assert config["files"] == {"legacy": None, "repo": str(path.resolve())}
+    assert config["error"] is None and config["repo_error"] is None
+    S.load_config_strict(tmp_path)  # no error
+
+
+def test_security_config_reads_the_legacy_file_only(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _isolate_config(monkeypatch)
+    path = _security_legacy_config(tmp_path, """
+[security]
+enabled = false
+tools = ["bandit", 3]
+allow_network = true
+fail_on = "MEDIUM"
+exclude = ["vendor/**", 4]
+max_findings = 5000
+block_secrets = false
+secret_allowlist = ["rule:generic_high_entropy", 5]
+""")
+    config = S.load_config(tmp_path)
+    # The legacy loader stays forgiving: bad entries are dropped, not fatal.
+    assert config["enabled"] is False
+    assert config["tools"] == ["bandit"]
+    assert config["allow_network"] is True
+    assert config["fail_on"] == "medium"
+    assert config["exclude"] == ["vendor/**"]
+    assert config["max_findings"] == S.MAX_FINDINGS
+    assert config["block_secrets"] is False
+    assert config["secret_allowlist"] == ["rule:generic_high_entropy"]
+    assert config["sources"] == {key: "legacy" for key in S.SECURITY_KEYS}
+    assert config["files"] == {"legacy": str(path.resolve()),
+                               "repo": str(
+                                   (tmp_path / "ozagia" / "config.toml").resolve())}
+    assert config["error"] is None
+
+
+def test_security_config_reads_the_env_and_state_legacy_files(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _isolate_config(monkeypatch)
+    root = tmp_path / "repo"
+    root.mkdir()
+    env_file = tmp_path / "other" / "cfg.toml"
+    _write(env_file, "[security]\nenabled = false\n")
+    monkeypatch.setenv("OZAGIA_CONFIG", str(env_file))
+    config = S.load_config(root)
+    assert config["enabled"] is False
+    assert config["sources"]["enabled"] == "legacy"
+    assert config["files"]["legacy"] == str(env_file.resolve())
+
+    monkeypatch.delenv("OZAGIA_CONFIG")
+    monkeypatch.setenv("OZAGIA_STATE_DIR", "state")
+    state_file = root / "state" / "config.toml"
+    _write(state_file, "[security]\nblock_secrets = false\n")
+    config = S.load_config(root)
+    assert config["block_secrets"] is False
+    assert config["sources"]["block_secrets"] == "legacy"
+    assert config["files"]["legacy"] == str(state_file.resolve())
+    assert config["error"] is None
+
+
+def test_security_config_legacy_wins_per_key(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _isolate_config(monkeypatch)
+    legacy = _security_legacy_config(tmp_path, """
+[security]
+enabled = true
+tools = ["bandit"]
+fail_on = "low"
+max_findings = 50
+""")
+    repo = _security_repo_config(tmp_path, """
+[security]
+enabled = false
+tools = ["gitleaks"]
+fail_on = "never"
+max_findings = 500
+exclude = ["vendor/**"]
+block_secrets = false
+secret_allowlist = ["path:tests/fixtures/**"]
+""")
+    config = S.load_config(tmp_path)
+    assert config["enabled"] is True
+    assert config["tools"] == ["bandit"]
+    assert config["fail_on"] == "low"
+    assert config["max_findings"] == 50
+    assert config["exclude"] == ["vendor/**"]
+    assert config["block_secrets"] is False
+    assert config["secret_allowlist"] == ["path:tests/fixtures/**"]
+    assert config["sources"] == {
+        "enabled": "legacy", "tools": "legacy", "fail_on": "legacy",
+        "max_findings": "legacy", "exclude": "repo",
+        "block_secrets": "repo", "secret_allowlist": "repo",
+        "allow_network": "default",
+    }
+    assert config["files"] == {"legacy": str(legacy.resolve()),
+                               "repo": str(repo.resolve())}
+    assert config["error"] is None and config["errors"] == []
+
+
+def test_security_config_malformed_legacy_file_is_forgiving(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _isolate_config(monkeypatch)
+    legacy = _security_legacy_config(tmp_path, "[security\n")
+    repo = _security_repo_config(tmp_path, """
+[security]
+enabled = false
+""")
+    config = S.load_config(tmp_path)
+    assert config["enabled"] is False
+    assert config["legacy_error"] is not None
+    assert str(legacy.resolve()) in config["legacy_error"]
+    assert config["repo_error"] is None
+    assert config["error"] == config["legacy_error"]
+    # Strict mode still only rejects a broken versioned config.
+    S.load_config_strict(tmp_path)
+
+    repo.unlink()
+    config = S.load_config(tmp_path)
+    assert config["enabled"] is True
+    assert config["legacy_error"] is not None
+    assert config["sources"]["enabled"] == "default"
+
+
+def test_security_config_malformed_versioned_file_is_reported(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _isolate_config(monkeypatch)
+    legacy = _security_legacy_config(tmp_path, """
+[security]
+enabled = false
+""")
+    repo = _security_repo_config(tmp_path, "[security\n")
+    config = S.load_config(tmp_path)
+    assert config["enabled"] is False  # the valid legacy value still applies
+    assert config["legacy_error"] is None
+    assert config["repo_error"] is not None
+    assert str(repo.resolve()) in config["repo_error"]
+    assert config["error"] == config["repo_error"]
+    assert config["errors"]
+    with pytest.raises(ConfigError, match="ozagia/config.toml"):
+        S.load_config_strict(tmp_path)
+    assert legacy.exists()
+
+
+@pytest.mark.parametrize("key, toml_value, message", [
+    ("enabled", '"yes"', "true or false"),
+    ("tools", '"bandit"', "list"),
+    ("allow_network", "1", "true or false"),
+    ("fail_on", '"loud"', "one of"),
+    ("exclude", '"tests/**"', "list"),
+    ("max_findings", "0", "between"),
+    ("block_secrets", '"false"', "true or false"),
+    ("secret_allowlist", '"rule:x"', "list"),
+])
+def test_security_config_invalid_versioned_values_are_reported(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        key: str, toml_value: str, message: str) -> None:
+    _isolate_config(monkeypatch)
+    _security_repo_config(
+        tmp_path, f"[security]\n{key} = {toml_value}\n")
+    config = S.load_config(tmp_path)
+    assert config["repo_error"] is not None
+    assert key in config["repo_error"]
+    assert message in config["repo_error"]
+    assert config["sources"][key] == "default"
+    with pytest.raises(ConfigError):
+        S.load_config_strict(tmp_path)
+
+
+def test_invalid_versioned_value_is_reported_even_when_legacy_wins(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _isolate_config(monkeypatch)
+    _security_legacy_config(tmp_path, "[security]\nenabled = true\n")
+    _security_repo_config(tmp_path, '[security]\nenabled = "yes"\n')
+    config = S.load_config(tmp_path)
+    assert config["enabled"] is True
+    assert config["sources"]["enabled"] == "legacy"
+    assert config["repo_error"] is not None
+    with pytest.raises(ConfigError):
+        S.load_config_strict(tmp_path)
+
+
+def test_security_config_ignores_unknown_and_nested_keys(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _isolate_config(monkeypatch)
+    _security_repo_config(tmp_path, """
+[security]
+enabled = false
+unknown = true
+
+[security.nested]
+key = "value"
+""")
+    config = S.load_config(tmp_path)
+    assert config["enabled"] is False
+    assert "unknown" not in config and "nested" not in config
+    assert config["error"] is None
 
 
 # --------------------------------------------------------------------------- #
