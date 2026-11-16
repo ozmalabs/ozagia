@@ -639,3 +639,226 @@ def test_hook_shares_the_intent_ref_moving_list():
     from ozagia.integrations import hookcore
     from ozagia.intent.shell import GIT_REF_MOVING
     assert hookcore.REF_MOVING_GIT is GIT_REF_MOVING
+
+
+# --------------------------------------------------------------------------- #
+# outside a repository: no autostart, no brief, nothing written
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def plain_dir(tmp_path, monkeypatch):
+    from ozagia.integrations import hookcore
+    for k in [k for k in os.environ if k.startswith("OZAGIA_")]:
+        monkeypatch.delenv(k)
+    d = tmp_path / "downloads"
+    d.mkdir()
+    (d / "notes.py").write_text("x = 1\n")
+    assert not hookcore.in_work_tree(d)
+    yield d
+    reply = autostart.ping(protocol.socket_path(d))
+    if reply is not None:  # the guard failed; do not leave a daemon behind
+        os.kill(reply["pid"], signal.SIGKILL)
+
+
+@pytest.mark.parametrize("payload", [
+    lambda d: base(d, "SessionStart", source="startup"),
+    lambda d: post(d, "Bash", {"command": "ls"}, "notes.py\n"),
+    lambda d: post(d, "apply_patch", {"command": PATCH}, "Success."),
+], ids=["SessionStart", "PostToolUse-Bash", "PostToolUse-apply_patch"])
+def test_non_git_cwd_starts_nothing(plain_dir, payload):
+    env = _env(None, autostart_on=True)
+    proc = run_hook(payload(plain_dir), sock=None, env=env, cwd=plain_dir)
+    assert proc.returncode == 0 and proc.stdout == "" and proc.stderr == ""
+    assert not (plain_dir / ".ozagia").exists()
+    assert autostart.ping(protocol.socket_path(plain_dir)) is None
+
+
+def test_autostart_allowed(plain_dir, repo, monkeypatch):
+    from ozagia.integrations import hookcore
+    assert not hookcore.autostart_allowed(plain_dir)
+    assert hookcore.ensure_daemon(plain_dir)["refused"] is True
+    assert hookcore.autostart_allowed(repo)
+    snap = plain_dir / ".ozagia" / hookcore.SNAPSHOT_NAME
+    snap.parent.mkdir()
+    snap.write_text("{}")
+    assert hookcore.autostart_allowed(plain_dir)
+    snap.unlink()
+    monkeypatch.setenv("OZAGIA_ROOT", str(plain_dir))
+    assert hookcore.autostart_allowed(plain_dir)
+
+
+# --------------------------------------------------------------------------- #
+# the hook's own timeout
+# --------------------------------------------------------------------------- #
+def test_alarm_leaves_margin_before_codex_timeout():
+    from ozagia.integrations import hookcore
+    assert hook.HOOK_ALARM_S + hook.BRIEF_ALARM_S < hook.HOOK_TIMEOUT_S
+    assert hookcore.AUTOSTART_BUDGET_S + hook.DAEMON_TIMEOUT_S < hook.HOOK_ALARM_S
+
+
+@pytest.fixture
+def clean_env(monkeypatch):
+    for k in [k for k in os.environ if k.startswith("OZAGIA_")]:
+        monkeypatch.delenv(k)
+
+
+def _run_main(payload):
+    import io
+    out = io.StringIO()
+    t0 = time.monotonic()
+    assert hook.main(io.StringIO(json.dumps(payload)), out) == 0
+    return out.getvalue(), time.monotonic() - t0
+
+
+def test_run_hook_timeout_prints_nothing_and_logs(repo, clean_env):
+    import io
+    from ozagia.integrations import hookcore
+    before = signal.getsignal(signal.SIGALRM)
+    out = io.StringIO()
+    t0 = time.monotonic()
+    rc = hookcore.run_hook(lambda p, r: time.sleep(5) or {"x": 1}, log_name=hook.LOG_NAME,
+                           timeout_s=1, stdin=io.StringIO(json.dumps(base(repo, "X"))),
+                           stdout=out)
+    assert rc == 0 and out.getvalue() == "" and time.monotonic() - t0 < 4
+    (entry,) = _log_lines(repo)
+    assert entry["error"].startswith("HookTimeout")
+    assert signal.getsignal(signal.SIGALRM) is before
+    assert signal.alarm(0) == 0
+
+
+def test_post_tool_use_timeout_during_autostart(repo, clean_env, monkeypatch):
+    from ozagia.integrations import hookcore
+    monkeypatch.setattr(hook, "HOOK_ALARM_S", 1)
+
+    def refused(*a, **k):
+        raise ConnectionRefusedError
+
+    monkeypatch.setattr(hookcore, "daemon_request", refused)
+    monkeypatch.setattr(hookcore, "ensure_daemon", lambda *a, **k: time.sleep(5))
+    out, took = _run_main(post(repo, "Bash", {"command": "ls"}, "x"))
+    assert out == "" and took < 4
+    (entry,) = _log_lines(repo)
+    assert entry["event"] == "PostToolUse" and entry["error"].startswith("HookTimeout")
+
+
+def test_session_start_keeps_an_alarm_after_a_swallowed_timeout(repo, clean_env,
+                                                                monkeypatch):
+    from ozagia.integrations import hookcore
+    monkeypatch.setattr(hook, "HOOK_ALARM_S", 1)
+    monkeypatch.setattr(hook, "BRIEF_ALARM_S", 1)
+    monkeypatch.setattr(hookcore, "ensure_daemon", lambda *a, **k: time.sleep(5))
+    monkeypatch.setattr(hook, "session_brief", lambda root: time.sleep(5) or "late")
+    out, took = _run_main(base(repo, "SessionStart", source="startup"))
+    assert out == "" and took < 4
+    entries = _log_lines(repo)
+    assert [e["error"].split(":")[0] for e in entries] == ["HookTimeout", "HookTimeout"]
+
+
+def test_session_start_brief_after_a_swallowed_timeout(repo, clean_env, monkeypatch):
+    from ozagia.integrations import hookcore
+    monkeypatch.setattr(hook, "HOOK_ALARM_S", 1)
+    monkeypatch.setattr(hookcore, "ensure_daemon", lambda *a, **k: time.sleep(5))
+    out, took = _run_main(base(repo, "SessionStart", source="startup"))
+    assert "[ozagia] session brief" in json.loads(out)["hookSpecificOutput"][
+        "additionalContext"]
+    assert took < 4
+
+
+def test_rearm_alarm_outside_run_hook_does_nothing():
+    from ozagia.integrations import hookcore
+    assert hookcore.rearm_alarm(5) is False
+    assert signal.alarm(0) == 0
+
+
+# --------------------------------------------------------------------------- #
+# config.toml: explicit [mcp_servers], refusals that name the line, no EOL
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("text", [
+    "[mcp_servers]\n",
+    '[mcp_servers]\n\n[mcp_servers.ozagia]\ncommand = "/old/python"\n',
+    'model = "o3"\n[mcp_servers]\n\n[mcp_servers.ozagia]\ncommand = "/old"\n\n'
+    '[profiles.work]\nmodel = "o3"\n',
+])
+def test_install_with_explicit_mcp_servers_header(tmp_path, text):
+    path = _config(tmp_path)
+    path.parent.mkdir()
+    path.write_text(text, encoding="utf-8")
+    inst.install(tmp_path, python="/opt/py/bin/python")
+    merged = path.read_text(encoding="utf-8")
+    data = tomllib.loads(merged)
+    assert data["mcp_servers"]["ozagia"]["command"] == "/opt/py/bin/python"
+    assert merged.startswith(text.split("[mcp_servers.ozagia]")[0])
+    inst.install(tmp_path, python="/opt/py/bin/python")
+    assert path.read_text(encoding="utf-8") == merged
+    inst.uninstall(tmp_path)
+    rest = tomllib.loads(path.read_text(encoding="utf-8"))
+    assert rest.get("mcp_servers", {}) == {}
+    assert rest.get("profiles", {}) == tomllib.loads(text).get("profiles", {})
+
+
+@pytest.mark.parametrize("text, line, why", [
+    ('[mcp_servers.ozagia]\ncommand = "x"\n\n[mcp_servers."a/b"]\ncommand = "y"\n',
+     4, 'line 4 (`[mcp_servers."a/b"]`) is a table header ozagia cannot read'),
+    ('[a]\ns = """\n[mcp_servers.ozagia]\n"""\n',
+     3, "multi-line string"),
+])
+def test_install_refusal_names_the_line(tmp_path, text, line, why):
+    path = _config(tmp_path)
+    path.parent.mkdir()
+    path.write_text(text, encoding="utf-8")
+    tomllib.loads(text)  # the file is valid
+    with pytest.raises(inst.SettingsError) as err:
+        inst.install(tmp_path, python="py")
+    msg = str(err.value)
+    assert "could not isolate its [mcp_servers.ozagia] table" in msg
+    assert why in msg
+    assert f"line {line}" in msg
+    assert path.read_text(encoding="utf-8") == text
+    assert not (tmp_path / ".codex" / "hooks.json").exists()
+    with pytest.raises(inst.SettingsError, match="could not isolate"):
+        inst.uninstall(tmp_path)
+    assert path.read_text(encoding="utf-8") == text
+
+
+@pytest.mark.parametrize("text", [
+    'model = "o3"', "# only a comment", '[profiles.work]\nmodel = "o3"',
+    'model = "o3"\r\n[profiles.work]\r\nmodel = "o3"',
+])
+def test_config_without_final_newline_round_trips(tmp_path, text):
+    path = _config(tmp_path)
+    path.parent.mkdir()
+    path.write_bytes(text.encode())
+    inst.install(tmp_path, python="py")
+    merged = path.read_bytes()
+    assert merged.startswith(text.encode() + b"\n")
+    assert inst.NO_EOL_TOML.encode() in merged
+    inst.install(tmp_path, python="py2")
+    assert tomllib.loads(path.read_text())["mcp_servers"]["ozagia"]["command"] == "py2"
+    assert inst.NO_EOL_TOML.encode() in path.read_bytes()
+    inst.uninstall(tmp_path)
+    assert path.read_bytes() == text.encode()
+
+
+@pytest.mark.parametrize("text", ['model = "o3"\n', 'model = "o3"\r\n[p]\r\nx = 1\r\n'])
+def test_config_with_final_newline_has_no_marker(tmp_path, text):
+    path = _config(tmp_path)
+    path.parent.mkdir()
+    path.write_bytes(text.encode())
+    inst.install(tmp_path, python="py")
+    assert path.read_bytes().startswith(text.encode())
+    assert inst.NO_EOL_TOML not in path.read_text(encoding="utf-8")
+    inst.uninstall(tmp_path)
+    assert path.read_bytes() == text.encode()
+
+
+@pytest.mark.parametrize("text", ["# Project\n\nRun `make test`.", "x", "a\n\nb"])
+def test_agents_without_final_newline_round_trips(tmp_path, text):
+    path = tmp_path / "AGENTS.md"
+    path.write_bytes(text.encode())
+    inst.install(tmp_path, python="py")
+    merged = path.read_bytes()
+    assert merged.startswith(text.encode() + b"\n\n" + inst.BEGIN.encode())
+    assert inst.NO_EOL_MD.encode() in merged
+    inst.install(tmp_path, python="py")
+    assert path.read_bytes() == merged
+    inst.uninstall(tmp_path)
+    assert path.read_bytes() == text.encode()

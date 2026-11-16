@@ -12,7 +12,13 @@ the locked file to the daemon it starts, which keeps it open for its whole
 life. So while a daemon started here is loading (or running), the lock is
 held: a second caller cannot take it and only waits for `ping`, and a
 caller that gets the lock pings again before starting anything. The lock
-goes away with the daemon process, however it ends.
+goes away with the daemon process, however it ends. `serve` takes the same
+lock itself (`--lock-fd` names the inherited descriptor), so a daemon
+started by hand or by a plugin holds it too while it loads, and a second
+`serve` exits at once instead of loading the graph again.
+
+The lock is `<state dir>/daemon.lock` for the root's default socket and
+`<socket>.lock` for any other socket (`lock_path`).
 
 The default idle timeout is `DEFAULT_IDLE_TIMEOUT_S` (30 minutes); 0 turns
 it off.
@@ -47,6 +53,18 @@ def ping(sock: str | Path, timeout: float = PING_TIMEOUT_S) -> dict[str, Any] | 
     except DaemonError:
         return None
     return reply if reply.get("ok") else None
+
+
+def lock_path(root: str | Path, sock: str | Path | None = None) -> Path:
+    """The lock file of the daemon for `root` on `sock` (default: the root's
+    socket): `<state dir>/daemon.lock` for the root's own socket, else
+    `<sock>.lock`, so daemons on separate sockets do not exclude each other."""
+    root_p = Path(root).resolve()
+    default = protocol.socket_path(root_p)
+    sock_p = Path(sock) if sock else default
+    if sock_p == default:
+        return state_path(root_p, LOCK_NAME)
+    return sock_p.with_name(sock_p.name + ".lock")
 
 
 def _try_lock(fd: int) -> bool:
@@ -93,9 +111,10 @@ def ensure(root: str | Path, *, wait_s: float = DEFAULT_WAIT_S,
     reply = ping(sock_p)
     if reply is not None:
         return {"ok": True, "started": False, "sock": str(sock_p), "pid": reply.get("pid")}
-    lock_p = state_path(root_p, LOCK_NAME)
+    lock_p = lock_path(root_p, sock_p)
     log_p = state_path(root_p, LOG_NAME)
     lock_p.parent.mkdir(parents=True, exist_ok=True)
+    log_p.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(lock_p, os.O_RDWR | os.O_CREAT, 0o600)
     try:
         while not _try_lock(fd):
@@ -113,17 +132,15 @@ def ensure(root: str | Path, *, wait_s: float = DEFAULT_WAIT_S,
             return {"ok": True, "started": False, "sock": str(sock_p),
                     "pid": reply.get("pid")}
         cmd = [python, "-m", "ozagia.daemon", "serve", "--root", str(root_p),
-               "--idle-timeout", f"{max(idle_timeout_s, 0.0):g}"]
+               "--idle-timeout", f"{max(idle_timeout_s, 0.0):g}", "--lock-fd", str(fd)]
         if sock:
             cmd += ["--sock", str(sock_p)]
         cmd += list(extra_args or [])
         env = {**os.environ, "OZAGIA_ROOT": str(root_p)}
-        os.ftruncate(fd, 0)
         with open(log_p, "ab") as log, open(os.devnull, "rb") as devnull:
             proc = subprocess.Popen(cmd, stdin=devnull, stdout=log, stderr=log,
                                     env=env, cwd=str(root_p), start_new_session=True,
                                     pass_fds=(fd,))
-        os.write(fd, f"{proc.pid}\n".encode())
     finally:
         # The child keeps its copy of the locked descriptor.
         os.close(fd)
@@ -138,4 +155,5 @@ def ensure(root: str | Path, *, wait_s: float = DEFAULT_WAIT_S,
             "reason": f"daemon not ready after {wait_s:g} s (still loading; log {log_p})"}
 
 
-__all__ = ["DEFAULT_IDLE_TIMEOUT_S", "LOCK_NAME", "LOG_NAME", "ensure", "ping"]
+__all__ = ["DEFAULT_IDLE_TIMEOUT_S", "LOCK_NAME", "LOG_NAME", "ensure", "lock_path",
+           "ping"]

@@ -52,13 +52,24 @@ What install does to each file:
   JSON, not an object, or whose `hooks` is not an object of lists is refused
   with an error, and nothing is written.
 - `config.toml`: adds or replaces only the `[mcp_servers.ozagia]` table (and
-  any `[mcp_servers.ozagia.*]` subtables). Every other byte stays the same:
-  the table is appended at the end, after one blank line, or written where
-  the old one was. The file is parsed with `tomllib` before and after, and
-  the edit is refused if anything outside the table would parse differently,
-  or if `mcp_servers.ozagia` is written as dotted keys or an inline table.
+  any `[mcp_servers.ozagia.*]` subtables). The table is appended at the end,
+  after one blank line, or written where the old one was. Every other byte
+  stays the same (CRLF line ends too), with one exception: if the file's
+  last line has no newline, install adds one before the table and says so in
+  a comment inside the table; uninstall takes that newline away again. The
+  file is parsed with `tomllib` before and after, and the edit is refused if
+  anything outside the table would parse differently (an empty
+  `[mcp_servers]` header counts as no `mcp_servers`), or if
+  `mcp_servers.ozagia` is written as dotted keys or an inline table. When
+  the line scanner cannot tell where ozagia's table ends (a header it cannot
+  read, such as `[mcp_servers."a/b"]`, after it, or a header-like line inside
+  a multi-line string), the error names the line.
 - `AGENTS.md`: adds or replaces the text between `<!-- ozagia:begin -->` and
-  `<!-- ozagia:end -->`.
+  `<!-- ozagia:end -->`, after one blank line. A missing final newline is
+  handled as in `config.toml`, with an HTML comment as the marker.
+
+So install followed by uninstall gives back the original bytes of
+`config.toml` and `AGENTS.md`.
 
 All three are checked before any is written. Running install again changes
 nothing, or only what differs (for example a new `--python`).
@@ -118,14 +129,25 @@ meanwhile come back without context. Start it ahead with
 `ozagia daemon ensure --root <project>`. Set `OZAGIA_DAEMON_AUTOSTART=0` to
 turn autostart off.
 
+A hook starts a daemon only when the session's root is a git work tree,
+`OZAGIA_ROOT` is set, or the root already has a graph snapshot
+(`<state dir>/graph.json`). In any other directory (`$HOME`, `/tmp`, a
+download folder; this matters for a user-scope install) the hooks start
+nothing, write nothing, and `SessionStart` prints no brief.
+
 Two hooks that start at the same moment start one daemon: the starter holds
 a lock on `<state dir>/daemon.lock`, and the daemon keeps it for its life.
+`ozagia daemon serve` takes the same lock itself before it loads the
+snapshot, so a daemon started by hand or by the OpenCode plugin holds it
+too, and a second `serve` for the same socket exits at once with an error
+instead of loading the graph again. (A daemon on a socket other than the
+root's default locks `<socket>.lock` instead.)
 
 ## What each hook does
 
 | Codex event | hook | what ozagia does | what Codex gets |
 |---|---|---|---|
-| `SessionStart` (every `source`) | brief | Starts the daemon if needed (waits at most 0.5 s, not for the snapshot load), and lists the dirty files (`git status --porcelain`, at most 15), the last 3 commits, and the ozagia MCP tools to prefer. At most 1,500 characters. | `additionalContext` |
+| `SessionStart` (every `source`) | brief | In a git work tree only: starts the daemon if needed (waits at most 0.5 s, not for the snapshot load), and lists the dirty files (`git status --porcelain`, at most 15), the last 3 commits, and the ozagia MCP tools to prefer. At most 1,500 characters. | `additionalContext` |
 | `PreToolUse` `Bash` with a ref-moving git command | refusal | Refuses it locally, without the daemon, with the intent layer's check (`ozagia.intent.shell.classify` is `git_refs`; see docs/claude_code.md for the list and the parsing). Listing forms (`git branch`, `git tag -l`, `git stash list`) are allowed. | `permissionDecision: "deny"` with a reason |
 | `PostToolUse` `Bash` | `after` as `shell` | Sends `{command, workdir: cwd}` and the command's output. The daemon maps pytest runs to test keys, re-ingests files the command changed, and maps `git diff`/`git show` hunks to node keys. | `additionalContext` with the daemon's `append`, when not empty |
 | `PostToolUse` `apply_patch` | `after` as `patch` | Sends `{patch: <patch text>}`; the daemon re-ingests the changed files. | the graph delta (`[ozagia] delta: ...`) as `additionalContext` |
@@ -141,8 +163,12 @@ hook); on PostToolUse and SessionStart `hookSpecificOutput.additionalContext`.
 Failures never block the agent. If the daemon is down, slow or returns an
 error, or the hook input is malformed, the hook prints nothing and exits 0,
 and appends one JSON line (`ts`, `event`, `tool`, `session`, `error`) to
-`<state dir>/codex_hook.log`. A daemon request has 15 s; the hook stops
-itself at 20 s, its `timeout` in `hooks.json`. The hook never exits 2.
+`<state dir>/codex_hook.log`. Codex's handler `timeout` in `hooks.json` is
+20 s (`HOOK_TIMEOUT_S`); the hook stops itself earlier, at 15 s
+(`HOOK_ALARM_S`), so Codex never has to kill it. Autostart waits at most
+3 s and a daemon request has 10 s. If the alarm fires while `SessionStart`
+starts the daemon, the brief still gets 3 s (`BRIEF_ALARM_S`) before the
+hook gives up. The hook never exits 2.
 
 ## Uninstall
 

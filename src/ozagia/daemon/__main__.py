@@ -46,6 +46,7 @@ def main(argv: list[str] | None = None) -> int:
                    help="shut down when this process (the harness) is gone")
     s.add_argument("--idle-timeout", type=float, default=None, metavar="S",
                    help="shut down after S seconds without a request (default: never)")
+    s.add_argument("--lock-fd", type=int, default=None, help=argparse.SUPPRESS)
     e = sub.add_parser("ensure", help="start the daemon detached unless one answers")
     e.add_argument("--root", default=None)
     e.add_argument("--sock", default=None)
@@ -69,7 +70,7 @@ def main(argv: list[str] | None = None) -> int:
             return serve(root, dump=args.dump, journal=args.journal,
                          sock=args.sock, build_if_missing=not args.no_build,
                          parent_pid=args.parent_pid,
-                         idle_timeout=args.idle_timeout)
+                         idle_timeout=args.idle_timeout, lock_fd=args.lock_fd)
         except (DaemonStartError, FileNotFoundError) as e:
             print(f"error: {e}", file=sys.stderr)
             return 2

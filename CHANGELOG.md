@@ -11,7 +11,9 @@
   runs the hooks after you trust them in `/hooks`. See docs/codex.md.
 - `ozagia daemon ensure` starts the graph daemon detached when none answers,
   with an idle timeout (`serve --idle-timeout S`, 30 minutes when started by
-  `ensure`). The Codex hooks call it on demand.
+  `ensure`). The Codex hooks call it on demand, and only for a git work
+  tree, `$OZAGIA_ROOT` or a root with a graph snapshot. `serve` takes the
+  daemon lock itself and exits at once when another daemon holds it.
 - The generic parts of the Claude Code hook moved to
   `ozagia.integrations.hookcore`.
 - Daemon stats count requests by harness (`by_harness`).

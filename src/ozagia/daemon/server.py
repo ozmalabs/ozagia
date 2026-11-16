@@ -514,6 +514,50 @@ def _clear_stale(sock: Path) -> None:
     raise DaemonStartError(f"a daemon already answers on {sock}")
 
 
+def _take_lock(root: Path, sock: Path, lock_fd: int | None) -> int:
+    """Hold the daemon lock (`ozagia.daemon.autostart.lock_path`) for this
+    process's life and return its descriptor: `lock_fd` when the starter
+    handed over the locked file, else a new one. Raise `DaemonStartError`
+    when another process holds it (a daemon loading, running or writing its
+    snapshot on the way out)."""
+    import fcntl
+
+    from ozagia.daemon.autostart import lock_path
+    lock_p = lock_path(root, sock)
+    if lock_fd is None:
+        lock_p.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(lock_p, os.O_RDWR | os.O_CREAT, 0o600)
+    else:
+        fd = lock_fd
+    try:
+        # On an inherited descriptor this succeeds: the lock is on the
+        # shared open file, which the starter already locked.
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        try:
+            holder = os.pread(fd, 32, 0).decode(errors="replace").strip()
+        except OSError:
+            holder = ""
+        if lock_fd is None:
+            os.close(fd)
+        # Only ask; the holder's socket is its own to remove.
+        from ozagia.daemon.client import DaemonClient, DaemonError
+        try:
+            with DaemonClient(sock, timeout=STALE_PING_TIMEOUT_S) as c:
+                c.ping()
+        except DaemonError:
+            pass
+        else:
+            raise DaemonStartError(f"a daemon already answers on {sock}") from None
+        pid = f" (pid {holder})" if holder.isdigit() else ""
+        raise DaemonStartError(
+            f"another daemon for {root} holds {lock_p}{pid}: it is loading, "
+            "running or shutting down; not starting a second one") from None
+    os.ftruncate(fd, 0)
+    os.pwrite(fd, f"{os.getpid()}\n".encode(), 0)
+    return fd
+
+
 def _parent_gone(parent_pid: int) -> bool:
     if os.getppid() != parent_pid:
         return True
@@ -550,19 +594,38 @@ def serve(root: str | Path, *, dump: str | Path | None = None,
           journal: str | Path | None = None, sock: str | Path | None = None,
           build_if_missing: bool = True, ready_stream: Any = None,
           parent_pid: int | None = None,
-          idle_timeout: float | None = None) -> int:
+          idle_timeout: float | None = None, lock_fd: int | None = None) -> int:
     """Run the daemon until shutdown; returns an exit code. With
     `parent_pid`, it also shuts down once that process is no longer its
     parent or no longer exists; with `idle_timeout`, once no request has
-    come for that many seconds."""
+    come for that many seconds.
+
+    The daemon holds its lock (`_take_lock`; `lock_fd` is a locked
+    descriptor handed over by `ozagia.daemon.autostart.ensure`) from before
+    the snapshot load until it exits, and refuses to start when another
+    process holds it."""
     root_p = Path(root).resolve()
     from ozagia.config import state_path
     sock_p = Path(sock) if sock else P.socket_path(root_p)
     journal_p = Path(journal) if journal else state_path(root_p, JOURNAL_NAME)
     if len(os.fsencode(str(sock_p))) > SUN_PATH_MAX:
         raise DaemonStartError(f"socket path too long: {sock_p}")
-    # Refuse a live daemon before the (slow) snapshot load.
+    # Refuse a live or loading daemon before the (slow) snapshot load.
     sock_p.parent.mkdir(parents=True, exist_ok=True)
+    lock = _take_lock(root_p, sock_p, lock_fd)
+    try:
+        return _serve_locked(root_p, sock_p, journal_p, dump=dump,
+                             build_if_missing=build_if_missing,
+                             ready_stream=ready_stream, parent_pid=parent_pid,
+                             idle_timeout=idle_timeout)
+    finally:
+        os.close(lock)
+
+
+def _serve_locked(root_p: Path, sock_p: Path, journal_p: Path, *,
+                  dump: str | Path | None, build_if_missing: bool,
+                  ready_stream: Any, parent_pid: int | None,
+                  idle_timeout: float | None) -> int:
     _clear_stale(sock_p)
     memory = load_memory(root_p, dump, build_if_missing=build_if_missing)
     # Rewriting the snapshot after every reingest costs ~1 s on a large repo;

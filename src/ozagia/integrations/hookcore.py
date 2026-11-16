@@ -6,10 +6,15 @@ pieces here do not depend on a harness's tool names or output envelope:
 - `daemon_request`: one protocol request over the daemon's Unix socket.
 - `daemon_request_autostart`: the same, starting the daemon
   (`ozagia.daemon.autostart.ensure`) when nothing listens, within a short
-  budget. Off with `$OZAGIA_DAEMON_AUTOSTART=0`.
+  budget. Off with `$OZAGIA_DAEMON_AUTOSTART=0`. A daemon is started only
+  for a root that is a git work tree, is `$OZAGIA_ROOT`, or already has a
+  graph snapshot (`autostart_allowed`); elsewhere (`$HOME`, `/tmp`, a
+  download folder) the hook starts nothing and writes nothing.
 - `run_hook`: the fail-open main. A SIGALRM timeout, any error printing
   nothing and exiting 0, each failure logged as one JSON line (`ts`,
-  `event`, `tool`, `session`, `error`) in the state dir.
+  `event`, `tool`, `session`, `error`) in the state dir. Set the alarm a
+  few seconds below the harness's handler timeout, so the hook stops
+  itself before the harness kills it.
 - `root_for`: the repository a hook event is about (its `cwd`).
 - `git_ref_moving`: the ref-moving git subcommand in a shell command
   (`ozagia.intent.shell.classify` is `git_refs`), and `git_refusal_reason`.
@@ -23,13 +28,14 @@ import os
 import re
 import signal
 import socket
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, TextIO
 
-from ozagia.config import repo_root, state_path
+from ozagia.config import ENV_ROOT, repo_root, state_path
 from ozagia.daemon import protocol
 from ozagia.intent.shell import GIT_REF_MOVING, classify
 
@@ -39,6 +45,9 @@ DAEMON_TIMEOUT_S = 15
 AUTOSTART_BUDGET_S = 3.0
 ENV_AUTOSTART = "OZAGIA_DAEMON_AUTOSTART"
 ENV_IDLE_TIMEOUT = "OZAGIA_DAEMON_IDLE_TIMEOUT"
+# The daemon's graph snapshot in the state dir (`ozagia.daemon.server.load_memory`).
+SNAPSHOT_NAME = "graph.json"
+GIT_TIMEOUT_S = 3
 
 KEY_PREFIXES = ("sym:", "test:", "doc:", "text:")
 # Harnesses may make file paths absolute before hooks run, so a key the model
@@ -56,6 +65,11 @@ class HookError(Exception):
 
 class HookTimeout(Exception):
     """The hook ran out of time."""
+
+
+class AutostartRefused(HookError):
+    """No daemon answers and the root is not one to start a daemon for.
+    Not a failure: `run_hook` prints nothing and logs nothing."""
 
 
 # --------------------------------------------------------------------------- #
@@ -180,12 +194,41 @@ def idle_timeout_s() -> float:
         return DEFAULT_IDLE_TIMEOUT_S
 
 
-def ensure_daemon(root: Path, budget_s: float = AUTOSTART_BUDGET_S) -> dict[str, Any]:
+def in_work_tree(root: Path) -> bool:
+    """Whether `root` is inside a git work tree."""
+    try:
+        proc = subprocess.run(["git", "-C", str(root), "rev-parse",
+                               "--is-inside-work-tree"], capture_output=True,
+                              text=True, timeout=GIT_TIMEOUT_S,
+                              stdin=subprocess.DEVNULL, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0 and proc.stdout.strip() == "true"
+
+
+def autostart_allowed(root: Path, in_repo: bool | None = None) -> bool:
+    """Whether a hook may start a daemon for `root`: `$OZAGIA_ROOT` is set,
+    `root` already has a graph snapshot, or it is a git work tree (`in_repo`,
+    when the caller has checked already). A daemon started anywhere else
+    would build a graph of an arbitrary directory, `$HOME` included."""
+    if os.environ.get(ENV_ROOT):
+        return True
+    if state_path(root, SNAPSHOT_NAME).exists():
+        return True
+    return in_work_tree(root) if in_repo is None else in_repo
+
+
+def ensure_daemon(root: Path, budget_s: float = AUTOSTART_BUDGET_S, *,
+                  in_repo: bool | None = None) -> dict[str, Any]:
     """Start the daemon for `root` if none answers (see
     `ozagia.daemon.autostart.ensure`); `{"ok": False, ...}` when autostart
-    is off."""
+    is off, and `{"ok": False, "refused": True, ...}` when `root` is not
+    one to start a daemon for (`autostart_allowed`)."""
     if not autostart_enabled():
         return {"ok": False, "started": False, "reason": "autostart is off"}
+    if not autostart_allowed(root, in_repo):
+        return {"ok": False, "started": False, "refused": True,
+                "reason": f"{root} is not a git work tree and has no graph snapshot"}
     from ozagia.daemon.autostart import ensure
     return ensure(root, wait_s=budget_s, idle_timeout_s=idle_timeout_s())
 
@@ -200,6 +243,8 @@ def daemon_request_autostart(root: Path, msg: dict[str, Any], *,
         return daemon_request(sock, msg, timeout)
     except (FileNotFoundError, ConnectionRefusedError):
         got = ensure_daemon(root, budget_s)
+        if got.get("refused"):
+            raise AutostartRefused(got.get("reason")) from None
         if not got.get("ok"):
             raise HookError(f"no daemon on {sock}: {got.get('reason')}") from None
     return daemon_request(sock, msg, timeout)
@@ -236,12 +281,27 @@ def log_failure(root: Path | None, log_name: str, payload: Any,
 
 Handler = Callable[[dict[str, Any], Path], "dict[str, Any] | None"]
 
+# The SIGALRM handler `run_hook` installed, while it runs.
+_alarm_handler: Any = None
+
+
+def rearm_alarm(seconds: int) -> bool:
+    """Arm `run_hook`'s alarm again for `seconds` (after a handler caught a
+    `HookTimeout` and goes on). Does nothing outside `run_hook`. True if
+    armed."""
+    if (_alarm_handler is None or not hasattr(signal, "SIGALRM")
+            or signal.getsignal(signal.SIGALRM) is not _alarm_handler):
+        return False
+    signal.alarm(max(int(seconds), 1))
+    return True
+
 
 def run_hook(handle: Handler, *, log_name: str, timeout_s: int,
              stdin: TextIO | None = None, stdout: TextIO | None = None) -> int:
     """Read one event, print `handle(payload, root)` as JSON when it is not
     None, and return 0. Any error, including running past `timeout_s`,
-    prints nothing and is logged."""
+    prints nothing and is logged (`AutostartRefused` is not)."""
+    global _alarm_handler
     stdin = stdin or sys.stdin
     stdout = stdout or sys.stdout
     payload: Any = None
@@ -251,9 +311,11 @@ def run_hook(handle: Handler, *, log_name: str, timeout_s: int,
     def on_alarm(signum: int, frame: Any) -> None:
         raise HookTimeout(f"hook exceeded {timeout_s} s")
 
+    previous: Any = None
     try:
         if use_alarm:
-            signal.signal(signal.SIGALRM, on_alarm)
+            previous = signal.signal(signal.SIGALRM, on_alarm)
+            _alarm_handler = on_alarm
             signal.alarm(timeout_s)
         payload = json.loads(stdin.read())
         if not isinstance(payload, dict):
@@ -263,16 +325,22 @@ def run_hook(handle: Handler, *, log_name: str, timeout_s: int,
         if out is not None:
             stdout.write(json.dumps(out, ensure_ascii=False) + "\n")
             stdout.flush()
+    except AutostartRefused:
+        pass
     except BaseException as exc:  # never block the agent because ozagia failed
         log_failure(root, log_name, payload, exc)
     finally:
         if use_alarm:
             signal.alarm(0)
+            _alarm_handler = None
+            if previous is not None:
+                signal.signal(signal.SIGALRM, previous)
     return 0
 
 
-__all__ = ["AUTOSTART_BUDGET_S", "DAEMON_TIMEOUT_S", "HookError", "HookTimeout",
-           "KEY_PREFIXES", "REF_MOVING_GIT", "autostart_enabled", "daemon_request",
-           "daemon_request_autostart", "ensure_daemon", "git_ref_moving",
-           "git_refusal_reason", "log_failure", "node_key", "response_text",
-           "root_for", "run_hook"]
+__all__ = ["AUTOSTART_BUDGET_S", "DAEMON_TIMEOUT_S", "AutostartRefused", "HookError",
+           "HookTimeout", "KEY_PREFIXES", "REF_MOVING_GIT", "autostart_allowed",
+           "autostart_enabled", "daemon_request", "daemon_request_autostart",
+           "ensure_daemon", "git_ref_moving", "git_refusal_reason", "in_work_tree",
+           "log_failure", "node_key", "rearm_alarm", "response_text", "root_for",
+           "run_hook"]

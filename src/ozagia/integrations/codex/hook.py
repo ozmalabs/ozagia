@@ -13,10 +13,14 @@ reference (https://learn.chatgpt.com/docs/hooks, see docs/codex.md).
   daemon re-ingests the changed files and returns the graph delta.
 - `SessionStart`: a short brief (dirty files, recent commits, the ozagia MCP
   tools to prefer) as `additionalContext`, and a start of the daemon so it
-  is loaded by the first tool call.
+  is loaded by the first tool call. Outside a git work tree it prints
+  nothing.
 
 The daemon is started on demand (`ozagia.daemon.autostart.ensure`, a few
-seconds at most) when nothing answers on its socket. The hook never blocks
+seconds at most) when nothing answers on its socket, and only for a git
+work tree, `$OZAGIA_ROOT` or a root with a graph snapshot
+(`hookcore.autostart_allowed`). The hook stops itself after
+`HOOK_ALARM_S`, a few seconds before Codex's handler timeout. It never blocks
 the agent because ozagia failed: any error prints nothing and exits 0, and
 is logged as one JSON line to `<state dir>/codex_hook.log`.
 """
@@ -28,9 +32,14 @@ from typing import Any, TextIO
 
 from ozagia.integrations import hookcore
 
-# The hook finishes within this many seconds; install.py sets the same value
-# as the handlers' `timeout` in hooks.json.
+# Codex's handler timeout, which install.py writes to hooks.json.
 HOOK_TIMEOUT_S = 20
+# The hook stops itself (prints nothing) after this many seconds, before
+# Codex kills it.
+HOOK_ALARM_S = 15
+# One daemon request: with AUTOSTART_BUDGET_S (3 s) and the root lookup it
+# stays under HOOK_ALARM_S.
+DAEMON_TIMEOUT_S = 10
 LOG_NAME = "codex_hook.log"
 HARNESS = "codex"
 # The SessionStart brief stays under this many characters.
@@ -40,6 +49,10 @@ BRIEF_COMMITS = 3
 # SessionStart only kicks the daemon off; it does not wait for the load.
 SESSION_START_BUDGET_S = 0.5
 GIT_TIMEOUT_S = 3
+# After the alarm fired during the SessionStart daemon start, the brief gets
+# this long (its git calls take GIT_TIMEOUT_S each at most); HOOK_ALARM_S
+# plus this stays under HOOK_TIMEOUT_S.
+BRIEF_ALARM_S = 3
 
 MCP_TOOLS_LINE = (
     "Prefer the ozagia MCP tools over reading whole files: dev_symbol / "
@@ -141,10 +154,17 @@ def handle(payload: dict[str, Any], root: Path) -> dict[str, Any] | None:
     cwd = payload.get("cwd")
 
     if event == "SessionStart":
+        in_repo = hookcore.in_work_tree(root)
         try:
-            hookcore.ensure_daemon(root, SESSION_START_BUDGET_S)
+            hookcore.ensure_daemon(root, SESSION_START_BUDGET_S, in_repo=in_repo)
+        except hookcore.HookTimeout as exc:
+            # The alarm is spent; arm it again so the brief is bounded too.
+            hookcore.log_failure(root, LOG_NAME, payload, exc)
+            hookcore.rearm_alarm(BRIEF_ALARM_S)
         except Exception as exc:  # the brief does not need the daemon
             hookcore.log_failure(root, LOG_NAME, payload, exc)
+        if not in_repo:
+            return None
         return _context("SessionStart", session_brief(root))
 
     if event == "PreToolUse" and tool_name == "Bash":
@@ -164,7 +184,8 @@ def handle(payload: dict[str, Any], root: Path) -> dict[str, Any] | None:
         resp = hookcore.daemon_request_autostart(root, {
             "id": 1, "op": "after", "harness": HARNESS, "session": session,
             "tool": tool, "input": inp,
-            "output": output_text(payload.get("tool_response"))})
+            "output": output_text(payload.get("tool_response"))},
+            timeout=DAEMON_TIMEOUT_S)
         append = resp.get("append")
         if not isinstance(append, str) or not append:
             return None
@@ -174,5 +195,5 @@ def handle(payload: dict[str, Any], root: Path) -> dict[str, Any] | None:
 
 def main(stdin: TextIO | None = None, stdout: TextIO | None = None) -> int:
     """Run one hook event. Always returns 0."""
-    return hookcore.run_hook(handle, log_name=LOG_NAME, timeout_s=HOOK_TIMEOUT_S,
+    return hookcore.run_hook(handle, log_name=LOG_NAME, timeout_s=HOOK_ALARM_S,
                              stdin=stdin, stdout=stdout)

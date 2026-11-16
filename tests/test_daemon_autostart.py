@@ -169,3 +169,91 @@ def test_serve_idle_timeout_in_process(tmp_path, monkeypatch):
 class _FakeMemory:
     defer_writes = False
     snapshot_dirty = False
+
+
+# --------------------------------------------------------------------------- #
+# serve holds the lock itself
+# --------------------------------------------------------------------------- #
+def _hold_lock(root: Path):
+    import fcntl
+    lock = autostart.lock_path(root)
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    f = open(lock, "a+")
+    fcntl.flock(f, fcntl.LOCK_EX)
+    return f
+
+
+def test_lock_path_per_socket(tmp_path):
+    root = tmp_path / "r"
+    root.mkdir()
+    assert autostart.lock_path(root) == root / ".ozagia" / autostart.LOCK_NAME
+    assert autostart.lock_path(root, socket_path(root)) == autostart.lock_path(root)
+    assert autostart.lock_path(root, tmp_path / "x.sock") == tmp_path / "x.sock.lock"
+
+
+def test_serve_refuses_while_the_lock_is_held(repo, monkeypatch):
+    from ozagia.daemon import server
+    loads: list[int] = []
+    monkeypatch.setattr(server, "load_memory", lambda *a, **k: loads.append(1))
+    with _hold_lock(repo):
+        with pytest.raises(server.DaemonStartError, match="holds .*daemon.lock"):
+            server.serve(repo, ready_stream=open(os.devnull, "w"))
+    assert loads == []
+
+
+def test_cli_serve_exits_early_while_the_lock_is_held(repo):
+    with _hold_lock(repo) as f:
+        f.seek(0)
+        f.truncate()
+        f.write("4242\n")
+        f.flush()
+        r = subprocess.run([sys.executable, "-m", "ozagia.daemon", "serve", "--root",
+                            str(repo)], env=_env(), capture_output=True, text=True,
+                           timeout=60)
+    assert r.returncode == 2
+    assert "another daemon" in r.stderr and "(pid 4242)" in r.stderr
+    assert not (repo / ".ozagia" / "graph.json").exists()
+
+
+def test_ensure_does_not_race_a_daemon_still_loading(repo, monkeypatch):
+    # A daemon started without ensure (by hand, by a plugin) holds the lock
+    # from before its snapshot load, so ensure waits instead of starting a
+    # second load.
+    from ozagia.daemon import server
+    loading, release = threading.Event(), threading.Event()
+
+    def slow_load(*a, **k):
+        loading.set()
+        assert release.wait(30)
+        return _FakeMemory()
+
+    monkeypatch.setattr(server, "load_memory", slow_load)
+    out: list[int] = []
+    t = threading.Thread(target=lambda: out.append(server.serve(
+        repo, ready_stream=open(os.devnull, "w"))))
+    t.start()
+    try:
+        assert loading.wait(10)
+        res = autostart.ensure(repo, wait_s=0.5)
+        assert res["ok"] is False and res["started"] is False
+        assert res["reason"] == "another daemon is starting"
+        release.set()
+        res = autostart.ensure(repo, wait_s=10)
+        assert res["ok"] and not res["started"] and res["pid"] == os.getpid()
+    finally:
+        release.set()
+        if autostart.ping(socket_path(repo)) is not None:
+            with DaemonClient(socket_path(repo), timeout=10) as c:
+                c.shutdown()
+        t.join(timeout=20)
+    assert out == [0]
+    assert not (repo / ".ozagia" / autostart.LOG_NAME).exists()
+
+
+def test_serve_releases_the_lock_on_exit(repo, monkeypatch):
+    import fcntl
+    from ozagia.daemon import server
+    monkeypatch.setattr(server, "load_memory", lambda *a, **k: _FakeMemory())
+    assert server.serve(repo, idle_timeout=0.2, ready_stream=open(os.devnull, "w")) == 0
+    with open(autostart.lock_path(repo)) as f:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
