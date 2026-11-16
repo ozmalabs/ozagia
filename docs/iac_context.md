@@ -6,9 +6,16 @@ graph and to proactive context.
 It provides partial static analysis, not deployment state, validation, plan
 execution, security scanning, or a complete dependency graph. HCL extraction
 uses a limited conservative parser; it masks heredoc bodies, resolves
-statically named local module directories, and records provider aliases and
-Terraform address aliases, but dynamic expressions, remote modules and unusual
-syntax remain unresolved. JSON support is structural. Kubernetes selector
+statically named local module directories, links parent module-output
+references to child outputs, records provider aliases and Terraform address
+aliases, and recognizes `moved`, `import`, `removed`, `check` and `ephemeral`
+blocks plus `count`/`for_each` instance modes. Terraform JSON extraction reads
+explicit `${...}` expressions and supports the same resource/meta groups, but
+dynamic expressions, remote modules and unusual syntax remain unresolved.
+Mixed `.tf` and `.tofu` files in one module scope are both indexed and produce
+an explicit diagnostic because documented OpenTofu dialect precedence is not
+evaluated.
+Kubernetes selector
 relationships are inferred only when both manifests specify the same namespace;
 RBAC `roleRef` and ServiceAccount subject links resolve only across known
 namespaces and roles, and User/Group subjects stay unresolved. Bicep compilation
@@ -30,7 +37,8 @@ the adapter. The `infra_context`, `infra_locate`, `infra_dependencies`, and
 `infra_impact` MCP tools are then available; graph queries use corresponding
 `infra.context`, `infra.locate`, `infra.dependencies`, and `infra.impact` names.
 Use `infra_status` (or `infra.status`) to inspect extraction diagnostics,
-resource counts by family, edge counts and extractor versions.
+resource counts by family, edge counts, extractor versions and query-cache
+hits, misses and entries.
 The `infra_import_sarif` tool accepts a supplied SARIF 2.1 report and returns
 limited finding metadata without running a scanner or storing the report.
 `infra_import_cdk` accepts a supplied CDK assembly manifest and optional
@@ -71,7 +79,10 @@ labels the report as synthetic. A bounded, process-local cache of parsed
 per-file graphs (keyed by root, path, dialect and content digest) makes a
 same-process refresh reuse unchanged files; it never stores source text. A new
 process, or a changed file, parses again. Infrastructure queries use a token
-index rebuilt only when the graph changes; context scoring still grows with the
-number of matching declarations. Measured numbers are in
+index rebuilt only when the graph changes and a bounded per-graph-version query
+cache. Cache keys are digests, so prompt/history text is not retained; the
+adapter's freshness check still runs before a cached result is served. Context
+scoring still grows with the number of matching declarations. Measured numbers
+are in
 [the 2026-11-16 benchmark](results/iac_bench_2026-11-16.md); they are not
 production latency or model-token evidence.

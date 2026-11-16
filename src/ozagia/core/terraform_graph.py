@@ -16,15 +16,26 @@ import posixpath
 from pathlib import PurePosixPath
 import re
 
-EXTRACTOR_VERSION = "terraform-source-v2"
+EXTRACTOR_VERSION = "terraform-source-v3"
 MAX_FILE_BYTES = 2 * 1024 * 1024
 SUPPORTED_SUFFIXES = (".tf", ".tf.json", ".tofu", ".tofu.json")
-_BLOCK = re.compile(r"(?m)^\s*(terraform|provider|resource|data|variable|locals|output|module)\b")
+_BLOCK = re.compile(
+    r"(?m)^\s*(terraform|provider|resource|data|ephemeral|variable|locals|"
+    r"output|module|moved|import|removed|check)\b")
 _REF = re.compile(r"\b([A-Za-z_][\w-]*(?:\.[A-Za-z_][\w-]*){1,3})\b")
+_INTERPOLATION = re.compile(r"\$\{([^}]{1,256})\}")
 _ADDR_PREFIX = {"var": "variable", "local": "local", "module": "module", "data": "data"}
 _MODULE_SOURCE = re.compile(r"[A-Za-z0-9_./-]{1,256}\Z")
 _PROVIDER_ALIAS = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
+_SAFE_LABEL = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
 MAX_MODULE_SOURCE_TARGETS = 256
+_UNLABELED_BLOCKS = frozenset({"moved", "import", "removed"})
+_ONE_LABEL_BLOCKS = frozenset({"provider", "variable", "output", "module", "check"})
+_TWO_LABEL_BLOCKS = frozenset({"resource", "data", "ephemeral"})
+_REF_PREFIXES = frozenset({
+    "var", "local", "module", "data", "ephemeral", "each", "count", "path",
+    "terraform", "self",
+})
 
 
 @dataclass(frozen=True)
@@ -42,6 +53,7 @@ class TerraformNode:
     provenance: str = "declared"
     confidence: str = "low"
     module_source: str | None = None
+    instance_mode: str | None = None
 
 
 @dataclass(frozen=True)
@@ -234,6 +246,63 @@ def _hcl_module_source(raw_body: str, clean_body: str) -> str | None:
     return _hcl_literal_attr(raw_body, clean_body, "source")
 
 
+def _top_level_assignments(clean_body: str) -> list[str]:
+    """Names assigned at a block's top level, not nested object keys."""
+    names: list[str] = []
+    depth = 0
+    for line in clean_body.splitlines():
+        if depth == 0:
+            match = re.match(r"\s*([A-Za-z_][\w-]*)\s*=", line)
+            if match:
+                names.append(match.group(1))
+        depth += line.count("{") - line.count("}")
+        if depth < 0:
+            depth = 0
+    return names
+
+
+def _instance_mode(clean_body: str) -> str | None:
+    names = set(_top_level_assignments(clean_body))
+    if "for_each" in names:
+        return "for_each"
+    if "count" in names:
+        return "count"
+    return None
+
+
+def _looks_like_reference(value: str, allowed: frozenset[str]) -> bool:
+    if not _REF.fullmatch(value):
+        return False
+    first = value.split(".", 1)[0]
+    return first in allowed or "_" in first
+
+
+def _expression_refs(expression: str, allowed: frozenset[str]) -> list[str]:
+    # Mask quoted strings inside an interpolation so a literal dotted value is
+    # not mistaken for an expression reference.
+    masked = re.sub(r'"[^"\\]*(?:\\.[^"\\]*)*"', " ", expression)
+    return [match.group(1) for match in _REF.finditer(masked)
+            if _looks_like_reference(match.group(1), allowed)]
+
+
+def _json_references(value: object, allowed: frozenset[str], *,
+                     depth: int = 0) -> list[str]:
+    """Extract explicit Terraform-JSON expressions, never literal strings."""
+    if depth > 32:
+        return []
+    found: list[str] = []
+    if isinstance(value, str):
+        for match in _INTERPOLATION.finditer(value):
+            found.extend(_expression_refs(match.group(1), allowed))
+    elif isinstance(value, dict):
+        for child in value.values():
+            found.extend(_json_references(child, allowed, depth=depth + 1))
+    elif isinstance(value, list):
+        for child in value:
+            found.extend(_json_references(child, allowed, depth=depth + 1))
+    return list(dict.fromkeys(found))[:256]
+
+
 def _module_source_edge(node: TerraformNode, source: str) -> TerraformEdge:
     digest = hashlib.sha256(source.encode("utf-8")).hexdigest()[:16]
     if source.startswith("./") or source.startswith("../"):
@@ -304,60 +373,84 @@ def index_terraform_text(path: str, text: str, *, module_scope: str = "root") ->
             return TerraformGraph((), (), (), ((path, "invalid Terraform JSON"),))
         if not isinstance(root, dict):
             return TerraformGraph((), (), (), ((path, "Terraform JSON root must be an object"),))
-        for kind, key in (
-            ("resource", "resource"),
-            ("data", "data"),
-            ("variable", "variable"),
-            ("output", "output"),
-            ("module", "module"),
-            ("provider", "provider"),
-        ):
-            group = root.get(key, {})
+        allowed_refs = set(_REF_PREFIXES)
+        for group_name in ("resource", "data", "ephemeral"):
+            group = root.get(group_name, {})
+            if isinstance(group, dict):
+                allowed_refs.update(str(name) for name in group)
+        providers = root.get("provider", {})
+        if isinstance(providers, dict):
+            allowed_refs.update(str(name) for name in providers)
+        allowed_refs_frozen = frozenset(allowed_refs)
+        for kind in ("resource", "data", "ephemeral"):
+            group = root.get(kind, {})
             if not isinstance(group, dict):
                 continue
-            if kind in ("resource", "data"):
-                for typ, entries in group.items():
-                    if not isinstance(entries, dict):
-                        continue
-                    for name, body in entries.items():
-                        if not isinstance(body, dict):
-                            continue
-                        address = f"{typ}.{name}"
-                        if kind == "data":
-                            address = f"data.{address}"
-                        identity = f"{kind}:{address}"
-                        node = _node(
-                            path, dialect, module_scope, identity, kind, address, 1, 1, digest
-                        )
-                        decls.append(node)
-                        bodies[node.key] = ""
-            else:
-                for name, body in group.items():
+            for typ, entries in group.items():
+                if not isinstance(entries, dict):
+                    continue
+                for name, body in entries.items():
                     if not isinstance(body, dict):
                         continue
-                    address = str(name)
-                    if kind == "provider":
-                        alias = _safe_provider_alias(body.get("alias"))
-                        if alias:
-                            address = f"{address}.{alias}"
+                    address = f"{typ}.{name}"
+                    if kind in ("data", "ephemeral"):
+                        address = f"{kind}.{address}"
+                    mode = ("for_each" if "for_each" in body
+                            else "count" if "count" in body else None)
                     identity = f"{kind}:{address}"
-                    source = body.get("source") if kind == "module" else None
                     node = _node(
-                        path,
-                        dialect,
-                        module_scope,
-                        identity,
-                        kind,
-                        address,
-                        1,
-                        1,
-                        digest,
-                        module_source=_safe_module_source(source),
+                        path, dialect, module_scope, identity, kind, address,
+                        1, 1, digest, instance_mode=mode,
                     )
                     decls.append(node)
-                    bodies[node.key] = ""
-                    if kind == "module" and isinstance(source, str):
-                        module_sources.append((node, source))
+                    bodies[node.key] = " ".join(
+                        _json_references(body, allowed_refs_frozen))
+        for kind in ("variable", "output", "module", "provider"):
+            group = root.get(kind, {})
+            if not isinstance(group, dict):
+                continue
+            for name, body in group.items():
+                if not isinstance(body, dict):
+                    continue
+                address = str(name)
+                if kind == "provider":
+                    alias = _safe_provider_alias(body.get("alias"))
+                    if alias:
+                        address = f"{address}.{alias}"
+                identity = f"{kind}:{address}"
+                source = body.get("source") if kind == "module" else None
+                mode = ("for_each" if "for_each" in body
+                        else "count" if "count" in body else None)
+                node = _node(
+                    path, dialect, module_scope, identity, kind, address,
+                    1, 1, digest,
+                    module_source=_safe_module_source(source),
+                    instance_mode=mode,
+                )
+                decls.append(node)
+                bodies[node.key] = " ".join(
+                    _json_references(body, allowed_refs_frozen))
+                if kind == "module" and isinstance(source, str):
+                    module_sources.append((node, source))
+        for kind in ("moved", "import", "removed", "check"):
+            group = root.get(kind, {})
+            entries: list[tuple[str, object]] = []
+            if isinstance(group, list):
+                entries = [(str(index), body) for index, body in enumerate(group)]
+            elif isinstance(group, dict):
+                entries = [(str(name), body) for name, body in group.items()]
+            for index, (name, body) in enumerate(entries):
+                if not isinstance(body, dict):
+                    continue
+                safe_name = name if _SAFE_LABEL.fullmatch(name) else str(index)
+                address = safe_name if kind == "check" else f"{kind}@{safe_name}"
+                node = _node(
+                    path, dialect, module_scope, f"{kind}:{address}", kind,
+                    address, 1, 1, digest,
+                )
+                decls.append(node)
+                bodies[node.key] = " ".join(
+                    _json_references(body, allowed_refs_frozen))
     else:
         clean, unterminated_heredoc = _clean_hcl(text)
         if unterminated_heredoc:
@@ -373,46 +466,37 @@ def index_terraform_text(path: str, text: str, *, module_scope: str = "root") ->
         if depth:
             return TerraformGraph((), (), (), ((path, "malformed HCL block structure"),))
         for kind, labels, begin, end, body in _blocks(text, clean):
-            if kind in ("locals",):
-                entries = [
-                    ("local", name) for name in re.findall(r"(?m)^\s*([A-Za-z_][\w-]*)\s*=", body)
-                ]
-                for _, name in entries:
+            start_line = text.count("\n", 0, begin) + 1
+            end_line = text.count("\n", 0, end) + 1
+            if kind == "locals":
+                for name in _top_level_assignments(body):
                     addr = name
                     ident = f"local:{addr}"
                     node = _node(
-                        path,
-                        dialect,
-                        module_scope,
-                        ident,
-                        "local",
-                        addr,
-                        text.count("\n", 0, begin) + 1,
-                        text.count("\n", 0, end) + 1,
-                        digest,
+                        path, dialect, module_scope, ident, "local", addr,
+                        start_line, end_line, digest,
                     )
                     decls.append(node)
                     bodies[node.key] = clean[begin:end]
                 continue
-            if kind not in (
-                "terraform",
-                "provider",
-                "resource",
-                "data",
-                "variable",
-                "output",
-                "module",
-            ):
-                continue
-            if kind in ("resource", "data") and len(labels) != 2:
-                continue
-            if kind in ("provider", "variable", "output", "module") and len(labels) != 1:
-                continue
             if kind == "terraform":
                 continue
-            address = f"{labels[0]}.{labels[1]}" if kind in ("resource", "data") else labels[0]
-            if kind == "data":
-                address = "data." + address
+            if kind in _TWO_LABEL_BLOCKS:
+                if len(labels) != 2:
+                    continue
+                address = f"{labels[0]}.{labels[1]}"
+                if kind in ("data", "ephemeral"):
+                    address = f"{kind}.{address}"
+            elif kind in _ONE_LABEL_BLOCKS:
+                if len(labels) != 1:
+                    continue
+                address = labels[0]
+            elif kind in _UNLABELED_BLOCKS:
+                if labels:
+                    continue
+                address = f"{kind}@{start_line}"
+            else:
+                continue
             raw_body = text[begin:end]
             clean_body = clean[begin:end]
             if kind == "provider":
@@ -423,16 +507,10 @@ def index_terraform_text(path: str, text: str, *, module_scope: str = "root") ->
             identity = f"{kind}:{address}"
             source = _hcl_module_source(raw_body, clean_body) if kind == "module" else None
             node = _node(
-                path,
-                dialect,
-                module_scope,
-                identity,
-                kind,
-                address,
-                text.count("\n", 0, begin) + 1,
-                text.count("\n", 0, end) + 1,
-                digest,
+                path, dialect, module_scope, identity, kind, address,
+                start_line, end_line, digest,
                 module_source=_safe_module_source(source),
+                instance_mode=_instance_mode(body),
             )
             decls.append(node)
             bodies[node.key] = clean_body
@@ -444,7 +522,7 @@ def index_terraform_text(path: str, text: str, *, module_scope: str = "root") ->
         prefix = _ADDR_PREFIX.get(node.kind)
         if prefix:
             by_ref[f"{prefix}.{node.address}"] = node
-        if node.kind in ("resource", "data", "provider"):
+        if node.kind in ("resource", "data", "ephemeral", "provider"):
             by_ref[node.address] = node
     edges: list[TerraformEdge] = []
     unresolved: list[TerraformEdge] = []
@@ -480,6 +558,24 @@ def index_terraform_text(path: str, text: str, *, module_scope: str = "root") ->
     return TerraformGraph(
         tuple(decls), tuple(_dedupe(edges)), tuple(_dedupe(unresolved)), tuple(errors)
     )
+
+
+def _local_module_target_scope(node: TerraformNode) -> tuple[str | None, str | None]:
+    """Normalized local target directory, or (None, unresolved reason)."""
+    source = node.module_source
+    if not source:
+        return None, None
+    if source.startswith("/"):
+        return None, "absolute module source is not repository-relative"
+    if not source.startswith(("./", "../")):
+        return None, None
+    parent = PurePosixPath(node.path).parent.as_posix()
+    target_scope = posixpath.normpath(posixpath.join(parent, source))
+    if (target_scope in ("", ".", "..")
+            or target_scope.startswith("../")
+            or target_scope.startswith("/")):
+        return None, "local module source escapes repository root"
+    return target_scope, None
 
 
 def merge_terraform_graphs(graphs) -> TerraformGraph:
@@ -539,39 +635,21 @@ def merge_terraform_graphs(graphs) -> TerraformGraph:
                     )
                 )
                 continue
-            source = source_node.module_source
-            if source.startswith("/"):
-                unresolved.append(
-                    TerraformEdge(
-                        edge.source,
-                        edge.target,
-                        edge.relation,
-                        edge.provenance,
-                        edge.scope,
-                        "absolute module source is not repository-relative",
+            target_scope, reason = _local_module_target_scope(source_node)
+            if target_scope is None:
+                if reason is None:
+                    unresolved.append(edge)
+                else:
+                    unresolved.append(
+                        TerraformEdge(
+                            edge.source,
+                            edge.target,
+                            edge.relation,
+                            edge.provenance,
+                            edge.scope,
+                            reason,
+                        )
                     )
-                )
-                continue
-            if not source.startswith(("./", "../")):
-                unresolved.append(edge)
-                continue
-            parent = PurePosixPath(source_node.path).parent.as_posix()
-            target_scope = posixpath.normpath(posixpath.join(parent, source))
-            if (
-                target_scope in ("", ".", "..")
-                or target_scope.startswith("../")
-                or target_scope.startswith("/")
-            ):
-                unresolved.append(
-                    TerraformEdge(
-                        edge.source,
-                        edge.target,
-                        edge.relation,
-                        edge.provenance,
-                        edge.scope,
-                        "local module source escapes repository root",
-                    )
-                )
                 continue
             targets = sorted(
                 (
@@ -628,8 +706,28 @@ def merge_terraform_graphs(graphs) -> TerraformGraph:
             unresolved.append(edge)
             continue
         ref = edge.evidence
-        target_candidates: list[TerraformNode] = []
         parts = ref.split(".")
+        if parts[0] == "module" and len(parts) >= 3:
+            modules = module_declarations.get(
+                (source.dialect, edge.scope, parts[1]), [])
+            if len(modules) == 1:
+                target_scope, _reason = _local_module_target_scope(modules[0])
+                if target_scope:
+                    outputs = [
+                        node for node in nodes
+                        if node.dialect == source.dialect
+                        and node.module_scope == target_scope
+                        and node.kind == "output"
+                        and node.address == parts[2]
+                    ]
+                    if len(outputs) == 1:
+                        edges.append(
+                            TerraformEdge(
+                                edge.source, outputs[0].key, "module_output",
+                                "declared", target_scope, ref,
+                            )
+                        )
+        target_candidates: list[TerraformNode] = []
         for stop in range(len(parts), 1, -1):
             key = (source.dialect, edge.scope, ".".join(parts[:stop]))
             found = declarations.get(key, [])
@@ -671,6 +769,7 @@ def _node(
     digest,
     *,
     module_source=None,
+    instance_mode=None,
 ):
     key = f"infra:v1:{dialect}:{path}:{scope}:{ident}"
     return TerraformNode(
@@ -684,6 +783,7 @@ def _node(
         scope,
         digest,
         module_source=module_source,
+        instance_mode=instance_mode,
     )
 
 

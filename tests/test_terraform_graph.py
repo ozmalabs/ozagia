@@ -1,3 +1,5 @@
+import json
+
 from ozagia.core.terraform_graph import (
     discover_terraform_files,
     index_terraform_text,
@@ -215,6 +217,145 @@ def test_file_discovery_skips_hidden_and_state_files(tmp_path):
     (tmp_path / ".terraform").mkdir()
     (tmp_path / ".terraform" / "cache.tf").write_text("x")
     assert discover_terraform_files(tmp_path) == ("main.tf",)
+
+
+def test_locals_do_not_treat_nested_object_keys_as_declarations():
+    graph = index_terraform_text(
+        "main.tf",
+        '''locals {
+  config = {
+    nested_key = "CANARY_SECRET"
+    deeper = { another = var.region }
+  }
+  region = var.region
+}
+''',
+    )
+    assert [node.address for node in graph.nodes] == ["config", "region"]
+    assert "CANARY_SECRET" not in repr(graph)
+
+
+def test_meta_blocks_ephemeral_resources_and_instance_modes():
+    graph = index_terraform_text(
+        "main.tf",
+        '''moved {
+  from = aws_vpc.old
+  to   = aws_vpc.new
+}
+import {
+  to = aws_vpc.main
+  id = "vpc-123"
+}
+removed {
+  from = aws_vpc.retired
+}
+check "health" {
+  assert {
+    condition = var.healthy
+  }
+}
+ephemeral "random_password" "db" {
+  length = 16
+}
+output "password" {
+  value = ephemeral.random_password.db.result
+}
+resource "aws_vpc" "main" {
+  count = 2
+}
+resource "aws_subnet" "private" {
+  for_each = var.subnets
+  vpc_id   = aws_vpc.main.id
+}
+''',
+    )
+    by_kind: dict[str, set[str]] = {}
+    for node in graph.nodes:
+        by_kind.setdefault(node.kind, set()).add(node.address)
+    assert by_kind["moved"] == {"moved@1"}
+    assert by_kind["import"] == {"import@5"}
+    assert by_kind["removed"] == {"removed@9"}
+    assert by_kind["check"] == {"health"}
+    assert by_kind["ephemeral"] == {"ephemeral.random_password.db"}
+    assert any(edge.relation == "references" and edge.evidence == "aws_vpc.main"
+               for edge in graph.edges)
+    assert any(edge.evidence == "ephemeral.random_password.db.result"
+               for edge in graph.edges)
+    modes = {node.address: node.instance_mode for node in graph.nodes}
+    assert modes["aws_vpc.main"] == "count"
+    assert modes["aws_subnet.private"] == "for_each"
+    assert modes["ephemeral.random_password.db"] is None
+
+
+def test_nested_count_is_not_a_top_level_instance_mode():
+    graph = index_terraform_text(
+        "main.tf",
+        '''resource "aws_vpc" "main" {
+  tags = {
+    count = 3
+  }
+}
+''',
+    )
+    assert graph.nodes[0].instance_mode is None
+
+
+def test_json_expression_references_ephemeral_and_meta_blocks():
+    graph = index_terraform_text(
+        "main.tf.json",
+        json.dumps({
+            "resource": {
+                "aws_vpc": {"main": {"cidr_block": "10.0.0.0/16"}},
+                "aws_subnet": {"private": {
+                    "vpc_id": "${aws_vpc.main.id}",
+                    "count": 2,
+                }},
+            },
+            "ephemeral": {"random_password": {"db": {"length": 16}}},
+            "output": {"id": {"value": "${ephemeral.random_password.db.result}"}},
+            "moved": [{"from": "${aws_vpc.old.id}", "to": "${aws_vpc.main.id}"}],
+            "import": [{"to": "${aws_vpc.main}", "id": "vpc-123"}],
+            "removed": [{"from": "${aws_vpc.removed}"}],
+            "check": {"health": {"assert": [{"condition": "${var.healthy}"}]}},
+            "variable": {"healthy": {"default": "CANARY_SECRET"}},
+        }),
+    )
+    addresses = {(node.kind, node.address) for node in graph.nodes}
+    assert ("ephemeral", "ephemeral.random_password.db") in addresses
+    assert ("moved", "moved@0") in addresses
+    assert ("import", "import@0") in addresses
+    assert ("removed", "removed@0") in addresses
+    assert ("check", "health") in addresses
+    assert any(edge.evidence == "aws_vpc.main.id" for edge in graph.edges)
+    assert any(edge.evidence == "ephemeral.random_password.db.result"
+               for edge in graph.edges)
+    assert any(node.address == "aws_subnet.private" and node.instance_mode == "count"
+               for node in graph.nodes)
+    assert "CANARY_SECRET" not in repr(graph)
+
+
+def test_module_output_reference_links_to_child_output():
+    parent = index_terraform_text(
+        "main.tf",
+        '''module "net" { source = "./modules/net" }
+output "vpc" { value = module.net.vpc_id }
+''',
+        module_scope=".",
+    )
+    child = index_terraform_text(
+        "modules/net/main.tf",
+        'output "vpc_id" { value = "vpc-123" }\n',
+        module_scope="modules/net",
+    )
+    merged = merge_terraform_graphs((parent, child))
+    child_output = next(node for node in child.nodes if node.kind == "output")
+    edge = next(edge for edge in merged.edges if edge.relation == "module_output")
+    assert edge.target == child_output.key
+    assert edge.evidence == "module.net.vpc_id"
+    assert edge.scope == "modules/net"
+    module_node = next(node for node in parent.nodes if node.kind == "module")
+    assert any(edge.relation == "references" and edge.target == module_node.key
+               for edge in merged.edges)
 
 
 def test_merge_resolves_provider_agnostic_cross_file_references_without_values():

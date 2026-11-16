@@ -5,6 +5,7 @@ from ozagia.core.proactive_context import build_context
 
 
 class Memory:
+    _index_version = 1
     nodes = {
         1: {"type": "InfraResource", "key": "infra:payments", "attrs": {
             "name": "payments", "kind": "Deployment", "path": "deploy/app.yaml",
@@ -23,6 +24,14 @@ class Memory:
 
     def code_search(self, *args, **kwargs):
         return {"results": []}
+
+    def nodes_of_type(self, type_name):
+        return [nid for nid, node in self.nodes.items()
+                if node.get("type") == type_name]
+
+    def node_by_key(self, key):
+        return next((nid for nid, node in self.nodes.items()
+                     if node.get("key") == key), None)
 
 
 class CodeMemory(Memory):
@@ -204,6 +213,46 @@ def test_duplicate_declarations_are_reported_as_ambiguous():
     assert result["ambiguous"] is True
     assert result["ambiguity"][0]["count"] == 2
     assert len(result["results"]) == 2
+
+
+def test_query_cache_is_bounded_by_graph_version_and_returns_copies(monkeypatch):
+    from ozagia.core import infra_query
+
+    memory = Memory()
+    calls = []
+    original = infra_query._score_node
+
+    def counted(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(infra_query, "_score_node", counted)
+    first = infra_query.context(memory, "payments", max_chars=800)
+    count = len(calls)
+    second = infra_query.context(memory, "payments", max_chars=800)
+    assert len(calls) == count
+    assert second["context"] == first["context"]
+    first["context"] = "mutated by caller"
+    assert second["context"] != "mutated by caller"
+    stats = infra_query.cache_stats(memory)
+    assert stats["hits"] >= 1 and stats["misses"] >= 1
+    memory._index_version += 1
+    infra_query.context(memory, "payments", max_chars=800)
+    assert len(calls) > count
+
+
+def test_locate_cache_and_eviction(monkeypatch):
+    from ozagia.core import infra_query
+
+    monkeypatch.setattr(infra_query, "QUERY_CACHE_MAX", 2)
+    memory = Memory()
+    first = infra_query.locate(memory, "payments")
+    second = infra_query.locate(memory, "payments")
+    assert first == second
+    assert infra_query.cache_stats(memory)["hits"] == 1
+    infra_query.locate(memory, "service")
+    infra_query.locate(memory, "payments-api")
+    assert infra_query.cache_stats(memory)["entries"] <= 2
 
 
 def test_relationship_line_names_the_target_and_avoids_inbound_duplicate():

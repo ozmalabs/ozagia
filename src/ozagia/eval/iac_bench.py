@@ -343,6 +343,13 @@ def _run_in_workspace(files: int, seed: int, query_count: int, workspace: Path) 
         query_rows, context_quality = _query_latency(memory, query_names, query_count, 480, canaries)
         if not context_quality["all_within_max_chars"]:
             raise RuntimeError("context exceeded its requested character budget")
+        from ozagia.core.infra_query import cache_stats
+        repeated_started = time.perf_counter()
+        for _ in range(5):
+            memory.adapter_query("infra.context", query=query_names[0],
+                                 max_chars=480)
+        repeated_context_seconds = (time.perf_counter() - repeated_started) / 5
+        query_cache = cache_stats(memory)
 
         changed_path = tf_paths[0]
         _write(root / changed_path, (root / changed_path).read_text(encoding="utf-8")
@@ -387,6 +394,8 @@ def _run_in_workspace(files: int, seed: int, query_count: int, workspace: Path) 
             "cold_build": {"adapter_enabled": enabled_build, "adapter_disabled": disabled_build,
                            "adapter_overhead_seconds": enabled_build["wall_seconds"] - disabled_build["wall_seconds"]},
             "warm_queries": query_rows,
+            "repeated_context_seconds": repeated_context_seconds,
+            "query_cache": query_cache,
             "incremental_refresh": {"modified_terraform": modified_refresh,
                                     "added_terraform": added_refresh, "noop_after_freshness_check": noop_refresh},
             "counts": {"adapter_enabled_nodes": enabled_build["nodes"], "adapter_enabled_edges": enabled_build["edges"],

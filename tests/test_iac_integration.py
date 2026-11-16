@@ -85,6 +85,7 @@ def test_opt_in_graph_context_reingests_and_excludes_values(tmp_path, monkeypatc
     assert status["resources"] > 0 and status["edges"] > 0
     assert status["families"]["terraform"] > 0
     assert status["complete"] is False
+    assert status["query_cache"]["max_entries"] > 0
     hint = server._handlers["infra_context"]({
         "query": "payments", "history": ["payments"], "max_chars": 240})
     assert hint["context"] and len(hint["context"]) <= 240
@@ -164,6 +165,23 @@ def test_renamed_infra_file_replaces_old_nodes_and_edges(tmp_path, monkeypatch):
     assert refreshed_edges == fresh_edges
 
 
+def test_mixed_terraform_and_opentofu_dialect_reports_precedence_gap(tmp_path, monkeypatch):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / ".ozagia.toml").write_text(
+        '[adapters]\nmodules = ["ozagia.integrations.iac.adapter:register"]\n')
+    (root / "main.tf").write_text('resource "aws_vpc" "main" {}\n')
+    (root / "main.tofu").write_text('resource "aws_vpc" "main" {}\n')
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    monkeypatch.delenv("OZAGIA_CONFIG", raising=False)
+    dump = tmp_path / "graph.json"
+    build_index(root, dump, include_docs="none", include_git=False)
+    memory = DevMemory(dump, tmp_path / "journal.jsonl", root=root)
+    status = memory.adapter_query("infra.status")
+    assert any("dialect precedence" in item["message"]
+               for item in status["diagnostics"])
+
+
 def test_new_infra_file_discovered_on_refresh(tmp_path, monkeypatch):
     root = tmp_path / "repo"
     root.mkdir()
@@ -209,7 +227,8 @@ def test_terraform_address_aliases_are_queryable(tmp_path, monkeypatch):
         'variable "region" { default = "x" }\n'
         'module "child" { source = "./child" }\n')
     (root / "child").mkdir()
-    (root / "child" / "main.tf").write_text('resource "aws_vpc" "main" {}\n')
+    (root / "child" / "main.tf").write_text(
+        'resource "aws_vpc" "main" { count = 2 }\n')
     subprocess.run(["git", "init", "-q", str(root)], check=True)
     subprocess.run(["git", "-C", str(root), "add", "."], check=True)
     subprocess.run(["git", "-C", str(root), "-c", "user.name=T", "-c",
@@ -221,6 +240,8 @@ def test_terraform_address_aliases_are_queryable(tmp_path, monkeypatch):
     memory = DevMemory(dump, tmp_path / "journal.jsonl", root=root)
     assert memory.adapter_query("infra.locate", query="var.region")["results"]
     assert memory.adapter_query("infra.locate", query="module.child")["results"]
+    vpc = memory.adapter_query("infra.locate", query="aws_vpc.main")["results"]
+    assert vpc and vpc[0]["instance_mode"] == "count"
     dependencies = memory.adapter_query(
         "infra.dependencies",
         key=memory.adapter_query("infra.locate", query="module.child")["results"][0]["key"],

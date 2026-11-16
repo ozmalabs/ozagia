@@ -7,14 +7,17 @@ never reads source files, state, or manifest values.
 """
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
+from copy import deepcopy
 from functools import lru_cache
+import hashlib
 import re
 from typing import Any, Iterable
 
 MAX_QUERY_CHARS = 4000
 MAX_TERM_CHARS = 64
 MAX_TERMS = 32
+QUERY_CACHE_MAX = 128
 _TOKEN = re.compile(r"[A-Za-z0-9_./:@#-]+")
 _STOP = frozenset({
     "about", "that", "this", "with", "what", "where", "which", "from", "find",
@@ -34,6 +37,63 @@ _FAMILY_ORDER = {
     "kubernetes": 0, "terraform": 1, "deployment": 2, "cloudformation": 3,
     "arm": 4, "pulumi": 5, "gitops": 6,
 }
+
+
+def _cache_state(memory: Any) -> dict[str, Any] | None:
+    """Per-memory query cache, invalidated by the graph index version."""
+    version = getattr(memory, "_index_version", None)
+    if version is None:
+        return None
+    state = getattr(memory, "_infra_query_cache", None)
+    if state is None or state.get("version") != version:
+        state = {"version": version, "entries": OrderedDict(),
+                 "hits": 0, "misses": 0}
+        memory._infra_query_cache = state
+    return state
+
+
+def _cache_key(operation: str, payload: tuple[Any, ...]) -> str:
+    # Raw query/history text is hashed, never retained in the cache or stats.
+    material = operation + "\0" + repr(payload)
+    return hashlib.sha256(material.encode("utf-8", "surrogatepass")).hexdigest()
+
+
+def _cache_get(memory: Any, key: str) -> dict[str, Any] | None:
+    state = _cache_state(memory)
+    if state is None:
+        return None
+    found = state["entries"].get(key)
+    if found is None:
+        state["misses"] += 1
+        return None
+    state["entries"].move_to_end(key)
+    state["hits"] += 1
+    return deepcopy(found)
+
+
+def _cache_put(memory: Any, key: str, value: dict[str, Any]) -> None:
+    state = _cache_state(memory)
+    if state is None:
+        return
+    state["entries"][key] = deepcopy(value)
+    state["entries"].move_to_end(key)
+    while len(state["entries"]) > QUERY_CACHE_MAX:
+        state["entries"].popitem(last=False)
+
+
+def cache_stats(memory: Any) -> dict[str, Any]:
+    """Query cache counters for diagnostics; zero when the cache is off."""
+    state = getattr(memory, "_infra_query_cache", None) or {}
+    version = getattr(memory, "_index_version", None)
+    if state and state.get("version") != version:
+        state = {}
+    return {
+        "hits": int(state.get("hits", 0)),
+        "misses": int(state.get("misses", 0)),
+        "entries": len(state.get("entries", {})),
+        "max_entries": QUERY_CACHE_MAX,
+        "version": state.get("version", version),
+    }
 
 
 def _query_terms(text: str, *, weight: float) -> dict[str, float]:
@@ -257,6 +317,23 @@ def _render_edge(relation: Any, target: str, provenance: str, *,
 
 def context(memory: Any, query: str, *, history: Iterable[str] = (),
             max_chars: int = 1600, limit: int = 8) -> dict[str, Any]:
+    """Cached task-aware infrastructure context query."""
+    history_items = tuple(item for item in history if isinstance(item, str))
+    budget = int(max_chars)
+    cap = int(limit)
+    key = _cache_key("context", (str(query or ""), history_items,
+                                 budget, cap))
+    cached = _cache_get(memory, key)
+    if cached is not None:
+        return cached
+    result = _context_uncached(
+        memory, query, history=history_items, max_chars=budget, limit=cap)
+    _cache_put(memory, key, result)
+    return result
+
+
+def _context_uncached(memory: Any, query: str, *, history: Iterable[str] = (),
+                      max_chars: int = 1600, limit: int = 8) -> dict[str, Any]:
     """Return ranked structural facts only; never read source or state values.
 
     ``history`` is used as a weaker hint than the current ``query`` so a
@@ -444,6 +521,19 @@ def context(memory: Any, query: str, *, history: Iterable[str] = (),
 
 
 def locate(memory: Any, query: str, *, limit: int = 20) -> dict[str, Any]:
+    """Cached declaration lookup."""
+    cap = int(limit)
+    text = str(query or "")
+    key = _cache_key("locate", (text, cap))
+    cached = _cache_get(memory, key)
+    if cached is not None:
+        return cached
+    result = _locate_uncached(memory, text, limit=cap)
+    _cache_put(memory, key, result)
+    return result
+
+
+def _locate_uncached(memory: Any, query: str, *, limit: int = 20) -> dict[str, Any]:
     """Find matching declarations; multiple matches are deliberately retained."""
     query = query.strip().lower()
     if not query:
@@ -475,6 +565,25 @@ def locate(memory: Any, query: str, *, limit: int = 20) -> dict[str, Any]:
 
 def traverse(memory: Any, key: str, *, direction: str = "dependencies",
              depth: int = 2, limit: int = 30) -> dict[str, Any]:
+    """Cached bounded dependency/impact traversal."""
+    if direction not in ("dependencies", "impact"):
+        raise ValueError("direction must be dependencies or impact")
+    node_key = str(key or "")
+    max_depth = int(depth)
+    cap = int(limit)
+    cache_key = _cache_key("traverse",
+                           (node_key, direction, max_depth, cap))
+    cached = _cache_get(memory, cache_key)
+    if cached is not None:
+        return cached
+    result = _traverse_uncached(
+        memory, node_key, direction=direction, depth=max_depth, limit=cap)
+    _cache_put(memory, cache_key, result)
+    return result
+
+
+def _traverse_uncached(memory: Any, key: str, *, direction: str = "dependencies",
+                       depth: int = 2, limit: int = 30) -> dict[str, Any]:
     """Traverse indexed edges with bounded depth; graph coverage is partial."""
     if direction not in ("dependencies", "impact"):
         raise ValueError("direction must be dependencies or impact")

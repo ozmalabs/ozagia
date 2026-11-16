@@ -79,6 +79,7 @@ def index(ctx: Any) -> None:
     terraform_graphs = []
     diagnostics: list[tuple[str, str]] = []
     manifests: dict[str, str] = {}
+    terraform_by_dir: dict[str, dict[str, str]] = {}
     # One bounded walk: register every candidate even when a source cannot be
     # read or the cumulative content budget is reached, otherwise every refresh
     # would repeatedly treat those paths as newly discovered.
@@ -103,6 +104,9 @@ def index(ctx: Any) -> None:
         digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
         if kind == "terraform":
             scope = PurePosixPath(rel).parent.as_posix()
+            dialect = ("opentofu" if rel.lower().endswith((".tofu", ".tofu.json"))
+                       else "terraform")
+            terraform_by_dir.setdefault(scope, {})[dialect] = rel
             graph = _cached_parse(
                 (root_key, rel, "terraform", scope, digest),
                 lambda: index_terraform_text(rel, text, module_scope=scope))
@@ -161,6 +165,14 @@ def index(ctx: Any) -> None:
                 continue
             if graph.nodes:
                 kube_graphs.append(graph)
+    for _scope, dialects in sorted(terraform_by_dir.items()):
+        if len(dialects) > 1:
+            path = dialects.get("terraform") or next(iter(dialects.values()))
+            diagnostics.append((
+                path,
+                "both Terraform and OpenTofu sources in one module scope; "
+                "documented dialect precedence is not evaluated",
+            ))
     if terraform_graphs:
         terraform = merge_terraform_graphs(terraform_graphs)
         all_nodes.extend((node, "terraform") for node in terraform.nodes)
@@ -205,6 +217,9 @@ def index(ctx: Any) -> None:
         alias = _safe_identifier(_address_alias(family, kind, name))
         if alias:
             attrs["aliases"] = alias
+        instance_mode = _safe_identifier(getattr(node, "instance_mode", None))
+        if instance_mode:
+            attrs["instance_mode"] = instance_mode
         namespace = _safe_identifier(getattr(node, "namespace", None))
         if namespace:
             attrs["namespace"] = namespace
@@ -257,7 +272,7 @@ def register(registry: Any) -> None:
     from dataclasses import asdict
 
     from ozagia.core.iac_findings import import_sarif
-    from ozagia.core.infra_query import locate, traverse
+    from ozagia.core.infra_query import cache_stats, locate, traverse
 
     def query(memory: Any, operation: str, **args: Any) -> dict[str, Any]:
         freshness = memory.staleness().get("freshness", "unknown")
@@ -301,6 +316,7 @@ def register(registry: Any) -> None:
         return {"freshness": memory.staleness().get("freshness", "unknown"),
                 "resources": len(resources), "families": dict(sorted(families.items())),
                 "edges": edges, "extractors": sorted(extractors),
+                "query_cache": cache_stats(memory),
                 "diagnostics": diagnostics[:100],
                 "complete": False,
                 "note": "Static, partial source analysis; not deployed state."}
