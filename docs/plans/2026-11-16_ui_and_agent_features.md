@@ -133,6 +133,7 @@ Effort: S = 1-3 days, M = 1-2 weeks, L = 3-6 weeks of focused agent work.
 | 8 | OpenCode add-in MVP (graph panel, status, settings, commands) | 4 | M | Medium | 1-6; host confirmation | 2 |
 | 9 | Research UI exposure (references, fetch, screening, evidence, review) | 4 | S-M | Low | 1, 6 | 2 |
 | 10 | Bounded task mode (scope, budgets, gates, evidence) | 5 | L | Medium | 2, 3, 4, 5; W8-W11 merged | 3 |
+| 10a | Test management + affected-test policy | 5 | M | Low-medium | 3, 4, 10; graph | 3 |
 | 11 | Task class library (research, coding, ops) | 4 | M | Low | 2, 10 | 3 |
 | 12 | Model registry, per-task defaults, optional classifier | 3 | M | Low | 2, 11 | 3 |
 | 13 | Inspect agent logs and propose improvements | 3 | M | Medium-high | 10, 11 | 4 |
@@ -987,6 +988,90 @@ to the task record. Every declared artifact has a ledger row and retention
 policy. The same inputs, model version and seed produce the same step sequence
 and artifact hashes (model output may differ; it is recorded, not asserted).
 
+### 10a. Test management and affected-test policy
+
+Agentic work wastes time running suites that cannot be affected by the
+change. The graph already knows changed files, symbols, callers, covering
+tests and import relationships. This item turns that into an explicit,
+configurable test policy for bounded tasks, code review and captured pytest.
+
+Modes, from least to most:
+
+| Mode | What runs |
+| --- | --- |
+| `none` | No tests. Allowed for docs-only or review-only tasks; recorded as a decision. |
+| `smoke` | The graph-linked tests for changed files, capped by `max_tests`. |
+| `affected` | Graph-linked tests plus changed tests, failed-last-run tests and tests of changed packages. |
+| `package` | All tests in the changed files' packages/modules, still capped. |
+| `all` | The command as typed. |
+
+Policy precedence: task spec > task class > path override > repository
+config > default. The default for bounded tasks is `affected`; captured
+interactive pytest keeps its current `[tests] select` default (`all`) so a
+typed `pytest` is not silently partial.
+
+```toml
+[testing]
+mode = "affected"
+fallback = "all"          # all | refuse | affected_with_warning
+max_tests = 50
+timeout_s = 300
+captured = "all"          # interactive shell default
+[testing.tasks]
+code_review = "none"
+diff_review = "affected"
+test_triage = "affected"
+repo_scan = "smoke"
+[testing.paths]
+"docs/**" = "none"
+"src/**" = "affected"
+```
+
+Planning is deterministic:
+
+- changed files from the task input or `git diff base..head`, plus
+  untracked/created files when the task owns them;
+- graph edges (`File -has_test-> Test`, `tests_module`, `mentions_file`),
+  transitive imports and the `covering_tests` query;
+- changed test files always run; tests that failed in the last known run
+  always run; flaky tests are never silently skipped;
+- docs/config-only changes may be `none`; a changed file with no test link
+  uses `fallback` (`all` by default, or `refuse` for strict tasks);
+- a missing/stale graph is not trusted: report it and fall back, never claim
+  affected coverage.
+
+The plan reports `mode`, selected tests, counts, omitted tests, fallback
+reason, graph freshness and `not_assessed`. A subset run is never described
+as a full pass.
+
+Integration:
+
+- `core/tasks.py`: a `test_policy` field and a `test` step that receives the
+  plan; `none` skips test steps and records why; budget/time limits apply.
+- `core/code_review.py`: packet includes the planned tests and the reason a
+  test was not run; an optional injected runner may execute the plan later.
+- captured pytest: keep `ozagia.intent.affected` as the executor; add the
+  `[testing] captured` default and per-task/path policy where a caller
+  supplies them. No change to the interactive default.
+- status/view: show the policy and last plan; no test result is invented.
+
+Acceptance:
+
+- a changed `src/app.py` linked to `tests/test_app.py` selects that test;
+- a docs-only change selects `none` where configured;
+- an unlinked changed file produces the configured fallback, not an empty
+  green result;
+- `max_tests` and `timeout_s` cap the plan and report omissions;
+- task-class and path overrides win in the documented order;
+- a missing/stale graph is reported and falls back;
+- failed/flaky tests are never skipped;
+- the selected tests can be printed by a CLI (`python -m ozagia.testing_cli
+  plan ... --json`) and are recorded in task/code-review evidence.
+
+Non-goals: no claim that a subset proves correctness; no automatic full
+suite after a subset; no Rust `cargo test` selection until the graph has
+crate/test-target nodes; no model calls in planning.
+
 ### 11. Task class library
 
 Start with classes that are useful and safe:
@@ -1313,6 +1398,7 @@ Four agents start from `e5676cd`:
 | `~/ozmadev/ozagia-wt/task-library` | `feat/task-library` | Versioned task-class catalogue on top of `core/tasks.py` |
 | `~/ozmadev/ozagia-wt/model-registry` | `feat/model-registry` | Available-model registry, per-task defaults and source reporting |
 | `~/ozmadev/ozagia-wt/log-inspect` | `feat/log-inspect` | Bounded, redacted local log inspection and proposed improvements |
+| `~/ozmadev/ozagia-wt/test-policy` | `feat/test-policy` | Graph-based affected-test planning and configurable test depth |
 
 The same review/merge/full-suite gate applies.
 
