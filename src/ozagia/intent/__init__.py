@@ -237,7 +237,7 @@ def _may_change_files(tool: str, input: dict[str, Any]) -> tuple[bool, dict]:
     cls = classify(str(input.get("command") or ""))
     if cls["class"] == "compound":
         return any(s["kind"] == "pytest" for s in cls["steps"]), cls
-    return cls["class"] not in ("read", "grep", "ls", "find", "git_read",
+    return cls["class"] not in ("read", "grep", "ls", "find", "jq", "git_read",
                                 "git_refs"), cls
 
 
