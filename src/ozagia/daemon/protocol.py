@@ -114,12 +114,14 @@ of that process going away, and removes its socket.
 
 Tool names are the harness-neutral names below. A plugin maps its harness's
 names onto them (OpenCode 2.3: read, grep, glob, edit, write, patch, shell;
-Claude Code: Read, Grep, Glob, Edit, Write, MultiEdit, Bash).
+Claude Code: Read, Grep, Glob, Edit, Write, MultiEdit, Bash; Codex: Bash as
+shell, apply_patch as patch).
 
 `input` field names follow OpenCode 2.3 (verified): read {path, offset?,
 limit?}, grep {pattern, path?, include?, literal?}, glob {pattern, path?},
 edit {path, oldString, newString, replaceAll?}, write {path, content}, shell
-{command, workdir?, timeout?, description?}. A plugin for another harness
+{command, workdir?, timeout?, description?}, patch {patch} (the patch text;
+`after` only: the daemon re-ingests what it changed). A plugin for another harness
 converts its inputs to these names before sending.
 """
 from __future__ import annotations
@@ -135,7 +137,7 @@ PROTOCOL_VERSION = 1
 ENV_SOCK = "OZAGIA_DAEMON_SOCK"
 SOCK_NAME = "daemon.sock"
 TOOLS = ("read", "grep", "glob", "edit", "write", "patch", "shell")
-HARNESSES = ("opencode", "claude", "native")
+HARNESSES = ("opencode", "claude", "codex", "native")
 # The largest request or response line a peer must accept, in bytes.
 MAX_MESSAGE_BYTES = 16 * 1024 * 1024
 # Unix socket paths longer than this fall back to the temp dir.

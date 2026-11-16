@@ -2,10 +2,16 @@
 
     python -m ozagia.daemon serve --root <repo> [--dump <graph>]
         [--journal <jsonl>] [--sock <path>] [--no-build] [--parent-pid PID]
+        [--idle-timeout S]
+    python -m ozagia.daemon ensure [--root <repo>] [--sock <path>]
+        [--wait S] [--idle-timeout S]
     python -m ozagia.daemon ping|stats|shutdown [--root <repo> | --sock <path>]
 
 `serve` prints `ready <socket path>` once it accepts connections; with
-`--parent-pid` it exits when that process is gone. The
+`--parent-pid` it exits when that process is gone, with `--idle-timeout`
+after that many seconds without a request. `ensure` starts `serve` detached
+when no daemon answers (`ozagia.daemon.autostart`), prints the result as
+JSON and exits 1 when no daemon answered within `--wait`. The
 client commands print the daemon's reply as JSON and exit 1 when no daemon
 answers.
 """
@@ -38,6 +44,15 @@ def main(argv: list[str] | None = None) -> int:
                    help="fail instead of building a missing snapshot")
     s.add_argument("--parent-pid", type=int, default=None,
                    help="shut down when this process (the harness) is gone")
+    s.add_argument("--idle-timeout", type=float, default=None, metavar="S",
+                   help="shut down after S seconds without a request (default: never)")
+    e = sub.add_parser("ensure", help="start the daemon detached unless one answers")
+    e.add_argument("--root", default=None)
+    e.add_argument("--sock", default=None)
+    e.add_argument("--wait", type=float, default=None, metavar="S",
+                   help="seconds to wait for the daemon to answer (default: 10)")
+    e.add_argument("--idle-timeout", type=float, default=None, metavar="S",
+                   help="the started daemon's idle timeout (default: 1800; 0: never)")
     for name in ("ping", "stats", "shutdown"):
         c = sub.add_parser(name)
         c.add_argument("--root", default=None)
@@ -53,10 +68,24 @@ def main(argv: list[str] | None = None) -> int:
         try:
             return serve(root, dump=args.dump, journal=args.journal,
                          sock=args.sock, build_if_missing=not args.no_build,
-                         parent_pid=args.parent_pid)
+                         parent_pid=args.parent_pid,
+                         idle_timeout=args.idle_timeout)
         except (DaemonStartError, FileNotFoundError) as e:
             print(f"error: {e}", file=sys.stderr)
             return 2
+
+    if args.cmd == "ensure":
+        from ozagia.daemon import autostart
+        try:
+            res = autostart.ensure(
+                root, sock=args.sock,
+                wait_s=autostart.DEFAULT_WAIT_S if args.wait is None else args.wait,
+                idle_timeout_s=(autostart.DEFAULT_IDLE_TIMEOUT_S
+                                if args.idle_timeout is None else args.idle_timeout))
+        except OSError as e:
+            res = {"ok": False, "started": False, "reason": str(e)}
+        print(json.dumps(res, sort_keys=True))
+        return 0 if res.get("ok") else 1
 
     from ozagia.daemon.client import DaemonClient, DaemonError
     from ozagia.daemon.protocol import socket_path

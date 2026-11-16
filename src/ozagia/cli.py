@@ -6,7 +6,7 @@
                  [--mcp coding|research|combined | --research]
                  [--clone [--base REV]] [--keep-plugin] [--timeout S]
                  [--python P] [--runs-dir D] [-- <extra opencode args>]
-    ozagia daemon serve|ping|stats|shutdown ...   (python -m ozagia.daemon)
+    ozagia daemon serve|ensure|ping|stats|shutdown ... (python -m ozagia.daemon)
     ozagia mcp ...                                (ozagia.integrations.mcp.server)
     ozagia eval ...                               (python -m ozagia.eval.agent)
     ozagia check ...                              (python -m ozagia.check)
@@ -66,7 +66,7 @@ def _self_main(argv: list[str]) -> int:
 
 # name -> (main(argv) -> int, help). Looked up at call time so tests can patch.
 DELEGATES: dict[str, tuple[str, str]] = {
-    "daemon": ("_daemon_main", "the graph daemon: serve|ping|stats|shutdown "
+    "daemon": ("_daemon_main", "the graph daemon: serve|ensure|ping|stats|shutdown "
                                "(python -m ozagia.daemon)"),
     "mcp": ("_mcp_main", "the MCP server (ozagia.integrations.mcp.server)"),
     "eval": ("_eval_main", "the break/fix agent eval (python -m ozagia.eval.agent)"),

@@ -25,7 +25,13 @@ Every request is journaled, one JSON object per line, to
     {"ts", "op", "tool", "intent", "handled", "is_error", "expired", "ms",
      "keys" (at most 20), "reason", "fallback", "session", "harness"}
 
-`stats` counts (`DaemonState.stats`): `handled` {"true", "false"} over
+With `idle_timeout` (seconds), the daemon shuts down once no request has
+arrived for that long and none is in progress (checked every
+`IDLE_POLL_S` seconds at most). `python -m ozagia.daemon ensure` starts
+daemons this way, so ones started by hooks don't linger.
+
+`stats` counts (`DaemonState.stats`): `by_harness` (requests that name a
+harness, by harness); `handled` {"true", "false"} over
 `tool` requests; `passthrough` (handled false by design, not expired);
 `expired` (`tool` requests dropped by their deadline; `after_expired` for
 `after`); `late` (handled, but finished after the deadline, so the plugin
@@ -63,6 +69,8 @@ JOURNAL_KEYS = 20
 STALE_PING_TIMEOUT_S = 1.0
 # How often a daemon started with `parent_pid` checks that its parent lives.
 PARENT_POLL_S = 2.0
+# The longest wait between idle checks.
+IDLE_POLL_S = 5.0
 # Variables the harness sets for ozagia's own processes, not for the agent's
 # test runs.
 _TOOL_ONLY_ENV = ("PYTHONPATH", "COLUMNS")
@@ -144,8 +152,10 @@ class DaemonState:
     """What the request handlers share: the graph, the lock, the counters."""
 
     def __init__(self, root: Path, memory: Any, journal: Path, *,
-                 test_env: dict[str, str] | None = None) -> None:
+                 test_env: dict[str, str] | None = None,
+                 idle_timeout: float | None = None) -> None:
         self.root = root
+        self.idle_timeout = idle_timeout if idle_timeout and idle_timeout > 0 else None
         self.memory = memory
         self.journal = journal
         self.test_env = test_env
@@ -155,6 +165,10 @@ class DaemonState:
         self.by_op: dict[str, int] = {}
         self.by_tool: dict[str, int] = {}
         self.by_intent: dict[str, int] = {}
+        self.by_harness: dict[str, int] = {}
+        self.active = 0          # requests in progress
+        self.last_activity = time.monotonic()
+        self.idle_shutdown = False
         self.handled = {"true": 0, "false": 0}
         self.errors = 0          # ok: false responses
         self.tool_errors = 0     # handled, is_error
@@ -272,6 +286,24 @@ class DaemonState:
             return {"ok": True, **body}
         return {"ok": False, "error": f"unknown op {op!r}"}
 
+    def begin(self) -> None:
+        """A request arrived (for the idle timeout)."""
+        with self._stats_lock:
+            self.active += 1
+            self.last_activity = time.monotonic()
+
+    def end(self) -> None:
+        with self._stats_lock:
+            self.active -= 1
+            self.last_activity = time.monotonic()
+
+    def idle_for(self) -> float:
+        """Seconds since the last request ended, or 0 while one runs."""
+        with self._stats_lock:
+            if self.active:
+                return 0.0
+            return time.monotonic() - self.last_activity
+
     def record(self, msg: dict[str, Any], resp: dict[str, Any],
                ms: float) -> None:
         op = str(msg.get("op"))
@@ -285,6 +317,9 @@ class DaemonState:
             self.by_op[op] = self.by_op.get(op, 0) + 1
             if tool:
                 self.by_tool[str(tool)] = self.by_tool.get(str(tool), 0) + 1
+            harness = msg.get("harness")
+            if isinstance(harness, str) and harness:
+                self.by_harness[harness] = self.by_harness.get(harness, 0) + 1
             if meta.get("intent"):
                 it = str(meta["intent"])
                 self.by_intent[it] = self.by_intent.get(it, 0) + 1
@@ -339,6 +374,8 @@ class DaemonState:
                 "uptime_s": round(time.time() - self.started, 1),
                 "by_op": dict(self.by_op), "by_tool": dict(self.by_tool),
                 "by_intent": dict(self.by_intent),
+                "by_harness": dict(self.by_harness),
+                "idle_timeout_s": self.idle_timeout,
                 "handled": dict(self.handled),
                 "passthrough": self.passthrough,
                 "expired": self.expired,
@@ -408,6 +445,7 @@ class _Handler(socketserver.StreamRequestHandler):
                 continue
             t0 = time.perf_counter()
             msg: Any = None
+            state.begin()
             try:
                 msg = json.loads(line)
             except (ValueError, UnicodeDecodeError) as e:
@@ -422,6 +460,8 @@ class _Handler(socketserver.StreamRequestHandler):
                     except Exception as e:  # noqa: BLE001 - reported
                         resp = {"id": msg.get("id"), "ok": False,
                                 "error": f"{type(e).__name__}: {e}"}
+            finally:
+                state.end()
             ms = (time.perf_counter() - t0) * 1000
             state.record(msg if isinstance(msg, dict) else {"op": "invalid"},
                          resp, ms)
@@ -494,13 +534,27 @@ def _watch_parent(state: DaemonState, parent_pid: int,
             return
 
 
+def _watch_idle(state: DaemonState, stop: threading.Event) -> None:
+    limit = state.idle_timeout
+    assert limit is not None
+    poll = min(IDLE_POLL_S, max(limit / 4, 0.05))
+    while not stop.wait(poll):
+        if state.idle_for() >= limit:
+            print(f"idle for {limit:g} s; shutting down", file=sys.stderr, flush=True)
+            state.idle_shutdown = True
+            state.shutdown_later()
+            return
+
+
 def serve(root: str | Path, *, dump: str | Path | None = None,
           journal: str | Path | None = None, sock: str | Path | None = None,
           build_if_missing: bool = True, ready_stream: Any = None,
-          parent_pid: int | None = None) -> int:
+          parent_pid: int | None = None,
+          idle_timeout: float | None = None) -> int:
     """Run the daemon until shutdown; returns an exit code. With
     `parent_pid`, it also shuts down once that process is no longer its
-    parent or no longer exists."""
+    parent or no longer exists; with `idle_timeout`, once no request has
+    come for that many seconds."""
     root_p = Path(root).resolve()
     from ozagia.config import state_path
     sock_p = Path(sock) if sock else P.socket_path(root_p)
@@ -514,7 +568,8 @@ def serve(root: str | Path, *, dump: str | Path | None = None,
     # Rewriting the snapshot after every reingest costs ~1 s on a large repo;
     # the daemon keeps the graph in memory and writes it once on exit.
     memory.defer_writes = True
-    state = DaemonState(root_p, memory, journal_p, test_env=captured_test_env())
+    state = DaemonState(root_p, memory, journal_p, test_env=captured_test_env(),
+                        idle_timeout=idle_timeout)
     _clear_stale(sock_p)
     server = _Server(str(sock_p), state)
     state.server = server
@@ -533,6 +588,10 @@ def serve(root: str | Path, *, dump: str | Path | None = None,
         threading.Thread(target=_watch_parent, name="ozagia-parent-watch",
                          args=(state, int(parent_pid), stop_watch),
                          daemon=True).start()
+    if state.idle_timeout:
+        state.last_activity = time.monotonic()
+        threading.Thread(target=_watch_idle, name="ozagia-idle-watch",
+                         args=(state, stop_watch), daemon=True).start()
     try:
         print(f"ready {sock_p}", file=out, flush=True)
         server.serve_forever(poll_interval=0.2)
@@ -555,5 +614,6 @@ def serve(root: str | Path, *, dump: str | Path | None = None,
     return 0
 
 
-__all__ = ["DaemonStartError", "DaemonState", "JOURNAL_NAME", "PARENT_POLL_S",
+__all__ = ["DaemonStartError", "DaemonState", "IDLE_POLL_S", "JOURNAL_NAME",
+           "PARENT_POLL_S",
            "captured_test_env", "load_memory", "serve"]
