@@ -123,6 +123,63 @@ def test_rbac_unknown_namespace_subject_stays_unresolved() -> None:
                for ref in binding.unresolved)
 
 
+def test_custom_resources_link_to_known_crd_scope() -> None:
+    crd = parse_kubernetes_source(json.dumps({
+        "apiVersion": "apiextensions.k8s.io/v1",
+        "kind": "CustomResourceDefinition",
+        "metadata": {"name": "widgets.example.com"},
+        "spec": {
+            "group": "example.com",
+            "scope": "Namespaced",
+            "names": {"kind": "Widget", "plural": "widgets"},
+        },
+    }), "crd.json")
+    resource = parse_kubernetes_source(json.dumps({
+        "apiVersion": "example.com/v1",
+        "kind": "Widget",
+        "metadata": {"name": "sample", "namespace": "prod"},
+    }), "widget.json")
+    merged = merge_kubernetes_graphs([crd, resource]).to_dict()
+    assert any(edge["relation"] == "custom_resource_definition"
+               for edge in merged["edges"])
+
+    wrong_scope = parse_kubernetes_source(json.dumps({
+        "apiVersion": "example.com/v1",
+        "kind": "Widget",
+        "metadata": {"name": "cluster-sample"},
+    }), "widget-cluster.json")
+    unmatched = merge_kubernetes_graphs([crd, wrong_scope])
+    assert not any(edge.relation == "custom_resource_definition"
+                   for edge in unmatched.edges)
+    assert any(ref.evidence == "CRD scope does not match resource namespace"
+               for ref in unmatched.unresolved)
+
+
+def test_ambiguous_crd_declarations_stay_unresolved() -> None:
+    declaration = {
+        "apiVersion": "apiextensions.k8s.io/v1",
+        "kind": "CustomResourceDefinition",
+        "metadata": {"name": "widgets.example.com"},
+        "spec": {
+            "group": "example.com",
+            "scope": "Cluster",
+            "names": {"kind": "Widget", "plural": "widgets"},
+        },
+    }
+    first = parse_kubernetes_source(json.dumps(declaration), "crd-a.json")
+    second = parse_kubernetes_source(json.dumps(declaration), "crd-b.json")
+    resource = parse_kubernetes_source(json.dumps({
+        "apiVersion": "example.com/v1",
+        "kind": "Widget",
+        "metadata": {"name": "sample"},
+    }), "widget.json")
+    merged = merge_kubernetes_graphs([first, second, resource])
+    assert not any(edge.relation == "custom_resource_definition"
+                   for edge in merged.edges)
+    assert any(ref.evidence == "ambiguous CRD declarations"
+               for ref in merged.unresolved)
+
+
 def test_duplicate_cross_file_references_are_ambiguous() -> None:
     workload = parse_kubernetes_source(json.dumps({
         "apiVersion": "apps/v1", "kind": "Deployment", "metadata": {"name": "api", "namespace": "prod"},

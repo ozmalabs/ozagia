@@ -220,6 +220,10 @@ def index(ctx: Any) -> None:
         instance_mode = _safe_identifier(getattr(node, "instance_mode", None))
         if instance_mode:
             attrs["instance_mode"] = instance_mode
+        for crd_field in ("crd_group", "crd_kind", "crd_scope"):
+            crd_value = _safe_identifier(getattr(node, crd_field, None))
+            if crd_value:
+                attrs[crd_field] = crd_value
         namespace = _safe_identifier(getattr(node, "namespace", None))
         if namespace:
             attrs["namespace"] = namespace

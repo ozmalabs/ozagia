@@ -9,16 +9,19 @@ uses a limited conservative parser; it masks heredoc bodies, resolves
 statically named local module directories, links parent module-output
 references to child outputs, records provider aliases and Terraform address
 aliases, and recognizes `moved`, `import`, `removed`, `check` and `ephemeral`
-blocks plus `count`/`for_each` instance modes. Terraform JSON extraction reads
-explicit `${...}` expressions and supports the same resource/meta groups, but
-dynamic expressions, remote modules and unusual syntax remain unresolved.
-Mixed `.tf` and `.tofu` files in one module scope are both indexed and produce
-an explicit diagnostic because documented OpenTofu dialect precedence is not
-evaluated.
+blocks plus `count`/`for_each` instance modes. Interpolation expressions inside
+quoted strings or heredocs are retained as references while literal template
+text is not. Terraform JSON extraction reads explicit `${...}` expressions and
+supports the same resource/meta groups, but dynamic expressions, remote modules
+and unusual syntax remain unresolved. Mixed `.tf` and `.tofu` files in one
+module scope are both indexed and produce an explicit diagnostic because
+documented OpenTofu dialect precedence is not evaluated.
 Kubernetes selector
 relationships are inferred only when both manifests specify the same namespace;
 RBAC `roleRef` and ServiceAccount subject links resolve only across known
-namespaces and roles, and User/Group subjects stay unresolved. Bicep compilation
+namespaces and roles, and User/Group subjects stay unresolved. Custom resources
+link to a uniquely declared CRD only when group, kind and scope agree; unknown
+or ambiguous CRD declarations stay unresolved. Bicep compilation
 is not performed. A standalone CDK assembly reader accepts supplied artifacts;
 it does not synthesize or automatically load an app. See the
 [HCL parser evaluation](research/hcl_parser_evaluation.md) for why an external

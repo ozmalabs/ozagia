@@ -32,6 +32,17 @@ def test_opt_in_graph_context_reingests_and_excludes_values(tmp_path, monkeypatc
     (root / "Pulumi.yaml").write_text("name: sample\nruntime: yaml\nresources:\n"
                                        "  app:\n    type: aws:s3:Bucket\n"
                                        "    properties:\n      secret: CANARY_SECRET\n")
+    (root / "crd.json").write_text(json.dumps({
+        "apiVersion": "apiextensions.k8s.io/v1",
+        "kind": "CustomResourceDefinition",
+        "metadata": {"name": "widgets.example.com"},
+        "spec": {"group": "example.com", "scope": "Namespaced",
+                 "names": {"kind": "Widget", "plural": "widgets"}},
+    }))
+    (root / "widget.json").write_text(json.dumps({
+        "apiVersion": "example.com/v1", "kind": "Widget",
+        "metadata": {"name": "sample", "namespace": "prod"},
+    }))
     (root / "terraform.tfstate").write_text('{"secret":"CANARY_SECRET"}')
     subprocess.run(["git", "init", "-q", str(root)], check=True)
     subprocess.run(["git", "-C", str(root), "add", "."], check=True)
@@ -45,6 +56,12 @@ def test_opt_in_graph_context_reingests_and_excludes_values(tmp_path, monkeypatc
     assert {n["kind"] for n in attrs} >= {"resource", "Deployment"}
     assert any(n["family"] == "cloudformation" and n["name"] == "PaymentsBucket" for n in attrs)
     assert any(n["family"] == "pulumi" and n["name"] == "app" for n in attrs)
+    assert any(n["family"] == "kubernetes" and n["kind"] == "Widget" for n in attrs)
+    widget = memory.adapter_query("infra.locate", query="Widget")["results"][0]
+    widget_edges = memory.adapter_query(
+        "infra.dependencies", key=widget["key"], depth=1)["edges"]
+    assert any(edge["relation"] == "infra_custom_resource_definition"
+               for edge in widget_edges)
     assert "CANARY_SECRET" not in dump.read_text()
     file_id = memory.node_by_key("file:deployment.json")
     assert file_id is not None
@@ -56,9 +73,16 @@ def test_opt_in_graph_context_reingests_and_excludes_values(tmp_path, monkeypatc
     assert result["allocation"]["budget_chars"] == 800
     assert result["allocation"]["infra_chars"] > 0
     assert result["allocation"]["infra_chars"] <= 360
+    cached_context = memory.adapter_query(
+        "infra.context", query="payments", max_chars=400)
+    assert cached_context["context"]
     (root / "ignored.tf").write_text('resource "aws_vpc" "ignored" {}\n')
     memory._staleness_memo = None
     assert memory.staleness()["freshness"] != "fresh"
+    stale_context = memory.adapter_query(
+        "infra.context", query="payments", max_chars=400)
+    assert stale_context["freshness"] != "fresh"
+    assert stale_context["context"] == ""
     memory.refresh()
     located = memory.adapter_query("infra.locate", query="payments")
     assert located["freshness"] == "fresh" and located["ambiguous"]

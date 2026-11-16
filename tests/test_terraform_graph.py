@@ -17,7 +17,11 @@ output "id" { value = aws_vpc.main.id }
     graph = index_terraform_text("env/main.tf", source)
     assert {node.address for node in graph.nodes} == {"region", "aws_vpc.main", "id"}
     assert any(edge.evidence == "aws_vpc.main.id" for edge in graph.edges)
-    assert any(edge.evidence == "var.region" for edge in graph.unresolved)
+    variable_edge = next(edge for edge in graph.edges
+                         if edge.evidence == "var.region")
+    variable = next(node for node in graph.nodes if node.address == "region")
+    assert variable_edge.target == variable.key
+    assert not any(edge.evidence == "var.region" for edge in graph.unresolved)
     serialized = repr(graph)
     assert "CANARY_SECRET" not in serialized
     assert all(node.confidence == "low" for node in graph.nodes)
@@ -217,6 +221,29 @@ def test_file_discovery_skips_hidden_and_state_files(tmp_path):
     (tmp_path / ".terraform").mkdir()
     (tmp_path / ".terraform" / "cache.tf").write_text("x")
     assert discover_terraform_files(tmp_path) == ("main.tf",)
+
+
+def test_template_interpolations_in_strings_and_heredocs_are_references():
+    graph = index_terraform_text(
+        "main.tf",
+        '''variable "region" {}
+resource "aws_vpc" "main" {}
+resource "aws_instance" "web" {
+  user_data = "echo ${var.region} ${aws_vpc.main.id}"
+  description = "$${not.a.reference}"
+  # ${aws_vpc.commented.id}
+  notes = <<EOF
+token ${aws_vpc.main.id}
+literal CANARY_SECRET
+EOF
+}
+''',
+    )
+    evidence = {edge.evidence for edge in graph.edges}
+    assert {"var.region", "aws_vpc.main.id"} <= evidence
+    assert "not.a.reference" not in evidence
+    assert "aws_vpc.commented.id" not in evidence
+    assert "CANARY_SECRET" not in repr(graph)
 
 
 def test_locals_do_not_treat_nested_object_keys_as_declarations():

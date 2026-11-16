@@ -14,9 +14,9 @@ class Memory:
             "name": "payments-service", "kind": "Service", "path": "deploy/svc.yaml",
             "pointer": "/documents/0"}},
     }
-    _out = {1: [{"src": 1, "tgt": 2, "type": "selector",
+    _out = {1: [{"src": 1, "tgt": 2, "type": "infra_selector",
                 "attrs": {"provenance": "inferred"}}]}
-    _in = {2: [{"src": 1, "tgt": 2, "type": "selector",
+    _in = {2: [{"src": 1, "tgt": 2, "type": "infra_selector",
                "attrs": {"provenance": "inferred"}}]}
 
     def staleness(self):
@@ -253,6 +253,20 @@ def test_locate_cache_and_eviction(monkeypatch):
     infra_query.locate(memory, "service")
     infra_query.locate(memory, "payments-api")
     assert infra_query.cache_stats(memory)["entries"] <= 2
+
+
+def test_traverse_is_cached_and_returns_independent_results():
+    from ozagia.core import infra_query
+
+    memory = Memory()
+    first = infra_query.traverse(memory, "infra:payments", depth=1)
+    assert first["edges"]
+    second = infra_query.traverse(memory, "infra:payments", depth=1)
+    assert second == first
+    assert infra_query.cache_stats(memory)["hits"] == 1
+    first["edges"].clear()
+    assert second["edges"] and infra_query.traverse(
+        memory, "infra:payments", depth=1)["edges"]
 
 
 def test_relationship_line_names_the_target_and_avoids_inbound_duplicate():

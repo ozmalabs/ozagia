@@ -24,7 +24,8 @@ _BLOCK = re.compile(
     r"output|module|moved|import|removed|check)\b")
 _REF = re.compile(r"\b([A-Za-z_][\w-]*(?:\.[A-Za-z_][\w-]*){1,3})\b")
 _INTERPOLATION = re.compile(r"\$\{([^}]{1,256})\}")
-_ADDR_PREFIX = {"var": "variable", "local": "local", "module": "module", "data": "data"}
+_ADDR_PREFIX = {"variable": "var", "local": "local", "module": "module",
+                "data": "data"}
 _MODULE_SOURCE = re.compile(r"[A-Za-z0-9_./-]{1,256}\Z")
 _PROVIDER_ALIAS = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
 _SAFE_LABEL = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
@@ -151,13 +152,45 @@ def _heredoc_end(text: str, opener_end: int, delimiter: str, indented: bool):
     return None
 
 
-def _clean_hcl(text: str) -> tuple[str, bool]:
+def _template_refs(text: str, start: int, end: int) -> list[tuple[int, str]]:
+    """Expression references inside template interpolations in one range."""
+    refs: list[tuple[int, str]] = []
+    i = start
+    while i < end:
+        if (text.startswith("${", i)
+                and (i == 0 or text[i - 1] != "$")):
+            close = text.find("}", i + 2, min(end, i + 258))
+            if close >= 0:
+                refs.extend(
+                    (i, ref) for ref in _expression_refs(
+                        text[i + 2:close], _REF_PREFIXES))
+                i = close + 1
+                continue
+        i += 1
+    return refs
+
+
+def _clean_hcl(text: str) -> tuple[str, bool, list[tuple[int, str]]]:
     # Preserve offsets/newlines while masking comments, strings and heredocs.
+    # Interpolation expressions inside strings/heredocs are retained as safe
+    # references with their offsets; literal template text is not retained.
     out = list(text)
+    templates: list[tuple[int, str]] = []
     i = 0
     quote = False
     while i < len(text):
         if quote:
+            if text.startswith("${", i) and (i == 0 or text[i - 1] != "$"):
+                close = text.find("}", i + 2, min(len(text), i + 258))
+                if close >= 0:
+                    templates.extend(
+                        (i, ref) for ref in _expression_refs(
+                            text[i + 2:close], _REF_PREFIXES))
+                    for k in range(i, close + 1):
+                        if text[k] != "\n":
+                            out[k] = " "
+                    i = close + 1
+                    continue
             if text[i] == "\\":
                 if i + 1 < len(text):
                     out[i + 1] = " "
@@ -183,8 +216,9 @@ def _clean_hcl(text: str) -> tuple[str, bool]:
                 for k in range(opener_start, len(text)):
                     if text[k] != "\n":
                         out[k] = " "
-                return "".join(out), True
+                return "".join(out), True, templates
             _, _, next_i = end
+            templates.extend(_template_refs(text, opener_start, next_i))
             for k in range(opener_start, next_i):
                 if text[k] != "\n":
                     out[k] = " "
@@ -207,7 +241,7 @@ def _clean_hcl(text: str) -> tuple[str, bool]:
             i = j
             continue
         i += 1
-    return "".join(out), False
+    return "".join(out), False, templates
 
 
 def _safe_provider_alias(value: object) -> str | None:
@@ -452,9 +486,14 @@ def index_terraform_text(path: str, text: str, *, module_scope: str = "root") ->
                 bodies[node.key] = " ".join(
                     _json_references(body, allowed_refs_frozen))
     else:
-        clean, unterminated_heredoc = _clean_hcl(text)
+        clean, unterminated_heredoc, templates = _clean_hcl(text)
         if unterminated_heredoc:
             return TerraformGraph((), (), (), ((path, "unterminated HCL heredoc"),))
+
+        def body_with_templates(begin: int, end: int, masked: str) -> str:
+            extra = [ref for offset, ref in templates if begin <= offset < end]
+            return masked + ((" " + " ".join(extra)) if extra else "")
+
         depth = 0
         for char in clean:
             if char == "{":
@@ -477,7 +516,8 @@ def index_terraform_text(path: str, text: str, *, module_scope: str = "root") ->
                         start_line, end_line, digest,
                     )
                     decls.append(node)
-                    bodies[node.key] = clean[begin:end]
+                    bodies[node.key] = body_with_templates(
+                        begin, end, clean[begin:end])
                 continue
             if kind == "terraform":
                 continue
@@ -513,7 +553,7 @@ def index_terraform_text(path: str, text: str, *, module_scope: str = "root") ->
                 instance_mode=_instance_mode(body),
             )
             decls.append(node)
-            bodies[node.key] = clean_body
+            bodies[node.key] = body_with_templates(begin, end, clean_body)
             if kind == "module" and source is not None:
                 module_sources.append((node, source))
     by_ref: dict[str, TerraformNode] = {}
