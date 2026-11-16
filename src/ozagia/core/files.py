@@ -9,7 +9,13 @@ Session start writes a bounded worktree manifest under
 untracked files are not attributed to the session. Cleanup is preview-first:
 `cleanup_plan` issues a one-time token, `cleanup_apply` moves planned files
 under `.ozagia/trash/<timestamp>/` (never deletes), and `restore` moves them
-back with conflict checks.
+back with conflict checks. Trash is retained until a person explicitly purges
+it: `trash_purge` is a dry-run that issues a one-time token, and applying the
+token deletes only old, intact trash entries (never repository files) and
+appends an audit row under `.ozagia/trash/audit.jsonl`.
+
+Trash retention comes from the typed setting `files.retention_days`
+(default 30). Nothing purges trash automatically.
 """
 from __future__ import annotations
 
@@ -52,6 +58,13 @@ MAX_SESSION_RECORDS = 500
 CLEANUP_PLAN_TTL_S = 15 * 60
 MAX_CLEANUP_PLANS = 64
 MAX_TRASH_RUNS = 200
+# Trash purge plans are one-time and short-lived too. Retention is a policy
+# label (`files.retention_days`, default 30): nothing is purged automatically.
+DEFAULT_TRASH_RETENTION_DAYS = 30
+TRASH_PURGE_PLAN_TTL_S = 15 * 60
+MAX_TRASH_PURGE_PLANS = 64
+MAX_TRASH_AUDIT_RECORDS = 5000
+TRASH_AUDIT_FILE = "audit.jsonl"
 # The reason is a short label, never a prompt or file content.
 MAX_REASON_CHARS = 200
 # Created_by strings (session, harness, task, tool) are labels too.
@@ -1251,6 +1264,167 @@ def _trash_root(root: Path) -> Path:
     return state_path(root, "trash")
 
 
+def _trash_audit_path(root: str | Path) -> Path:
+    return _trash_root(Path(root).resolve()) / TRASH_AUDIT_FILE
+
+
+def trash_retention_days(root: str | Path) -> int:
+    """The configured trash retention in days (`files.retention_days`).
+
+    The typed settings registry is the source of truth (default 30). A
+    malformed configuration raises instead of silently using the default: a
+    purge decision should never run on a value nobody can read.
+    """
+    try:
+        from ozagia.core.settings import get as settings_get
+    except ImportError:  # pragma: no cover - settings is part of core
+        return DEFAULT_TRASH_RETENTION_DAYS
+    value = settings_get(root, "files.retention_days").get("value")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise FileLedgerError(
+            "files.retention_days must be a non-negative integer, "
+            f"got {value!r}")
+    return value
+
+
+def _purge_older_than(root: str | Path, older_than_days: int | None) -> int:
+    value = (trash_retention_days(root) if older_than_days is None
+             else older_than_days)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError("older_than_days must be a non-negative integer")
+    return value
+
+
+def _age_days(value: Any, *, now: datetime | None = None) -> int | None:
+    """Whole days since an ISO timestamp, or None when it cannot be read."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        created = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    current = now or datetime.now(timezone.utc)
+    return max(0, int((current - created).total_seconds() // 86400))
+
+
+def _trash_entry_state(entry: Mapping[str, Any]) -> str:
+    if entry.get("purged_at"):
+        return "purged"
+    if entry.get("restored_at") or entry.get("decision") == "restore":
+        return "restored"
+    return "in-trash"
+
+
+def _valid_trash_id(value: Any) -> bool:
+    return (isinstance(value, str) and value not in {"", ".", "..", ".git"}
+            and len(value) <= 128 and "\x00" not in value and "/" not in value
+            and "\\" not in value)
+
+
+def _load_trash_manifest(root: Path, run_dir: Path
+                         ) -> tuple[dict[str, Any] | None, str | None]:
+    """Read and validate one trash run's metadata-only manifest."""
+    manifest_path = run_dir / "manifest.json"
+    if manifest_path.is_symlink():
+        return None, "trash manifest is a symlink"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except OSError:
+        return None, "trash manifest is missing"
+    except json.JSONDecodeError:
+        return None, "trash manifest is corrupt"
+    if not isinstance(manifest, dict):
+        return None, "trash manifest is not an object"
+    if manifest.get("kind") != "trash_manifest":
+        return None, "trash manifest has an unknown kind"
+    if manifest.get("trash_id") != run_dir.name:
+        return None, "trash manifest id does not match its directory"
+    if manifest.get("root") != str(root):
+        return None, "trash manifest belongs to another repository"
+    if not isinstance(manifest.get("entries"), list):
+        return None, "trash manifest has no entries"
+    return manifest, None
+
+
+def _trash_entry_problem(root: Path, run_dir: Path, entry: Any) -> str | None:
+    """Why this manifest entry must not be purged, or None when it is safe.
+
+    Only a regular file below this run's directory can be deleted. The
+    repository path in the manifest is metadata for the audit, never a
+    deletion target.
+    """
+    if not isinstance(entry, Mapping):
+        return "entry is not an object"
+    rel = entry.get("path")
+    if not isinstance(rel, str) or not rel:
+        return "entry has no repository path"
+    if _path_parts_problem(rel):
+        return "entry repository path is outside the repository"
+    trash_path = entry.get("trash_path")
+    if not isinstance(trash_path, str) or not trash_path:
+        return "entry has no trash path"
+    target = _resolve_display(root, trash_path)
+    if _unsafe_under(run_dir, target):
+        return "trash path is unsafe"
+    if target == run_dir:
+        return "trash path is the run directory"
+    if target.name == "manifest.json" and target.parent == run_dir:
+        return "trash path is the trash manifest"
+    try:
+        resolved = target.resolve(strict=False)
+        base = run_dir.resolve()
+    except OSError:
+        return "trash path is unsafe"
+    if base not in resolved.parents:
+        return "trash path is unsafe"
+    if target.is_symlink():
+        return "trash path is a symlink"
+    if not target.is_file():
+        return "file is missing from trash"
+    size = entry.get("size")
+    try:
+        actual = target.stat().st_size
+    except OSError:
+        return "file is missing from trash"
+    if (isinstance(size, int) and not isinstance(size, bool)
+            and size != actual):
+        return "file size does not match the manifest"
+    return None
+
+
+def _trash_runs(root: Path) -> tuple[Path, list[Path]]:
+    """The trash root and its direct, non-symlink run directories."""
+    trash_root = _trash_root(root)
+    if trash_root.is_symlink():
+        raise FileLedgerError("trash directory is a symlink; refusing to purge")
+    try:
+        relative = trash_root.relative_to(root)
+    except ValueError:
+        relative = None
+    if relative is not None:
+        current = root
+        for part in relative.parts:
+            current = current / part
+            if current.is_symlink():
+                raise FileLedgerError(
+                    "trash directory contains a symlink; refusing to purge")
+    try:
+        directories = [p for p in trash_root.iterdir()
+                       if p.is_dir() and not p.is_symlink()]
+    except OSError:
+        return trash_root, []
+    try:
+        base = trash_root.resolve()
+    except OSError:
+        return trash_root, []
+    directories = [p for p in directories
+                   if _valid_trash_id(p.name) and p.resolve().parent == base]
+    directories.sort(key=lambda p: p.name, reverse=True)
+    return trash_root, directories
+
+
 def _prune_cleanup_plans(root: Path) -> None:
     directory = _cleanup_dir(root)
     try:
@@ -1383,6 +1557,8 @@ def _unsafe_under(base: Path, target: Path) -> bool:
     try:
         relative = target.relative_to(base)
     except ValueError:
+        return True
+    if any(part in {"", ".", ".."} for part in relative.parts):
         return True
     current = base
     for part in relative.parts:
@@ -1579,40 +1755,523 @@ def cleanup_apply(root: str | Path, candidates: Sequence[str | Mapping[str, Any]
     }
 
 
-def list_trash(root: str | Path, *, limit: int = MAX_TRASH_RUNS
-               ) -> dict[str, Any]:
-    """List trash runs and their entries (metadata only, newest first)."""
+def list_trash(root: str | Path, *, limit: int = MAX_TRASH_RUNS,
+               retention_days: int | None = None) -> dict[str, Any]:
+    """List trash runs and their entries (metadata only, newest first).
+
+    Each run reports its age, size, retention state and whether a purge has
+    anything to do. Runs whose manifest is missing or unreadable are reported
+    as `unknown` and are never purge candidates.
+    """
     root_path = Path(root).resolve()
-    trash_root = _trash_root(root_path)
+    retention = (_purge_older_than(root_path, retention_days)
+                 if retention_days is not None
+                 else trash_retention_days(root_path))
+    now = datetime.now(timezone.utc)
+    trash_root, directories = _trash_runs(root_path)
     runs: list[dict[str, Any]] = []
-    try:
-        directories = [p for p in trash_root.iterdir()
-                       if p.is_dir() and not p.is_symlink()]
-    except OSError:
-        directories = []
-    directories.sort(key=lambda p: p.name, reverse=True)
     for directory in directories[:max(0, int(limit))]:
-        manifest_path = directory / "manifest.json"
-        try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        manifest, problem = _load_trash_manifest(root_path, directory)
+        if manifest is None:
+            runs.append({
+                "trash_id": directory.name,
+                "id": directory.name,
+                "trash_dir": _trash_display(root_path, directory),
+                "created_at": None,
+                "count": 0,
+                "restored": 0,
+                "purged": 0,
+                "bytes": 0,
+                "remaining_bytes": 0,
+                "age_days": None,
+                "retention_days": retention,
+                "retention_state": "unknown",
+                "retention": "unknown",
+                "expired": False,
+                "purgeable": False,
+                "manifest": False,
+                "problem": problem,
+                "entries": [],
+            })
             continue
-        entries = manifest.get("entries") if isinstance(manifest, dict) else None
-        entries = [e for e in entries if isinstance(e, dict)] if isinstance(
-            entries, list) else []
+        entries = [e for e in manifest["entries"] if isinstance(e, dict)]
+        age = _age_days(manifest.get("created_at"), now=now)
+        in_trash = [entry for entry in entries
+                    if _trash_entry_state(entry) == "in-trash"]
+        if age is None:
+            state = "unknown"
+        elif age >= retention:
+            state = "expired"
+        else:
+            state = "retained"
+        purgeable = bool(in_trash) and state == "expired" and any(
+            _trash_entry_problem(root_path, directory, entry) is None
+            for entry in in_trash)
         runs.append({
             "trash_id": directory.name,
             "id": directory.name,
             "trash_dir": _trash_display(root_path, directory),
-            "created_at": manifest.get("created_at") if isinstance(
-                manifest, dict) else None,
+            "created_at": manifest.get("created_at"),
             "count": len(entries),
             "restored": sum(1 for e in entries if e.get("restored_at")),
+            "purged": sum(1 for e in entries if e.get("purged_at")),
             "bytes": sum(int(e.get("size") or 0) for e in entries),
+            "remaining_bytes": sum(int(e.get("size") or 0)
+                                   for e in in_trash),
+            "age_days": age,
+            "retention_days": retention,
+            "retention_state": state,
+            "retention": state,
+            "expired": state == "expired",
+            "purgeable": purgeable,
+            "manifest": True,
+            "problem": None,
             "entries": entries,
         })
     return {"schema": SCHEMA, "trash": runs, "runs": runs,
-            "count": len(runs)}
+            "count": len(runs), "retention_days": retention,
+            "trash_dir": _trash_display(root_path, trash_root)}
+
+
+def _purge_dir(root: Path) -> Path:
+    return state_path(root, LEDGER_DIR, "purge")
+
+
+def _prune_purge_plans(root: Path) -> None:
+    directory = _purge_dir(root)
+    try:
+        paths = [p for p in directory.glob("*.json") if p.is_file()]
+        markers = [p for p in directory.glob("*.used") if p.is_file()]
+    except OSError:
+        return
+    for group in (paths, markers):
+        if len(group) <= MAX_TRASH_PURGE_PLANS:
+            continue
+        try:
+            group.sort(key=lambda p: p.stat().st_mtime_ns, reverse=True)
+        except OSError:
+            continue
+        for path in group[MAX_TRASH_PURGE_PLANS:]:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+
+def _trash_purge_candidates(root: Path, older_than_days: int,
+                            now: datetime) -> tuple[list[dict[str, Any]],
+                                                   list[dict[str, Any]]]:
+    """Old, intact trash runs and why other runs are not candidates."""
+    _, directories = _trash_runs(root)
+    candidates: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for directory in directories:
+        manifest, problem = _load_trash_manifest(root, directory)
+        if manifest is None:
+            skipped.append({"trash_id": directory.name,
+                            "reason": problem or "unknown trash manifest"})
+            continue
+        created_at = manifest.get("created_at")
+        age = _age_days(created_at, now=now)
+        if age is None:
+            skipped.append({"trash_id": directory.name,
+                            "reason": "trash manifest has no valid created_at"})
+            continue
+        if age < older_than_days:
+            skipped.append({
+                "trash_id": directory.name,
+                "reason": f"run is {age} day(s) old; older-than-days is "
+                          f"{older_than_days}"})
+            continue
+        entries = [e for e in manifest["entries"] if isinstance(e, dict)]
+        eligible: list[dict[str, Any]] = []
+        for entry in entries:
+            if _trash_entry_state(entry) != "in-trash":
+                continue
+            if _trash_entry_problem(root, directory, entry) is not None:
+                continue
+            target = _resolve_display(root, str(entry.get("trash_path")))
+            try:
+                size = target.stat().st_size
+            except OSError:
+                continue
+            digest = entry.get("hash")
+            if not isinstance(digest, str) or not digest:
+                digest, _ = _hash_file(target)
+            eligible.append({
+                "path": entry.get("path"),
+                "source_path": entry.get("path"),
+                "trash_path": entry.get("trash_path"),
+                "size": size,
+                "hash": digest,
+                "classification": entry.get("classification"),
+                "reason": entry.get("reason"),
+                "run_created_at": created_at,
+                "age_days": age,
+            })
+        if not eligible:
+            skipped.append({
+                "trash_id": directory.name,
+                "reason": "no purgeable entries (restored, purged or unknown)"})
+            continue
+        candidates.append({
+            "trash_id": directory.name,
+            "id": directory.name,
+            "trash_dir": _trash_display(root, directory),
+            "created_at": created_at,
+            "age_days": age,
+            "count": len(eligible),
+            "entries_total": len(entries),
+            "restored": sum(1 for e in entries if e.get("restored_at")),
+            "purged": sum(1 for e in entries if e.get("purged_at")),
+            "remove_run": bool(entries) and len(eligible) == len(entries),
+            "bytes": sum(int(item["size"] or 0) for item in eligible),
+            "entries": eligible,
+        })
+    return candidates, skipped
+
+
+def trash_purge_plan(root: str | Path, *, older_than_days: int | None = None,
+                     ttl_s: int = TRASH_PURGE_PLAN_TTL_S,
+                     retention_days: int | None = None) -> dict[str, Any]:
+    """A dry-run trash purge and its one-time confirmation token.
+
+    Candidates are whole runs with a valid manifest older than
+    `older_than_days` (default `files.retention_days`), restricted to entries
+    that are still in the trash and safe to delete. Restored, purged, missing,
+    symlinked and unsafe entries are never candidates. Nothing is deleted and
+    no repository path is touched.
+    """
+    root_path = Path(root).resolve()
+    if retention_days is None:
+        retention = trash_retention_days(root_path)
+    elif (isinstance(retention_days, bool)
+          or not isinstance(retention_days, int) or retention_days < 0):
+        raise ValueError("retention_days must be a non-negative integer")
+    else:
+        retention = retention_days
+    older = retention if older_than_days is None else older_than_days
+    if isinstance(older, bool) or not isinstance(older, int) or older < 0:
+        raise ValueError("older_than_days must be a non-negative integer")
+    now = datetime.now(timezone.utc)
+    candidates, skipped = _trash_purge_candidates(root_path, older, now)
+    expires = now + timedelta(seconds=max(0, int(ttl_s)))
+    token = "p" + secrets.token_urlsafe(18)
+    plan = {
+        "schema": SCHEMA, "kind": "trash_purge_plan", "token": token,
+        "root": str(root_path), "created_at": now.isoformat(timespec="seconds"),
+        "expires_at": expires.isoformat(timespec="seconds"),
+        "ttl_s": max(0, int(ttl_s)), "used_at": None,
+        "older_than_days": older, "retention_days": retention,
+        "candidates": candidates, "skipped": skipped,
+    }
+    _write_json(_purge_dir(root_path) / f"{token}.json", plan)
+    _prune_purge_plans(root_path)
+    return {**plan, "dry_run": True, "confirmation": token,
+            "counts": {
+                "runs": len(candidates),
+                "entries": sum(int(run.get("count") or 0)
+                               for run in candidates),
+                "bytes": sum(int(run.get("bytes") or 0)
+                             for run in candidates),
+                "skipped": len(skipped),
+            },
+            "ok": True}
+
+
+def _load_purge_plan(root: str | Path, confirmation: str) -> dict[str, Any]:
+    if not _valid_token(confirmation):
+        raise FileLedgerError("invalid purge confirmation token")
+    root_path = Path(root).resolve()
+    path = _purge_dir(root_path) / f"{confirmation}.json"
+    try:
+        plan = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise FileLedgerError("unknown purge confirmation token") from exc
+    except json.JSONDecodeError as exc:
+        raise FileLedgerError("purge confirmation token is corrupt") from exc
+    if (not isinstance(plan, dict) or plan.get("kind") != "trash_purge_plan"
+            or plan.get("token") != confirmation):
+        raise FileLedgerError("purge confirmation token is not a plan")
+    if plan.get("used_at"):
+        raise FileLedgerError("purge confirmation token was already used")
+    if plan.get("root") != str(root_path):
+        raise FileLedgerError("trash purge plan belongs to another repository")
+    expires = plan.get("expires_at")
+    try:
+        expired = (not isinstance(expires, str)
+                   or datetime.now(timezone.utc) >= datetime.fromisoformat(expires))
+    except ValueError:
+        expired = True
+    if expired:
+        raise FileLedgerError("purge confirmation token has expired")
+    if not isinstance(plan.get("candidates"), list):
+        raise FileLedgerError("purge confirmation token has no candidates")
+    return plan
+
+
+def _consume_purge_plan(root: Path, plan: Mapping[str, Any], *,
+                        session: str | None, harness: str | None) -> None:
+    marker = _purge_dir(root) / f"{plan['token']}.used"
+    try:
+        descriptor = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                             0o600)
+    except FileExistsError as exc:
+        raise FileLedgerError(
+            "purge confirmation token was already used") from exc
+    except OSError as exc:
+        raise FileLedgerError(f"cannot consume purge token: {exc}") from exc
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(_now() + "\n")
+    item = dict(plan)
+    item["used_at"] = _now()
+    item["used_by"] = {"session": _label(session), "harness": _label(harness)}
+    _write_json(_purge_dir(root) / f"{plan['token']}.json", item)
+
+
+def _trim_jsonl(path: Path, limit: int) -> None:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    if len(lines) <= limit:
+        return
+    try:
+        path.write_text("\n".join(lines[-limit:]) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _append_trash_audit(root: Path, record: Mapping[str, Any]) -> None:
+    """Append one metadata-only audit row under `.ozagia/trash/audit.jsonl`."""
+    path = _trash_audit_path(root)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(dict(record), sort_keys=True) + "\n")
+    except OSError as exc:
+        raise FileLedgerError(f"cannot write trash audit: {exc}") from exc
+    _trim_jsonl(path, MAX_TRASH_AUDIT_RECORDS)
+
+
+def _prune_empty_dirs(run_dir: Path, start: Path) -> None:
+    """Remove empty directories between a purged file and its run directory."""
+    current = start
+    while current != run_dir and run_dir in current.parents:
+        if current.is_symlink():
+            return
+        try:
+            current.rmdir()
+        except OSError:
+            return
+        current = current.parent
+
+
+def _remove_purged_run(run_dir: Path, manifest: Mapping[str, Any]) -> bool:
+    """Remove a run directory when only its manifest is left.
+
+    Fully purged runs disappear from `trash list`; the audit is the durable
+    record. A run with restored entries, unknown entries or extra files keeps
+    its manifest.
+    """
+    manifest_path = run_dir / "manifest.json"
+    try:
+        leftovers = [p for p in run_dir.iterdir() if p != manifest_path]
+    except OSError:
+        return False
+    if leftovers:
+        return False
+    try:
+        manifest_path.unlink()
+    except OSError:
+        return False
+    try:
+        run_dir.rmdir()
+    except OSError:
+        _write_json(manifest_path, manifest)
+        return False
+    return True
+
+
+def _trash_purge_apply(root: Path, confirmation: str, *,
+                       session: str | None, harness: str | None,
+                       reason: str) -> dict[str, Any]:
+    plan = _load_purge_plan(root, confirmation)
+    _consume_purge_plan(root, plan, session=session, harness=harness)
+    older = int(plan.get("older_than_days") or 0)
+    stored_retention = plan.get("retention_days")
+    retention = (int(stored_retention)
+                 if isinstance(stored_retention, int)
+                 and not isinstance(stored_retention, bool) else older)
+    trash_root, _ = _trash_runs(root)
+    applied: list[dict[str, Any]] = []
+    refused: list[dict[str, Any]] = []
+    removed_runs: list[str] = []
+    audit_path = _trash_audit_path(root)
+
+    def refuse(path: Any, why: str) -> None:
+        refused.append({"path": path, "reason": why})
+
+    for run in plan["candidates"]:
+        if not isinstance(run, Mapping):
+            continue
+        trash_id = run.get("trash_id")
+        planned_entries = run.get("entries")
+        planned_entries = (planned_entries
+                           if isinstance(planned_entries, list) else [])
+        if not _valid_trash_id(trash_id):
+            for item in planned_entries:
+                if isinstance(item, Mapping):
+                    refuse(item.get("path"), "unsafe trash run id")
+            continue
+        run_dir = trash_root / str(trash_id)
+        if run_dir.is_symlink() or not run_dir.is_dir():
+            for item in planned_entries:
+                if isinstance(item, Mapping):
+                    refuse(item.get("path"), "trash run is missing or unsafe")
+            continue
+        try:
+            if run_dir.resolve().parent != trash_root.resolve():
+                raise ValueError
+        except (OSError, ValueError):
+            for item in planned_entries:
+                if isinstance(item, Mapping):
+                    refuse(item.get("path"), "trash run is outside the trash")
+            continue
+        manifest, problem = _load_trash_manifest(root, run_dir)
+        if manifest is None:
+            for item in planned_entries:
+                if isinstance(item, Mapping):
+                    refuse(item.get("path"), problem or "unknown trash manifest")
+            continue
+        if manifest.get("created_at") != run.get("created_at"):
+            for item in planned_entries:
+                if isinstance(item, Mapping):
+                    refuse(item.get("path"),
+                           "trash manifest changed since the plan")
+            continue
+        current: dict[tuple[Any, Any], dict[str, Any]] = {}
+        for entry in manifest["entries"]:
+            if isinstance(entry, dict):
+                current.setdefault(
+                    (entry.get("path"), entry.get("trash_path")), entry)
+        changed = False
+        removed_run = False
+        audits: list[dict[str, Any]] = []
+        for planned in planned_entries:
+            if not isinstance(planned, Mapping):
+                continue
+            rel = planned.get("path")
+            trash_path = planned.get("trash_path")
+            entry = current.get((rel, trash_path))
+            if entry is None:
+                refuse(rel, "entry is no longer in the trash manifest")
+                continue
+            state = _trash_entry_state(entry)
+            if state != "in-trash":
+                refuse(rel, f"entry is already {state}")
+                continue
+            problem = _trash_entry_problem(root, run_dir, entry)
+            if problem:
+                refuse(rel, problem)
+                continue
+            target = _resolve_display(root, str(entry.get("trash_path")))
+            try:
+                size = target.stat().st_size
+            except OSError:
+                refuse(rel, "file is missing from trash")
+                continue
+            expected = planned.get("hash") or entry.get("hash")
+            if isinstance(expected, str) and expected:
+                digest, _ = _hash_file(target)
+                if digest is not None and digest != expected:
+                    refuse(rel, "file changed since the plan")
+                    continue
+            try:
+                target.unlink()
+            except OSError as exc:
+                refuse(rel, f"delete failed: {exc}")
+                continue
+            purged_at = _now()
+            entry["purged_at"] = purged_at
+            entry["decision"] = "purged"
+            changed = True
+            applied.append({
+                "path": rel, "trash_id": trash_id,
+                "trash_path": trash_path, "size": size,
+                "hash": expected or entry.get("hash"), "decision": "purged",
+                "age_days": planned.get("age_days"),
+            })
+            audits.append({
+                "schema": SCHEMA, "kind": "trash_purge",
+                "event": "purged", "decision": "purged",
+                "purged_at": purged_at, "trash_id": trash_id,
+                "trash_dir": _trash_display(root, run_dir),
+                "path": rel, "trash_path": trash_path,
+                "size": size, "hash": expected or entry.get("hash"),
+                "classification": entry.get("classification"),
+                "reason": entry.get("reason"),
+                "age_days": planned.get("age_days"),
+                "manifest_created_at": manifest.get("created_at"),
+                "older_than_days": older, "retention_days": retention,
+                "purged_by": {
+                    "session": _label(session), "harness": _label(harness),
+                    "tool": "trash_purge", "reason": _clean_reason(reason),
+                },
+            })
+            _prune_empty_dirs(run_dir, target.parent)
+        if changed:
+            if (manifest["entries"]
+                    and all(isinstance(entry, Mapping)
+                            and _trash_entry_state(entry) == "purged"
+                            for entry in manifest["entries"])):
+                removed_run = _remove_purged_run(run_dir, manifest)
+            if not removed_run:
+                _write_json(run_dir / "manifest.json", manifest)
+            for audit in audits:
+                _append_trash_audit(root, audit)
+        if removed_run:
+            removed_runs.append(str(trash_id))
+    return {
+        "schema": SCHEMA, "dry_run": False, "token": confirmation,
+        "confirmation": confirmation,
+        "older_than_days": older, "retention_days": retention,
+        "applied": applied, "purged": applied, "refused": refused,
+        "removed_runs": removed_runs,
+        "counts": {"purged": len(applied), "applied": len(applied),
+                   "refused": len(refused), "runs": len(removed_runs),
+                   "bytes": sum(int(item.get("size") or 0)
+                                for item in applied)},
+        "audit_path": _trash_display(root, audit_path),
+        "ok": not refused,
+    }
+
+
+def trash_purge(root: str | Path, *, older_than_days: int | None = None,
+                confirmation: str | Mapping[str, Any] = "",
+                ttl_s: int = TRASH_PURGE_PLAN_TTL_S,
+                dry_run: bool | None = None,
+                session: str | None = None, harness: str | None = None,
+                reason: str = "trash purge") -> dict[str, Any]:
+    """Dry-run trash purging, or apply a one-time confirmation token.
+
+    With no confirmation token the call is a dry run (the default) and returns
+    the token for a later apply. Applying deletes only trash entries that are
+    still present, older than `older_than_days`, and safe; repository files are
+    never touched. Each purge appends metadata to
+    `.ozagia/trash/audit.jsonl`. Restored and unknown entries are refused.
+    """
+    root_path = Path(root).resolve()
+    if isinstance(confirmation, Mapping):
+        confirmation = str(confirmation.get("confirmation")
+                           or confirmation.get("token") or "")
+    token = str(confirmation or "")
+    apply = bool(token) if dry_run is None else not dry_run
+    if not apply:
+        return trash_purge_plan(root_path, older_than_days=older_than_days,
+                                ttl_s=ttl_s)
+    return _trash_purge_apply(root_path, token, session=session,
+                              harness=harness, reason=reason)
 
 
 def _trash_directory(root: Path, value: str) -> Path:
@@ -1896,13 +2555,58 @@ def format_trash(listing: Mapping[str, Any]) -> str:
         return "trash is empty"
     lines = []
     for run in runs:
-        lines.append(f"{run.get('trash_id')}: {run.get('count')} file(s), "
-                     f"{run.get('bytes')} bytes, restored={run.get('restored')} "
-                     f"({run.get('trash_dir')})")
+        state = run.get("retention_state") or "unknown"
+        age = run.get("age_days")
+        age_text = "unknown" if age is None else f"{age}d"
+        lines.append(
+            f"{run.get('trash_id')}: {run.get('count')} file(s), "
+            f"{run.get('remaining_bytes', run.get('bytes', 0))} bytes, "
+            f"restored={run.get('restored')} purged={run.get('purged')} "
+            f"age={age_text} retention={state} "
+            f"({run.get('trash_dir')})")
         for item in run.get("entries") or []:
-            state = "restored" if item.get("restored_at") else "in trash"
+            state = "restored" if item.get("restored_at") else (
+                "purged" if item.get("purged_at") else "in trash")
             lines.append(f"  {state:9} {item.get('size', 0):>8}  "
                          f"{item.get('path')}")
+    return "\n".join(lines)
+
+
+def format_trash_purge(result: Mapping[str, Any]) -> str:
+    counts = result.get("counts") or {}
+    if result.get("dry_run"):
+        lines = [
+            "trash purge is dry-run only; nothing is deleted",
+            f"  older-than-days={result.get('older_than_days')} "
+            f"retention-days={result.get('retention_days')} "
+            f"runs={counts.get('runs', 0)} entries={counts.get('entries', 0)} "
+            f"bytes={counts.get('bytes', 0)}",
+        ]
+        for run in result.get("candidates") or []:
+            lines.append(f"  {run.get('trash_id')} age={run.get('age_days')}d "
+                         f"{run.get('count')} file(s) {run.get('bytes')} bytes")
+            for item in run.get("entries") or []:
+                lines.append(f"    {item.get('size', 0):>8}  "
+                             f"{item.get('path')}")
+        for skipped in result.get("skipped") or []:
+            lines.append(f"  skipped {skipped.get('trash_id')}: "
+                         f"{skipped.get('reason')}")
+        if result.get("candidates"):
+            lines.append(f"purge with: ozagia-files trash purge --confirm "
+                         f"{result.get('confirmation') or result.get('token')}")
+            lines.append(f"the token is one-time and expires at "
+                         f"{result.get('expires_at')}")
+        return "\n".join(lines)
+    lines = [f"trash purge: purged={counts.get('purged', 0)} "
+             f"refused={counts.get('refused', 0)} "
+             f"bytes={counts.get('bytes', 0)}"]
+    for item in result.get("applied") or []:
+        lines.append(f"  purged {item.get('trash_id')} "
+                     f"{item.get('size', 0):>8}  {item.get('path')}")
+    for item in result.get("refused") or []:
+        lines.append(f"  refused {item.get('path')}: {item.get('reason')}")
+    if result.get("audit_path"):
+        lines.append(f"  audit: {result.get('audit_path')}")
     return "\n".join(lines)
 
 
@@ -1921,8 +2625,9 @@ __all__ = [
     "FileLedgerError", "append_record", "cleanup_apply", "cleanup_candidates",
     "cleanup_plan", "explain", "format_cleanup", "format_cleanup_apply",
     "format_cleanup_plan", "format_explain", "format_list", "format_restore",
-    "format_trash", "ledger_path", "list_files", "list_trash",
-    "markdown_route", "new_file_count", "orphans", "record_file",
-    "record_paths", "restore", "scan_new_files", "session_delta",
-    "session_manifest_path", "session_snapshot",
+    "format_trash", "format_trash_purge", "ledger_path", "list_files",
+    "list_trash", "markdown_route", "new_file_count", "orphans",
+    "record_file", "record_paths", "restore", "scan_new_files",
+    "session_delta", "session_manifest_path", "session_snapshot",
+    "trash_purge", "trash_purge_plan", "trash_retention_days",
 ]
