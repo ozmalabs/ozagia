@@ -50,6 +50,8 @@ def test_profiles_cover_formats_and_declare_required_fields():
         "book", "chapter", "note", "website", "article", "dataset", "software",
         "standard", "report", "thesis", "preprint", "interview", "lecture",
         "video", "other",
+        # A user's stated position in an agent conversation.
+        "conversation",
         # Research artifacts.
         "protocol", "preregistration", "registered_report", "analysis_plan",
         "lab_notebook", "field_notes", "computational_notebook", "workflow",
@@ -71,7 +73,7 @@ def test_profiles_cover_formats_and_declare_required_fields():
         "sequence", "structure", "synthetic_data", "model_output",
     }
     assert set(sf.SOURCE_FORMATS) == expected
-    assert len(sf.SOURCE_FORMATS) == 76
+    assert len(sf.SOURCE_FORMATS) == 77
     assert set(sf.list_source_formats()) == expected
 
     common = set(sf.COMMON_OPTIONAL_METADATA)

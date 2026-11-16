@@ -18,8 +18,21 @@ from typing import Any
 
 from ozagia.config import state_path
 
-SCHEMA_VERSION = 6
-SUPPORTED_SCHEMA_VERSIONS = frozenset({1, 2, 3, 4, 5, 6})
+# Version 7 adds LedgerFinding nodes, ``concerns`` edges and user-position
+# holdings. Older graphs (1-6) still load and are written back as version 7,
+# which earlier builds refuse with an unsupported-schema error.
+SCHEMA_VERSION = 7
+SUPPORTED_SCHEMA_VERSIONS = frozenset({1, 2, 3, 4, 5, 6, 7})
+# Ledger finding fields, validated here so the generic ``record`` operation
+# cannot create a finding the review ledger cannot report. The severities
+# match ``structured_review.SEVERITIES``.
+LEDGER_STATUSES = ("open", "addressed", "wont_fix", "disputed")
+LEDGER_SEVERITIES = ("blocking", "major", "minor", "note")
+# A conversation Source holds what the user said. It is never evidence, so it
+# cannot be an endpoint of these edges and holds only user positions.
+EVIDENCE_EDGE_TYPES = frozenset({"supports", "opposes", "cites"})
+USER_POSITION_ROLE = "user_position"
+CONVERSATION_SOURCE_TYPE = "conversation"
 LEGACY_GRAPH_DIR = Path("var") / "ocelot_research"
 NODE_TYPES = frozenset(
     {
@@ -34,6 +47,8 @@ NODE_TYPES = frozenset(
         "ReviewPlan",
         "ReviewRun",
         "ReviewFinding",
+        # A review finding tracked across sessions until it is closed.
+        "LedgerFinding",
         "Reconciliation",
         "Argument",
         "SearchRun",
@@ -93,6 +108,7 @@ EDGE_TYPES = frozenset(
         "discriminated_by",
         "explains",
         "held_as",
+        "concerns",
         "defines",
         "uses_symbol",
         "constrains",
@@ -152,7 +168,7 @@ _EDGE_ENDPOINTS = {
     ),
     "finds": (frozenset({"ReviewRun"}), frozenset({"ReviewFinding"})),
     "about": (
-        frozenset({"ReviewFinding"}),
+        frozenset({"ReviewFinding", "LedgerFinding"}),
         frozenset({"Claim", "Evidence", "Reference", "Argument", "Source"}),
     ),
     "reconciles": (frozenset({"Reconciliation"}), frozenset({"ReviewRun"})),
@@ -210,6 +226,16 @@ _EDGE_ENDPOINTS = {
     # A Source can have several epistemic holdings (for example, a book held
     # as an authorial interpretation rather than as behavioural evidence).
     "held_as": (frozenset({"Source"}), frozenset({"Holding"})),
+    # A user position (a conversation-sourced Holding) concerns the records
+    # it is about. The link is topical, not a support relation.
+    "concerns": (
+        frozenset({"Holding"}),
+        frozenset({
+            "Question", "Frame", "Claim", "Assumption", "Source", "Reference",
+            "Theory", "Argument", "Evidence", "Prediction", "ReviewFinding",
+            "LedgerFinding", "Holding",
+        }),
+    ),
     # A small scoped-symbol layer, following the OpenMath/OMDoc distinction
     # between a symbol's identity, its defining assertion, and its context.
     # These remain authored graph assertions; they are not inferred from TeX.
@@ -222,6 +248,84 @@ _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 
 class ResearchError(RuntimeError):
     """Invalid graph operation or malformed persisted graph."""
+
+
+def _token(value: Any) -> str:
+    return str(value or "").strip().casefold().replace("-", "_")
+
+
+def is_conversation_source(node: Any) -> bool:
+    return (isinstance(node, dict) and node.get("type") == "Source"
+            and _token(node.get("source_type")) == CONVERSATION_SOURCE_TYPE)
+
+
+def _node_field_errors(node: dict[str, Any],
+                       by_id: dict[str, dict[str, Any]]) -> list[tuple[str, str]]:
+    """(code, reason) pairs for W14 field rules on one node.
+
+    Shared by ``record``/``amend`` (which raise) and ``check`` (which
+    reports), so a hand-recorded node meets the same rules as one made by the
+    positions or review-ledger modules.
+    """
+    errors: list[tuple[str, str]] = []
+    if node.get("type") == "Holding":
+        role = _token(node.get("epistemic_role"))
+        source_type = _token(node.get("source_type"))
+        source = by_id.get(str(node.get("source_id")))
+        conversation = (source_type == CONVERSATION_SOURCE_TYPE
+                        or is_conversation_source(source))
+        if conversation and role != USER_POSITION_ROLE:
+            errors.append((
+                "conversation_held_as_non_position",
+                "A conversation Source is held with role "
+                f"{node.get('epistemic_role')!r}; a conversation can only hold "
+                "user_position holdings, never evidence."))
+        if role == USER_POSITION_ROLE and not (
+                source_type == CONVERSATION_SOURCE_TYPE
+                and (source is None or is_conversation_source(source))):
+            errors.append((
+                "user_position_without_conversation",
+                "A user_position holding must be held by a conversation Source."))
+    if node.get("type") == "LedgerFinding":
+        if "status" in node and node.get("status") not in LEDGER_STATUSES:
+            errors.append((
+                "ledger_finding_status_invalid",
+                f"LedgerFinding status {node.get('status')!r} is not one of "
+                f"{list(LEDGER_STATUSES)}."))
+        if "severity" in node and node.get("severity") not in LEDGER_SEVERITIES:
+            errors.append((
+                "ledger_finding_severity_invalid",
+                f"LedgerFinding severity {node.get('severity')!r} is not one of "
+                f"{list(LEDGER_SEVERITIES)}."))
+        history = node.get("history")
+        if not isinstance(history, list) or not history or not all(
+                isinstance(entry, dict) and entry.get("status") in LEDGER_STATUSES
+                for entry in history):
+            errors.append((
+                "ledger_finding_history_invalid",
+                "LedgerFinding needs a non-empty history of status entries."))
+        elif history[-1].get("status") != node.get("status"):
+            errors.append((
+                "ledger_finding_history_invalid",
+                "LedgerFinding history does not end at its current status."))
+    return errors
+
+
+def _evidence_edge_error(relation: str, src: Any, tgt: Any) -> tuple[str, str] | None:
+    """(code, reason) when an edge crosses the conversation/evidence boundary."""
+    if relation in EVIDENCE_EDGE_TYPES and (
+            is_conversation_source(src) or is_conversation_source(tgt)):
+        return ("conversation_source_used_as_evidence",
+                f"a conversation Source cannot be an endpoint of {relation}; "
+                "a user position is not evidence")
+    role = _token((tgt or {}).get("epistemic_role"))
+    if relation == "held_as" and is_conversation_source(src) and role != USER_POSITION_ROLE:
+        return ("conversation_held_as_non_position",
+                "a conversation Source can only hold user_position holdings")
+    if relation == "held_as" and not is_conversation_source(src) and role == USER_POSITION_ROLE:
+        return ("user_position_without_conversation",
+                "a user_position holding must be held by a conversation Source")
+    return None
 
 
 def _utc() -> str:
@@ -329,6 +433,12 @@ class ResearchGraph:
         return self._data["investigation_id"]
 
     def _validate(self) -> None:
+        version = self._data.get("schema_version") if isinstance(self._data, dict) else None
+        if (isinstance(version, int) and not isinstance(version, bool)
+                and version > SCHEMA_VERSION):
+            raise ResearchError(
+                f"investigation uses graph schema {version}, newer than this build "
+                f"supports (up to {SCHEMA_VERSION}); upgrade ozagia to open it")
         if (
             not isinstance(self._data, dict)
             or self._data.get("schema_version") not in SUPPORTED_SCHEMA_VERSIONS
@@ -425,6 +535,12 @@ class ResearchGraph:
         self._data["schema_version"] = SCHEMA_VERSION
         _atomic_write(self.path, self._data)
 
+    def _require_valid_fields(self, node: dict[str, Any]) -> None:
+        by_id = {n["id"]: n for n in self._data["nodes"]}
+        errors = _node_field_errors(node, by_id)
+        if errors:
+            raise ResearchError(errors[0][1])
+
     def record(self, node_type: str, **fields: Any) -> dict[str, Any]:
         if node_type not in NODE_TYPES:
             raise ResearchError(f"unknown node type: {node_type}")
@@ -444,6 +560,7 @@ class ResearchGraph:
             "created_at": _utc(),
             **fields,
         }
+        self._require_valid_fields(node)
         event = {
             "id": f"event-{len(self._data['events']) + 1:06d}",
             "type": "node_recorded",
@@ -481,6 +598,7 @@ class ResearchGraph:
         fields["updated_at"] = at
         previous = self._data["nodes"][index]
         updated = {**previous, **fields}
+        self._require_valid_fields(updated)
         event = {
             "id": f"event-{len(self._data['events']) + 1:06d}",
             "type": "node_amended",
@@ -517,6 +635,9 @@ class ResearchGraph:
             raise ResearchError(
                 f"{relation} edge is incompatible with {by_id[src]['type']} -> {by_id[tgt]['type']}"
             )
+        boundary = _evidence_edge_error(relation, by_id[src], by_id[tgt])
+        if boundary is not None:
+            raise ResearchError(boundary[1])
         edge = {
             "id": f"edge-{len(self._data['edges']) + 1:06d}",
             "type": relation,
@@ -583,6 +704,20 @@ class ResearchGraph:
     def check(self) -> dict[str, Any]:
         issues: list[dict[str, str]] = []
         nodes = self._data["nodes"]
+        by_id = {n["id"]: n for n in nodes}
+        for edge in self._data["edges"]:
+            boundary = _evidence_edge_error(
+                edge["type"], by_id.get(edge["src"]), by_id.get(edge["tgt"]))
+            if boundary is not None:
+                code, reason = boundary
+                issues.append({
+                    "code": code,
+                    "edge_id": edge["id"],
+                    "reason": reason[0].upper() + reason[1:] + ".",
+                })
+        for node in nodes:
+            for code, reason in _node_field_errors(node, by_id):
+                issues.append({"code": code, "node_id": node["id"], "reason": reason})
         if not any(n["type"] == "Question" for n in nodes):
             issues.append({"code": "missing_question", "reason": "Investigation has no question."})
         if not any(n["type"] == "Frame" for n in nodes):
@@ -668,6 +803,15 @@ class ResearchGraph:
                             "node_id": node["id"],
                             "field": field,
                             "reason": f"ReviewFinding has no {field}.",
+                        })
+            if node["type"] == "LedgerFinding":
+                for field in ("document", "severity", "text", "status"):
+                    if not node.get(field):
+                        issues.append({
+                            "code": "ledger_finding_field_missing",
+                            "node_id": node["id"],
+                            "field": field,
+                            "reason": f"LedgerFinding has no {field}.",
                         })
             if node["type"] == "Reconciliation" and not node.get("method"):
                 issues.append({

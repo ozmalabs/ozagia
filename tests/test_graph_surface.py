@@ -31,7 +31,8 @@ FULL_SURFACE_TOOLS = [
     "dev_architecture", "dev_code_search", "dev_scip", "dev_search",
     "dev_file", "dev_symbol", "dev_outline", "dev_query", "dev_ast",
     "dev_edit",
-    "dev_span_edit", "dev_key_edit", "dev_tests", "dev_seed", "dev_rule", "dev_node",
+    "dev_span_edit", "dev_key_edit", "dev_replace", "dev_tests", "dev_seed",
+    "dev_rule", "dev_node",
     "dev_neighbours", "dev_stats", "dev_changed", "dev_refresh", "dev_record",
     "dev_session_start", "dev_session_record", "dev_session_state",
     "dev_session_next", "dev_session_finish", "dev_session_list",
@@ -41,11 +42,13 @@ FULL_SURFACE_TOOLS = [
     "dev_symbol_callers", "dev_symbol_callees", "dev_symbol_graph_impact",
     "dev_symbol_resolve", "job_start", "job_wait", "job_list", "job_log",
     "job_stop", "dev_working_set", "dev_files_list", "dev_files_explain",
+    "dev_review_repo",
+    "goal_list", "goal_show", "goal_check", "goal_add", "goal_from_review", "goal_claim",
     "dev_graph_query", "dev_environments",
     "dev_check_iac", "dev_ops_record", "dev_ops_resume", "dev_live_import",
     "dev_live_diff", "dev_live_save", "dev_aws_cli_check",
     "dev_relay_plan", "dev_preflight_plan", "dev_runtime_status",
-    "dev_runtime_logs",
+    "dev_runtime_logs", "research_fetch",
 ]
 VERBS = ["find", "node", "expand", "impact", "edit", "create", "check", "note"]
 

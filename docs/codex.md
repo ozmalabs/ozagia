@@ -349,6 +349,8 @@ It lives in the daemon's memory, keyed like the read ledger (session id,
 goes with `SessionEnd` or a daemon restart. The root's failing tests are
 also kept in `.ozagia/working_set/tests.json` for the next session's brief:
 test ids, outcomes, times and the rerun prefix (interpreter and `-m pytest`),
+and the last 50 runs (time, selectors as paths or node ids, failed test
+ids, completeness; for goal criteria, docs/goals.md),
 never failure messages or command lines.
 The MCP tool `dev_working_set` returns the same text; an MCP server does
 not know Codex's session id, so without `session` it answers for the

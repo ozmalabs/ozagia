@@ -7,9 +7,10 @@ from collections.abc import Callable
 import os
 from pathlib import Path
 import shutil
+import stat
 from typing import Any
 
-from ozagia.config import state_path
+from ozagia.config import state_dir, state_path
 from ozagia.research.graph import ResearchGraph, ResearchError
 from ozagia.research.sources import build_index, retrieve, open_locator
 from ozagia.research.checks import check_research_workflow, check_finite_math
@@ -22,6 +23,52 @@ from ozagia.research.runtime import (
     engine_preamble as _default_engine_preamble,
     provenance_stamp as _default_provenance_stamp,
 )
+
+MAX_WORKSPACE_DOCUMENT_BYTES = 5_000_000
+
+
+def _without_positions(inspected: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+    """A claim's ``inspect`` view with user positions taken out.
+
+    Research context reports positions in their own ``user_positions`` block;
+    a position's ``concerns`` edge must not list it beside a claim's evidence.
+    """
+    from ozagia.research.positions import is_position
+
+    hidden = {node["id"] for node in inspected["related_nodes"]
+              if is_position(node, state)}
+    edges = [edge for edge in inspected["edges"]
+             if edge["type"] != "concerns"
+             and edge["src"] not in hidden and edge["tgt"] not in hidden]
+    linked = {edge[end] for edge in edges for end in ("src", "tgt")}
+    out = {**inspected, "edges": edges,
+           "related_nodes": [node for node in inspected["related_nodes"]
+                             if node["id"] not in hidden and node["id"] in linked]}
+    if hidden:
+        out["user_positions_omitted"] = len(hidden)
+    return out
+
+
+def _open_beneath(base: Path, rel: Path) -> int:
+    """An fd for ``base/rel`` opened one component at a time without symlinks.
+
+    ``rel`` is already resolved, so it has no symlinks; a component swapped
+    for a symlink after resolution makes the open fail instead of escaping.
+    """
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if os.open not in os.supports_dir_fd or not nofollow:
+        return os.open(base / rel, os.O_RDONLY | nofollow)
+    directory = getattr(os, "O_DIRECTORY", 0)
+    fd = os.open(base, os.O_RDONLY | directory)
+    try:
+        for part in rel.parts[:-1]:
+            next_fd = os.open(part, os.O_RDONLY | directory | nofollow, dir_fd=fd)
+            os.close(fd)
+            fd = next_fd
+        return os.open(rel.parts[-1], os.O_RDONLY | nofollow
+                       | getattr(os, "O_NONBLOCK", 0), dir_fd=fd)
+    finally:
+        os.close(fd)
 
 
 class ResearchService:
@@ -98,6 +145,40 @@ class ResearchService:
             return str(injected)
         project_lean = self.workspace / ".ozagia/tools/lean/bin/lean"
         return str(project_lean) if project_lean.is_file() else shutil.which("lean")
+
+    def _read_workspace_document(self, document: str) -> str | None:
+        """Text of a workspace-relative document, or None when unavailable.
+
+        Used for review-ledger baselines and re-reviews. Only regular files
+        inside the workspace are read: no absolute paths, no symlinks that
+        leave the workspace, nothing in the ozagia state directory and no
+        dotfiles or dot-directories (``.env``, ``.git/``). The file is opened
+        without following symlinks after resolution and checked through its
+        fd, up to 5 MB of UTF-8.
+        """
+        if not document or Path(document).is_absolute():
+            return None
+        try:
+            requested = Path(os.path.normpath(document))
+            path = (self.workspace / requested).resolve()
+            rel = path.relative_to(self.workspace)
+            if not rel.parts or any(part.startswith(".")
+                                    for part in (*requested.parts, *rel.parts)):
+                return None
+            state = state_dir(self.workspace)
+            if path == state or state in path.parents:
+                return None
+            fd = _open_beneath(self.workspace, rel)
+            with os.fdopen(fd, "rb") as stream:
+                info = os.fstat(stream.fileno())
+                if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_WORKSPACE_DOCUMENT_BYTES:
+                    return None
+                data = stream.read(MAX_WORKSPACE_DOCUMENT_BYTES + 1)
+            if len(data) > MAX_WORKSPACE_DOCUMENT_BYTES:
+                return None
+            return data.decode("utf-8")
+        except (OSError, ValueError, UnicodeError):
+            return None
 
     def call(self, operation: str, args: dict):
         if operation == "init":
@@ -1234,11 +1315,101 @@ class ResearchService:
             return {"lean": export_lean(state, target=args.get("node_id")),
                     "kernel_checked": False,
                     "note": "Generated definitions; no domain claim or Lean proof is certified."}
+        if operation in {"position_record", "position_supersede"}:
+            from ozagia.research import positions
+            if operation == "position_supersede" and not args.get("position_id"):
+                raise ResearchError("position_supersede needs position_id")
+            return positions.record_position(
+                graph,
+                stance=args.get("stance"),
+                conversation_session_id=args.get("conversation_session_id"),
+                topic=args.get("topic"),
+                quote=args.get("quote"),
+                stated_at=args.get("stated_at"),
+                concerns=args.get("concerns"),
+                documents=args.get("documents"),
+                correction_of=args.get("correction_of"),
+                supersedes=(args.get("position_id")
+                            if operation == "position_supersede" else None),
+            )
+        if operation == "position_retract":
+            from ozagia.research import positions
+            return positions.retract_position(
+                graph, position_id=args.get("position_id"),
+                conversation_session_id=args.get("conversation_session_id"),
+                note=args.get("note"))
+        if operation == "position_list":
+            from ozagia.research import positions
+            return positions.list_positions(
+                state, status=args.get("status", "active"),
+                node_id=args.get("node_id"), document=args.get("document"))
+        if operation == "review_finding_add":
+            from ozagia.research import review_ledger
+            return review_ledger.add_findings(
+                graph,
+                conversation_session_id=args.get("conversation_session_id"),
+                findings=args.get("findings"),
+                run_id=args.get("run_id"),
+                document=args.get("document"),
+                document_text=args.get("document_text"),
+                read_document=self._read_workspace_document,
+            )
+        if operation == "review_finding_status":
+            from ozagia.research import review_ledger
+            return review_ledger.set_status(
+                graph, finding_id=args.get("finding_id"), status=args.get("status"),
+                note=args.get("note"),
+                conversation_session_id=args.get("conversation_session_id"))
+        if operation == "review_outstanding":
+            from ozagia.research import review_ledger
+            return review_ledger.outstanding(
+                state, document=args.get("document"), statuses=args.get("statuses"))
+        if operation == "review_rereview":
+            from ozagia.research import review_ledger
+            document = args.get("document")
+            text = args.get("text")
+            if text is None:
+                text = self._read_workspace_document(str(document or ""))
+                if text is None:
+                    raise ResearchError(
+                        "give text, or a document path readable in the workspace")
+            return review_ledger.rereview(
+                state, document=document, text=text, statuses=args.get("statuses"))
         if operation == "context":
+            from ozagia.research import positions
             index = build_index(state["roots"])
             result = retrieve(index, args["query"], limit=args.get("limit", 8))
+            retrieved: list[tuple[str, str]] = []
+            retrieved_documents: list[str] = []
+            root_dirs = {root["root_id"]: Path(root["path"])
+                         for root in index.get("roots", [])}
+            for item in result.get("results", []):
+                citation = item.get("citation")
+                if not isinstance(citation, dict):
+                    continue
+                root_id, rel = citation.get("root_id"), citation.get("path")
+                if not isinstance(root_id, str) or not isinstance(rel, str):
+                    continue
+                retrieved.append((root_id, rel))
+                # Position documents are workspace-relative; a root may be a
+                # subdirectory of the workspace (or lie outside it).
+                if root_id in root_dirs:
+                    try:
+                        retrieved_documents.append(
+                            (root_dirs[root_id] / rel).resolve()
+                            .relative_to(self.workspace).as_posix())
+                    except (OSError, ValueError):
+                        pass
+            # Kept apart from the sourced results above: a user position is
+            # the user's stance, not evidence.
+            result["user_positions"] = positions.context_section(
+                state, args["query"], retrieved=retrieved,
+                retrieved_documents=retrieved_documents,
+                node_ids=args.get("node_ids") or [])
             result["mechanical_check"] = graph.check()
-            result["recorded_claims"] = [graph.inspect(n["id"]) for n in state["nodes"] if n["type"] == "Claim"]
+            result["recorded_claims"] = [
+                _without_positions(graph.inspect(n["id"]), state)
+                for n in state["nodes"] if n["type"] == "Claim"]
             frames = [n for n in state["nodes"] if n["type"] == "Frame"]
             ledger_fields = ("boundary", "state", "rules", "grammar", "possibilities", "realisation", "residual", "cost", "grounding", "test")
             result["frame_ledger"] = [{"node_id": f["id"], "missing": [k for k in ledger_fields if k not in f]} for f in frames]
@@ -1330,7 +1501,7 @@ class ResearchService:
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Research helper; arguments and output are JSON.")
-    parser.add_argument("operation", choices=["init", "context", "native_graph", "paper_preview", "paper_ingest", "ref_preview", "ref_import", "ref_record", "ref_export", "ref_check", "ref_link_citations", "source_types", "holding_record", "holding_check", "holding_report", "claim_holding", "source_register", "document_claim_preview", "document_claim_ingest", "ref_resolve", "ref_providers", "external_search", "fetch_preview", "fetch_apply", "zotero_import", "tei_preview", "pdf_preview", "pdf_claim_preview", "pdf_claim_ingest", "citation_resolve", "citation_resolution_report", "search", "semantic_build", "semantic_search", "cite_context", "evidence_table", "screen", "screening_report", "ref_citation_fetch", "ref_citation_neighborhood", "ref_citation_path", "manuscript_check", "manuscript_bundle", "review_plan_create", "review_search_log", "review_packet", "review_validate", "review_run_record", "review_agreement", "review_reconcile", "review_report", "argument_brief", "argument_record", "argument_check", "argument_report", "risk_of_bias_record", "risk_of_bias_check", "certainty_record", "certainty_report", "appraisal_table", "extraction_record", "extraction_check", "extraction_table", "extraction_report", "contradiction_scan", "contradiction_record", "contradiction_check", "contradiction_report", "alert_scan", "alert_record", "alert_ack", "alert_report", "theory_record", "theory_rivalry", "theory_compatibility", "theory_link_evidence", "theory_compare", "theory_scan", "theory_report", "theory_compatibility_matrix", "paper_review_start", "paper_review_packet", "paper_review_report", "paper_review_bundle", "formula_parse_candidates", "formula_resolve", "formula_translate", "formula_model", "model_candidate", "record", "link", "inspect", "trace", "execute", "export_lean", "check_lean", "check", "export"])
+    parser.add_argument("operation", choices=["init", "context", "native_graph", "paper_preview", "paper_ingest", "ref_preview", "ref_import", "ref_record", "ref_export", "ref_check", "ref_link_citations", "source_types", "holding_record", "holding_check", "holding_report", "claim_holding", "source_register", "document_claim_preview", "document_claim_ingest", "ref_resolve", "ref_providers", "external_search", "fetch_preview", "fetch_apply", "zotero_import", "tei_preview", "pdf_preview", "pdf_claim_preview", "pdf_claim_ingest", "citation_resolve", "citation_resolution_report", "search", "semantic_build", "semantic_search", "cite_context", "evidence_table", "screen", "screening_report", "ref_citation_fetch", "ref_citation_neighborhood", "ref_citation_path", "manuscript_check", "manuscript_bundle", "review_plan_create", "review_search_log", "review_packet", "review_validate", "review_run_record", "review_agreement", "review_reconcile", "review_report", "review_finding_add", "review_finding_status", "review_outstanding", "review_rereview", "position_record", "position_supersede", "position_retract", "position_list", "argument_brief", "argument_record", "argument_check", "argument_report", "risk_of_bias_record", "risk_of_bias_check", "certainty_record", "certainty_report", "appraisal_table", "extraction_record", "extraction_check", "extraction_table", "extraction_report", "contradiction_scan", "contradiction_record", "contradiction_check", "contradiction_report", "alert_scan", "alert_record", "alert_ack", "alert_report", "theory_record", "theory_rivalry", "theory_compatibility", "theory_link_evidence", "theory_compare", "theory_scan", "theory_report", "theory_compatibility_matrix", "paper_review_start", "paper_review_packet", "paper_review_report", "paper_review_bundle", "formula_parse_candidates", "formula_resolve", "formula_translate", "formula_model", "model_candidate", "record", "link", "inspect", "trace", "execute", "export_lean", "check_lean", "check", "export"])
     parser.add_argument("--workspace", default=".", help="Workspace containing Ozagia research state")
     parser.add_argument("--args", default="{}", help="JSON object of operation arguments")
     parser.add_argument("--lean", action="store_true", help="For export_lean, print Lean source rather than JSON")

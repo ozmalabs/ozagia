@@ -23,11 +23,15 @@ from ozagia.core.infra_discovery import (
 )
 
 MAX_TOTAL_SOURCE_BYTES = 16 * 1024 * 1024
+# Operations sources (compose, Containerfiles, quadlets, units) are budgeted
+# separately from the other IaC sources.
+MAX_OPS_SOURCE_BYTES = 8 * 1024 * 1024
 # Parsed per-file graphs are immutable and keyed by root, path, dialect and
 # content digest. The cache never stores source text or arbitrary values;
 # Terraform graphs retain only allowlisted literal backend identity fields.
-# It covers the adapter's 5,000-file discovery budget with headroom.
-PARSE_CACHE_MAX = 6000
+# It covers the adapter's 5,000-file discovery budget and the 2,000-file
+# operations budget with headroom.
+PARSE_CACHE_MAX = 8000
 _PARSE_CACHE: OrderedDict[tuple[Any, ...], Any] = OrderedDict()
 
 
@@ -131,22 +135,33 @@ def index(ctx: Any) -> None:
     # would repeatedly treat those paths as newly discovered.
     total_bytes = 0
     budget_exceeded = False
+    ops_bytes = 0
+    ops_budget_exceeded = False
     root_key = str(ctx.root.resolve())
     for rel, kind in iter_candidate_paths(ctx.root):
         if ctx.skipped(rel):
             continue
         ctx.file_node(rel, indexed=False)
-        if budget_exceeded:
+        if budget_exceeded if kind != "ops" else ops_budget_exceeded:
             continue
         text = read_source(ctx.root, rel)
         if text is None:
             diagnostics.append((rel, "Infrastructure source unreadable or over the per-file limit"))
             continue
-        total_bytes += len(text.encode("utf-8"))
-        if total_bytes > MAX_TOTAL_SOURCE_BYTES:
-            diagnostics.append((rel, "Infrastructure source budget exceeded; later files skipped"))
-            budget_exceeded = True
-            continue
+        size = len(text.encode("utf-8"))
+        if kind == "ops":
+            # Operations sources have their own budget (see MAX_OPS_FILES).
+            ops_bytes += size
+            if ops_bytes > MAX_OPS_SOURCE_BYTES:
+                diagnostics.append((rel, "Operations source budget exceeded; later operations files skipped"))
+                ops_budget_exceeded = True
+                continue
+        else:
+            total_bytes += size
+            if total_bytes > MAX_TOTAL_SOURCE_BYTES:
+                diagnostics.append((rel, "Infrastructure source budget exceeded; later files skipped"))
+                budget_exceeded = True
+                continue
         digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
         if kind == "ops":
             ops_sources[rel] = text
@@ -485,8 +500,16 @@ def index(ctx: Any) -> None:
                 environment_by_node[node.key] = None
                 ambiguous_environment_nodes.add(node.key)
 
+    from ozagia.core.ops_graph import parse_ops_source
     from ozagia.integrations.iac.ops import emit_ops
-    diagnostics.extend(emit_ops(ctx, ops_sources))
+
+    def parse_ops(rel: str, text: str) -> Any:
+        return _cached_parse(
+            (root_key, rel, "ops",
+             hashlib.sha256(text.encode("utf-8")).hexdigest()),
+            lambda: parse_ops_source(text, rel))
+
+    diagnostics.extend(emit_ops(ctx, ops_sources, parse=parse_ops))
 
     skip_info = skipped_summary(ctx.root)
     ids: dict[str, int] = {}

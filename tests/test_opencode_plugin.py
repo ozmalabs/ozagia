@@ -50,6 +50,13 @@ const tools = {
              return { output: "ORIG SHELL", content: [{ type: "text", text: "ORIG SHELL" }] }; } },
   patch: { name: "patch", description: "Apply a patch.", output: { kind: "patch" },
            execute: async (input) => { calls.push(["patch", input]); return "ORIG PATCH"; } },
+  webfetch: { name: "webfetch", description: "Fetch a URL.", output: { kind: "webfetch" },
+              execute: async (input) => { calls.push(["webfetch", input]);
+                if (cfg.fetchThrows) {
+                  class FetchHTTPError extends Error {}
+                  throw Object.assign(new FetchHTTPError(cfg.fetchThrows), { status: 404 });
+                }
+                return { output: cfg.fetchOutput ?? "PAGE", title: input.url, metadata: {} }; } },
 };
 const original = Object.fromEntries(Object.entries(tools).map(([k, t]) => [k, t.execute]));
 const reg = {
@@ -82,7 +89,14 @@ const c = { sessionID: "ses_test", agent: "build", messageID: "msg_1", id: "call
             progress: () => {}, signal: undefined };
 for (const call of cfg.calls || []) {
   try { results.push({ ok: true, result: await tools[call.tool].execute(call.input, c) }); }
-  catch (err) { results.push({ ok: false, error: String(err && err.message) }); }
+  catch (err) {
+    const r = { ok: false, error: String(err && err.message) };
+    // A built-in's own error class and fields (the webfetch stub's).
+    if (err && err.status !== undefined) {
+      Object.assign(r, { cls: err.constructor.name, status: err.status });
+    }
+    results.push(r);
+  }
 }
 await new Promise((r) => setTimeout(r, cfg.settleMs || 50));
 process.stdout.write(JSON.stringify({
@@ -342,7 +356,7 @@ def test_daemon_down_falls_back_to_the_original(tmp_path, sockdir):
     assert [r["ok"] for r in out["results"]] == [True, True]
     assert out["results"][0]["result"]["output"] == "ORIG READ"
     assert out["results"][1]["result"]["output"] == "ORIG SHELL"
-    assert sorted(out["replaced"]) == ["edit", "grep", "read", "shell"]
+    assert sorted(out["replaced"]) == ["edit", "grep", "read", "shell", "webfetch"]
 
 
 @needs_node
@@ -493,11 +507,13 @@ def test_expired_answer_runs_the_builtin(tmp_path, daemon):
 def test_registry_patch_untouched_schema_swapped_and_notes_added(tmp_path, daemon):
     d = daemon()
     out = _run(tmp_path, {}, d.path)
-    assert sorted(out["replaced"]) == ["edit", "grep", "read", "shell"]
+    assert sorted(out["replaced"]) == ["edit", "grep", "read", "shell", "webfetch"]
     assert "patch" not in out["replaced"]
     assert out["descriptions"]["patch"] == "Apply a patch."
+    # webfetch is wrapped for `after` only: its schema and description stay.
+    assert out["descriptions"]["webfetch"] == "Fetch a URL."
     assert out["schema_swapped"] == {"read": True, "grep": True, "edit": True,
-                                     "shell": True, "patch": False}
+                                     "shell": True, "patch": False, "webfetch": False}
     desc = out["descriptions"]
     assert desc["read"].startswith("Read a file.")
     assert "sym:<file>::<name>" in desc["read"] and "[ozagia]" in desc["read"]
@@ -1074,3 +1090,75 @@ def test_no_watch_without_session_synthetic(tmp_path, daemon):
     d = daemon(_jobs_script([]))
     out = _run(tmp_path, {"calls": [READ]}, d.path)
     assert out["results"][0]["ok"] and "job_events" not in d.ops()
+
+
+# --------------------------------------------------------------------------- #
+# webfetch: `after` only (the research_fetch hint)
+# --------------------------------------------------------------------------- #
+HINT = '[ozagia] fetch failed; the research fetcher can try: research_fetch {"url": "u"}'
+
+
+def _fetch_script(append):
+    def script(req):
+        if req["op"] == "after":
+            return {"ok": True, "append": append}
+        return _standard(req)
+    return script
+
+
+@needs_node
+def test_webfetch_error_gets_the_hint_and_no_tool_request(tmp_path, daemon):
+    d = daemon(_fetch_script(HINT))
+    call = {"tool": "webfetch", "input": {"url": "https://arxiv.org/abs/2401.12345",
+                                          "format": "markdown"}}
+    out = _run(tmp_path, {"calls": [call],
+                          "fetchThrows": "Request failed with status code: 404"}, d.path)
+    # The built-in's error itself, its message extended: class and fields kept.
+    assert out["results"][0] == {
+        "ok": False, "error": "Request failed with status code: 404\n" + HINT,
+        "cls": "FetchHTTPError", "status": 404}
+    assert [c[0] for c in out["calls"]] == ["webfetch"]  # the built-in ran
+    assert "tool" not in d.ops()                          # never handled by the daemon
+    (after,) = [r for r in d.requests if r["op"] == "after"]
+    assert after["tool"] == "webfetch"
+    assert after["input"] == {"url": "https://arxiv.org/abs/2401.12345"}
+    assert after["output"] == "Request failed with status code: 404"
+    assert after["meta"] == {"builtin_error": True}
+
+
+@needs_node
+def test_webfetch_output_keeps_its_shape(tmp_path, daemon):
+    d = daemon(_fetch_script(HINT))
+    call = {"tool": "webfetch", "input": {"url": "https://x.org/p.pdf"}}
+    out = _run(tmp_path, {"calls": [call], "fetchOutput": "%PDF-1.7 binary"}, d.path)
+    res = out["results"][0]["result"]
+    assert res["output"] == "%PDF-1.7 binary\n" + HINT
+    assert res["title"] == "https://x.org/p.pdf"
+    # No append: the built-in's result as it was.
+    d.script = _fetch_script("")
+    out = _run(tmp_path, {"calls": [call]}, d.path)
+    assert out["results"][0]["result"] == {"output": "PAGE", "title": "https://x.org/p.pdf",
+                                           "metadata": {}}
+    # Daemon down: the built-in's result and error as they were.
+    d.close()
+    out = _run(tmp_path, {"calls": [call], "fetchThrows": "boom"}, d.path)
+    assert out["results"][0] == {"ok": False, "error": "boom", "cls": "FetchHTTPError",
+                                 "status": 404}
+
+
+@needs_node
+def test_webfetch_after_uses_the_short_hint_timeout(tmp_path, daemon):
+    budgets = []
+
+    def script(req):
+        if req["op"] == "after":
+            budgets.append(req["deadline_ms"] - time.time() * 1000)
+            return {"ok": True, "append": ""}
+        return _standard(req)
+    d = daemon(script)
+    call = {"tool": "webfetch", "input": {"url": "https://x.org/a"}}
+    out = _run(tmp_path, {"calls": [call]}, d.path)
+    assert out["results"][0]["ok"] is True
+    # HINT_TIMEOUT_MS (6 s), not the 30 s request default.
+    (budget,) = budgets
+    assert 0 < budget <= 6000

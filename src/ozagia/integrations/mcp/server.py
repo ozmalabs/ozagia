@@ -30,6 +30,7 @@ import argparse
 import atexit
 import importlib
 import json
+import math
 import os
 import re
 import signal
@@ -343,6 +344,72 @@ _TOOLS: list[dict[str, Any]] = [
             "task": {"type": "string",
                      "description": "Optional journal task label."},
         }, ["key", "new_text"]),
+    },
+    {
+        "name": "dev_replace",
+        "description": (
+            "Replace a pattern across files (use it instead of a script that "
+            "rewrites files). Literal by default; regex=true takes a Python re "
+            "pattern and a replacement with \\1 / \\g<name> groups. Scope by "
+            "globs and/or node keys (sym:, doc:<file>#<section>, "
+            "text:<file>#L<a>-L<b>: only matches inside those spans); by "
+            "default only text files (known text suffixes, no dotfiles such "
+            "as .env; any_suffix=true for every file). Preview by default: "
+            "per-file match counts, enclosing keys, a short diff, `shas` and "
+            "`plan_id`. Apply with apply=true and the preview's plan_id "
+            "(required; base_shas alone is not enough): a plan that changed "
+            "since the preview (the request, a file's bytes, the set of "
+            "files), a match count other than `expect`, a cap, the scan's "
+            "deadline, or a file the replace would stop parsing refuses the "
+            "whole batch before any write. Each file is written with a "
+            "backup; if a write fails, the files written before it are "
+            "restored, and `partial` is set only when a restore fails. One "
+            "journal entry; the graph is updated. .git, the state dir, "
+            "symlinks, binary and oversized files are never touched; "
+            "gitignore=false also scans files .gitignore excludes."),
+        "inputSchema": _schema({
+            "pattern": {"type": "string",
+                        "description": "Literal text, or a regex with regex=true."},
+            "replacement": {"type": "string",
+                            "description": "Replacement (regex groups allowed "
+                                           "with regex=true)."},
+            "regex": {"type": "boolean", "default": False},
+            "flags": {"type": "string",
+                      "description": "Regex flags as letters (i, m, s, x, a) "
+                                     "or names (IGNORECASE,MULTILINE)."},
+            "globs": {"type": "array", "items": {"type": "string"},
+                      "description": "Root-relative globs (** crosses dirs; "
+                                     "a glob without / matches base names)."},
+            "keys": {"type": "array", "items": {"type": "string"},
+                     "description": "Node keys whose spans restrict the matches."},
+            "max_files": {"type": "integer",
+                          "description": "Refuse when more files match "
+                                         "(default 200)."},
+            "max_matches": {"type": "integer",
+                            "description": "Refuse when there are more matches "
+                                           "(default 5000)."},
+            "expect": {"type": "integer",
+                       "description": "Refuse unless the total match count "
+                                      "is exactly this."},
+            "apply": {"type": "boolean", "default": False,
+                      "description": "Write the change; needs plan_id."},
+            "base_shas": {"type": "object",
+                          "description": "Optional, with plan_id: the "
+                                         "preview's `shas` (file -> sha256); "
+                                         "apply refuses files changed since."},
+            "plan_id": {"type": "string",
+                        "description": "The preview's plan_id (required to "
+                                       "apply): apply refuses any difference "
+                                       "from the preview."},
+            "allow_parse_errors": {"type": "boolean", "default": False},
+            "gitignore": {"type": "boolean", "default": True,
+                          "description": "false: also files .gitignore excludes."},
+            "any_suffix": {"type": "boolean", "default": False,
+                           "description": "true: every file, not only text "
+                                          "suffixes; dotfiles included."},
+            "task": {"type": "string",
+                     "description": "Optional journal task label."},
+        }, ["pattern", "replacement"]),
     },
     {
         "name": "dev_tests",
@@ -816,6 +883,128 @@ _TOOLS.extend([
 ])
 
 
+# Whole-repository review (`ozagia.core.repo_review`): deterministic, no model
+# calls. The full packet goes to `<state dir>/reviews/`; the answer is a
+# budgeted summary.
+_TOOLS.append({
+    "name": "dev_review_repo",
+    "description": (
+        "Review the whole repository deterministically: architecture (import "
+        "cycles, hubs, layering), tests (failing tests from the record, "
+        "untested modules), health (large files and functions, TODO density, "
+        "unreferenced symbols), churn hotspots without tests, stale doc "
+        "references, security hygiene (tracked .env and key files, sensitive "
+        "constructs; not a security audit), ops sources (unpinned images, "
+        "restart policy, health checks, published ports) and dependency lock "
+        "files. Uses the graph only when it is fresh and says what it could "
+        "not check. Returns counts and the top findings, each with an id, graph "
+        "keys and a suggested goal; the full packet is written under "
+        ".ozagia/reviews/ (latest.json is the newest)."),
+    "inputSchema": _schema({
+        "sections": {"type": "array", "items": {"type": "string"},
+                     "description": "Only these sections (architecture, tests, health, churn, docs, security, ops, dependencies); default all."},
+        "compare_latest": {"type": "boolean", "default": False,
+                           "description": "Compare finding ids with the previous latest.json packet."},
+        "budget_s": {"type": "number", "default": 30,
+                     "description": "Wall-clock budget for the sections (at most 300 s)."},
+        "max_findings": {"type": "integer", "default": 10,
+                         "description": "Top findings to return (at most 50)."},
+    }),
+})
+# Goals (`ozagia.core.goals`): repo-level records in `.ozagia/goals/`, whose
+# targets and criteria are graph keys; criteria are checked against the
+# graph, the working tree and the test record.
+_TOOLS.extend([
+    {
+        "name": "goal_list",
+        "description": (
+            "List this repository's goals (graph-addressed work items): id, "
+            "title, status (open, met, regressed, blocked, dropped), who "
+            "claimed them, targets and the criteria not passing at the last "
+            "check. Read-only; goal_check re-evaluates."),
+        "inputSchema": _schema({
+            "status": {"type": "string",
+                       "enum": ["open", "met", "regressed", "blocked", "dropped"],
+                       "description": "Only goals with this status."},
+            "all": {"type": "boolean", "default": False,
+                    "description": "Include dropped goals."},
+        }),
+    },
+    {
+        "name": "goal_show",
+        "description": (
+            "One goal in full: targets, scope, each criterion with its last "
+            "result and evidence, claims and history."),
+        "inputSchema": _schema({
+            "id": {"type": "string", "description": "Goal id, e.g. g1."},
+        }, ["id"]),
+    },
+    {
+        "name": "goal_check",
+        "description": (
+            "Evaluate goals' criteria from the graph, the working tree and the "
+            "test record (never from the agent's claim), record the results, "
+            "and move a goal to met when every criterion passes or to "
+            "regressed when a met goal fails. A test result older than the "
+            "last change to the goal's targets is stale: rerun the test."),
+        "inputSchema": _schema({
+            "ids": {"type": "array", "items": {"type": "string"},
+                    "description": "Goal ids (default: every goal not dropped)."},
+        }),
+    },
+    {
+        "name": "goal_add",
+        "description": (
+            "Create a goal. targets are graph keys (file:, sym:, test:, doc:, "
+            "ops:); scope keys or path globs; criteria strings 'kind:args' or "
+            "objects {kind, args}. Kinds: test_passes, test_fails, "
+            "symbol_exists, symbol_absent, calls, not_calls, no_callers, "
+            "file_exists, file_absent, unchanged, lint_clean, "
+            "review_resolved, ops_has. Unknown keys are refused, except the "
+            "subject of symbol_exists/file_exists. ops: keys also resolve "
+            "from the tracked ops sources; ops_has takes pinned: true. "
+            "review_resolved {packet, finding_id} needs a saved review "
+            "packet under .ozagia/reviews/ that contains the finding, and "
+            "passes only on a later review (goal_from_review is simpler)."),
+        "inputSchema": _schema({
+            "title": {"type": "string"},
+            "why": {"type": "string", "description": "Free text."},
+            "targets": {"type": "array", "items": {"type": "string"}},
+            "scope": {"type": "array", "items": {"type": "string"}},
+            "criteria": {"type": "array",
+                         "items": {"type": ["string", "object"]},
+                         "description": "'kind:args' strings or {kind, args} objects."},
+        }, ["title", "criteria"]),
+    },
+    {
+        "name": "goal_from_review",
+        "description": (
+            "Turn a finding of the saved whole-repo review (dev_review_repo; "
+            ".ozagia/reviews/latest.json) into a goal: its suggested targets "
+            "and criteria plus review_resolved, which passes only when a later "
+            "review no longer reports the finding."),
+        "inputSchema": _schema({
+            "finding_id": {"type": "string",
+                           "description": "A finding id from dev_review_repo, e.g. RR-1a2b..."},
+        }, ["finding_id"]),
+    },
+    {
+        "name": "goal_claim",
+        "description": (
+            "Claim a goal for your harness session (or release it). After an "
+            "edit, the daemon then names the goal when the edit touches its "
+            "targets and notes edits outside its scope (advisory)."),
+        "inputSchema": _schema({
+            "id": {"type": "string"},
+            "harness": {"type": "string",
+                        "description": "opencode, claude, codex or kiro."},
+            "session": {"type": "string", "description": "Your session id."},
+            "release": {"type": "boolean", "default": False},
+        }, ["id", "harness", "session"]),
+    },
+])
+
+
 # --------------------------------------------------------------------------- #
 # dispatch
 # --------------------------------------------------------------------------- #
@@ -931,6 +1120,7 @@ class DevMemoryServer:
             "dev_edit": self._edit,
             "dev_span_edit": self._span_edit,
             "dev_key_edit": self._key_edit,
+            "dev_replace": self._replace,
             "dev_tests": self._tests,
             "dev_seed": self._seed,
             "dev_rule": self._rule,
@@ -960,6 +1150,13 @@ class DevMemoryServer:
             "dev_working_set": self._working_set,
             "dev_files_list": self._files_list,
             "dev_files_explain": self._files_explain,
+            "dev_review_repo": self._review_repo,
+            "goal_list": self._goal_list,
+            "goal_show": self._goal_show,
+            "goal_check": self._goal_check,
+            "goal_add": self._goal_add,
+            "goal_from_review": self._goal_from_review,
+            "goal_claim": self._goal_claim,
         } if mode in {"coding", "combined"} else {})
         if self.mem is not None:
             present = {n.get("type") for n in self.mem.nodes.values()}
@@ -975,6 +1172,22 @@ class DevMemoryServer:
             self._load_research_tools()
         if mode == "combined":
             self._load_research_dev_context()
+        self._load_research_fetch_tool()
+
+    def _load_research_fetch_tool(self) -> None:
+        """`research_fetch` (`ozagia.research.fallback`) in every mode of the
+        full surface (the graph surface keeps to its verbs): the `[ozagia]`
+        hint after a failed web fetch names it. It needs no
+        research session; it touches the network only when called."""
+        from ozagia.research import fallback
+        spec = fallback.TOOL_SPEC
+        name = spec["name"]
+        if name in self._handlers:
+            return
+        root = self.workspace
+        self._handlers[name] = lambda args: fallback.research_fetch_tool(args, root=root)
+        self._tools.append(spec)
+        self._schemas[name] = spec["inputSchema"]
 
     def _load_research_tools(self) -> None:
         """Load the optional research package only for a research mode."""
@@ -1198,6 +1411,68 @@ class DevMemoryServer:
                                      base_sha256=a.get("base_sha256") or None,
                                      apply=a.get("apply", False),
                                      task=a.get("task"))
+
+    def _replace(self, a: dict[str, Any]) -> Any:
+        from ozagia.intent.replace import lint_replace
+        if a.get("apply") is True and not (isinstance(a.get("plan_id"), str)
+                                           and a["plan_id"]):
+            return {"ok": False, "applied": False,
+                    "error": "apply needs the preview's plan_id (base_shas "
+                             "alone does not bind the request); preview "
+                             "first, then apply with its plan_id"}
+        with self._acting():
+            res = self.mem.replace(
+                a["pattern"], a["replacement"], regex=a.get("regex", False),
+                flags=a.get("flags"), globs=a.get("globs"), keys=a.get("keys"),
+                max_files=a.get("max_files"), max_matches=a.get("max_matches"),
+                expect=a.get("expect"), gitignore=a.get("gitignore", True),
+                any_suffix=a.get("any_suffix", False),
+                apply=a.get("apply", False), base_shas=a.get("base_shas"),
+                plan_id=a.get("plan_id") or None,
+                allow_parse_errors=a.get("allow_parse_errors", False),
+                task=a.get("task"))
+        if res.get("applied"):
+            lines, meta = lint_replace(self.mem, res)
+            res["lint"] = lines
+            res.update(meta)
+        return res
+
+    def _review_repo(self, a: dict[str, Any]) -> Any:
+        """A whole-repo review (`ozagia.core.repo_review`): the packet is
+        saved under the state dir and a budgeted summary returned."""
+        from ozagia.core import repo_review as RR
+        root = Path(self.mem.raw_repo_root if self.mem else self.workspace).resolve()
+        try:
+            budget = float(a.get("budget_s", 30))
+        except (TypeError, ValueError):
+            budget = float("nan")
+        if not math.isfinite(budget):
+            return {"ok": False, "error": "budget_s must be a finite number"}
+        budget = min(max(budget, 0.0), 300.0)
+        limit = min(max(int(a.get("max_findings", 10)), 0), 50)
+        compare = None
+        if a.get("compare_latest"):
+            latest = RR.reviews_dir(root) / RR.LATEST_NAME
+            compare = latest if latest.is_file() else None
+        try:
+            packet = RR.review_repo(
+                root, sections=a.get("sections") or None, compare=compare,
+                budget_s=budget,
+                graph_path=self.mem.dump if self.mem else None)
+            paths = RR.save_packet(root, packet)
+        except RR.PreflightError as exc:
+            return {"ok": False, "refused": True, "error": str(exc),
+                    "report": exc.report}
+        except RR.CR.CodeReviewError as exc:
+            return {"ok": False, "error": str(exc)}
+        out = {"ok": True, **paths, **RR.brief(packet, max_findings=limit),
+               "compared_with": str(compare) if compare else None}
+        # Which top findings a goal already tracks (goal_from_review makes one).
+        from ozagia.core.goals import tracking_goals
+        tracked = tracking_goals(root)
+        for item in out["top_findings"]:
+            item["goal"] = tracked.get(str(item.get("id")))
+        return out
 
     def _who(self, a: dict[str, Any]) -> Any:
         """The sessions that edited a file (`ozagia.core.owners.who`): from
@@ -1479,6 +1754,50 @@ class DevMemoryServer:
             return {"ok": False, "error": str(e)}
         return {"ok": True, **report}
 
+    # -- goals (`ozagia.core.goals`) ---------------------------------------- #
+    def _goal_call(self, fn: Callable[[], Any]) -> Any:
+        from ozagia.core.goals import GoalError
+        try:
+            return fn()
+        except GoalError as e:
+            return {"ok": False, "error": str(e)}
+
+    def _goal_list(self, a: dict[str, Any]) -> Any:
+        from ozagia.core import goals as G
+        return self._goal_call(lambda: {"ok": True, "goals": [
+            G.summary(g) for g in G.list_goals(
+                self._files_root(), status=a.get("status"),
+                include_dropped=a.get("all") is True)]})
+
+    def _goal_show(self, a: dict[str, Any]) -> Any:
+        from ozagia.core import goals as G
+        return self._goal_call(lambda: {"ok": True, "goal": G.get_goal(
+            self._files_root(), str(a["id"]))})
+
+    def _goal_check(self, a: dict[str, Any]) -> Any:
+        from ozagia.core import goals as G
+        ids = [str(x) for x in a.get("ids") or []]
+        return self._goal_call(lambda: {"ok": True, "goals": G.check_goals(
+            self._files_root(), self.mem, ids or None, by="mcp")})
+
+    def _goal_add(self, a: dict[str, Any]) -> Any:
+        from ozagia.core import goals as G
+        spec = {k: a[k] for k in ("title", "why", "targets", "scope", "criteria")
+                if k in a}
+        return self._goal_call(lambda: {"ok": True, "goal": G.add_goal(
+            self._files_root(), self.mem, spec, by="mcp")})
+
+    def _goal_from_review(self, a: dict[str, Any]) -> Any:
+        from ozagia.core import goals as G
+        return self._goal_call(lambda: {"ok": True, "goal": G.from_review(
+            self._files_root(), self.mem, None, str(a["finding_id"]), by="mcp")})
+
+    def _goal_claim(self, a: dict[str, Any]) -> Any:
+        from ozagia.core import goals as G
+        return self._goal_call(lambda: {"ok": True, "goal": G.summary(G.claim_goal(
+            self._files_root(), str(a["id"]), str(a["harness"]), str(a["session"]),
+            release=a.get("release") is True, by="mcp"))})
+
     # -- JSON-RPC ---------------------------------------------------------- #
     def handle(self, msg: Any) -> dict[str, Any] | None:
         """Answer one JSON-RPC message. Never raises.
@@ -1656,19 +1975,27 @@ def _respond(server: DevMemoryServer, msg: Any) -> dict[str, Any] | None:
     return server.handle(msg)
 
 
+# Tools besides `job_*` that run on the worker pool: they may take long and
+# share no state with the other handlers.
+POOLED_TOOLS = frozenset({"research_fetch"})
+
+
 def _is_job_call(msg: Any) -> bool:
-    """A `tools/call` of a job tool (it only talks to the daemon, so it can
-    run on a worker thread)."""
+    """A `tools/call` that runs on a worker thread: a job tool (it only talks
+    to the daemon) or one of POOLED_TOOLS (`research_fetch` downloads for up
+    to its time budget)."""
     if not isinstance(msg, dict) or msg.get("method") != "tools/call" or "id" not in msg:
         return False
     params = msg.get("params")
-    return (isinstance(params, dict) and isinstance(params.get("name"), str)
-            and params["name"].startswith("job_"))
+    if not isinstance(params, dict) or not isinstance(params.get("name"), str):
+        return False
+    return params["name"].startswith("job_") or params["name"] in POOLED_TOOLS
 
 
 def serve(server: DevMemoryServer) -> int:
     """Read messages from stdin and write the replies to stdout. Job tool
-    calls (`job_wait` may block for up to MCP_WAIT_MAX_S) run on a pool of
+    calls (`job_wait` may block for up to MCP_WAIT_MAX_S) and POOLED_TOOLS
+    calls (`research_fetch`) run on a pool of
     MCP_JOB_WORKERS threads, so the next messages are answered meanwhile;
     their replies may come out of order (JSON-RPC matches them by `id`).
     Every other message is handled in order on this thread. Replies are

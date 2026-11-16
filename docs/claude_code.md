@@ -107,9 +107,12 @@ The entries look like this:
 ```json
 {
   "hooks": {
-    "PostToolUse": [{"matcher": "Read|Grep|Glob|Edit|MultiEdit|Write|Bash",
+    "PostToolUse": [{"matcher": "Read|Grep|Glob|Edit|MultiEdit|Write|Bash|WebFetch",
                      "hooks": [{"type": "command", "timeout": 20,
                                 "command": "/path/to/python -m ozagia.integrations.claude_code hook"}]}],
+    "PostToolUseFailure": [{"matcher": "WebFetch",
+                            "hooks": [{"type": "command", "timeout": 20,
+                                       "command": "/path/to/python -m ozagia.integrations.claude_code hook"}]}],
     "PreToolUse": [{"matcher": "Bash|Read|Edit|MultiEdit|Write",
                     "hooks": [{"type": "command", "timeout": 20,
                                "command": "/path/to/python -m ozagia.integrations.claude_code hook"}]}],

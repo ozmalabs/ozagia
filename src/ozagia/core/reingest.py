@@ -1050,14 +1050,18 @@ def _git_status_paths(root: Path) -> list[str]:
 # --------------------------------------------------------------------------- #
 def file_stamp(root: Path, rel: str) -> list[Any] | None:
     """[size, mtime_ns, sha256] of `rel` (sha256 None above
-    MAX_PARSE_BYTES), or None when it is not a readable file."""
+    MAX_PARSE_BYTES, and for env files, which are never read or hashed:
+    a whole-file hash of `API_TOKEN=...` is a brute-force oracle), or None
+    when it is not a readable file."""
+    from ozagia.core.infra_discovery import env_file_name
     p = Path(root) / rel
     try:
         st = p.stat()
         if not p.is_file():
             return None
         sha = (hashlib.sha256(p.read_bytes()).hexdigest()
-               if st.st_size <= M.MAX_PARSE_BYTES else None)
+               if st.st_size <= M.MAX_PARSE_BYTES and not env_file_name(rel)
+               else None)
     except OSError:
         return None
     return [st.st_size, st.st_mtime_ns, sha, st.st_ctime_ns]

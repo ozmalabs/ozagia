@@ -37,6 +37,10 @@ glibc) and macOS (arm64, x64). `ozagia self check --tui` verifies the install;
   Markdown section ops, JSON path ops, HCL block/attribute ops and optional
   comment-preserving YAML path ops. Preview by default, base hash check,
   atomic write, backup. A diff is output only, never input.
+- **Review**: deterministic review of a commit range (`ozagia-review`) or of the
+  whole repository (`ozagia review-repo`: import cycles, test gaps, dead
+  symbols, stale doc references, security hygiene, ops sources, lock files),
+  with stable finding ids and graph keys. No model calls.
 - **Evals**: a leakage-checked retrieval eval, a break/fix agent eval with
   selectable agent backends (OpenCode, Claude Code), and an index bench.
 
@@ -55,6 +59,7 @@ glibc) and macOS (arm64, x64). `ozagia self check --tui` verifies the install;
 | SRE/IaC operations | Opt-in job waiting, nested command/network relays, ops receipts, supplied live-state snapshots, offline IaC checks and dry-run preflight ([docs/sre_operations.md](docs/sre_operations.md), [docs/relay.md](docs/relay.md)) | experimental; live paths default off |
 | Workspace checks | `ozagia-worktree`, `ozagia-resources`, `ozagia-files`: worktree/branch drift and commit/merge/push policy, host/disk admission checks, created-file ledger and Markdown routing ([docs/worktree.md](docs/worktree.md), [docs/resources.md](docs/resources.md), [docs/files.md](docs/files.md)) | read-only; cleanup is dry-run |
 | OpenCode GUI add-in | Graph, status and test-plan side panel plus commands, backed by a server RPC over the ozagia CLIs ([docs/opencode_addin.md](docs/opencode_addin.md)) | read-only; build/typecheck verified against OpenCode 2.3 |
+| Goals | `ozagia goal`: repo-level goals whose targets and criteria are graph keys, checked against the graph, the working tree and the test record; claimed by sessions, named in the daemon's after-edit lines and the session brief; `ozagia goal from-review` turns a `review-repo` finding into a goal that is met only after a later review no longer reports it ([docs/goals.md](docs/goals.md)) | new; no live harness runs yet |
 
 ## Quick start (from source)
 

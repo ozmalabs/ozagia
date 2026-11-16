@@ -80,6 +80,8 @@ HOOKS: tuple[tuple[str, str, str, str | None], ...] = (
     ("ozagia-post-read", "PostToolUse", "postToolUse", "read"),
     ("ozagia-post-write", "PostToolUse", "postToolUse", "write"),
     ("ozagia-post-shell", "PostToolUse", "postToolUse", "shell"),
+    # A plain word is tried as a regex against the tool ID: web_fetch.
+    ("ozagia-post-web-fetch", "PostToolUse", "postToolUse", "web_fetch"),
 )
 # Hooks only the V3 hook file gets: (name, trigger, matcher). PostCompact
 # (CLI 3.1.0+) hands back the working set (hook.compaction_context). The

@@ -104,6 +104,12 @@ one, every key has the generic default below. All keys are optional:
     name = "iam"                  # data "terraform_remote_state" label
     producer = "envs/iam"
 
+    [review]
+    layers = []                   # `ozagia review-repo`: path prefixes from
+                                  # the lowest layer to the highest; a file
+                                  # importing a file of a higher layer is a
+                                  # layering violation (docs/repo_review.md)
+
     [environments.dev]
     paths = ["envs/dev"]
     namespaces = ["dev"]
@@ -336,6 +342,8 @@ class ProjectConfig:
     relays: tuple[RelayConfig, ...] = ()
     runtime_services: tuple[RuntimeServiceConfig, ...] = ()
     runtime_tunnels: tuple[RuntimeTunnelConfig, ...] = ()
+    # `[review] layers`: path prefixes, lowest layer first.
+    review_layers: tuple[str, ...] = ()
 
     @property
     def adapter_base(self) -> Path | None:
@@ -356,6 +364,7 @@ _KEYS = {
     "tests": {"select", "cache"},
     "lint": {"enabled", "timeout_s", "python", "rust"},
     "iac": {"roots", "skip_globs", "remote_states"},
+    "review": {"layers"},
 }
 REPEAT_POLICIES = ("stub", "note", "off")
 TEST_SELECT_POLICIES = ("all", "affected")
@@ -658,6 +667,10 @@ def _parse(root: Path, source: Path | None, data: dict[str, Any]) -> ProjectConf
     memory = data.get("memory", {})
     adapters = data.get("adapters", {})
     iac = data.get("iac", {})
+    review = data.get("review", {})
+    review_layers = tuple(_dedup([
+        _rel_dir(v, "layers", f"{where} [review]")
+        for v in (_str_list(review, "layers", f"{where} [review]") or [])]))
     runtime = data.get("runtime", {})
     relay_configs = _relay_configs(data.get("relays"), where=where)
     relay_names = {relay.name for relay in relay_configs}
@@ -951,6 +964,7 @@ def _parse(root: Path, source: Path | None, data: dict[str, Any]) -> ProjectConf
         relays=relay_configs,
         runtime_services=tuple(runtime_services),
         runtime_tunnels=tuple(runtime_tunnels),
+        review_layers=review_layers,
     )
 
 

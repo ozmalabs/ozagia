@@ -16,6 +16,7 @@ from ozagia.core.research_ui import (
     render_html,
     render_json,
 )
+from ozagia.research.graph import SCHEMA_VERSION as GRAPH_SCHEMA_VERSION
 from ozagia.research.graph import ResearchGraph
 
 
@@ -241,7 +242,7 @@ def test_library_view_reports_identity_versions_retractions_and_gaps(research):
     assert model["truth_assessed"] is False
     assert model["not_assessed"]
     assert model["provenance"]["derived"] is True
-    assert model["provenance"]["graph_schema"] == 6
+    assert model["provenance"]["graph_schema"] == GRAPH_SCHEMA_VERSION
 
     rows = {row["reference_id"]: row for row in model["rows"]}
     assert rows[ids["ref1"]]["retraction_status"] == "retracted"

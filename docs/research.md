@@ -48,6 +48,43 @@ group, and an operation must name it (`research_external_search`,
 `research_ref_resolve`, or `research_fetch_preview`). See
 [optional external providers](research/providers.md).
 
+### Fetch fallback (`research_fetch`)
+
+A harness's own web fetch fails on many paper URLs (a 403 landing page, a
+dead link, a PDF it can't read). After such a failure the hooks append
+`[ozagia] fetch failed; the research fetcher can try: research_fetch {"url":
+"..."}`; the hint is computed locally and nothing is fetched inside a hook.
+`research_fetch {url, max_chars?, offset?, refresh?}` is listed in every MCP mode (not
+on the `graph` surface, which keeps to its verbs) and
+needs no research session. It derives identifiers from the URL (arXiv, DOI,
+PubMed/PMC, Europe PMC, Semantic Scholar, OpenReview, `.pdf` links), lists
+open-access candidates with the providers above (arXiv PDF; Crossref/OpenAlex
+and Unpaywall for a DOI, Unpaywall only with `OZAGIA_RESEARCH_EMAIL`; Europe PMC
+full-text JATS) and the Semantic Scholar Graph API, and follows a landing
+page's `citation_pdf_url` once. Downloads use the research User-Agent and
+the SSRF guard, which checks the URL, every redirect target before it is
+requested, and the address actually connected to (so a name that resolves
+to a private address on the second lookup is refused too). Each request has
+a 25 MB cap and a 30 s deadline for the whole download, not only per socket
+read; one call has a 90 s wall-clock budget
+(`OZAGIA_RESEARCH_FETCH_BUDGET_S`), after which it stops and reports its
+attempts. No cookies or credentials are sent; a body that is not a PDF where
+a PDF is declared is rejected. The MCP server runs the call on its worker
+pool, so other tools are answered meanwhile.
+PDF text comes from the PDF pipeline below (OCR off), JATS from the TEI
+reader. The artifact and its text are cached by content hash under
+`.ozagia/research/fetch`; the answer has a stable `source:sha256:<16 hex>`
+key, metadata, and page chunks (`page`, `start`, `key`, `text`) from
+`offset`, at most `max_chars` (default 20,000), with `next_offset`. A URL
+fetched before is answered from the cache (`cache_hit: true`), with the
+provenance (`url`, `resolved_url`, `provider`, `identifiers`) of that URL
+even when another URL fetched the same document first; `refresh: true`
+resolves it again.
+`OZAGIA_RESEARCH_OFFLINE=1` turns the network off; cached copies are still
+served. The daemon's `stats` reports `fetch_fallback_hints`,
+`research_fetches` and `research_fetch_cache_hits`. Implementation:
+`ozagia.research.fallback`.
+
 `research_search` uses SQLite FTS5 BM25 over selected local passages when
 available, with the older lexical index as fallback. `research_cite_context`
 extracts sentence/line citation contexts as unclassified candidates;
@@ -98,6 +135,20 @@ analogy pass; the exact clusters remain recorded.
 build steelman, red-team or synthesis arguments with premise/evidence
 obligations. Multi-model execution is a separate harness driver so the core
 never calls a model. See [structured review](research/review.md).
+
+`research_position_record` stores a user's stated stance or correction as a
+`Holding` sourced to the conversation (session id, date, an optional quote the
+user approved), linked to the records and documents it concerns;
+`research_position_supersede`, `research_position_retract` and
+`research_position_list` manage it. `research_context` reports matching active
+positions with their dates in a separate `user_positions` block, never among
+the sourced results. `research_review_finding_add` keeps review findings in a
+ledger (document, section anchor, severity, status, history with session ids);
+`research_review_finding_status` changes a status with a note,
+`research_review_outstanding` lists open findings by document and
+`research_review_rereview` proposes which may be addressed in a new version by
+checking whether their anchored text changed. See
+[positions and the review ledger](research/positions.md).
 
 `research_extraction_record` / `research_extraction_table` store comparable
 study fields and effect sizes with source locators. `research_risk_of_bias_record`
