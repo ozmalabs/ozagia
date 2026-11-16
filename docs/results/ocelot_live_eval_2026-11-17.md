@@ -31,7 +31,20 @@ through `$OZAGIA_CONFIG`.
 
 The same four tasks passed in every arm (`admissible-moves-weight`,
 `bound-audit-quantifier-scope`, `checkpoint-instance-index`,
-`seed-dependency-closure`), and the same four failed in every arm. A
+`seed-dependency-closure`), and the same four failed in every arm.
+
+**Correction: the four failures were the harness, not the agents.** The
+harness ran each task's check with ozagia's own interpreter, which has no
+`numpy`. The checks of `learner-board-pairs`, `life-step-cache`,
+`r2-cycle-arms` and `remote-causal-posit-noop` import `numpy`, so they
+stopped at collection with `ModuleNotFoundError`. The agents had run the
+same tests with the system `python`, which has `numpy`, and seen them pass.
+`ozagia.eval.agent validate` with that interpreter reports all four as
+"check does not pass on base". Rerun with `--python` set to Ocelot's
+`.venv` (same model, one run each), all four passed in both arms, editing
+the expected files. So every arm solved 8/8 tasks; the success column
+above reflects the broken check, and the time and token comparisons are
+unaffected. A
 timed-out session can still pass when its edit was already made.
 Input tokens are the uncached tokens the driver reports; the graph arm's
 preparation (about 70 s per task) is timed separately.
