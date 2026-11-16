@@ -30,10 +30,10 @@ Add one plugin entry to your **global** OpenCode config (`opencode.json` or
   "$schema": "https://opencode.ai/config.json",
   "plugins": [
     {
-      "package": "/home/matt/ozmadev/ozagia-wt/opencode-addin/addins/opencode",
+      "package": "/home/matt/ozmadev/ozagia/addins/opencode",
       "options": {
         "python": "/home/matt/ozmadev/ozagia/.venv/bin/python",
-        "root": "/home/matt/ozmadev/ozagia-wt/opencode-addin",
+        "root": "/home/matt/ozmadev/ozagia",
         "timeoutMs": 20000
       }
     }
@@ -58,7 +58,7 @@ also works. The server entry does not hot-reload on source edits.
 If you only want to experiment without options, the equivalent string entry is:
 
 ```jsonc
-"plugins": ["/home/matt/ozmadev/ozagia-wt/opencode-addin/addins/opencode"]
+"plugins": ["/home/matt/ozmadev/ozagia/addins/opencode"]
 ```
 
 ## What it shows

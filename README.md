@@ -54,6 +54,7 @@ glibc) and macOS (arm64, x64). `ozagia self check --tui` verifies the install;
 | Infrastructure | Opt-in source-only Terraform, Kubernetes and related infrastructure graph/context ([docs/iac_context.md](docs/iac_context.md)) | experimental, partial static analysis |
 | SRE/IaC operations | Opt-in job waiting, nested command/network relays, ops receipts, supplied live-state snapshots, offline IaC checks and dry-run preflight ([docs/sre_operations.md](docs/sre_operations.md), [docs/relay.md](docs/relay.md)) | experimental; live paths default off |
 | Workspace checks | `ozagia-worktree`, `ozagia-resources`, `ozagia-files`: worktree/branch drift and commit/merge/push policy, host/disk admission checks, created-file ledger and Markdown routing ([docs/worktree.md](docs/worktree.md), [docs/resources.md](docs/resources.md), [docs/files.md](docs/files.md)) | read-only; cleanup is dry-run |
+| OpenCode GUI add-in | Graph, status and test-plan side panel plus commands, backed by a server RPC over the ozagia CLIs ([docs/opencode_addin.md](docs/opencode_addin.md)) | read-only; build/typecheck verified against OpenCode 2.3 |
 
 ## Quick start (from source)
 

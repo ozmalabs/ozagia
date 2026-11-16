@@ -36,10 +36,10 @@ Local install (absolute path, object form for options):
   "$schema": "https://opencode.ai/config.json",
   "plugins": [
     {
-      "package": "/home/matt/ozmadev/ozagia-wt/opencode-addin/addins/opencode",
+      "package": "/home/matt/ozmadev/ozagia/addins/opencode",
       "options": {
         "python": "/home/matt/ozmadev/ozagia/.venv/bin/python",
-        "root": "/home/matt/ozmadev/ozagia-wt/opencode-addin",
+        "root": "/home/matt/ozmadev/ozagia",
         "timeoutMs": 20000
       }
     }

@@ -1352,17 +1352,27 @@ The read-only part of 1a landed as new files:
 - `core/testing.py`, `testing_cli.py`: test policy modes, graph-based
   affected-test planning, caps/fallbacks and task/code-review integration
   (`feat/test-policy`, merged as `5fdab35`).
+- `core/actions.py`, `actions_cli.py`: preview-first daemon/service/tunnel
+  actions with one-time confirmation, precondition rechecks and a redacted
+  audit log (`feat/process-actions`, merged as `abe0e8f`).
+- `addins/opencode/`: read-only OpenCode GUI add-in with server RPC over the
+  ozagia CLIs, graph/status/testing panels, commands, typecheck, 14 offline
+  Node tests and a built CJS bundle (`feat/opencode-addin`, merged as
+  `f052248`).
 - Tests for all of the above; docs `worktree.md`, `resources.md`, `files.md`,
   `status.md`, `view.md`, `settings.md`, `code_review.md`, `tasks.md`,
   `task_library.md`, `research_ui.md`, `log_inspect.md`, `models.md`,
-  `testing.md`, `ocelot.md`; console scripts for view, status, settings,
-  tasks, task library, research UI, log inspection, models, testing, review,
-  Ocelot, worktree, resources and files in `pyproject.toml`.
+  `testing.md`, `actions.md`, `ocelot.md`, `opencode_addin.md`; console scripts
+  for view, status, settings, tasks, task library, research UI, log inspection,
+  models, testing, actions, review, Ocelot, worktree, resources and files in
+  `pyproject.toml`.
 
-Checks after all three waves: `3626 passed, 21 skipped`;
-`ruff check src tests` passes. A concurrent TUI-brand merge added
+Checks after all four waves: `3637 passed, 21 skipped`;
+`ruff check src tests` passes. The OpenCode add-in additionally passes
+`npm run typecheck`, `node --test` (14/14) and `npm run build` (one CJS
+bundle) against OpenCode 2.3.0. A concurrent TUI-brand merge added
 `.opencode/plugins/ozagia/tui.js`; the harness exclude patterns and tests were
-updated for it, and the full suite is green.
+updated for it.
 
 Not yet: cgroups and exact per-job disk accounting; cleanup apply/trash;
 command-derived path extraction for `patch`/`shell`; a true before/after
@@ -1372,8 +1382,10 @@ reconciliation in the code-review harness; model/tool adapters and an injected
 test runner; interactive captured-pytest wiring for `testing.captured`;
 `[models.tasks]`/`[models.local]` support in the settings registry;
 `ozagia config` CLI/`config.py` integration, migration from `.ozagia.toml`,
-doctor source reporting; and the UI hosts (OpenCode add-in, standalone
-console), process/connection actions, repo scan and upstream submission.
+doctor source reporting; the add-in settings page, mutation commands, research
+tab and a live Desktop smoke test; action UI buttons/MCP preview tools; repo
+scan; Ocelot coding enhancements; the standalone console; and upstream
+submission.
 
 ### Parallel workstreams (2026-11-16)
 
@@ -1425,16 +1437,17 @@ ruff passes.
 
 ### Wave 4: OpenCode add-in (2026-11-16)
 
-OpenCode is the first UI host. One agent starts from `acce262`:
+OpenCode is the first UI host. Two agents started from `acce262`/`b89ec1d`:
 
 | Worktree | Branch | Scope |
 | --- | --- | --- |
 | `~/ozmadev/ozagia-wt/opencode-addin` | `feat/opencode-addin` | Local GUI plugin: server RPC over the ozagia CLIs, graph/status/testing panels and commands |
 | `~/ozmadev/ozagia-wt/process-actions` | `feat/process-actions` | Preview-first daemon/service action layer and audit log |
 
-Read-only in this slice: the panel renders graph views, status, worktree,
-resource and test-plan data. Mutating actions remain preview-first in the CLI;
-the panel does not execute them yet.
+Status: both are merged, `process-actions` as `abe0e8f` and `opencode-addin`
+as `f052248`. The add-in is read-only in this slice: the panel renders graph
+views, status, worktree, resource and test-plan data. Mutating actions remain
+preview-first in the CLI; the panel does not execute them yet.
 
 ## Open decisions
 
