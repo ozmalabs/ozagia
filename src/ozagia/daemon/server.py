@@ -85,7 +85,9 @@ clears or drops them, `read_check` answers a hook's PreToolUse.
 
 Working set (`ozagia.core.working_set`): after each `tool`/`after` answer
 the daemon notes in the session state's `work` what it edited (handled
-`edit`/`write`/key edits; `after_refresh` with `meta.changed_paths`) and
+`edit`/`write`/key edits; `after_refresh` of a built-in edit, write or
+patch with its `meta.edited_files`, of a shell command with
+`meta.changed_paths`) and
 which tests a pytest run failed (also in the root's test record in the
 state dir); the ledger copies reads into it. The `working_set` op renders
 it; `stats` adds `working_sets_served`, `working_set_chars` and
@@ -526,13 +528,26 @@ class DaemonState:
                 if it == "edit_key":
                     files.append(W.key_file(str(inp.get("key") or "")))
             elif op == "after" and it == "after_refresh":
+                # A built-in edit, write or patch: the files this call
+                # changed (`meta.edited_files`, session-scoped). A shell
+                # command: the changed files it may have written
+                # (`meta.changed_paths`, recently written ones only). Not
+                # every pending change in the root: other sessions and the
+                # user's editor change files too.
                 edited = True
-                if tool in ("edit", "write"):
-                    files.append(self._ws_rel(inp.get("path", inp.get("filePath"))))
-                files.extend(p for p in meta.get("changed_paths") or []
-                             if isinstance(p, str))
+                if tool in ("edit", "write", "patch"):
+                    files.extend(p for p in meta.get("edited_files") or []
+                                 if isinstance(p, str))
+                elif tool == "shell":
+                    files.extend(p for p in meta.get("changed_paths") or []
+                                 if isinstance(p, str))
             if work is not None and edited:
-                work.note_edit([f for f in files if f], keys)
+                named = [f for f in files if f]
+                if op == "after":
+                    # The refresh's delta covers every pending file: keep
+                    # the keys of the files this call changed.
+                    keys = [k for k in keys if W.key_file(k) in named]
+                work.note_edit(named, keys)
             command = inp.get("command")
             if tool != "shell" or not isinstance(command, str) or "pytest" not in command:
                 return
@@ -573,6 +588,9 @@ class DaemonState:
         session = msg.get("session") if isinstance(msg.get("session"), str) and msg.get(
             "session") else None
         since = msg.get("since") is True
+        # `free_text: false`: only paths, keys, test ids and job ids (no
+        # failure messages, command lines or DevSession titles).
+        free_text = msg.get("free_text") is not False
         cap = W.BRIEF_MAX_CHARS if since else W.TEXT_MAX_CHARS
         raw = msg.get("max_chars")
         if isinstance(raw, int) and not isinstance(raw, bool):
@@ -600,7 +618,7 @@ class DaemonState:
         if states:
             harness = harness or states[0].harness
             jobs = self._running_jobs()
-            plan = W.devsession_line(self.root)
+            plan = W.devsession_line(self.root, free_text=free_text)
 
             def exists(key: str) -> bool:
                 if not key.startswith(("sym:", "test:")):
@@ -610,7 +628,8 @@ class DaemonState:
                 text = W.working_set_text(
                     view, harness=harness, session=session,
                     compactions=max(st.compactions for st in states),
-                    jobs=jobs, plan=plan, key_exists=exists, max_chars=cap)
+                    jobs=jobs, plan=plan, key_exists=exists, max_chars=cap,
+                    free_text=free_text)
         if text:
             with self._stats_lock:
                 self.working["working_sets_served"] += 1

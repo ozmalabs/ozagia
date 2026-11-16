@@ -101,7 +101,8 @@ Requests (`op`):
     Any request with a `session` (and `hello`) marks that session live.
 
     {"id": 12, "op": "working_set", "harness": "codex", "session": "...",
-     "sub"?: "...", "max_chars"?: 7000, "since"?: false}
+     "sub"?: "...", "max_chars"?: 7000, "since"?: false,
+     "free_text"?: true}
       -> {"id": 12, "ok": true, "text": "<[ozagia] working set ...>" | "",
           "meta": {"intent": "working_set"|"working_set_empty"|"session_brief",
                    "keys", "harness", "session", "resolved", "files",
@@ -118,6 +119,9 @@ Requests (`op`):
       empty when the daemon has nothing for the session. With
       `since: true`, the session-start brief instead (git status, recent
       commits, the root's failing tests, running jobs; at most 1,500).
+      `free_text: false` keeps only paths, keys, test ids and job ids: no
+      failure messages, command lines or DevSession titles (the OpenCode
+      plugin, which puts the text in the system prompt).
 
 Sessions. `tool`, `after` and `read_check` with a `session` use that
 session's read ledger (`ozagia.intent.ledger`), keyed by (harness, session,

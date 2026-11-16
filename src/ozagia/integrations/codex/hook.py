@@ -41,7 +41,7 @@ reference (https://learn.chatgpt.com/docs/hooks, see docs/codex.md).
 - `PostToolUse` for `apply_patch`: send `after` as `patch` ({patch}); the
   daemon re-ingests the changed files and returns the graph delta.
 - `SessionStart`: a short brief "since the last session" (dirty files,
-  recent commits, tests failing at the last pytest run, running jobs, the
+  recent commits, the root's recorded failing tests, running jobs, the
   ozagia MCP tools to prefer; `ozagia.core.working_set.session_brief`) as
   `additionalContext`, and a start of the daemon so it is loaded by the
   first tool call. With source "compact", the session's working set
@@ -153,8 +153,8 @@ def map_tool(tool_name: str, tool_input: Any,
 # SessionStart brief
 # --------------------------------------------------------------------------- #
 def session_brief(root: Path, max_chars: int = BRIEF_MAX_CHARS) -> str:
-    """Dirty files, the last commits, the tests failing at the last pytest
-    run, running jobs and the MCP tools to prefer (`hookcore.session_brief`:
+    """Dirty files, the last commits, the root's recorded failing tests,
+    running jobs and the MCP tools to prefer (`hookcore.session_brief`:
     from the daemon when one answers, else from git and the state dir)."""
     return hookcore.session_brief(root, max_chars)
 

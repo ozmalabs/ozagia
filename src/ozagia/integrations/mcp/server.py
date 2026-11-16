@@ -756,18 +756,19 @@ _TOOLS.extend([
 _TOOLS.append({
     "name": "dev_working_set",
     "description": (
-        "What this agent session was working on, kept by the ozagia daemon "
+        "What an agent session was working on, kept by the ozagia daemon "
         "across context compaction: files and node keys it edited, tests that "
         "failed in its last pytest runs (with the command that reruns them), "
         "running background jobs, the current DevSession step, and the files "
         "and line ranges it read last. Use it after a compaction or when "
         "resuming, instead of re-reading files. Without session it answers "
-        "for the most recently active session in this repository; "
-        "since=true gives the session-start brief (dirty files, recent "
-        "commits, tests failing at the last run, running jobs)."),
+        "for the most recently active session in this repository, of any "
+        "harness unless harness is given (named in the header; it may not be "
+        "yours); since=true gives the session-start brief (dirty files, "
+        "recent commits, the root's recorded failing tests, running jobs)."),
     "inputSchema": _schema({
         "session": {"type": "string",
-                    "description": "The harness's session id (default: the most recently active session)."},
+                    "description": "The harness's session id (default: the most recently active session, named in the header)."},
         "harness": {"type": "string",
                     "description": "opencode, claude, codex or kiro (default: any)."},
         "since": {"type": "boolean", "default": False,

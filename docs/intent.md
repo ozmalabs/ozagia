@@ -225,7 +225,8 @@ last pytest runs failed, and a copy of its most recent reads. The daemon's
 `working_set` op renders it as an `[ozagia] working set` block (at most
 7,000 characters), which the compaction hooks hand back: OpenCode's
 `compaction` hook pushes it onto the summary request's system prompt and
-adds it once to the next request, Codex and Claude Code return it from
+adds it once to the next request (asked for with `free_text: false`: paths,
+keys, test ids and job ids only, marked as untrusted data), Codex and Claude Code return it from
 `SessionStart` with source `compact`, Kiro prints it on `PostCompact`. The
 MCP tool `dev_working_set` returns it too (docs/codex.md, "Working set").
 
