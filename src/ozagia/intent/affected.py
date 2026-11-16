@@ -46,16 +46,31 @@ The tests linked to them are:
   points, ...) is linked to every change.
 
 Everything runs, as typed, when the graph cannot decide: no green run yet,
-the green run's commit is gone, not a git work tree, a conftest.py changed,
-a non-Python file changed (tests may read it; this includes pytest and
-packaging config), a changed Python file no test is linked to, too many
-changed or untracked files, or no file changed at all. The output then says
-`[ozagia] ran all tests: <reason>`. A subset run says
+the green run's commit is gone, not a git work tree, the root is below the
+git top level (changes outside it are not seen), the interpreter, its
+installed distributions or the environment differ from the green run's, a
+conftest.py changed, a non-Python file changed (tests may read it; this
+includes pytest and packaging config), a changed Python file no test is
+linked to, too many changed or untracked files, no file changed at all,
+every test file is affected (named: the files whose dynamic imports link
+every change), or planning took longer than `MAX_PLAN_S` (or
+`PLAN_SHARE` of `_deadline_s_remaining`). The output then says
+`[ozagia] ran all tests: <reason>`. Test files that failed in the suite's
+latest run are always selected. A subset run says so in the head line and
+after it:
 
+    [ozagia] pytest passed (affected subset: 2 of 3 tests run, 1 not run): exit 0, ...
     [ozagia] ran N affected tests of M; not run: K tests in F files (a, b, +n more); run all: OZAGIA_TESTS_ALL=1 <command>
 
-Only a run of the command as typed that exits 0 moves the green run forward;
-an affected run never does, so changes accumulate until the next full pass.
+Only a run of the command as typed that exits 0 moves the green run forward,
+and only when HEAD, the dirty files and the interpreter are the same after
+the run as before it; an affected run never does, so changes accumulate
+until the next full pass.
+
+Files: git's list (`ls-files -c -o --exclude-standard`), less tool caches
+(`__pycache__`, `.pytest_cache`, ...) at any depth and the other
+`GENERIC_SKIP_DIRS` names (`build`, `dist`, `venv`, ...) at the top level
+only, since below it they are ordinary package names.
 
 Cache (`cache = true`). Each test node's last outcome is stored with the key
 of its test file: a hash of the test file, its conftest chain, the project
@@ -72,12 +87,15 @@ error is never served from the cache; a node seen with no stored outcome
 under the current key (the file's node list is stored only by a run of the
 whole file that was not cut short by `-x`) makes the whole file run. With
 `select = "all"` the cache applies to every test file of the green run.
+`pytest not run: every selected test has a cached pass` needs at least one
+cached node; an empty selection runs the command as typed.
 
 Slow (> `SLOW_S`) and flaky (passed and failed under one key) tests are
 remembered while either feature is on and listed at the end of the output.
 
 State: `<state dir>/tests/results.json` (bounded: `MAX_NODES` nodes,
-`MAX_FILES` files, `MAX_SUITES` suites, `MAX_SLOW`/`MAX_FLAKY`).
+`MAX_FILES` files, `MAX_SUITES` suites, `MAX_SLOW`/`MAX_FLAKY`). Entries of
+the wrong shape are dropped on load; a failed write resets the file.
 
 Known limits: tests that pass alone but fail with others (order or shared
 state) can pass in a subset run; files git ignores (generated data, the
@@ -104,7 +122,7 @@ from ozagia.config import GENERIC_SKIP_DIRS, state_path, state_rel
 
 ENV_ALL = "OZAGIA_TESTS_ALL"
 SLOW_S = 5.0
-VERSION = 1
+VERSION = 2
 MAX_NODES = 20000
 MAX_FILES = 5000
 MAX_SUITES = 16
@@ -117,6 +135,15 @@ MAX_SELECTOR_CHARS = 100_000
 MAX_LISTED = 5
 MAX_CACHED_LINES = 10
 GIT_TIMEOUT_S = 20
+# Planning time: at most this, and at most PLAN_SHARE of the caller's
+# remaining time; past it the command runs as typed.
+MAX_PLAN_S = 30.0
+PLAN_SHARE = 0.25
+# Tool caches, skipped at any depth. Other `GENERIC_SKIP_DIRS` names
+# (`build`, `dist`, `target`, `venv`, ...) are ordinary package names below
+# the top level, so they are skipped only there.
+_CACHE_DIRS = frozenset({"__pycache__", ".pytest_cache", ".mypy_cache",
+                         ".ruff_cache", ".hypothesis", ".git"})
 
 PYTEST_CONFIG_FILES = ("pytest.ini", ".pytest.ini", "pyproject.toml",
                        "setup.cfg", "tox.ini")
@@ -249,9 +276,20 @@ def _sha(path: Path) -> str | None:
 
 def _excluded(rel: str, state: str | None) -> bool:
     parts = PurePosixPath(rel).parts
-    if any(p in GENERIC_SKIP_DIRS for p in parts[:-1]):
+    if len(parts) > 1 and parts[0] in GENERIC_SKIP_DIRS:
+        return True
+    if any(p in _CACHE_DIRS for p in parts[:-1]) or rel.endswith((".pyc", ".pyo")):
         return True
     return bool(state) and (rel == state or rel.startswith(state + "/"))
+
+
+class _OutOfTime(Exception):
+    pass
+
+
+def _check_time(deadline: float | None) -> None:
+    if deadline is not None and time.monotonic() > deadline:
+        raise _OutOfTime
 
 
 def _git(root: Path, *args: str) -> bytes | None:
@@ -275,6 +313,54 @@ def _head(root: Path) -> str | None:
     return out.decode().strip() if out else None
 
 
+def _below_toplevel(root: Path) -> str | None:
+    """The git top level when `root` is a directory below it, else None
+    (also when `root` is not in a work tree)."""
+    out = _git(root, "rev-parse", "--show-toplevel")
+    if not out:
+        return None
+    top = Path(out.decode("utf-8", "surrogateescape").strip())
+    try:
+        same = top.resolve() == root.resolve()
+    except OSError:
+        return None
+    return None if same else top.as_posix()
+
+
+def _git_files(root: Path, state: str | None) -> list[str] | None:
+    """The files git tracks or does not ignore under `root`, less tool
+    caches, top-level build output and the state dir; None outside git."""
+    out = _git(root, "ls-files", "-z", "-c", "-o", "--exclude-standard")
+    if out is None:
+        return None
+    return sorted({r for r in _zsplit(out) if not _excluded(r, state)})
+
+
+def _walk_py(root: Path, state: str | None,
+             deadline: float | None) -> list[str]:
+    """The Python files under `root` when git cannot list them."""
+    out: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        _check_time(deadline)
+        rel_dir = Path(dirpath).relative_to(root).as_posix()
+        rel_dir = "" if rel_dir == "." else rel_dir
+        dirnames[:] = sorted(
+            d for d in dirnames
+            if not _excluded(f"{rel_dir}/{d}/_" if rel_dir else f"{d}/_", state))
+        out.extend(f"{rel_dir}/{n}" if rel_dir else n
+                   for n in filenames if n.endswith(".py"))
+        if len(out) > MAX_PY_FILES:
+            break
+    return sorted(out)
+
+
+def _py_files(root: Path, state: str | None, files: list[str] | None,
+              deadline: float | None = None) -> list[str]:
+    if files is None:
+        return _walk_py(root, state, deadline)
+    return [r for r in files if r.endswith(".py") and (root / r).is_file()]
+
+
 def _dirty_since(root: Path, base: str) -> tuple[list[str], list[str]] | None:
     """(tracked files that differ from `base`, untracked files), relative to
     `root`, or None when git cannot tell."""
@@ -286,15 +372,17 @@ def _dirty_since(root: Path, base: str) -> tuple[list[str], list[str]] | None:
     return _zsplit(tracked), _zsplit(untracked)
 
 
-def _nonpy_fingerprint(root: Path, state: str | None) -> str | None:
+def _nonpy_fingerprint(root: Path, state: str | None,
+                       files: list[str] | None = None) -> str | None:
     """A hash of the size and mtime of every non-Python file git does not
     ignore (tests may read any of them)."""
-    out = _git(root, "ls-files", "-z", "-c", "-o", "--exclude-standard")
-    if out is None:
+    if files is None:
+        files = _git_files(root, state)
+    if files is None:
         return None
     h = hashlib.sha256()
-    for rel in sorted(set(_zsplit(out))):
-        if rel.endswith(".py") or _excluded(rel, state):
+    for rel in files:
+        if rel.endswith(".py"):
             continue
         try:
             st = (root / rel).stat()
@@ -372,6 +460,14 @@ class _PyInfo:
 _PARSE_CACHE: dict[str, tuple[int, int, _PyInfo]] = {}
 
 
+def _stamp(path: Path) -> tuple[int, int]:
+    try:
+        st = path.stat()
+    except OSError:
+        return (-1, -1)
+    return (st.st_mtime_ns, st.st_size)
+
+
 def _call_name(func: ast.AST) -> str:
     if isinstance(func, ast.Name):
         return func.id
@@ -439,25 +535,23 @@ class _Project:
     """The project's Python files and their dependencies."""
 
     def __init__(self, root: Path, state: str | None,
-                 extra: set[str] = frozenset()) -> None:
+                 extra: set[str] = frozenset(),
+                 files: list[str] | None = None,
+                 deadline: float | None = None) -> None:
         self.root = root
+        self.state = state
         self.files: dict[str, _PyInfo] = {}
+        self.stamps: dict[str, tuple[int, int]] = {}
         self.too_many = False
-        for dirpath, dirnames, filenames in os.walk(root):
-            here = Path(dirpath)
-            rel_dir = here.relative_to(root).as_posix()
-            rel_dir = "" if rel_dir == "." else rel_dir
-            dirnames[:] = sorted(
-                d for d in dirnames if d not in GENERIC_SKIP_DIRS
-                and not (state and (f"{rel_dir}/{d}" if rel_dir else d) == state))
-            for name in filenames:
-                if not name.endswith(".py"):
-                    continue
-                rel = f"{rel_dir}/{name}" if rel_dir else name
-                self.files[rel] = _parse_py(here / name)
-                if len(self.files) > MAX_PY_FILES:
-                    self.too_many = True
-                    return
+        rels = _py_files(root, state, files, deadline)
+        if len(rels) > MAX_PY_FILES:
+            self.too_many = True
+            return
+        for i, rel in enumerate(rels):
+            if i % 256 == 0:
+                _check_time(deadline)
+            self.stamps[rel] = _stamp(root / rel)
+            self.files[rel] = _parse_py(root / rel)
         # Deleted files still resolve, so their importers are linked.
         names = set(self.files) | {r for r in extra if r.endswith(".py")}
         self.by_dotted: dict[str, set[str]] = {}
@@ -472,6 +566,20 @@ class _Project:
             self.by_tail.setdefault(PurePosixPath(rel).name, set()).add(rel)
         self.names = names
         self._deps: dict[str, set[str]] = {}
+
+    def unchanged(self, files: list[str] | None) -> bool:
+        """Whether the project's Python files are the same set with the same
+        size and mtime as when this was built (then it can be reused)."""
+        if self.too_many:
+            return False
+        rels = _py_files(self.root, self.state, files)
+        if set(rels) != set(self.stamps):
+            return False
+        return all(_stamp(self.root / r) == self.stamps[r] for r in rels)
+
+    def opaque_in(self, files: set[str]) -> set[str]:
+        return {r for r in files
+                if (info := self.files.get(r)) is not None and info.opaque}
 
     def _rel_module(self, rel: str, module: str, level: int) -> list[str]:
         base = PurePosixPath(rel).parent
@@ -576,37 +684,112 @@ class _Project:
 
 def _empty() -> dict[str, Any]:
     return {"version": VERSION, "suites": {}, "files": {}, "nodes": {},
-            "flaky": {}, "slow": {}}
+            "flaky": {}, "slow": {}, "failing": {}}
 
 
 def _state_file(root: Path) -> Path:
     return state_path(root, "tests", "results.json")
 
 
+def _num(v: Any) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _str_map(v: Any, ok: Any) -> bool:
+    return isinstance(v, dict) and all(isinstance(k, str) and ok(x)
+                                       for k, x in v.items())
+
+
+def _t_ok(rec: dict[str, Any]) -> bool:
+    return "t" not in rec or _num(rec["t"])
+
+
+def _valid_suite(r: Any) -> bool:
+    return (isinstance(r, dict) and _t_ok(r)
+            and isinstance(r.get("head"), str)
+            and _str_map(r.get("dirty"), lambda x: x is None or isinstance(x, str))
+            and _str_map(r.get("files"), lambda x: isinstance(x, int)
+                         and not isinstance(x, bool))
+            and all(r.get(k) is None or isinstance(r.get(k), str)
+                    for k in ("py", "env")))
+
+
+def _valid_file(r: Any) -> bool:
+    return (isinstance(r, dict) and _t_ok(r) and isinstance(r.get("k"), str)
+            and isinstance(r.get("nodes"), list)
+            and all(isinstance(n, str) for n in r["nodes"]))
+
+
+def _valid_node(r: Any) -> bool:
+    return (isinstance(r, dict) and _t_ok(r) and isinstance(r.get("k"), str)
+            and isinstance(r.get("o"), str)
+            and ("s" not in r or _num(r["s"])))
+
+
+def _valid_flaky(r: Any) -> bool:
+    return (isinstance(r, dict) and _t_ok(r)
+            and ("n" not in r or (isinstance(r["n"], int)
+                                  and not isinstance(r["n"], bool))))
+
+
+def _valid_slow(r: Any) -> bool:
+    return isinstance(r, dict) and _t_ok(r) and _num(r.get("s"))
+
+
+def _valid_failing(r: Any) -> bool:
+    return (isinstance(r, dict) and _t_ok(r)
+            and _str_map(r.get("files"), _num))
+
+
+_VALID = {"suites": _valid_suite, "files": _valid_file, "nodes": _valid_node,
+          "flaky": _valid_flaky, "slow": _valid_slow, "failing": _valid_failing}
+
+
 def load_state(root: Path) -> dict[str, Any]:
+    """The stored results; entries of the wrong shape are dropped, so a
+    hand-edited or older file degrades to full runs instead of an error."""
     try:
         data = json.loads(_state_file(root).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return _empty()
     if not isinstance(data, dict) or data.get("version") != VERSION:
         return _empty()
-    for k, v in _empty().items():
-        if not isinstance(data.get(k), type(v)):
-            data[k] = v
-    return data
+    out = _empty()
+    for name, ok in _VALID.items():
+        table = data.get(name)
+        if isinstance(table, dict):
+            out[name] = {k: v for k, v in table.items()
+                         if isinstance(k, str) and ok(v)}
+    return out
 
 
 def _prune(table: dict[str, Any], limit: int) -> None:
     if len(table) <= limit:
         return
-    order = sorted(table, key=lambda k: (table[k].get("t") or 0)
-                   if isinstance(table[k], dict) else 0)
+
+    def t(k: str) -> float:
+        v = table[k].get("t") if isinstance(table[k], dict) else None
+        return float(v) if _num(v) else 0.0
+    order = sorted(table, key=t)
     for k in order[:len(table) - limit]:
         del table[k]
 
 
+def _write_state(path: Path, data: dict[str, Any]) -> None:
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        tmp.write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+
+
 @contextlib.contextmanager
 def _locked(root: Path) -> Iterator[dict[str, Any]]:
+    """The state under a lock, written back after the block. When the
+    block or the write fails, the state is reset to empty (full runs
+    from then on) rather than left as it was, and the error is raised."""
     path = _state_file(root)
     path.parent.mkdir(parents=True, exist_ok=True)
     with _LOCK, open(path.parent / ".lock", "a+") as lk:
@@ -616,15 +799,22 @@ def _locked(root: Path) -> Iterator[dict[str, Any]]:
         except (ImportError, OSError):
             pass
         data = load_state(root)
-        yield data
-        _prune(data["suites"], MAX_SUITES)
-        _prune(data["files"], MAX_FILES)
-        _prune(data["nodes"], MAX_NODES)
-        _prune(data["flaky"], MAX_FLAKY)
-        _prune(data["slow"], MAX_SLOW)
-        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-        tmp.write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8")
-        os.replace(tmp, path)
+        try:
+            yield data
+            _prune(data["suites"], MAX_SUITES)
+            _prune(data["files"], MAX_FILES)
+            _prune(data["nodes"], MAX_NODES)
+            _prune(data["flaky"], MAX_FLAKY)
+            _prune(data["slow"], MAX_SLOW)
+            _prune(data["failing"], MAX_SUITES)
+            _write_state(path, data)
+        except Exception:
+            try:
+                _write_state(path, _empty())
+            except Exception:  # noqa: BLE001 - the original error is raised
+                with contextlib.suppress(OSError):
+                    path.unlink()
+            raise
 
 
 # --------------------------------------------------------------------------- #
@@ -652,10 +842,20 @@ class Plan:
     keys: dict[str, str] = field(default_factory=dict)
     key_inputs: dict[str, Any] = field(default_factory=dict)
     state: dict[str, Any] = field(default_factory=dict)
+    python: str = ""
+    env_hash: str = ""
+    # Test files that failed in this suite's latest run; always selected.
+    refailed: list[str] = field(default_factory=list)
+    # The tree before a run of the command as typed: the green record is
+    # written only when the tree after the run is the same.
+    snapshot: dict[str, Any] | None = None
+    can_be_green: bool = True
 
     @property
     def nothing_to_run(self) -> bool:
-        return self.selectors is not None and not self.selectors
+        """Every selected node is served from the cache (at least one)."""
+        return (self.selectors is not None and not self.selectors
+                and bool(self.cached))
 
 
 def _run_all_cmd(inp: dict[str, Any], cls: dict[str, Any]) -> str:
@@ -688,6 +888,26 @@ def _in_scope(rel: str, scope: list[str]) -> bool:
                             for s in scope)
 
 
+def _plan_budget(inp: dict[str, Any]) -> float:
+    """Seconds planning may take: `MAX_PLAN_S`, and at most `PLAN_SHARE` of
+    the caller's remaining time."""
+    budget = MAX_PLAN_S
+    remaining = inp.get("_deadline_s_remaining")
+    if _num(remaining):
+        budget = min(budget, max(0.0, float(remaining)) * PLAN_SHARE)
+    return budget
+
+
+def _run_as_typed(p: Plan, reason: str | None, *, keep_keys: bool) -> None:
+    p.selectors = None
+    p.reason = reason
+    p.forced = p.select == "affected"
+    p.selected, p.not_run, p.refailed = [], {}, []
+    p.cached, p.cached_since, p.whole_files = {}, {}, set()
+    if not keep_keys:
+        p.keys, p.key_inputs = {}, {}
+
+
 def plan(memory: Any, cls: dict[str, Any], inp: dict[str, Any], *,
          root: Path, python: str, selectors: list[str],
          env: dict[str, str] | None) -> Plan | None:
@@ -707,28 +927,52 @@ def plan(memory: Any, cls: dict[str, Any], inp: dict[str, Any], *,
     eff_env = dict(env if isinstance(env, dict) else os.environ)
     p = Plan(root=root, select=select, cache=cache,
              suite=_suite_id(python, scope, cls, args),
-             run_all_cmd=_run_all_cmd(inp, cls), early_stop=early)
-    state = load_state(root)
-    p.state = state
-    srel = state_rel(root)
+             run_all_cmd=_run_all_cmd(inp, cls), early_stop=early,
+             python=python, env_hash=_env_hash(eff_env))
+    p.state = load_state(root)
+    budget = _plan_budget(inp)
+    try:
+        _plan(p, memory, cls, inp, scope, args, eff_env,
+              time.monotonic() + budget)
+    except _OutOfTime:
+        _run_as_typed(p, f"planning took longer than {budget:g} s",
+                      keep_keys=False)
+    if sum(len(s) + 1 for s in p.selectors or []) > MAX_SELECTOR_CHARS:
+        _run_as_typed(p, "too many tests to name on the command line",
+                      keep_keys=True)
+    if p.selectors is None and p.can_be_green:
+        p.snapshot = _snapshot(root, python)
+    return p
 
-    def everything(reason: str, proj: _Project | None = None) -> Plan:
-        p.selectors = None
-        p.reason = reason
-        p.forced = select == "affected"
+
+def _plan(p: Plan, memory: Any, cls: dict[str, Any], inp: dict[str, Any],
+          scope: list[str], args: list[str], eff_env: dict[str, str],
+          deadline: float) -> None:
+    root, select, cache, state = p.root, p.select, p.cache, p.state
+    srel = state_rel(root)
+    _check_time(deadline)
+    top = _below_toplevel(root)
+    if top is not None:
+        p.can_be_green = False
+        return _run_as_typed(
+            p, f"the root is below the git top level {top}, so changes "
+               "outside it are not seen", keep_keys=False)
+    files = _git_files(root, srel)
+
+    def everything(reason: str, proj: _Project | None = None) -> None:
+        _run_as_typed(p, reason, keep_keys=False)
         if cache:
             # Keys for every test file, so this run fills the cache.
             if proj is None:
-                proj = _Project(root, srel)
+                proj = _Project(root, srel, files=files, deadline=deadline)
             if not proj.too_many:
                 p.selected = sorted(
                     f for f in proj.files
                     if (_is_test_name(f) or f in state["files"])
                     and _in_scope(f, scope))
-                _key_inputs(p, proj, python, eff_env, args)
+                _key_inputs(p, proj, eff_env, args, files)
                 p.key_inputs["project"] = proj
                 p.selected = []
-        return p
 
     if (cls.get("env") or {}).get(ENV_ALL) == "1" or eff_env.get(ENV_ALL) == "1":
         return everything(f"{ENV_ALL}=1")
@@ -736,18 +980,25 @@ def plan(memory: Any, cls: dict[str, Any], inp: dict[str, Any], *,
     if cfg_why:
         return everything(cfg_why)
     base = state["suites"].get(p.suite)
-    if not isinstance(base, dict) or not isinstance(base.get("files"), dict):
+    if base is None:
         return everything("no fully green run of this suite recorded yet")
-    head = base.get("head")
-    if not head or _git(root, "cat-file", "-e", f"{head}^{{commit}}") is None:
+    head = base["head"]
+    if _git(root, "cat-file", "-e", f"{head}^{{commit}}") is None:
         return everything("the commit of the last green run is not available")
+    pyfp = _python_fingerprint(p.python)
+    if pyfp is None or base.get("py") != pyfp:
+        return everything("the interpreter or its installed packages changed "
+                          "since the last green run")
+    if base.get("env") != p.env_hash:
+        return everything("the environment changed since the last green run")
+    _check_time(deadline)
     dirty = _dirty_since(root, head)
     if dirty is None:
         return everything("git cannot list the changed files")
     tracked, untracked = dirty
     if len(untracked) > MAX_UNTRACKED:
         return everything(f"more than {MAX_UNTRACKED} untracked files")
-    recorded: dict[str, str | None] = base.get("dirty") or {}
+    recorded: dict[str, str | None] = base["dirty"]
     changed: list[str] = []
     for rel in sorted(set(tracked) | set(untracked) | set(recorded)):
         if _excluded(rel, srel):
@@ -765,12 +1016,12 @@ def plan(memory: Any, cls: dict[str, Any], inp: dict[str, Any], *,
         if not rel.endswith(".py"):
             return everything(f"non-Python file changed: {rel}")
 
+    _check_time(deadline)
     gone = {r for r in changed if not (root / r).exists()}
-    proj = _Project(root, srel, extra=gone)
+    proj = _Project(root, srel, extra=gone, files=files, deadline=deadline)
     if proj.too_many:
         return everything(f"more than {MAX_PY_FILES} Python files", proj)
-    green_files: dict[str, int] = {f: int(n) for f, n in base["files"].items()
-                                   if isinstance(n, int)}
+    green_files: dict[str, int] = dict(base["files"])
     green_dirs = {PurePosixPath(f).parent.as_posix() for f in green_files}
     candidates = {f for f in green_files if f in proj.files}
     for rel in changed:
@@ -781,15 +1032,23 @@ def plan(memory: Any, cls: dict[str, Any], inp: dict[str, Any], *,
             else:
                 return everything(f"new test file outside the known test "
                                   f"directories: {rel}", proj)
+    failing = (state["failing"].get(p.suite) or {}).get("files") or {}
+    refailed = {f for f in failing if f in proj.files and _in_scope(f, scope)}
+    candidates |= refailed
     changed_py = [r for r in changed if r.endswith(".py")]
-    closures = {t: proj.closure(t) for t in candidates}
     linked: set[str] = set()
     affected: set[str] = set()
-    for t, (files, opaque) in closures.items():
-        hit = files.intersection(changed_py)
+    opaque_closures: set[str] = set()
+    for i, t in enumerate(sorted(candidates)):
+        if i % 64 == 0:
+            _check_time(deadline)
+        files_t, opaque = proj.closure(t)
+        hit = files_t.intersection(changed_py)
         if hit or (opaque and changed_py):
             affected.add(t)
             linked |= hit
+        if opaque:
+            opaque_closures |= files_t
     # A captured pytest runs outside the daemon's graph lock; the graph is
     # read under it (`_lock`, set by the daemon for lock-free calls).
     with inp.get("_lock") or contextlib.nullcontext():
@@ -805,6 +1064,7 @@ def plan(memory: Any, cls: dict[str, Any], inp: dict[str, Any], *,
         if rel in gone and rel in green_files:
             continue
         return everything(f"no test is linked to {rel}", proj)
+    affected |= refailed
 
     if select == "all" or not affected:
         if select == "affected":
@@ -816,18 +1076,49 @@ def plan(memory: Any, cls: dict[str, Any], inp: dict[str, Any], *,
         affected = set(candidates)
 
     p.selected = sorted(affected)
+    p.refailed = sorted(refailed)
     p.not_run = {f: n for f, n in green_files.items()
                  if f not in affected and f in proj.files}
     if cache:
-        _key_inputs(p, proj, python, eff_env, args)
+        _key_inputs(p, proj, eff_env, args, files)
         _apply_cache(p, proj)
     else:
         p.selectors = list(p.selected)
         p.whole_files = set(p.selected)
-    if sum(len(s) + 1 for s in p.selectors or []) > MAX_SELECTOR_CHARS:
-        return everything("too many tests to name on the command line")
     p.key_inputs["project"] = proj
-    return p
+    # Every candidate runs, whole, and none is cached: that is the command
+    # as typed, so run it as typed (a full run; the green run can move).
+    if (not p.cached and not p.not_run and p.whole_files == set(p.selected)
+            and set(p.selectors or []) == p.whole_files):
+        reason = p.reason
+        if select == "affected" and not p.forced:
+            opaque = sorted(proj.opaque_in(opaque_closures))
+            reason = "every test file is affected by the changes"
+            if opaque:
+                reason += (f" (an unresolved dynamic import in "
+                           f"{_listed(opaque)} links every change to the "
+                           "tests that load it)")
+        elif not p.selected and reason is None:
+            reason = "no test file of the last green run is left"
+        _run_as_typed(p, reason, keep_keys=True)
+    return None
+
+
+def _snapshot(root: Path, python: str) -> dict[str, Any] | None:
+    """HEAD, the dirty files' hashes and the interpreter fingerprint, or
+    None when git cannot tell."""
+    head = _head(root)
+    if head is None:
+        return None
+    dirty = _dirty_since(root, head)
+    if dirty is None:
+        return None
+    srel = state_rel(root)
+    rels = sorted(r for r in set(dirty[0]) | set(dirty[1]) if not _excluded(r, srel))
+    if len(rels) > MAX_CHANGED or len(dirty[1]) > MAX_UNTRACKED:
+        return None
+    return {"head": head, "dirty": {r: _sha(root / r) for r in rels},
+            "py": _python_fingerprint(python)}
 
 
 def _graph_tests(memory: Any, changed: list[str]) -> dict[str, set[str]]:
@@ -851,19 +1142,21 @@ def _graph_tests(memory: Any, changed: list[str]) -> dict[str, set[str]]:
 
 
 def _common_key(root: Path, python: str, env: dict[str, str],
-                args: list[str], state: str | None) -> str | None:
+                args: list[str], state: str | None,
+                files: list[str] | None = None) -> str | None:
     pyfp = _python_fingerprint(python)
-    nonpy = _nonpy_fingerprint(root, state)
+    nonpy = _nonpy_fingerprint(root, state, files)
     if pyfp is None or nonpy is None:
         return None
     cfg = [(n, _sha(root / n) or "-") for n in PYTEST_CONFIG_FILES]
     return json.dumps([VERSION, pyfp, nonpy, cfg, _env_hash(env), args])
 
 
-def _key_inputs(p: Plan, proj: _Project, python: str, env: dict[str, str],
-                args: list[str]) -> None:
+def _key_inputs(p: Plan, proj: _Project, env: dict[str, str],
+                args: list[str], files: list[str] | None) -> None:
+    python = p.python
     p.key_inputs.update(python=python, env=env, args=args)
-    common = _common_key(p.root, python, env, args, state_rel(p.root))
+    common = _common_key(p.root, python, env, args, state_rel(p.root), files)
     p.key_inputs["common"] = common
     if common is None:
         return
@@ -932,14 +1225,28 @@ def _record(p: Plan, res: dict[str, Any] | None, *, full: bool) -> list[str]:
     post: dict[str, str] = {}
     if p.cache and usable and proj is not None and p.key_inputs.get("common"):
         srel = state_rel(p.root)
-        fresh = _Project(p.root, srel)
+        files = _git_files(p.root, srel)
+        fresh = proj if proj.unchanged(files) else _Project(p.root, srel,
+                                                            files=files)
         common = _common_key(p.root, p.key_inputs["python"],
-                             p.key_inputs["env"], p.key_inputs["args"], srel)
+                             p.key_inputs["env"], p.key_inputs["args"], srel,
+                             files)
         if common is not None and common == p.key_inputs["common"]:
             for f in {t["file"] for t in tests}:
                 k = fresh.key(f, common)
                 if k is not None and p.keys.get(f) == k:
                     post[f] = k
+    passed_as_typed = (full and res.get("exit_code") == 0
+                       and res.get("status") == "passed")
+    green: dict[str, Any] | None = None
+    if passed_as_typed and p.snapshot is not None:
+        after = _snapshot(p.root, p.python)
+        if after == p.snapshot:
+            green = after
+        else:
+            lines.append(tag("green run not recorded: files or the interpreter "
+                             "changed during the run"))
+    complete = not (p.early_stop and res.get("exit_code") != 0)
     slow_now: list[tuple[str, float]] = []
     flaky_now: list[str] = []
     with _locked(p.root) as data:
@@ -969,12 +1276,13 @@ def _record(p: Plan, res: dict[str, Any] | None, *, full: bool) -> list[str]:
                                   "t": now}
             if nid in data["flaky"]:
                 flaky_now.append(nid)
-        complete = not (p.early_stop and res.get("exit_code") != 0)
         for f, nids in by_file.items():
             if complete and (p.selectors is None or f in p.whole_files):
                 data["files"][f] = {"k": post[f], "nodes": nids, "t": now}
-        if full and res.get("exit_code") == 0 and res.get("status") == "passed":
-            _green(p, data, tests, now)
+        if usable:
+            _failing(p, data, res, complete, passed_as_typed, now)
+        if green is not None:
+            _green(p, data, tests, now, green)
     for nid, secs in sorted(slow_now, key=lambda x: -x[1])[:MAX_LISTED]:
         lines.append(tag(f"slow test (> {SLOW_S:g} s): {nid} {secs:.1f} s"))
     if len(slow_now) > MAX_LISTED:
@@ -987,25 +1295,59 @@ def _record(p: Plan, res: dict[str, Any] | None, *, full: bool) -> list[str]:
     return lines
 
 
+def _failing(p: Plan, data: dict[str, Any], res: dict[str, Any],
+             complete: bool, passed_as_typed: bool, now: float) -> None:
+    """Remember the suite's test files that failed in this run, and forget
+    those that ran to the end without a failure."""
+    tests = res.get("tests") or []
+    bad = {t.get("file") for t in tests if t.get("outcome") in ("failed", "error")}
+    bad |= {e.get("file") for e in res.get("collection_errors") or []}
+    bad = {f for f in bad if isinstance(f, str) and f}
+    old = (data["failing"].get(p.suite) or {}).get("files") or {}
+    fails: dict[str, float] = {} if passed_as_typed else dict(old)
+    if complete:
+        for f in {t.get("file") for t in tests} - bad:
+            fails.pop(f, None)
+    for f in bad:
+        fails[f] = now
+    if fails:
+        data["failing"][p.suite] = {"files": fails, "t": now}
+    else:
+        data["failing"].pop(p.suite, None)
+
+
 def _green(p: Plan, data: dict[str, Any], tests: list[dict[str, Any]],
-           now: float) -> None:
-    head = _head(p.root)
-    if head is None:
-        return
-    dirty = _dirty_since(p.root, head)
-    if dirty is None:
-        return
-    srel = state_rel(p.root)
-    rels = [r for r in set(dirty[0]) | set(dirty[1]) if not _excluded(r, srel)]
-    if len(rels) > MAX_CHANGED or len(dirty[1]) > MAX_UNTRACKED:
-        return
+           now: float, snap: dict[str, Any]) -> None:
     files: dict[str, int] = {}
     for t in tests:
         if t.get("file"):
             files[t["file"]] = files.get(t["file"], 0) + 1
-    data["suites"][p.suite] = {
-        "head": head, "dirty": {r: _sha(p.root / r) for r in sorted(rels)},
-        "files": files, "t": now}
+    data["suites"][p.suite] = {**snap, "env": p.env_hash, "files": files,
+                               "t": now}
+
+
+def _tally(p: Plan, res: dict[str, Any] | None) -> tuple[int, int, int, int]:
+    """(tests run, cached passes, cached skips, tests not run)."""
+    ran = len((res or {}).get("tests") or [])
+    cached_p = sum(c["passed"] for c in p.cached.values())
+    cached_s = sum(c["skipped"] for c in p.cached.values())
+    return ran, cached_p, cached_s, sum(p.not_run.values())
+
+
+def scope(p: Plan | None, res: dict[str, Any] | None) -> str:
+    """The head line's scope, `" (affected subset: 2 of 4 tests run, 2 not
+    run)"`, or "" for a run of the command as typed."""
+    if p is None or p.selectors is None:
+        return ""
+    ran, cached_p, cached_s, not_run = _tally(p, res)
+    kind = ("affected" if p.select == "affected" and not p.forced
+            else "cached")
+    parts = [f"{ran} of {ran + cached_p + cached_s + not_run} tests run"]
+    if cached_p or cached_s:
+        parts.append(f"{cached_p + cached_s} cached")
+    if not_run:
+        parts.append(f"{not_run} not run")
+    return f" ({kind} subset: {', '.join(parts)})"
 
 
 def finish(p: Plan, res: dict[str, Any] | None) -> tuple[list[str], list[str],
@@ -1023,10 +1365,7 @@ def finish(p: Plan, res: dict[str, Any] | None) -> tuple[list[str], list[str],
         if p.select == "affected" or p.reason:
             head.append(tag(f"ran all tests: {p.reason}"))
     else:
-        ran = len((res or {}).get("tests") or [])
-        cached_p = sum(c["passed"] for c in p.cached.values())
-        cached_s = sum(c["skipped"] for c in p.cached.values())
-        not_run = sum(p.not_run.values())
+        ran, cached_p, cached_s, not_run = _tally(p, res)
         total = ran + cached_p + cached_s + not_run
         word = ("affected tests" if p.select == "affected" and not p.forced
                 else "tests")
@@ -1043,6 +1382,9 @@ def finish(p: Plan, res: dict[str, Any] | None) -> tuple[list[str], list[str],
         head.append(tag("; ".join(parts)))
         if p.forced and p.reason:
             head.append(tag(f"selection off for this run: {p.reason}"))
+        if p.refailed:
+            head.append(tag("run again, failed in the last run: "
+                            f"{_listed(p.refailed)}"))
         for f in sorted(p.cached)[:MAX_CACHED_LINES]:
             c = p.cached[f]
             since = time.strftime("%Y-%m-%d %H:%M:%S",
@@ -1075,4 +1417,5 @@ def merge_meta(metas: list[dict[str, Any]]) -> dict[str, Any]:
     return {"tests": out} if out else {}
 
 
-__all__ = ["ENV_ALL", "Plan", "finish", "load_state", "merge_meta", "plan"]
+__all__ = ["ENV_ALL", "Plan", "finish", "load_state", "merge_meta", "plan",
+           "scope"]

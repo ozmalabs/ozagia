@@ -67,16 +67,17 @@ def layout(monkeypatch):
     clear_config_cache()
 
 
-def _make(tmp_path: Path, config: str | None, extra: dict[str, str] | None = None
-          ) -> tuple[Path, DevMemory]:
-    root = tmp_path / "repo"
+def _make(tmp_path: Path, config: str | None, extra: dict[str, str] | None = None,
+          *, below_top: bool = False) -> tuple[Path, DevMemory]:
+    root = tmp_path / "outer" / "repo" if below_top else tmp_path / "repo"
+    top = root.parent if below_top else root
     for rel, text in {**FILES, **(extra or {})}.items():
         _write(root / rel, text)
     if config is not None:
         _write(root / ".ozagia.toml", config)
-    _git(root, "init", "-q")
-    _git(root, "add", "-A")
-    _git(root, "commit", "-q", "-m", "initial")
+    _git(top, "init", "-q")
+    _git(top, "add", "-A")
+    _git(top, "commit", "-q", "-m", "initial")
     dump = tmp_path / "state" / "graph.json"
     build_index(root, dump, include_docs="none", include_git=False)
     return root, DevMemory(dump, tmp_path / "state" / "journal.jsonl", root=root)
@@ -168,7 +169,10 @@ def test_import_chain_selects_transitive_importers_only(affected):
     _write(root / "pkg/base.py", "def one():\n    return 1  # edited\n")
     res = _run(mem)
     out = res["output"]
-    assert "2 passed" in out and "pytest passed: exit 0" in out
+    assert "2 passed" in out
+    assert ("[ozagia] pytest passed (affected subset: 2 of 3 tests run, "
+            "1 not run): exit 0") in out
+    assert "pytest passed: exit 0" not in out
     line = ("[ozagia] ran 2 affected tests of 3; not run: 1 test in 1 file "
             f"(tests/test_other.py); {RUN_ALL}")
     assert line in _ozagia(res)
@@ -189,16 +193,22 @@ def test_affected_failure_is_reported_and_green_does_not_move(affected):
     _write(root / "pkg/base.py", "def one():\n    return 5\n")
     res = _run(mem)
     assert res["output"].count("[ozagia] failed test:") == 2
-    assert "pytest failed: exit 1" in res["output"]
+    assert ("pytest failed (affected subset: 2 of 3 tests run, 1 not run): "
+            "exit 1") in res["output"]
     assert any(ln.startswith("[ozagia] ran 2 affected tests of 3;")
                for ln in _ozagia(res))
     # Fixed, then another change: the base change still counts, because
-    # only a full green run moves the baseline.
+    # only a full green run moves the baseline. Every test file is then
+    # affected, so the command runs as typed and the baseline moves.
     _write(root / "pkg/base.py", "def one():\n    return 1  # fixed\n")
     _write(root / "pkg/other.py", "def three():\n    return 3  # edited\n")
     res = _run(mem)
-    assert any(ln.startswith("[ozagia] ran 3 affected tests of 3;")
-               for ln in _ozagia(res))
+    assert ("[ozagia] ran all tests: every test file is affected by the "
+            "changes") in _ozagia(res)
+    assert "pytest passed: exit 0" in res["output"]
+    res = _run(mem)
+    assert ("[ozagia] ran all tests: no files changed since the last green "
+            "run") in _ozagia(res)
 
 
 def test_changed_test_file_and_new_test_file_are_selected(affected):
@@ -286,10 +296,19 @@ def test_project_resolution(tmp_path):
         "t/test_x.py": "import a.b\nP = 's/run.py'\nQ = 'a.d.e'\n",
         "t/test_dyn.py": "import importlib\nimportlib.import_module(n)\n",
         "t/test_lit.py": "import importlib\nimportlib.import_module('a.c')\n",
+        "build/gen.py": "",
+        "a/dist/x.py": "",
+        "a/__pycache__/y.py": "",
     }
     for rel, text in files.items():
         _write(tmp_path / rel, text)
     proj = A._Project(tmp_path, None)
+    # Build-output names are skipped only at the top level; tool caches
+    # at any depth.
+    assert "a/dist/x.py" in proj.files
+    assert "build/gen.py" not in proj.files
+    assert "a/__pycache__/y.py" not in proj.files
+    assert proj.unchanged(None)
     assert proj.deps("a/c.py") >= {"a/__init__.py", "a/b.py", "a/d/__init__.py",
                                    "a/d/e.py"}
     files_x, opaque = proj.closure("t/test_x.py")
@@ -299,7 +318,8 @@ def test_project_resolution(tmp_path):
     assert "a/d/e.py" in lit and not opaque
     assert proj.key("t/test_dyn.py", "c") is None
     k1 = proj.key("t/test_x.py", "c")
-    _write(tmp_path / "a/b.py", "X = 2\n")
+    _write(tmp_path / "a/b.py", "X = 22\n")
+    assert not proj.unchanged(None)
     assert A._Project(tmp_path, None).key("t/test_x.py", "c") != k1
 
 
@@ -341,7 +361,8 @@ def test_failure_is_never_cached(cached):
     _write(root / "pkg/other.py", "def three():\n    return 4\n")
     for _ in range(2):
         res = _run(mem)
-        assert "pytest failed: exit 1" in res["output"]
+        assert ("pytest failed (cached subset: 1 of 3 tests run, 2 cached): "
+                "exit 1") in res["output"]
         assert "[ozagia] failed test:tests/test_other.py::test_three" in res["output"]
         assert f"[ozagia] ran 1 tests of 3; cached: 2 passed; {RUN_ALL}" in _ozagia(res)
     state = A.load_state(root)
@@ -404,3 +425,248 @@ def test_daemon_counts_test_selection(affected, tmp_path):
     stats = st.stats()
     assert (stats["affected_runs"], stats["tests_skipped_unaffected"],
             stats["cached_passes"], stats["full_runs_forced"]) == (1, 2, 0, 1)
+
+
+# --------------------------------------------------------------------------- #
+# failure paths (review W9)
+# --------------------------------------------------------------------------- #
+
+EDIT_OTHER = "def three():\n    return 3  # edited\n"
+EDIT_BASE = "def one():\n    return 1  # edited\n"
+
+
+def _suite(root: Path) -> str:
+    (suite,) = A.load_state(root)["suites"]
+    return suite
+
+
+BUILD = {
+    "pkg/build/__init__.py": "",
+    "pkg/build/calc.py": "def four():\n    return 4\n",
+    "tests/test_build.py": "from pkg.build.calc import four\n\n\n"
+                           "def test_four():\n    assert four() == 4\n",
+}
+
+
+@pytest.mark.parametrize("config", [AFFECTED, CACHED])
+def test_nested_build_directory_is_project_source(tmp_path, layout, config):
+    root, mem = _make(tmp_path, config, BUILD)
+    _run(mem)
+    _write(root / "pkg/build/calc.py", "def four():\n    return 5\n")
+    _write(root / "pkg/other.py", EDIT_OTHER)
+    res = _run(mem)
+    assert "[ozagia] failed test:tests/test_build.py::test_four" in res["output"]
+    assert not any("cached pass tests/test_build.py" in ln for ln in _ozagia(res))
+
+
+ENVY = {"tests/test_envy.py": "import os\n\n\ndef test_envy():\n"
+                              "    assert not os.path.exists(os.environ['ENVY_MARK'])\n"}
+
+
+def test_failure_since_the_green_run_is_run_again(tmp_path, layout, monkeypatch):
+    mark = tmp_path / "mark"
+    monkeypatch.setenv("ENVY_MARK", str(mark))
+    root, mem = _make(tmp_path, AFFECTED, ENVY)
+    _run(mem)                                   # green
+    mark.write_text("x")                        # fails with no file change
+    res = _run(mem)
+    assert "[ozagia] failed test:tests/test_envy.py::test_envy" in res["output"]
+    assert A.load_state(root)["failing"][_suite(root)]["files"].keys() == {
+        "tests/test_envy.py"}
+    # An unrelated edit: test_envy is not linked to it, but failed last time.
+    _write(root / "pkg/base.py", EDIT_BASE)
+    res = _run(mem)
+    assert ("[ozagia] run again, failed in the last run: tests/test_envy.py"
+            in _ozagia(res))
+    assert ("pytest failed (affected subset: 3 of 4 tests run, 1 not run): "
+            "exit 1") in res["output"]
+    mark.unlink()
+    res = _run(mem)
+    assert "pytest passed (affected subset: 3 of 4 tests run" in res["output"]
+    assert A.load_state(root)["failing"] == {}
+    res = _run(mem)
+    assert "pytest passed (affected subset: 2 of 4 tests run" in res["output"]
+
+
+def test_environment_or_interpreter_change_runs_everything(affected, monkeypatch):
+    root, mem = affected
+    _run(mem)
+    monkeypatch.setenv("OZAGIA_TEST_SOMETHING", "1")
+    _write(root / "pkg/other.py", EDIT_OTHER)
+    res = _run(mem)
+    assert ("[ozagia] ran all tests: the environment changed since the last "
+            "green run") in _ozagia(res)
+    assert "pytest passed: exit 0" in res["output"]
+    real = A._python_fingerprint
+    monkeypatch.setattr(A, "_python_fingerprint", lambda py: "x" + (real(py) or ""))
+    _write(root / "pkg/base.py", EDIT_BASE)
+    res = _run(mem)
+    assert ("[ozagia] ran all tests: the interpreter or its installed packages "
+            "changed since the last green run") in _ozagia(res)
+
+
+MUTATE = {"tests/test_mutate.py": (
+    "from pathlib import Path\n\nimport pkg.other\n\n\ndef test_mutate():\n"
+    "    p = Path(pkg.other.__file__)\n"
+    "    p.write_text(p.read_text() + '# mutated\\n')\n")}
+
+
+@pytest.mark.parametrize("config", [AFFECTED, CACHED])
+def test_edit_during_the_run_is_not_recorded(tmp_path, layout, config):
+    root, mem = _make(tmp_path, config, MUTATE)
+    res = _run(mem)
+    assert "pytest passed: exit 0" in res["output"]
+    assert ("[ozagia] green run not recorded: files or the interpreter changed "
+            "during the run") in _ozagia(res)
+    state = A.load_state(root)
+    assert state["suites"] == {}
+    if config == CACHED:
+        assert "tests/test_mid.py" in state["files"]
+        assert "tests/test_other.py" not in state["files"]
+        assert "tests/test_mutate.py" not in state["files"]
+
+
+def test_cache_with_no_test_file_left_runs_as_typed(cached):
+    root, mem = cached
+    _run(mem)
+    for f in (root / "tests").glob("test_*.py"):
+        f.unlink()
+    res = _run(mem)
+    assert not any("cached pass" in ln for ln in _ozagia(res))
+    assert "pytest not run" not in res["output"]
+    assert ("[ozagia] ran all tests: no test file of the last green run is left"
+            in _ozagia(res))
+    assert ": exit 5," in res["output"]
+
+
+def test_opaque_conftest_runs_as_typed_and_names_it(tmp_path, layout):
+    conftest = (FILES["tests/conftest.py"]
+                + "\n\ndef load(name):\n    import importlib\n"
+                  "    return importlib.import_module(name)\n")
+    root, mem = _make(tmp_path, AFFECTED, {"tests/conftest.py": conftest})
+    _run(mem)
+    _write(root / "pkg/other.py", EDIT_OTHER)
+    res = _run(mem)
+    assert ("[ozagia] ran all tests: every test file is affected by the changes "
+            "(an unresolved dynamic import in tests/conftest.py links every "
+            "change to the tests that load it)") in _ozagia(res)
+    assert "pytest passed: exit 0" in res["output"]
+    assert _counts(res)["full_runs_forced"] == 1
+    # A run of the command as typed: the green run moved.
+    res = _run(mem)
+    assert ("[ozagia] ran all tests: no files changed since the last green run"
+            in _ozagia(res))
+
+
+def test_exitfirst_partial_run_stores_no_node_lists(tmp_path, layout, monkeypatch):
+    mark = tmp_path / "mark"
+    monkeypatch.setenv("ENVY_MARK", str(mark))
+    two = ("import os\n\n\ndef test_a():\n"
+           "    assert not os.path.exists(os.environ['ENVY_MARK'])\n\n\n"
+           "def test_b():\n    pass\n")
+    root, mem = _make(tmp_path, CACHED, {"tests/test_two.py": two})
+    mark.write_text("x")
+    cmd = f"{PY} -m pytest -x -q"
+    res = _run(mem, cmd)
+    assert "pytest failed: exit 1" in res["output"]
+    state = A.load_state(root)
+    assert state["files"] == {}
+    assert state["nodes"]["tests/test_two.py::test_a"]["o"] == "failed"
+    assert "tests/test_two.py::test_b" not in state["nodes"]
+    (fails,) = state["failing"].values()
+    assert set(fails["files"]) == {"tests/test_two.py"}
+    mark.unlink()
+    res = _run(mem, cmd)
+    assert "pytest passed: exit 0" in res["output"]
+    state = A.load_state(root)
+    assert state["files"]["tests/test_two.py"]["nodes"] == [
+        "tests/test_two.py::test_a", "tests/test_two.py::test_b"]
+    assert state["failing"] == {}
+
+
+def test_root_below_the_git_top_level_runs_everything(tmp_path, layout):
+    root, mem = _make(tmp_path, AFFECTED + "cache = true\n", below_top=True)
+    for _ in range(2):
+        res = _run(mem)
+        assert any(ln.startswith("[ozagia] ran all tests: the root is below "
+                                 "the git top level ") for ln in _ozagia(res))
+        assert not any("cached" in ln for ln in _ozagia(res))
+        assert "3 passed" in res["output"]
+    assert A.load_state(root)["suites"] == {}
+
+
+def test_plan_time_is_bounded(affected, monkeypatch):
+    root, mem = affected
+    _run(mem)
+    assert A._plan_budget({"_deadline_s_remaining": 40}) == 10
+    assert A._plan_budget({}) == A.MAX_PLAN_S
+    monkeypatch.setattr(A, "MAX_PLAN_S", 0.0)
+    _write(root / "pkg/other.py", EDIT_OTHER)
+    res = _run(mem)
+    assert "[ozagia] ran all tests: planning took longer than 0 s" in _ozagia(res)
+    assert "3 passed" in res["output"]
+
+
+def test_malformed_state_entries_are_dropped(affected):
+    root, mem = affected
+    _run(mem)
+    path = root / ".ozagia" / "tests" / "results.json"
+    data = json.loads(path.read_text())
+    suite = next(iter(data["suites"]))
+    data["suites"][suite]["dirty"] = ["pkg/base.py"]
+    data["nodes"]["tests/x.py::t"] = {"k": "k", "o": "passed", "t": "soon"}
+    data["files"]["tests/x.py"] = {"k": 1, "nodes": "all"}
+    data["slow"]["tests/x.py::t"] = {"s": "long", "t": 1}
+    data["failing"] = {suite: {"files": ["tests/test_mid.py"]}}
+    path.write_text(json.dumps(data))
+    state = A.load_state(root)
+    assert all(not state[k] for k in ("suites", "nodes", "files", "slow",
+                                       "failing"))
+    _write(root / "pkg/other.py", EDIT_OTHER)
+    res = _run(mem)
+    assert ("[ozagia] ran all tests: no fully green run of this suite recorded "
+            "yet") in _ozagia(res)
+    assert not any("warning" in ln for ln in _ozagia(res))
+    assert _suite(root) == suite
+
+
+def test_state_resets_when_the_write_fails(tmp_path, monkeypatch):
+    monkeypatch.setenv("OZAGIA_STATE_DIR", str(tmp_path / "st"))
+    with A._locked(tmp_path) as data:
+        data["slow"]["t.py::a"] = {"s": 9.0, "t": 1}
+    assert A.load_state(tmp_path)["slow"]
+
+    def boom(table, limit):
+        raise RuntimeError("boom")
+    monkeypatch.setattr(A, "_prune", boom)
+    with pytest.raises(RuntimeError), A._locked(tmp_path) as data:
+        data["slow"]["t.py::b"] = {"s": 9.0, "t": 2}
+    assert A.load_state(tmp_path) == A._empty()
+    assert json.loads((tmp_path / "st" / "tests" / "results.json").read_text()
+                      ) == A._empty()
+
+
+def test_concurrent_writers_keep_every_entry(tmp_path, monkeypatch):
+    import threading
+    monkeypatch.setenv("OZAGIA_STATE_DIR", str(tmp_path / "st"))
+    code = ("import sys\nfrom pathlib import Path\n"
+            "from ozagia.intent import affected as A\n"
+            "for i in range(15):\n"
+            "    with A._locked(Path(sys.argv[1])) as d:\n"
+            "        d['slow'][f'p{sys.argv[2]}::{i}'] = {'s': 6.0, 't': i}\n")
+    procs = [subprocess.Popen([PY, "-c", code, str(tmp_path), str(n)])
+             for n in range(4)]
+
+    def writer(n: int) -> None:
+        for i in range(15):
+            with A._locked(tmp_path) as d:
+                d["slow"][f"t{n}::{i}"] = {"s": 6.0, "t": i}
+    threads = [threading.Thread(target=writer, args=(n,)) for n in range(3)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(60)
+    assert [p.wait(60) for p in procs] == [0] * 4
+    slow = A.load_state(tmp_path)["slow"]
+    assert len(slow) == 4 * 15 + 3 * 15
+    assert not list((tmp_path / "st" / "tests").glob("*.tmp"))

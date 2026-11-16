@@ -178,9 +178,14 @@ def run_pytest(memory: Any, cls: dict[str, Any], inp: dict[str, Any],
         env = {**base_env, **cls["env"]}
     preflight_stop(inp)
     from ozagia.intent import affected as A
+    t_plan = time.monotonic()
     plan = A.plan(memory, cls, inp, root=root, python=python,
                   selectors=selectors,
                   env=env if isinstance(env, dict) else None)
+    if isinstance(remaining, (int, float)) and not isinstance(remaining, bool):
+        # Planning time comes out of the caller's remaining time.
+        timeout_s = max(MIN_TIMEOUT_S, min(
+            timeout_s, float(remaining) - (time.monotonic() - t_plan)))
     run_selectors = (selectors if plan is None or plan.selectors is None
                      else plan.selectors)
     if plan is not None and plan.nothing_to_run:
@@ -212,7 +217,7 @@ def run_pytest(memory: Any, cls: dict[str, Any], inp: dict[str, Any],
             rows[:filt[1]] if filt[0] == "head" else [])
         out = "\n".join(rows)
     lines = [out]
-    head = (f"pytest {res['status']}: exit {res['exit_code']}, "
+    head = (f"pytest {res['status']}{A.scope(plan, res)}: exit {res['exit_code']}, "
             f"{res['seconds']} s, {c['passed']} passed, {c['failed']} failed, "
             f"{c['error']} error, {c['skipped']} skipped")
     if res["collection_errors"]:
