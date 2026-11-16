@@ -1776,6 +1776,20 @@ Status: all merged: `module-build` as `f91980a`, `plumbing` as `07ad251`, and
 ruff passes. The live OpenCode Desktop smoke test still needs a host with the
 desktop app.
 
+### Parallel wave 7 (2026-11-16)
+
+Four agents start from `5863870`:
+
+| Worktree | Branch | Scope |
+| --- | --- | --- |
+| `~/ozmadev/ozagia-wt/file-lifecycle` | `feat/file-lifecycle` | Cleanup apply/trash/restore and true session manifest deltas |
+| `~/ozmadev/ozagia-wt/cgroup-enforcement` | `feat/cgroup-enforcement` | Linux cgroup v2 memory/pids limits with rlimit/watchdog fallback |
+| `~/ozmadev/ozagia-wt/config-hooks` | `feat/config-hooks` | `.ozagia.toml` migration and opt-in pre-commit/pre-push hooks |
+| `~/ozmadev/ozagia-wt/addin-tasks` | `feat/addin-tasks` | Task-class catalogue tab in the OpenCode add-in |
+
+The same review/merge/full-suite gate applies; the live Desktop smoke test and
+remaining model/tool adapters stay for the following wave.
+
 ### Library-first workstream (2026-11-16)
 
 One additional agent starts from `79c3b3e`:
