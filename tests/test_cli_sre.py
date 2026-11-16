@@ -1,4 +1,5 @@
 import json
+import sys
 
 from ozagia import cli
 
@@ -75,6 +76,51 @@ def test_cli_environment_profiles_are_declarative(tmp_path, capsys):
                      "--json"]) == 0
     shown = json.loads(capsys.readouterr().out)
     assert shown["environments"][0]["risk"] == "low"
+
+
+def test_cli_runtime_status_and_foreground_service(tmp_path, capsys):
+    (tmp_path / ".ozagia.toml").write_text(
+        f"""
+[relays.local]
+specs = [{{ kind = "local" }}]
+allowed_kinds = ["local"]
+max_timeout_s = 20
+
+[runtime.services.echo]
+command = [{json.dumps(sys.executable)}, "-c", "print('cli-ok')"]
+mode = "foreground"
+description = "Echo service"
+
+[runtime.tunnels.database]
+relay = "local"
+target = "127.0.0.1:5432"
+description = "Database tunnel"
+""", encoding="utf-8")
+    assert cli.main(["runtime", "status", "--root", str(tmp_path),
+                     "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["configured"] is True and payload["live"] is False
+    assert payload["services"][0]["state"] == "configured"
+    assert payload["tunnels"][0]["state"] == "configured"
+    assert payload["tunnels"][0]["running"] is False
+    assert not (tmp_path / ".ozagia" / "runtime").exists()
+
+    assert cli.main(["service", "run", "echo", "--root", str(tmp_path),
+                     "--json"]) == 0
+    ran = json.loads(capsys.readouterr().out)
+    assert ran["state"] == "exited" and ran["exit_code"] == 0
+    assert ran["output"] == "cli-ok\n"
+    assert "cli-ok" not in (tmp_path / ".ozagia" / "runtime" /
+                            "state.json").read_text()
+
+    assert cli.main(["runtime", "status", "echo", "--root", str(tmp_path),
+                     "--json"]) == 0
+    updated = json.loads(capsys.readouterr().out)
+    assert updated["services"][0]["state"] == "exited"
+
+    assert cli.main(["tunnel", "start", "database", "--root", str(tmp_path),
+                     "--json"]) == 2
+    assert "--allow-live" in capsys.readouterr().err
 
 
 def test_cli_job_wait_is_disabled_without_allow_live(tmp_path, capsys):

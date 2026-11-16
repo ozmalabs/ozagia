@@ -16,6 +16,10 @@
     ozagia iac check ...                          (offline Terraform checks)
     ozagia env list|show ...                      (declarative environment profiles)
     ozagia relay plan|run|tunnel ...              (nested command/network relays)
+    ozagia runtime status|list ...                (configured services and tunnels)
+    ozagia service start|run|stop|restart|status|logs NAME
+    ozagia process start|run -- ARGV ...          (explicit local processes)
+    ozagia tunnel start|stop|status|list ...      (tunnel config vs live state)
     ozagia preflight plan ...                     (dry-run emulator plan)
     ozagia --version
 
@@ -491,6 +495,198 @@ def _cmd_relay(args: argparse.Namespace, command: list[str]) -> int:
         relay.close()
 
 
+def _runtime_config(args: argparse.Namespace):
+    from ozagia.config import ConfigError, load_project_config
+    try:
+        return load_project_config(_root(args.root))
+    except (ConfigError, OSError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return None
+
+
+def _print_runtime_item(item: dict) -> None:
+    from ozagia.core.runtime import runtime_line
+    print(runtime_line(item))
+
+
+def _cmd_runtime(args: argparse.Namespace) -> int:
+    from ozagia.core.runtime import (
+        RuntimeErrorBase, ServiceManager, TunnelManager, runtime_logs,
+        runtime_status,
+    )
+
+    config = _runtime_config(args)
+    if config is None:
+        return 2
+    try:
+        if args.command == "runtime":
+            selected = args.name if getattr(args, "name", None) else None
+            payload = runtime_status(config, name=selected)
+            if args.json:
+                _print_json(payload)
+            else:
+                if payload["context"]:
+                    print(payload["context"])
+                else:
+                    print("no configured runtime services or tunnels")
+            return 0
+
+        if args.command == "service":
+            if args.action == "logs":
+                payload = runtime_logs(
+                    config, args.name, max_bytes=args.max_bytes)
+                if args.json:
+                    _print_json(payload)
+                else:
+                    print(payload["logs"], end="")
+                return 0
+            manager = ServiceManager(config)
+            if args.action == "list":
+                rows = manager.list()
+                if args.json:
+                    _print_json({"services": rows, "live": False})
+                else:
+                    for row in rows:
+                        _print_runtime_item(row)
+                return 0
+            if args.action == "start":
+                item = manager.start(args.name)
+            elif args.action == "run":
+                item = manager.run(args.name)
+                if args.json:
+                    _print_json(item)
+                else:
+                    output = item.get("output") or ""
+                    if output:
+                        print(output, end="" if output.endswith("\n") else "\n")
+                    _print_runtime_item(item)
+                return 0 if item.get("exit_code") == 0 else 1
+            elif args.action == "stop":
+                item = manager.stop(args.name)
+            elif args.action == "restart":
+                item = manager.restart(args.name)
+            else:
+                item = manager.status(args.name)
+            if args.json:
+                _print_json(item)
+            else:
+                _print_runtime_item(item)
+            return 0
+
+        if args.command == "process":
+            if args.action == "logs":
+                payload = runtime_logs(
+                    config, args.name, max_bytes=args.max_bytes)
+                if args.json:
+                    _print_json(payload)
+                else:
+                    print(payload["logs"], end="")
+                return 0
+            manager = ServiceManager(config)
+            if args.action in {"start", "run"}:
+                if not args.argv:
+                    print("error: process command needs argv after --",
+                          file=sys.stderr)
+                    return 2
+                workdir = None
+                if args.workdir:
+                    root = config.root.resolve()
+                    candidate = (root / args.workdir).resolve()
+                    if not candidate.is_relative_to(root):
+                        print("error: workdir must stay inside the repository",
+                              file=sys.stderr)
+                        return 2
+                    workdir = str(candidate)
+                if args.action == "start":
+                    item = manager.start_raw(args.argv, workdir=workdir)
+                else:
+                    item = manager.run_raw(args.argv, workdir=workdir)
+                    if args.json:
+                        _print_json(item)
+                    else:
+                        output = item.get("output") or ""
+                        if output:
+                            print(output, end="" if output.endswith("\n") else "\n")
+                        _print_runtime_item(item)
+                    return 0 if item.get("exit_code") == 0 else 1
+            elif args.action == "list":
+                rows = manager.list()
+                if args.json:
+                    _print_json({"processes": rows, "live": False})
+                else:
+                    for row in rows:
+                        _print_runtime_item(row)
+                return 0
+            elif args.action == "stop":
+                item = manager.stop(args.name)
+            else:
+                item = manager.status(args.name)
+            if args.json:
+                _print_json(item)
+            else:
+                _print_runtime_item(item)
+            return 0
+
+        if args.command == "tunnel":
+            if args.action in {"status", "list"}:
+                selected = args.name if getattr(args, "name", None) else None
+                payload = runtime_status(config, name=selected)
+                if args.json:
+                    _print_json(payload)
+                else:
+                    for item in payload["tunnels"]:
+                        _print_runtime_item(item)
+                    if not payload["tunnels"]:
+                        print("no configured tunnels")
+                return 0
+            manager = TunnelManager(config)
+            if args.action == "stop":
+                item = manager.stop(args.name)
+            else:
+                if not args.allow_live or not args.allow_network:
+                    print("error: tunnel start requires --allow-live and "
+                          "--allow-network", file=sys.stderr)
+                    return 2
+                started = manager.start(
+                    args.name, allow_live=True, allow_network=True)
+                if args.once:
+                    stopped = manager.stop(args.name)
+                    payload = {"started": started, "stopped": stopped,
+                               "live": False}
+                    if args.json:
+                        _print_json(payload)
+                    else:
+                        _print_runtime_item(started)
+                        print("tunnel opened once and closed")
+                    return 0
+                if args.json:
+                    _print_json(started)
+                else:
+                    _print_runtime_item(started)
+                    print("holding tunnel; press Ctrl-C to stop",
+                          file=sys.stderr)
+                try:
+                    import time
+                    while True:
+                        time.sleep(3600)
+                except KeyboardInterrupt:
+                    pass
+                finally:
+                    item = manager.stop(args.name)
+                if not args.json:
+                    _print_runtime_item(item)
+                return 0
+            if args.json:
+                _print_json(item)
+            else:
+                _print_runtime_item(item)
+            return 0
+    except (RuntimeErrorBase, OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    return 2
+
+
 def _cmd_preflight(args: argparse.Namespace) -> int:
     from ozagia.core.preflight import build_preflight
     dependencies: dict[str, list[str]] = {}
@@ -670,6 +866,85 @@ def build_parser() -> argparse.ArgumentParser:
     tunnel.add_argument("--timeout-s", type=float, default=30.0)
     tunnel.add_argument("--json", action="store_true")
 
+    runtime = sub.add_parser(
+        "runtime", help="configured services, processes and tunnels")
+    rtsub = runtime.add_subparsers(dest="action", required=True)
+    for name, help_text in (("status", "show configured and observed runtime state"),
+                            ("list", "list configured runtime items")):
+        item = rtsub.add_parser(name, help=help_text)
+        item.add_argument("name", nargs="?", default=None)
+        item.add_argument("--root", default=None)
+        item.add_argument("--json", action="store_true")
+
+    service = sub.add_parser("service", help="manage configured local services")
+    svcsub = service.add_subparsers(dest="action", required=True)
+    svc_list = svcsub.add_parser("list", help="list configured services")
+    svc_list.add_argument("--root", default=None)
+    svc_list.add_argument("--json", action="store_true")
+    for name, help_text in (
+        ("start", "start one configured service in the background"),
+        ("run", "run one configured service in the foreground and wait"),
+        ("stop", "stop one verified background service"),
+        ("restart", "restart one configured background service"),
+        ("status", "show one configured service"),
+        ("logs", "read a bounded local service log"),
+    ):
+        item = svcsub.add_parser(name, help=help_text)
+        item.add_argument("name")
+        item.add_argument("--root", default=None)
+        item.add_argument("--json", action="store_true")
+        if name == "logs":
+            item.add_argument("--max-bytes", type=int, default=4_096)
+
+    process = sub.add_parser("process", help="manage explicit local processes")
+    psub = process.add_subparsers(dest="action", required=True)
+    for name, help_text in (
+        ("start", "start an explicit argv in the background; use -- before it"),
+        ("run", "run an explicit argv in the foreground; use -- before it"),
+    ):
+        item = psub.add_parser(name, help=help_text)
+        item.add_argument("--workdir", default=None,
+                          help="repository-relative working directory")
+        item.add_argument("--root", default=None)
+        item.add_argument("--json", action="store_true")
+    proc_list = psub.add_parser("list", help="list configured and raw processes")
+    proc_list.add_argument("--root", default=None)
+    proc_list.add_argument("--json", action="store_true")
+    for name, help_text in (
+        ("status", "show one process"),
+        ("stop", "stop one verified background process"),
+        ("logs", "read a bounded local process log"),
+    ):
+        item = psub.add_parser(name, help=help_text)
+        item.add_argument("name")
+        item.add_argument("--root", default=None)
+        item.add_argument("--json", action="store_true")
+        if name == "logs":
+            item.add_argument("--max-bytes", type=int, default=4_096)
+
+    tunnel = sub.add_parser(
+        "tunnel", help="configured relay tunnels and their live state")
+    tsub = tunnel.add_subparsers(dest="action", required=True)
+    for name, help_text in (("status", "show configured and observed tunnels"),
+                            ("list", "list configured tunnels")):
+        item = tsub.add_parser(name, help=help_text)
+        item.add_argument("name", nargs="?", default=None)
+        item.add_argument("--root", default=None)
+        item.add_argument("--json", action="store_true")
+    tunnel_start = tsub.add_parser(
+        "start", help="open one configured tunnel and hold it in this process")
+    tunnel_start.add_argument("name")
+    tunnel_start.add_argument("--root", default=None)
+    tunnel_start.add_argument("--allow-live", action="store_true")
+    tunnel_start.add_argument("--allow-network", action="store_true")
+    tunnel_start.add_argument("--once", action="store_true",
+                              help="open, report and close it immediately")
+    tunnel_start.add_argument("--json", action="store_true")
+    tunnel_stop = tsub.add_parser("stop", help="stop a tunnel held by this process")
+    tunnel_stop.add_argument("name")
+    tunnel_stop.add_argument("--root", default=None)
+    tunnel_stop.add_argument("--json", action="store_true")
+
     preflight = sub.add_parser("preflight", help="dry-run IaC emulator plan")
     psub = preflight.add_subparsers(dest="action", required=True)
     plan = psub.add_parser("plan", help="print an ordered, scrubbed plan")
@@ -690,7 +965,7 @@ def main(argv: list[str] | None = None) -> int:
     if argv and argv[0] in DELEGATES:
         return _delegate(argv[0])(argv[1:])
     extra: list[str] = []
-    if argv[:1] in (["agent"], ["relay"]) and "--" in argv:
+    if argv[:1] in (["agent"], ["relay"], ["process"]) and "--" in argv:
         at = argv.index("--")
         argv, extra = argv[:at], argv[at + 1:]
     parser = build_parser()
@@ -719,6 +994,15 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_env(args)
     if args.command == "relay":
         return _cmd_relay(args, extra)
+    if args.command == "runtime":
+        return _cmd_runtime(args)
+    if args.command == "service":
+        return _cmd_runtime(args)
+    if args.command == "process":
+        args.argv = extra
+        return _cmd_runtime(args)
+    if args.command == "tunnel":
+        return _cmd_runtime(args)
     if args.command == "preflight":
         return _cmd_preflight(args)
     parser.error(f"unknown command {args.command}")  # pragma: no cover

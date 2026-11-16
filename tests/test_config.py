@@ -314,3 +314,98 @@ def test_iac_config_rejects_secrets_unknown_fields_and_escaping_paths(
     _write(tmp_path / ".ozagia.toml", text)
     with pytest.raises(ConfigError, match=message):
         load_project_config(tmp_path)
+
+
+def test_runtime_config_is_declarative_bounded_and_immutable(tmp_path):
+    _write(tmp_path / ".ozagia.toml", """
+[relays.prod]
+specs = [
+  { kind = "local", name = "base" },
+  { kind = "ssh", options = { host = "internal.example", port = 22 } },
+]
+allowed_kinds = ["local", "ssh"]
+max_timeout_s = 300
+command_allowlist = [["uptime"], ["kubectl", "get"]]
+max_output_bytes = 2048
+
+[runtime.services.api]
+command = ["python", "-m", "app"]
+workdir = "services/api"
+relay = "prod"
+mode = "background"
+description = "API service"
+
+[runtime.tunnels.database]
+relay = "prod"
+target = "db.internal.example:5432"
+local_port = 0
+description = "Payments database"
+""")
+    config = load_project_config(tmp_path)
+    relay = config.relays[0]
+    assert relay.name == "prod"
+    assert relay.allowed_kinds == ("local", "ssh")
+    assert relay.command_allowlist == (("uptime",), ("kubectl", "get"))
+    assert relay.specs[1].options == (("host", "internal.example"),
+                                      ("port", 22))
+    with pytest.raises((AttributeError, TypeError)):
+        relay.specs[0].kind = "ssm"
+    service = config.runtime_services[0]
+    assert service.command == ("python", "-m", "app")
+    assert service.workdir == "services/api"
+    assert service.relay == "prod" and service.mode == "background"
+    tunnel = config.runtime_tunnels[0]
+    assert tunnel.target == "db.internal.example:5432"
+    assert tunnel.local_port == 0
+
+
+@pytest.mark.parametrize("text, message", [
+    ('[relays.prod]\nspecs = []\n', "1 to 16"),
+    ('[relays.prod]\nspecs = [{ kind="local", unknown="x" }]\n',
+     "unknown key"),
+    ('[relays.prod]\nspecs = [{ kind="local", options={password="bad"} }]\n',
+     "unsafe relay option"),
+    ('[relays.prod]\nspecs = [{ kind="local" }]\nallowed_kinds=["ssh"]\n',
+     "configured spec kinds"),
+    ('[relays.prod]\nspecs = [{ kind="local", name="same" }, '
+     '{ kind="ssh", name="same" }]\n', "duplicate relay spec name"),
+    ('[runtime.services.api]\ncommand=[]\n', "non-empty argv"),
+    ('[runtime.services.api]\ncommand=["python -m app"]\n',
+     "shell command string"),
+    ('[runtime.services.api]\ncommand=["sh", "-c", "echo hi"]\n',
+     "shell command string"),
+    ('[runtime.services.api]\ncommand=["python", "x; echo bad"]\n',
+     "unsafe argv"),
+    ('[runtime.services.api]\ncommand=["python", "--api-key", "secret"]\n',
+     "credential-like"),
+    ('[runtime.services.api]\ncommand=["python"]\nworkdir="../outside"\n',
+     "inside the repository root"),
+    ('[runtime.services.api]\ncommand=["python"]\nrelay="missing"\n',
+     "not configured"),
+    ('[relays.prod]\nspecs=[{kind="local"}]\n'
+     '[runtime.services.api]\ncommand=["python"]\nmode="shell"\n',
+     "background or foreground"),
+    ('[relays.prod]\nspecs=[{kind="local"}]\n'
+     '[runtime.tunnels.db]\nrelay="prod"\ntarget="db.example:0"\n',
+     "outside 1..65535"),
+    ('[relays.prod]\nspecs=[{kind="local"}]\n'
+     '[runtime.tunnels.db]\nrelay="prod"\ntarget="db.example:22"\nlocal_port=65536\n',
+     "outside 0..65535"),
+    ('[relays.prod]\nspecs=[{kind="local"}]\n'
+     '[runtime.services.api]\ncommand=["python"]\ncredentials="bad"\n',
+     "unknown key"),
+])
+def test_runtime_config_rejects_unsafe_or_unknown_values(tmp_path, text, message):
+    _write(tmp_path / ".ozagia.toml", text)
+    with pytest.raises(ConfigError, match=message):
+        load_project_config(tmp_path)
+
+
+def test_runtime_config_rejects_duplicate_command_prefixes(tmp_path):
+    _write(tmp_path / ".ozagia.toml", """
+[relays.local]
+specs = [{ kind = "local" }]
+command_allowlist = [["python"], ["python"]]
+""")
+    with pytest.raises(ConfigError, match="contains duplicates"):
+        load_project_config(tmp_path)

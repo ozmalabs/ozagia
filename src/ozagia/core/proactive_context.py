@@ -195,6 +195,7 @@ def build_context(memory: Any, prompt: str, history: Iterable[str] = (), *,
                   single_query: bool = True,
                   infra_share: float = 0.45,
                   infra_results: int = 6,
+                  runtime_share: float = 0.2,
                   ) -> dict[str, Any]:
     """Stable token-budget API for daemon/plugin integrations.
 
@@ -217,12 +218,30 @@ def build_context(memory: Any, prompt: str, history: Iterable[str] = (), *,
         result["keys"] = result.get("rendered_keys", [])
         result["estimated_tokens"] = (len(result.get("context", "")) + 3) // 4
         return result
+    recent = history_list[-max_history_turns:] if max_history_turns > 0 else []
+    runtime: dict[str, Any] = {"context": "", "items": [], "truncated": False}
+    try:
+        from ozagia.core.runtime import runtime_context
+        runtime = runtime_context(
+            memory, prompt, history=recent,
+            max_chars=min(400, max(0, int(budget * max(0.0, float(runtime_share))))),
+        )
+    except Exception:
+        # Runtime config/state is advisory; never break a hint on it.
+        runtime = {"context": "", "items": [], "truncated": False}
+    runtime_text = runtime.get("context", "") if isinstance(runtime, dict) else ""
+    available = budget
+    if runtime_text:
+        available = max(0, budget - len(runtime_text) - 2)
+        rendered_code = _render_results(result.get("results", []), available)
+        result["context"] = rendered_code["context"]
+        result["rendered_keys"] = rendered_code["rendered_keys"]
+        result["truncated"] = bool(rendered_code["truncated"])
     # Only opt-in indexed infrastructure nodes participate. Include structural
     # facts and citations, never raw infrastructure values.
     from ozagia.core.infra_query import context as infra_context
-    recent = history_list[-max_history_turns:] if max_history_turns > 0 else []
     share = min(1.0, max(0.0, float(infra_share)))
-    infra_budget = int(budget * share)
+    infra_budget = int(available * share)
     infra = infra_context(memory, prompt, history=recent,
                           max_chars=infra_budget,
                           limit=max(1, int(infra_results)))
@@ -235,9 +254,9 @@ def build_context(memory: Any, prompt: str, history: Iterable[str] = (), *,
     chosen_infra = infra
     if infra["context"] and not code_context:
         # No code result rendered, so the infrastructure hint may use the
-        # whole budget instead of leaving the reserved share unused.
+        # whole remaining budget instead of leaving the reserved share unused.
         chosen_infra = infra_context(memory, prompt, history=recent,
-                                     max_chars=budget,
+                                     max_chars=available,
                                      limit=max(1, int(infra_results)))
         final_context = chosen_infra["context"]
         final_keys = list(chosen_infra["keys"])
@@ -245,7 +264,7 @@ def build_context(memory: Any, prompt: str, history: Iterable[str] = (), *,
         code_chars = 0
         truncated = bool(chosen_infra["truncated"])
     elif infra["context"]:
-        remaining = max(0, budget - len(infra["context"]) - 2)
+        remaining = max(0, available - len(infra["context"]) - 2)
         rendered_code = _render_results(result.get("results", []), remaining)
         if rendered_code["context"]:
             final_context = infra["context"] + "\n\n" + rendered_code["context"]
@@ -258,13 +277,18 @@ def build_context(memory: Any, prompt: str, history: Iterable[str] = (), *,
             # The code headers cannot fit after the infrastructure hint; give
             # the budget to infrastructure rather than returning a stub.
             chosen_infra = infra_context(memory, prompt, history=recent,
-                                         max_chars=budget,
+                                         max_chars=available,
                                          limit=max(1, int(infra_results)))
             final_context = chosen_infra["context"]
             final_keys = list(chosen_infra["keys"])
             infra_chars = len(final_context)
             code_chars = 0
             truncated = bool(chosen_infra["truncated"]) or bool(code_context)
+    if runtime_text:
+        final_context = runtime_text + ("\n\n" + final_context
+                                        if final_context else "")
+        final_keys = []  # runtime lines are config/state, not graph keys
+        truncated = truncated or bool(runtime.get("truncated"))
     result["context"] = final_context
     result["rendered_keys"] = final_keys
     result["keys"] = final_keys
@@ -275,9 +299,14 @@ def build_context(memory: Any, prompt: str, history: Iterable[str] = (), *,
         "ambiguous": chosen_infra["ambiguous"],
         "matched_term_count": chosen_infra["matched_term_count"],
     }
+    result["runtime"] = {
+        "items": runtime.get("items", []) if isinstance(runtime, dict) else [],
+        "truncated": bool(runtime.get("truncated")) if isinstance(runtime, dict) else False,
+    }
     result["allocation"] = {
-        "budget_chars": budget, "infra_chars": infra_chars,
-        "code_chars": code_chars, "infra_share": share,
+        "budget_chars": budget, "runtime_chars": len(runtime_text),
+        "infra_chars": infra_chars, "code_chars": code_chars,
+        "infra_share": share,
     }
     result["estimated_tokens"] = (len(final_context) + 3) // 4
     return result

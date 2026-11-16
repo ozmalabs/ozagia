@@ -129,6 +129,44 @@ def test_iac_check_and_preflight_are_supported_without_live_calls(tmp_path):
     assert escaped["ok"] is False
 
 
+def test_runtime_mcp_tools_are_read_only_and_config_is_not_connectivity(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / ".ozagia.toml").write_text(
+        """
+[relays.local]
+specs = [{ kind = "local" }]
+allowed_kinds = ["local"]
+
+[runtime.services.api]
+command = ["python", "-m", "app"]
+description = "API service"
+
+[runtime.tunnels.database]
+relay = "local"
+target = "127.0.0.1:5432"
+description = "Database tunnel"
+""", encoding="utf-8")
+    handlers = tools(root)
+    assert "dev_runtime_status" in handlers and "dev_runtime_logs" in handlers
+    assert not any(name.startswith("dev_runtime_start") or
+                   name.startswith("dev_runtime_stop")
+                   for name in handlers)
+
+    result = handlers["dev_runtime_status"]({})
+    assert result["ok"] is True and result["configured"] is True
+    assert result["services"][0]["state"] == "configured"
+    assert result["tunnels"][0]["state"] == "configured"
+    assert result["tunnels"][0]["running"] is False
+    assert "not connected" in result["context"]
+    assert not (root / ".ozagia" / "runtime").exists()
+
+    selected = handlers["dev_runtime_status"]({"name": "database"})
+    assert selected["ok"] is True and selected["services"] == []
+    assert handlers["dev_runtime_status"]({"name": "missing"})["ok"] is False
+    assert handlers["dev_runtime_logs"]({"name": "missing"})["ok"] is False
+
+
 def test_mcp_server_registers_offline_sre_tools(tmp_path):
     root = tmp_path / "repo"
     root.mkdir()
@@ -136,5 +174,6 @@ def test_mcp_server_registers_offline_sre_tools(tmp_path):
     assert {"dev_environments", "dev_check_iac", "dev_ops_record", "dev_ops_resume",
             "dev_live_import", "dev_live_diff", "dev_live_save",
             "dev_aws_cli_check", "dev_relay_plan",
-            "dev_preflight_plan"} <= set(server._handlers)
+            "dev_preflight_plan", "dev_runtime_status",
+            "dev_runtime_logs"} <= set(server._handlers)
     assert server._schemas["dev_ops_record"]["additionalProperties"] is False

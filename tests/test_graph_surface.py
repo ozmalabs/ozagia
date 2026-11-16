@@ -41,7 +41,8 @@ FULL_SURFACE_TOOLS = [
     "dev_symbol_resolve", "dev_graph_query", "dev_environments",
     "dev_check_iac", "dev_ops_record", "dev_ops_resume", "dev_live_import",
     "dev_live_diff", "dev_live_save", "dev_aws_cli_check",
-    "dev_relay_plan", "dev_preflight_plan",
+    "dev_relay_plan", "dev_preflight_plan", "dev_runtime_status",
+    "dev_runtime_logs",
 ]
 VERBS = ["find", "node", "expand", "impact", "edit", "create", "check", "note"]
 

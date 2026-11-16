@@ -185,6 +185,30 @@ def sre_tools(memory: Any) -> list[tuple[dict[str, Any], Any]]:
                     pass
         return {"ok": True, "dry_run": True, "argv": list(planned)}
 
+    def runtime_status(args: dict[str, Any]) -> dict[str, Any]:
+        from ozagia.config import ConfigError, load_project_config
+        from ozagia.core.runtime import RuntimeErrorBase
+        from ozagia.core.runtime import runtime_status as observe
+        try:
+            config = load_project_config(root)
+            payload = observe(config, name=args.get("name"))
+        except (ConfigError, OSError, RuntimeErrorBase) as exc:
+            return {"ok": False, "error": str(exc)}
+        return {"ok": True, **payload}
+
+    def runtime_log(args: dict[str, Any]) -> dict[str, Any]:
+        from ozagia.config import ConfigError, load_project_config
+        from ozagia.core.runtime import RuntimeErrorBase
+        from ozagia.core.runtime import runtime_logs as read_logs
+        try:
+            limit = int(args.get("max_bytes", 2_048))
+            payload = read_logs(
+                load_project_config(root), str(args.get("name", "")),
+                max_bytes=limit)
+        except (ConfigError, OSError, RuntimeErrorBase, TypeError, ValueError) as exc:
+            return {"ok": False, "error": str(exc)}
+        return {"ok": True, **payload}
+
     def preflight_plan(args: dict[str, Any]) -> dict[str, Any]:
         from ozagia.core.preflight import build_preflight
         roots = args.get("roots")
@@ -259,6 +283,18 @@ def sre_tools(memory: Any) -> list[tuple[dict[str, Any], Any]]:
               "dependencies": {"type": "object"},
               "emulator_bin": {"type": "string"}},
               ["roots", "emulator_bin"])}, preflight_plan),
+        ({"name": "dev_runtime_status",
+          "description": ("Read configured services/tunnels and their observed local "
+                          "state. Never starts a process or opens a tunnel; a "
+                          "configured tunnel is not reported as connected."),
+          "inputSchema": _schema({"name": {"type": "string"}})}, runtime_status),
+        ({"name": "dev_runtime_logs",
+          "description": ("Read one bounded local service/process log on request. "
+                          "Logs are never included in automatic context."),
+          "inputSchema": _schema({
+              "name": {"type": "string"},
+              "max_bytes": {"type": "integer", "default": 2_048}},
+              ["name"])}, runtime_log),
     ]
     return [(spec, handler) for spec, handler in specs]
 
