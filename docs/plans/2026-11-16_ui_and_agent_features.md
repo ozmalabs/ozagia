@@ -1339,12 +1339,27 @@ The read-only part of 1a landed as new files:
 - `integrations/ocelot/`: explicit pinned resolver/installer with checksum,
   SSRF/path-traversal guard and manifest verification (`feat/ocelot-installer`,
   merged as `11c1b60`).
+- `core/task_library.py`, 13 task specs: versioned research/coding/ops classes,
+  repo overrides and copy workflow (`feat/task-library`, merged as `6259c99`).
+- `core/research_ui.py`, `research_ui_cli.py`: read-only library, fetch,
+  screening, evidence, consensus and citation views (`feat/research-ui`,
+  merged as `57666bd`).
+- `core/log_inspect.py`, `log_inspect_cli.py`: bounded, redacted local log
+  clustering and proposals (`feat/log-inspect`, merged as `a7e1ea2`).
+- `core/models.py`, `models_cli.py`: available-model registry, per-task
+  defaults, local-only filtering and source reporting (`feat/model-registry`,
+  merged as `d47338f`).
+- `core/testing.py`, `testing_cli.py`: test policy modes, graph-based
+  affected-test planning, caps/fallbacks and task/code-review integration
+  (`feat/test-policy`, merged as `5fdab35`).
 - Tests for all of the above; docs `worktree.md`, `resources.md`, `files.md`,
   `status.md`, `view.md`, `settings.md`, `code_review.md`, `tasks.md`,
-  `ocelot.md`; console scripts for view, status, settings, tasks, review,
+  `task_library.md`, `research_ui.md`, `log_inspect.md`, `models.md`,
+  `testing.md`, `ocelot.md`; console scripts for view, status, settings,
+  tasks, task library, research UI, log inspection, models, testing, review,
   Ocelot, worktree, resources and files in `pyproject.toml`.
 
-Checks after both waves: `3469 passed, 21 skipped`;
+Checks after all three waves: `3626 passed, 21 skipped`;
 `ruff check src tests` passes. A concurrent TUI-brand merge added
 `.opencode/plugins/ozagia/tui.js`; the harness exclude patterns and tests were
 updated for it, and the full suite is green.
@@ -1353,9 +1368,12 @@ Not yet: cgroups and exact per-job disk accounting; cleanup apply/trash;
 command-derived path extraction for `patch`/`shell`; a true before/after
 session manifest (the current scan attributes pre-existing untracked files to
 the session with `reason: unknown`); live/multi-model review and Ocelot
-reconciliation in the code-review harness; model/tool adapters and the task
-class library; `ozagia config` CLI/`config.py` integration, migration from
-`.ozagia.toml`, doctor source reporting; and the UI hosts.
+reconciliation in the code-review harness; model/tool adapters and an injected
+test runner; interactive captured-pytest wiring for `testing.captured`;
+`[models.tasks]`/`[models.local]` support in the settings registry;
+`ozagia config` CLI/`config.py` integration, migration from `.ozagia.toml`,
+doctor source reporting; and the UI hosts (OpenCode add-in, standalone
+console), process/connection actions, repo scan and upstream submission.
 
 ### Parallel workstreams (2026-11-16)
 
@@ -1390,7 +1408,7 @@ as `11c1b60`, `code-review` as `20570d7`, and `resource-enforcement` as
 
 ### Parallel wave 3 (2026-11-16)
 
-Four agents start from `e5676cd`:
+Five agents started from `e5676cd`/`13ee19c`:
 
 | Worktree | Branch | Scope |
 | --- | --- | --- |
@@ -1400,7 +1418,10 @@ Four agents start from `e5676cd`:
 | `~/ozmadev/ozagia-wt/log-inspect` | `feat/log-inspect` | Bounded, redacted local log inspection and proposed improvements |
 | `~/ozmadev/ozagia-wt/test-policy` | `feat/test-policy` | Graph-based affected-test planning and configurable test depth |
 
-The same review/merge/full-suite gate applies.
+Status: all five are merged: `task-library` as `6259c99`, `research-ui` as
+`57666bd`, `log-inspect` as `a7e1ea2`, `model-registry` as `d47338f`, and
+`test-policy` as `5fdab35`. The final full suite is `3626 passed, 21 skipped`;
+ruff passes.
 
 ## Open decisions
 
