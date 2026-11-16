@@ -144,9 +144,12 @@ Details:
   review's `unpinned_image` uses; it excludes `value`, and `pinned: false`
   is refused. An image reference ozagia cannot read (a variable) is
   `unknown`.
-- **`file:` keys** also resolve when the file is a regular file in the
-  working tree inside the root (not a symlink, not in the state dir), so a
-  committed `.env` or key file the indexer leaves out can be a target.
+- **`file:` keys** not in the graph also resolve when the exact path is
+  one `git ls-files` lists and is a regular file inside the root (not a
+  symlink, not in the state dir), so a committed `.env` or key file the
+  indexer leaves out can be a target. Ignored files, `.git/` internals and
+  aliases such as `./a.py` are refused. File contents are hashed in 1 MB
+  chunks, and a file over 256 MB cannot be hashed (`unknown`).
 - **Review packets** have the W17 schema `ozagia.repo_review.packet.v1`.
   A packet must be a regular file under the state dir's `reviews/`
   directory (`.ozagia/reviews/`; symlinks are resolved first, so a link to
@@ -181,7 +184,10 @@ newest `repo_review-*.json`. Then, in order:
    matches) or the finding's keys has other content now than when that
    review started: the packet's `tree` is the same working-tree
    fingerprint test runs carry, taken before the review reads any file,
-   and is compared the same way (see "Freshness of test results"). A
+   and is compared the same way (see "Freshness of test results"),
+   except that a file git ignores now and that was neither committed nor
+   dirty at the review is skipped rather than counted as changed. Finding
+   keys taken from the packet must name canonical root-relative paths. A
    packet without `tree` (an older ozagia, or no git) falls back to file
    mtimes against `generated_at`, which is weaker: a backdated mtime hides
    an edit and scope globs are not expanded;
@@ -288,11 +294,10 @@ Limits:
   fingerprint and are not evidence.
 - A dirty symlink is compared as "not a regular file": retargeting it is
   not seen.
-- Git-ignored files are not in the fingerprint. A compared file that is
-  ignored now and was neither committed nor dirty at the run is skipped
-  rather than reported as changed (for example a `.env` untracked and
-  ignored to resolve a review finding); edits to ignored files are not
-  seen.
+- Git-ignored files are not in the fingerprint, so a test result whose
+  goal names one is always `stale`. (Review freshness, below, skips such
+  files instead, so that untracking and ignoring a `.env` can resolve a
+  finding.)
 - Skipped tests are not told apart from passed ones (the record keeps no
   per-test outcomes beyond failures and errors).
 

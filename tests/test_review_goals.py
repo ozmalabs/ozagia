@@ -314,3 +314,53 @@ def test_cli_from_review_takes_packet_and_id(repo: Path,
     assert "[PACKET] FINDING_ID" in capsys.readouterr().err
     assert main(["goal", "from-review", "--root", str(repo), "RR-nope"]) == 2
     assert "not in" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- #
+# review fixes: ignored files, the file: fallback, hashing, packet keys
+# --------------------------------------------------------------------------- #
+
+
+def test_ignored_file_skip_is_only_for_review_freshness(repo: Path) -> None:
+    _write(repo, ".gitignore", (repo / ".gitignore").read_text() + "local.cfg\n")
+    _commit(repo, "ignore local.cfg")
+    _write(repo, "local.cfg", "a = 1\n")
+    fp = FP.tree_fingerprint(repo)
+    assert fp is not None and "local.cfg" not in fp["dirty"]
+    _write(repo, "local.cfg", "a = 2\n")
+    view = FP.TreeView(repo)
+    # Test freshness stays fail-closed: content never recorded = changed.
+    assert FP.changed_since(view, fp, ["local.cfg"])[0] == ["local.cfg"]
+    # Review freshness skips it (an untracked, ignored .env after a fix).
+    assert FP.changed_since(view, fp, ["local.cfg"], skip_ignored=True)[0] == []
+
+
+def test_file_fallback_takes_only_exact_tracked_paths(repo: Path) -> None:
+    _write(repo, ".gitignore", (repo / ".gitignore").read_text() + "local.cfg\n")
+    _commit(repo, "ignore local.cfg")
+    _write(repo, "local.cfg", "a = 1\n")
+    assert G._working_file(repo, "file:.env") == ".env"           # tracked
+    for key in ("file:local.cfg", "file:.git/config", "file:./.env",
+                "file:src//pkg/c.py", "file:../x", "file:.ozagia/graph.json"):
+        assert G._working_file(repo, key) is None, key
+    mem = _memory(repo)
+    with pytest.raises(G.GoalError, match="unknown key"):
+        G.add_goal(repo, mem, {"title": "x", "targets": ["file:local.cfg"],
+                               "criteria": [f"symbol_exists:sym:{'src/pkg/c.py'}::lonely"]})
+
+
+def test_content_hash_streams_and_caps(repo: Path, monkeypatch) -> None:
+    digest, ev = G.content_hash(repo, None, "file:.env")
+    assert digest and ev["basis"] == "file bytes"
+    monkeypatch.setattr(G, "MAX_HASH_BYTES", 4)
+    digest, ev = G.content_hash(repo, None, "file:.env")
+    assert digest is None and ev["error"] == "unreadable"
+
+
+def test_packet_keys_need_canonical_paths() -> None:
+    assert G._safe_key_path("file:src/pkg/c.py")
+    assert G._safe_key_path("ops:compose/deploy/compose.yaml#service/web")
+    assert G._safe_key_path("package:src/pkg/a")
+    for key in ("file:../../tmp/x", "file:/etc/passwd", "file:./a.py",
+                "file:a//b", "sym:../x.py::f"):
+        assert not G._safe_key_path(key), key

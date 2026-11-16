@@ -288,11 +288,14 @@ class TreeView:
         return self._status or None
 
 
-def changed_since(view: TreeView, fp: dict[str, Any], paths: Iterable[str]
+def changed_since(view: TreeView, fp: dict[str, Any], paths: Iterable[str],
+                  *, skip_ignored: bool = False
                   ) -> tuple[list[str], str | None]:
     """The paths whose current content differs from their content when
     `fp` was taken, and a reason when that cannot be told for some path
-    (then the caller treats the evidence as stale)."""
+    (then the caller treats the evidence as stale). With `skip_ignored`,
+    paths git ignores now that were neither in the commit nor dirty when
+    `fp` was taken are not compared (their content was never recorded)."""
     tree = view.tree(fp.get("head"))
     if tree is None:
         return [], f"cannot read commit {fp.get('head')} of the run"
@@ -308,10 +311,12 @@ def changed_since(view: TreeView, fp: dict[str, Any], paths: Iterable[str]
         elif rel in unhashed or fp.get("overflow"):
             return [rel], (f"the run's fingerprint has no content hash for {rel} "
                            "(too many dirty files when it ran)")
-        elif rel not in tree and rel not in visible:
+        elif skip_ignored and rel not in tree and rel not in visible:
             # Git-ignored now and neither committed nor dirty then: the
             # fingerprint never covers ignored files, so their content is
             # not compared (a file untracked and ignored after a review).
+            # Only review freshness asks for this; test freshness keeps
+            # such files fail-closed (always changed).
             continue
         else:
             then = tree.get(rel)

@@ -613,6 +613,11 @@ def _working_file(root: Path, key: str) -> str | None:
     state = state_rel(root)
     if state and (rel == state or rel.startswith(state.rstrip("/") + "/")):
         return None
+    if rel not in _tracked_paths(root):
+        # Only exact paths git tracks: not ignored files, `.git/` internals
+        # or aliases (`./a.py`, `a//b`) that would never match a
+        # fingerprint's paths.
+        return None
     p = root / rel
     try:
         if p.is_symlink() or not p.is_file():
@@ -622,6 +627,21 @@ def _working_file(root: Path, key: str) -> str | None:
     except OSError:
         return None
     return rel
+
+
+def _tracked_paths(root: Path) -> frozenset[str]:
+    """Root-relative paths `git ls-files` lists (empty outside git)."""
+    import subprocess
+    try:
+        proc = subprocess.run(["git", "-C", str(root), "ls-files", "-z"],
+                              capture_output=True, timeout=30, check=False,
+                              stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return frozenset()
+    if proc.returncode != 0:
+        return frozenset()
+    return frozenset(p.decode("utf-8", "surrogateescape")
+                     for p in proc.stdout.split(b"\0") if p)
 
 
 def declared_ops_node(root: Path, key: str,
@@ -773,12 +793,24 @@ def _review_anchor(root: Path, packet_arg: str, finding_id: str) -> dict[str, An
     if info is None:
         raise GoalError(f"finding {finding_id} is not in {path}")
     ftype, keys = info
-    if len(keys) > MAX_KEYS or any(len(k) > MAX_KEY_CHARS for k in keys):
-        keys = [k for k in keys if len(k) <= MAX_KEY_CHARS][:MAX_KEYS]
+    keys = [k for k in keys if isinstance(k, str) and len(k) <= MAX_KEY_CHARS
+            and _safe_key_path(k)][:MAX_KEYS]
     return {"packet": stored, "type": _clip(ftype, 100), "keys": keys,
             "anchor": {"generated_at": packet.get("generated_at"),
                        "head_commit": packet.get("head_commit"),
                        "sha256": _sha(raw)}}
+
+
+def _safe_key_path(key: str) -> bool:
+    """A packet key whose file (if any) is a canonical root-relative path:
+    not absolute, no `.`/`..`/empty parts. Packet keys feed the files a
+    check hashes, so they get the path checks targets get."""
+    rel = _key_path(key) if key.startswith("ops:") else key_file(key)
+    if not rel:
+        return True
+    if rel.startswith("/"):
+        return False
+    return all(part not in ("", ".", "..") for part in rel.split("/"))
 
 
 def _not_ours(packet: dict[str, Any], root: Path) -> str | None:
@@ -896,6 +928,29 @@ def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+MAX_HASH_BYTES = 256 * 1024 * 1024
+
+
+def _sha_file(path: Path) -> str:
+    """sha256 of a regular file, read in chunks, refusing symlinks, files
+    that are not regular and files over `MAX_HASH_BYTES` (OSError)."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    fd = os.open(path, flags)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise OSError(f"{path} is not a regular file")
+        if st.st_size > MAX_HASH_BYTES:
+            raise OSError(f"{path} is over {MAX_HASH_BYTES} bytes")
+        h = hashlib.sha256()
+        with os.fdopen(fd, "rb", closefd=False) as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    finally:
+        os.close(fd)
+
+
 def content_hash(root: Path, memory: Any, key: str) -> tuple[str | None, dict[str, Any]]:
     """The content hash of a key and how it was taken: a file's bytes
     (`file:`, `doc:`), the lines of a `text:` range or of a symbol's or
@@ -905,7 +960,7 @@ def content_hash(root: Path, memory: Any, key: str) -> tuple[str | None, dict[st
     rel = key_file(key)
     if prefix in ("file", "doc") and rel:
         try:
-            return _sha((root / rel).read_bytes()), {"basis": "file bytes", "file": rel}
+            return _sha_file(root / rel), {"basis": "file bytes", "file": rel}
         except OSError:
             return None, {"basis": "file bytes", "file": rel, "error": "unreadable"}
     if prefix == "text" and rel:
@@ -1363,7 +1418,8 @@ class Evaluator:
             ev: dict[str, Any] = {"basis": "content", "files_compared": len(files)}
             if err:
                 return "unknown", {**ev, "reason": err}
-            changed, why = changed_since(self.view(), tree, files)
+            changed, why = changed_since(self.view(), tree, files,
+                                         skip_ignored=True)
             if why:
                 return "stale", {**ev, "changed_files": changed[:5], "reason": why}
             if changed:
