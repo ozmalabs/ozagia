@@ -9,6 +9,22 @@ Status: alpha. The library, the MCP server, the OpenCode capture plugin and
 the agent harnesses work; the Claude Code hooks are untested against a live
 Claude Code. Measurements are in `docs/results/`; plans in `docs/plans/`.
 
+## Install
+
+```bash
+curl -fsSL https://ozagia.com/install | bash
+cd /path/to/your/repo
+ozagia                     # OpenCode's TUI with the ozagia graph in its path
+```
+
+The installer puts a self-contained ozagia (its own Python, with the
+tree-sitter parsers) and a pinned OpenCode release under `~/.ozagia`, checks
+every download's sha256, and adds `~/.ozagia/bin` to PATH. Linux (x64, arm64,
+glibc) and macOS (arm64, x64). `ozagia self check --tui` verifies the install;
+`ozagia self upgrade` and `ozagia self uninstall` manage it. See
+[docs/install.md](docs/install.md); releases are made as in
+[docs/release.md](docs/release.md).
+
 ## What it does
 
 - **Graph index**: files, symbols, tests, docs, imports, git history and known
@@ -33,7 +49,7 @@ Claude Code. Measurements are in `docs/results/`; plans in `docs/plans/`.
 | Claude Code hooks | partial capture: graph context after each tool, git ref refusal; `ozagia install claude` | implemented, untested live |
 | Harness | `ozagia agent`: an OpenCode session with the daemon and plugin set up and torn down for you ([docs/harness.md](docs/harness.md)); `python -m ozagia.harness.native`: a small agent loop over any OpenAI-compatible API, with or without the graph ([docs/native_loop.md](docs/native_loop.md)) | implemented; the eval's live runs use the same pieces |
 
-## Quick start
+## Quick start (from source)
 
 ```bash
 uv pip install -e '.[all]'          # or: pip install -e '.[all]'

@@ -1,0 +1,275 @@
+#!/usr/bin/env bash
+# ozagia installer.
+#
+#   curl -fsSL https://ozagia.com/install | bash
+#   curl -fsSL https://ozagia.com/install | bash -s -- --version 0.1.0
+#   (the same script: https://raw.githubusercontent.com/ozmalabs/ozagia/main/install)
+#
+# Installs a self-contained ozagia (its own Python runtime) and the pinned
+# OpenCode release it drives, under $OZAGIA_HOME (default ~/.ozagia):
+#
+#   bin/ozagia                  launcher (put on PATH)
+#   versions/<version>/         the unpacked bundle (python/, manifest.json)
+#   current -> versions/<v>     the active version
+#   opencode/<version>/opencode the pinned OpenCode binary
+#
+# Every download is checked: the bundle against the release's SHA256SUMS,
+# OpenCode against the sha256 pinned in the bundle's manifest.
+set -euo pipefail
+
+APP=ozagia
+REPO_URL="https://github.com/ozmalabs/ozagia"
+
+MUTED='\033[0;2m'
+RED='\033[0;31m'
+ORANGE='\033[38;5;214m'
+NC='\033[0m'
+if [ ! -t 1 ]; then MUTED=''; RED=''; ORANGE=''; NC=''; fi
+
+usage() {
+    cat <<EOF
+ozagia installer
+
+Usage: install [options]
+
+Options:
+    -h, --help              Show this help
+    -v, --version <version> Install a specific version (e.g. 0.1.0); default: latest
+    -b, --bundle <file>     Install from a local bundle (ozagia-<target>.tar.gz)
+        --base-url <url>    Release download root (default: $REPO_URL/releases);
+                            also \$OZAGIA_RELEASES_URL
+        --opencode-url <u>  OpenCode download URL template with {name}
+                            (default: the bundle manifest's); also \$OZAGIA_OPENCODE_URL
+        --no-opencode       Do not install OpenCode (use one on PATH: ozagia --opencode system)
+        --no-modify-path    Do not edit shell startup files
+EOF
+}
+
+die() { echo -e "${RED}error: $*${NC}" >&2; exit 1; }
+info() { echo -e "$*"; }
+
+requested_version="${VERSION:-}"
+bundle_path=""
+base_url="${OZAGIA_RELEASES_URL:-$REPO_URL/releases}"
+opencode_url="${OZAGIA_OPENCODE_URL:-}"
+no_opencode=false
+no_modify_path=false
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -h|--help) usage; exit 0 ;;
+        -v|--version) [ -n "${2:-}" ] || die "--version needs a value"; requested_version="$2"; shift 2 ;;
+        -b|--bundle) [ -n "${2:-}" ] || die "--bundle needs a path"; bundle_path="$2"; shift 2 ;;
+        --base-url) [ -n "${2:-}" ] || die "--base-url needs a value"; base_url="$2"; shift 2 ;;
+        --opencode-url) [ -n "${2:-}" ] || die "--opencode-url needs a value"; opencode_url="$2"; shift 2 ;;
+        --no-opencode) no_opencode=true; shift ;;
+        --no-modify-path) no_modify_path=true; shift ;;
+        *) echo -e "${ORANGE}warning: unknown option '$1'${NC}" >&2; shift ;;
+    esac
+done
+requested_version="${requested_version#v}"
+base_url="${base_url%/}"
+
+OZAGIA_HOME="${OZAGIA_HOME:-$HOME/.ozagia}"
+
+# -- platform ---------------------------------------------------------------
+raw_os=$(uname -s)
+case "$raw_os" in
+    Linux*) os=linux ;;
+    Darwin*) os=darwin ;;
+    *) die "unsupported OS: $raw_os (ozagia runs on Linux and macOS)" ;;
+esac
+arch=$(uname -m)
+case "$arch" in
+    x86_64|amd64) arch=x64 ;;
+    aarch64|arm64) arch=arm64 ;;
+    *) die "unsupported architecture: $arch" ;;
+esac
+if [ "$os" = darwin ] && [ "$arch" = x64 ]; then
+    if [ "$(sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)" = 1 ]; then arch=arm64; fi
+fi
+if [ "$os" = linux ]; then
+    if [ -f /etc/alpine-release ] || (command -v ldd >/dev/null 2>&1 && ldd --version 2>&1 | grep -qi musl); then
+        die "musl libc (Alpine) is not supported yet: the bundled Python needs glibc"
+    fi
+fi
+target="$os-$arch"
+baseline=false
+if [ "$arch" = x64 ]; then
+    if [ "$os" = linux ] && ! grep -qwi avx2 /proc/cpuinfo 2>/dev/null; then baseline=true; fi
+    if [ "$os" = darwin ] && [ "$(sysctl -n hw.optional.avx2_0 2>/dev/null || echo 0)" != 1 ]; then baseline=true; fi
+fi
+
+for tool in curl tar; do
+    command -v "$tool" >/dev/null 2>&1 || die "'$tool' is required"
+done
+if command -v sha256sum >/dev/null 2>&1; then
+    sha256() { sha256sum "$1" | awk '{print $1}'; }
+elif command -v shasum >/dev/null 2>&1; then
+    sha256() { shasum -a 256 "$1" | awk '{print $1}'; }
+else
+    die "'sha256sum' or 'shasum' is required"
+fi
+
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/ozagia_install.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT
+
+download() {  # url dest
+    local url="$1" dest="$2"
+    if [ -t 2 ] && [ "${url#file:}" = "$url" ]; then
+        curl -fL# -o "$dest" "$url" || return 1
+    else
+        curl -fsSL -o "$dest" "$url" || return 1
+    fi
+}
+
+# -- the bundle -------------------------------------------------------------
+asset="$APP-$target.tar.gz"
+if [ -n "$bundle_path" ]; then
+    [ -f "$bundle_path" ] || die "bundle not found: $bundle_path"
+    cp "$bundle_path" "$tmp/$asset"
+    info "${MUTED}Installing from ${NC}$bundle_path"
+else
+    if [ -n "$requested_version" ]; then
+        dl="$base_url/download/v$requested_version"
+    else
+        dl="$base_url/latest/download"
+    fi
+    info "${MUTED}Downloading ${NC}$asset ${MUTED}(${requested_version:-latest})${NC}"
+    download "$dl/$asset" "$tmp/$asset" \
+        || die "no $asset at $dl (is $target released for ${requested_version:-the latest version}?)"
+    download "$dl/SHA256SUMS" "$tmp/SHA256SUMS" || die "no SHA256SUMS at $dl"
+    want=$(awk -v f="$asset" '$2 == f || $2 == "*"f {print $1}' "$tmp/SHA256SUMS")
+    [ -n "$want" ] || die "$asset is not listed in SHA256SUMS"
+    got=$(sha256 "$tmp/$asset")
+    [ "$got" = "$want" ] || die "checksum mismatch for $asset: $got != $want"
+fi
+
+mkdir -p "$tmp/unpack"
+tar -xzf "$tmp/$asset" -C "$tmp/unpack"
+src="$tmp/unpack/$APP-$target"
+[ -f "$src/manifest.json" ] || die "$asset has no $APP-$target/manifest.json"
+py="$src/python/bin/python3"
+[ -x "$py" ] || die "$asset has no python/bin/python3"
+field() { "$py" -I -c 'import json,sys; d=json.load(open(sys.argv[1]))
+for k in sys.argv[2].split("."): d=(d or {}).get(k) if isinstance(d, dict) else None
+print("" if d is None else d)' "$src/manifest.json" "$1"; }
+version=$(field version)
+[ "$(field target)" = "$target" ] || die "$asset is for $(field target), not $target"
+[ -z "$requested_version" ] || [ "$version" = "$requested_version" ] \
+    || die "$asset is version $version, not $requested_version"
+
+mkdir -p "$OZAGIA_HOME/versions" "$OZAGIA_HOME/bin" "$OZAGIA_HOME/opencode"
+dest="$OZAGIA_HOME/versions/$version"
+rm -rf "$dest.new"
+mv "$src" "$dest.new"
+rm -rf "$dest"
+mv "$dest.new" "$dest"
+ln -sfn "versions/$version" "$OZAGIA_HOME/current.new"
+mv -fT "$OZAGIA_HOME/current.new" "$OZAGIA_HOME/current" 2>/dev/null \
+    || { rm -f "$OZAGIA_HOME/current"; mv "$OZAGIA_HOME/current.new" "$OZAGIA_HOME/current"; }
+py="$OZAGIA_HOME/current/python/bin/python3"
+src="$OZAGIA_HOME/current"
+
+# -- OpenCode ---------------------------------------------------------------
+oc_bin=""
+if [ "$no_opencode" != true ]; then
+    oc_version=$(field opencode.version)
+    variant=default
+    if [ "$baseline" = true ] && [ -n "$(field opencode.assets.baseline.name)" ]; then variant=baseline; fi
+    oc_name=$(field "opencode.assets.$variant.name")
+    oc_sha=$(field "opencode.assets.$variant.sha256")
+    [ -n "$oc_name" ] && [ -n "$oc_sha" ] || die "the manifest pins no OpenCode for $target"
+    oc_dir="$OZAGIA_HOME/opencode/$oc_version"
+    oc_bin="$oc_dir/opencode"
+    if [ -x "$oc_bin" ] && [ "$(cat "$oc_dir/.archive-sha256" 2>/dev/null)" = "$oc_sha" ]; then
+        info "${MUTED}OpenCode ${NC}$oc_version ${MUTED}already installed${NC}"
+    else
+        template="${opencode_url:-$(field opencode.url)}"
+        url="${template//\{name\}/$oc_name}"
+        info "${MUTED}Downloading OpenCode ${NC}$oc_version ${MUTED}($oc_name)${NC}"
+        download "$url" "$tmp/$oc_name" || die "cannot download $url"
+        got=$(sha256 "$tmp/$oc_name")
+        [ "$got" = "$oc_sha" ] || die "checksum mismatch for $oc_name: $got != $oc_sha"
+        mkdir -p "$tmp/oc"
+        case "$oc_name" in
+            *.zip) command -v unzip >/dev/null 2>&1 || die "'unzip' is required"
+                   unzip -q "$tmp/$oc_name" -d "$tmp/oc" ;;
+            *) tar -xzf "$tmp/$oc_name" -C "$tmp/oc" ;;
+        esac
+        [ -f "$tmp/oc/opencode" ] || die "$oc_name has no opencode binary"
+        mkdir -p "$oc_dir"
+        mv "$tmp/oc/opencode" "$oc_bin.new"
+        chmod 755 "$oc_bin.new"
+        mv -f "$oc_bin.new" "$oc_bin"
+        echo "$oc_sha" > "$oc_dir/.archive-sha256"
+    fi
+fi
+
+# -- launcher ---------------------------------------------------------------
+q() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+{
+    echo '#!/bin/sh'
+    echo "# ozagia launcher, written by the installer ($version)."
+    echo "OZAGIA_HOME=\${OZAGIA_HOME:-$(q "$OZAGIA_HOME")}"
+    echo 'export OZAGIA_HOME'
+    if [ -n "$oc_bin" ]; then
+        echo "[ -n \"\${OZAGIA_OPENCODE:-}\" ] || OZAGIA_OPENCODE=$(q "$oc_bin")"
+        echo 'export OZAGIA_OPENCODE'
+    fi
+    echo 'exec "$OZAGIA_HOME/current/python/bin/python3" -I -m ozagia "$@"'
+} > "$OZAGIA_HOME/bin/ozagia.new"
+chmod 755 "$OZAGIA_HOME/bin/ozagia.new"
+mv -f "$OZAGIA_HOME/bin/ozagia.new" "$OZAGIA_HOME/bin/ozagia"
+
+"$OZAGIA_HOME/bin/ozagia" --version >/dev/null 2>&1 || die "the installed ozagia does not start"
+
+# Old versions, except the active one.
+for d in "$OZAGIA_HOME"/versions/*; do
+    [ -d "$d" ] && [ "$(basename "$d")" != "$version" ] && rm -rf "$d"
+done
+
+# -- PATH -------------------------------------------------------------------
+bin_dir="$OZAGIA_HOME/bin"
+add_line() {  # file line
+    if grep -Fxq "$2" "$1" 2>/dev/null; then
+        info "${MUTED}PATH already set in ${NC}$1"
+    elif [ -w "$1" ]; then
+        printf '\n# ozagia\n%s\n' "$2" >> "$1"
+        info "${MUTED}Added ${NC}$bin_dir ${MUTED}to PATH in ${NC}$1"
+    else
+        info "Add this to $1 (or similar):"
+        info "  $2"
+    fi
+}
+if [ "$no_modify_path" != true ] && [[ ":$PATH:" != *":$bin_dir:"* ]]; then
+    XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-$HOME/.config}
+    case "$(basename "${SHELL:-sh}")" in
+        fish) files="$XDG_CONFIG_HOME/fish/config.fish"; line="fish_add_path $bin_dir" ;;
+        zsh) files="${ZDOTDIR:-$HOME}/.zshrc ${ZDOTDIR:-$HOME}/.zshenv"; line="export PATH=$bin_dir:\$PATH" ;;
+        bash) files="$HOME/.bashrc $HOME/.bash_profile $HOME/.profile"; line="export PATH=$bin_dir:\$PATH" ;;
+        *) files="$HOME/.profile"; line="export PATH=$bin_dir:\$PATH" ;;
+    esac
+    target_file=""
+    for f in $files; do
+        if [ -f "$f" ]; then target_file="$f"; break; fi
+    done
+    if [ -n "$target_file" ]; then
+        add_line "$target_file" "$line"
+    else
+        info "Add $bin_dir to your PATH:"
+        info "  $line"
+    fi
+fi
+if [ "${GITHUB_ACTIONS:-}" = true ] && [ -n "${GITHUB_PATH:-}" ]; then
+    echo "$bin_dir" >> "$GITHUB_PATH"
+fi
+
+info ""
+info "${MUTED}Installed ${NC}ozagia $version${MUTED} ($target) in ${NC}$OZAGIA_HOME"
+[ -z "$oc_bin" ] || info "${MUTED}OpenCode: ${NC}$oc_bin"
+info ""
+info "cd <project>   ${MUTED}# open a repository${NC}"
+info "ozagia         ${MUTED}# OpenCode with the ozagia graph${NC}"
+info "ozagia self check  ${MUTED}# verify the install${NC}"
+info ""

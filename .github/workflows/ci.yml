@@ -23,6 +23,8 @@ jobs:
           uv venv --python ${{ matrix.python }} .venv
           uv pip install --python .venv/bin/python -e '.[dev]'
       - name: Lint
-        run: .venv/bin/ruff check src tests
+        run: |
+          .venv/bin/ruff check src tests scripts
+          bash -n install scripts/release/smoke.sh
       - name: Test
         run: .venv/bin/python -m pytest -q
