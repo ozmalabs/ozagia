@@ -1347,3 +1347,49 @@ def test_graph_stats_fields_and_aggregate_read_working_set_counters():
              "working_set_chars": None}]
     row = ae.aggregate(runs, ["graph_intent"])[0]
     assert (row["total_working_sets_served"], row["total_working_set_chars"]) == (3, 4100)
+
+
+# ===================================================================================== #
+# W22: per-component timing stored per run
+# ===================================================================================== #
+def test_run_records_timing_setup_and_one_warm_index(fixture):
+    other = dict(fixture["sign"], id="add-sign-2")
+    report = run_eval(fixture["repo"], [fixture["sign"], other],
+                      ["baseline", "graph_intent"], FakeDriver(), fixture["base"],
+                      tasks_dir=fixture["tdir"], python=_python(),
+                      run_root=fixture["run_root"])
+    runs = report["runs"]
+    assert all(isinstance(r.get("timing"), dict) for r in runs)
+    for r in runs:
+        assert r["setup_workdir_s"] >= 0
+        assert r["timing"]["setup"]["workdir_s"] == r["setup_workdir_s"]
+        assert r["timing"]["check"]["s"] == r["check_s"]
+        assert r["timing"]["model"] is None          # the fake driver has no events
+        assert isinstance(r["driver_started_at"], float)
+    graph = [r for r in runs if r["arm"] == "graph_intent"]
+    assert all(r["plugin_install_s"] is not None for r in graph)
+    assert all(r["timing"]["setup"]["missing"] == [] for r in graph)
+    warm = [r for r in runs if r.get("prep_warm_s") is not None]
+    assert len(warm) == 1 and warm[0]["arm"] == "graph_intent"
+    assert (Path(warm[0]["log_dir"]) / "prep_warm.log").is_file()
+    assert report["warm_index_s"] == warm[0]["prep_warm_s"]
+    assert report["amortize_n"] == 2
+    rows = {r["arm"]: r for r in report["summary"]}
+    assert rows["graph_intent"]["warm_index_s"] == warm[0]["prep_warm_s"]
+    assert rows["baseline"]["warm_index_s"] is None
+    assert rows["graph_intent"]["amortized_s"] == pytest.approx(
+        rows["graph_intent"]["pay_once_s"] / 2 + rows["graph_intent"]["per_task_s"],
+        abs=0.002)
+    assert "## Time per component" in render_markdown(report)
+
+
+def test_run_can_skip_the_warm_index_and_set_n(fixture):
+    report = run_eval(fixture["repo"], [fixture["sign"]], ["dev_memory"], NoopDriver(),
+                      fixture["base"], tasks_dir=fixture["tdir"], python=_python(),
+                      run_root=fixture["run_root"], measure_warm_index=False,
+                      amortize=5)
+    assert report["runs"][0].get("prep_warm_s") is None
+    assert report["summary"][0]["amortize_n"] == 5
+    with pytest.raises(HarnessError):
+        run_eval(fixture["repo"], [fixture["sign"]], ["baseline"], NoopDriver(),
+                 fixture["base"], tasks_dir=fixture["tdir"], amortize=0)

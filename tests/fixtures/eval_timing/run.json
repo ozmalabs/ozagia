@@ -1,0 +1,91 @@
+{
+  "arms": [
+    "baseline",
+    "graph_intent"
+  ],
+  "backend": {
+    "backend": "opencode",
+    "model": "scrubbed"
+  },
+  "base": "0000000000000000000000000000000000000000",
+  "driver": "opencode",
+  "repeats": 1,
+  "run_root": "/scrubbed/run-root",
+  "runs": [
+    {
+      "arm": "baseline",
+      "check_returncode": 0,
+      "check_s": 0.542,
+      "cost_usd": 0.0,
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "files_changed": [
+        "substrate/primitives.py"
+      ],
+      "localized": true,
+      "log_dir": "/scrubbed/run-root/logs/admissible-moves-weight-baseline-r1",
+      "mcp_calls": 0,
+      "prep_error": null,
+      "prep_ok": null,
+      "prep_s": 0.0,
+      "repeat": 1,
+      "success": true,
+      "task": "admissible-moves-weight",
+      "timed_out": false,
+      "tokens_in": 93781,
+      "tokens_out": 5828,
+      "tool_calls": 40,
+      "tools_by_name": {
+        "edit": 1,
+        "grep": 7,
+        "read": 14,
+        "shell": 18
+      },
+      "wall_s": 137.651
+    },
+    {
+      "arm": "graph_intent",
+      "captured_calls": 13,
+      "check_returncode": 0,
+      "check_s": 0.542,
+      "cost_usd": 0.0,
+      "daemon_ok": true,
+      "daemon_ready_s": 2.224,
+      "driver": "opencode",
+      "driver_error": null,
+      "exit_code": 0,
+      "fallbacks": 0,
+      "files_changed": [
+        "substrate/primitives.py"
+      ],
+      "localized": true,
+      "log_dir": "/scrubbed/run-root/logs/admissible-moves-weight-graph_intent-r1",
+      "mcp_calls": 0,
+      "passthrough_calls": 2,
+      "prep_error": null,
+      "prep_ok": true,
+      "prep_s": 63.307,
+      "repeat": 1,
+      "success": true,
+      "task": "admissible-moves-weight",
+      "timed_out": false,
+      "tokens_in": 51319,
+      "tokens_out": 1354,
+      "tool_calls": 15,
+      "tools_by_name": {
+        "edit": 1,
+        "grep": 4,
+        "read": 3,
+        "shell": 7
+      },
+      "wall_s": 66.155
+    }
+  ],
+  "stopped": null,
+  "tasks": [
+    "admissible-moves-weight"
+  ],
+  "total_cost_usd": 0.0,
+  "version": 1
+}
