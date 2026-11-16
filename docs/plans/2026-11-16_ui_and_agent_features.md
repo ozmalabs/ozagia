@@ -1800,6 +1800,18 @@ Status: all merged: `addin-tasks` as `9957764`, `config-hooks` as `2e0b359`,
 final full suite is `4134 passed, 21 skipped`; ruff passes. The live Desktop
 smoke test and the remaining model/tool adapters stay for a later wave.
 
+### Parallel wave 8 (2026-11-16)
+
+Three agents start from `b8c77a1`:
+
+| Worktree | Branch | Scope |
+| --- | --- | --- |
+| `~/ozmadev/ozagia-wt/ocelot-impact` | `feat/ocelot-impact` | Test-impact and architecture-pattern clustering over code shapes |
+| `~/ozmadev/ozagia-wt/action-integrations` | `feat/action-integrations` | Preview/apply integration install and uninstall |
+| `~/ozmadev/ozagia-wt/cleanup-retention` | `feat/cleanup-retention` | Trash retention and explicit purge |
+
+The same review/merge/full-suite gate applies.
+
 ### Library-first workstream (2026-11-16)
 
 One additional agent starts from `79c3b3e`:
