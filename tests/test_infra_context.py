@@ -5,6 +5,7 @@ from ozagia.core.proactive_context import build_context
 
 
 class Memory:
+    _index_version = 1
     nodes = {
         1: {"type": "InfraResource", "key": "infra:payments", "attrs": {
             "name": "payments", "kind": "Deployment", "path": "deploy/app.yaml",
@@ -13,9 +14,9 @@ class Memory:
             "name": "payments-service", "kind": "Service", "path": "deploy/svc.yaml",
             "pointer": "/documents/0"}},
     }
-    _out = {1: [{"src": 1, "tgt": 2, "type": "selector",
+    _out = {1: [{"src": 1, "tgt": 2, "type": "infra_selector",
                 "attrs": {"provenance": "inferred"}}]}
-    _in = {2: [{"src": 1, "tgt": 2, "type": "selector",
+    _in = {2: [{"src": 1, "tgt": 2, "type": "infra_selector",
                "attrs": {"provenance": "inferred"}}]}
 
     def staleness(self):
@@ -23,6 +24,14 @@ class Memory:
 
     def code_search(self, *args, **kwargs):
         return {"results": []}
+
+    def nodes_of_type(self, type_name):
+        return [nid for nid, node in self.nodes.items()
+                if node.get("type") == type_name]
+
+    def node_by_key(self, key):
+        return next((nid for nid, node in self.nodes.items()
+                     if node.get("key") == key), None)
 
 
 class CodeMemory(Memory):
@@ -126,6 +135,66 @@ class AmbiguousMemory:
         return {"ok": True, "results": []}
 
 
+class EnvironmentMemory:
+    _index_version = 1
+    nodes = {
+        1: {"type": "InfraResource", "key": "env:dev", "attrs": {
+            "name": "dev", "kind": "Environment", "family": "environment",
+            "environment": "dev", "environment_values": ["dev", "us-east-1"],
+            "region": "us-east-1", "cluster": "dev-cluster",
+            "namespaces": ["dev"]}},
+        2: {"type": "InfraResource", "key": "env:stg", "attrs": {
+            "name": "stg", "kind": "Environment", "family": "environment",
+            "environment": "stg", "environment_values": ["stg", "us-west-2"]}},
+        3: {"type": "InfraResource", "key": "env:pprd", "attrs": {
+            "name": "pprd", "kind": "Environment", "family": "environment",
+            "environment": "pprd", "environment_values": ["pprd", "preview"]}},
+        4: {"type": "InfraResource", "key": "env:prd", "attrs": {
+            "name": "prd", "kind": "Environment", "family": "environment",
+            "environment": "prd", "environment_values": ["prd", "production"]}},
+        5: {"type": "InfraResource", "key": "local:dev", "attrs": {
+            "name": "dev", "address": "local.dev", "kind": "local",
+            "family": "terraform", "path": "infra/locals.tf"}},
+        6: {"type": "InfraResource", "key": "local:stg", "attrs": {
+            "name": "stg", "address": "local.stg", "kind": "local",
+            "family": "terraform", "path": "infra/locals.tf"}},
+        7: {"type": "InfraResource", "key": "local:pprd", "attrs": {
+            "name": "pprd", "address": "local.pprd", "kind": "local",
+            "family": "terraform", "path": "infra/locals.tf"}},
+        8: {"type": "InfraResource", "key": "local:prd", "attrs": {
+            "name": "prd", "address": "local.prd", "kind": "local",
+            "family": "terraform", "path": "infra/locals.tf"}},
+        9: {"type": "InfraResource", "key": "deploy:dev", "attrs": {
+            "name": "payments-api", "kind": "Deployment", "family": "kubernetes",
+            "path": "envs/dev/deployment.yaml", "namespace": "dev",
+            "environment": "dev"}},
+        10: {"type": "InfraResource", "key": "deploy:stg", "attrs": {
+            "name": "payments-api", "kind": "Deployment", "family": "kubernetes",
+            "path": "envs/stg/deployment.yaml", "namespace": "stg",
+            "environment": "stg"}},
+        11: {"type": "InfraResource", "key": "deploy:pprd", "attrs": {
+            "name": "payments-api", "kind": "Deployment", "family": "kubernetes",
+            "path": "envs/pprd/deployment.yaml", "namespace": "pprd",
+            "environment": "pprd"}},
+        12: {"type": "InfraResource", "key": "deploy:prd", "attrs": {
+            "name": "payments-api", "kind": "Deployment", "family": "kubernetes",
+            "path": "envs/prd/deployment.yaml", "namespace": "prd",
+            "environment": "prd"}},
+    }
+    _out = {}
+    _in = {}
+
+    def nodes_of_type(self, type_name):
+        return [nid for nid, node in self.nodes.items()
+                if node.get("type") == type_name]
+
+    def staleness(self):
+        return {"freshness": "fresh"}
+
+    def code_search(self, *args, **kwargs):
+        return {"results": []}
+
+
 def test_infrastructure_context_is_attributed_bounded_and_uses_history():
     result = build_context(Memory(), "Check configuration", ["payments"], budget_tokens=80)
     assert "deploy/app.yaml#/documents/0" in result["context"]
@@ -206,6 +275,60 @@ def test_duplicate_declarations_are_reported_as_ambiguous():
     assert len(result["results"]) == 2
 
 
+def test_query_cache_is_bounded_by_graph_version_and_returns_copies(monkeypatch):
+    from ozagia.core import infra_query
+
+    memory = Memory()
+    calls = []
+    original = infra_query._score_node
+
+    def counted(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(infra_query, "_score_node", counted)
+    first = infra_query.context(memory, "payments", max_chars=800)
+    count = len(calls)
+    second = infra_query.context(memory, "payments", max_chars=800)
+    assert len(calls) == count
+    assert second["context"] == first["context"]
+    first["context"] = "mutated by caller"
+    assert second["context"] != "mutated by caller"
+    stats = infra_query.cache_stats(memory)
+    assert stats["hits"] >= 1 and stats["misses"] >= 1
+    memory._index_version += 1
+    infra_query.context(memory, "payments", max_chars=800)
+    assert len(calls) > count
+
+
+def test_locate_cache_and_eviction(monkeypatch):
+    from ozagia.core import infra_query
+
+    monkeypatch.setattr(infra_query, "QUERY_CACHE_MAX", 2)
+    memory = Memory()
+    first = infra_query.locate(memory, "payments")
+    second = infra_query.locate(memory, "payments")
+    assert first == second
+    assert infra_query.cache_stats(memory)["hits"] == 1
+    infra_query.locate(memory, "service")
+    infra_query.locate(memory, "payments-api")
+    assert infra_query.cache_stats(memory)["entries"] <= 2
+
+
+def test_traverse_is_cached_and_returns_independent_results():
+    from ozagia.core import infra_query
+
+    memory = Memory()
+    first = infra_query.traverse(memory, "infra:payments", depth=1)
+    assert first["edges"]
+    second = infra_query.traverse(memory, "infra:payments", depth=1)
+    assert second == first
+    assert infra_query.cache_stats(memory)["hits"] == 1
+    first["edges"].clear()
+    assert second["edges"] and infra_query.traverse(
+        memory, "infra:payments", depth=1)["edges"]
+
+
 def test_relationship_line_names_the_target_and_avoids_inbound_duplicate():
     result = context(Memory(), "payments", max_chars=800)
     edge_lines = [line for line in result["context"].splitlines()
@@ -214,3 +337,29 @@ def test_relationship_line_names_the_target_and_avoids_inbound_duplicate():
     assert "Service payments-service" in edge_lines[0]
     assert "deploy/svc.yaml#/documents/0" not in edge_lines[0]
     assert not any("<- selector" in line for line in result["context"].splitlines())
+
+
+def test_environment_terms_filter_generic_names_paths_and_deployment_kinds():
+    from ozagia.core.infra_query import locate
+
+    located_environment = locate(EnvironmentMemory(), "dev")
+    assert {row["kind"] for row in located_environment["results"]} == {
+        "Environment",
+    }
+    for environment in ("dev", "stg", "pprd", "prd"):
+        result = context(
+            EnvironmentMemory(), f"payments-api {environment} deployment",
+            max_chars=800,
+        )
+        assert [row["path"] for row in result["results"]] == [
+            f"envs/{environment}/deployment.yaml",
+        ]
+        assert f"local:{environment}" not in result["keys"]
+    region = context(EnvironmentMemory(), "payments-api us-east-1 deployment",
+                     max_chars=800)
+    assert [row["path"] for row in region["results"]] == [
+        "envs/dev/deployment.yaml",
+    ]
+    hint = context(EnvironmentMemory(), "us-east-1", max_chars=800)
+    assert "Environment dev" in hint["context"]
+    assert "region=us-east-1" in hint["context"]

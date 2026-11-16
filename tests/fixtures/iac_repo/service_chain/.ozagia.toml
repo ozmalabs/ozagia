@@ -1,0 +1,17 @@
+[adapters]
+modules = ["ozagia.integrations.iac.adapter:register"]
+
+[environments.pprd]
+paths = ["envs/pprd"]
+namespaces = ["pprd"]
+region = "us-east-1"
+risk = "high"
+
+[services.api]
+chart = "charts/api"
+values_globs = ["charts/api/values.pprd.yaml"]
+buildspec = "buildspec.yml"
+pipeline = "pipelines/api.yaml"
+namespace = "pprd"
+environment = "pprd"
+paths = ["envs/pprd"]

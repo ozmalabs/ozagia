@@ -126,6 +126,8 @@ def test_ops_round_trip(daemon):
         assert stats["passthrough"] >= 1 and stats["handled"]["false"] >= 1
         assert stats["fallbacks"] == 0
         assert stats["uptime_s"] >= 0 and stats["max_ms"] >= stats["mean_ms"] > 0
+        assert stats["lock_wait_count"] >= 1
+        assert stats["lock_wait_ms_max"] >= stats["lock_wait_ms_mean"] >= 0
 
 
 def test_hint_round_trip_with_real_index(tmp_path):

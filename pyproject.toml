@@ -36,6 +36,7 @@ treesitter = [
 lsp = ["pyright>=1.1.400"]
 openapi-yaml = ["PyYAML>=6"]
 iac-yaml = ["PyYAML>=6"]
+edit-yaml = ["ruamel.yaml>=0.18,<1"]
 research = ["sympy>=1.14,<2", "lark>=1.2,<2"]
 all = ["ozagia[treesitter,lsp,research,iac-yaml,openapi-yaml]"]
 dev = ["ozagia[all]", "pytest>=8", "ruff>=0.6"]

@@ -10,6 +10,7 @@ import json
 from dataclasses import asdict
 from dataclasses import dataclass
 from pathlib import PurePosixPath
+import re
 from typing import Any
 
 EXTRACTOR_VERSION = "kubernetes-source-v2"
@@ -19,6 +20,8 @@ _CLUSTER_SCOPED = frozenset({
     "ClusterRole", "ClusterRoleBinding", "Namespace", "Node", "PersistentVolume",
     "StorageClass", "CustomResourceDefinition",
 })
+_CRD_GROUP = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?\Z")
+_CRD_KIND = re.compile(r"[A-Za-z][A-Za-z0-9]{0,62}\Z")
 
 
 @dataclass(frozen=True)
@@ -36,6 +39,9 @@ class InfraNode:
     pod_labels: tuple[tuple[str, str], ...] = ()
     service_selector: tuple[tuple[str, str], ...] = ()
     references: tuple[tuple[str, str, str, str, str | None], ...] = ()
+    crd_group: str | None = None
+    crd_kind: str | None = None
+    crd_scope: str | None = None
 
 
 @dataclass(frozen=True)
@@ -77,6 +83,8 @@ class KubernetesGraph:
                 "path": node.path, "pointer": node.pointer,
                 "source_digest": node.source_digest, "provenance": node.provenance,
                 "extractor_version": node.extractor_version,
+                "crd_group": node.crd_group, "crd_kind": node.crd_kind,
+                "crd_scope": node.crd_scope,
             } for node in self.nodes],
             "edges": [asdict(edge) for edge in self.edges],
             "unresolved": [asdict(ref) for ref in self.unresolved],
@@ -186,7 +194,24 @@ def parse_kubernetes_source(
         svc_selector = spec.get("selector") if kind == "Service" and isinstance(spec.get("selector"), dict) else {}
         safe_pod_labels = tuple(sorted((k, v) for k, v in pod_labels.items() if isinstance(k, str) and isinstance(v, str)))
         safe_selector = tuple(sorted((k, v) for k, v in svc_selector.items() if isinstance(k, str) and isinstance(v, str)))
-        node = InfraNode(key, kind, name, ns, api, path, pointer, digest, pod_labels=safe_pod_labels, service_selector=safe_selector)
+        crd_group = crd_kind = crd_scope = None
+        if kind == "CustomResourceDefinition":
+            group = spec.get("group")
+            names = spec.get("names")
+            scope = spec.get("scope")
+            if (isinstance(group, str) and _CRD_GROUP.fullmatch(group)
+                    and len(group) <= 253):
+                crd_group = group
+            if (isinstance(names, dict) and isinstance(names.get("kind"), str)
+                    and _CRD_KIND.fullmatch(names["kind"])):
+                crd_kind = names["kind"]
+            if scope in {"Namespaced", "Cluster"}:
+                crd_scope = scope
+        node = InfraNode(
+            key, kind, name, ns, api, path, pointer, digest,
+            pod_labels=safe_pod_labels, service_selector=safe_selector,
+            crd_group=crd_group, crd_kind=crd_kind, crd_scope=crd_scope,
+        )
         nodes.append(node)
         identities.setdefault(ident, node)
 
@@ -335,6 +360,41 @@ def merge_kubernetes_graphs(graphs: list[KubernetesGraph]) -> KubernetesGraph:
                 unresolved.append(UnresolvedReference(
                     node.key, relation, name, target_ns,
                     "missing" if not matches else "ambiguous"))
+    crds: dict[tuple[str, str], list[InfraNode]] = {}
+    for node in nodes:
+        if (node.kind == "CustomResourceDefinition" and node.crd_group
+                and node.crd_kind):
+            crds.setdefault((node.crd_group, node.crd_kind), []).append(node)
+    for node in nodes:
+        if node.kind == "CustomResourceDefinition" or "/" not in node.api_version:
+            continue
+        group = node.api_version.split("/", 1)[0]
+        matches = crds.get((group, node.kind), [])
+        if not matches:
+            continue
+        if len(matches) > 1:
+            unresolved.append(UnresolvedReference(
+                node.key, "custom_resource_definition", node.kind, node.namespace,
+                "ambiguous CRD declarations"))
+            continue
+        crd = matches[0]
+        if crd.crd_scope is None:
+            unresolved.append(UnresolvedReference(
+                node.key, "custom_resource_definition", node.kind, node.namespace,
+                "CRD scope unknown"))
+            continue
+        if ((crd.crd_scope == "Cluster" and node.namespace is not None)
+                or (crd.crd_scope == "Namespaced" and node.namespace is None)):
+            unresolved.append(UnresolvedReference(
+                node.key, "custom_resource_definition", node.kind, node.namespace,
+                "CRD scope does not match resource namespace"))
+            continue
+        edge = InfraEdge(node.key, crd.key, "custom_resource_definition",
+                         "declared", "apiVersion group/kind and CRD scope",
+                         "cluster")
+        if edge not in edges:
+            edges.append(edge)
+    for node in nodes:
         if node.kind not in {"Deployment", "StatefulSet", "DaemonSet", "ReplicaSet", "Job", "Pod"} or node.namespace is None:
             continue
         labels = dict(node.pod_labels)

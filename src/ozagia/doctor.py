@@ -1,6 +1,7 @@
 """Read-only diagnostics for a local repository and optional tools."""
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -53,4 +54,12 @@ def diagnose(root: str | Path) -> dict[str, Any]:
                          sorted({entry["language"] for entry in LANGUAGES.values()})}
     result["language_servers"] = available_servers(root)["languages"]
     result["language_server_note"] = "Binary presence only; server startup and readiness are not tested."
+    result["external_tools"] = {
+        name: {"available": bool(path), "path": path}
+        for name in ("ssh", "aws", "session-manager-plugin", "kubectl")
+        for path in (shutil.which(name),)
+    }
+    result["external_tool_note"] = (
+        "Binary presence only; no relay, cloud or cluster command is run."
+    )
     return result

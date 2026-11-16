@@ -17,7 +17,8 @@ SECRET_CANARY = "BASE64_SECRET_CANARY_63819"
 
 
 def _tracked_fixture(root: Path) -> None:
-    shutil.copytree(FIXTURE, root, dirs_exist_ok=True)
+    shutil.copytree(FIXTURE, root, dirs_exist_ok=True,
+                    ignore=shutil.ignore_patterns("service_chain"))
     subprocess.run(["git", "init", "-q", str(root)], check=True)
     subprocess.run(["git", "-C", str(root), "add", "."], check=True)
     subprocess.run([
@@ -127,3 +128,64 @@ def test_retrieval_questions_score_actual_context_at_two_budgets(tmp_path, monke
     assert unrelated["context"] == ""
     assert unrelated["reason"] == "no matching infrastructure declarations"
     print(report)
+
+
+def test_service_environment_locate_returns_only_declared_sources(tmp_path,
+                                                                  monkeypatch):
+    fixture = FIXTURE / "service_chain"
+    root = tmp_path / "service-repo"
+    shutil.copytree(fixture, root, dirs_exist_ok=True)
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+    subprocess.run([
+        "git", "-C", str(root), "-c", "user.name=Fixture",
+        "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture",
+    ], check=True)
+    monkeypatch.delenv("OZAGIA_CONFIG", raising=False)
+    dump = tmp_path / "graph.json"
+    build_index(root, dump, include_docs="none", include_git=False)
+    memory = DevMemory(dump, tmp_path / "journal.jsonl", root=root)
+
+    located = memory.adapter_query(
+        "infra.locate", query="api pprd deployment")
+    paths = {row["path"] for row in located["results"]}
+    expected = {
+        "charts/api/Chart.yaml",
+        "charts/api/values.pprd.yaml",
+        "envs/pprd/deployment.json",
+        "envs/pprd/ingress.json",
+        "envs/pprd/service-account.json",
+        "buildspec.yml",
+        "pipelines/api.yaml",
+    }
+    assert expected <= paths
+    assert "charts/api/templates/deployment.yaml" not in paths
+    assert not any("helm/charts/microservice/values.yaml" in path
+                   for path in paths)
+
+    templates = [
+        node for node in memory.nodes.values()
+        if node["type"] == "InfraResource"
+        and node["attrs"].get("kind") == "helm_template_source"
+    ]
+    assert [node["attrs"]["path"] for node in templates] == [
+        "charts/api/templates/deployment.yaml",
+    ]
+    chart = next(
+        node for node in memory.nodes.values()
+        if node["type"] == "InfraResource"
+        and node["attrs"].get("kind") == "helm_chart"
+    )
+    chart_dependencies = memory.adapter_query(
+        "infra.dependencies", key=chart["key"], depth=1)
+    assert any(edge["relation"] == "infra_chart_template_source"
+               for edge in chart_dependencies["edges"])
+    assert any(node["path"] == "charts/api/templates/deployment.yaml"
+               for node in chart_dependencies["nodes"])
+    status = memory.adapter_query("infra.status")
+    assert any("Helm template source" in item["message"]
+               for item in status["diagnostics"])
+    assert not any("invalid YAML" in item["message"]
+                   for item in status["diagnostics"]
+                   if item.get("path") == "charts/api/templates/deployment.yaml")
+    assert "VALUES_SECRET_CANARY_2468" not in dump.read_text(encoding="utf-8")

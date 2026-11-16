@@ -127,6 +127,28 @@ def _node(kind: str, path: str, name: str, content: str = "") -> DeploymentNode:
     return DeploymentNode(key, kind, path, name, digest)
 
 
+def helm_template_paths(files: Mapping[str, str]) -> frozenset[str]:
+    """Identify chart template sources without parsing or rendering their YAML."""
+    chart_roots = {
+        PurePosixPath(path).parent.as_posix()
+        for path in files
+        if PurePosixPath(path).name == "Chart.yaml"
+    }
+    result = set()
+    for raw_path, content in files.items():
+        path = _safe_path(raw_path)
+        if path is None:
+            continue
+        under_chart_templates = any(
+            path.startswith((root + "/" if root != "." else "") + "templates/")
+            for root in chart_roots
+        )
+        is_yaml = path.lower().endswith((".yaml", ".yml"))
+        if under_chart_templates or (is_yaml and ("{{" in content or "{%" in content)):
+            result.add(path)
+    return frozenset(result)
+
+
 def extract_deployment_metadata(files: Mapping[str, str]) -> DeploymentGraph:
     """Extract relationships from an in-memory repo-relative file mapping.
 
