@@ -26,8 +26,20 @@ Every request is journaled, one JSON object per line, to
      "keys" (at most 20), "reason", "fallback", "session", "harness"}
 
 With `idle_timeout` (seconds), the daemon shuts down once no request has
-arrived for that long and none is in progress (checked every
-`IDLE_POLL_S` seconds at most). `python -m ozagia.daemon ensure` starts
+arrived for that long, none is in progress and no background job runs (the
+idle time then counts from the last job's end; checked every `IDLE_POLL_S`
+seconds at most).
+
+Background jobs (`ozagia.daemon.jobs`): the ops `job_start`, `job_wait`,
+`job_list`, `job_log`, `job_stop`, `job_events` and `job_ps` go to the job table and
+take no graph lock (a `job_wait` blocks only its own connection). When the
+daemon exits, for whatever reason, it stops every job it started (SIGTERM
+to the job's process group, SIGKILL after `jobs.SHUTDOWN_GRACE_S`) except
+those started with `detach`, which it leaves running and names in its log.
+A captured `shell` that is a `pgrep`/`ps -p` form about a job's process is
+answered from /proc and the job table (`jobs.capture_ps`, intent
+`shell_ps`), and `after` for `shell` adds the job hints
+(`JobTable.shell_hints`). `python -m ozagia.daemon ensure` starts
 daemons this way, so ones started by hooks don't linger.
 
 `stats` counts (`DaemonState.stats`): `by_harness` (requests that name a
@@ -68,6 +80,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from ozagia.daemon import jobs as J
 from ozagia.daemon import protocol as P
 
 JOURNAL_NAME = "daemon_journal.jsonl"
@@ -228,6 +241,7 @@ class DaemonState:
         self.ms_max = 0.0
         self.ms_count = 0
         self.server: socketserver.BaseServer | None = None
+        self.jobs = J.JobTable(root, base_env=test_env)
 
     # -- requests ------------------------------------------------------------ #
     def dispatch(self, msg: dict[str, Any]) -> dict[str, Any]:
@@ -250,6 +264,8 @@ class DaemonState:
             return {"ok": True, "stats": self.stats()}
         if op == "shutdown":
             return {"ok": True}
+        if op in J.OPS:
+            return self.jobs.dispatch(op, msg)
         if op == "hint":
             prompt = msg.get("prompt")
             history = msg.get("history", [])
@@ -302,6 +318,10 @@ class DaemonState:
                     inp["_test_env"] = dict(self.test_env)
             harness = str(msg.get("harness") or "opencode")
             session = msg.get("session")
+            if op == "tool" and tool == "shell" and isinstance(inp, dict):
+                captured = self._capture_ps(inp, msg)
+                if captured is not None:
+                    return captured
             free = _lock_free(op, tool, inp)
             if free and isinstance(inp, dict):
                 inp["_lock"] = self.lock
@@ -326,8 +346,44 @@ class DaemonState:
                                         session=session)
             if op == "tool" and body.get("handled") and _expired(msg):
                 body = {**body, "late": True}
-            return {"ok": True, **body}
+            if op == "after" and tool == "shell" and isinstance(inp, dict):
+                hints = self.jobs.shell_hints(str(inp.get("command") or ""),
+                                              session)
+                if hints:
+                    body = {**body, "append": "\n".join(
+                        [x for x in [body.get("append") or ""] if x] + hints)}
+            return {"ok": True, **self._job_meta(body)}
         return {"ok": False, "error": f"unknown op {op!r}"}
+
+    def _job_meta(self, body: dict[str, Any]) -> dict[str, Any]:
+        """`body` with `meta.jobs_running` and `meta.job_seq` while a job
+        runs, so a plugin knows to watch for job ends (`job_events`)."""
+        n = self.jobs.running_count()
+        if not n or not isinstance(body.get("meta"), dict):
+            return body
+        return {**body, "meta": {**body["meta"], "jobs_running": n,
+                                 "job_seq": self.jobs.event_seq}}
+
+    def _capture_ps(self, inp: dict[str, Any], msg: dict[str, Any]
+                    ) -> dict[str, Any] | None:
+        """The `tool` answer for a `pgrep`/`ps -p` command about a job's
+        process (`jobs.capture_ps`), or None."""
+        command = inp.get("command")
+        if not isinstance(command, str):
+            return None
+        out = self.jobs.capture_ps(command, count=msg.get("preflight") is not True)
+        if out is None:
+            return None
+        from ozagia import intent
+        perm = intent.permission_request(self.memory, "shell", inp)
+        meta = {"intent": "shell_ps", "keys": [], "ms": 0.0}
+        if msg.get("preflight") is True:
+            return {"ok": True, "handled": False, "preflight": True,
+                    "reason": "permission required", "permission": perm,
+                    "meta": {**meta, "intent": "shell_preflight"}}
+        return {"ok": True, **self._job_meta({
+            "handled": True, "output": out, "is_error": False,
+            "permission": perm, "meta": meta})}
 
     def begin(self) -> None:
         """A request arrived (for the idle timeout)."""
@@ -341,11 +397,14 @@ class DaemonState:
             self.last_activity = time.monotonic()
 
     def idle_for(self) -> float:
-        """Seconds since the last request ended, or 0 while one runs."""
+        """Seconds since the last request ended or the last job exited, or
+        0 while a request or a job runs."""
+        if self.jobs.running_count():
+            return 0.0
         with self._stats_lock:
             if self.active:
                 return 0.0
-            return time.monotonic() - self.last_activity
+            return time.monotonic() - max(self.last_activity, self.jobs.last_end)
 
     def record(self, msg: dict[str, Any], resp: dict[str, Any],
                ms: float) -> None:
@@ -430,6 +489,7 @@ class DaemonState:
                 print(f"journal write failed: {e}", file=sys.stderr, flush=True)
 
     def stats(self) -> dict[str, Any]:
+        job_stats = self.jobs.stats()
         with self._stats_lock:
             return {
                 "root": str(self.root), "pid": os.getpid(),
@@ -470,6 +530,13 @@ class DaemonState:
                 "structured_outlines": self.by_intent.get(
                     "read_structured_outline", 0),
                 "jq_captures": self.by_intent.get("shell_jq", 0),
+                # Background jobs (`ozagia.daemon.jobs`): started, waits and
+                # the seconds spent in them, and waits that returned new
+                # output or the job's end (each one a poll the agent did not
+                # make); `jobs` has the rest of the job counters.
+                **{k: job_stats[k] for k in ("jobs_started", "waits",
+                                            "wait_seconds", "polls_avoided")},
+                "jobs": job_stats,
                 "permission_assert": _last(self.hellos, "permission_assert"),
                 "codemode_tools": sorted({
                     name for h in self.hellos
@@ -741,6 +808,10 @@ def _serve_locked(root_p: Path, sock_p: Path, journal_p: Path, *,
     finally:
         stop_watch.set()
         server.server_close()
+        try:
+            state.jobs.shutdown()
+        except Exception as e:  # noqa: BLE001 - the snapshot still gets written
+            print(f"job shutdown failed: {e}", file=sys.stderr, flush=True)
         if getattr(memory, "snapshot_dirty", False):
             try:
                 memory.write_snapshot()

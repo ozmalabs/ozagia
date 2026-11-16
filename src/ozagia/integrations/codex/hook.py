@@ -6,6 +6,11 @@ reference (https://learn.chatgpt.com/docs/hooks, see docs/codex.md).
 
 - `PreToolUse` for `Bash`: refuse ref-moving git commands with
   `permissionDecision: "deny"`. Local; no daemon needed.
+- `PreToolUse` for `Bash`, a `pgrep` or `ps -p` command: when a daemon
+  answers and the command is about one of its background jobs
+  (`ozagia.daemon.jobs.capture_ps`), deny it with the answer (the
+  processes, and the job's status) as the reason. No daemon is started
+  for this.
 - `PostToolUse` for `Bash`: send `after` as `shell` ({command, workdir})
   with the command's output, and return the daemon's `append` as
   `additionalContext`.
@@ -40,6 +45,8 @@ HOOK_ALARM_S = 15
 # One daemon request: with AUTOSTART_BUDGET_S (3 s) and the root lookup it
 # stays under HOOK_ALARM_S.
 DAEMON_TIMEOUT_S = 10
+# A PreToolUse `ps`/`pgrep` check asks a running daemon for this long.
+PS_TIMEOUT_S = 3
 LOG_NAME = "codex_hook.log"
 HARNESS = "codex"
 # The SessionStart brief stays under this many characters.
@@ -55,10 +62,11 @@ GIT_TIMEOUT_S = 3
 BRIEF_ALARM_S = 3
 
 MCP_TOOLS_LINE = (
-    "Prefer the ozagia MCP tools over reading whole files: dev_symbol / "
-    "dev_node to read one symbol by key (sym:path::name), dev_outline for a "
-    "file's outline, dev_impact before changing a widely used module, and "
-    "dev_context to start a task.")
+    "Prefer the ozagia MCP tools to reading whole files: dev_symbol / dev_node "
+    "(one symbol by key, sym:path::name), dev_outline, dev_impact before "
+    "changing a shared module, dev_context to start a task. Long commands: "
+    "job_start, then job_wait (blocks until exit or a log line, returns only "
+    "new output) instead of polling write_stdin, sleep or ps.")
 
 
 # --------------------------------------------------------------------------- #
@@ -143,6 +151,32 @@ def _context(event: str, text: str) -> dict[str, Any]:
     return {"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}}
 
 
+def _deny(reason: str) -> dict[str, Any]:
+    return {"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                                   "permissionDecision": "deny",
+                                   "permissionDecisionReason": reason}}
+
+
+def job_ps_answer(root: Path, command: str, session: str = "") -> str | None:
+    """The daemon's answer to a `pgrep`/`ps -p` command about one of its
+    jobs, as a deny reason, or None (no such form, no daemon, not a job)."""
+    head = command.lstrip().split(None, 1)[:1]
+    if head not in (["ps"], ["pgrep"]):
+        return None
+    from ozagia.daemon import protocol
+    try:
+        resp = hookcore.daemon_request(protocol.socket_path(root), {
+            "id": 1, "op": "job_ps", "harness": HARNESS, "session": session,
+            "command": command}, PS_TIMEOUT_S)
+    except (OSError, ValueError, hookcore.HookError):
+        return None
+    out = resp.get("output")
+    if not isinstance(out, str):
+        return None
+    return ("[ozagia] answered from the ozagia job table instead of running "
+            f"`{command.strip()[:200]}` (same output):\n{out}")
+
+
 def handle(payload: dict[str, Any], root: Path) -> dict[str, Any] | None:
     """The hook's JSON answer for one event, or None to print nothing."""
     event = payload.get("hook_event_name")
@@ -168,13 +202,14 @@ def handle(payload: dict[str, Any], root: Path) -> dict[str, Any] | None:
         return _context("SessionStart", session_brief(root))
 
     if event == "PreToolUse" and tool_name == "Bash":
-        sub = hookcore.git_ref_moving(str(tool_input.get("command") or ""))
-        if sub is None:
-            return None
-        return {"hookSpecificOutput": {"hookEventName": "PreToolUse",
-                                       "permissionDecision": "deny",
-                                       "permissionDecisionReason":
-                                           hookcore.git_refusal_reason(sub)}}
+        command = str(tool_input.get("command") or "")
+        sub = hookcore.git_ref_moving(command)
+        if sub is not None:
+            return _deny(hookcore.git_refusal_reason(sub))
+        answer = job_ps_answer(root, command, session)
+        if answer is not None:
+            return _deny(answer)
+        return None
 
     if event == "PostToolUse":
         mapped = map_tool(tool_name, tool_input, cwd if isinstance(cwd, str) else None)

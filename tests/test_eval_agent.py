@@ -1016,7 +1016,11 @@ def test_graph_stats_fields_read_counts():
                                            "shell_passthrough": None,
                                            "structured_queries": None,
                                            "structured_outlines": None,
-                                           "jq_captures": None}
+                                           "jq_captures": None,
+                                           "jobs_started": None,
+                                           "job_waits": None,
+                                           "job_wait_seconds": None,
+                                           "polls_avoided": None}
     # The daemon's shape: handled {"true": captured, "false": passthrough and
     # expired}; fallbacks = plugin fallbacks + expired + failed (review fix 4).
     assert ae.graph_stats_fields({"hellos": 2, "handled": {"true": 3, "false": 4},
@@ -1031,13 +1035,27 @@ def test_graph_stats_fields_read_counts():
         "fallbacks": 3, "preflights": 2, "permission_assert": True,
         "codemode_tools": ["read"], "shell_captured": None,
         "shell_passthrough": None, "structured_queries": 4,
-        "structured_outlines": 1, "jq_captures": 2}
+        "structured_outlines": 1, "jq_captures": 2, "jobs_started": None,
+        "job_waits": None, "job_wait_seconds": None, "polls_avoided": None}
     got = ae.graph_stats_fields({"hellos": 1, "shell": {"captured": 4,
                                                         "passthrough": 1}})
     assert (got["shell_captured"], got["shell_passthrough"]) == (4, 1)
     assert ae.graph_stats_fields({"hellos": 1, "handled": 2})["captured_calls"] == 2
     assert ae.graph_stats_fields({"hellos": 0, "by_handled": {"true": 5}})[
         "captured_calls"] == 5
+
+
+def test_graph_stats_fields_and_aggregate_read_job_counters():
+    got = ae.graph_stats_fields({"hellos": 1, "jobs_started": 2, "waits": 5,
+                                 "wait_seconds": 61.234, "polls_avoided": 4})
+    assert (got["jobs_started"], got["job_waits"], got["job_wait_seconds"],
+            got["polls_avoided"]) == (2, 5, 61.2, 4)
+    runs = [{"arm": "graph_intent", "daemon_ok": True, **got},
+            {"arm": "graph_intent", "daemon_ok": True, "jobs_started": None, "job_waits": 1,
+             "job_wait_seconds": 3.0, "polls_avoided": None}]
+    row = ae.aggregate(runs, ["graph_intent"])[0]
+    assert (row["total_jobs_started"], row["total_job_waits"],
+            row["total_job_wait_seconds"], row["total_polls_avoided"]) == (2, 6, 64.2, 4)
 
 
 def test_aggregate_totals_structured_reads():

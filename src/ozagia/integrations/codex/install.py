@@ -71,6 +71,14 @@ Prefer its tools to reading whole files and repeating greps:
 - Check what depends on a module with `dev_impact` before changing it.
 - Start a task with `dev_context`.
 
+Long-running commands (servers, builds, slow test runs): start them with
+`job_start` (a command or argv; output goes to a log) and wait with
+`job_wait` (`until`: `exit`, `log:<regex>` or `file:<path>`). It blocks
+until then or its deadline (45 s) and returns only the log lines you have
+not seen; if the job is still running, call it again. Do not poll a running
+command with empty `write_stdin` calls, `sleep` loops or `ps`/`pgrep`.
+`job_log` reads new output, `job_list` lists jobs, `job_stop` stops one.
+
 Shell commands and patches work as usual; ozagia adds graph context to their
 results (node keys, failing tests, the graph delta after a patch). Git
 commands that move refs (commit, push, checkout, reset, stash, ...) are

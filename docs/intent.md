@@ -389,7 +389,26 @@ op, tool, intent and handled; `passthrough` (not handled by design),
 plugin could not get answered; `expired` and failed `tool` requests are the
 daemon's view of some of the same calls), errors, hellos and their sessions, mean and max ms and
 uptime; `structured_queries`, `structured_outlines` and `jq_captures` count
-the intents `read_structured`, `read_structured_outline` and `shell_jq`.
+the intents `read_structured`, `read_structured_outline` and `shell_jq`;
+`jobs_started`, `waits`, `wait_seconds` and `polls_avoided` (waits that
+returned new output or the job's end) count background jobs, and `jobs`
+has the rest of their counters (`jobs_running`, `job_stops`, `ps_captures`,
+`sleep_hints`, `background_hints`, `job_events`).
+
+Background jobs (`ozagia.daemon.jobs`, ops `job_start`, `job_wait`,
+`job_list`, `job_log`, `job_stop`, `job_events` in `ozagia.daemon.protocol`)
+live in the daemon. The idle timeout does not fire while one runs. On exit
+the daemon stops its jobs (SIGTERM to each process group, SIGKILL after
+2 s) except those started with `detach`, which it leaves running and logs.
+In `shell`, a `pgrep [-f] [-a|-l] PAT` whose pattern matches a job's
+command (or, without `-f`, a running job's process name), or a `ps -p
+PID[,PID] [-o pid=|args=|cmd=|command=|comm=]` where every PID is a job's,
+is answered from /proc as pgrep or ps prints it, plus one `[ozagia] job
+...` line per job (intent `shell_ps`); every other `ps`/`pgrep` runs as
+usual. `after` for `shell` adds an `[ozagia]` line pointing to `job_wait`
+for a `sleep N` (N ≥ 20 s) while a job runs, and one pointing to
+`job_start` for a background start (`&`, `nohup`, `setsid`, `disown`), each
+at most 3 times per session.
 
 `ozagia.core.memory` takes its layout from `$OZAGIA_ROOT` when imported, so
 `serve` sets it to `--root` first. `DevMemory`'s own journal goes next to a

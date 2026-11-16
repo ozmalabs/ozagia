@@ -9,7 +9,8 @@
   the graph tools (`dev_symbol`, `dev_node`, `dev_outline`, `dev_impact`,
   `dev_context`, ...) next to Codex's own.
 - **An `AGENTS.md` section** telling the agent to prefer those tools for
-  reading by key, outlines and impact.
+  reading by key, outlines and impact, and to run long commands as
+  background jobs (`job_start`, `job_wait`) instead of polling them.
 
 Codex keeps running its own tools. The hooks add context to their results;
 they never replace a result.
@@ -143,12 +144,61 @@ too, and a second `serve` for the same socket exits at once with an error
 instead of loading the graph again. (A daemon on a socket other than the
 root's default locks `<socket>.lock` instead.)
 
+## Background jobs
+
+In Codex history, 44,938 of 51,005 `write_stdin` calls were empty polls of
+a running command, next to 5,914 `wait`, 1,020 `sleep` and 6,099 `ps`/`pgrep`
+calls. Each poll is a model call. The MCP tools `job_start`, `job_wait`,
+`job_list`, `job_log` and `job_stop` replace them (see
+`ozagia.daemon.jobs`):
+
+- `job_start {"command": "npm run dev"}` (or `argv`, `cwd` inside the
+  project, `env`, `detach`) runs the command in the daemon, in its own
+  process group, with stdin from /dev/null and stdout and stderr in
+  `<state dir>/jobs/<id>.log`. It returns the job id.
+- `job_wait {"job": "j1", "until": "log:Listening on"}` blocks in the daemon
+  until the job exits (`until: "exit"`, the default), a file exists
+  (`file:<path>`) or a new log line matches, or until `deadline_s`
+  (default 45 s, at most 50 s, below Codex's MCP tool timeout,
+  `tool_timeout_sec`, 60 s by default). It returns the status, the exit code,
+  the elapsed time, and only the log lines this MCP server has not read yet
+  (the newest 200 lines / 16 kB of them), with a `cursor`. If the job is
+  still running the reply says so; the agent calls `job_wait` again and
+  gets the next lines. `job: "any"` waits for the first running job to end.
+- `job_log` reads new lines without waiting (`cursor: 0`: the end of the
+  whole log); `job_list` lists the last 50 jobs; `job_stop` signals the
+  job's process group (SIGTERM, then SIGKILL after `grace_s`).
+
+The MCP server is a separate process: it reaches the daemon over the socket
+and starts it when nothing answers (as the hooks do, waiting up to 10 s).
+When no daemon can be reached, the tool returns an error that says so and
+how to start one (`ozagia daemon ensure --root <project>`). The same jobs are
+there from the shell: `ozagia job run|wait|list|log|stop`.
+
+The daemon does not stop on its idle timeout while a job runs. When it
+stops, it stops its jobs (SIGTERM to each process group, SIGKILL after 2 s),
+except jobs started with `detach: true`, which it leaves running and names
+in `<state dir>/daemon.log`; the next daemon lists them as `detached`.
+
+The hooks help too:
+
+- `PreToolUse` `Bash` with `pgrep [-f] [-a|-l] PAT` or `ps -p PID [-o
+  FIELD=]` about a job's process: if a daemon is running, the hook denies
+  the command with its answer as the reason (the processes as pgrep or ps
+  would list them, from /proc, and the job's status and the `job_wait`
+  call to make). Other `ps`/`pgrep` commands run as usual.
+- `PostToolUse` `Bash`: a `sleep N` of 20 s or more while a job runs gets a
+  `[ozagia]` line pointing to `job_wait`; a command that starts something in
+  the background (`... &`, `nohup`, `setsid`) gets one pointing to
+  `job_start`. Each hint is shown at most 3 times per session.
+
 ## What each hook does
 
 | Codex event | hook | what ozagia does | what Codex gets |
 |---|---|---|---|
 | `SessionStart` (every `source`) | brief | In a git work tree only: starts the daemon if needed (waits at most 0.5 s, not for the snapshot load), and lists the dirty files (`git status --porcelain`, at most 15), the last 3 commits, and the ozagia MCP tools to prefer. At most 1,500 characters. | `additionalContext` |
 | `PreToolUse` `Bash` with a ref-moving git command | refusal | Refuses it locally, without the daemon, with the intent layer's check (`ozagia.intent.shell.classify` is `git_refs`; see docs/claude_code.md for the list and the parsing). Listing forms (`git branch`, `git tag -l`, `git stash list`) are allowed. | `permissionDecision: "deny"` with a reason |
+| `PreToolUse` `Bash` with `pgrep`/`ps -p` about a job | job table | Asks a running daemon (3 s, no autostart) with `job_ps`; a null answer (not about a job) lets the command run. | `permissionDecision: "deny"` with the answer |
 | `PostToolUse` `Bash` | `after` as `shell` | Sends `{command, workdir: cwd}` and the command's output. The daemon maps pytest runs to test keys, re-ingests files the command changed, and maps `git diff`/`git show` hunks to node keys. | `additionalContext` with the daemon's `append`, when not empty |
 | `PostToolUse` `apply_patch` | `after` as `patch` | Sends `{patch: <patch text>}`; the daemon re-ingests the changed files. | the graph delta (`[ozagia] delta: ...`) as `additionalContext` |
 
@@ -185,7 +235,8 @@ timeout, or with `ozagia daemon shutdown --root <project>`.
 ## Limits
 
 - `write_stdin` polls (input to a running interactive command) do not run
-  hooks, so output read that way gets no context.
+  hooks, so output read that way gets no context, and a poll cannot be
+  turned into a `job_wait`; the AGENTS.md section asks for jobs instead.
 - The built-in result is never replaced. ozagia does not use PostToolUse
   `decision: "block"` or PreToolUse `updatedInput`.
 - Patch misses get no special handling: when `apply_patch` fails, the

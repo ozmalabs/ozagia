@@ -59,6 +59,44 @@ Requests (`op`):
     {"id": 5, "op": "stats"}   -> {"id": 5, "ok": true, "stats": {...}}
     {"id": 6, "op": "shutdown"} -> {"id": 6, "ok": true}
 
+Background jobs (`ozagia.daemon.jobs` documents the fields and semantics).
+Each takes optional `session`/`harness`, and `reader` (default: `session`,
+else "default"), whose log position `job_wait` and `job_log` use:
+
+    {"op": "job_start", "command": "<shell line>" | "argv": [...], "cwd"?,
+     "env"?: {...}, "detach"?: bool}
+      -> {"ok": true, "job": {"id": "j1", "pid", "pgid", "status", "log", ...}}
+    {"op": "job_wait", "job": "j1" | "any", "until"?: "exit" | "file:<path>" |
+     "log:<regex>", "deadline_s"?: 45, "cursor"?: <byte offset>}
+      -> {"ok": true, "job", "met", "status", "exit_code", "elapsed_s",
+          "waited_s", "output": "<new lines>", "cursor", "skipped_lines",
+          "skipped_bytes", "match"?, "note"?}
+    {"op": "job_list"} -> {"ok": true, "jobs": [...], "running": n}
+    {"op": "job_log", "job", "cursor"?, "tail"?}
+      -> {"ok": true, "job", "status", ..., "output", "cursor"}
+    {"op": "job_stop", "job", "signal"?: "TERM", "grace_s"?: 3}
+      -> {"ok": true, "job", "status", "exit_code", "signal", ...}
+      (`job_list` and `job_start` give job records with `id`; replies that
+      are one job name it `job`.)
+    {"op": "job_events", "reader", "after_seq"?: n, "deadline_s"?: 300}
+      -> {"ok": true, "events": [{"seq", "job", "command", "status",
+          "exit_code", "elapsed_s", "session", "harness"}], "running": n,
+          "seq": <the latest event's seq>}
+      Job ends after `after_seq` (default: the last `seq` this reader was
+      given; a new reader: from now). Blocks while a job runs and there is
+      none (the OpenCode plugin's completion announcements). While a job
+      runs, `tool` and `after` answers carry `meta.jobs_running` and
+      `meta.job_seq` (the `seq` to watch from).
+
+    {"op": "job_ps", "command": "ps -p 123"}
+      -> {"ok": true, "output": "<what the command prints>" | null}
+      The shell capture of `pgrep`/`ps -p` about a job (null: not one), for
+      hooks that answer before the command runs (Codex PreToolUse).
+
+A bad job request is `{"ok": false, "error": "..."}`. A `job_wait` holds its
+connection until it returns: give the client a timeout of `deadline_s` plus
+a margin.
+
 Deadlines. Every `tool` and `after` request may carry `"deadline_ms"`: an
 absolute Unix epoch time in milliseconds, after which the sender no longer
 waits for the answer (the plugin sends `Date.now() + its timeout`). The
