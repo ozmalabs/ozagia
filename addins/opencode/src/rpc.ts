@@ -112,6 +112,20 @@ const RESEARCH_INPUT = {
   additionalProperties: false,
 } as const
 
+const TASK_SHOW_INPUT = {
+  type: "object",
+  properties: {
+    id: {
+      type: "string",
+      minLength: 1,
+      maxLength: 64,
+      pattern: "^[A-Za-z][A-Za-z0-9_.-]{0,63}$",
+    },
+  },
+  required: ["id"],
+  additionalProperties: false,
+} as const
+
 export const ACTION_NAMES = [
   "daemon.status",
   "daemon.ensure",
@@ -159,6 +173,10 @@ export const Ozagia = Rpc.define({
     researchView: { input: RESEARCH_INPUT, output: ENVELOPE_OUTPUT },
     settingsSchema: { input: EMPTY_INPUT, output: ENVELOPE_OUTPUT },
     settingsValues: { input: EMPTY_INPUT, output: ENVELOPE_OUTPUT },
+    tasksList: { input: EMPTY_INPUT, output: ENVELOPE_OUTPUT },
+    tasksShow: { input: TASK_SHOW_INPUT, output: ENVELOPE_OUTPUT },
+    tasksValidate: { input: EMPTY_INPUT, output: ENVELOPE_OUTPUT },
+    tasksCatalog: { input: EMPTY_INPUT, output: ENVELOPE_OUTPUT },
     actionsList: { input: EMPTY_INPUT, output: ENVELOPE_OUTPUT },
     actionPreview: { input: ACTION_PREVIEW_INPUT, output: ENVELOPE_OUTPUT },
   },

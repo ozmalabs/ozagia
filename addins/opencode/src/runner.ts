@@ -47,6 +47,7 @@ const MAX_ID = 128
 const MAX_NODE = 256
 const MAX_REF = 256
 const MAX_TASK = 256
+const MAX_TASK_ID = 64
 const MAX_APERTURE = 64
 const MAX_MESSAGE = 1000
 const MAX_CHANGED = 500
@@ -62,6 +63,7 @@ const ERROR_TAIL = 500
 
 const APERTURE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 const INVESTIGATION_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/
+const TASK_ID_RE = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/
 
 const RESEARCH_VIEWS = ["library", "fetch", "screening", "evidence", "consensus", "citation"] as const
 const POLICY_KINDS = ["commit", "merge", "push"] as const
@@ -393,6 +395,54 @@ export function settingsValuesSpec(root: string): CommandSpec {
     module: "ozagia.settings_cli",
     args: ["values", "--root", root, "--json"],
     display: "ozagia.settings_cli values --json",
+  }
+}
+
+export function tasksListSpec(root: string): CommandSpec {
+  return {
+    module: "ozagia.task_library_cli",
+    args: ["list", "--root", root, "--json"],
+    display: "ozagia.task_library_cli list --json",
+  }
+}
+
+export interface TaskShowInput {
+  id?: unknown
+}
+
+/** Validate a task-class id before it reaches argv. */
+export function taskId(value: unknown): string {
+  const id = text(value, "id", MAX_TASK_ID)
+  if (!TASK_ID_RE.test(id)) {
+    throw new InputError(
+      "id must start with a letter and contain only letters, digits, dots, underscores and dashes",
+    )
+  }
+  return id
+}
+
+export function tasksShowSpec(root: string, input: TaskShowInput): CommandSpec {
+  const id = taskId(input.id)
+  return {
+    module: "ozagia.task_library_cli",
+    args: ["show", id, "--root", root, "--json"],
+    display: "ozagia.task_library_cli show --json",
+  }
+}
+
+export function tasksValidateSpec(root: string): CommandSpec {
+  return {
+    module: "ozagia.task_library_cli",
+    args: ["validate", "--root", root, "--json"],
+    display: "ozagia.task_library_cli validate --json",
+  }
+}
+
+export function tasksCatalogSpec(root: string): CommandSpec {
+  return {
+    module: "ozagia.task_library_cli",
+    args: ["catalog", "--root", root, "--json"],
+    display: "ozagia.task_library_cli catalog --json",
   }
 }
 

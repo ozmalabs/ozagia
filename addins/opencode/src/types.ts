@@ -407,6 +407,151 @@ export interface SettingsValuesReport {
   settings?: Record<string, SettingValueEntry>
 }
 
+export interface TaskWorktreeSpec {
+  expected_branch?: string | null
+  base?: string
+  require_clean?: boolean
+  require_up_to_date?: boolean
+}
+
+export interface TaskBudget {
+  tokens?: number
+  model_calls?: number
+  cost_usd?: number
+  wall_s?: number
+}
+
+export interface TaskResources {
+  memory_mb?: number
+  disk_mb?: number
+  pids?: number
+  wall_s?: number
+}
+
+export interface TaskGates {
+  before?: string[]
+  after?: string[]
+}
+
+export interface TaskApproval {
+  mutate?: string
+  network?: string
+}
+
+export interface TaskStepBudget {
+  tokens?: number
+  model_calls?: number
+  cost_usd?: number
+  wall_s?: number
+}
+
+export interface TaskStep {
+  id: string
+  tool: string
+  goal: string
+  paths?: string[]
+  write_paths?: string[]
+  budget?: TaskStepBudget
+  args?: Record<string, unknown>
+}
+
+export interface TaskDefaults {
+  worktree?: TaskWorktreeSpec
+  resources?: TaskResources
+  budget?: TaskBudget
+  gates?: TaskGates
+  approval?: TaskApproval
+  output?: string
+  tools?: string[]
+  write_scope?: string[]
+  requires_graph?: boolean
+  steps?: number
+}
+
+export interface TaskEntry {
+  id: string
+  domain: string
+  version: number
+  title: string
+  description: string
+  source: string
+  path: string
+  digest?: string
+  overrides?: boolean
+  builtin_version?: number | null
+  warnings?: string[]
+  defaults?: TaskDefaults
+}
+
+export interface TaskSpec {
+  id: string
+  version: number
+  title: string
+  objective: string
+  inputs: string[]
+  tools: string[]
+  write_scope: string[]
+  steps: TaskStep[]
+  worktree?: TaskWorktreeSpec
+  resources?: TaskResources
+  budget?: TaskBudget
+  gates?: TaskGates
+  stop?: string[]
+  output?: string
+  output_schema?: unknown
+  approval?: TaskApproval
+  requires_graph?: boolean
+  test_policy?: Record<string, unknown> | null
+}
+
+export interface TaskDetail {
+  entry: TaskEntry
+  spec: TaskSpec
+}
+
+export interface TaskListReport {
+  schema?: number
+  domain?: string | null
+  count?: number
+  tasks?: TaskEntry[]
+}
+
+export interface TaskDomainSummary {
+  id: string
+  count: number
+  task_ids?: string[]
+}
+
+export interface TaskCounts {
+  builtin?: number
+  repo?: number
+  total?: number
+}
+
+export interface TaskCatalogReport {
+  schema?: number
+  root?: string | null
+  builtin_dir?: string | null
+  counts?: TaskCounts
+  domains?: TaskDomainSummary[]
+  tasks?: TaskEntry[]
+}
+
+export interface TaskIssue {
+  code: string
+  severity: string
+  message: string
+  task_id?: string | null
+  path?: string | null
+}
+
+export interface TaskValidateReport extends TaskCatalogReport {
+  ok?: boolean
+  errors?: string[]
+  warnings?: string[]
+  issues?: TaskIssue[]
+}
+
 export interface ActionSummary {
   name: string
   description?: string

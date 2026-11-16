@@ -1,18 +1,21 @@
 # OpenCode add-in
 
-**Status:** read-only add-in extension (plan item 8 follow-on). The package lives
-in [`addins/opencode/`](../addins/opencode/); this page records its design, the
+**Status:** read-only add-in extension (plan item 8 follow-on; task-class
+catalogue for plan item 11). The package lives in
+[`addins/opencode/`](../addins/opencode/); this page records its design, the
 CLI mapping, the GUI surface and the API gaps found while building it.
 
-The plan item is [item 8, OpenCode add-in MVP](plans/2026-11-16_ui_and_agent_features.md).
-It reuses the presentation layer from items 1 and 6: the same apertures, view
-model and status snapshot that the CLI and static HTML export use. The add-in
-does not import Python and does not duplicate graph queries in TypeScript.
+The plan item is [item 8, OpenCode add-in MVP](plans/2026-11-16_ui_and_agent_features.md),
+with the task-class catalogue from item 11. It reuses the presentation layer
+from items 1 and 6: the same apertures, view model and status snapshot that the
+CLI and static HTML export use. The add-in does not import Python and does not
+duplicate graph queries in TypeScript.
 
 ```text
 ozagia CLI JSON  ->  server part (RPC)  ->  GUI Solid panel / settings page
 python -m ...        spawn, validate        graph / status / testing /
-                                             research / actions / settings
+                                             research / actions / tasks /
+                                             settings
 ```
 
 ## Package and loading
@@ -118,6 +121,10 @@ schema and these methods:
 | `researchView()` | `{investigation, view}` | `python -m ozagia.research_ui_cli --root ROOT --investigation ID --view VIEW --format json` | Read-only research projection; backs the Research tab. |
 | `settingsSchema()` | `{}` | `python -m ozagia.settings_cli schema --json` | Registry entries with type, default, scope, validation and env names. |
 | `settingsValues()` | `{}` | `python -m ozagia.settings_cli values --root ROOT --json` | Effective values, sources and file locations. |
+| `tasksList()` | `{}` | `python -m ozagia.task_library_cli list --root ROOT --json` | Task-class catalogue entries; the GUI filters by domain locally. |
+| `tasksShow()` | `{id}` | `python -m ozagia.task_library_cli show ID --root ROOT --json` | One task class: library entry plus the normalised specification. |
+| `tasksValidate()` | `{}` | `python -m ozagia.task_library_cli validate --root ROOT --json` | Library validation: ok, counts, errors, warnings, issues and loaded entries. |
+| `tasksCatalog()` | `{}` | `python -m ozagia.task_library_cli catalog --root ROOT --json` | Domain counts and the same catalogue metadata, for clients that prefer one object. |
 | `actionsList()` | `{}` | `python -m ozagia.actions_cli list --json` | Action catalogue with mutating/destructive/live-gated flags. |
 | `actionPreview()` | `{action, name?, live?, network?, maxBytes?, scope?, wait?, idleTimeout?}` | `python -m ozagia.actions_cli preview ACTION --root ROOT ... --json` | Preview only; returns the operation, argv, risks and token. No `actionApply` exists. |
 
@@ -125,7 +132,8 @@ Input rules:
 
 - unknown arguments are rejected (`additionalProperties: false`);
 - aperture and investigation ids are pattern-checked; views and policy/resource
-  kinds are enums;
+  kinds are enums; a task id is bounded to 64 characters and must match
+  `^[A-Za-z][A-Za-z0-9_.-]{0,63}$` before it reaches argv;
 - every string has a maximum length; changed-file lists are capped at 500;
   depth is an integer 0–32; memory/disk values are finite and non-negative;
 - `actionPreview` validates the action against the fifteen published names and
@@ -159,15 +167,15 @@ per-session gap in the first slice.
 - `Style` with a small prefixed stylesheet (`ozagia-*`), so the panel does not
   depend on host internals;
 - one `Panel` with id `ozagia`, region `side`, width 430, a mobile menu view and
-  tabs `graph`, `status`, `testing`, `research`, `actions`;
+  tabs `graph`, `status`, `testing`, `research`, `actions`, `tasks`;
 - one `SettingsPage` with id `ozagia-settings` and the host's
   `SettingsLayout`, `SettingsSection` and `SettingsRow` components;
-- eight `Command`s: open graph, status, testing, research, actions and settings,
-  check worktree and plan tests.
+- nine `Command`s: open graph, status, testing, research, actions, tasks and
+  settings, check worktree and plan tests.
 
-The graph tab is pinned and is the panel's fallback. Status, testing, research
-and actions are listed when their stored tab ids are open; their commands call
-`ctx.layout.open(`${ctx.id}:${tab}`, session, { background: true })`. The
+The graph tab is pinned and is the panel's fallback. Status, testing, research,
+actions and tasks are listed when their stored tab ids are open; their commands
+call `ctx.layout.open(`${ctx.id}:${tab}`, session, { background: true })`. The
 settings command calls `ctx.layout.settings("ozagia-settings")`; it does not
 need a routed session. Panel commands are disabled when no session is routed.
 No command mutates anything.
@@ -294,6 +302,42 @@ operation, argv and risks. A preview writes one pending token under
 `.ozagia/actions/pending` (mode `0600`, ten-minute TTL); it starts, stops,
 signals and connects nothing.
 
+### Tasks
+
+The Tasks tab is the catalogue from [item 11](plans/2026-11-16_ui_and_agent_features.md)
+over `core.task_library`. It loads `tasksList` and `tasksValidate` together,
+then the selected class through `tasksShow`:
+
+- validation card: library valid/invalid, total/built-in/repo counts, every
+  error and warning, and a capped issues table with severity, code, task id and
+  message. An invalid override is shown, not hidden;
+- domain filter: `all`, `research`, `coding` and `ops`, with counts; filtering is
+  local because `tasksList` already returns the whole catalogue;
+- catalogue table: id, domain, version, source badge (`builtin` or `repo`),
+  override version, title and warning count; rows are keyboard-selectable;
+- detail: title, objective/description, id, version, source, path, digest,
+  built-in version, inputs, tool allowlist, write scope, budget, resources,
+  worktree expectations, before/after gates, stop conditions, approval policy,
+  `requires_graph`, optional test policy and every step with tool, goal, paths
+  and write paths;
+- copy command: a read-only **Copy command** button copies a display-only
+  `python -m ozagia.tasks_cli run PATH --dry-run --root ROOT ... --json`
+  command. Each declared, non-automatic input becomes an editable
+  `--input NAME=<value>` placeholder. It never contains `--allow-exec` or
+  `--approve`, and the add-in never executes it.
+
+`list` refuses an invalid library without printing JSON. The tab therefore
+falls back to the entries that `validate` still reports, and labels the state
+"catalogue read from validate"; the validation card carries the actual errors.
+`show` also refuses an invalid library, so the detail and copy cards stay
+hidden until validation passes, and the tab says why. A missing root, a broken
+interpreter or a failed `show` is shown as a structured error with retry, not as
+an empty successful catalogue.
+
+The tab does not run a task, approve a mutation, copy a class into
+`ozagia/tasks/` or write any file. Browsing, copying the display command and
+editing the repository configuration remain separate, explicit actions.
+
 ## Read-only guarantees
 
 This slice is intentionally narrower than the full plan item. It does **not**:
@@ -302,20 +346,23 @@ This slice is intentionally narrower than the full plan item. It does **not**:
 - apply a process/connection action, or start, stop, signal or autostart a
   daemon, service, tunnel or job (the Actions tab only previews);
 - write a setting, or call `settings_cli set` (the Settings page only reads);
+- run a bounded task, call `tasks_cli run`, approve a mutating step, copy a
+  task class into `ozagia/tasks/` or call `task_library_cli copy`;
 - download artifacts, install Ocelot, fetch references or call a model;
 - build or refresh the graph snapshot or a research investigation;
 - run tests or apply a test plan;
 - write repository files. A preview's pending token is the only state-dir write,
   and it is bounded, `0600` and expires.
 
-The graph, status, testing and research panels read existing JSON. The
+The graph, status, testing, research and tasks panels read existing JSON. The
 worktree/policy/resource commands on the RPC are checks, not actions. The action
 preview is the landed `core.actions` preview: it reads runtime state and returns
-a token, but never constructs a manager that could mutate state. The CLI paths
+a token, but never constructs a manager that could mutate state. The task
+catalogue only reads the library; its copied command is text. The CLI paths
 themselves are read-only by design (see [view](view.md), [status](status.md),
 [worktree](worktree.md), [resources](resources.md), [testing](testing.md),
-[settings](settings.md), [actions](actions.md) and
-[research UI](research_ui.md)).
+[settings](settings.md), [actions](actions.md), [task library](task_library.md)
+and [research UI](research_ui.md)).
 
 ## Build and tests
 
@@ -329,12 +376,13 @@ npm run build
 
 - `npm run typecheck` runs `tsc --noEmit` over `src` and `vite.config.ts`.
 - `npm test` runs `node --test tests/*.test.cjs`. The suite covers every
-  argument builder, optional flags, bounds and enum rejection, action/argument
+  argument builder, optional flags, bounds and enum rejection, task-id
+  validation, the copy-command builder and its shell quoting, action/argument
   matching, `changed` repetition, credential redaction/tail capping, and the
   subprocess wrapper (JSON parse, exit 1, redacted exit errors, timeout,
   cancellation and stdout cap). It is offline and does not load
-  `@opencode/plugin`; `tests/load-ts.cjs` transpiles `src/runner.ts` with the
-  installed TypeScript package.
+  `@opencode/plugin`; `tests/load-ts.cjs` transpiles `src/runner.ts` and the pure
+  task-command module with the installed TypeScript package.
 - `npm run build` uses `gui()` from `@opencode/plugin/gui/vite` and emits one
   CommonJS file at `dist/gui-experimental.cjs`. The bundle keeps `solid-js`,
   `solid-js/web`, `@opencode/plugin/gui` and `@opencode/plugin/rpc` external and
@@ -346,13 +394,16 @@ directory plugin loads without a build. `node_modules/` is ignored.
 Local verification on 2026-11-16 (Node 20.5.1, npm 9.8.0, Vite 7.3.8):
 
 - `npm run typecheck`: passed.
-- `node --test tests/*.test.cjs`: 17 tests passed, 0 failed, offline.
-- `npm run build`: one `dist/gui-experimental.cjs` (79.70 kB, 18.25 kB gzip).
+- `node --test tests/*.test.cjs`: 20 tests passed, 0 failed, offline.
+- `npm run build`: one `dist/gui-experimental.cjs` (100.26 kB, 22.93 kB gzip).
 - A direct runner smoke test against this worktree returned valid JSON for
   `settingsSchema`, `settingsValues`, `actionsList` and `actionPreview`;
   `researchView` correctly returned a structured missing-investigation error.
   Earlier checks covered `status`, `apertures`, `worktreeCheck`, `policyCheck`,
-  `resourcesCheck` and `testingPlan`.
+  `resourcesCheck` and `testingPlan`. The task library commands were read
+  directly and through the builder: `list` returned 13 entries, `validate`
+  returned `ok: true` with one expected `evidence_table` warning, and `show`
+  returned the `diff_review` entry and spec.
 - The server registration was exercised with a mock `ctx.rpc.register` in the
   earlier slice; the new handlers use the same wrapper and the pure builders
   tested by the Node suite.
@@ -375,15 +426,17 @@ known gaps or host dependencies, not hidden behaviour:
    `ctx.layout`, `ctx.toast`, `ctx.client`, `ctx.ui`), so it should work wherever
    those are provided.
 3. **Panel layout breadth.** The panel is a side panel with a pinned graph tab
-   and command-opened status/testing/research/actions tabs. The settings page is
-   a separate Settings contribution. There is no slot-based embedded view.
+   and command-opened status/testing/research/actions/tasks tabs. The settings
+   page is a separate Settings contribution. There is no slot-based embedded
+   view.
 4. **Per-session root.** As above, the root is per plugin/server instance, not
    per routed session. `options.root` is the override.
 5. **No mutation surface.** There is no setting write, action apply, service
-   start/stop, tunnel start, review run, bounded task or reindex RPC. The plan
-   item lists those commands, but they remain behind their existing CLI layers
-   and confirmation flows. In particular, `actionPreview` returns a token and
-   the add-in deliberately has no `actionApply`.
+   start/stop, tunnel start, review run, bounded-task run or reindex RPC. The
+   plan item lists those commands, but they remain behind their existing CLI
+   layers and confirmation flows. In particular, `actionPreview` returns a token
+   and the add-in deliberately has no `actionApply`, and the Tasks tab browses
+   the task library but has no run, approve or copy-into-repository method.
 6. **Research writes.** The Research tab is a projection only. Reference merge,
    screening revision, adjudication, fetch apply and manuscript controls are not
    exposed.
@@ -405,4 +458,5 @@ known gaps or host dependencies, not hidden behaviour:
   [server](https://opencode.ai/docs/build/plugins/server/).
 - ozagia: [status](status.md), [view](view.md), [worktree](worktree.md),
   [resources](resources.md), [testing](testing.md), [settings](settings.md),
-  [actions](actions.md), [research UI](research_ui.md).
+  [actions](actions.md), [task library](task_library.md),
+  [research UI](research_ui.md).

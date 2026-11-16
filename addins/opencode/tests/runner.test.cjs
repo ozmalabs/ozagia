@@ -8,6 +8,7 @@ const { after, test } = require("node:test")
 const { loadTs } = require("./load-ts.cjs")
 
 const runner = loadTs(path.join(__dirname, "..", "src", "runner.ts"))
+const taskCommand = loadTs(path.join(__dirname, "..", "src", "gui", "task-command.ts"))
 const {
   ACTION_NAMES,
   InputError,
@@ -26,11 +27,17 @@ const {
   settingsSchemaSpec,
   settingsValuesSpec,
   statusSpec,
+  taskId,
+  tasksCatalogSpec,
+  tasksListSpec,
+  tasksShowSpec,
+  tasksValidateSpec,
   testingPlanSpec,
   text,
   viewSpec,
   worktreeCheckSpec,
 } = runner
+const { AUTOMATIC_TASK_INPUTS, shellQuote, taskRunCommand } = taskCommand
 
 const ROOT = "/tmp/ozagia repo"
 const tempDirs = []
@@ -249,6 +256,79 @@ test("research builder validates the investigation id and view", () => {
   )
   assert.throws(() => researchViewSpec(ROOT, { investigation: "../escape", view: "library" }), InputError)
   assert.throws(() => researchViewSpec(ROOT, { investigation: "research-1", view: "unknown" }), InputError)
+})
+
+test("task library builders use bounded, read-only arguments", () => {
+  assert.deepEqual(tasksListSpec(ROOT), {
+    module: "ozagia.task_library_cli",
+    args: ["list", "--root", ROOT, "--json"],
+    display: "ozagia.task_library_cli list --json",
+  })
+  assert.deepEqual(tasksValidateSpec(ROOT), {
+    module: "ozagia.task_library_cli",
+    args: ["validate", "--root", ROOT, "--json"],
+    display: "ozagia.task_library_cli validate --json",
+  })
+  assert.deepEqual(tasksCatalogSpec(ROOT), {
+    module: "ozagia.task_library_cli",
+    args: ["catalog", "--root", ROOT, "--json"],
+    display: "ozagia.task_library_cli catalog --json",
+  })
+  assert.deepEqual(tasksShowSpec(ROOT, { id: "diff_review" }), {
+    module: "ozagia.task_library_cli",
+    args: ["show", "diff_review", "--root", ROOT, "--json"],
+    display: "ozagia.task_library_cli show --json",
+  })
+  assert.equal(tasksShowSpec(ROOT, { id: "  paper_triage  " }).args[1], "paper_triage")
+})
+
+test("task ids are validated before they reach argv", () => {
+  assert.equal(taskId("diff_review"), "diff_review")
+  assert.equal(taskId("a.b-c_d"), "a.b-c_d")
+  for (const value of [
+    undefined,
+    null,
+    "",
+    " ",
+    "1diff_review",
+    "../escape",
+    "diff review",
+    "diff_review;rm",
+    `x${"a".repeat(64)}`,
+  ]) {
+    assert.throws(() => taskId(value), InputError)
+  }
+  assert.throws(() => tasksShowSpec(ROOT, {}), InputError)
+  assert.throws(() => tasksShowSpec(ROOT, { id: "diff\nreview" }), InputError)
+})
+
+test("task run command is a preview with quoted paths and input placeholders", () => {
+  assert.equal(
+    taskRunCommand({
+      path: "/repo/src/ozagia/task_specs/coding/diff_review.toml",
+      root: "/repo",
+      inputs: ["diff", "repo_root", "run_id", "state_dir"],
+    }),
+    "python -m ozagia.tasks_cli run /repo/src/ozagia/task_specs/coding/diff_review.toml --dry-run --root /repo --input 'diff=<value>' --json",
+  )
+
+  const spaced = taskRunCommand({
+    path: "/tmp/a repo/task's.toml",
+    root: "/tmp/a repo",
+    inputs: [],
+  })
+  assert.match(spaced, /--dry-run/)
+  assert.match(spaced, /--root '\/tmp\/a repo'/)
+  assert.match(spaced, /'\/tmp\/a repo\/task'\\''s.toml'/)
+  assert.doesNotMatch(spaced, /--allow-exec/)
+  assert.doesNotMatch(spaced, /--approve/)
+
+  assert.equal(shellQuote("plain"), "plain")
+  assert.equal(shellQuote("has space"), "'has space'")
+  assert.equal(shellQuote("it's"), "'it'\\''s'")
+  assert.ok(AUTOMATIC_TASK_INPUTS.has("repo_root"))
+  assert.ok(AUTOMATIC_TASK_INPUTS.has("run_id"))
+  assert.ok(AUTOMATIC_TASK_INPUTS.has("state_dir"))
 })
 
 test("settings and action catalogue builders", () => {

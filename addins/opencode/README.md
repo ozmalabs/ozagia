@@ -1,9 +1,10 @@
 # ozagia OpenCode add-in
 
-Read-only graph, status, testing, research, settings and action-preview surfaces
-for OpenCode Desktop. This is the first interactive UI host for ozagia (plan
-item 8): the add-in talks to the local `ozagia` CLIs over a typed RPC and never
-imports Python, applies an action or edits the repository.
+Read-only graph, status, testing, research, settings, action-preview and
+task-class catalogue surfaces for OpenCode Desktop. This is the first
+interactive UI host for ozagia (plan item 8): the add-in talks to the local
+`ozagia` CLIs over a typed RPC and never imports Python, applies an action,
+runs a bounded task or edits the repository.
 
 ## Requirements
 
@@ -22,6 +23,9 @@ imports Python, applies an action or edits the repository.
 - Optional user/repository configuration for the Settings page; with no files it
   shows the built-in defaults and their source. The Actions tab needs no extra
   file unless the selected action targets a configured service or tunnel.
+- The Tasks tab reads the task-class library that ships with the installed
+  `ozagia` package and any `<root>/ozagia/tasks/` overrides. No extra file is
+  needed; an invalid override is reported in the validation card, not hidden.
 - Node 20.19+ or 22.12+ to build the GUI bundle with Vite 7. Node 20.5 builds
   successfully but prints Vite's engine warning.
 
@@ -68,7 +72,7 @@ If you only want to experiment without options, the equivalent string entry is:
 
 ## What it shows
 
-One side panel, `ozagia`, with up to five tabs:
+One side panel, `ozagia`, with up to six tabs:
 
 - **Graph** (pinned): aperture picker loaded from `view_cli --list-apertures`,
   refresh, node/edge/group counts, deterministic seeded circle layout in SVG,
@@ -91,6 +95,14 @@ One side panel, `ozagia`, with up to five tabs:
   and `live-gated` badges, action-specific arguments, and a Preview button. The
   preview shows the exact operation, manager call, argv, preconditions, risks,
   current state and one-time confirmation token. There is no Apply button.
+- **Tasks**: the versioned task-class catalogue with a domain filter, library
+  validation status (counts, errors, warnings and issues), and a detail view for
+  the selected class. The detail shows title, description, version, source,
+  inputs, tools, write scope, budget, resources, worktree expectations, before
+  and after gates, stop conditions, approval policy, output and every step. A
+  read-only **Copy command** affordance copies a `tasks_cli run --dry-run`
+  preview command with input placeholders. The tab never runs a task, applies an
+  approval or writes a file.
 
 A `SettingsPage` also contributes an **ozagia settings** page under Settings.
 It reads `settings_cli schema` and `settings_cli values` and shows every key's
@@ -106,18 +118,19 @@ Commands in the palette:
 - `ozagia: Open testing panel`
 - `ozagia: Open research panel`
 - `ozagia: Open action previews`
+- `ozagia: Open task classes`
 - `ozagia: Open settings page`
 - `ozagia: Check worktree` (runs the read-only check and opens status)
 - `ozagia: Plan tests` (plans HEAD against the working tree and opens testing)
 
-The status, testing, research and actions tabs are opened by their commands;
-the graph tab is pinned so the panel is discoverable. The settings command
-opens the contributed settings page directly. All actions are read-only.
+The status, testing, research, actions and tasks tabs are opened by their
+commands; the graph tab is pinned so the panel is discoverable. The settings
+command opens the contributed settings page directly. All actions are read-only.
 
 ## Read-only scope
 
 This slice has no commits, edits, service starts/stops, downloads, index
-builds, test runs, setting writes or model calls. It only invokes:
+builds, test runs, task runs, setting writes or model calls. It only invokes:
 
 ```text
 python -m ozagia.status_cli
@@ -128,6 +141,7 @@ python -m ozagia.testing_cli
 python -m ozagia.research_ui_cli
 python -m ozagia.settings_cli schema|values
 python -m ozagia.actions_cli list|preview
+python -m ozagia.task_library_cli list|show|validate|catalog
 ```
 
 The settings page only uses `schema` and `values`; it never calls `settings_cli
@@ -138,6 +152,13 @@ ten-minute TTL); it does not start, stop, signal or connect anything. Applying
 an action remains a separate, explicit CLI command after a person reviews the
 preview.
 
+The Tasks tab uses `task_library_cli list`, `show` and `validate`; the RPC also
+exposes `catalog` for a client that prefers one object. The tab never calls
+`task_library_cli copy`, `tasks_cli run` or `tasks_cli run --allow-exec`. The
+copied command is display text with `--dry-run` and no `--allow-exec`; this
+add-in does not execute it, approve a mutating step or write to
+`ozagia/tasks/`.
+
 The subprocesses use `spawn` with argument arrays, no shell, closed stdin,
 a bounded timeout and a bounded output buffer. Stdout is parsed as JSON; stderr
 is capped, redacted and returned as a short tail. A CLI exit status of 1 is
@@ -146,11 +167,13 @@ failures and admission refusals while still emitting JSON.
 
 The RPC contract exposes `status`, `apertures`, `view`, `worktreeCheck`,
 `policyCheck`, `resourcesCheck`, `testingPlan`, `researchView`,
-`settingsSchema`, `settingsValues`, `actionsList` and `actionPreview`. There is
-no `actionApply`, settings write or other mutating method. Action input is
-limited to the published action names and each action's documented arguments;
-names are bounded, byte caps and timeouts are range-checked, and no value is
-passed through a shell.
+`settingsSchema`, `settingsValues`, `tasksList`, `tasksShow`, `tasksValidate`,
+`tasksCatalog`, `actionsList` and `actionPreview`. There is no `actionApply`,
+task run, settings write or other mutating method. Action input is limited to
+the published action names and each action's documented arguments; names are
+bounded, byte caps and timeouts are range-checked, and no value is passed
+through a shell. A task id is bounded to 64 characters and must match the
+library's `[A-Za-z][A-Za-z0-9_.-]{0,63}` form before it reaches argv.
 
 ## Build and test
 
@@ -176,9 +199,10 @@ a local plugin directory loads without a build step. `node_modules/` is ignored;
 `package-lock.json` and `dist/` are committed.
 
 The Node tests (`tests/*.test.cjs`) cover the pure argument builders, input
-bounds, action argument/action matching, redaction and the subprocess wrapper.
-They are offline and do not load `@opencode/plugin`; a small helper transpiles
-`src/runner.ts` with the installed TypeScript package.
+bounds, task-id validation, the copy-command builder, action argument/action
+matching, redaction and the subprocess wrapper. They are offline and do not
+load `@opencode/plugin`; a small helper transpiles `src/runner.ts` and the pure
+task-command module with the installed TypeScript package.
 
 ## Package layout
 
@@ -191,7 +215,7 @@ src/index.ts          server part: Plugin.define + ctx.rpc.register
 src/runner.ts         argument builders + bounded subprocess runner
 src/gui.tsx           GUI Plugin.define, Panel/SettingsPage/Command/Style
 src/gui/              Solid components (graph, status, testing, research,
-                      actions, settings)
+                      actions, tasks, settings), task-command.ts
 src/types.ts          envelope and read-only data shapes
 tests/                node:test for runner/argument builders
 dist/gui-experimental.cjs

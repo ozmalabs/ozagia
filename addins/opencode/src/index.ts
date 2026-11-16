@@ -13,6 +13,10 @@ import {
   settingsSchemaSpec,
   settingsValuesSpec,
   statusSpec,
+  tasksCatalogSpec,
+  tasksListSpec,
+  tasksShowSpec,
+  tasksValidateSpec,
   testingPlanSpec,
   viewSpec,
   worktreeCheckSpec,
@@ -101,6 +105,14 @@ export default Plugin.define({
         run(() => settingsSchemaSpec(), context.signal),
       settingsValues: async (_input, context) =>
         run(() => settingsValuesSpec(config.root), context.signal),
+      tasksList: async (_input, context) =>
+        run(() => tasksListSpec(config.root), context.signal),
+      tasksShow: async (input, context) =>
+        run(() => tasksShowSpec(config.root, input as Record<string, unknown>), context.signal),
+      tasksValidate: async (_input, context) =>
+        run(() => tasksValidateSpec(config.root), context.signal),
+      tasksCatalog: async (_input, context) =>
+        run(() => tasksCatalogSpec(config.root), context.signal),
       actionsList: async (_input, context) =>
         run(() => actionsListSpec(), context.signal),
       actionPreview: async (input, context) =>
