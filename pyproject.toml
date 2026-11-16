@@ -44,6 +44,8 @@ dev = ["ozagia[all]", "pytest>=8", "ruff>=0.6"]
 [project.scripts]
 ozagia = "ozagia.cli:main"
 ozagia-memory = "ozagia.core.memory:main"
+ozagia-view = "ozagia.view_cli:main"
+ozagia-status = "ozagia.status_cli:main"
 ozagia-worktree = "ozagia.worktree_cli:main"
 ozagia-resources = "ozagia.resources_cli:main"
 ozagia-files = "ozagia.files_cli:main"
