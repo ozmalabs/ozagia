@@ -21,7 +21,7 @@ import * as mod from "./plugin.mjs";
 let hook;
 const system = [];
 const ctx = { session: { hook: async (name, fn) => { if (name === "context") hook = fn; } } };
-await mod.createPlugin({ hintHistoryRefreshMs: 5 }).setup(ctx);
+await mod.createPlugin({}).setup(ctx);
 const event = {
   sessionID: "ses_context", system,
   messages: [
@@ -120,7 +120,9 @@ def test_context_hook_sends_bounded_text_only_and_caches_per_session(tmp_path):
         assert proc.returncode == 0, proc.stderr
         result = json.loads(proc.stdout)
         hint_requests = [r for r in daemon.requests if r["op"] == "hint"]
-        assert len(hint_requests) == 2
+        # One per user prompt: new history (or time) does not refresh it,
+        # so the system prompt stays the same and the prompt cache holds.
+        assert len(hint_requests) == 1
         request = hint_requests[0]
         assert request["session"] == "ses_context"
         assert request["harness"] == "opencode"
@@ -132,7 +134,6 @@ def test_context_hook_sends_bounded_text_only_and_caches_per_session(tmp_path):
         assert len(request["prompt"]) <= 2000
         assert len(request["history"]) <= 6
         assert all(len(item["text"]) <= 2000 for item in request["history"])
-        assert hint_requests[1]["history"][2]["text"] == "Earlier answer changed"
         assert "DO_NOT_SEND" not in json.dumps(request)
         assert len(result["system"]) == 1
         assert result["system"][0]["type"] == "text"
@@ -153,7 +154,7 @@ def test_context_hook_is_optional_when_daemon_socket_is_missing(tmp_path):
 
 
 @needs_node
-def test_read_only_shell_keeps_cached_hint_but_edit_invalidates_it(tmp_path):
+def test_hint_is_stable_across_tool_calls_and_new_prompts_refresh_it(tmp_path):
     daemon = StubDaemon(tmp_path / "daemon.sock")
     try:
         plugin = Path(oc.__file__).with_name("plugin.js")
@@ -178,18 +179,29 @@ await mod.default.setup(ctx);
 const event = () => ({ sessionID: "ses_mutation", system: [], messages: [
   { role: "user", content: [{ type: "text", text: "Fix checkout" }] },
 ] });
-await hook(event());
+const texts = [];
+const run = async (e) => { await hook(e); texts.push(JSON.stringify(e.system)); };
+await run(event());
 await tools.shell.execute({ command: "cat src/checkout.py" }, { sessionID: "ses_mutation" });
-await hook(event());
+await run(event());
 await tools.edit.execute({ path: "src/checkout.py" }, { sessionID: "ses_mutation" });
-await hook(event());
-process.stdout.write("ok\n");
+await run(event());
+// A new user prompt asks again.
+const next = event();
+next.messages.push({ role: "assistant", content: [{ type: "text", text: "Done" }] },
+                   { role: "user", content: [{ type: "text", text: "Now fix refunds" }] });
+await run(next);
+process.stdout.write(JSON.stringify(texts) + "\n");
 """, encoding="utf-8")
         env = dict(os.environ, OZAGIA_DAEMON_SOCK=str(daemon.path))
         proc = subprocess.run([NODE, str(harness)], cwd=tmp_path, env=env,
                               capture_output=True, text=True, timeout=10)
         assert proc.returncode == 0, proc.stderr
-        assert sum(request["op"] == "hint" for request in daemon.requests) == 2
+        hints = [r for r in daemon.requests if r["op"] == "hint"]
+        assert [r["prompt"] for r in hints] == ["Fix checkout", "Now fix refunds"]
+        texts = json.loads(proc.stdout)
+        # Identical system prompt text before and after a read and an edit.
+        assert texts[0] == texts[1] == texts[2]
     finally:
         daemon.close()
 
