@@ -220,7 +220,6 @@ def run_pytest(memory: Any, cls: dict[str, Any], inp: dict[str, Any],
 
 def handle_shell(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
     from ozagia.intent.read import read_range
-    from ozagia.intent.search import handle_grep
     command = inp.get("command")
     if not isinstance(command, str):
         raise IntentError("command must be a string")
@@ -228,14 +227,25 @@ def handle_shell(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
     kind = cls["class"]
     if kind == "git_refs":
         raise IntentError(refusal(command), intent="shell_refused")
-    if kind not in ("pytest", "read", "grep", "ls", "find", "compound"):
+    if kind not in ("pytest", "read", "grep", "ls", "find", "files", "compound"):
         raise Unhandled(cls.get("compound_reason") or cls.get("reason")
                         or kind)
     root = root_of(memory)
     wd = _workdir(root, inp.get("workdir"))
+    if kind == "files":
+        # `rg --files` runs rg itself; the compound runner already carries
+        # out one step with its status and timeout.
+        from ozagia.intent.shell import plan_compound
+        plan, why = plan_compound(command)
+        if plan is None:
+            raise Unhandled(why)
+        kind, cls = "compound", {**cls, **plan}
     if kind == "compound":
         from ozagia.intent.compound import run_compound
-        return run_compound(memory, cls, inp, wd)
+        res = run_compound(memory, cls, inp, wd)
+        if cls["class"] == "files":
+            res["intent"] = "shell_files"
+        return res
     if "cd" in cls:
         p = Path(cls["cd"])
         wd = _workdir(root, p if p.is_absolute() else wd / p)
@@ -244,7 +254,7 @@ def handle_shell(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
     if kind == "read":
         p = Path(cls["file"])
         p = _inside(root, p if p.is_absolute() else wd / p)
-        res = read_range(memory, p, cls["range"])
+        res = read_range(memory, p, cls["range"], numbering=cls.get("number"))
         preflight_stop(inp)
         return res
     if kind == "ls":
@@ -264,69 +274,21 @@ def handle_shell(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
         preflight_stop(inp)
         return {"intent": "shell_ls", "output": "\n".join(names), "keys": []}
     if kind == "find":
-        import fnmatch
-        p = Path(cls["path"])
-        candidate = p if p.is_absolute() else wd / p
-        if candidate.is_symlink():
-            raise Unhandled("find capture does not follow a symlink start path")
-        base = _inside(root, candidate)
-        if not base.is_dir() and not base.is_file():
-            raise Unhandled(f"find root does not exist: {base}")
-        if base.name in (".git", ".ozagia"):
-            raise Unhandled("find capture excludes repository state")
-        if not cls["file_only"]:
-            raise Unhandled("find capture requires -type f")
-        found: list[str] = []
-        visited = 0
-        if base.is_file() and not base.is_symlink() and fnmatch.fnmatchcase(base.name, cls["pattern"]):
-            found.append(cls["path"])
-        def walk_error(error: OSError) -> None:
-            raise Unhandled(f"find traversal failed: {error}") from None
-
-        try:
-            for current, dirs, files in os.walk(base, followlinks=False,
-                                                onerror=walk_error):
-                if any(d in (".git", ".ozagia") for d in dirs):
-                    raise Unhandled("find capture would traverse repository state")
-                dirs[:] = [d for d in dirs if not (Path(current) / d).is_symlink()]
-                visited += len(dirs) + len(files)
-                if visited > 5000:
-                    raise Unhandled("find traversal exceeds capture limit")
-                if len(found) > 1000:
-                    raise Unhandled("find result exceeds capture limit")
-                for name in files:
-                    item = Path(current) / name
-                    if item.is_symlink():
-                        continue
-                    if fnmatch.fnmatchcase(name, cls["pattern"]):
-                        rel = item.relative_to(base).as_posix()
-                        # find prints the starting path as written, then paths
-                        # relative to it; absolute starts remain absolute.
-                        prefix = cls["path"].rstrip("/")
-                        found.append((prefix + "/" if prefix not in ("", ".") else
-                                      ("./" if prefix == "." else "")) + rel)
-                        if len(found) > 1000:
-                            raise Unhandled("find result exceeds capture limit")
-        except OSError as e:
-            raise Unhandled(f"find traversal failed: {e}") from None
+        from ozagia.intent.shellfs import prepare_find, run_find
+        found = run_find(cls, prepare_find(root, wd, cls))
         preflight_stop(inp)
         return {"intent": "shell_find", "output": "\n".join(found),
                 "keys": []}
-    base = wd
-    if cls["path"] is not None:
-        p = Path(cls["path"])
-        p = _inside(root, p if p.is_absolute() else wd / p)
-        if p.is_dir() and not cls["recursive"]:
-            raise Unhandled("grep of a directory without -r")
-        path = str(p)
-    else:
-        path = str(wd)
+    from ozagia.intent.search import (
+        render_shell_grep,
+        shell_grep_records,
+        shell_grep_resolve,
+    )
+    resolved = shell_grep_resolve(root, cls, wd)
     preflight_stop(inp)
     try:
-        res = handle_grep(memory, {"pattern": cls["pattern"], "path": path,
-                                   "include": cls["include"],
-                                   "literal": cls["literal"]},
-                          base=base, ignore_case=cls["ignore_case"])
+        recs = shell_grep_records(memory, cls, wd, resolved)
+        res = render_shell_grep(memory, cls["pattern"], recs)
     except IntentError as e:
         raise Unhandled(str(e)) from None
     res["intent"] = "shell_grep"

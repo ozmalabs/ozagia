@@ -133,10 +133,10 @@ def _lock_free(op: Any, tool: Any, inp: Any) -> bool:
     (`_lock`) for the steps that read the graph."""
     if op != "tool" or tool != "shell" or not isinstance(inp, dict):
         return False
-    from ozagia.intent.shell import classify
+    from ozagia.intent.shell import classify, compound_steps
     cls = classify(str(inp.get("command") or ""))
     if cls["class"] == "compound":
-        return any(s["kind"] == "pytest" for s in cls["steps"])
+        return any(s["kind"] == "pytest" for s in compound_steps(cls))
     return cls["class"] == "pytest"
 
 

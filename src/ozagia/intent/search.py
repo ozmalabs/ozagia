@@ -334,5 +334,255 @@ def handle_glob(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
     return {"intent": "glob", "output": "\n".join(lines), "keys": keys}
 
 
-__all__ = ["MAX_MATCHES", "defined_keys", "handle_glob", "handle_grep",
-           "rg_binary"]
+# --------------------------------------------------------------------------- #
+# Captured shell searches (grep, rg, git grep classes of `intent.shell`)
+# --------------------------------------------------------------------------- #
+# A record is (kind, abs path, display path, line, text): kind ":" for a
+# match, "-" for a context line, "--" for a group separator.
+Record = tuple[str, str, str, int, str]
+
+
+def _inside_root(root: Path, p: Path) -> Path:
+    real = Path(os.path.realpath(p))
+    if real != root and root not in real.parents:
+        raise Unhandled(f"{p} is outside the project root")
+    return real
+
+
+def shell_grep_resolve(root: Path, cls: dict[str, Any], wd: Path
+                       ) -> dict[str, Any]:
+    """Check a grep class against the file system before anything runs.
+    Unhandled when the capture could differ from the command: a path
+    outside the root or missing, a directory without `-r`, overlapping
+    paths (the command would print their matches twice), grep `--include`
+    with a file operand (grep filters it, rg does not), or rg features
+    without rg installed. Returns the targets and whether file names are
+    printed (several paths, a directory, no path, or `-H`)."""
+    paths = list(cls.get("paths") or ([cls["path"]] if cls.get("path") else []))
+    targets: list[tuple[str | None, Path]] = []
+    for p in paths:
+        q = Path(p)
+        real = _inside_root(root, q if q.is_absolute() else wd / q)
+        if not real.exists():
+            raise Unhandled(f"no such path: {p}")
+        if real.is_dir() and not cls["recursive"]:
+            raise Unhandled("grep of a directory without -r")
+        targets.append((p, real))
+    if not targets:
+        targets = [(None, wd)]
+    reals = [t[1] for t in targets]
+    for i, a in enumerate(reals):
+        for j, b in enumerate(reals):
+            if i != j and (a == b or a in b.parents):
+                raise Unhandled("overlapping paths are not mapped")
+    globs = list(cls.get("globs") or [])
+    if cls["tool"] == "grep" and globs and any(r.is_file() for r in reals):
+        raise Unhandled("grep --include with a file operand is not mapped")
+    if rg_binary() is None and (cls["tool"] == "rg" or cls.get("types")
+                                or len(globs) > 1):
+        raise Unhandled("rg is not installed")
+    wf = cls.get("with_filename")
+    if wf is None:
+        wf = not paths or len(targets) > 1 or any(r.is_dir() for r in reals)
+    return {"targets": targets, "with_filename": bool(wf)}
+
+
+def _display(written: str | None, real: Path, wd: Path, abs_p: str) -> str:
+    """A path as grep and rg print it: relative to the working directory
+    with no path, the operand as written for a file, the operand joined to
+    the relative path for a directory."""
+    if written is None:
+        return os.path.relpath(abs_p, wd)
+    if real.is_file():
+        return written
+    rel = os.path.relpath(abs_p, real)
+    return written + ("" if written.endswith("/") else "/") + rel
+
+
+def _shell_matches(root: Path, cls: dict[str, Any], wd: Path,
+                   resolved: dict[str, Any]) -> list[tuple[str, str, int, str]]:
+    """(abs path, display path, line, text) of every match, in operand
+    order, then by display path and line."""
+    rg = rg_binary()
+    sd, excl = _state_excludes(root)
+    out: list[tuple[str, str, int, str]] = []
+    for written, real in resolved["targets"]:
+        found: list[tuple[str, str, int, str]] = []
+        if rg:
+            cmd = [rg, "-n", "-H", "--no-heading", "--null", "--color", "never",
+                   "--no-messages", "--max-filesize", str(MAX_READ_BYTES), *excl]
+            if cls.get("hidden", True):
+                cmd += ["--hidden", "--glob", "!.git"]
+            if cls["literal"]:
+                cmd.append("-F")
+            if cls["ignore_case"]:
+                cmd.append("-i")
+            for g in cls.get("globs") or []:
+                cmd += ["--glob", g]
+            for opt, t in cls.get("types") or []:
+                cmd += [opt, t]
+            cmd += ["-e", cls["pattern"]]
+            if written is not None:
+                cmd += ["--", written]
+            proc = subprocess.run(cmd, capture_output=True, cwd=str(wd),
+                                  timeout=SEARCH_TIMEOUT_S,
+                                  stdin=subprocess.DEVNULL)
+            for raw in proc.stdout.split(b"\n"):
+                path_b, sep, rest = raw.partition(b"\0")
+                num, _, text = rest.partition(b":")
+                if not sep or not num.isdigit():
+                    continue
+                disp = os.fsdecode(path_b)
+                abs_p = os.path.abspath(os.path.join(wd, disp))
+                if _under(Path(abs_p), sd):
+                    continue
+                line = text.decode("utf-8", errors="replace")
+                found.append((abs_p, disp, int(num),
+                              line[:-1] if line.endswith("\r") else line))
+            if proc.returncode == 2 and not found:
+                msg = proc.stderr.decode("utf-8", errors="replace").strip()
+                if msg:
+                    raise IntentError(f"ripgrep failed: {msg}")
+        else:
+            include = (cls.get("globs") or [None])[0]
+            for p, n, text in _py_grep(root, real, cls["pattern"],
+                                       include=include,
+                                       literal=cls["literal"],
+                                       ignore_case=cls["ignore_case"]):
+                abs_p = os.path.abspath(p)
+                found.append((abs_p, _display(written, real, wd, abs_p), n, text))
+        if cls["tool"] == "git grep":
+            found = [(a, os.path.relpath(a, wd), n, t) for a, _d, n, t in found]
+        found.sort(key=lambda m: (m[1], m[2]))
+        out.extend(found)
+    return out
+
+
+def _file_lines(path: str) -> list[str]:
+    try:
+        data = Path(path).read_bytes()
+    except OSError as e:
+        raise IntentError(f"cannot read {path}: {e}") from None
+    parts = data.split(b"\n")
+    if parts and parts[-1] == b"":
+        parts.pop()
+    out = []
+    for raw in parts:
+        line = raw.decode("utf-8", errors="replace")
+        out.append(line[:-1] if line.endswith("\r") else line)
+    return out
+
+
+def shell_grep_records(memory: Any, cls: dict[str, Any], wd: Path,
+                       resolved: dict[str, Any]) -> list[Record]:
+    """The lines a captured grep prints, as records: matches, the `-A/-B/-C`
+    context around them (overlapping and adjacent windows merge), and a
+    `--` record before each group after the first when the tool prints
+    separators (`cls["separators"]`)."""
+    root = root_of(memory)
+    matches = _shell_matches(root, cls, wd, resolved)
+    before, after = int(cls.get("before") or 0), int(cls.get("after") or 0)
+    sep = bool(cls.get("separators"))
+    by_file: dict[str, list[tuple[str, int, str]]] = {}
+    for abs_p, disp, n, text in matches:
+        by_file.setdefault(disp, []).append((abs_p, n, text))
+    recs: list[Record] = []
+    for disp, found in by_file.items():
+        abs_p = found[0][0]
+        texts = {n: t for _a, n, t in found}
+        lines = _file_lines(abs_p) if (before or after) else []
+        total = max(len(lines), max(texts))
+        groups: list[list[int]] = []
+        for n in sorted(texts):
+            lo, hi = max(1, n - before), min(total, n + after)
+            if groups and lo <= groups[-1][1] + 1:
+                groups[-1][1] = max(groups[-1][1], hi)
+            else:
+                groups.append([lo, hi])
+        for lo, hi in groups:
+            if sep and recs:
+                recs.append(("--", abs_p, disp, 0, "--"))
+            for k in range(lo, hi + 1):
+                if k in texts:
+                    recs.append((":", abs_p, disp, k, texts[k]))
+                else:
+                    recs.append(("-", abs_p, disp, k, lines[k - 1]))
+    return recs
+
+
+def grep_raw_line(rec: Record, *, with_filename: bool, line_numbers: bool) -> str:
+    """One record as the command prints it: `path:n:text` for a match,
+    `path-n-text` for a context line, `--` for a separator."""
+    kind, _abs, disp, n, text = rec
+    if kind == "--":
+        return "--"
+    head = (disp + kind if with_filename else "") + (
+        f"{n}{kind}" if line_numbers else "")
+    return head + text
+
+
+def render_shell_grep(memory: Any, pattern: str, recs: list[Record]
+                      ) -> dict[str, Any]:
+    """Records in the grep tool's format (`handle_grep`): matches as
+    `  Line n: text`, context lines as `  Line n- text`, a separator inside
+    a file as `  --` (one between files is the blank line)."""
+    root = root_of(memory)
+    total = sum(1 for r in recs if r[0] == ":")
+    defined = defined_keys(memory, pattern)
+    keys: list[str] = list(defined)
+    lines: list[str] = []
+    if defined:
+        shown = ", ".join(defined[:MAX_DEFINED_KEYS])
+        if len(defined) > MAX_DEFINED_KEYS:
+            shown += f", +{len(defined) - MAX_DEFINED_KEYS} more"
+        lines.append(tag(f"defined: {shown}"))
+    if total == 0:
+        lines.append("No files found")
+        return {"intent": "grep", "output": "\n".join(lines), "keys": keys}
+    by_file: dict[str, list[Record]] = {}
+    for i, r in enumerate(recs):
+        if r[0] == "--":
+            prev, nxt = recs[i - 1] if i else None, recs[i + 1] if i + 1 < len(recs) else None
+            if prev is None or nxt is None or prev[1] != nxt[1]:
+                continue
+        by_file.setdefault(r[1], []).append(r)
+    order = sorted(by_file, key=lambda p: (-_mtime(p), p))
+    truncated = total > MAX_MATCHES
+    lines.append(f"Found {total} matches"
+                 + (f" (showing first {MAX_MATCHES})" if truncated else ""))
+    shown_n = 0
+    for p in order:
+        if shown_n >= MAX_MATCHES:
+            break
+        if shown_n:
+            lines.append("")
+        lines.append(f"{p}:")
+        rel = _rel(root, p)
+        keyer = Keyer(memory, rel) if rel else None
+        last = None
+        for kind, _abs, _disp, n, text in by_file[p]:
+            if kind == ":" and shown_n >= MAX_MATCHES:
+                break
+            if kind == "--":
+                lines.append("  --")
+                continue
+            if keyer is not None:
+                k = keyer.key(n)
+                if k != last:
+                    lines.append(tag(k))
+                    last = k
+                    if k not in keys:
+                        keys.append(k)
+            if len(text) > MAX_LINE_CHARS:
+                text = text[:MAX_LINE_CHARS] + "..."
+            lines.append(f"  Line {n}{kind} {text}")
+            shown_n += kind == ":"
+    if truncated:
+        lines.append("")
+        lines.append(TRUNCATED.format(shown=MAX_MATCHES, total=total))
+    return {"intent": "grep", "output": "\n".join(lines), "keys": keys}
+
+
+__all__ = ["MAX_MATCHES", "defined_keys", "grep_raw_line", "handle_glob",
+           "handle_grep", "render_shell_grep", "rg_binary",
+           "shell_grep_records", "shell_grep_resolve"]
