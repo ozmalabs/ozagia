@@ -1,0 +1,94 @@
+id = "paper_triage"
+version = 1
+title = "Paper triage"
+objective = "Screen a paper against the review question and record an include, exclude or maybe recommendation with reasons."
+inputs = ["paper_path", "review_question"]
+tools = ["read", "grep"]
+write_scope = []
+requires_graph = false
+stop = ["gate_failed", "budget_exhausted", "resource_limit", "no_progress", "repeated_state"]
+output = "screening_recommendation.v1"
+
+[worktree]
+base = "main"
+require_clean = false
+require_up_to_date = false
+
+[resources]
+memory_mb = 512
+disk_mb = 256
+pids = 32
+wall_s = 180
+
+[budget]
+tokens = 16000
+model_calls = 0
+cost_usd = 0.0
+wall_s = 180
+
+[gates]
+before = ["resources_fit"]
+after = ["schema_valid", "evidence_present"]
+
+[approval]
+mutate = "deny"
+network = "deny"
+
+[output_schema]
+type = "object"
+required = ["recommendation", "reasons", "not_assessed"]
+additionalProperties = false
+
+[output_schema.properties.recommendation]
+type = "string"
+enum = ["include", "exclude", "maybe"]
+
+[output_schema.properties.reasons]
+type = "array"
+minItems = 1
+
+[output_schema.properties.reasons.items]
+type = "object"
+required = ["reason", "locator"]
+additionalProperties = false
+
+[output_schema.properties.reasons.items.properties.reason]
+type = "string"
+minLength = 1
+
+[output_schema.properties.reasons.items.properties.locator]
+type = "string"
+minLength = 1
+
+[output_schema.properties.not_assessed]
+type = "array"
+
+[output_schema.properties.not_assessed.items]
+type = "string"
+
+[[steps]]
+id = "read-paper"
+tool = "read"
+goal = "Read the paper title, abstract and screening-relevant sections."
+paths = ["."]
+
+[steps.budget]
+tokens = 6000
+
+[[steps]]
+id = "match-question"
+tool = "grep"
+goal = "Find passages that address the review question and record their locators."
+paths = ["."]
+
+[steps.budget]
+tokens = 6000
+
+[[steps]]
+id = "recommend"
+tool = "read"
+goal = "Assemble the recommendation, reasons and what was not assessed."
+paths = ["."]
+
+[steps.budget]
+tokens = 4000

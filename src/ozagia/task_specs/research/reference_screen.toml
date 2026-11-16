@@ -1,0 +1,97 @@
+id = "reference_screen"
+version = 1
+title = "Reference screening"
+objective = "Screen references at title/abstract or full-text stage and record an include, exclude or maybe decision with a reason."
+inputs = ["reference_path", "review_question"]
+tools = ["read", "grep"]
+write_scope = []
+requires_graph = false
+stop = ["gate_failed", "budget_exhausted", "resource_limit", "no_progress", "repeated_state"]
+output = "screening_decisions.v1"
+
+[worktree]
+base = "main"
+require_clean = false
+require_up_to_date = false
+
+[resources]
+memory_mb = 512
+disk_mb = 256
+pids = 32
+wall_s = 240
+
+[budget]
+tokens = 24000
+model_calls = 0
+cost_usd = 0.0
+wall_s = 240
+
+[gates]
+before = ["resources_fit"]
+after = ["schema_valid", "evidence_present"]
+
+[approval]
+mutate = "deny"
+network = "deny"
+
+[output_schema]
+type = "object"
+required = ["decisions", "not_assessed"]
+additionalProperties = false
+
+[output_schema.properties.decisions]
+type = "array"
+
+[output_schema.properties.decisions.items]
+type = "object"
+required = ["reference", "stage", "decision", "reason"]
+additionalProperties = false
+
+[output_schema.properties.decisions.items.properties.reference]
+type = "string"
+minLength = 1
+
+[output_schema.properties.decisions.items.properties.stage]
+type = "string"
+enum = ["title_abstract", "full_text"]
+
+[output_schema.properties.decisions.items.properties.decision]
+type = "string"
+enum = ["include", "exclude", "maybe"]
+
+[output_schema.properties.decisions.items.properties.reason]
+type = "string"
+minLength = 1
+
+[output_schema.properties.not_assessed]
+type = "array"
+
+[output_schema.properties.not_assessed.items]
+type = "string"
+
+[[steps]]
+id = "read-references"
+tool = "read"
+goal = "Read the reference export and identify its entry format."
+paths = ["."]
+
+[steps.budget]
+tokens = 8000
+
+[[steps]]
+id = "screen"
+tool = "grep"
+goal = "Match each reference against the review question and record the stage and reason."
+paths = ["."]
+
+[steps.budget]
+tokens = 12000
+
+[[steps]]
+id = "assemble"
+tool = "read"
+goal = "Assemble decisions and list references that could not be assessed."
+paths = ["."]
+
+[steps.budget]
+tokens = 4000

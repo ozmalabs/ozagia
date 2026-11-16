@@ -1,0 +1,112 @@
+id = "theory_compare"
+version = 1
+title = "Theory comparison"
+objective = "Compare two theories for compatibility, shared assumptions and conflicts with locators, without deciding which is true."
+inputs = ["theory_a", "theory_b"]
+tools = ["read", "grep"]
+write_scope = []
+requires_graph = false
+stop = ["gate_failed", "budget_exhausted", "resource_limit", "no_progress", "repeated_state"]
+output = "theory_comparison.v1"
+
+[worktree]
+base = "main"
+require_clean = false
+require_up_to_date = false
+
+[resources]
+memory_mb = 512
+disk_mb = 256
+pids = 32
+wall_s = 240
+
+[budget]
+tokens = 24000
+model_calls = 0
+cost_usd = 0.0
+wall_s = 240
+
+[gates]
+before = ["resources_fit"]
+after = ["schema_valid", "evidence_present"]
+
+[approval]
+mutate = "deny"
+network = "deny"
+
+[output_schema]
+type = "object"
+required = ["compatibility", "shared_assumptions", "conflicts", "not_assessed"]
+additionalProperties = false
+
+[output_schema.properties.compatibility]
+type = "string"
+enum = ["compatible", "partial", "incompatible", "unknown"]
+
+[output_schema.properties.shared_assumptions]
+type = "array"
+
+[output_schema.properties.shared_assumptions.items]
+type = "string"
+
+[output_schema.properties.conflicts]
+type = "array"
+
+[output_schema.properties.conflicts.items]
+type = "object"
+required = ["topic", "detail", "locator"]
+additionalProperties = false
+
+[output_schema.properties.conflicts.items.properties.topic]
+type = "string"
+minLength = 1
+
+[output_schema.properties.conflicts.items.properties.detail]
+type = "string"
+minLength = 1
+
+[output_schema.properties.conflicts.items.properties.locator]
+type = "string"
+minLength = 1
+
+[output_schema.properties.not_assessed]
+type = "array"
+
+[output_schema.properties.not_assessed.items]
+type = "string"
+
+[[steps]]
+id = "read-a"
+tool = "read"
+goal = "Read theory A and list its assumptions and commitments."
+paths = ["."]
+
+[steps.budget]
+tokens = 8000
+
+[[steps]]
+id = "read-b"
+tool = "read"
+goal = "Read theory B and list its assumptions and commitments."
+paths = ["."]
+
+[steps.budget]
+tokens = 8000
+
+[[steps]]
+id = "compare"
+tool = "grep"
+goal = "Find shared assumptions and conflicting claims with locators."
+paths = ["."]
+
+[steps.budget]
+tokens = 6000
+
+[[steps]]
+id = "assemble"
+tool = "read"
+goal = "Assemble the compatibility result and what was not assessed."
+paths = ["."]
+
+[steps.budget]
+tokens = 2000
