@@ -1255,15 +1255,60 @@ max_findings = 200
 - MCP: read-only `dev_security_scan`/`dev_security_explain` if the surface is
   small.
 
+**Secrets and the default commit gate:**
+
+Secret detection is on by default, but a finding is never printed as the
+secret value:
+
+- provider key formats (AWS, GitHub, OpenAI, Anthropic, Slack, Google, JWT,
+  private-key blocks) and generic credential assignments with high entropy;
+- credential files (`.env`, `.npmrc`, `.pypirc`, cloud credential files,
+  key stores) and private-key material, including filenames that are
+  themselves sensitive;
+- `ozagia-worktree policy --for commit` scans **staged content** and returns
+  `commit.secret` errors before a commit; this is on by default;
+- `policy --for push` scans the outgoing `base..HEAD` diff for secrets that
+  are already in commits;
+- output is `rule`, `path`, `line` and a redacted fingerprint
+  (`sha256:...` prefix), never the value. The audit/event log stores the
+  fingerprint and rule, not the secret.
+- false positives are handled by an explicit allowlist by path, rule or
+  fingerprint. An override for one commit uses a one-time confirmed token
+  (`--allow-secret FINGERPRINT`), records the decision and does not disable
+  the gate globally.
+- pre-commit/pre-push hooks may call the same checks; installation is
+  opt-in and reversible. Bypass is never silent: the hook reports the rule
+  and requires the explicit allowlist/override.
+
+```toml
+[security]
+block_secrets = true                 # default on for commit/push checks
+secret_allowlist = [
+  "path:tests/fixtures/**",
+  "rule:generic_high_entropy",
+  "sha256:0123abcd",                 # a specific reviewed fingerprint
+]
+```
+
 **CLI:** `python -m ozagia.security_cli scan --root R [--tool NAME ...]
-[--allow-network] [--fail-on LEVEL] [--json] [--out FILE]`,
-`python -m ozagia.security_cli tools`, and `explain FINDING_ID`.
+[--allow-network] [--fail-on LEVEL] [--staged] [--diff BASE..HEAD]
+[--json] [--out FILE]`, `python -m ozagia.security_cli tools`,
+`explain FINDING_ID`, and `secrets --staged|--diff` (redacted output).
 
 **Acceptance:**
 
 - a graph path from a request parameter to a shell/SQL sink produces a
   finding with the path and evidence;
 - a secret-like literal is found without printing the value;
+- a staged AWS/GitHub/OpenAI-style key refuses `policy --for commit` by
+  default, with rule/path/line/fingerprint and no secret text;
+- an allowlisted path/fingerprint passes; a one-time override is recorded and
+  does not disable the gate globally;
+- `policy --for push` catches a secret already committed in the outgoing
+  range;
+- the event/audit log and JSON output contain no secret value;
+- `block_secrets = false` is the only way to disable the gate, and the
+  report says it is disabled;
 - a fake tool adapter produces a dependency CVE with tool/version/database
   provenance;
 - no network, no tool install and no mutation by default;
