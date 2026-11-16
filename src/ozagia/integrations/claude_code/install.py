@@ -24,6 +24,8 @@ SETTINGS_FILES = {"local": "settings.local.json", "project": "settings.json"}
 MATCHERS = {
     "PostToolUse": "Read|Grep|Glob|Edit|MultiEdit|Write|Bash",
     "PreToolUse": "Bash|Read",
+    "SessionStart": "startup|resume|clear|compact",
+    "SessionEnd": "",
 }
 
 

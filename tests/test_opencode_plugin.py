@@ -748,6 +748,37 @@ def test_read_output_is_shown_only_after_the_permission(tmp_path, daemon):
     assert out["asserts"][0]["resources"] == [".env"]
 
 
+def _acking(req):
+    """A daemon whose handled reads are staged (meta.ack = r<request id>)."""
+    if req["op"] == "tool":
+        return {"ok": True, "handled": True, "output": "TEXT",
+                "permission": {"action": "read", "resources": ["pkg/mod.py"],
+                               "save": ["*"]},
+                "meta": {"intent": "read_file", "ack": f"r{req['id']}"}}
+    return _standard(req)
+
+
+@needs_node
+@pytest.mark.parametrize("permission,acked", [
+    ("allow", True), ("deny", False), ("broken", False), (None, True)])
+def test_a_served_read_is_acked_only_once_delivered(tmp_path, daemon, permission, acked):
+    d = daemon(_acking)
+    cfg = {"calls": [READ, READ], "settleMs": 100}
+    if permission is not None:
+        cfg["permission"] = permission
+    out = _run(tmp_path, cfg, d.path)
+    tools = [r for r in d.requests if r["op"] == "tool"]
+    assert len(tools) == 2 and "acks" not in tools[0]
+    if acked:
+        assert out["results"][0]["result"]["output"] == "TEXT"
+        assert tools[1]["acks"] == [f"r{tools[0]['id']}"]
+    else:
+        # Refused (a tool error) or handed to the built-in: never acked.
+        assert all("acks" not in r for r in d.requests)
+    # Without a registered compaction hook the plugin does not claim one.
+    assert all("compaction_hook" not in r for r in tools)
+
+
 @needs_node
 def test_without_the_permission_api_there_is_no_preflight(tmp_path, daemon):
     d = daemon(_preflighting)

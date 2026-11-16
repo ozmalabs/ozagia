@@ -49,6 +49,13 @@ captured ones, and the 30 most common `passthrough_reasons` (the
 classifier's `... is not mapped` reasons; 200 distinct ones are kept, the
 rest count as "(other)").
 
+Read ledger (`ozagia.intent.ledger`): one `SessionStore` of per-session
+ledgers, handed to `intent.handle`/`after` as `state`; `session_event`
+clears or drops them, `read_check` answers a hook's PreToolUse.
+`stats` adds `repeats_seen`, `stubs_served`, `notes_served`,
+`outlines_served`, `bytes_saved` (from the answers' `meta.repeat` and
+`meta.bytes_saved`) and `ledger` (sessions, evictions, events).
+
 The socket is created mode 0600. A socket file left at the path by a daemon
 that no longer answers `ping` is replaced; a live daemon or a non-socket
 file at the path is an error.
@@ -224,6 +231,11 @@ class DaemonState:
         self.shell_intents: dict[str, int] = {}
         self.shell_reasons: dict[str, int] = {}
         self.hellos: list[dict[str, Any]] = []
+        from ozagia.intent.ledger import SessionStore
+        # Per-session read ledgers (`ozagia.intent.ledger`).
+        self.sessions = SessionStore()
+        self.reads = {"repeats_seen": 0, "stubs_served": 0, "notes_served": 0,
+                      "bytes_saved": 0}
         self.ms_total = 0.0
         self.ms_max = 0.0
         self.ms_count = 0
@@ -244,12 +256,44 @@ class DaemonState:
                     "plugin": msg.get("plugin"), "version": msg.get("version"),
                     "session": msg.get("session"), "phase": msg.get("phase"),
                     "tools": tools,
-                    "permission_assert": msg.get("permission_assert")})
+                    "permission_assert": msg.get("permission_assert"),
+                    "compaction_hook": msg.get("compaction_hook")})
+            if msg.get("compaction_hook") is True:
+                from ozagia.intent.ledger import CAP_COMPACTION
+                self.sessions.confirm(str(msg.get("harness") or "opencode"),
+                                      msg.get("session"), CAP_COMPACTION)
             return {"ok": True}
         if op == "stats":
             return {"ok": True, "stats": self.stats()}
         if op == "shutdown":
             return {"ok": True}
+        if op == "session_event":
+            from ozagia.intent.ledger import SESSION_EVENTS
+            session, event = msg.get("session"), msg.get("event")
+            if not isinstance(session, str) or not session:
+                return {"ok": False, "error": "session is required"}
+            if event not in SESSION_EVENTS:
+                return {"ok": False, "error": "event must be one of "
+                        + ", ".join(SESSION_EVENTS)}
+            self.session_state(msg)     # caps, acks, a pending reset
+            n = self.sessions.event(str(msg.get("harness") or "opencode"),
+                                    session, event)
+            return {"ok": True, "cleared": n,
+                    "meta": {"intent": f"session_{event}", "keys": []}}
+        if op == "read_check":
+            tool = msg.get("tool")
+            inp = msg.get("input")
+            if not isinstance(tool, str) or not isinstance(inp, dict):
+                return {"ok": False, "error": "tool and input are required"}
+            inp = {k: v for k, v in inp.items() if not str(k).startswith("_")}
+            state = self.session_state(msg)
+            with self.lock:
+                if _expired(msg):
+                    return {"ok": True, "repeat": False, "stub": None,
+                            "expired": True,
+                            "meta": {"intent": "check_expired", "keys": []}}
+                body = intent.check_read(self.memory, tool, inp, state=state)
+            return {"ok": True, **body}
         if op == "hint":
             prompt = msg.get("prompt")
             history = msg.get("history", [])
@@ -302,6 +346,7 @@ class DaemonState:
                     inp["_test_env"] = dict(self.test_env)
             harness = str(msg.get("harness") or "opencode")
             session = msg.get("session")
+            state = self.session_state(msg)
             free = _lock_free(op, tool, inp)
             if free and isinstance(inp, dict):
                 inp["_lock"] = self.lock
@@ -319,15 +364,40 @@ class DaemonState:
                 if op == "tool":
                     body = intent.handle(self.memory, tool, inp,
                                          harness=harness, session=session,
-                                         preflight=msg.get("preflight") is True)
+                                         preflight=msg.get("preflight") is True,
+                                         state=state)
                 else:
                     body = intent.after(self.memory, tool, inp,
                                         msg.get("output"), harness=harness,
-                                        session=session)
+                                        session=session, state=state,
+                                        delivered=msg.get("delivered"))
             if op == "tool" and body.get("handled") and _expired(msg):
                 body = {**body, "late": True}
             return {"ok": True, **body}
         return {"ok": False, "error": f"unknown op {op!r}"}
+
+    def session_state(self, msg: dict[str, Any]) -> Any:
+        """The ledger of the request's (harness, session, sub), with the
+        harness's configured repeat policy (`ledger.effective_policy` may
+        lower `stub` to `note`); None without a session id. Before the
+        request itself: `compaction_hook: true` confirms that the harness
+        reports compaction, `acks` records staged served reads, and
+        `reset_pending: true` (a `session_event` that failed earlier) is
+        applied as a `compact`, in that order."""
+        from ozagia.intent.ledger import CAP_COMPACTION, policy_for
+        harness = str(msg.get("harness") or "opencode")
+        session = msg.get("session")
+        if not isinstance(session, str) or not session:
+            return None
+        if msg.get("compaction_hook") is True:
+            self.sessions.confirm(harness, session, CAP_COMPACTION)
+        st = self.sessions.get(harness, session, msg.get("sub"),
+                               policy=policy_for(self.root, harness))
+        if msg.get("acks"):
+            st.ack(msg.get("acks"))
+        if msg.get("reset_pending") is True:
+            self.sessions.event(harness, session, "compact")
+        return st
 
     def begin(self) -> None:
         """A request arrived (for the idle timeout)."""
@@ -368,6 +438,13 @@ class DaemonState:
                 self.by_intent[it] = self.by_intent.get(it, 0) + 1
             if handled is not None:
                 self.handled["true" if handled else "false"] += 1
+            if meta.get("repeat") in ("stub", "note"):
+                self.reads["repeats_seen"] += 1
+                self.reads["stubs_served" if meta["repeat"] == "stub"
+                           else "notes_served"] += 1
+            saved = meta.get("bytes_saved")
+            if isinstance(saved, int) and not isinstance(saved, bool) and saved > 0:
+                self.reads["bytes_saved"] += saved
             if not resp.get("ok"):
                 self.errors += 1
             if resp.get("is_error"):
@@ -470,6 +547,13 @@ class DaemonState:
                 "structured_outlines": self.by_intent.get(
                     "read_structured_outline", 0),
                 "jq_captures": self.by_intent.get("shell_jq", 0),
+                # The read ledger (`ozagia.intent.ledger`): repeats of an
+                # unchanged range (stubbed or noted), outlines served for
+                # large text files, and the bytes they kept out of context.
+                **self.reads,
+                "outlines_served": (self.by_intent.get("read_outline", 0)
+                                    + self.by_intent.get("shell_read_outline", 0)),
+                "ledger": self.sessions.stats(),
                 "permission_assert": _last(self.hellos, "permission_assert"),
                 "codemode_tools": sorted({
                     name for h in self.hellos

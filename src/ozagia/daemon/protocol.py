@@ -59,6 +59,50 @@ Requests (`op`):
     {"id": 5, "op": "stats"}   -> {"id": 5, "ok": true, "stats": {...}}
     {"id": 6, "op": "shutdown"} -> {"id": 6, "ok": true}
 
+    {"id": 7, "op": "session_event", "harness": "codex", "session": "...",
+     "event": "compact"|"start"|"end"}
+      -> {"id": 7, "ok": true, "cleared": <ledgers touched>, "meta": {...}}
+      The harness compacted the session's context (`compact`), started or
+      cleared it (`start`), or ended it (`end`). `compact` and `start`
+      clear the read ledger of every `sub` of (harness, session); `end`
+      drops them. Sent by the OpenCode plugin's `compaction` session hook,
+      Codex `PreCompact`/`SessionStart`/`SessionEnd` and Claude Code
+      `SessionStart`/`SessionEnd`.
+
+    {"id": 8, "op": "read_check", "harness": "claude", "session": "...",
+     "sub": "...", "tool": "read"|"shell", "input": {...}}
+      -> {"id": 8, "ok": true, "repeat": bool, "policy": "stub"|"note"|"off",
+          "stub": "<one line>"|null, "meta": {...}}
+      For a hook's PreToolUse: does this read, which the harness is about
+      to run itself, repeat an unchanged range the session already read?
+      `stub` is set only under the `stub` policy; the hook then denies the
+      call with it as the reason. Nothing is recorded (the call's `after`
+      records it). Takes the graph lock and honours `deadline_ms`.
+
+Sessions. `tool`, `after` and `read_check` with a `session` use that
+session's read ledger (`ozagia.intent.ledger`), keyed by (harness, session,
+`sub`). `sub` is optional: agents that share a session id send something
+that tells them apart (Claude Code subagents: `agent_id`; Codex:
+`transcript_path`, plus `agent_id` when present). A served read that
+repeats an unchanged range gets a stub or a note by the harness's repeat
+policy (`meta.repeat`, `meta.bytes_saved`; see `docs/intent.md`).
+
+Ledger fields on `tool`, `after`, `read_check` and `session_event` (all
+optional):
+    acks             tokens (`meta.ack` of earlier served reads) whose output
+                     reached the model; a served read is recorded only once
+                     acked. The OpenCode plugin sends them on its next
+                     request for the session.
+    reset_pending    true: a `session_event` for the session failed earlier;
+                     applied as `compact` before the request (after `acks`).
+    compaction_hook  true: the sender reports compaction for this session
+                     (the plugin's `compaction` hook registered; also in
+                     `hello`), so a configured `stub` may apply.
+    delivered        `after` only: `{"start": n, "lines": k}`, the lines the
+                     harness says it showed (Claude Code Read's
+                     `file.startLine`/`numLines`). `after` records only the
+                     lines `output` shows in any case.
+
 Deadlines. Every `tool` and `after` request may carry `"deadline_ms"`: an
 absolute Unix epoch time in milliseconds, after which the sender no longer
 waits for the answer (the plugin sends `Date.now() + its timeout`). The

@@ -5,16 +5,32 @@ hook event as JSON on stdin and answers on stdout, following the Codex hooks
 reference (https://learn.chatgpt.com/docs/hooks, see docs/codex.md).
 
 - `PreToolUse` for `Bash`: refuse ref-moving git commands with
-  `permissionDecision: "deny"`. Local; no daemon needed.
+  `permissionDecision: "deny"`. Local; no daemon needed. A shell read
+  (`sed -n`, `cat`, `nl -ba F | sed -n ...`) is checked with the daemon's
+  `read_check`: under the `stub` repeat policy a repeat of an unchanged
+  range is denied with the one-line stub as the reason. The default
+  policy is `note` (`ozagia.intent.ledger`), so this denies only when
+  `[reads]` opts in. Codex is a poor candidate: subagent hooks carry the
+  parent's session id, and exec output is truncated (the ledger records
+  only the lines the output shows). A command with a `cd` is not tracked.
 - `PostToolUse` for `Bash`: send `after` as `shell` ({command, workdir})
   with the command's output, and return the daemon's `append` as
-  `additionalContext`.
+  `additionalContext` (with the ledger's `unchanged since read N` note).
 - `PostToolUse` for `apply_patch`: send `after` as `patch` ({patch}); the
   daemon re-ingests the changed files and returns the graph delta.
 - `SessionStart`: a short brief (dirty files, recent commits, the ozagia MCP
   tools to prefer) as `additionalContext`, and a start of the daemon so it
   is loaded by the first tool call. Outside a git work tree it prints
-  nothing.
+  nothing. It also sends `session_event`: `compact` for source "compact",
+  `start` otherwise, which clears the session's read ledger; it carries
+  `compaction_hook: true` (PreCompact is installed with it).
+- `PreCompact`: `session_event` `compact`; `SessionEnd`: `end`. A failed
+  compact or start leaves a marker; the session's next ledger request
+  (`after`, `read_check`) carries `reset_pending`.
+
+Ledger requests carry `sub`: the payload's `transcript_path` (and
+`agent_id` when present), so threads sharing a session id are kept apart
+where Codex tells them apart.
 
 The daemon is started on demand (`ozagia.daemon.autostart.ensure`, a few
 seconds at most) when nothing answers on its socket, and only for a git
@@ -53,6 +69,8 @@ GIT_TIMEOUT_S = 3
 # this long (its git calls take GIT_TIMEOUT_S each at most); HOOK_ALARM_S
 # plus this stays under HOOK_TIMEOUT_S.
 BRIEF_ALARM_S = 3
+# SessionStart's `session_event` (the ledger reset) waits this long at most.
+SESSION_EVENT_TIMEOUT_S = 1.0
 
 MCP_TOOLS_LINE = (
     "Prefer the ozagia MCP tools over reading whole files: dev_symbol / "
@@ -143,6 +161,15 @@ def _context(event: str, text: str) -> dict[str, Any]:
     return {"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}}
 
 
+def session_sub(payload: dict[str, Any]) -> str:
+    """The ledger sub-key of a Codex event: its `transcript_path` and, when
+    the payload has one, `agent_id`. Codex documents that subagent hooks
+    carry the parent's session id; these keep threads apart where Codex
+    sends them (see `ozagia.intent.ledger`)."""
+    parts = [payload.get(k) for k in ("transcript_path", "agent_id")]
+    return "|".join(p for p in parts if isinstance(p, str) and p)
+
+
 def handle(payload: dict[str, Any], root: Path) -> dict[str, Any] | None:
     """The hook's JSON answer for one event, or None to print nothing."""
     event = payload.get("hook_event_name")
@@ -152,6 +179,14 @@ def handle(payload: dict[str, Any], root: Path) -> dict[str, Any] | None:
         tool_input = {}
     session = payload.get("session_id") or ""
     cwd = payload.get("cwd")
+    sub = session_sub(payload)
+
+    if event == "PreCompact":
+        hookcore.session_event(root, HARNESS, session, "compact")
+        return None
+    if event == "SessionEnd":
+        hookcore.session_event(root, HARNESS, session, "end")
+        return None
 
     if event == "SessionStart":
         in_repo = hookcore.in_work_tree(root)
@@ -165,32 +200,51 @@ def handle(payload: dict[str, Any], root: Path) -> dict[str, Any] | None:
             hookcore.log_failure(root, LOG_NAME, payload, exc)
         if not in_repo:
             return None
-        return _context("SessionStart", session_brief(root))
+        # The brief first: a failed event writes a marker in the state dir,
+        # which would show up in the brief's `git status`.
+        brief = session_brief(root)
+        try:
+            hookcore.session_event(root, HARNESS, session,
+                                   hookcore.start_event(payload.get("source")),
+                                   timeout=SESSION_EVENT_TIMEOUT_S)
+        except Exception as exc:  # the brief does not need the daemon
+            hookcore.log_failure(root, LOG_NAME, payload, exc)
+        return _context("SessionStart", brief)
 
     if event == "PreToolUse" and tool_name == "Bash":
-        sub = hookcore.git_ref_moving(str(tool_input.get("command") or ""))
-        if sub is None:
+        command = str(tool_input.get("command") or "")
+        sub_cmd = hookcore.git_ref_moving(command)
+        if sub_cmd is not None:
+            return _deny(hookcore.git_refusal_reason(sub_cmd))
+        mapped = map_tool(tool_name, tool_input, cwd if isinstance(cwd, str) else None)
+        if mapped is None:
             return None
-        return {"hookSpecificOutput": {"hookEventName": "PreToolUse",
-                                       "permissionDecision": "deny",
-                                       "permissionDecisionReason":
-                                           hookcore.git_refusal_reason(sub)}}
+        stub = hookcore.repeat_stub(root, HARNESS, session, sub, *mapped)
+        return _deny(stub) if stub else None
 
     if event == "PostToolUse":
         mapped = map_tool(tool_name, tool_input, cwd if isinstance(cwd, str) else None)
         if mapped is None:
             return None
         tool, inp = mapped
-        resp = hookcore.daemon_request_autostart(root, {
-            "id": 1, "op": "after", "harness": HARNESS, "session": session,
-            "tool": tool, "input": inp,
-            "output": output_text(payload.get("tool_response"))},
-            timeout=DAEMON_TIMEOUT_S)
+        msg = {"id": 1, "op": "after", "harness": HARNESS, "session": session,
+               "tool": tool, "input": inp,
+               "output": output_text(payload.get("tool_response"))}
+        if sub:
+            msg["sub"] = sub
+        resp = hookcore.ledger_request(root, msg, lambda m: hookcore.daemon_request_autostart(
+            root, m, timeout=DAEMON_TIMEOUT_S))
         append = resp.get("append")
         if not isinstance(append, str) or not append:
             return None
         return _context("PostToolUse", append)
     return None
+
+
+def _deny(reason: str) -> dict[str, Any]:
+    return {"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                                   "permissionDecision": "deny",
+                                   "permissionDecisionReason": reason}}
 
 
 def main(stdin: TextIO | None = None, stdout: TextIO | None = None) -> int:

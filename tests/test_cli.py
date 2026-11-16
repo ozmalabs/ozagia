@@ -118,7 +118,8 @@ def test_install_codex(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "/hooks" in out and "trust" in out
     hooks = json.loads((tmp_path / ".codex" / "hooks.json").read_text())
-    assert set(hooks["hooks"]) == {"SessionStart", "PreToolUse", "PostToolUse"}
+    assert set(hooks["hooks"]) == {"SessionStart", "PreToolUse", "PostToolUse",
+                                  "PreCompact", "SessionEnd"}
     assert "[mcp_servers.ozagia]" in (tmp_path / ".codex" / "config.toml").read_text()
     assert "<!-- ozagia:begin -->" in (tmp_path / "AGENTS.md").read_text()
 

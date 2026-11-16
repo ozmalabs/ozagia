@@ -133,7 +133,7 @@ def permission_request(memory: Any, tool: str, inp: dict[str, Any]
 
 def handle(memory: Any, tool: str, input: dict[str, Any], *,
            harness: str = "opencode", session: str | None = None,
-           preflight: bool = False) -> dict[str, Any]:
+           preflight: bool = False, state: Any = None) -> dict[str, Any]:
     """Carry out one captured tool call (see the module docstring).
 
     With `preflight`, a mutating tool's handler (edit, write, shell) runs
@@ -142,10 +142,40 @@ def handle(memory: Any, tool: str, input: dict[str, Any], *,
     "permission": {...}}`: the caller asks for that permission and sends the
     call again without `preflight`. A call that would be passthrough or a
     tool error is answered as usual (it changes nothing). Other tools ignore
-    `preflight`; every handled answer carries `permission` (or None)."""
+    `preflight`; every handled answer carries `permission` (or None).
+
+    `state` is the session's `ozagia.intent.ledger.SessionState` (or
+    None): a read or shell read is staged in its ledger (`meta.ack` is the
+    token; it counts once the caller acknowledges delivery, see
+    `SessionState.ack`), and a repeat of an unchanged range gets a stub or
+    a note by its policy (`meta.repeat` is "stub" or "note",
+    `meta.bytes_saved` an estimate). A `write` replacing a file the ledger
+    holds only part of gets an `[ozagia] warning:` line."""
     t0 = time.perf_counter()
     meta: dict[str, Any] = {"intent": str(tool), "keys": []}
     body: dict[str, Any]
+    spec = prior = None
+    if (state is not None and not preflight and tool in ("read", "shell")
+            and state.policy != "off" and isinstance(input, dict)):
+        from ozagia.intent import ledger as L
+        spec = L.read_spec(memory, tool, input, served=True,
+                           no_cd=state.harness in L.HOOK_HARNESSES)
+        prior = state.find(spec) if spec is not None else None
+        if prior is not None and state.policy == "stub":
+            try:
+                stub, keys = L.stub_text(memory, spec, prior)
+            except Exception:  # noqa: BLE001 - serve the text instead
+                spec = prior = None
+            else:
+                state.tick()
+                meta.update(intent=("read_stub" if tool == "read"
+                                    else "shell_read_stub"),
+                            keys=keys, repeat="stub",
+                            bytes_saved=L.stub_bytes_saved(spec, stub),
+                            ms=_ms(t0))
+                return {"handled": True, "output": stub, "is_error": False,
+                        "permission": permission_request(memory, tool, input),
+                        "meta": meta}
     try:
         handler = HANDLERS.get(tool)
         if handler is None:
@@ -166,11 +196,26 @@ def handle(memory: Any, tool: str, input: dict[str, Any], *,
             return {"handled": False, "preflight": True,
                     "reason": "permission required", "permission": perm,
                     "meta": meta}
+        partial = None
+        if state is not None and tool == "write" and state.policy != "off":
+            from ozagia.intent.ledger import partial_view
+            partial = partial_view(memory, state, input)
         res = handler(memory, input)
-        body = {"handled": True, "output": res["output"], "is_error": False,
+        output = res["output"]
+        if partial:
+            output += "\n" + partial
+        if res.get("bytes_saved"):
+            meta["bytes_saved"] = int(res["bytes_saved"])
+        if state is not None and not preflight:
+            state.tick()
+            if spec is not None:
+                output += _ledger_note(state, spec, prior, res, meta)
+        body = {"handled": True, "output": output, "is_error": False,
                 "permission": permission_request(memory, tool, input)}
         meta.update(intent=res["intent"], keys=list(res.get("keys") or []))
     except IntentError as e:
+        if state is not None and not preflight:
+            state.tick()
         body = {"handled": True, "output": str(e), "is_error": True}
         # A read-only tool's error is shown after the same permission as its
         # answer (the plugin runs the built-in when an answer has none).
@@ -181,14 +226,46 @@ def handle(memory: Any, tool: str, input: dict[str, Any], *,
                 body["permission"] = None
         meta.update(intent=e.intent or f"{tool}_error", keys=e.keys)
     except Unhandled as e:
+        if state is not None and not preflight:
+            state.tick(then_after=True)
         body = {"handled": False, "reason": str(e)}
         meta["intent"] = f"{tool}_passthrough"
     except Exception as e:  # noqa: BLE001 - the plugin falls back
+        if state is not None and not preflight:
+            state.tick(then_after=True)
         body = {"handled": False, "reason": f"{type(e).__name__}: {e}"}
         meta.update(intent=f"{tool}_exception", error=True)
     meta["ms"] = _ms(t0)
     body["meta"] = meta
     return body
+
+
+# Intents whose output is not lines of a file range.
+_NOT_A_RANGE = frozenset({"read_dir", "read_structured",
+                          "read_structured_outline", "shell_jq"})
+
+
+def _ledger_note(state: Any, spec: Any, prior: Any, res: dict[str, Any],
+                 meta: dict[str, Any]) -> str:
+    """Stage a served read in the session's ledger (`meta.ack` is its
+    token: it is recorded once the caller acknowledges delivery); the note
+    lines to append ("" for none)."""
+    from ozagia.intent import ledger as L
+    if res.get("intent") in _NOT_A_RANGE:
+        return ""
+    if "shown" in res:             # an outline: only its head was shown
+        if res["shown"] is None:
+            return ""
+        a, b = res["shown"]
+        if (a, b) != (spec.a, spec.b):
+            spec.a, spec.b = a, min(b, len(spec.lines))
+            prior = state.find(spec)
+    overlaps = [] if prior is not None else state.overlaps(spec)
+    meta["ack"] = state.stage(spec)
+    lines = L.note_lines(spec, prior, overlaps)
+    if prior is not None:
+        meta["repeat"] = "note"
+    return "".join("\n" + line for line in lines)
 
 
 def _unquote(path: str) -> str:
@@ -325,15 +402,25 @@ def _cd_dir(inp: dict[str, Any]) -> Any:
 
 
 def after(memory: Any, tool: str, input: dict[str, Any], output: Any, *,
-          harness: str = "opencode", session: str | None = None
-          ) -> dict[str, Any]:
+          harness: str = "opencode", session: str | None = None,
+          state: Any = None, delivered: Any = None) -> dict[str, Any]:
     """Graph context after a tool ran: the delta of any files it changed,
-    and for `git diff`/`git show` the keys its hunks touch."""
+    and for `git diff`/`git show` the keys its hunks touch. With `state`
+    (`ozagia.intent.ledger.SessionState`), a read or shell read the
+    built-in ran is recorded in the session's ledger, as far as `output`
+    shows the file's current lines (`ledger.delivered_spec`; `delivered`
+    is a harness's own `{"start", "lines"}`), with a note when it repeats
+    or overlaps an earlier read of the unchanged file."""
     t0 = time.perf_counter()
     meta: dict[str, Any] = {"intent": "after_none", "keys": []}
     lines: list[str] = []
     try:
         inp = input if isinstance(input, dict) else {}
+        if state is not None:
+            state.tick_after()
+            if tool in ("read", "shell") and state.policy != "off":
+                lines.extend(_after_ledger(memory, state, tool, inp, meta,
+                                           output, delivered))
         changes, cls = _may_change_files(tool, inp)
         heads: list[list[str]] = []
         if cls.get("class") in ("complex", "compound") and isinstance(output, str):
@@ -370,7 +457,70 @@ def after(memory: Any, tool: str, input: dict[str, Any], output: Any, *,
     return {"append": "\n".join(lines), "meta": meta}
 
 
+def _after_ledger(memory: Any, state: Any, tool: str, inp: dict[str, Any],
+                  meta: dict[str, Any], output: Any, delivered: Any
+                  ) -> list[str]:
+    from ozagia.intent import ledger as L
+    spec = L.read_spec(memory, tool, inp, served=False,
+                       no_cd=state.harness in L.HOOK_HARNESSES)
+    if spec is None:
+        return []
+    spec = L.delivered_spec(spec, output, delivered)
+    if spec is None:            # the output does not show the file's lines
+        meta["intent"] = "after_read_unconfirmed"
+        return []
+    prior = state.find(spec)
+    overlaps = [] if prior is not None else state.overlaps(spec)
+    state.record(spec)
+    meta["intent"] = "after_read"
+    if prior is not None:
+        meta["repeat"] = "note"
+    return L.note_lines(spec, prior, overlaps)
+
+
+def check_read(memory: Any, tool: str, input: Any, *, state: Any = None
+               ) -> dict[str, Any]:
+    """Whether a read the harness is about to run itself repeats an
+    unchanged range this session read already (a hook's PreToolUse):
+    `{"repeat": bool, "policy": ..., "stub": "<text>" | None, "meta"}`.
+    `stub` is set only under the `stub` policy; the hook then denies the
+    call with it. Nothing is recorded; the call's `after` does that."""
+    t0 = time.perf_counter()
+    meta: dict[str, Any] = {"intent": "check_none", "keys": []}
+    policy = state.policy if state is not None else "off"
+    out: dict[str, Any] = {"repeat": False, "policy": policy, "stub": None}
+    if state is None or policy == "off" or tool not in ("read", "shell"):
+        meta["ms"] = _ms(t0)
+        return {**out, "meta": meta}
+    from ozagia.intent import ledger as L
+    spec = L.read_spec(memory, tool, input, served=False,
+                       no_cd=state.harness in L.HOOK_HARNESSES)
+    prior = state.find(spec) if spec is not None else None
+    if prior is None:
+        if spec is not None:
+            # The built-in runs and its `after` comes next.
+            state.tick(then_after=True)
+        meta.update(intent="check_read", ms=_ms(t0))
+        return {**out, "meta": meta}
+    out["repeat"] = True
+    meta["intent"] = "check_repeat"
+    if policy == "stub":
+        try:
+            stub, keys = L.stub_text(memory, spec, prior)
+        except Exception:  # noqa: BLE001 - let the read run
+            meta["ms"] = _ms(t0)
+            return {**out, "meta": meta}
+        state.tick()
+        out["stub"] = stub
+        meta.update(intent="check_stub", keys=keys, repeat="stub",
+                    bytes_saved=L.stub_bytes_saved(spec, stub))
+    else:
+        state.tick(then_after=True)
+    meta["ms"] = _ms(t0)
+    return {**out, "meta": meta}
+
+
 __all__ = ["HANDLERS", "MAX_REFRESH_FILES", "MUTATING_TOOLS", "Preflight",
-           "after", "classify", "handle", "permission_request",
+           "after", "check_read", "classify", "handle", "permission_request",
            "handle_edit", "handle_glob", "handle_grep", "handle_read",
            "handle_shell", "handle_write", "touched_keys"]

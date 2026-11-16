@@ -239,6 +239,90 @@ def test_pre_bash_other_commands_allowed(repo, command, sockdir):
     assert proc.returncode == 0 and proc.stdout == ""
 
 
+# --------------------------------------------------------------------------- #
+# read ledger: PreToolUse repeat checks, compaction and session events
+# --------------------------------------------------------------------------- #
+STUB = "[ozagia] src/a.py unchanged since read 1 (lines 1-2, sha 0123456789ab)"
+
+
+def _check_reply(policy):
+    def reply(req):
+        if req["op"] == "read_check":
+            return {"ok": True, "repeat": True, "policy": policy,
+                    "stub": STUB if policy == "stub" else None, "meta": {}}
+        return {"ok": True}
+    return reply
+
+
+@pytest.mark.parametrize("command", ["sed -n '1,2p' src/a.py",
+                                     "nl -ba src/a.py | sed -n '1,2p'",
+                                     "cat src/a.py"])
+def test_pre_bash_repeat_read_is_denied_with_the_stub(repo, daemon, command):
+    stub = daemon(_check_reply("stub"))
+    proc = run_hook(tool_event(repo, "PreToolUse", "Bash", {"command": command}),
+                    sock=stub.sock)
+    out = json.loads(proc.stdout)
+    assert out == {"hookSpecificOutput": {
+        "hookEventName": "PreToolUse", "permissionDecision": "deny",
+        "permissionDecisionReason": STUB}}
+    (req,) = stub.requests
+    assert req["op"] == "read_check" and req["harness"] == "codex"
+    assert req["tool"] == "shell"
+    assert req["input"] == {"command": command, "workdir": str(repo)}
+    assert req["sub"] == "/home/u/.codex/sessions/x.jsonl"
+
+
+def test_pre_bash_note_policy_allows_silently(repo, daemon):
+    stub = daemon(_check_reply("note"))
+    proc = run_hook(tool_event(repo, "PreToolUse", "Bash",
+                               {"command": "sed -n '1,2p' src/a.py"}), sock=stub.sock)
+    assert proc.returncode == 0 and proc.stdout == ""
+    assert len(stub.requests) == 1
+
+
+def test_pre_bash_non_read_does_not_ask_the_daemon(repo, daemon):
+    stub = daemon(_check_reply("stub"))
+    proc = run_hook(tool_event(repo, "PreToolUse", "Bash", {"command": "npm test"}),
+                    sock=stub.sock)
+    assert proc.returncode == 0 and proc.stdout == ""
+    assert stub.requests == []
+
+
+def test_sub_key_has_agent_id_when_present(repo, daemon):
+    stub = daemon()
+    payload = post(repo, "Bash", {"command": "cat src/a.py"}, "x")
+    payload["agent_id"] = "agent-2"
+    run_hook(payload, sock=stub.sock)
+    assert stub.requests[0]["sub"] == "/home/u/.codex/sessions/x.jsonl|agent-2"
+    assert hook.session_sub({"session_id": "s"}) == ""
+
+
+def test_pre_compact_sends_compact(repo, daemon):
+    stub = daemon()
+    proc = run_hook(base(repo, "PreCompact", turn_id="t", trigger="auto"),
+                    sock=stub.sock)
+    assert proc.returncode == 0 and proc.stdout == ""
+    assert stub.requests == [{"id": 1, "op": "session_event", "harness": "codex",
+                              "session": "019a-sess", "event": "compact",
+                              "compaction_hook": True}]
+
+
+def test_session_end_sends_end(repo, daemon):
+    stub = daemon()
+    run_hook(base(repo, "SessionEnd", reason="other"), sock=stub.sock)
+    assert [r["event"] for r in stub.requests] == ["end"]
+
+
+@pytest.mark.parametrize("source,event", [("compact", "compact"), ("startup", "start"),
+                                          ("clear", "start"), ("resume", "start")])
+def test_session_start_sends_session_event(repo, daemon, source, event):
+    stub = daemon()
+    proc = run_hook(base(repo, "SessionStart", source=source), sock=stub.sock)
+    assert "[ozagia] session brief" in context_of(proc, "SessionStart")
+    events = [r for r in stub.requests if r["op"] == "session_event"]
+    assert [(r["event"], r["session"]) for r in events] == [(event, "019a-sess")]
+
+
 def test_pre_apply_patch_passes(repo, sockdir):
     proc = run_hook(tool_event(repo, "PreToolUse", "apply_patch", {"command": PATCH}),
                     sock=sockdir / "missing.sock")
@@ -421,6 +505,8 @@ def test_install_merges_hooks_and_is_idempotent(tmp_path):
     assert _ours(data, "PreToolUse") == [("^Bash$", expected)]
     assert _ours(data, "PostToolUse") == [("^(Bash|apply_patch)$", expected)]
     assert _ours(data, "SessionStart") == [(None, expected)]
+    assert _ours(data, "PreCompact") == [(None, expected)]
+    assert _ours(data, "SessionEnd") == [(None, expected)]
 
 
 def test_install_updates_python_without_duplicates(tmp_path):

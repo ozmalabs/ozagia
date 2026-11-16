@@ -199,7 +199,15 @@ def test_read_range_and_continuation_header(mem, repo):
     assert _source(out) == [(7, "    return a + b"), (8, ""), (9, "")]
 
 
-def test_read_default_limit_is_2000_lines(mem, repo):
+@pytest.fixture
+def no_outline(tmp_path, monkeypatch):
+    """Outline-first reads off (`[reads] outline_lines = outline_bytes = 0`)."""
+    cfg = tmp_path / "no_outline.toml"
+    cfg.write_text("[reads]\noutline_lines = 0\noutline_bytes = 0\n")
+    monkeypatch.setenv("OZAGIA_CONFIG", str(cfg))
+
+
+def test_read_default_limit_is_2000_lines(mem, repo, no_outline):
     out = _ok(mem, "read", path="pkg/big.py")
     assert out.split("\n")[0].endswith("lines 1-2000 of 2100")
     src = _source(out)
@@ -707,7 +715,7 @@ def test_shell_pytest_selector_relative_to_workdir(mem, repo):
     assert "pytest passed: exit 0" in res["output"]
 
 
-def test_shell_reads_map_to_read_ranges(mem, repo):
+def test_shell_reads_map_to_read_ranges(mem, repo, no_outline):
     def first(cmd: str) -> str:
         res = _call(mem, "shell", command=cmd)
         assert res["handled"] and res["meta"]["intent"] == "shell_read", res

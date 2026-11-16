@@ -45,6 +45,19 @@
 //   timeout (input.timeout, ms; 120 s when unset, the built-in's default)
 //   plus 30 s.
 // - setup never throws.
+// - Read ledger (ozagia.intent.ledger). The default repeat policy is
+//   `note`; under an opt-in `stub` a handled read that repeats an unchanged
+//   range comes back as a one-line stub, returned like any other output.
+//   A served read counts only once delivered: its answer carries
+//   `meta.ack`, and the plugin sends that token in `acks` on its next
+//   request for the session, after the permission check passed and the
+//   output was returned (a refused or failed read is never acked). The
+//   `compaction` session hook sends `session_event` (`compact`) so the
+//   daemon clears the session's ledger; when that request fails, the next
+//   request for the session carries `reset_pending: true` instead.
+//   Whether the hook registered is reported as `compaction_hook` in
+//   `hello` and on every ledger request; without it the daemon keeps the
+//   session on `note` even when `stub` is configured.
 // Plain ES module, node: built-ins only.
 
 import net from "node:net";
@@ -56,6 +69,7 @@ export const REQUEST_TIMEOUT_MS = 30000;
 const SHELL_DEFAULT_TIMEOUT_MS = 120000; // with the 30 s margin: 150000
 const HARNESS = "opencode";
 const HINT_TIMEOUT_MS = 6000;
+const COMPACTION_TIMEOUT_MS = 2000;
 const HINT_MAX_TOTAL_CHARS = 6000;
 const HINT_MAX_MESSAGE_CHARS = 2000;
 const HINT_MAX_HISTORY = 4;
@@ -84,6 +98,18 @@ class DaemonClient {
     this.session = undefined;
     this.tools = {};
     this.permissionAssert = false;
+    this.compactionHook = false;
+    this.acks = new Map();          // session -> tokens of delivered reads
+    this.resetPending = new Set();  // sessions whose compaction was not sent
+  }
+
+  // A served read was delivered to the model: acknowledge it on the next
+  // request for the session (bounded; a dropped ack only loses a repeat).
+  ack(session, token) {
+    if (!session || typeof token !== "string") return;
+    const list = this.acks.get(session) || [];
+    list.push(token);
+    this.acks.set(session, list.slice(-32));
   }
 
   // `hello` on its own short-lived connection: phase "setup" once, then
@@ -96,7 +122,8 @@ class DaemonClient {
     this.request({ op: "hello", harness: HARNESS, plugin: PLUGIN_ID,
                    version: PLUGIN_VERSION, session,
                    phase: session ? "session" : "setup",
-                   tools: this.tools, permission_assert: this.permissionAssert },
+                   tools: this.tools, permission_assert: this.permissionAssert,
+                   compaction_hook: this.compactionHook },
                  this.timeoutMs, false, false)
       .catch((err) => { if (!err.sent) this.sessions.delete(key); });
   }
@@ -108,7 +135,17 @@ class DaemonClient {
   request(msg, timeoutMs = this.timeoutMs, keepAlive = true, withHello = true) {
     if (withHello && this.session) this.hello(this.session);
     const id = this.nextId++;
-    const line = JSON.stringify({ ...msg, id, deadline_ms: Date.now() + timeoutMs }) + "\n";
+    const session = typeof msg.session === "string" && msg.session ? msg.session : undefined;
+    const extra = {};
+    let resetSent = false;
+    if (session && LEDGER_OPS.has(msg.op)) {
+      if (this.compactionHook) extra.compaction_hook = true;
+      const acks = this.acks.get(session);
+      if (acks && acks.length) { extra.acks = acks; this.acks.delete(session); }
+      if (this.resetPending.has(session)) { extra.reset_pending = true; resetSent = true; }
+    }
+    const line = JSON.stringify({ ...msg, ...extra, id,
+                                  deadline_ms: Date.now() + timeoutMs }) + "\n";
     return new Promise((resolve, reject) => {
       let sent = false;
       let done = false;
@@ -119,7 +156,9 @@ class DaemonClient {
         done = true;
         clearTimeout(timer);
         s.destroy();
-        if (err) { err.sent = sent; reject(err); } else resolve(res);
+        if (err) { err.sent = sent; reject(err); return; }
+        if (resetSent) this.resetPending.delete(session);
+        resolve(res);
       };
       const timer = setTimeout(
         () => finish(new Error(`daemon timeout after ${timeoutMs} ms`)), timeoutMs);
@@ -251,8 +290,31 @@ function contextHook(client, cache, historyRefreshMs) {
   };
 }
 
+// OpenCode 2.3 runs the `compaction` session hook on the model request that
+// builds a compaction summary, with the same event as `context`
+// ({sessionID, model, system, messages, options, agent, tools}). Tell the
+// daemon (`session_event`, `compact`) so the session's read ledger is
+// cleared and a read after the compaction gets the text again. Awaited, so
+// the ledger is cleared before any later tool call; bounded by the request
+// timeout, and never throws. A failed request marks the session, and its
+// next ledger request carries `reset_pending: true`.
+function compactionHook(client) {
+  return async function clearLedger(event) {
+    const session = event && typeof event.sessionID === "string" ? event.sessionID : undefined;
+    if (!session) return;
+    try {
+      await client.request({ op: "session_event", harness: HARNESS, session,
+                             event: "compact" }, COMPACTION_TIMEOUT_MS, true, false);
+      client.resetPending.delete(session);
+    } catch { client.resetPending.add(session); /* the compaction goes on */ }
+  };
+}
+
 // Tools whose request, once sent, may have changed files or run commands.
 const MUTATING = new Set(["edit", "write", "shell"]);
+// Requests that use the session's read ledger: they carry `acks`,
+// `reset_pending` and `compaction_hook`.
+const LEDGER_OPS = new Set(["tool", "after", "read_check", "session_event"]);
 
 function unknownOutcome(name, why) {
   const what = name === "shell"
@@ -336,7 +398,8 @@ function wrap(client, perm, name, tool, original, hintCache) {
       res = await send({});
     }
     const readOnlyShell = name === "shell" && res && res.handled
-      && ["shell_read", "shell_find", "shell_ls", "shell_grep", "shell_files", "shell_jq"].includes(
+      && ["shell_read", "shell_read_outline", "shell_read_stub", "shell_find",
+        "shell_ls", "shell_grep", "shell_files", "shell_jq"].includes(
         res.meta && res.meta.intent);
     if (MUTATING.has(name) && session && !readOnlyShell) hintCache.delete(session);
     if (res && res.handled) {
@@ -345,6 +408,8 @@ function wrap(client, perm, name, tool, original, hintCache) {
         res = undefined;
       } else {
         if (res.is_error) throw new Error(out);
+        // Delivered: the daemon may now count this read (meta.ack).
+        if (session && res.meta && typeof res.meta.ack === "string") client.ack(session, res.meta.ack);
         return textResult(out);
       }
     }
@@ -380,6 +445,13 @@ export function createPlugin(options = {}) {
           try { await ctx.session.hook("context", contextHook(client, hintCache,
             historyRefreshMs)); }
           catch { /* older OpenCode versions do not expose this hook */ }
+          // The compaction request: the session's earlier reads leave the
+          // context, so the daemon's read ledger for it is cleared.
+          try {
+            await ctx.session.hook("compaction", compactionHook(client));
+            client.compactionHook = true;
+          } catch { /* not registered: compaction_hook stays false, and the
+                       daemon keeps this plugin's sessions on `note` */ }
         }
         const perm = ctx.permission && typeof ctx.permission.assert === "function"
           ? ctx.permission : null;

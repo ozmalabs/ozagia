@@ -161,6 +161,20 @@ class DaemonClient:
         return self.request("after", timeout=timeout, tool=tool, input=input,
                             output=output, session=session, harness=harness)
 
+    def read_check(self, tool: str, input: dict[str, Any], *,
+                   session: str | None = None, harness: str = "opencode",
+                   sub: str | None = None,
+                   timeout: float | None = None) -> dict[str, Any]:
+        return self.request("read_check", timeout=timeout, tool=tool,
+                            input=input, session=session, harness=harness,
+                            sub=sub)
+
+    def session_event(self, event: str, *, session: str,
+                      harness: str = "opencode",
+                      timeout: float | None = None) -> dict[str, Any]:
+        return self.request("session_event", timeout=timeout, event=event,
+                            session=session, harness=harness)
+
     def stats(self) -> dict[str, Any]:
         return self.request("stats")
 

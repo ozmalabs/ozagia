@@ -1301,6 +1301,12 @@ def _rate(part: int, whole: int) -> float | None:
     return round(part / whole, 4) if whole else None
 
 
+# Read-ledger counters of the daemon's `stats` (`ozagia.intent.ledger`),
+# copied into each run record and totalled per arm.
+READ_LEDGER_FIELDS = ("repeats_seen", "stubs_served", "notes_served",
+                      "outlines_served", "bytes_saved")
+
+
 def graph_stats_fields(stats: Any) -> dict[str, Any]:
     """Run-record fields from the daemon's `stats`: plugin_loaded
     (hellos > 0), captured_calls (tool calls the daemon handled; an expired
@@ -1311,7 +1317,9 @@ def graph_stats_fields(stats: Any) -> dict[str, Any]:
     codemode_tools (from the plugin's `hello`), and shell_captured /
     shell_passthrough (`stats.shell`: shell calls the daemon carried out or
     left to the built-in; absent from older daemons), structured_queries,
-    structured_outlines and jq_captures (structured data reads)."""
+    structured_outlines and jq_captures (structured data reads), and the
+    read ledger's repeats_seen, stubs_served, notes_served, outlines_served
+    and bytes_saved (`ozagia.intent.ledger`)."""
     if not isinstance(stats, dict):
         return {"plugin_loaded": None, "captured_calls": None,
                 "passthrough_calls": None, "fallbacks": None,
@@ -1319,7 +1327,7 @@ def graph_stats_fields(stats: Any) -> dict[str, Any]:
                 "codemode_tools": None, "shell_captured": None,
                 "shell_passthrough": None,
                 "structured_queries": None, "structured_outlines": None,
-                "jq_captures": None}
+                "jq_captures": None, **{k: None for k in READ_LEDGER_FIELDS}}
     hellos = _count(stats.get("hellos"))
     raw = stats.get("handled")
     # The daemon reports {"true": n, "false": m}; only handled calls count.
@@ -1342,7 +1350,8 @@ def graph_stats_fields(stats: Any) -> dict[str, Any]:
             "shell_passthrough": _count(shell.get("passthrough")),
             "structured_queries": _count(stats.get("structured_queries")),
             "structured_outlines": _count(stats.get("structured_outlines")),
-            "jq_captures": _count(stats.get("jq_captures"))}
+            "jq_captures": _count(stats.get("jq_captures")),
+            **{k: _count(stats.get(k)) for k in READ_LEDGER_FIELDS}}
 
 
 
@@ -1577,6 +1586,8 @@ def aggregate(runs: list[dict[str, Any]], arms: Iterable[str]) -> list[dict[str,
                     int(r.get("structured_outlines") or 0) for r in mine),
                 "total_jq_captures": sum(int(r.get("jq_captures") or 0)
                                          for r in mine),
+                **{f"total_{k}": sum(int(r.get(k) or 0) for r in mine)
+                   for k in READ_LEDGER_FIELDS},
                 "codemode_tools": sorted({t for r in mine
                                           for t in (r.get("codemode_tools") or [])}),
             })
