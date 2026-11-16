@@ -70,12 +70,19 @@ class _FakeCgroupHandle:
         self.attached: list[int] = []
         self.killed: list[dict] = []
         self.cleaned: list[bool] = []
-        self._stats = dict(stats or {
+        stats = stats or {}
+        self._stats = {
             "memory_peak_mb": 12.5, "memory_current_mb": 12.5,
             "memory_max_mb": 64.0, "pids_current": 1, "pids_max": 8,
             "oom_events": 0, "oom_kill": 0, "populated": False,
             "peak_source": "memory.peak",
-        })
+            "io_read_mb": 2.0, "io_write_mb": 4.0,
+            "io_source": "cgroup.io.stat",
+            "io_devices": [{"device": "8:0", "read_mb": 2.0,
+                            "write_mb": 4.0}],
+            "io_device_count": 1,
+            **stats,
+        }
 
     def attach(self, pid: int) -> dict:
         self.attached.append(pid)
@@ -469,6 +476,7 @@ def test_job_records_limits_and_a_short_job_is_not_killed(table):
                              "disk_mb": 4096.0, "wall_s": None,
                              "file_mb": None}
     for key in ("limits", "peak_memory_mb", "resource_events",
+                "peak_disk_write_mb", "disk_write_source",
                 "enforcement", "admission"):
         assert key in job
     got = t.wait(job["id"], deadline_s=10)
@@ -476,13 +484,18 @@ def test_job_records_limits_and_a_short_job_is_not_killed(table):
     assert got["resource_events"] == []
     assert isinstance(got["peak_memory_mb"], (int, float))
     assert got["peak_memory_mb"] > 0
+    assert got["disk_write_source"] in (None, "proc.io")
     listed = t.dispatch("job_list", {})
     row = next(r for r in listed["jobs"] if r["id"] == job["id"])
     assert row["limits"]["memory_mb"] == 2048
     assert row["resource_events"] == []
+    assert row["peak_disk_write_mb"] == got["peak_disk_write_mb"]
+    assert row["disk_write_source"] == got["disk_write_source"]
     logged = t.log(job["id"], reader="resource-reader")
     assert logged["limits"]["memory_mb"] == 2048
     assert logged["peak_memory_mb"] == got["peak_memory_mb"]
+    assert logged["peak_disk_write_mb"] == got["peak_disk_write_mb"]
+    assert t.stats()["resource_peak_disk_write_mb"] >= 0.0
 
 
 def test_wall_limit_kills_the_job_and_logs_the_event(table):
@@ -589,12 +602,68 @@ def test_cgroup_mechanism_records_path_limits_peak_and_cleanup(
     assert got["status"] == "exited"
     assert got["enforcement"] == "cgroup+rlimit"
     assert got["cgroup"]["peak_memory_mb"] == 12.5
+    assert got["cgroup"]["io_read_mb"] == 2.0
+    assert got["cgroup"]["io_write_mb"] == 4.0
+    assert got["cgroup"]["io_source"] == "cgroup.io.stat"
+    assert got["peak_disk_write_mb"] == 4.0
+    assert got["disk_write_source"] == "cgroup.io.stat"
     assert got["cgroup"]["cleaned_up"] is True
     assert handle.cleaned == [True]
     stats = t.stats()
     assert stats["cgroup_jobs"] == 1
     assert stats["cgroup_fallbacks"] == 0
     assert stats["cgroup_oom_kills"] == 0
+    assert stats["resource_peak_disk_write_mb"] == 4.0
+
+
+def test_job_disk_peak_prefers_the_cgroup_and_keeps_the_final_counter(table):
+    t = table()
+    rec = {"id": "j-disk", "command": "true", "cwd": ".", "status": "running",
+           "started": time.time(), "log": "", "resource_events": [],
+           "peak_memory_mb": 1.0, "cgroup": {}}
+    t.jobs["j-disk"] = rec
+    try:
+        t._record_resource_sample("j-disk", {
+            "peak_memory_mb": 2.0, "peak_disk_write_mb": 9.0,
+            "disk_source": "proc.io"})
+        assert rec["peak_disk_write_mb"] == 9.0
+        assert rec["disk_write_source"] == "proc.io"
+
+        # A cgroup counter is preferred even when its first value is smaller.
+        t._merge_cgroup_stats("j-disk", {
+            "io_read_mb": 1.0, "io_write_mb": 4.0,
+            "io_source": "cgroup.io.stat"})
+        assert rec["peak_disk_write_mb"] == 4.0
+        assert rec["disk_write_source"] == "cgroup.io.stat"
+        assert rec["cgroup"]["io_write_mb"] == 4.0
+
+        # A missing io.stat at a later sample leaves the cgroup value alone.
+        t._merge_cgroup_stats("j-disk", {"io_write_mb": None,
+                                         "io_source": None})
+        assert rec["peak_disk_write_mb"] == 4.0
+        assert rec["disk_write_source"] == "cgroup.io.stat"
+
+        # The final read can be larger; the record keeps the larger counter.
+        t._merge_cgroup_stats("j-disk", {
+            "io_read_mb": 2.0, "io_write_mb": 12.0,
+            "io_source": "cgroup.io.stat"})
+        assert rec["peak_disk_write_mb"] == 12.0
+        assert rec["cgroup"]["io_write_mb"] == 12.0
+
+        # A later process-group sample never downgrades the source or peak.
+        t._record_resource_sample("j-disk", {
+            "peak_memory_mb": 3.0, "peak_disk_write_mb": 20.0,
+            "disk_source": "proc.io"})
+        assert rec["peak_disk_write_mb"] == 12.0
+        assert rec["disk_write_source"] == "cgroup.io.stat"
+
+        rec["status"] = "exited"
+        public = t.public(rec)
+        assert public["peak_disk_write_mb"] == 12.0
+        assert public["disk_write_source"] == "cgroup.io.stat"
+        assert t.stats()["resource_peak_disk_write_mb"] == 12.0
+    finally:
+        t.jobs.pop("j-disk", None)
 
 
 def test_cgroup_oom_counters_become_a_resource_event(table, monkeypatch):

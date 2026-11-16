@@ -54,14 +54,18 @@ memory/disk admission check before spawning, applies child rlimits
 (`RLIMIT_AS`, optional `RLIMIT_FSIZE`) and starts a watchdog after the
 spawn. On Linux with a delegated cgroup v2 hierarchy, a per-job
 `ozagia/job-<id>` cgroup also gets `memory.max`/`pids.max`, the child joins it
-before exec, and `memory.peak`/`memory.events` are read back; the record then
-says `cgroup+rlimit`. Without delegation, a permission failure or a host
-without cgroup v2, the job records `rlimit+watch` and a `cgroup` report that
-names the fallback reason. The watchdog samples the verified process group and
-the cwd filesystem; on a breach it SIGTERMs the group, waits
+before exec, and `memory.peak`/`memory.events`/`io.stat` are read back; the
+record then says `cgroup+rlimit`. Without delegation, a permission failure or
+a host without cgroup v2, the job records `rlimit+watch` and a `cgroup` report
+that names the fallback reason. The watchdog samples the verified process group
+and the cwd filesystem; on a breach it SIGTERMs the group, waits
 `RESOURCE_KILL_GRACE_S`, then uses `cgroup.kill` (or SIGKILL) if members
 remain. The group is verified again before any signal, and an unverified/stale
-group is never signalled. The job record carries `limits`, `enforcement`
+group is never signalled. Disk writes are attributed from the cgroup's
+`io.stat` when there is one, otherwise from the group's `/proc/<pid>/io`
+`write_bytes`; the record carries `peak_disk_write_mb` and
+`disk_write_source` (`cgroup.io.stat` or `proc.io`). Those are bytes sent to
+storage, not retained blocks. The job record carries `limits`, `enforcement`
 (`cgroup+rlimit`, `rlimit+watch` or `off`), `cgroup`, `admission`,
 `peak_memory_mb` and `resource_events`; the log gets `[ozagia] resource:`
 lines. `[resources] enabled = false` or `watchdog = "off"` opts out (the
@@ -429,7 +433,9 @@ class JobTable:
                        "sleep_hints": 0, "background_hints": 0, "job_events": 0,
                        "jobs_refused": 0, "stopped_on_load": 0,
                        "jobs_resource_killed": 0, "resource_events": 0,
-                       "resource_peak_mb": 0.0, "resource_refusals": 0,
+                       "resource_peak_mb": 0.0,
+                       "resource_peak_disk_write_mb": 0.0,
+                       "resource_refusals": 0,
                        "cgroup_jobs": 0, "cgroup_fallbacks": 0,
                        "cgroup_oom_kills": 0}
         self._load()
@@ -611,6 +617,8 @@ class JobTable:
         out["limits"] = rec.get("limits")
         out["cgroup"] = rec.get("cgroup")
         out["peak_memory_mb"] = rec.get("peak_memory_mb")
+        out["peak_disk_write_mb"] = rec.get("peak_disk_write_mb")
+        out["disk_write_source"] = rec.get("disk_write_source")
         out["resource_events"] = list(rec.get("resource_events") or [])
         out["elapsed_s"] = _elapsed(rec)
         out["log_bytes"] = size
@@ -719,6 +727,9 @@ class JobTable:
             "path": data.get("path"),
             "limits": data.get("limits") or {},
             "peak_memory_mb": None,
+            "io_read_mb": None,
+            "io_write_mb": None,
+            "io_source": None,
             "oom_events": None,
             "oom_kill": None,
             "fallback": bool(data.get("fallback")),
@@ -726,6 +737,38 @@ class JobTable:
             "errors": list(data.get("errors") or []),
             "cleaned_up": None,
         }
+
+    def _note_disk_peak(self, rec: dict[str, Any], value: Any,
+                        source: Any = None) -> None:
+        """Raise a job's attributed write peak; prefer the cgroup counter.
+
+        Once a job has a cgroup value, a process-group sample never replaces it
+        or its ``cgroup.io.stat`` source label. Call with ``cond`` held.
+        """
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return
+        source = str(source) if source else None
+        peak = max(0.0, round(float(value), 4))
+        old = rec.get("peak_disk_write_mb")
+        old_source = rec.get("disk_write_source")
+        if source == "cgroup.io.stat":
+            if old_source != "cgroup.io.stat":
+                rec["peak_disk_write_mb"] = peak
+            elif not isinstance(old, (int, float)) or peak > float(old):
+                rec["peak_disk_write_mb"] = peak
+            rec["disk_write_source"] = "cgroup.io.stat"
+        elif old_source == "cgroup.io.stat":
+            return
+        else:
+            if not isinstance(old, (int, float)) or peak > float(old):
+                rec["peak_disk_write_mb"] = peak
+            if source:
+                rec["disk_write_source"] = source
+        current = rec.get("peak_disk_write_mb")
+        if isinstance(current, (int, float)):
+            self.counts["resource_peak_disk_write_mb"] = max(
+                float(self.counts.get("resource_peak_disk_write_mb") or 0.0),
+                float(current))
 
     def _merge_cgroup_stats(self, jid: str, stats: Mapping[str, Any]) -> None:
         """Record a cgroup sample/peak on the job (call with or without lock)."""
@@ -749,18 +792,35 @@ class JobTable:
                         "peak_source"):
                 if key in stats:
                     info[key] = stats[key]
+            for key in ("io_read_mb", "io_write_mb"):
+                value = stats.get(key)
+                if (isinstance(value, (int, float))
+                        and not isinstance(value, bool)):
+                    old = info.get(key)
+                    info[key] = round(max(float(old or 0.0),
+                                          float(value)), 4)
+            if stats.get("io_source"):
+                info["io_source"] = stats["io_source"]
+            for key in ("io_devices", "io_device_count"):
+                if stats.get(key) is not None:
+                    info[key] = stats[key]
+            self._note_disk_peak(rec, stats.get("io_write_mb"),
+                                 stats.get("io_source"))
 
-    def _sample_cgroup(self, jid: str) -> None:
+    def _sample_cgroup(self, jid: str) -> dict[str, Any] | None:
+        """Read and merge one cgroup sample; return it for the watchdog."""
         with self.cond:
             handle = self._cgroups.get(jid)
         if handle is None:
-            return
+            return None
         try:
             stats = handle.stats()
         except Exception:  # noqa: BLE001 - observation is best-effort
-            return
+            return None
         if isinstance(stats, Mapping):
             self._merge_cgroup_stats(jid, stats)
+            return dict(stats)
+        return None
 
     def _cleanup_record_cgroup(self, rec: dict[str, Any]) -> None:
         """Best-effort removal of a recorded cgroup, never inside another job."""
@@ -859,17 +919,24 @@ class JobTable:
     def _record_resource_sample(self, jid: str,
                                 sample: Mapping[str, Any]) -> None:
         peak = sample.get("peak_memory_mb")
-        if not isinstance(peak, (int, float)):
+        disk_peak = sample.get("peak_disk_write_mb")
+        disk_source = sample.get("disk_source")
+        memory_ok = isinstance(peak, (int, float))
+        disk_ok = (isinstance(disk_peak, (int, float)) and bool(disk_source))
+        if not memory_ok and not disk_ok:
             return
         with self.cond:
             rec = self.jobs.get(jid)
             if rec is None:
                 return
-            old = rec.get("peak_memory_mb")
-            value = round(max(float(old or 0.0), float(peak)), 2)
-            rec["peak_memory_mb"] = value
-            self.counts["resource_peak_mb"] = max(
-                float(self.counts.get("resource_peak_mb") or 0.0), value)
+            if memory_ok:
+                old = rec.get("peak_memory_mb")
+                value = round(max(float(old or 0.0), float(peak)), 2)
+                rec["peak_memory_mb"] = value
+                self.counts["resource_peak_mb"] = max(
+                    float(self.counts.get("resource_peak_mb") or 0.0), value)
+            if disk_ok:
+                self._note_disk_peak(rec, disk_peak, disk_source)
 
     @staticmethod
     def _append_log_line(rec: Mapping[str, Any], line: str) -> None:
@@ -1116,11 +1183,17 @@ class JobTable:
                     cgroup_record["reason"] = (
                         "cgroup v2 unavailable; rlimit+watch fallback")
             initial_peak: float | None = None
+            initial_disk: float | None = None
+            initial_disk_source: str | None = None
             if enforcing:
                 try:
                     first = R.process_group_usage(proc.pid)
                     if first.get("process_count"):
                         initial_peak = float(first.get("memory_mb") or 0.0)
+                    disk_write = first.get("disk_write_mb")
+                    if isinstance(disk_write, (int, float)):
+                        initial_disk = round(float(disk_write), 4)
+                        initial_disk_source = first.get("disk_source")
                 except Exception:  # noqa: BLE001 - observation is best-effort
                     initial_peak = 0.0
             rel = os.path.relpath(wd, self.root)
@@ -1135,7 +1208,10 @@ class JobTable:
                    "harness": harness if isinstance(harness, str) else None,
                    "limits": chosen.to_dict(), "enforcement": mechanism,
                    "cgroup": cgroup_record,
-                   "peak_memory_mb": initial_peak, "resource_events": [],
+                   "peak_memory_mb": initial_peak,
+                   "peak_disk_write_mb": None,
+                   "disk_write_source": None,
+                   "resource_events": [],
                    "admission": self._admission_summary(admission),
                    "owned": True}
             self.jobs[jid] = rec
@@ -1147,6 +1223,8 @@ class JobTable:
                 self.counts["resource_peak_mb"] = max(
                     float(self.counts.get("resource_peak_mb") or 0.0),
                     initial_peak)
+            if initial_disk is not None:
+                self._note_disk_peak(rec, initial_disk, initial_disk_source)
             self._evict()
             self._save()
             t = threading.Thread(target=self._reap, args=(jid, proc),
@@ -1161,16 +1239,21 @@ class JobTable:
                 def on_sample(sample: Mapping[str, Any],
                               job_id: str = jid) -> None:
                     self._record_resource_sample(job_id, sample)
-                    self._sample_cgroup(job_id)
 
                 def killer(event: dict[str, Any],
                            job_id: str = jid) -> None:
                     self._resource_breach(job_id, event)
 
+                disk_attributor = None
+                if cgroup_handle is not None:
+                    def disk_attributor(
+                            job_id: str = jid) -> dict[str, Any] | None:
+                        return self._sample_cgroup(job_id)
+
                 watchdog = R.ResourceWatchdog(
                     chosen, pgid=proc.pid, verify=verify, killer=killer,
                     path=wd, interval_s=sample_s, reserve_disk_gb=reserve_gb,
-                    on_sample=on_sample)
+                    disk_attributor=disk_attributor, on_sample=on_sample)
                 self._watchdogs[jid] = watchdog
                 watchdog.start()
             return self.public(rec)
@@ -1428,6 +1511,8 @@ class JobTable:
                         "limits": pub.get("limits"),
                         "cgroup": pub.get("cgroup"),
                         "peak_memory_mb": pub.get("peak_memory_mb"),
+                        "peak_disk_write_mb": pub.get("peak_disk_write_mb"),
+                        "disk_write_source": pub.get("disk_write_source"),
                         "resource_events": pub.get("resource_events") or [],
                         "enforcement": pub.get("enforcement"),
                         "admission": pub.get("admission"),
