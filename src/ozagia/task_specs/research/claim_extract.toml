@@ -1,0 +1,99 @@
+id = "claim_extract"
+version = 1
+title = "Claim extraction"
+objective = "Extract claims with source locators and an explicit uncertainty level, without writing to the repository."
+inputs = ["document_path"]
+tools = ["read", "grep"]
+write_scope = []
+requires_graph = false
+stop = ["gate_failed", "budget_exhausted", "resource_limit", "no_progress", "repeated_state"]
+output = "claims.v1"
+
+[worktree]
+base = "main"
+require_clean = false
+require_up_to_date = false
+
+[resources]
+memory_mb = 512
+disk_mb = 256
+pids = 32
+wall_s = 180
+
+[budget]
+tokens = 20000
+model_calls = 0
+cost_usd = 0.0
+wall_s = 180
+
+[gates]
+before = ["resources_fit"]
+after = ["schema_valid", "evidence_present"]
+
+[approval]
+mutate = "deny"
+network = "deny"
+
+[output_schema]
+type = "object"
+required = ["claims", "open_questions", "not_assessed"]
+additionalProperties = false
+
+[output_schema.properties.claims]
+type = "array"
+
+[output_schema.properties.claims.items]
+type = "object"
+required = ["text", "locator", "uncertainty"]
+additionalProperties = false
+
+[output_schema.properties.claims.items.properties.text]
+type = "string"
+minLength = 1
+
+[output_schema.properties.claims.items.properties.locator]
+type = "string"
+minLength = 1
+
+[output_schema.properties.claims.items.properties.uncertainty]
+type = "string"
+enum = ["low", "medium", "high"]
+
+[output_schema.properties.open_questions]
+type = "array"
+
+[output_schema.properties.open_questions.items]
+type = "string"
+
+[output_schema.properties.not_assessed]
+type = "array"
+
+[output_schema.properties.not_assessed.items]
+type = "string"
+
+[[steps]]
+id = "read-document"
+tool = "read"
+goal = "Read the requested document and its section structure."
+paths = ["."]
+
+[steps.budget]
+tokens = 8000
+
+[[steps]]
+id = "locate-claims"
+tool = "grep"
+goal = "Locate claim statements, hedges and their line locators."
+paths = ["."]
+
+[steps.budget]
+tokens = 8000
+
+[[steps]]
+id = "assemble"
+tool = "read"
+goal = "Assemble claims, open questions and what was not assessed."
+paths = ["."]
+
+[steps.budget]
+tokens = 4000

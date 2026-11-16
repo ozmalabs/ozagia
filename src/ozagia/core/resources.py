@@ -1,11 +1,14 @@
-"""Host resource observation and read-only admission checks.
+"""Host resource observation, admission checks and first-layer enforcement.
 
-This module never starts, signals or kills a process. It reports what the host
-and ozagia-owned process groups are using, keeps a bounded history of observed
-runs, and answers whether a requested job/task/worktree is likely to fit.
+The module reports what the host and ozagia-owned process groups are using,
+keeps a bounded history of observed runs, and answers whether a requested
+job/task/worktree is likely to fit. It also carries the first enforcement
+layer: child rlimits (POSIX ``resource``), a watchdog that samples a verified
+process group and the filesystem, and the child ``oom_score_adj`` hint.
 
-Enforcement (cgroups, rlimits, a watchdog and ozagia's own OOM) is a later
-layer; this module is the deterministic data and refusal path it builds on.
+The watchdog never signals a process itself. Callers inject a killer, and a
+watchdog only calls it while its injected verifier says the process group is
+still the caller's. cgroups are out of scope for this layer.
 """
 from __future__ import annotations
 
@@ -14,13 +17,21 @@ import json
 import os
 import shutil
 import sys
+import threading
+import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 import tomllib
 
 from ozagia.config import state_path
+
+try:  # POSIX only; never fail the import on Windows.
+    import resource as _resource
+except ImportError:  # pragma: no cover - exercised on non-POSIX hosts
+    _resource = None
 
 SCHEMA = 1
 HISTORY_DIR = "resources"
@@ -59,6 +70,14 @@ DEFAULT_POLICY: dict[str, Any] = {
     },
 }
 TMPFS_TYPES = frozenset({"tmpfs", "ramfs"})
+# The first enforcement layer: rlimits in the child plus a sampling watchdog.
+# cgroups (memory.max/pids.max) are a later layer.
+ENFORCEMENT_MECHANISM = "rlimit+watch"
+# Best-effort: if the kernel OOM killer runs anyway, prefer ozagia's children
+# over the user's shell or desktop. Raising oom_score_adj needs no privilege.
+DEFAULT_OOM_SCORE_ADJ = 500
+_RESOURCE_LIMIT_FIELDS = ("memory_mb", "pids", "disk_mb", "wall_s", "file_mb")
+_MAX_RESOURCE_EVENTS = 50
 
 
 def _now() -> str:
@@ -385,6 +404,413 @@ def process_group_usage(pgid: int) -> dict[str, Any]:
         "command": command,
         "processes": sorted(members, key=lambda m: m["pid"])[:100],
     }
+
+
+@dataclass(frozen=True)
+class ResourceLimits:
+    """Limits for one child run; ``None`` means "not limited".
+
+    ``memory_mb`` is enforced with ``RLIMIT_AS`` and the watchdog, ``pids``
+    with the watchdog (and optionally ``RLIMIT_NPROC``, which counts every
+    process of the real UID), ``file_mb`` with ``RLIMIT_FSIZE``, and ``wall_s``
+    with the watchdog. ``disk_mb`` is an admission/expected-use budget and a
+    best-effort watchdog delta (a drop in filesystem free space since the
+    first sample); exact per-job disk use cannot be attributed.
+    """
+
+    memory_mb: float | None = None
+    pids: int | None = None
+    disk_mb: float | None = None
+    wall_s: float | None = None
+    file_mb: float | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("memory_mb", "disk_mb", "wall_s", "file_mb"):
+            value = getattr(self, name)
+            if value is None:
+                continue
+            try:
+                number = _clean_number(value, name=name, low=0)
+            except ValueError as exc:
+                raise ValueError(f"limit {name}: {exc}") from None
+            object.__setattr__(self, name, number if number > 0 else None)
+        if self.pids is not None:
+            try:
+                pids = int(_clean_number(self.pids, name="pids", low=0))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"limit pids: {exc}") from None
+            object.__setattr__(self, "pids", pids if pids > 0 else None)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "memory_mb": self.memory_mb,
+            "pids": self.pids,
+            "disk_mb": self.disk_mb,
+            "wall_s": self.wall_s,
+            "file_mb": self.file_mb,
+        }
+
+    @property
+    def enabled(self) -> bool:
+        return any(getattr(self, name) is not None
+                   for name in _RESOURCE_LIMIT_FIELDS)
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "ResourceLimits":
+        if not isinstance(value, Mapping):
+            raise ValueError("limits must be a mapping")
+        return cls(**{name: value.get(name) for name in _RESOURCE_LIMIT_FIELDS
+                      if name in value})
+
+
+def limits_from_policy(policy: Mapping[str, Any],
+                       kind: str = "job") -> ResourceLimits:
+    """Limits for ``kind`` from ``[resources.limits]``.
+
+    Keys are ``<kind>_memory_mb``, ``<kind>_pids``, ``<kind>_disk_mb``,
+    ``<kind>_wall_s`` and ``<kind>_file_mb``; a bare field name is accepted as
+    a fallback. Zero or a negative value means "no limit".
+    """
+    if kind not in {"job", "task", "worktree"}:
+        raise ValueError("kind must be job, task or worktree")
+    if not isinstance(policy, Mapping):
+        raise ValueError("policy must be a mapping")
+    limits = policy.get("limits")
+    if not isinstance(limits, Mapping):
+        limits = {}
+    values: dict[str, Any] = {}
+    for name in _RESOURCE_LIMIT_FIELDS:
+        raw = limits.get(f"{kind}_{name}")
+        if raw is None:
+            raw = limits.get(name)
+        if raw is not None:
+            values[name] = raw
+    return ResourceLimits(**values)
+
+
+def _rlimit_value(report: dict[str, Any], name: str, value: int) -> None:
+    """Set one rlimit, recording unsupported/failed limits instead of raising."""
+    if _resource is None:
+        report["unsupported"].append(name)
+        return
+    try:
+        which = getattr(_resource, name)
+    except AttributeError:
+        report["unsupported"].append(name)
+        return
+    try:
+        _soft, hard = _resource.getrlimit(which)
+        desired = int(value)
+        if hard != _resource.RLIM_INFINITY and desired > hard:
+            desired = int(hard)
+        _resource.setrlimit(which, (desired, desired))
+        report["applied"].append(name)
+        report["values"][name] = desired
+    except (OSError, ValueError, OverflowError) as exc:
+        report["errors"].append(f"{name}: {exc}")
+
+
+def apply_child_limits(limits: ResourceLimits | Mapping[str, Any] | None, *,
+                       apply_nproc: bool = True,
+                       oom_score_adj: int | None = DEFAULT_OOM_SCORE_ADJ
+                       ) -> dict[str, Any]:
+    """Apply child rlimits and the OOM hint; never raise (``preexec_fn``).
+
+    Returns a report: ``applied`` and ``unsupported`` limit names, ``values``
+    set, ``errors``, and the ``oom_score_adj`` written (or ``None``). The
+    return value is for direct callers and tests; a ``preexec_fn`` return is
+    discarded by :mod:`subprocess`.
+
+    ``RLIMIT_NPROC`` is per real UID, not per process group, so a job wrapper
+    normally leaves it to the watchdog (``apply_nproc=False``); the other
+    limits are per process. ``oom_score_adj`` is best-effort.
+    """
+    report: dict[str, Any] = {
+        "mechanism": "rlimit",
+        "applied": [],
+        "unsupported": [],
+        "errors": [],
+        "values": {},
+        "oom_score_adj": None,
+    }
+    try:
+        if limits is None:
+            parsed = ResourceLimits()
+        elif isinstance(limits, Mapping):
+            parsed = ResourceLimits.from_mapping(limits)
+        else:
+            parsed = limits
+        if not isinstance(parsed, ResourceLimits):
+            report["errors"].append("limits is not a ResourceLimits")
+            return report
+        if parsed.memory_mb is not None:
+            _rlimit_value(report, "RLIMIT_AS",
+                          int(parsed.memory_mb * 1024 * 1024))
+        if parsed.file_mb is not None:
+            _rlimit_value(report, "RLIMIT_FSIZE",
+                          int(parsed.file_mb * 1024 * 1024))
+        if parsed.pids is not None and apply_nproc:
+            _rlimit_value(report, "RLIMIT_NPROC", int(parsed.pids))
+        if oom_score_adj is not None:
+            try:
+                value = max(-1000, min(1000, int(oom_score_adj)))
+                target = PROC_ROOT / "self" / "oom_score_adj"
+                with open(target, "w", encoding="ascii") as handle:
+                    handle.write(f"{value}\n")
+                report["oom_score_adj"] = value
+            except (OSError, TypeError, ValueError) as exc:
+                report["errors"].append(f"oom_score_adj: {exc}")
+    except Exception as exc:  # noqa: BLE001 - the child path must never raise
+        report["errors"].append(f"{type(exc).__name__}: {exc}")
+    return report
+
+
+def describe_resource_event(event: Mapping[str, Any]) -> str:
+    """One human-readable body for a ``[ozagia] resource:`` log line."""
+    kind = event.get("kind")
+    if kind == "memory":
+        return (f"memory limit {_fmt_mb(event.get('limit_mb'))} exceeded "
+                f"(peak {_fmt_mb(event.get('observed_mb'))})")
+    if kind == "pids":
+        return (f"process limit {event.get('limit_pids')} exceeded "
+                f"({event.get('observed')} processes in the group)")
+    if kind == "wall":
+        return (f"wall-time limit {event.get('limit_s')} s exceeded "
+                f"(elapsed {event.get('observed_s')} s)")
+    if kind == "disk" and event.get("budget_mb") is not None:
+        return (f"disk budget {_fmt_mb(event.get('budget_mb'))} exceeded "
+                f"({_fmt_mb(event.get('observed_mb'))} written since the job "
+                "started, best-effort)")
+    if kind == "disk":
+        return (f"disk reserve {event.get('reserve_gb')} GiB crossed "
+                f"({event.get('free_gb')} GiB free)")
+    if kind == "unverified":
+        return "process group is not verified as the job's; not signalled"
+    return f"resource event {kind or 'unknown'}"
+
+
+class ResourceWatchdog:
+    """Sample one process group and filesystem; call an injected killer.
+
+    The watchdog does not know how to signal a process. ``killer`` receives
+    the breach event and is called at most once, and only while ``verify``
+    returns true. Without a verifier, the group must still report at least one
+    process; jobs pass a start-token/ownership verifier so a stale or reused
+    process group is never treated as the job's.
+    """
+
+    def __init__(self, limits: ResourceLimits | Mapping[str, Any],
+                 *, pgid: int, verify: Callable[[], bool] | None = None,
+                 killer: Callable[[dict[str, Any]], Any] | None = None,
+                 sampler: Callable[[int], Mapping[str, Any]] = process_group_usage,
+                 disk_probe: Callable[[], Mapping[str, Any]] | None = None,
+                 path: str | Path | None = None,
+                 interval_s: float = 2.0,
+                 reserve_disk_gb: float = 0.0,
+                 on_sample: Callable[[dict[str, Any]], Any] | None = None,
+                 clock: Callable[[], float] = time.monotonic) -> None:
+        self.limits = (limits if isinstance(limits, ResourceLimits)
+                       else ResourceLimits.from_mapping(limits))
+        self.pgid = int(pgid)
+        self.verify = verify
+        self.killer = killer
+        self._sampler = sampler
+        self._disk_probe = disk_probe
+        self.path = str(path) if path is not None else None
+        self.interval_s = max(0.01, float(interval_s))
+        self.reserve_disk_gb = max(0.0, float(reserve_disk_gb))
+        self._on_sample = on_sample
+        self._clock = clock
+        self.started_at = clock()
+        self.peak_memory_mb: float | None = None
+        self.disk_used_mb: float | None = None
+        self._disk_baseline_free_gb: float | None = None
+        self.samples = 0
+        self.kills = 0
+        self.events: list[dict[str, Any]] = []
+        self.last_sample: dict[str, Any] | None = None
+        self._thread: threading.Thread | None = None
+        self._stop = threading.Event()
+        self._lock = threading.RLock()
+        self._kill_attempted = False
+        self._unverified_reported = False
+
+    # -- sampling ------------------------------------------------------------ #
+    def _usage(self) -> dict[str, Any]:
+        try:
+            value = self._sampler(self.pgid)
+        except Exception as exc:  # noqa: BLE001 - observation must not crash
+            return {"pgid": self.pgid, "process_count": 0, "memory_mb": 0.0,
+                    "error": f"{type(exc).__name__}: {exc}"}
+        if not isinstance(value, Mapping):
+            return {"pgid": self.pgid, "process_count": 0,
+                    "memory_mb": 0.0}
+        return dict(value)
+
+    def _verified(self, usage: Mapping[str, Any]) -> bool:
+        if self.verify is not None:
+            try:
+                return bool(self.verify())
+            except Exception:  # noqa: BLE001 - a failed check is not proof
+                return False
+        # The default sampler reports process_count; a caller-supplied sampler
+        # that omits it is taken as first-hand evidence for its own group.
+        if "process_count" not in usage:
+            return True
+        try:
+            return int(usage.get("process_count") or 0) > 0
+        except (TypeError, ValueError):
+            return False
+
+    def _disk(self) -> dict[str, Any] | None:
+        if self._disk_probe is not None:
+            try:
+                value = self._disk_probe()
+            except Exception:  # noqa: BLE001
+                return None
+            return dict(value) if isinstance(value, Mapping) else None
+        if self.path is None:
+            return None
+        try:
+            return disk_usage(self.path)
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _breach(self, usage: Mapping[str, Any], disk: Mapping[str, Any] | None,
+                elapsed: float) -> dict[str, Any] | None:
+        limits = self.limits
+        memory = usage.get("memory_mb")
+        if (limits.memory_mb is not None and isinstance(memory, (int, float))
+                and float(memory) > float(limits.memory_mb)):
+            return {"kind": "memory", "limit_mb": limits.memory_mb,
+                    "observed_mb": round(float(memory), 2)}
+        count = usage.get("process_count")
+        if (limits.pids is not None and isinstance(count, (int, float))
+                and int(count) > int(limits.pids)):
+            return {"kind": "pids", "limit_pids": int(limits.pids),
+                    "observed": int(count)}
+        if limits.wall_s is not None and elapsed > float(limits.wall_s):
+            return {"kind": "wall", "limit_s": float(limits.wall_s),
+                    "observed_s": round(elapsed, 2)}
+        if disk is not None:
+            free = disk.get("free_gb")
+            if (isinstance(free, (int, float)) and self.reserve_disk_gb > 0
+                    and float(free) < self.reserve_disk_gb):
+                return {"kind": "disk",
+                        "reserve_gb": self.reserve_disk_gb,
+                        "free_gb": round(float(free), 2)}
+            if (limits.disk_mb is not None and isinstance(free, (int, float))
+                    and self._disk_baseline_free_gb is not None):
+                used = max(0.0, (self._disk_baseline_free_gb
+                                 - float(free)) * 1024)
+                if used > float(limits.disk_mb):
+                    return {"kind": "disk",
+                            "budget_mb": limits.disk_mb,
+                            "observed_mb": round(used, 1),
+                            "free_gb": round(float(free), 2),
+                            "baseline_free_gb": round(
+                                self._disk_baseline_free_gb, 2)}
+        return None
+
+    def sample_once(self) -> dict[str, Any] | None:
+        """Take one sample; return the sample dict (or the last one)."""
+        with self._lock:
+            if self._kill_attempted:
+                return self.last_sample
+            self.samples += 1
+            usage = self._usage()
+            now = self._clock()
+            if not self._verified(usage):
+                if not self._unverified_reported:
+                    self._unverified_reported = True
+                    self._add_event({
+                        "ts": _now(), "pgid": self.pgid, "kind": "unverified",
+                        "verified": False, "action": "not_signalled",
+                    })
+                return None
+            memory = usage.get("memory_mb")
+            if isinstance(memory, (int, float)):
+                value = round(float(memory), 2)
+                if self.peak_memory_mb is None or value > self.peak_memory_mb:
+                    self.peak_memory_mb = value
+            disk = self._disk()
+            free = (disk or {}).get("free_gb")
+            if isinstance(free, (int, float)):
+                if self._disk_baseline_free_gb is None:
+                    self._disk_baseline_free_gb = float(free)
+                used = max(0.0, (self._disk_baseline_free_gb
+                                 - float(free)) * 1024)
+                self.disk_used_mb = max(self.disk_used_mb or 0.0,
+                                        round(used, 1))
+            elapsed = max(0.0, now - self.started_at)
+            sample = {
+                "ts": _now(),
+                "pgid": self.pgid,
+                "memory_mb": self.peak_memory_mb,
+                "process_count": usage.get("process_count"),
+                "elapsed_s": round(elapsed, 3),
+                "disk_free_gb": free,
+                "disk_used_mb": self.disk_used_mb,
+                "peak_memory_mb": self.peak_memory_mb,
+            }
+            self.last_sample = sample
+            breach = self._breach(usage, disk, elapsed)
+            on_sample = self._on_sample
+            killer = self.killer
+            if breach is not None:
+                self._kill_attempted = True
+                breach.update({"ts": _now(), "pgid": self.pgid,
+                               "verified": True, "action": "recorded"})
+                self._add_event(breach)
+            else:
+                breach = None
+        if on_sample is not None:
+            try:
+                on_sample(sample)
+            except Exception:  # noqa: BLE001 - reporting must not crash
+                pass
+        if breach is not None:
+            if killer is not None:
+                try:
+                    killer(breach)
+                    breach["action"] = "signalled"
+                except Exception as exc:  # noqa: BLE001
+                    breach["action"] = "killer_error"
+                    breach["error"] = f"{type(exc).__name__}: {exc}"
+            self.kills += 1 if killer is not None else 0
+        return sample
+
+    def _add_event(self, event: dict[str, Any]) -> None:
+        self.events.append(event)
+        del self.events[:-_MAX_RESOURCE_EVENTS]
+
+    # -- thread -------------------------------------------------------------- #
+    def start(self) -> "ResourceWatchdog":
+        with self._lock:
+            if self._thread is not None:
+                return self
+            self._stop.clear()
+            self._thread = threading.Thread(
+                target=self._run, name=f"ozagia-resource-watch-{self.pgid}",
+                daemon=True)
+            self._thread.start()
+        return self
+
+    def _run(self) -> None:
+        while not self._stop.is_set() and not self._kill_attempted:
+            self.sample_once()
+            if self._stop.wait(self.interval_s):
+                break
+
+    def stop(self) -> None:
+        self._stop.set()
+        thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=max(2.0, min(self.interval_s * 2, 10.0)))
+
+    @property
+    def alive(self) -> bool:
+        return bool(self._thread and self._thread.is_alive())
 
 
 def top_process_groups(limit: int = 10) -> list[dict[str, Any]]:
@@ -851,6 +1277,7 @@ def check_admission(root: str | Path, *, kind: str = "job",
             "memory_total_mb": total_mb,
             "disk_free_gb": free_gb,
             "disk_free_pct": disk.get("free_pct"),
+            "disk_total_gb": disk.get("total_gb"),
             "disk_mount": disk.get("mount"),
             "disk_fstype": disk.get("fstype"),
         },
@@ -879,8 +1306,15 @@ def status(root: str | Path, *, path: str | Path | None = None,
         "policy": policy,
         "history": history_summary(root, limit=500),
         "enforcement": {
-            "available": False,
-            "note": "read-only observation; cgroup/rlimit/watchdog enforcement is a later layer",
+            "available": _resource is not None,
+            "mechanism": ENFORCEMENT_MECHANISM if _resource is not None else "watch",
+            "rlimits": sorted({"RLIMIT_AS", "RLIMIT_FSIZE", "RLIMIT_NPROC"}
+                              & {name for name in dir(_resource)
+                                 if name.startswith("RLIMIT_")}
+                              ) if _resource is not None else [],
+            "cgroups": False,
+            "note": ("child rlimits + verified-group watchdog; cgroups are "
+                     "not used"),
         },
     }
 
@@ -889,6 +1323,11 @@ def _fmt_mb(value: Any) -> str:
     if isinstance(value, (int, float)):
         return f"{value:.0f} MiB"
     return "unknown"
+
+
+def format_memory(value: Any) -> str:
+    """``value`` MiB as text, or ``unknown`` (public for job log lines)."""
+    return _fmt_mb(value)
 
 
 def format_status(report: Mapping[str, Any]) -> str:
@@ -926,7 +1365,13 @@ def format_status(report: Mapping[str, Any]) -> str:
                          f"({group.get('process_count')} procs) {command}")
     if report.get("policy", {}).get("errors"):
         lines.append("policy errors: " + "; ".join(report["policy"]["errors"]))
-    lines.append("enforcement: read-only observation (no process is signalled)")
+    enforcement = report.get("enforcement") or {}
+    if enforcement.get("available"):
+        lines.append("enforcement: child rlimits + verified-group watchdog "
+                     "(cgroups are not used)")
+    else:
+        lines.append("enforcement: observation only (rlimits unavailable on "
+                     "this platform)")
     return "\n".join(lines)
 
 
@@ -948,8 +1393,11 @@ def format_check(report: Mapping[str, Any]) -> str:
 
 
 __all__ = [
-    "DEFAULT_POLICY", "check_admission", "command_key", "disk_usage",
-    "estimate", "format_check", "format_status", "history_path",
-    "history_summary", "host_snapshot", "load_policy", "process_group_usage",
-    "process_usage", "record_sample", "status", "top_process_groups",
+    "DEFAULT_OOM_SCORE_ADJ", "DEFAULT_POLICY", "ENFORCEMENT_MECHANISM",
+    "ResourceLimits", "ResourceWatchdog", "apply_child_limits",
+    "check_admission", "command_key", "describe_resource_event", "disk_usage",
+    "estimate", "format_check", "format_memory", "format_status", "history_path",
+    "history_summary", "host_snapshot", "limits_from_policy", "load_policy",
+    "process_group_usage", "process_usage", "record_sample", "status",
+    "top_process_groups",
 ]

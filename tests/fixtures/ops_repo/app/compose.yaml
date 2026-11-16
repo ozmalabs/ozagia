@@ -1,0 +1,45 @@
+name: shop
+x-common: &common
+  restart: unless-stopped
+services:
+  web:
+    <<: *common
+    build:
+      context: .
+      dockerfile: Containerfile
+      target: runtime
+    image: localhost/shop-web:1.2
+    container_name: shop-web
+    ports:
+      - "8080:80"
+      - target: 443
+        published: 8443
+        protocol: tcp
+    expose: ["9000"]
+    volumes:
+      - data:/var/lib/app
+      - ./static:/srv/static:ro
+    networks: [front]
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: ../deploy/web.env
+    environment:
+      DB_PASSWORD: CANARY_COMPOSE_SECRET
+      LOG_LEVEL: info
+    profiles: [prod]
+  db:
+    image: docker.io/library/postgres:16
+    volumes:
+      - data:/var/lib/postgresql/data
+    networks:
+      front: {}
+    environment:
+      - POSTGRES_PASSWORD=CANARY_COMPOSE_SECRET
+  worker:
+    build: ./worker
+    command: ["python", "-m", "worker", "--token", "CANARY_COMPOSE_SECRET"]
+networks:
+  front: {}
+volumes:
+  data: {}

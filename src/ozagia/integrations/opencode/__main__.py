@@ -5,7 +5,13 @@ import argparse
 import json
 import sys
 
-from ozagia.integrations.opencode.install import check_loads, install, uninstall
+from ozagia.integrations.opencode.install import (
+    check_loads,
+    install,
+    plugin_path,
+    tui_brand_path,
+    uninstall,
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -16,7 +22,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--timeout", type=float, default=60, help="check: seconds to wait")
     args = p.parse_args(argv)
     if args.command == "install":
-        print(install(args.workdir))
+        install(args.workdir)
+        # The server plugin and the TUI brand plugin are siblings in the same
+        # directory; report both.
+        print(plugin_path(args.workdir))
+        print(tui_brand_path(args.workdir))
         return 0
     if args.command == "uninstall":
         print("removed" if uninstall(args.workdir) else "not installed")

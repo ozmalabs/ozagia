@@ -571,6 +571,124 @@ def test_real_opencode_lists_the_installed_plugin(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# the TUI brand plugin (ozagia-brand.js)
+# --------------------------------------------------------------------------- #
+# The brand plugin borrows the text renderable's class from a live node and
+# pokes at getChildren / parent / add / setPosition / setPositionType, so the
+# stub implements exactly that surface. The logo is 3 rows x 12 cells (y=6..8,
+# x=21..32); >= 10 cells in a row counts as a "main" logo row, so the brand
+# must land at (minX, mainMaxY+1) = (21, 9), one row below the logo.
+TUI_BRAND_STUB = r"""
+const mod = await import(new URL("file://" + process.argv[1]).href);
+const plugin = mod.default;
+
+class Node {
+  constructor(ctx, opts = {}) {
+    this._ctx = ctx;
+    this.id = opts.id || "";
+    this.x = opts.x ?? 0;
+    this.y = opts.y ?? 0;
+    this.parent = null;
+    this._children = [];
+    this._isDestroyed = false;
+    this.calls = [];
+  }
+  getChildren() { return this._children; }
+  getChildrenCount() { return this._children.length; }
+  add(c) { c.parent = this; this._children.push(c); }
+  remove(c) { c.parent = null; this._children = this._children.filter(k => k !== c); }
+  setPositionType(t) { this.calls.push(["setPositionType", t]); }
+  setPosition(p) { this.calls.push(["setPosition", p]); }
+}
+class TextCell extends Node {
+  constructor(ctx, opts = {}) { super(ctx, opts); this.content = opts.content ?? ""; }
+}
+class Textarea extends Node {}
+
+const out = { id: plugin && plugin.id, has_setup: typeof plugin.setup === "function" };
+const root = new Node(null, { id: "__root__" });
+const container = new Node(null, { id: "box-6" });
+root.add(container);
+for (let y = 6; y <= 8; y++)
+  for (let x = 21; x < 33; x++)
+    container.add(new TextCell(null, { id: "text-" + x + "-" + y, x, y }));
+container.add(new Textarea(null, { id: "textarea-1" }));
+
+let cleanup;
+try {
+  cleanup = plugin.setup({ renderer: { root } });
+  out.setup_ran = true;
+  await new Promise(r => setTimeout(r, 600)); // let the first tick (400ms) fire
+  const brand = container._children.find(c => c.id === "ozagia-brand");
+  out.brand_present = !!brand;
+  if (brand) {
+    out.brand_content = brand.content;
+    out.brand_parent_is_container = brand.parent === container;
+    out.fg_green = !!(brand.fg && brand.fg.buffer && brand.fg.buffer[1] === 216);
+    out.calls = brand.calls;
+  }
+} catch (e) { out.error = String((e && e.stack) || e); }
+if (typeof cleanup === "function") { try { cleanup(); } catch (e) { out.cleanup_error = String(e); } }
+out.brand_removed = !container._children.some(c => c.id === "ozagia-brand");
+process.stdout.write(JSON.stringify(out) + "\n");
+process.exit(0);
+"""
+
+
+@needs_node
+def test_tui_brand_stub_injects_under_the_logo(tmp_path):
+    (tmp_path / "tui_brand.mjs").write_text(oc.tui_brand_source(), encoding="utf-8")
+    # cwd=tmp_path keeps the plugin's `.opencode/ozagia-brand.log` (written to
+    # process.cwd()) out of the repository root.
+    proc = subprocess.run([NODE, "--input-type=module", "-e", TUI_BRAND_STUB,
+                           str(tmp_path / "tui_brand.mjs")],
+                          cwd=str(tmp_path), capture_output=True, text=True,
+                          timeout=30, stdin=subprocess.DEVNULL)
+    doc = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert doc["has_setup"] is True
+    assert doc["id"] == oc.TUI_BRAND_ID
+    assert "error" not in doc, doc
+    assert doc["brand_present"] is True, doc
+    assert doc["brand_content"] == "[ + ozAGIa ]"
+    assert doc["brand_parent_is_container"] is True
+    assert doc["fg_green"] is True
+    calls = {name: arg for name, arg in doc["calls"]}
+    assert calls["setPositionType"] == 2                      # absolute
+    assert calls["setPosition"] == {"left": 21, "top": 9}     # one row below the logo
+    assert doc["brand_removed"] is True                      # cleanup detaches it
+
+
+@pytest.mark.skipif(shutil.which("opencode") is None, reason="opencode not installed")
+def test_tui_brand_renders_under_the_logo_in_a_real_pty(tmp_path):
+    """The real OpenCode TUI paints `[ + ozAGIa ]` under the home-screen logo.
+
+    Runs `opencode` in a headless PTY in a workdir with the brand plugin
+    installed, lets the home screen (and the plugin's first injection) render,
+    then checks the captured stream. This is a TUI render check, not a model
+    call, so it needs no live-model approval -- only the `opencode` binary.
+    """
+    work = tmp_path / "w"
+    work.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=work, check=True)
+    oc.install(work)
+    env = dict(os.environ, TERM="xterm-256color", COLUMNS="80", LINES="24")
+    try:
+        proc = subprocess.run(["script", "-qec", "opencode", "/dev/null"],
+                              cwd=work, capture_output=True, timeout=15, env=env)
+        data = proc.stdout.decode("utf-8", "replace")
+    except subprocess.TimeoutExpired as e:
+        data = (e.stdout or b"").decode("utf-8", "replace")
+    assert "ozAGIa" in data
+    # The plugin fails silently: it must not log a hard failure.
+    brand_log = work / ".opencode" / "ozagia-brand.log"
+    if brand_log.is_file():
+        hard = [ln for ln in brand_log.read_text(encoding="utf-8").splitlines()
+                if ln.startswith(("construct failed", "inject failed",
+                                  "reposition failed", "tick:"))]
+        assert not hard, hard
+
+
+# --------------------------------------------------------------------------- #
 # end to end: the real daemon and the real plugin (review fix 1)
 # --------------------------------------------------------------------------- #
 E2E = r"""

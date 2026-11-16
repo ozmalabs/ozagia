@@ -1,9 +1,18 @@
 """Install the ozagia OpenCode plugin into a workdir and check that it loads.
 
 OpenCode 2.3 loads project plugins from `<project>/.opencode/plugins/*.js`
-(a path under `plugins` in OPENCODE_CONFIG did not load, verified). The
-plugin does nothing unless `OZAGIA_DAEMON_SOCK` is set in OpenCode's
-environment.
+(a path under `plugins` in OPENCODE_CONFIG did not load, verified). `install`
+writes two of them:
+
+- `ozagia.js` -- the server plugin (a top-level file). It does nothing unless
+  `OZAGIA_DAEMON_SOCK` is set in OpenCode's environment.
+- `ozagia/tui.js` -- the TUI brand plugin (in a subdirectory, the only place
+  the TUI process loads a plugin from). It renders `[ + ozAGIa ]` (green) under
+  the home-screen logo. It fails silently: if the render tree it pokes at has
+  changed, it leaves the base TUI untouched.
+
+The server plugin is the one `check_loads` and `self_test` verify; the brand
+plugin is a companion that has no daemon to talk to.
 
 `check_loads` uses two checks, neither of which calls a model:
 
@@ -36,6 +45,11 @@ from typing import Any
 
 PLUGIN_ID = "ozagia"
 PLUGIN_REL = Path(".opencode") / "plugins" / "ozagia.js"
+TUI_BRAND_ID = "ozagia-brand"
+# The TUI process loads a plugin only from `plugins/<name>/tui.js` (a
+# top-level `plugins/*.js` or a subdir `index.js` is not picked up by the TUI;
+# verified against the 2.3.0 binary). The server plugin stays a top-level file.
+TUI_BRAND_REL = Path(".opencode") / "plugins" / "ozagia" / "tui.js"
 REPLACED_TOOLS = ("read", "grep", "glob", "edit", "write", "shell")
 # Pause between `opencode plugin list` polls while the service loads plugins.
 LIST_POLL_S = 1.0
@@ -77,32 +91,55 @@ process.exit(0);
 
 
 def plugin_source() -> str:
-    """The packaged plugin.js."""
+    """The packaged plugin.js (server plugin)."""
     return (resources.files("ozagia.integrations.opencode")
             .joinpath("plugin.js").read_text(encoding="utf-8"))
+
+
+def tui_brand_source() -> str:
+    """The packaged tui_brand.js (TUI brand plugin)."""
+    return (resources.files("ozagia.integrations.opencode")
+            .joinpath("tui_brand.js").read_text(encoding="utf-8"))
 
 
 def plugin_path(workdir: str | Path) -> Path:
     return Path(workdir) / PLUGIN_REL
 
 
+def tui_brand_path(workdir: str | Path) -> Path:
+    return Path(workdir) / TUI_BRAND_REL
+
+
 def install(workdir: str | Path) -> Path:
-    """Write the plugin to `<workdir>/.opencode/plugins/ozagia.js`."""
-    path = plugin_path(workdir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(plugin_source(), encoding="utf-8")
-    return path
+    """Write both plugin files into `<workdir>/.opencode/plugins/`.
+
+    Returns the server plugin's path (the one `check_loads` and `self_test`
+    operate on). The TUI brand plugin is written alongside it, in the
+    `ozagia/` subdirectory the TUI process loads from."""
+    workdir = Path(workdir)
+    server = plugin_path(workdir)
+    server.parent.mkdir(parents=True, exist_ok=True)
+    server.write_text(plugin_source(), encoding="utf-8")
+    brand = tui_brand_path(workdir)
+    brand.parent.mkdir(parents=True, exist_ok=True)
+    brand.write_text(tui_brand_source(), encoding="utf-8")
+    return server
 
 
 def uninstall(workdir: str | Path) -> bool:
-    """Remove the plugin file, and its directories when they are left empty.
+    """Remove both plugin files, and their directories when left empty.
     Returns whether a file was removed."""
-    path = plugin_path(workdir)
+    workdir = Path(workdir)
     removed = False
-    if path.is_file():
-        path.unlink()
-        removed = True
-    for parent in (path.parent, path.parent.parent):
+    for rel in (PLUGIN_REL, TUI_BRAND_REL):
+        path = workdir / rel
+        if path.is_file():
+            path.unlink()
+            removed = True
+    # deepest-first; a non-empty directory (another plugin) stops the cleanup
+    for parent in (workdir / TUI_BRAND_REL.parent,
+                   workdir / PLUGIN_REL.parent,
+                   workdir / ".opencode"):
         try:
             parent.rmdir()
         except OSError:
