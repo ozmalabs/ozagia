@@ -1632,36 +1632,46 @@ The read-only part of 1a landed as new files:
 - `core/library_hints.py`, `library_hints_cli.py`, handled-edit hook: stdlib-
   and dependency-aware reuse hints with local events and feedback
   (`feat/library-hints`, merged as `d270f20`).
+- Research review strengths, semantic reconciliation, Ocelot reconciliation
+  and the popular-science Origin demo (`eb804cf`, `0051899`). The Ocelot
+  worker and MIT notice are committed; the demo result is recorded.
+- `core/module_build.py`, `module_build_cli.py`: preview-first, token-gated
+  module scaffolds from repo-scan opportunities (`feat/module-build`, merged
+  as `f91980a`).
+- `core/ocelot_code.py`, `ocelot_code_cli.py`: optional Ocelot structural
+  clustering for code-review and repo-scan findings, with exact fallback and
+  no cross-family/target merge (`feat/ocelot-code`, merged as `3c70c10`).
+- Settings plumbing: `[models.tasks]`/`[models.local]`, `ozagia config`,
+  captured-pytest `testing.captured`, and doctor settings sources
+  (`feat/plumbing`, merged as `07ad251`).
 - Tests for all of the above; docs `worktree.md`, `resources.md`, `files.md`,
   `status.md`, `view.md`, `settings.md`, `code_review.md`, `tasks.md`,
   `task_library.md`, `research_ui.md`, `log_inspect.md`, `models.md`,
-  `testing.md`, `actions.md`, `ocelot.md`, `opencode_addin.md`, `repo_scan.md`,
-  `console.md`, `upstream.md`, `security.md`, `library_hints.md`; console
-  scripts for view, status, settings, tasks, task library, research UI, log
-  inspection, models, testing, actions, repo scan, upstream, console, security,
-  library hints, review, Ocelot, worktree, resources and files in
+  `testing.md`, `actions.md`, `ocelot.md`, `ocelot_code.md`,
+  `opencode_addin.md`, `repo_scan.md`, `module_build.md`, `console.md`,
+  `upstream.md`, `security.md`, `library_hints.md`; console scripts for view,
+  status, settings, tasks, task library, research UI, log inspection, models,
+  testing, actions, repo scan, module build, upstream, console, security,
+  library hints, Ocelot code, review, Ocelot, worktree, resources and files in
   `pyproject.toml`.
 
-Checks after all five waves: `3737 passed, 21 skipped`;
+Checks after all six waves: `3816 passed, 21 skipped`;
 `ruff check src tests` passes. The OpenCode add-in additionally passes
 `npm run typecheck`, `node --test` (17/17) and `npm run build` (one CJS
 bundle) against OpenCode 2.3.0. A concurrent TUI-brand merge added
 `.opencode/plugins/ozagia/tui.js`; the harness exclude patterns and tests were
 updated for it.
 
-Not yet: Ocelot coding enhancements; the live OpenCode Desktop smoke test;
-add-in apply/mutation controls and a bounded-task launcher; the repo-scan
-module-build stage; cgroups and exact per-job disk accounting; cleanup
-apply/trash; command-derived path extraction for `patch`/`shell`; a true
-before/after session manifest (the current scan attributes pre-existing
-untracked files to the session with `reason: unknown`); live/multi-model review
-and Ocelot reconciliation in the code-review harness; model/tool adapters and
-an injected test runner; interactive captured-pytest wiring for
-`testing.captured`; `[models.tasks]`/`[models.local]` support in the settings
-registry; `ozagia config` CLI/`config.py` integration, migration from
-`.ozagia.toml`, doctor source reporting; action apply UI and integration
-install/uninstall; live security-tool matrix/DAST; library hints in code
-review/repo scan and non-handled edits; and hook installer CLI.
+Not yet: the live OpenCode Desktop smoke test; add-in apply/mutation controls
+and a bounded-task launcher; Ocelot test-impact/architecture-pattern
+clustering; cgroups and exact per-job disk accounting; cleanup apply/trash;
+command-derived path extraction for `patch`/`shell`; a true before/after
+session manifest (the current scan attributes pre-existing untracked files to
+the session with `reason: unknown`); live/multi-model review; model/tool
+adapters and an injected test runner; migration from `.ozagia.toml`; action
+apply UI and integration install/uninstall; live security-tool matrix/DAST;
+library hints in code review/repo scan and non-handled edits; and hook
+installer CLI.
 
 ### Parallel workstreams (2026-11-16)
 
@@ -1761,8 +1771,10 @@ Three agents start from `0051899`:
 | `~/ozmadev/ozagia-wt/module-build` | `feat/module-build` | Preview-first module scaffolding from a repo-scan opportunity |
 | `~/ozmadev/ozagia-wt/plumbing` | `feat/plumbing` | Models/test settings integration, captured-pytest policy, doctor sources, `ozagia config` |
 
-The same review/merge/full-suite gate applies. The live OpenCode Desktop
-smoke test still needs a host with the desktop app.
+Status: all merged: `module-build` as `f91980a`, `plumbing` as `07ad251`, and
+`ocelot-code` as `3c70c10`. The final full suite is `3816 passed, 21 skipped`;
+ruff passes. The live OpenCode Desktop smoke test still needs a host with the
+desktop app.
 
 ### Library-first workstream (2026-11-16)
 
