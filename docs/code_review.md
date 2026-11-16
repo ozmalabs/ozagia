@@ -184,9 +184,28 @@ Important fields:
   "omissions": [],
   "not_assessed": [],
   "model_review": {"status": "not_run", "truth_assessed": false},
+  "security": {"provided": true, "findings": [], "truth_assessed": false},
   "truth_assessed": false
 }
 ```
+
+`security` is present only when the caller supplies a security report.
+
+## Optional security findings
+
+A caller that already ran `ozagia.core.security.scan` may pass the report:
+
+```python
+packet = R.review_range(root, "main..HEAD", security_report=security_report)
+```
+
+The packet then contains a `security` section with the supplied findings and
+their original `sec-...` ids, summary, `not_assessed` entries and
+`truth_assessed: false`. The review does **not** run a scan or a tool. A
+`not_assessed` entry records that exploitability and the scan's currentness
+were not established. `exit_code` includes the supplied findings: critical
+maps to `blocking`, high to `major`, medium to `minor`, low/info to `note`.
+This is a review flag, not a vulnerability claim.
 
 `truth_assessed` is always `false`. A finding is evidence for a human or a
 later reviewer, not a proof that the change is wrong. The packet does not

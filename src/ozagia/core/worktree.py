@@ -464,12 +464,149 @@ def _branches_containing(path: Path, branch: str) -> list[str]:
     return out
 
 
+def _secret_policy_checks(path: Path, kind: str, base: str,
+                          allow_secrets: Sequence[str],
+                          security: Mapping[str, Any] | None
+                          ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Run the default secret gate for a commit or push policy check."""
+    from ozagia.core import security as security_core
+    checks: list[dict[str, Any]] = []
+    prefix = "commit" if kind == "commit" else "push"
+    settings = security_core.load_config(path)
+    override = dict(security or {})
+    block = bool(override.get("block_secrets", settings["block_secrets"]))
+    allowlist = override.get("secret_allowlist", settings["secret_allowlist"])
+    if not isinstance(allowlist, list):
+        allowlist = list(settings["secret_allowlist"])
+    allowlist = [str(item) for item in allowlist if isinstance(item, str)]
+    tokens_raw = ([allow_secrets] if isinstance(allow_secrets, str)
+                  else list(allow_secrets or []))
+    tokens = [str(item) for item in tokens_raw
+              if str(item).startswith("sha256:")
+              and len(str(item)) > len("sha256:") + 4]
+    invalid_tokens = [str(item) for item in tokens_raw
+                      if not (str(item).startswith("sha256:")
+                              and len(str(item)) > len("sha256:") + 4)]
+    info: dict[str, Any] = {
+        "block_secrets": block,
+        "secret_allowlist": allowlist,
+        "overrides": [],
+        "mode": "staged" if kind == "commit" else f"{base}..HEAD",
+        "findings": 0,
+        "allowed": 0,
+        "disabled": not block,
+        "truncated": False,
+    }
+    if invalid_tokens:
+        _add(checks, "warn", f"{prefix}.secret_override_invalid",
+             "ignored an override that is not a sha256: fingerprint")
+    try:
+        if kind == "commit":
+            report = security_core.scan_secrets(
+                path, staged=True, allowlist=allowlist, block_secrets=block)
+        else:
+            report = security_core.scan_secrets(
+                path, diff=f"{base}..HEAD", allowlist=allowlist,
+                block_secrets=block)
+    except security_core.SecurityError as exc:
+        _add(checks, "not_checked", f"{prefix}.secret_scan",
+             f"secret scan unavailable: {exc}",
+             command=("git diff --cached --unified=0" if kind == "commit"
+                      else f"git diff {base}..HEAD --unified=0"))
+        info["error"] = str(exc)
+        return checks, info
+    info.update({
+        "findings": int((report.get("summary") or {}).get("total", 0)),
+        "allowed": int((report.get("summary") or {}).get("allowed", 0)),
+        "truncated": bool((report.get("summary") or {}).get("truncated")),
+        "notes": list(report.get("notes") or []),
+    })
+    if not block:
+        _add(checks, "warn", f"{prefix}.secret_gate",
+             "secret gate disabled by [security] block_secrets=false; "
+             "findings are reported but do not block")
+        if info["findings"]:
+            _add(checks, "warn", f"{prefix}.secret",
+                 f"{info['findings']} secret-like finding(s) are not blocking "
+                 "because the gate is disabled")
+        info["disabled"] = True
+        return checks, info
+    if info["truncated"]:
+        _add(checks, "error", f"{prefix}.secret_scan",
+             "the secret diff exceeded the scan bound; the gate is not "
+             "checked completely",
+             command=("git diff --cached --unified=0" if kind == "commit"
+                      else f"git diff {base}..HEAD --unified=0"))
+    if info["allowed"]:
+        _add(checks, "info", f"{prefix}.secret_allowlisted",
+             f"{info['allowed']} secret finding(s) matched the configured "
+             "allowlist")
+    for finding in report.get("findings") or []:
+        fingerprint = str(finding.get("secret_fingerprint") or "")
+        rule = str(finding.get("secret_rule") or "secret")
+        file_path = finding.get("file")
+        line = finding.get("line")
+        location = str(file_path or "unknown")
+        if line:
+            location += f":{line}"
+        override = next(
+            (token for token in tokens if fingerprint == token
+             or (fingerprint and fingerprint.startswith(token))), None)
+        if override:
+            try:
+                record = security_core.record_secret_decision(
+                    path, kind=prefix, finding=finding,
+                    decision="allowed_once", mode=str(info["mode"]))
+            except security_core.SecurityError as exc:
+                _add(checks, "error", f"{prefix}.secret_override_audit",
+                     f"secret override could not be recorded: {exc}",
+                     fingerprint=fingerprint)
+                _add(checks, "error", f"{prefix}.secret",
+                     f"secret-like value matched rule {rule} at {location}; "
+                     f"fingerprint {fingerprint}; value withheld",
+                     command=("git diff --cached --unified=0"
+                              if kind == "commit" else
+                              f"git diff {base}..HEAD --unified=0"),
+                     rule=rule, path=file_path, line=line,
+                     fingerprint=fingerprint)
+                continue
+            info["overrides"].append(record)
+            _add(checks, "warn", f"{prefix}.secret_override",
+                 f"secret-like value matched rule {rule} at {location}; "
+                 f"allowed once by explicit override (fingerprint "
+                 f"{fingerprint}); the value is withheld",
+                 rule=rule, path=file_path, line=line,
+                 fingerprint=fingerprint)
+            continue
+        _add(checks, "error", f"{prefix}.secret",
+             f"secret-like value matched rule {rule} at {location}; "
+             f"fingerprint {fingerprint}; value withheld",
+             command=("git diff --cached --unified=0" if kind == "commit"
+                      else f"git diff {base}..HEAD --unified=0"),
+             rule=rule, path=file_path, line=line,
+             fingerprint=fingerprint)
+    if not info["findings"] and not info["truncated"]:
+        _add(checks, "ok", f"{prefix}.secret",
+             "no secret-like content found in the checked range")
+    return checks, info
+
+
 def policy_check(path: str | Path, kind: str, *, base: str = "main",
                  target: str | None = None, message: str | None = None,
                  checks: Mapping[str, bool] | None = None,
                  force: bool = False, tags: bool = False,
-                 config_dir: str | Path | None = None) -> dict[str, Any]:
-    """Check commit, merge or push policy for one worktree. No mutation."""
+                 config_dir: str | Path | None = None,
+                 allow_secrets: Sequence[str] = (),
+                 security: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Check commit, merge or push policy for one worktree. No mutation.
+
+    Commit checks scan staged content for secrets and push checks scan the
+    outgoing ``base..HEAD`` diff. The gate is on by default; set
+    ``[security] block_secrets = false`` to disable it. ``allow_secrets`` is a
+    one-time override by fingerprint and is recorded under the state
+    directory. ``security`` may override ``block_secrets`` and
+    ``secret_allowlist`` for this call only.
+    """
     if kind not in {"commit", "merge", "push"}:
         raise ValueError("kind must be commit, merge or push")
     path = Path(path).resolve()
@@ -686,8 +823,17 @@ def policy_check(path: str | Path, kind: str, *, base: str = "main",
             _add(checks_out, "error", "push.branch_checked_out",
                  f"branch is checked out in {len(holders)} worktrees")
 
-    return _result(checks_out, kind=kind, path=path, branch=branch,
-                   expected=expected)
+    secret_info: dict[str, Any] = {}
+    if kind in ("commit", "push"):
+        secret_checks, secret_info = _secret_policy_checks(
+            path, kind, base, allow_secrets, security)
+        checks_out.extend(secret_checks)
+
+    result = _result(checks_out, kind=kind, path=path, branch=branch,
+                     expected=expected)
+    if secret_info:
+        result["security"] = secret_info
+    return result
 
 
 def prune_dry_run(root: str | Path) -> dict[str, Any]:

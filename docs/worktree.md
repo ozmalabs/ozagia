@@ -30,6 +30,7 @@ Examples:
 ```bash
 ozagia-worktree check --root .
 ozagia-worktree policy --for commit --message 'feat: add worktree checks'
+ozagia-worktree policy --for commit --allow-secret sha256:0123abcd
 ozagia-worktree policy --for merge --target main
 ozagia-worktree policy --for push --force
 ```
@@ -95,7 +96,55 @@ require_upstream = false
 
 Commit checks include protected branches, branch and message patterns, author
 identity, signed commits when required, staged-only state, conflicts, fixup and
-merge commits, and whitespace errors.
+merge commits, whitespace errors, and staged secrets.
+
+## Default secret gate
+
+`policy --for commit` scans **staged content** for secrets and returns
+`commit.secret` errors by default. `policy --for push` scans the outgoing
+`base..HEAD` diff and returns `push.secret` errors. This gate is on with no
+configuration; `[security] block_secrets = false` is the only global switch
+and the report says `security.disabled = true` when it is used.
+
+Findings contain the rule, path, line and a `sha256:` fingerprint. The secret
+value is never written to the check, report, JSON, event or audit record.
+
+```toml
+# .ozagia.toml
+[security]
+block_secrets = true
+secret_allowlist = [
+  "path:tests/fixtures/**",
+  "rule:generic_high_entropy",
+  "sha256:0123abcd",
+]
+```
+
+A false positive is allowed by path glob, rule or fingerprint. A one-time
+override takes a confirmed fingerprint token and does not change the config:
+
+```bash
+ozagia-worktree policy --for commit --allow-secret sha256:0123abcd
+```
+
+The override is recorded in `.ozagia/security/audit.jsonl` with the decision,
+rule, path, line, mode and fingerprint, never the value. A disabled gate is
+reported as a warning (`commit.secret_gate` / `push.secret_gate`); findings
+are still listed but do not block.
+
+Pre-commit and pre-push hooks may call the same commands. Installation is
+opt-in and reversible through `ozagia.core.security.install_hook` /
+`uninstall_hook`; nothing installs a hook automatically. An existing hook
+without the `# ozagia security gate` marker is never overwritten without an
+explicit force.
+
+The secret scan is bounded to 1 MiB per file and 16 MiB of diff text. Binary
+and larger files are reported as skipped with a reason; their path is still
+checked for a credential-file rule. A truncated diff makes the gate report
+that the check was incomplete rather than silently passing.
+
+See [security](security.md) for the rule catalogue, fingerprints, tool
+registry and the standalone `python -m ozagia.security_cli secrets` command.
 
 Merge checks include the target ref, source/target cleanliness, a conflict
 preview with `git merge-tree`, up-to-date state, and required checks supplied

@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from ozagia.config import repo_root
+from ozagia.core import security as SEC
 from ozagia.core import worktree as W
 
 
@@ -15,7 +16,8 @@ def _root(value: str | None) -> Path:
 
 
 def _print_json(value: object) -> None:
-    print(json.dumps(value, indent=2, sort_keys=True, default=str))
+    print(SEC.redact_text(json.dumps(value, indent=2, sort_keys=True,
+                                     default=str)))
 
 
 def _checks(values: list[str] | None) -> dict[str, bool]:
@@ -62,6 +64,10 @@ def build_parser() -> argparse.ArgumentParser:
                         metavar="NAME=passed|failed")
     policy.add_argument("--force", action="store_true")
     policy.add_argument("--tags", action="store_true")
+    policy.add_argument("--allow-secret", action="append", default=None,
+                        metavar="sha256:FINGERPRINT",
+                        help="allow one finding once by fingerprint; the "
+                             "decision is recorded")
     policy.add_argument("--config-dir", default=None)
     policy.add_argument("--root", default=None)
     policy.add_argument("--json", action="store_true")
@@ -120,11 +126,12 @@ def main(argv: list[str] | None = None) -> int:
                 path, args.kind, base=args.base, target=args.target,
                 message=args.message, checks=_checks(args.check),
                 force=args.force, tags=args.tags, config_dir=args.config_dir,
+                allow_secrets=args.allow_secret or (),
             )
             if args.json:
                 _print_json(report)
             else:
-                print(W.format_policy(report))
+                print(SEC.redact_text(W.format_policy(report)), end="")
             return 0 if report.get("ok") else 1
         if args.command == "prune":
             if not args.dry_run:

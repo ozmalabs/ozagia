@@ -1,0 +1,597 @@
+"""Tests for the offline security scan, secret gate and CLI."""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import socket
+import subprocess
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from ozagia import security_cli as CLI
+from ozagia.core import code_review as CR
+from ozagia.core import repo_scan as RS
+from ozagia.core import security as S
+from ozagia.core import worktree as W
+
+AWS_KEY = "AKIAIOSFODNN7EXAMPLE"
+GITHUB_KEY = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+OPENAI_KEY = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"
+SECRETS = (AWS_KEY, GITHUB_KEY, OPENAI_KEY)
+
+
+# --------------------------------------------------------------------------- #
+# helpers
+# --------------------------------------------------------------------------- #
+def _git(repo: Path, *args: str, check: bool = True
+         ) -> subprocess.CompletedProcess[str]:
+    env = dict(os.environ)
+    for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+                 "GIT_OBJECT_DIRECTORY"):
+        env.pop(name, None)
+    env.update({
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_AUTHOR_NAME": "Security Tester",
+        "GIT_AUTHOR_EMAIL": "security@example.com",
+        "GIT_COMMITTER_NAME": "Security Tester",
+        "GIT_COMMITTER_EMAIL": "security@example.com",
+    })
+    proc = subprocess.run(["git", "-C", str(repo), *args],
+                          capture_output=True, text=True, env=env,
+                          check=False)
+    if check and proc.returncode != 0:
+        raise AssertionError(
+            f"git {' '.join(args)} failed: {proc.stderr or proc.stdout}")
+    return proc
+
+
+def _init_repo(path: Path) -> Path:
+    path.mkdir(parents=True)
+    _git(path, "init", "-q")
+    _git(path, "symbolic-ref", "HEAD", "refs/heads/main")
+    _git(path, "config", "user.name", "Security Tester")
+    _git(path, "config", "user.email", "security@example.com")
+    _git(path, "config", "commit.gpgsign", "false")
+    (path / ".gitignore").write_text(".ozagia/\n", encoding="utf-8")
+    (path / "ozagia").mkdir()
+    (path / "ozagia" / "resources.toml").write_text(
+        "enabled = false\n", encoding="utf-8")
+    (path / "README.md").write_text("# fixture\n", encoding="utf-8")
+    _git(path, "add", "-A")
+    _git(path, "commit", "-q", "-m", "initial")
+    return path
+
+
+def _commit(repo: Path, message: str = "feat: change") -> str:
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", message)
+    return _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+
+def _write(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def _stage(repo: Path, rel: str, text: str) -> None:
+    _write(repo / rel, text)
+    _git(repo, "add", rel)
+
+
+def _graph(repo: Path) -> Path:
+    path = repo / ".ozagia" / "graph.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    nodes = [
+        {"id": 0, "type": "Repo", "key": "repo:",
+         "attrs": {"root": str(repo.resolve())}},
+        {"id": 1, "type": "File", "key": "file:src/app.py",
+         "attrs": {"path": "src/app.py"}},
+        {"id": 2, "type": "Symbol", "key": "sym:src/app.py::run",
+         "attrs": {"file": "src/app.py", "qualname": "run", "name": "run",
+                   "start_line": 6, "end_line": 10,
+                   "decorators": ["app.post('/run')"]}},
+        {"id": 3, "type": "Symbol", "key": "sym:src/app.py::helper",
+         "attrs": {"file": "src/app.py", "qualname": "helper",
+                   "name": "helper", "start_line": 12, "end_line": 18,
+                   "decorators": []}},
+    ]
+    path.write_text(json.dumps({
+        "version": 2, "nodes": nodes,
+        "edges": [{"src": 1, "type": "defines", "tgt": 2},
+                  {"src": 1, "type": "defines", "tgt": 3}],
+        "next_id": 4, "files": {},
+    }), encoding="utf-8")
+    return path
+
+
+APP = """\
+from flask import Flask, request
+import subprocess, requests
+
+app = Flask(__name__)
+
+@app.post("/run")
+def run():
+    cmd = request.form["cmd"]
+    subprocess.run(cmd, shell=True)
+    return "ok"
+
+def helper():
+    requests.get("https://example.com", verify=False)
+    SECRET_KEY = "0123456789abcdef"
+    AWS = "AKIAIOSFODNN7EXAMPLE"
+    GITHUB = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    OPENAI = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"
+"""
+
+
+@pytest.fixture
+def sec_repo(tmp_path: Path) -> Path:
+    repo = _init_repo(tmp_path / "repo")
+    _write(repo / "src" / "app.py", APP)
+    _write(repo / "pyproject.toml", """\
+[project]
+name = "fixture"
+version = "0.1"
+dependencies = ["flask==2.0.1", "requests>=2"]
+""")
+    _graph(repo)
+    _git(repo, "checkout", "-q", "-b", "feat/security")
+    return repo
+
+
+def _snapshot(root: Path) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for path in sorted(root.rglob("*")):
+        if path.is_file():
+            rel = path.relative_to(root).as_posix()
+            if rel.startswith(".git/"):
+                continue
+            out[rel] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return out
+
+
+def _finding(report: dict[str, Any], rule: str) -> dict[str, Any]:
+    return next(item for item in report["findings"]
+                if item["source"].get("rule") == rule)
+
+
+def _all_text(report: dict[str, Any]) -> str:
+    return S.report_json(report) + S.format_report(report)
+
+
+# --------------------------------------------------------------------------- #
+# graph-derived findings
+# --------------------------------------------------------------------------- #
+def test_graph_shell_sink_path(sec_repo: Path) -> None:
+    report = S.scan(sec_repo, exclude=[], max_findings=100)
+    finding = _finding(report, "shell-true")
+    assert finding["category"] == "owasp:a03"
+    assert finding["cwe"] == ["cwe:78"]
+    assert finding["file"] == "src/app.py"
+    assert finding["line"] == 9
+    assert finding["source"]["type"] == "graph"
+    assert finding["graph_path"][0] == "route:POST /run"
+    assert finding["graph_path"][-1] == "sink:shell"
+    assert finding["evidence"]["kind"] == "graph_path"
+    assert finding["evidence"]["path"] == finding["graph_path"]
+    assert report["graph"]["available"] is True
+    assert report["truth_assessed"] is False
+
+    access = _finding(report, "route-without-auth")
+    assert access["category"] == "owasp:a01"
+    assert "check:permission-missing" in access["graph_path"]
+
+
+def test_secret_values_are_never_printed(sec_repo: Path) -> None:
+    report = S.scan(sec_repo, exclude=[], max_findings=100)
+    text = _all_text(report)
+    for value in SECRETS:
+        assert value not in text
+    secrets = [item for item in report["findings"]
+               if item["category"] == "secret"]
+    assert secrets
+    for item in secrets:
+        assert item["value_withheld"] is True
+        assert item["secret_fingerprint"].startswith("sha256:")
+        assert len(item["secret_fingerprint"]) == len("sha256:") + 16
+    assert any(item["source"]["rule"] == "aws_access_key"
+               for item in secrets)
+    assert any(item["source"]["rule"] == "github_token"
+               for item in secrets)
+    assert any(item["source"]["rule"] == "openai_key"
+               for item in secrets)
+
+
+def test_crypto_and_tls_rules(sec_repo: Path) -> None:
+    report = S.scan(sec_repo, exclude=[], max_findings=100)
+    key = _finding(report, "hardcoded-key")
+    assert key["category"] == "owasp:a02"
+    assert key["cwe"] == ["cwe:321"]
+    tls = _finding(report, "tls-verify-false")
+    assert tls["category"] == "owasp:a02"
+    assert tls["cwe"] == ["cwe:295"]
+
+
+def test_dependency_inventory_without_scanner(sec_repo: Path) -> None:
+    report = S.scan(sec_repo, exclude=[], max_findings=100)
+    inventory = report["dependency_inventory"]
+    assert inventory["components"] == 2
+    assert inventory["manifests"][0]["path"] == "pyproject.toml"
+    assert inventory["cve_status"] == "not_assessed"
+    assert inventory["scanner_ran"] is False
+    finding = _finding(report, "dependency-inventory")
+    assert finding["category"] == "dependency"
+    assert finding["cve_status"] == "not_assessed"
+    assert any("CVE" in note for note in finding["not_assessed"])
+    assert any("CVE" in note for note in report["not_assessed"])
+
+
+def test_dedupe_and_cap(sec_repo: Path) -> None:
+    full = S.scan(sec_repo, exclude=[], max_findings=100)
+    shell = [item for item in full["findings"]
+             if item["source"]["rule"] == "shell-true"]
+    assert len(shell) == 1
+    assert shell[0]["graph_path"][-1] == "sink:shell"
+
+    capped = S.scan(sec_repo, exclude=[], max_findings=1)
+    assert len(capped["findings"]) == 1
+    assert capped["summary"]["candidates"] > 1
+    assert capped["summary"]["omitted"] > 0
+    assert S.report_json(S.scan(sec_repo, exclude=[], max_findings=100)) == (
+        S.report_json(full))
+
+
+# --------------------------------------------------------------------------- #
+# tool registry and adapters
+# --------------------------------------------------------------------------- #
+def test_tools_reports_availability(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        S.shutil, "which",
+        lambda name: f"/usr/bin/{name}" if name == "bandit" else None)
+    listed = {item["name"]: item for item in S.tools()}
+    assert listed["bandit"]["status"] == "available"
+    assert listed["bandit"]["network_required"] is False
+    assert listed["pip-audit"]["status"] == "unavailable"
+
+
+def _fake_pip_audit(argv: list[str], *, timeout: int, cwd: str) -> dict[str, Any]:
+    assert argv == ["pip-audit", "--format", "json"]
+    return {
+        "returncode": 1,
+        "version": "pip-audit 9.9.9",
+        "database": {"timestamp": "2026-01-01T00:00:00Z"},
+        "stdout": json.dumps({"dependencies": [{
+            "name": "flask", "version": "2.0.1",
+            "vulns": [{"id": "CVE-2026-0001", "severity": "high",
+                       "description": "fixture advisory",
+                       "fix_versions": ["3.0.0"]}],
+        }]}),
+        "stderr": "",
+    }
+
+
+def test_fake_tool_adapter_records_provenance(sec_repo: Path) -> None:
+    report = S.scan(
+        sec_repo, exclude=[], tools=["pip-audit"], allow_network=True,
+        runner=_fake_pip_audit, max_findings=100)
+    result = report["tools"]["results"][0]
+    assert result["status"] == "ok"
+    assert result["version"] == "pip-audit 9.9.9"
+    assert result["command"] == ["pip-audit", "--format", "json"]
+    assert result["exit_code"] == 1
+    assert result["database"]["time"] == "2026-01-01T00:00:00Z"
+    finding = _finding(report, "pip-audit:CVE-2026-0001")
+    assert finding["category"] == "dependency"
+    assert finding["package"] == "flask"
+    assert finding["source"]["tool"] == "pip-audit"
+    assert finding["source"]["version"] == "pip-audit 9.9.9"
+    assert finding["evidence"]["kind"] == "tool"
+    assert report["dependency_inventory"]["cve_status"] == (
+        "scanner_reported_not_exhaustive")
+
+
+def test_missing_tool_is_unavailable_not_failure(
+        sec_repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(S.shutil, "which", lambda name: None)
+    report = S.scan(sec_repo, exclude=[], tools=["bandit"])
+    result = report["tools"]["results"][0]
+    assert result["status"] == "unavailable"
+    assert "not installed" in result["error"]
+    assert not [item for item in report["findings"]
+                if item["source"].get("type") == "tool"]
+
+
+def test_network_tool_refused_without_allow_network(
+        sec_repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(S.shutil, "which", lambda name: f"/usr/bin/{name}")
+    called: list[list[str]] = []
+
+    def runner(argv: list[str], *, timeout: int, cwd: str) -> dict[str, Any]:
+        called.append(argv)
+        raise AssertionError("the runner must not run behind the network gate")
+
+    report = S.scan(
+        sec_repo, exclude=[], tools=["pip-audit"], allow_network=False,
+        runner=runner)
+    result = report["tools"]["results"][0]
+    assert result["status"] == "refused"
+    assert called == []
+    assert any("refused" in note for note in report["not_assessed"])
+
+
+# --------------------------------------------------------------------------- #
+# bounded, read-only scan
+# --------------------------------------------------------------------------- #
+def test_scan_makes_no_network_or_subprocess_calls(
+        sec_repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Remove the graph so the fallback path is filesystem-only.
+    (sec_repo / ".ozagia" / "graph.json").unlink()
+    before = _snapshot(sec_repo)
+
+    def _no_network(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("the scan must not use the network")
+
+    monkeypatch.setattr(socket, "socket", _no_network)
+    monkeypatch.setattr(socket, "create_connection", _no_network)
+    monkeypatch.setattr(subprocess, "run",
+                        lambda *args, **kwargs: (_ for _ in ()).throw(
+                            AssertionError("the scan must not run a process")))
+    report = S.scan(sec_repo, exclude=[], max_findings=20)
+    assert report["graph"]["freshness"] == "missing"
+    assert report["truth_assessed"] is False
+    assert _snapshot(sec_repo) == before
+
+
+# --------------------------------------------------------------------------- #
+# CLI
+# --------------------------------------------------------------------------- #
+def test_cli_scan_exit_codes_and_explain(
+        sec_repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    assert CLI.main(["scan", "--root", str(sec_repo), "--json",
+                     "--fail-on", "high"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["schema"] == S.SCHEMA
+    assert CLI.main(["scan", "--root", str(sec_repo), "--fail-on",
+                     "never"]) == 0
+    capsys.readouterr()
+    assert CLI.main(["tools"]) == 0
+    assert "Security tool registry" in capsys.readouterr().out
+
+    finding = payload["findings"][0]
+    assert CLI.main(["explain", finding["id"], "--root", str(sec_repo),
+                     "--json"]) == 0
+    text = capsys.readouterr().out
+    assert finding["id"] in text
+    for value in SECRETS:
+        assert value not in text
+    assert CLI.main(["explain", "sec-missing", "--root", str(sec_repo)]) == 2
+    assert CLI.main(["scan", "--root", str(sec_repo / "missing")]) == 2
+
+
+def test_cli_secrets_json_has_no_secret(
+        sec_repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    _stage(sec_repo, "src/leak.py", f'KEY = "{AWS_KEY}"\n')
+    code = CLI.main(["secrets", "--root", str(sec_repo), "--staged",
+                     "--json"])
+    assert code == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["schema"] == S.SECRETS_SCHEMA
+    assert payload["findings"]
+    for value in SECRETS:
+        assert value not in json.dumps(payload)
+    assert payload["findings"][0]["secret_fingerprint"].startswith("sha256:")
+
+
+# --------------------------------------------------------------------------- #
+# default commit/push gate
+# --------------------------------------------------------------------------- #
+def test_commit_gate_blocks_staged_keys_without_values(sec_repo: Path) -> None:
+    _stage(sec_repo, "src/keys.py",
+           f"AWS = \"{AWS_KEY}\"\nGITHUB = \"{GITHUB_KEY}\"\n"
+           f"OPENAI = \"{OPENAI_KEY}\"\n")
+    report = W.policy_check(sec_repo, "commit", message="feat: add keys")
+    assert report["ok"] is False
+    errors = [check for check in report["checks"]
+              if check["id"] == "commit.secret"]
+    assert len(errors) == 3
+    payload = json.dumps(report, sort_keys=True)
+    for value in SECRETS:
+        assert value not in payload
+    for check in errors:
+        assert check["fingerprint"].startswith("sha256:")
+        assert "value withheld" in check["message"]
+
+
+def test_commit_gate_allowlist_path_and_fingerprint(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path / "allowed")
+    _git(repo, "checkout", "-q", "-b", "feat/allowed")
+    _write(repo / ".ozagia.toml", """\
+[security]
+secret_allowlist = ["path:tests/fixtures/**", "rule:github_token"]
+""")
+    _stage(repo, "tests/fixtures/key.txt", f"AWS = \"{AWS_KEY}\"\n")
+    _stage(repo, "src/github.py", f'TOKEN = "{GITHUB_KEY}"\n')
+    report = W.policy_check(repo, "commit", message="feat: fixture key")
+    assert not [check for check in report["checks"]
+                if check["id"] == "commit.secret"
+                and check["level"] == "error"]
+    assert report["security"]["allowed"] >= 2
+    assert any(check["id"] == "commit.secret_allowlisted"
+               for check in report["checks"])
+
+    fingerprint = S.secret_fingerprint(GITHUB_KEY)
+    _write(repo / ".ozagia.toml", f"""\
+[security]
+secret_allowlist = ["path:tests/fixtures/**", "{fingerprint}"]
+""")
+    report = W.policy_check(repo, "commit", message="feat: fixture token")
+    assert not [check for check in report["checks"]
+                if check["id"] == "commit.secret"
+                and check["level"] == "error"]
+    assert any(check["id"] == "commit.secret_allowlisted"
+               for check in report["checks"])
+
+
+def test_one_time_override_is_recorded(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path / "override")
+    _git(repo, "checkout", "-q", "-b", "feat/override")
+    _stage(repo, "src/key.py", f'AWS = "{AWS_KEY}"\n')
+    fingerprint = S.secret_fingerprint(AWS_KEY)
+    report = W.policy_check(
+        repo, "commit", message="feat: override",
+        allow_secrets=[fingerprint])
+    assert not [check for check in report["checks"]
+                if check["id"] == "commit.secret"
+                and check["level"] == "error"]
+    assert any(check["id"] == "commit.secret_override"
+               for check in report["checks"])
+    audit_path = repo / ".ozagia" / "security" / "audit.jsonl"
+    audit = audit_path.read_text(encoding="utf-8")
+    payload = json.loads(audit.strip().splitlines()[-1])
+    assert payload["fingerprint"] == fingerprint
+    assert payload["decision"] == "allowed_once"
+    assert AWS_KEY not in audit
+
+
+def test_block_secrets_false_is_reported(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path / "disabled")
+    _git(repo, "checkout", "-q", "-b", "feat/disabled")
+    _write(repo / ".ozagia.toml", "[security]\nblock_secrets = false\n")
+    _stage(repo, "src/key.py", f'AWS = "{AWS_KEY}"\n')
+    report = W.policy_check(repo, "commit", message="feat: disabled")
+    assert report["security"]["disabled"] is True
+    assert not [check for check in report["checks"]
+                if check["id"] == "commit.secret"
+                and check["level"] == "error"]
+    assert any(check["id"] == "commit.secret_gate"
+               and check["level"] == "warn" for check in report["checks"])
+
+
+def test_push_gate_catches_committed_secret(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path / "push")
+    _git(repo, "checkout", "-q", "-b", "feat/push")
+    _write(repo / "src" / "key.py", f'AWS = "{AWS_KEY}"\n')
+    _commit(repo, "feat: committed key")
+    report = W.policy_check(repo, "push", base="main")
+    assert report["ok"] is False
+    errors = [check for check in report["checks"]
+              if check["id"] == "push.secret"]
+    assert errors
+    assert AWS_KEY not in json.dumps(report, sort_keys=True)
+    assert errors[0]["fingerprint"].startswith("sha256:")
+
+
+def test_secret_scan_skips_binary_and_large(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path / "skips")
+    binary = b"\x00\x01" + AWS_KEY.encode() + b"\x00"
+    (repo / "blob.bin").write_bytes(binary)
+    _write(repo / "large.txt", ("padding line\n" * 100000) +
+           f"AWS = \"{AWS_KEY}\"\n")
+    _git(repo, "add", "blob.bin", "large.txt")
+    report = S.scan_secrets(repo, staged=True)
+    reasons = {item["path"]: item["reason"] for item in report["skipped"]}
+    assert "binary" in reasons["blob.bin"]
+    assert "larger" in reasons["large.txt"]
+    assert AWS_KEY not in S.report_json(report)
+
+
+def test_missing_staged_content_is_reported(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path / "clean")
+    report = S.scan_secrets(repo, staged=True)
+    assert report["findings"] == []
+    assert any("no staged content" in note for note in report["notes"])
+    policy = W.policy_check(repo, "commit", message="feat: clean")
+    assert any(check["id"] == "commit.secret" and check["level"] == "ok"
+               for check in policy["checks"])
+
+
+def test_secret_scan_requires_one_mode(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path / "mode")
+    with pytest.raises(S.SecurityError):
+        S.scan_secrets(repo)
+    with pytest.raises(S.SecurityError):
+        S.scan_secrets(repo, staged=True, diff="main..HEAD")
+
+
+def test_hooks_are_opt_in_and_reversible(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path / "hooks")
+    hook = repo / ".git" / "hooks" / "pre-commit"
+    assert not hook.exists()
+    # A policy check never installs a hook.
+    W.policy_check(repo, "commit", message="feat: clean")
+    assert not hook.exists()
+    installed = S.install_hook(repo, "commit")
+    assert installed["installed"] is True
+    assert S.HOOK_MARKER in hook.read_text(encoding="utf-8")
+    assert hook.stat().st_mode & 0o111
+    removed = S.uninstall_hook(repo, "commit")
+    assert removed["removed"] is True
+    assert not hook.exists()
+    hook.write_text("#!/bin/sh\necho local\n", encoding="utf-8")
+    with pytest.raises(S.SecurityError):
+        S.uninstall_hook(repo, "commit")
+
+
+def test_scan_staged_cli_adds_secret_section(
+        sec_repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    _stage(sec_repo, "src/extra.py", f'AWS = "{AWS_KEY}"\n')
+    code = CLI.main(["scan", "--root", str(sec_repo), "--staged", "--json",
+                     "--fail-on", "never"])
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["secrets"]["mode"] == "staged"
+    assert payload["secrets"]["summary"]["total"] >= 1
+    assert AWS_KEY not in json.dumps(payload)
+
+
+# --------------------------------------------------------------------------- #
+# integration: code review and repo scan
+# --------------------------------------------------------------------------- #
+def test_code_review_accepts_supplied_security_findings(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path / "review")
+    _write(repo / "src" / "app.py", "def f():\n    return 1\n")
+    base = _commit(repo, "feat: base")
+    _write(repo / "src" / "app.py", "def f():\n    return 2\n")
+    head = _commit(repo, "feat: head")
+    supplied = {
+        "schema": S.SCHEMA,
+        "findings": [{
+            "id": "sec-abc123",
+            "severity": "high",
+            "category": "secret",
+            "kind": "provider-key",
+            "file": "src/app.py",
+            "line": 1,
+            "message": "supplied finding",
+            "evidence": {"kind": "line"},
+            "source": {"type": "graph", "rule": "fixture"},
+            "not_assessed": ["runtime reachability"],
+            "secret_fingerprint": "sha256:0123456789abcdef",
+        }],
+        "summary": {"total": 1},
+        "not_assessed": ["exploitability"],
+    }
+    packet = CR.review_diff(
+        repo, base=base, head=head, memory_mb=0, disk_mb=0,
+        security_report=supplied)
+    assert packet["security"]["findings"][0]["id"] == "sec-abc123"
+    assert packet["security"]["truth_assessed"] is False
+    assert CR.exit_code(packet, "major") == 1
+    assert any(entry.get("area") == "security"
+               for entry in packet["not_assessed"])
+
+
+def test_repo_scan_injects_security_category(sec_repo: Path) -> None:
+    security_report = S.scan(sec_repo, exclude=[], max_findings=100)
+    report = RS.scan(sec_repo, top=50, security_report=security_report)
+    assert report["security"]["available"] is True
+    security = [item for item in report["opportunities"]
+                if item["category"] == "security"]
+    assert security
+    ids = {item["id"] for item in security_report["findings"]}
+    assert any(item["id"] in ids for item in security)
+    assert "security" in report["inputs"]["categories"]

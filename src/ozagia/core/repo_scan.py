@@ -185,10 +185,20 @@ CATEGORIES: tuple[dict[str, str], ...] = (
         "description": "Blocking or major findings from existing review "
                        "packets, plus known-failure records.",
     },
+    {
+        "id": "security",
+        "title": "Security signals",
+        "description": "High-confidence findings from an explicit security "
+                       "report, or an explicit note that security was not "
+                       "assessed. The repository scan never runs a security "
+                       "tool or a scanner itself.",
+    },
 )
 CATEGORY_IDS = tuple(item["id"] for item in CATEGORIES)
 CATEGORY_RANK = {name: rank for rank, name in enumerate(CATEGORY_IDS)}
 CATEGORY_TITLE = {item["id"]: item["title"] for item in CATEGORIES}
+SECURITY_CATEGORY = next(item for item in CATEGORIES
+                         if item["id"] == "security")
 
 EFFORTS = ("S", "M", "L")
 RISKS = ("low", "medium", "high")
@@ -627,6 +637,7 @@ class _ScanContext:
     unindexed: dict[str, list[str]] = field(default_factory=dict)
     clutter: list[dict[str, Any]] = field(default_factory=list)
     history: dict[str, Any] | None = None
+    security_report: dict[str, Any] | None = None
 
     @property
     def has_graph(self) -> bool:
@@ -1730,6 +1741,167 @@ def _detect_test_policy(ctx: _ScanContext) -> list[dict[str, Any]]:
     return out
 
 
+def _load_security_report(root: Path,
+                          supplied: Mapping[str, Any] | None
+                          ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """Load an already-produced security report; never run one."""
+    info: dict[str, Any] = {
+        "available": False,
+        "source": None,
+        "path": None,
+        "schema": None,
+        "findings": 0,
+    }
+    report: dict[str, Any] | None = None
+    if supplied is not None:
+        if isinstance(supplied, Mapping):
+            report = dict(supplied)
+            info["source"] = "injected"
+        else:
+            return None, info
+    else:
+        path = state_path(root, "security", "latest.json")
+        info["path"] = str(path)
+        if not path.is_file():
+            return None, info
+        try:
+            if path.stat().st_size > MAX_REVIEW_BYTES:
+                return None, info
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None, info
+        if not isinstance(raw, Mapping):
+            return None, info
+        report = dict(raw)
+        info["source"] = "state_file"
+    findings = report.get("findings")
+    if not isinstance(findings, list):
+        return None, info
+    if report.get("schema") not in (None, "ozagia.security.report.v1"):
+        return None, info
+    info.update({
+        "available": True,
+        "schema": report.get("schema"),
+        "findings": len(findings),
+        "truth_assessed": bool(report.get("truth_assessed", False)),
+    })
+    return report, info
+
+
+_SECURITY_SEVERITY_SCORE = {
+    "critical": 90,
+    "high": 82,
+    "medium": 65,
+    "low": 48,
+    "info": 30,
+}
+_SECURITY_SEVERITY_RANK = {
+    "critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4,
+}
+_SECURITY_CONFIDENCE_RANK = {"high": 0, "medium": 1, "low": 2}
+
+
+def _security_opportunities(ctx: _ScanContext,
+                            report: Mapping[str, Any]
+                            ) -> list[dict[str, Any]]:
+    findings = [item for item in report.get("findings") or []
+                if isinstance(item, Mapping)]
+    findings.sort(key=lambda item: (
+        _SECURITY_SEVERITY_RANK.get(str(item.get("severity")), 9),
+        _SECURITY_CONFIDENCE_RANK.get(str(item.get("confidence")), 9),
+        str(item.get("file") or ""),
+        _safe_int(item.get("line")),
+        str(item.get("id") or "")))
+    out: list[dict[str, Any]] = []
+    for finding in findings[:5]:
+        severity = str(finding.get("severity") or "info")
+        if severity not in _SECURITY_SEVERITY_SCORE:
+            severity = "info"
+        confidence = str(finding.get("confidence") or "low")
+        if confidence not in CONFIDENCES:
+            confidence = "low"
+        file_path = finding.get("file")
+        line = _safe_int(finding.get("line")) or None
+        finding_id = str(finding.get("id") or "")
+        if not finding_id:
+            continue
+        evidence: list[dict[str, Any]] = []
+        if isinstance(file_path, str) and file_path:
+            evidence.append(_file_ev(file_path, line, "security finding"))
+        for key in finding.get("graph_path") or []:
+            if isinstance(key, str) and key:
+                evidence.append(_key_ev(key, "security graph path"))
+        evidence.extend([
+            _metric_ev("severity", severity),
+            _metric_ev("security_category",
+                       str(finding.get("category") or "unknown")),
+            _cmd_ev(f"python -m ozagia.security_cli explain {finding_id}",
+                    "show the supplied security finding"),
+        ])
+        not_assessed = [str(item) for item in finding.get("not_assessed") or []]
+        if not not_assessed:
+            not_assessed = ["exploitability and runtime reachability"]
+        not_assessed.append(
+            "whether the supplied security report is current for this tree")
+        item = _opportunity(
+            ctx, "security", finding_id,
+            f"Security finding ({severity}): "
+            f"{finding.get('message') or finding.get('kind') or 'finding'}",
+            evidence=evidence,
+            expected_effect="review or fix a security-relevant signal before "
+                            "it is forgotten",
+            effort="S" if isinstance(file_path, str) and file_path else "M",
+            risk=("high" if severity in ("critical", "high")
+                  else "medium" if severity == "medium" else "low"),
+            confidence=confidence,
+            proposed_module=(file_path if isinstance(file_path, str)
+                             and file_path else "security"),
+            action=("Review the evidence and remediation; fix it in a "
+                    "separate, reviewed change. The scan does not auto-fix "
+                    "or run a security tool."),
+            not_assessed=not_assessed,
+            score=_SECURITY_SEVERITY_SCORE[severity],
+            graph_derived=bool(finding.get("graph_path")))
+        item.update({
+            "security_id": finding_id,
+            "severity": severity,
+            "security_category": str(
+                finding.get("category") or "unknown"),
+            "security_kind": str(finding.get("kind") or "unknown"),
+            "remediation": str(finding.get("remediation") or ""),
+            "false_positive_note": str(
+                finding.get("false_positive_note") or ""),
+            "source_rule": str(
+                (finding.get("source") or {}).get("rule") or ""),
+        })
+        out.append(item)
+    return out
+
+
+def _detect_security(ctx: _ScanContext) -> list[dict[str, Any]]:
+    if ctx.security_report is not None:
+        return _security_opportunities(ctx, ctx.security_report)
+    if ctx.graph_info.get("empty"):
+        return []
+    return [_opportunity(
+        ctx, "security", "security:not-assessed",
+        "Security has not been assessed",
+        evidence=[
+            _cmd_ev("python -m ozagia.security_cli scan --root .",
+                    "produce a report for this category"),
+        ],
+        expected_effect="a triaged security signal instead of an unexamined "
+                        "gap",
+        effort="S", risk="low", confidence="low",
+        proposed_module=".ozagia/security/latest.json",
+        action="Run the security scan explicitly, review the findings, then "
+               "re-run this scan; no security tool is run implicitly.",
+        not_assessed=[
+            "injection, crypto, auth, configuration and dependency risk",
+            "exploitability and runtime reachability",
+        ], score=20, graph_derived=False)]
+
+
 def _node_types(ctx: _ScanContext) -> set[str]:
     nodes = ctx.graph.get("nodes")
     if not isinstance(nodes, list):
@@ -1874,6 +2046,7 @@ _DETECTORS = (
     ("missing_adapters", _detect_missing_adapters),
     ("test_policy", _detect_test_policy),
     ("code_review", _detect_code_review),
+    ("security", _detect_security),
 )
 
 
@@ -1884,12 +2057,19 @@ def _global_not_assessed(ctx: _ScanContext) -> list[str]:
         "runtime performance, memory use and production behaviour",
         "line or branch coverage; the graph records links, not execution",
         "semantic equivalence of duplicate candidates",
-        "security, dependency, licence and supply-chain properties",
         "anything requiring a model, the network or a live service; none was "
         "used",
         "cleanup or edits; the scan never deletes, moves or writes into the "
         "repository",
     ]
+    if ctx.security_report is None:
+        items.append(
+            "security, dependency, licence and supply-chain properties: no "
+            "security report was supplied or found under .ozagia/security/")
+    else:
+        items.append(
+            "security findings: the report is advisory and does not prove "
+            "exploitability; this scan did not rerun a security tool")
     if not ctx.has_graph:
         items.append(
             "every graph-derived category (missing tests, hotspots, weak "
@@ -1947,6 +2127,11 @@ def format_report(report: Mapping[str, Any]) -> str:
         f"opportunities: {summary.get('opportunities', 0)} shown "
         f"({omitted.get('total', 0)} omitted of "
         f"{summary.get('candidates', 0)} candidates)")
+    security = report.get("security") or {}
+    if security.get("available"):
+        lines.append(
+            f"security report: {security.get('findings', 0)} supplied "
+            f"finding(s) from {security.get('source')} (not rerun)")
     by_category = summary.get("by_category") or {}
     if by_category:
         lines.append("by category: " + ", ".join(
@@ -1997,7 +2182,8 @@ def format_categories() -> str:
 
 def scan(root: str | Path = ".", *, graph_path: str | Path | None = None,
          since_days: int = DEFAULT_SINCE_DAYS, top: int = DEFAULT_TOP,
-         per_category: int = DEFAULT_PER_CATEGORY) -> dict[str, Any]:
+         per_category: int = DEFAULT_PER_CATEGORY,
+         security_report: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Scan one checkout read-only and return a deterministic report.
 
     `since_days` bounds the churn window and the stale-note age. `top` bounds
@@ -2039,7 +2225,9 @@ def scan(root: str | Path = ".", *, graph_path: str | Path | None = None,
         graph_file = candidate.resolve()
     graph, graph_info = _load_graph(root_path, graph_file, head,
                                     dirty if status_ok else None)
+    security, security_info = _load_security_report(root_path, security_report)
     ctx = _prepare(root_path, cfg, graph, graph_info, since, changed, warnings)
+    ctx.security_report = security
     if graph_info.get("available") and graph_info.get("empty"):
         warnings.append("graph snapshot is empty; graph-derived categories "
                         "were not assessed")
@@ -2098,6 +2286,9 @@ def scan(root: str | Path = ".", *, graph_path: str | Path | None = None,
         "risk": dict(sorted(Counter(
             str(item.get("risk")) for item in shown).items())),
         "omitted": omitted_total,
+        "security_findings": (
+            int(security_info.get("findings") or 0)
+            if security_info.get("available") else 0),
     }
     report = {
         "schema": SCHEMA,
@@ -2107,6 +2298,7 @@ def scan(root: str | Path = ".", *, graph_path: str | Path | None = None,
         "status": status,
         "root": str(root_path),
         "graph": dict(graph_info),
+        "security": dict(security_info),
         "inputs": {
             "since_days": since,
             "top": top_n,
