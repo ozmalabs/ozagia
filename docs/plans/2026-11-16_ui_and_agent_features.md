@@ -1430,10 +1430,11 @@ OpenCode is the first UI host. One agent starts from `acce262`:
 | Worktree | Branch | Scope |
 | --- | --- | --- |
 | `~/ozmadev/ozagia-wt/opencode-addin` | `feat/opencode-addin` | Local GUI plugin: server RPC over the ozagia CLIs, graph/status/testing panels and commands |
+| `~/ozmadev/ozagia-wt/process-actions` | `feat/process-actions` | Preview-first daemon/service action layer and audit log |
 
 Read-only in this slice: the panel renders graph views, status, worktree,
-resource and test-plan data. Mutating actions remain in the CLI until the
-action layer is reviewed.
+resource and test-plan data. Mutating actions remain preview-first in the CLI;
+the panel does not execute them yet.
 
 ## Open decisions
 
