@@ -25,6 +25,8 @@ EXPECTED_TYPES = {
     "video",
     "chapter",
     "other",
+    # A user's stated position in an agent conversation
+    "conversation",
     # Research artifacts
     "protocol",
     "preregistration",

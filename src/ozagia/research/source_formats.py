@@ -348,6 +348,15 @@ SOURCE_FORMATS: dict[str, SourceFormat] = {
         "A chapter is part of a larger book; record the containing work so the "
         "citation is unambiguous.",
     ),
+    "conversation": _source_format(
+        "conversation",
+        ("session_id", "date"),
+        ("participant", "client", "topic"),
+        None,
+        False,
+        "A conversation with an agent is the source of a user's stated "
+        "position. It needs no bibliographic Reference and is not evidence.",
+    ),
     "other": _source_format(
         "other",
         ("title",),

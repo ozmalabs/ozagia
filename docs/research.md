@@ -97,6 +97,20 @@ build steelman, red-team or synthesis arguments with premise/evidence
 obligations. Multi-model execution is a separate harness driver so the core
 never calls a model. See [structured review](research/review.md).
 
+`research_position_record` stores a user's stated stance or correction as a
+`Holding` sourced to the conversation (session id, date, an optional quote the
+user approved), linked to the records and documents it concerns;
+`research_position_supersede`, `research_position_retract` and
+`research_position_list` manage it. `research_context` reports matching active
+positions with their dates in a separate `user_positions` block, never among
+the sourced results. `research_review_finding_add` keeps review findings in a
+ledger (document, section anchor, severity, status, history with session ids);
+`research_review_finding_status` changes a status with a note,
+`research_review_outstanding` lists open findings by document and
+`research_review_rereview` proposes which may be addressed in a new version by
+checking whether their anchored text changed. See
+[positions and the review ledger](research/positions.md).
+
 `research_extraction_record` / `research_extraction_table` store comparable
 study fields and effect sizes with source locators. `research_risk_of_bias_record`
 and `research_certainty_record` record reviewer appraisals and GRADE-like
