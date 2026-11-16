@@ -516,6 +516,7 @@ pytest output is pytest's own output tail, then:
 ```
 [ozagia] pytest failed: exit 1, 0.4 s, 1 passed, 1 failed, 0 error, 0 skipped
 [ozagia] failed test:tests/test_mod.py::test_broken: assert 3 == 5
+[ozagia]   frame test:tests/test_mod.py::test_broken tests/test_mod.py:9
 ```
 
 Affected tests and the result cache (`ozagia.intent.affected`, off by
@@ -523,19 +524,25 @@ default; `[tests] select = "affected"`, `[tests] cache = true`). A captured
 pytest with no test selector (or only directory selectors) and only
 reporting options runs the tests linked to the files changed since the last
 fully green run of that suite (git working-tree changes, the import walk of
-`ozagia.intent.affected`, the graph's covering tests), and says so after
-the head line:
+`ozagia.intent.affected`, the graph's covering tests), plus the test files
+that failed in the suite's latest run, and says so in the head line and
+after it:
 
 ```
+[ozagia] pytest passed (affected subset: 2 of 3 tests run, 1 not run): exit 0, 0.2 s, 2 passed, 0 failed, 0 error, 0 skipped
 [ozagia] ran 2 affected tests of 3; not run: 1 test in 1 file (tests/test_other.py); run all: OZAGIA_TESTS_ALL=1 python -m pytest -q
 ```
 
 When it cannot decide (no green run yet, conftest.py, a non-Python file or
-the pytest config changed, a changed file no test is linked to, no change
-at all, `OZAGIA_TESTS_ALL=1`) it runs the command as typed and says
-`[ozagia] ran all tests: <reason>`. With the cache, a test whose inputs are
+the pytest config changed, the interpreter, its packages or the environment
+differ from the green run's, the root is below the git top level, a changed
+file no test is linked to, every test file affected, no change at all,
+planning over its time bound, `OZAGIA_TESTS_ALL=1`) it runs the command as
+typed and says `[ozagia] ran all tests: <reason>`. The green run is
+recorded only when the tree is the same after the run as before it. With the
+cache, a test whose inputs are
 unchanged since it passed is reported as `[ozagia] cached pass <file>: ...`
-instead of run; failures are never cached. Slow (> 5 s) and flaky tests are
+instead of run (head line `(cached subset: ...)`); failures are never cached. Slow (> 5 s) and flaky tests are
 listed at the end (`[ozagia] slow test ...`, `[ozagia] flaky test ...`).
 `select = "all"` is the default because changing what a command runs is
 surprising. `meta.tests` has the counters `affected_runs`,
