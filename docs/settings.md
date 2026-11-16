@@ -74,6 +74,111 @@ A repository-only setting in the user config is an error, and
 Environment values and explicit overrides are process-local and are not
 restricted by file scope.
 
+### Legacy `.ozagia.toml` and `ozagia/config.toml`
+
+The registry file is now also read by the runtime project loader
+(`ozagia.config.load_project_config`), which supplies `ProjectConfig` for the
+index, memory, adapters, reads, tests, lint, jobs, IaC and review layers. It
+merges two sources, highest priority first:
+
+1. the legacy file: `$OZAGIA_CONFIG`, `<root>/.ozagia.toml` or
+   `<state dir>/config.toml`;
+2. `<root>/ozagia/config.toml`.
+
+The legacy file wins for **every key it defines**, so an existing project keeps
+its exact behaviour. The registry file supplies only the supported keys the
+legacy file leaves unset, key by key. `ozagia.config.config_path()` returns
+the legacy file when present, else `ozagia/config.toml`;
+`ozagia.config.config_sources()` reports both paths, which one is active
+(`legacy` or `repo`), their precedence and the files that supplied the loaded
+configuration. `ozagia doctor` reports the same information in its `config`
+section (JSON and the Python API; the text summary keeps its existing
+path/valid line) and lists the first 20 keys from the registry file that the
+project loader did not map.
+
+`$OZAGIA_CONFIG` may name either file. When it names the versioned file of the
+same root it keeps the registry schema; when it names a config from another
+root (an eval workdir or a clone), the loader accepts the registry's
+`[testing]` table as the `[tests]` alias and reports the groups other modules
+own, so the file still loads.
+
+The project loader consumes these registry keys:
+
+| Group | Keys |
+| --- | --- |
+| `index` | every key in the legacy `[index]` table |
+| `memory` | `skip_dirs` |
+| `adapters` | `modules` (a module from `ozagia/config.toml` imports from the repository root) |
+| `reads` | `structured_outline_lines`, `structured_outline_bytes`, `outline_lines`, `outline_bytes`, `repeat`, `repeat_by_harness` |
+| `tests` / `testing` | `select`/`cache`, and the `testing.captured`/`testing.cache` aliases |
+| `jobs` | `enabled` |
+| `lint` | `enabled`, `timeout_s`, `python`, `rust` (`auto` means unset) |
+| `iac` | `roots`, `skip_globs` |
+| `review` | `layers` |
+
+Empty `index.map_dirs`, `index.import_roots`, `index.path_prefixes` and
+`index.command_docs` mean "derive the project default", matching the registry
+descriptions. `testing.captured` is reduced to the two selectors the captured
+executor implements: `affected` and `smoke` mean `affected`; `none`, `off`,
+`package` and `all` mean `all`.
+
+Everything else stays with its own module: `security.*` belongs to
+`ozagia.core.security` (which still reads `[security]` from `.ozagia.toml`),
+`hints.*` is read by `ozagia.core.library_hints`, `models.*` by
+`ozagia.core.models`, and the `ui`, `resources`, `worktrees`, `markdown`,
+`files` and `tasks` groups by their modules. The project loader reports those
+keys in `ProjectConfig.unmapped` (and doctor lists them) instead of silently
+ignoring or copying them. The same applies to legacy sections owned by another
+module, such as `[security]`: they are reported and left in place.
+
+Invalid values in `ozagia/config.toml` are a `ConfigError` that names the file,
+for example `/repo/ozagia/config.toml: source_dirs entry '../outside' must be
+inside the root`.
+
+Example: keep the legacy graph scope and move the rest of the project config
+into the versioned file.
+
+```toml
+# .ozagia.toml (still present; wins for every key it defines)
+[index]
+source_dirs = ["src"]
+```
+
+```toml
+# ozagia/config.toml (supplies every supported key the legacy file omits)
+[index]
+test_dirs = ["tests", "spec"]
+docs = ["docs/**/*.md"]
+
+[memory]
+skip_dirs = ["generated"]
+
+[testing]
+captured = "affected"
+cache = true
+
+[lint]
+python = "ruff"
+
+[jobs]
+enabled = true
+
+[iac]
+roots = ["infra"]
+
+[review]
+layers = ["src/core", "src/api"]
+
+[hints]
+library = "strict"
+```
+
+`load_project_config()` uses `src` from the legacy file, `tests`/`spec`,
+`docs`, the memory skip, testing, lint, jobs, IaC and review values from the
+versioned file, and reports `hints` in `unmapped` (the hints module reads it).
+`config_path()` returns `.ozagia.toml`; `config_sources()` reports both files
+with `precedence == ("legacy", "repo")`.
+
 ### Environment overrides
 
 | Variable | Setting |
@@ -587,6 +692,24 @@ Unsupported keys are reported, never guessed:
 - `invalid`: the value violates the registry; it is not written and the
   command exits 1.
 
+After an apply, `ozagia.config.load_project_config` reads the new values
+immediately. The legacy file still wins for every key it defines, so the
+migrated repository behaves as before; values the legacy file does not define
+now come from `ozagia/config.toml`. Removing the legacy file is a separate
+step and is safe only after checking the migration report:
+
+- `[environments]`, `[services]`, `[relays]` and `[runtime]` are still legacy
+  project models and are not part of the registry yet.
+- `ozagia.core.security` still reads `[security]` from `.ozagia.toml` directly;
+  deleting the file would drop the commit/push secret policy until that loader
+  moves to the registry.
+- Any `unmapped` or `unknown` entry stays in `.ozagia.toml` by design.
+
+When both files define a supported key, the legacy value wins and the
+registry value is ignored for the runtime configuration (the `settings`
+commands still report the registry's own value). This is deliberate
+backward compatibility during the transition.
+
 Example JSON shape:
 
 ```json
@@ -599,10 +722,13 @@ Example JSON shape:
  "diff": "--- ..."}
 ```
 
-The migration is deliberately not a replacement for the existing loaders:
-`ozagia.config` still reads `.ozagia.toml` for the graph, index, lint, jobs
-and reads until those loaders are wired to the registry. The legacy file is
-kept so behaviour does not change during that transition.
+The migration is not a replacement for the existing loaders, but the project
+loader now reads the migrated file: `ozagia.config` merges
+`ozagia/config.toml` under `.ozagia.toml` for the graph, index, memory,
+adapters, reads, tests, lint, jobs, IaC and review. The legacy file is kept and
+keeps priority so behaviour does not change during the transition; security,
+hints, models and the legacy project-model sections still need their existing
+files and loaders.
 
 ## JSON shapes
 
@@ -640,12 +766,15 @@ kept so behaviour does not change during that transition.
 
 ## Integration status
 
-This module is deliberately standalone until the existing loaders are wired:
+This module is deliberately standalone for the settings groups that have not
+moved yet:
 
-- `.ozagia.toml` still loads through `ozagia.config` for the index, memory,
-  reads, jobs, tests and lint. `ozagia config migrate` copies the registry
-  subset into `ozagia/config.toml` and keeps the legacy file; the registry
-  does not replace that parser yet.
+- `.ozagia.toml` and `ozagia/config.toml` are both read by
+  `ozagia.config.load_project_config` for the index, memory, adapters, reads,
+  jobs, tests, lint, IaC and review layers. The legacy file keeps priority for
+  every key it defines; the registry file supplies the remaining supported
+  keys. `ozagia config migrate` copies the registry subset into
+  `ozagia/config.toml` and keeps the legacy file.
 - `ozagia.core.resources` still reads `ozagia/resources.toml` or `[resources]`
   from `ozagia/config.toml`. The canonical registry locations match its nested
   `limits`, `admission` and `worktrees` tables.
@@ -657,8 +786,9 @@ This module is deliberately standalone until the existing loaders are wired:
 - `ozagia.core.testing` reads the `testing` group and its open-ended tables.
   The interactive captured-pytest selector in `ozagia.intent.affected` reads
   `[tests] select`/`[tests] cache` from `.ozagia.toml` first; when `select` is
-  not set it uses `testing.captured`. `OZAGIA_TESTS_ALL=1` still runs the
-  command as typed.
+  not set it uses `testing.captured`. `ozagia.config` maps the same keys (and
+  `testing.cache`) into `ProjectConfig`, keeping the legacy value when both
+  files define one. `OZAGIA_TESTS_ALL=1` still runs the command as typed.
 - `ozagia.core.models` reads `[models]` directly, including the same
   `[models.tasks]`/`[models.by_task_class]` and `[models.local]` tables the
   registry now validates. `settings.model_overrides(root)` returns the same
@@ -672,9 +802,11 @@ This module is deliberately standalone until the existing loaders are wired:
   existing loader until it is switched to the registry.
 - `ozagia doctor` reports a `settings` section: the active user/repository/
   state paths, registry validity and the first error, per-source counts, and a
-  bounded list of non-default keys. A broken settings file is reported there
-  and does not change doctor's exit status, which still follows the root and
-  `.ozagia.toml` validity.
+  bounded list of non-default keys. Its `config` section reports the legacy
+  and versioned project-config paths, the active source and precedence, and the
+  first 20 versioned-config keys the project loader did not map. A broken
+  settings file is reported there and does not change doctor's exit status,
+  which still follows the root and project-config validity.
 - `ozagia config migrate` handles the legacy `.ozagia.toml` file. It is
   preview-first (dry run by default), applies only with the preview token,
   never deletes the legacy file and reports unknown, unmapped, conflicting
@@ -684,8 +816,9 @@ This module is deliberately standalone until the existing loaders are wired:
 ## Tests
 
 ```bash
-PYTHONPATH=src python -m pytest -q tests/test_settings.py tests/test_models.py \
-  tests/test_testing.py tests/test_doctor.py tests/test_cli.py \
+PYTHONPATH=src python -m pytest -q tests/test_config.py \
+  tests/test_settings.py tests/test_models.py tests/test_testing.py \
+  tests/test_doctor.py tests/test_affected_tests.py tests/test_cli.py \
   tests/test_hooks.py
 ruff check src tests
 ```

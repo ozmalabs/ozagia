@@ -9,9 +9,15 @@ State (graph snapshot, journal, tag cache, sessions, edit backups) lives in
 absolute path, or one relative to the root). Add `.ozagia/` to the target's
 `.gitignore`; the indexers skip it either way.
 
-The project configuration (`load_project_config`) is a TOML file, the first of:
-`$OZAGIA_CONFIG`, `<root>/.ozagia.toml`, `<state dir>/config.toml`. Without
-one, every key has the generic default below. All keys are optional:
+The project configuration (`load_project_config`) comes from two TOML files.
+The legacy file is the first of `$OZAGIA_CONFIG`, `<root>/.ozagia.toml`,
+`<state dir>/config.toml`; it keeps the highest priority for every key it
+defines. The versioned repository config `<root>/ozagia/config.toml` (the
+settings registry, `ozagia.core.settings`) supplies the supported values for
+keys the legacy file does not define. Without either file, every key has the
+generic default below. `config_path()` names the highest-priority file that
+exists; `config_sources()` reports both files and the precedence. All keys are
+optional:
 
     [index]
     source_dirs = ["."]           # dirs indexed into the graph (memory)
@@ -149,15 +155,37 @@ one, every key has the generic default below. All keys are optional:
     local_port = 0
 
 Directory entries are paths relative to the root ("." is the root itself).
+
+`<root>/ozagia/config.toml` is read with the settings registry's names. The
+project config maps these groups and keys into the fields above:
+
+    [index]          all keys above
+    [memory] skip_dirs
+    [adapters] modules
+    [reads]          all keys above (including repeat_by_harness)
+    [tests]          select, cache
+    [testing]        captured, cache
+    [jobs] enabled
+    [lint]           enabled, timeout_s, python, rust
+    [iac]            roots, skip_globs
+    [review] layers
+
+Values from the other registry groups (`security`, `hints`, `models`, `ui`,
+`resources`, `worktrees`, `markdown`, `files`, `tasks`) stay with the modules
+that own them. The loader reports them, and any unknown key, in
+`ProjectConfig.unmapped` instead of silently ignoring them. The legacy file is
+never rewritten; a migrated `ozagia/config.toml` is read for every key the
+legacy file leaves unset.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import posixpath
 import re
 import subprocess
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -167,6 +195,9 @@ ENV_CONFIG = "OZAGIA_CONFIG"
 STATE_DIRNAME = ".ozagia"
 CONFIG_FILENAME = ".ozagia.toml"
 STATE_CONFIG_FILENAME = "config.toml"
+#: Versioned repository configuration (the settings registry's file).
+REPO_CONFIG_DIRNAME = "ozagia"
+REPO_CONFIG_FILENAME = "config.toml"
 DEFAULT_IAC_SKIP_GLOBS = ("*.backup.last", "*.backup", "*.bak", "*.orig")
 
 # Directory names no indexer enters, in any repository.
@@ -346,11 +377,59 @@ class ProjectConfig:
     runtime_tunnels: tuple[RuntimeTunnelConfig, ...] = ()
     # `[review] layers`: path prefixes, lowest layer first.
     review_layers: tuple[str, ...] = ()
+    #: The configuration files that supplied values, highest priority first.
+    sources: tuple[Path, ...] = ()
+    #: Versioned-config keys this loader does not map, as (key, reason).
+    unmapped: tuple[tuple[str, str], ...] = ()
+    #: Directory adapter modules are imported from when it differs from the
+    #: active source file's directory (a new-only `ozagia/config.toml` uses the
+    #: repository root). None falls back to the source file's directory.
+    adapter_base_dir: Path | None = None
 
     @property
     def adapter_base(self) -> Path | None:
         """The directory adapter modules are imported from."""
+        if self.adapter_base_dir is not None:
+            return self.adapter_base_dir
         return self.source.parent if self.source is not None else None
+
+
+@dataclass(frozen=True)
+class ConfigSources:
+    """The project configuration files that apply to a root.
+
+    ``legacy`` is the highest-priority legacy file (``$OZAGIA_CONFIG``,
+    ``<root>/.ozagia.toml`` or the state directory's ``config.toml``).
+    ``repo_config`` is the versioned ``<root>/ozagia/config.toml``, whether or
+    not it exists. ``active`` is the file ``config_path`` returns:
+    ``legacy`` when present, else the repository config. ``precedence`` names
+    the files that can supply values, highest priority first (``"legacy"``,
+    ``"repo"``).
+    """
+
+    root: Path
+    legacy: Path | None = None
+    legacy_kind: str | None = None
+    repo_config: Path | None = None
+    repo_exists: bool = False
+    active: Path | None = None
+    precedence: tuple[str, ...] = ()
+
+    @property
+    def active_kind(self) -> str | None:
+        """``"legacy"``, ``"repo"`` or None for the active file."""
+        if self.active is None:
+            return None
+        if self.legacy is not None and self.active == self.legacy:
+            return "legacy"
+        return "repo"
+
+    @property
+    def paths(self) -> tuple[Path, ...]:
+        """Existing configuration files, highest priority first."""
+        by_kind = {"legacy": self.legacy, "repo": self.repo_config}
+        return tuple(path for kind in self.precedence
+                     if (path := by_kind.get(kind)) is not None)
 
 
 _KEYS = {
@@ -370,6 +449,85 @@ _KEYS = {
 }
 REPEAT_POLICIES = ("stub", "note", "off")
 TEST_SELECT_POLICIES = ("all", "affected")
+
+#: Versioned-config keys mapped into ProjectConfig -> legacy TOML location.
+#: `testing.captured` and `tests.select` are aliases, as in the registry.
+_PROJECT_CONFIG_KEYS: dict[str, tuple[str, str]] = {
+    "index.source_dirs": ("index", "source_dirs"),
+    "index.map_dirs": ("index", "map_dirs"),
+    "index.test_dirs": ("index", "test_dirs"),
+    "index.skip_dirs": ("index", "skip_dirs"),
+    "index.docs": ("index", "docs"),
+    "index.docs_all": ("index", "docs_all"),
+    "index.key_docs": ("index", "key_docs"),
+    "index.command_docs": ("index", "command_docs"),
+    "index.import_roots": ("index", "import_roots"),
+    "index.path_prefixes": ("index", "path_prefixes"),
+    "index.changed_exclude": ("index", "changed_exclude"),
+    "index.entrypoint_prefixes": ("index", "entrypoint_prefixes"),
+    "memory.skip_dirs": ("memory", "skip_dirs"),
+    "adapters.modules": ("adapters", "modules"),
+    "reads.structured_outline_lines": ("reads", "structured_outline_lines"),
+    "reads.structured_outline_bytes": ("reads", "structured_outline_bytes"),
+    "reads.outline_lines": ("reads", "outline_lines"),
+    "reads.outline_bytes": ("reads", "outline_bytes"),
+    "reads.repeat": ("reads", "repeat"),
+    "reads.repeat_by_harness": ("reads", "repeat_by_harness"),
+    "tests.select": ("tests", "select"),
+    "tests.cache": ("tests", "cache"),
+    "testing.captured": ("tests", "select"),
+    "testing.cache": ("tests", "cache"),
+    "jobs.enabled": ("jobs", "enabled"),
+    "lint.enabled": ("lint", "enabled"),
+    "lint.timeout_s": ("lint", "timeout_s"),
+    "lint.python": ("lint", "python"),
+    "lint.rust": ("lint", "rust"),
+    "iac.roots": ("iac", "roots"),
+    "iac.skip_globs": ("iac", "skip_globs"),
+    "review.layers": ("review", "layers"),
+}
+_PROJECT_CONFIG_SECTIONS = frozenset(_KEYS) | {"testing"}
+
+#: Registry groups another module reads. Reported once per group, never
+#: mapped into ProjectConfig and never copied into the legacy shape.
+_OWNED_SECTIONS = {
+    "security": "owned by ozagia.core.security (still reads .ozagia.toml)",
+    "hints": "read by ozagia.core.library_hints",
+    "models": "read by ozagia.core.models",
+    "ui": "UI presentation setting; not part of the index configuration",
+    "resources": "read by ozagia.core.resources",
+    "worktrees": "read by the worktree modules",
+    "markdown": "read by the Markdown routing modules",
+    "files": "read by the file-ledger and cleanup modules",
+    "tasks": "read by the bounded-task modules",
+}
+
+#: Individual registry keys another module reads, or with no mapping.
+_OWNED_KEYS = {
+    "lint.trust_project_venv": "user-level lint setting (scope user)",
+    "review.min_reviewers": "read by the review modules",
+    "review.require_clean": "read by the review modules",
+    "testing.mode": "read by ozagia.core.testing",
+    "testing.fallback": "read by ozagia.core.testing",
+    "testing.max_tests": "read by ozagia.core.testing",
+    "testing.timeout_s": "read by ozagia.core.testing",
+    "iac.remote_states": "an array of tables has no registry equivalent yet",
+}
+
+#: Registry values that mean "derive the project default" when empty.
+_DERIVED_WHEN_EMPTY = frozenset({
+    "index.map_dirs", "index.import_roots", "index.path_prefixes",
+    "index.command_docs",
+})
+
+#: Registry `testing.captured` -> the selector the existing executor uses
+#: (`ozagia.core.testing.CAPTURED_SELECT`, plus `off` as an alias for `none`).
+_CAPTURED_SELECT = {
+    "all": "all", "affected": "affected",
+    "none": "all", "off": "all", "package": "all", "smoke": "affected",
+}
+
+_SKIP = object()
 
 _RELAY_KEYS = {
     "specs", "allowed_kinds", "max_timeout_s", "command_allowlist",
@@ -403,19 +561,62 @@ _HOST_PORT = re.compile(
 )
 
 
-def config_path(root: str | Path) -> Path | None:
-    """The configuration file that applies to `root`, or None for defaults."""
+def repo_config_path(root: str | Path) -> Path:
+    """``<root>/ozagia/config.toml`` (the versioned repository config)."""
+    return Path(root).resolve() / REPO_CONFIG_DIRNAME / REPO_CONFIG_FILENAME
+
+
+def _legacy_config(root: Path) -> tuple[Path | None, str | None]:
+    """The legacy config path and its kind: env, root or state."""
     env = os.environ.get(ENV_CONFIG)
     if env:
         p = Path(env).expanduser().resolve()
         if not p.is_file():
             raise ConfigError(f"${ENV_CONFIG} names {p}, which is not a file")
-        return p
-    for p in (Path(root).resolve() / CONFIG_FILENAME,
-              state_path(root, STATE_CONFIG_FILENAME)):
+        return p, "env"
+    for p, kind in ((root / CONFIG_FILENAME, "root"),
+                    (state_path(root, STATE_CONFIG_FILENAME), "state")):
         if p.is_file():
-            return p
-    return None
+            return p, kind
+    return None, None
+
+
+def config_sources(root: str | Path) -> ConfigSources:
+    """Both configuration locations and the precedence that applies to `root`.
+
+    The legacy file (``$OZAGIA_CONFIG``, ``<root>/.ozagia.toml`` or the state
+    directory's ``config.toml``) wins for every key it defines. The versioned
+    ``<root>/ozagia/config.toml`` supplies the rest. When a location selector
+    names the versioned file itself, it keeps the registry schema instead of
+    becoming a legacy layer. Reads only.
+    """
+    root_p = Path(root).resolve()
+    repo = repo_config_path(root_p)
+    legacy, kind = _legacy_config(root_p)
+    if legacy is not None and legacy == repo:
+        # A subprocess can receive the versioned file through OZAGIA_CONFIG.
+        # Its schema is the registry, not the legacy one.
+        legacy, kind = None, None
+    repo_exists = repo.is_file()
+    precedence = tuple(
+        name for name, present in (("legacy", legacy is not None),
+                                   ("repo", repo_exists)) if present)
+    return ConfigSources(
+        root=root_p, legacy=legacy, legacy_kind=kind, repo_config=repo,
+        repo_exists=repo_exists,
+        active=legacy if legacy is not None else (repo if repo_exists else None),
+        precedence=precedence,
+    )
+
+
+def config_path(root: str | Path) -> Path | None:
+    """The configuration file that applies to `root`, or None for defaults.
+
+    The legacy file when present, else ``<root>/ozagia/config.toml``. Values
+    from both files are loaded; see :func:`load_project_config` and
+    :func:`config_sources`.
+    """
+    return config_sources(root).active
 
 
 def _str_list(table: dict[str, Any], key: str, where: str) -> list[str] | None:
@@ -970,30 +1171,265 @@ def _parse(root: Path, source: Path | None, data: dict[str, Any]) -> ProjectConf
     )
 
 
-_CONFIG_CACHE: dict[tuple[str, str, int], ProjectConfig] = {}
+_CONFIG_CACHE: dict[tuple[Any, ...], ProjectConfig] = {}
+
+
+def _read_source(path: Path | None) -> bytes | None:
+    if path is None:
+        return None
+    try:
+        return path.read_bytes()
+    except OSError as exc:
+        raise ConfigError(f"{path}: {exc}") from exc
+
+
+def _source_signature(path: Path | None, raw: bytes | None) -> tuple[Any, ...]:
+    """A cache-key component: path, mtime, size and content digest."""
+    if path is None or raw is None:
+        return ("", 0, 0, "")
+    try:
+        mtime = path.stat().st_mtime_ns
+    except OSError:
+        mtime = 0
+    return (str(path), mtime, len(raw), hashlib.sha256(raw).hexdigest())
+
+
+def _toml_data(path: Path, raw: bytes | None) -> dict[str, Any]:
+    if raw is None:
+        return {}
+    try:
+        data = tomllib.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise ConfigError(f"{path}: {exc}") from exc
+    if not isinstance(data, dict):  # tomllib always returns a mapping
+        raise ConfigError(f"{path}: not a TOML table")
+    return data
+
+
+def _map_project_value(key: str, value: Any, *, source: Path) -> Any:
+    """The legacy-shaped value, `_SKIP`, or a ConfigError naming `source`."""
+    if key in {"testing.captured", "tests.select"}:
+        if not isinstance(value, str):
+            section, name = key.split(".", 1)
+            raise ConfigError(
+                f"{source}: [{section}] {name} must be a string")
+        policy = value.strip().lower()
+        if policy not in _CAPTURED_SELECT:
+            section, name = key.split(".", 1)
+            raise ConfigError(
+                f"{source}: [{section}] {name} must be one of "
+                + ", ".join(sorted(_CAPTURED_SELECT)))
+        return _CAPTURED_SELECT[policy]
+    if key in {"lint.python", "lint.rust"} and value == "auto":
+        return _SKIP
+    if key in _DERIVED_WHEN_EMPTY and value == []:
+        return _SKIP
+    return value
+
+
+def _validate_registry_value(key: str, value: Any, *, source: Path) -> Any:
+    """Validate a mapped value against the settings registry as well.
+
+    The project-config parser still validates every value; this step catches
+    registry-only rules (for example, source_dirs must not be empty or contain
+    globs) so the versioned file has one schema, whichever module reads it.
+    """
+    if key == "reads.repeat_by_harness":
+        if isinstance(value, dict):
+            from ozagia.core import settings as settings_registry
+            for harness, policy in value.items():
+                try:
+                    settings_registry.validate_file_value(
+                        f"{key}.{harness}", policy,
+                        where=f"{source}: [reads.repeat_by_harness] {harness}")
+                except (settings_registry.SettingsError, ValueError) as exc:
+                    message = str(exc)
+                    if str(source) not in message:
+                        message = f"{source}: {message}"
+                    raise ConfigError(message) from exc
+        return value
+    from ozagia.core import settings as settings_registry
+    section, _, name = key.partition(".")
+    try:
+        return settings_registry.validate_file_value(
+            key, value, where=f"{source}: [{section}] {name}")
+    except (settings_registry.SettingsError, ValueError) as exc:
+        message = str(exc)
+        if str(source) not in message:
+            message = f"{source}: {message}"
+        raise ConfigError(message) from exc
+
+
+def _project_config_values(
+        data: dict[str, Any], *, source: Path,
+) -> tuple[dict[str, Any], tuple[tuple[str, str], ...]]:
+    """Map the supported registry keys in `data` to the legacy TOML shape.
+
+    Values the project config does not consume are returned, with a reason, as
+    unmapped entries. Their values are not retained: doctor reports key names,
+    and the owning module still reads the setting itself.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    origins: dict[tuple[str, str], str] = {}
+    unmapped: list[tuple[str, str]] = []
+    for section, table in data.items():
+        if section in _OWNED_SECTIONS:
+            unmapped.append((section, _OWNED_SECTIONS[section]))
+            continue
+        if section not in _PROJECT_CONFIG_SECTIONS:
+            unmapped.append(
+                (section, "not part of the project configuration"))
+            continue
+        if not isinstance(table, dict):
+            raise ConfigError(f"{source}: [{section}] must be a table")
+        for name, value in table.items():
+            dotted = f"{section}.{name}"
+            if isinstance(value, dict) and dotted != "reads.repeat_by_harness":
+                unmapped.append((dotted, "nested table is not mapped"))
+                continue
+            target = _PROJECT_CONFIG_KEYS.get(dotted)
+            if target is None:
+                unmapped.append((dotted, _OWNED_KEYS.get(
+                    dotted, "not mapped into the project configuration")))
+                continue
+            mapped = _map_project_value(dotted, value, source=source)
+            if mapped is _SKIP:
+                continue
+            mapped = _validate_registry_value(dotted, mapped, source=source)
+            if target in origins:
+                raise ConfigError(
+                    f"{source}: [{origins[target]}] and [{dotted}] define "
+                    "the same value; use one")
+            out.setdefault(target[0], {})[target[1]] = mapped
+            origins[target] = dotted
+    unmapped.sort()
+    return out, tuple(unmapped)
+
+
+def _legacy_values(
+        data: dict[str, Any], *, source: Path | None = None,
+) -> tuple[dict[str, Any], tuple[tuple[str, str], ...]]:
+    """Legacy TOML minus the groups another module owns.
+
+    `ozagia.core.security` reads `[security]` from `.ozagia.toml` directly;
+    the project config reports that group instead of rejecting the file.
+    A `[testing]` table is accepted as the registry's alias for `[tests]`
+    `select`/`cache`, so an explicitly selected `ozagia/config.toml` (for
+    example through `$OZAGIA_CONFIG` in a subprocess) also loads. Unknown
+    sections still fail in `_parse`.
+    """
+    parsed: dict[str, Any] = {}
+    unmapped: list[tuple[str, str]] = []
+    for section, table in data.items():
+        if section == "testing":
+            continue
+        if section in _OWNED_SECTIONS:
+            unmapped.append((section, _OWNED_SECTIONS[section]))
+            continue
+        parsed[section] = table
+    if "testing" in data:
+        table = data["testing"]
+        if not isinstance(table, dict):
+            raise ConfigError(f"{source}: [testing] must be a table")
+        mapped, more = _project_config_values(
+            {"testing": table}, source=source or Path("configuration"))
+        for target_section, values in mapped.items():
+            existing = parsed.setdefault(target_section, {})
+            for name, value in values.items():
+                if name in existing:
+                    raise ConfigError(
+                        f"{source}: [testing] and [{target_section}] "
+                        "define the same value; use one")
+                existing[name] = value
+        unmapped.extend(more)
+    unmapped.sort()
+    return parsed, tuple(unmapped)
+
+
+def _merge_legacy(new_data: dict[str, Any],
+                  legacy_data: dict[str, Any]) -> dict[str, Any]:
+    """Legacy-shaped data with new-config values only where legacy omits one.
+
+    The legacy file keeps its project-model sections (environments, services,
+    relays, runtime) unchanged; `_parse` still validates them.
+    """
+    merged = dict(legacy_data)
+    for section, table in new_data.items():
+        existing = merged.get(section)
+        if not isinstance(existing, dict):
+            existing = {}
+        else:
+            existing = dict(existing)
+        merged[section] = existing
+        for name, value in table.items():
+            existing.setdefault(name, value)
+    return merged
+
+
+def _adapter_base(legacy_data: dict[str, Any], legacy: Path | None,
+                  new_data: dict[str, Any], root: Path) -> Path | None:
+    """The directory adapter modules are imported from.
+
+    Legacy modules keep the historical base: the legacy file's directory. A
+    module from the versioned repository config uses the repository root, so a
+    migrated root-level adapter module keeps working.
+    """
+    legacy_adapters = legacy_data.get("adapters")
+    if (legacy is not None and isinstance(legacy_adapters, dict)
+            and "modules" in legacy_adapters):
+        if (legacy.name == REPO_CONFIG_FILENAME
+                and legacy.parent.name == REPO_CONFIG_DIRNAME):
+            # An explicitly selected registry-schema file from another root.
+            return legacy.parent.parent
+        return legacy.parent
+    if "adapters" in new_data:
+        return root
+    return None
 
 
 def load_project_config(root: str | Path | None = None) -> ProjectConfig:
     """The project configuration for `root` (default `repo_root()`).
 
-    Cached per resolved root, configuration file and file mtime, so editing
-    the file or changing `$OZAGIA_CONFIG` takes effect on the next call.
-    Raises ConfigError for a malformed file.
+    The legacy file supplies every key it defines; the versioned
+    `<root>/ozagia/config.toml` supplies the supported keys it leaves unset.
+    Cached per resolved root, both configuration paths, their mtimes and the
+    content digests, so editing either file or changing `$OZAGIA_CONFIG` takes
+    effect on the next call. Raises ConfigError for a malformed file.
     """
     root_p = Path(root).resolve() if root is not None else repo_root()
-    path = config_path(root_p)
-    mtime = path.stat().st_mtime_ns if path is not None else 0
-    key = (str(root_p), str(path or ""), mtime)
+    sources = config_sources(root_p)
+    repo_path = sources.repo_config if sources.repo_exists else None
+    legacy_raw = _read_source(sources.legacy)
+    new_raw = _read_source(repo_path)
+    key = (str(root_p), _source_signature(sources.legacy, legacy_raw),
+           _source_signature(repo_path, new_raw))
     cached = _CONFIG_CACHE.get(key)
     if cached is not None:
         return cached
-    data: dict[str, Any] = {}
-    if path is not None:
-        try:
-            data = tomllib.loads(path.read_text(encoding="utf-8"))
-        except (OSError, tomllib.TOMLDecodeError) as e:
-            raise ConfigError(f"{path}: {e}") from e
-    cfg = _parse(root_p, path, data)
+
+    legacy_data, legacy_unmapped = _legacy_values(
+        _toml_data(sources.legacy, legacy_raw)
+        if sources.legacy is not None else {}, source=sources.legacy)
+    if sources.legacy is not None:
+        _parse(root_p, sources.legacy, legacy_data)
+
+    new_data: dict[str, Any] = {}
+    new_unmapped: tuple[tuple[str, str], ...] = ()
+    if repo_path is not None:
+        new_data, new_unmapped = _project_config_values(
+            _toml_data(repo_path, new_raw), source=repo_path)
+        if new_data:
+            _parse(root_p, repo_path, new_data)
+    unmapped = tuple(sorted(set(legacy_unmapped) | set(new_unmapped)))
+
+    if repo_path is None:
+        cfg = _parse(root_p, sources.legacy, legacy_data)
+    else:
+        cfg = _parse(root_p, sources.active,
+                     _merge_legacy(new_data, legacy_data))
+    adapter_base = _adapter_base(legacy_data, sources.legacy, new_data, root_p)
+    cfg = replace(cfg, sources=sources.paths, unmapped=unmapped,
+                  adapter_base_dir=adapter_base)
     _CONFIG_CACHE[key] = cfg
     return cfg
 
