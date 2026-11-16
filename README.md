@@ -34,7 +34,7 @@ Claude Code. Measurements are in `docs/results/`; plans in `docs/plans/`.
 | Claude Code hooks | partial capture: graph context after each tool, git ref refusal; `ozagia install claude` | implemented, untested live |
 | Harness | `ozagia agent`: an OpenCode session with the daemon and plugin set up and torn down for you ([docs/harness.md](docs/harness.md)); `python -m ozagia.harness.native`: a small agent loop over any OpenAI-compatible API, with or without the graph ([docs/native_loop.md](docs/native_loop.md)) | implemented; the eval's live runs use the same pieces |
 | Infrastructure | Opt-in source-only Terraform, Kubernetes and related infrastructure graph/context ([docs/iac_context.md](docs/iac_context.md)) | experimental, partial static analysis |
-| SRE/IaC operations | Opt-in job waiting, ops receipts, supplied live-state snapshots, offline IaC checks and dry-run preflight ([docs/sre_operations.md](docs/sre_operations.md)) | experimental; live paths default off |
+| SRE/IaC operations | Opt-in job waiting, nested command/network relays, ops receipts, supplied live-state snapshots, offline IaC checks and dry-run preflight ([docs/sre_operations.md](docs/sre_operations.md), [docs/relay.md](docs/relay.md)) | experimental; live paths default off |
 
 ## Quick start
 

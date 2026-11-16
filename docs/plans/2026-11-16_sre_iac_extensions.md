@@ -427,14 +427,18 @@ duplicate it. The remaining offline workstreams are implemented:
 - **Offline validation/preflight:** `dev_aws_cli_check`, AWS CLI shell hints,
   and a dry-run emulator plan. Execution requires an injected runner and two
   explicit opt-ins; this branch does not run an emulator.
-- **Relay/tunnel foundation:** composable `Relay` chains, arbitrary backend
-  registry, policy gates, ephemeral backend instances, local loopback TCP
-  forwarding and dry-run SSH/SSM plans. Live SSH/SSM should delegate to
-  OpenSSH and the AWS Session Manager plugin; the build-versus-integrate review
-  is in [the relay library evaluation](../research/relay_libraries.md).
-  The relay is not yet wired into the CLI/MCP live gates.
+- **Relay/tunnel:** composable `Relay` chains, arbitrary backend registry,
+  policy gates, ephemeral backend instances, local loopback TCP forwarding, and
+  live OpenSSH/AWS-CLI SSM backends. SSH/SSM process and tunnel lifecycles are
+  bounded; SSM tunnels require the official Session Manager plugin. The
+  build-versus-integrate review is in
+  [the relay library evaluation](../research/relay_libraries.md).
+  `ozagia relay plan|run|tunnel`, the dry-run `dev_relay_plan` MCP tool and
+  `doctor` binary detection are wired; live execution remains policy- and
+  flag-gated and has not been tried against a real host/account here.
+  See [the relay backend plan](2026-11-16_relay_backends.md).
 
-Validation on this branch: full suite `1779 passed, 39 skipped` (the optional
+Validation on this branch: full suite `1814 passed, 39 skipped` (the optional
 `ruamel.yaml` round-trip cases are included locally); `ruff check src tests`
 passed; benchmark and scale numbers are in
 [the benchmark results](../results/iac_bench_2026-11-16.md).

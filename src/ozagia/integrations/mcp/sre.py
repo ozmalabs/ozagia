@@ -147,6 +147,44 @@ def sre_tools(memory: Any) -> list[tuple[dict[str, Any], Any]]:
             return {"ok": False, "error": str(exc)}
         return {"ok": True, **asdict(result)}
 
+    def relay_plan(args: dict[str, Any]) -> dict[str, Any]:
+        from ozagia.relay_cli import RelaySpecFileError, build_relay, parse_target
+        document = args.get("spec")
+        if not isinstance(document, dict):
+            return {"ok": False, "error": "spec must be an object"}
+        relay = None
+        try:
+            relay = build_relay(document)
+            if args.get("target") is not None:
+                target = parse_target(str(args["target"]))
+                timeout_s = min(30.0, relay.policy.max_timeout_s) \
+                    if relay.policy.max_timeout_s > 0 else 30.0
+                lease = relay.open_tunnel(
+                    target, local_port=int(args.get("local_port", 0)),
+                    timeout_s=timeout_s, dry_run=True)
+                return {
+                    "ok": True, "dry_run": True,
+                    "local_host": lease.local_host,
+                    "local_port": lease.local_port,
+                    "target_host": lease.target_host,
+                    "target_port": lease.target_port,
+                    "planned_argv": list(lease.planned_argv),
+                }
+            argv = args.get("argv")
+            if not isinstance(argv, list) or not all(
+                    isinstance(item, str) for item in argv):
+                return {"ok": False, "error": "argv must be an array of strings"}
+            planned = relay.plan_argv(argv)
+        except (RelaySpecFileError, ValueError, TypeError) as exc:
+            return {"ok": False, "error": str(exc)}
+        finally:
+            if relay is not None:
+                try:
+                    relay.close()
+                except Exception:
+                    pass
+        return {"ok": True, "dry_run": True, "argv": list(planned)}
+
     def preflight_plan(args: dict[str, Any]) -> dict[str, Any]:
         from ozagia.core.preflight import build_preflight
         roots = args.get("roots")
@@ -206,6 +244,14 @@ def sre_tools(memory: Any) -> list[tuple[dict[str, Any], Any]]:
           "inputSchema": _schema({
               "argv": {"type": "array", "items": {"type": "string"}}},
               ["argv"])}, aws_cli_check),
+        ({"name": "dev_relay_plan",
+          "description": "Build a dry-run relay command/tunnel plan; never executes or binds a live network.",
+          "inputSchema": _schema({
+              "spec": {"type": "object"},
+              "argv": {"type": "array", "items": {"type": "string"}},
+              "target": {"type": "string"},
+              "local_port": {"type": "integer", "default": 0}},
+              ["spec"])}, relay_plan),
         ({"name": "dev_preflight_plan",
           "description": "Build a dry-run, scrubbed emulator pre-flight plan; never executes it.",
           "inputSchema": _schema({

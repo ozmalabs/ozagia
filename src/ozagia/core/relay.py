@@ -1,7 +1,7 @@
 """Policy-gated command relays and loopback TCP forwarding.
 
-The core has no provider dependencies. Remote SSH/SSM backends in this module
-are planners only: they expose argv plans, but never start remote processes.
+The core has no provider dependencies. Live SSH and SSM operations delegate to
+OpenSSH and the AWS CLI; policy and process lifecycle remain local.
 """
 from __future__ import annotations
 
@@ -9,8 +9,12 @@ import hashlib
 import ipaddress
 import json
 import math
+import os
 import re
 import select
+import shlex
+import shutil
+import signal
 import socket
 import subprocess
 import threading
@@ -200,6 +204,7 @@ class RelayBackend(Protocol):
 
 CommandRunner = Callable[..., CommandResult | tuple[int, str, str]]
 RelayFactory = Callable[..., RelayBackend]
+ProcessFactory = Callable[..., Any]
 
 
 def _validate_timeout(timeout_s: float) -> None:
@@ -256,6 +261,43 @@ def _validate_target(target: TunnelTarget, *, loopback_only: bool) -> None:
             raise RelayPolicyError("local tunnels may target loopback addresses only")
 
 
+def _validate_remote_host(host: str) -> None:
+    if not isinstance(host, str) or not host or len(host) > 253 or host.startswith("-"):
+        raise RelaySpecError("invalid remote tunnel host")
+    name = host[:-1] if host.endswith(".") else host
+    labels = name.split(".")
+    if not name or any(
+        not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label)
+        for label in labels
+    ):
+        raise RelaySpecError("invalid remote tunnel host")
+
+
+def _valid_proxy_jump(value: str) -> bool:
+    if not isinstance(value, str) or not value or len(value) > _MAX_ARG_LENGTH:
+        return False
+    if any(ord(char) < 33 or ord(char) > 126 for char in value):
+        return False
+    for hop in value.split(","):
+        if not hop or hop.startswith("-") or hop.count("@") > 1:
+            return False
+        authority = hop.rsplit("@", 1)[-1]
+        host, separator, port_text = authority.partition(":")
+        if not _HOST.fullmatch(host):
+            return False
+        if separator:
+            if not port_text.isdecimal():
+                return False
+            port = int(port_text)
+            if not 1 <= port <= 65_535:
+                return False
+        if "@" in hop:
+            user = hop.split("@", 1)[0]
+            if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", user):
+                return False
+    return True
+
+
 def _evidence(argv: Sequence[str]) -> str:
     encoded = b"\0".join(item.encode("utf-8") for item in argv)
     return f"sha256:{hashlib.sha256(encoded).hexdigest()[:16]};argc:{len(argv)}"
@@ -269,68 +311,264 @@ def _bounded_text(value: str, limit: int) -> str:
 def _subprocess_runner(
     argv: Sequence[str], *, timeout_s: float, stdin: bytes | None = None
 ) -> tuple[int, str, str]:
-    captured = [bytearray(), bytearray()]
+    process = ProcessLease(argv, capture_output=True)
+    try:
+        process.start(stdin=stdin)
+        try:
+            returncode = process.wait(timeout_s)
+        except RelayError:
+            process.close()
+            raise RelayError("local command timed out") from None
+        stdout, stderr = process.output()
+        return returncode, stdout, stderr
+    except RelayError:
+        raise
+    except Exception:
+        raise RelayError("local command failed") from None
+    finally:
+        process.close()
 
-    def drain(stream: Any, output: bytearray) -> None:
+
+class ProcessLease:
+    """Bounded, argv-only local process handle.
+
+    Capture mode drains at most two pipes using two bounded-lifetime daemon
+    threads. Long-lived tunnel mode discards output and creates no drain threads.
+    """
+
+    def __init__(
+        self,
+        argv: Sequence[str],
+        *,
+        process_factory: ProcessFactory | None = None,
+        capture_output: bool = False,
+        output_limit: int = _MAX_OUTPUT_BYTES,
+    ) -> None:
+        self.argv = _validate_argv(argv)
+        self._factory = (
+            subprocess.Popen if process_factory is None else process_factory
+        )
+        self._capture = capture_output
+        self._output_limit = min(max(0, output_limit), _MAX_OUTPUT_BYTES)
+        self._process: Any | None = None
+        self._closed = False
+        self._lock = threading.RLock()
+        self._stdout = bytearray()
+        self._stderr = bytearray()
+        self._readers: list[threading.Thread] = []
+
+    def __repr__(self) -> str:
+        return "ProcessLease(<redacted argv>)"
+
+    @property
+    def pid(self) -> int | None:
+        process = self._process
+        pid = getattr(process, "pid", None)
+        return pid if isinstance(pid, int) and not isinstance(pid, bool) else None
+
+    @property
+    def process_group(self) -> int | None:
+        """The new-session process group ID on POSIX."""
+        return self.pid if os.name == "posix" else None
+
+    def start(self, *, stdin: bytes | None = None) -> ProcessLease:
+        with self._lock:
+            if self._closed:
+                raise RelayError("process lease is closed")
+            if self._process is not None:
+                return self
+            if stdin is not None and not isinstance(stdin, bytes):
+                raise RelaySpecError("stdin must be bytes")
+            kwargs: dict[str, Any] = {
+                "stdin": subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+                "stdout": subprocess.PIPE if self._capture else subprocess.DEVNULL,
+                "stderr": subprocess.PIPE if self._capture else subprocess.DEVNULL,
+                "shell": False,
+                "start_new_session": True,
+                "close_fds": True,
+            }
+            try:
+                process = self._factory(list(self.argv), **kwargs)
+            except Exception:
+                raise RelayError("local process could not be started") from None
+            self._process = process
+            if self._capture:
+                for stream, output in (
+                    (getattr(process, "stdout", None), self._stdout),
+                    (getattr(process, "stderr", None), self._stderr),
+                ):
+                    if stream is not None:
+                        reader = threading.Thread(
+                            target=self._drain,
+                            args=(stream, output),
+                            name="ozagia-relay-drain",
+                            daemon=True,
+                        )
+                        self._readers.append(reader)
+                        reader.start()
+            if stdin is not None:
+                pipe = getattr(process, "stdin", None)
+                if pipe is None:
+                    self.close()
+                    raise RelayError("local process input is unavailable")
+
+                def write_input() -> None:
+                    try:
+                        pipe.write(stdin)
+                    except (OSError, ValueError):
+                        pass
+                    finally:
+                        try:
+                            pipe.close()
+                        except (OSError, ValueError):
+                            pass
+
+                threading.Thread(
+                    target=write_input, name="ozagia-relay-input", daemon=True
+                ).start()
+        return self
+
+    def _drain(self, stream: Any, output: bytearray) -> None:
         try:
             while True:
                 chunk = stream.read(8 * 1_024)
                 if not chunk:
                     return
-                remaining = _MAX_OUTPUT_BYTES - len(output)
+                remaining = self._output_limit - len(output)
                 if remaining > 0:
                     output.extend(chunk[:remaining])
-        except OSError:
+        except (OSError, ValueError):
             return
 
-    try:
-        process = subprocess.Popen(
-            list(argv),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            shell=False,
-        )
-        assert process.stdout is not None and process.stderr is not None
-        readers = [
-            threading.Thread(target=drain, args=(process.stdout, captured[0]), daemon=True),
-            threading.Thread(target=drain, args=(process.stderr, captured[1]), daemon=True),
-        ]
-        for reader in readers:
-            reader.start()
-        if process.stdin is not None:
-            if stdin is None:
-                process.stdin.close()
-            else:
-                def write_input() -> None:
-                    try:
-                        process.stdin.write(stdin)
-                    except OSError:
-                        pass
-                    finally:
-                        try:
-                            process.stdin.close()
-                        except OSError:
-                            pass
-
-                threading.Thread(target=write_input, daemon=True).start()
+    def poll(self) -> int | None:
+        process = self._process
+        if process is None:
+            return None
         try:
-            returncode = process.wait(timeout=timeout_s)
+            return process.poll()
+        except Exception:
+            return None
+
+    def wait(self, timeout_s: float | None = None) -> int:
+        process = self._process
+        if process is None:
+            raise RelayError("process lease has not started")
+        try:
+            code = process.wait(timeout=timeout_s)
         except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait()
-            raise RelayError("local command timed out") from None
-        for reader in readers:
+            self._stop()
+            raise RelayError("local process timed out") from None
+        except Exception:
+            raise RelayError("local process failed") from None
+        self._join_readers()
+        if isinstance(code, bool) or not isinstance(code, int):
+            raise RelayError("local process returned an invalid status")
+        return code
+
+    def _join_readers(self) -> None:
+        for reader in self._readers:
             reader.join(timeout=1.0)
-    except RelayError:
-        raise
-    except (OSError, subprocess.SubprocessError):
-        raise RelayError("local command failed") from None
-    return (
-        returncode,
-        captured[0].decode("utf-8", errors="replace"),
-        captured[1].decode("utf-8", errors="replace"),
-    )
+
+    def output(self) -> tuple[str, str]:
+        return (
+            bytes(self._stdout).decode("utf-8", errors="replace"),
+            bytes(self._stderr).decode("utf-8", errors="replace"),
+        )
+
+    def _stop(self) -> None:
+        process = self._process
+        if process is None or self.poll() is not None:
+            return
+        pid = self.pid
+        try:
+            if pid is not None and os.name == "posix":
+                os.killpg(pid, signal.SIGTERM)
+            else:
+                process.terminate()
+        except (OSError, ProcessLookupError):
+            pass
+        try:
+            process.wait(timeout=0.5)
+        except Exception:
+            try:
+                if pid is not None and os.name == "posix":
+                    os.killpg(pid, signal.SIGKILL)
+                else:
+                    process.kill()
+            except (OSError, ProcessLookupError):
+                pass
+            try:
+                process.wait(timeout=1.0)
+            except Exception:
+                pass
+        self._join_readers()
+
+    def close(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+        self.stop()
+
+    def stop(self) -> None:
+        self._stop()
+
+
+class PortLease:
+    """Temporary reservation of a loopback TCP port."""
+
+    def __init__(self, port: int = 0) -> None:
+        _validate_port(port, allow_zero=True)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind(("127.0.0.1", port))
+        except OSError:
+            sock.close()
+            raise RelayError("could not reserve loopback port") from None
+        self.port = int(sock.getsockname()[1])
+        self._socket: socket.socket | None = sock
+
+    def release(self) -> None:
+        sock, self._socket = self._socket, None
+        if sock is not None:
+            sock.close()
+
+    def close(self) -> None:
+        self.release()
+
+    def __enter__(self) -> PortLease:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
+
+
+def _wait_for_loopback_listener(
+    port: int, *, timeout_s: float, process: ProcessLease | None = None
+) -> None:
+    """Wait for a loopback listener without creating a helper thread."""
+    _validate_port(port)
+    _validate_timeout(timeout_s)
+    deadline = time.monotonic() + min(float(timeout_s), _MAX_TIMEOUT_S)
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RelayError("tunnel listener did not become ready")
+        if process is not None and process.poll() is not None:
+            raise RelayError("tunnel process exited before opening its listener")
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        probe.settimeout(min(0.1, remaining))
+        try:
+            probe.connect(("127.0.0.1", port))
+            return
+        except OSError:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RelayError("tunnel listener did not become ready") from None
+            time.sleep(min(0.05, remaining))
+        finally:
+            probe.close()
 
 
 class LocalTcpTunnel:
@@ -454,9 +692,17 @@ class LocalBackend:
         self,
         *,
         runner: CommandRunner | None = None,
+        process_factory: ProcessFactory | None = None,
         policy: RelayPolicy | None = None,
     ) -> None:
         self._runner = runner or _subprocess_runner
+        # A custom command runner does not imply permission to spawn persistent
+        # processes; tests/integrators opt into that separately.
+        self._process_factory = (
+            process_factory
+            if process_factory is not None
+            else (None if runner is not None else subprocess.Popen)
+        )
         self.policy = policy if policy is not None else RelayPolicy()
         self._closed = False
 
@@ -505,6 +751,22 @@ class LocalBackend:
 
     def plan_run(self, argv: Sequence[str]) -> tuple[str, ...]:
         return _validate_argv(argv)
+
+    def start_process(
+        self, argv: Sequence[str], *, timeout_s: float
+    ) -> ProcessLease:
+        if self._closed:
+            raise RelayError("relay backend is closed")
+        if self._process_factory is None:
+            raise RelayUnsupported("local parent cannot start persistent processes")
+        checked_argv = _validate_argv(argv)
+        self.policy.check_tunnel(self.kind, timeout_s, live=True)
+        self.policy.check_command(self.kind, checked_argv, timeout_s, live=True)
+        return ProcessLease(
+            checked_argv,
+            process_factory=self._process_factory,
+            capture_output=False,
+        ).start()
 
     def open_tunnel(
         self,
@@ -629,7 +891,7 @@ class CommandBackend:
 
 
 class SshBackend(CommandBackend):
-    """SSH argv planner requiring an explicit host; it never launches SSH."""
+    """OpenSSH backend requiring an explicit host and reviewed relay policy."""
 
     kind = "ssh"
 
@@ -641,6 +903,8 @@ class SshBackend(CommandBackend):
         user: str | None = None,
         port: int | None = None,
         identity_file: str | None = None,
+        proxy_jump: str | None = None,
+        proxy_command: str | None = None,
         policy: RelayPolicy | None = None,
     ) -> None:
         if not isinstance(host, str) or not _HOST.fullmatch(host) or host.startswith("-"):
@@ -658,12 +922,26 @@ class SshBackend(CommandBackend):
             if (
                 not isinstance(identity_file, str)
                 or not identity_file
+                or identity_file.startswith("-")
                 or len(identity_file) > _MAX_ARG_LENGTH
                 or "\x00" in identity_file
                 or any(ord(char) < 32 for char in identity_file)
             ):
                 raise RelaySpecError("invalid SSH identity file")
             prefix.extend(["-i", identity_file])
+        if proxy_jump is not None:
+            if not _valid_proxy_jump(proxy_jump):
+                raise RelaySpecError("invalid SSH proxy jump")
+            prefix.extend(["-J", proxy_jump])
+        if proxy_command is not None:
+            if (
+                not isinstance(proxy_command, str)
+                or not proxy_command
+                or len(proxy_command) > _MAX_ARG_LENGTH
+                or any(ord(char) < 32 for char in proxy_command)
+            ):
+                raise RelaySpecError("invalid SSH proxy command")
+            prefix.extend(["-o", f"ProxyCommand={proxy_command}"])
         prefix.extend(["--", destination])
         tunnel = [
             "ssh", "-N", "-o", "ExitOnForwardFailure=yes",
@@ -673,6 +951,10 @@ class SshBackend(CommandBackend):
             tunnel.extend(["-p", str(port)])
         if identity_file is not None:
             tunnel.extend(["-i", identity_file])
+        if proxy_jump is not None:
+            tunnel.extend(["-J", proxy_jump])
+        if proxy_command is not None:
+            tunnel.extend(["-o", f"ProxyCommand={proxy_command}"])
         tunnel.extend(["--", destination])
         super().__init__(
             command_prefix=prefix,
@@ -680,19 +962,120 @@ class SshBackend(CommandBackend):
             tunnel_command=tunnel,
             policy=policy,
         )
+        self.host = host
+        self.destination = destination
+        self.policy = policy
 
     def plan_run(self, argv: Sequence[str]) -> tuple[str, ...]:
         return self.plan_argv(argv)
 
+    def run(
+        self,
+        argv: Sequence[str],
+        *,
+        timeout_s: float,
+        stdin: bytes | None = None,
+    ) -> CommandResult:
+        if self.policy is None:
+            raise RelayUnsupported("SSH live execution requires an explicit relay policy")
+        checked = _validate_argv(argv)
+        ssh_argv = _validate_argv((*self.command_prefix, *checked))
+        planned = self.plan_run(checked)
+        self.policy.check_command(self.kind, planned, timeout_s, live=True)
+        started = time.monotonic()
+        if self.parent is not None:
+            result = self.parent.run(
+                ssh_argv, timeout_s=timeout_s, stdin=stdin, dry_run=False
+            )
+            return CommandResult(
+                result.returncode,
+                result.stdout,
+                result.stderr,
+                result.elapsed_s,
+                backend=self.kind,
+                planned_argv=(),
+            )
+        code, stdout, stderr = _subprocess_runner(
+            ssh_argv, timeout_s=timeout_s, stdin=stdin
+        )
+        return CommandResult(
+            code,
+            _bounded_text(stdout, self.policy.max_output_bytes),
+            _bounded_text(stderr, self.policy.max_output_bytes),
+            max(0.0, time.monotonic() - started),
+            backend=self.kind,
+        )
+
+    def open_tunnel(
+        self,
+        target: TunnelTarget,
+        *,
+        local_port: int = 0,
+        timeout_s: float = 30.0,
+    ) -> TunnelLease:
+        if self.policy is None:
+            raise RelayUnsupported("SSH live tunnels require an explicit relay policy")
+        self.policy.check_tunnel(self.kind, timeout_s, live=True)
+        _validate_target(target, loopback_only=False)
+        _validate_remote_host(target.host)
+        _validate_port(local_port, allow_zero=True)
+        if self.parent is None or self.parent.kind != "local":
+            raise RelayUnsupported("SSH tunnels require a local parent relay")
+        if not callable(getattr(self.parent, "start_process", None)):
+            raise RelayUnsupported("local parent cannot start tunnel processes")
+        port_lease = PortLease(local_port)
+        port = port_lease.port
+        values = {
+            "local_host": "127.0.0.1",
+            "local_port": str(port),
+            "target_host": target.host,
+            "target_port": str(target.port),
+        }
+        assert self.tunnel_command is not None
+        ssh_argv = _validate_argv(
+            tuple(part.format_map(values) for part in self.tunnel_command)
+        )
+        planned = (
+            self.parent.plan_argv(ssh_argv)
+            if self.parent is not None
+            else ssh_argv
+        )
+        self.policy.check_command(self.kind, planned, timeout_s, live=True)
+        process: ProcessLease | None = None
+        try:
+            port_lease.release()
+            process = self.parent.start_process(ssh_argv, timeout_s=timeout_s)
+            _wait_for_loopback_listener(port, timeout_s=timeout_s, process=process)
+            return TunnelLease(
+                "127.0.0.1",
+                port,
+                target.host,
+                target.port,
+                "local loopback",
+                self.kind,
+                process.close,
+                planned_argv=planned,
+            )
+        except Exception:
+            if process is not None:
+                process.close()
+            raise
+        finally:
+            port_lease.close()
+
+    def plan_tunnel_argv(
+        self, target: TunnelTarget, *, local_port: int
+    ) -> tuple[str, ...]:
+        _validate_target(target, loopback_only=False)
+        _validate_remote_host(target.host)
+        return super().plan_tunnel_argv(target, local_port=local_port)
+
 
 class SsmBackend:
-    """Dry-run-only AWS SSM command/tunnel shape planner.
-
-    Plans require an explicit instance ID and region. This implementation does
-    not invoke AWS CLI or start a Session Manager plugin.
-    """
+    """AWS CLI SSM command and Session Manager tunnel backend."""
 
     kind = "ssm"
+    _POLL_INTERVAL_S = 0.2
 
     def __init__(
         self,
@@ -701,9 +1084,10 @@ class SsmBackend:
         region: str,
         parent: Relay | None = None,
         command_id: str | None = None,
+        remote_host: str | None = None,
+        executable_lookup: Callable[[str], str | None] | None = None,
         policy: RelayPolicy | None = None,
     ) -> None:
-        del policy
         if not isinstance(instance_id, str) or not re.fullmatch(
             r"i-[A-Za-z0-9]{8,32}", instance_id
         ):
@@ -715,51 +1099,143 @@ class SsmBackend:
             or not re.fullmatch(r"[A-Za-z0-9-]{1,128}", command_id)
         ):
             raise RelaySpecError("invalid SSM command ID")
+        if remote_host is not None:
+            _validate_remote_host(remote_host)
         self.instance_id = instance_id
         self.region = region
         self.command_id = command_id
         self.parent = parent
+        self.remote_host = remote_host
+        self.executable_lookup = executable_lookup or shutil.which
+        self.policy = policy if policy is not None else RelayPolicy()
 
     def plan_status(self) -> tuple[str, ...]:
         if self.command_id is None:
             raise RelaySpecError("read-only SSM status plan requires a command ID")
-        argv = (
+        return self._through_parent((
             "aws", "ssm", "get-command-invocation",
             "--command-id", self.command_id,
             "--instance-id", self.instance_id,
             "--region", self.region,
             "--output", "json",
             "--no-cli-pager",
+        ))
+
+    def _through_parent(self, argv: Sequence[str]) -> tuple[str, ...]:
+        checked = _validate_argv(argv)
+        return (
+            _validate_argv(self.parent.plan_argv(checked))
+            if self.parent is not None
+            else checked
         )
-        return self.parent.plan_argv(argv) if self.parent is not None else argv
+
+    def _send_argv(self, command: Sequence[str]) -> tuple[str, ...]:
+        checked = _validate_argv(command)
+        shell_command = shlex.join(checked)
+        parameters = json.dumps(
+            {"commands": [shell_command]},
+            separators=(",", ":"),
+        )
+        return (
+            "aws", "ssm", "send-command",
+            "--document-name", "AWS-RunShellScript",
+            "--instance-ids", self.instance_id,
+            "--parameters", parameters,
+            "--region", self.region,
+            "--output", "json",
+            "--no-cli-pager",
+        )
 
     def plan_tunnel_argv(
         self, target: TunnelTarget, *, local_port: int
     ) -> tuple[str, ...]:
+        return self._through_parent(self._tunnel_argv(target, local_port))
+
+    def _tunnel_argv(
+        self, target: TunnelTarget, local_port: int
+    ) -> tuple[str, ...]:
         _validate_port(local_port, allow_zero=True)
-        argv = (
+        _validate_target(target, loopback_only=False)
+        if self.remote_host is not None:
+            document = "AWS-StartPortForwardingSessionToRemoteHost"
+            parameters: dict[str, list[str]] = {
+                "host": [self.remote_host],
+                "portNumber": [str(target.port)],
+                "localPortNumber": [str(local_port)],
+            }
+        else:
+            document = "AWS-StartPortForwardingSession"
+            parameters = {
+                "portNumber": [str(target.port)],
+                "localPortNumber": [str(local_port)],
+            }
+        return (
             "aws", "ssm", "start-session",
             "--target", self.instance_id,
-            "--document-name", "AWS-StartPortForwardingSession",
+            "--document-name", document,
             "--parameters",
             json.dumps(
-                {
-                    "portNumber": [str(target.port)],
-                    "localPortNumber": [str(local_port)],
-                },
+                parameters,
                 separators=(",", ":"),
             ),
             "--region", self.region,
             "--no-cli-pager",
         )
-        return self.parent.plan_argv(argv) if self.parent is not None else argv
 
     def plan_run(self, argv: Sequence[str]) -> tuple[str, ...]:
         if tuple(argv) != ("status",):
-            raise RelayUnsupported(
-                "SSM command execution is disabled; use the read-only status plan"
-            )
+            if self.policy.command_allowlist is None:
+                raise RelayPolicyError("SSM commands require an explicit command allowlist")
+            return self._through_parent(self._send_argv(argv))
         return self.plan_status()
+
+    def _invoke_parent(
+        self, argv: Sequence[str], *, timeout_s: float
+    ) -> CommandResult:
+        if self.parent is not None:
+            return self.parent._run_with_output_limit(
+                argv,
+                timeout_s=timeout_s,
+                stdin=None,
+                dry_run=False,
+                output_limit=_MAX_OUTPUT_BYTES,
+            )
+        code, stdout, stderr = _subprocess_runner(argv, timeout_s=timeout_s)
+        return CommandResult(code, stdout, stderr, backend=self.kind)
+
+    def _preflight_parent_command(
+        self, argv: Sequence[str], timeout_s: float
+    ) -> None:
+        if self.parent is None:
+            return
+        planned = self.parent.plan_argv(argv)
+        self.parent.policy.check_command(
+            self.parent.kind,
+            planned,
+            timeout_s,
+            live=True,
+        )
+        parent_prefixes = self.parent.policy.command_allowlist
+        if parent_prefixes is not None and "--command-id" in planned:
+            dynamic_value_index = planned.index("--command-id") + 1
+            if not any(
+                len(prefix) <= dynamic_value_index
+                and tuple(planned[: len(prefix)]) == prefix
+                for prefix in parent_prefixes
+            ):
+                raise RelayPolicyError("SSM polling command is not allowlisted")
+
+    @staticmethod
+    def _json_object(text: str) -> dict[str, Any]:
+        if not isinstance(text, str) or len(text.encode("utf-8", errors="replace")) > _MAX_OUTPUT_BYTES:
+            raise RelayError("SSM returned oversized output")
+        try:
+            value = json.loads(text)
+        except (json.JSONDecodeError, TypeError):
+            raise RelayError("SSM returned malformed JSON") from None
+        if not isinstance(value, dict):
+            raise RelayError("SSM returned malformed JSON")
+        return value
 
     def run(
         self,
@@ -768,8 +1244,145 @@ class SsmBackend:
         timeout_s: float,
         stdin: bytes | None = None,
     ) -> CommandResult:
-        del argv, timeout_s, stdin
-        raise RelayUnsupported("SSM is a dry-run-only backend")
+        if tuple(argv) == ("status",):
+            raise RelayUnsupported("SSM status is plan-only")
+        if stdin is not None:
+            raise RelayUnsupported("SSM RunShellScript does not accept stdin")
+        if self.policy.command_allowlist is None:
+            raise RelayPolicyError("SSM commands require an explicit command allowlist")
+        checked = _validate_argv(argv)
+        raw_send = self._send_argv(checked)
+        final_send = self._through_parent(raw_send)
+        self.policy.check_command(self.kind, final_send, timeout_s, live=True)
+        preflight_poll = self._through_parent((
+            "aws", "ssm", "get-command-invocation",
+            "--command-id", "preflight-command-id",
+            "--instance-id", self.instance_id,
+            "--region", self.region,
+            "--output", "json",
+            "--no-cli-pager",
+        ))
+        self._check_poll_allowlist(preflight_poll, timeout_s)
+        self._preflight_parent_command(raw_send, timeout_s)
+        self._preflight_parent_command(
+            (
+                "aws", "ssm", "get-command-invocation",
+                "--command-id", "preflight-command-id",
+                "--instance-id", self.instance_id,
+                "--region", self.region,
+                "--output", "json",
+                "--no-cli-pager",
+            ),
+            timeout_s,
+        )
+        started = time.monotonic()
+        deadline = started + float(timeout_s)
+        send_remaining = deadline - time.monotonic()
+        if send_remaining <= 0:
+            return CommandResult(
+                124,
+                stderr="SSM command timed out",
+                elapsed_s=max(0.0, time.monotonic() - started),
+                backend=self.kind,
+            )
+        send_result = self._invoke_parent(
+            raw_send,
+            timeout_s=send_remaining,
+        )
+        if send_result.returncode != 0:
+            return CommandResult(
+                send_result.returncode or 1,
+                stderr="SSM send-command failed",
+                elapsed_s=max(0.0, time.monotonic() - started),
+                backend=self.kind,
+            )
+        send_payload = self._json_object(send_result.stdout)
+        command = send_payload.get("Command")
+        command_id = command.get("CommandId") if isinstance(command, dict) else None
+        if not isinstance(command_id, str) or not re.fullmatch(
+            r"[A-Za-z0-9-]{1,128}", command_id
+        ):
+            raise RelayError("SSM send-command returned malformed JSON")
+
+        raw_poll = (
+            "aws", "ssm", "get-command-invocation",
+            "--command-id", command_id,
+            "--instance-id", self.instance_id,
+            "--region", self.region,
+            "--output", "json",
+            "--no-cli-pager",
+        )
+        poll_argv = self._through_parent(raw_poll)
+        self._check_poll_allowlist(poll_argv, timeout_s)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return CommandResult(
+                    124,
+                    stderr="SSM command timed out",
+                    elapsed_s=max(0.0, time.monotonic() - started),
+                    backend=self.kind,
+                )
+            result = self._invoke_parent(
+                raw_poll,
+                timeout_s=remaining,
+            )
+            if result.returncode != 0:
+                return CommandResult(
+                    result.returncode or 1,
+                    stderr="SSM command status request failed",
+                    elapsed_s=max(0.0, time.monotonic() - started),
+                    backend=self.kind,
+                )
+            payload = self._json_object(result.stdout)
+            status = payload.get("Status")
+            if not isinstance(status, str):
+                raise RelayError("SSM returned malformed command status")
+            if status in {"Pending", "InProgress", "Delayed", "Cancelling"}:
+                time.sleep(min(self._POLL_INTERVAL_S, max(0.0, deadline - time.monotonic())))
+                continue
+            if status not in {"Success", "Failed", "TimedOut", "Cancelled"}:
+                raise RelayError("SSM returned an unsupported command status")
+            stdout = payload.get("StandardOutputContent", "")
+            stderr = payload.get("StandardErrorContent", "")
+            if not isinstance(stdout, str) or not isinstance(stderr, str):
+                raise RelayError("SSM returned malformed command output")
+            response_code = payload.get("ResponseCode")
+            if isinstance(response_code, bool) or not isinstance(response_code, int):
+                response_code = 1
+            if status == "Success":
+                code = 0
+            elif status == "TimedOut":
+                code = 124
+            elif status == "Cancelled":
+                code = 130
+            else:
+                code = response_code if response_code > 0 else 1
+            return CommandResult(
+                code,
+                _bounded_text(stdout, self.policy.max_output_bytes),
+                _bounded_text(stderr, self.policy.max_output_bytes),
+                max(0.0, time.monotonic() - started),
+                backend=self.kind,
+            )
+
+    def _check_poll_allowlist(
+        self, poll_argv: Sequence[str], timeout_s: float
+    ) -> None:
+        self.policy.check_command(self.kind, poll_argv, timeout_s, live=True)
+        prefixes = self.policy.command_allowlist
+        if prefixes is None:
+            raise RelayPolicyError("SSM commands require an explicit command allowlist")
+        try:
+            dynamic_value_index = tuple(poll_argv).index("--command-id") + 1
+        except ValueError:
+            raise RelayPolicyError("SSM polling command is not allowlisted") from None
+        if not any(
+            len(prefix) <= dynamic_value_index
+            and tuple(poll_argv[: len(prefix)]) == prefix
+            for prefix in prefixes
+        ):
+            raise RelayPolicyError("SSM polling command is not allowlisted")
 
     def open_tunnel(
         self,
@@ -778,8 +1391,47 @@ class SsmBackend:
         local_port: int = 0,
         timeout_s: float = 30.0,
     ) -> TunnelLease:
-        del target, local_port, timeout_s
-        raise RelayUnsupported("SSM tunnels are dry-run only")
+        self.policy.check_tunnel(self.kind, timeout_s, live=True)
+        if self.parent is None or self.parent.kind != "local":
+            raise RelayUnsupported("SSM tunnels require a local parent relay")
+        if not callable(getattr(self.parent, "start_process", None)):
+            raise RelayUnsupported("local parent cannot start tunnel processes")
+        try:
+            plugin = self.executable_lookup("session-manager-plugin")
+        except Exception:
+            plugin = None
+        if not plugin:
+            raise RelayUnsupported(
+                "AWS Session Manager plugin is required; install session-manager-plugin"
+            )
+        _validate_target(target, loopback_only=False)
+        _validate_port(local_port, allow_zero=True)
+        port_lease = PortLease(local_port)
+        port = port_lease.port
+        argv = self._tunnel_argv(target, port)
+        planned = self._through_parent(argv)
+        self.policy.check_command(self.kind, planned, timeout_s, live=True)
+        process: ProcessLease | None = None
+        try:
+            port_lease.release()
+            process = self.parent.start_process(argv, timeout_s=timeout_s)
+            _wait_for_loopback_listener(port, timeout_s=timeout_s, process=process)
+            return TunnelLease(
+                "127.0.0.1",
+                port,
+                self.remote_host or target.host,
+                target.port,
+                "local loopback",
+                self.kind,
+                process.close,
+                planned_argv=planned,
+            )
+        except Exception:
+            if process is not None:
+                process.close()
+            raise
+        finally:
+            port_lease.close()
 
     def close(self) -> None:
         return None
@@ -956,6 +1608,68 @@ class Relay:
         except Exception:
             raise RelayError("relay planning failed") from None
 
+    def start_process(
+        self, argv: Sequence[str], *, timeout_s: float
+    ) -> ProcessLease:
+        """Start a long-lived process through this relay's local backend."""
+        self.policy.check_tunnel(self.kind, timeout_s, live=True)
+        self._ensure_open()
+        if self.kind != "local":
+            raise RelayUnsupported("persistent processes require a local parent relay")
+        checked = _validate_argv(argv)
+        self.policy.check_command(self.kind, checked, timeout_s, live=True)
+        ephemeral_backend = self._make_backend() if self._ephemeral else None
+        backend = ephemeral_backend or self._persistent_backend()
+        starter = getattr(backend, "start_process", None)
+        if not callable(starter):
+            if ephemeral_backend is not None:
+                try:
+                    ephemeral_backend.close()
+                except Exception:
+                    pass
+            raise RelayUnsupported("local parent cannot start persistent processes")
+        try:
+            process = starter(checked, timeout_s=float(timeout_s))
+            if ephemeral_backend is not None:
+                original_close = process.close
+                close_lock = threading.Lock()
+                closed = False
+
+                def close_ephemeral_process() -> None:
+                    nonlocal closed
+                    with close_lock:
+                        if closed:
+                            return
+                        closed = True
+                    try:
+                        original_close()
+                    finally:
+                        ephemeral_backend.close()
+
+                process.close = close_ephemeral_process
+            return process
+        except RelayUnsupported:
+            if ephemeral_backend is not None:
+                try:
+                    ephemeral_backend.close()
+                except Exception:
+                    pass
+            raise
+        except RelayPolicyError:
+            if ephemeral_backend is not None:
+                try:
+                    ephemeral_backend.close()
+                except Exception:
+                    pass
+            raise
+        except Exception:
+            if ephemeral_backend is not None:
+                try:
+                    ephemeral_backend.close()
+                except Exception:
+                    pass
+            raise RelayError("local process could not be started") from None
+
     def _planned_argv(self, backend: RelayBackend, argv: Sequence[str]) -> tuple[str, ...]:
         planner = getattr(backend, "plan_argv", None)
         if callable(planner):
@@ -973,9 +1687,32 @@ class Relay:
         stdin: bytes | None = None,
         dry_run: bool = False,
     ) -> CommandResult:
+        return self._run_with_output_limit(
+            argv,
+            timeout_s=timeout_s,
+            stdin=stdin,
+            dry_run=dry_run,
+            output_limit=self.policy.max_output_bytes,
+        )
+
+    def _run_with_output_limit(
+        self,
+        argv: Sequence[str],
+        *,
+        timeout_s: float,
+        stdin: bytes | None,
+        dry_run: bool,
+        output_limit: int,
+    ) -> CommandResult:
         checked = _validate_argv(argv)
         if stdin is not None and not isinstance(stdin, bytes):
             raise RelaySpecError("stdin must be bytes")
+        if (
+            isinstance(output_limit, bool)
+            or not isinstance(output_limit, int)
+            or not 0 <= output_limit <= _MAX_OUTPUT_BYTES
+        ):
+            raise RelaySpecError("invalid internal output limit")
         self.policy.check_command_gate(self.kind, timeout_s, live=not dry_run)
         self._ensure_open()
         started = time.monotonic()
@@ -1013,8 +1750,8 @@ class Relay:
                 raise RelayError("relay backend returned an invalid result")
             return CommandResult(
                 raw.returncode,
-                _bounded_text(raw.stdout, self.policy.max_output_bytes),
-                _bounded_text(raw.stderr, self.policy.max_output_bytes),
+                _bounded_text(raw.stdout, output_limit),
+                _bounded_text(raw.stderr, output_limit),
                 max(0.0, raw.elapsed_s or time.monotonic() - started),
                 False,
                 self.kind,
@@ -1196,9 +1933,13 @@ class Relay:
 
 def _local_factory(*, options: Mapping[str, Any], parent: Relay | None, policy: RelayPolicy) -> RelayBackend:
     del parent
-    if set(options) - {"runner"}:
+    if set(options) - {"runner", "process_factory"}:
         raise RelaySpecError("unknown local backend option")
-    return LocalBackend(runner=options.get("runner"), policy=policy)
+    return LocalBackend(
+        runner=options.get("runner"),
+        process_factory=options.get("process_factory"),
+        policy=policy,
+    )
 
 
 def _command_factory(*, options: Mapping[str, Any], parent: Relay | None, policy: RelayPolicy) -> RelayBackend:
@@ -1213,13 +1954,18 @@ def _command_factory(*, options: Mapping[str, Any], parent: Relay | None, policy
 
 
 def _ssh_factory(*, options: Mapping[str, Any], parent: Relay | None, policy: RelayPolicy) -> RelayBackend:
-    if set(options) - {"host", "user", "port", "identity_file"}:
+    if set(options) - {
+        "host", "user", "port", "identity_file", "proxy_jump", "proxy_command"
+    }:
         raise RelaySpecError("unknown SSH backend option")
     return SshBackend(parent=parent, policy=policy, **options)
 
 
 def _ssm_factory(*, options: Mapping[str, Any], parent: Relay | None, policy: RelayPolicy) -> RelayBackend:
-    if set(options) - {"instance_id", "region", "command_id"}:
+    if set(options) - {
+        "instance_id", "region", "command_id", "remote_host",
+        "executable_lookup",
+    }:
         raise RelaySpecError("unknown SSM backend option")
     return SsmBackend(parent=parent, policy=policy, **options)
 

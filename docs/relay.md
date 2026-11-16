@@ -61,18 +61,43 @@ connections, and only forwards to a loopback target. Closing its lease stops
 the listener and active connections. This is intended for local services and
 offline tests, not as a general network pivot.
 
-## SSH and SSM plans
+## OpenSSH and SSM live backends
 
 `SshBackend` requires an explicit host and can include an explicit user, port,
-and identity file. Its argv plans use `ssh` arrays and do not disable host-key
-checking. `SsmBackend` requires an explicit instance ID and region. It can
-produce a read-only `get-command-invocation` status plan when given a command
-ID, and an `AWS-StartPortForwardingSession` argv plan.
+and identity file. It invokes the system `ssh` executable with argv arrays,
+preserves normal SSH config/agent/known-hosts behavior, and never disables
+host-key checking. An explicitly configured, validated `proxy_jump` is passed
+as `-J`; `proxy_command` is never synthesized and is used only when explicitly
+configured. Command execution goes through the parent relay. Local SSH
+forwarding requires a local parent, starts `ssh -N -L` and waits for its
+loopback listener; forwarding through a remote parent is unsupported because
+that endpoint would not be local to this process.
 
-These SSH/SSM backends, and the generic `CommandBackend`, are **dry-run
-planners only** in this implementation: they do not launch SSH, AWS CLI,
-Session Manager, remote commands, or remote tunnels. There is no `send-command`
-plan for arbitrary input because that would encode remote command execution.
-Live remote operations need a separately reviewed implementation and explicit
-human approval. Tests use fake runners and local loopback sockets only; they
-do not contact AWS, Kubernetes, SSH hosts, or other remote systems.
+`SsmBackend` requires an explicit instance ID and region. Commands use the
+reviewed `AWS-RunShellScript` document via `aws ssm send-command`, then poll
+`get-command-invocation` through the parent relay. An explicit command-prefix
+allowlist and `allow_live=True` are mandatory for this remote execution. Its
+read-only status plan remains available when a command ID is configured.
+Tunnels use `AWS-StartPortForwardingSession`, or
+`AWS-StartPortForwardingSessionToRemoteHost` when `remote_host` is explicitly
+configured. They require the AWS CLI, the official Session Manager plugin, and
+a local parent relay. The plugin is checked before starting a session.
+
+Live commands and tunnels remain default-deny: enable the relevant relay kind,
+set a bounded positive timeout and explicitly approve `allow_live`; tunnels
+also require `allow_network`. Review command prefixes against the final argv,
+including the AWS CLI invocation for SSM. Dry-run plans perform no process
+launch, port reservation or provider call. AWS credentials/region are not
+discovered by ozagia; provide the region explicitly and configure credentials
+through the user's ordinary AWS CLI environment. OpenSSH's normal host-key
+validation remains enabled.
+
+The core process boundary is argv-only, starts a process group with stdin
+disconnected, bounds captured output, and closes tunnel processes idempotently.
+Tests inject fake runners/process handles and use local loopback listeners only;
+they never contact AWS, SSH hosts, Kubernetes, or another remote system.
+`CommandBackend` remains plan-only.
+
+AsyncSSH, sshtunnel, pyssm-client and gost remain optional/future alternatives,
+not dependencies or default backends; see the
+[library evaluation](research/relay_libraries.md).

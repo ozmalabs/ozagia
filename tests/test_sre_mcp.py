@@ -72,6 +72,25 @@ def test_environment_profiles_are_declarative_only(tmp_path):
     assert result["environments"][0]["risk"] == "low"
 
 
+def test_relay_plan_is_dry_run_and_policy_gated(tmp_path):
+    handlers = tools(tmp_path)
+    spec = {
+        "specs": [{"kind": "local"}],
+        "policy": {"allowed_kinds": ["local"], "max_timeout_s": 10},
+    }
+    planned = handlers["dev_relay_plan"]({
+        "spec": spec, "argv": ["printf", "ok"]})
+    assert planned == {"ok": True, "dry_run": True, "argv": ["printf", "ok"]}
+    denied = handlers["dev_relay_plan"]({
+        "spec": {"specs": [{"kind": "local"}], "policy": {}},
+        "argv": ["printf", "ok"]})
+    assert denied["ok"] is False
+    tunnel = handlers["dev_relay_plan"]({
+        "spec": spec, "target": "127.0.0.1:9000"})
+    assert tunnel["ok"] is True and tunnel["dry_run"] is True
+    assert tunnel["target_port"] == 9000
+
+
 def test_aws_cli_check_uses_injected_model_result(monkeypatch, tmp_path):
     import ozagia.aws_cli as aws_module
 
@@ -116,5 +135,6 @@ def test_mcp_server_registers_offline_sre_tools(tmp_path):
     server = DevMemoryServer(Memory(root))
     assert {"dev_environments", "dev_check_iac", "dev_ops_record", "dev_ops_resume",
             "dev_live_import", "dev_live_diff", "dev_live_save",
-            "dev_aws_cli_check", "dev_preflight_plan"} <= set(server._handlers)
+            "dev_aws_cli_check", "dev_relay_plan",
+            "dev_preflight_plan"} <= set(server._handlers)
     assert server._schemas["dev_ops_record"]["additionalProperties"] is False

@@ -104,6 +104,37 @@ def test_cli_job_wait_uses_injected_live_runner(tmp_path, capsys):
     assert payload["last_log_lines"] == ["status=succeeded"]
 
 
+def _relay_spec(tmp_path, **policy):
+    path = tmp_path / "relay.json"
+    path.write_text(json.dumps({
+        "specs": [{"kind": "local"}],
+        "policy": {"allowed_kinds": ["local"], "max_timeout_s": 30, **policy},
+    }), encoding="utf-8")
+    return path
+
+
+def test_cli_relay_plan_and_live_local_run(tmp_path, capsys):
+    spec = _relay_spec(tmp_path, command_allowlist=[["printf"]])
+    assert cli.main(["relay", "plan", "--spec", str(spec), "--", "printf", "hi"]) == 0
+    assert "printf hi" in capsys.readouterr().out
+    assert cli.main(["relay", "run", "--spec", str(spec), "--", "printf", "hi"]) == 2
+    assert "requires --allow-live" in capsys.readouterr().err
+    assert cli.main([
+        "relay", "run", "--spec", str(spec), "--allow-live", "--timeout-s", "10",
+        "--", "printf", "relay-ok"]) == 0
+    assert "relay-ok" in capsys.readouterr().out
+
+
+def test_cli_relay_tunnel_dry_run(tmp_path, capsys):
+    spec = _relay_spec(tmp_path)
+    assert cli.main([
+        "relay", "tunnel", "--spec", str(spec), "--target",
+        "127.0.0.1:9000", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["dry_run"] is True
+    assert payload["target_port"] == 9000
+
+
 def test_cli_preflight_plan_is_dry_run(tmp_path, capsys):
     root = tmp_path / "root"
     root.mkdir()

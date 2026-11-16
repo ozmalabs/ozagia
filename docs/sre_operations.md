@@ -31,6 +31,11 @@ ozagia preflight plan --root envs/prod --root envs/staging \
 # Explicit read-only live job polling (opt-in)
 ozagia job wait --provider codebuild --job-id project:build-id \
   --region us-east-1 --allow-live [--json]
+
+# Nested command/network relays; plan is always dry-run
+ozagia relay plan --spec relay.json -- uptime
+ozagia relay run --spec relay.json --allow-live -- uptime
+ozagia relay tunnel --spec relay.json --target 127.0.0.1:5432 [--json]
 ```
 
 Without `--allow-live`, `job wait` returns `status: disabled` and does not run
@@ -48,6 +53,7 @@ The full coding surface adds these read-only/offline tools:
 | `dev_ops_record` / `dev_ops_resume` | Ops receipts and bounded handoffs. |
 | `dev_live_import` / `dev_live_diff` / `dev_live_save` | Supplied snapshot artifacts only. |
 | `dev_aws_cli_check` | Offline AWS CLI service/operation/enum check. |
+| `dev_relay_plan` | Dry-run relay command/tunnel plan; never executes or binds live. |
 | `dev_preflight_plan` | Dry-run emulator plan. |
 
 The minimal graph surface intentionally stays small and does not add these

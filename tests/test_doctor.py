@@ -29,6 +29,23 @@ def test_doctor_reports_missing_fresh_and_stale(tmp_path, monkeypatch, capsys):
     assert report()["snapshot"]["state"] == "stale"
 
 
+def test_doctor_reports_relay_binaries_without_running_them(tmp_path, monkeypatch, capsys):
+    from ozagia import doctor as doctor_module
+
+    monkeypatch.delenv("OZAGIA_CONFIG", raising=False)
+    monkeypatch.delenv("OZAGIA_STATE_DIR", raising=False)
+    monkeypatch.setattr(
+        doctor_module.shutil, "which",
+        lambda name: f"/fake/bin/{name}" if name in {"ssh", "aws"} else None)
+    assert cli.main(["doctor", "--root", str(tmp_path), "--json"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["external_tools"]["ssh"] == {
+        "available": True, "path": "/fake/bin/ssh"}
+    assert result["external_tools"]["aws"]["available"] is True
+    assert result["external_tools"]["session-manager-plugin"]["available"] is False
+    assert "no relay" in result["external_tool_note"]
+
+
 def test_doctor_invalid_config_and_snapshot(tmp_path, monkeypatch, capsys):
     monkeypatch.delenv("OZAGIA_CONFIG", raising=False)
     monkeypatch.delenv("OZAGIA_STATE_DIR", raising=False)

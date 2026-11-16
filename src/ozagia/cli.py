@@ -15,6 +15,7 @@
     ozagia live import|diff|save ...              (supplied snapshots only)
     ozagia iac check ...                          (offline Terraform checks)
     ozagia env list|show ...                      (declarative environment profiles)
+    ozagia relay plan|run|tunnel ...              (nested command/network relays)
     ozagia preflight plan ...                     (dry-run emulator plan)
     ozagia --version
 
@@ -96,6 +97,11 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
             if not status["available"]:
                 print(f"Parser {language}: unavailable ({status['error']})")
         print(report["language_server_note"])
+        for name, status in report.get("external_tools", {}).items():
+            state = status["path"] if status["available"] else "unavailable"
+            print(f"Relay tool {name}: {state}")
+        if report.get("external_tool_note"):
+            print(report["external_tool_note"])
     return 0 if report["root_exists"] and report["config"]["valid"] else 2
 
 def _cmd_index(args: argparse.Namespace) -> int:
@@ -386,6 +392,105 @@ def _cmd_env(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_relay(args: argparse.Namespace, command: list[str]) -> int:
+    from ozagia.relay_cli import (
+        RelaySpecFileError, build_relay, load_document, load_file,
+        parse_target,
+    )
+
+    try:
+        document = (load_document(sys.stdin.read()) if args.spec == "-"
+                    else load_file(args.spec))
+        relay = build_relay(
+            document, allow_live=args.allow_live,
+            allow_network=args.allow_network, ephemeral=args.ephemeral)
+    except (RelaySpecFileError, OSError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    try:
+        if args.action == "tunnel":
+            try:
+                target = parse_target(args.target)
+            except RelaySpecFileError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 2
+            lease = relay.open_tunnel(
+                target, local_port=args.local_port,
+                timeout_s=args.timeout_s, dry_run=not args.allow_live)
+            payload = {
+                "dry_run": lease.dry_run,
+                "local_host": lease.local_host,
+                "local_port": lease.local_port,
+                "target_host": lease.target_host,
+                "target_port": lease.target_port,
+                "scope": lease.scope,
+                "backend": lease.backend,
+                "planned_argv": list(lease.planned_argv),
+            }
+            if args.hold and not args.allow_live:
+                print("error: --hold requires --allow-live", file=sys.stderr)
+                lease.close()
+                return 2
+            if args.hold:
+                if not args.json:
+                    print(f"tunnel {lease.local_host}:{lease.local_port} "
+                          f"-> {lease.target_host}:{lease.target_port}")
+                try:
+                    import time
+                    while True:
+                        time.sleep(3600)
+                except KeyboardInterrupt:
+                    pass
+            lease.close()
+            if args.json:
+                _print_json(payload)
+            else:
+                print("dry-run tunnel plan" if lease.dry_run else "tunnel closed")
+                if lease.dry_run and lease.planned_argv:
+                    print(" ".join(lease.planned_argv))
+            return 0
+
+        if not command:
+            print("error: relay command needs arguments after --", file=sys.stderr)
+            return 2
+        if args.action == "plan":
+            planned = relay.plan_argv(command)
+            payload = {"dry_run": True, "argv": list(planned),
+                       "backend": relay.kind}
+            if args.json:
+                _print_json(payload)
+            else:
+                print(" ".join(planned))
+            return 0
+        if not args.allow_live:
+            print("error: relay run requires --allow-live", file=sys.stderr)
+            return 2
+        result = relay.run(command, timeout_s=args.timeout_s)
+        payload = {
+            "returncode": result.returncode,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "elapsed_s": result.elapsed_s,
+            "dry_run": result.dry_run,
+            "backend": result.backend,
+            "argv_evidence": result.argv_evidence,
+        }
+        if args.json:
+            _print_json(payload)
+        else:
+            if result.stdout:
+                print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
+            if result.stderr:
+                print(result.stderr, file=sys.stderr,
+                      end="" if result.stderr.endswith("\n") else "\n")
+        return 0 if result.returncode == 0 else 1
+    except Exception as exc:  # relay errors are deliberately terse
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        relay.close()
+
+
 def _cmd_preflight(args: argparse.Namespace) -> int:
     from ozagia.core.preflight import build_preflight
     dependencies: dict[str, list[str]] = {}
@@ -543,6 +648,28 @@ def build_parser() -> argparse.ArgumentParser:
     env_show.add_argument("--root", default=None)
     env_show.add_argument("--json", action="store_true")
 
+    relay = sub.add_parser("relay", help="policy-gated command and TCP relays")
+    rsub = relay.add_subparsers(dest="action", required=True)
+    for name, help_text in (("plan", "print the exact argv plan"),
+                            ("run", "run one allowlisted command")):
+        item = rsub.add_parser(name, help=help_text)
+        item.add_argument("--spec", required=True, help="JSON chain spec, or - for stdin")
+        item.add_argument("--allow-live", action="store_true")
+        item.add_argument("--allow-network", action="store_true")
+        item.add_argument("--ephemeral", action="store_true")
+        item.add_argument("--timeout-s", type=float, default=300.0)
+        item.add_argument("--json", action="store_true")
+    tunnel = rsub.add_parser("tunnel", help="open or plan a local tunnel")
+    tunnel.add_argument("--spec", required=True, help="JSON chain spec, or - for stdin")
+    tunnel.add_argument("--target", required=True, help="HOST:PORT")
+    tunnel.add_argument("--local-port", type=int, default=0)
+    tunnel.add_argument("--allow-live", action="store_true")
+    tunnel.add_argument("--allow-network", action="store_true")
+    tunnel.add_argument("--ephemeral", action="store_true")
+    tunnel.add_argument("--hold", action="store_true")
+    tunnel.add_argument("--timeout-s", type=float, default=30.0)
+    tunnel.add_argument("--json", action="store_true")
+
     preflight = sub.add_parser("preflight", help="dry-run IaC emulator plan")
     psub = preflight.add_subparsers(dest="action", required=True)
     plan = psub.add_parser("plan", help="print an ordered, scrubbed plan")
@@ -563,7 +690,7 @@ def main(argv: list[str] | None = None) -> int:
     if argv and argv[0] in DELEGATES:
         return _delegate(argv[0])(argv[1:])
     extra: list[str] = []
-    if argv[:1] == ["agent"] and "--" in argv:
+    if argv[:1] in (["agent"], ["relay"]) and "--" in argv:
         at = argv.index("--")
         argv, extra = argv[:at], argv[at + 1:]
     parser = build_parser()
@@ -590,6 +717,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_iac(args)
     if args.command == "env":
         return _cmd_env(args)
+    if args.command == "relay":
+        return _cmd_relay(args, extra)
     if args.command == "preflight":
         return _cmd_preflight(args)
     parser.error(f"unknown command {args.command}")  # pragma: no cover
