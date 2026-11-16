@@ -35,7 +35,7 @@ FULL_SURFACE_TOOLS = [
     "dev_neighbours", "dev_stats", "dev_changed", "dev_refresh", "dev_record",
     "dev_session_start", "dev_session_record", "dev_session_state",
     "dev_session_next", "dev_session_finish", "dev_session_list",
-    "dev_recent", "dev_lsp_status", "dev_definition", "dev_references",
+    "dev_who", "dev_recent", "dev_lsp_status", "dev_definition", "dev_references",
     "dev_callers", "dev_callees", "dev_symbol_impact", "dev_rename_preview",
     "dev_diagnostics", "dev_hover", "dev_document_symbols",
     "dev_symbol_callers", "dev_symbol_callees", "dev_symbol_graph_impact",

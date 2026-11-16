@@ -1334,7 +1334,10 @@ def graph_stats_fields(stats: Any) -> dict[str, Any]:
     lint_findings, lint_timeouts and ruff_captures (`LINT_FIELDS`, lint
     inside the edit), affected_runs, tests_skipped_unaffected,
     cached_passes and full_runs_forced (`TEST_SELECTION_FIELDS`, test
-    selection, `ozagia.intent.affected`), and working_sets_served and
+    selection, `ozagia.intent.affected`), path_suggestions and
+    ownership_warnings (missing paths answered with candidates,
+    `ozagia.intent.paths`; warnings about another live session's
+    uncommitted edits, `ozagia.core.owners`), and working_sets_served and
     working_set_chars (`WORKING_SET_FIELDS`, working sets handed back after
     compactions, `ozagia.core.working_set`)."""
     if not isinstance(stats, dict):
@@ -1348,6 +1351,7 @@ def graph_stats_fields(stats: Any) -> dict[str, Any]:
                 "patch_checks": None, "patch_misses_caught": None,
                 "region_replies": None, "key_edits": None, "jobs_started": None, "job_waits": None,
                 "job_wait_seconds": None, "polls_avoided": None,
+                "path_suggestions": None, "ownership_warnings": None,
                 **{k: None for k in LINT_FIELDS},
                 **{k: None for k in TEST_SELECTION_FIELDS},
                 **{k: None for k in WORKING_SET_FIELDS}}
@@ -1386,6 +1390,8 @@ def graph_stats_fields(stats: Any) -> dict[str, Any]:
                                  and not isinstance(stats.get("wait_seconds"), bool)
                                  else None),
             "polls_avoided": _count(stats.get("polls_avoided")),
+            "path_suggestions": _count(stats.get("path_suggestions")),
+            "ownership_warnings": _count(stats.get("ownership_warnings")),
             **{k: _count(stats.get(k)) for k in LINT_FIELDS},
             **{k: _count(stats.get(k)) for k in TEST_SELECTION_FIELDS},
             **{k: _count(stats.get(k)) for k in WORKING_SET_FIELDS}}
@@ -1640,6 +1646,10 @@ def aggregate(runs: list[dict[str, Any]], arms: Iterable[str]) -> list[dict[str,
                     float(r.get("job_wait_seconds") or 0) for r in mine), 1),
                 "total_polls_avoided": sum(int(r.get("polls_avoided") or 0)
                                            for r in mine),
+                "total_path_suggestions": sum(
+                    int(r.get("path_suggestions") or 0) for r in mine),
+                "total_ownership_warnings": sum(
+                    int(r.get("ownership_warnings") or 0) for r in mine),
                 **{f"total_{k}": sum(int(r.get(k) or 0) for r in mine)
                    for k in (*LINT_FIELDS, *TEST_SELECTION_FIELDS,
                              *WORKING_SET_FIELDS)},

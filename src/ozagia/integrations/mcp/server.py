@@ -492,6 +492,20 @@ _TOOLS: list[dict[str, Any]] = [
         "inputSchema": _schema({}),
     },
     {
+        "name": "dev_who",
+        "description": (
+            "Which agent sessions edited a file (harness and session id, "
+            "edit count, first and last edit), whether each session is live "
+            "(seen by the ozagia daemon in the last 15 minutes), and whether "
+            "its edits are committed (the file is clean, or committed after "
+            "the edit). Check it before editing a file other sessions may "
+            "be changing in the same checkout."),
+        "inputSchema": _schema({
+            "path": {"type": "string",
+                     "description": "Repo-relative or absolute file path."},
+        }, ["path"]),
+    },
+    {
         "name": "dev_recent",
         "description": "Recent dev-journal entries (decisions/verifications).",
         "inputSchema": _schema({
@@ -893,6 +907,7 @@ class DevMemoryServer:
             "dev_session_finish": self._session_finish,
             "dev_session_list": self._session_list,
             "dev_recent": self._recent,
+            "dev_who": self._who,
             "dev_symbol_callers": self._symbol_callers,
             "dev_symbol_callees": self._symbol_callees,
             "dev_symbol_graph_impact": self._symbol_graph_impact,
@@ -1115,22 +1130,58 @@ class DevMemoryServer:
             script["base_sha256"] = a["base_sha256"]
         if a.get("cst_graph") is not None:
             script["cst_graph"] = a["cst_graph"]
-        return self.mem.edit(script, task=a.get("task"),
-                             diagnostics=a.get("diagnostics", False))
+        with self._acting():
+            return self.mem.edit(script, task=a.get("task"),
+                                 diagnostics=a.get("diagnostics", False))
+
+    def _acting(self) -> Any:
+        """Edits made through this server are journaled as session
+        ("mcp", "pid<N>") (`ozagia.core.owners`)."""
+        from ozagia.core.owners import acting, mcp_session
+        sess = mcp_session()
+        return acting(self.mem, sess["harness"], sess["id"])
 
     def _span_edit(self, a: dict[str, Any]) -> Any:
-        return self.mem.span_edit(str(a["file"]), a["old_string"],
-                                  a["new_string"],
-                                  replace_all=a.get("replace_all", False),
-                                  base_sha256=a.get("base_sha256") or None,
-                                  apply=a.get("apply", False),
-                                  task=a.get("task"))
+        with self._acting():
+            return self.mem.span_edit(str(a["file"]), a["old_string"],
+                                      a["new_string"],
+                                      replace_all=a.get("replace_all", False),
+                                      base_sha256=a.get("base_sha256") or None,
+                                      apply=a.get("apply", False),
+                                      task=a.get("task"))
 
     def _key_edit(self, a: dict[str, Any]) -> Any:
-        return self.mem.key_edit(str(a["key"]), a["new_text"],
-                                 base_sha256=a.get("base_sha256") or None,
-                                 apply=a.get("apply", False),
-                                 task=a.get("task"))
+        with self._acting():
+            return self.mem.key_edit(str(a["key"]), a["new_text"],
+                                     base_sha256=a.get("base_sha256") or None,
+                                     apply=a.get("apply", False),
+                                     task=a.get("task"))
+
+    def _who(self, a: dict[str, Any]) -> Any:
+        """The sessions that edited a file (`ozagia.core.owners.who`): from
+        the running daemon, which knows which sessions are live, else from
+        the journals (liveness from the daemon journal)."""
+        from ozagia.core import owners as O
+        root = Path(self.mem.raw_repo_root).resolve()
+        raw = str(a["path"])
+        p = Path(raw) if os.path.isabs(raw) else root / raw
+        try:
+            rel = Path(os.path.realpath(p)).relative_to(root).as_posix()
+        except ValueError:
+            return {"ok": False, "error": f"{raw} is outside the repository {root}"}
+        try:
+            from ozagia.daemon import protocol
+            from ozagia.integrations.hookcore import daemon_request
+            resp = daemon_request(protocol.socket_path(root),
+                                  {"id": 1, "op": "who", "path": rel}, timeout=3)
+            if isinstance(resp.get("who"), dict):
+                return {"ok": True, "source": "daemon", **resp["who"]}
+        except Exception:  # noqa: BLE001 - no daemon: read the journals
+            pass
+        from ozagia.daemon.server import JOURNAL_NAME
+        tracker = O.Owners(root, daemon_journal=state_path(root, JOURNAL_NAME))
+        return {"ok": True, "source": "journal",
+                **O.who(root, rel, self.mem.journal, live=tracker.live)}
 
     def _symbol_callers(self, a: dict[str, Any]) -> Any:
         return self.mem.symbol_graph("callers", str(a["symbol"]),

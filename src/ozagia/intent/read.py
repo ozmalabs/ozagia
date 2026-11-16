@@ -698,7 +698,11 @@ def handle_read(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
         out = render_node(memory, path, offset=offset, limit=limit)
         return {"intent": "read_node", "output": "\n".join(out.lines),
                 "keys": out.keys}
-    target = resolve(root, path)
+    from ozagia.intent.paths import missing_error, with_suggestions
+    try:
+        target = resolve(root, path)
+    except IntentError as e:
+        raise with_suggestions(memory, path, e) from None
     if target.path.is_dir():
         out = render_dir(memory, target, offset=offset, limit=limit)
         intent = "read_dir"
@@ -712,6 +716,10 @@ def handle_read(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
                 return got
         out = render_file(memory, target, offset=offset, limit=limit)
         intent = "read_file"
+    elif not target.path.exists():
+        # Candidates when there are any, else the built-in reports the miss.
+        raise missing_error(memory, path, f"File not found: {target.display}",
+                            intent="read_missing")
     else:
         raise Unhandled(f"no such file: {path}")
     return {"intent": intent, "output": "\n".join(out.lines), "keys": out.keys}

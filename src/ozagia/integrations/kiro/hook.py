@@ -24,6 +24,13 @@ accepts both.
   `test:`, `doc:`, `text:`, `json:`, `yaml:`, `toml:`): the daemon answers
   the read (`tool` op) and the hook blocks the built-in with the answer on
   stderr, so the model reads the node instead of a "file not found".
+- `PreToolUse` for a read or directory listing whose every path is missing
+  under the event's cwd: blocked (exit 2) with the nearest existing paths
+  (`[ozagia] no such file <p>; did you mean: ...`), when there are any;
+  otherwise the read runs.
+- `PreToolUse` for a write or edit tool: the warnings about another live
+  session's uncommitted edits of the file (`owner_check`), on stdout. Never
+  blocks.
 - `PostToolUse` for read, write, edit, shell, grep and glob tools: `after`
   with the neutral tool and input; the daemon re-ingests changed files and
   counts the call. A non-empty `append` is printed on stdout. (Kiro 2.37
@@ -334,6 +341,27 @@ def _pre_read(tool_name: str, tool_input: dict[str, Any], root: Path,
     return hookcore.HookBlock(head + "\n\n" + "\n\n".join(parts))
 
 
+def _pre_missing(tool_input: dict[str, Any], root: Path,
+                 cwd: str | None) -> hookcore.HookBlock | None:
+    """Block a read whose every path is missing under the event's cwd, with
+    the nearest existing paths (`hookcore.missing_path_line`). A read with
+    any existing path, or with no candidate, runs as usual."""
+    reqs = read_requests(tool_input)
+    if not reqs or len(reqs) > MAX_KEY_READS:
+        return None
+    if any(hookcore.path_exists(r["path"], cwd, root)
+           or hookcore.node_key(r["path"], KEY_PREFIXES, cwd) for r in reqs):
+        return None
+    lines = [x for x in (hookcore.missing_path_line(root, r["path"], cwd)
+                         for r in reqs) if x]
+    if not lines:
+        return None
+    return hookcore.HookBlock(
+        "ozagia: the read did not run because the path does not exist. "
+        "Pick one of these paths (or check the name) and read it:\n"
+        + "\n".join(lines))
+
+
 def handle(payload: dict[str, Any], root: Path) -> str | hookcore.HookBlock | None:
     """The hook's answer for one event: text for stdout, a `HookBlock`, or
     None to print nothing."""
@@ -362,7 +390,16 @@ def handle(payload: dict[str, Any], root: Path) -> str | hookcore.HookBlock | No
             return None if sub is None else hookcore.HookBlock(
                 hookcore.git_refusal_reason(sub))
         if tool_name in READ_TOOLS:
-            return _pre_read(tool_name, tool_input, root, session, cwd)
+            got = _pre_read(tool_name, tool_input, root, session, cwd)
+            return got if got is not None else _pre_missing(tool_input, root, cwd)
+        if tool_name in LIST_TOOLS:
+            return _pre_missing(tool_input, root, cwd)
+        if tool_name in EDIT_TOOLS | WRITE_TOOLS | APPEND_TOOLS:
+            mapped = map_tool(tool_name, tool_input, cwd)
+            path = mapped[1].get("path") if mapped else None
+            warnings = hookcore.owner_warnings(root, HARNESS, session,
+                                               [path] if path else [], cwd)
+            return "\n".join(warnings) if warnings else None
         return None
 
     if event == "PostToolUse":

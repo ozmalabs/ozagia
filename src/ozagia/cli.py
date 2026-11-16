@@ -27,6 +27,7 @@
     ozagia process start|run -- ARGV ...          (explicit local processes)
     ozagia tunnel start|stop|status|list ...      (tunnel config vs live state)
     ozagia preflight plan ...                     (dry-run emulator plan)
+    ozagia who PATH [--root R] [--json]           (sessions that edited PATH)
     ozagia --version
 
 `daemon`, `bg`, `mcp`, `eval` and `check` pass every argument after their name to
@@ -753,6 +754,45 @@ def _cmd_preflight(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_who(args: argparse.Namespace) -> int:
+    """The sessions that edited a file, from the running daemon (which
+    knows which sessions are live), else from the journals."""
+    import os
+    from ozagia.config import state_path
+    from ozagia.core import owners as O
+    root = _root(args.root)
+    p = Path(os.path.expanduser(args.path))
+    if not p.is_absolute():
+        p = Path.cwd() / p
+    try:
+        rel = Path(os.path.realpath(p)).relative_to(root).as_posix()
+    except ValueError:
+        print(f"{args.path} is outside the repository {root}", file=sys.stderr)
+        return 2
+    report = None
+    try:
+        from ozagia.daemon import protocol
+        from ozagia.integrations.hookcore import daemon_request
+        resp = daemon_request(protocol.socket_path(root),
+                              {"id": 1, "op": "who", "path": rel}, timeout=3)
+        if isinstance(resp.get("who"), dict):
+            report = resp["who"]
+    except Exception:  # noqa: BLE001 - no daemon: read the journals
+        report = None
+    if report is None:
+        from ozagia.daemon.server import JOURNAL_NAME
+        seen = O.seen_sessions(state_path(root, JOURNAL_NAME))
+        tracker = O.Owners(root)
+        tracker.seen = seen
+        report = O.who(root, rel, state_path(root, "journal.jsonl"),
+                       live=tracker.live)
+    if args.json:
+        _print_json(report)
+    else:
+        print(O.format_who(report))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog=PROG, description=__doc__.splitlines()[0])
     p.add_argument("--version", action="version", version=f"{PROG} {_version()}")
@@ -982,6 +1022,12 @@ def build_parser() -> argparse.ArgumentParser:
     tunnel_stop.add_argument("--root", default=None)
     tunnel_stop.add_argument("--json", action="store_true")
 
+    who = sub.add_parser("who", help="sessions that edited a file, and whether "
+                                     "their edits are committed")
+    who.add_argument("path", help="file (relative to the cwd, or absolute)")
+    who.add_argument("--root", default=None, help="repository root")
+    who.add_argument("--json", action="store_true", help="print the report as JSON")
+
     preflight = sub.add_parser("preflight", help="dry-run IaC emulator plan")
     psub = preflight.add_subparsers(dest="action", required=True)
     plan = psub.add_parser("plan", help="print an ordered, scrubbed plan")
@@ -1002,7 +1048,7 @@ def _opencode_exe(value: str | None) -> str:
     return value or os.environ.get("OZAGIA_OPENCODE") or "opencode"
 
 
-_COMMANDS = frozenset({"index", "agent", "install", *DELEGATES})
+_COMMANDS = frozenset({"index", "agent", "install", "who", *DELEGATES})
 # Agent options that may lead a bare `ozagia ...` (the TUI).
 _AGENT_FLAGS = frozenset({"--research", "--mcp", "--model", "-m", "--workdir",
                           "--root", "--clone", "--prompt", "--prompt-file"})
@@ -1070,6 +1116,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_runtime(args)
     if args.command == "preflight":
         return _cmd_preflight(args)
+    if args.command == "who":
+        return _cmd_who(args)
     parser.error(f"unknown command {args.command}")  # pragma: no cover
     return 2
 

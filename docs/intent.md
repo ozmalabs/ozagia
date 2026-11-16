@@ -599,10 +599,64 @@ the plugin apply the change a second time.
   `after_read`; `after_read_unconfirmed` when nothing matched and nothing
   was recorded); a repeat or overlap appends its note line (see read).
 
+- For a built-in read or edit of a path that does not exist, and for the
+  paths of "No such file or directory" lines in a shell output (`cat`,
+  `sed`, `head`, `nl`, `ls`, `rg`, `cd`, Python), it appends the missing
+  path line (see "Missing paths"); `meta.path_suggestions` counts them.
+- For a built-in edit, write or patch with a session, the files it named
+  that changed are journaled in DevMemory's journal as `builtin_edit` with
+  the session (see "Ownership"), and listed in `meta.edited_files`.
+
 `check_read(tool, input)` (the daemon's `read_check`) tells a hook whether
 a read the harness is about to run repeats an unchanged range: `{"repeat",
 "policy", "stub"}`, with `stub` only under the `stub` policy. It records
 nothing; the call's `after` does.
+
+## Missing paths
+
+A read or edit of a path that does not exist gets up to 5 existing paths
+(`ozagia.intent.paths`): the same path inside this root when an absolute
+path points into another worktree of the repository; the path with each
+missing component replaced by the closest name in its directory; close
+names in the same directory (`difflib`); graph files with the same base
+name; the same relative path in the other worktrees (`git worktree list
+--porcelain`, the main checkout included). One line names them:
+
+    [ozagia] no such file <path>; did you mean: <path> (file:<rel>), <abs> (worktree <branch>)
+
+A served read answers `File not found: <abs path>` and that line as a tool
+error (intent `read_missing`); a served edit `File <abs path> not found`
+and the line (`edit_missing`); a path refused as outside the root gets the
+line after the refusal. Without a candidate a served read stays
+passthrough, so the built-in reports the miss. Nothing is ever read or
+edited in place of the missing path. The hooks: Claude Code denies a
+`Read` of a missing path with the line; Kiro blocks (exit 2) a read whose
+every path is missing under the event's cwd, when there is a candidate;
+Codex gets it from `after` of the failed `cat`/`sed`. They ask the daemon
+(`path_check`) when one runs, else check locally (no graph names).
+
+## Ownership
+
+DevMemory journals each edit made while a session acts with `session:
+{harness, id}`, `epoch` and `head` (`ozagia.core.owners`): handled edits
+and writes, built-in edits reported by `after`, and MCP edits (session
+`mcp pid<N>`). The daemon journal's `files` field lists the files a
+request edited. A session is live while the daemon has seen a request or
+`hello` from it in the last 15 minutes (read back from the daemon journal
+when it starts); an MCP session while its process runs.
+
+Before a handled edit or write, each other live session whose last edit of
+the file is not yet committed (the file is dirty, and no commit after the
+HEAD of that edit touched it) adds a line to the result:
+
+    [ozagia] warning: <file> has uncommitted edits by another live session (<harness> <short id>, <age>)
+
+It never blocks the edit. Hooks ask the daemon (`owner_check`) before an
+edit where it is cheap: Claude Code `Edit`/`MultiEdit`/`Write` and Codex
+`apply_patch` (`additionalContext`), Kiro write tools (stdout).
+`ozagia who <path>` and MCP `dev_who {path}` list the sessions that edited
+a file: edits, first and last time, live or not, committed or not, with the
+file's git state.
 
 ## Daemon
 
@@ -621,7 +675,7 @@ remove the socket; with `--parent-pid` it also exits within
 `PARENT_POLL_S` (2 s) of that process going away (the harnesses pass their
 own pid). The journal (`<state dir>/daemon_journal.jsonl`) has one
 record per request: `ts, op, tool, intent, handled, is_error, expired, ms,
-keys (≤20), reason, fallback, session, harness`. `stats` returns counts by
+keys (≤20), reason, fallback, session, harness, files`. `stats` returns counts by
 op, tool, intent and handled; `passthrough` (not handled by design),
 `expired`, `after_expired`, `late` (handled after the deadline),
 `plugin_fallbacks` (`after` requests with `meta.fallback`),
@@ -651,6 +705,10 @@ apply_patch text against the current files and never writes (see
 docs/codex.md, "Patch check"). Its output is the region reply, or `the
 patch matches the current files`; intents `patch_check_ok`,
 `patch_check_miss` and `patch_check_unparsed`.
+
+Path resolution and ownership add `path_suggestions` (answers that named
+existing paths for a missing one), `ownership_warnings` and
+`live_sessions`.
 
 Background jobs add `jobs_started`, `waits`, `wait_seconds` and `polls_avoided` (waits that
 returned new output or the job's end) count background jobs, and `jobs`

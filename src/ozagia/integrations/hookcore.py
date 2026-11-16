@@ -23,6 +23,9 @@ pieces here do not depend on a harness's tool names or output envelope:
   (`ozagia.intent.shell.classify` is `git_refs`), and `git_refusal_reason`.
 - `node_key`: the node key a file path names, if any.
 - `response_text`: a built-in's result flattened to text for `after`.
+- `missing_path_line`, `owner_warnings`: the nearest existing paths for a
+  read of a missing path, and the warnings about another live session's
+  uncommitted edits before an edit (`path_check`, `owner_check`).
 - `repeat_stub`, `session_event`, `start_event`, `ledger_request`: the
   read ledger (`ozagia.intent.ledger`): ask whether a read repeats an
   unchanged range (PreToolUse), report compaction, start and end of a
@@ -454,6 +457,65 @@ def session_brief(root: Path, max_chars: int | None = None, *,
 
 
 # --------------------------------------------------------------------------- #
+# missing paths and ownership
+# --------------------------------------------------------------------------- #
+# A PreToolUse path or ownership check asks a running daemon (never started
+# for this) for this long.
+PATH_CHECK_TIMEOUT_S = 1.5
+OWNER_CHECK_TIMEOUT_S = 1.5
+
+
+def path_exists(path: Any, cwd: str | None, root: Path) -> bool:
+    """Whether `path` exists, a relative one under `cwd` (else `root`)."""
+    if not isinstance(path, str) or not path:
+        return True
+    base = cwd if cwd and os.path.isdir(cwd) else str(root)
+    p = os.path.expanduser(path)
+    return os.path.exists(p if os.path.isabs(p) else os.path.join(base, p))
+
+
+def missing_path_line(root: Path, path: Any, cwd: str | None = None) -> str:
+    """`[ozagia] no such file <path>; did you mean: ...` for a path that
+    does not exist under `cwd` (`ozagia.intent.paths`), or "" (it exists,
+    or nothing is close). The daemon answers when one runs (it adds files
+    of the graph with the same name); otherwise the check is local."""
+    if path_exists(path, cwd, root):
+        return ""
+    base = cwd if cwd and os.path.isdir(cwd) else str(root)
+    try:
+        resp = daemon_request(protocol.socket_path(root), {
+            "id": 1, "op": "path_check", "path": path, "cwd": base},
+            PATH_CHECK_TIMEOUT_S)
+        if "exists" in resp:
+            line = resp.get("line")
+            return line if isinstance(line, str) else ""
+    except (OSError, HookError, ValueError):
+        pass
+    from ozagia.intent.paths import suggest
+    return suggest(root, path, base=base)
+
+
+def owner_warnings(root: Path, harness: str, session: Any, paths: list[str],
+                   cwd: str | None = None) -> list[str]:
+    """The daemon's ownership warnings for an edit of `paths` by this
+    session (`owner_check`, `ozagia.core.owners`); [] when none or no
+    daemon answers."""
+    if not paths:
+        return []
+    msg: dict[str, Any] = {"id": 1, "op": "owner_check", "harness": harness,
+                           "session": session if isinstance(session, str) else "",
+                           "paths": paths[:20]}
+    if cwd:
+        msg["cwd"] = cwd
+    try:
+        resp = daemon_request(protocol.socket_path(root), msg, OWNER_CHECK_TIMEOUT_S)
+    except (OSError, HookError, ValueError):
+        return []
+    got = resp.get("warnings")
+    return [w for w in got if isinstance(w, str) and w] if isinstance(got, list) else []
+
+
+# --------------------------------------------------------------------------- #
 # the fail-open main
 # --------------------------------------------------------------------------- #
 def root_for(payload: Any) -> Path:
@@ -573,6 +635,7 @@ __all__ = ["AUTOSTART_BUDGET_S", "DAEMON_TIMEOUT_S", "AutostartRefused", "HookBl
            "STRUCTURED_KEY_PREFIXES", "autostart_allowed",
            "autostart_enabled", "daemon_request", "daemon_request_autostart",
            "ensure_daemon", "git_ref_moving", "git_refusal_reason", "in_work_tree",
-           "ledger_request", "log_failure", "maybe_read", "node_key", "rearm_alarm", "repeat_stub",
+           "ledger_request", "log_failure", "maybe_read", "missing_path_line",
+           "node_key", "owner_warnings", "path_exists", "rearm_alarm", "repeat_stub",
            "response_text", "root_for", "run_hook", "session_brief", "session_event",
            "start_event", "working_set"]
