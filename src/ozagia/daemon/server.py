@@ -83,6 +83,10 @@ clears or drops them, `read_check` answers a hook's PreToolUse.
 `outlines_served`, `bytes_saved` (from the answers' `meta.repeat` and
 `meta.bytes_saved`) and `ledger` (sessions, evictions, events).
 
+Test selection (`ozagia.intent.affected`): `stats` adds `affected_runs`,
+`tests_skipped_unaffected`, `cached_passes` and `full_runs_forced`, summed
+from the answers' `meta.tests`.
+
 The socket is created mode 0600. A socket file left at the path by a daemon
 that no longer answers `ping` is replaced; a live daemon or a non-socket
 file at the path is an error.
@@ -110,6 +114,9 @@ JOURNAL_NAME = "daemon_journal.jsonl"
 JOURNAL_KEYS = 20
 # Distinct shell passthrough reasons kept, and shown in `stats`.
 SHELL_REASONS = 200
+# `meta.tests` counters of a captured pytest (`ozagia.intent.affected`).
+TEST_COUNTERS = ("affected_runs", "tests_skipped_unaffected", "cached_passes",
+                 "full_runs_forced")
 SHELL_REASONS_SHOWN = 30
 
 # Passthrough reasons that name a file or directory, rewritten to one key
@@ -272,6 +279,9 @@ class DaemonState:
         self.sessions = SessionStore()
         self.reads = {"repeats_seen": 0, "stubs_served": 0, "notes_served": 0,
                       "bytes_saved": 0}
+        # Affected-test selection and the test-result cache
+        # (`ozagia.intent.affected`), from the answers' `meta.tests`.
+        self.tests = {k: 0 for k in TEST_COUNTERS}
         self.ms_total = 0.0
         self.ms_max = 0.0
         self.ms_count = 0
@@ -615,6 +625,12 @@ class DaemonState:
             saved = meta.get("bytes_saved")
             if isinstance(saved, int) and not isinstance(saved, bool) and saved > 0:
                 self.reads["bytes_saved"] += saved
+            tests = meta.get("tests")
+            if isinstance(tests, dict):
+                for k in TEST_COUNTERS:
+                    v = tests.get(k)
+                    if isinstance(v, int) and not isinstance(v, bool) and v > 0:
+                        self.tests[k] += v
             if not resp.get("ok"):
                 self.errors += 1
             if resp.get("is_error"):
@@ -767,6 +783,11 @@ class DaemonState:
                 **{k: job_stats[k] for k in ("jobs_started", "waits",
                                             "wait_seconds", "polls_avoided")},
                 "jobs": job_stats,
+                # Affected-test selection and the test-result cache: subset
+                # runs, tests not run because no change reached them, tests
+                # answered from the cache, and runs that fell back to the
+                # whole suite while selection was on.
+                **self.tests,
                 "permission_assert": _last(self.hellos, "permission_assert"),
                 "codemode_tools": sorted({
                     name for h in self.hellos

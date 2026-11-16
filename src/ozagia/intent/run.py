@@ -8,6 +8,12 @@ pytest output: pytest's own output tail (verbatim, `ozagia.check`'s last
     [ozagia]   frame sym:<rel>::<qual> <file>:<line>
     [ozagia] collection error file:<rel>: <message>
 
+With `[tests] select = "affected"` or `[tests] cache = true`
+(`ozagia.intent.affected`), a pytest with no test selector may run only the
+affected or uncached tests; the line after the head then says what ran and
+what did not (`[ozagia] ran N affected tests of M; not run: ...; run all:
+<cmd>`, or `[ozagia] ran all tests: <reason>`), followed by `cached pass`
+lines, and slow and flaky tests come last.
 A read-like command becomes a read of the same range; a search-like command
 becomes a grep; `ruff check` runs ruff itself and appends the node keys
 of its findings (`run_ruff`); a `jq` command in the subset of `ozagia.core.jq` prints
@@ -170,12 +176,32 @@ def run_pytest(memory: Any, cls: dict[str, Any], inp: dict[str, Any],
         base_env = env if isinstance(env, dict) else dict(os.environ)
         env = {**base_env, **cls["env"]}
     preflight_stop(inp)
-    res = run_tests(root, selectors, python=python, timeout_s=timeout_s,
-                    extra_args=_verbosity(list(cls["extra_args"])),
-                    tail_lines=int(OUTPUT_TAIL_LINES if cls.get("tail_lines") is None
-                                   else cls["tail_lines"]),
-                    **({"env": env, "inherit": False}
-                       if isinstance(env, dict) else {}))
+    from ozagia.intent import affected as A
+    plan = A.plan(memory, cls, inp, root=root, python=python,
+                  selectors=selectors,
+                  env=env if isinstance(env, dict) else None)
+    run_selectors = (selectors if plan is None or plan.selectors is None
+                     else plan.selectors)
+    if plan is not None and plan.nothing_to_run:
+        res = None
+    else:
+        res = run_tests(root, run_selectors, python=python, timeout_s=timeout_s,
+                        extra_args=_verbosity(list(cls["extra_args"])),
+                        tail_lines=int(OUTPUT_TAIL_LINES
+                                       if cls.get("tail_lines") is None
+                                       else cls["tail_lines"]),
+                        **({"env": env, "inherit": False}
+                           if isinstance(env, dict) else {}))
+    sel_head: list[str] = []
+    sel_tail: list[str] = []
+    meta: dict[str, Any] = {}
+    if plan is not None:
+        sel_head, sel_tail, meta = A.finish(plan, res)
+    if res is None:
+        lines = [tag("pytest not run: every selected test has a cached pass "
+                     "(exit 0)"), *sel_head, *sel_tail]
+        return {"intent": "shell_pytest", "output": "\n".join(lines),
+                "keys": [], "exit_code": 0, "meta": meta}
     c = res["counts"]
     out = res.get("output_tail") or ""
     filt = cls.get("output_filter")
@@ -191,6 +217,7 @@ def run_pytest(memory: Any, cls: dict[str, Any], inp: dict[str, Any],
     if res["collection_errors"]:
         head += f", {len(res['collection_errors'])} collection errors"
     lines.append(tag(head))
+    lines.extend(sel_head)
     if res.get("error"):
         lines.append(tag(f"error: {res['error']}"))
     keys: list[str] = []
@@ -217,8 +244,13 @@ def run_pytest(memory: Any, cls: dict[str, Any], inp: dict[str, Any],
         lines.append(tag(f"{t['outcome']} {t['key']}{param}: "
                          f"{one_line(t['message'])}"))
         frames(t)
-    return {"intent": "shell_pytest", "output": "\n".join(lines),
-            "keys": list(dict.fromkeys(keys)), "exit_code": res["exit_code"]}
+    lines.extend(sel_tail)
+    out_res: dict[str, Any] = {
+        "intent": "shell_pytest", "output": "\n".join(lines),
+        "keys": list(dict.fromkeys(keys)), "exit_code": res["exit_code"]}
+    if meta:
+        out_res["meta"] = meta
+    return out_res
 
 
 def run_jq(memory: Any, cls: dict[str, Any], path: Path) -> dict[str, Any]:

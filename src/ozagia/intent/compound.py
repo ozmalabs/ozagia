@@ -638,11 +638,15 @@ def _prepare(memory: Any, step: dict[str, Any], inp: dict[str, Any],
             tail = _pytest_tail_lines(filters)
             try:
                 res = run_pytest(memory, {**cls, "output_filter": None,
+                                          "_raw": step.get("raw"),
                                           **({"tail_lines": tail}
                                              if tail is not None else {})},
                                  sub, wd)
             except (Unhandled, IntentError) as e:
                 return f"pytest: {e}", [], 1, []
+            metas = inp.get("_tests_meta")
+            if isinstance(metas, list) and res.get("meta"):
+                metas.append(res["meta"])
             body, tags = _split_tags(res["output"])
             code = res.get("exit_code")
             status = code if isinstance(code, int) and code >= 0 else 1
@@ -699,6 +703,8 @@ def run_compound(memory: Any, cls: dict[str, Any], inp: dict[str, Any],
 
     env = inp.get("_test_env") if isinstance(inp.get("_test_env"), dict) else None
     home = (env or os.environ).get("HOME")
+    test_metas: list[dict[str, Any]] = []
+    inp = {**inp, "_tests_meta": test_metas}
     prepared = _prepare_seq(memory, cls["steps"], inp, wd, lock,
                             seen={"pytest": False}, home=home)
 
@@ -776,8 +782,12 @@ def run_compound(memory: Any, cls: dict[str, Any], inp: dict[str, Any],
                      f" of {len(out)} characters"))
     if status != 0:
         out = (out + "\n" if out else "") + tag(f"exit {status}")
-    return {"intent": "shell_compound", "output": out, "keys": keys,
-            "exit_code": status}
+    res: dict[str, Any] = {"intent": "shell_compound", "output": out,
+                           "keys": keys, "exit_code": status}
+    if test_metas:
+        from ozagia.intent.affected import merge_meta
+        res["meta"] = merge_meta(test_metas)
+    return res
 
 
 __all__ = ["MAX_OUTPUT_CHARS", "check_filters", "run_compound"]

@@ -62,6 +62,21 @@ one, every key has the generic default below. All keys are optional:
     repeat_by_harness = {opencode = "stub"}  # per-harness override
                                       # (wins over `repeat`)
 
+    [tests]
+    select = "all" | "affected"   # a captured pytest with no test selector:
+                                  # "all" (default) runs what the command
+                                  # names; "affected" runs only the tests
+                                  # linked to files changed since the last
+                                  # fully green run and reports the rest as
+                                  # not run (`ozagia.intent.affected`). Off by
+                                  # default because changing what a command
+                                  # runs is surprising. OZAGIA_TESTS_ALL=1 on
+                                  # the command runs everything.
+    cache = false                 # skip a selected test whose inputs (test
+                                  # file, conftests, imported project files,
+                                  # pytest config, interpreter, environment)
+                                  # are unchanged since it passed
+
     [jobs]
     enabled = false               # allow job_start (background jobs in the
                                   # daemon; see ozagia.daemon.jobs). Jobs run
@@ -305,6 +320,8 @@ class ProjectConfig:
     repeat: str | None = None
     repeat_by_harness: tuple[tuple[str, str], ...] = ()
     jobs_enabled: bool = False
+    tests_select: str = "all"
+    tests_cache: bool = False
     # `[lint]`: None means "unset" (decided by the files of the project).
     lint_enabled: bool | None = None
     lint_timeout_s: float = 3.0
@@ -335,10 +352,12 @@ _KEYS = {
               "outline_lines", "outline_bytes", "repeat",
               "repeat_by_harness"},
     "jobs": {"enabled"},
+    "tests": {"select", "cache"},
     "lint": {"enabled", "timeout_s", "python", "rust"},
     "iac": {"roots", "skip_globs", "remote_states"},
 }
 REPEAT_POLICIES = ("stub", "note", "off")
+TEST_SELECT_POLICIES = ("all", "affected")
 
 _RELAY_KEYS = {
     "specs", "allowed_kinds", "max_timeout_s", "command_allowlist",
@@ -698,6 +717,14 @@ def _parse(root: Path, source: Path | None, data: dict[str, Any]) -> ProjectConf
     jobs_enabled = data.get("jobs", {}).get("enabled", False)
     if not isinstance(jobs_enabled, bool):
         raise ConfigError(f"{where}: [jobs] enabled must be true or false")
+    tests = data.get("tests", {})
+    tests_select = tests.get("select", "all")
+    if tests_select not in TEST_SELECT_POLICIES:
+        raise ConfigError(f"{where}: [tests] select must be one of "
+                          + ", ".join(f'"{p}"' for p in TEST_SELECT_POLICIES))
+    tests_cache = tests.get("cache", False)
+    if not isinstance(tests_cache, bool):
+        raise ConfigError(f"{where}: [tests] cache must be true or false")
     lint = data.get("lint", {})
     lint_enabled = lint.get("enabled")
     if lint_enabled is not None and not isinstance(lint_enabled, bool):
@@ -909,6 +936,8 @@ def _parse(root: Path, source: Path | None, data: dict[str, Any]) -> ProjectConf
         repeat=repeat,
         repeat_by_harness=repeat_by_harness,
         jobs_enabled=jobs_enabled,
+        tests_select=tests_select,
+        tests_cache=tests_cache,
         lint_enabled=lint_enabled,
         lint_timeout_s=float(lint_timeout),
         lint_python=lint_langs["python"],

@@ -1035,7 +1035,9 @@ def test_graph_stats_fields_read_counts():
                                            "lint_runs": None,
                                            "lint_findings": None,
                                            "lint_timeouts": None,
-                                           "ruff_captures": None}
+                                           "ruff_captures": None,
+                                           **{k: None for k in
+                                              ae.TEST_SELECTION_FIELDS}}
     # The daemon's shape: handled {"true": captured, "false": passthrough and
     # expired}; fallbacks = plugin fallbacks + expired + failed (review fix 4).
     assert ae.graph_stats_fields({"hellos": 2, "handled": {"true": 3, "false": 4},
@@ -1062,7 +1064,8 @@ def test_graph_stats_fields_read_counts():
         "job_waits": None, "job_wait_seconds": None, "polls_avoided": None,
         "path_suggestions": None, "ownership_warnings": None,
         "lint_runs": None, "lint_findings": None, "lint_timeouts": None,
-        "ruff_captures": None}
+        "ruff_captures": None,
+        **{k: None for k in ae.TEST_SELECTION_FIELDS}}
     got = ae.graph_stats_fields({"hellos": 1, "shell": {"captured": 4,
                                                         "passthrough": 1}})
     assert (got["shell_captured"], got["shell_passthrough"]) == (4, 1)
@@ -1082,6 +1085,19 @@ def test_graph_stats_fields_and_aggregate_read_job_counters():
     row = ae.aggregate(runs, ["graph_intent"])[0]
     assert (row["total_jobs_started"], row["total_job_waits"],
             row["total_job_wait_seconds"], row["total_polls_avoided"]) == (2, 6, 64.2, 4)
+
+
+def test_graph_stats_fields_and_aggregate_test_selection_counters():
+    got = ae.graph_stats_fields({"hellos": 1, "affected_runs": 2,
+                                 "tests_skipped_unaffected": 40,
+                                 "cached_passes": 7, "full_runs_forced": 1})
+    assert [got[k] for k in ae.TEST_SELECTION_FIELDS] == [2, 40, 7, 1]
+    runs = [{"arm": "graph_intent", "daemon_ok": True, **got},
+            {"arm": "graph_intent", "daemon_ok": True, "affected_runs": 1,
+             "tests_skipped_unaffected": None, "cached_passes": 3,
+             "full_runs_forced": None}]
+    row = ae.aggregate(runs, ["graph_intent"])[0]
+    assert [row[f"total_{k}"] for k in ae.TEST_SELECTION_FIELDS] == [3, 40, 10, 1]
 
 
 def test_aggregate_totals_structured_reads():
