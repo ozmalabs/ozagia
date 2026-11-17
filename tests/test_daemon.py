@@ -266,7 +266,7 @@ def test_journal_records_every_request(daemon):
     rec = [r for r in recs if r.get("session") == "ses_j"][-1]
     assert set(rec) == {"ts", "op", "tool", "intent", "handled", "is_error",
                         "expired", "ms", "keys", "reason", "fallback",
-                        "session", "harness", "files"}
+                        "session", "harness", "files", "preflight", "ok"}
     assert rec["files"] is None
     assert rec["op"] == "tool" and rec["tool"] == "read"
     assert rec["intent"] == "read_file" and rec["handled"] is True

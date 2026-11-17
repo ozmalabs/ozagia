@@ -292,10 +292,12 @@ def _snapshot(workdir: Path) -> dict[str, str | None]:
     ozagia's own state directory and the harness-installed OpenCode plugin
     are never part of it, whether or not the target repository ignores them."""
     proc = _git(["ls-files", "-z", "-m", "-d", "-o", "--exclude-standard"], workdir)
-    plugin = opencode_plugin.PLUGIN_REL.as_posix()
+    plugins = {opencode_plugin.PLUGIN_REL.as_posix(),
+               opencode_plugin.TUI_BRAND_REL.as_posix(),
+               opencode_plugin.TUI_PROFILE_REL.as_posix()}
     snap: dict[str, str | None] = {}
     for rel in sorted(p for p in proc.stdout.split("\0")
-                      if p and p.split("/", 1)[0] != STATE_DIRNAME and p != plugin):
+                      if p and p.split("/", 1)[0] != STATE_DIRNAME and p not in plugins):
         target = workdir / rel
         if target.is_file():
             snap[rel] = hashlib.sha256(target.read_bytes()).hexdigest()

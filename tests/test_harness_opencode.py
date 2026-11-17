@@ -27,6 +27,7 @@ PLUGIN_REL = Path(".opencode") / "plugins" / "ozagia.js"
 BRAND_REL = Path(".opencode") / "plugins" / "ozagia" / "tui.js"
 EXCLUDES = ["/.opencode/plugins/ozagia.js",
             "/.opencode/plugins/ozagia/tui.js", "/.ozagia/"]
+PROFILE_EXCLUDE = "/.opencode/plugins/ozagia-profile/tui.js"
 
 MOD = "def add(a, b):\n    return a + b\n"
 TEST = "from pkg.mod import add\n\n\ndef test_add():\n    assert add(1, 2) == 3\n"
@@ -168,15 +169,15 @@ def test_run_agent_end_to_end(repo, stub, tmp_path):
     assert _exclude_lines(repo).count(EXCLUDES[0]) == 0
     assert _exclude_lines(repo).count(EXCLUDES[1]) == 0
     assert _exclude_lines(repo).count(EXCLUDES[2]) == 1
-    assert res["exclude_removed"] == EXCLUDES[:2]
+    assert res["exclude_removed"] == [*EXCLUDES[:2], PROFILE_EXCLUDE]
     assert _git(repo, "status", "--porcelain") == ""
 
 
 def test_second_run_is_idempotent_and_refreshes(repo, stub, tmp_path):
     first = _run(repo, tmp_path)
-    assert sorted(first["exclude"]["added"]) == sorted(EXCLUDES)
+    assert sorted(first["exclude"]["added"]) == sorted([*EXCLUDES, PROFILE_EXCLUDE])
     second = _run(repo, tmp_path)
-    assert second["exclude"]["added"] == EXCLUDES[:2]
+    assert second["exclude"]["added"] == [*EXCLUDES[:2], PROFILE_EXCLUDE]
     assert second["prep"]["action"] == "fresh"
     assert _exclude_lines(repo).count(EXCLUDES[0]) == 0
     assert _exclude_lines(repo).count(EXCLUDES[1]) == 0
@@ -192,14 +193,15 @@ def test_git_exclude_appends_only_missing_lines(repo):
     path = repo / ".git" / "info" / "exclude"
     path.write_text("*.log\n/.ozagia/", encoding="utf-8")  # no trailing newline
     out = git_exclude(repo)
-    assert out["added"] == EXCLUDES[:2]
+    assert out["added"] == [*EXCLUDES[:2], PROFILE_EXCLUDE]
     assert path.read_text().splitlines() == [
-        "*.log", "/.ozagia/", *EXCLUDES[:2]]
+        "*.log", "/.ozagia/", *EXCLUDES[:2], PROFILE_EXCLUDE]
     assert git_exclude(repo)["added"] == []
     sub = repo / "pkg"
     assert git_exclude(sub)["added"] == [
         "/pkg/.opencode/plugins/ozagia.js",
-        "/pkg/.opencode/plugins/ozagia/tui.js", "/pkg/.ozagia/"]
+        "/pkg/.opencode/plugins/ozagia/tui.js",
+        "/pkg/.opencode/plugins/ozagia-profile/tui.js", "/pkg/.ozagia/"]
 
 
 def test_git_exclude_outside_git_is_none(tmp_path):

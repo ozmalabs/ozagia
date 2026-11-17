@@ -642,6 +642,95 @@ function noteJobs(client, res) {
   if (meta && meta.jobs_running > 0 && client.onJobs) client.onJobs(meta.job_seq);
 }
 
+function profileMillis(value) {
+  if (typeof value === "number" && Number.isFinite(value) && value >= 0) return value;
+  if (typeof value === "string") {
+    const parsed = Date.parse(value);
+    if (Number.isFinite(parsed) && parsed >= 0) return parsed;
+  }
+  return undefined;
+}
+
+/** Extract only allowlisted metadata from OpenCode's durable message events. */
+export function profileMetadataEvent(event) {
+  const properties = event && (event.properties || event.data || event);
+  if (!properties || typeof properties !== "object") return undefined;
+  const messageInfo = properties.info && typeof properties.info === "object" ? properties.info : {};
+  const eventPart = properties.part && typeof properties.part === "object" ? properties.part : {};
+  const session = properties.sessionID || messageInfo.sessionID || eventPart.sessionID;
+  if (typeof session !== "string" || !session || session.length > 256) return undefined;
+  if (event.type === "message.updated") {
+    const info = messageInfo;
+    if (info.role !== "assistant" || typeof info.id !== "string" || !info.id) return undefined;
+    const time = info.time && typeof info.time === "object" ? info.time : {};
+    const created = profileMillis(time.created);
+    const completed = profileMillis(time.completed);
+    // Final assistant updates have completed time and final token accounting.
+    // Intermediate stream updates are ignored, so the record is idempotent.
+    if (created === undefined || completed === undefined || completed < created) return undefined;
+    const token = info.tokens && typeof info.tokens === "object" ? info.tokens : {};
+    const cache = token.cache && typeof token.cache === "object" ? token.cache : {};
+    const value = (raw) => typeof raw === "number" && Number.isFinite(raw) && raw >= 0 ? Math.trunc(raw) : null;
+    const duration = (field) => {
+      const stamp = profileMillis(time[field]);
+      return stamp !== undefined && stamp >= created ? Math.trunc(stamp - created) : null;
+    };
+    const provider = typeof info.providerID === "string" && /^[\w.-]{1,80}$/.test(info.providerID)
+      ? info.providerID : "";
+    const modelID = typeof info.modelID === "string" && /^[\w./:+-]{1,120}$/.test(info.modelID)
+      ? info.modelID : "";
+    return {
+      op: "profile_event", harness: HARNESS, session, kind: "message",
+      event_id: info.id,
+      metadata: {
+        model: modelID ? (provider ? `${provider}/${modelID}` : modelID) : null,
+        tokens: {
+          input: value(token.input), output: value(token.output),
+          reasoning: value(token.reasoning), cache_read: value(cache.read),
+          cache_write: value(cache.write),
+        },
+        timing_ms: {
+          first_token: duration("firstToken"), streamed: duration("streamed"),
+          completed: duration("completed"), model_turn: Math.trunc(completed - created),
+        },
+      },
+    };
+  }
+  if (event.type === "message.part.updated") {
+    const part = eventPart;
+    if (part.type !== "tool" || typeof part.id !== "string" || !part.id
+        || typeof part.tool !== "string" || !/^[A-Za-z0-9_.-]{1,80}$/.test(part.tool)) return undefined;
+    const state = part.state && typeof part.state === "object" ? part.state : {};
+    if (state.status !== "completed" && state.status !== "error") return undefined;
+    const timing = state.time && typeof state.time === "object" ? state.time
+      : part.time && typeof part.time === "object" ? part.time : {};
+    const start = profileMillis(timing.ran ?? timing.start);
+    const completed = profileMillis(timing.completed ?? timing.end);
+    const durationMs = start !== undefined && completed !== undefined && completed >= start
+      ? Math.trunc(completed - start) : null;
+    return {
+      op: "profile_event", harness: HARNESS, session, kind: "tool",
+      event_id: part.id,
+      metadata: { tool: part.tool, status: state.status, duration_ms: durationMs },
+    };
+  }
+  return undefined;
+}
+
+async function captureProfileEvents(ctx, client, signal) {
+  try {
+    const events = ctx.event.subscribe({
+      types: ["message.updated", "message.part.updated"], signal,
+    });
+    for await (const event of events) {
+      const message = profileMetadataEvent(event);
+      if (!message) continue;
+      try { await client.request(message, 2000, false, false); }
+      catch { /* profiles are best-effort and never interrupt an agent turn */ }
+    }
+  } catch { /* unsupported event API or an unloaded daemon: no profile events */ }
+}
+
 export function createPlugin(options = {}) {
   const timeoutMs = options.requestTimeoutMs || REQUEST_TIMEOUT_MS;
   return {
@@ -651,6 +740,10 @@ export function createPlugin(options = {}) {
         const sockPath = process.env.OZAGIA_DAEMON_SOCK;
         if (!sockPath || !ctx) return;
         const client = new DaemonClient(sockPath, timeoutMs);
+        const profileAbort = new AbortController();
+        if (ctx.event && typeof ctx.event.subscribe === "function") {
+          void captureProfileEvents(ctx, client, profileAbort.signal);
+        }
         if (options.jobEventsDeadlineS) client.jobEventsDeadlineS = options.jobEventsDeadlineS;
         client.onJobs = (seq) => watchJobs(client, ctx.session, seq);
         const hintCache = new Map();
@@ -703,6 +796,7 @@ export function createPlugin(options = {}) {
           }
         });
         client.hello(undefined);
+        return () => profileAbort.abort();
       } catch { /* never break OpenCode startup */ }
     },
   };

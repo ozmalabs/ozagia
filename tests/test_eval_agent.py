@@ -938,6 +938,7 @@ def test_snapshot_never_lists_the_installed_plugin(tmp_path):
     from ozagia.integrations.opencode import install as oc
     oc.install(wd)
     assert ".opencode/plugins/ozagia.js" not in ae._snapshot(wd)
+    assert ".opencode/plugins/ozagia-profile/tui.js" not in ae._snapshot(wd)
     other = wd / ".opencode" / "plugins" / "agent.js"
     other.write_text("x", encoding="utf-8")
     assert ".opencode/plugins/agent.js" in ae._snapshot(wd)

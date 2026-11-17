@@ -76,7 +76,8 @@ from ozagia.integrations.opencode import install as plugin
 RUN_ARGV = ("run", "--standalone", "--format", "json", "--auto", "--archived")
 TUI_ARGV = ("--standalone",)
 EXCLUDE_PATTERNS = ("/" + plugin.PLUGIN_REL.as_posix(),
-                    "/" + plugin.TUI_BRAND_REL.as_posix(), "/.ozagia/")
+                    "/" + plugin.TUI_BRAND_REL.as_posix(),
+                    "/" + plugin.TUI_PROFILE_REL.as_posix(), "/.ozagia/")
 RUNS_DIRNAME = "ozagia_agent"
 # Seconds the TUI gets to exit after SIGTERM before SIGKILL.
 TUI_KILL_GRACE_S = ea.KILL_GRACE_S

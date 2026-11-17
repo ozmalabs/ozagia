@@ -17,6 +17,7 @@ import {
   settingsSchemaSpec,
   settingsValuesSpec,
   statusSpec,
+  sessionProfileSpec,
   tasksCatalogSpec,
   tasksListSpec,
   tasksShowSpec,
@@ -100,6 +101,8 @@ export default Plugin.define({
     const registration = await ctx.rpc.register(Ozagia, {
       status: async (_input, context) =>
         run(() => statusSpec(config.root), context.signal),
+      sessionProfile: async (_input, context) =>
+        run(() => sessionProfileSpec(config.root), context.signal),
       apertures: async (_input, context) =>
         run(() => aperturesSpec(config.root), context.signal),
       view: async (input, context) =>

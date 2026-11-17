@@ -41,6 +41,7 @@ One npm package with three exports:
 | Export | File | Loaded by |
 | --- | --- | --- |
 | `.` | `src/index.ts` | OpenCode server: `Plugin.define` + `ctx.rpc.register` |
+| `./tui` | `src/tui.tsx` | OpenCode TUI: `sidebar.content` slot |
 | `./rpc` | `src/rpc.ts` | server, GUI and external clients: `Rpc.define` contract |
 | `./gui-experimental` | `dist/gui-experimental.cjs` | OpenCode Desktop windows and main process |
 
@@ -211,6 +212,54 @@ or set `options.root`, when working across worktrees. This is the main
 per-session gap in the first slice.
 
 ## GUI part
+
+### Session profile in OpenCode
+
+The normal `ozagia integrations opencode install --workdir <repo>` command
+installs a separate `.opencode/plugins/ozagia-profile/tui.js` companion. It
+uses OpenCode's supported `sidebar.content` slot and leaves the existing
+`.opencode/plugins/ozagia/tui.js` brand plugin alone. The server-side Ozagia
+plugin subscribes to OpenCode's `message.updated` and `message.part.updated`
+events, so host profiling does not depend on opening the sidebar. The TUI
+companion renders the report and status only. Neither plugin requires a change
+to the global `cli.json`. The optional Desktop GUI add-in offers the same report
+in its Profile tab through the add-in's `sessionProfile` RPC.
+
+The report counts daemon-observed tool/after operations per harness and
+session, handled tools, passthrough, expiry, errors, plugin fallbacks, and the
+durations the daemon actually recorded. It asks the live daemon's `stats`
+operation for the active journal path. If the daemon is unavailable, a default
+journal can be shown only as `fallback_unverified`; counts then are not evidence
+of complete session activity. The journal read is capped at 2 MiB and
+200 sessions are returned. Sanitized daemon outcome counters are also persisted
+as operations occur under `.ozagia/session_profiles/`, allowing retrospective
+reports after the daemon or its temporary journal disappears. Handled,
+successful passthrough, expired, failed (`ok=false`), and unknown tool outcomes
+are reported separately; errors include daemon failures. Legacy rows without
+`ok` retain the old explicit `handled=false` passthrough interpretation. Writers
+use a cross-process file lock with a 50 ms wait bound and atomic replacement; the
+daemon performs this write after releasing its stats lock. A lock timeout drops
+that profile event and is returned by the RPC or logged by the daemon. Persisted
+counters take precedence over a truncated journal window; reports mark bounded
+journal truncation. Writes close before returning but skip per-tool
+`fsync` to avoid storage-device sync on the tool response path, matching the
+journal's process-crash durability level. A local 80-write microbenchmark on the
+worktree filesystem measured 0.229 ms median and 0.258 ms p95; this is an
+observed measurement, not a platform guarantee. The report does not expose
+journal keys, paths, prompts, source, or tool contents. Model and
+token usage come from OpenCode message events when supplied; missing fields are
+reported as unknown. The session profile state is bounded to 200 sessions and
+32 KiB per session. No message body or tool input/output is stored. SDK-shaped
+event extraction is tested, and a temporary PTY smoke verifies the installed
+sidebar, but live host event delivery has not been end-to-end injected because
+the available host API for creating assistant messages invokes a model.
+Operation durations are not a task critical path: no
+dependency graph or model-think times are available here. Missing journals,
+unknown fields, and daemon/RPC failures remain explicit.
+
+Use `python -m ozagia.session_profile_cli --root <repo> --session <id> --json`
+to inspect one session without the add-in. The package also exposes
+`ozagia-session-profile` on a fresh installation.
 
 `src/gui.tsx` registers:
 

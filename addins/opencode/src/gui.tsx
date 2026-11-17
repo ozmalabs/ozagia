@@ -17,7 +17,7 @@ import { OzagiaPanel } from "./gui/panel"
 import { OzagiaSettings } from "./gui/settings"
 import { panelCss } from "./gui/styles"
 
-type TabId = "graph" | "status" | "testing" | "research" | "actions" | "tasks" | "tools"
+type TabId = "graph" | "status" | "profile" | "testing" | "research" | "actions" | "tasks" | "tools"
 
 export default Plugin.define({
   ...definition,
@@ -40,6 +40,7 @@ export default Plugin.define({
     // opened by their commands or the panel launcher and stay closeable.
     const graphTab = tab("graph", "tab.graph", true)
     const statusTab = tab("status", "tab.status")
+    const profileTab = tab("profile", "tab.profile")
     const testingTab = tab("testing", "tab.testing")
     const researchTab = tab("research", "tab.research")
     const actionsTab = tab("actions", "tab.actions")
@@ -61,6 +62,7 @@ export default Plugin.define({
       list: (input) => [
         graphTab,
         ...(input.open.includes("status") ? [statusTab] : []),
+        ...(input.open.includes("profile") ? [profileTab] : []),
         ...(input.open.includes("testing") ? [testingTab] : []),
         ...(input.open.includes("research") ? [researchTab] : []),
         ...(input.open.includes("actions") ? [actionsTab] : []),
@@ -120,6 +122,7 @@ export default Plugin.define({
 
     ctx.add(Command, openCommand("graph", "open-graph", "command.openGraph"))
     ctx.add(Command, openCommand("status", "open-status", "command.openStatus"))
+    ctx.add(Command, openCommand("profile", "open-profile", "command.openProfile"))
     ctx.add(Command, openCommand("testing", "open-testing", "command.openTesting"))
     ctx.add(Command, openCommand("research", "open-research", "command.openResearch"))
     ctx.add(Command, openCommand("actions", "open-actions", "command.openActions"))

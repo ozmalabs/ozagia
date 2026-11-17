@@ -5,6 +5,7 @@ import { ActionsTab } from "./actions"
 import { GraphTab } from "./graph"
 import { ResearchTab } from "./research"
 import { StatusTab } from "./status"
+import { ProfileTab } from "./profile"
 import { TasksTab } from "./tasks"
 import { TestingTab } from "./testing"
 import { ToolchainTab } from "./toolchain"
@@ -22,6 +23,9 @@ export function OzagiaPanel(props: {
         </Match>
         <Match when={props.tab().id === "status"}>
           <StatusTab />
+        </Match>
+        <Match when={props.tab().id === "profile"}>
+          <ProfileTab />
         </Match>
         <Match when={props.tab().id === "testing"}>
           <TestingTab lastPlan={props.lastPlan} setLastPlan={props.setLastPlan} />

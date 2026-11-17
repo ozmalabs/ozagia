@@ -272,6 +272,14 @@ export function statusSpec(root: string): CommandSpec {
   }
 }
 
+export function sessionProfileSpec(root: string): CommandSpec {
+  return {
+    module: "ozagia.session_profile_cli",
+    args: ["--root", root, "--json"],
+    display: "ozagia.session_profile_cli --json",
+  }
+}
+
 export function aperturesSpec(root: string): CommandSpec {
   return {
     module: "ozagia.view_cli",

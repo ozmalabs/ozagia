@@ -37,6 +37,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from importlib import resources
@@ -50,6 +51,8 @@ TUI_BRAND_ID = "ozagia-brand"
 # top-level `plugins/*.js` or a subdir `index.js` is not picked up by the TUI;
 # verified against the 2.3.0 binary). The server plugin stays a top-level file.
 TUI_BRAND_REL = Path(".opencode") / "plugins" / "ozagia" / "tui.js"
+TUI_PROFILE_ID = "ozagia-profile"
+TUI_PROFILE_REL = Path(".opencode") / "plugins" / TUI_PROFILE_ID / "tui.js"
 REPLACED_TOOLS = ("read", "grep", "glob", "edit", "write", "shell")
 # Pause between `opencode plugin list` polls while the service loads plugins.
 LIST_POLL_S = 1.0
@@ -102,6 +105,13 @@ def tui_brand_source() -> str:
             .joinpath("tui_brand.js").read_text(encoding="utf-8"))
 
 
+def tui_profile_source() -> str:
+    """The metadata-only OpenCode session profile sidebar plugin."""
+    source = (resources.files("ozagia.integrations.opencode")
+              .joinpath("tui_profile.js").read_text(encoding="utf-8"))
+    return source.replace('"__OZAGIA_PYTHON__"', json.dumps(sys.executable))
+
+
 def plugin_path(workdir: str | Path) -> Path:
     return Path(workdir) / PLUGIN_REL
 
@@ -111,7 +121,7 @@ def tui_brand_path(workdir: str | Path) -> Path:
 
 
 def install(workdir: str | Path) -> Path:
-    """Write both plugin files into `<workdir>/.opencode/plugins/`.
+    """Write the server plugin and separate TUI companions into the workdir.
 
     Returns the server plugin's path (the one `check_loads` and `self_test`
     operate on). The TUI brand plugin is written alongside it, in the
@@ -123,6 +133,9 @@ def install(workdir: str | Path) -> Path:
     brand = tui_brand_path(workdir)
     brand.parent.mkdir(parents=True, exist_ok=True)
     brand.write_text(tui_brand_source(), encoding="utf-8")
+    profile = workdir / TUI_PROFILE_REL
+    profile.parent.mkdir(parents=True, exist_ok=True)
+    profile.write_text(tui_profile_source(), encoding="utf-8")
     return server
 
 
@@ -131,13 +144,14 @@ def uninstall(workdir: str | Path) -> bool:
     Returns whether a file was removed."""
     workdir = Path(workdir)
     removed = False
-    for rel in (PLUGIN_REL, TUI_BRAND_REL):
+    for rel in (PLUGIN_REL, TUI_BRAND_REL, TUI_PROFILE_REL):
         path = workdir / rel
         if path.is_file():
             path.unlink()
             removed = True
     # deepest-first; a non-empty directory (another plugin) stops the cleanup
     for parent in (workdir / TUI_BRAND_REL.parent,
+                   workdir / TUI_PROFILE_REL.parent,
                    workdir / PLUGIN_REL.parent,
                    workdir / ".opencode"):
         try:

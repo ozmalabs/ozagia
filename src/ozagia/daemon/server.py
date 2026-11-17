@@ -581,6 +581,15 @@ class DaemonState:
             if secrets_cleared is not None:
                 body["secrets_cleared"] = secrets_cleared
             return body
+        if op == "profile_event":
+            try:
+                from ozagia.session_profile_cli import store_profile_event
+                stored = store_profile_event(self.root, msg)
+            except TimeoutError as exc:
+                return {"ok": False, "error": f"profile event persistence timed out; event was dropped: {exc}"}
+            except (OSError, ValueError, TypeError) as exc:
+                return {"ok": False, "error": f"invalid profile event: {exc}"}
+            return stored
         if op == "read_check":
             tool = msg.get("tool")
             inp = msg.get("input")
@@ -1792,7 +1801,9 @@ class DaemonState:
                 harness = self._redact_response_text(harness)
             rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "op": op,
                    "tool": tool, "intent": meta.get("intent"),
+                   "ok": resp.get("ok") if isinstance(resp.get("ok"), bool) else None,
                    "handled": handled, "is_error": resp.get("is_error"),
+                   "preflight": resp.get("preflight") or None,
                    "expired": expired or None, "ms": round(ms, 1),
                    "keys": list(meta.get("keys") or [])[:JOURNAL_KEYS],
                    "reason": reason,
@@ -1806,6 +1817,12 @@ class DaemonState:
                     fh.write(json.dumps(rec, sort_keys=True) + "\n")
             except OSError as e:
                 print(f"journal write failed: {e}", file=sys.stderr, flush=True)
+        try:
+            from ozagia.session_profile_cli import store_daemon_event
+            store_daemon_event(self.root, rec)
+        except (OSError, ValueError, TypeError) as e:
+            print(f"session profile write failed: {type(e).__name__}: {e}",
+                  file=sys.stderr, flush=True)
 
     @contextlib.contextmanager
     def _unlocked(self):

@@ -22,6 +22,16 @@ Requests (`op`):
           "ms": 1.2, ...}}
       -> {"id": 2, "ok": true, "handled": false, "reason": "...",
           "meta": {...}}
+
+    {"id": 3, "op": "profile_event", "harness": "opencode",
+     "session": "ses_...", "kind": "message"|"tool", "event_id": "...",
+     "metadata": {"model"?, "tokens"?, "timing_ms"?, "tool"?, "status"?,
+                  "duration_ms"?}}
+      -> {"id": 3, "ok": true, "stored": true}
+      Persists an allowlisted aggregate in `.ozagia/session_profiles/`.
+      The OpenCode server plugin sends only final assistant-message and tool
+      outcome metadata; prompts, source, paths, and tool inputs/outputs are
+      never included.
       `meta` always has `intent` (a short name of what was done), `keys`
       (the node keys involved) and `ms` (handler time); `ozagia.intent`
       documents the intents and output formats. A handled answer also

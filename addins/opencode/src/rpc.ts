@@ -49,6 +49,7 @@ const EMPTY_INPUT = {
   additionalProperties: false,
 } as const
 
+
 const VIEW_INPUT = {
   type: "object",
   properties: {
@@ -146,6 +147,7 @@ export const Ozagia = Rpc.define({
   id: "ozagia",
   methods: {
     status: { input: EMPTY_INPUT, output: ENVELOPE_OUTPUT },
+    sessionProfile: { input: EMPTY_INPUT, output: ENVELOPE_OUTPUT },
     apertures: { input: EMPTY_INPUT, output: ENVELOPE_OUTPUT },
     view: { input: VIEW_INPUT, output: ENVELOPE_OUTPUT },
     worktreeCheck: { input: EMPTY_INPUT, output: ENVELOPE_OUTPUT },
