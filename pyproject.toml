@@ -38,6 +38,7 @@ openapi-yaml = ["PyYAML>=6"]
 iac-yaml = ["PyYAML>=6"]
 edit-yaml = ["ruamel.yaml>=0.18,<1"]
 research = ["sympy>=1.14,<2", "lark>=1.2,<2"]
+keyring = ["keyring>=24"]
 all = ["ozagia[treesitter,lsp,research,iac-yaml,openapi-yaml]"]
 dev = ["ozagia[all]", "pytest>=8", "ruff>=0.6"]
 # Optional, task-specific libraries. These are deliberately not part of
@@ -70,6 +71,7 @@ ozagia-ocelot-code = "ozagia.ocelot_code_cli:main"
 ozagia-hooks = "ozagia.hooks_cli:main"
 ozagia-console = "ozagia.console:main"
 ozagia-security = "ozagia.security_cli:main"
+ozagia-secrets = "ozagia.secrets_cli:main"
 ozagia-library-hints = "ozagia.library_hints_cli:main"
 ozagia-toolchain = "ozagia.toolchain_cli:main"
 ozagia-review = "ozagia.code_review_cli:main"

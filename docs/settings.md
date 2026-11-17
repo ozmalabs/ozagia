@@ -481,6 +481,28 @@ and includes the error in `config.error`, `config.errors` and its warnings.
 `max_findings` is capped at 1000 by the security loader even though the
 registry accepts up to 10000.
 
+### secrets
+
+| Key | Type | Default | Scope | Restart |
+| --- | --- | --- | --- | --- |
+| `secrets.providers` | string_list | `["env", "file"]` | repo | no |
+| `secrets.allow_cli` | string_list | `[]` | repo | no |
+| `secrets.allow_network` | boolean | `false` | repo | no |
+| `secrets.allow_absolute_files` | boolean | `false` | repo | no |
+| `secrets.max_bytes` | integer | `4096` | repo | no |
+| `secrets.redact_output` | boolean | `true` | repo | no |
+
+`ozagia.core.secrets` reads `[secrets]` from both files with
+`ozagia.config.load_config_section` (legacy wins per key). Providers are a
+subset of `env`, `file`, `keyring`, `pass` and `op`; `allow_cli` is a subset of
+`pass` and `op`; `op` also requires `allow_network`. `max_bytes` is capped at
+1 MiB. Environment overrides are `OZAGIA_SECRET_PROVIDERS`,
+`OZAGIA_ALLOW_SECRET_NETWORK` and `OZAGIA_SECRETS_DIR`. The table holds
+provider policy only: secret values are referenced as `secret://...` and are
+never stored in configuration, logs, job records or model messages. See
+[secrets.md](secrets.md) for the grammar, providers, redaction and the
+in-memory session store.
+
 ### iac
 
 | Key | Type | Default | Scope | Restart |

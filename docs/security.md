@@ -102,6 +102,10 @@ reload cache on both files (path, `mtime_ns`, size and content digest), so
 editing the non-active `ozagia/config.toml` invalidates it; `reload=True` still
 forces a rebuild.
 
+Secret references (`secret://...`), provider policy and in-memory session
+captures are a separate layer; see [secrets.md](secrets.md). The security scan
+still does not read an external secret store and never resolves a reference.
+
 ## Graph-derived rules
 
 The scan loads `.ozagia/graph.json` read-only. A missing, stale or unverified
