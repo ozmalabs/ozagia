@@ -65,7 +65,8 @@ def test_api_identity_and_deployment_comparisons_preserve_provenance(tmp_path, m
 
 def test_api_coverage_is_declared_and_stale_snapshot_is_unknown(tmp_path, monkeypatch):
     code, contract = tmp_path / "code", tmp_path / "contract"
-    code.mkdir(); contract.mkdir()
+    code.mkdir()
+    contract.mkdir()
     _snapshot(code, "code", [_node(1, "sym:app.py::serve", "Symbol", {})])
     _snapshot(contract, "contract", [_node(1, "api:get", "ApiOperation",
                                               {"method": "GET", "path": "/x"})])
@@ -84,7 +85,8 @@ def test_api_coverage_is_declared_and_stale_snapshot_is_unknown(tmp_path, monkey
 
 def test_wrong_endpoint_types_and_missing_links_are_unknown(tmp_path, monkeypatch):
     a, b = tmp_path / "a", tmp_path / "b"
-    a.mkdir(); b.mkdir()
+    a.mkdir()
+    b.mkdir()
     _snapshot(a, "a", [_node(1, "file:x.py", "File", {})])
     _snapshot(b, "b", [_node(1, "infra:x", "InfraResource", {})])
     _manifest(a, [{"source": "a::file:x.py", "target": "b::infra:x",
@@ -98,3 +100,55 @@ def test_wrong_endpoint_types_and_missing_links_are_unknown(tmp_path, monkeypatc
     assert report["checks"][0]["reason"] == "unsupported_endpoint_types"
     assert report["checks"][1]["reason"] == "invalid_declared_link"
     assert report["counts"]["unknown"] == 2
+
+
+def test_empty_links_and_unavailable_members_are_not_success(tmp_path, monkeypatch):
+    root, missing = tmp_path / "root", tmp_path / "missing"
+    root.mkdir()
+    _snapshot(root, "root", [])
+    calls = []
+
+    def freshness(item):
+        calls.append(item["root"])
+        return ("missing" if item["error"] else "unknown",
+                item["error"] or "working-tree freshness unavailable")
+
+    monkeypatch.setattr(federation, "_freshness", freshness)
+
+    report = cross_repo.check(root, roots=[missing])
+
+    assert report["checks"] == []
+    assert report["overall"] == "incomplete"
+    assert report["counts"]["unknown"] == 0
+    assert [member["state"] for member in report["members"]] == ["unknown", "missing"]
+    assert [error["state"] for error in report["member_errors"]] == ["unknown", "missing"]
+    assert len(calls) == 2
+
+
+def test_empty_links_with_verified_member_reports_no_checks(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    root.mkdir()
+    _snapshot(root, "root", [])
+    monkeypatch.setattr(federation, "_freshness", lambda _: ("fresh", None))
+
+    report = cross_repo.check(root, roots=[])
+
+    assert report["overall"] == "no_checks"
+    assert report["checks"] == []
+    assert report["member_errors"] == []
+
+
+def test_malformed_attrs_report_unknown_comparison(tmp_path, monkeypatch):
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    _snapshot(a, "a", [_node(1, "api:a", "ApiOperation", [])])
+    _snapshot(b, "b", [_node(1, "api:b", "ApiOperation", None)])
+    _manifest(a, [{"source": "a::api:a", "target": "b::api:b",
+                   "relation": "same_api_operation", "provenance": "fixture"}])
+    monkeypatch.setattr(federation, "_freshness", lambda _: ("fresh", None))
+
+    result = cross_repo.check(a, roots=[b])["checks"][0]
+
+    assert result["result"] == "unknown"
+    assert result["reason"] == "operation_identity_missing"
