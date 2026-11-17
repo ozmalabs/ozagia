@@ -14,14 +14,26 @@ _BRE_DEFINITION = re.compile(
     r"(?:^|\\\|)\^?(?:def|class)\s+([A-Za-z_]\w*)\s*(?:\\\(|\(|:|$)")
 
 
+def _tag_cache_refresh(stats: dict[str, Any]) -> str:
+    """Describe cache work for this refresh without presenting it as coverage."""
+    fields = ("parsed", "reused", "failed", "files", "cached_files")
+    values = {field: stats.get(field, "unknown") for field in fields}
+    return (
+        "tag cache refresh: "
+        f"{values['parsed']} parsed, {values['reused']} reused, "
+        f"{values['failed']} failed of {values['files']} scanned files; "
+        f"{values['cached_files']} cached entries"
+    )
+
+
 def definition_hint(memory: Any, pattern: Any, *, paths: list[str] | None = None,
                     matched_names: list[str] | None = None
                     ) -> tuple[str, list[str]]:
     """Return an additive definition hint for an explicit definition grep.
 
-    The graph snapshot must be fresh. Results include tag-index coverage so
-    partial indexing is visible, and an unhandled or stale lookup produces no
-    hint rather than changing the shell result.
+    The graph snapshot must be fresh. Results include tag-cache refresh
+    counters, and an unhandled or stale lookup produces no hint rather than
+    changing the shell result.
     """
     if not isinstance(pattern, str):
         return "", []
@@ -51,14 +63,7 @@ def definition_hint(memory: Any, pattern: Any, *, paths: list[str] | None = None
     if not resolved:
         return "", []
     tag_cache = cache_stats
-    total = tag_cache.get("files")
-    parsed = tag_cache.get("parsed")
-    failed = tag_cache.get("failed")
-    coverage = (f"{parsed}/{total} tag files parsed"
-                if isinstance(parsed, int) and isinstance(total, int)
-                else "tag coverage unknown")
-    if isinstance(failed, int) and failed:
-        coverage += f", {failed} failed"
+    refresh = _tag_cache_refresh(tag_cache)
     rows: list[str] = []
     keys: list[str] = []
     total = 0
@@ -80,7 +85,7 @@ def definition_hint(memory: Any, pattern: Any, *, paths: list[str] | None = None
                 break
     if not rows:
         return "", []
-    lead = "[ozagia] structural definitions (fresh snapshot; " + coverage + "):"
+    lead = "[ozagia] structural definitions (fresh snapshot; " + refresh + "):"
     detail = "\n".join(f"  {row}" for row in rows)
     guidance = "[ozagia] read a definition by passing its sym: key to read."
     if total > len(rows):
@@ -118,11 +123,7 @@ def query(memory: Any, kind: Any, target: Any, *, depth: Any = 1,
             return {"ok": False, "error": f"symbol graph failed: {type(exc).__name__}",
                     "freshness": state, "coverage": "unavailable", "resources": []}
         stats = result.get("tag_cache") or {}
-        total, parsed, failed = stats.get("files"), stats.get("parsed"), stats.get("failed")
-        if isinstance(total, int) and isinstance(parsed, int):
-            coverage += f"; tags {parsed}/{total} files parsed"
-            if isinstance(failed, int) and failed:
-                coverage += f", {failed} failed"
+        coverage += "; " + _tag_cache_refresh(stats)
         if kind == "resolve":
             rows = [{"id": item} for item in result.get("matches", [])[:20]
                     if isinstance(item, str)]
@@ -200,7 +201,7 @@ def query(memory: Any, kind: Any, target: Any, *, depth: Any = 1,
     resources = _safe_resources(memory, sorted({f["path"] for f in files
                         if isinstance(f, dict) and isinstance(f.get("path"), str)}))
     stats = result.get("cache") or {}
-    coverage += f"; tags {stats.get('parsed', 'unknown')}/{stats.get('cached_files', 'unknown')} files parsed"
+    coverage += "; " + _tag_cache_refresh(stats)
     all_cited = len(resources) == len(files)
     map_text = str(result.get("markdown") or "")
     return {"ok": bool(result.get("ok")), "kind": kind, "target": target,

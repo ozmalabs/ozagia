@@ -777,7 +777,7 @@ def test_explicit_definition_grep_appends_fresh_structural_lookup(mem, repo):
     assert "  Line 5: def helper(a, b=1):" in output
     assert "[ozagia] structural definitions (fresh snapshot;" in output
     assert "sym:pkg/mod.py::helper" in output
-    assert "tag files parsed" in output
+    assert "tag cache refresh:" in output
     assert "read a definition by passing its sym: key to read" in output
     assert "sym:pkg/mod.py::helper" in result["meta"]["keys"]
     assert result["permission"]["resources"] == ["grep -rn 'def helper' pkg"]
@@ -811,7 +811,8 @@ def test_structural_query_routes_to_existing_fresh_graph_services(mem):
     assert definitions["ok"] and definitions["freshness"] == "fresh"
     assert {row["id"] for row in definitions["results"]} == {
         "pkg/mod.py::helper"}
-    assert definitions["coverage"].startswith("graph snapshot: fresh; tags ")
+    assert definitions["coverage"].startswith(
+        "graph snapshot: fresh; tag cache refresh:")
     assert definitions["resources"] == ["pkg/mod.py"]
 
     callers = query(mem, "callers", "helper")
@@ -828,6 +829,37 @@ def test_structural_query_routes_to_existing_fresh_graph_services(mem):
     assert "def helper" in outline["text"]
     assert outline["resources"] == ["pkg/mod.py"]
     assert "snapshot nodes" in outline["coverage"]
+
+
+def test_structural_query_reports_warm_cache_reuse_not_missing_coverage(
+        mem, monkeypatch):
+    from ozagia.intent.structural import query
+
+    original = mem.symbol_graph
+    observed_stats = []
+
+    def record_stats(*args, **kwargs):
+        result = original(*args, **kwargs)
+        observed_stats.append(result["tag_cache"])
+        return result
+
+    monkeypatch.setattr(mem, "symbol_graph", record_stats)
+    cold = query(mem, "callers", "helper")
+    warm = query(mem, "callers", "helper")
+
+    assert cold["ok"] and warm["ok"]
+    assert any(row["id"] == "pkg/use.py::run" for row in warm["results"])
+    cold_stats, warm_stats = observed_stats
+    assert cold_stats["parsed"] == cold_stats["files"]
+    assert warm_stats["parsed"] == 0
+    assert warm_stats["reused"] == warm_stats["files"]
+    assert warm_stats["failed"] == 0
+    assert warm_stats["cached_files"] >= warm_stats["files"]
+    assert "0 parsed" in warm["coverage"]
+    assert f"{warm_stats['reused']} reused" in warm["coverage"]
+    assert f"{warm_stats['failed']} failed" in warm["coverage"]
+    assert "cached entries" in warm["coverage"]
+    assert "0/" not in warm["coverage"]
 
 
 def test_structural_outline_withholds_text_without_safe_citation(mem, monkeypatch):
