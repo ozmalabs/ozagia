@@ -1,0 +1,1282 @@
+# Curated, approximate model profiles for `ozagia.core.model_graph`.
+#
+# These are *not* authoritative provider metadata. They are a small,
+# human-curated reference used to place a discovered model id on a graph when
+# `opencode models` reports only the id. Every number is approximate and may be
+# stale; a missing value is deliberately left out instead of guessed.
+#
+# Rules:
+# - `match` entries are fnmatch patterns against the lower-case model name
+#   (the part after the provider, including any `/`).
+# - The first matching profile wins, so specific variants come before the
+#   generic family entry.
+# - `params_total_b` / `params_active_b` are only present for open-weight
+#   models whose size is public. Closed models keep them unset and use
+#   `size_class` instead.
+# - `context` is tokens. Costs are USD per million tokens. Omit both when the
+#   value is version-dependent or not public.
+# - A repository override in `[model_graph.models."provider/model"]` always
+#   wins over these profiles.
+
+schema = 1
+
+# --------------------------------------------------------------------------
+# Non-chat modalities and special-purpose models
+# --------------------------------------------------------------------------
+[[profiles]]
+family = "qwen"
+variant = "embedding"
+match = ["*qwen*embed*"]
+type = "embedding"
+size_class = "unknown"
+modalities_in = ["text"]
+modalities_out = ["embedding"]
+source = "curated: Qwen embedding model docs"
+notes = "Embedding model; no chat or tool use."
+
+[[profiles]]
+family = "embedding"
+variant = "default"
+match = ["*embed*", "*bge-*", "*e5-*", "*nomic*"]
+type = "embedding"
+size_class = "unknown"
+modalities_in = ["text"]
+modalities_out = ["embedding"]
+source = "curated: generic embedding-family naming"
+notes = "Inferred only from the model name; parameters and context are unknown."
+
+[[profiles]]
+family = "gpt"
+variant = "image"
+match = ["*gpt-image*"]
+type = "image"
+size_class = "unknown"
+modalities_in = ["text"]
+modalities_out = ["image"]
+source = "curated: OpenAI image model naming"
+notes = "Image generation/editing model; parameter count is undisclosed."
+
+[[profiles]]
+family = "imagegen"
+variant = "default"
+match = ["*dall-e*", "*imagen*", "*flux*", "*stable-diffusion*", "*-image-*"]
+type = "image"
+size_class = "unknown"
+modalities_in = ["text", "image"]
+modalities_out = ["image"]
+source = "curated: image-generation family naming"
+notes = "Image generation/editing; metadata is approximate."
+
+[[profiles]]
+family = "whisper"
+variant = "default"
+match = ["*whisper*"]
+type = "audio"
+size_class = "unknown"
+modalities_in = ["audio"]
+modalities_out = ["text"]
+source = "curated: speech-to-text naming"
+notes = "Speech recognition model."
+
+[[profiles]]
+family = "audio"
+variant = "default"
+match = ["*tts*", "*text-to-speech*"]
+type = "audio"
+size_class = "unknown"
+modalities_in = ["text"]
+modalities_out = ["audio"]
+source = "curated: speech-synthesis naming"
+notes = "Speech synthesis model."
+
+# --------------------------------------------------------------------------
+# Claude (Anthropic)
+# --------------------------------------------------------------------------
+[[profiles]]
+family = "claude"
+variant = "opus"
+match = ["*claude*opus*"]
+type = "reasoning"
+size_class = "frontier"
+context = 200000
+input_cost = 15.0
+output_cost = 75.0
+modalities_in = ["text", "image", "pdf"]
+modalities_out = ["text"]
+capabilities = [
+  "tools", "vision", "pdf_native", "long_context", "structured_output",
+  "computer_use", "code", "reasoning",
+]
+tool_formats = [
+  "apply_patch", "replace", "whole_file", "library_call", "cli", "mcp",
+  "native_pdf",
+]
+source = "curated: Anthropic Claude Opus family, 2025 list prices"
+notes = "Closed weights; parameter count undisclosed. Prices are approximate."
+
+[[profiles]]
+family = "claude"
+variant = "sonnet"
+match = ["*claude*sonnet*"]
+type = "reasoning"
+size_class = "large"
+context = 200000
+input_cost = 3.0
+output_cost = 15.0
+modalities_in = ["text", "image", "pdf"]
+modalities_out = ["text"]
+capabilities = [
+  "tools", "vision", "pdf_native", "long_context", "structured_output",
+  "computer_use", "code", "reasoning",
+]
+tool_formats = [
+  "apply_patch", "replace", "whole_file", "library_call", "cli", "mcp",
+  "native_pdf",
+]
+source = "curated: Anthropic Claude Sonnet family, 2025 list prices"
+notes = "Closed weights; parameter count undisclosed. Prices are approximate."
+
+[[profiles]]
+family = "claude"
+variant = "haiku"
+match = ["*claude*haiku*"]
+type = "reasoning"
+size_class = "medium"
+context = 200000
+input_cost = 0.8
+output_cost = 4.0
+modalities_in = ["text", "image", "pdf"]
+modalities_out = ["text"]
+capabilities = [
+  "tools", "vision", "pdf_native", "long_context", "structured_output",
+  "code", "reasoning",
+]
+tool_formats = [
+  "apply_patch", "replace", "whole_file", "library_call", "cli", "mcp",
+  "native_pdf",
+]
+source = "curated: Anthropic Claude Haiku family, 2025 list prices"
+notes = "Closed weights; parameter count undisclosed. Prices are approximate."
+
+[[profiles]]
+family = "claude"
+variant = "default"
+match = ["*claude*"]
+type = "reasoning"
+size_class = "unknown"
+modalities_in = ["text", "image"]
+modalities_out = ["text"]
+capabilities = ["tools", "vision", "code", "reasoning"]
+tool_formats = ["replace", "whole_file", "library_call", "cli", "mcp"]
+source = "curated: Anthropic Claude naming"
+notes = "Family known from the id; version-specific metadata not curated."
+
+# --------------------------------------------------------------------------
+# GPT / Codex / o-series (OpenAI)
+# --------------------------------------------------------------------------
+[[profiles]]
+family = "gpt"
+variant = "codex-mini"
+match = ["*codex-mini*"]
+type = "code"
+size_class = "small"
+context = 200000
+input_cost = 1.5
+output_cost = 6.0
+modalities_in = ["text"]
+modalities_out = ["text"]
+capabilities = [
+  "tools", "long_context", "structured_output", "code", "reasoning",
+]
+tool_formats = [
+  "apply_patch", "replace", "whole_file", "library_call", "cli", "mcp",
+]
+source = "curated: OpenAI Codex mini, 2025 list prices"
+notes = "Closed weights; parameter count undisclosed. Prices are approximate."
+
+[[profiles]]
+family = "gpt"
+variant = "codex"
+match = ["*codex*"]
+type = "code"
+size_class = "large"
+context = 200000
+input_cost = 1.5
+output_cost = 6.0
+modalities_in = ["text"]
+modalities_out = ["text"]
+capabilities = [
+  "tools", "long_context", "structured_output", "code", "reasoning",
+]
+tool_formats = [
+  "apply_patch", "replace", "whole_file", "library_call", "cli", "mcp",
+]
+source = "curated: OpenAI Codex family"
+notes = "Closed weights; parameter count undisclosed. Prices are approximate."
+
+[[profiles]]
+family = "gpt"
+variant = "o4"
+match = ["*o4-mini*", "*o4*"]
+type = "reasoning"
+size_class = "small"
+context = 200000
+input_cost = 1.1
+output_cost = 4.4
+modalities_in = ["text", "image"]
+modalities_out = ["text"]
+capabilities = [
+  "tools", "vision", "long_context", "structured_output", "code", "reasoning",
+]
+tool_formats = ["replace", "whole_file", "library_call", "cli", "mcp"]
+source = "curated: OpenAI o4 family, 2025 list prices"
+notes = "Closed weights; parameter count undisclosed. Prices are approximate."
+
+[[profiles]]
+family = "gpt"
+variant = "o3"
+match = ["*o3-mini*", "*o3*"]
+type = "reasoning"
+size_class = "large"
+context = 200000
+input_cost = 2.0
+output_cost = 8.0
+modalities_in = ["text", "image"]
+modalities_out = ["text"]
+capabilities = [
+  "tools", "vision", "long_context", "structured_output", "code", "reasoning",
+]
+tool_formats = ["replace", "whole_file", "library_call", "cli", "mcp"]
+source = "curated: OpenAI o3 family, 2025 list prices"
+notes = "Closed weights; parameter count undisclosed. Prices are approximate."
+
+[[profiles]]
+family = "gpt"
+variant = "o1"
+match = ["*o1-mini*", "*o1*"]
+type = "reasoning"
+size_class = "large"
+context = 200000
+input_cost = 15.0
+output_cost = 60.0
+modalities_in = ["text", "image"]
+modalities_out = ["text"]
+capabilities = [
+  "tools", "vision", "long_context", "structured_output", "code", "reasoning",
+]
+tool_formats = ["replace", "whole_file", "library_call", "cli", "mcp"]
+source = "curated: OpenAI o1 family, 2025 list prices"
+notes = "Closed weights; parameter count undisclosed. Prices are approximate."
+
+[[profiles]]
+family = "gpt"
+variant = "nano"
+match = ["*gpt-5*nano*", "*gpt*nano*"]
+type = "reasoning"
+size_class = "tiny"
+context = 400000
+input_cost = 0.05
+output_cost = 0.4
+modalities_in = ["text", "image"]
+modalities_out = ["text"]
+capabilities = [
+  "tools", "vision", "long_context", "structured_output", "code", "reasoning",
+]
+tool_formats = ["replace", "whole_file", "library_call", "cli", "mcp"]
+source = "curated: OpenAI GPT-5 nano, 2025 list prices"
+notes = "Closed weights; parameter count undisclosed. Prices are approximate."
+
+[[profiles]]
+family = "gpt"
+variant = "mini"
+match = ["*gpt-5*mini*", "*gpt-4.1*mini*"]
+type = "reasoning"
+size_class = "small"
+context = 400000
+input_cost = 0.25
+output_cost = 2.0
+modalities_in = ["text", "image"]
+modalities_out = ["text"]
+capabilities = [
+  "tools", "vision", "pdf_native", "long_context", "structured_output",
+  "code", "reasoning",
+]
+tool_formats = [
+  "replace", "whole_file", "apply_patch", "library_call", "cli", "mcp",
+  "native_pdf",
+]
+source = "curated: OpenAI GPT-5 mini, 2025 list prices"
+notes = "Closed weights; parameter count undisclosed. Prices are approximate."
+
+[[profiles]]
+family = "gpt"
+variant = "gpt-5"
+match = ["*gpt-5*"]
+type = "reasoning"
+size_class = "frontier"
+context = 400000
+input_cost = 1.25
+output_cost = 10.0
+modalities_in = ["text", "image", "pdf"]
+modalities_out = ["text"]
+capabilities = [
+  "tools", "vision", "pdf_native", "long_context", "structured_output",
+  "code", "reasoning",
+]
+tool_formats = [
+  "apply_patch", "replace", "whole_file", "library_call", "cli", "mcp",
+  "native_pdf",
+]
+source = "curated: OpenAI GPT-5 family, 2025 list prices"
+notes = "Closed weights; parameter count undisclosed. Prices are approximate."
+
+[[profiles]]
+family = "gpt"
+variant = "gpt-4.1"
+match = ["*gpt-4.1*"]
+type = "chat"
+size_class = "large"
+context = 1047576
+input_cost = 2.0
+output_cost = 8.0
+modalities_in = ["text", "image", "pdf"]
+modalities_out = ["text"]
+capabilities = [
+  "tools", "vision", "pdf_native", "long_context", "structured_output",
+  "code", "reasoning",
+]
+tool_formats = [
+  "apply_patch", "replace", "whole_file", "library_call", "cli", "mcp",
+  "native_pdf",
+]
+source = "curated: OpenAI GPT-4.1 family, 2025 list prices"
+notes = "Closed weights; parameter count undisclosed. Prices are approximate."
+
+[[profiles]]
+family = "gpt"
+variant = "gpt-4o-mini"
+match = ["*gpt-4o-mini*"]
+type = "multimodal"
+size_class = "small"
+context = 128000
+input_cost = 0.15
+output_cost = 0.6
+modalities_in = ["text", "image"]
+modalities_out = ["text"]
+capabilities = ["tools", "vision", "structured_output", "code"]
+tool_formats = ["replace", "whole_file", "library_call", "cli", "mcp"]
+source = "curated: OpenAI GPT-4o mini, 2025 list prices"
+notes = "Closed weights; parameter count undisclosed. Prices are approximate."
+
+[[profiles]]
+family = "gpt"
+variant = "gpt-4o"
+match = ["*gpt-4o*"]
+type = "multimodal"
+size_class = "large"
+context = 128000
+input_cost = 2.5
+output_cost = 10.0
+modalities_in = ["text", "image"]
+modalities_out = ["text"]
+capabilities = [
+  "tools", "vision", "long_context", "structured_output", "code",
+]
+tool_formats = ["replace", "whole_file", "library_call", "cli", "mcp"]
+source = "curated: OpenAI GPT-4o, 2025 list prices"
+notes = "Closed weights; parameter count undisclosed. Prices are approximate."
+
+[[profiles]]
+family = "gpt"
+variant = "default"
+match = ["*gpt*"]
+type = "chat"
+size_class = "unknown"
+modalities_in = ["text"]
+modalities_out = ["text"]
+capabilities = ["tools", "structured_output", "code"]
+tool_formats = ["replace", "whole_file", "library_call", "cli", "mcp"]
+source = "curated: OpenAI GPT naming"
+notes = "Family known from the id; version-specific metadata not curated."
+
+# --------------------------------------------------------------------------
+# Gemini (Google)
+# --------------------------------------------------------------------------
+[[profiles]]
+family = "gemini"
+variant = "pro"
+match = ["*gemini*pro*"]
+type = "multimodal"
+size_class = "frontier"
+context = 1048576
+input_cost = 1.25
+output_cost = 10.0
+modalities_in = ["text", "image", "pdf", "audio", "video"]
+modalities_out = ["text"]
+capabilities = [
+  "tools", "vision", "audio", "pdf_native", "long_context",
+  "structured_output", "code", "reasoning",
+]
+tool_formats = [
+  "replace", "whole_file", "library_call", "cli", "mcp", "native_pdf",
+]
+source = "curated: Google Gemini Pro family, 2025 list prices"
+notes = "Closed weights; parameter count undisclosed. Prices are approximate."
+
+[[profiles]]
+family = "gemini"
+variant = "flash"
+match = ["*gemini*flash*"]
+type = "multimodal"
+size_class = "medium"
+context = 1048576
+input_cost = 0.3
+output_cost = 2.5
+modalities_in = ["text", "image", "pdf", "audio", "video"]
+modalities_out = ["text"]
+capabilities = [
+  "tools", "vision", "audio", "pdf_native", "long_context",
+  "structured_output", "code", "reasoning",
+]
+tool_formats = [
+  "replace", "whole_file", "library_call", "cli", "mcp", "native_pdf",
+]
+source = "curated: Google Gemini Flash family, 2025 list prices"
+notes = "Closed weights; parameter count undisclosed. Prices are approximate."
+
+[[profiles]]
+family = "gemini"
+variant = "default"
+match = ["*gemini*"]
+type = "multimodal"
+size_class = "large"
+context = 1048576
+modalities_in = ["text", "image", "pdf"]
+modalities_out = ["text"]
+capabilities = [
+  "tools", "vision", "pdf_native", "long_context", "structured_output", "code",
+]
+tool_formats = [
+  "replace", "whole_file", "library_call", "cli", "mcp", "native_pdf",
+]
+source = "curated: Google Gemini naming"
+notes = "Family known from the id; version-specific metadata not curated."
+
+# --------------------------------------------------------------------------
+# Llama (Meta)
+# --------------------------------------------------------------------------
+[[profiles]]
+family = "llama"
+variant = "scout"
+match = ["*llama*4*scout*", "*llama-scout*"]
+type = "multimodal"
+size_class = "large"
+params_total_b = 109.0
+params_active_b = 17.0
+context = 10000000
+modalities_in = ["text", "image"]
+modalities_out = ["text"]
+capabilities = ["tools", "vision", "long_context", "code"]
+tool_formats = ["replace", "whole_file", "library_call", "cli", "mcp"]
+source = "curated: Meta Llama 4 Scout, open weights"
+notes = "Open weights; total and active parameters are public."
+
+[[profiles]]
+family = "llama"
+variant = "maverick"
+match = ["*llama*4*maverick*", "*llama-maverick*"]
+type = "multimodal"
+size_class = "frontier"
+params_total_b = 400.0
+params_active_b = 17.0
+context = 1000000
+modalities_in = ["text", "image"]
+modalities_out = ["text"]
+capabilities = ["tools", "vision", "long_context", "code"]
+tool_formats = ["replace", "whole_file", "library_call", "cli", "mcp"]
+source = "curated: Meta Llama 4 Maverick, open weights"
+notes = "Open weights; total and active parameters are public."
+
+[[profiles]]
+family = "llama"
+variant = "405b"
+match = ["*llama*405b*"]
+type = "chat"
+size_class = "frontier"
+params_total_b = 405.0
+params_active_b = 405.0
+context = 128000
+modalities_in = ["text"]
+modalities_out = ["text"]
+capabilities = ["tools", "long_context", "code"]
+tool_formats = ["replace", "whole_file", "library_call", "cli", "mcp"]
+source = "curated: Meta Llama 3.1 405B, open weights"
+notes = "Open weights; dense 405B model."
+
+[[profiles]]
+family = "llama"
+variant = "70b"
+match = ["*llama*70b*"]
+type = "chat"
+size_class = "large"
+params_total_b = 70.0
+params_active_b = 70.0
+context = 128000
+modalities_in = ["text"]
+modalities_out = ["text"]
+capabilities = ["tools", "long_context", "code"]
+tool_formats = ["replace", "whole_file", "library_call", "cli", "mcp"]
+source = "curated: Meta Llama 3.x 70B, open weights"
+notes = "Open weights; dense 70B model."
+
+[[profiles]]
+family = "llama"
+variant = "8b"
+match = ["*llama*8b*"]
+type = "chat"
+size_class = "small"
+params_total_b = 8.0
+params_active_b = 8.0
+context = 128000
+modalities_in = ["text"]
+modalities_out = ["text"]
+capabilities = ["tools", "long_context", "code"]
+tool_formats = ["replace", "whole_file", "library_call", "cli", "mcp"]
+source = "curated: Meta Llama 3.x 8B, open weights"
+notes = "Open weights; dense 8B model."
+
+[[profiles]]
+family = "llama"
+variant = "3.2-3b"
+match = ["*llama*3.2*3b*"]
+type = "chat"
+size_class = "tiny"
+params_total_b = 3.0
+params_active_b = 3.0
+context = 128000
+modalities_in = ["text"]
+modalities_out = ["text"]
+capabilities = ["long_context"]
+source = "curated: Meta Llama 3.2 3B, open weights"
+notes = "Open weights; dense 3B model."
+
+[[profiles]]
+family = "llama"
+variant = "3.2-1b"
+match = ["*llama*3.2*1b*"]
+type = "chat"
+size_class = "tiny"
+params_total_b = 1.0
+params_active_b = 1.0
+context = 128000
+modalities_in = ["text"]
+modalities_out = ["text"]
+capabilities = ["long_context"]
+source = "curated: Meta Llama 3.2 1B, open weights"
+notes = "Open weights; dense 1B model."
+
+[[profiles]]
+family = "llama"
+variant = "default"
+match = ["*llama*"]
+type = "chat"
+size_class = "unknown"
+modalities_in = ["text"]
+modalities_out = ["text"]
+capabilities = ["tools", "code"]
+tool_formats = ["replace", "library_call", "cli", "mcp"]
+source = "curated: Meta Llama naming"
+notes = "Family known from the id; version-specific metadata not curated."
+
+# --------------------------------------------------------------------------
+# Qwen (Alibaba)
+# --------------------------------------------------------------------------
+[[profiles]]
+family = "qwen"
+variant = "coder-32b"
+match = ["*qwen*coder*32b*"]
+type = "code"
+size_class = "medium"
+params_total_b = 32.0
+params_active_b = 32.0
+context = 131072
+modalities_in = ["text"]
+modalities_out = ["text"]
+capabilities = ["tools", "long_context", "structured_output", "code"]
+tool_formats = [
+  "apply_patch", "replace", "whole_file", "library_call", "cli", "mcp",
+]
+source = "curated: Qwen2.5 Coder 32B, open weights"
+notes = "Open weights; dense 32B code model."
+
+[[profiles]]
+family = "qwen"
+variant = "coder-7b"
+match = ["*qwen*coder*7b*"]
+type = "code"
+size_class = "small"
+params_total_b = 7.0
+params_active_b = 7.0
+context = 131072
+modalities_in = ["text"]
+modalities_out = ["text"]
+capabilities = ["tools", "long_context", "structured_output", "code"]
+tool_formats = [
+  "apply_patch", "replace", "whole_file", "library_call", "cli", "mcp",
+]
+source = "curated: Qwen2.5 Coder 7B, open weights"
+notes = "Open weights; dense 7B code model."
+
+[[profiles]]
+family = "qwen"
+variant = "coder"
+match = ["*qwen*coder*"]
+type = "code"
+size_class = "unknown"
+modalities_in = ["text"]
+modalities_out = ["text"]
+capabilities = ["tools", "code", "structured_output"]
+tool_formats = [
+  "apply_patch", "replace", "whole_file", "library_call", "cli", "mcp",
+]
+source = "curated: Qwen Coder naming"
+notes = "Open weights; parameter count omitted unless the id says it."
+
+[[profiles]]
+family = "qwen"
+variant = "qwen3-235b"
+match = ["*qwen3*235b*"]
+type = "reasoning"
+size_class = "large"
+params_total_b = 235.0
+params_active_b = 22.0
+context = 262144
+modalities_in = ["text"]
+modalities_out = ["text"]
+capabilities = [
+  "tools", "long_context", "structured_output", "code", "reasoning",
+]
+tool_formats = [
+  "apply_patch", "replace", "whole_file", "library_call", "cli", "mcp",
+]
+source = "curated: Qwen3 235B-A22B, open weights"
+notes = "Open weights; mixture-of-experts total/active parameters."
+
+[[profiles]]
+family = "qwen"
+variant = "qwen3-30b-a3b"
+match = ["*qwen3*30b*a3b*"]
+type = "reasoning"
+size_class = "medium"
+params_total_b = 30.0
+params_active_b = 3.0
+context = 262144
+modalities_in = ["text"]
+modalities_out = ["text"]
+capabilities = [
+  "tools", "long_context", "structured_output", "code", "reasoning",
+]
+tool_formats = [
+  "apply_patch", "replace", "whole_file", "library_call", "cli", "mcp",
+]
+source = "curated: Qwen3 30B-A3B, open weights"
+notes = "Open weights; mixture-of-experts total/active parameters."
+
+[[profiles]]
+family = "qwen"
+variant = "32b"
+match = ["*qwen*32b*"]
+type = "reasoning"
+size_class = "medium"
+params_total_b = 32.0
+params_active_b = 32.0
+context = 131072
+modalities_in = ["text"]
+modalities_out = ["text"]
+capabilities = [
+  "tools", "long_context", "structured_output", "code", "reasoning",
+]
+tool_formats = [
+  "apply_patch", "replace", "whole_file", "library_call", "cli", "mcp",
+]
+source = "curated: Qwen 32B family, open weights"
+notes = "Open weights; dense 32B model."
+
+[[profiles]]
+family = "qwen"
+variant = "14b"
+match = ["*qwen*14b*"]
+type = "chat"
+size_class = "small"
+params_total_b = 14.0
+params_active_b = 14.0
+context = 131072
+modalities_in = ["text"]
+modalities_out = ["text"]
+capabilities = ["tools", "long_context", "structured_output", "code"]
+tool_formats = ["replace", "whole_file", "library_call", "cli", "mcp"]
+source = "curated: Qwen 14B family, open weights"
+notes = "Open weights; dense 14B model."
+
+[[profiles]]
+family = "qwen"
+variant = "8b"
+match = ["*qwen*8b*"]
+type = "chat"
+size_class = "small"
+params_total_b = 8.0
+params_active_b = 8.0
+context = 131072
+modalities_in = ["text"]
+modalities_out = ["text"]
+capabilities = ["tools", "long_context", "structured_output", "code"]
+tool_formats = ["replace", "whole_file", "library_call", "cli", "mcp"]
+source = "curated: Qwen 8B family, open weights"
+notes = "Open weights; dense 8B model."
+
+[[profiles]]
+family = "qwen"
+variant = "1.7b"
+match = ["*qwen3*1.7b*", "*qwen*1.7b*"]
+type = "chat"
+size_class = "tiny"
+params_total_b = 1.7
+params_active_b = 1.7
+context = 32768
+modalities_in = ["text"]
+modalities_out = ["text"]
+capabilities = ["tools"]
+source = "curated: Qwen 1.7B family, open weights"
+notes = "Open weights; small dense model."
+
+[[profiles]]
+family = "qwen"
+variant = "0.6b"
+match = ["*qwen3*0.6b*", "*qwen*0.6b*"]
+type = "chat"
+size_class = "tiny"
+params_total_b = 0.6
+params_active_b = 0.6
+context = 32768
+modalities_in = ["text"]
+modalities_out = ["text"]
+capabilities = ["tools"]
+source = "curated: Qwen 0.6B family, open weights"
+notes = "Open weights; small dense model."
+
+[[profiles]]
+family = "qwen"
+variant = "default"
+match = ["*qwen*"]
+type = "chat"
+size_class = "unknown"
+modalities_in = ["text"]
+modalities_out = ["text"]
+capabilities = ["tools", "code"]
+tool_formats = ["replace", "library_call", "cli", "mcp"]
+source = "curated: Alibaba Qwen naming"
+notes = "Family known from the id; version-specific metadata not curated."
+
+# --------------------------------------------------------------------------
+# Mistral / Mixtral
+# --------------------------------------------------------------------------
+[[profiles]]
+family = "mistral"
+variant = "mixtral-8x22b"
+match = ["*mixtral*8x22b*"]
+type = "chat"
+size_class = "large"
+params_total_b = 141.0
+params_active_b = 39.0
+context = 65536
+modalities_in = ["text"]
+modalities_out = ["text"]
+capabilities = ["tools", "long_context", "code"]
+tool_formats = ["replace", "library_call", "cli", "mcp"]
+source = "curated: Mistral Mixtral 8x22B, open weights"
+notes = "Open weights; mixture-of-experts total/active parameters."
+
+[[profiles]]
+family = "mistral"
+variant = "mixtral-8x7b"
+match = ["*mixtral*8x7b*"]
+type = "chat"
+size_class = "medium"
+params_total_b = 46.7
+params_active_b = 12.9
+context = 32768
+modalities_in = ["text"]
+modalities_out = ["text"]
+capabilities = ["tools", "code"]
+tool_formats = ["replace", "library_call", "cli", "mcp"]
+source = "curated: Mistral Mixtral 8x7B, open weights"
+notes = "Open weights; mixture-of-experts total/active parameters."
+
+[[profiles]]
+family = "mistral"
+variant = "codestral"
+match = ["*codestral*"]
+type = "code"
+size_class = "medium"
+params_total_b = 22.0
+params_active_b = 22.0
+context = 256000
+modalities_in = ["text"]
+modalities_out = ["text"]
+capabilities = ["tools", "long_context", "structured_output", "code"]
+tool_formats = [
+  "apply_patch", "replace", "whole_file", "library_call", "cli", "mcp",
+]
+source = "curated: Mistral Codestral, open weights"
+notes = "Open weights; dense 22B code model."
+
+[[profiles]]
+family = "mistral"
+variant = "devstral"
+match = ["*devstral*"]
+type = "code"
+size_class = "medium"
+params_total_b = 24.0
+params_active_b = 24.0
+context = 128000
+modalities_in = ["text"]
+modalities_out = ["text"]
+capabilities = ["tools", "long_context", "structured_output", "code"]
+tool_formats = [
+  "apply_patch", "replace", "whole_file", "library_call", "cli", "mcp",
+]
+source = "curated: Mistral Devstral, open weights"
+notes = "Open weights; 24B coding model."
+
+[[profiles]]
+family = "mistral"
+variant = "large"
+match = ["*mistral*large*"]
+type = "chat"
+size_class = "large"
+context = 128000
+modalities_in = ["text"]
+modalities_out = ["text"]
+capabilities = ["tools", "long_context", "structured_output", "code"]
+tool_formats = ["replace", "whole_file", "library_call", "cli", "mcp"]
+source = "curated: Mistral Large naming"
+notes = "Mostly closed weights; parameter count not stated here."
+
+[[profiles]]
+family = "mistral"
+variant = "small"
+match = ["*mistral*small*"]
+type = "chat"
+size_class = "medium"
+params_total_b = 24.0
+params_active_b = 24.0
+context = 128000
+modalities_in = ["text"]
+modalities_out = ["text"]
+capabilities = ["tools", "long_context", "structured_output", "code"]
+tool_formats = ["replace", "whole_file", "library_call", "cli", "mcp"]
+source = "curated: Mistral Small 3, open weights"
+notes = "Open weights; dense 24B model."
+
+[[profiles]]
+family = "mistral"
+variant = "7b"
+match = ["*mistral*7b*"]
+type = "chat"
+size_class = "small"
+params_total_b = 7.0
+params_active_b = 7.0
+context = 32768
+modalities_in = ["text"]
+modalities_out = ["text"]
+capabilities = ["tools", "code"]
+tool_formats = ["replace", "library_call", "cli", "mcp"]
+source = "curated: Mistral 7B, open weights"
+notes = "Open weights; dense 7B model."
+
+[[profiles]]
+family = "mistral"
+variant = "default"
+match = ["*mistral*"]
+type = "chat"
+size_class = "unknown"
+modalities_in = ["text"]
+modalities_out = ["text"]
+capabilities = ["tools", "code"]
+tool_formats = ["replace", "library_call", "cli", "mcp"]
+source = "curated: Mistral naming"
+notes = "Family known from the id; version-specific metadata not curated."
+
+# --------------------------------------------------------------------------
+# DeepSeek
+# --------------------------------------------------------------------------
+[[profiles]]
+family = "deepseek"
+variant = "r1"
+match = ["*deepseek*r1*"]
+type = "reasoning"
+size_class = "frontier"
+params_total_b = 671.0
+params_active_b = 37.0
+context = 163840
+modalities_in = ["text"]
+modalities_out = ["text"]
+capabilities = ["long_context", "structured_output", "code", "reasoning"]
+tool_formats = ["replace", "whole_file", "library_call", "cli", "mcp"]
+source = "curated: DeepSeek R1, open weights"
+notes = "Open weights; mixture-of-experts total/active parameters."
+
+[[profiles]]
+family = "deepseek"
+variant = "v3"
+match = ["*deepseek*v3*"]
+type = "chat"
+size_class = "frontier"
+params_total_b = 671.0
+params_active_b = 37.0
+context = 163840
+modalities_in = ["text"]
+modalities_out = ["text"]
+capabilities = [
+  "tools", "long_context", "structured_output", "code", "reasoning",
+]
+tool_formats = [
+  "apply_patch", "replace", "whole_file", "library_call", "cli", "mcp",
+]
+source = "curated: DeepSeek V3, open weights"
+notes = "Open weights; mixture-of-experts total/active parameters."
+
+[[profiles]]
+family = "deepseek"
+variant = "coder"
+match = ["*deepseek*coder*"]
+type = "code"
+size_class = "unknown"
+modalities_in = ["text"]
+modalities_out = ["text"]
+capabilities = ["tools", "structured_output", "code"]
+tool_formats = [
+  "apply_patch", "replace", "whole_file", "library_call", "cli", "mcp",
+]
+source = "curated: DeepSeek Coder naming"
+notes = "Open weights; parameter count omitted unless the id says it."
+
+[[profiles]]
+family = "deepseek"
+variant = "default"
+match = ["*deepseek*"]
+type = "reasoning"
+size_class = "unknown"
+modalities_in = ["text"]
+modalities_out = ["text"]
+capabilities = ["tools", "code", "reasoning"]
+tool_formats = ["replace", "library_call", "cli", "mcp"]
+source = "curated: DeepSeek naming"
+notes = "Family known from the id; version-specific metadata not curated."
+
+# --------------------------------------------------------------------------
+# Gemma (Google)
+# --------------------------------------------------------------------------
+[[profiles]]
+family = "gemma"
+variant = "27b"
+match = ["*gemma*27b*"]
+type = "multimodal"
+size_class = "medium"
+params_total_b = 27.0
+params_active_b = 27.0
+context = 128000
+modalities_in = ["text", "image"]
+modalities_out = ["text"]
+capabilities = ["vision", "long_context", "code"]
+tool_formats = ["replace", "library_call", "cli", "mcp"]
+source = "curated: Gemma 3 27B, open weights"
+notes = "Open weights; dense 27B model."
+
+[[profiles]]
+family = "gemma"
+variant = "12b"
+match = ["*gemma*12b*"]
+type = "multimodal"
+size_class = "small"
+params_total_b = 12.0
+params_active_b = 12.0
+context = 128000
+modalities_in = ["text", "image"]
+modalities_out = ["text"]
+capabilities = ["vision", "long_context", "code"]
+tool_formats = ["replace", "library_call", "cli", "mcp"]
+source = "curated: Gemma 3 12B, open weights"
+notes = "Open weights; dense 12B model."
+
+[[profiles]]
+family = "gemma"
+variant = "9b"
+match = ["*gemma*9b*"]
+type = "multimodal"
+size_class = "small"
+params_total_b = 9.0
+params_active_b = 9.0
+context = 128000
+modalities_in = ["text", "image"]
+modalities_out = ["text"]
+capabilities = ["vision", "long_context", "code"]
+tool_formats = ["replace", "library_call", "cli", "mcp"]
+source = "curated: Gemma 3 9B, open weights"
+notes = "Open weights; dense 9B model."
+
+[[profiles]]
+family = "gemma"
+variant = "4b"
+match = ["*gemma*4b*"]
+type = "multimodal"
+size_class = "small"
+params_total_b = 4.0
+params_active_b = 4.0
+context = 128000
+modalities_in = ["text", "image"]
+modalities_out = ["text"]
+capabilities = ["vision", "long_context"]
+tool_formats = ["replace", "library_call", "cli", "mcp"]
+source = "curated: Gemma 3 4B, open weights"
+notes = "Open weights; dense 4B model."
+
+[[profiles]]
+family = "gemma"
+variant = "2b"
+match = ["*gemma*2b*"]
+type = "multimodal"
+size_class = "tiny"
+params_total_b = 2.0
+params_active_b = 2.0
+context = 128000
+modalities_in = ["text", "image"]
+modalities_out = ["text"]
+capabilities = ["vision", "long_context"]
+tool_formats = ["replace", "library_call", "cli", "mcp"]
+source = "curated: Gemma 3 2B, open weights"
+notes = "Open weights; dense 2B model."
+
+[[profiles]]
+family = "gemma"
+variant = "default"
+match = ["*gemma*"]
+type = "multimodal"
+size_class = "unknown"
+modalities_in = ["text", "image"]
+modalities_out = ["text"]
+capabilities = ["vision", "code"]
+tool_formats = ["replace", "library_call", "cli", "mcp"]
+source = "curated: Google Gemma naming"
+notes = "Family known from the id; version-specific metadata not curated."
+
+# --------------------------------------------------------------------------
+# Phi (Microsoft)
+# --------------------------------------------------------------------------
+[[profiles]]
+family = "phi"
+variant = "phi-4"
+match = ["*phi-4*"]
+type = "reasoning"
+size_class = "small"
+params_total_b = 14.7
+params_active_b = 14.7
+context = 16384
+modalities_in = ["text"]
+modalities_out = ["text"]
+capabilities = ["code", "reasoning"]
+source = "curated: Microsoft Phi-4, open weights"
+notes = "Open weights; dense 14.7B model."
+
+[[profiles]]
+family = "phi"
+variant = "phi-3.5-mini"
+match = ["*phi-3.5*mini*", "*phi-3.5*"]
+type = "chat"
+size_class = "tiny"
+params_total_b = 3.8
+params_active_b = 3.8
+context = 131072
+modalities_in = ["text"]
+modalities_out = ["text"]
+capabilities = ["tools", "long_context", "code"]
+tool_formats = ["replace", "library_call", "cli", "mcp"]
+source = "curated: Microsoft Phi-3.5 mini, open weights"
+notes = "Open weights; dense 3.8B model."
+
+[[profiles]]
+family = "phi"
+variant = "default"
+match = ["*phi*"]
+type = "chat"
+size_class = "unknown"
+modalities_in = ["text"]
+modalities_out = ["text"]
+capabilities = ["code"]
+source = "curated: Microsoft Phi naming"
+notes = "Family known from the id; version-specific metadata not curated."
+
+# --------------------------------------------------------------------------
+# Grok (xAI)
+# --------------------------------------------------------------------------
+[[profiles]]
+family = "grok"
+variant = "mini"
+match = ["*grok*mini*"]
+type = "reasoning"
+size_class = "small"
+context = 131072
+modalities_in = ["text", "image"]
+modalities_out = ["text"]
+capabilities = ["tools", "vision", "long_context", "structured_output", "code"]
+tool_formats = ["replace", "whole_file", "library_call", "cli", "mcp"]
+source = "curated: xAI Grok mini naming"
+notes = "Closed weights; parameter count undisclosed."
+
+[[profiles]]
+family = "grok"
+variant = "default"
+match = ["*grok*"]
+type = "reasoning"
+size_class = "frontier"
+context = 256000
+input_cost = 3.0
+output_cost = 15.0
+modalities_in = ["text", "image"]
+modalities_out = ["text"]
+capabilities = [
+  "tools", "vision", "long_context", "structured_output", "code", "reasoning",
+]
+tool_formats = ["replace", "whole_file", "library_call", "cli", "mcp"]
+source = "curated: xAI Grok family, 2025 list prices"
+notes = "Closed weights; parameter count undisclosed. Prices are approximate."
+
+# --------------------------------------------------------------------------
+# Command (Cohere)
+# --------------------------------------------------------------------------
+[[profiles]]
+family = "command"
+variant = "r-plus"
+match = ["*command*r-plus*", "*command-r-plus*"]
+type = "chat"
+size_class = "large"
+context = 128000
+input_cost = 2.5
+output_cost = 10.0
+modalities_in = ["text"]
+modalities_out = ["text"]
+capabilities = [
+  "tools", "long_context", "structured_output", "code", "reasoning",
+]
+tool_formats = ["replace", "whole_file", "library_call", "cli", "mcp"]
+source = "curated: Cohere Command R+ family, 2025 list prices"
+notes = "Closed weights; parameter count undisclosed. Prices are approximate."
+
+[[profiles]]
+family = "command"
+variant = "r7b"
+match = ["*command*r7b*", "*command-r7b*"]
+type = "chat"
+size_class = "small"
+params_total_b = 7.0
+params_active_b = 7.0
+context = 128000
+modalities_in = ["text"]
+modalities_out = ["text"]
+capabilities = ["tools", "long_context", "structured_output", "code"]
+tool_formats = ["replace", "library_call", "cli", "mcp"]
+source = "curated: Cohere Command R7B, open weights"
+notes = "Open weights; dense 7B model."
+
+[[profiles]]
+family = "command"
+variant = "r"
+match = ["*command-r*"]
+type = "chat"
+size_class = "medium"
+params_total_b = 35.0
+params_active_b = 35.0
+context = 128000
+modalities_in = ["text"]
+modalities_out = ["text"]
+capabilities = ["tools", "long_context", "structured_output", "code"]
+tool_formats = ["replace", "whole_file", "library_call", "cli", "mcp"]
+source = "curated: Cohere Command R, open weights"
+notes = "Open weights; dense 35B model."
+
+[[profiles]]
+family = "command"
+variant = "default"
+match = ["*command*"]
+type = "chat"
+size_class = "unknown"
+modalities_in = ["text"]
+modalities_out = ["text"]
+capabilities = ["tools", "structured_output"]
+tool_formats = ["replace", "library_call", "cli", "mcp"]
+source = "curated: Cohere Command naming"
+notes = "Family known from the id; version-specific metadata not curated."
+
+# --------------------------------------------------------------------------
+# Nemotron (NVIDIA)
+# --------------------------------------------------------------------------
+[[profiles]]
+family = "nemotron"
+variant = "340b"
+match = ["*nemotron*340b*"]
+type = "chat"
+size_class = "large"
+params_total_b = 340.0
+params_active_b = 340.0
+context = 4096
+modalities_in = ["text"]
+modalities_out = ["text"]
+capabilities = ["tools"]
+tool_formats = ["replace", "library_call", "cli", "mcp"]
+source = "curated: NVIDIA Nemotron-4 340B, open weights"
+notes = "Open weights; dense 340B model."
+
+[[profiles]]
+family = "nemotron"
+variant = "70b"
+match = ["*nemotron*70b*"]
+type = "chat"
+size_class = "large"
+params_total_b = 70.0
+params_active_b = 70.0
+context = 4096
+modalities_in = ["text"]
+modalities_out = ["text"]
+capabilities = ["tools"]
+tool_formats = ["replace", "library_call", "cli", "mcp"]
+source = "curated: NVIDIA Nemotron 70B, open weights"
+notes = "Open weights; dense 70B model."
+
+[[profiles]]
+family = "nemotron"
+variant = "49b"
+match = ["*nemotron*49b*"]
+type = "chat"
+size_class = "medium"
+params_total_b = 49.0
+params_active_b = 49.0
+context = 4096
+modalities_in = ["text"]
+modalities_out = ["text"]
+capabilities = ["tools"]
+tool_formats = ["replace", "library_call", "cli", "mcp"]
+source = "curated: NVIDIA Nemotron 49B, open weights"
+notes = "Open weights; dense 49B model."
+
+[[profiles]]
+family = "nemotron"
+variant = "default"
+match = ["*nemotron*"]
+type = "chat"
+size_class = "unknown"
+modalities_in = ["text"]
+modalities_out = ["text"]
+capabilities = ["tools"]
+tool_formats = ["replace", "library_call", "cli", "mcp"]
+source = "curated: NVIDIA Nemotron naming"
+notes = "Family known from the id; version-specific metadata not curated."
