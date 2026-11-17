@@ -163,9 +163,9 @@ def test_mcp_tool_permissions_match_server_table() -> None:
     names = {str(tool["name"]) for tool in _TOOLS}
     assert "dev_maps" in names and "dev_capabilities" in names
     assert set(L.MCP_READ_TOOLS) <= names
-    assert set(L.MCP_MUTATING_TOOLS) <= names
-    assert not (set(L.MCP_READ_TOOLS) & set(L.MCP_MUTATING_TOOLS))
-    for tool in (*L.MCP_READ_TOOLS, *L.MCP_MUTATING_TOOLS):
+    assert set(L.MCP_DENIED_TOOLS) <= names
+    assert not (set(L.MCP_READ_TOOLS) & set(L.MCP_DENIED_TOOLS))
+    for tool in (*L.MCP_READ_TOOLS, *L.MCP_DENIED_TOOLS):
         assert L.mcp_permission_action(tool) == f"ozagia_{tool}"
 
 
