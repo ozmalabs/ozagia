@@ -20,9 +20,9 @@ static evidence only.
 Declared reference members include their pin and cached sync status. A failed
 or pending sync, an unverified sync, or an updated checkout whose graph still
 needs reindexing makes its checks unknown and the overall report unknown (or
-incomplete when its snapshot is unavailable). The report reads references
-under the no-sync context; run the explicit sync operation or a session brief
-to request the bounded background update.
+incomplete when its snapshot is unavailable). Federation checks request
+updates by default; use `--no-sync` or the no-sync context to inspect the
+stored state without updating references.
 
 Supported declarations are:
 

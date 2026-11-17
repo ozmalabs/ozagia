@@ -41,10 +41,9 @@ def check(root: str | Path | None = None,
     selected = federation._root(root)
     if roots is not None:
         roots = tuple(roots)
-    # Checking stored evidence is read-only; synchronization is requested by
-    # the session brief or an explicit sync command, not by this report.
-    with federation.without_reference_sync():
-        members = federation._members(selected, roots)
+    # Federation use updates explicitly designated references by default;
+    # callers can opt out through without_reference_sync().
+    members = federation._members(selected, roots)
     link_report = federation._declared_links(selected, members)
     reference_report = federation.reference_status(selected)
     references: dict[Path, dict[str, Any]] = {}

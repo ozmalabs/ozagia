@@ -153,6 +153,24 @@ def test_invalid_member_declaration_is_reported(tmp_path, monkeypatch):
     assert any("members[0]" in error for error in report["errors"])
 
 
+def test_check_honors_caller_reference_sync_policy(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    root.mkdir()
+    _snapshot(root, "root", [])
+    seen = []
+    original = federation._sync_references
+
+    def observe(anchor, roots):
+        seen.append(federation._SYNC_ENABLED.get())
+        return original(anchor, roots)
+
+    monkeypatch.setattr(federation, "_sync_references", observe)
+    cross_repo.check(root)
+    with federation.without_reference_sync():
+        cross_repo.check(root)
+    assert seen == [True, False]
+
+
 def test_malformed_attrs_report_unknown_comparison(tmp_path, monkeypatch):
     a, b = tmp_path / "a", tmp_path / "b"
     a.mkdir()
