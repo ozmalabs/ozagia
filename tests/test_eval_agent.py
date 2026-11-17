@@ -1352,7 +1352,7 @@ def test_graph_stats_fields_and_aggregate_read_working_set_counters():
 # ===================================================================================== #
 # W22: per-component timing stored per run
 # ===================================================================================== #
-def test_run_records_timing_setup_and_one_warm_index(fixture):
+def test_run_records_timing_setup_and_one_repeat_index(fixture):
     other = dict(fixture["sign"], id="add-sign-2")
     report = run_eval(fixture["repo"], [fixture["sign"], other],
                       ["baseline", "graph_intent"], FakeDriver(), fixture["base"],
@@ -1369,27 +1369,53 @@ def test_run_records_timing_setup_and_one_warm_index(fixture):
     graph = [r for r in runs if r["arm"] == "graph_intent"]
     assert all(r["plugin_install_s"] is not None for r in graph)
     assert all(r["timing"]["setup"]["missing"] == [] for r in graph)
-    warm = [r for r in runs if r.get("prep_warm_s") is not None]
-    assert len(warm) == 1 and warm[0]["arm"] == "graph_intent"
-    assert (Path(warm[0]["log_dir"]) / "prep_warm.log").is_file()
-    assert report["warm_index_s"] == warm[0]["prep_warm_s"]
+    # Measured once per run root, in the first indexing run: snapshot load +
+    # refresh + tag cache on the unchanged tree, not a second build.
+    measured = [r for r in runs if r.get("prep_repeat_ok") is not None]
+    assert len(measured) == 1 and measured[0]["arm"] == "graph_intent"
+    rec = measured[0]
+    assert rec["prep_repeat_ok"] is True, rec["prep_repeat_error"]
+    parts = rec["prep_repeat_parts"]
+    assert parts["pending"] == 0
+    assert rec["prep_repeat_s"] == pytest.approx(
+        parts["load_s"] + parts["refresh_s"] + parts["tags_s"], abs=0.002)
+    log_dir = Path(rec["log_dir"])
+    assert (log_dir / "prep_repeat.log").is_file()
+    assert not (log_dir / "repeat_index").exists()   # the scratch copy is gone
+    assert (log_dir / "dev_graph.json").is_file()
+    assert rec["timing"]["index"]["repeat_s"] == rec["prep_repeat_s"]
+    assert report["index_repeat_s"] == rec["prep_repeat_s"]
     assert report["amortize_n"] == 2
     rows = {r["arm"]: r for r in report["summary"]}
-    assert rows["graph_intent"]["warm_index_s"] == warm[0]["prep_warm_s"]
-    assert rows["baseline"]["warm_index_s"] is None
-    assert rows["graph_intent"]["amortized_s"] == pytest.approx(
-        rows["graph_intent"]["pay_once_s"] / 2 + rows["graph_intent"]["per_task_s"],
-        abs=0.002)
-    assert "## Time per component" in render_markdown(report)
+    g = rows["graph_intent"]
+    assert g["index_repeat_s"] == rec["prep_repeat_s"]
+    assert rows["baseline"]["index_repeat_s"] is None
+    assert g["amortized_s"] == pytest.approx(
+        (g["mean_index_s"] + g["index_repeat_s"]) / 2 + g["mean_setup_s"]
+        + g["per_task_s"], abs=0.002)
+    md = render_markdown(report)
+    assert "## Time per component" in md
+    assert md.count("- Per task (agent time") == 1
 
 
-def test_run_can_skip_the_warm_index_and_set_n(fixture):
+def test_run_can_skip_the_repeat_index_and_set_n(fixture):
     report = run_eval(fixture["repo"], [fixture["sign"]], ["dev_memory"], NoopDriver(),
                       fixture["base"], tasks_dir=fixture["tdir"], python=_python(),
-                      run_root=fixture["run_root"], measure_warm_index=False,
+                      run_root=fixture["run_root"], repeat_index=False,
                       amortize=5)
-    assert report["runs"][0].get("prep_warm_s") is None
+    assert report["runs"][0].get("prep_repeat_ok") is None
+    assert report["index_repeat_s"] is None
     assert report["summary"][0]["amortize_n"] == 5
+    assert report["summary"][0]["repeat_assumed_zero"] is True
     with pytest.raises(HarnessError):
         run_eval(fixture["repo"], [fixture["sign"]], ["baseline"], NoopDriver(),
                  fixture["base"], tasks_dir=fixture["tdir"], amortize=0)
+
+
+def test_failed_repeat_index_is_recorded_not_raised(tmp_path):
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    out = ae.measure_repeat_index(tmp_path, _python(), log_dir)   # no snapshot
+    assert out["prep_repeat_ok"] is False and out["prep_repeat_s"] is None
+    assert "cannot copy the snapshot" in out["prep_repeat_error"]
+    assert not (log_dir / "repeat_index").exists()

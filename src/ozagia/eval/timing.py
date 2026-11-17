@@ -6,36 +6,43 @@ second task on the same revision. This module splits a run into components
 (docs/eval_agent.md, "Time per component"):
 
   setup   workdir creation and break patch, plugin install, daemon start.
-          Pay-once per session.
-  index   prep (graph build and tag cache), cold. Pay-once per revision.
-          `warm_s`, where measured, is the same prep run a second time on
-          the same tree.
+          Per session: every eval task is its own session.
+  index   prep (graph build and tag cache), cold: pay-once per revision.
+          `repeat_s`, where measured, is what a later session on the same
+          revision pays instead: snapshot load + refresh + tag cache.
   model   waiting for the model: per step, from the end of the previous
           step to the step's first tool call (or its finish when it calls
-          no tool). Prefill and generation together: no driver reports
-          per-token timing.
+          no tool), plus the time from the step's last tool end to its
+          finish. Prefill and generation together: no driver reports
+          per-token timing. For graph_intent it holds the plugin's hint
+          wait; `model_excl_hint_s` leaves it out.
   tools   the union of the tool calls' intervals as the driver saw them,
           and per tool name the time in the built-in, in ozagia (the
           daemon's handled `ms`), and the daemon's overhead on calls it
           passed through.
   other   driver wall minus model and tools, never negative: driver start
-          and exit, the first request's wait before its first event, and
-          per-step bookkeeping.
+          and exit, the first request's wait before its first event.
+          For a run killed at its timeout, the time after the last event
+          (an unanswered request or a running tool) is `timeout_tail_s`.
   check   the task check. Not agent time.
 
-`per_task_s` is model + tools + other (the driver wall, or more when the
-driver's event clock runs past the harness timer). `pay_once_s` is setup +
-index. Every function here is pure over the files it reads and never raises
-on missing or malformed logs: a component it cannot compute is None, with
-the reason in `reasons`.
+`per_task_s` is model + tools + other + timeout tail (the driver wall, or
+more when the driver's event clock runs past the harness timer).
+`pay_once_s` is setup + index cold, what a first task pays on top of its
+per-task time. Over N tasks on one revision, the amortized time per task is
+(index cold + (N - 1) * index repeat) / N + setup + per task. Every function
+here is pure over the files it reads and never raises on missing or
+malformed logs: a component it cannot compute is None, with the reason in
+`reasons`.
 """
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any, Iterable
 
-TIMING_VERSION = 1
+TIMING_VERSION = 2
 # Read at most this many bytes of a driver log or journal.
 MAX_LOG_BYTES = 64 * 1024 * 1024
 # Arms whose runs build the dev-memory index before the driver starts.
@@ -46,6 +53,14 @@ OZAGIA_TOOL_PREFIX = "ozagia"
 # goes out without it (`HINT_TIMEOUT_MS` in integrations/opencode/plugin.js).
 PLUGIN_HINT_TIMEOUT_S = 6.0
 COMPONENTS = ("setup", "index", "model", "tools", "other", "check")
+# A driver call and its journal entries are a plausible pair only when the
+# daemon's ms fit in the call (plus this much for clock differences) ...
+PAIR_MS_TOLERANCE_S = 0.25
+# ... and every journal `ts` (whole seconds) lies within the call, widened
+# by this much on each side.
+PAIR_TS_TOLERANCE_S = 1.0
+# Logs and record must agree on when the driver started (same system clock).
+START_TOLERANCE_S = 2.0
 
 
 def _num(value: Any) -> float | None:
@@ -107,18 +122,23 @@ def opencode_events(text: str) -> dict[str, Any]:
     each tool part's `state.time.{start,end}`. The `step_start` event is
     printed after OpenCode has the response stream and has taken its
     per-step snapshot, so most of a step's wait comes before it: in the live
-    Ocelot runs the step_start-to-first-tool time was a few ms in most steps
-    and the gap since the previous step_finish was seconds. A step's model
-    time is therefore previous step end -> first tool start (or step
-    finish), split into `pre_s` (gap before step_start) and `in_s`
-    (step_start -> first tool). The first step has no observable start (the
+    Ocelot runs the median step_start-to-first-tool time was 3-4 ms in two
+    log sets and 236 ms in a third, against seconds since the previous
+    step_finish. A step's model time is therefore previous step end ->
+    first tool start (or step finish), split into `pre_s` (gap before
+    step_start) and `in_s` (step_start -> first tool), plus `post_s`, the
+    step's last tool end -> its step_finish (the model's turn closing after
+    the tool results are in). The first step has no observable start (the
     request goes out before any event), so its `pre_s` is 0 and that wait
-    is in `other`. Returns {} when there is no step.
+    is in `other`. `tool_events` counts every tool_use event (as the
+    harness's `tool_calls` does), `calls` only those with valid times.
+    Returns {} when there is no step.
     """
     steps: list[dict[str, Any]] = []
     cur: dict[str, Any] | None = None
     calls: list[dict[str, Any]] = []
     stamps: list[float] = []
+    tool_events = 0
     for event in _json_lines(text):
         kind = event.get("type")
         ts = _num(event.get("timestamp"))
@@ -138,6 +158,7 @@ def opencode_events(text: str) -> dict[str, Any]:
         if ts is not None:
             cur["last"] = ts
         if kind == "tool_use":
+            tool_events += 1
             state = part.get("state") if isinstance(part.get("state"), dict) else {}
             times = state.get("time") if isinstance(state.get("time"), dict) else {}
             start, end = _num(times.get("start")), _num(times.get("end"))
@@ -172,11 +193,16 @@ def opencode_events(text: str) -> dict[str, Any]:
         pre_s = (max(0.0, start - prev_end) / 1000
                  if start is not None and prev_end is not None else 0.0)
         tool_end = max((c["end"] for c in step["tools"]), default=None)
+        # The step's last tool end -> its finish. Only for a finished step:
+        # an unfinished one ends at its last event, which may be the tool.
+        post_s = (max(0.0, step["finish"] - tool_end) / 1000
+                  if step["finish"] is not None and tool_end is not None else 0.0)
         candidates = [x for x in (end, tool_end) if x is not None]
         if candidates:
             prev_end = max(candidates)
         per_step.append({
-            "model_s": _r(pre_s + in_s), "pre_s": _r(pre_s), "in_s": _r(in_s),
+            "model_s": _r(pre_s + in_s + post_s), "pre_s": _r(pre_s), "in_s": _r(in_s),
+            "post_s": _r(post_s),
             "tools": len(step["tools"]),
             "tools_s": _r(_union_s((c["start"], c["end"])
                                    for c in step["tools"]) / 1000),
@@ -186,6 +212,7 @@ def opencode_events(text: str) -> dict[str, Any]:
               for k in ("input_uncached", "input_cached", "cache_write",
                         "output", "reasoning")}
     return {"steps": per_step, "calls": calls, "tokens": tokens,
+            "tool_events": tool_events,
             "span_s": (max(stamps) - min(stamps)) / 1000 if stamps else 0.0,
             "first_ts": min(stamps) if stamps else None,
             "tools_union_s": _union_s((c["start"], c["end"]) for c in calls) / 1000}
@@ -253,35 +280,84 @@ def claude_result(text: str) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # daemon journal
 # --------------------------------------------------------------------------- #
+def journal_ts(value: Any) -> float | None:
+    """A journal `ts` ("%Y-%m-%dT%H:%M:%S", the daemon host's local time, whole
+    seconds) as epoch seconds in this process's local time, or None. A time
+    zone that differs from the eval host's shows up as a whole-quarter-hour
+    offset, which `journal_clock_offset` removes."""
+    if not isinstance(value, str):
+        return None
+    try:
+        return time.mktime(time.strptime(value[:19], "%Y-%m-%dT%H:%M:%S"))
+    except (ValueError, OverflowError):
+        return None
+
+
+def _call(handled: Any, decision_ms: float, preflight: dict[str, Any] | None,
+          intent: str | None, ts: float | None, seq: int) -> dict[str, Any]:
+    stamps = [t for t in ((preflight or {}).get("ts"), ts) if t is not None]
+    return {"handled": handled, "decision_ms": decision_ms,
+            "preflight_ms": (preflight or {}).get("ms", 0.0), "after_ms": 0.0,
+            "intent": intent, "refused": False, "ts": stamps,
+            "seq": (preflight or {}).get("seq", seq)}
+
+
+def _orphan(preflight: dict[str, Any]) -> dict[str, Any]:
+    """A preflight that got no decision: a call refused at the permission
+    step (OpenCode's "Permission denied"), counted as its own call."""
+    out = _call(None, 0.0, preflight, "preflight_only", None, preflight["seq"])
+    out["refused"] = True
+    return out
+
+
 def journal_calls(entries: list[dict[str, Any]]) -> dict[str, Any]:
-    """Per tool name, the daemon's view of each call, in journal order.
+    """Per tool name, the daemon's view of each call, in the order the calls
+    started.
 
     One call of the plugin can write up to three entries: a `tool` entry
     with an intent ending in `_preflight` (the permission request before a
     mutating call), the deciding `tool` entry (`handled` true or false), and
     for a call left to the built-in an `after` entry (post-processing of
-    the built-in's output, awaited inside the tool call). Preflights attach
-    to the next deciding entry of the same tool, `after` entries to the
-    previous one. Other ops (hint, working_set, session_event, stats, ...)
-    are totalled in `ops`."""
+    the built-in's output, awaited inside the tool call). A decision takes
+    the oldest waiting preflight of its tool, an `after` entry attaches to
+    the latest decided call of its tool. A preflight that never gets a
+    decision is a refused call and becomes a call of its own (`refused`):
+    one still waiting when another preflight of the tool arrives more than
+    PAIR_TS_TOLERANCE_S later (preflights within that window are parallel
+    calls), or at the end of the journal. Each call carries its entries'
+    `ts` (epoch s) for `tool_breakdown`'s checks. Other ops (hint,
+    working_set, session_event, stats, ...) are totalled in `ops`; hints
+    are also listed in `hints` ({ts, ms}) for `hint_in_model`."""
     by_tool: dict[str, list[dict[str, Any]]] = {}
-    pending_preflight: dict[str, float] = {}
+    pending: dict[str, list[dict[str, Any]]] = {}
     ops: dict[str, dict[str, Any]] = {}
-    for e in entries:
+    hints: list[dict[str, Any]] = []
+    for seq, e in enumerate(entries):
         op = str(e.get("op") or "?")
         tool = str(e.get("tool") or "?")
         ms = _num(e.get("ms")) or 0.0
         intent = str(e.get("intent") or "")
+        ts = journal_ts(e.get("ts"))
         if op == "tool":
+            queue = pending.setdefault(tool, [])
             if intent.endswith("_preflight"):
-                pending_preflight[tool] = pending_preflight.get(tool, 0.0) + ms
+                last = queue[-1]["ts"] if queue else None
+                if queue and not (last is not None and ts is not None
+                                  and abs(ts - last) <= PAIR_TS_TOLERANCE_S):
+                    by_tool.setdefault(tool, []).extend(_orphan(p) for p in queue)
+                    queue.clear()
+                queue.append({"ms": ms, "ts": ts, "seq": seq})
                 continue
-            by_tool.setdefault(tool, []).append({
-                "handled": e.get("handled") is True and not e.get("expired"),
-                "decision_ms": ms, "preflight_ms": pending_preflight.pop(tool, 0.0),
-                "after_ms": 0.0, "intent": intent or None})
-        elif op == "after" and by_tool.get(tool):
-            by_tool[tool][-1]["after_ms"] += ms
+            pre = queue.pop(0) if queue else None
+            by_tool.setdefault(tool, []).append(_call(
+                e.get("handled") is True and not e.get("expired"), ms, pre,
+                intent or None, ts, seq))
+        elif op == "after" and any(not c["refused"] for c in by_tool.get(tool, [])):
+            # Appended in journal order (orphans too, but those are skipped).
+            target = [c for c in by_tool[tool] if not c["refused"]][-1]
+            target["after_ms"] += ms
+            if ts is not None:
+                target["ts"].append(ts)
         else:
             slot = ops.setdefault(op, {"count": 0, "s": 0.0})
             slot["count"] += 1
@@ -291,25 +367,73 @@ def journal_calls(entries: list[dict[str, Any]]) -> dict[str, Any]:
                 # daemon may go on (and delay the next calls).
                 slot["waited_s"] = (slot.get("waited_s", 0.0)
                                     + min(ms / 1000, PLUGIN_HINT_TIMEOUT_S))
+                hints.append({"ts": ts, "ms": ms})
+    for tool, queue in pending.items():
+        by_tool.setdefault(tool, []).extend(_orphan(p) for p in queue)
+    for calls in by_tool.values():
+        calls.sort(key=lambda c: c["seq"])
     for slot in ops.values():
         slot["s"] = round(slot["s"], 3)
         if "waited_s" in slot:
             slot["waited_s"] = round(slot["waited_s"], 3)
-    return {"by_tool": by_tool, "ops": dict(sorted(ops.items()))}
+    return {"by_tool": by_tool, "ops": dict(sorted(ops.items())), "hints": hints}
+
+
+def journal_clock_offset(calls: list[dict[str, Any]],
+                         journal: dict[str, Any] | None) -> float:
+    """Seconds to add to journal `ts` to get the driver's clock: the median
+    difference between call starts and their journal stamps, rounded to a
+    whole quarter hour (0 when the report runs in the eval host's time
+    zone; one or more hours when it does not). Pairs by order here, which
+    is close enough for a quarter-hour rounding."""
+    jt = (journal or {}).get("by_tool") or {}
+    names: dict[str, list[dict[str, Any]]] = {}
+    for c in sorted(calls, key=lambda c: c["start"]):
+        names.setdefault(c["tool"], []).append(c)
+    diffs = sorted(c["start"] / 1000 - d["ts"][0]
+                   for name, mine in names.items()
+                   for c, d in zip(mine, jt.get(name, [])) if d["ts"])
+    if not diffs:
+        return 0.0
+    return round(diffs[len(diffs) // 2] / 900.0) * 900.0
+
+
+def _pair_problem(call: dict[str, Any], d: dict[str, Any], offset: float) -> str | None:
+    """Why a driver call and a journal call cannot be the same call, or None."""
+    dur = (call["end"] - call["start"]) / 1000
+    daemon_s = (d["decision_ms"] + d["preflight_ms"] + d["after_ms"]) / 1000
+    if daemon_s > dur + PAIR_MS_TOLERANCE_S:
+        return f"daemon {daemon_s:.2f} s in a {dur:.2f} s call"
+    lo = int(call["start"] // 1000) - PAIR_TS_TOLERANCE_S
+    hi = int(call["end"] // 1000) + PAIR_TS_TOLERANCE_S
+    for ts in d["ts"]:
+        t = ts + offset
+        if not lo <= t <= hi:
+            return (f"journal entry at {time.strftime('%H:%M:%S', time.localtime(t))} "
+                    f"outside the call "
+                    f"{time.strftime('%H:%M:%S', time.localtime(call['start'] / 1000))}"
+                    f"-{time.strftime('%H:%M:%S', time.localtime(call['end'] / 1000))}")
+    return None
 
 
 def tool_breakdown(calls: list[dict[str, Any]], journal: dict[str, Any] | None,
-                   *, daemon_expected: bool) -> dict[str, Any]:
+                   *, daemon_expected: bool, offset: float = 0.0) -> dict[str, Any]:
     """Per tool name: calls, driver-seen seconds, and where they went.
 
     `calls` are the driver's tool calls ({tool, start, end} in ms). With a
     journal, the calls of a tool name are paired in start order with the
-    daemon's deciding entries of that name; when the counts differ the pair
-    is not trusted (`matched: false`) and the split is by totals:
+    daemon's calls of that name (`journal_calls`, refused preflights
+    included). The pairing is trusted (`matched: true`) only when the
+    counts agree and every pair is plausible: the daemon's ms fit in the
+    call (+ PAIR_MS_TOLERANCE_S) and every journal `ts` (+ `offset`) lies
+    within the call's seconds +- PAIR_TS_TOLERANCE_S. Otherwise
+    `matched: false`, `mismatch` says why, and the split is by totals:
     ozagia = handled ms, daemon overhead = the rest of the daemon's ms,
     built-in = what is left (including plugin IPC). Without a journal and
     with no daemon expected (baseline, dev_memory), every non-ozagia tool's
     time is built-in time, and MCP tools named `ozagia...` are ozagia time.
+    A refused call's time is built-in time (OpenCode's permission handling)
+    apart from its preflight ms (daemon overhead).
     """
     names: dict[str, list[dict[str, Any]]] = {}
     for c in sorted(calls, key=lambda c: c["start"]):
@@ -320,22 +444,39 @@ def tool_breakdown(calls: list[dict[str, Any]], journal: dict[str, Any] | None,
         durs = [(c["end"] - c["start"]) / 1000 for c in mine]
         row: dict[str, Any] = {"calls": len(mine), "s": sum(durs),
                                "handled_calls": 0, "passthrough_calls": 0,
+                               "refused_calls": 0,
                                "ozagia_s": 0.0, "builtin_s": 0.0,
                                "daemon_overhead_s": 0.0, "plugin_ipc_s": 0.0,
                                "matched": True}
         decisions = jt.get(name, [])
+        problem = None
+        if decisions and len(decisions) != len(mine):
+            refused = sum(1 for d in decisions if d["refused"])
+            problem = (f"{len(mine)} driver calls, {len(decisions)} in the journal"
+                       + (f" ({refused} refused)" if refused else ""))
+        elif decisions:
+            for i, (c, d) in enumerate(zip(mine, decisions), 1):
+                why = _pair_problem(c, d, offset)
+                if why:
+                    problem = f"call {i}: {why}"
+                    break
         if name.startswith(OZAGIA_TOOL_PREFIX) and not decisions:
             row["ozagia_s"] = row["s"]
         elif journal is None and daemon_expected:
             row.update(ozagia_s=None, builtin_s=None, daemon_overhead_s=None,
                        plugin_ipc_s=None, handled_calls=None,
-                       passthrough_calls=None, matched=False)
+                       passthrough_calls=None, refused_calls=None, matched=False,
+                       mismatch="no daemon journal")
         elif not decisions:
             row["builtin_s"] = row["s"]
-        elif len(decisions) == len(mine):
+        elif problem is None:
             for dur, d in zip(durs, decisions):
                 daemon_s = (d["decision_ms"] + d["preflight_ms"] + d["after_ms"]) / 1000
-                if d["handled"]:
+                if d["refused"]:
+                    row["refused_calls"] += 1
+                    row["daemon_overhead_s"] += daemon_s
+                    row["builtin_s"] += max(0.0, dur - daemon_s)
+                elif d["handled"]:
                     row["handled_calls"] += 1
                     work = (d["decision_ms"] + d["preflight_ms"]) / 1000
                     row["ozagia_s"] += work
@@ -346,18 +487,40 @@ def tool_breakdown(calls: list[dict[str, Any]], journal: dict[str, Any] | None,
                     row["daemon_overhead_s"] += daemon_s
                     row["builtin_s"] += max(0.0, dur - daemon_s)
         else:
-            handled = [d for d in decisions if d["handled"]]
-            passed = [d for d in decisions if not d["handled"]]
+            handled = [d for d in decisions if d["handled"] is True]
+            passed = [d for d in decisions if d["handled"] is not True]
             oz = sum(d["decision_ms"] + d["preflight_ms"] for d in handled) / 1000
             over = (sum(d["decision_ms"] + d["preflight_ms"] + d["after_ms"]
                         for d in passed)
                     + sum(d["after_ms"] for d in handled)) / 1000
-            row.update(handled_calls=len(handled), passthrough_calls=len(passed),
+            row.update(handled_calls=len(handled),
+                       passthrough_calls=sum(1 for d in passed if not d["refused"]),
+                       refused_calls=sum(1 for d in passed if d["refused"]),
                        ozagia_s=oz, daemon_overhead_s=over,
                        builtin_s=max(0.0, row["s"] - oz - over), plugin_ipc_s=None,
-                       matched=False)
+                       matched=False, mismatch=problem)
         out[name] = {k: (_r(v) if isinstance(v, float) else v) for k, v in row.items()}
     return out
+
+
+def hint_in_model(hints: list[dict[str, Any]], first_ts_ms: float | None,
+                  offset: float = 0.0) -> float:
+    """Seconds of hint wait (min(ms, PLUGIN_HINT_TIMEOUT_S) per hint) that
+    lie in model time: hints that started after the driver's first event.
+    The plugin asks for a hint before each model request; the first one is
+    before the first event, so its wait is in other. A hint's start is its
+    `ts` (end, whole seconds, so + 0.5 s) minus its ms. Without stamps, every
+    hint but the first counts."""
+    total = 0.0
+    for i, h in enumerate(hints):
+        waited = min(h["ms"] / 1000, PLUGIN_HINT_TIMEOUT_S)
+        if h["ts"] is None or first_ts_ms is None:
+            if i > 0:
+                total += waited
+            continue
+        if h["ts"] + offset + 0.5 - h["ms"] / 1000 > first_ts_ms / 1000:
+            total += waited
+    return total
 
 
 def _sum_field(by_name: dict[str, Any], key: str) -> float | None:
@@ -380,13 +543,41 @@ def run_timing(record: dict[str, Any], log_dir: str | Path | None) -> dict[str, 
                 "pay_once_s": None, "reasons": {"all": "timing failed"}}
 
 
+def logs_mismatch(record: dict[str, Any], parsed: dict[str, Any]) -> str | None:
+    """Why the parsed OpenCode logs are not this run's, or None. The record's
+    `tool_calls` and `tokens_in` come from the same driver output when the
+    run is made, and `driver_started_at` (newer runs) must precede the first
+    event by less than the wall. A run root reused by a later run leaves
+    other logs at the recorded path."""
+    problems = []
+    tools = record.get("tool_calls")
+    if isinstance(tools, int) and not isinstance(tools, bool) \
+            and tools != parsed.get("tool_events"):
+        problems.append(f"{parsed.get('tool_events')} tool calls in the log, "
+                        f"{tools} in the record")
+    tokens = record.get("tokens_in")
+    seen = (parsed.get("tokens") or {}).get("input_uncached")
+    if isinstance(tokens, int) and not isinstance(tokens, bool) and tokens != seen:
+        problems.append(f"{seen} uncached input tokens in the log, {tokens} in the record")
+    started = _num(record.get("driver_started_at"))
+    first = parsed.get("first_ts")
+    wall = _num(record.get("wall_s"))
+    if started is not None and first is not None:
+        lag = first / 1000 - started
+        if lag < -START_TOLERANCE_S or (wall is not None
+                                        and lag > wall + START_TOLERANCE_S):
+            problems.append(f"first event {lag:+.1f} s from the recorded driver start")
+    return "; ".join(problems) or None
+
+
 def _run_timing(record: dict[str, Any], log_dir: Path | None) -> dict[str, Any]:
     reasons: dict[str, str] = {}
     arm = record.get("arm")
     driver = str(record.get("driver") or "")
     wall = _num(record.get("wall_s"))
+    timed_out = record.get("timed_out") is True
 
-    # setup
+    # setup: per session
     parts = {"workdir_s": _num(record.get("setup_workdir_s")),
              "plugin_install_s": _num(record.get("plugin_install_s")),
              "daemon_start_s": _num(record.get("daemon_ready_s"))}
@@ -396,20 +587,25 @@ def _run_timing(record: dict[str, Any], log_dir: Path | None) -> dict[str, Any]:
     missing = [k for k in expected if parts[k] is None]
     known = [parts[k] for k in expected if parts[k] is not None]
     setup = {"s": _r(sum(known)) if known else None,
-             **{k: _r(v) for k, v in parts.items()}, "missing": missing}
+             **{k: _r(v) for k, v in parts.items()}, "missing": missing,
+             "partial": bool(known) and bool(missing)}
     if missing:
         reasons["setup"] = ("not recorded by this harness version: "
-                            + ", ".join(missing))
+                            + ", ".join(missing)
+                            + ("" if known else " (setup unknown)"))
 
-    # index
+    # index: cold per revision, repeat where measured
     prepped = arm in INDEX_ARMS and record.get("prep_ok") is not None
     if arm in INDEX_ARMS and not prepped:
-        index: dict[str, Any] = {"cold_s": None, "warm_s": None, "ok": None}
+        index: dict[str, Any] = {"cold_s": None, "repeat_s": None, "ok": None}
         reasons["index"] = "no prep recorded"
     else:
         index = {"cold_s": _r(_num(record.get("prep_s")) or 0.0) if prepped else 0.0,
-                 "warm_s": _r(_num(record.get("prep_warm_s"))),
+                 "repeat_s": (_r(_num(record.get("prep_repeat_s"))) if prepped
+                              else 0.0),
                  "ok": record.get("prep_ok") if prepped else None}
+        if prepped and record.get("prep_repeat_parts"):
+            index["repeat_parts"] = record["prep_repeat_parts"]
     index["s"] = index["cold_s"]
 
     check = {"s": _r(_num(record.get("check_s")))}
@@ -422,15 +618,21 @@ def _run_timing(record: dict[str, Any], log_dir: Path | None) -> dict[str, Any]:
     span: float | None = None
     first_ts: float | None = None
     daemon_ops: dict[str, Any] | None = None
+    hint_model_s: float | None = None
+    mismatch: str | None = None
     stdout = _read_text(log_dir / "driver.stdout.txt") if log_dir else None
     if log_dir is None:
         reasons["model"] = reasons["tools"] = "no log dir for this run"
     elif driver == "opencode":
         parsed = opencode_events(stdout) if stdout is not None else {}
+        mismatch = logs_mismatch(record, parsed) if parsed else None
         if not parsed:
             reasons["model"] = reasons["tools"] = (
                 "driver.stdout.txt missing" if stdout is None
                 else "no step events in driver.stdout.txt")
+        elif mismatch:
+            reasons["model"] = reasons["tools"] = (
+                f"the logs in {log_dir} are not this run's: {mismatch}")
         else:
             journal = None
             jtext = _read_text(log_dir / "daemon_journal.jsonl")
@@ -441,19 +643,27 @@ def _run_timing(record: dict[str, Any], log_dir: Path | None) -> dict[str, Any]:
                 reasons["tools"] = ("daemon_journal.jsonl missing: no ozagia/built-in "
                                     "split")
             steps = parsed["steps"]
+            offset = journal_clock_offset(parsed["calls"], journal)
             model = {"s": _r(sum(s["model_s"] for s in steps)),
                      "pre_step_s": _r(sum(s["pre_s"] for s in steps)),
                      "in_step_s": _r(sum(s["in_s"] for s in steps)),
+                     "post_tool_s": _r(sum(s["post_s"] for s in steps)),
                      "steps": len(steps),
                      "split": "combined",
                      "split_reason": "opencode reports no per-token timing",
                      "tokens": parsed["tokens"], "per_step": steps}
+            if journal is not None and journal["hints"]:
+                hint_model_s = min(model["s"], hint_in_model(
+                    journal["hints"], parsed["first_ts"], offset))
+                model["hint_waited_s"] = _r(hint_model_s)
             tools_union = parsed["tools_union_s"]
             span = parsed["span_s"]
             first_ts = parsed["first_ts"]
             by_name = tool_breakdown(parsed["calls"], journal,
-                                     daemon_expected=uses_daemon)
+                                     daemon_expected=uses_daemon, offset=offset)
             tools = _tools_block(by_name, tools_union)
+            if offset:
+                tools["journal_offset_s"] = offset
     elif driver == "native":
         ttext = _read_text(log_dir / "native" / "transcript.jsonl")
         parsed = native_transcript(ttext) if ttext is not None else {}
@@ -499,13 +709,15 @@ def _run_timing(record: dict[str, Any], log_dir: Path | None) -> dict[str, Any]:
         reasons["model"] = reasons["tools"] = (
             f"driver {driver or '?'} writes no model or tool events")
 
-    # other: the rest of the driver wall
+    # other: the rest of the driver wall; for a timed-out run the time after
+    # the last event is the timeout tail, not other.
     other: dict[str, Any] | None = None
     accounted = None
+    tail_s: float | None = None
     if model is not None and wall is not None:
         accounted = model["s"] + (tools_union or 0.0)
         rest = wall - accounted
-        other = {"s": _r(max(0.0, rest)),
+        other = {"s": None,
                  "startup_shutdown_s": (_r(max(0.0, wall - span))
                                         if span is not None else None)}
         started_at = _num(record.get("driver_started_at"))
@@ -515,6 +727,17 @@ def _run_timing(record: dict[str, Any], log_dir: Path | None) -> dict[str, Any]:
             head = min(max(0.0, first_ts / 1000 - started_at), max(0.0, wall - span))
             other["head_s"] = _r(head)
             other["tail_s"] = _r(max(0.0, wall - span - head))
+        tail_s = 0.0
+        if timed_out:
+            if other.get("tail_s") is not None:
+                tail_s = other["tail_s"]
+            elif span is not None:
+                # No driver start recorded: the time outside the event span,
+                # start-up included (a few seconds in the live runs).
+                tail_s = max(0.0, wall - span)
+                other["timeout_tail_includes_head"] = True
+            tail_s = min(tail_s, max(0.0, rest))
+        other["s"] = _r(max(0.0, rest) - tail_s)
         if daemon_ops and "hint" in daemon_ops:
             other["hint_waited_s"] = daemon_ops["hint"].get("waited_s")
             other["hint_daemon_s"] = daemon_ops["hint"]["s"]
@@ -531,25 +754,41 @@ def _run_timing(record: dict[str, Any], log_dir: Path | None) -> dict[str, Any]:
         reasons["other"] = "model time unknown"
 
     if other is not None:
-        per_task = _r(accounted + other["s"])
+        per_task = _r(accounted + other["s"] + (tail_s or 0.0))
     else:
         per_task = _r(wall)
-    pay_once = _r((setup["s"] or 0.0) + (index["cold_s"] or 0.0))
-    return {"version": TIMING_VERSION, "driver": driver, "wall_s": _r(wall),
-            "setup": setup, "index": index, "model": model, "tools": tools,
-            "other": other, "check": check, "daemon_ops": daemon_ops,
-            "per_task_s": per_task, "pay_once_s": pay_once, "reasons": reasons}
+    if setup["s"] is None or index["cold_s"] is None:
+        pay_once = None
+    else:
+        pay_once = _r(setup["s"] + index["cold_s"])
+    model_excl = (None if model is None
+                  else _r(max(0.0, model["s"] - (hint_model_s or 0.0))))
+    out = {"version": TIMING_VERSION, "driver": driver, "wall_s": _r(wall),
+           "timed_out": timed_out,
+           "setup": setup, "index": index, "model": model, "tools": tools,
+           "other": other, "check": check, "daemon_ops": daemon_ops,
+           "model_excl_hint_s": model_excl,
+           "timeout_tail_s": _r(tail_s) if other is not None else None,
+           "per_task_s": per_task, "pay_once_s": pay_once,
+           "pay_once_partial": setup["partial"], "reasons": reasons}
+    if mismatch:
+        out["log_mismatch"] = mismatch
+    return out
 
 
 def _tools_block(by_name: dict[str, Any], union_s: float | None) -> dict[str, Any]:
-    return {"s": _r(union_s),
-            "sum_s": _sum_field(by_name, "s"),
-            "ozagia_s": _sum_field(by_name, "ozagia_s"),
-            "builtin_s": _sum_field(by_name, "builtin_s"),
-            "daemon_overhead_s": _sum_field(by_name, "daemon_overhead_s"),
-            "plugin_ipc_s": _sum_field(by_name, "plugin_ipc_s"),
-            "matched": all(r.get("matched") for r in by_name.values()),
-            "by_name": by_name}
+    out = {"s": _r(union_s),
+           "sum_s": _sum_field(by_name, "s"),
+           "ozagia_s": _sum_field(by_name, "ozagia_s"),
+           "builtin_s": _sum_field(by_name, "builtin_s"),
+           "daemon_overhead_s": _sum_field(by_name, "daemon_overhead_s"),
+           "plugin_ipc_s": _sum_field(by_name, "plugin_ipc_s"),
+           "matched": all(r.get("matched") for r in by_name.values()),
+           "by_name": by_name}
+    mismatches = {k: r["mismatch"] for k, r in by_name.items() if r.get("mismatch")}
+    if mismatches:
+        out["mismatches"] = mismatches
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -569,31 +808,47 @@ def _get(timing: dict[str, Any] | None, *path: str) -> Any:
     return cur
 
 
-def amortized(pay_once_s: float | None, per_task_s: float | None,
+def amortized(index_cold_s: float | None, index_repeat_s: float | None,
+              setup_s: float | None, per_task_s: float | None,
               n: int) -> float | None:
-    """Time per task over `n` tasks on one revision: pay_once / n + per_task."""
-    if per_task_s is None or n < 1:
+    """Time per task over `n` tasks (sessions) on one revision:
+    (index cold + (n - 1) * index repeat) / n + setup + per task. Setup is
+    per session, so it is not divided. An unknown repeat counts as 0 (the
+    caller says so); an unknown cold index, setup or per-task time makes
+    the result unknown."""
+    if None in (index_cold_s, setup_s, per_task_s) or n < 1:
         return None
-    return round((pay_once_s or 0.0) / n + per_task_s, 3)
+    index = index_cold_s + (n - 1) * (index_repeat_s or 0.0)
+    return round(index / n + setup_s + per_task_s, 3)
 
 
 def summarize_arm(runs: list[dict[str, Any]], n: int,
-                  warm_index_s: float | None = None) -> dict[str, Any]:
+                  index_repeat_s: float | None = None) -> dict[str, Any]:
     """Means over one arm's runs (unknown values left out of each mean), the
-    arm's per-task and amortized time, and per tool name means per run."""
+    arm's per-task and amortized time, and per tool name means per run.
+    `index_repeat_s` is the run root's repeat index cost (`repeat_index`)."""
     timings = [r.get("timing") for r in runs if isinstance(r.get("timing"), dict)]
+    setups = [_get(t, "setup", "s") for t in timings]
+    known_setup = [v for v in setups if v is not None]
     row: dict[str, Any] = {
         "timing_runs": len(timings),
         "breakdown_runs": sum(1 for t in timings if t.get("model") is not None),
-        "mean_setup_s": _mean(_get(t, "setup", "s") for t in timings),
+        "timed_out_runs": sum(1 for t in timings if t.get("timed_out")),
+        "mean_setup_s": _mean(known_setup),
         "mean_index_s": _mean(_get(t, "index", "cold_s") for t in timings),
         "mean_model_s": _mean(_get(t, "model", "s") for t in timings),
+        "mean_model_excl_hint_s": _mean(t.get("model_excl_hint_s") for t in timings),
+        "mean_hint_in_model_s": _mean(_get(t, "model", "hint_waited_s")
+                                      for t in timings),
         "mean_tools_s": _mean(_get(t, "tools", "s") for t in timings),
         "mean_tools_ozagia_s": _mean(_get(t, "tools", "ozagia_s") for t in timings),
         "mean_tools_builtin_s": _mean(_get(t, "tools", "builtin_s") for t in timings),
         "mean_daemon_overhead_s": _mean(_get(t, "tools", "daemon_overhead_s")
                                         for t in timings),
         "mean_other_s": _mean(_get(t, "other", "s") for t in timings),
+        "mean_timeout_tail_s": _mean(t.get("timeout_tail_s") for t in timings),
+        "timeout_tail_with_head_runs": sum(
+            1 for t in timings if _get(t, "other", "timeout_tail_includes_head")),
         "mean_hint_s": _mean(_get(t, "other", "hint_waited_s") for t in timings),
         "mean_check_s": _mean(_get(t, "check", "s") for t in timings),
         "mean_input_uncached": _mean((_get(t, "model", "tokens", "input_uncached")
@@ -601,13 +856,25 @@ def summarize_arm(runs: list[dict[str, Any]], n: int,
         "mean_input_cached": _mean((_get(t, "model", "tokens", "input_cached")
                                     for t in timings), 1),
         "per_task_s": _mean(t.get("per_task_s") for t in timings),
+        "unmatched_tool_runs": sum(1 for t in timings
+                                   if _get(t, "tools", "matched") is False),
         "amortize_n": n,
     }
-    index_s = row["mean_index_s"] or 0.0
-    row["warm_index_s"] = _r(warm_index_s) if index_s > 0 else None
-    row["pay_once_s"] = (_r((row["mean_setup_s"] or 0.0) + index_s)
-                         if timings else None)
-    row["amortized_s"] = amortized(row["pay_once_s"], row["per_task_s"], n)
+    # Setup is partial when a run lacks some of its parts, or some runs
+    # lack all of them; unknown when no run has any.
+    row["setup_partial"] = bool(known_setup) and (
+        len(known_setup) < len(timings)
+        or any(_get(t, "setup", "partial") for t in timings))
+    row["setup_missing"] = sorted({m for t in timings
+                                   for m in (_get(t, "setup", "missing") or [])})
+    index_s = row["mean_index_s"]
+    indexes = bool(index_s)
+    row["index_repeat_s"] = _r(index_repeat_s) if indexes else None
+    row["repeat_assumed_zero"] = indexes and index_repeat_s is None and n > 1
+    row["pay_once_s"] = (None if row["mean_setup_s"] is None or index_s is None
+                         else _r(row["mean_setup_s"] + index_s))
+    row["amortized_s"] = amortized(index_s, row["index_repeat_s"],
+                                   row["mean_setup_s"], row["per_task_s"], n)
     tools: dict[str, dict[str, Any]] = {}
     with_tools = [t for t in timings if isinstance(_get(t, "tools", "by_name"), dict)]
     for t in with_tools:
@@ -627,9 +894,10 @@ def summarize_arm(runs: list[dict[str, Any]], n: int,
     return row
 
 
-def warm_index(runs: list[dict[str, Any]]) -> float | None:
-    """The warm re-index time measured in this run root (mean if several)."""
-    return _mean(r.get("prep_warm_s") for r in runs)
+def repeat_index(runs: list[dict[str, Any]]) -> float | None:
+    """The repeat index cost measured in this run root (`prep_repeat_s`,
+    mean if several), or None."""
+    return _mean(r.get("prep_repeat_s") for r in runs)
 
 
 def _fmt(value: Any, digits: int = 1) -> str:
@@ -640,8 +908,13 @@ def _fmt(value: Any, digits: int = 1) -> str:
     return str(value)
 
 
+def _has_hints(row: dict[str, Any]) -> bool:
+    return row.get("mean_hint_in_model_s") is not None
+
+
 def headline(rows: list[dict[str, Any]]) -> list[str]:
-    """Per-task and amortized time per arm, each against the first arm."""
+    """Per-task, model and amortized time per arm, each against the first
+    arm, with footnotes on what is unknown, partial or assumed."""
     rows = [r for r in rows if r.get("per_task_s") is not None]
     if not rows:
         return []
@@ -656,46 +929,109 @@ def headline(rows: list[dict[str, Any]]) -> list[str]:
 
     per_task = ", ".join(f"{r['arm']} {_fmt(r['per_task_s'])} s{against(r, 'per_task_s')}"
                          for r in rows)
-    amort = ", ".join(f"{r['arm']} {_fmt(r['amortized_s'])} s{against(r, 'amortized_s')}"
-                      for r in rows)
-    return [f"- Per task (agent time, no pay-once costs): {per_task}.",
-            f"- Amortized over {n} task{'s' if n != 1 else ''} on one revision "
-            f"(pay-once / {n} + per task): {amort}."]
+    lines = [f"- Per task (agent time, without setup and index): {per_task}."]
+    timed = [f"{r['timed_out_runs']} of {r['timing_runs']} {r['arm']}"
+             for r in rows if r.get("timed_out_runs")]
+    if timed:
+        with_head = sum(r.get("timeout_tail_with_head_runs") or 0 for r in rows)
+        lines.append(f"  - Runs killed at the timeout: {', '.join(timed)}; their "
+                     "per-task time is the timeout, and the time after their last "
+                     "event is the timeout tail"
+                     + (f" (for {with_head} without a recorded driver start, the "
+                        "tail also holds start-up and the first request)"
+                        if with_head else "") + ".")
+    if any(_has_hints(r) for r in rows):
+        parts = []
+        for r in rows:
+            if _has_hints(r):
+                parts.append(f"{r['arm']} {_fmt(r['mean_model_excl_hint_s'])} s "
+                             f"without its {_fmt(r['mean_hint_in_model_s'])} s of "
+                             "hint wait")
+            elif r.get("mean_model_s") is not None:
+                parts.append(f"{r['arm']} {_fmt(r['mean_model_s'])} s")
+        lines.append(f"- Model time per task: {', '.join(parts)}. The hint wait is "
+                     "the plugin waiting for the daemon's task hint before a model "
+                     "request; it is in the per-task time above.")
+
+    def amort(r: dict[str, Any]) -> str:
+        if r.get("amortized_s") is None:
+            return f"{r['arm']} unknown"
+        mark = "*" if r.get("setup_partial") else ""
+        return f"{r['arm']} {_fmt(r['amortized_s'])} s{mark}{against(r, 'amortized_s')}"
+
+    lines.append(f"- Amortized over {n} task{'s' if n != 1 else ''} on one revision "
+                 f"((index cold + {n - 1 if n else 'N-1'} × index repeat) / {n} + "
+                 f"setup + per task): {', '.join(amort(r) for r in rows)}.")
+    for r in rows:
+        if r.get("mean_setup_s") is None and r.get("per_task_s") is not None:
+            lines.append(f"  - {r['arm']}: setup not recorded by this harness "
+                         "version, so pay-once and amortized are unknown.")
+        elif r.get("setup_partial"):
+            lines.append(f"  - * {r['arm']}: setup only partly recorded (missing "
+                         f"{', '.join(r.get('setup_missing') or []) or 'some runs'}); "
+                         "a lower bound.")
+        if r.get("repeat_assumed_zero"):
+            lines.append(f"  - {r['arm']}: index repeat cost not measured in this "
+                         "run, counted as 0, so its amortized time is a lower bound.")
+    return lines
 
 
 def render_markdown_sections(rows: list[dict[str, Any]]) -> list[str]:
-    """The components and per-tool tables for render_markdown."""
+    """The components and per-tool tables for render_markdown (the headline
+    is in the report's header list)."""
     rows = [r for r in rows if r.get("timing_runs")]
     if not rows:
         return []
     n = rows[0].get("amortize_n")
+
+    def marked(r: dict[str, Any], key: str) -> str:
+        text = _fmt(r.get(key))
+        return f"{text}*" if text and r.get("setup_partial") else text
+
     lines = ["", "## Time per component", "",
-             *headline(rows), "",
-             "Mean seconds per run. Pay-once = setup + index (cold). "
-             f"Amortized = pay-once / {n} + per task.", "",
-             "| arm | runs | runs with breakdown | setup | index cold | index warm | "
-             "model | tools | in ozagia | in built-in | daemon overhead | other | "
-             "hint waited | per task | pay-once | amortized | check | "
-             "uncached input tokens | cached input tokens |",
-             "|---" * 19 + "|"]
+             "Mean seconds per run. Setup is per session (every task is a session), "
+             "index cold per revision, index repeat what a later session on the same "
+             "revision pays instead (snapshot load + refresh + tag cache). "
+             "Pay-once = setup + index cold. Amortized = (index cold + "
+             f"{n - 1} × index repeat) / {n} + setup + per task.", "",
+             "| arm | runs | runs with breakdown | timed out | setup | index cold | "
+             "index repeat | model | model without hint | tools | in ozagia | "
+             "in built-in | daemon overhead | other | timeout tail | hint waited | "
+             "per task | pay-once | amortized | check | uncached input tokens | "
+             "cached input tokens |",
+             "|---" * 22 + "|"]
     for r in rows:
-        lines.append("| " + " | ".join(_fmt(v) for v in (
-            r["arm"], r["timing_runs"], r["breakdown_runs"], r["mean_setup_s"],
-            r["mean_index_s"], r["warm_index_s"], r["mean_model_s"], r["mean_tools_s"],
-            r["mean_tools_ozagia_s"], r["mean_tools_builtin_s"],
-            r["mean_daemon_overhead_s"], r["mean_other_s"], r["mean_hint_s"],
-            r["per_task_s"], r["pay_once_s"], r["amortized_s"], r["mean_check_s"],
-            r["mean_input_uncached"], r["mean_input_cached"])) + " |")
+        excl = r["mean_model_excl_hint_s"] if _has_hints(r) else None
+        lines.append("| " + " | ".join((
+            str(r["arm"]), _fmt(r["timing_runs"]), _fmt(r["breakdown_runs"]),
+            _fmt(r["timed_out_runs"]), marked(r, "mean_setup_s"),
+            _fmt(r["mean_index_s"]), _fmt(r["index_repeat_s"]),
+            _fmt(r["mean_model_s"]), _fmt(excl), _fmt(r["mean_tools_s"]),
+            _fmt(r["mean_tools_ozagia_s"]), _fmt(r["mean_tools_builtin_s"]),
+            _fmt(r["mean_daemon_overhead_s"]), _fmt(r["mean_other_s"]),
+            _fmt(r["mean_timeout_tail_s"]), _fmt(r["mean_hint_s"]),
+            _fmt(r["per_task_s"]), marked(r, "pay_once_s"), marked(r, "amortized_s"),
+            _fmt(r["mean_check_s"]), _fmt(r["mean_input_uncached"]),
+            _fmt(r["mean_input_cached"]))) + " |")
+    unmatched = [f"{r['arm']} {r['unmatched_tool_runs']}" for r in rows
+                 if r.get("unmatched_tool_runs")]
     lines += ["", "Model is the wait from one step's end to the next step's first "
-              "tool call (prefill and generation together). Tools is the union of "
-              "tool-call intervals; in ozagia, in built-in and daemon overhead are "
-              "sums over calls, so with parallel calls they can exceed it. Other is "
-              "the rest of the driver wall: start-up, the first request's wait, "
-              "exit (and, for a run killed at its timeout, the last unanswered "
-              "request). Hint waited is the time the plugin waited for the "
-              f"daemon's task hint (at most {PLUGIN_HINT_TIMEOUT_S:g} s per hint; "
-              "it lies in model or other). Check is not agent time. "
-              "Blank cells are unknown. Definitions: docs/eval_agent.md."]
+              "tool call, plus a step's last tool end to its finish (prefill and "
+              "generation together). Model without hint leaves out the plugin's "
+              "hint wait that falls in model time (arms with the plugin only). "
+              "Tools is the union of tool-call intervals; in ozagia, in built-in "
+              "and daemon overhead are sums over calls, so with parallel calls they "
+              "can exceed it. Other is the rest of the driver wall: start-up, the "
+              "first request's wait and exit. Timeout tail is, for a run killed at "
+              "its timeout, the time after its last event (an unanswered request "
+              "or a running tool). Hint waited is the time the plugin waited for "
+              "the daemon's task hint (at most "
+              f"{PLUGIN_HINT_TIMEOUT_S:g} s per hint; it lies in model or other). "
+              "Check is not agent time. * marks a partial setup sum (a lower "
+              "bound). Blank cells are unknown. Definitions: docs/eval_agent.md."]
+    if unmatched:
+        lines += ["", "Runs whose driver calls and journal entries could not be "
+                  f"paired one to one (tool split by totals): {', '.join(unmatched)}."]
     tool_rows = [(r["arm"], name, t) for r in rows
                  for name, t in (r.get("mean_tools_by_name") or {}).items()]
     if tool_rows:
