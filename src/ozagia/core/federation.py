@@ -4,6 +4,11 @@ Federated keys have the form ``<checkout-id>::<snapshot-key>``. Integer node
 IDs remain private to each snapshot. Discovery is intentionally bounded: with
 no explicit ``roots``, inspect the selected checkout and its immediate sibling
 directories only. No adapters are imported and no checkout is indexed.
+The selected root uses its configured state path; an absolute
+``OZAGIA_STATE_DIR`` applies only to that anchor. Other members are read from
+their own ``<root>/.ozagia/graph.json`` so one external state directory cannot
+make sibling snapshots appear identical. Explicit roots remain listed when
+they do not exist or have no valid snapshot.
 Optional declared cross-checkout links live in the consumer's
 ``.ozagia/federation.json`` as ``{"version": 1, "links": [{"source":
 "<checkout-id>::<node-key>", "target": "...", "relation": "...",
@@ -25,12 +30,20 @@ def _root(value: str | Path | None) -> Path:
     return Path(value or repo_root()).expanduser().resolve()
 
 
-def _snapshot_path(root: Path) -> Path:
-    return state_path(root, "graph.json")
+def _state_path(root: Path, anchor: Path) -> Path:
+    """Use the configured state directory only for the selected checkout.
+
+    An absolute ``OZAGIA_STATE_DIR`` is a location for the anchor's state; it
+    must not make each sibling appear to own the same graph or manifest.
+    Other checkouts use their repository-local ``.ozagia`` state directory.
+    """
+    if root == anchor:
+        return state_path(root, "graph.json")
+    return root / ".ozagia" / "graph.json"
 
 
-def _read_snapshot(root: Path) -> tuple[dict[str, Any] | None, str | None]:
-    path = _snapshot_path(root)
+def _read_snapshot(root: Path, anchor: Path) -> tuple[dict[str, Any] | None, str | None]:
+    path = _state_path(root, anchor)
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -57,7 +70,8 @@ def _candidate_roots(root: Path, roots: Iterable[str | Path] | None) -> list[Pat
     candidates = [root]
     if roots is None:
         try:
-            siblings = [p for p in root.parent.iterdir() if p.is_dir() and p.resolve() != root]
+            siblings = [p for p in root.parent.iterdir()
+                        if not p.is_symlink() and p.is_dir() and p.resolve() != root]
         except OSError:
             siblings = []
         candidates.extend(sorted(siblings, key=lambda p: p.name.casefold()))
@@ -78,16 +92,16 @@ def _members(root: str | Path | None, roots: Iterable[str | Path] | None
     selected = _root(root)
     entries: list[dict[str, Any]] = []
     for path in _candidate_roots(selected, roots):
-        if not path.is_dir():
+        if roots is None and not path.is_dir():
             continue
-        snapshot, error = _read_snapshot(path)
+        snapshot, error = _read_snapshot(path, selected)
         # Automatic discovery includes only immediate siblings with a graph;
         # explicit roots are retained even when their snapshot is unavailable.
         if roots is None and path != selected and error:
             continue
         attrs = _repo_attrs(snapshot)
         label = str(attrs.get("name") or path.name or "repo")
-        entries.append({"root": path, "snapshot_path": _snapshot_path(path),
+        entries.append({"root": path, "snapshot_path": _state_path(path, selected),
                         "snapshot": snapshot, "error": error,
                         "label": label, "attrs": attrs})
     # Alias collisions are resolved deterministically with an identity suffix.
@@ -219,8 +233,9 @@ def _node_key(node: dict[str, Any]) -> str:
 
 def _searchable(node: dict[str, Any]) -> str:
     attrs = node.get("attrs") if isinstance(node.get("attrs"), dict) else {}
-    return " ".join([str(node.get("type", "")), *(str(v) for v in attrs.values()
-                    if isinstance(v, (str, int, float)))])
+    return " ".join([str(node.get("type", "")), _node_key(node),
+                      *(str(v) for v in attrs.values()
+                        if isinstance(v, (str, int, float)))])
 
 
 def search(root: str | Path | None, query: str,
