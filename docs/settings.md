@@ -393,6 +393,12 @@ unioned across layers. `ozagia.core.models` reads the same tables through its
 own loader; `settings.model_overrides(root)` returns its effective
 `tasks`/`local` maps for callers that need the registry's view.
 
+`[model_graph]` is a separate direct-read overlay, not a registry section. It
+holds optional model-profile, family, task-profile and distance-weight
+overrides for the advisory graph in `ozagia.core.model_graph`. Unknown keys are
+reported in the graph report rather than rejected. See
+[model_graph.md](model_graph.md) for the schema and precedence.
+
 ### tasks
 
 | Key | Type | Default | Scope | Restart |

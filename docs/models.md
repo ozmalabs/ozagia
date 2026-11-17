@@ -10,6 +10,11 @@ request and calls no model. Resolution is deterministic and reportable. Auto-
 routing waits for an offline evaluation that beats the explicit default on
 success rate and cost (plan item 12).
 
+The advisory model graph — curated families, model-space distance, bounded
+similarity edges and task/tool matching — lives in `ozagia.core.model_graph`
+and is documented in [model_graph.md](model_graph.md). It does not change
+`models.resolve`.
+
 The module is standard-library only and does not import the target project.
 `python -m ozagia.models_cli` is the command entry point until the main CLI is
 wired; no console script is installed by this slice.
@@ -172,6 +177,16 @@ The order is:
 4. if nothing is configured, `host_default`: the result has no selected model
    because the host CLI owns that choice.
 
+### Model graph
+
+`ozagia.core.model_graph` maps the same catalog onto curated family, type and
+size profiles, a bounded similarity graph and advisory task/tool matching. Use
+it to compare models (`similar`), inspect profiles (`graph`) or rank candidates
+for `code_review`/`pdf_edit` and related task classes (`match`). It never calls
+`models.resolve` or a model, and it never changes the deterministic choice
+above. Profiles are approximate; missing metadata stays `null`. See
+[model_graph.md](model_graph.md).
+
 `status` values:
 
 | Status | Meaning |
@@ -197,7 +212,13 @@ because the registry cannot prove it is local.
 python -m ozagia.models_cli list [--root R] [--json]
 python -m ozagia.models_cli show MODEL_ID [--root R] [--json]
 python -m ozagia.models_cli resolve [--task CLASS] [--root R] [--json]
+python -m ozagia.models_cli graph [--root R] [--json]
+python -m ozagia.models_cli similar MODEL_ID [--limit N] [--root R] [--json]
+python -m ozagia.models_cli match [--task CLASS] [...] [--root R] [--json]
 ```
+
+`graph`, `similar` and `match` are the advisory model-graph commands; see
+[model_graph.md](model_graph.md) for their filters and JSON shape.
 
 Examples:
 
@@ -260,6 +281,10 @@ it beats the explicit default on success rate and cost.
 - Locality is explicit configuration, not provider-name inference.
 - `ozagia/models.toml` is not read yet. Defaults and task pins live in
   `[models]` in `ozagia/config.toml`, as this slice specifies.
+- The advisory model graph reads `[model_graph]` directly through
+  `load_config_section`; it is not part of the typed settings registry. Its
+  profiles are curated approximations and its matching is advisory. See
+  [model_graph.md](model_graph.md).
 - The settings registry validates `[models.tasks]`/`[models.by_task_class]`
   and `[models.local]` as dynamic tables. `core.models` still reads `[models]`
   directly and ignores unrelated sections.
