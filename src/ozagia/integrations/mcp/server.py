@@ -625,6 +625,17 @@ _TOOLS.extend([
                       "description": "Optional explicit member roots."},
         }, ["qualified_key"]),
     },
+    {
+        "name": "federation_check",
+        "description": (
+            "Read-only static checks for declared cross-repository API and "
+            "code-to-infrastructure relationships. Uses existing snapshots; "
+            "missing or unverifiable evidence remains unknown."),
+        "inputSchema": _schema({
+            "roots": {"type": "array", "items": {"type": "string"},
+                      "description": "Optional explicit member roots; an empty array selects only the anchor."},
+        }),
+    },
 ])
 
 
@@ -1225,6 +1236,7 @@ class DevMemoryServer:
             "federation_status": self._federation_status,
             "federation_search": self._federation_search,
             "federation_node": self._federation_node,
+            "federation_check": self._federation_check,
         }
 
     def _federation_call(self, operation: str, *args: Any,
@@ -1247,6 +1259,13 @@ class DevMemoryServer:
     def _federation_node(self, a: dict[str, Any]) -> Any:
         return self._federation_call("node", str(a["qualified_key"]),
                                      roots=a.get("roots"))
+
+    def _federation_check(self, a: dict[str, Any]) -> Any:
+        from ozagia.core import cross_repo
+        roots = a.get("roots")
+        selected = [str(Path(root).expanduser().resolve()) for root in roots] \
+            if roots is not None else None
+        return cross_repo.check(self.workspace, roots=selected)
 
     def _load_research_fetch_tool(self) -> None:
         """`research_fetch` (`ozagia.research.fallback`) in every mode of the
