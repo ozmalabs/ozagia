@@ -1,9 +1,10 @@
 # Federated repository graphs
 
-Federation queries read snapshots that already exist in several checkouts. They
-do not build, refresh, or otherwise write a member snapshot. The feature is
-opt-in at query time and leaves ordinary single-repository graph commands
-unchanged.
+Federation queries read snapshots that already exist in several checkouts.
+They never build or refresh a member snapshot. By default they may fetch and
+fast-forward clean checkouts explicitly designated as references in the anchor
+manifest; ordinary members remain read-only. Use `--no-sync` to prevent those
+updates for a query.
 
 ## Discovery and membership
 
@@ -33,6 +34,10 @@ anchor checkout or an absolute directory path:
 {
   "version": 1,
   "members": ["../service-b", "~/work/shared-library"],
+  "reference_repos": [
+    {"path": "../shared-library"},
+    {"path": "../frozen-api", "pin": "0123456789abcdef0123456789abcdef01234567"}
+  ],
   "links": []
 }
 ```
@@ -46,6 +51,34 @@ both discovery sources. A member declaration only selects an existing
 snapshot; it never builds or refreshes one. Declaring a path can disclose its
 location and snapshot metadata to the caller, so only add checkouts that are
 appropriate for the connected client to inspect.
+
+`members` only selects checkouts. It never authorizes an update. `reference_repos`
+is a separate, opt-in list; each object has a relative or absolute `path` and
+an optional full 40 or 64 character commit SHA `pin`. Unpinned references are
+updated automatically when federation commands and MCP federation tools run.
+Only a clean, attached checkout whose upstream is `origin/<current-branch>` is
+eligible. Ozagia fetches that branch and fast-forwards only when the remote is
+a descendant of local `HEAD`. Dirty, detached, missing-upstream, diverged, or
+failed checkouts are left untouched and report an error. Pins prevent updates;
+a checkout not at its pin reports `pin_mismatch`. No reset, stash, rebase,
+project command, index refresh, or project import is run.
+
+Automatic synchronization can access the network and change explicitly listed
+checkouts. It has a 60 second per-Git-command timeout, disables Git hooks,
+credential helpers, terminal prompts and the `ext` protocol, and caches results
+for 30 seconds to avoid duplicate fetches during repeated tool calls. At most
+six references are considered per automatic query. Use `--no-sync` on status,
+search, node or check to opt out. Explicitly run the sync command to update
+references and inspect its JSON report:
+
+```sh
+ozagia federation sync --root ~/work/service-a
+ozagia federation sync --root ~/work/service-a --repo ~/work/shared-library
+```
+
+After a reference update its existing graph snapshot is stale until rebuilt
+separately. Query reports expose synchronization state; they never imply that
+the graph was refreshed.
 
 Automatic sibling discovery can expose repository names, paths, snapshot
 freshness, and indexed code metadata to the CLI caller or connected MCP
@@ -101,11 +134,13 @@ prints the same complete JSON representation.
 
 ## MCP tools
 
-The read-only tools `federation_status`, `federation_search`, and
-`federation_node`, and `federation_check` use the server workspace as their anchor. Each accepts an
-optional `roots` array to select explicit member roots. They are available on
-both the full and graph tool surfaces. They do not refresh indexes or invoke
-project adapters.
+The tools `federation_status`, `federation_search`, `federation_node`, and
+`federation_check` use the server workspace as their anchor. Each accepts an
+optional `roots` array to select explicit member roots and a `no_sync` boolean
+to opt out of updating designated references. They are available on both the
+full and graph tool surfaces. They do not refresh indexes or invoke project
+adapters. Automatic updates may access the network and change the clean,
+explicitly designated Git checkouts as described above.
 
 `federation check` and `federation_check` run offline static checks for
 declared API relationships and code-to-infrastructure links. API identity

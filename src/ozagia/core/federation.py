@@ -1,9 +1,11 @@
-"""Read-only queries across independently indexed repository snapshots.
+"""Queries across independently indexed repository snapshots.
 
 Federated keys have the form ``<checkout-id>::<snapshot-key>``. Integer node
 IDs remain private to each snapshot. Discovery is intentionally bounded: with
 no explicit ``roots``, inspect the selected checkout and its immediate sibling
-directories only. No adapters are imported and no checkout is indexed.
+directories only. No adapters are imported and no checkout is indexed. Paths
+explicitly designated as references may be fetched and fast-forwarded; callers
+can use ``without_reference_sync`` for cache-only inspection.
 The selected root uses its configured state path; an absolute
 ``OZAGIA_STATE_DIR`` applies only to that anchor. Other members are read from
 their own ``<root>/.ozagia/graph.json`` so one external state directory cannot
@@ -20,10 +22,29 @@ import hashlib
 import json
 import re
 import subprocess
+import threading
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Iterable
 
 from ozagia.config import repo_root, state_path
+
+_SYNC_ENABLED: ContextVar[bool] = ContextVar("ozagia_reference_sync_enabled", default=True)
+_REFERENCE_SYNC_RESULTS: dict[Path, list[dict[str, Any]]] = {}
+_REFERENCE_SYNC_PENDING: dict[Path, list[dict[str, Any]]] = {}
+_REFERENCE_SYNC_THREADS: dict[Path, threading.Thread] = {}
+_REFERENCE_SYNC_LOCK = threading.Lock()
+
+
+@contextmanager
+def without_reference_sync():
+    """Temporarily disable automatic reference updates in this context."""
+    token = _SYNC_ENABLED.set(False)
+    try:
+        yield
+    finally:
+        _SYNC_ENABLED.reset(token)
 
 
 def _root(value: str | Path | None) -> Path:
@@ -66,6 +87,158 @@ def _repo_attrs(data: dict[str, Any] | None) -> dict[str, Any]:
     return {}
 
 
+def _reference_specs(root: Path) -> tuple[list[dict[str, Any]], list[str]]:
+    """Read explicitly designated references; ordinary members stay read-only."""
+    path = state_path(root, "federation.json")
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return [], []
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return [], [f"cannot read manifest: {type(exc).__name__}: {exc}"]
+    if not isinstance(raw, dict):
+        return [], ["manifest must be an object"]
+    if raw.get("version") != 1 or not isinstance(raw.get("links"), list):
+        return [], ["expected {version: 1, links: [...]} manifest"]
+    if "reference_repos" not in raw:
+        return [], []
+    values = raw["reference_repos"]
+    if not isinstance(values, list):
+        return [], ["reference_repos must be an array of objects"]
+    specs: list[dict[str, Any]] = []
+    errors: list[str] = []
+    seen: set[Path] = set()
+    for index, value in enumerate(values):
+        if not isinstance(value, dict) or set(value) - {"path", "pin"}:
+            errors.append(f"reference_repos[{index}] must contain only path and optional pin")
+            continue
+        name, pin = value.get("path"), value.get("pin")
+        if not isinstance(name, str) or not name.strip():
+            errors.append(f"reference_repos[{index}].path must be a non-empty string")
+            continue
+        if pin is not None and (not isinstance(pin, str) or not re.fullmatch(
+                r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", pin)):
+            errors.append(f"reference_repos[{index}].pin must be a full commit SHA")
+            continue
+        candidate = Path(name).expanduser()
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        resolved = candidate.resolve()
+        if resolved == root or resolved in seen:
+            errors.append(f"reference_repos[{index}] is duplicate or names the anchor")
+            continue
+        seen.add(resolved)
+        specs.append({"root": resolved, "pin": pin})
+    return specs, errors
+
+
+def _sync_references(root: Path, roots: Iterable[str | Path] | None) -> list[dict[str, Any]]:
+    specs, errors = _reference_specs(root)
+    selected = ({Path(p).expanduser().resolve() for p in roots}
+                if roots is not None else None)
+    results: list[dict[str, Any]] = []
+    if _SYNC_ENABLED.get():
+        from ozagia.core.reference_sync import sync_reference
+        matching = [spec for spec in specs
+                    if selected is None or spec["root"] in selected]
+        for spec in matching[:6]:
+            results.append(sync_reference(spec["root"], pin=spec["pin"]))
+        if len(matching) > 6:
+            results.append({"state": "deferred", "reason": "reference_limit",
+                            "detail": "automatic sync checks at most six references per query",
+                            "updated": False})
+    else:
+        from ozagia.core.reference_sync import cached_status
+        matching = [spec for spec in specs
+                    if selected is None or spec["root"] in selected]
+        for spec in matching[:6]:
+            cached = cached_status(spec["root"])
+            prior = next((item for item in reversed(cached)
+                          if item.get("pin") == spec["pin"]), None)
+            results.append(prior or {"root": str(spec["root"]),
+                                     "state": "not_checked", "updated": False})
+    results.extend({"state": "error", "reason": "invalid_manifest",
+                    "detail": message, "updated": False} for message in errors)
+    _REFERENCE_SYNC_RESULTS[root] = results
+    return results
+
+
+def reference_status(root: str | Path | None = None) -> dict[str, Any]:
+    """Return reference declarations and cached status without syncing."""
+    selected = _root(root)
+    specs, errors = _reference_specs(selected)
+    from ozagia.core.reference_sync import cached_status
+    entries = []
+    for spec in specs:
+        cached = cached_status(spec["root"])
+        item = next((entry for entry in reversed(cached)
+                     if entry.get("pin") == spec["pin"]), None)
+        is_pending = any(p["path"] == str(spec["root"])
+                         for p in _REFERENCE_SYNC_PENDING.get(selected, []))
+        entries.append({"path": str(spec["root"]), "pin": spec["pin"],
+                        "state": "pending" if is_pending else
+                                item["state"] if item else "not_checked",
+                        "sync": item})
+    return {"root": str(selected), "references": entries, "errors": errors,
+            "pending": list(_REFERENCE_SYNC_PENDING.get(selected, []))}
+
+
+def request_reference_sync(root: str | Path | None = None, *, limit: int = 6
+                           ) -> dict[str, Any]:
+    """Schedule bounded reference updates and return immediately (no Git I/O here)."""
+    selected = _root(root)
+    specs, errors = _reference_specs(selected)
+    selected_specs = specs[:max(0, int(limit))]
+    pending = [{"path": str(item["root"]), "pin": item["pin"], "state": "pending"}
+               for item in selected_specs]
+    with _REFERENCE_SYNC_LOCK:
+        active = _REFERENCE_SYNC_THREADS.get(selected)
+        if active and active.is_alive():
+            return {"root": str(selected), "state": "pending",
+                    "references": list(_REFERENCE_SYNC_PENDING.get(selected, [])),
+                    "errors": errors}
+        _REFERENCE_SYNC_PENDING[selected] = pending
+
+        def worker() -> None:
+            try:
+                roots = [item["root"] for item in selected_specs]
+                report = sync_references(selected, roots=roots, force=False)
+                _REFERENCE_SYNC_RESULTS[selected] = report["references"]
+            finally:
+                _REFERENCE_SYNC_PENDING[selected] = []
+
+        thread = threading.Thread(target=worker,
+                                  name="ozagia-reference-sync", daemon=True)
+        _REFERENCE_SYNC_THREADS[selected] = thread
+        thread.start()
+    return {"root": str(selected), "state": "pending", "references": pending,
+            "errors": errors,
+            "omitted": max(0, len(specs) - len(selected_specs))}
+
+
+def sync_references(root: str | Path | None = None,
+                    roots: Iterable[str | Path] | None = None,
+                    *, force: bool = False) -> dict[str, Any]:
+    """Explicitly synchronize selected designated references and report results."""
+    selected = _root(root)
+    if not force:
+        results = _sync_references(selected, roots)
+        return {"ok": not any(item.get("state") == "error" for item in results),
+                "root": str(selected), "references": results}
+    # Explicit sync bypasses the per-process query throttle.
+    specs, errors = _reference_specs(selected)
+    roots = tuple(roots) if roots is not None else None
+    paths = {Path(p).expanduser().resolve() for p in roots} if roots is not None else None
+    from ozagia.core.reference_sync import sync_reference
+    results = [sync_reference(spec["root"], pin=spec["pin"], force=True)
+               for spec in specs if paths is None or spec["root"] in paths]
+    results.extend({"state": "error", "reason": "invalid_manifest",
+                    "detail": message, "updated": False} for message in errors)
+    _REFERENCE_SYNC_RESULTS[selected] = results
+    return {"ok": not any(item.get("state") == "error" for item in results),
+            "root": str(selected), "references": results}
+
+
 def _candidate_roots(root: Path, roots: Iterable[str | Path] | None) -> list[Path]:
     candidates = [root]
     if roots is None:
@@ -76,7 +249,9 @@ def _candidate_roots(root: Path, roots: Iterable[str | Path] | None) -> list[Pat
             siblings = []
         candidates.extend(sorted(siblings, key=lambda p: p.name.casefold()))
         declared, _errors = _manifest_members(root)
+        references, _reference_errors = _reference_specs(root)
         candidates.extend(declared)
+        candidates.extend(spec["root"] for spec in references)
     else:
         candidates.extend(Path(p).expanduser() for p in roots)
     result: list[Path] = []
@@ -125,21 +300,34 @@ def _manifest_members(root: Path) -> tuple[list[Path], list[str]]:
 def _members(root: str | Path | None, roots: Iterable[str | Path] | None
              ) -> list[dict[str, Any]]:
     selected = _root(root)
+    if roots is not None:
+        roots = tuple(roots)
+    sync_results = _sync_references(selected, roots)
+    specs, _ = _reference_specs(selected)
+    references = {spec["root"]: spec for spec in specs}
+    sync_by_root = {Path(item["root"]).resolve(): item for item in sync_results
+                    if item.get("root")}
     entries: list[dict[str, Any]] = []
     declared_roots, _ = _manifest_members(selected)
+    reference_roots = set(references)
     for path in _candidate_roots(selected, roots):
-        if roots is None and not path.is_dir() and path not in declared_roots:
+        if (roots is None and not path.is_dir() and path not in declared_roots
+                and path not in reference_roots):
             continue
         snapshot, error = _read_snapshot(path, selected)
         # Automatic discovery includes only immediate siblings with a graph;
         # explicit roots are retained even when their snapshot is unavailable.
-        if roots is None and path != selected and error and path not in declared_roots:
+        if (roots is None and path != selected and error
+                and path not in declared_roots and path not in reference_roots):
             continue
         attrs = _repo_attrs(snapshot)
         label = str(attrs.get("name") or path.name or "repo")
         entries.append({"root": path, "snapshot_path": _state_path(path, selected),
                         "snapshot": snapshot, "error": error,
-                        "label": label, "attrs": attrs})
+                        "label": label, "attrs": attrs,
+                        "reference": path in references,
+                        "pin": references.get(path, {}).get("pin"),
+                        "sync": sync_by_root.get(path)})
     # Alias collisions are resolved deterministically with an identity suffix.
     counts: dict[str, int] = {}
     for item in entries:
@@ -184,12 +372,20 @@ def _freshness(item: dict[str, Any]) -> tuple[str, str | None]:
 def _public_member(item: dict[str, Any]) -> dict[str, Any]:
     state, detail = _freshness(item)
     attrs = item["attrs"]
-    return {"id": item["alias"], "name": item["label"],
+    out = {"id": item["alias"], "name": item["label"],
             "root": str(item["root"]), "snapshot": str(item["snapshot_path"]),
             "state": state, "detail": detail,
             "head": attrs.get("head"), "generated_at": attrs.get("generated_at"),
             "nodes": len((item["snapshot"] or {}).get("nodes", [])),
             "edges": len((item["snapshot"] or {}).get("edges", []))}
+    if item.get("reference"):
+        out["reference"] = True
+        out["pin"] = item.get("pin")
+        out["sync"] = item.get("sync") or {"state": "not_checked", "updated": False}
+        if out["sync"].get("updated"):
+            out["state"] = "stale"
+            out["detail"] = "reference updated; snapshot is stale until reindexed"
+    return out
 
 
 def _declared_links(root: Path, members: list[dict[str, Any]]) -> dict[str, Any]:
@@ -241,18 +437,19 @@ def _declared_links(root: Path, members: list[dict[str, Any]]) -> dict[str, Any]
 
 def discover(root: str | Path | None = None,
              roots: Iterable[str | Path] | None = None) -> dict[str, Any]:
-    """List federation members and snapshot availability without writing."""
+    """List federation members; sync explicitly designated refs by default."""
     selected = _root(root)
     members = _members(selected, roots)
     links = _declared_links(selected, members)
     return {"ok": True, "root": str(selected),
             "discovery": "immediate-siblings" if roots is None else "explicit",
-            "members": [_public_member(item) for item in members], "links": links}
+            "members": [_public_member(item) for item in members], "links": links,
+            "reference_sync": list(_REFERENCE_SYNC_RESULTS.get(selected, []))}
 
 
 def status(root: str | Path | None = None,
            roots: Iterable[str | Path] | None = None) -> dict[str, Any]:
-    """Return read-only status for each discovered or explicitly named repo."""
+    """Return status for selected repos, syncing designated refs by default."""
     report = discover(root, roots)
     report["states"] = {state: sum(m["state"] == state for m in report["members"])
                         for state in ("fresh", "stale", "missing", "invalid", "unknown")}
@@ -355,4 +552,5 @@ def node(root: str | Path | None, qualified_key: str,
             "cross_repository_link_errors": link_data["errors"]}
 
 
-__all__ = ["discover", "status", "search", "node"]
+__all__ = ["discover", "status", "search", "node", "sync_references",
+           "reference_status", "request_reference_sync", "without_reference_sync"]

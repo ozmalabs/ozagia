@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import atexit
+from contextlib import nullcontext
 import importlib
 import json
 import math
@@ -585,32 +586,37 @@ _TOOLS: list[dict[str, Any]] = [
     },
 ]
 
-# Federation tools are read-only and independent of the single-repository
-# graph surface. Their repository membership is visible in every response.
+# Federation queries may fast-forward explicitly designated reference
+# checkouts over Git; ordinary members are never updated. Membership is visible.
 _TOOLS.extend([
     {
         "name": "federation_status",
         "description": (
             "Read-only status of indexed repositories in the bounded sibling "
             "federation, or in explicitly supplied roots. Reports membership "
-            "and snapshot freshness; it never indexes or refreshes repositories. "
-            "Automatic sibling discovery exposes repository metadata to this client."),
+            "and snapshot freshness. Only paths explicitly listed in the anchor "
+            "manifest's reference_repos may be fetched and fast-forwarded; this "
+            "uses the network and changes those clean checkouts. Set no_sync to "
+            "true to opt out. Indexes are not refreshed."),
         "inputSchema": _schema({
             "roots": {"type": "array", "items": {"type": "string"},
                       "description": "Optional explicit member roots."},
+            "no_sync": {"type": "boolean", "default": False},
         }),
     },
     {
         "name": "federation_search",
         "description": (
             "Read-only lexical search over discovered or explicitly selected "
-            "repository snapshots. Results retain repository provenance; search "
-            "does not create precise cross-repository symbol edges."),
+            "repository snapshots. Designated references may be fetched and "
+            "fast-forwarded over Git; set no_sync to opt out. Results retain "
+            "provenance; no index is refreshed."),
         "inputSchema": _schema({
             "query": {"type": "string"},
             "roots": {"type": "array", "items": {"type": "string"},
                       "description": "Optional explicit member roots."},
             "limit": {"type": "integer", "default": 20},
+            "no_sync": {"type": "boolean", "default": False},
         }, ["query"]),
     },
     {
@@ -618,22 +624,26 @@ _TOOLS.extend([
         "description": (
             "Read-only inspection of a qualified federated node and its "
             "snapshot-local edges. Use the qualified key returned by federation "
-            "search; node/edge inspection does not infer cross-repository links."),
+            "search. Designated references may be fetched and fast-forwarded; "
+            "set no_sync to opt out. Node inspection does not infer links."),
         "inputSchema": _schema({
             "qualified_key": {"type": "string"},
             "roots": {"type": "array", "items": {"type": "string"},
                       "description": "Optional explicit member roots."},
+            "no_sync": {"type": "boolean", "default": False},
         }, ["qualified_key"]),
     },
     {
         "name": "federation_check",
         "description": (
             "Read-only static checks for declared cross-repository API and "
-            "code-to-infrastructure relationships. Uses existing snapshots; "
-            "missing or unverifiable evidence remains unknown."),
+            "code-to-infrastructure relationships. Designated references may "
+            "be fetched and fast-forwarded over Git; set no_sync to opt out. "
+            "Indexes are not refreshed; missing evidence remains unknown."),
         "inputSchema": _schema({
             "roots": {"type": "array", "items": {"type": "string"},
                       "description": "Optional explicit member roots; an empty array selects only the anchor."},
+            "no_sync": {"type": "boolean", "default": False},
         }),
     },
 ])
@@ -1249,23 +1259,35 @@ class DevMemoryServer:
                                      roots=selected, **kwargs)
 
     def _federation_status(self, a: dict[str, Any]) -> Any:
-        return self._federation_call("status", roots=a.get("roots"))
+        from ozagia.core import federation as F
+        context = F.without_reference_sync() if a.get("no_sync") else nullcontext()
+        with context:
+            return self._federation_call("status", roots=a.get("roots"))
 
     def _federation_search(self, a: dict[str, Any]) -> Any:
-        return self._federation_call("search", str(a["query"]),
-                                     roots=a.get("roots"),
-                                     limit=a.get("limit", 20))
+        from ozagia.core import federation as F
+        context = F.without_reference_sync() if a.get("no_sync") else nullcontext()
+        with context:
+            return self._federation_call("search", str(a["query"]),
+                                         roots=a.get("roots"),
+                                         limit=a.get("limit", 20))
 
     def _federation_node(self, a: dict[str, Any]) -> Any:
-        return self._federation_call("node", str(a["qualified_key"]),
-                                     roots=a.get("roots"))
+        from ozagia.core import federation as F
+        context = F.without_reference_sync() if a.get("no_sync") else nullcontext()
+        with context:
+            return self._federation_call("node", str(a["qualified_key"]),
+                                         roots=a.get("roots"))
 
     def _federation_check(self, a: dict[str, Any]) -> Any:
         from ozagia.core import cross_repo
+        from ozagia.core import federation as F
         roots = a.get("roots")
         selected = [str(Path(root).expanduser().resolve()) for root in roots] \
             if roots is not None else None
-        return cross_repo.check(self.workspace, roots=selected)
+        context = F.without_reference_sync() if a.get("no_sync") else nullcontext()
+        with context:
+            return cross_repo.check(self.workspace, roots=selected)
 
     def _load_research_fetch_tool(self) -> None:
         """`research_fetch` (`ozagia.research.fallback`) in every mode of the

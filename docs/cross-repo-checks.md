@@ -1,7 +1,7 @@
 # Cross-repository static checks
 
-`ozagia.core.cross_repo.check(root, roots=None)` returns a JSON-serializable,
-read-only report over the selected existing federation snapshots. It uses only
+`ozagia.core.cross_repo.check(root, roots=None)` returns a JSON-serializable
+report over the selected existing federation snapshots. It uses only
 explicit links in the anchor's `.ozagia/federation.json`; it does not match
 names or invent relationships. `roots` follows federation selection rules.
 Each result includes qualified endpoints, relation, source manifest and
@@ -40,4 +40,7 @@ Supported declarations are:
 Unknown relations, unsupported node types, missing endpoints and unavailable
 comparison attributes are unknown. This is static evidence, not provider
 verification, test execution, deployment state, or a general compatibility
-claim. The core performs no target imports, network calls, indexing, or writes.
+claim. The check itself performs no target imports or indexing. Federation
+selection may fetch and fast-forward explicitly designated `reference_repos`;
+use CLI `--no-sync` to suppress that behavior. See
+[federation membership and reference synchronization](federation.md#discovery-and-membership).
