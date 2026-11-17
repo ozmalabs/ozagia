@@ -552,6 +552,84 @@ export interface TaskValidateReport extends TaskCatalogReport {
   issues?: TaskIssue[]
 }
 
+export interface ActionPreviewInput {
+  action: string
+  name?: string
+  live?: boolean
+  network?: boolean
+  maxBytes?: number
+  scope?: "project" | "user"
+  wait?: number
+  idleTimeout?: number
+}
+
+/** `actionApply` repeats every preview argument and adds the token. */
+export interface ActionApplyInput extends ActionPreviewInput {
+  confirm: string
+}
+
+export interface TaskRunInput {
+  id: string
+  inputs?: Record<string, string>
+}
+
+export interface TaskRunStep {
+  id?: string
+  tool?: string
+  status?: string
+  summary?: string
+  error?: string | null
+  evidence_count?: number
+  duration_s?: number
+  [key: string]: unknown
+}
+
+/** The `tasks_cli run --executor local` report, narrowed for the run result. */
+export interface TaskRunReport {
+  schema?: number | string
+  mode?: string
+  executed?: boolean
+  ok?: boolean
+  run_id?: string
+  root?: string
+  spec?: {
+    id?: string
+    version?: number
+    title?: string
+    [key: string]: unknown
+  }
+  inputs?: {
+    names?: string[]
+    digests?: Record<string, string>
+    digest?: string
+  }
+  status?: string
+  stop?: string | null
+  stop_detail?: string
+  preflight?: Record<string, unknown>
+  test_plan?: unknown
+  gates?: {
+    before?: unknown[]
+    after?: unknown[]
+    after_skipped?: string | null
+  }
+  steps?: TaskRunStep[]
+  artifacts?: unknown[]
+  evidence_count?: number
+  budget?: Record<string, unknown>
+  output?: {
+    name?: string
+    present?: boolean
+    digest?: string | null
+    value?: unknown
+    [key: string]: unknown
+  }
+  what_was_not_assessed?: string[]
+  warnings?: string[]
+  run_dir?: string
+  [key: string]: unknown
+}
+
 export interface ActionSummary {
   name: string
   description?: string

@@ -7,7 +7,8 @@
  * free-form argument is bounded before it reaches argv.
  */
 import { spawn } from "node:child_process"
-import { existsSync } from "node:fs"
+import { existsSync, realpathSync } from "node:fs"
+import * as nodePath from "node:path"
 import type { Envelope, EnvelopeError } from "./types.js"
 
 export interface RunnerConfig {
@@ -15,8 +16,10 @@ export interface RunnerConfig {
   python: string
   /** Repository root passed to every CLI invocation. */
   root: string
-  /** Wall-clock limit for one subprocess. */
+  /** Wall-clock limit for one read-only subprocess. */
   timeoutMs: number
+  /** Wall-clock limit for a bounded task run. Defaults to 15 minutes. */
+  taskTimeoutMs?: number
   /** Maximum JSON bytes accepted from stdout. Defaults to 8 MiB. */
   maxBuffer?: number
 }
@@ -28,6 +31,12 @@ export interface CommandSpec {
   args: string[]
   /** Short display string; never includes free-form user input. */
   display: string
+  /**
+   * Values that must not appear in the display command or an error envelope.
+   * The subprocess args still carry them. Used for confirmation tokens and
+   * task input values, which may be credentials.
+   */
+  sensitive?: readonly string[]
 }
 
 /** A request that did not match the documented shape. */
@@ -57,13 +66,29 @@ const MAX_ACTION_NAME = 128
 const MAX_ACTION_LOG_BYTES = 64 * 1024
 const MAX_ACTION_WAIT_S = 600
 const MAX_ACTION_IDLE_TIMEOUT_S = 86_400
+const MAX_CONFIRMATION = 128
+const MIN_CONFIRMATION = 20
+const MAX_TASK_INPUTS = 16
+const MAX_TASK_INPUT_VALUE = 4096
+const MAX_TASK_ARGV_BYTES = 64 * 1024
 const DEFAULT_MAX_BUFFER = 8 * 1024 * 1024
 const STDERR_TAIL = 64 * 1024
 const ERROR_TAIL = 500
 
+/**
+ * The local executor's test runner is capped at 900 s. The task RPC uses the
+ * same 15-minute ceiling instead of the short read-only timeout.
+ */
+export const MAX_TASK_TIMEOUT_MS = 15 * 60_000
+export const DEFAULT_TASK_TIMEOUT_MS = MAX_TASK_TIMEOUT_MS
+
 const APERTURE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 const INVESTIGATION_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/
 const TASK_ID_RE = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/
+const TASK_INPUT_NAME_RE = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/
+/** The same alphabet and length as `core.actions._TOKEN`. */
+const CONFIRMATION_RE = /^[A-Za-z0-9_-]{20,128}$/
+const CONTROL_RE = /[\u0000-\u001f\u007f]/
 
 const RESEARCH_VIEWS = ["library", "fetch", "screening", "evidence", "consensus", "citation"] as const
 const POLICY_KINDS = ["commit", "merge", "push"] as const
@@ -72,9 +97,10 @@ const ACTION_SCOPES = ["project", "user"] as const
 const INTEGRATION_NAMES = ["opencode", "claude", "codex", "kiro"] as const
 
 /**
- * The action names `ozagia.actions_cli list` publishes. Kept as a static
- * allowlist so a caller cannot pass an arbitrary positional argument. Keep it
- * in step with `ACTION_NAMES` in `rpc.ts` and `core/actions.py`.
+ * The action names this add-in publishes. `core.actions` also lists
+ * `integration.install`, `integration.uninstall` and `integration.verify`;
+ * those installers remain CLI-only. Keep in step with `ACTION_NAMES` in
+ * `schemas.ts` and `core/actions.py`.
  */
 export const ACTION_NAMES = [
   "daemon.status",
@@ -421,6 +447,28 @@ export function taskId(value: unknown): string {
   return id
 }
 
+/**
+ * Validate a preview confirmation token.
+ *
+ * This mirrors `ozagia.core.actions._TOKEN` exactly: 20-128 characters from
+ * `[A-Za-z0-9_-]`. The token is argv-only; it never enters a display string,
+ * log line, error tail or GUI command text.
+ */
+export function confirmationToken(value: unknown): string {
+  if (typeof value !== "string" || !value) {
+    throw new InputError("confirm must be the confirmation token from a preview")
+  }
+  if (value.length > MAX_CONFIRMATION) {
+    throw new InputError(`confirm must be at most ${MAX_CONFIRMATION} characters`)
+  }
+  if (!CONFIRMATION_RE.test(value)) {
+    throw new InputError(
+      `confirm must be ${MIN_CONFIRMATION}-${MAX_CONFIRMATION} letters, digits, underscores or dashes`,
+    )
+  }
+  return value
+}
+
 export function tasksShowSpec(root: string, input: TaskShowInput): CommandSpec {
   const id = taskId(input.id)
   return {
@@ -465,20 +513,29 @@ export interface ActionPreviewInput {
   idleTimeout?: unknown
 }
 
+export interface ActionApplyInput extends ActionPreviewInput {
+  confirm?: unknown
+}
+
 function supplied(value: unknown): boolean {
   if (value === undefined || value === null) return false
   if (typeof value === "string" && !value.trim()) return false
   return true
 }
 
+interface ValidatedActionArguments {
+  action: ActionName
+  /** Optional action flags, without the subcommand, root or `--json`. */
+  args: string[]
+}
+
 /**
- * Build a read-only `actions_cli preview` invocation.
+ * Validate one action's arguments against `ACTION_ARGUMENTS`.
  *
- * The argument set is checked against the action's documented arguments before
- * anything is spawned. The one-time confirmation token that preview returns is
- * display data: this add-in has no apply RPC.
+ * Both preview and apply use this, so a caller cannot smuggle a flag that the
+ * chosen action does not document.
  */
-export function actionPreviewSpec(root: string, input: ActionPreviewInput): CommandSpec {
+function validatedActionArguments(input: ActionPreviewInput): ValidatedActionArguments {
   const action = oneOf(input.action, "action", ACTION_NAMES)
   const allowed = ACTION_ARGUMENTS[action]
 
@@ -526,7 +583,7 @@ export function actionPreviewSpec(root: string, input: ActionPreviewInput): Comm
     ? optionalNumber(input.idleTimeout, "idleTimeout", MAX_ACTION_IDLE_TIMEOUT_S)
     : undefined
 
-  const args = ["preview", action, "--root", root]
+  const args: string[] = []
   if (name !== undefined) args.push("--name", name)
   if (live) args.push("--allow-live")
   if (network) args.push("--allow-network")
@@ -534,13 +591,260 @@ export function actionPreviewSpec(root: string, input: ActionPreviewInput): Comm
   if (scope !== undefined) args.push("--scope", scope)
   if (wait !== undefined) args.push("--wait", String(wait))
   if (idleTimeout !== undefined) args.push("--idle-timeout", String(idleTimeout))
-  args.push("--json")
+  return { action, args }
+}
 
+/**
+ * Build a read-only `actions_cli preview` invocation.
+ *
+ * The argument set is checked against the action's documented arguments before
+ * anything is spawned. The one-time confirmation token that preview returns is
+ * shown as data; applying it needs the explicit `actionApply` RPC.
+ */
+export function actionPreviewSpec(root: string, input: ActionPreviewInput): CommandSpec {
+  const { action, args } = validatedActionArguments(input)
   return {
     module: "ozagia.actions_cli",
-    args,
+    args: ["preview", action, "--root", root, ...args, "--json"],
     display: `ozagia.actions_cli preview ${action} --json`,
   }
+}
+
+/**
+ * Build an `actions_cli apply` invocation from a preview token.
+ *
+ * The actual argv carries the token so the CLI can consume it. The display
+ * string only ever shows `<redacted>`, and `sensitive` makes the runner scrub
+ * the token from any error tail as well.
+ */
+export function actionApplySpec(root: string, input: ActionApplyInput): CommandSpec {
+  const token = confirmationToken(input.confirm)
+  const { action, args } = validatedActionArguments(input)
+  return {
+    module: "ozagia.actions_cli",
+    args: ["apply", action, "--confirm", token, "--root", root, ...args, "--json"],
+    display: `ozagia.actions_cli apply ${action} --confirm <redacted> --json`,
+    sensitive: [token],
+  }
+}
+
+export interface TaskRunInput {
+  id?: unknown
+  inputs?: unknown
+}
+
+export interface TaskRunValues {
+  id: string
+  inputs: Record<string, string>
+}
+
+/**
+ * Bounded task inputs: at most 16 names, the library's name alphabet, string
+ * values up to 4096 characters with no control characters.
+ */
+export function taskInputs(value: unknown): Record<string, string> {
+  if (value === undefined || value === null) return {}
+  if (!isRecord(value)) {
+    throw new InputError("inputs must be an object mapping names to strings")
+  }
+  const entries = Object.entries(value)
+  if (entries.length > MAX_TASK_INPUTS) {
+    throw new InputError(`inputs must contain at most ${MAX_TASK_INPUTS} entries`)
+  }
+  const out: Record<string, string> = {}
+  for (const [name, raw] of entries) {
+    if (!TASK_INPUT_NAME_RE.test(name)) {
+      throw new InputError(
+        "input names must start with a letter and contain only letters, digits, dots, underscores and dashes",
+      )
+    }
+    if (typeof raw !== "string") {
+      throw new InputError(`inputs.${name} must be a string`)
+    }
+    if (raw.length > MAX_TASK_INPUT_VALUE) {
+      throw new InputError(`inputs.${name} must be at most ${MAX_TASK_INPUT_VALUE} characters`)
+    }
+    if (CONTROL_RE.test(raw)) {
+      throw new InputError(`inputs.${name} contains control characters`)
+    }
+    out[name] = raw
+  }
+  return out
+}
+
+/** Validate the `taskRun` request before any CLI is spawned. */
+export function taskRunValues(value: unknown): TaskRunValues {
+  if (!isRecord(value)) throw new InputError("task run input must be an object")
+  return { id: taskId(value.id), inputs: taskInputs(value.inputs) }
+}
+
+/** A library spec path, checked before it reaches `tasks_cli run`. */
+export function taskSpecPath(value: unknown): string {
+  if (typeof value !== "string" || !value) {
+    throw new InputError("the task library returned no spec path")
+  }
+  if (value.length > MAX_PATH) {
+    throw new InputError(`the task spec path must be at most ${MAX_PATH} characters`)
+  }
+  if (CONTROL_RE.test(value)) {
+    throw new InputError("the task spec path contains control characters")
+  }
+  if (!nodePath.isAbsolute(value)) {
+    throw new InputError("the task spec path must be absolute")
+  }
+  return nodePath.normalize(value)
+}
+
+function within(base: string, target: string): boolean {
+  const relative = nodePath.relative(base, target)
+  return (
+    relative === "" ||
+    (!relative.startsWith(".." + nodePath.sep) && relative !== ".." && !nodePath.isAbsolute(relative))
+  )
+}
+
+/** Resolve symlinks when the path exists; otherwise keep the lexical path. */
+function canonicalPath(value: string): string {
+  try {
+    return realpathSync(value)
+  } catch {
+    return value
+  }
+}
+
+export interface TaskPathResolution {
+  path?: string
+  error?: string
+}
+
+/**
+ * Take the spec path from `task_library_cli show` and prove it belongs to the
+ * library: a repository override must stay under `<root>/ozagia/tasks` and a
+ * built-in must stay under the package's `task_specs` directory. A caller's
+ * path is never used.
+ */
+export function resolveTaskSpecPath(
+  root: string,
+  id: string,
+  data: unknown,
+): TaskPathResolution {
+  if (!isRecord(data) || !isRecord(data.entry)) {
+    return { error: "the task library returned no catalogue entry" }
+  }
+  const entry = data.entry
+  if (entry.id !== id) {
+    return { error: "the task library returned a different task id" }
+  }
+  if (isRecord(data.spec) && data.spec.id !== undefined && data.spec.id !== id) {
+    return { error: "the task specification id does not match the requested id" }
+  }
+  let resolved: string
+  try {
+    resolved = taskSpecPath(entry.path)
+  } catch (error) {
+    return {
+      error: error instanceof Error ? error.message : "the task library returned an invalid spec path",
+    }
+  }
+  if (nodePath.basename(resolved) !== `${id}.toml`) {
+    return { error: "the spec path is not the library file for this task id" }
+  }
+  const canonical = canonicalPath(resolved)
+  if (entry.source === "repo") {
+    const base = canonicalPath(nodePath.resolve(root, "ozagia", "tasks"))
+    if (!within(base, canonical)) {
+      return { error: "the repository task spec is outside ozagia/tasks" }
+    }
+  } else if (entry.source === "builtin") {
+    const segments = canonical.split(/[\\/]+/)
+    if (!segments.includes("task_specs")) {
+      return { error: "the built-in task spec is outside the package library" }
+    }
+  } else {
+    return { error: "the task library returned an unknown spec source" }
+  }
+  return { path: canonical }
+}
+
+/**
+ * Build a `tasks_cli run` invocation for a resolved library spec.
+ *
+ * The local executor is read-only and `--approve` is never passed, so a
+ * mutating step stops as blocked. Input values are argv-only; the display
+ * string and error tails show placeholders.
+ */
+export function taskRunSpec(
+  root: string,
+  input: TaskRunInput,
+  specPath: string,
+): CommandSpec {
+  const id = taskId(input.id)
+  const inputs = taskInputs(input.inputs)
+  const path = taskSpecPath(specPath)
+
+  const args = ["run", path, "--executor", "local", "--allow-exec", "--root", root]
+  const names = Object.keys(inputs).sort()
+  for (const name of names) {
+    args.push("--input", `${name}=${inputs[name]}`)
+  }
+  args.push("--json")
+
+  const total = args.reduce((sum, item) => sum + Buffer.byteLength(item, "utf8"), 0)
+  if (total > MAX_TASK_ARGV_BYTES) {
+    throw new InputError(`task arguments must be at most ${MAX_TASK_ARGV_BYTES} bytes`)
+  }
+
+  const placeholders = names.map((name) => `${name}=<redacted>`).join(" ")
+  return {
+    module: "ozagia.tasks_cli",
+    args,
+    display:
+      `ozagia.tasks_cli run ${path} --executor local --allow-exec --json` +
+      (placeholders ? ` (--input ${placeholders})` : ""),
+    sensitive: Object.values(inputs),
+  }
+}
+
+/** The task RPC timeout: at least one second, never above 15 minutes. */
+export function taskRunTimeoutMs(config: RunnerConfig): number {
+  const value = config.taskTimeoutMs
+  if (typeof value !== "number" || !Number.isFinite(value)) return DEFAULT_TASK_TIMEOUT_MS
+  return Math.min(MAX_TASK_TIMEOUT_MS, Math.max(1000, Math.trunc(value)))
+}
+
+/**
+ * Resolve and run one library task.
+ *
+ * Resolution is a bounded `task_library_cli show`, and the path comes only from
+ * that JSON. A missing, mismatched or out-of-library path is a structured
+ * error, never a fallback to a caller-supplied spec. The run uses the local
+ * read-only executor; no approve flag, model or network call is added.
+ */
+export async function runTask(
+  config: RunnerConfig,
+  inputValue: unknown,
+  signal?: AbortSignal,
+): Promise<Envelope> {
+  const input = taskRunValues(inputValue)
+  const show = await runOzagia(config, tasksShowSpec(config.root, { id: input.id }), signal)
+  if (!show.ok) return show
+
+  const resolution = resolveTaskSpecPath(config.root, input.id, show.data)
+  if (!resolution.path) {
+    return {
+      ok: false,
+      command: `${config.python} -m ozagia.tasks_cli run --json`,
+      data: null,
+      error: {
+        code: "task_path_invalid",
+        message: safeTail(resolution.error ?? "the task library returned no usable spec path"),
+      },
+      exitCode: null,
+    }
+  }
+
+  const spec = taskRunSpec(config.root, input, resolution.path)
+  return runOzagia({ ...config, timeoutMs: taskRunTimeoutMs(config) }, spec, signal)
 }
 
 
@@ -574,6 +878,22 @@ export function safeTail(input: string, max = ERROR_TAIL): string {
   return `…${normal.slice(-max)}`
 }
 
+/**
+ * Remove exact sensitive values (tokens, input values) from display text.
+ *
+ * Short values are left alone so a one-character input cannot shred an error
+ * message; confirmation tokens are at least 20 characters.
+ */
+export function redactSensitive(input: string, secrets?: readonly string[]): string {
+  if (!secrets?.length) return input
+  let out = input
+  for (const secret of secrets) {
+    if (typeof secret !== "string" || secret.length < 8) continue
+    out = out.split(secret).join("[redacted]")
+  }
+  return out
+}
+
 function failure(
   code: string,
   message: string,
@@ -597,11 +917,12 @@ export function runOzagia(
 ): Promise<Envelope> {
   const command = `${config.python} -m ${spec.display}`
   const maxBuffer = config.maxBuffer ?? DEFAULT_MAX_BUFFER
+  const secrets = spec.sensitive
 
   if (!existsSync(config.root)) {
     return Promise.resolve({
       ...failure("root_missing", `root does not exist: ${config.root}`),
-      command,
+      command: redactSensitive(command, secrets),
     })
   }
 
@@ -620,7 +941,20 @@ export function runOzagia(
       settled = true
       clearTimeout(timer)
       signal?.removeEventListener("abort", onAbort)
-      resolve({ ...envelope, command: envelope.command || command })
+      const sealed: Envelope = {
+        ...envelope,
+        command: redactSensitive(envelope.command || command, secrets),
+      }
+      if (envelope.error) {
+        sealed.error = {
+          ...envelope.error,
+          message: redactSensitive(envelope.error.message, secrets),
+        }
+        if (envelope.error.detail) {
+          sealed.error.detail = redactSensitive(envelope.error.detail, secrets)
+        }
+      }
+      resolve(sealed)
     }
 
     const stop = (reason: "timeout" | "too_large" | "abort") => {

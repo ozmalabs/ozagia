@@ -1,4 +1,8 @@
 import { Rpc } from "@opencode/plugin/rpc"
+import { ACTION_APPLY_INPUT, ACTION_PREVIEW_INPUT, TASK_RUN_INPUT } from "./schemas.js"
+
+export { ACTION_NAMES } from "./schemas.js"
+export type { ActionApplyInput, ActionPreviewInput, TaskRunInput } from "./types.js"
 
 /**
  * The ozagia RPC contract.
@@ -126,40 +130,6 @@ const TASK_SHOW_INPUT = {
   additionalProperties: false,
 } as const
 
-export const ACTION_NAMES = [
-  "daemon.status",
-  "daemon.ensure",
-  "daemon.stop",
-  "daemon.restart",
-  "service.list",
-  "service.status",
-  "service.start",
-  "service.run",
-  "service.stop",
-  "service.restart",
-  "service.logs",
-  "tunnel.list",
-  "tunnel.status",
-  "tunnel.start",
-  "integration.status",
-] as const
-
-const ACTION_PREVIEW_INPUT = {
-  type: "object",
-  properties: {
-    action: { type: "string", enum: ACTION_NAMES },
-    name: { type: "string", minLength: 1, maxLength: 128 },
-    live: { type: "boolean" },
-    network: { type: "boolean" },
-    maxBytes: { type: "integer", minimum: 0, maximum: 65536 },
-    scope: { type: "string", enum: ["project", "user"] },
-    wait: { type: "number", minimum: 0, maximum: 600 },
-    idleTimeout: { type: "number", minimum: 0, maximum: 86400 },
-  },
-  required: ["action"],
-  additionalProperties: false,
-} as const
-
 export const Ozagia = Rpc.define({
   id: "ozagia",
   methods: {
@@ -179,6 +149,8 @@ export const Ozagia = Rpc.define({
     tasksCatalog: { input: EMPTY_INPUT, output: ENVELOPE_OUTPUT },
     actionsList: { input: EMPTY_INPUT, output: ENVELOPE_OUTPUT },
     actionPreview: { input: ACTION_PREVIEW_INPUT, output: ENVELOPE_OUTPUT },
+    actionApply: { input: ACTION_APPLY_INPUT, output: ENVELOPE_OUTPUT },
+    taskRun: { input: TASK_RUN_INPUT, output: ENVELOPE_OUTPUT },
   },
   events: {},
 })

@@ -1,10 +1,13 @@
 import { For, Show, createEffect, createMemo, createResource, createSignal } from "solid-js"
 import { usePlugin } from "@opencode/plugin/gui"
-import { Ozagia } from "../rpc"
+import { ACTION_NAMES, Ozagia } from "../rpc"
 import type { ActionPreview, ActionSummary, Envelope } from "../types"
 import { invoke } from "./client"
 import type { definition } from "./definition"
+import { canApplyAction, redactedApplyCommand } from "./mutation"
 import { Badge, Card, Empty, FailureView, Loading, Metric } from "./ui"
+
+const SUPPORTED_ACTIONS = new Set<string>(ACTION_NAMES)
 
 const NAME_ACTIONS = new Set([
   "service.status",
@@ -56,6 +59,10 @@ export function ActionsTab() {
   const [idleTimeout, setIdleTimeout] = createSignal("")
   const [result, setResult] = createSignal<Envelope<ActionPreview> | null>(null)
   const [busy, setBusy] = createSignal(false)
+  const [previewInput, setPreviewInput] = createSignal<Record<string, unknown> | null>(null)
+  const [applyConfirmed, setApplyConfirmed] = createSignal(false)
+  const [applyBusy, setApplyBusy] = createSignal(false)
+  const [applyResult, setApplyResult] = createSignal<Envelope<ActionPreview> | null>(null)
 
   const [actions, { refetch }] = createResource<Envelope<ActionSummary[]>>(() =>
     invoke<ActionSummary[]>(ctx, () => ctx.client.rpc(Ozagia).actionsList({})),
@@ -64,7 +71,8 @@ export function ActionsTab() {
   const actionData = () => {
     const envelope = actions()
     if (!envelope?.ok || !Array.isArray(envelope.data)) return null
-    return envelope.data
+    // `actions_cli list` also publishes installers this add-in does not expose.
+    return envelope.data.filter((item) => SUPPORTED_ACTIONS.has(item.name))
   }
   const selected = createMemo(
     () => actionData()?.find((item) => item.name === action()) ?? null,
@@ -97,6 +105,14 @@ export function ActionsTab() {
     setWait("")
     setIdleTimeout("")
     setResult(null)
+    setPreviewInput(null)
+    setApplyResult(null)
+    setApplyConfirmed(false)
+  }
+
+  const resetApply = () => {
+    setApplyResult(null)
+    setApplyConfirmed(false)
   }
 
   const submit = async () => {
@@ -119,12 +135,30 @@ export function ActionsTab() {
       if (idleValue !== undefined) input.idleTimeout = idleValue
     }
 
+    resetApply()
     setBusy(true)
     const envelope = await invoke<ActionPreview>(ctx, () =>
       ctx.client.rpc(Ozagia).actionPreview(input),
     )
     setResult(envelope)
+    setPreviewInput(envelope.ok && envelope.data?.confirmation ? input : null)
     setBusy(false)
+  }
+
+  const applyReady = () => canApplyAction(previewData() ?? null, applyConfirmed(), applyBusy())
+
+  const apply = async () => {
+    const preview = previewData()
+    const input = previewInput()
+    const token = preview?.confirmation
+    if (!preview || !input || !token || !applyReady()) return
+    setApplyBusy(true)
+    const envelope = await invoke<ActionPreview>(ctx, () =>
+      ctx.client.rpc(Ozagia).actionApply({ ...input, confirm: token }),
+    )
+    setApplyResult(envelope)
+    setApplyBusy(false)
+    setApplyConfirmed(false)
   }
 
   return (
@@ -132,7 +166,7 @@ export function ActionsTab() {
       <div class="ozagia-head">
         <div>
           <div class="ozagia-title">Actions</div>
-          <div class="ozagia-sub">Preview only: this panel never applies an action</div>
+          <div class="ozagia-sub">Preview first; applying needs a second, explicit confirmation</div>
         </div>
         <button class="ozagia-button" type="button" onClick={() => void refetch()}>
           Refresh
@@ -350,7 +384,7 @@ export function ActionsTab() {
                 <span class="ozagia-note">
                   {nameRequired() && !name().trim()
                     ? `${action()} needs a name before it can be previewed.`
-                    : "Runs the read-only preview and shows its token; it never applies."}
+                    : "Runs the read-only preview and shows its token. Preview alone never applies."}
                 </span>
               </div>
 
@@ -469,10 +503,125 @@ export function ActionsTab() {
                 <code class="ozagia-token">{preview().confirmation}</code>
               </Show>
               <div class="ozagia-note" style={{ "margin-top": "6px" }}>
-                Display only. This add-in has no Apply control and no mutating RPC. Applying needs
-                the separate <code>ozagia.actions_cli apply</code> command after reviewing the
-                operation, argv and risks above.
+                The token is bound to this action, these arguments and this repository, and is
+                consumed once. Applying passes it through argv only: command text, logs and error
+                tails show <code>--confirm &lt;redacted&gt;</code>.
               </div>
+            </Card>
+
+            <Card
+              title="Apply action"
+              state={applyResult()?.data?.state}
+              error={applyResult()?.data?.error ?? null}
+            >
+              <Show
+                when={preview().confirmation}
+                fallback={
+                  <Empty>
+                    Apply stays unavailable until the preview returns a one-time token.
+                  </Empty>
+                }
+              >
+                <div class="ozagia-metrics">
+                  <Metric label="action" value={preview().action ?? action()} />
+                  <Metric label="applicable" value={preview().applicable ? "yes" : "no"} />
+                  <Metric
+                    label="kind"
+                    value={[
+                      selected()?.mutating ? "mutating" : "read-only",
+                      selected()?.destructive ? "destructive" : null,
+                      selected()?.live_gated ? "live-gated" : null,
+                    ]
+                      .filter(Boolean)
+                      .join(" · ")}
+                  />
+                </div>
+                <Show
+                  when={(preview().risks ?? []).length > 0}
+                  fallback={<div class="ozagia-note">The preview listed no risks.</div>}
+                >
+                  <ul class="ozagia-list">
+                    <For each={preview().risks ?? []}>
+                      {(item) => (
+                        <li>
+                          <Badge tone="warn">risk</Badge> {item}
+                        </li>
+                      )}
+                    </For>
+                  </ul>
+                </Show>
+                <div class="ozagia-sep" />
+                <label class="ozagia-check">
+                  <input
+                    type="checkbox"
+                    checked={applyConfirmed()}
+                    onChange={(event) => setApplyConfirmed(event.currentTarget.checked)}
+                  />
+                  {`I reviewed ${preview().action ?? action()}, its argv, risks and current state, and I want to apply it.`}
+                </label>
+                <div class="ozagia-row" style={{ "margin-top": "6px" }}>
+                  <button
+                    class="ozagia-button"
+                    type="button"
+                    disabled={!applyReady()}
+                    onClick={() => void apply()}
+                  >
+                    {applyBusy() ? "Applying…" : "Apply action"}
+                  </button>
+                  <span class="ozagia-note">
+                    Runs <code>actions_cli apply</code> through the add-in RPC. This is separate
+                    from Preview and cannot be triggered by it.
+                  </span>
+                </div>
+                <div class="ozagia-note" style={{ "margin-top": "6px" }}>
+                  Command shape: <code>{redactedApplyCommand(preview().action ?? action())}</code>
+                </div>
+                <Show when={preview().applicable === false}>
+                  <div class="ozagia-note" style={{ "margin-top": "6px" }}>
+                    The preview reported that apply would be refused or a no-op; the CLI still
+                    decides.
+                  </div>
+                </Show>
+                <Show when={applyBusy()}>
+                  <Loading label="Applying the confirmed action…" />
+                </Show>
+                <Show when={applyResult() && !applyResult()!.ok}>
+                  <FailureView envelope={applyResult()!} />
+                </Show>
+                <Show when={applyResult()?.ok && applyResult()?.data}>
+                  {(applied) => (
+                    <>
+                      <div class="ozagia-sep" />
+                      <div class="ozagia-sub">Apply result</div>
+                      <div class="ozagia-metrics">
+                        <Metric label="state" value={applied().state ?? "—"} />
+                        <Metric label="ok" value={applied().ok ? "yes" : "no"} />
+                        <Metric label="mode" value={applied().mode ?? "apply"} />
+                      </div>
+                      <Show when={applied().error}>
+                        <div class="ozagia-note">{`Apply error: ${applied().error}`}</div>
+                      </Show>
+                      <Show when={applied().current_state}>
+                        <div class="ozagia-note">{`Current state: ${applied().current_state}`}</div>
+                      </Show>
+                      <Show when={applied().result !== null && applied().result !== undefined}>
+                        <details class="ozagia-details">
+                          <summary>Structured result</summary>
+                          <pre class="ozagia-pre">
+                            {JSON.stringify(applied().result, null, 2)}
+                          </pre>
+                        </details>
+                      </Show>
+                      <Show when={applied().audit}>
+                        <div class="ozagia-note">{`Audit: ${applied().audit}`}</div>
+                      </Show>
+                      <Show when={applied().audit_error}>
+                        <div class="ozagia-note">{`Audit warning: ${applied().audit_error}`}</div>
+                      </Show>
+                    </>
+                  )}
+                </Show>
+              </Show>
             </Card>
           </>
         )}
@@ -482,7 +631,8 @@ export function ActionsTab() {
         <Empty>
           <div>No preview yet.</div>
           <div class="ozagia-note" style={{ "margin-top": "4px" }}>
-            Pick an action and preview it. Nothing is started, stopped, signalled or connected.
+            Pick an action and preview it. Nothing is started, stopped, signalled or connected
+            until you check the confirmation box and press Apply.
           </div>
         </Empty>
       </Show>

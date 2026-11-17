@@ -1,10 +1,14 @@
 # ozagia OpenCode add-in
 
-Read-only graph, status, testing, research, settings, action-preview and
-task-class catalogue surfaces for OpenCode Desktop. This is the first
-interactive UI host for ozagia (plan item 8): the add-in talks to the local
-`ozagia` CLIs over a typed RPC and never imports Python, applies an action,
-runs a bounded task or edits the repository.
+Preview-first graph, status, testing, research, settings, action and task
+surfaces for OpenCode Desktop. This is the first interactive UI host for
+ozagia (plan item 8): the add-in talks to the local `ozagia` CLIs over a typed
+RPC and never imports Python, builds a graph, edits the repository or calls a
+model. It has exactly two mutating surfaces, both preview-first and explicitly
+confirmed: `actionApply` consumes a preview token, and `taskRun` executes a
+library task through the read-only local executor. No other method changes
+local state; the preview token, apply audit record and task-run records are the
+only state-dir writes, and all belong to the existing CLIs.
 
 ## Requirements
 
@@ -43,7 +47,8 @@ Add one plugin entry to your **global** OpenCode config (`opencode.json` or
       "options": {
         "python": "/home/matt/ozmadev/ozagia/.venv/bin/python",
         "root": "/home/matt/ozmadev/ozagia",
-        "timeoutMs": 20000
+        "timeoutMs": 20000,
+        "taskTimeoutMs": 900000
       }
     }
   ]
@@ -56,7 +61,8 @@ Options:
 | --- | --- | --- |
 | `python` | `python3` | Interpreter with `ozagia` importable. Relative paths resolve from `root`. |
 | `root` | the plugin location directory | Repository root passed as `--root`. Relative paths resolve against the plugin location. |
-| `timeoutMs` | `20000` | Per-call wall-clock limit, clamped to 1000–120000 ms. |
+| `timeoutMs` | `20000` | Per-call wall-clock limit for read-only CLIs, clamped to 1000–120000 ms. |
+| `taskTimeoutMs` | `900000` | Wall-clock limit for `taskRun`, clamped to 1000–900000 ms. The local test runner is capped at 900 s. |
 
 The object form uses the same local-path resolution as the string entry.
 
@@ -94,15 +100,22 @@ One side panel, `ozagia`, with up to six tabs:
 - **Actions**: the action catalogue with `read-only`, `mutating`, `destructive`
   and `live-gated` badges, action-specific arguments, and a Preview button. The
   preview shows the exact operation, manager call, argv, preconditions, risks,
-  current state and one-time confirmation token. There is no Apply button.
+  current state and one-time confirmation token. After a preview with a token,
+  an explicit **Apply** control requires a checkbox confirmation naming the
+  action and risks; it shows the structured apply result, state, audit note and
+  error. Preview never applies by itself.
 - **Tasks**: the versioned task-class catalogue with a domain filter, library
   validation status (counts, errors, warnings and issues), and a detail view for
   the selected class. The detail shows title, description, version, source,
   inputs, tools, write scope, budget, resources, worktree expectations, before
   and after gates, stop conditions, approval policy, output and every step. A
   read-only **Copy command** affordance copies a `tasks_cli run --dry-run`
-  preview command with input placeholders. The tab never runs a task, applies an
-  approval or writes a file.
+  preview command with input placeholders. A **Run** form fills the declared
+  inputs (runner-supplied names are listed, not asked for), then requires a
+  second confirmation that names the task id and shows the exact redacted
+  command. Run calls the local read-only executor; it never auto-runs on
+  selection, never passes `--approve`, and reports the run status, stop reason,
+  exit code, findings count and a bounded output tail.
 
 A `SettingsPage` also contributes an **ozagia settings** page under Settings.
 It reads `settings_cli schema` and `settings_cli values` and shows every key's
@@ -125,12 +138,38 @@ Commands in the palette:
 
 The status, testing, research, actions and tasks tabs are opened by their
 commands; the graph tab is pinned so the panel is discoverable. The settings
-command opens the contributed settings page directly. All actions are read-only.
+command opens the contributed settings page directly. Only pressing **Apply**
+after a preview, or **Run** after a confirmation, changes local state; all
+other actions are read-only.
 
-## Read-only scope
+## Mutation surfaces and safety
 
-This slice has no commits, edits, service starts/stops, downloads, index
-builds, test runs, task runs, setting writes or model calls. It only invokes:
+The add-in has exactly two mutating RPC methods:
+
+- `actionApply({action, confirm, ...previewArgs})` spawns
+  `python -m ozagia.actions_cli apply ACTION --confirm TOKEN ... --json`. The
+  confirmation token is validated against the same `[A-Za-z0-9_-]{20,128}`
+  alphabet and length as `core.actions._TOKEN`. It is carried only in argv: the
+  display command shows `--confirm <redacted>`, and the runner scrubs the token
+  from command text and error tails. Applying is a separate RPC and can never
+  be triggered by preview.
+- `taskRun({id, inputs})` resolves the id with
+  `task_library_cli show ID --root ROOT --json`, takes `entry.path` from that
+  JSON, proves it belongs to the library (`<root>/ozagia/tasks` for a repo
+  override, the package `task_specs` tree for a built-in), then spawns
+  `python -m ozagia.tasks_cli run PATH --executor local --allow-exec --root
+  ROOT --input NAME=VALUE ... --json`. There is no caller-supplied path and no
+  path fallback. At most 16 inputs are accepted; names match
+  `[A-Za-z][A-Za-z0-9_.-]{0,63}`, values are strings of at most 4096 characters
+  with no control characters, and the whole argv is capped at 64 KiB. The task
+  call uses `taskTimeoutMs` (15 minutes maximum); the local executor's own test
+  runner is capped at 900 s. No `--approve` is passed, so mutating, model and
+  unimplemented tools remain blocked by `LocalExecutor`.
+
+The add-in still has no arbitrary shell, no direct edit/write/patch tool, no
+model or provider call, no network fetch, no setting write, no graph rebuild,
+no service start/stop beyond an explicitly previewed and confirmed action, and
+no task approval. It only invokes:
 
 ```text
 python -m ozagia.status_cli
@@ -140,40 +179,40 @@ python -m ozagia.resources_cli
 python -m ozagia.testing_cli
 python -m ozagia.research_ui_cli
 python -m ozagia.settings_cli schema|values
-python -m ozagia.actions_cli list|preview
+python -m ozagia.actions_cli list|preview|apply
 python -m ozagia.task_library_cli list|show|validate|catalog
+python -m ozagia.tasks_cli run --executor local --allow-exec
 ```
 
-The settings page only uses `schema` and `values`; it never calls `settings_cli
-set`. The actions tab only uses `list` and `preview`; it never calls
-`actions_cli apply` and has no mutating RPC. A preview issues a one-time
-confirmation token and records it under `.ozagia/actions/pending` (mode `0600`,
-ten-minute TTL); it does not start, stop, signal or connect anything. Applying
-an action remains a separate, explicit CLI command after a person reviews the
-preview.
-
-The Tasks tab uses `task_library_cli list`, `show` and `validate`; the RPC also
-exposes `catalog` for a client that prefers one object. The tab never calls
-`task_library_cli copy`, `tasks_cli run` or `tasks_cli run --allow-exec`. The
-copied command is display text with `--dry-run` and no `--allow-exec`; this
-add-in does not execute it, approve a mutating step or write to
-`ozagia/tasks/`.
+The settings page only uses `schema` and `values`; it never calls
+`settings_cli set`. A preview issues a one-time confirmation token and records
+it under `.ozagia/actions/pending` (mode `0600`, ten-minute TTL); it does not
+start, stop, signal or connect anything. Apply re-checks the preconditions,
+consumes the token, performs the action through the landed managers and writes
+an audit record. The Tasks tab copies a `--dry-run` command as display text;
+only the explicit Run control executes, and it never approves a mutating step
+or writes to `ozagia/tasks/`.
 
 The subprocesses use `spawn` with argument arrays, no shell, closed stdin,
-a bounded timeout and a bounded output buffer. Stdout is parsed as JSON; stderr
-is capped, redacted and returned as a short tail. A CLI exit status of 1 is
-treated as a successful report because these CLIs use it for findings, policy
-failures and admission refusals while still emitting JSON.
+bounded timeouts and a bounded output buffer. Stdout is parsed as JSON; stderr
+is capped, redacted and returned as a short tail. Confirmation tokens and task
+input values of eight or more characters are additionally scrubbed from
+commands and error envelopes; input values never appear in command displays in
+any case.
+
+A CLI exit status of 1 is treated as a successful report because these CLIs use
+it for findings, policy failures, refusals and failed actions while still
+emitting JSON.
 
 The RPC contract exposes `status`, `apertures`, `view`, `worktreeCheck`,
 `policyCheck`, `resourcesCheck`, `testingPlan`, `researchView`,
 `settingsSchema`, `settingsValues`, `tasksList`, `tasksShow`, `tasksValidate`,
-`tasksCatalog`, `actionsList` and `actionPreview`. There is no `actionApply`,
-task run, settings write or other mutating method. Action input is limited to
-the published action names and each action's documented arguments; names are
-bounded, byte caps and timeouts are range-checked, and no value is passed
-through a shell. A task id is bounded to 64 characters and must match the
-library's `[A-Za-z][A-Za-z0-9_.-]{0,63}` form before it reaches argv.
+`tasksCatalog`, `actionsList`, `actionPreview`, `actionApply` and `taskRun`.
+Action input is limited to the published action names and each action's
+documented arguments; names are bounded, byte caps and timeouts are
+range-checked, and no value is passed through a shell. A task id is bounded to
+64 characters and must match the library's `[A-Za-z][A-Za-z0-9_.-]{0,63}` form
+before it reaches argv. Task inputs are bounded again in the handler.
 
 ## Build and test
 
@@ -199,10 +238,12 @@ a local plugin directory loads without a build step. `node_modules/` is ignored;
 `package-lock.json` and `dist/` are committed.
 
 The Node tests (`tests/*.test.cjs`) cover the pure argument builders, input
-bounds, task-id validation, the copy-command builder, action argument/action
-matching, redaction and the subprocess wrapper. They are offline and do not
-load `@opencode/plugin`; a small helper transpiles `src/runner.ts` and the pure
-task-command module with the installed TypeScript package.
+bounds, task-id validation, the copy-command and redacted task-run builders,
+action argument/action matching, apply token validation and redaction, task
+path resolution and no-fallback behaviour, RPC schema shape, confirmation
+gating and the subprocess wrapper. They are offline and do not load
+`@opencode/plugin`; a small helper transpiles `src/runner.ts` and the pure
+modules with the installed TypeScript package.
 
 ## Package layout
 
@@ -211,13 +252,14 @@ package.json          exports "." "./rpc" "./gui-experimental"
 vite.config.ts        gui() preset
 tsconfig.json
 src/rpc.ts            Rpc.define contract (ozagia)
+src/schemas.ts        dependency-free input schemas for the mutating RPCs
 src/index.ts          server part: Plugin.define + ctx.rpc.register
 src/runner.ts         argument builders + bounded subprocess runner
 src/gui.tsx           GUI Plugin.define, Panel/SettingsPage/Command/Style
 src/gui/              Solid components (graph, status, testing, research,
-                      actions, tasks, settings), task-command.ts
-src/types.ts          envelope and read-only data shapes
-tests/                node:test for runner/argument builders
+                      actions, tasks, settings), task-command.ts, mutation.ts
+src/types.ts          envelope and data/input shapes
+tests/                node:test for runner/argument builders/schemas
 dist/gui-experimental.cjs
 README.md
 ```
