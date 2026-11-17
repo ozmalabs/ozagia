@@ -1225,6 +1225,18 @@ class Evaluator:
         run = got.get("run") or {}
         ev.update({"outcome": got["outcome"], "run_at": got.get("ts"),
                    "run_source": run.get("source")})
+        not_evidence = self._not_evidence(run, key)
+        if run.get("failure_class"):
+            ev["failure_class"] = run["failure_class"]
+        if run.get("failure_module"):
+            ev["failure_module"] = run["failure_module"]
+        own = _own_item(run, key)
+        if own is not None:
+            ev["test_failure_class"] = own["class"]
+            if own.get("module"):
+                ev["test_failure_module"] = own["module"]
+        if not_evidence and got["outcome"] != "passed":
+            return _result("unknown", ev, not_evidence)
         if got["outcome"] == "unknown":
             return _result("unknown", ev, got["reason"])
         status, fev = self._fresh(goal, run, key)
@@ -1240,6 +1252,39 @@ class Evaluator:
         ok = got["outcome"] == want
         return _result("pass" if ok else "fail", ev,
                        f"test {got['outcome']}: {got['reason']}")
+
+    def _not_evidence(self, run: dict[str, Any], key: str) -> str | None:
+        """Why the deciding run says nothing about test `key`, or None
+        (`ozagia.core.failures`). Per test: the test's own failure has an
+        environment cause (a `failure_items` entry), or the whole run is
+        `environment` (every failing item had an environment cause) or
+        `harness`, or `collection` of a module that is not first-party
+        (records from before items). A test that failed with an assertion
+        in a run where another test hit a missing module still decides. A
+        pass is still a pass (`_test` keeps it)."""
+        own = _own_item(run, key)
+        if own is not None and own["class"] in ("environment", "harness"):
+            return (f"the test's own failure class is {own['class']}"
+                    + (f" (module {own['module']})" if own.get("module") else "")
+                    + ": it says nothing about the code under test; fix the "
+                    "environment and rerun the test")
+        cls = run.get("failure_class")
+        module = run.get("failure_module")
+        if cls == "collection" and isinstance(module, str):
+            from ozagia.core.failures import first_party_names
+            from ozagia.config import load_project_config
+            try:
+                roots = load_project_config(self.root).import_roots
+            except Exception:  # noqa: BLE001 - the root alone then
+                roots = ()
+            if module.split(".")[0] in first_party_names(self.root, roots):
+                return None
+        elif cls not in ("environment", "harness"):
+            return None
+        return (f"the deciding run's failure class is {cls}"
+                + (f" (module {module})" if module else "")
+                + ": it says nothing about the code under test; fix the "
+                "environment and rerun the test")
 
     def _eval_test_passes(self, goal: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
         return self._test(goal, args, "passed")
@@ -1487,6 +1532,14 @@ class Evaluator:
         ok = (want in [str(v) for v in value]) if isinstance(value, list) else str(value) == want
         return _result("pass" if ok else "fail", ev,
                        f"{key} {attr} {'matches' if ok else 'does not match'} {want!r}")
+
+
+def _own_item(run: dict[str, Any], key: str) -> dict[str, Any] | None:
+    """The run's `failure_items` entry for test `key`, or None."""
+    for item in run.get("failure_items") or []:
+        if isinstance(item, dict) and item.get("key") == key:
+            return item
+    return None
 
 
 def _result(status: str, evidence: dict[str, Any], reason: str) -> dict[str, Any]:

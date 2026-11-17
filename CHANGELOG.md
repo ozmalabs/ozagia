@@ -32,6 +32,22 @@
   not substrings of paths (`tests/test_tokenizer.py` and a checkout under
   `…/environments/` are accepted in a command argv).
 
+- Deterministic failure classes (`ozagia.core.failures`): `harness`,
+  `timeout`, `environment`, `collection`, `assertion`, `error`, `passed`
+  (and `unknown`), from parsed pytest output (failure and collection
+  blocks, the short summary, startup errors, the daemon's own lines;
+  captured output and assertion diffs are skipped), with a class per
+  failing item; a run is `environment` only when every failing item is.
+  The agent eval classifies each check and the agent's last pytest in the
+  transcript; a `harness` or `environment` check makes a run invalid only
+  when the agent cannot have caused it (validated base, else an import
+  probe outside the worktree; `validity_basis`), invalid runs leave
+  success counts and rates, and `paired_rate` compares arms over the cells
+  valid in every arm. A captured pytest that did not pass gets an
+  `[ozagia] failure class` line and `failure item` lines for tests with
+  an environment cause; the test record keeps them (captured runs only),
+  and goal test criteria give `unknown` per test for environment causes
+  and for harness runs.
 - Ocelot test-impact and architecture-pattern candidates:
   `ocelot_code.change_shape` records changed files, graph symbols, edge
   types, test links, import/package directories and a stable digest;

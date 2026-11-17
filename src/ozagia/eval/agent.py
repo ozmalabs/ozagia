@@ -13,6 +13,12 @@ Each task is a break/fix case (see docs/features/AGENT_E2E_EVAL.md):
   3. The task's break patch is applied. The check must now FAIL.
   4. For a run, the driver (the agent under test) gets the task prompt in the
      broken worktree. The check then decides success.
+  5. The check's result is classified (`ozagia.core.failures`). A run whose
+     check failed as `harness` or `environment` is invalid only when the
+     agent cannot have caused it (`check_validity`, recorded as
+     `validity_basis`); invalid runs are left out of success counts and
+     rates. The agent's own last pytest in the transcript is classified
+     too, so "agent saw green, check saw red" shows in the report.
 
 Drivers:
   noop    does nothing. Expected success 0%. Negative control.
@@ -68,6 +74,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Iterable
 from ozagia.config import STATE_DIRNAME, config_path, repo_root
+from ozagia.core import failures as F
 from ozagia.daemon.protocol import ENV_SOCK
 from ozagia.integrations.opencode import install as opencode_plugin
 from ozagia.intent.shell import GIT_REF_MOVING
@@ -364,25 +371,237 @@ def spawn_group(argv: list[str], *, cwd: str | Path, env: dict[str, str],
             "seconds": round(time.monotonic() - started, 3)}
 
 
+def _first_party(root: Path) -> set[str]:
+    """The project's top-level module names (`failures.first_party_names`
+    with the import roots of its configuration)."""
+    try:
+        from ozagia.config import load_project_config
+        roots = load_project_config(root).import_roots
+    except Exception:  # noqa: BLE001 - the root alone then
+        roots = ()
+    return F.first_party_names(root, roots)
+
+
+def failure_fields(result: dict[str, Any], prefix: str = "failure") -> dict[str, Any]:
+    """The run-record fields of a classification: `<prefix>_class`,
+    `<prefix>_evidence`, `<prefix>_detail` and, when known,
+    `<prefix>_module`."""
+    out = {f"{prefix}_class": result.get("class"),
+           f"{prefix}_evidence": list(result.get("evidence") or []),
+           f"{prefix}_detail": result.get("detail")}
+    if result.get("module"):
+        out[f"{prefix}_module"] = result["module"]
+    if result.get("available_in"):
+        out[f"{prefix}_available_in"] = list(result["available_in"])
+    if result.get("items"):
+        out[f"{prefix}_items"] = list(result["items"])
+    return out
+
+
+# The daemon's captured head line in a tool output.
+_OZAGIA_HEAD_RE = re.compile(r"^\[ozagia\] pytest \w+(?: \([^)]*\))?: exit (-?\d+)")
+_PYTEST_SUMMARY_RE = re.compile(
+    r"\d+ (?:passed|failed|errors?|skipped|deselected|xfailed|xpassed)\b.* in [\d.]+s\b")
+AGENT_SUMMARY_CHARS = 160
+
+
+def last_agent_pytest(stdout: str) -> dict[str, Any] | None:
+    """The agent's last completed shell call that ran pytest, from
+    OpenCode's JSON events (`tool_use` with tool `shell` or `bash` and
+    `pytest` in `input.command`): `{"command", "output", "returncode"}`.
+    The exit code is the daemon's (`[ozagia] pytest ...: exit N`) when the
+    call was captured (the head is in the block of `[ozagia]` lines that
+    ends the output, `failures.daemon_head_index`; a head a test printed
+    is followed by pytest's own output), else the tool's own
+    `metadata.exit` for a command with no pipe (with one, the exit is the
+    last command's), else None. None when no such call is found (other
+    drivers' output included)."""
+    last: dict[str, Any] | None = None
+    for line in (stdout or "").splitlines():
+        line = line.strip()
+        if not line.startswith("{") or '"tool_use"' not in line:
+            continue
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        part = event.get("part") if isinstance(event.get("part"), dict) else {}
+        if event.get("type") != "tool_use" or part.get("tool") not in ("shell", "bash"):
+            continue
+        state = part.get("state") if isinstance(part.get("state"), dict) else {}
+        inp = state.get("input") if isinstance(state.get("input"), dict) else {}
+        command = inp.get("command")
+        if not isinstance(command, str) or "pytest" not in command:
+            continue
+        if state.get("status") not in (None, "completed", "error"):
+            continue
+        output = state.get("output") if isinstance(state.get("output"), str) else ""
+        rc: int | None = None
+        rows = output.splitlines()
+        at = F.daemon_head_index(rows)
+        head = _OZAGIA_HEAD_RE.match(rows[at].strip()) if at is not None else None
+        if head:
+            rc = int(head.group(1))
+        elif "|" not in command:
+            meta = state.get("metadata") if isinstance(state.get("metadata"), dict) else {}
+            inner = meta.get("metadata") if isinstance(meta.get("metadata"), dict) else meta
+            exit_code = inner.get("exit")
+            if isinstance(exit_code, int) and not isinstance(exit_code, bool):
+                rc = exit_code
+        last = {"command": command, "output": output, "returncode": rc}
+    return last
+
+
+def agent_test_fields(log_dir: Path, workdir: Path | None = None,
+                      first_party: set[str] | None = None) -> dict[str, Any]:
+    """`agent_test_class` and `agent_test_summary` for the agent's last
+    pytest in `log_dir/driver.stdout.txt` (`last_agent_pytest`), both None
+    when there is none. The summary is the daemon's head line or pytest's
+    summary line (no paths), at most `AGENT_SUMMARY_CHARS`."""
+    try:
+        text = (log_dir / "driver.stdout.txt").read_text(encoding="utf-8",
+                                                          errors="replace")
+    except OSError:
+        text = ""
+    got = last_agent_pytest(text)
+    if got is None:
+        return {"agent_test_class": None, "agent_test_summary": None}
+    res = F.classify(got["returncode"], False, got["output"], "",
+                     command=got["command"], first_party=first_party)
+    rows = [x.strip() for x in got["output"].splitlines()]
+    at = F.daemon_head_index(rows)
+    summary = (rows[at][len("[ozagia] "):] if at is not None
+               and _OZAGIA_HEAD_RE.match(rows[at]) else None)
+    if summary is None:
+        summary = next((x.strip("= ") for x in reversed(rows)
+                        if _PYTEST_SUMMARY_RE.search(x)), None)
+    if summary is None:
+        summary = res.get("detail")
+    summary = str(summary or "")
+    if len(summary) > AGENT_SUMMARY_CHARS:
+        summary = summary[:AGENT_SUMMARY_CHARS - 3] + "..."
+    return {"agent_test_class": res["class"], "agent_test_summary": summary,
+            "agent_test_evidence": list(res.get("evidence") or [])}
+
+
+IMPORT_PROBE_TIMEOUT_S = 60
+
+
+def import_probe(python: str, module: str) -> bool | None:
+    """Whether `python` imports the top-level package of `module` when run
+    isolated (`-I`: no current directory, user site or `PYTHON*`
+    variables on the path) from an empty temporary directory outside any
+    worktree; None when the probe cannot run (a missing interpreter, a
+    timeout) or the name is not an identifier."""
+    top = str(module).split(".")[0]
+    if not top.isidentifier():
+        return None
+    tmp = tempfile.mkdtemp(prefix="ozagia_probe_")
+    try:
+        proc = subprocess.run([python, "-I", "-c", f"import {top}"], cwd=tmp,
+                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, timeout=IMPORT_PROBE_TIMEOUT_S)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return proc.returncode == 0
+
+
+def _inside(path: str, root: Path | None) -> bool:
+    if root is None:
+        return False
+    try:
+        Path(os.path.abspath(path)).relative_to(Path(os.path.abspath(root)))
+    except ValueError:
+        return False
+    return True
+
+
+def check_validity(failure: dict[str, Any], *, base_passed: bool = False,
+                   python: str | None = None, workdir: Path | None = None
+                   ) -> dict[str, Any]:
+    """Whether a run is valid, as `{"valid", "invalid_reason",
+    "validity_basis"}`. Only a `harness` or `environment` check can make a
+    run invalid, and only when the agent cannot have caused it:
+
+    - `base_passed` (validation ran with this interpreter and the check
+      passed on base): an environment failure after the agent is the
+      agent's (a new import of an uninstalled package, `cannot import name
+      X from numpy`), and so is a harness failure, unless the interpreter
+      itself is gone and lies outside the worktree. The run counts as a
+      failure, with its class shown.
+    - Validation skipped: for `environment` with a `module`,
+      `import_probe(python, module)` decides: importable means the agent
+      broke it (a failure), not importable means the environment lacks it
+      (invalid). Without a module to probe, or for `harness`, invalid.
+
+    A passing check is always valid."""
+    cls = failure.get("class")
+    detail = failure.get("detail")
+    if cls not in F.NOT_EVIDENCE:
+        return {"valid": True, "invalid_reason": None,
+                "validity_basis": f"check class {cls}"}
+    invalid = f"check {cls}: {detail}"
+    if cls == "harness" and python and not os.path.exists(python) \
+            and not _inside(python, workdir):
+        return {"valid": False, "invalid_reason": invalid,
+                "validity_basis": f"the check interpreter {python} is missing "
+                                  "and lies outside the worktree"}
+    if base_passed:
+        return {"valid": True, "invalid_reason": None,
+                "validity_basis": f"check {cls} after the base check passed with "
+                                  "this interpreter: counted against the agent"}
+    module = failure.get("module")
+    if cls == "environment" and module and python:
+        got = import_probe(python, module)
+        top = str(module).split(".")[0]
+        if got is True:
+            return {"valid": True, "invalid_reason": None,
+                    "validity_basis": f"check environment, but {top} imports under "
+                                      f"{python} outside the worktree: counted "
+                                      "against the agent"}
+        why = ("does not import" if got is False else "could not be probed")
+        return {"valid": False, "invalid_reason": invalid,
+                "validity_basis": f"validation skipped; {top} {why} under {python} "
+                                  "outside the worktree"}
+    return {"valid": False, "invalid_reason": invalid,
+            "validity_basis": f"validation skipped; check {cls} with nothing to probe"}
+
+
 def run_check(workdir: Path, check: dict[str, Any], python: str,
               log_path: Path) -> dict[str, Any]:
+    """Run the task check with `python` and classify its result
+    (`ozagia.core.failures`): `failure` holds the class, evidence and
+    detail. A runner that cannot start (a missing interpreter or workdir)
+    is a `harness` failure, not an exception."""
     argv = [a.replace("{workdir}", str(workdir)) for a in check["argv"]]
     cmd = [python, *argv]
     timeout = int(check["timeout_s"])
     # No .pyc files: a break that keeps the byte length (a + b -> a - b) within the
     # same mtime second would otherwise run stale bytecode from the base check.
     env = dict(os.environ, COLUMNS="250", PYTHONDONTWRITEBYTECODE="1")
-    res = spawn_group(cmd, cwd=workdir, env=env, timeout_s=timeout)
+    started = time.monotonic()
+    try:
+        res = spawn_group(cmd, cwd=workdir, env=env, timeout_s=timeout)
+    except OSError as e:
+        res = {"returncode": None, "timed_out": False, "stdout": "",
+               "stderr": f"{type(e).__name__}: [Errno {e.errno}] {e.strerror}: "
+                         f"'{e.filename}'",
+               "seconds": round(time.monotonic() - started, 3)}
     out, err = res["stdout"], res["stderr"]
     returncode, timed_out = res["returncode"], res["timed_out"]
     seconds = res["seconds"]
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_text(f"$ {' '.join(cmd)}\n\n{out}\n--- stderr ---\n{err}\n",
                         encoding="utf-8")
+    failure = F.classify(returncode, timed_out, out, err, command=cmd,
+                         first_party=_first_party(workdir) if workdir.is_dir() else None,
+                         interpreter=python, root=workdir)
     return {"passed": (not timed_out) and returncode == 0,
             "returncode": returncode, "timed_out": timed_out,
             "seconds": seconds, "log": str(log_path),
-            "tail": _tail(out + "\n" + err, 12)}
+            "tail": _tail(out + "\n" + err, 12), "failure": failure}
 
 
 # --------------------------------------------------------------------------- #
@@ -447,20 +666,98 @@ def default_check_python(repo: str | Path, tasks: list[dict[str, Any]],
             "reason": "env_for: no interpreter could be probed; this interpreter"}
 
 
-def validation_summary(report: dict[str, Any] | None) -> dict[str, Any]:
-    """What a run report says about the preflight: {"ran": false} without
+NOT_VALIDATED_REASON = ("not validated (--skip-validate, or run_eval called "
+                        "without a validation report): invalid runs are decided "
+                        "by the import probe")
+
+
+def validation_summary(report: dict[str, Any] | None, *,
+                       source: str | None = None) -> dict[str, Any]:
+    """What a run report says about its validation: {"ran": false} without
     one, else whether every task passed, the counts, the failed ids with
-    their reasons and the interpreter the checks ran under."""
+    their reasons, the interpreter the checks ran under (and why), and
+    `source` ("preflight", or the path of a reused `validate` report)."""
     if report is None:
-        return {"ran": False, "reason": "not validated (--skip-validate or "
-                                        "run_eval called without a preflight)"}
+        return {"ran": False, "reason": NOT_VALIDATED_REASON}
     results = report.get("results") or []
     failed = [{"id": r.get("id"), "reason": (r.get("details") or {}).get("reason")}
               for r in results if not r.get("ok")]
     return {"ran": True, "ok": bool(report.get("ok")), "tasks": len(results),
             "passed": len(results) - len(failed), "failed": failed,
-            "base": report.get("base"),
-            "check_python": report.get("check_python")}
+            "base": report.get("base"), "source": source or "preflight",
+            "check_python": validation_python(report),
+            "check_python_reason": report.get("check_python_reason")}
+
+
+def validation_python(report: dict[str, Any]) -> str | None:
+    """The interpreter a `validate_all` report ran its checks under
+    (`check_python`; `python` in reports written before W23)."""
+    got = report.get("check_python") or report.get("python")
+    return got if isinstance(got, str) else None
+
+
+def task_fingerprint(task: dict[str, Any], tasks_dir: str | Path) -> str:
+    """A digest of what validation tested for a task: its check and the
+    text of its break patch."""
+    try:
+        patch = (Path(tasks_dir) / task["break_patch"]).read_bytes()
+    except (OSError, KeyError, TypeError):
+        patch = b""
+    h = hashlib.sha256(json.dumps(task.get("check"), sort_keys=True).encode())
+    h.update(b"\0")
+    h.update(patch)
+    return h.hexdigest()[:16]
+
+
+def _same_interpreter(a: str, b: str) -> bool:
+    # abspath, not realpath: a venv's bin/python is a symlink to its base
+    # interpreter, and the two import different packages.
+    return os.path.abspath(a) == os.path.abspath(b)
+
+
+def validation_mismatch(report: Any, *, base: str, python: str,
+                        tasks: list[dict[str, Any]],
+                        tasks_dir: str | Path) -> str | None:
+    """Why a `validate_all` report cannot stand for a run with `base`,
+    `python` and `tasks`, or None when it can: the same base, the same
+    check interpreter, and every task present with the same check and
+    break patch (`task_fingerprint`, when the report has one)."""
+    if not isinstance(report, dict) or not isinstance(report.get("results"), list):
+        return "not a `validate --out-json` report"
+    if report.get("base") != base:
+        return f"base {report.get('base')!r}, this run {base!r}"
+    vp = validation_python(report)
+    if vp is None or not _same_interpreter(vp, python):
+        return f"check interpreter {vp!r}, this run {python!r}"
+    by_id = {r.get("id"): r for r in report["results"] if isinstance(r, dict)}
+    missing = [t["id"] for t in tasks if t["id"] not in by_id]
+    if missing:
+        return "task(s) not in the report: " + ", ".join(sorted(missing))
+    changed = [t["id"] for t in tasks
+               if by_id[t["id"]].get("fingerprint") is not None
+               and by_id[t["id"]]["fingerprint"] != task_fingerprint(t, tasks_dir)]
+    if changed:
+        return "check or break patch changed since validation: " + ", ".join(sorted(changed))
+    return None
+
+
+def restrict_validation(report: dict[str, Any], task_ids: Iterable[str]) -> dict[str, Any]:
+    """`report` with only the results of `task_ids`, `ok` recomputed."""
+    keep = set(task_ids)
+    results = [r for r in report.get("results") or []
+               if isinstance(r, dict) and r.get("id") in keep]
+    return {**report, "results": results, "ok": all(r.get("ok") for r in results)}
+
+
+def validated_tasks(validation: dict[str, Any] | None) -> set[str]:
+    """The task ids whose check passed on base in a `validate_all` report
+    (already matched to the run, `validation_mismatch`); empty without
+    one."""
+    if not isinstance(validation, dict):
+        return set()
+    return {r["id"] for r in validation.get("results") or []
+            if isinstance(r, dict) and r.get("pass_on_base") is True
+            and isinstance(r.get("id"), str)}
 
 
 def resolve_check_python(repo: str | Path, tasks: list[dict[str, Any]],
@@ -498,17 +795,22 @@ def validate_task(repo: str | Path, task: dict[str, Any], base: str, *,
         fail_after_break = broken_check is not None and not broken_check["passed"]
         ok = bool(pass_on_base and applied["ok"] and fail_after_break)
         details: dict[str, Any] = {
-            "base_check": {k: base_check[k] for k in ("returncode", "seconds", "log")},
+            "base_check": {**{k: base_check[k] for k in ("returncode", "seconds", "log")},
+                           "failure_class": base_check["failure"]["class"],
+                           "failure_detail": base_check["failure"]["detail"]},
             "break_apply": applied,
         }
         if broken_check is not None:
-            details["broken_check"] = {k: broken_check[k]
-                                       for k in ("returncode", "seconds", "log")}
+            details["broken_check"] = {
+                **{k: broken_check[k] for k in ("returncode", "seconds", "log")},
+                "failure_class": broken_check["failure"]["class"],
+                "failure_detail": broken_check["failure"]["detail"]}
         if not ok:
             details["reason"] = _validation_reason(pass_on_base, applied["ok"],
                                                    fail_after_break)
         result = {"id": tid, "ok": ok, "pass_on_base": pass_on_base,
                   "fail_after_break": fail_after_break,
+                  "fingerprint": task_fingerprint(task, tasks_dir),
                   "seconds": round(time.monotonic() - started, 3),
                   "details": details, "cleanup_warnings": cleanup}
         if keep:
@@ -1512,7 +1814,10 @@ def run_one(repo: str | Path, task: dict[str, Any], arm: str, repeat: int,
             driver: Any, base: str, *, tasks_dir: str | Path, python: str,
             run_root: Path, timeout_s: int, keep: bool,
             isolation: str = "worktree",
-            tool_python: str | None = None) -> dict[str, Any]:
+            tool_python: str | None = None,
+            base_passed: bool = False) -> dict[str, Any]:
+    """One task × arm × repeat. `base_passed`: validation ran with `python`
+    and the task's check passed on base (`check_validity`)."""
     tool_python = tool_python or sys.executable
     config = config_path(repo)
     tid = task["id"]
@@ -1586,6 +1891,10 @@ def run_one(repo: str | Path, task: dict[str, Any], arm: str, repeat: int,
         expected = [f.replace("\\", "/") for f in task["expected_files"]]
         record.update(
             success=check["passed"],
+            **check_validity(check["failure"], base_passed=base_passed,
+                             python=python, workdir=workdir),
+            **failure_fields(check["failure"]),
+            **agent_test_fields(log_dir, workdir, _first_party(workdir)),
             check_returncode=check["returncode"],
             check_s=check["seconds"],
             exit_code=result["exit_code"],
@@ -1639,14 +1948,22 @@ def run_eval(repo: str | Path, tasks: list[dict[str, Any]], arms: Iterable[str],
              python_reason: str | None = None, run_root: Path | None = None,
              keep: bool = False, timeout_s: int = 900,
              max_total_usd: float | None = None,
-             validation: dict[str, Any] | None = None) -> dict[str, Any]:
+             validation: dict[str, Any] | None = None,
+             validation_source: str | None = None) -> dict[str, Any]:
     """Run every task × arm × repeat. `max_total_usd` stops the run once the
     reported cost of finished sessions exceeds it (a soft cap: the session
     that crosses it still completes). Without `python` the checks run under
     `default_check_python`'s choice; each run records the interpreter and
-    why (`check_python`, `check_python_reason`). `validation` is the
-    preflight's `validate_all` report, None when it did not run: the report
-    records `validated` and `validation` (``validation_summary``)."""
+    why (`check_python`, `check_python_reason`).
+
+    `validation` is the `validate_all` report for these tasks (the `run`
+    preflight's, or a reused one; `validation_source` says which), None when
+    validation did not run. It must match `base`, `python` and the tasks
+    (`validation_mismatch`, else HarnessError). Its tasks whose check passed
+    on base are `validated_tasks`: for them an environment or harness check
+    after the agent counts against the agent (`check_validity`). Without
+    one, the import probe decides. The report records `validated`,
+    `validation` (``validation_summary``) and `validated_tasks`."""
     arms = list(arms)
     check_arms(arms, driver)
     if repeats < 1:
@@ -1655,6 +1972,13 @@ def run_eval(repo: str | Path, tasks: list[dict[str, Any]], arms: Iterable[str],
         python, python_reason = resolve_check_python(repo, tasks, None)
     python_reason = python_reason or "explicit --python"
     run_root = run_root or new_run_root()
+    if validation is not None:
+        why = validation_mismatch(validation, base=base, python=python,
+                                  tasks=tasks, tasks_dir=tasks_dir)
+        if why:
+            raise HarnessError(f"the validation report does not match this run: {why}")
+        validation = restrict_validation(validation, (t["id"] for t in tasks))
+    validated = validated_tasks(validation)
     ordered_arms = [a for a in ARMS if a in arms]
     runs: list[dict[str, Any]] = []
     isolation = getattr(driver, "isolation", "worktree")
@@ -1672,7 +1996,8 @@ def run_eval(repo: str | Path, tasks: list[dict[str, Any]], arms: Iterable[str],
                 record = run_one(repo, task, arm, repeat, driver, base,
                                  tasks_dir=tasks_dir, python=python,
                                  run_root=run_root, timeout_s=timeout_s,
-                                 keep=keep, isolation=isolation)
+                                 keep=keep, isolation=isolation,
+                                 base_passed=task["id"] in validated)
                 record.update(check_python=python,
                               check_python_reason=python_reason)
                 runs.append(record)
@@ -1694,10 +2019,11 @@ def run_eval(repo: str | Path, tasks: list[dict[str, Any]], arms: Iterable[str],
             "stopped": stopped,
             "check_python": python, "check_python_reason": python_reason,
             "validated": validation is not None,
-            "validation": validation_summary(validation),
+            "validation": validation_summary(validation, source=validation_source),
             "arms": ordered_arms, "repeats": repeats,
             "tasks": [t["id"] for t in sorted(tasks, key=lambda t: t["id"])],
             "run_root": str(run_root),
+            "validated_tasks": sorted(validated),
             "runs": runs,
             "summary": aggregate(runs, ordered_arms),
             "per_task": paired(runs, ordered_arms)}
@@ -1711,17 +2037,55 @@ def _mean(values: Iterable[Any], digits: int = 3) -> float | None:
     return round(sum(known) / len(known), digits) if known else None
 
 
+def _valid(run: dict[str, Any]) -> bool:
+    """A run counts for success unless `check_validity` made it invalid;
+    runs recorded before classes count."""
+    return run.get("valid") is not False
+
+
+def paired_cells(runs: list[dict[str, Any]], arms: Iterable[str]) -> set[tuple[Any, Any]]:
+    """The (task, repeat) cells that have a valid run in every arm."""
+    arms = list(arms)
+    have: dict[tuple[Any, Any], set[str]] = {}
+    bad: set[tuple[Any, Any]] = set()
+    for r in runs:
+        if r.get("arm") not in arms:
+            continue
+        cell = (r.get("task"), r.get("repeat"))
+        if _valid(r):
+            have.setdefault(cell, set()).add(r["arm"])
+        else:
+            bad.add(cell)
+    return {c for c, got in have.items() if c not in bad and got >= set(arms)}
+
+
 def aggregate(runs: list[dict[str, Any]], arms: Iterable[str]) -> list[dict[str, Any]]:
+    """Per arm: `runs` counts every run, `valid_runs` and `invalid_runs`
+    split them by `check_validity`, and `successes` and `success_rate`
+    count the arm's valid runs. `paired_runs`, `paired_successes` and
+    `paired_rate` cover only the (task, repeat) cells valid in every arm
+    (`paired_cells`), so arms compare over the same runs. The other means
+    cover every run."""
+    arms = list(arms)
+    cells = paired_cells(runs, arms)
     rows = []
     for arm in arms:
         mine = [r for r in runs if r["arm"] == arm]
         n = len(mine)
-        successes = sum(1 for r in mine if r.get("success") is True)
+        valid = [r for r in mine if _valid(r)]
+        successes = sum(1 for r in valid if r.get("success") is True)
+        both = [r for r in valid if (r.get("task"), r.get("repeat")) in cells]
+        paired_ok = sum(1 for r in both if r.get("success") is True)
         rows.append({
             "arm": arm,
             "runs": n,
+            "valid_runs": len(valid),
+            "invalid_runs": n - len(valid),
             "successes": successes,
-            "success_rate": round(successes / n, 4) if n else None,
+            "success_rate": round(successes / len(valid), 4) if valid else None,
+            "paired_runs": len(both),
+            "paired_successes": paired_ok,
+            "paired_rate": round(paired_ok / len(both), 4) if both else None,
             "mean_wall_s": _mean(r.get("wall_s") for r in mine),
             "mean_prep_s": _mean((r.get("prep_s") for r in mine), 1),
             "prep_failures": sum(1 for r in mine if r.get("prep_ok") is False),
@@ -1790,27 +2154,42 @@ def aggregate(runs: list[dict[str, Any]], arms: Iterable[str]) -> list[dict[str,
 
 
 def paired(runs: list[dict[str, Any]], arms: Iterable[str]) -> dict[str, Any]:
-    """Per task, the success outcome of each repeat, for each arm."""
+    """Per task, for each arm, the success outcome of each repeat in repeat
+    order (`outcomes[i]` is repeat i + 1): True or False for a valid run,
+    None for an invalid or missing one, so arms stay aligned by repeat.
+    `successes` and `repeats` count the valid runs, `invalid` the invalid
+    ones."""
     arms = list(arms)
     out: dict[str, Any] = {}
     for tid in sorted({r["task"] for r in runs}):
+        mine_all = [r for r in runs if r["task"] == tid]
+        last = max((int(r["repeat"]) for r in mine_all
+                    if isinstance(r.get("repeat"), int)), default=0)
         row: dict[str, Any] = {}
         for arm in arms:
-            outcomes = [r.get("success") is True for r in sorted(
-                (r for r in runs if r["task"] == tid and r["arm"] == arm),
-                key=lambda r: r["repeat"])]
+            by_rep = {r["repeat"]: r for r in mine_all if r["arm"] == arm}
+            outcomes: list[bool | None] = []
+            for rep in range(1, last + 1):
+                r = by_rep.get(rep)
+                outcomes.append(None if r is None or not _valid(r)
+                                else r.get("success") is True)
+            known = [o for o in outcomes if o is not None]
             row[arm] = {"outcomes": outcomes,
-                        "successes": sum(outcomes),
-                        "repeats": len(outcomes)}
+                        "successes": sum(known),
+                        "repeats": len(known),
+                        "invalid": sum(1 for r in by_rep.values() if not _valid(r))}
         out[tid] = row
     return out
 
 
 def _validation_line(summary: dict[str, Any] | None) -> str:
-    if not summary or not summary.get("ran"):
-        return "no" + (f" ({summary['reason']})" if summary and summary.get("reason")
-                       else "")
-    return (f"yes, {summary.get('passed')} of {summary.get('tasks')} task(s) "
+    if summary is None:
+        return "not recorded (a report written before validation was recorded)"
+    if not summary.get("ran"):
+        return "no" + (f" ({summary['reason']})" if summary.get("reason") else "")
+    source = summary.get("source") or "preflight"
+    how = "preflight" if source == "preflight" else f"reused `{source}`"
+    return (f"yes ({how}), {summary.get('passed')} of {summary.get('tasks')} task(s) "
             f"passed with `{summary.get('check_python')}`")
 
 
@@ -1835,21 +2214,29 @@ def render_markdown(report: dict[str, Any]) -> str:
         "",
         "## Per arm",
         "",
-        "| arm | runs | success | success rate | mean wall s | mean prep s | "
+        "| arm | runs | valid runs | invalid runs | success | success rate | "
+        "paired rate | mean wall s | mean prep s | "
         "prep failures | driver errors | mean tokens in | "
         "mean tokens out | mean cost USD | mean tool calls | mean MCP calls | "
         "localization rate |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for row in report["summary"]:
         lines.append("| " + " | ".join(_cell(v) for v in (
-            row["arm"], row["runs"], row["successes"], row["success_rate"],
-            row["mean_wall_s"], row["mean_prep_s"], row["prep_failures"],
+            row["arm"], row["runs"], row.get("valid_runs", row["runs"]),
+            row.get("invalid_runs", 0), row["successes"], row["success_rate"],
+            _paired_cell(row), row["mean_wall_s"], row["mean_prep_s"], row["prep_failures"],
             row.get("driver_errors", 0),
             row["mean_tokens_in"], row["mean_tokens_out"],
             row["mean_cost_usd"], row.get("mean_tool_calls"),
             row.get("mean_mcp_calls"), row["localization_rate"])) + " |")
-    lines += ["", "Token, cost and tool columns are blank where the driver reports no "
+    lines += ["", "Success and success rate count the arm's valid runs: a run "
+              "whose check failed as `harness` or `environment` for a reason the "
+              "agent cannot have caused (see Invalid runs) is invalid. Paired "
+              "rate counts only the (task, repeat) cells valid in every arm "
+              "(successes/cells), so arms compare over the same runs. "
+              "Token, cost and tool columns cover every run and are "
+              "blank where the driver reports no "
               "value. MCP calls count calls to the ozagia MCP server. "
               "Prep (dev_memory snapshot and tag cache) runs before the driver timer; "
               "mean prep s is 0 for baseline."]
@@ -1878,13 +2265,75 @@ def render_markdown(report: dict[str, Any]) -> str:
         if reachable:
             lines += ["", "Warning: replaced tools not registered `codemode: false` "
                       f"(Code Mode could call their built-ins): {', '.join(reachable)}."]
+    lines += _invalid_section(report.get("runs") or [])
+    lines += _agent_test_section(report.get("runs") or [])
     lines += ["", "## Per task (paired)", ""]
     header = "| task | " + " | ".join(report["arms"]) + " |"
     lines += [header, "|---" * (len(report["arms"]) + 1) + "|"]
     for tid, row in report["per_task"].items():
-        cells = [f"{row[a]['successes']}/{row[a]['repeats']}" for a in report["arms"]]
+        cells = [f"{row[a]['successes']}/{row[a]['repeats']}"
+                 + (f" ({row[a]['invalid']} invalid)" if row[a].get("invalid") else "")
+                 for a in report["arms"]]
         lines.append(f"| {_cell(tid)} | " + " | ".join(cells) + " |")
     return "\n".join(lines) + "\n"
+
+
+def _paired_cell(row: dict[str, Any]) -> str | None:
+    if row.get("paired_runs") is None:
+        return None
+    return f"{row.get('paired_rate')} ({row.get('paired_successes')}/{row['paired_runs']})"
+
+
+def _invalid_section(runs: list[dict[str, Any]]) -> list[str]:
+    """The report's list of invalid runs and why, or nothing."""
+    bad = [r for r in runs if not _valid(r)]
+    if not bad:
+        return []
+    lines = ["", "## Invalid runs", "",
+             "Runs whose check failed for a reason outside the agent's work "
+             "(`ozagia.core.failures`): left out of success counts and rates, "
+             "kept in the JSON.", "",
+             "| task | arm | repeat | check class | reason | basis |",
+             "|---|---|---|---|---|---|"]
+    for r in bad:
+        lines.append("| " + " | ".join(_cell(v) for v in (
+            r.get("task"), r.get("arm"), r.get("repeat"), r.get("failure_class"),
+            r.get("invalid_reason"), r.get("validity_basis"))) + " |")
+    return lines
+
+
+def agent_check_note(run: dict[str, Any]) -> str:
+    """`agent saw green, check saw red` (or the reverse) when the agent's
+    last pytest and the check disagree, else "" (also when either class is
+    unknown or missing)."""
+    agent, check = run.get("agent_test_class"), run.get("failure_class")
+    if agent in (None, "unknown") or check in (None, "unknown"):
+        return ""
+    if agent == "passed" and check != "passed":
+        return "agent saw green, check saw red"
+    if agent != "passed" and check == "passed":
+        return "agent saw red, check saw green"
+    return ""
+
+
+def _agent_test_section(runs: list[dict[str, Any]]) -> list[str]:
+    """The agent's last pytest next to the check's result, per run that
+    has either class, or nothing."""
+    rows = [r for r in runs if r.get("agent_test_class") or r.get("failure_class")]
+    if not rows:
+        return []
+    lines = ["", "## Agent tests and check", "",
+             "The agent's last pytest in its transcript (class and summary) "
+             "next to the check's class. The two can differ: another "
+             "interpreter, other tests, edits after the agent's last run.", "",
+             "| task | arm | repeat | agent last pytest | agent summary | check | note |",
+             "|---|---|---|---|---|---|---|"]
+    for r in rows:
+        lines.append("| " + " | ".join(_cell(v) for v in (
+            r.get("task"), r.get("arm"), r.get("repeat"),
+            r.get("agent_test_class") or "none", r.get("agent_test_summary"),
+            r.get("failure_class"), agent_check_note(r))) + " |")
+    return lines
 
 
 def _cell(value: Any) -> str:
@@ -1928,9 +2377,14 @@ def _print_validation(report: dict[str, Any], *, failed_only: bool = False,
     for r in report["results"]:
         if failed_only and r["ok"]:
             continue
+        base_fc = (r["details"].get("base_check") or {}).get("failure_class")
+        why = r["details"].get("reason")
+        if not r["ok"] and not r["pass_on_base"] and base_fc:
+            why = f"{why}; base check {base_fc}: " \
+                  f"{r['details']['base_check'].get('failure_detail')}"
         print(f"{'ok  ' if r['ok'] else 'FAIL'} {r['id']}: pass_on_base={r['pass_on_base']} "
               f"fail_after_break={r['fail_after_break']} "
-              + ("" if r["ok"] else f"({r['details'].get('reason')})"),
+              + ("" if r["ok"] else f"({why})"),
               file=file or sys.stdout)
 
 
@@ -1945,6 +2399,25 @@ def default_arms(driver_name: str) -> list[str]:
             and (a != GRAPH_ARM or driver_name in GRAPH_ARM_DRIVERS)]
 
 
+def _read_validation(path: str | None) -> dict[str, Any] | None:
+    if not path:
+        return None
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise HarnessError(f"cannot read the validation report {path}: {e}") from e
+
+
+def summary_line(row: dict[str, Any]) -> str:
+    """The console line for one arm: successes over valid runs, the invalid
+    count, the paired rate and localization."""
+    valid = row.get("valid_runs", row["runs"])
+    return (f"{row['arm']}: {row['successes']}/{valid} valid runs succeeded "
+            f"(rate {row['success_rate']}; {row.get('invalid_runs', 0)} invalid "
+            f"of {row['runs']} runs; paired rate {row.get('paired_rate')} over "
+            f"{row.get('paired_runs')} cells), localized {row['localization_rate']}")
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     spec = load_tasks(args.tasks)
     base = args.base or spec["base"]
@@ -1956,29 +2429,47 @@ def _cmd_run(args: argparse.Namespace) -> int:
     run_root = _run_root(args)
     python, reason = resolve_check_python(args.repo, tasks, args.python)
     print(f"check python: {python} ({reason})")
+    # One validation, three ways: the preflight (default), a reused
+    # `validate --out-json` report (--validation; it must match the base,
+    # the tasks and the check interpreter), or none (--skip-validate; the
+    # import probe then decides which environment failures are invalid).
     checked: dict[str, Any] | None = None
-    if not args.skip_validate:
+    source: str | None = None
+    if args.validation:
+        checked = _read_validation(args.validation)
+        why = validation_mismatch(checked, base=base, python=python, tasks=tasks,
+                                  tasks_dir=spec["dir"])
+        if why:
+            print(f"refused: the validation report {args.validation} does not "
+                  f"match this run ({why}); validate again, or pass the "
+                  "--python it was made with", file=sys.stderr)
+            return 2
+        checked = restrict_validation(checked, (t["id"] for t in tasks))
+        source = args.validation
+        print(f"validation: reused {args.validation}")
+    elif not args.skip_validate:
         # A check that does not pass on base or does not fail after the
         # break measures the harness, not the agent.
         checked = validate_all(args.repo, tasks, base, tasks_dir=spec["dir"],
                                python=python, python_reason=reason,
                                run_root=run_root, keep=False)
-        if not checked["ok"]:
-            bad = [r for r in checked["results"] if not r["ok"]]
-            print(f"refused: {len(bad)} of {len(tasks)} task(s) fail validation "
-                  f"with {python} (--skip-validate runs anyway):", file=sys.stderr)
-            _print_validation(checked, failed_only=True, file=sys.stderr)
-            return 2
+        source = "preflight"
+    if checked is not None and not checked["ok"]:
+        bad = [r for r in checked["results"] if not r["ok"]]
+        print(f"refused: {len(bad)} of {len(tasks)} task(s) fail validation "
+              f"with {python} (--skip-validate runs anyway):", file=sys.stderr)
+        _print_validation(checked, failed_only=True, file=sys.stderr)
+        return 2
     report = run_eval(args.repo, tasks, arms, driver, base,
                       tasks_dir=spec["dir"], repeats=args.repeats,
                       python=python, python_reason=reason, run_root=run_root,
                       keep=args.keep, timeout_s=args.timeout_s,
-                      max_total_usd=args.max_total_usd, validation=checked)
+                      max_total_usd=args.max_total_usd, validation=checked,
+                      validation_source=source)
     _write(args.out_json, json.dumps(report, indent=2, sort_keys=True) + "\n")
     _write(args.out_md, render_markdown(report))
     for row in report["summary"]:
-        print(f"{row['arm']}: {row['successes']}/{row['runs']} succeeded "
-              f"(rate {row['success_rate']}), localized {row['localization_rate']}")
+        print(summary_line(row))
     return 0
 
 
@@ -2028,10 +2519,18 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--max-total-usd", type=float, default=None,
                    help="any backend: stop once reported session cost exceeds this")
     r.add_argument("--out-md", default=None)
-    r.add_argument("--skip-validate", action="store_true",
-                   help="start without validating the selected tasks first "
-                        "(by default `run` refuses with exit 2 when a check "
-                        "does not pass on base or does not fail after the break)")
+    once = r.add_mutually_exclusive_group()
+    once.add_argument("--skip-validate", action="store_true",
+                      help="start without validating the selected tasks first "
+                           "(by default `run` refuses with exit 2 when a check "
+                           "does not pass on base or does not fail after the "
+                           "break); invalid runs are then decided by an import "
+                           "probe")
+    once.add_argument("--validation", default=None,
+                      help="reuse a `validate --out-json` report instead of "
+                           "validating again; it must have the same base, every "
+                           "selected task unchanged and the same check "
+                           "interpreter, else `run` refuses with exit 2")
     r.set_defaults(func=_cmd_run)
     return p
 

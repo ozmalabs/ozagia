@@ -1,0 +1,21 @@
+$ /opt/tool/.venv/bin/python -m pytest -q -p no:cacheprovider --confcutdir=/work/repo tests/test_learner.py
+
+
+======== ERRORS ========
+________ ERROR collecting tests/test_learner.py ________
+ImportError while importing test module '/work/repo/tests/test_learner.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.13/importlib/__init__.py:88: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/test_learner.py:6: in <module>
+    import numpy as np
+E   ModuleNotFoundError: No module named 'numpy'
+======== short test summary info ========
+ERROR tests/test_learner.py
+!!!!!!!! Interrupted: 1 error during collection !!!!!!!!
+1 error in 0.23s
+
+--- stderr ---
+

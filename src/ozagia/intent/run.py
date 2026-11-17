@@ -4,9 +4,20 @@ pytest output: pytest's own output tail (verbatim, `ozagia.check`'s last
 `OUTPUT_TAIL_LINES` lines), then
 
     [ozagia] pytest <status>: exit <code>, <s> s, <p> passed, <f> failed, <e> error, <k> skipped
+    [ozagia] failure class <class>[, module <name>]: <detail>
+    [ozagia] failure item <class> <key>[, module <name>]
     [ozagia] failed test:<rel>::<qual>[<param>]: <message>
     [ozagia]   frame sym:<rel>::<qual> <file>:<line>
     [ozagia] collection error file:<rel>: <message>
+
+The `failure class` line (`failure_lines`, `ozagia.core.failures`) follows
+the head of a run that did not pass: `environment`, `collection`,
+`assertion`, `error`, `timeout` or `harness`; for `environment` the missing
+module, the interpreter and, when `ozagia.core.environments` provides
+`who_has`, the interpreters that have the module. A run that is not
+`environment` as a whole gets a `failure item` line for each failing test
+or collection error whose own cause is an environment one (at most
+`MAX_ITEM_LINES`), so goals can tell those tests apart.
 
 With `[tests] select = "affected"` or `[tests] cache = true`
 (`ozagia.intent.affected`), a pytest with no test selector may run only the
@@ -144,6 +155,51 @@ def _verbosity(extra: list[str]) -> list[str]:
     return kept
 
 
+MAX_ITEM_LINES = 20
+
+
+def failure_lines(root: Path, res: dict[str, Any], python: str,
+                  ozagia_lines: list[str]) -> list[str]:
+    """The notes after a captured pytest's head line (`ozagia.core.failures`),
+    none for a pass: `failure class <class>[, module <name>]: <detail>`,
+    then `failure item environment <key>[, module <name>]` for each failing
+    item with an environment cause when the run's class is another one. The
+    classifier reads pytest's output tail and the daemon's own lines (from
+    the head on); first-party names come from the root and its import
+    roots. Never raises (no lines then)."""
+    if res.get("exit_code") == 0 and not res.get("timed_out"):
+        return []
+    try:
+        from ozagia.core import failures as F
+        try:
+            from ozagia.config import load_project_config
+            import_roots = load_project_config(root).import_roots
+        except Exception:  # noqa: BLE001 - the root alone then
+            import_roots = ()
+        text = "\n".join([str(res.get("output_tail") or ""), *ozagia_lines])
+        got = F.classify(res.get("exit_code"), bool(res.get("timed_out")), text, "",
+                         command=res.get("command"),
+                         first_party=F.first_party_names(root, import_roots),
+                         interpreter=python, root=root)
+    except Exception:  # noqa: BLE001 - an annotation only
+        return []
+    if got["class"] in ("passed", "unknown"):
+        return []
+    module = got.get("module")
+    out = [f"failure class {got['class']}"
+           + (f", module {module}" if module else "")
+           + f": {one_line(got['detail'], 400)}"]
+    if got["class"] not in F.NOT_EVIDENCE:
+        for item in got.get("items") or []:
+            node = item.get("node") or ""
+            if (item["class"] in F.NOT_EVIDENCE and len(out) <= MAX_ITEM_LINES
+                    and node.startswith(("test:", "file:")) and " " not in node):
+                out.append(f"failure item {item['class']} {node}"
+                           + (f", module {item['module']}" if item.get("module")
+                              else ""))
+    return out
+
+
 def run_pytest(memory: Any, cls: dict[str, Any], inp: dict[str, Any],
                wd: Path) -> dict[str, Any]:
     from ozagia.check import OUTPUT_TAIL_LINES, run_tests
@@ -223,6 +279,7 @@ def run_pytest(memory: Any, cls: dict[str, Any], inp: dict[str, Any],
     if res["collection_errors"]:
         head += f", {len(res['collection_errors'])} collection errors"
     lines.append(tag(head))
+    note_at = len(lines)
     lines.extend(sel_head)
     if res.get("error"):
         lines.append(tag(f"error: {res['error']}"))
@@ -251,6 +308,8 @@ def run_pytest(memory: Any, cls: dict[str, Any], inp: dict[str, Any],
                          f"{one_line(t['message'])}"))
         frames(t)
     lines.extend(sel_tail)
+    notes = failure_lines(root, res, python, lines[note_at - 1:])
+    lines[note_at:note_at] = [tag(n) for n in notes]
     out_res: dict[str, Any] = {
         "intent": "shell_pytest", "output": "\n".join(lines),
         "keys": list(dict.fromkeys(keys)), "exit_code": res["exit_code"]}

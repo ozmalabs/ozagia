@@ -75,7 +75,12 @@ For each task and arm, `run_eval` does the following:
    tokens, cost, transcript and tool calls. Unknown values are `None`.
 7. Snapshots again. `files_changed` lists paths whose content hash changed in step 6.
    The break itself does not count as an agent edit.
-8. Runs the check. `success` means the check passed.
+8. Runs the check. `success` means the check passed. The check's result is
+   classified (see Failure classes below): `failure_class`,
+   `failure_evidence`, `failure_detail` and, when known, `failure_module`.
+   A run whose check class is `harness` or `environment` gets `valid: false`
+   and an `invalid_reason` only when the agent cannot have caused it (see
+   Failure classes); every run records why in `validity_basis`.
 9. `localized` is true if any `expected_files` entry is in `files_changed`.
 10. Removes the workdir, unless `--keep`. Cleanup problems are listed in
     `cleanup_warnings` on the run record.
@@ -85,17 +90,104 @@ journal) stay in `<run_root>/logs/`. Only workdirs are removed.
 
 `validate` runs check, then break, then check on a worktree at `base`. It reports
 `ok` only when the check passes on base, the patch applies, and the check fails
-after the break.
+after the break. Its JSON (`--out-json`) records the interpreter it used and
+why (`check_python`, `check_python_reason`) and, per task, a `fingerprint`
+of the check and the break patch. Each check in `details` carries its
+`failure_class` and `failure_detail`, and a task that does not pass on base
+prints the base check's class (`base check environment: missing module
+numpy ...`).
 
-`run` validates the selected tasks first, with the same interpreter, and
-refuses to start (exit 2, the failing tasks and their reasons on stderr) when
-any check does not pass on base, the patch does not apply or the check still
-passes after the break. `--skip-validate` starts anyway. A check that fails
-on base scores every arm as a failure for a reason no agent can fix. The
-report records whether the preflight ran (`validated`) and its summary
-(`validation`: `ran`, `ok`, `tasks`, `passed`, the `failed` ids with their
-reasons, `base` and `check_python`; `{"ran": false, "reason": ...}` with
-`--skip-validate`); the Markdown report says it too.
+`run` uses one validation, obtained one of three ways:
+
+- by default, a preflight: `validate` on the selected tasks with the run's
+  check interpreter, in the run root;
+- with `--validation <validate --out-json file>`, that report instead of a
+  new preflight. It must have the same base, the same check interpreter
+  (compared by absolute path, not resolved: a venv's `bin/python` is a
+  symlink to an interpreter with other packages) and every selected task,
+  with an unchanged fingerprint where the report has one; otherwise `run`
+  refuses with exit 2 and the reason. Only the selected tasks' results are
+  kept;
+- with `--skip-validate`, none (the two flags exclude each other).
+
+In the first two cases `run` refuses (exit 2, the failing tasks and their
+reasons on stderr) when any selected check does not pass on base, the patch
+does not apply or the check still passes after the break: such a check
+scores every arm as a failure for a reason no agent can fix. The same
+report then decides validity: its tasks whose check passed on base are
+`validated_tasks`, and for them an environment or harness check after the
+agent counts against the agent (below). With `--skip-validate` the import
+probe decides. `run_eval(validation=...)` applies the same matching and
+raises `HarnessError` on a mismatch. The run report records `validated`,
+`validated_tasks` and `validation` (`ran`, `ok`, `tasks`, `passed`, the
+`failed` ids with their reasons, `base`, `source` (`preflight` or the
+reused file), `check_python`, `check_python_reason`; `{"ran": false,
+"reason": ...}` without one); the Markdown report says it too.
+
+### Failure classes
+
+`ozagia.core.failures.classify` gives every check one class from the
+places where pytest states a cause (failure and collection blocks, the
+short summary, startup errors; captured output is skipped), by rules in
+this order: `harness` (the interpreter, the runner or the workdir is
+missing; only when the run may not have started, never for exit 0),
+`timeout`, `passed`, `environment` (`No module named pytest`, a missing
+plugin's `unrecognized arguments`, or every failing test and collection
+error has an environment cause: an import error of a third-party module,
+a missing executable or shared library), `collection` (an import error of
+a first-party module, a syntax error, a missing fixture, no collectors
+for a named node id), `assertion`, `error` (exceptions that are not
+assertions, other non-zero exits), and `unknown` when nothing is known.
+`failure_items` lists each failing item's class. First-party names are
+the workdir's top-level modules and packages (namespace packages
+included), in the root and its configured import roots. When
+`ozagia.core.environments.who_has` (W20) is importable, an `environment`
+result also lists the interpreters that have the module
+(`failure_available_in`).
+
+A check that fails as `harness` or `environment` makes the run invalid
+only when the agent cannot have caused it (`check_validity`, recorded as
+`validity_basis`):
+
+- When the task is in `validated_tasks` (the run's validation, made with
+  this interpreter, saw its check pass on base), an environment failure after the agent is the agent's: a new
+  import of an uninstalled package, `cannot import name X from numpy`. The
+  run counts as a failure, with its class shown. So does a harness
+  failure, unless the interpreter itself is gone and lies outside the
+  worktree.
+- When validation was skipped, an `environment` check with a module is
+  probed: `<python> -I -c "import <top>"` from an empty temporary
+  directory outside the worktree. Importable means the agent broke it (a
+  failure); not importable means the environment lacks it (invalid). With
+  nothing to probe, or for `harness`, the run is invalid.
+
+A passing check is always valid. Invalid runs stay in the JSON with every
+field, but `aggregate` leaves them out of `successes` and `success_rate`
+(`runs` counts all, `valid_runs` and `invalid_runs` split them; the time,
+token and tool means still cover every run). Because each arm loses
+different runs, `paired_runs`, `paired_successes` and `paired_rate` count
+only the (task, repeat) cells valid in every arm, so arms compare over the
+same runs. `paired` keeps `outcomes` in repeat order, with None for an
+invalid or missing repeat, and counts valid repeats in `repeats` and
+invalid ones in `invalid`. The Markdown report shows valid and invalid
+runs and the paired rate per arm, an "Invalid runs" section with each
+run's class, reason and basis, and `N/M (K invalid)` per task. The console
+prints `<arm>: S/V valid runs succeeded (rate R; I invalid of N runs;
+paired rate P over C cells)`.
+
+The agent's own last pytest is classified too, from `driver.stdout.txt`
+(OpenCode's JSON events: the last `tool_use` of tool `shell` or `bash`
+whose command runs pytest): `agent_test_class` and `agent_test_summary`
+(the daemon's `[ozagia] pytest ...` head, else pytest's summary line). Its
+exit code is the daemon's head when the call was captured (the head is
+in the block of `[ozagia]` lines that ends the output; a head a test
+printed is followed by pytest's own output and is ignored), else the
+tool's `metadata.exit` for a command with no pipe, else unknown (the
+summary decides). Drivers without such events (Claude's JSON, native) give None.
+The "Agent tests and check" section puts the two side by side and flags
+`agent saw green, check saw red` (and the reverse; nothing when either
+class is `unknown`), the shape of the
+2026-11-17 Ocelot eval, where the check's interpreter lacked `numpy`.
 
 ### The check interpreter
 

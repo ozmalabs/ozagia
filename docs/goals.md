@@ -301,6 +301,19 @@ Limits:
 - Skipped tests are not told apart from passed ones (the record keeps no
   per-test outcomes beyond failures and errors).
 
+Failure classes (`ozagia.core.failures`, recorded for captured runs; see
+`docs/testing.md`) are applied per test. A run says nothing about a test
+when the test's own failure has an environment cause (a `failure_items`
+entry: `the test's own failure class is environment (module yaml)`, with
+`test_failure_class`/`test_failure_module` in the evidence), or when the
+whole run is `environment` (every failing item had an environment cause)
+or `harness`, or `collection` of a module that is not first-party (`the
+deciding run's failure class is environment (module numpy)`). Then a
+`test_passes` or `test_fails` criterion it decides with anything but a
+pass is `unknown`, with `failure_class`/`failure_module` in the evidence.
+A test that failed an assertion in a run where another test hit a missing
+module still decides, and a test that passed still passes.
+
 ## Commands
 
 ```
