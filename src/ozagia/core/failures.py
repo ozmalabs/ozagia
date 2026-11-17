@@ -63,8 +63,12 @@ The run's class is decided in this order:
    `passed`, else `unknown`.
 
 For `environment` the result names the `module` (or `executable`), the
-`interpreter` and, when `ozagia.core.environments.who_has` exists (W20),
-the interpreters that have it (`available_in`).
+`interpreter` and, with a `root` and W20's
+`ozagia.core.environments.module_environment`, the interpreters that have
+it (`available_in`) and the manifests that declare it (`declared_in`, `[]`
+when none does). W20 memoizes that answer per root and module and follows
+its trust rule: project-shipped interpreters are read statically unless
+the user trusts them, so a captured pytest never runs one.
 
 First-party versus third-party: a module is first-party when its top-level
 name is in `first_party` (callers pass the project's top-level module
@@ -275,27 +279,76 @@ def _names_from_output(lines: list[str]) -> set[str]:
     return out
 
 
+def _env_module() -> Any:
+    try:
+        return importlib.import_module("ozagia.core.environments")
+    except Exception:  # noqa: BLE001 - W20 absent: no detail
+        return None
+
+
+def _paths(items: Any) -> list[str]:
+    """Interpreter paths from W20's items (`{"interpreter", "version"}`;
+    `path` and plain strings accepted too), at most `WHO_HAS_MAX`."""
+    out: list[str] = []
+    for item in items or []:
+        if isinstance(item, str):
+            path = item
+        elif isinstance(item, dict):
+            path = item.get("interpreter") or item.get("path")
+        else:
+            path = None
+        if isinstance(path, str) and path and path not in out:
+            out.append(path)
+    return out[:WHO_HAS_MAX]
+
+
 def who_has(root: str | Path | None, module: str) -> list[str] | None:
     """The interpreters that can import `module`, from W20's
-    `ozagia.core.environments.who_has(root, module)` when that module
-    exists; None when it does not or fails. Items may be paths or dicts
-    with a `path`; at most `WHO_HAS_MAX` are kept."""
-    try:
-        env = importlib.import_module("ozagia.core.environments")
-        fn = getattr(env, "who_has")
-    except Exception:  # noqa: BLE001 - W20 absent: no detail
+    `ozagia.core.environments.who_has(root, module)` (items
+    `{"interpreter", "version", "probe"}`) when that module exists; None
+    when it does not or fails. At most `WHO_HAS_MAX` paths are kept."""
+    env = _env_module()
+    fn = getattr(env, "who_has", None) if env is not None else None
+    if fn is None:
         return None
     try:
         got = fn(root, module)
     except Exception:  # noqa: BLE001 - an optional detail
         return None
-    out: list[str] = []
-    for item in got or []:
-        path = item if isinstance(item, str) else (
-            item.get("path") if isinstance(item, dict) else None)
-        if isinstance(path, str) and path and path not in out:
-            out.append(path)
-    return out[:WHO_HAS_MAX]
+    return _paths(got)
+
+
+def module_environment(root: str | Path | None, module: str, *,
+                       cache_mode: str = "rw"
+                       ) -> tuple[list[str] | None, list[dict[str, Any]] | None]:
+    """(available_in, declared_in) for a missing module: the interpreters
+    that have it and the manifests that declare it (`[]`: none does), from
+    W20's `environments.module_environment` (memoized there, trust
+    respected: untrusted project interpreters are read, not run); with only
+    a `who_has`, declared_in is None; (None, None) without W20 or when it
+    fails. `cache_mode` is W20's probe cache mode (`read` writes nothing
+    under the root's state dir)."""
+    env = _env_module()
+    if env is None:
+        return None, None
+    fn = getattr(env, "module_environment", None)
+    if fn is None:
+        return who_has(root, module), None
+    try:
+        got = fn(root, module, cache_mode=cache_mode)
+    except Exception:  # noqa: BLE001 - an optional detail
+        return None, None
+    if not isinstance(got, dict):
+        return None, None
+    declared = got.get("declared_in")
+    if isinstance(declared, list):
+        declared = [{"file": str(d.get("file")), "optional": bool(d.get("optional")),
+                     "group": d.get("group")}
+                    for d in declared if isinstance(d, dict) and d.get("file")
+                    ][:WHO_HAS_MAX]
+    else:
+        declared = None
+    return _paths(got.get("available_in")), declared
 
 
 def _runner(command: Any) -> str | None:
@@ -656,12 +709,15 @@ def classify(returncode: int | None, timed_out: bool, stdout: str | None,
              stderr: str | None, *, command: Any = None,
              first_party: Iterable[str] | None = None,
              interpreter: str | None = None,
-             root: str | Path | None = None) -> dict[str, Any]:
+             root: str | Path | None = None,
+             env_cache: str = "rw") -> dict[str, Any]:
     """The failure class of one command result (see the module doc for the
     parsing, the rules and their order). `command`: the command line
     (string or argv); `first_party`: the project's top-level module names;
     `interpreter`: the Python that ran it; `root`: the project root (its
-    working directory; also where first-party names and `who_has` look)."""
+    working directory; also where first-party names and `who_has` look);
+    `env_cache`: the probe cache mode for the environment detail (`read`
+    leaves the root's state dir alone)."""
     text = bounded(stdout) + "\n" + bounded(stderr)
     lines = [x.rstrip() for x in text.splitlines()]
     rc = returncode if isinstance(returncode, int) and not isinstance(
@@ -737,7 +793,7 @@ def classify(returncode: int | None, timed_out: bool, stdout: str | None,
     if not started:
         if p.no_pytest:
             return _environment("pytest", [p.no_pytest, exit_ev], interpreter, root,
-                                "pytest is not installed")
+                                "pytest is not installed", env_cache=env_cache)
         if p.arg_error:
             msg = _ARG_ERROR.match(p.arg_error).group(1)  # type: ignore[union-attr]
             m = _UNRECOGNIZED.match(msg)
@@ -761,7 +817,8 @@ def classify(returncode: int | None, timed_out: bool, stdout: str | None,
         raw = _attach(p.summary, p.blocks, keep_unmatched=True)
     items = [_classify_item(i, fp) for i in raw]
     if items:
-        return _decide(items, p, head, rc, exit_ev, interpreter, root, fp_source)
+        return _decide(items, p, head, rc, exit_ev, interpreter, root, fp_source,
+                       env_cache=env_cache)
 
     # 6. no items
     for node, s in p.no_collectors:
@@ -794,7 +851,8 @@ def classify(returncode: int | None, timed_out: bool, stdout: str | None,
 
 def _decide(items: list[dict[str, Any]], p: _Parsed, head: str | None,
             rc: int | None, exit_ev: str, interpreter: str | None,
-            root: str | Path | None, fp_source: str) -> dict[str, Any]:
+            root: str | Path | None, fp_source: str, *,
+            env_cache: str = "rw") -> dict[str, Any]:
     """The run's class from its classified failing items (rule 5)."""
     public = _public_items(items)
     env = [i for i in items if i["class"] == "environment"]
@@ -805,7 +863,8 @@ def _decide(items: list[dict[str, Any]], p: _Parsed, head: str | None,
         top = module.split(".")[0] if module else None
         return _environment(top, [*first["evidence"], exit_ev], interpreter, root,
                             first["detail"], full=module,
-                            executable=first.get("executable"), items=public)
+                            executable=first.get("executable"), items=public,
+                            env_cache=env_cache)
     also = ""
     if env:
         mods = sorted({str(i.get("module") or i.get("executable") or "?")
@@ -855,21 +914,28 @@ def _count(total: int | None, rest: list[dict[str, Any]], env: list[dict[str, An
 def _environment(module: str | None, evidence: list[str], interpreter: str | None,
                  root: str | Path | None, detail: str, *,
                  full: str | None = None, executable: str | None = None,
-                 items: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+                 items: list[dict[str, Any]] | None = None,
+                 env_cache: str = "rw") -> dict[str, Any]:
     if module is not None and not _MODULE_NAME.fullmatch(module):
         module = None
-    available = who_has(root, module) if module and root is not None else None
+    available, declared = (module_environment(root, module, cache_mode=env_cache)
+                           if module and root is not None else (None, None))
     if available is not None and interpreter:
-        available = [p for p in available if p != interpreter]
+        here = os.path.abspath(interpreter)
+        available = [p for p in available if os.path.abspath(p) != here]
     text = detail
     if interpreter:
         text += f" under {interpreter}"
     if available:
         text += "; available in " + ", ".join(available)
+    if declared is not None:
+        text += ("; declared in " + ", ".join(
+            d["file"] + (" (optional)" if d["optional"] else "") for d in declared)
+            if declared else "; declared in no manifest")
     return _result("environment", evidence, text, module=module,
                    module_path=full if full and full != module else None,
                    executable=executable, interpreter=interpreter,
-                   available_in=available, items=items)
+                   available_in=available, declared_in=declared, items=items)
 
 
 def head_note(result: dict[str, Any]) -> str | None:
@@ -885,5 +951,6 @@ def head_note(result: dict[str, Any]) -> str | None:
 
 
 __all__ = ["CLASSES", "NOT_EVIDENCE", "bounded", "classify", "daemon_head_index",
+           "module_environment",
            "first_party_names",
            "head_note", "who_has"]

@@ -168,9 +168,14 @@ first-party is third-party; a stdlib module the interpreter lacks counts
 as third-party too.
 
 For `environment`, the result names the `module`, the `interpreter` and,
-when `ozagia.core.environments.who_has(root, module)` (W20) is importable,
-the interpreters that have the module (`available_in`, the one that ran
-excluded). Without W20, or when it raises, that detail is left out.
+with a root, from `ozagia.core.environments.module_environment(root,
+module)` (W20), the interpreters that have the module (`available_in`, the
+one that ran excluded) and the manifests that declare it (`declared_in`,
+`[]` when none does; the detail says `declared in no manifest`). W20
+memoizes the answer per root and module and keeps its trust rule, so the
+daemon reads untrusted project venvs statically and probes once per module,
+not per captured run. Without W20, or when it raises, that detail is left
+out; a W20 with only `who_has` gives `available_in` alone.
 
 A captured pytest that did not pass gets a line right after its head, and
 when the run is not `environment` as a whole, a `failure item` line for

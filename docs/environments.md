@@ -185,8 +185,18 @@ complete interpreter, or null.
 
 `who_has(root, module)` returns `[{"interpreter", "version", "probe"}]` for the
 candidates that can import the module's top-level name, in candidate order.
-The failure classifier calls it to say which interpreter has a module a
-check could not import.
+
+`module_environment(root, module)` is what the failure classifier
+(`ozagia.core.failures`, W21) calls for an `environment` failure: one
+discovery and probe pass gives `available_in` (`who_has`'s items) and
+`declared_in` (the manifest entries that declare the module, `[{"file",
+"optional", "group"}]`, `[]` when none does, through the declared
+dependencies below and the probes' distribution names), with `trusted`.
+Trust is the user's (`trust_project_python`) unless the caller passes it:
+an untrusted project venv is read statically, never run. Answers are
+memoized in-process for `MODULE_ENV_TTL_S` (300 s) per root, module, trust
+and cache mode, so the daemon, which classifies every captured pytest that
+did not pass, discovers once per module and not per run.
 
 ## Declared dependencies
 

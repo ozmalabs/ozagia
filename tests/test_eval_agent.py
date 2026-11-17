@@ -1397,6 +1397,17 @@ def test_default_check_python_is_the_env_that_has_the_imports(tmp_path, monkeypa
     assert "misses the fewest: zz_nowhere_w20" in chosen["reason"]
 
 
+def test_default_check_python_writes_nothing_into_the_repo(tmp_path, monkeypatch):
+    from ozagia.core import environments as EN
+    from ozagia.config import state_dir
+    repo, _base = _repo(tmp_path)
+    monkeypatch.setattr(EN, "_lock_candidates", lambda *a, **k: [])
+    EN.clear_memo()
+    chosen = ae.default_check_python(repo, [_task("s", BREAK_SIGN)])
+    assert chosen["python"]
+    assert not (state_dir(repo) / EN.CACHE_DIR).exists()
+
+
 def test_runs_record_the_check_python(fixture, monkeypatch):
     explicit = run_eval(fixture["repo"], [fixture["sign"]], ["baseline"], NoopDriver(),
                         fixture["base"], tasks_dir=fixture["tdir"], python=_python(),
@@ -1533,7 +1544,7 @@ def test_check_classes_and_invalid_runs_end_to_end(tmp_path, monkeypatch):
     assert report["per_task"]["add-env"]["baseline"] == {
         "outcomes": [None], "successes": 0, "repeats": 0, "invalid": 1}
     # Not validated: the probe found the module missing outside the worktree.
-    assert bad["validity_basis"].startswith("validation skipped; w21_absent_mod "
+    assert bad["validity_basis"].startswith("no validation, import probe: w21_absent_mod "
                                             "does not import under ")
     md = render_markdown(report)
     assert "## Invalid runs" in md
@@ -1704,7 +1715,7 @@ def test_agent_caused_environment_failure_counts_after_validation(tmp_path, monk
                       run_root=tmp_path / "runs-none", validation=None)
     assert report["runs"][0]["valid"] is False
     assert report["validated_tasks"] == [] and report["validated"] is False
-    assert "validation skipped" in report["runs"][0]["validity_basis"]
+    assert "no validation, import probe" in report["runs"][0]["validity_basis"]
     # One made with another interpreter, base or task is refused, not
     # silently ignored.
     other_task = {**task, "check": {**task["check"], "timeout_s": 7}}

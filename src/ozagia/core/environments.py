@@ -96,6 +96,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import warnings
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterable, Mapping, Sequence
@@ -592,6 +593,7 @@ _MEMO: dict[str, dict[str, Any]] = {}
 
 def clear_memo() -> None:
     _MEMO.clear()
+    _MODULE_ENV_MEMO.clear()
 
 
 def probe(python: str, *, cache: ProbeCache | None = None,
@@ -2044,6 +2046,61 @@ def who_has(root: str | Path, module: str, *, cache_mode: str = "rw",
     return [{"interpreter": item["path"], "version": item["probe"]["version"],
              "probe": probe_kind(item)}
             for item in probed if provides(item["probe"], module)]
+
+
+# In-process memo of `module_environment`: (root, top, trusted, cache_mode)
+# -> (monotonic time, answer). Discovery runs git and lock tools and reads
+# manifests, so a daemon that classifies every captured pytest asks at most
+# once per MODULE_ENV_TTL_S for the same module.
+MODULE_ENV_TTL_S = 300.0
+MODULE_ENV_MAX = 64
+_MODULE_ENV_MEMO: dict[tuple[str, str, bool, str], tuple[float, dict[str, Any]]] = {}
+
+
+def module_environment(root: str | Path, module: str, *, cache_mode: str = "rw",
+                       timeout: float = PROBE_TIMEOUT_S,
+                       candidates: Sequence[Mapping[str, Any]] | None = None,
+                       runner: Callable[..., dict[str, Any]] | None = None,
+                       trust: bool | None = None) -> dict[str, Any]:
+    """Where ``module`` (its top-level name) is available and declared, for
+    an `environment` failure (W21 calls this): {"module", "available_in":
+    ``who_has``'s items, "declared_in": [{"file", "optional", "group"}]
+    (the manifests that declare it; [] when none does), "trusted"}.
+
+    Trust follows ``trust_project_python`` unless ``trust`` is given:
+    untrusted project-shipped interpreters are read statically, never run.
+    Answers are memoized in-process for ``MODULE_ENV_TTL_S`` per root,
+    module, trust and cache mode (not with ``candidates`` or ``runner``)."""
+    root = Path(root).resolve()
+    top = str(module).split(".", 1)[0]
+    trusted = _trusted_flag(root, trust)
+    key = (str(root), top, trusted, cache_mode)
+    memo = candidates is None and runner is None and cache_mode != "off"
+    now = time.monotonic()
+    if memo:
+        hit = _MODULE_ENV_MEMO.get(key)
+        if hit is not None and now - hit[0] < MODULE_ENV_TTL_S:
+            return {**hit[1], "cached": True}
+    probed = probe_candidates(root, cache_mode=cache_mode, timeout=timeout,
+                              candidates=candidates, runner=runner, trust=trusted)
+    ok_probes = [item["probe"] for item in probed if item["probe"].get("ok")]
+    available = [{"interpreter": item["path"], "version": item["probe"]["version"],
+                  "probe": probe_kind(item)}
+                 for item in probed if provides(item["probe"], top)]
+    try:
+        declared = declared_dependencies(root)
+    except (OSError, ValueError):
+        declared = None
+    declared_in = None if declared is None else [
+        {k: e[k] for k in ("file", "optional", "group")}
+        for e in declarations(top, declared, ok_probes)]
+    answer = {"module": top, "available_in": available,
+              "declared_in": declared_in, "trusted": trusted}
+    if memo:
+        if len(_MODULE_ENV_MEMO) >= MODULE_ENV_MAX:
+            _MODULE_ENV_MEMO.pop(min(_MODULE_ENV_MEMO, key=lambda k: _MODULE_ENV_MEMO[k][0]))
+        _MODULE_ENV_MEMO[key] = (now, answer)
+    return {**answer, "cached": False}
 
 
 def environments(root: str | Path, *, cache_mode: str = "rw",

@@ -43,7 +43,8 @@ Arms:
 Checks run under `--python`, by default the interpreter
 `ozagia.core.environments.env_for` picks for the check files in `--repo`
 (docs/environments.md). `run` validates the selected tasks first and refuses
-(exit 2) when one fails, unless `--skip-validate`.
+(exit 2) when one fails; `--validation <json>` reuses a matching `validate`
+report instead, and `--skip-validate` runs without one.
 
 Live drivers refuse to run unless both `--live` and the environment variable
 OZAGIA_EVAL_LIVE=1 are set. A live run spends hosted-model tokens and
@@ -390,7 +391,8 @@ def _first_party(root: Path) -> set[str]:
 def failure_fields(result: dict[str, Any], prefix: str = "failure") -> dict[str, Any]:
     """The run-record fields of a classification: `<prefix>_class`,
     `<prefix>_evidence`, `<prefix>_detail` and, when known,
-    `<prefix>_module`."""
+    `<prefix>_module`, `<prefix>_available_in` (interpreters that have it)
+    and `<prefix>_declared_in` (manifests that declare it; [] for none)."""
     out = {f"{prefix}_class": result.get("class"),
            f"{prefix}_evidence": list(result.get("evidence") or []),
            f"{prefix}_detail": result.get("detail")}
@@ -398,6 +400,8 @@ def failure_fields(result: dict[str, Any], prefix: str = "failure") -> dict[str,
         out[f"{prefix}_module"] = result["module"]
     if result.get("available_in"):
         out[f"{prefix}_available_in"] = list(result["available_in"])
+    if result.get("declared_in") is not None:
+        out[f"{prefix}_declared_in"] = list(result["declared_in"])
     if result.get("items"):
         out[f"{prefix}_items"] = list(result["items"])
     return out
@@ -536,7 +540,8 @@ def check_validity(failure: dict[str, Any], *, base_passed: bool = False,
       X from numpy`), and so is a harness failure, unless the interpreter
       itself is gone and lies outside the worktree. The run counts as a
       failure, with its class shown.
-    - Validation skipped: for `environment` with a `module`,
+    - No validation (`--skip-validate`, or a report recorded before
+      validation): for `environment` with a `module`,
       `import_probe(python, module)` decides: importable means the agent
       broke it (a failure), not importable means the environment lacks it
       (invalid). Without a module to probe, or for `harness`, invalid.
@@ -563,15 +568,15 @@ def check_validity(failure: dict[str, Any], *, base_passed: bool = False,
         top = str(module).split(".")[0]
         if got is True:
             return {"valid": True, "invalid_reason": None,
-                    "validity_basis": f"check environment, but {top} imports under "
-                                      f"{python} outside the worktree: counted "
-                                      "against the agent"}
+                    "validity_basis": f"no validation, import probe: {top} imports "
+                                      f"under {python} outside the worktree: "
+                                      "counted against the agent"}
         why = ("does not import" if got is False else "could not be probed")
         return {"valid": False, "invalid_reason": invalid,
-                "validity_basis": f"validation skipped; {top} {why} under {python} "
+                "validity_basis": f"no validation, import probe: {top} {why} under {python} "
                                   "outside the worktree"}
     return {"valid": False, "invalid_reason": invalid,
-            "validity_basis": f"validation skipped; check {cls} with nothing to probe"}
+            "validity_basis": f"no validation; check {cls} with nothing to probe"}
 
 
 def run_check(workdir: Path, check: dict[str, Any], python: str,
@@ -648,6 +653,9 @@ def default_check_python(repo: str | Path, tasks: list[dict[str, Any]],
     files = list(dict.fromkeys(f for t in tasks for f in check_files(t)))
     modules = list(dict.fromkeys(m for t in tasks for m in check_modules(t)))
     env_kwargs.setdefault("trust", True)
+    # The source repo is read, not written: no probe or import cache under
+    # its state dir.
+    env_kwargs.setdefault("cache_mode", "read")
     try:
         doc = EN.env_for(repo, files, extra_modules=modules, **env_kwargs)
     except (EN.EnvError, OSError) as exc:
@@ -2189,8 +2197,11 @@ def aggregate(runs: list[dict[str, Any]], arms: Iterable[str], *,
     `paired_rate` cover only the (task, repeat) cells valid in every arm
     (`paired_cells`), so arms compare over the same runs. The other means
     cover every run. Each row also carries the per-component time means of
-    `timing.summarize_arm` (per_task_s, pay_once_s, amortized_s over
-    `amortize` tasks, default the number of tasks in `runs`)."""
+    `timing.summarize_arm` over the arm's valid runs, the same runs as
+    `success_rate` (per_task_s, pay_once_s, amortized_s over `amortize`
+    tasks, default the number of tasks in `runs`), `timing_invalid_excluded`
+    (the invalid runs left out) and `per_task_all_runs_s` (per-task time
+    over every run)."""
     arms = list(arms)
     cells = paired_cells(runs, arms)
     tasks_n = amortize_n(amortize, runs)
@@ -2226,7 +2237,13 @@ def aggregate(runs: list[dict[str, Any]], arms: Iterable[str], *,
             "localization_rate": round(sum(1 for r in mine if r.get("localized")) / n, 4)
             if n else None,
         })
-        rows[-1].update(timing.summarize_arm(mine, tasks_n, repeat))
+        # Timing covers the same runs as success_rate: the arm's valid runs.
+        # With invalid runs, per-task time over every run is kept beside it.
+        rows[-1].update(timing.summarize_arm(valid, tasks_n, repeat))
+        rows[-1]["timing_invalid_excluded"] = n - len(valid)
+        rows[-1]["per_task_all_runs_s"] = (
+            timing.summarize_arm(mine, tasks_n, repeat)["per_task_s"]
+            if len(valid) < n else rows[-1]["per_task_s"])
         if any("daemon_ok" in r for r in mine):
             rows[-1].update({
                 "mean_captured_calls": _mean((r.get("captured_calls") for r in mine), 1),
@@ -2321,6 +2338,38 @@ def _validation_line(summary: dict[str, Any] | None) -> str:
             f"passed with `{summary.get('check_python')}`")
 
 
+def _interpreter_line(report: dict[str, Any]) -> str:
+    """The check interpreter and why: the report's, else the runs' (an old
+    report re-read by `report`: taken from the check logs)."""
+    if report.get("check_python"):
+        return (f"`{report['check_python']}` "
+                f"({report.get('check_python_reason') or 'no reason recorded'})")
+    seen = sorted({(r.get("check_python"), r.get("check_python_reason"))
+                   for r in report.get("runs") or [] if r.get("check_python")})
+    if not seen:
+        return "not recorded"
+    return "; ".join(f"`{p}` ({why or 'no reason recorded'})" for p, why in seen)
+
+
+def _success_headline(rows: list[dict[str, Any]]) -> list[str]:
+    """Success per arm over its valid runs, the invalid count and the paired
+    rate (the cells valid in every arm)."""
+    if not rows:
+        return []
+    parts = []
+    for r in rows:
+        valid = r.get("valid_runs", r.get("runs"))
+        text = f"{r['arm']} {r.get('successes')}/{valid}"
+        if r.get("invalid_runs"):
+            text += f" ({r['invalid_runs']} invalid)"
+        parts.append(text)
+    line = f"- Success over valid runs: {', '.join(parts)}."
+    if any(r.get("invalid_runs") for r in rows) and len(rows) > 1:
+        line += " Paired rate over the cells valid in every arm: " + ", ".join(
+            f"{r['arm']} {_paired_cell(r)}" for r in rows) + "."
+    return [line]
+
+
 def render_markdown(report: dict[str, Any]) -> str:
     lines = [
         "# Agent end-to-end evaluation",
@@ -2337,8 +2386,10 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"- Arms: {', '.join(report['arms'])}",
         f"- Repeats per task and arm: {report['repeats']}",
         f"- Tasks: {len(report['tasks'])}",
+        "- Check interpreter: " + _interpreter_line(report),
         "- Validated before the run: "
         + _validation_line(report.get("validation")),
+        *_success_headline(report["summary"]),
         *timing.headline(report["summary"]),
         *([f"- Warning: the logs of {len(report['log_mismatches'])} run(s) do not "
            "match their record, so their components are unknown: "
@@ -2625,23 +2676,82 @@ def resolve_log_dir(record: dict[str, Any], logs_root: str | Path | None) -> Pat
     return Path(recorded) if recorded else None
 
 
+def read_check_log(path: Path) -> tuple[str, str, str] | None:
+    """(command, stdout, stderr) of a `run_check` log, None when unreadable."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    head, _, rest = text.partition("\n")
+    if not head.startswith("$ "):
+        return None
+    out, _, err = rest.partition("\n--- stderr ---\n")
+    return head[2:], out, err
+
+
+def reclassify_run(record: dict[str, Any], log_dir: Path | None, *,
+                   validated: Iterable[str] = (),
+                   repo: str | Path | None = None) -> dict[str, Any]:
+    """The W21 fields for a run recorded before failure classes, from its
+    `check.log`: `failure_*`, `valid`, `invalid_reason`, `validity_basis`,
+    the agent's last pytest, and `check_python` (the log's interpreter)
+    when the record has none; `classified_at_report` marks them. {} when
+    the record already has a class, or there is no readable check log.
+    `validated`: the report's validated task ids (none in old reports, so
+    the import probe decides, run now with the logged interpreter). `repo`
+    gives first-party names and the environment detail."""
+    if record.get("failure_class") is not None or log_dir is None:
+        return {}
+    got = read_check_log(Path(log_dir) / "check.log")
+    if got is None:
+        return {}
+    command, out, err = got
+    argv = command.split()
+    interpreter = record.get("check_python") or (argv[0] if argv else None)
+    rc = record.get("check_returncode")
+    first_party = _first_party(Path(repo)) if repo else None
+    # The record keeps no check timeout flag; a timed-out check has no
+    # exit code, which classifies as unknown or harness, not as a pass.
+    failure = F.classify(rc, False, out, err, command=argv,
+                         first_party=first_party, interpreter=interpreter,
+                         root=repo, env_cache="read")
+    fields: dict[str, Any] = {
+        **check_validity(failure, base_passed=record.get("task") in set(validated),
+                         python=interpreter, workdir=None),
+        **failure_fields(failure),
+        "classified_at_report": True}
+    if record.get("agent_test_class") is None:
+        fields.update(agent_test_fields(Path(log_dir), None, first_party))
+    if not record.get("check_python") and interpreter:
+        fields.update(check_python=interpreter,
+                      check_python_reason="not recorded; read from the check log")
+    return fields
+
+
 def rereport(report: dict[str, Any], *, logs_root: str | Path | None = None,
-             amortize: int | None = None) -> dict[str, Any]:
+             amortize: int | None = None,
+             repo: str | Path | None = None) -> dict[str, Any]:
     """`report` with every run's `timing` recomputed from its logs, and the
     summary and per-task tables rebuilt. Other run fields are kept. The
     repeat index cost is not re-measured: it is taken from `prep_repeat_s`
     where a run recorded one. Runs whose logs do not match their record
     (`timing.logs_mismatch`: a reused run root) get no model/tool
-    breakdown and are listed in `log_mismatches`."""
+    breakdown and are listed in `log_mismatches`. Runs recorded before
+    failure classes are classified from their check logs
+    (`reclassify_run`), except those whose logs do not match."""
     runs = report.get("runs")
     if not isinstance(runs, list):
         raise HarnessError("report JSON has no 'runs' list")
     arms = report.get("arms") or sorted({r.get("arm") for r in runs})
     out = dict(report)
+    validated = report.get("validated_tasks") or []
     new_runs = []
     for r in runs:
         r = dict(r)
-        r["timing"] = timing.run_timing(r, resolve_log_dir(r, logs_root))
+        log_dir = resolve_log_dir(r, logs_root)
+        r["timing"] = timing.run_timing(r, log_dir)
+        if not r["timing"].get("log_mismatch"):
+            r.update(reclassify_run(r, log_dir, validated=validated, repo=repo))
         new_runs.append(r)
     n = amortize_n(amortize, new_runs)
     out.pop("warm_index_s", None)
@@ -2672,10 +2782,13 @@ def _cmd_report(args: argparse.Namespace) -> int:
         raise HarnessError(f"cannot read {args.in_json}: {exc}") from exc
     if not isinstance(report, dict):
         raise HarnessError(f"{args.in_json}: expected a report object")
-    out = rereport(report, logs_root=args.logs_root, amortize=args.amortize)
+    out = rereport(report, logs_root=args.logs_root, amortize=args.amortize,
+                   repo=args.repo)
     _write(args.out_json, json.dumps(out, indent=2, sort_keys=True) + "\n")
     _write(args.out_md, render_markdown(out))
-    for line in timing.headline(out["summary"]):
+    print("- Check interpreter: " + _interpreter_line(out))
+    print("- Validated before the run: " + _validation_line(out.get("validation")))
+    for line in _success_headline(out["summary"]) + timing.headline(out["summary"]):
         print(line)
     bad = out["log_mismatches"]
     if bad:
@@ -2765,6 +2878,10 @@ def build_parser() -> argparse.ArgumentParser:
                           "or a logs dir (default: each run's recorded log_dir)")
     rep.add_argument("--amortize", type=int, default=None, metavar="N",
                      help="N of the amortized view (default: the number of tasks)")
+    rep.add_argument("--repo", default=None,
+                     help="the source repo, for first-party names and the "
+                          "environment detail when classifying runs recorded "
+                          "before failure classes (default: none)")
     rep.add_argument("--out-md", default=None)
     rep.add_argument("--out-json", default=None)
     rep.set_defaults(func=_cmd_report)

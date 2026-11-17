@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- Environments, failure classes and timing integrated (W23). The agent
+  eval has one validation: `run`'s preflight by default, a reused `validate
+  --out-json` report with `--validation` (same base, check interpreter and
+  task fingerprints, else exit 2), or none with `--skip-validate`; the same
+  report decides validity (`validated_tasks`), and without one the import
+  probe does. `failures` takes W20's `{interpreter, version}` items for
+  `available_in` and adds `declared_in` (the manifests that declare the
+  missing module, `[]` for none) through
+  `environments.module_environment`, memoized per root and module with the
+  user's trust rule. The report header gives the check interpreter, the
+  validation, success over valid runs with the paired rate, then timing;
+  timing covers valid runs only, like success, with per-task time over every
+  run beside it. `report` classifies runs recorded before failure classes
+  from their check logs (`--repo` for first-party names). The harness no
+  longer writes probe or import caches into `--repo` when it picks the check
+  interpreter.
 - Python environments (`ozagia.core.environments`, docs/environments.md):
   `ozagia env [--for PATH ...] [--json] [--no-cache]` and the MCP tool
   `dev_environment` list a project's interpreters ($VIRTUAL_ENV, root and

@@ -930,6 +930,14 @@ def headline(rows: list[dict[str, Any]]) -> list[str]:
     per_task = ", ".join(f"{r['arm']} {_fmt(r['per_task_s'])} s{against(r, 'per_task_s')}"
                          for r in rows)
     lines = [f"- Per task (agent time, without setup and index): {per_task}."]
+    excluded = [f"{r['timing_invalid_excluded']} {r['arm']}" for r in rows
+                if r.get("timing_invalid_excluded")]
+    if excluded:
+        every = ", ".join(f"{r['arm']} {_fmt(r.get('per_task_all_runs_s'))} s"
+                          for r in rows)
+        lines.append(f"  - Timing, like success, covers valid runs only: left out "
+                     f"{', '.join(excluded)} invalid run(s). Per task over every "
+                     f"run: {every}.")
     timed = [f"{r['timed_out_runs']} of {r['timing_runs']} {r['arm']}"
              for r in rows if r.get("timed_out_runs")]
     if timed:
@@ -994,6 +1002,7 @@ def render_markdown_sections(rows: list[dict[str, Any]]) -> list[str]:
              "revision pays instead (snapshot load + refresh + tag cache). "
              "Pay-once = setup + index cold. Amortized = (index cold + "
              f"{n - 1} × index repeat) / {n} + setup + per task.", "",
+             "Valid runs only, as success (see Invalid runs).", "",
              "| arm | runs | runs with breakdown | timed out | setup | index cold | "
              "index repeat | model | model without hint | tools | in ozagia | "
              "in built-in | daemon overhead | other | timeout tail | hint waited | "

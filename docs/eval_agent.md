@@ -142,10 +142,12 @@ for a named node id), `assertion`, `error` (exceptions that are not
 assertions, other non-zero exits), and `unknown` when nothing is known.
 `failure_items` lists each failing item's class. First-party names are
 the workdir's top-level modules and packages (namespace packages
-included), in the root and its configured import roots. When
-`ozagia.core.environments.who_has` (W20) is importable, an `environment`
-result also lists the interpreters that have the module
-(`failure_available_in`).
+included), in the root and its configured import roots. An
+`environment` result also lists, from W20's
+`ozagia.core.environments.module_environment` for the workdir, the
+interpreters that have the module (`failure_available_in`) and the
+manifests that declare it (`failure_declared_in`, `[]` when none does);
+project interpreters are read statically unless the user trusts them.
 
 A check that fails as `harness` or `environment` makes the run invalid
 only when the agent cannot have caused it (`check_validity`, recorded as
@@ -540,6 +542,16 @@ second task on the same revision. Each run therefore gets a `timing` block
 (`src/ozagia/eval/timing.py`), and the report shows the components per arm, a
 per-task time without setup and index, and an amortized time.
 
+Timing covers the same runs as success: each arm's valid runs. Invalid
+runs (above) are left out of the components table, the per-tool table and
+the timing headline, so a run whose check never measured the agent does not
+move either number. When an arm has invalid runs, the headline also gives
+its per-task time over every run (`per_task_all_runs_s`;
+`timing_invalid_excluded` counts the runs left out), and every run's
+`timing` stays in the JSON. The header list starts with the check
+interpreter and why, whether and how validation ran, and success over valid
+runs with the invalid count and the paired rate, then the timing headline.
+
 | component | what it is | source | kind |
 |---|---|---|---|
 | setup | workdir creation, break patch and arm config (`setup_workdir_s`); plugin install (`plugin_install_s`); daemon start to `ready`, including the snapshot load (`daemon_ready_s`) | harness timers | per session |
@@ -697,7 +709,7 @@ record. Timing never fails a run.
 
 ```
 $PY -m ozagia.eval.agent report --in <run>.json [--logs-root <run root or logs dir>] \
-    [--amortize N] --out-md <out>.md [--out-json <out>.json]
+    [--amortize N] [--repo <source repo>] --out-md <out>.md [--out-json <out>.json]
 ```
 
 `report` recomputes every run's `timing` from the JSON and the logs and
@@ -713,6 +725,16 @@ other (`timing.log_mismatch`, `log_mismatches` in the JSON); `report` prints a
 warning listing these runs and the markdown header names them. The repeat
 index cost cannot be recomputed from logs; it is used only where a run
 recorded `prep_repeat_s`.
+
+A run recorded before failure classes (no `failure_class`) whose logs match
+is classified from its `check.log` (`reclassify_run`, `classified_at_report:
+true`): the exit code is the record's `check_returncode`, the interpreter the
+log's first word (also recorded as `check_python`, "not recorded; read from
+the check log"), and validity follows `check_validity`: such reports have no
+validation, so the import probe decides, run now with that interpreter. The
+agent's last pytest is classified from `driver.stdout.txt` too. `--repo`
+supplies first-party names and the environment detail (read-only: no cache
+is written under the repo). Runs that already have a class keep it.
 
 ## How a live run is approved and launched
 

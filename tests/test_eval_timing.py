@@ -620,3 +620,82 @@ def test_resolve_log_dir_accepts_run_root_or_logs_dir(tmp_path):
     assert ae.resolve_log_dir(rec, tmp_path / "logs") == tmp_path / "logs" / "x-baseline-r1"
     assert ae.resolve_log_dir(rec, tmp_path / "other") is None
     assert ae.resolve_log_dir(rec, None) == Path("/elsewhere/logs/x-baseline-r1")
+
+
+# --------------------------------------------------------------------------- #
+# W23: an old report re-read with classes, validity and timing together
+# --------------------------------------------------------------------------- #
+def _old_report_with_an_environment_task(tmp_path: Path) -> Path:
+    """The fixture run (one passing task, both arms) plus the same runs for
+    a second task whose check failed on a module the check interpreter
+    lacks (a W21 check log), as a report written before W20-W22."""
+    import sys
+    doc = json.loads((FIX / "run.json").read_text(encoding="utf-8"))
+    logs = tmp_path / "root" / "logs"
+    shutil.copytree(FIX / "logs", logs)
+    fail_log = (Path(__file__).resolve().parent / "fixtures" / "failures"
+                / "check_life-step-cache.log").read_text(encoding="utf-8")
+    head, _, rest = fail_log.partition("\n")
+    fail_log = (f"$ {sys.executable} {head.split(' ', 2)[2]}\n"
+                + rest.replace("numpy", "zz_w23_absent"))
+    extra = []
+    for r in doc["runs"]:
+        name = Path(r["log_dir"]).name.replace("admissible-moves-weight", "env-task")
+        shutil.copytree(logs / Path(r["log_dir"]).name, logs / name)
+        (logs / name / "check.log").write_text(fail_log, encoding="utf-8")
+        extra.append({**r, "task": "env-task", "success": False, "check_returncode": 4,
+                      "log_dir": f"/gone/logs/{name}"})
+    doc["runs"] += extra
+    doc["tasks"] = ["admissible-moves-weight", "env-task"]
+    for r in doc["runs"]:
+        for key in ("failure_class", "valid", "check_python", "validated_tasks"):
+            r.pop(key, None)
+    src = tmp_path / "old.json"
+    src.write_text(json.dumps(doc), encoding="utf-8")
+    return src
+
+
+def test_report_classifies_old_runs_and_times_valid_runs_only(tmp_path, capsys):
+    import sys
+    src = _old_report_with_an_environment_task(tmp_path)
+    out_md, out_json = tmp_path / "out.md", tmp_path / "out.json"
+    assert ae.main(["report", "--in", str(src), "--logs-root", str(tmp_path / "root"),
+                    "--out-md", str(out_md), "--out-json", str(out_json)]) == 0
+    printed = capsys.readouterr().out
+    doc = json.loads(out_json.read_text(encoding="utf-8"))
+    env = [r for r in doc["runs"] if r["task"] == "env-task"]
+    ok = [r for r in doc["runs"] if r["task"] != "env-task"]
+    for r in env:
+        assert r["failure_class"] == "environment" and r["valid"] is False
+        assert r["failure_module"] == "zz_w23_absent"
+        # No validation in an old report: the import probe decided, with the
+        # interpreter read from the check log.
+        assert r["validity_basis"].startswith(
+            "no validation, import probe: zz_w23_absent does not import")
+        assert r["check_python"] == sys.executable
+        assert r["classified_at_report"] is True
+    assert all(r["failure_class"] == "passed" and r["valid"] for r in ok)
+    rows = {r["arm"]: r for r in doc["summary"]}
+    for arm, row in rows.items():
+        assert (row["valid_runs"], row["invalid_runs"], row["successes"]) == (1, 1, 1)
+        # Timing covers the valid runs, like success; every run is beside it.
+        assert row["timing_runs"] == 1 and row["timing_invalid_excluded"] == 1
+        mine = [r for r in ok if r["arm"] == arm]
+        assert row["per_task_s"] == mine[0]["timing"]["per_task_s"]
+        assert row["per_task_all_runs_s"] is not None
+    md = out_md.read_text(encoding="utf-8")
+    assert f"- Check interpreter: `{sys.executable}` (not recorded; read from the " \
+           "check log)" in md
+    assert "- Validated before the run: not recorded" in md
+    assert "- Success over valid runs: baseline 1/1 (1 invalid), graph_intent 1/1 " \
+           "(1 invalid). Paired rate" in md
+    assert "Timing, like success, covers valid runs only: left out 1 baseline, " \
+           "1 graph_intent invalid run(s)" in md
+    for section in ("## Time per component", "## Invalid runs", "### Tools (mean per run)",
+                    "## Agent tests and check"):
+        assert section in md
+    assert "Success over valid runs" in printed and "Per task" in printed
+    # Runs that already have a class keep it.
+    again = ae.rereport(doc, logs_root=tmp_path / "root")
+    assert [r["validity_basis"] for r in again["runs"]] == \
+        [r["validity_basis"] for r in doc["runs"]]

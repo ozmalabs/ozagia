@@ -913,3 +913,75 @@ def test_import_cache_by_blob_id(tmp_path: Path) -> None:
     doc = json.loads(path.read_text())
     assert set(doc["blobs"]) == {blobs["b.py"]}
     assert EN.blob_ids(tmp_path / "nogit") == {}
+
+
+# --------------------------------------------------------------------------- #
+# W23: the failure classifier's environment detail, through the real model
+# --------------------------------------------------------------------------- #
+
+
+def _missing_module_log(module: str) -> tuple[str, str]:
+    """A real collection-error check log (W21 fixture) for `module`."""
+    fix = Path(__file__).parent / "fixtures" / "failures" / "check_learner-board-pairs.log"
+    text = fix.read_text(encoding="utf-8").replace("numpy", module)
+    _head, _, rest = text.partition("\n")
+    out, _, err = rest.partition("\n--- stderr ---\n")
+    return out, err
+
+
+def test_failure_classes_use_the_real_environment_model(tmp_path: Path, monkeypatch,
+                                                        no_user_config: Path) -> None:
+    from ozagia.core import failures as F
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _write(repo, "tests/test_learner.py", "import zzfake_numpy\n")
+    _write(repo, "requirements-ml.txt", "fake-numpy\n")
+    _write(repo, "requirements.txt", "requests\n")
+    _git(repo, "init", "-q")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "init")
+    venv_python = make_venv(repo / ".venv", {"fake-numpy": ["zzfake_numpy"]})
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    monkeypatch.delenv(EN.TRUST_ENV, raising=False)
+    monkeypatch.setenv("OZAGIA_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(EN, "_lock_candidates", lambda *a, **k: [])
+    ran: list[str] = []
+    real_run_probe = EN.run_probe
+
+    def spy(python: str, **kw: Any) -> dict[str, Any]:
+        ran.append(os.path.abspath(python))
+        return real_run_probe(python, **kw)
+    monkeypatch.setattr(EN, "run_probe", spy)
+    discovered: list[Path] = []
+    real_discover = EN.discover
+    monkeypatch.setattr(EN, "discover",
+                        lambda root, **kw: discovered.append(root) or real_discover(root, **kw))
+
+    out, err = _missing_module_log("zzfake_numpy")
+    got = F.classify(2, False, out, err, command="python -m pytest tests/test_learner.py",
+                     root=repo, interpreter="/opt/tool/.venv/bin/python")
+    assert got["class"] == "environment" and got["module"] == "zzfake_numpy"
+    # W20's {"interpreter", "version"} items fill available_in: the repo's
+    # .venv has it, read statically (untrusted), never run.
+    assert str(venv_python) in got["available_in"]
+    assert str(venv_python) not in ran
+    assert got["declared_in"] == [{"file": "requirements-ml.txt", "optional": True,
+                                   "group": got["declared_in"][0]["group"]}]
+    assert "declared in requirements-ml.txt (optional)" in got["detail"]
+    assert f"available in {venv_python}" in got["detail"]
+    # The daemon classifies every captured pytest: the answer is memoized.
+    F.classify(2, False, out, err, command="python -m pytest", root=repo)
+    assert len(discovered) == 1
+    # A module no manifest declares and no interpreter has.
+    out2, err2 = _missing_module_log("zz_nowhere_w23")
+    got = F.classify(2, False, out2, err2, command="python -m pytest", root=repo)
+    assert got["declared_in"] == [] and got["available_in"] == []
+    assert got["detail"].endswith("declared in no manifest")
+    # Trusted by the user: the project venv is run (exec probe).
+    EN.clear_memo()
+    monkeypatch.setenv(EN.TRUST_ENV, "1")
+    doc = EN.module_environment(repo, "zzfake_numpy.sub", cache_mode="off")
+    assert doc["trusted"] is True and doc["module"] == "zzfake_numpy"
+    assert {"interpreter": str(venv_python), "version": doc["available_in"][0]["version"],
+            "probe": "exec"} in doc["available_in"]
+    assert str(venv_python) in ran
