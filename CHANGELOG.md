@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Model metadata sources (`ozagia.core.model_sources`, docs/model_sources.md):
+  an explicit source registry and cache for models.dev, LiteLLM, OpenRouter
+  and Epoch AI, with `sources`, `sync` and `import` commands. `sync` refuses
+  the network without `--allow-network`; caches live under
+  `<state>/models/` with SHA-256 metadata and are read by `graph`, `similar`,
+  `match` and `show` by default (`--source`, `--no-sources`). Merge precedence
+  is models.dev, LiteLLM, OpenRouter, Epoch; an explicit model override still
+  wins. Epoch supplies parameter counts only for conservative name matches.
+  The graph accepts the external `profile_source` field. No automatic sync, no
+  credentials and no model calls.
 - W23 fix round. Lock-file tools (`pdm info --python`, `poetry env info
   --path`) run only for a trusted project and never in `read` cache mode;
   `.pdm-python` is read as text and its target judged project-shipped like

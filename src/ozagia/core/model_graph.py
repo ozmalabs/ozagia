@@ -160,13 +160,14 @@ _PROFILE_FIELDS = frozenset({
     "family", "variant", "type", "size_class", "params_total_b",
     "params_active_b", "context", "input_cost", "output_cost",
     "modalities_in", "modalities_out", "capabilities", "tool_formats", "local",
-    "source", "confidence", "notes", "match", "providers",
+    "source", "confidence", "notes", "profile_source", "match", "providers",
 })
 _OVERRIDE_FIELDS = _PROFILE_FIELDS - {"match", "providers"}
 _FAMILY_FIELDS = frozenset({
     "patterns", "type", "size_class", "params_total_b", "params_active_b",
     "context", "input_cost", "output_cost", "modalities_in", "modalities_out",
     "capabilities", "tool_formats", "local", "source", "confidence", "notes",
+    "profile_source",
 })
 _GRAPH_KEYS = frozenset({"models", "families", "tasks", "weights"})
 _TASK_FIELDS = frozenset({
@@ -329,6 +330,9 @@ def _parse_profile_fields(table: Mapping[str, Any], where: str,
     if "notes" in table:
         fields["notes"] = _text(table["notes"], f"{where}.notes",
                                 allow_empty=True)
+    if "profile_source" in table:
+        fields["profile_source"] = _text(
+            table["profile_source"], f"{where}.profile_source")
     return fields
 
 
@@ -357,6 +361,7 @@ class Profile:
     source: str = ""
     confidence: str = "curated"
     notes: str = ""
+    profile_source: str = ""
     providers: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
@@ -380,6 +385,7 @@ class Profile:
             "source": self.source,
             "confidence": self.confidence,
             "notes": self.notes,
+            "profile_source": self.profile_source,
         }
 
 
@@ -804,7 +810,8 @@ def _profile_fields(profile: Profile) -> dict[str, Any]:
         "source": "profile",
         "confidence": profile.confidence,
         "notes": profile.notes,
-        "profile_source": profile.source or f"curated profile: {profile.family}",
+        "profile_source": (profile.profile_source or profile.source
+                           or f"curated profile: {profile.family}"),
     }
 
 

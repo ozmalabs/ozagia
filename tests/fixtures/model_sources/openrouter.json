@@ -1,0 +1,30 @@
+{
+  "data": [
+    {
+      "id": "openai/gpt-5",
+      "canonical_slug": "openai/gpt-5-2025-08-07",
+      "context_length": 400000,
+      "architecture": {
+        "input_modalities": ["text", "image", "file"],
+        "output_modalities": ["text"]
+      },
+      "pricing": {"prompt": "0.00000125", "completion": "0.00001"},
+      "supported_parameters": ["tools", "structured_outputs", "reasoning"],
+      "top_provider": {"max_completion_tokens": 128000},
+      "knowledge_cutoff": "2024-10-01",
+      "created": 1754524800,
+      "expiration_date": "2027-01-01"
+    },
+    {
+      "id": "acme/legacy",
+      "canonical_slug": "acme/legacy-1",
+      "context_length": 8192,
+      "architecture": {
+        "input_modalities": ["text"],
+        "output_modalities": ["text"]
+      },
+      "pricing": {"prompt": "-1", "completion": "0"},
+      "supported_parameters": ["temperature"]
+    }
+  ]
+}

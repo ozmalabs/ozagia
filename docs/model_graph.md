@@ -44,9 +44,9 @@ locality. The graph adds profile metadata:
 | `tool_formats` | `apply_patch`, `replace`, `whole_file`, `library_call`, `cli`, `mcp`, `native_pdf`. |
 | `local`, `remote` | `true`/`false` only when configuration declares locality, else `null`. |
 | `status` | `available` (listed by `opencode models`) or `unknown`. |
-| `source` | `profile`, `override`, `external` or `inferred`. |
+| `source` | `profile`, `override`, `external` or `inferred`; a cached source id (for example `models-dev`) when imported metadata supplied the node. |
 | `confidence` | `curated`, `declared`, `external` or `inferred`. |
-| `profile_source` | The short source note of the matched profile. |
+| `profile_source` | The short source note of the matched profile, or the cached source/provenance note. |
 | `notes` | A short caveat, for example "closed weights; parameter count undisclosed". |
 | `catalog_source` | How the record entered the catalog: `opencode`, `settings`, `config` or `override`. |
 
@@ -134,34 +134,36 @@ external = {
 graph = model_graph.graph(root, external=external)
 ```
 
-Each value accepts the same fields as a `[model_graph.models]` override. A
-field present externally replaces the curated or inferred value; fields it
-omits keep the curated value, or stay `null` when nothing is known. `null` is
-never turned into a guessed number. When external metadata supplies a parameter
-count but no size class, the coarse size class is derived from that count.
-An explicit repository override still wins for every field it sets. Nodes that
-received external fields report `source: "external"` and
-`confidence: "external"` unless the mapping sets those fields itself; an
+Each value accepts the same fields as a `[model_graph.models]` override,
+including `profile_source`. A field present externally replaces the curated or
+inferred value; fields it omits keep the curated value, or stay `null` when
+nothing is known. `null` is never turned into a guessed number. When external
+metadata supplies a parameter count but no size class, the coarse size class is
+derived from that count. An explicit repository override still wins for every
+field it sets. Nodes that received external fields report `source: "external"`
+and `confidence: "external"` unless the mapping sets those fields itself; an
 explicit override reports `source: "override"` and `confidence: "declared"`.
 
-### Data sources (next slice)
+### Cached data sources
 
-A follow-up slice may import cached metadata from these sources. This slice
-only defines the merge seam; it makes no network request, starts no download
-and adds no dependency.
+`ozagia.core.model_sources` implements the explicit cache/import seam for
+models.dev, LiteLLM, OpenRouter and Epoch AI. `graph`, `similar`, `match` and
+`show` load valid cached snapshots by default and pass the merged mapping as
+`external=`. Use `--source SOURCE` to select one or more, or `--no-sources` to
+use curated profiles only. Cached metadata never changes `models.resolve`.
 
-| Source | Licence / shape | Planned contribution |
-| --- | --- | --- |
-| [models.dev](https://models.dev/api.json) (`/api.json`, `models.json`, `catalog.json`) | MIT; OpenCode already consumes it | **Primary** source: family, open weights, release/knowledge dates, modalities, tools/reasoning/structured flags, context/output limits, provider cost, benchmarks. Most closed models still have no parameter count. |
-| [LiteLLM model prices and context](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json) | MIT JSON | Broad fallback map for context, cost, mode and capability flags. |
-| [OpenRouter models](https://openrouter.ai/api/v1/models?output_modalities=all) | Public JSON | Fallback context, architecture modalities, per-token pricing, supported parameters and benchmark fields. No parameter counts. |
-| [Epoch AI models](https://epoch.ai/data/all_ai_models.csv) | CC BY 4.0 CSV | Historical parameter counts and training-compute facts; requires name-to-id mapping. |
-| Hugging Face model API/config | Variable quality | Open-weight architecture and parameter metadata. |
+```bash
+ozagia-models sources --root .
+ozagia-models sync models-dev --allow-network --root .   # explicit opt-in
+ozagia-models import models-dev ./snapshot.json --root . # offline
+ozagia-models graph --source models-dev --root . --json
+```
 
-All sources would be fetched by a separate, explicit, cached importer, then
-passed in as `external=`. They would not run during `graph()`, `match()` or a
-CLI status refresh, and every imported number would keep its source and
-confidence.
+The merge precedence is `models-dev` > `litellm` > `openrouter` > `epoch`, with
+field-level gap filling. Missing, malformed and stale caches are reported in a
+`sources` object and are never fetched while building a graph. See
+[model_sources.md](model_sources.md) for the source table, licences, cache
+metadata, commands, field mapping and limitations.
 
 ## Distance
 
@@ -344,10 +346,10 @@ cost = 0.0
 Supported model fields are `family`, `variant`, `type`, `size_class`,
 `params_total_b`, `params_active_b`, `context`, `input_cost`, `output_cost`,
 `modalities_in`, `modalities_out`, `capabilities`, `tool_formats`, `local`,
-`source`, `confidence` and `notes`. Family declarations use `patterns` plus the
-same metadata fields. Unknown keys are reported in the graph report under
-`unknown_keys` and as warnings; they are not fatal. A known field with an
-invalid type or range is a `ModelGraphError`.
+`source`, `confidence`, `notes` and `profile_source`. Family declarations use
+`patterns` plus the same metadata fields. Unknown keys are reported in the
+graph report under `unknown_keys` and as warnings; they are not fatal. A known
+field with an invalid type or range is a `ModelGraphError`.
 
 ## Tool fit
 
@@ -371,19 +373,35 @@ unsupported), capability coverage and preference match, then ordered by fit.
 ```text
 ozagia-models graph [--root R] [--json] [--max-nodes N] [--max-edges N]
                     [--top-k K] [--threshold F]
+                    [--source SOURCE]... [--no-sources]
 ozagia-models show MODEL [--root R] [--json]
+                   [--source SOURCE]... [--no-sources] [--with-metadata]
 ozagia-models similar MODEL [--limit N] [--root R] [--json]
+                     [--source SOURCE]... [--no-sources]
 ozagia-models match [--task CLASS] [--capability X]... [--tool-format F]...
                     [--local] [--min-context N] [--max-cost N]
                     [--size CLASS] [--type TYPE] [--modality M]...
                     [--limit N] [--root R] [--json]
+                    [--source SOURCE]... [--no-sources]
+ozagia-models sources [--root R] [--json]
+ozagia-models sync SOURCE [--allow-network] [--timeout S] [--max-bytes N]
+                        [--root R] [--json]
+ozagia-models import SOURCE PATH [--root R] [--json]
 ```
 
 Existing `list` and `resolve` commands are unchanged. `show` keeps the
-registry JSON shape and adds a `profile` object; text output adds the graph
-fields. `graph` text output is capped at 40 nodes and 40 edges for readability;
-`--json` contains the bounded graph. `similar` and `match` print compact,
-model-facing lines with ids, family/type/size, status, score and reasons.
+registry JSON shape and adds a `profile` object; `--with-metadata` (or an
+explicit `--source`) also adds the cached `metadata` and a `sources` report.
+`show` uses valid caches by default; `--no-sources` keeps the curated view.
+Text output adds the graph fields and, with metadata, the provenance. `graph`
+text output is capped at 40 nodes and 40 edges for readability; `--json`
+contains the bounded graph and a `sources` object. `similar` and `match` print
+compact, model-facing lines with ids, family/type/size, status, score and
+reasons, followed by a source-cache summary.
+
+`graph`, `similar`, `match` and `show` use valid cached metadata by default
+in the documented precedence order. `--no-sources` disables it. `sync` refuses
+to open a socket without `--allow-network`; `import` is offline.
 
 Exit status is `0` on success and `2` for validation, configuration or IO
 errors, including an unknown model id for `show`/`similar` and an invalid
@@ -397,8 +415,11 @@ errors, including an unknown model id for `show`/`similar` and an invalid
   context and cost also stay `null`. The graph does not infer them from a name.
 - Matching is advisory and does not call `models.resolve`, a classifier or a
   model. Auto-routing remains out of scope.
-- `opencode models` only lists ids. Everything else comes from profiles,
-  explicit overrides or a future richer discovery source.
+- `opencode models` only lists ids. Everything else comes from curated
+  profiles, explicit overrides or an explicitly cached metadata source
+  ([model_sources.md](model_sources.md)). The graph never fetches a cache.
+- Cached metadata can be stale; `sources` reports age and staleness, and
+  `--no-sources` returns to the curated-only view.
 - The graph is bounded by node and edge counts; very large catalogs are
   truncated with a reported count.
 - The toolchain module is not present yet. `tool_fit` deliberately accepts
@@ -407,7 +428,8 @@ errors, including an unknown model id for `show`/`similar` and an invalid
 ## Tests
 
 ```bash
-PYTHONPATH=src python -m pytest -q tests/test_model_graph.py tests/test_models.py
+PYTHONPATH=src python -m pytest -q tests/test_model_graph.py \
+  tests/test_model_sources.py tests/test_models.py
 ruff check src tests
 ```
 
@@ -415,4 +437,5 @@ Tests inject the discovery runner or patch `default_runner`; no test runs the
 real `opencode` CLI, contacts a provider or calls a model. They cover profile
 matching and overrides, missing metadata, distance symmetry/coverage, bounded
 edges and deterministic neighbours, hard filters, task profiles, tool fit,
-unknown/unavailable reporting and CLI JSON/text shapes.
+unknown/unavailable reporting, cache adapters/import/sync and CLI JSON/text
+shapes.

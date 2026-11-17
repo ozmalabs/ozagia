@@ -1,0 +1,7 @@
+Model,Organization,Publication date,Parameters,Training compute (FLOP),Open model weights?,Base model,Hugging Face developer id,Domain,Task
+GPT-5,OpenAI,2025-08-07,1.8e12,3.2e25,No,,openai,language,text generation
+Llama 3.3 70B Instruct,Meta,2024-12-06,70B,6.4e24,Yes,Llama 3.3 70B,meta-llama,language,chat
+Mystery Model,Acme,2024-01-01,2.4T,,Yes,,acme,language,chat
+Ambiguous Model,One,2024-01-01,7B,,Yes,,,language,chat
+Ambiguous Model,Two,2024-01-02,13B,,Yes,,,language,chat
+Bad Parameters,Acme,2024-02-01,unknown,,No,,,language,chat

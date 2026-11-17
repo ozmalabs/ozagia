@@ -397,7 +397,9 @@ own loader; `settings.model_overrides(root)` returns its effective
 holds optional model-profile, family, task-profile and distance-weight
 overrides for the advisory graph in `ozagia.core.model_graph`. Unknown keys are
 reported in the graph report rather than rejected. See
-[model_graph.md](model_graph.md) for the schema and precedence.
+[model_graph.md](model_graph.md) for the schema and precedence. Cached provider
+metadata is a separate explicit layer under the state directory, not a settings
+section; see [model_sources.md](model_sources.md).
 
 ### tasks
 
