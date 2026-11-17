@@ -32,6 +32,8 @@ treesitter = [
     "tree-sitter-go>=0.25",
     "tree-sitter-java>=0.23",
     "tree-sitter-typescript>=0.23",
+    "tree-sitter-kotlin>=1.1",
+    "tree-sitter-swift>=0.7",
 ]
 lsp = ["pyright>=1.1.400"]
 openapi-yaml = ["PyYAML>=6"]

@@ -51,20 +51,32 @@ __all__ = [
 TAGS_SCHEMA_VERSION = 3
 
 # Every grammar package inspected for this registry keeps its upstream tag
-# query at <package>/queries/tags.scm.
+# query at <package>/queries/tags.scm, except tree-sitter-kotlin, whose wheel
+# ships no tags.scm at all. The Kotlin query is bundled inside this package and
+# resolved through ``query_package``.
 _TAGS_QUERY = "queries/tags.scm"
+_BUNDLED_KOTLIN_QUERY = "index/queries/kotlin-tags.scm"
 
 
 def _entry(language: str, module: str, factory: str, *,
-           backend: str = "tree-sitter") -> dict[str, Any]:
-    """One registry value. The four required fields are always present."""
-    return {
+           backend: str = "tree-sitter", tags_query: str = _TAGS_QUERY,
+           query_package: str | None = None) -> dict[str, Any]:
+    """One registry value. The core fields are always present.
+
+    ``tags_query`` is relative to the grammar package by default. When
+    ``query_package`` names an importable package (here ``"ozagia"``), the
+    query is resolved relative to that package instead, for a bundled query.
+    """
+    entry = {
         "language": language,
         "module": module,
-        "tags_query": _TAGS_QUERY,
+        "tags_query": tags_query,
         "factory": factory,
         "backend": backend,
     }
+    if query_package is not None:
+        entry["query_package"] = query_package
+    return entry
 
 
 # suffix -> backend spec. The TypeScript package exposes two factories:
@@ -89,6 +101,11 @@ LANGUAGES: dict[str, dict[str, Any]] = {
     ".cc": _entry("cpp", "tree_sitter_cpp", "language"),
     ".cxx": _entry("cpp", "tree_sitter_cpp", "language"),
     ".hpp": _entry("cpp", "tree_sitter_cpp", "language"),
+    ".kt": _entry("kotlin", "tree_sitter_kotlin", "language",
+                  tags_query=_BUNDLED_KOTLIN_QUERY, query_package="ozagia"),
+    ".kts": _entry("kotlin", "tree_sitter_kotlin", "language",
+                   tags_query=_BUNDLED_KOTLIN_QUERY, query_package="ozagia"),
+    ".swift": _entry("swift", "tree_sitter_swift", "language"),
 }
 
 
@@ -135,10 +152,14 @@ def _query_path(module: Any, query_rel: str) -> Path:
 
 @lru_cache(maxsize=None)
 def _load_tree_sitter_backend(module_name: str, factory_name: str,
-                              query_rel: str) -> _TreeSitterBackend:
+                              query_rel: str,
+                              query_package: str | None = None
+                              ) -> _TreeSitterBackend:
     """Import a grammar, build its Language and compile tags.scm once.
 
-    Cached per (module, factory, query path). Query compilation is the
+    The query comes from the grammar package by default, or from
+    ``query_package`` when a bundled query is registered. Cached per
+    (module, factory, query package, query path). Query compilation is the
     expensive part; Parser objects are cheap and stay per-call so separate
     callers cannot share parser state.
     """
@@ -147,7 +168,9 @@ def _load_tree_sitter_backend(module_name: str, factory_name: str,
     module = importlib.import_module(module_name)
     factory = getattr(module, factory_name)
     language = Language(factory())
-    query_path = _query_path(module, query_rel)
+    query_module = (importlib.import_module(query_package)
+                    if query_package else module)
+    query_path = _query_path(query_module, query_rel)
     text = query_path.read_text(encoding="utf-8")
     query = Query(language, text)
     return _TreeSitterBackend(
@@ -345,7 +368,8 @@ def extract_tags_status(path: str | Path,
         from tree_sitter import Parser, QueryCursor
 
         backend = _load_tree_sitter_backend(
-            entry["module"], entry["factory"], entry["tags_query"])
+            entry["module"], entry["factory"], entry["tags_query"],
+            entry.get("query_package"))
         parser = Parser(backend.language)
         tree = parser.parse(source.encode("utf-8"))
         cursor = QueryCursor(backend.query)
@@ -427,10 +451,11 @@ def _distribution_version(module: str) -> str | None:
     return None
 
 
-def _tags_query_sha(module: str, tags_query: str) -> str | None:
-    """sha256 of the grammar's tags.scm bytes, or None if it cannot be read."""
+def _tags_query_sha(module: str, tags_query: str,
+                    query_package: str | None = None) -> str | None:
+    """sha256 of the grammar or bundled tags.scm bytes, or None if unreadable."""
     try:
-        package = importlib.import_module(module)
+        package = importlib.import_module(query_package or module)
         return hashlib.sha256(
             _query_path(package, tags_query).read_bytes()).hexdigest()
     except Exception:
@@ -446,7 +471,8 @@ def _fingerprint_for_suffix(suffix: str) -> str:
         backend = entry["backend"]
         module = entry["module"]
         query_sha = (None if backend == "python-ast"
-                     else _tags_query_sha(module, entry["tags_query"]))
+                     else _tags_query_sha(module, entry["tags_query"],
+                                          entry.get("query_package")))
         payload = [TAGS_SCHEMA_VERSION, backend, module,
                    _distribution_version(module), query_sha,
                    entry["language"]]
@@ -528,7 +554,8 @@ def backend_status(language: str) -> dict[str, Any]:
         return result
     try:
         backend = _load_tree_sitter_backend(
-            entry["module"], entry["factory"], entry["tags_query"])
+            entry["module"], entry["factory"], entry["tags_query"],
+            entry.get("query_package"))
     except Exception as exc:
         result["error"] = f"{type(exc).__name__}: {exc}"
         return result

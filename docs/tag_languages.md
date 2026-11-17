@@ -4,10 +4,11 @@
 
 `src/ozagia/index/tag_languages.py` is a suffix-keyed registry of tree-sitter tag
 backends. It extends the repo map's Python/Rust/Lua tag extraction to
-TypeScript, TSX, JavaScript, Go, Java, C and C++ without changing the tag-cache
-or reference-graph code. Each backend uses the grammar package's own
-`queries/tags.scm`; Python keeps the stdlib-AST fast path already used by
-`ocelot_repo_map`.
+TypeScript, TSX, JavaScript, Go, Java, C, C++, Kotlin and Swift without
+changing the tag-cache or reference-graph code. Each backend uses the grammar
+package's own `queries/tags.scm` when it ships one; Kotlin uses a small query
+bundled in this package, and Python keeps the stdlib-AST fast path already used
+by `ocelot_repo_map`.
 
 Tags are **syntactic hints** for the repo map. They are not scope-resolved,
 they are not compiler-accurate, and they never edit code.
@@ -38,12 +39,20 @@ LANGUAGES[".rs"] == {
 | `.java` | `java` | `tree_sitter_java` | `language` | tree-sitter | yes | yes |
 | `.c`, `.h` | `c` | `tree_sitter_c` | `language` | tree-sitter | yes | **no** |
 | `.cpp`, `.cc`, `.cxx`, `.hpp` | `cpp` | `tree_sitter_cpp` | `language` | tree-sitter | yes | **no** |
+| `.kt`, `.kts` | `kotlin` | `tree_sitter_kotlin` | `language` | tree-sitter | yes | yes |
+| `.swift` | `swift` | `tree_sitter_swift` | `language` | tree-sitter | yes | **no** |
 
 `tags_query` is package-relative. `backend_status()` resolves it to the
 installed absolute path and reports whether the shipped query actually contains
 `@definition.*` / `@reference.*` captures. `.js`/`.jsx` use the TSX factory
 because that grammar is the JavaScript + JSX superset; plain JavaScript parses
 there too.
+
+Kotlin is the one entry with `query_package: "ozagia"`: the
+`tree-sitter-kotlin` PyPI wheel (1.1.0) ships no `queries/tags.scm`, so the
+registry points at `src/ozagia/index/queries/kotlin-tags.scm`. The loader
+resolves that path through the named package instead of the grammar. Swift
+uses its package query (`tree_sitter_swift/queries/tags.scm`, 0.7.4).
 
 ## API
 
@@ -65,8 +74,8 @@ tags = extract_tags("src/App.tsx", source)
 #   "line": 12}, ...]
 
 available_languages()
-# ["c", "cpp", "go", "java", "javascript", "lua", "python", "rust",
-#  "tsx", "typescript"]  (sorted, installed-only)
+# ["c", "cpp", "go", "java", "javascript", "kotlin", "lua", "python",
+#  "rust", "swift", "tsx", "typescript"]  (sorted, installed-only)
 
 backend_status("c")
 # {
@@ -102,10 +111,10 @@ For tree-sitter backends:
    `name` becomes a tag.
 
 Language objects and compiled queries are cached per
-`(module, factory, query)`; parsers are created per call so callers do not
-share parser state. A grammar import, query compile, or per-file parse failure
-returns `[]` for that file. `backend_status()` carries the reason, so a caller
-can distinguish "no tags in this file" from "backend unavailable".
+`(module, factory, query package, query)`; parsers are created per call so
+callers do not share parser state. A grammar import, query compile, or per-file
+parse failure returns `[]` for that file. `backend_status()` carries the reason,
+so a caller can distinguish "no tags in this file" from "backend unavailable".
 
 Python does not touch tree-sitter: `ast.parse` + `ast.walk` supplies the same
 tags as the repo map. Its AST path remains available even when
@@ -113,8 +122,8 @@ tags as the repo map. Its AST path remains available even when
 
 ## Which shipped `tags.scm` queries worked
 
-All eight installed grammars expose `queries/tags.scm` and the expected
-language factory/factories. The granularity differs:
+Nine of the ten installed grammar packages expose `queries/tags.scm`; the
+Kotlin wheel does not, so ozagia bundles one. The granularity differs:
 
 - **Python** (`tree_sitter_python`) — query exists, but the AST path is used.
   Grammar query covers classes, functions, module-level constants and calls.
@@ -141,10 +150,25 @@ language factory/factories. The granularity differs:
 - **C** — structs/unions, functions, typedefs, enums. **No reference captures.**
 - **C++** — structs/unions, functions (including field/qualified declarators),
   typedefs, enums, classes. **No reference captures.**
+- **Kotlin** — ozagia's bundled query covers `class_declaration` (classes,
+  interfaces, enum classes), `object_declaration`, named `companion_object`,
+  `enum_entry`, `function_declaration`, `property_declaration` and `type_alias`
+  definitions; references are simple calls, navigation calls and `user_type`
+  identifiers. The grammar wheel ships no tags query and its `queries/`
+  directory is absent, so there is no upstream query to defer to.
+- **Swift** — the shipped query covers class/struct/enum/extension
+  declarations (`definition.class` for all of them), protocols
+  (`definition.interface`), methods, `init`/`deinit` and properties. **No
+  reference captures.** It marks the enclosing `class_declaration` as the
+  definition node for method/property patterns, so a class member can be
+  captured twice: once with the whole class range and once with the member
+  range. Names and lines are correct; the duplicate occurrence is preserved,
+  and `qualname` for the wider capture can be misleading. The repo map's
+  symbol list de-duplicates by `(name, line)`.
 
-The C/C++ reference gap is reported directly by `backend_status()`
-(`references: False`). Both gaps are also explicit skips with reasons in the
-test suite rather than hidden.
+The C/C++ and Swift reference gaps are reported directly by
+`backend_status()` (`references: False`). All gaps are explicit skips with
+reasons in the test suite rather than hidden.
 
 ## Integration notes for `ocelot_repo_map.py`
 
@@ -174,16 +198,18 @@ Then:
 2. `_grammar()` and `_tag_query_path()` become unused for extraction. If they
    are kept for diagnostics, route them through `language_for()` and
    `backend_status()` rather than duplicating module/factory knowledge.
-3. `_source_files()` now sees all 15 suffixes through the `LANGUAGES` mapping,
+3. `_source_files()` now sees all 18 suffixes through the `LANGUAGES` mapping,
    provided the relevant files live under its `SOURCE_DIRS`. Extend
-   `SOURCE_DIRS` separately if TypeScript/Go/Java/C/C++ trees live elsewhere.
+   `SOURCE_DIRS` separately if TypeScript/Go/Java/C/C++/Kotlin/Swift trees live
+   elsewhere.
 4. No `CACHE_VERSION` bump is required for existing Python/Rust/Lua entries:
    their tag output is unchanged. New suffixes were simply never indexed
    before; the cache's prune/add logic handles them. Bump the version only if
    you also change existing-language extraction semantics.
 5. `backend_status()` is suitable for a one-line brief/diagnostic (for example
    "tags: python(AST), rust, lua, typescript/tsx/js, go, java, c/cpp
-   (definition-only)") and to explain empty tags for a file.
+   (definition-only), kotlin, swift (definition-only)") and to explain empty
+   tags for a file.
 6. The registry's `extract_tags` swallows per-file failures exactly like the
    repo map. Do not use `available_languages()` as a per-file gate; call
    `extract_tags` directly and keep the empty-list fallback.
@@ -191,8 +217,8 @@ Then:
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest tests/test_tag_languages_migrated.py -q
-# 37 passed, 3 skipped
+PYTHONPATH=$PWD/src .venv/bin/python -m pytest -q tests/test_tag_languages.py
+# 62 passed, 4 skipped (with both new grammars installed)
 ```
 
 Skips are explicit and upstream-driven:
@@ -202,7 +228,12 @@ SKIPPED  javascript: upstream tags.scm declares no definition capture for this
          snippet's declaration form
 SKIPPED  c: upstream tags.scm has no reference captures
 SKIPPED  cpp: upstream tags.scm has no reference captures
+SKIPPED  swift: upstream tags.scm has no reference captures
 ```
+
+A genuinely missing grammar skips the affected language instead of failing the
+registry; with neither Kotlin nor Swift installed, their extraction cases and
+the repo-map integration case skip cleanly.
 
 Covered: the exact suffix table and factory choices; case-insensitive
 `language_for`; sorted/unique/usable `available_languages`; honest unknown
@@ -210,8 +241,12 @@ status; definition and reference extraction for every installed grammar, with
 explicit skips for the upstream capture gaps; capture-class reporting; output
 shape and determinism; exact Python parity with
 `ocelot_repo_map.extract_tags`; syntax-error and unknown-suffix empties; JSX in
-`.js`/`.jsx`/`.tsx`; C-family suffix aliases; and graceful degradation when a
-grammar import fails.
+`.js`/`.jsx`/`.tsx`; C-family suffix aliases; Kotlin bundled-query resolution,
+realistic class/function nesting and `.kts` scripts; Swift
+struct/protocol/function captures; and graceful degradation when a grammar
+import fails. `tests/test_repo_map.py` additionally checks that `.kt` and
+`.swift` files are listed by `_source_files()` and tagged through the cache
+when the grammar is available.
 
 ## Honest limits
 
@@ -219,9 +254,18 @@ grammar import fails.
   edges; aliases, re-exports, dynamic dispatch and overload resolution are
   invisible. LSP/SCIP remains the precise layer.
 - **Upstream query gaps.** TypeScript/JavaScript ordinary declarations and all
-  call expressions are missing from the shipped TypeScript query; C and C++
-  ship definition-only queries. Extending those queries is a follow-up, not a
-  registry change.
+  call expressions are missing from the shipped TypeScript query; C, C++ and
+  Swift ship definition-only queries. Swift also classifies structs, enums and
+  extensions as `definition.class` and repeats class-member captures through
+  its class-scoped patterns. Extending or replacing those queries is a
+  follow-up, not a registry change.
+- **Kotlin bundled query.** It is deliberately small: it does not capture
+  constructors, lambda parameters, annotations, package/import names or
+  type-parameter declarations, and a qualified call contributes every
+  identifier in its receiver chain (so `users.map` yields references to
+  `users` and `map`). Because no upstream query exists, future grammar releases
+  may rename nodes; the query is compiled at load time, so a mismatch surfaces
+  as a reported backend error rather than silent wrong tags.
 - **File-level graph.** Tags feed the existing file reference graph; there is
   no symbol-level call graph.
 - **Suffix-based language choice.** `.h` is treated as C, `.hpp`/`.cc`/`.cxx`
@@ -242,8 +286,10 @@ grammar import fails.
 
 - `src/ozagia/index/tag_languages.py` — registry, lazy backend loader, tag
   extraction, availability/status diagnostics.
-- `tests/test_tag_languages_migrated.py` — per-grammar and registry tests.
-- `docs/features/TAG_LANGUAGES.md` — this document.
+- `src/ozagia/index/queries/kotlin-tags.scm` — bundled Kotlin tags query (the
+  grammar wheel ships none).
+- `tests/test_tag_languages.py` — per-grammar and registry tests.
+- `docs/tag_languages.md` — this document.
 
 ## Source
 

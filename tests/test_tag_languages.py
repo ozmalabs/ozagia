@@ -32,6 +32,7 @@ EXPECTED_SUFFIXES = {
     ".ts", ".tsx", ".js", ".jsx",
     ".go", ".java",
     ".c", ".h", ".cpp", ".cc", ".cxx", ".hpp",
+    ".kt", ".kts", ".swift",
 }
 
 EXPECTED_LANGUAGE = {
@@ -50,6 +51,9 @@ EXPECTED_LANGUAGE = {
     ".cc": "cpp",
     ".cxx": "cpp",
     ".hpp": "cpp",
+    ".kt": "kotlin",
+    ".kts": "kotlin",
+    ".swift": "swift",
 }
 
 # label, suffix, snippet, expected definition + detail, expected reference +
@@ -162,6 +166,41 @@ CASES = [
         "reference": None,
         "reference_detail": None,
     },
+    {
+        "label": "kotlin",
+        "suffix": ".kt",
+        "source": ("package demo\n"
+                   "\n"
+                   "class GreetingService(private val prefix: String) {\n"
+                   "    fun run(): String {\n"
+                   "        return helper(prefix)\n"
+                   "    }\n"
+                   "}\n"),
+        "definition": "GreetingService",
+        "definition_detail": "definition.class",
+        "reference": "helper",
+        "reference_detail": "reference.call",
+    },
+    {
+        "label": "swift",
+        "suffix": ".swift",
+        "source": ("protocol Greeter {\n"
+                   "    func greet(name: String) -> String\n"
+                   "}\n"
+                   "\n"
+                   "struct User {\n"
+                   "    let id: Int\n"
+                   "}\n"
+                   "\n"
+                   "func makeGreeting(_ name: String) -> String {\n"
+                   "    return name\n"
+                   "}\n"),
+        "definition": "User",
+        "definition_detail": "definition.class",
+        # tree_sitter_swift 0.7.4 tags.scm is definition-only.
+        "reference": None,
+        "reference_detail": None,
+    },
 ]
 
 CASE_IDS = [case["label"] for case in CASES]
@@ -191,9 +230,15 @@ def test_extension_registry_mapping() -> None:
         entry = LANGUAGES[suffix]
         assert entry["language"] == label
         assert entry["module"].startswith("tree_sitter_")
-        assert entry["tags_query"] == "queries/tags.scm"
         assert entry["factory"] in factories
         assert entry["backend"] in backends
+        if suffix in (".kt", ".kts"):
+            # tree-sitter-kotlin ships no tags.scm; ozagia bundles one.
+            assert entry["tags_query"] == "index/queries/kotlin-tags.scm"
+            assert entry["query_package"] == "ozagia"
+        else:
+            assert entry["tags_query"] == "queries/tags.scm"
+            assert "query_package" not in entry
     assert LANGUAGES[".py"]["backend"] == "python-ast"
     assert LANGUAGES[".rs"]["backend"] == "tree-sitter"
     # The TypeScript package exposes two language functions; TSX/JSX must use
@@ -207,6 +252,11 @@ def test_extension_registry_mapping() -> None:
     assert {LANGUAGES[s]["module"] for s in (".c", ".h")} == {"tree_sitter_c"}
     assert {LANGUAGES[s]["module"]
             for s in (".cpp", ".cc", ".cxx", ".hpp")} == {"tree_sitter_cpp"}
+    assert {LANGUAGES[s]["module"] for s in (".kt", ".kts")
+            } == {"tree_sitter_kotlin"}
+    assert LANGUAGES[".swift"]["module"] == "tree_sitter_swift"
+    assert LANGUAGES[".kt"]["factory"] == "language"
+    assert LANGUAGES[".swift"]["factory"] == "language"
 
 
 def test_language_for_is_suffix_based_and_case_insensitive() -> None:
@@ -214,6 +264,9 @@ def test_language_for_is_suffix_based_and_case_insensitive() -> None:
     assert language_for(Path("a.tsx"))["language"] == "tsx"
     assert language_for("header.h")["language"] == "c"
     assert language_for("header.hpp")["language"] == "cpp"
+    assert language_for("Main.KT")["language"] == "kotlin"
+    assert language_for("build.gradle.kts")["language"] == "kotlin"
+    assert language_for("App.SWIFT")["language"] == "swift"
     assert language_for("Makefile") is None
     assert language_for("notes.txt") is None
 
@@ -249,6 +302,8 @@ def test_backend_status_unknown_language_is_honest() -> None:
     ("java", True, True),
     ("c", True, False),
     ("cpp", True, False),
+    ("kotlin", True, True),
+    ("swift", True, False),
 ])
 def test_backend_status_reports_capture_classes(
         label: str, definitions: bool, references: bool) -> None:
@@ -259,7 +314,7 @@ def test_backend_status_reports_capture_classes(
     if status["tags_query"] is not None:
         query = Path(status["tags_query"])
         assert query.is_file()
-        assert query.name == "tags.scm"
+        assert query.name.endswith("tags.scm")
 
 
 @pytest.mark.parametrize("case", CASES, ids=CASE_IDS)
@@ -352,6 +407,127 @@ def test_c_family_suffix_aliases_extract_definitions() -> None:
             "x" + suffix, "class Gamma { public: int v; };\n"))
 
 
+def test_kotlin_bundled_query_is_resolved_from_the_ozagia_package() -> None:
+    import importlib.util
+
+    status = _skip_if_unavailable("kotlin")
+    expected = (Path(tag_languages.__file__).resolve().parent
+                / "queries" / "kotlin-tags.scm")
+    assert Path(status["tags_query"]) == expected
+    assert expected.is_file()
+    # The grammar package itself does not ship a tags query (1.1.0).
+    spec = importlib.util.find_spec("tree_sitter_kotlin")
+    assert spec is not None and spec.origin
+    assert not (Path(spec.origin).resolve().parent
+                / "queries" / "tags.scm").is_file()
+
+
+KOTLIN_FIXTURE = (
+    "package demo.app\n"
+    "\n"
+    "interface Greeter {\n"
+    "    fun greet(name: String): String\n"
+    "}\n"
+    "\n"
+    "class GreetingService(private val prefix: String) : Greeter {\n"
+    "    private val marker = prefix\n"
+    "\n"
+    "    override fun greet(name: String): String {\n"
+    "        return buildString(name)\n"
+    "    }\n"
+    "}\n"
+    "\n"
+    "object Registry {\n"
+    "    val default: Greeter = GreetingService(\"hi\")\n"
+    "}\n"
+    "\n"
+    "fun greetAll(users: List<User>): List<String> {\n"
+    "    return users.map { Registry.default.greet(it.name) }\n"
+    "}\n"
+)
+
+
+def test_kotlin_class_function_fixture_tags_and_nesting() -> None:
+    _skip_if_unavailable("kotlin")
+    tags = extract_tags("Greeting.kt", KOTLIN_FIXTURE)
+    defs = {(tag["name"], tag["detail"]) for tag in tags if tag["kind"] == "def"}
+    assert {
+        ("Greeter", "definition.class"),
+        ("greet", "definition.function"),
+        ("GreetingService", "definition.class"),
+        ("marker", "definition.property"),
+        ("Registry", "definition.class"),
+        ("default", "definition.property"),
+        ("greetAll", "definition.function"),
+    } <= defs
+    nested = [tag for tag in tags if tag["kind"] == "def"
+              and tag["name"] == "greet"
+              and tag["detail"] == "definition.function"]
+    assert any(tag["qualname"] == "GreetingService.greet" for tag in nested)
+    refs = {(tag["name"], tag["detail"]) for tag in tags if tag["kind"] == "ref"}
+    assert ("buildString", "reference.call") in refs
+    assert ("Greeter", "reference.type") in refs
+
+
+def test_kotlin_script_suffix_extracts_top_level_declarations() -> None:
+    _skip_if_unavailable("kotlin")
+    tags = extract_tags(
+        "build.gradle.kts",
+        'val name = "demo"\n'
+        "println(helper(name))\n")
+    assert any(tag["kind"] == "def" and tag["name"] == "name"
+               and tag["detail"] == "definition.property" for tag in tags)
+    refs = {tag["name"] for tag in tags if tag["kind"] == "ref"}
+    assert {"println", "helper"} <= refs
+
+
+SWIFT_FIXTURE = (
+    "import Foundation\n"
+    "\n"
+    "protocol Greeter {\n"
+    "    func greet(name: String) -> String\n"
+    "}\n"
+    "\n"
+    "struct User: Equatable {\n"
+    "    let id: Int\n"
+    "    let name: String\n"
+    "}\n"
+    "\n"
+    "final class GreetingService: Greeter {\n"
+    "    private let prefix: String\n"
+    "    init(prefix: String) { self.prefix = prefix }\n"
+    "    func greet(name: String) -> String {\n"
+    "        return makeGreeting(name)\n"
+    "    }\n"
+    "}\n"
+    "\n"
+    "func makeGreeting(_ name: String) -> String {\n"
+    "    return \"hi \" + name\n"
+    "}\n"
+)
+
+
+def test_swift_struct_protocol_function_fixture_tags() -> None:
+    status = _skip_if_unavailable("swift")
+    tags = extract_tags("App.swift", SWIFT_FIXTURE)
+    defs = {(tag["name"], tag["detail"]) for tag in tags if tag["kind"] == "def"}
+    assert {
+        ("Greeter", "definition.interface"),
+        ("greet", "definition.method"),
+        ("User", "definition.class"),
+        ("id", "definition.property"),
+        ("name", "definition.property"),
+        ("GreetingService", "definition.class"),
+        ("prefix", "definition.property"),
+        ("init", "definition.method"),
+        ("makeGreeting", "definition.function"),
+    } <= defs
+    assert all(tag["line"] >= 1 for tag in tags)
+    # The shipped query has no reference captures (reported, not hidden).
+    assert status["references"] is False
+    assert [tag for tag in tags if tag["kind"] == "ref"] == []
+
+
 def test_missing_backend_degrades_honestly(monkeypatch) -> None:
     def unavailable(*_args, **_kwargs):
         raise ImportError("grammar not installed")
@@ -365,6 +541,23 @@ def test_missing_backend_degrades_honestly(monkeypatch) -> None:
     assert "rust" not in available_languages()
     # Python's AST path does not need a tree-sitter grammar.
     assert "python" in available_languages()
+
+
+def test_missing_kotlin_grammar_degrades_even_with_bundled_query(
+        monkeypatch) -> None:
+    def unavailable(*_args, **_kwargs):
+        raise ImportError("tree-sitter-kotlin not installed")
+
+    monkeypatch.setattr(tag_languages, "_load_tree_sitter_backend",
+                        unavailable)
+    tags, error = tag_languages.extract_tags_status(
+        "x.kt", "class Alpha\n")
+    assert tags == []
+    assert error == "ImportError: tree-sitter-kotlin not installed"
+    status = backend_status("kotlin")
+    assert status["available"] is False
+    assert status["tags_query"] is None
+    assert status["suffixes"] == [".kt", ".kts"]
 
 
 def test_extract_tags_status_reports_backend_error(monkeypatch) -> None:

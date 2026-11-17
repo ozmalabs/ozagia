@@ -334,11 +334,18 @@ def test_registry_and_language_detection() -> None:
     assert LANGUAGE_SERVERS["c"][0].name == "clangd"
     assert LANGUAGE_SERVERS["cpp"][0].name == "clangd"
     assert LANGUAGE_SERVERS["typescript"][0].name == "typescript-language-server"
+    assert LANGUAGE_SERVERS["kotlin"][0].name == "kotlin-language-server"
+    assert LANGUAGE_SERVERS["kotlin"][0].args == ()
+    assert LANGUAGE_SERVERS["swift"][0].name == "sourcekit-lsp"
+    assert LANGUAGE_SERVERS["swift"][0].args == ()
 
     assert detect_language("x.py") == "python"
     assert detect_language("x.rs") == "rust"
     assert detect_language("x.cpp") == "cpp"
     assert detect_language("x.tsx") == "typescript"
+    assert detect_language("x.kt") == "kotlin"
+    assert detect_language("x.kts") == "kotlin"
+    assert detect_language("x.swift") == "swift"
     assert detect_language("x.zzz") is None
 
     python = server_candidates("python", ROOT)
@@ -349,10 +356,45 @@ def test_registry_and_language_detection() -> None:
         assert python[0]["available"] is True
         assert Path(python[0]["path"]).name == "pyright-langserver"
 
+    # Aliases and suffixes both select the same ordered candidate list.
+    for selector in ("kotlin", "kt", "kts"):
+        assert [c["name"] for c in server_candidates(selector, ROOT)] == [
+            "kotlin-language-server"]
+    assert [c["name"] for c in server_candidates("swift", ROOT)] == [
+        "sourcekit-lsp"]
+
     snapshot = available_servers(ROOT)
     assert snapshot["ok"] is True
-    assert {"python", "rust", "c", "cpp", "typescript"} <= set(
-        snapshot["languages"])
+    assert {"python", "rust", "c", "cpp", "typescript",
+            "kotlin", "swift"} <= set(snapshot["languages"])
+
+
+def test_kotlin_and_swift_did_open_language_ids(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    _write_fixture(root)
+    (root / "Sample.kt").write_text("class Sample\n", encoding="utf-8")
+    (root / "App.swift").write_text("struct App {}\n", encoding="utf-8")
+    server = tmp_path / "fake_lsp_server.py"
+    server.write_text(FAKE_SERVER, encoding="utf-8")
+    log = tmp_path / "languages.log"
+    command = [sys.executable, str(server)]
+    for language, rel in (("kotlin", "Sample.kt"), ("kt", "Sample.kt"),
+                          ("swift", "App.swift")):
+        client = LSPClient(
+            root, language, command=command, timeout=5.0,
+            initialize_timeout=5.0,
+            env={"FAKE_LSP_LOG": str(log)})
+        try:
+            assert client.definition(rel, 0, 0)["ok"] is True
+        finally:
+            client.close()
+    opens = [m for m in _client_messages(log)
+             if m["method"] == "textDocument/didOpen"]
+    assert [m["params"]["textDocument"]["languageId"] for m in opens] == [
+        "kotlin", "kotlin", "swift"]
+    assert [m["params"]["textDocument"]["uri"].rsplit("/", 1)[-1]
+            for m in opens] == ["Sample.kt", "Sample.kt", "App.swift"]
 
 
 def test_shared_client_is_reused_and_closed(tmp_path: Path) -> None:

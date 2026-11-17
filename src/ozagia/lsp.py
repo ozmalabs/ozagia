@@ -82,6 +82,8 @@ LANGUAGE_SERVERS: dict[str, tuple[ServerSpec, ...]] = {
     "cpp": (ServerSpec("clangd"),),
     "typescript": (ServerSpec("typescript-language-server", ("--stdio",)),),
     "javascript": (ServerSpec("typescript-language-server", ("--stdio",)),),
+    "kotlin": (ServerSpec("kotlin-language-server"),),
+    "swift": (ServerSpec("sourcekit-lsp"),),
 }
 
 LANGUAGE_ALIASES = {
@@ -96,6 +98,9 @@ LANGUAGE_ALIASES = {
     "tsx": "typescript",
     "js": "javascript",
     "jsx": "javascript",
+    "kt": "kotlin",
+    "kts": "kotlin",
+    "swift": "swift",
 }
 
 SUFFIX_LANGUAGES = {
@@ -114,6 +119,9 @@ SUFFIX_LANGUAGES = {
     ".tsx": "typescript",
     ".js": "javascript",
     ".jsx": "javascript",
+    ".kt": "kotlin",
+    ".kts": "kotlin",
+    ".swift": "swift",
 }
 
 # LSP `languageId` is not always the registry language (TSX/JSX differ).
@@ -121,6 +129,9 @@ _LANGUAGE_IDS_BY_SUFFIX = {
     ".tsx": "typescriptreact",
     ".jsx": "javascriptreact",
     ".pyi": "python",
+    ".kt": "kotlin",
+    ".kts": "kotlin",
+    ".swift": "swift",
 }
 
 SYMBOL_KINDS = {
