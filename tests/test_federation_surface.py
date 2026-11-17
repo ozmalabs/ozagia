@@ -51,3 +51,5 @@ def test_federation_mcp_tools_are_read_only_surface(monkeypatch,
     assert response["result"]["isError"] is False
     assert calls == [("search", str(tmp_path), "cache",
                       [str((tmp_path / "member").resolve())], 4)]
+    server._federation_status({"roots": []})
+    assert calls[-1] == ("status", str(tmp_path), [])

@@ -30,6 +30,10 @@ freshness, and indexed code metadata to the CLI caller or connected MCP
 client. Use explicit `--repo` membership when that disclosure boundary matters.
 The feature does not provide a cross-repository access-control system: the
 calling process must already be allowed to read every selected state directory.
+Sibling symlinks are not followed. The anchor honors `OZAGIA_STATE_DIR`;
+other members use their own `<root>/.ozagia/graph.json`, so an absolute state
+directory override is not mistakenly reused for every checkout. An explicit
+empty MCP `roots` array selects only the anchor.
 
 ## Queries
 
@@ -86,7 +90,8 @@ Node keys are qualified by a checkout ID because local keys such as
 `file:src/main.py` and numeric graph IDs can repeat across snapshots. A
 checkout ID uses the repo name recorded in the snapshot (or the checkout
 directory name when absent); colliding IDs get a stable path-derived suffix. A
-qualified key identifies a node in the selected snapshot, not a permanent
+change in federation membership can introduce or remove a collision and change
+these IDs. A qualified key identifies a node in the selected snapshot, not a permanent
 identity across renames or commits. The federation status response must be
 consulted when freshness matters. Search and inspection are limited to stored
 snapshot data; they do not guarantee that a checkout's current working tree is

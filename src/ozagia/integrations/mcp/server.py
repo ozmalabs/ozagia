@@ -1232,7 +1232,7 @@ class DevMemoryServer:
                          **kwargs: Any) -> Any:
         from ozagia.core import federation as F
         selected = [str(Path(root).expanduser().resolve()) for root in roots] \
-            if roots else None
+            if roots is not None else None
         return getattr(F, operation)(self.workspace, *args,
                                      roots=selected, **kwargs)
 
