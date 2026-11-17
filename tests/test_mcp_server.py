@@ -133,7 +133,43 @@ def test_dev_tools_is_listed_and_plans_paths(monkeypatch, server) -> None:
                for option in capability["install"])
 
 
-def test_blank_line_is_skipped_and_ping_answered(monkeypatch, server) -> None:
+def test_dev_secrets_is_read_only_and_calls_the_daemon(monkeypatch, server) -> None:
+    listed = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    tools = {tool["name"]: tool for tool in listed["result"]["tools"]}
+    assert "dev_secrets" in tools
+    schema = tools["dev_secrets"]["inputSchema"]
+    assert set(schema["properties"]) == {"action", "refs", "session", "harness"}
+    assert schema["properties"]["action"]["enum"] == [
+        "providers", "list", "check"]
+    description = tools["dev_secrets"]["description"].lower()
+    assert "never" in description and "value" in description
+    assert "capture" not in schema["properties"]["action"]["enum"]
+
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def fake_daemon(self, op, fields):
+        calls.append((op, dict(fields)))
+        return {"ok": True, "checks": [{
+            "reference": "secret://env/TOKEN", "status": "available",
+            "provider": "env", "code": None, "detail": "set"}]}
+
+    monkeypatch.setattr(DevMemoryServer, "_daemon", fake_daemon)
+    resp = server.handle(_call("dev_secrets", {
+        "action": "check", "refs": ["secret://env/TOKEN"],
+        "session": "s1", "harness": "opencode"}))
+    assert resp["result"]["isError"] is False
+    payload = json.loads(resp["result"]["content"][0]["text"])
+    assert payload["checks"][0]["status"] == "available"
+    assert calls == [("secrets", {
+        "action": "check", "refs": ["secret://env/TOKEN"],
+        "session": "s1", "harness": "opencode"})]
+
+    # A capture action is not part of the tool's schema.
+    bad = server.handle(_call("dev_secrets", {"action": "capture"}))
+    assert bad["error"]["code"] == -32602
+
+
+
     out = _serve(monkeypatch, server, b"\n" + PING)
     assert out == [{"jsonrpc": "2.0", "id": 5, "result": {}}]
 

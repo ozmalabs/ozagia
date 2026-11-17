@@ -1005,3 +1005,123 @@ def test_after_builtin_edit_failure_adds_no_hints(tmp_path):
     assert resp["ok"], resp
     assert "library hint" not in resp["append"]
     assert "library_hints_builtin" not in resp.get("meta", {})
+
+
+def test_secrets_op_capture_text_list_forget_providers_and_check(tmp_path):
+    from ozagia.daemon.server import DaemonState
+    st = DaemonState(tmp_path, None, tmp_path / "j.jsonl")
+    secret = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789"
+    text = f'key = "{secret}"\nplain text\n'
+    got = st.dispatch({"op": "secrets", "action": "capture_text",
+                       "text": text, "harness": "opencode", "session": "s1"})
+    assert got["ok"] and got["captured"] == 1 and got["withheld"] == 0
+    assert secret not in json.dumps(got)
+    ref = got["secrets"][0]["ref"]
+    assert ref.startswith("secret://session/") and ref in got["text"]
+    assert got["secrets"][0]["expires"] > got["secrets"][0]["created"]
+
+    listed = st.dispatch({"op": "secrets", "action": "list",
+                          "harness": "opencode", "session": "s1"})
+    assert [item["ref"] for item in listed["secrets"]] == [ref]
+    assert secret not in json.dumps(listed)
+
+    providers = st.dispatch({"op": "secrets", "action": "providers"})
+    assert providers["ok"] and providers["storage"] == "memory-only"
+    assert {item["name"] for item in providers["providers"]} >= {
+        "env", "file", "session"}
+
+    checks = st.dispatch({"op": "secrets", "action": "check",
+                          "refs": [ref, "secret://env/DOES_NOT_EXIST"],
+                          "harness": "opencode", "session": "s1"})
+    assert [item["status"] for item in checks["checks"]] == [
+        "available", "missing"]
+    assert secret not in json.dumps(checks)
+
+    forgot = st.dispatch({"op": "secrets", "action": "forget", "ref": ref,
+                          "harness": "opencode", "session": "s1"})
+    assert forgot["ok"] and forgot["forgotten"] is True
+    absent = st.dispatch({"op": "secrets", "action": "forget", "ref": ref,
+                          "harness": "opencode", "session": "s1"})
+    assert absent["forgotten"] is False
+    stats = st.stats()
+    assert stats["secret_captures"] == 1 and stats["secret_checks"] == 2
+    assert stats["secret_store"]["entries"] == 0
+    bad = st.dispatch({"op": "secrets", "action": "resolve",
+                       "ref": ref, "harness": "opencode", "session": "s1"})
+    assert bad["ok"] is False and bad["code"] == "invalid_action"
+    stats = st.stats()
+    assert stats["secret_errors"] == 1
+    assert stats["secret_store"]["storage"] == "memory-only"
+
+
+def test_secrets_session_end_clears_and_responses_redact_values(tmp_path):
+    from ozagia.daemon.server import DaemonState
+    st = DaemonState(tmp_path, None, tmp_path / "j.jsonl")
+    value = "tool-output-secret-1234"
+    got = st.dispatch({"op": "secrets", "action": "capture", "value": value,
+                       "label": "cli token", "harness": "opencode",
+                       "session": "s1"})
+    ref = got["ref"]
+    assert value not in json.dumps(got)
+
+    redacted = st.redact_response({
+        "ok": True, "output": f"out {value}", "append": f"add {value}",
+        "error": f"bad {value}", "meta": {"ref": ref},
+    })
+    assert value not in json.dumps(redacted)
+    assert redacted["meta"]["ref"] == ref
+    assert "[REDACTED]" in redacted["output"]
+    assert "[REDACTED]" in redacted["append"]
+    assert "[REDACTED]" in redacted["error"]
+
+    ended = st.dispatch({"op": "session_event", "event": "end",
+                         "harness": "opencode", "session": "s1"})
+    assert ended["ok"] and ended["secrets_cleared"] == 1
+    assert len(st.secret_store) == 0
+    stats = st.stats()
+    assert stats["secret_captures"] == 1
+    assert stats["secret_redactions"] >= 3
+    assert stats["secret_store"]["entries"] == 0
+
+
+def test_secrets_op_over_the_socket_never_returns_a_value(daemon):
+    value = "socket-secret-value-1234"
+    with DaemonClient(daemon["sock"], timeout=10) as c:
+        captured = c.request("secrets", action="capture", value=value,
+                             label="socket", harness="opencode",
+                             session="socket-s")
+        assert captured["ok"] and value not in json.dumps(captured)
+        ref = captured["ref"]
+        rewritten = c.request(
+            "secrets", action="capture_text", harness="opencode",
+            session="socket-s", text=f'api_key = "{value}"')
+        assert rewritten["ok"] and value not in json.dumps(rewritten)
+        assert rewritten["captured"] == 0 or rewritten["secrets"]
+        listed = c.request("secrets", action="list", harness="opencode",
+                           session="socket-s")
+        assert value not in json.dumps(listed)
+        checks = c.request("secrets", action="check", refs=[ref],
+                           harness="opencode", session="socket-s")
+        assert checks["checks"][0]["status"] == "available"
+        assert value not in json.dumps(checks)
+        c.request("secrets", action="forget", ref=ref, harness="opencode",
+                  session="socket-s")
+        stats = c.stats()["stats"]
+        assert stats["secret_captures"] >= 1
+        assert stats["secret_store"]["storage"] == "memory-only"
+
+
+def test_daemon_redacts_a_tool_response_that_echoes_a_captured_value(daemon):
+    value = "tool-response-secret-1234"
+    target = daemon["root"] / "leak.txt"
+    target.write_text(f"line one\n{value}\nline three\n")
+    with DaemonClient(daemon["sock"], timeout=10) as c:
+        captured = c.request("secrets", action="capture", value=value,
+                             harness="opencode", session="redact-s")
+        assert captured["ok"]
+        res = c.tool("read", {"path": "leak.txt"}, session="redact-s")
+        assert res["ok"] and res["handled"]
+        text = json.dumps(res)
+        assert value not in text
+        assert "[REDACTED]" in text
+        assert "line one" in text and "line three" in text

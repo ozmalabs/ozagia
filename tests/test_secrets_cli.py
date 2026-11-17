@@ -1,13 +1,16 @@
 """CLI tests for secret inspection commands (never a resolved value)."""
 from __future__ import annotations
 
+import io
 import json
+import sys
 from pathlib import Path
 
 import pytest
 
 from ozagia import secrets_cli as CLI
 from ozagia.core import secrets as S
+from ozagia.daemon.jobcli import JobUnavailable
 
 
 @pytest.fixture(autouse=True)
@@ -142,10 +145,156 @@ allow_cli = ["pass"]
     assert "token" in out
 
 
-def test_cli_has_no_capture_or_resolve_command() -> None:
+def test_cli_has_capture_commands_but_no_resolve_or_show_command() -> None:
     parser = CLI.build_parser()
+    assert parser.parse_args(["capture-text"]).command == "capture-text"
+    assert parser.parse_args(["capture"]).command == "capture"
     with pytest.raises(SystemExit):
-        parser.parse_args(["capture"])
+        parser.parse_args(["capture", "a-value-in-argv"])
     with pytest.raises(SystemExit):
         parser.parse_args(["resolve", "secret://env/TOKEN"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["show", "secret://env/TOKEN"])
     assert S.REDACTED == "[REDACTED]"
+
+
+def _fake_request(calls: list[dict], reply: dict):
+    def request(root, op, fields, **kwargs):
+        calls.append({"root": Path(root), "op": op, "fields": dict(fields)})
+        return dict(reply)
+    return request
+
+
+def test_cli_capture_text_uses_stdin_and_daemon(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str]) -> None:
+    secret = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789"
+    text = f'api_key = "{secret}"\n'
+    calls: list[dict] = []
+    reply = {"ok": True, "text": 'api_key = "secret://session/token"\n',
+             "secrets": [{"ref": "secret://session/token",
+                          "fingerprint": "sha256:abc", "label": "api_key",
+                          "start": 0, "end": 0, "kind": "anthropic_key",
+                          "captured": True}],
+             "detected": 1, "captured": 1, "withheld": 0,
+             "truncated": False, "not_assessed": []}
+    monkeypatch.setattr("ozagia.daemon.jobcli.request",
+                        _fake_request(calls, reply))
+    monkeypatch.setattr(sys, "stdin", io.StringIO(text))
+    assert CLI.main(["capture-text", "--root", str(tmp_path),
+                     "--session", "s1", "--harness", "opencode"]) == 0
+    out, err = capsys.readouterr()
+    assert secret not in out and secret not in err
+    assert "secret://session/token" in out
+    assert calls[0]["op"] == "secrets"
+    assert calls[0]["fields"]["action"] == "capture_text"
+    assert calls[0]["fields"]["text"] == text
+    assert calls[0]["fields"]["session"] == "s1"
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO(text))
+    assert CLI.main(["capture-text", "--root", str(tmp_path),
+                     "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["captured"] == 1
+    assert secret not in json.dumps(payload)
+
+
+def test_cli_capture_text_fails_closed_without_a_daemon(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str]) -> None:
+    secret = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789"
+    text = f'api_key = "{secret}"\n'
+
+    def unavailable(*args, **kwargs):
+        raise JobUnavailable("no daemon answers")
+
+    monkeypatch.setattr("ozagia.daemon.jobcli.request", unavailable)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(text))
+    assert CLI.main(["capture-text", "--root", str(tmp_path)]) == 2
+    out, err = capsys.readouterr()
+    assert secret not in out and secret not in err
+    assert "[REDACTED]" in out
+    assert "redacted" in err
+    assert "api_key" in out
+
+
+def test_cli_capture_reads_one_value_from_stdin_only(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str]) -> None:
+    value = "captured-value-1234"
+    calls: list[dict] = []
+    reply = {"ok": True, "ref": "secret://session/token",
+             "fingerprint": "sha256:abc", "label": None,
+             "created": 1.0, "expires": 2.0}
+    monkeypatch.setattr("ozagia.daemon.jobcli.request",
+                        _fake_request(calls, reply))
+    monkeypatch.setattr(sys, "stdin", io.StringIO(value + "\n"))
+    assert CLI.main(["capture", "--root", str(tmp_path),
+                     "--session", "s1", "--label", "cli token",
+                     "--ttl", "60"]) == 0
+    out, err = capsys.readouterr()
+    assert value not in out and value not in err
+    assert "secret://session/token" in out
+    assert "sha256:abc" in out
+    fields = calls[0]["fields"]
+    assert fields["action"] == "capture"
+    assert fields["value"] == value
+    assert fields["label"] == "cli token" and fields["ttl_s"] == 60.0
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    assert CLI.main(["capture", "--root", str(tmp_path)]) == 2
+    assert "non-empty" in capsys.readouterr().err
+
+
+def test_cli_capture_and_list_are_status_only_without_a_daemon(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str]) -> None:
+    def unavailable(*args, **kwargs):
+        raise JobUnavailable("no daemon answers")
+
+    monkeypatch.setattr("ozagia.daemon.jobcli.request", unavailable)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("value-1234\n"))
+    assert CLI.main(["capture", "--root", str(tmp_path)]) == 2
+    out, err = capsys.readouterr()
+    assert "value-1234" not in out and "value-1234" not in err
+    assert "no daemon" in err
+    assert CLI.main(["list", "--root", str(tmp_path),
+                     "--session", "s1"]) == 2
+    out, err = capsys.readouterr()
+    assert out == "" and "no daemon" in err
+
+
+def test_cli_list_forget_and_check_session_use_the_daemon(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str]) -> None:
+    calls: list[dict] = []
+    listed = {"ok": True, "count": 1, "storage": "memory-only", "secrets": [{
+        "ref": "secret://session/token", "fingerprint": "sha256:abc",
+        "label": "cli", "created": 1.0, "expires": 2.0}]}
+    monkeypatch.setattr("ozagia.daemon.jobcli.request",
+                        _fake_request(calls, listed))
+    assert CLI.main(["list", "--root", str(tmp_path),
+                     "--session", "s1"]) == 0
+    out = capsys.readouterr().out
+    assert "secret://session/token" in out and "sha256:abc" in out
+    assert calls[0]["fields"]["action"] == "list"
+
+    forgotten = {"ok": True, "forgotten": True,
+                 "ref": "secret://session/token"}
+    monkeypatch.setattr("ozagia.daemon.jobcli.request",
+                        _fake_request(calls, forgotten))
+    assert CLI.main(["forget", "secret://session/token", "--root",
+                     str(tmp_path), "--session", "s1"]) == 0
+    assert "forgotten" in capsys.readouterr().out
+    assert calls[-1]["fields"]["action"] == "forget"
+
+    checks = {"ok": True, "checks": [{
+        "reference": "secret://session/token", "status": "available",
+        "provider": "session", "code": None, "detail": "session secret"}]}
+    monkeypatch.setattr("ozagia.daemon.jobcli.request",
+                        _fake_request(calls, checks))
+    assert CLI.main(["check", "secret://session/token", "--root",
+                     str(tmp_path), "--session", "s1"]) == 0
+    out = capsys.readouterr().out
+    assert "available" in out and "secret://session/token" in out
+    assert calls[-1]["fields"]["action"] == "check"

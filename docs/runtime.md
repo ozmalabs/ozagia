@@ -20,6 +20,7 @@ command = ["python", "-m", "app"]
 workdir = "services/api"       # repository-relative; may be omitted
 mode = "background"             # background or foreground
 description = "API service"
+env = { LOG_LEVEL = "info", API_TOKEN = "secret://env/API_TOKEN" }
 
 [runtime.services.migrate]
 command = ["python", "manage.py", "migrate"]
@@ -35,9 +36,20 @@ description = "Payments database"
 
 Relay specs and commands are argv data, never shell strings. Config accepts
 bounded structural values only; unknown keys, secret-like option names,
-credential-like command arguments, environment assignments, and repository
-escaping workdirs are rejected. Config models contain no environment values or
-credentials. Treat the config file itself as reviewed executable policy.
+credential-like command arguments, environment assignments in `command`, and
+repository escaping workdirs are rejected. `env` values are either `secret://`
+references or plain settings for non-sensitive names; a credential-like name
+with a plain value is a configuration error. Resolved values are never stored
+in the config model, a runtime record, a log or a status reply. Treat the
+config file itself as reviewed executable policy.
+
+The `env` table is resolved when a process is spawned, not when the file is
+loaded. `ServiceManager` passes `{**os.environ, **resolved}` to the child, so
+existing inherited variables remain available; a service with no `env` table
+keeps the exact inherited environment. A `secret://session/...` reference is
+denied for a runtime service because there is no interactive session at spawn;
+use `env`, `file`, `keyring`, `pass` or `op`, or start a job in the session that
+captured the value. See [secrets.md](secrets.md#runtime-services).
 
 ## Where the definitions live
 
@@ -95,12 +107,16 @@ Observed state is separate, normally under `.ozagia/runtime/`:
 - `state.json` is versioned, atomically replaced, bounded, and mode `0600`;
 - `logs/<id>.log` is a bounded tail with mode `0600`;
 - records contain names, state, timestamps, fingerprints, and process/tunnel
-  metadata, not full argv, environment, prompts, or output.
+  metadata, not full argv, environment (including names/refs), prompts, or
+  output.
 
 Both the runtime directory and logs are local state. Add `.ozagia/` to the
-repository's ignore rules. Logs may still contain sensitive application output:
-read them only on explicit request and protect the local state directory.
-Automatic runtime context never reads logs or includes commands.
+repository's ignore rules. Logs may still contain sensitive application output
+that the manager did not resolve; read them only on explicit request and
+protect the local state directory. Output the manager did resolve is redacted
+before it is appended or returned, including output that arrives in several
+reads on one line. Automatic runtime context never reads logs or includes
+commands.
 
 ## Services and processes
 
@@ -115,6 +131,12 @@ persisted as argv.
 Background processes use `shell=False`, their own session/process group, and a
 bounded log. Local execution is supported. Background services with a relay and
 foreground relay execution are explicitly unsupported in this phase.
+
+A service's `env` refs resolve at each start/run. A refusal (for example a
+session reference, a missing value or a denied provider) raises a safe error
+naming the service and key/code, and no process starts. Runtime records do not
+store the values or refs; the configuration fingerprint includes the configured
+env refs, so a changed reference changes the recorded fingerprint.
 
 The manager stores a PID, expected process group, and process start token where
 the operating system provides one. Before stopping, it verifies that the PID

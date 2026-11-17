@@ -226,6 +226,11 @@ SHELL_REASONS_SHOWN = 30
 REPLACE_COUNTERS = ("replace_previews", "replace_applies", "replace_files")
 # The `goals` op's text (`ozagia.core.goals.brief_lines`) stays under this.
 W_GOALS_CHARS = 2000
+# `secrets` op actions (bounded; none resolves or returns a value).
+SECRET_ACTIONS = ("capture_text", "capture", "list", "forget", "providers",
+                  "check")
+MAX_SECRET_CHECK_REFS = 64
+_SECRET_REF_TEXT = re.compile(r"secret://[A-Za-z0-9._~%/:@+-]+")
 
 # Passthrough reasons that name a file or directory, rewritten to one key
 # each so paths do not fill the reason table: (pattern, replacement), in
@@ -405,11 +410,18 @@ class DaemonState:
         self.memory = memory
         self.journal = journal
         self.test_env = test_env
+        from ozagia.core.secrets import SecretBroker, SessionSecretStore
+        self.secret_store = SessionSecretStore()
+        self.secret_broker = SecretBroker(root, session_store=self.secret_store)
+        self.secret_captures = 0
+        self.secret_checks = 0
+        self.secret_redactions = 0
+        self.secret_errors = 0
         self.lock = threading.Lock()          # serialises handle/after
         self.lock_wait_total_ms = 0.0
         self.lock_wait_max_ms = 0.0
         self.lock_wait_count = 0
-        self._stats_lock = threading.Lock()
+        self._stats_lock = threading.RLock()
         self.started = time.time()
         self.by_op: dict[str, int] = {}
         self.by_tool: dict[str, int] = {}
@@ -461,7 +473,8 @@ class DaemonState:
         # loaded policy for the daemon's lifetime (a config edit needs a
         # restart, like the other daemon-loaded settings).
         self.jobs = J.JobTable(root, base_env=test_env,
-                               resource_policy=R.load_policy(root))
+                               resource_policy=R.load_policy(root),
+                               secret_broker=self.secret_broker)
         from ozagia.core.working_set import TestRecord
         # The root's failing tests across sessions (`working_set` with
         # `since`), persisted in the state dir.
@@ -555,8 +568,19 @@ class DaemonState:
             n = self.sessions.event(str(msg.get("harness") or "opencode"),
                                     session, event)
             self._files_session_event(msg, event)
-            return {"ok": True, "cleared": n,
-                    "meta": {"intent": f"session_{event}", "keys": []}}
+            secrets_cleared = None
+            if event == "end":
+                try:
+                    secrets_cleared = self.secret_store.clear(
+                        str(msg.get("harness") or "opencode"), session)
+                except Exception:  # noqa: BLE001 - session end must not fail
+                    self.secret_errors += 1
+            body: dict[str, Any] = {"ok": True, "cleared": n,
+                                    "meta": {"intent": f"session_{event}",
+                                             "keys": []}}
+            if secrets_cleared is not None:
+                body["secrets_cleared"] = secrets_cleared
+            return body
         if op == "read_check":
             tool = msg.get("tool")
             inp = msg.get("input")
@@ -573,6 +597,8 @@ class DaemonState:
             return {"ok": True, **body}
         if op in ("path_check", "owner_check", "who"):
             return self._owners_op(op, msg)
+        if op == "secrets":
+            return self.secrets_op(msg)
         if op in J.OPS:
             return self.jobs.dispatch(op, msg)
         if op == "working_set":
@@ -702,6 +728,172 @@ class DaemonState:
                 body = self._library_hints_after(op, tool, inp, msg, body)
             return {"ok": True, **self._job_meta(body)}
         return {"ok": False, "error": f"unknown op {op!r}"}
+
+    # -- secrets ------------------------------------------------------------- #
+    def _secret_stat(self, name: str, n: int = 1) -> None:
+        if n <= 0:
+            return
+        with self._stats_lock:
+            setattr(self, name, getattr(self, name) + n)
+
+    def _redact_response_text(self, text: str) -> str:
+        original = text
+        from ozagia.core import security
+        refs: list[str] = []
+
+        def keep(match: re.Match[str]) -> str:
+            refs.append(match.group(0))
+            return f"\x00ozagia-ref-{len(refs) - 1}\x00"
+
+        masked = _SECRET_REF_TEXT.sub(keep, text)
+        try:
+            masked = self.secret_broker.redactor.redact(masked)
+        except Exception:  # noqa: BLE001 - fail closed
+            masked = "[redacted]"
+        masked = security.redact_text(masked)
+        for index, ref in enumerate(refs):
+            masked = masked.replace(f"\x00ozagia-ref-{index}\x00", ref)
+        if masked != original:
+            self._secret_stat("secret_redactions")
+        return masked
+
+    def _redact_values(self, value: Any, depth: int = 0) -> Any:
+        if isinstance(value, str):
+            return self._redact_response_text(value)
+        if depth >= 24:
+            return value
+        if isinstance(value, dict):
+            return {(self._redact_response_text(key)
+                     if isinstance(key, str) else key):
+                    self._redact_values(item, depth + 1)
+                    for key, item in value.items()}
+        if isinstance(value, list):
+            return [self._redact_values(item, depth + 1) for item in value]
+        if isinstance(value, tuple):
+            return tuple(self._redact_values(item, depth + 1)
+                         for item in value)
+        return value
+
+    def redact_response(self, resp: dict[str, Any]) -> dict[str, Any]:
+        """Redact every value before a response is sent or journaled.
+
+        Resolved values and captured session values go first (the broker's
+        redactor); the security module's generic patterns are defense in
+        depth. ``secret://`` references are preserved, never redacted.
+        """
+        if not isinstance(resp, dict):
+            return resp
+        try:
+            redacted = self._redact_values(resp)
+            return redacted if isinstance(redacted, dict) else resp
+        except Exception:  # noqa: BLE001 - never send an unredacted response
+            self._secret_stat("secret_errors")
+            return {"id": resp.get("id"), "ok": False,
+                    "error": "response redaction failed"}
+
+    @staticmethod
+    def _require_secret_session(session: Any) -> str:
+        from ozagia.core.secrets import SecretError
+        if (not isinstance(session, str) or not session
+                or len(session) > 256
+                or any(ord(char) < 32 or ord(char) == 127
+                       for char in session)):
+            raise SecretError("session is required", code="session_required")
+        return session
+
+    def secrets_op(self, msg: dict[str, Any]) -> dict[str, Any]:
+        """Session captures and status. Never captures from argv, resolves,
+        or returns a value."""
+        from ozagia.core.secrets import SecretError, detect_text
+        action = msg.get("action")
+        if action not in SECRET_ACTIONS:
+            self._secret_stat("secret_errors")
+            return {"ok": False, "code": "invalid_action",
+                    "error": "action must be one of " + ", ".join(SECRET_ACTIONS)}
+        harness = msg.get("harness")
+        harness = harness if isinstance(harness, str) and harness else "opencode"
+        session = msg.get("session")
+        try:
+            self.secret_store.prune()
+            if action == "providers":
+                return {"ok": True, "providers": self.secret_broker.providers(),
+                        "storage": "memory-only",
+                        "redact_output": self.secret_broker.config.redact_output}
+            if action == "capture_text":
+                text = msg.get("text")
+                if not isinstance(text, str):
+                    raise SecretError("text must be a string",
+                                      code="invalid_text")
+                # Validate and prune the session before detection, so a bad
+                # context is an error instead of silently withheld matches.
+                self.secret_store.list(harness, self._require_secret_session(session))
+
+                def factory(value: str, label: str) -> Any:
+                    self.secret_broker.redactor.add(value)
+                    return self.secret_store.capture(
+                        value, harness=harness, session=session, label=label)
+
+                capture = detect_text(text, ref_factory=factory)
+                self._secret_stat("secret_captures", capture.captured)
+                entries = {item.ref: item for item in self.secret_store.list(
+                    harness, self._require_secret_session(session))}
+                secrets = []
+                for item in capture.secrets:
+                    data = item.as_dict()
+                    entry = entries.get(data.get("ref") or "")
+                    if entry is not None:
+                        data["created"] = entry.created
+                        data["expires"] = entry.expires
+                    secrets.append(data)
+                return {"ok": True, **capture.as_dict(), "secrets": secrets,
+                        "count": capture.captured}
+            if action == "capture":
+                value = msg.get("value")
+                if not isinstance(value, str):
+                    raise SecretError("value must be a string",
+                                      code="invalid_value")
+                captured = self.secret_store.capture(
+                    value, harness=harness,
+                    session=self._require_secret_session(session),
+                    label=msg.get("label"), ttl_s=msg.get("ttl_s"))
+                self.secret_broker.redactor.add(value)
+                self._secret_stat("secret_captures")
+                return {"ok": True, **captured.as_dict()}
+            if action == "list":
+                items = self.secret_store.list(
+                    harness, self._require_secret_session(session))
+                return {"ok": True, "secrets": [item.as_dict() for item in items],
+                        "count": len(items), "storage": "memory-only"}
+            if action == "forget":
+                ref = msg.get("ref")
+                if not isinstance(ref, str) or not ref:
+                    raise SecretError("ref is required", code="invalid_ref")
+                forgotten = self.secret_store.forget(
+                    ref, harness=harness,
+                    session=self._require_secret_session(session))
+                return {"ok": True, "forgotten": forgotten, "ref": ref}
+            refs = msg.get("refs")
+            if (not isinstance(refs, list) or not refs
+                    or len(refs) > MAX_SECRET_CHECK_REFS
+                    or not all(isinstance(ref, str)
+                               and 0 < len(ref) <= 1024 for ref in refs)):
+                raise SecretError(
+                    f"refs must be a non-empty list of at most "
+                    f"{MAX_SECRET_CHECK_REFS} references",
+                    code="invalid_refs")
+            checks = self.secret_broker.check_many(
+                refs, harness=harness,
+                session=session if isinstance(session, str) else None)
+            self._secret_stat("secret_checks", len(checks))
+            return {"ok": True, "checks": [check.as_dict() for check in checks]}
+        except SecretError as exc:
+            self._secret_stat("secret_errors")
+            return {"ok": False, "error": self._redact_response_text(str(exc)),
+                    "code": exc.code}
+        except Exception:  # noqa: BLE001 - a secrets op must not leak a value
+            self._secret_stat("secret_errors")
+            return {"ok": False, "code": "secret_error",
+                    "error": "secrets operation failed"}
 
     @staticmethod
     def _plan_key(tool: str, inp: Any, harness: str, session: Any
@@ -1589,15 +1781,24 @@ class DaemonState:
                 self.ms_total += ms
                 self.ms_count += 1
                 self.ms_max = max(self.ms_max, ms)
+            reason = resp.get("reason") or resp.get("error")
+            if isinstance(reason, str):
+                reason = self._redact_response_text(reason)
+            session = msg.get("session")
+            if isinstance(session, str):
+                session = self._redact_response_text(session)
+            harness = msg.get("harness")
+            if isinstance(harness, str):
+                harness = self._redact_response_text(harness)
             rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "op": op,
                    "tool": tool, "intent": meta.get("intent"),
                    "handled": handled, "is_error": resp.get("is_error"),
                    "expired": expired or None, "ms": round(ms, 1),
                    "keys": list(meta.get("keys") or [])[:JOURNAL_KEYS],
-                   "reason": resp.get("reason") or resp.get("error"),
+                   "reason": reason,
                    "fallback": fallback,
-                   "session": msg.get("session"),
-                   "harness": msg.get("harness"),
+                   "session": session,
+                   "harness": harness,
                    "files": list(meta.get("edited_files") or []) or None}
             try:
                 self.journal.parent.mkdir(parents=True, exist_ok=True)
@@ -1739,6 +1940,14 @@ class DaemonState:
                 "library_hint_builtin_files": self.library_hint_builtin_files,
                 # Goal lines added after edits (`ozagia.core.goals`).
                 "goal_hints": self.goal_hints,
+                # Secrets (`ozagia.core.secrets`): session captures, status
+                # checks, response redactions and errors. No value is kept in
+                # the store, a record, a log or a response.
+                "secret_captures": self.secret_captures,
+                "secret_checks": self.secret_checks,
+                "secret_redactions": self.secret_redactions,
+                "secret_errors": self.secret_errors,
+                "secret_store": self.secret_store.describe(),
                 # Lint inside the edit, and captured `ruff check` calls.
                 **self.lint,
                 # Multi-file replace: previews, applies, files written.
@@ -1817,11 +2026,13 @@ class _Handler(socketserver.StreamRequestHandler):
             if not line:
                 return
             if len(line) > P.MAX_MESSAGE_BYTES:
-                self._send({"id": None, "ok": False,
-                            "error": f"message exceeds {P.MAX_MESSAGE_BYTES} "
-                                     f"bytes; connection closed"})
-                state.record({"op": "oversized"}, {"ok": False,
-                                                   "error": "oversized"}, 0.0)
+                resp = state.redact_response(
+                    {"id": None, "ok": False,
+                     "error": f"message exceeds {P.MAX_MESSAGE_BYTES} "
+                              f"bytes; connection closed"})
+                self._send(resp)
+                state.record({"op": "oversized"},
+                             {"ok": False, "error": resp.get("error")}, 0.0)
                 return
             if not line.strip():
                 continue
@@ -1845,6 +2056,7 @@ class _Handler(socketserver.StreamRequestHandler):
             finally:
                 state.end()
             ms = (time.perf_counter() - t0) * 1000
+            resp = state.redact_response(resp)
             state.record(msg if isinstance(msg, dict) else {"op": "invalid"},
                          resp, ms)
             if not self._send(resp):

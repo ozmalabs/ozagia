@@ -19,6 +19,7 @@ import pytest
 
 from ozagia.config import clear_config_cache
 from ozagia.core import resources as R
+from ozagia.core.secrets import SecretBroker, SessionSecretStore
 from ozagia.daemon import jobs as J
 from ozagia.daemon.client import DaemonClient
 from ozagia.daemon.protocol import socket_path
@@ -186,7 +187,61 @@ def test_start_captures_stdout_and_stderr_and_waits_for_exit(table, repo):
     assert job["env_keys"] == ["FOO"] and job["cwd"] == "pkg"
 
 
-def test_wait_log_regex_then_cursor_semantics(table):
+def test_jobs_resolve_env_refs_and_redact_the_log_before_it_is_written(
+        table, repo):
+    secret = "job-secret-value-1234"
+    broker = SecretBroker(repo, environ={"FAKE_TOKEN": secret})
+    t = table(secret_broker=broker)
+    job = t.start(
+        command="printf '%s' \"$TOKEN\"; sleep 0.3; "
+                "printf '\\nREADY\\n'; sleep 30",
+        env={"TOKEN": "secret://env/FAKE_TOKEN", "LOG_LEVEL": "info"},
+        session="s1", harness="opencode")
+    assert job["env_keys"] == ["LOG_LEVEL", "TOKEN"]
+    assert job["env_refs"] == {"TOKEN": "secret://env/FAKE_TOKEN"}
+    got = t.wait(job["id"], until="log:READY", deadline_s=15)
+    assert got["met"] and got["status"] == "running"
+    assert secret not in got["output"] and "[REDACTED]" in got["output"]
+    assert got["output"].splitlines()[0] == "[REDACTED]"
+    raw = Path(job["log"]).read_text()
+    assert secret not in raw and "[REDACTED]" in raw
+    assert got["cursor"] == Path(job["log"]).stat().st_size
+    # A second reader sees the same redacted text, never the value.
+    seen = t.log(job["id"], reader="second")
+    assert secret not in seen["output"]
+    # The wait/read fields redact a legacy raw log too.
+    Path(job["log"]).write_text(f"old {secret}\\n")
+    legacy = t.log(job["id"], reader="legacy", cursor=0)
+    assert secret not in legacy["output"] and "[REDACTED]" in legacy["output"]
+    stopped = t.stop(job["id"], grace_s=1)
+    assert stopped["status"] == "killed"
+    assert t.stats()["secret_resolutions"] == 1
+    assert t.stats()["secret_redactions"] >= 1
+
+
+def test_jobs_deny_a_session_reference_for_another_session(table, repo):
+    store = SessionSecretStore()
+    captured = store.capture("cross-job-secret-value", harness="opencode",
+                             session="s1")
+    t = table(secret_broker=SecretBroker(repo, environ={},
+                                         session_store=store))
+    with pytest.raises(J.JobError) as excinfo:
+        t.start(argv=["true"], env={"TOKEN": captured.ref},
+                harness="opencode", session="s2")
+    message = str(excinfo.value)
+    assert "session_mismatch" in message
+    assert "cross-job-secret-value" not in message
+    assert t.jobs == {}
+    # The same session resolves it (the child prints no value here).
+    job = t.start(argv=["true"], env={"TOKEN": captured.ref},
+                  harness="opencode", session="s1")
+    assert job["env_refs"] == {"TOKEN": captured.ref}
+    got = t.wait(job["id"], deadline_s=10)
+    assert got["status"] == "exited"
+    assert t.stats()["secret_resolutions"] == 1
+
+
+
     t = table()
     job = t.start(command="echo one; echo two; sleep 0.4; echo READY 42; "
                           "sleep 0.4; echo after; sleep 30")

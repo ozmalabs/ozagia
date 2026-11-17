@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import signal
 import subprocess
 from pathlib import Path
@@ -20,6 +21,7 @@ from ozagia.core.runtime import (
     runtime_logs,
     runtime_status,
 )
+from ozagia.core.secrets import SecretBroker, SessionSecretStore
 
 
 def _write_config(root: Path, text: str) -> None:
@@ -431,3 +433,120 @@ def test_manager_restart_marks_held_tunnel_stale_without_claiming_connection(tmp
     assert "stale" in result["context"]
     assert "connected" not in result["context"]
     assert second.status("database")["running"] is False
+
+
+class _EnvProcesses:
+    """A process factory that records the child env and emits fixed output."""
+
+    def __init__(self, output: bytes) -> None:
+        self.output = output
+        self.calls: list[dict[str, Any]] = []
+        self.created: list[FakeProcess] = []
+
+    def factory(self, argv: list[str], **kwargs: Any) -> FakeProcess:
+        self.calls.append({"argv": argv, "kwargs": kwargs})
+        process = FakeProcess(50001 + len(self.created), output=self.output,
+                              auto_exit=True)
+        self.created.append(process)
+        return process
+
+    def identity(self, pid: int) -> tuple[str | None, int | None]:
+        return f"start-{pid}", pid
+
+
+def _env_config(root: Path, mode: str = "foreground",
+                token: str = "secret://env/FAKE_TOKEN") -> Any:
+    root.mkdir(parents=True, exist_ok=True)
+    _write_config(root, f"""
+[runtime.services.api]
+command = ["python", "-m", "app"]
+mode = "{mode}"
+env = {{ LOG_LEVEL = "info", API_TOKEN = "{token}" }}
+""")
+    return load_project_config(root)
+
+
+def test_runtime_env_refs_resolve_at_spawn_and_logs_are_redacted(tmp_path):
+    config = _env_config(tmp_path)
+    secret = "runtime-secret-value-1234"
+    processes = _EnvProcesses(f"line {secret} end\n".encode())
+    broker = SecretBroker(tmp_path, environ={"FAKE_TOKEN": secret})
+    manager = ServiceManager(
+        config, state_dir=tmp_path / "state",
+        process_factory=processes.factory,
+        identity_reader=processes.identity, secret_broker=broker)
+
+    result = manager.run("api")
+    assert secret not in result["output"]
+    assert "[REDACTED]" in result["output"]
+    child_env = processes.calls[0]["kwargs"]["env"]
+    assert child_env["API_TOKEN"] == secret
+    assert child_env["LOG_LEVEL"] == "info"
+    assert child_env["PATH"] == os.environ["PATH"]
+    state_text = (tmp_path / "state" / "state.json").read_text()
+    assert secret not in state_text
+    assert "API_TOKEN" not in state_text
+
+    background = _env_config(tmp_path / "bg", mode="background")
+    processes = _EnvProcesses(f"log {secret}\n".encode())
+    manager = ServiceManager(
+        background, state_dir=tmp_path / "bg-state",
+        process_factory=processes.factory,
+        identity_reader=processes.identity, secret_broker=broker)
+    started = manager.start("api")
+    manager._reader_threads[started["id"]].join(timeout=2)
+    logs = manager.logs("api")
+    assert secret not in logs and "[REDACTED]" in logs
+    assert secret not in (tmp_path / "bg-state" / "state.json").read_text()
+    log_path = tmp_path / "bg-state" / "logs" / f"{started['id']}.log"
+    assert secret not in log_path.read_text()
+
+
+def test_runtime_env_without_refs_keeps_inherited_environment(tmp_path):
+    _write_config(tmp_path, """
+[runtime.services.api]
+command = ["python", "-m", "app"]
+mode = "foreground"
+""")
+    config = load_project_config(tmp_path)
+    processes = _EnvProcesses(b"ok\n")
+    manager = ServiceManager(
+        config, state_dir=tmp_path / "state",
+        process_factory=processes.factory,
+        identity_reader=processes.identity,
+        secret_broker=SecretBroker(tmp_path, environ={}))
+    manager.run("api")
+    assert "env" not in processes.calls[0]["kwargs"]
+
+
+def test_runtime_session_reference_is_denied_without_a_value(tmp_path):
+    store = SessionSecretStore()
+    captured = store.capture("session-value-1234", harness="opencode",
+                             session="s1")
+    config = _env_config(tmp_path, token=captured.ref)
+    processes = _EnvProcesses(b"never\n")
+    manager = ServiceManager(
+        config, state_dir=tmp_path / "state",
+        process_factory=processes.factory,
+        identity_reader=processes.identity,
+        secret_broker=SecretBroker(tmp_path, environ={}, session_store=store))
+    with pytest.raises(RuntimeErrorBase) as excinfo:
+        manager.run("api")
+    message = str(excinfo.value)
+    assert "session_context_required" in message
+    assert "API_TOKEN" in message
+    assert "session-value-1234" not in message
+    assert processes.calls == []
+    assert not (tmp_path / "state" / "state.json").exists()
+
+
+def test_runtime_service_fingerprint_includes_env_refs(tmp_path):
+    first = _env_config(tmp_path)
+    second = _env_config(tmp_path, token="secret://env/OTHER_TOKEN")
+    manager = ServiceManager(
+        first, state_dir=tmp_path / "state",
+        secret_broker=SecretBroker(tmp_path, environ={}))
+    service_a = first.runtime_services[0]
+    service_b = second.runtime_services[0]
+    assert manager._service_fingerprint(service_a) != manager._service_fingerprint(service_b)
+    assert manager._service_fingerprint(service_a) == manager._service_fingerprint(service_a)

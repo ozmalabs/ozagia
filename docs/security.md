@@ -105,6 +105,15 @@ forces a rebuild.
 Secret references (`secret://...`), provider policy and in-memory session
 captures are a separate layer; see [secrets.md](secrets.md). The security scan
 still does not read an external secret store and never resolves a reference.
+Runtime services and daemon jobs resolve their configured references at spawn.
+A resolved value is redacted before a runtime log, a job log, a daemon response
+or a journal reason is written; job records keep only `env_keys` and
+`env_refs`. This is defense in depth for values the resolving process knows,
+not an OS-level guarantee: a child, same-user process, core dump or swap can
+still read the value. Session captures are memory-only, scoped to a
+`(harness, session)` pair and cleared on session end; they are not a durable
+secret store. See [runtime.md](runtime.md) for service configuration and
+[settings.md](settings.md#secrets) for the provider policy.
 
 ## Graph-derived rules
 

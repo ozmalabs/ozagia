@@ -329,7 +329,12 @@ class RelayConfig:
 
 @dataclass(frozen=True)
 class RuntimeServiceConfig:
-    """A local, argv-only runtime process definition."""
+    """A local, argv-only runtime process definition.
+
+    ``env`` is an ordered tuple of ``(name, value)`` pairs. A value that
+    starts with ``secret://`` is a reference resolved at spawn; any other
+    value is a plain setting allowed only for a non-sensitive name.
+    """
 
     name: str
     command: tuple[str, ...]
@@ -337,6 +342,12 @@ class RuntimeServiceConfig:
     relay: str | None = None
     mode: str = "background"
     description: str = ""
+    env: tuple[tuple[str, str], ...] = ()
+
+    @property
+    def env_map(self) -> dict[str, str]:
+        """The configured environment as a mapping (values are refs/plain)."""
+        return dict(self.env)
 
 
 @dataclass(frozen=True)
@@ -571,7 +582,9 @@ _RELAY_KEYS = {
 }
 _RELAY_SPEC_KEYS = {"kind", "options", "name"}
 _RUNTIME_KEYS = {"services", "tunnels"}
-_RUNTIME_SERVICE_KEYS = {"command", "workdir", "relay", "mode", "description"}
+_RUNTIME_SERVICE_KEYS = {
+    "command", "workdir", "relay", "mode", "description", "env",
+}
 _RUNTIME_TUNNEL_KEYS = {"relay", "target", "local_port", "description"}
 _ENVIRONMENT_KEYS = {
     "paths", "namespaces", "account_alias", "region", "cluster", "risk",
@@ -585,6 +598,9 @@ _REMOTE_STATE_KEYS = {"consumer", "name", "producer"}
 _STRUCTURAL_VALUE = re.compile(r"[A-Za-z0-9_./:@#*?+\[\]-]{1,256}\Z")
 _CONFIG_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}\Z")
 _RELAY_OPTION_KEY = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}\Z")
+_RUNTIME_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}\Z")
+MAX_RUNTIME_ENV = 64
+MAX_RUNTIME_ENV_VALUE = 4096
 _SENSITIVE_KEY = re.compile(
     r"(?:secret|password|passwd|token|credential|access[_-]?key|private[_-]?key|"
     r"api[_-]?key|authorization|environment|env_vars?)",
@@ -986,6 +1002,49 @@ def _uncovered(dirs: list[str]) -> list[str]:
     return out
 
 
+def _runtime_env(value: Any, *, section: str) -> tuple[tuple[str, str], ...]:
+    """Validate `[runtime.services.NAME.env]` without resolving anything.
+
+    A `secret://` value is parsed as a reference and kept as a reference. A
+    plain value is allowed only for a non-sensitive name; credential-like
+    names must use a reference. Values never leave this function resolved.
+    """
+    if not isinstance(value, dict):
+        raise ConfigError(f"{section}: env must be a table of names to strings")
+    if len(value) > MAX_RUNTIME_ENV:
+        raise ConfigError(
+            f"{section}: env exceeds the {MAX_RUNTIME_ENV}-entry limit")
+    pairs: list[tuple[str, str]] = []
+    for name, raw in value.items():
+        if (not isinstance(name, str)
+                or _RUNTIME_ENV_NAME.fullmatch(name) is None):
+            raise ConfigError(f"{section}: env name {name!r} is invalid")
+        if not isinstance(raw, str) or not raw:
+            raise ConfigError(
+                f"{section}: env {name} must be a non-empty string")
+        if len(raw) > MAX_RUNTIME_ENV_VALUE:
+            raise ConfigError(
+                f"{section}: env {name} exceeds "
+                f"{MAX_RUNTIME_ENV_VALUE} characters")
+        if any(ord(char) < 32 or ord(char) == 127 for char in raw):
+            raise ConfigError(
+                f"{section}: env {name} contains a control character")
+        if raw.startswith("secret://"):
+            from ozagia.core.secrets import SecretRefError, parse_ref
+            try:
+                parse_ref(raw, allow_absolute=True)
+            except SecretRefError as exc:
+                raise ConfigError(
+                    f"{section}: env {name} has an invalid secret reference "
+                    f"({exc.code})") from None
+        elif _SENSITIVE_KEY.search(name):
+            raise ConfigError(
+                f"{section}: env {name} is credential-like; use a "
+                f"secret:// reference instead of a plain value")
+        pairs.append((name, raw))
+    return tuple(sorted(pairs))
+
+
 def _parse(root: Path, source: Path | None, data: dict[str, Any], *,
            extra_environment_names: Iterable[str] = (),
            extra_relay_names: Iterable[str] = ()) -> ProjectConfig:
@@ -1237,9 +1296,11 @@ def _parse(root: Path, source: Path | None, data: dict[str, Any], *,
         description = (_description(
             table["description"], key="description", where=section)
             if "description" in table else "")
+        env = (_runtime_env(table["env"], section=section)
+               if "env" in table else ())
         runtime_services.append(RuntimeServiceConfig(
             name=name, command=command, workdir=workdir, relay=relay,
-            mode=mode, description=description,
+            mode=mode, description=description, env=env,
         ))
 
     runtime_tunnels: list[RuntimeTunnelConfig] = []
