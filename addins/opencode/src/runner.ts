@@ -71,6 +71,10 @@ const MIN_CONFIRMATION = 20
 const MAX_TASK_INPUTS = 16
 const MAX_TASK_INPUT_VALUE = 4096
 const MAX_TASK_ARGV_BYTES = 64 * 1024
+const MAX_TOOLCHAIN_CAPABILITIES = 16
+const MAX_TOOLCHAIN_PATHS = 32
+const MAX_TOOLCHAIN_CAPABILITY = 32
+const MAX_TOOLCHAIN_PATH = 2000
 const DEFAULT_MAX_BUFFER = 8 * 1024 * 1024
 const STDERR_TAIL = 64 * 1024
 const ERROR_TAIL = 500
@@ -86,6 +90,8 @@ const APERTURE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 const INVESTIGATION_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/
 const TASK_ID_RE = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/
 const TASK_INPUT_NAME_RE = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/
+/** Toolchain capability and group ids are lower-case registry ids. */
+const TOOLCHAIN_CAPABILITY_RE = /^[a-z][a-z0-9_-]{0,31}$/
 /** The same alphabet and length as `core.actions._TOKEN`. */
 const CONFIRMATION_RE = /^[A-Za-z0-9_-]{20,128}$/
 const CONTROL_RE = /[\u0000-\u001f\u007f]/
@@ -360,6 +366,142 @@ export function resourcesCheckSpec(root: string, input: ResourcesInput): Command
     module: "ozagia.resources_cli",
     args,
     display: `ozagia.resources_cli check --for ${kind} --json`,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Toolchain discovery and install previews
+// ---------------------------------------------------------------------------
+
+/**
+ * The static capability/tool registry.
+ *
+ * `toolchain_cli list` has no `--root` flag: the registry is versioned data,
+ * not a per-repository read. Keep the argument for a uniform spec signature.
+ */
+export function toolchainListSpec(_root: string): CommandSpec {
+  return {
+    module: "ozagia.toolchain_cli",
+    args: ["list", "--json"],
+    display: "ozagia.toolchain_cli list --json",
+  }
+}
+
+export interface ToolchainEnvInput {
+  probeSudo?: unknown
+}
+
+/** Host, manager, Python, sudo and `[tools]` approval facts. */
+export function toolchainEnvSpec(root: string, input: ToolchainEnvInput = {}): CommandSpec {
+  const probeSudo = optionalBoolean(input.probeSudo, "probeSudo")
+
+  const args = ["env", "--root", root, "--json"]
+  if (probeSudo === false) args.push("--no-sudo")
+
+  return {
+    module: "ozagia.toolchain_cli",
+    args,
+    display:
+      "ozagia.toolchain_cli env --json" + (probeSudo === false ? " --no-sudo" : ""),
+  }
+}
+
+export interface ToolchainPlanInput {
+  capabilities?: unknown
+  paths?: unknown
+  probeVersions?: unknown
+  probeSudo?: unknown
+}
+
+/**
+ * Validate capability and group ids before they reach argv.
+ *
+ * The core registry lower-cases ids, but the add-in accepts only the canonical
+ * lower-case form so a value can never look like an option or an arbitrary
+ * argument. At most 16 ids are accepted; duplicates are removed.
+ */
+export function toolchainCapabilities(value: unknown): string[] {
+  if (value === undefined || value === null) return []
+  const raw = typeof value === "string" ? [value] : value
+  if (!Array.isArray(raw)) {
+    throw new InputError("capabilities must be a string or an array of strings")
+  }
+  if (raw.length > MAX_TOOLCHAIN_CAPABILITIES) {
+    throw new InputError(
+      `capabilities must contain at most ${MAX_TOOLCHAIN_CAPABILITIES} entries`,
+    )
+  }
+  const out: string[] = []
+  raw.forEach((item, index) => {
+    const id = text(item, `capabilities[${index}]`, MAX_TOOLCHAIN_CAPABILITY)
+    if (!TOOLCHAIN_CAPABILITY_RE.test(id)) {
+      throw new InputError(
+        `capabilities[${index}] must be a lower-case capability id such as pdf or documents`,
+      )
+    }
+    if (!out.includes(id)) out.push(id)
+  })
+  return out
+}
+
+/**
+ * Validate paths used for extension-based capability inference.
+ *
+ * The path is never opened or resolved by the add-in or the CLI; only its
+ * extension is read. It still gets the core's 2000-character limit and no
+ * control characters, and at most 32 paths are accepted.
+ */
+export function toolchainPaths(value: unknown): string[] {
+  if (value === undefined || value === null) return []
+  const raw = typeof value === "string" ? [value] : value
+  if (!Array.isArray(raw)) {
+    throw new InputError("paths must be a string or an array of strings")
+  }
+  if (raw.length > MAX_TOOLCHAIN_PATHS) {
+    throw new InputError(`paths must contain at most ${MAX_TOOLCHAIN_PATHS} entries`)
+  }
+  const out: string[] = []
+  raw.forEach((item, index) => {
+    const path = text(item, `paths[${index}]`, MAX_TOOLCHAIN_PATH)
+    if (CONTROL_RE.test(path)) {
+      throw new InputError(`paths[${index}] contains control characters`)
+    }
+    if (!out.includes(path)) out.push(path)
+  })
+  return out
+}
+
+/**
+ * Build a read-only `toolchain_cli plan` invocation.
+ *
+ * `--no-versions` and `--no-sudo` are the only probe switches the CLI has.
+ * There is no `--model-family` flag; the model brief in the GUI is rendered
+ * locally from the plan's `native_for`/`preferred_by` metadata. Free-form
+ * paths are argv-only and never appear in the display command.
+ */
+export function toolchainPlanSpec(root: string, input: ToolchainPlanInput): CommandSpec {
+  const capabilities = toolchainCapabilities(input.capabilities)
+  const paths = toolchainPaths(input.paths)
+  const probeVersions = optionalBoolean(input.probeVersions, "probeVersions")
+  const probeSudo = optionalBoolean(input.probeSudo, "probeSudo")
+
+  const args = ["plan", "--root", root]
+  for (const id of capabilities) args.push("--capability", id)
+  for (const path of paths) args.push("--path", path)
+  args.push("--json")
+  if (probeVersions === false) args.push("--no-versions")
+  if (probeSudo === false) args.push("--no-sudo")
+
+  const display = ["ozagia.toolchain_cli", "plan"]
+  for (const id of capabilities) display.push("--capability", id)
+  display.push("--json")
+  if (probeVersions === false) display.push("--no-versions")
+  if (probeSudo === false) display.push("--no-sudo")
+
+  return {
+    module: "ozagia.toolchain_cli",
+    args,
+    display: display.join(" "),
   }
 }
 

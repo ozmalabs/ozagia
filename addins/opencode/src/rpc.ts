@@ -1,8 +1,20 @@
 import { Rpc } from "@opencode/plugin/rpc"
-import { ACTION_APPLY_INPUT, ACTION_PREVIEW_INPUT, TASK_RUN_INPUT } from "./schemas.js"
+import {
+  ACTION_APPLY_INPUT,
+  ACTION_PREVIEW_INPUT,
+  TASK_RUN_INPUT,
+  TOOLCHAIN_ENV_INPUT,
+  TOOLCHAIN_PLAN_INPUT,
+} from "./schemas.js"
 
 export { ACTION_NAMES } from "./schemas.js"
-export type { ActionApplyInput, ActionPreviewInput, TaskRunInput } from "./types.js"
+export type {
+  ActionApplyInput,
+  ActionPreviewInput,
+  TaskRunInput,
+  ToolchainEnvInput,
+  ToolchainPlanInput,
+} from "./types.js"
 
 /**
  * The ozagia RPC contract.
@@ -139,6 +151,9 @@ export const Ozagia = Rpc.define({
     worktreeCheck: { input: EMPTY_INPUT, output: ENVELOPE_OUTPUT },
     policyCheck: { input: POLICY_INPUT, output: ENVELOPE_OUTPUT },
     resourcesCheck: { input: RESOURCES_INPUT, output: ENVELOPE_OUTPUT },
+    toolchainEnv: { input: TOOLCHAIN_ENV_INPUT, output: ENVELOPE_OUTPUT },
+    toolchainList: { input: EMPTY_INPUT, output: ENVELOPE_OUTPUT },
+    toolchainPlan: { input: TOOLCHAIN_PLAN_INPUT, output: ENVELOPE_OUTPUT },
     testingPlan: { input: TESTING_INPUT, output: ENVELOPE_OUTPUT },
     researchView: { input: RESEARCH_INPUT, output: ENVELOPE_OUTPUT },
     settingsSchema: { input: EMPTY_INPUT, output: ENVELOPE_OUTPUT },

@@ -22,6 +22,9 @@ import {
   tasksShowSpec,
   tasksValidateSpec,
   testingPlanSpec,
+  toolchainEnvSpec,
+  toolchainListSpec,
+  toolchainPlanSpec,
   viewSpec,
   worktreeCheckSpec,
   type CommandSpec,
@@ -107,6 +110,18 @@ export default Plugin.define({
         run(() => policyCheckSpec(config.root, input as Record<string, unknown>), context.signal),
       resourcesCheck: async (input, context) =>
         run(() => resourcesCheckSpec(config.root, input as Record<string, unknown>), context.signal),
+      toolchainEnv: async (input, context) =>
+        run(
+          () => toolchainEnvSpec(config.root, input as Record<string, unknown>),
+          context.signal,
+        ),
+      toolchainList: async (_input, context) =>
+        run(() => toolchainListSpec(config.root), context.signal),
+      toolchainPlan: async (input, context) =>
+        run(
+          () => toolchainPlanSpec(config.root, input as Record<string, unknown>),
+          context.signal,
+        ),
       testingPlan: async (input, context) =>
         run(() => testingPlanSpec(config.root, input as Record<string, unknown>), context.signal),
       researchView: async (input, context) =>

@@ -1,5 +1,5 @@
 /**
- * JSON schemas for the RPC methods that can change local state.
+ * JSON schemas for the RPC methods whose inputs need explicit bounds.
  *
  * Kept dependency-free so the offline `node:test` suite can load this module
  * without the GUI host or a build. `rpc.ts` composes these into `Rpc.define`;
@@ -86,5 +86,67 @@ export const TASK_RUN_INPUT = {
     },
   },
   required: ["id"],
+  additionalProperties: false,
+} as const
+
+/**
+ * Toolchain discovery is read-only: `list`, `env` and `plan` only. `plan`
+ * bounds the repeated `--capability`/`--path` flags and accepts the CLI's two
+ * probe switches. There is no `--model-family` flag and no install method.
+ */
+export const TOOLCHAIN_ENV_INPUT = {
+  type: "object",
+  properties: {
+    probeSudo: { type: "boolean" },
+  },
+  additionalProperties: false,
+} as const
+
+export const TOOLCHAIN_PLAN_INPUT = {
+  type: "object",
+  properties: {
+    capabilities: {
+      oneOf: [
+        {
+          type: "string",
+          minLength: 1,
+          maxLength: 32,
+          pattern: "^[a-z][a-z0-9_-]{0,31}$",
+        },
+        {
+          type: "array",
+          items: {
+            type: "string",
+            minLength: 1,
+            maxLength: 32,
+            pattern: "^[a-z][a-z0-9_-]{0,31}$",
+          },
+          maxItems: 16,
+        },
+      ],
+    },
+    paths: {
+      oneOf: [
+        {
+          type: "string",
+          minLength: 1,
+          maxLength: 2000,
+          pattern: "^[^\\u0000-\\u001f\\u007f]*$",
+        },
+        {
+          type: "array",
+          items: {
+            type: "string",
+            minLength: 1,
+            maxLength: 2000,
+            pattern: "^[^\\u0000-\\u001f\\u007f]*$",
+          },
+          maxItems: 32,
+        },
+      ],
+    },
+    probeVersions: { type: "boolean" },
+    probeSudo: { type: "boolean" },
+  },
   additionalProperties: false,
 } as const

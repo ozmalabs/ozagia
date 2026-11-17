@@ -7,6 +7,7 @@ import { ResearchTab } from "./research"
 import { StatusTab } from "./status"
 import { TasksTab } from "./tasks"
 import { TestingTab } from "./testing"
+import { ToolchainTab } from "./toolchain"
 
 export function OzagiaPanel(props: {
   tab: () => PanelTab
@@ -33,6 +34,9 @@ export function OzagiaPanel(props: {
         </Match>
         <Match when={props.tab().id === "tasks"}>
           <TasksTab />
+        </Match>
+        <Match when={props.tab().id === "tools"}>
+          <ToolchainTab />
         </Match>
       </Switch>
     </div>
