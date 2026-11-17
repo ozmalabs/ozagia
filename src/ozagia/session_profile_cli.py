@@ -360,6 +360,73 @@ def store_profile_event(root: Path, value: dict) -> dict:
         return _store_profile_event(root, value)
 
 
+_CAPTURE_DIAGNOSTIC_COUNTERS = (
+    "events_received", "step_events", "content_events", "tool_parts_seen",
+    "tool_parts_accepted", "tool_lifecycle_started", "tool_lifecycle_called",
+    "tool_lifecycle_terminal", "tool_lifecycle_events_accepted",
+    "profile_events_accepted", "store_attempts",
+    "store_successes_observed_lower_bound", "store_failures_observed_lower_bound",
+)
+
+
+def _merge_capture_diagnostics(profile: dict, raw: object) -> bool:
+    """Merge a bounded snapshot of metadata-only plugin counters."""
+    if not isinstance(raw, dict):
+        return False
+    capture_id = raw.get("capture_id")
+    if not isinstance(capture_id, str) or not re.fullmatch(r"[a-f0-9-]{36}", capture_id):
+        return False
+    counters = raw.get("counters") if isinstance(raw.get("counters"), dict) else raw
+    clean = {key: min(2**53 - 1, int(counters[key])) for key in _CAPTURE_DIAGNOSTIC_COUNTERS
+             if isinstance(counters.get(key), int) and not isinstance(counters.get(key), bool)
+             and 0 <= counters[key] <= 2**53 - 1}
+    if not clean:
+        return False
+    records = profile.setdefault("capture_diagnostics", [])
+    if not isinstance(records, list):
+        records = profile["capture_diagnostics"] = []
+    record = next((item for item in records if isinstance(item, dict)
+                   and item.get("capture_id") == capture_id), None)
+    if record is None:
+        record = {"capture_id": capture_id, "counters": {}}
+        records.append(record)
+        del records[:-4]
+    old = record.get("counters") if isinstance(record.get("counters"), dict) else {}
+    merged = {key: max(old.get(key, 0), value) for key, value in clean.items()}
+    if merged == old:
+        return False
+    record["counters"] = merged
+    return True
+
+
+def _write_profile_event(path: Path, directory: Path, envelope: dict, new_profile: bool) -> None:
+    encoded = json.dumps(envelope, sort_keys=True, separators=(",", ":"))
+    if len(encoded.encode()) > MAX_PROFILE_BYTES:
+        profile = envelope["host_profile"]
+        profile["models"] = profile.get("models", [])[:10]
+        profile["tools"] = dict(list(profile.get("tools", {}).items())[-64:])
+        profile["truncated"] = True
+        envelope["host_profile"] = profile
+        encoded = json.dumps(envelope, sort_keys=True, separators=(",", ":"))
+    fd, temp_name = tempfile.mkstemp(prefix=".profile-", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(encoded)
+        os.replace(temp_name, path)
+    finally:
+        try:
+            os.unlink(temp_name)
+        except FileNotFoundError:
+            pass
+    if new_profile:
+        profiles = sorted(directory.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+        for stale in profiles[MAX_ROWS:]:
+            try:
+                stale.unlink()
+            except OSError:
+                pass
+
+
 def _store_profile_event(root: Path, value: dict) -> dict:
     """Merge one metadata-only OpenCode message/tool completion event.
 
@@ -417,7 +484,13 @@ def _store_profile_event(root: Path, value: dict) -> dict:
     seen = profile.get(seen_key)
     if not isinstance(seen, list):
         seen = []
+    diagnostics_changed = _merge_capture_diagnostics(profile, metadata.get("capture_diagnostics"))
     if event_key in seen:
+        if diagnostics_changed:
+            profile["observed_at"] = datetime.now(timezone.utc).isoformat()
+            envelope.update({"session_id": session, "harness": harness,
+                             "observed_at": profile["observed_at"], "host_profile": profile})
+            _write_profile_event(path, directory, envelope, new_profile)
         return {"ok": True, "stored": False, "duplicate": True}
     seen.append(event_key)
     if len(seen) > 256:
@@ -474,32 +547,7 @@ def _store_profile_event(root: Path, value: dict) -> dict:
     profile["observed_at"] = datetime.now(timezone.utc).isoformat()
     envelope.update({"session_id": session, "harness": harness,
                      "observed_at": profile["observed_at"], "host_profile": profile})
-    encoded = json.dumps(envelope, sort_keys=True, separators=(",", ":"))
-    if len(encoded.encode()) > MAX_PROFILE_BYTES:
-        profile["models"] = profile.get("models", [])[:10]
-        profile["tools"] = dict(list(profile.get("tools", {}).items())[-64:])
-        profile["truncated"] = True
-        envelope["host_profile"] = profile
-        encoded = json.dumps(envelope, sort_keys=True, separators=(",", ":"))
-    fd, temp_name = tempfile.mkstemp(prefix=".profile-", dir=directory)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            stream.write(encoded)
-            # Host event recording is on the response path too. Close and
-            # atomic replace protect process-crash state without device sync.
-        os.replace(temp_name, path)
-    finally:
-        try:
-            os.unlink(temp_name)
-        except FileNotFoundError:
-            pass
-    if new_profile:
-        profiles = sorted(directory.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
-        for stale in profiles[MAX_ROWS:]:
-            try:
-                stale.unlink()
-            except OSError:
-                pass
+    _write_profile_event(path, directory, envelope, new_profile)
     return {"ok": True, "stored": True}
 
 

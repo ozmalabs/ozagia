@@ -419,6 +419,48 @@ def test_opencode_23_durable_event_payloads_extract_metadata_only(tmp_path):
     assert "secret" not in serialized and '"no"' not in serialized
 
 
+def test_opencode_23_tool_lifecycle_events_correlate_bounded_metadata_only(tmp_path):
+    node = shutil.which("node")
+    if not node:
+        return
+    source = Path(__file__).parents[1] / "src/ozagia/integrations/opencode/plugin.js"
+    plugin = tmp_path / "plugin.mjs"
+    plugin.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+    script = textwrap.dedent(f"""\
+        import {{ profileToolLifecycleEvent }} from {json.dumps(plugin.as_uri())};
+        const runs = new Map();
+        const emit = (type, sessionID, id, created, extra = {{}}) =>
+          profileToolLifecycleEvent({{type, created, data: {{sessionID, id, ...extra}}}}, runs);
+        emit("session.tool.input.started", "s1", "read-1", 100, {{name: "read", input: {{secret: "private"}}}});
+        emit("session.tool.called", "s1", "read-1", 125, {{input: {{secret: "private"}}}});
+        const success = emit("session.tool.success", "s1", "read-1", 260, {{content: [{{text: "private"}}]}});
+        emit("session.tool.input.started", "s1", "shell-1", 200, {{name: "shell"}});
+        emit("session.tool.called", "s1", "shell-1", 250);
+        const failed = emit("session.tool.failed", "s1", "shell-1", 400, {{error: "private"}});
+        const orphan = emit("session.tool.success", "s1", "orphan", 500);
+        emit("session.tool.called", "s1", "no-start", 510);
+        const noStart = emit("session.tool.failed", "s1", "no-start", 700);
+        emit("session.tool.input.started", "other", "read-1", 900, {{name: "grep"}});
+        const independent = emit("session.tool.success", "other", "read-1", 1000);
+        for (let i = 0; i < 70; i++) emit("session.tool.input.started", "bounded", `id-${{i}}`, i, {{name: "read"}});
+        const boundedCount = runs.get("bounded").size;
+        for (let i = 0; i < 40; i++) emit("session.tool.input.started", `session-${{i}}`, "pending", i, {{name: "read"}});
+        console.log(JSON.stringify({{success, failed, orphan, noStart, independent,
+          sessionCount: runs.size, boundedCount}}));
+    """)
+    completed = subprocess.run([node, "--input-type=module", "-e", script], capture_output=True,
+                               text=True, check=True)
+    result = json.loads(completed.stdout)
+    assert result["success"]["metadata"] == {"tool": "read", "status": "completed", "duration_ms": 135}
+    assert result["failed"]["metadata"] == {"tool": "shell", "status": "error", "duration_ms": 150}
+    assert result["orphan"]["metadata"] == {"tool": "unknown", "status": "completed", "duration_ms": None}
+    assert result["noStart"]["metadata"] == {"tool": "unknown", "status": "error", "duration_ms": 190}
+    assert result["independent"]["metadata"]["tool"] == "grep"
+    assert result["sessionCount"] == 32
+    assert result["boundedCount"] == 64
+    assert "private" not in json.dumps(result)
+
+
 def test_opencode_23_subscribes_to_supported_durable_event_types(tmp_path):
     node = shutil.which("node")
     if not node:
@@ -440,6 +482,10 @@ def test_opencode_23_subscribes_to_supported_durable_event_types(tmp_path):
     types = json.loads(completed.stdout)
     assert "session.step.ended" in types
     assert "session.message.content.updated" in types
+    assert "session.tool.input.started" in types
+    assert "session.tool.called" in types
+    assert "session.tool.success" in types
+    assert "session.tool.failed" in types
     assert "message.updated" not in types
     assert "message.part.updated" not in types
 
@@ -492,6 +538,15 @@ def test_opencode_23_event_subscription_persists_correlated_metadata_and_dedupli
               {{type: "session.step.ended", created: 1500, data: {{sessionID,
                 assistantMessageID: "msg-opencode-23", finish: "stop", cost: 0.01,
                 tokens: {{input: 21, output: 8, reasoning: 3, cache: {{read: 4, write: 2}}}}}}}},
+              {{type: "session.tool.input.started", created: 1160,
+                data: {{sessionID, assistantMessageID: "msg-opencode-23", id: "call-read", name: "read", input: {{secret: "private"}}}}}},
+              {{type: "session.tool.called", created: 1200,
+                data: {{sessionID, assistantMessageID: "msg-opencode-23", id: "call-read", input: {{secret: "private"}}}}}},
+              {{type: "session.tool.success", created: 1340,
+                data: {{sessionID, assistantMessageID: "msg-opencode-23", id: "call-read", content: [{{type: "text", text: "private"}}], executed: true}}}},
+              // Missing input.started: retain coverage as unknown and untimed.
+              {{type: "session.tool.failed", created: 1450,
+                data: {{sessionID, assistantMessageID: "msg-opencode-23", id: "orphan-tool", error: "private"}}}},
               {{type: "session.message.content.updated", created: 1600, data: {{sessionID,
                 messageID: "msg-opencode-23", content: [
                   {{type: "tool", id: "call-bash", name: "bash", time: {{created: 1200, ran: 1220, completed: 1320}},
@@ -505,7 +560,9 @@ def test_opencode_23_event_subscription_persists_correlated_metadata_and_dedupli
             const keepAlive = setInterval(() => {{}}, 1000);
             const event = {{subscribe(options) {{
               if (!options.types.includes("session.step.ended")
-                  || !options.types.includes("session.message.content.updated")) throw new Error("wrong event filter");
+                  || !options.types.includes("session.message.content.updated")
+                  || !options.types.includes("session.tool.success")
+                  || !options.types.includes("session.tool.failed")) throw new Error("wrong event filter");
               return (async function*() {{ for (const item of [...events, ...events]) yield item; drained(); }})();
             }}}};
             await createPlugin().setup({{event}});
@@ -517,8 +574,8 @@ def test_opencode_23_event_subscription_persists_correlated_metadata_and_dedupli
                                    text=True, check=True, timeout=15)
         assert "event stream drained" in completed.stdout
         assert not errors, errors
-        assert len(responses) == 6
-        assert sum(bool(response.get("duplicate")) for response in responses) == 3
+        assert len(responses) == 10
+        assert sum(bool(response.get("duplicate")) for response in responses) == 5
 
         persisted = report(tmp_path)["sessions"][0]["host_profile"]
         assert persisted["model_calls"] == 1
@@ -530,17 +587,67 @@ def test_opencode_23_event_subscription_persists_correlated_metadata_and_dedupli
         assert persisted["timing_ms"] == {
             "first_token": 100, "streamed": 200, "completed": 500, "model_turn": 500,
         }
-        assert persisted["coverage"]["host_tool_calls"] == 2
+        assert persisted["coverage"]["host_tool_calls"] == 4
         assert persisted["tools"]["bash"]["completed"]["duration_ms_sum"] == 100
         assert persisted["tools"]["edit"]["error"]["duration_ms_sum"] == 50
+        assert persisted["tools"]["read"]["completed"]["duration_ms_sum"] == 140
+        assert persisted["tools"]["unknown"]["error"]["untimed_count"] == 1
+        diagnostics = persisted["capture_diagnostics"]
+        assert len(diagnostics) == 1
+        counts = diagnostics[0]["counters"]
+        assert counts["content_events"] == 2
+        assert counts["tool_parts_seen"] == 4
+        assert counts["tool_parts_accepted"] == 8
+        assert counts["tool_lifecycle_started"] == 2
+        assert counts["tool_lifecycle_called"] == 2
+        assert counts["tool_lifecycle_terminal"] == 4
+        assert counts["tool_lifecycle_events_accepted"] == 4
+        assert counts["profile_events_accepted"] == 10
+        assert counts["store_attempts"] == 10
+        # Snapshots precede their request's response; the persisted final value
+        # is an explicit lower bound, excluding the last successful response.
+        assert counts["store_successes_observed_lower_bound"] == 9
+        assert counts["store_failures_observed_lower_bound"] == 0
         raw = json.dumps(persisted)
-        assert "must-not-persist" not in raw and "private-output" not in raw
+        assert "must-not-persist" not in raw and "private-output" not in raw and "private" not in raw
     finally:
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
         sock.unlink(missing_ok=True)
         sockdir.rmdir()
+
+
+def test_profile_capture_diagnostics_merge_on_duplicate_and_are_bounded(tmp_path):
+    counters = {"events_received": 3, "content_events": 1, "tool_parts_seen": 1,
+                "tool_parts_accepted": 1, "profile_events_accepted": 1,
+                "store_attempts": 1, "store_successes_observed_lower_bound": 0,
+                "store_failures_observed_lower_bound": 1}
+    event = {"session": "diag-session", "harness": "opencode", "kind": "tool",
+             "event_id": "same-event", "metadata": {"tool": "bash", "status": "completed",
+             "duration_ms": 7, "capture_diagnostics": {"capture_id": "a" * 36,
+             **counters, "payload": "must-not-persist"}}}
+    assert store_profile_event(tmp_path, event)["stored"] is True
+    improved = {**event, "metadata": {**event["metadata"], "capture_diagnostics": {
+        "capture_id": "a" * 36,
+        **{**counters, "store_successes_observed_lower_bound": 1},
+    }}}
+    result = store_profile_event(tmp_path, improved)
+    assert result["duplicate"] is True
+    persisted = report(tmp_path)["sessions"][0]["host_profile"]
+    assert persisted["coverage"]["host_tool_calls"] == 1
+    assert persisted["capture_diagnostics"] == [{
+        "capture_id": "a" * 36,
+        "counters": {**counters, "store_successes_observed_lower_bound": 1},
+    }]
+    assert "must-not-persist" not in json.dumps(persisted)
+
+    for index in range(5):
+        diagnostics = {"capture_id": f"{index:036x}", "events_received": index + 1}
+        store_profile_event(tmp_path, {**event, "event_id": f"event-{index}",
+            "metadata": {**event["metadata"], "capture_diagnostics": diagnostics}})
+    persisted = report(tmp_path)["sessions"][0]["host_profile"]
+    assert len(persisted["capture_diagnostics"]) == 4
 
 
 def test_store_profile_bounds_retention_and_rejects_oversized_input(tmp_path):

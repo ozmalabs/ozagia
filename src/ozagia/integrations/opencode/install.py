@@ -121,6 +121,35 @@ def tui_profile_source() -> str:
     return source.replace('"__OZAGIA_PYTHON__"', json.dumps(sys.executable))
 
 
+def is_generated_plugin(rel: str, source: str) -> bool:
+    """Whether ``source`` is a pristine generated OpenCode plugin output.
+
+    The profile's executable literal is an install-time substitution, so any
+    valid JSON string in that exact template position is accepted. All other
+    content must match the packaged template byte-for-byte.
+    """
+    if rel == PLUGIN_REL.as_posix():
+        return source == plugin_source()
+    if rel == TUI_BRAND_REL.as_posix():
+        return source == tui_brand_source()
+    if rel != TUI_PROFILE_REL.as_posix():
+        return False
+    template = (resources.files("ozagia.integrations.opencode")
+                .joinpath("tui_profile.js").read_text(encoding="utf-8"))
+    marker = '"__OZAGIA_PYTHON__"'
+    if template.count(marker) != 1:
+        return False
+    prefix, suffix = template.split(marker)
+    if not source.startswith(prefix) or not source.endswith(suffix):
+        return False
+    encoded = source[len(prefix):len(source) - len(suffix)]
+    try:
+        executable = json.loads(encoded)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(executable, str) and bool(executable)
+
+
 def plugin_path(workdir: str | Path) -> Path:
     return Path(workdir) / PLUGIN_REL
 

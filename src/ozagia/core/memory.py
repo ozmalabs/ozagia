@@ -690,6 +690,30 @@ def _walked(root: Path, rel: str) -> bool:
         return False
 
 
+def _is_pristine_generated_opencode_output(root: Path, rel: str) -> bool:
+    """Ignore untouched plugin outputs that OpenCode installs into a repo.
+
+    These JavaScript files are outside the graph indexer's source formats. The
+    profile plugin embeds the installing interpreter path, which can change
+    independently of repository knowledge. Edited outputs still participate
+    in the digest, and tracked changes remain visible through ``git diff``.
+    """
+    try:
+        from ozagia.integrations.opencode import install
+
+        generated = {
+            install.PLUGIN_REL.as_posix(),
+            install.TUI_BRAND_REL.as_posix(),
+            install.TUI_PROFILE_REL.as_posix(),
+        }
+        if rel not in generated:
+            return False
+        source = (root / rel).read_text(encoding="utf-8")
+        return install.is_generated_plugin(rel, source)
+    except (OSError, UnicodeError):
+        return False
+
+
 class FileIndexer:
     """The per-file part of a build: one source, test or doc file.
 
@@ -1412,6 +1436,8 @@ def _build_untracked_paths(root: Path, *, dump: str | Path | None,
                                 for p in check.stdout.split(b"\0") if p}
         output = []
         for rel in sorted(candidates):
+            if _is_pristine_generated_opencode_output(root, rel):
+                continue
             if rel in expanded_ignored and rel not in ignored_expanded:
                 continue
             if not _walked(root, rel):

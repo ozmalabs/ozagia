@@ -80,7 +80,7 @@
 // Plain ES module, node: built-ins only.
 
 import net from "node:net";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 export const PLUGIN_ID = "ozagia";
 export const PLUGIN_VERSION = "0.1.0";
@@ -760,15 +760,103 @@ export function profileMetadataEvent(event) {
   return undefined;
 }
 
+/** Convert durable tool lifecycle events to metadata-only profile rows. */
+export function profileToolLifecycleEvent(event, sessions) {
+  const data = event && (event.properties || event.data || event);
+  const session = data?.sessionID;
+  const id = data?.id;
+  if (typeof session !== "string" || !session || session.length > 256
+      || typeof id !== "string" || !id || id.length > 256) return undefined;
+  const terminal = event.type === "session.tool.success" || event.type === "session.tool.failed";
+  if (!terminal && event.type !== "session.tool.input.started" && event.type !== "session.tool.called") {
+    return undefined;
+  }
+  let tools = sessions.get(session);
+  if (!tools) {
+    if (sessions.size >= 32) sessions.delete(sessions.keys().next().value);
+    tools = new Map();
+    sessions.set(session, tools);
+  }
+  const name = (value) => typeof value === "string" && /^[A-Za-z0-9_.-]{1,80}$/.test(value)
+    ? value : null;
+  if (event.type === "session.tool.input.started") {
+    const prior = tools.get(id);
+    tools.set(id, { name: name(data.name), started: prior?.started ?? null });
+    if (tools.size > 64) tools.delete(tools.keys().next().value);
+    return undefined;
+  }
+  if (event.type === "session.tool.called") {
+    const prior = tools.get(id);
+    if (!prior) {
+      tools.set(id, { name: null, started: profileMillis(event.created) });
+      if (tools.size > 64) tools.delete(tools.keys().next().value);
+    } else if (prior.started === null) {
+      // Measure execution from dispatch, not from the beginning of input generation.
+      prior.started = profileMillis(event.created);
+    }
+    return undefined;
+  }
+  const started = tools.get(id);
+  tools.delete(id);
+  if (tools.size === 0) sessions.delete(session);
+  const completed = profileMillis(event.created);
+  const duration = started?.started !== null && started?.started !== undefined
+      && completed !== undefined && completed >= started.started
+    ? Math.trunc(completed - started.started) : null;
+  return {
+    op: "profile_event", harness: HARNESS, session, kind: "tool", event_id: id,
+    metadata: {
+      tool: started?.name || "unknown",
+      status: event.type === "session.tool.success" ? "completed" : "error",
+      duration_ms: duration,
+    },
+  };
+}
+
 async function captureProfileEvents(ctx, client, signal) {
   try {
     const steps = new Map();
+    const toolRuns = new Map();
+    const captureId = randomUUID();
+    const diagnostics = new Map();
+    const counters = (session) => {
+      let value = diagnostics.get(session);
+      if (!value) {
+        if (diagnostics.size >= 32) diagnostics.delete(diagnostics.keys().next().value);
+        value = { events_received: 0, step_events: 0, content_events: 0,
+          tool_parts_seen: 0, tool_parts_accepted: 0, tool_lifecycle_started: 0,
+          tool_lifecycle_called: 0, tool_lifecycle_terminal: 0,
+          tool_lifecycle_events_accepted: 0, profile_events_accepted: 0,
+          store_attempts: 0, store_successes_observed_lower_bound: 0,
+          store_failures_observed_lower_bound: 0 };
+        diagnostics.set(session, value);
+      }
+      return value;
+    };
     const events = ctx.event.subscribe({ types: [
       "session.step.started", "session.step.first-token", "session.step.streamed",
       "session.step.ended", "session.step.failed", "session.message.content.updated",
+      "session.tool.input.started", "session.tool.called",
+      "session.tool.success", "session.tool.failed",
     ], signal });
     for await (const event of events) {
       const data = event && (event.properties || event.data || event);
+      const sessionId = typeof data?.sessionID === "string" ? data.sessionID : null;
+      const diag = sessionId ? counters(sessionId) : null;
+      if (diag) {
+        diag.events_received++;
+        if (event.type.startsWith("session.step.")) diag.step_events++;
+        if (event.type === "session.tool.input.started") diag.tool_lifecycle_started++;
+        if (event.type === "session.tool.called") diag.tool_lifecycle_called++;
+        if (event.type === "session.tool.success" || event.type === "session.tool.failed") {
+          diag.tool_lifecycle_terminal++;
+        }
+        if (event.type === "session.message.content.updated") {
+          diag.content_events++;
+          const content = Array.isArray(data.content) ? data.content : [];
+          diag.tool_parts_seen += content.filter((part) => part?.type === "tool").length;
+        }
+      }
       if (data && typeof data.sessionID === "string" && typeof data.assistantMessageID === "string") {
         const key = `${data.sessionID}\0${data.assistantMessageID}`;
         if (event.type === "session.step.started") {
@@ -785,12 +873,19 @@ async function captureProfileEvents(ctx, client, signal) {
           steps.delete(key);
         }
       }
-      const messages = event?.type === "session.message.content.updated"
+      const toolMessage = profileToolLifecycleEvent(event, toolRuns);
+      const messages = toolMessage ? [toolMessage] : event?.type === "session.message.content.updated"
         ? (Array.isArray(data?.content) ? data.content : []).map((part) =>
           profileMetadataEvent({ type: event.type, data: { sessionID: data.sessionID, content: [part] } }))
         : [profileMetadataEvent(event)];
       for (const message of messages) {
         if (!message) continue;
+        const messageDiag = counters(message.session);
+        messageDiag.profile_events_accepted++;
+        if (message.kind === "tool") messageDiag.tool_parts_accepted++;
+        if (toolMessage === message) messageDiag.tool_lifecycle_events_accepted++;
+        messageDiag.store_attempts++;
+        message.metadata.capture_diagnostics = { capture_id: captureId, ...messageDiag };
         if (message.kind === "message") {
           const key = `${message.session}\0${message.event_id}`;
           const step = steps.get(key);
@@ -806,8 +901,16 @@ async function captureProfileEvents(ctx, client, signal) {
             steps.delete(key);
           }
         }
-        try { await client.request(message, 2000, false, false); }
-        catch { /* profiles are best-effort and never interrupt an agent turn */ }
+        // Outcome counters are included in later snapshots, so their persisted
+        // values are lower bounds when the final response has no later event.
+        try {
+          const result = await client.request(message, 2000, false, false);
+          if (result?.ok) messageDiag.store_successes_observed_lower_bound++;
+          else messageDiag.store_failures_observed_lower_bound++;
+        } catch {
+          messageDiag.store_failures_observed_lower_bound++;
+          /* best-effort profile; never interrupt an agent turn */
+        }
       }
     }
   } catch { /* unsupported event API or an unloaded daemon: no profile events */ }
