@@ -187,7 +187,9 @@ parser with the offending file's path.
 `[security]` is consumed by `ozagia.core.security` from both files through
 :func:`load_config_section`; its supported keys are `enabled`, `tools`,
 `allow_network`, `fail_on`, `exclude`, `max_findings`, `block_secrets` and
-`secret_allowlist`. Values from the other registry groups (`hints`, `models`,
+`secret_allowlist`. `[secrets]` is consumed the same way by
+`ozagia.core.secrets`; it holds provider policy and never a secret value (see
+`docs/secrets.md`). Values from the other registry groups (`hints`, `models`,
 `ui`, `resources`, `worktrees`, `markdown`, `files`, `tasks`) stay with the
 modules that own them. The loader reports them, and any unknown key or nested
 table, in `ProjectConfig.unmapped` instead of silently ignoring them. The
@@ -533,6 +535,7 @@ _OWNED_SECTIONS = {
     "files": "read by the file-ledger and cleanup modules",
     "tasks": "read by the bounded-task modules",
     "tools": "read by ozagia.core.toolchain",
+    "secrets": "read by ozagia.core.secrets",
 }
 
 #: Individual registry keys another module reads, or with no mapping.
