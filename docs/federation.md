@@ -116,6 +116,28 @@ unknown or unverifiable results remain unknown. Selected roots and declared
 links can disclose repository metadata to the caller, so use explicit
 membership where needed.
 
+## Static code-to-Kubernetes configuration observations
+
+`ozagia.core.cross_config.check(root, roots=None)` provides a read-only static
+observation for explicitly declared `configured_by` federation links. It
+accepts a link from a Python `File` node to a Kubernetes `InfraResource`, reads
+the current Python source and referenced JSON manifest (or YAML when the
+optional safe YAML parser is installed), then compares literal
+`os.environ["NAME"]` lookups with the names in a single workload container's
+`env` list. Optional `os.getenv` and `os.environ.get` lookups are not required
+variables. The report retains qualified endpoints, provenance, repository
+freshness states and source paths; it never returns environment values.
+
+Dynamic lookups, parse/read errors, missing or ambiguous resources,
+`envFrom`, multiple containers, unsafe paths and unavailable snapshots produce
+unknown results. A missing name is reported as `observed_missing` from current
+source, not as a deployment failure. Even matching names are only
+`observed_match`: snapshot freshness is reported separately, and an unknown or
+stale snapshot keeps the overall result unknown. This check does not establish
+that the source is deployed, that optional environment access is covered, or
+that runtime behavior is correct. It does not execute code, load projects,
+refresh graphs or write to member repositories.
+
 ## Identity and freshness limits
 
 Node keys are qualified by a checkout ID because local keys such as
