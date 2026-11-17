@@ -860,6 +860,9 @@ def _live_run(args: argparse.Namespace) -> int:
         pin = _source_pin(source, args.base, runtime)
         _write_json(out / SOURCE_MANIFEST, pin["manifest"])
         facts = L.validate_facts()
+        if not facts["ok"]:
+            raise RunRefused(
+                "frozen facts do not validate: " + "; ".join(facts["errors"][:5]))
         tool = _check_tool_python(args.tool_python, source, runtime)
         mcp = _mcp_surface(args.tool_python, source, runtime)
         opencode = shutil.which("opencode")
