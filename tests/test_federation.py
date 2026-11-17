@@ -59,6 +59,66 @@ def test_discover_does_not_follow_symlink_sibling(tmp_path: Path) -> None:
     assert [m["root"] for m in report["members"]] == [str(root.resolve())]
 
 
+def test_manifest_members_are_combined_with_indexed_siblings(tmp_path: Path) -> None:
+    root = tmp_path / "workspace" / "anchor"
+    sibling = root.parent / "indexed-sibling"
+    linked = tmp_path / "elsewhere" / "linked"
+    missing = tmp_path / "elsewhere" / "future"
+    for path in (root, sibling, linked):
+        path.mkdir(parents=True)
+    _snapshot(root, "anchor")
+    _snapshot(sibling, "sibling")
+    _snapshot(linked, "linked")
+    manifest = root / ".ozagia" / "federation.json"
+    manifest.write_text(json.dumps({
+        "version": 1,
+        "members": ["../../elsewhere/linked", str(missing)],
+        "links": [],
+    }), encoding="utf-8")
+
+    report = federation.status(root)
+
+    assert [member["name"] for member in report["members"]] == [
+        "anchor", "sibling", "linked", "future",
+    ]
+    assert report["members"][-1]["state"] == "missing"
+    assert report["discovery"] == "immediate-siblings"
+
+
+def test_explicit_roots_override_manifest_members_and_siblings(tmp_path: Path) -> None:
+    root, sibling, linked, selected = [tmp_path / name for name in
+                                      ("root", "sibling", "linked", "selected")]
+    for path in (root, sibling, linked, selected):
+        path.mkdir()
+        _snapshot(path, path.name)
+    (root / ".ozagia" / "federation.json").write_text(json.dumps({
+        "version": 1, "members": [str(linked)], "links": [],
+    }), encoding="utf-8")
+
+    report = federation.discover(root, roots=[selected])
+
+    assert [member["name"] for member in report["members"]] == ["root", "selected"]
+
+
+def test_malformed_manifest_members_are_reported(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    _snapshot(root, "root")
+    file_member = root / "not-a-directory"
+    file_member.write_text("not a checkout", encoding="utf-8")
+    (root / ".ozagia" / "federation.json").write_text(json.dumps({
+        "version": 1, "members": ["", 3, str(file_member)], "links": [],
+    }), encoding="utf-8")
+
+    report = federation.discover(root)
+
+    assert report["links"]["member_errors"] == [
+        "members[0] must be a non-empty directory string",
+        "members[1] must be a non-empty directory string",
+        f"members[2] is not a directory: {file_member}",
+    ]
+
+
 def test_absolute_state_dir_applies_only_to_anchor(tmp_path: Path, monkeypatch) -> None:
     root, sibling = tmp_path / "root", tmp_path / "sibling"
     state = tmp_path / "external-state"

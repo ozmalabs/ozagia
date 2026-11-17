@@ -25,6 +25,28 @@ which roots were considered, which snapshots were usable, and freshness or
 loading problems. An absent or invalid graph is reported; the command does not
 repair it.
 
+The anchor's `.ozagia/federation.json` may also declare linked checkouts with
+an optional `members` array. Each item is a relative path resolved from the
+anchor checkout or an absolute directory path:
+
+```json
+{
+  "version": 1,
+  "members": ["../service-b", "~/work/shared-library"],
+  "links": []
+}
+```
+
+When roots are discovered automatically, indexed immediate siblings and these
+declared members are combined. Declared paths remain visible in status when a
+directory or snapshot is missing or invalid. A malformed `members` value or
+entry is reported under `links.member_errors`. Passing explicit CLI `--repo`
+options or MCP `roots` selects only those roots plus the anchor, overriding
+both discovery sources. A member declaration only selects an existing
+snapshot; it never builds or refreshes one. Declaring a path can disclose its
+location and snapshot metadata to the caller, so only add checkouts that are
+appropriate for the connected client to inspect.
+
 Automatic sibling discovery can expose repository names, paths, snapshot
 freshness, and indexed code metadata to the CLI caller or connected MCP
 client. Use explicit `--repo` membership when that disclosure boundary matters.
