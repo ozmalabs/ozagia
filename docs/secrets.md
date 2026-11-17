@@ -3,8 +3,16 @@
 Secrets are passed by reference, never by value. Configuration, job records,
 CLI output, logs and model messages carry a `secret://...` reference. The
 value is resolved only at the execution boundary: when a child environment or
-process is about to receive it. Every resolved value is registered with a
-bounded redactor for the lifetime of the process.
+process is about to receive it, or when a daemon session capture is explicitly
+needed. Every resolved value is registered with a bounded redactor for the
+lifetime of the process.
+
+Runtime services (`[runtime.services.NAME.env]`), background jobs
+(`job_start` with an `env` value), and the daemon's `secrets` op all use this
+boundary. A resolved value is not written to a record, a log file, a journal,
+a CLI output or a daemon response by ozagia. The guarantee is about values
+this process resolved; a value printed by a child in a form the redactor does
+not know, or a value in a file another process wrote, is outside it.
 
 `ozagia.core.secrets` is standard-library only. It makes no network or model
 calls, does not import a target project and does not read a value while
@@ -122,6 +130,98 @@ supported path for credentials.
 `resolve_env()` is the boundary. Do not call `reveal()` while building a job
 record, a log line, a prompt or CLI output.
 
+### Runtime services
+
+```toml
+[runtime.services.api]
+command = ["python", "-m", "app"]
+workdir = "services/api"
+env = { LOG_LEVEL = "info", API_TOKEN = "secret://env/API_TOKEN" }
+```
+
+`[runtime.services.NAME.env]` is an optional table of environment names to
+strings. Names are bounded ASCII identifiers. A value that starts with
+`secret://` is kept as a reference and resolved by `ServiceManager` at spawn
+with `harness="runtime", session=None`. A plain value is allowed only for a
+non-sensitive name; a credential-like name (`token`, `password`, `secret`,
+`api_key`, `authorization`, ... from the existing `_SENSITIVE_KEY` words) must
+use a reference, or configuration fails with an error naming the service and
+key.
+Empty values, control characters and malformed references are rejected at
+configuration load; nothing is resolved then.
+
+- The child receives the manager's inherited environment plus the resolved
+  entries (`env={**os.environ, **resolved}`). A service without an `env` table
+  keeps the old inherited-environment behavior exactly.
+- `secret://session/...` is **not valid for a runtime service**: there is no
+  interactive session at spawn, so it is denied with
+  `session_context_required`. Start a job in the session that captured the
+  value instead, or use `env`/`file`/`keyring`/`pass`/`op`.
+- Runtime records contain no environment values or refs (they carry only a
+  configuration fingerprint that includes the configured env refs). Foreground
+  `output` and background log chunks are redacted before they are returned or
+  appended to `logs/<id>.log`; a value spanning a line boundary is handled by
+  line buffering, and output draining never raises.
+- Start/run errors name the service and the configuration key/code, never a
+  value. Provider output and argv values are not copied into an error.
+
+### Background jobs
+
+`job_start` (daemon op, `ozagia bg run --env NAME=VALUE`, and the MCP
+`job_start` tool) accepts environment additions. A `secret://` value is
+resolved by the daemon's `SecretBroker` with the job's `harness` and `session`:
+
+```bash
+ozagia bg run --env API_TOKEN='secret://env/API_TOKEN' -- ./serve.sh
+```
+
+- A session reference resolves only for the job's own `(harness, session)`.
+  Another session is denied (`session_mismatch`); no harness/session is denied
+  (`session_context_required`). The refusal is structured
+  (`env references could not be resolved (<code>): KEYS`) and contains no
+  value.
+- The job record stores `env_keys` (names) and `env_refs` (the reference
+  strings), never values. `jobs.json` is local state; the refs are safe to
+  keep there.
+- The child's stdout/stderr is read through a bounded pump that decodes
+  incrementally, holds partial lines, and redacts **before** writing
+  `<state>/jobs/<id>.log`. The pump is joined when the process group is empty,
+  before the job is reported as ended. `job_log`, `job_wait` output and
+  `log:` regex matches are redacted again on read, so a legacy log written
+  before the pump cannot leak a value this daemon has resolved. Cursors remain
+  byte offsets into the redacted log; a partial last line is never split or
+  duplicated and is written when its newline arrives or the job ends.
+- A value that never matches a registered value (another process's log, an
+  encoding the redactor does not generate, or output written before the daemon
+  resolved it) is not guaranteed to be removed.
+
+### Daemon and plugin hook
+
+The daemon owns one `SecretBroker` and one memory-only `SessionSecretStore`
+per root. The `secrets` op is bounded and value-free:
+
+| Action | Input | Result |
+| --- | --- | --- |
+| `capture_text` | `text`, `harness`, `session` | `detect_text` rewrite with session refs; detected/captured/withheld counts, fingerprints, creation/expiry |
+| `capture` | `value`, optional `label`, `ttl_s`, `harness`, `session` | one session ref, fingerprint, creation/expiry |
+| `list` | `harness`, `session` | that session's refs and metadata only |
+| `forget` | `ref`, `harness`, `session` | whether one capture was removed |
+| `providers` | none | provider names, availability, requirements |
+| `check` | `refs`, optional context | status only (`available`, `missing`, ...) |
+
+There is deliberately **no** `resolve`/`show` action. `capture` and
+`capture_text` are called with the value/text over the local daemon socket
+(the CLI reads stdin; a plugin hook passes text it received). No value is
+returned. Captured values are registered with the broker redactor, so a
+response that echoes one is redacted before `_Handler._send` and before the
+journal record is written. The security module's generic redaction runs as
+defense in depth; `secret://` references are protected from it. `session_event
+end` clears that session's captures, and expired entries are pruned on access.
+`stats` reports `secret_captures`, `secret_checks`, `secret_redactions`,
+`secret_errors` and `secret_store` counts. Any client that can write to the
+daemon socket can call these actions; protect the socket and state directory
+like the rest of `.ozagia/`.
+
 ### Redaction
 
 `SecretBroker.redactor` (a `Redactor`) keeps at most 64 resolved values and
@@ -135,7 +235,10 @@ depth bound. `contains()` tests the exact registered value.
 
 This is defense in depth, not a guarantee. It only knows values this process
 resolved; values from another process, an undetected encoding, or text that
-never passed through the redactor are not covered.
+never passed through the redactor are not covered. Runtime logs, job logs and
+daemon responses apply the redactor unconditionally at their boundary; the
+`redact_output` setting only governs other reports. A resolved value must never
+be written even when report redaction is turned off.
 
 ### Status without values
 
@@ -190,12 +293,13 @@ rewritten = detect_text(
   reference. The store's `repr` and `describe()` expose counts and limits, not
   tokens or values.
 
-The daemon/plugin wiring is the next slice: capture on the host hook, register
-the `SessionSecretStore` with the daemon, pass the session identity to job and
-child-process boundaries, and clear the store when the session ends. This
-slice deliberately has **no CLI `capture`/`resolve` command**: a CLI process
-cannot persist an in-memory store for a later process, and writing the value
-to disk would defeat the boundary.
+The daemon/plugin wiring is the current slice: the daemon owns the store, the
+`secrets` op captures text and values over its local socket, jobs resolve
+session references only for their own harness/session, and a session end
+clears its captures. The CLI's `capture`/`capture-text` commands read from
+stdin and call the daemon; they never take a value in argv. No in-memory store
+is persisted by a CLI process, and a capture made by one session cannot be
+resolved by another.
 
 ### Pasted-text detection
 
@@ -229,16 +333,37 @@ PYTHONPATH=src python -m ozagia.secrets_cli providers --root .
 PYTHONPATH=src python -m ozagia.secrets_cli list --root . --json
 PYTHONPATH=src python -m ozagia.secrets_cli check secret://env/API_TOKEN
 PYTHONPATH=src python -m ozagia.secrets_cli doctor --root .
+
+# Session captures (the value/text is read from stdin, never argv).
+PYTHONPATH=src python -m ozagia.secrets_cli capture --session ses_123 \
+  --label "api token" --ttl 600 < token.txt
+PYTHONPATH=src python -m ozagia.secrets_cli capture-text --session ses_123 \
+  < prompt.txt
+PYTHONPATH=src python -m ozagia.secrets_cli list --session ses_123 \
+  --harness opencode
+PYTHONPATH=src python -m ozagia.secrets_cli check secret://session/... \
+  --session ses_123
+PYTHONPATH=src python -m ozagia.secrets_cli forget secret://session/... \
+  --session ses_123
 ```
 
 `providers` prints names, whether they are enabled/available/ready, and their
-requirements. `list` finds `secret://` strings in both configuration files
-(dotted key and source path) and reports their status. `check` accepts one or
-more references and reports status only: exit `0` when all are available, `1`
-when any is missing/denied/unavailable/failed, and `2` when any is invalid or
-for usage errors. `doctor` shows the configuration source, file base,
-providers, errors and session-store counts. No command prints a resolved value
-and there is no `resolve`/`show`/`capture` command.
+requirements. `list` without `--session` finds `secret://` strings in both
+configuration files (dotted key and source path) and reports their status;
+`list --session` asks the daemon for that session's capture metadata. `check`
+accepts one or more references and reports status only: exit `0` when all are
+available, `1` when any is missing/denied/unavailable/failed, and `2` when any
+is invalid or for usage errors. With `--session`, `check` uses the daemon so a
+session reference can be checked in its own context. `doctor` shows the
+configuration source, file base, providers, errors and session-store counts.
+
+`capture` reads one value from stdin (one trailing line ending is trimmed) and
+prints only its reference, fingerprint and expiry. `capture-text` reads text
+from stdin and prints the rewritten text (or JSON with refs and counts). If no
+daemon answers, `capture-text` **fails closed**: it prints the text with
+detected secrets replaced by `[REDACTED]`, writes the daemon error to stderr,
+and exits `2`; no value is captured. No command prints a resolved value and
+there is no `resolve`/`show` command.
 
 ## Rotation and revocation
 
@@ -251,9 +376,15 @@ and there is no `resolve`/`show`/`capture` command.
 - **`keyring` / `pass` / `op`**: rotate in the external store. Resolved values
   are cached for up to 64 references; call `clear_cache()` or restart. `op`
   also requires `allow_network` and a fresh CLI session.
-- **`session`**: `forget(ref, harness=..., session=...)` revokes one capture;
-  `clear(harness, session)` ends a session; TTL expiry is automatic. An
-  old reference is no longer resolvable after any of these.
+- **`session`**: `forget(ref, harness=..., session=...)` (or
+  `ozagia.secrets_cli forget`) revokes one capture; `clear(harness, session)`
+  ends a session and `session_event end` clears it; TTL expiry is automatic.
+  An old reference is no longer resolvable after any of these. Runtime
+  services cannot resolve a session reference at all.
+- **Runtime services and jobs**: a restart (or a new job) resolves the
+  reference again. The daemon caches provider values; `clear_cache()` or a
+  daemon restart is needed after rotation for a cached provider. A child
+  process keeps the value it received until it exits.
 - Deleting a value from configuration is not rotation. Remove the old
   credential at the provider, then update the reference.
 
@@ -287,21 +418,38 @@ and there is no `resolve`/`show`/`capture` command.
   already contain the pasted value before detection runs. The hook can only
   rewrite text it receives. It does not guarantee that the host, a model
   provider or an external service forgets it.
-- This slice does not yet wire runtime services or jobs to the broker. Until
-  that lands, a job record or model message must carry references and the
-  runtime must resolve them at spawn; do not add a plaintext path.
+- Runtime services and jobs inherit the daemon's (or manager's) environment
+  plus resolved entries. The child and any same-user process that can read
+  `/proc/<pid>/environ` or process memory can see the value. Use `file`,
+  `keyring`, `pass` or `op` when other local users are in scope. Core dumps,
+  swap, a debugger or a compromised child can read it; ozagia cannot prevent
+  that.
+- Logs are redacted at write time only for values that process has resolved.
+  A legacy log, another process's output, a binary or encoded form the
+  redactor does not generate, or a value resolved after the output was written
+  may remain. The daemon journal stores bounded reasons and metadata, not job
+  output; job logs live under `.ozagia/jobs/` and runtime logs under
+  `.ozagia/runtime/logs/` with restrictive modes. Protect the state directory.
 - A clean `check` means the provider is reachable, not that the credential is
   valid, unexpired or authorized. Missing/denied statuses are the safe
   outcomes.
+- No live GUI or host plugin is implemented here: the hook path is the daemon
+  `secrets capture_text` op, exercised by tests and the CLI. There is no
+  external keychain integration beyond the optional `keyring` provider, and no
+  guarantee about a GUI keychain's lock state.
 
 ## Tests
 
 ```bash
 PYTHONPATH=src python -m pytest -q tests/test_secrets.py \
-  tests/test_secrets_cli.py tests/test_security.py tests/test_config.py
+  tests/test_secrets_cli.py tests/test_security.py tests/test_config.py \
+  tests/test_runtime.py tests/test_daemon.py tests/test_daemon_jobs.py \
+  tests/test_mcp_server.py
 .venv/bin/ruff check src tests
 ```
 
-The tests use temporary directories and injected fakes for keyring, `pass`
-and `op`. No test uses a real secret store, the network, `pass`, `op` or the
-keyring package.
+The tests use temporary directories and injected fakes for keyring, `pass`,
+`op` and the runtime process factory. Job tests print a fake value from a real
+child and assert that the raw log file, reads and responses do not contain it.
+No test uses a real secret store, the network, `pass`, `op` or the keyring
+package.

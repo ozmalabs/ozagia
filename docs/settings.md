@@ -137,7 +137,7 @@ The project loader consumes these registry keys:
 | `environments` | one named table per environment; every legacy environment field |
 | `services` | one named table per service; every legacy service field |
 | `relays` | one named table per relay; `specs`, `allowed_kinds`, `max_timeout_s`, `command_allowlist`, `max_output_bytes` |
-| `runtime.services` | one named table per service; `command`, `workdir`, `relay`, `mode`, `description` |
+| `runtime.services` | one named table per service; `command`, `workdir`, `relay`, `mode`, `description`, `env` |
 | `runtime.tunnels` | one named table per tunnel; `relay`, `target`, `local_port`, `description` |
 
 Empty `index.map_dirs`, `index.import_roots`, `index.path_prefixes` and
@@ -219,6 +219,7 @@ specs = [{ kind = "local" }]
 [runtime.services.api]
 command = ["python", "-m", "app"]
 workdir = "services/api"
+env = { LOG_LEVEL = "info", API_TOKEN = "secret://env/API_TOKEN" }
 
 [runtime.tunnels.database]
 relay = "local"
@@ -501,9 +502,12 @@ subset of `env`, `file`, `keyring`, `pass` and `op`; `allow_cli` is a subset of
 1 MiB. Environment overrides are `OZAGIA_SECRET_PROVIDERS`,
 `OZAGIA_ALLOW_SECRET_NETWORK` and `OZAGIA_SECRETS_DIR`. The table holds
 provider policy only: secret values are referenced as `secret://...` and are
-never stored in configuration, logs, job records or model messages. See
-[secrets.md](secrets.md) for the grammar, providers, redaction and the
-in-memory session store.
+never stored in configuration, logs, job records or model messages. Runtime
+services (`[runtime.services.NAME.env]`) and background jobs resolve references
+at spawn; job records keep only `env_keys`/`env_refs`, and job/runtime logs and
+daemon responses are redacted before they are written or sent. See
+[secrets.md](secrets.md) for the grammar, providers, redaction, the in-memory
+session store, runtime/job boundaries and the CLI/MCP check surface.
 
 ### iac
 

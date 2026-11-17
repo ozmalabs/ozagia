@@ -112,6 +112,7 @@ enabled).
 """
 from __future__ import annotations
 
+import codecs
 import functools
 import json
 import os
@@ -152,6 +153,12 @@ MAX_COMMAND_CHARS = 16000
 MAX_READERS = 1000
 TABLE_NAME = "jobs.json"
 JOBS_DIR = "jobs"
+# Bytes of a log line held before it is flushed through the redactor, and the
+# tail kept across a forced split so a value spanning it is still seen.
+LOG_PARTIAL_CHARS = 64 * 1024
+LOG_KEEP_TAIL_CHARS = 8 * 1024
+LOG_READ_CHUNK = 8 * 1024
+LOG_PUMP_JOIN_S = 5.0
 RESOURCE_LOG_PREFIX = "[ozagia] resource:"
 MAX_RESOURCE_EVENTS = 50
 # `sleep N` at least this long, while a job runs, gets the job_wait hint.
@@ -398,11 +405,19 @@ class JobTable:
                  enabled: bool | None = None,
                  resource_policy: Mapping[str, Any] | None = None,
                  cgroup_base: str | Path | None = None,
-                 cgroup_manager: Any | None = None) -> None:
+                 cgroup_manager: Any | None = None,
+                 secret_broker: Any | None = None,
+                 broker: Any | None = None) -> None:
         from ozagia.config import state_path
         self.root = Path(root).resolve()
         self.dir = Path(jobs_dir) if jobs_dir else state_path(self.root, JOBS_DIR)
         self.base_env = base_env
+        if secret_broker is None:
+            secret_broker = broker
+        if secret_broker is None:
+            from ozagia.core.secrets import SecretBroker
+            secret_broker = SecretBroker(self.root)
+        self.secret_broker = secret_broker
         # None: `jobs_enabled(root)` decides at each start.
         self.enabled = enabled
         # A loaded `[resources]` policy, or None to load it per start.
@@ -418,6 +433,7 @@ class JobTable:
         # Owned jobs whose leader is not reaped yet (its pgid is reserved).
         self._procs: dict[str, subprocess.Popen] = {}
         self._reapers: dict[str, threading.Thread] = {}
+        self._pumps: dict[str, threading.Thread] = {}
         self._watchdogs: dict[str, R.ResourceWatchdog] = {}
         self._cgroups: dict[str, Any] = {}
         self.cursors: dict[tuple[str, str], int] = {}
@@ -437,7 +453,9 @@ class JobTable:
                        "resource_peak_disk_write_mb": 0.0,
                        "resource_refusals": 0,
                        "cgroup_jobs": 0, "cgroup_fallbacks": 0,
-                       "cgroup_oom_kills": 0}
+                       "cgroup_oom_kills": 0,
+                       "secret_resolutions": 0, "secret_redactions": 0,
+                       "secret_pump_errors": 0}
         self._load()
 
     def is_enabled(self) -> bool:
@@ -502,7 +520,8 @@ class JobTable:
                      stopped_on_load=True, group_gone=not self._live(r))
             self.counts["stopped_on_load"] += 1
             print(f"stopped job {r['id']} (pid {r.get('pid')}) left running by "
-                  f"an earlier daemon: {str(r.get('command'))[:200]}",
+                  f"an earlier daemon: "
+                  f"{self._redact(str(r.get('command')))[:200]}",
                   file=sys.stderr, flush=True)
 
     def _save(self) -> None:
@@ -511,8 +530,16 @@ class JobTable:
             self.dir.mkdir(parents=True, exist_ok=True)
             path = self.dir / TABLE_NAME
             tmp = path.with_suffix(".tmp")
-            recs = [{k: v for k, v in r.items() if k != "owned"}
-                    for r in self.jobs.values()]
+            recs = []
+            for r in self.jobs.values():
+                clean = {k: v for k, v in r.items() if k != "owned"}
+                if isinstance(clean.get("command"), str):
+                    clean["command"] = self._redact(clean["command"])
+                if isinstance(clean.get("argv"), list):
+                    clean["argv"] = [
+                        self._redact(item) if isinstance(item, str) else item
+                        for item in clean["argv"]]
+                recs.append(clean)
             tmp.write_text(json.dumps({"next": self.next_id, "jobs": recs},
                                       indent=1, sort_keys=True), encoding="utf-8")
             os.replace(tmp, path)
@@ -544,6 +571,7 @@ class JobTable:
             self._cleanup_record_cgroup(rec)
             del self.jobs[jid]
             self._reapers.pop(jid, None)
+            self._pumps.pop(jid, None)
             self._watchdogs.pop(jid, None)
             for key in [k for k in self.cursors if k[0] == jid]:
                 del self.cursors[key]
@@ -603,6 +631,54 @@ class JobTable:
             raise JobError(f"unknown job {jid!r}")
         return rec
 
+    def _redact(self, text: str) -> str:
+        """Redact every value resolved through this table's broker.
+
+        Used both at write time and again when an old log or a command field
+        is read, so a legacy file that predates the pump cannot leak a value
+        this process has resolved.
+        """
+        if not isinstance(text, str) or not text:
+            return text
+        try:
+            return self.secret_broker.redactor.redact(text)
+        except Exception:  # noqa: BLE001 - fail closed
+            return "[redacted]"
+
+    def _resolve_env(self, env: Mapping[str, str], *,
+                     harness: Any, session: Any
+                     ) -> tuple[dict[str, str], dict[str, str]]:
+        """Resolve env references for a job boundary.
+
+        Returns the child values and the safe key→reference map. Session
+        references resolve only for the job's own harness/session. A refusal
+        names no value.
+        """
+        from ozagia.core.secrets import SecretError
+        try:
+            resolved = self.secret_broker.resolve_env(
+                env, harness=harness if isinstance(harness, str) else None,
+                session=session if isinstance(session, str) else None)
+        except SecretError as exc:
+            code = exc.code
+        except Exception:  # noqa: BLE001 - no provider detail in the error
+            code = "provider_error"
+        else:
+            refs = {key: ref.original for key, ref in resolved.refs.items()}
+            if refs:
+                with self.cond:
+                    self.counts["secret_resolutions"] += len(refs)
+            return dict(resolved.values), refs
+        refs = [key for key, value in env.items()
+                if isinstance(value, str)
+                and value.startswith("secret://")]
+        detail = f": {', '.join(sorted(refs)[:8])}" if refs else ""
+        with self.cond:
+            self.counts["jobs_refused"] += 1
+        raise JobError(
+            f"env references could not be resolved ({code})"
+            f"{detail}") from None
+
     def public(self, rec: dict[str, Any]) -> dict[str, Any]:
         """A job record as the ops report it."""
         log = Path(rec.get("log") or "")
@@ -611,9 +687,14 @@ class JobTable:
         except OSError:
             size = None
         out = {k: rec.get(k) for k in (
-            "id", "command", "argv", "cwd", "env_keys", "pid", "pgid", "status",
-            "exit_code", "signal", "started", "ended", "detach", "session",
-            "harness", "log", "enforcement", "admission")}
+            "id", "command", "argv", "cwd", "env_keys", "env_refs", "pid",
+            "pgid", "status", "exit_code", "signal", "started", "ended",
+            "detach", "session", "harness", "log", "enforcement", "admission")}
+        if isinstance(out["command"], str):
+            out["command"] = self._redact(out["command"])
+        if isinstance(out["argv"], list):
+            out["argv"] = [self._redact(item) if isinstance(item, str) else item
+                           for item in out["argv"]]
         out["limits"] = rec.get("limits")
         out["cgroup"] = rec.get("cgroup")
         out["peak_memory_mb"] = rec.get("peak_memory_mb")
@@ -1098,7 +1179,9 @@ class JobTable:
         else:
             from ozagia.daemon.server import captured_test_env
             base = captured_test_env()
-        full_env = {**base, **env, "PWD": str(wd)}
+        child_env, env_refs = self._resolve_env(
+            env, harness=harness, session=session)
+        full_env = {**base, **child_env, "PWD": str(wd)}
         with self.cond:
             if self.closed:
                 raise JobError("the daemon is shutting down")
@@ -1137,10 +1220,13 @@ class JobTable:
             if preexec is not None:
                 extra["preexec_fn"] = preexec
             try:
-                with open(log, "wb") as fh, open(os.devnull, "rb") as devnull:
+                log_fd = os.open(
+                    log, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                os.close(log_fd)
+                with open(os.devnull, "rb") as devnull:
                     proc = subprocess.Popen(
                         args, cwd=str(wd), env=full_env, stdin=devnull,
-                        stdout=fh, stderr=subprocess.STDOUT,
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                         start_new_session=True, close_fds=True, **extra)
             except OSError as e:
                 if cgroup_handle is not None:
@@ -1148,7 +1234,13 @@ class JobTable:
                         cgroup_handle.cleanup()
                     except Exception:  # noqa: BLE001 - cleanup is best-effort
                         pass
-                raise JobError(f"cannot start {text!r}: {e}") from None
+                raise JobError(
+                    f"cannot start {self._redact(text)!r}: {e}") from None
+            pump = threading.Thread(
+                target=self._pump_log, args=(jid, log, proc.stdout),
+                name=f"ozagia-job-log-{jid}", daemon=True)
+            self._pumps[jid] = pump
+            pump.start()
             if cgroup_handle is not None:
                 try:
                     attached = cgroup_handle.attach(proc.pid)
@@ -1197,10 +1289,12 @@ class JobTable:
                 except Exception:  # noqa: BLE001 - observation is best-effort
                     initial_peak = 0.0
             rel = os.path.relpath(wd, self.root)
-            rec = {"id": jid, "command": text,
-                   "argv": list(argv) if argv is not None else None,
+            rec = {"id": jid, "command": self._redact(text),
+                   "argv": ([self._redact(item) for item in argv]
+                            if argv is not None else None),
                    "cwd": "." if rel == "." else rel.replace(os.sep, "/"),
-                   "env_keys": sorted(env), "pid": proc.pid, "pgid": proc.pid,
+                   "env_keys": sorted(env), "env_refs": dict(env_refs),
+                   "pid": proc.pid, "pgid": proc.pid,
                    "proc_start": _proc_start(proc.pid), "status": "running",
                    "exit_code": None, "signal": None, "started": _now(),
                    "ended": None, "detach": bool(detach), "log": str(log),
@@ -1258,6 +1352,61 @@ class JobTable:
                 watchdog.start()
             return self.public(rec)
 
+    def _pump_log(self, jid: str, log_path: Path, stream: Any) -> None:
+        """Copy a job's stdout/stderr into its log, redacting first.
+
+        Complete lines are written as they arrive; the partial tail is held
+        (bounded, with a kept tail across a forced split) so a value spanning
+        reads is still seen. This thread never raises and never writes a
+        resolved value.
+        """
+        if stream is None:
+            return
+        decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        pending = ""
+
+        def write(text: str) -> None:
+            if not text:
+                return
+            redacted = self._redact(text)
+            if redacted != text:
+                self.counts["secret_redactions"] += 1
+            fh.write(redacted.encode("utf-8"))
+
+        try:
+            with open(log_path, "ab", buffering=0) as fh:
+                read = getattr(stream, "read1", None) or stream.read
+                while True:
+                    chunk = read(LOG_READ_CHUNK)
+                    if not chunk:
+                        break
+                    if not isinstance(chunk, bytes):
+                        chunk = str(chunk).encode("utf-8", errors="replace")
+                    pending += decoder.decode(chunk)
+                    while True:
+                        cut = pending.find("\n")
+                        if cut < 0:
+                            break
+                        write(pending[:cut + 1])
+                        pending = pending[cut + 1:]
+                    while len(pending) > LOG_PARTIAL_CHARS:
+                        keep = LOG_KEEP_TAIL_CHARS
+                        write(pending[:-keep])
+                        pending = pending[-keep:]
+                pending += decoder.decode(b"", final=True)
+                if pending:
+                    write(pending)
+        except Exception:  # noqa: BLE001 - the log pump must not raise
+            self.counts["secret_pump_errors"] += 1
+
+    def _join_pump(self, jid: str) -> None:
+        pump = self._pumps.pop(jid, None)
+        if pump is None:
+            return
+        pump.join(timeout=LOG_PUMP_JOIN_S)
+        if pump.is_alive():
+            self.counts["secret_pump_errors"] += 1
+
     def _reap(self, jid: str, proc: subprocess.Popen) -> None:
         """Wait for the leader to exit, without reaping it, then for its
         process group to empty; then reap it and record the end. The
@@ -1277,8 +1426,16 @@ class JobTable:
         watchdog = self._watchdogs.pop(jid, None)
         if watchdog is not None:
             watchdog.stop()
-        with self.cond:
+        try:
             code = proc.wait()          # the group is empty: free the pgid
+        except Exception:  # noqa: BLE001 - a reaped leader has already ended
+            code = proc.poll()
+            if code is None:
+                code = 0
+        # The log pump drains the pipe to EOF, still redacting; join it before
+        # the record can claim the job ended (never under `cond`).
+        self._join_pump(jid)
+        with self.cond:
             self._procs.pop(jid, None)
             rec = self.jobs.get(jid)
             if rec is not None:
@@ -1312,10 +1469,12 @@ class JobTable:
     # -- logs ---------------------------------------------------------------- #
     @staticmethod
     def read_new(log_path: Any, start: int, running: bool, *,
-                 tail_lines: int = TAIL_LINES, tail_bytes: int = TAIL_BYTES
+                 tail_lines: int = TAIL_LINES, tail_bytes: int = TAIL_BYTES,
+                 redact: Any = None
                  ) -> dict[str, Any]:
         """The log text from byte `start` to the end, tail-capped. Reads the
-        file only: call it without `cond` held."""
+        file only: call it without `cond` held. `redact` is applied to the
+        returned text as defense for a log written before the redacting pump."""
         path = Path(log_path or "")
         try:
             size = path.stat().st_size
@@ -1345,7 +1504,10 @@ class JobTable:
         skipped_lines = max(len(lines) - tail_lines, 0)
         if skipped_lines:
             lines = lines[-tail_lines:]
-        return {"output": "\n".join(lines), "lines": len(lines), "cursor": end,
+        output = "\n".join(lines)
+        if redact is not None:
+            output = redact(output)
+        return {"output": output, "lines": len(lines), "cursor": end,
                 "skipped_lines": skipped_lines, "skipped_bytes": skipped}
 
     def _cursor(self, jid: str, reader: str, cursor: Any) -> int:
@@ -1375,7 +1537,8 @@ class JobTable:
             start = self._cursor(rec["id"], reader, cursor)
             path, running = rec.get("log"), rec.get("status") in ("running", "detached")
         got = self.read_new(path, start, running, tail_lines=tail_lines,
-                            tail_bytes=max(TAIL_BYTES, tail_lines * 160))
+                            tail_bytes=max(TAIL_BYTES, tail_lines * 160),
+                            redact=self._redact)
         with self.cond:
             self._set_cursor(rec["id"], reader, got["cursor"], cursor is not None)
             return {**self.flat(rec), **got}
@@ -1442,6 +1605,8 @@ class JobTable:
             jid = r["id"]
             hit, scan[jid], partial[jid] = self._scan(
                 logs[jid], scan[jid], partial[jid], value, final=final)
+            if hit is not None:
+                hit = self._redact(hit)
             return hit
 
         while True:
@@ -1498,7 +1663,8 @@ class JobTable:
             return out
         with self.cond:
             running = subject.get("status") in ("running", "detached")
-        got = self.read_new(logs[subject["id"]], starts[subject["id"]], running)
+        got = self.read_new(logs[subject["id"]], starts[subject["id"]], running,
+                            redact=self._redact)
         with self.cond:
             self.counts["waits"] += 1
             self.counts["wait_seconds"] = round(self.counts["wait_seconds"] + waited, 2)
@@ -1582,7 +1748,16 @@ class JobTable:
             while len(self._event_seen) > MAX_READERS:
                 del self._event_seen[next(iter(self._event_seen))]
             self.counts["job_events"] += len(new)
-            return {"ok": True, "events": new, "running": running,
+            safe = [{**event,
+                     "command": self._redact(str(event.get("command") or "")),
+                     "session": (self._redact(event["session"])
+                                 if isinstance(event.get("session"), str)
+                                 else event.get("session")),
+                     "harness": (self._redact(event["harness"])
+                                 if isinstance(event.get("harness"), str)
+                                 else event.get("harness"))}
+                    for event in new]
+            return {"ok": True, "events": safe, "running": running,
                     "seq": self.event_seq}
 
     # -- stop ---------------------------------------------------------------- #
@@ -1731,7 +1906,7 @@ class JobTable:
         if out is not None and count:
             with self.cond:
                 self.counts["ps_captures"] += 1
-        return out
+        return self._redact(out) if isinstance(out, str) else out
 
     def hint_ok(self, session: Any, kind: str) -> bool:
         key = (str(session or ""), kind)

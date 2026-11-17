@@ -499,6 +499,52 @@ max_output_bytes = 2048
     ]
 
 
+def test_runtime_service_env_refs_are_ordered_and_cached(tmp_path: Path) -> None:
+    config = _write_repo_config(tmp_path, """
+[runtime.services.api]
+command = ["python", "-m", "app"]
+env = { LOG_LEVEL = "info", API_TOKEN = "secret://env/API_TOKEN" }
+
+[runtime.services.worker]
+command = ["python", "worker"]
+""")
+    cfg = load_project_config(tmp_path)
+    services = {item.name: item for item in cfg.runtime_services}
+    assert services["api"].env == (
+        ("API_TOKEN", "secret://env/API_TOKEN"), ("LOG_LEVEL", "info"))
+    assert services["api"].env_map["API_TOKEN"] == "secret://env/API_TOKEN"
+    assert services["worker"].env == ()
+    assert cfg.source == config.resolve()
+
+    # The loader's cache follows the file content: a plain non-sensitive
+    # value change is visible without clearing the cache.
+    config.write_text(config.read_text().replace('"info"', '"debug"'),
+                      encoding="utf-8")
+    changed = load_project_config(tmp_path)
+    assert dict(changed.runtime_services[0].env)["LOG_LEVEL"] == "debug"
+
+
+@pytest.mark.parametrize("env_text,message", [
+    ('env = { API_TOKEN = "plain-value" }', "API_TOKEN is credential-like"),
+    ('env = { DB_PASSWORD = "hunter2hunter2" }', "DB_PASSWORD is credential-like"),
+    ('env = { API_TOKEN = "secret://literal/value" }', "invalid secret reference"),
+    ('env = { API_TOKEN = "" }', "non-empty string"),
+    ('env = { "BAD-NAME" = "x" }', "env name"),
+    ('env = { API_TOKEN = "a\\u0000b" }', "control character"),
+    ('env = "secret://env/TOKEN"', "env must be a table"),
+])
+def test_runtime_service_env_rejects_plain_credentials_and_bad_values(
+        tmp_path: Path, env_text: str, message: str) -> None:
+    _write_repo_config(tmp_path, f"""
+[runtime.services.api]
+command = ["python", "-m", "app"]
+{env_text}
+""")
+    with pytest.raises(ConfigError, match=message) as excinfo:
+        load_project_config(tmp_path)
+    assert "[runtime.services.api]" in str(excinfo.value)
+
+
 def test_versioned_runtime_only(tmp_path: Path) -> None:
     config = _write_repo_config(tmp_path, """
 [relays.local]

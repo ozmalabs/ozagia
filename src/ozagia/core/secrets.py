@@ -485,9 +485,11 @@ class Redactor:
         self._max_values = max(1, int(max_values))
         self._values: OrderedDict[str, tuple[str, ...]] = OrderedDict()
         self._patterns: tuple[str, ...] = ()
+        self._lock = threading.RLock()
 
     def __len__(self) -> int:
-        return len(self._values)
+        with self._lock:
+            return len(self._values)
 
     def __repr__(self) -> str:
         return f"Redactor(values={len(self._values)})"
@@ -534,26 +536,32 @@ class Redactor:
         if not isinstance(value, str) or self._trivial(value):
             return
         variants = self._variants(value)
-        self._values.pop(value, None)
-        self._values[value] = variants
-        while len(self._values) > self._max_values:
-            self._values.popitem(last=False)
-        self._patterns = tuple(sorted(
-            {item for items in self._values.values() for item in items},
-            key=lambda item: (-len(item), item)))
+        with self._lock:
+            self._values.pop(value, None)
+            self._values[value] = variants
+            while len(self._values) > self._max_values:
+                self._values.popitem(last=False)
+            self._patterns = tuple(sorted(
+                {item for items in self._values.values() for item in items},
+                key=lambda item: (-len(item), item)))
 
     def contains(self, value: str) -> bool:
         """Whether ``value`` itself is registered (not its encoded forms)."""
-        return isinstance(value, str) and value in self._values
+        with self._lock:
+            return isinstance(value, str) and value in self._values
 
     def redact(self, text: str) -> str:
         """Replace every registered form in ``text`` with ``[REDACTED]``."""
-        if not isinstance(text, str) or not text or not self._patterns:
+        if not isinstance(text, str) or not text:
             return str(text)
-        result = text
-        for pattern in self._patterns:
-            if pattern and pattern in result:
-                result = result.replace(pattern, REDACTED)
+        with self._lock:
+            patterns = self._patterns
+            if not patterns:
+                return str(text)
+            result = text
+            for pattern in patterns:
+                if pattern and pattern in result:
+                    result = result.replace(pattern, REDACTED)
         return result
 
     def redact_structure(self, value: Any) -> Any:

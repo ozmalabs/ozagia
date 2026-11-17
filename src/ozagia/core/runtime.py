@@ -6,6 +6,7 @@ Tunnel configuration is deliberately distinct from a live tunnel lease.
 """
 from __future__ import annotations
 
+import codecs
 import hashlib
 import json
 import os
@@ -37,6 +38,9 @@ MAX_STATE_BYTES = 1_048_576
 MAX_LOG_BYTES = 256 * 1_024
 MAX_REQUESTED_LOG_BYTES = 64 * 1_024
 MAX_CONTEXT_ITEMS = 24
+# Output held before a newline is flushed through the redactor (bytes/chars).
+OUTPUT_PARTIAL_CHARS = 64 * 1024
+OUTPUT_KEEP_TAIL_CHARS = 8 * 1024
 _ID = re.compile(r"[a-f0-9]{24,32}\Z")
 _STATES = {
     "configured", "starting", "running", "exited", "failed", "stopped",
@@ -314,8 +318,16 @@ class ServiceManager:
         signal_group: Callable[[int, int], None] | None = None,
         stop_grace_s: float = 0.5,
         output_limit: int = 64 * 1_024,
+        secret_broker: Any | None = None,
+        broker: Any | None = None,
     ):
         self.config = _project_config(config)
+        if secret_broker is None:
+            secret_broker = broker
+        if secret_broker is None:
+            from ozagia.core.secrets import SecretBroker
+            secret_broker = SecretBroker(self.config.root)
+        self.secret_broker = secret_broker
         selected_state_dir = (state_dir if state_dir is not None else
                               state_path(self.config.root, "runtime"))
         self.store = store or RuntimeStore(selected_state_dir)
@@ -369,8 +381,43 @@ class ServiceManager:
         return _fingerprint({
             "name": service.name, "command": service.command,
             "workdir": service.workdir, "relay": service.relay,
-            "mode": service.mode,
+            "mode": service.mode, "env": service.env,
         })
+
+    def _redact_text(self, text: str) -> str:
+        """Redact every value this manager resolved, regardless of output
+        preferences: a resolved value must never reach a log or a reply."""
+        try:
+            return self.secret_broker.redactor.redact(text)
+        except Exception:  # noqa: BLE001 - fail closed if the redactor fails
+            return "[redacted]" if text else text
+
+    def _service_env(
+        self, service: RuntimeServiceConfig,
+    ) -> dict[str, str] | None:
+        """Resolve one service's env at the spawn boundary.
+
+        None means "inherit this process's environment" (no env table). A
+        session reference is denied here: runtime services have no session.
+        """
+        if not service.env:
+            return None
+        from ozagia.core.secrets import SecretError
+        try:
+            resolved = self.secret_broker.resolve_env(
+                service.env_map, harness="runtime", session=None)
+        except SecretError as exc:
+            code = exc.code
+        except Exception:  # noqa: BLE001 - no provider detail in the error
+            code = "provider_error"
+        else:
+            return dict(resolved.values)
+        refs = [key for key, value in service.env
+                if value.startswith("secret://")]
+        detail = f": {', '.join(refs[:8])}" if refs else ""
+        raise RuntimeErrorBase(
+            f"service {service.name!r} environment reference failed "
+            f"({code}){detail}") from None
 
     def _base_record(
         self,
@@ -411,10 +458,14 @@ class ServiceManager:
         argv: Sequence[str],
         workdir: str | None,
         background: bool,
+        env: Mapping[str, str] | None = None,
     ) -> tuple[Any, bytearray | None]:
         record["state"] = "starting"
         record["updated_at"] = _now()
         self.store.put(record)
+        extra: dict[str, Any] = {}
+        if env is not None:
+            extra["env"] = {**os.environ, **dict(env)}
         try:
             process = self._process_factory(
                 list(argv),
@@ -425,6 +476,7 @@ class ServiceManager:
                 shell=False,
                 start_new_session=(os.name == "posix"),
                 close_fds=True,
+                **extra,
             )
         except Exception:
             record["state"] = "failed"
@@ -464,20 +516,68 @@ class ServiceManager:
         self, record_id: str, stream: Any, background: bool,
         collected: bytearray | None,
     ) -> None:
+        decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        pending = ""
+        batch: list[str] = []
+        batch_bytes = 0
+
+        def flush() -> None:
+            nonlocal batch_bytes
+            if not batch:
+                return
+            payload = "".join(batch).encode("utf-8")
+            batch.clear()
+            batch_bytes = 0
+            self.store.append_log(record_id, payload)
+
+        def emit(text: str) -> None:
+            nonlocal batch_bytes
+            if not text:
+                return
+            redacted = self._redact_text(text)
+            if background:
+                batch.append(redacted)
+                batch_bytes += len(redacted.encode("utf-8"))
+                if batch_bytes >= 8 * 1_024:
+                    flush()
+                return
+            if collected is None:
+                return
+            remaining = self._output_limit - len(collected)
+            if remaining > 0:
+                collected.extend(redacted.encode("utf-8")[:remaining])
+
         try:
+            read = getattr(stream, "read1", None) or stream.read
             while True:
-                chunk = stream.read(8 * 1_024)
+                chunk = read(8 * 1_024)
                 if not chunk:
-                    return
+                    break
                 if not isinstance(chunk, bytes):
                     chunk = str(chunk).encode("utf-8", errors="replace")
-                if background:
-                    self.store.append_log(record_id, chunk)
-                elif collected is not None:
-                    remaining = self._output_limit - len(collected)
-                    if remaining > 0:
-                        collected.extend(chunk[:remaining])
+                pending += decoder.decode(chunk)
+                while True:
+                    cut = pending.find("\n")
+                    if cut < 0:
+                        break
+                    emit(pending[:cut + 1])
+                    pending = pending[cut + 1:]
+                # A line longer than the bound is flushed in chunks, keeping a
+                # tail so a value spanning a split still reaches the redactor.
+                while len(pending) > OUTPUT_PARTIAL_CHARS:
+                    keep = OUTPUT_KEEP_TAIL_CHARS
+                    emit(pending[:-keep])
+                    pending = pending[-keep:]
+            pending += decoder.decode(b"", final=True)
+            if pending:
+                emit(pending)
+            flush()
         except (OSError, ValueError, RuntimeStateError):
+            try:
+                flush()
+            except (OSError, ValueError, RuntimeStateError):
+                pass
+        except Exception:  # noqa: BLE001 - output draining must not raise
             return
 
     def _finalize(self, record: dict[str, Any], code: int) -> dict[str, Any]:
@@ -538,6 +638,7 @@ class ServiceManager:
             mode="background", relay=service.relay)
         if current["state"] in {"running", "starting", "stale", "unknown"}:
             raise RuntimeErrorBase("service has an active or unverified runtime record")
+        env = self._service_env(service)
         record = self._base_record(
             record_id, kind="service", name=name, mode="background",
             command=service.command,
@@ -546,7 +647,8 @@ class ServiceManager:
         )
         self._spawn(
             record=record, argv=service.command,
-            workdir=self._workdir(service.workdir), background=True)
+            workdir=self._workdir(service.workdir), background=True,
+            env=env)
         return _result(self._status_record(
             "service", name, fingerprint=self._service_fingerprint(service),
             mode="background", relay=service.relay))
@@ -561,6 +663,7 @@ class ServiceManager:
             mode="foreground", relay=service.relay)
         if current["state"] in {"running", "starting", "stale", "unknown"}:
             raise RuntimeErrorBase("service has an active or unverified runtime record")
+        env = self._service_env(service)
         record = self._base_record(
             record_id, kind="service", name=name, mode="foreground",
             command=service.command,
@@ -569,7 +672,7 @@ class ServiceManager:
         )
         process, output = self._spawn(
             record=record, argv=service.command,
-            workdir=self._workdir(service.workdir), background=False)
+            workdir=self._workdir(service.workdir), background=False, env=env)
         try:
             code = process.wait()
         except Exception:
@@ -668,7 +771,7 @@ class ServiceManager:
             if candidate is None:
                 raise RuntimeErrorBase("unknown runtime process")
             record_id = candidate["id"]
-        return self.store.logs(record_id, max_bytes=max_bytes)
+        return self._redact_text(self.store.logs(record_id, max_bytes=max_bytes))
 
     def stop(self, name: str) -> dict[str, Any]:
         current = self.status(name)

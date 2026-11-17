@@ -827,7 +827,7 @@ _TOOLS.extend([
             "cwd": {"type": "string",
                     "description": "Working directory inside the project (default: its root)."},
             "env": {"type": "object", "additionalProperties": {"type": "string"},
-                    "description": "Environment variables to add."},
+                    "description": "Environment variables to add. A value may be a secret:// reference resolved by the daemon at spawn; use a reference for credentials."},
             "detach": {"type": "boolean", "default": False,
                        "description": "Leave it running when the daemon exits."},
         }),
@@ -881,6 +881,31 @@ _TOOLS.extend([
         }, ["job"]),
     },
 ])
+
+# The secrets surface is read-only: provider status, one session's capture
+# metadata, and reference checks. It never captures, resolves or returns a
+# value; session captures live only in the daemon's memory.
+_TOOLS.append({
+    "name": "dev_secrets",
+    "description": (
+        "Read-only secret status through the ozagia daemon: provider "
+        "availability (providers), reference check results (check) and one "
+        "session's in-memory capture metadata such as refs, fingerprints and "
+        "expiry (list). It never returns a secret value, and this tool cannot "
+        "capture or resolve one. A clean check means the provider is "
+        "reachable, not that the credential is valid."),
+    "inputSchema": _schema({
+        "action": {"type": "string",
+                   "enum": ["providers", "list", "check"],
+                   "default": "providers"},
+        "refs": {"type": "array", "items": {"type": "string"},
+                 "description": "References to check (action=check)."},
+        "session": {"type": "string",
+                    "description": "The harness's session id (needed for session references and list)."},
+        "harness": {"type": "string",
+                    "description": "opencode, claude, codex or kiro (default: opencode)."},
+    }),
+})
 
 # The working set (`ozagia.core.working_set`), kept by the daemon per
 # harness session. An MCP server does not learn the harness's session id,
@@ -1271,6 +1296,7 @@ class DevMemoryServer:
             "job_list": self._job_list,
             "job_log": self._job_log,
             "job_stop": self._job_stop,
+            "dev_secrets": self._secrets,
             "dev_working_set": self._working_set,
             "dev_files_list": self._files_list,
             "dev_files_explain": self._files_explain,
@@ -1928,6 +1954,15 @@ class DevMemoryServer:
         if isinstance(grace, (int, float)) and not isinstance(grace, bool):
             a = {**a, "grace_s": min(max(float(grace), 0.0), MCP_STOP_GRACE_MAX_S)}
         return self._job("job_stop", a)
+
+    def _secrets(self, a: dict[str, Any]) -> Any:
+        """Read-only secret status; never captures, resolves or reveals."""
+        action = a.get("action") or "providers"
+        fields: dict[str, Any] = {"action": action}
+        for key in ("refs", "session", "harness"):
+            if a.get(key) is not None:
+                fields[key] = a[key]
+        return self._daemon("secrets", fields)
 
     def _daemon(self, op: str, fields: dict[str, Any]) -> Any:
         """One daemon op (started when none answers), its reply without `id`."""
