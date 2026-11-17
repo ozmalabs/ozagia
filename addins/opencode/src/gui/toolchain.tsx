@@ -260,7 +260,7 @@ function CapabilityCard(props: { report: ToolchainCapabilityReport }) {
 
       <Show when={(report().available ?? []).length > 0}>
         <div class="ozagia-sep" />
-        <div class="ozagia-sub">Installed and usable</div>
+        <div class="ozagia-sub">Installed / available</div>
         <div class="ozagia-scroll" style={{ "margin-top": "4px" }}>
           <table class="ozagia-table">
             <thead>
