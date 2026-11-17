@@ -297,3 +297,44 @@ def test_collector_does_not_write(project):
     assert after == before
     assert G.goals_path(project).is_file()
     assert not (project / "tasks").exists()
+
+
+# ---------------------------------------------------------------------------
+# Optional durable-store join (additive; the collector stays read-only)
+# ---------------------------------------------------------------------------
+
+
+def test_store_join_is_opt_in_and_absent_by_default(project):
+    from ozagia.core import evidence_store as ES
+
+    base = collect(project, run_ids=("run-1",))
+    assert "durable" not in base
+    attached = E.attach_store(base, project)
+    assert attached["durable"]["state"] == "absent"
+    assert attached["durable"]["records"] == []
+    assert attached["durable"]["writes"].startswith("separate store")
+    assert attached["deferred"] == base["deferred"]
+    assert attached["hash"] == E.evidence_hash(attached)
+    assert base["hash"] == E.evidence_hash(base)
+    assert ES.journal_path(project).is_file() is False
+
+
+def test_store_join_returns_current_records_and_marks_partial_writes(project):
+    from ozagia.core import evidence_store as ES
+
+    base = collect(project, run_ids=("run-1",))
+    ES.record_observation(project, "g1", run_ids=("run-1",),
+                          sources=_sources(), now_ms=1_700_000_000_000)
+    attached = E.attach_store(base, project)
+    assert attached["durable"]["state"] == "current"
+    assert attached["durable"]["counts"]["total"] == 1
+    assert attached["durable"]["records"][0]["current"] is True
+    assert CANARY not in E.evidence_json(attached)
+
+    with ES.journal_path(project).open("ab") as handle:
+        handle.write(b'{"torn":')
+    partial = E.attach_store(base, project)
+    assert partial["durable"]["state"] == "partial"
+    assert partial["durable"]["counts"]["total"] == 1
+    assert partial["durable"]["partial"]
+    assert partial["hash"] == E.evidence_hash(partial)

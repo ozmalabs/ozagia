@@ -956,11 +956,61 @@ def evidence_hash(report: Mapping[str, Any]) -> str:
                            if key != "hash"})
 
 
+def attach_store(report: Mapping[str, Any], root: str | Path, *,
+                 limit: int = 10, include_partial: bool = False
+                 ) -> dict[str, Any]:
+    """Return a copy of an evidence report with the durable store view.
+
+    This is an explicit, additive join: ``collect_evidence`` still never
+    writes or reads the store by default.  The base report's own fields are
+    left intact (including its ``deferred`` list, which describes the
+    collector); only ``durable`` is added and ``hash`` is recomputed because
+    it covers the whole document.  Partial records are never listed as
+    current.
+    """
+    from ozagia.core import evidence_store as ES
+
+    if not isinstance(report, Mapping):
+        raise EvidenceError("report must be an evidence report mapping")
+    if isinstance(limit, bool) or not isinstance(limit, int):
+        raise EvidenceError("limit must be an integer")
+    if limit < 1 or limit > ES.MAX_RECORDS:
+        raise EvidenceError(f"limit must be between 1 and {ES.MAX_RECORDS}")
+    goal_row = report.get("goal") if isinstance(report.get("goal"),
+                                                Mapping) else {}
+    goal_id = goal_row.get("id") if isinstance(goal_row, Mapping) else None
+    try:
+        view = ES.read_store(root, limit=limit, goal=goal_id,
+                             include_partial=include_partial)
+    except ES.EvidenceStoreError as exc:
+        raise EvidenceError(
+            f"the durable evidence store refused the join: {exc}",
+            code=getattr(exc, "code", "invalid_request")) from exc
+    result = dict(report)
+    result.pop("hash", None)
+    result["durable"] = {
+        "schema": view["schema"],
+        "state": view["state"],
+        "path": view["path"],
+        "scope": {"goal": goal_id},
+        "observed_at": view["observed_at"],
+        "records": view["records"],
+        "partial": view["partial"],
+        "counts": view["counts"],
+        "truncated": view["truncated"],
+        "reasons": view["reasons"],
+        "unknowns": view["unknowns"],
+        "writes": "separate store; this collector remains read-only",
+    }
+    result["hash"] = evidence_hash(result)
+    return result
+
+
 __all__ = [
     "DEFERRED", "EVIDENCE_KINDS", "EvidenceError", "MAX_CRITERIA",
     "MAX_INTERPRETERS", "MAX_LABELS", "MAX_REPORT_BYTES", "MAX_RUNS",
     "MAX_TEST_KEYS", "REPORT_VERSION", "SCHEMA_NAMESPACE", "SCHEMA_VERSION",
-    "Sources", "collect_evidence", "default_goal_source",
+    "Sources", "attach_store", "collect_evidence", "default_goal_source",
     "default_interpreters_source", "default_runs_source",
     "default_test_record_source", "evidence_hash", "evidence_json", "fact",
     "redact_text",

@@ -210,12 +210,14 @@ The report's `not_assessed` list includes, as applicable:
 
 ## Deferred durable writes
 
-This package is read-only. Durable evidence writes are **deferred**: there is
-no evidence store, no append to the goal/task/session/graph stores, no
-idempotency key, no retention/compaction policy and no crash/partial-run
-recovery. The report's `deferred` list names them. A later package must reuse
-`locked_store`/the existing atomic writers, define idempotency and retention,
-and test crashes and partial results before any write is added.
+This package is read-only. The preflight does not write and does not call the
+durable store. Durable writes now live in the additive
+`src/ozagia/core/evidence_store.py` (see [evidence.md](evidence.md)): versioned
+observation/assessment/declaration records, idempotency keys, bounded
+retention, atomic compaction and crash/partial-record recovery. The report's
+`deferred` list still names what this preflight itself does not do; the
+collector's optional `evidence.attach_store(report, root)` join reads the store
+without writing it.
 
 ## Limits
 
