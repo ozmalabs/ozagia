@@ -211,6 +211,117 @@ a failure of the action (exit status `0`); a failed check is (exit status `1`).
   there is no automatic backup of the tool's configuration outside the
   installer's behavior.
 
+## Action readiness
+
+`ozagia.core.action_readiness.readiness(root, selections=...)` describes the
+declared `service.*` and `tunnel.*` operations from `ACTION_SPECS` and joins
+read-only observations. It is not a second action layer and it does not replace
+preview/apply:
+
+- preview remains the only source of a confirmation token;
+- apply remains the only path that performs an operation and it re-checks the
+  preconditions;
+- readiness never previews, applies, resolves a secret, constructs a mutating
+  manager, writes runtime state, appends an audit record or creates a token.
+
+A selection is an explicit list of bounded mappings:
+
+```python
+from ozagia.core.action_readiness import readiness
+
+report = readiness(".", selections=[
+    {"action": "service.start", "name": "api"},
+    {"action": "tunnel.start", "name": "database"},
+])
+```
+
+`selections=None` reports every operation for every configured service and
+tunnel; this is a conservative review view, not a claim that every verb is
+applicable. An explicit empty list reports `unknown` with no operations.
+
+### States
+
+| State | Meaning |
+| --- | --- |
+| `available` | Every observed prerequisite for that operation is satisfied. This is still not permission: preview and confirmation are required. |
+| `blocked` | A definite configuration/runtime precondition prevents the operation: foreground/background mismatch, relay present, live gate not granted, stale/unverified process or lease, or an already-active/no-op state. |
+| `unknown` | The observation is insufficient: unresolved secret reference, unreadable configuration/runtime state, or the target was not observed. |
+| `absent` | The named service or tunnel is not configured. |
+
+A target summary is derived from its lifecycle operations. A tunnel target is
+`blocked` whenever `tunnel.start` is blocked, even if `tunnel.status` is
+readable. A service target can be `available` when at least one lifecycle verb
+fits its mode (for example `service.run` for a foreground service) while the
+other verbs remain explicitly `blocked`.
+
+`tunnel.start` is always `blocked` in readiness because live and network gates
+are operations, not configuration:
+
+- `--allow-live` and `--allow-network` must be passed explicitly at apply;
+- the one-time confirmation token must come from a preview;
+- the relay policy, lease state, target reachability and remote authorization
+  are not tested by readiness.
+
+### What is joined
+
+For each service:
+
+- configured/absent, mode (`background`/`foreground`) and relay name;
+- the existing runtime process state (configured, running, starting, exited,
+  failed, stopped, stale, unknown), PID and whether the existing observation
+  verified it;
+- environment key names, `secret://...` reference strings, plain key names and
+  counts. Values are never read or resolved;
+- local log presence, path and size from the runtime store's metadata. Log
+  content is not read.
+
+For each tunnel:
+
+- configured/absent, relay name and the relay's configured/allowed kinds;
+- the existing runtime lease state. A persisted lease is never treated as a
+  held connection; `stale`/unknown leases block a new start.
+
+The join uses `ozagia.config.load_project_config`,
+`ozagia.core.runtime.runtime_status` and `RuntimeStore(create=False)`. It never
+calls `federation`, `relay.open_tunnel`, `ServiceManager` methods or
+`TunnelManager` methods.
+
+### Secret boundary
+
+Readiness reports only references: for example
+`{"key": "API_TOKEN", "reference": "secret://env/API_TOKEN"}`. It never calls
+`reveal()`, `SecretBroker.resolve*` or provider checks. A service whose
+environment contains an unresolved reference cannot be `available` for a
+mutating operation; it is `unknown` (or `blocked` for a
+`secret://session/...` reference, which a runtime service cannot resolve at
+spawn). A missing provider, denied reference or invalid credential is therefore
+reported as not assessed, never as ready.
+
+`readiness` writes nothing, including no token, audit or runtime record. The
+report's `provenance` records `secrets_resolved: false`, `previewed: false`,
+`applied: false` and `wrote: false`.
+
+### Task preflight
+
+`ozagia.core.task_preflight.build_preflight(..., action_readiness=[...])` adds
+an optional `actions` dimension and top-level `actions` section. It is absent
+(and the six-dimension report is unchanged) when `action_readiness` is omitted.
+When selected, an `available` operation is the only state that can make the
+dimension `true`; `blocked`/`unknown` map to `unknown`, and `absent` maps to
+`false`, so none can make the assessment green. See
+[task_preflight.md](task_preflight.md#action-readiness-join).
+
+```python
+from ozagia.core.task_preflight import build_preflight
+
+report = build_preflight(
+    ".", "g1",
+    action_readiness=[{"action": "service.start", "name": "api"}],
+)
+```
+
+The standalone CLI and MCP surfaces do not expose action readiness yet.
+
 ## Live gates
 
 The relay policy remains the enforcement point. `tunnel.start` passes
@@ -240,8 +351,11 @@ A record contains:
 - a bounded, redacted error message for a refusal or failure.
 
 It never contains argv, the configured Python path, installer output, target
-file content, environment values, credentials or log contents. Pending tokens
-live under `<state dir>/actions/pending/` (`0600`) and
+file content, environment values, credentials or log contents. A bounded
+credential-pattern redactor is applied to error text, including prefixed
+credential names such as `API_TOKEN=...`; a manager/installer error must still
+not carry a resolved value that has no recognizable credential key. Pending
+tokens live under `<state dir>/actions/pending/` (`0600`) and
 are pruned after ten minutes or when the pending set grows too large. Neither
 path is written outside the configured state directory.
 

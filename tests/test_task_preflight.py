@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -698,6 +699,8 @@ def test_linked_dimension_is_absent_without_an_explicit_selection(tmp_path):
     report = build(tmp_path)
     assert list(report["dimensions"]) == list(TP.DIMENSIONS)
     assert "linked" not in report
+    assert "research" not in report
+    assert "actions" not in report
     assert report["bounds"]["dimensions"] == len(TP.DIMENSIONS)
 
     empty = build(tmp_path, linked_checkouts=[], research_sessions=[])
@@ -927,3 +930,201 @@ def test_optional_joins_are_canonical_hashed_and_deterministic(project, tmp_path
     envelope = TP.preflight_envelope(report)
     assert S.validate(envelope) == envelope
     assert envelope["provenance"]["inputs"] == [report["hash"]]
+
+
+# ---------------------------------------------------------------------------
+# Optional action readiness join (read-only M5/WP7 slice)
+# ---------------------------------------------------------------------------
+
+
+def _write_runtime_config(root: Path, *, secret_env: bool = False) -> None:
+    env_line = ""
+    if secret_env:
+        env_line = ('env = { API_TOKEN = "secret://env/'
+                    'OZAGIA_PREFLIGHT_ACTION_CANARY" }')
+    _write(root / ".ozagia.toml", f"""
+[relays.local]
+specs = [{{ kind = "local" }}]
+allowed_kinds = ["local"]
+max_timeout_s = 20
+
+[runtime.services.api]
+command = ["python", "-m", "app"]
+mode = "background"
+{env_line}
+
+[runtime.tunnels.database]
+relay = "local"
+target = "db.example.test:5432"
+""")
+
+
+def _runtime_id(kind: str, name: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(f"{kind}\0{name}".encode("utf-8")).hexdigest()[:24]
+
+
+def test_actions_dimension_joins_a_configured_service(tmp_path):
+    _write_runtime_config(tmp_path)
+    before = {
+        path.relative_to(tmp_path).as_posix(): (
+            path.stat().st_size, path.stat().st_mtime_ns)
+        for path in tmp_path.rglob("*") if path.is_file()
+    }
+
+    report = build(tmp_path, action_readiness=[
+        {"action": "service.start", "name": "api"}])
+
+    assert report["dimensions"]["actions"]["readiness"] is True
+    assert report["assessment"]["status"] == "green"
+    assert report["actions"]["selection"] == "explicit"
+    assert report["actions"]["state"] == "available"
+    assert report["actions"]["readiness"] is True
+    assert report["actions"]["operations"][0]["action"] == "service.start"
+    assert report["actions"]["operations"][0]["readiness"] == "available"
+    assert report["actions"]["provenance"]["secrets_resolved"] is False
+    assert report["bounds"]["actions_selected"] == 1
+    assert report["bounds"]["actions_operations"] == 1
+    assert list(report["dimensions"]) == list(TP.DIMENSIONS) + ["actions"]
+    assert list(report["dimensions"])[-1] == TP.ACTIONS_DIMENSION
+
+    after = {
+        path.relative_to(tmp_path).as_posix(): (
+            path.stat().st_size, path.stat().st_mtime_ns)
+        for path in tmp_path.rglob("*") if path.is_file()
+    }
+    assert after == before
+    assert not state_path(tmp_path, "actions").exists()
+    assert not state_path(tmp_path, "runtime").exists()
+
+
+def test_actions_dimension_blocks_live_tunnel_and_unresolved_secret(
+        tmp_path, monkeypatch):
+    _write_runtime_config(tmp_path, secret_env=True)
+    canary = "preflight-canary-7c3e-must-never-appear"
+    monkeypatch.setenv("OZAGIA_PREFLIGHT_ACTION_CANARY", canary)
+    from ozagia.core import secrets
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("preflight action readiness resolved a secret")
+
+    monkeypatch.setattr(secrets.SecretBroker, "resolve", forbidden)
+    monkeypatch.setattr(secrets.SecretBroker, "resolve_env", forbidden)
+    monkeypatch.setattr(secrets.SecretBroker, "check", forbidden)
+    monkeypatch.setattr(secrets.SecretValue, "reveal", forbidden)
+    before = {
+        path.relative_to(tmp_path).as_posix(): (
+            path.stat().st_size, path.stat().st_mtime_ns)
+        for path in tmp_path.rglob("*") if path.is_file()
+    }
+
+    report = build(tmp_path, action_readiness=[
+        {"action": "service.start", "name": "api"},
+        {"action": "tunnel.start", "name": "database"},
+    ])
+
+    assert report["dimensions"]["actions"]["readiness"] == "unknown"
+    assert report["assessment"]["status"] == "unknown"
+    assert report["assessment"]["green"] is False
+    assert any(row["dimension"] == "actions"
+               for row in report["assessment"]["reasons"])
+    states = {row["action"]: row["readiness"]
+              for row in report["actions"]["operations"]}
+    assert states == {"service.start": "unknown",
+                      "tunnel.start": "blocked"}
+    assert report["actions"]["state"] == "unknown"
+    assert "live-gated" in next(
+        row["reason"] for row in report["actions"]["operations"]
+        if row["action"] == "tunnel.start")
+    assert canary not in TP.report_json(report)
+    assert report["actions"]["provenance"]["secrets_resolved"] is False
+    after = {
+        path.relative_to(tmp_path).as_posix(): (
+            path.stat().st_size, path.stat().st_mtime_ns)
+        for path in tmp_path.rglob("*") if path.is_file()
+    }
+    assert after == before
+    assert not state_path(tmp_path, "actions").exists()
+    assert not state_path(tmp_path, "runtime").exists()
+
+
+def test_actions_dimension_does_not_green_an_unverified_process(tmp_path):
+    _write_runtime_config(tmp_path)
+    directory = state_path(tmp_path, "runtime")
+    directory.mkdir(parents=True)
+    record_id = _runtime_id("service", "api")
+    (directory / "state.json").write_text(json.dumps({
+        "version": 1,
+        "records": {
+            record_id: {
+                "id": record_id, "kind": "service", "name": "api",
+                "state": "running", "pid": 999_999,
+                "process_group": 999_999, "process_start": "bogus",
+            },
+        },
+    }), encoding="utf-8")
+
+    report = build(tmp_path, action_readiness=[
+        {"action": "service.stop", "name": "api"}])
+
+    assert report["dimensions"]["actions"]["readiness"] == "unknown"
+    assert report["assessment"]["status"] != "green"
+    row = report["actions"]["operations"][0]
+    assert row["readiness"] == "blocked"
+    assert "stale or unverified" in row["reason"]
+    assert report["actions"]["targets"][0]["process"]["state"] == "stale"
+    assert not state_path(tmp_path, "actions").exists()
+
+
+def test_actions_missing_target_is_false_and_not_green(tmp_path):
+    _write_runtime_config(tmp_path)
+    report = build(tmp_path, action_readiness=[
+        {"action": "service.start", "name": "missing"}])
+    assert report["dimensions"]["actions"]["readiness"] is False
+    assert report["assessment"]["status"] == "failed"
+    assert report["assessment"]["green"] is False
+    assert report["actions"]["state"] == "absent"
+    assert report["actions"]["operations"][0]["readiness"] == "absent"
+    assert not state_path(tmp_path, "actions").exists()
+
+
+def test_empty_action_selection_is_present_and_unknown(tmp_path):
+    report = build(tmp_path, action_readiness=[])
+    assert "actions" in report["dimensions"]
+    assert report["dimensions"]["actions"]["readiness"] == "unknown"
+    assert report["actions"]["state"] == "unknown"
+    assert report["actions"]["selection"] == "explicit"
+    assert report["actions"]["operations"] == []
+    assert report["assessment"]["status"] == "unknown"
+
+
+def test_actions_provider_can_be_injected(tmp_path):
+    calls: list[tuple[Any, ...]] = []
+
+    def actions_provider(ctx):
+        calls.append(tuple(item.action for item in ctx.action_readiness))
+        return observation(False, reason="action provider refused")
+
+    report = build(tmp_path, fake=providers(actions=actions_provider),
+                   action_readiness=[
+                       {"action": "service.status", "name": "api"}])
+    assert calls == [("service.status",)]
+    assert report["dimensions"]["actions"]["readiness"] is False
+    assert report["assessment"]["status"] == "failed"
+
+
+def test_action_selection_validation(tmp_path):
+    with pytest.raises(TP.PreflightError, match="service/tunnel"):
+        build(tmp_path, action_readiness=[
+            {"action": "integration.status"}])
+    with pytest.raises(TP.PreflightError, match="requires a bounded"):
+        build(tmp_path, action_readiness=[{"action": "service.start"}])
+    with pytest.raises(TP.PreflightError, match="unsupported"):
+        build(tmp_path, action_readiness=[
+            {"action": "service.start", "name": "api", "force": True}])
+    with pytest.raises(TP.PreflightError, match="at most"):
+        build(tmp_path, action_readiness=[
+            {"action": "service.status", "name": f"s{index}"}
+            for index in range(TP.MAX_ACTION_SELECTIONS + 1)
+        ])

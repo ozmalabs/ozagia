@@ -2,11 +2,11 @@
 
 Status: implemented in `src/ozagia/core/task_preflight.py` and
 `src/ozagia/core/evidence.py`, with the read-only CLI
-`ozagia task-preflight`, 2026-11-17. The optional read-only `linked` and
-`research` joins were added 2026-11-18. It is the M2 task preflight: a bounded,
-read-only composition of existing owners. It does not run tests, refresh the
-graph, start a daemon, call a model, import a target project or write a
-goal/task/session/graph record.
+`ozagia task-preflight`, 2026-11-17. The optional read-only `linked`,
+`research` and `actions` joins were added 2026-11-18. It is the M2 task
+preflight: a bounded, read-only composition of existing owners. It does not run
+tests, refresh the graph, start a daemon, call a model, import a target project
+or write a goal/task/session/graph record.
 
 ## What it answers
 
@@ -36,6 +36,7 @@ never turns a planned or selected test into a passed test.
 | capability trust | unobserved | explicit `True`, `False` or `"unknown"` per required capability |
 | linked checkouts | not selected | at most 8 explicit `{root, label?, repo?, checkout?, snapshot?, authorized?, read_scope?}` entries; a path is not an identity or permission |
 | research sessions | not selected | at most 8 retained `.ozagia/research/<id>.json` ids; an explicit empty list selects none |
+| action readiness | not selected | at most 16 explicit `{action, name?}` service/tunnel operations; `action` must be a declared `service.*`/`tunnel.*` action; an explicit empty list selects none |
 | timeout | 30 s; max 600 s | caller-owned; checked before each dimension; no provider is started after expiry |
 | limit / cursor | 25; max 200 | paginates the criteria display; the assessment still considers every criterion it read |
 | max facts | 256 | a hard bound on returned facts |
@@ -56,17 +57,18 @@ Per-dimension readiness is `true`, `false` or `"unknown"`.
 | `resources` | `core.resources.check_admission` | admission `ok`, or checks disabled | admission refused | the host sample could not be read |
 | `tests` | `core.testing.plan` | a plan is available and current (`executed=false`) | the policy refused to select tests | the graph is stale/unknown, or a fallback left affected coverage unassessed |
 
-`linked` and `research` are optional, primary-scope dimensions. They are
-present only when the caller selects `linked_checkouts` or
-`research_sessions`; without those inputs the report keeps exactly the six
-base dimensions, the same schema/version and the same assessment. When
-selected, an unknown, absent, stale or unauthorized result is a required
-dimension and cannot yield `green`.
+`linked`, `research` and `actions` are optional, primary-scope dimensions.
+They are present only when the caller selects `linked_checkouts`,
+`research_sessions` or `action_readiness`; without those inputs the report
+keeps exactly the six base dimensions, the same schema/version and the same
+assessment. When selected, an unknown, absent, stale or unauthorized result is
+a required dimension and cannot yield `green`.
 
 | Dimension | Owner | `true` | `false` | `unknown` |
 | --- | --- | --- | --- | --- |
 | `linked` | `core.memory` snapshot read + `core.federation.reference_status` cache | every selected member is explicitly authorized, has a declared read scope, is in its own `.ozagia` state, and its snapshot is fresh | the caller marked a selected member unauthorized | a member is absent, stale, has no snapshot, lacks authorization/scope, or reference-sync state is not verified |
 | `research` | `core.research_projection` over retained research graphs | a selected session is readable and asserts no claim, assumption or evidence | a selected session is unreadable and the error is an authorization failure | the session is absent/invalid, or any recorded claim/assumption/evidence exists (they are declarations, not verified evidence) |
+| `actions` | `core.action_readiness` over `actions.ACTION_SPECS` | every selected service/tunnel operation is `available` and current | a selected service or tunnel is `absent` | a selected operation is `blocked` or `unknown`, or no operation was selected |
 
 The `linked` dimension reads an existing member snapshot through
 `DevMemory.staleness()` and the anchor's cached federation reference status.
@@ -99,9 +101,10 @@ unknown; it never upgrades a recorded pass.
    - `unknown` if no dimension is false but any is not true;
    - `green` only when **every** required dimension is `true` and every fact
      it used is `current`.
-   The required set is the six base dimensions plus `linked`/`research` when
-   the caller selected them. Neither optional dimension can be omitted from
-   the assessment to make a selected member or claim look green.
+   The required set is the six base dimensions plus `linked`/`research`/
+   `actions` when the caller selected them. None of the optional dimensions can
+   be omitted from the assessment to make a selected member, claim or action
+   look green.
 4. `assessment.green` is a boolean convenience; `assessment.reasons` names
    every non-true dimension and each checkout's reason.
 5. `assessment.notes` states that a test plan is not an executed test and that
@@ -181,6 +184,31 @@ omission; `criteria.truncated` is the page-specific envelope and
                "engines": {"ocelot": {"state": "unknown", "reason": "..."}},
                "not_assessed": ["..."], "omissions": [],
                "truncated": {"...": "..."}},
+  "actions": {"schema": {"namespace": "ozagia.action_readiness",
+                         "version": "1.0"},
+              "selection": "explicit", "state": "blocked",
+              "readiness": "unknown", "reason": "...",
+              "targets": [{"kind": "service", "name": "api",
+                           "configured": true, "mode": "background",
+                           "process": {"state": "configured",
+                                       "verified": false},
+                           "environment": {"keys": ["API_TOKEN"],
+                                           "references": [{"key": "API_TOKEN",
+                                                           "reference": "secret://env/API_TOKEN"}],
+                                           "resolved": false},
+                           "readiness": "unknown"}],
+              "operations": [{"action": "service.start", "target": "api",
+                              "readiness": "unknown",
+                              "reason": "environment secret references "
+                                        "were not resolved",
+                              "requirements": ["..."]}],
+              "counts": {"operations": {"available": 0, "blocked": 0,
+                                        "unknown": 1, "absent": 0,
+                                        "operations": 1}},
+              "provenance": {"reader": "ozagia.core.action_readiness",
+                             "secrets_resolved": false},
+              "not_assessed": ["..."], "deferred": ["..."],
+              "truncated": {"...": "..."}},
   "bounds": {"...": "..."},
   "started_at": 1700000000000,
   "duration_ms": 12,
@@ -260,6 +288,63 @@ includes those display omissions.
 See [research_projection.md](research_projection.md) for the standalone schema,
 source-hash rules and limits.
 
+## Action readiness join
+
+`build_preflight(..., action_readiness=[...])` adds the optional `actions`
+dimension and a top-level `actions` section. Each selection is a bounded
+mapping:
+
+```python
+{"action": "service.start", "name": "api"}
+{"action": "tunnel.start", "name": "database"}
+{"action": "service.list"}          # no name
+```
+
+`action` must be a `service.*` or `tunnel.*` action declared in
+`core.actions.ACTION_SPECS`; unknown fields, unsupported actions, duplicate
+selections, a missing target name (except `service.list`/`tunnel.list`) and
+more than 16 selections are refused. `action_readiness=[]` selects the
+dimension explicitly but observes no operation, so it is `unknown`.
+
+The join calls `core.action_readiness.readiness` and maps the four-state
+result into the preflight vocabulary:
+
+- `available` -> `true`, only when every selected operation is available;
+- `absent` -> `false`;
+- `blocked` or `unknown` -> `"unknown"`.
+
+Therefore an unresolved secret reference, a live-gated tunnel, a stale or
+unverified process/lease, a mode/relay mismatch and a missing target can never
+make the assessment green. The target/operation reason is retained; the
+dimension is not collapsed to a bare boolean.
+
+Each selected operation contributes a bounded `contracts.Fact` under
+`action.<operation>.<target>`, with freshness `current` only for `available`,
+`absent` for `absent` and `unknown` otherwise. A summary fact
+`preflight.actions` records the state and counts. The top-level section carries
+the target observations and operation rows; the dimension `data` carries a
+compact copy so the report stays within the dimension byte bound.
+
+The join reads only:
+
+- `ozagia.config.load_project_config` (configured/absent, mode, relay, env key
+  names and `secret://...` references);
+- `ozagia.core.runtime.runtime_status` (existing process/lease state);
+- `RuntimeStore(create=False)` log metadata (presence/size, never content).
+
+It does not call `actions.preview`/`actions.apply`, create a confirmation
+token, audit or runtime record, resolve a secret, construct a mutating manager,
+start/stop/signal a process, open a tunnel or test relay/target reachability.
+`tunnel.start` is always `blocked` in this join because live/network gates are
+explicit apply inputs, not configuration. A service with any unresolved
+environment reference is never `available`; a `secret://session/...` reference
+is `blocked` because a runtime service cannot resolve it at spawn.
+
+`linked`, `research` and `actions` are independent selectors. When
+`action_readiness` is omitted, the report has the same six dimensions, schema,
+bounds and assessment as before this join. The CLI does not expose
+`action_readiness` in this slice; it is available to Python callers.
+
 ## Evidence collector
 
 `core.evidence.collect_evidence(root, goal_id, run_ids=..., test_keys=...,
@@ -290,16 +375,16 @@ so the join reports `not_recorded` rather than guessing.
 ## Injection seams and tests
 
 `task_preflight.Providers` is a frozen set of six required callables
-(`goal`, `graph`, `capabilities`, `environment`, `resources`, `tests`) plus two
-optional primary-scope callables (`linked`, `research`). Each receives a
-`ProviderContext` with the checkout, deadline, goal, scope, changed paths,
-required capabilities, trust map, selected linked members/research sessions and
-injected observation time, and returns an
+(`goal`, `graph`, `capabilities`, `environment`, `resources`, `tests`) plus
+three optional primary-scope callables (`linked`, `research`, `actions`). Each
+receives a `ProviderContext` with the checkout, deadline, goal, scope, changed
+paths, required capabilities, trust map, selected linked members/research
+sessions/action selections and injected observation time, and returns an
 `Observation(readiness, facts, data, reason, error, truncated)`.
-`default_providers()` returns the read-only defaults (including the linked and
-research observations); individual providers are also callable directly.
-Existing callers that construct `Providers` with only the six required
-callables keep working.
+`default_providers()` returns the read-only defaults (including the linked,
+research and action observations); individual providers are also callable
+directly. Existing callers that construct `Providers` with only the six
+required callables keep working.
 
 Tests use fakes for every assessment rule and a temporary git project for the
 integration path (stale graph, missing interpreter, failing test, missing or
@@ -332,7 +417,14 @@ The report's `not_assessed` list includes, as applicable:
   observed or verified facts;
 - a research source is verified only when it is a selected local file with a
   recorded SHA-256; remote sources were not fetched;
-- the Ocelot adapter is deferred and represented as an explicit unknown.
+- the Ocelot adapter is deferred and represented as an explicit unknown;
+- action readiness did not resolve secret references, check provider
+  availability or validate credentials;
+- action readiness did not start, stop, signal, preview or apply anything, and
+  did not test relay/target reachability or remote authorization;
+- live/network gates are never granted by preflight; apply still requires the
+  explicit flags and a one-time confirmation token;
+- action readiness reads log presence/size only, not log content.
 
 ## Deferred durable writes
 
@@ -367,3 +459,7 @@ without writing it.
 - The preflight does not prove a criterion's evidence is still current beyond
   the read-only evaluator's fingerprint checks; the evidence collector
   explicitly does not re-evaluate staleness.
+- Action readiness keeps at most 16 explicit selections, 32 target rows and 64
+  environment key names per service. It reports references and counts, not
+  environment values or log content. Over-limit bytes are trimmed
+  deterministically and named in `actions.truncated`.
