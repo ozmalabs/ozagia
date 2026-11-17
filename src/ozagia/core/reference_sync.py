@@ -14,6 +14,7 @@ _TIMEOUT = 60
 _CACHE_SECONDS = 30.0
 _lock = threading.Lock()
 _cache: dict[tuple[str, str | None], tuple[float, dict[str, Any]]] = {}
+_checkout_locks: dict[str, threading.Lock] = {}
 
 
 def _git(root: Path, *args: str, timeout: int = _TIMEOUT) -> subprocess.CompletedProcess[str]:
@@ -49,6 +50,17 @@ def sync_reference(root: str | Path, *, pin: str | None = None,
     if supplied.is_symlink():
         return _error(supplied.absolute(), "symlink_checkout")
     path = supplied.resolve()
+    checkout_key = str(path)
+    with _lock:
+        checkout_lock = _checkout_locks.setdefault(checkout_key, threading.Lock())
+    # Serialize the cache check and the entire Git transaction for this path.
+    # Other checkouts use different locks and can proceed concurrently.
+    with checkout_lock:
+        return _sync_reference_locked(path, pin=pin, force=force)
+
+
+def _sync_reference_locked(path: Path, *, pin: str | None,
+                           force: bool) -> dict[str, Any]:
     cache_key = (str(path), pin)
     now = time.monotonic()
     with _lock:

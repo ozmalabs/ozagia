@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import json
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 from ozagia.core import federation
+from ozagia.core import reference_sync
 from ozagia.core.reference_sync import sync_reference
 from ozagia.federation_cli import main as federation_main
 
@@ -158,3 +161,41 @@ def test_automatic_reference_batches_rotate_without_starvation(tmp_path: Path) -
                for repository, target in zip(repositories, targets))
     assert sum(item["state"] == "updated" and not item.get("cached")
                for item in second["reference_sync"]) == 2
+
+
+def test_concurrent_sync_calls_serialize_per_checkout(tmp_path: Path,
+                                                      monkeypatch) -> None:
+    _origin, seed, repository = _repo_pair(tmp_path)
+    _publish(seed, "concurrent-update")
+    original_git = reference_sync._git
+    fetch_count = 0
+    count_lock = threading.Lock()
+
+    def counted_git(root: Path, *args: str, timeout: int = 60):
+        nonlocal fetch_count
+        if args and args[0] == "fetch":
+            with count_lock:
+                fetch_count += 1
+            time.sleep(0.05)
+        return original_git(root, *args, timeout=timeout)
+
+    monkeypatch.setattr(reference_sync, "_git", counted_git)
+    barrier = threading.Barrier(3)
+    results = []
+
+    def update() -> None:
+        barrier.wait()
+        results.append(sync_reference(repository))
+
+    threads = [threading.Thread(target=update) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    barrier.wait()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert fetch_count == 1
+    assert len(results) == 2
+    assert all(result["state"] == "updated" for result in results)
+    assert sum(bool(result.get("cached")) for result in results) == 1
