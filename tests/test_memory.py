@@ -767,6 +767,63 @@ def test_staleness_sees_new_untracked_source_file(tmp_path: Path) -> None:
     assert stale["stale"] is True
 
 
+def test_staleness_ignores_pristine_opencode_outputs_only(tmp_path: Path) -> None:
+    import sys
+
+    from ozagia.core.memory import _build_untracked_paths
+    from ozagia.integrations.opencode.install import (
+        PLUGIN_REL, TUI_BRAND_REL, TUI_PROFILE_REL, install,
+    )
+
+    _fixture(tmp_path)
+    tracked_config = tmp_path / ".opencode" / "opencode.json"
+    _write(tracked_config, '{"theme": "user"}\n')
+    _git(tmp_path, "init", "-q")
+    _commit_all(tmp_path)
+    exclude = tmp_path / ".git" / "info" / "exclude"
+    _write(exclude, "".join(
+        "/" + rel.as_posix() + "\n"
+        for rel in (PLUGIN_REL, TUI_BRAND_REL, TUI_PROFILE_REL)))
+    out = tmp_path / ".ozagia" / "graph.json"
+    build_index(tmp_path, out, include_docs="none",
+                include_git=True, include_scripts=False)
+
+    install(tmp_path)
+    generated = {
+        PLUGIN_REL.as_posix(), TUI_BRAND_REL.as_posix(),
+        TUI_PROFILE_REL.as_posix(),
+    }
+    paths = _build_untracked_paths(
+        tmp_path, dump=out, include_docs="none")
+    assert paths is not None
+    assert not (generated & set(paths))
+    assert DevMemory(out, tmp_path / ".ozagia" / "journal.jsonl").staleness()[
+        "tree_changed"] is False
+
+    profile = tmp_path / TUI_PROFILE_REL
+    profile.write_text(profile.read_text(encoding="utf-8").replace(
+        sys.executable, "/alternate/python"), encoding="utf-8")
+    assert DevMemory(out, tmp_path / ".ozagia" / "journal.jsonl").staleness()[
+        "tree_changed"] is False
+
+    # User edits to a generated-looking path and other untracked .opencode
+    # files still affect freshness.
+    profile.write_text(profile.read_text(encoding="utf-8") + "\n// local edit\n",
+                       encoding="utf-8")
+    assert DevMemory(out, tmp_path / ".ozagia" / "journal.jsonl").staleness()[
+        "tree_changed"] is True
+    install(tmp_path)
+    custom = tmp_path / ".opencode" / "plugins" / "custom" / "tui.js"
+    _write(custom, "export default { id: 'user-plugin' };\n")
+    assert DevMemory(out, tmp_path / ".ozagia" / "journal.jsonl").staleness()[
+        "tree_changed"] is True
+
+    custom.unlink()
+    tracked_config.write_text('{"theme": "changed"}\n', encoding="utf-8")
+    assert DevMemory(out, tmp_path / ".ozagia" / "journal.jsonl").staleness()[
+        "tree_changed"] is True
+
+
 
 def test_staleness_sees_untracked_tests_outside_source_dirs(tmp_path: Path, monkeypatch) -> None:
     from ozagia.core import memory as memory_module
