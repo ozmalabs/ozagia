@@ -24,6 +24,7 @@ from ozagia.core.actions import (
     preview,
 )
 from ozagia.daemon.client import DaemonUnavailable
+from ozagia.core.runtime import RuntimeErrorBase
 
 SECRET = "hunter2-hidden-value"
 
@@ -895,3 +896,152 @@ def test_installer_default_runner_is_in_process_not_a_subprocess(tmp_path, monke
                          "--scope", "project", "--python", sys.executable]]
     assert not (tmp_path / ".codex").exists()
     assert not (tmp_path / "AGENTS.md").exists()
+
+
+# --------------------------------------------------------------------------- #
+# Secret boundary canaries
+# --------------------------------------------------------------------------- #
+SECRET_CANARY = "canary-4f8a9d2c-must-never-appear"
+CANARY_ENV = "OZAGIA_ACTION_CANARY_TOKEN"
+
+
+def _write_env_config(root: Path) -> None:
+    (root / ".ozagia.toml").write_text(
+        f"""
+[relays.local]
+specs = [{{ kind = "local" }}]
+allowed_kinds = ["local"]
+max_timeout_s = 20
+
+[runtime.services.api]
+command = ["python", "-m", "app"]
+mode = "background"
+env = {{ API_TOKEN = "secret://env/{CANARY_ENV}" }}
+
+[runtime.tunnels.database]
+relay = "local"
+target = "db.example.test:5432"
+""",
+        encoding="utf-8",
+    )
+
+
+def _forbid_secret_resolution(monkeypatch) -> None:
+    from ozagia.core import secrets
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("the action layer resolved a secret")
+
+    monkeypatch.setattr(secrets.SecretBroker, "resolve", forbidden)
+    monkeypatch.setattr(secrets.SecretBroker, "resolve_env", forbidden)
+    monkeypatch.setattr(secrets.SecretBroker, "check", forbidden)
+    monkeypatch.setattr(secrets.SecretValue, "reveal", forbidden)
+
+
+def test_secret_canary_never_appears_in_service_preview_apply_or_audit(
+        tmp_path, monkeypatch):
+    _write_env_config(tmp_path)
+    monkeypatch.setenv(CANARY_ENV, SECRET_CANARY)
+    _forbid_secret_resolution(monkeypatch)
+
+    class FailingManager(FakeManager):
+        def start(self, name: str) -> dict[str, Any]:
+            self.calls.append(("start", name))
+            raise RuntimeErrorBase(f"cannot start: API_TOKEN={SECRET_CANARY}")
+
+    manager = FailingManager()
+    ctx = ActionContext(manager_factory=lambda *_a, **_k: manager)
+
+    request = preview(tmp_path, "service.start", context=ctx, name="api")
+    preview_text = json.dumps(request.to_dict(), sort_keys=True)
+    assert SECRET_CANARY not in preview_text
+    assert "secret://" not in preview_text
+    token_path = (tmp_path / ".ozagia" / "actions" / "pending"
+                  / f"{request.confirmation}.json")
+    token_text = token_path.read_text(encoding="utf-8")
+    assert SECRET_CANARY not in token_text
+    assert "secret://" not in token_text
+
+    result = apply(tmp_path, "service.start", request.confirmation,
+                   context=ctx, name="api")
+    assert result.ok is False and result.state == "refused"
+    assert SECRET_CANARY not in json.dumps(result.to_dict(), sort_keys=True)
+    assert "API_TOKEN=[redacted]" in (result.error or "")
+    audit = (tmp_path / ".ozagia" / "actions" / "audit.jsonl").read_text(
+        encoding="utf-8")
+    assert SECRET_CANARY not in audit
+    assert "secret://" not in audit
+    assert "API_TOKEN=[redacted]" in audit
+
+
+def test_secret_canary_never_appears_in_installer_error_or_audit(
+        tmp_path, monkeypatch):
+    monkeypatch.setenv(CANARY_ENV, SECRET_CANARY)
+    _forbid_secret_resolution(monkeypatch)
+    fake = FakeInstaller(
+        error=RuntimeError(f"install failed: password={SECRET_CANARY}"))
+    ctx = ActionContext(installer_runner=fake)
+
+    request = preview(tmp_path, "integration.install", context=ctx,
+                      name="codex", python=sys.executable)
+    result = apply(tmp_path, "integration.install", request.confirmation,
+                   context=ctx, name="codex", python=sys.executable)
+
+    assert result.ok is False and result.state == "failed"
+    assert SECRET_CANARY not in json.dumps(result.to_dict(), sort_keys=True)
+    assert "password=[redacted]" in (result.error or "")
+    audit = (tmp_path / ".ozagia" / "actions" / "audit.jsonl").read_text(
+        encoding="utf-8")
+    assert SECRET_CANARY not in audit
+    assert "password=[redacted]" in audit
+
+
+def test_secret_canary_never_appears_in_tunnel_planning_notes(
+        tmp_path, monkeypatch):
+    _write_env_config(tmp_path)
+    monkeypatch.setenv(CANARY_ENV, SECRET_CANARY)
+    _forbid_secret_resolution(monkeypatch)
+
+    def relay_factory(*_args, **_kwargs):
+        raise RuntimeError(f"relay planning failed: API_TOKEN={SECRET_CANARY}")
+
+    ctx = ActionContext(relay_factory=relay_factory)
+    request = preview(tmp_path, "tunnel.start", context=ctx, name="database")
+
+    text = json.dumps(request.to_dict(), sort_keys=True)
+    assert SECRET_CANARY not in text
+    assert "API_TOKEN=[redacted]" in text
+    assert request.notes
+    assert "command planning failed" in request.notes[0]
+    token_text = (tmp_path / ".ozagia" / "actions" / "pending"
+                  / f"{request.confirmation}.json").read_text(encoding="utf-8")
+    assert SECRET_CANARY not in token_text
+
+
+def test_secret_canary_never_appears_in_daemon_probe_errors(
+        tmp_path, monkeypatch):
+    monkeypatch.setenv(CANARY_ENV, SECRET_CANARY)
+    _forbid_secret_resolution(monkeypatch)
+
+    class LeakyDaemonClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return None
+
+        def ping(self, *, timeout: float | None = None):
+            raise DaemonUnavailable(f"ping failed: API_TOKEN={SECRET_CANARY}")
+
+    ctx = ActionContext(daemon_client_factory=LeakyDaemonClient)
+    request = preview(tmp_path, "daemon.status", context=ctx)
+    text = json.dumps(request.to_dict(), sort_keys=True)
+    assert SECRET_CANARY not in text
+    assert "API_TOKEN=[redacted]" in text
+    assert request.current["error"] == "ping failed: API_TOKEN=[redacted]"
+    token_text = (tmp_path / ".ozagia" / "actions" / "pending"
+                  / f"{request.confirmation}.json").read_text(encoding="utf-8")
+    assert SECRET_CANARY not in token_text

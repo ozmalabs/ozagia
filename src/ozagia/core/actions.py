@@ -88,8 +88,8 @@ _INTEGRATION_SCOPES = {
     "kiro": ("project", "user"),
 }
 _SECRET_TEXT = re.compile(
-    r"(?i)\b(token|secret|password|passwd|api[_-]?key|authorization)"
-    r"(\s*[=:]\s*)\S+"
+    r"(?i)(token|secret|password|passwd|api[_-]?key|authorization|"
+    r"access[_-]?key|private[_-]?key|credential)(\s*[=:]\s*)\S+"
 )
 
 

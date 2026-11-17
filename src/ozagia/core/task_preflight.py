@@ -35,6 +35,10 @@ defaults read files, `/proc`, git and the existing owners' read-only APIs.
 Tests inject fakes through :class:`Providers`; only the integration tests use
 the defaults on a temporary project.
 
+Optional primary-scope joins (only when the caller selects them) add `linked`
+checkouts, retained `research` sessions and read-only service/tunnel `actions`
+readiness. They never change the six-dimension shape when omitted.
+
 Durable evidence writes are deferred.  This package is read-only and does not
 add records to the goal, task, session or graph stores.
 """
@@ -64,7 +68,8 @@ DIMENSIONS = (
 # DIMENSIONS so existing readers keep the six-dimension shape and assessment.
 LINKED_DIMENSION = "linked"
 RESEARCH_DIMENSION = "research"
-OPTIONAL_DIMENSIONS = (LINKED_DIMENSION, RESEARCH_DIMENSION)
+ACTIONS_DIMENSION = "actions"
+OPTIONAL_DIMENSIONS = (LINKED_DIMENSION, RESEARCH_DIMENSION, ACTIONS_DIMENSION)
 REQUIRED_DIMENSIONS = DIMENSIONS
 ASSESSMENTS = ("green", "unknown", "failed")
 
@@ -87,6 +92,7 @@ MAX_FACTS = 256
 MAX_CHECKOUTS = 8
 MAX_LINKED = 8
 MAX_RESEARCH_SESSIONS = 8
+MAX_ACTION_SELECTIONS = 16
 MAX_SCOPE_ITEMS = 32
 MAX_CHANGED = 512
 MAX_TIMEOUT_MS = 600_000
@@ -498,6 +504,27 @@ def _research_sessions(value: Any) -> tuple[str, ...] | None:
     return tuple(sorted(checked))
 
 
+def _action_selections(value: Any) -> tuple[Any, ...] | None:
+    """Validate an explicit service/tunnel action readiness selection."""
+    if value is None:
+        return None
+    from ozagia.core import action_readiness as AR
+
+    if isinstance(value, (str, bytes, Mapping)):
+        raise PreflightError(
+            "action_readiness must be an iterable of action selections")
+    items = list(value)
+    if len(items) > MAX_ACTION_SELECTIONS:
+        raise PreflightError(
+            f"at most {MAX_ACTION_SELECTIONS} action selections are allowed")
+    try:
+        parsed = AR.parse_selections(items)
+    except AR.ActionReadinessError as exc:
+        raise PreflightError(str(exc)) from None
+    assert parsed is not None
+    return tuple(parsed)
+
+
 @dataclass(frozen=True)
 class ProviderContext:
     """Everything a provider may read, with no ambient authority."""
@@ -516,6 +543,7 @@ class ProviderContext:
     timeout_ms: int
     linked: tuple[LinkedCheckout, ...] = ()
     research_sessions: tuple[str, ...] | None = None
+    action_readiness: tuple[Any, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -562,10 +590,12 @@ class Providers:
     resources: Provider
     tests: Provider
     # Optional primary-scope providers.  They are used only when the caller
-    # selects linked checkouts or research sessions and an explicit provider
-    # was supplied; otherwise the read-only defaults below are used.
+    # selects linked checkouts, research sessions or action readiness and an
+    # explicit provider was supplied; otherwise the read-only defaults below
+    # are used.
     linked: Provider | None = None
     research: Provider | None = None
+    actions: Provider | None = None
 
     def __post_init__(self) -> None:
         for name in DIMENSIONS:
@@ -810,6 +840,8 @@ def build_preflight(root: str | Path, goal_id: str, *,
                     linked_checkouts: (Iterable[Mapping[str, Any] | LinkedCheckout]
                                        | None) = None,
                     research_sessions: Iterable[str] | None = None,
+                    action_readiness: (Iterable[Mapping[str, Any] | Any]
+                                       | None) = None,
                     providers: Providers | None = None,
                     timeout_ms: int | None = None,
                     clock: Callable[[], int] | None = None,
@@ -852,6 +884,7 @@ def build_preflight(root: str | Path, goal_id: str, *,
 
     linked_selected = _linked_checkouts(linked_checkouts, base=primary.root)
     research_selected = _research_sessions(research_sessions)
+    action_selected = _action_selections(action_readiness)
     provider_set = providers or default_providers()
     if not isinstance(provider_set, Providers):
         raise TypeError("providers must be a task_preflight.Providers")
@@ -877,6 +910,7 @@ def build_preflight(root: str | Path, goal_id: str, *,
             timeout_ms=timeout_value,
             linked=tuple(linked_selected or ()),
             research_sessions=research_selected,
+            action_readiness=action_selected,
         )
         contexts.append(context)
         dimensions: dict[str, dict[str, Any]] = {}
@@ -907,6 +941,13 @@ def build_preflight(root: str | Path, goal_id: str, *,
             RESEARCH_DIMENSION, provider, contexts[0],
             timed_out=timed_out, timeout_ms=timeout_value)
         checkout_reports[0]["dimensions"][RESEARCH_DIMENSION] = (
+            _dimension_report(observation))
+    if action_selected is not None:
+        provider = provider_set.actions or actions_observation
+        observation, timed_out = _run_provider(
+            ACTIONS_DIMENSION, provider, contexts[0],
+            timed_out=timed_out, timeout_ms=timeout_value)
+        checkout_reports[0]["dimensions"][ACTIONS_DIMENSION] = (
             _dimension_report(observation))
 
     dimension_names = list(DIMENSIONS)
@@ -962,12 +1003,17 @@ def build_preflight(root: str | Path, goal_id: str, *,
                    if linked_selected is not None else None)
     research_data = (aggregated[RESEARCH_DIMENSION]["data"]
                      if research_selected is not None else None)
+    actions_data = (aggregated[ACTIONS_DIMENSION]["data"]
+                    if action_selected is not None else None)
     extra_omitted = 0
     if isinstance(linked_data, Mapping):
         extra_omitted += int((linked_data.get("truncated") or {}).get("omitted") or 0)
     if isinstance(research_data, Mapping):
         extra_omitted += int(
             (research_data.get("truncated") or {}).get("omitted") or 0)
+    if isinstance(actions_data, Mapping):
+        extra_omitted += int(
+            (actions_data.get("truncated") or {}).get("omitted") or 0)
     if extra_omitted:
         report_truncation = C.truncation(
             True,
@@ -1092,6 +1138,49 @@ def build_preflight(root: str | Path, goal_id: str, *,
             research_section.get("claims") or [])
         report["bounds"]["research_claims_total"] = int(
             (research_section.get("counts") or {}).get("claims") or 0)
+    if isinstance(actions_data, Mapping):
+        actions_section = {
+            "schema": dict(actions_data.get("schema") or {
+                "namespace": "ozagia.action_readiness", "version": "1.0"}),
+            "selection": "explicit",
+            "state": actions_data.get("state"),
+            "readiness": aggregated[ACTIONS_DIMENSION]["readiness"],
+            "reason": aggregated[ACTIONS_DIMENSION]["reason"],
+            "targets": list(actions_data.get("targets") or []),
+            "operations": list(actions_data.get("operations") or []),
+            "counts": dict(actions_data.get("counts") or {}),
+            "provenance": dict(actions_data.get("provenance") or {}),
+            "not_assessed": list(actions_data.get("not_assessed") or []),
+            "deferred": list(actions_data.get("deferred") or []),
+            "error": actions_data.get("error"),
+            "observed_at": actions_data.get("observed_at"),
+            "truncated": dict(actions_data.get("truncated")
+                              or C.truncation().to_dict()),
+        }
+        report["actions"] = actions_section
+        compact_actions = {
+            "selection": actions_section["selection"],
+            "state": actions_section["state"],
+            "readiness": actions_section["readiness"],
+            "reason": actions_section["reason"],
+            "operations": [
+                {"action": row.get("action"), "target": row.get("target"),
+                 "readiness": row.get("readiness"),
+                 "reason": row.get("reason")}
+                for row in actions_section["operations"]
+            ],
+            "counts": actions_section["counts"],
+            "provenance": {"reader": "ozagia.core.action_readiness"},
+            "not_assessed": actions_section["not_assessed"],
+            "deferred": actions_section["deferred"],
+            "truncated": actions_section["truncated"],
+        }
+        checkout_reports[0]["dimensions"][ACTIONS_DIMENSION]["data"] = (
+            compact_actions)
+        aggregated[ACTIONS_DIMENSION]["data"] = compact_actions
+        report["bounds"]["actions_selected"] = len(action_selected or ())
+        report["bounds"]["actions_operations"] = len(
+            actions_section["operations"])
     report = _enforce_bytes(report)
     report["hash"] = C.content_hash(
         {key: value for key, value in report.items() if key != "hash"})
@@ -1201,6 +1290,20 @@ def _enforce_bytes(report: dict[str, Any]) -> dict[str, Any]:
     facts_dropped = 0
     criteria_dropped = 0
     research_dropped = 0
+    actions_dropped = 0
+    actions = report.get("actions")
+    if isinstance(actions, dict):
+        for key in ("operations", "targets"):
+            values = actions.get(key)
+            while isinstance(values, list) and values and too_big():
+                values.pop()
+                actions_dropped += 1
+        if actions_dropped:
+            actions["truncated"] = C.truncation(
+                True,
+                omitted=int((actions.get("truncated") or {}).get("omitted") or 0)
+                + actions_dropped,
+                reason="bytes").to_dict()
     research = report.get("research")
     if isinstance(research, dict):
         for key in ("evidence", "assumptions", "sources", "claims", "sessions"):
@@ -1236,7 +1339,8 @@ def _enforce_bytes(report: dict[str, Any]) -> dict[str, Any]:
         - criteria_dropped)
     report["bounds"]["bytes_truncated"] = True
     report["truncated"] = C.truncation(
-        True, omitted=facts_dropped + criteria_dropped + research_dropped,
+        True, omitted=(facts_dropped + criteria_dropped + research_dropped
+                       + actions_dropped),
         reason="bytes").to_dict()
     report["criteria"]["truncated"] = report["truncated"]
     report["bounds"]["report_bytes"] = len(
@@ -2403,6 +2507,87 @@ def research_observation(context: ProviderContext) -> Observation:
     )
 
 
+def actions_observation(context: ProviderContext) -> Observation:
+    """Explicitly selected service/tunnel action readiness; read-only.
+
+    The join reads configuration, the existing runtime status and log
+    filesystem metadata.  It never previews, applies, resolves a secret,
+    creates a token/audit/runtime record or starts/stops/signals anything.
+    """
+    from ozagia.core import action_readiness as AR
+
+    selections = context.action_readiness or ()
+    try:
+        report = AR.readiness(
+            context.checkout.root, selections=selections,
+            observed_at=context.observed_at)
+    except Exception as exc:  # noqa: BLE001 - unknown, never assumed green
+        return Observation(
+            "unknown",
+            (fact(
+                "preflight.actions",
+                {"state": "unknown", "reason": type(exc).__name__},
+                source="ozagia.core.action_readiness",
+                freshness="unknown", evidence="inferred"),),
+            data={
+                "selection": "explicit",
+                "state": "unknown",
+                "operations": [],
+                "counts": {},
+                "not_assessed": [
+                    "action readiness failed before any operation was observed",
+                ],
+            },
+            reason=_line(f"action readiness failed: "
+                         f"{type(exc).__name__}: {exc}", 300),
+            error="unavailable",
+        )
+    state = str(report.get("state") or AR.UNKNOWN)
+    readiness: bool | str = (
+        True if state == AR.AVAILABLE else
+        False if state == AR.ABSENT else "unknown")
+    facts = []
+    for row in report.get("operations") or []:
+        row_state = str(row.get("readiness") or AR.UNKNOWN)
+        facts.append(fact(
+            f"action.{row.get('action')}.{row.get('target') or '*'}",
+            {
+                "readiness": row_state,
+                "reason": row.get("reason"),
+                "mutating": bool(row.get("mutating")),
+                "live_gated": bool(row.get("live_gated")),
+            },
+            source="ozagia.core.action_readiness",
+            observed_at=context.observed_at,
+            freshness=("current" if row_state == AR.AVAILABLE else
+                       "absent" if row_state == AR.ABSENT else "unknown"),
+            evidence=("observed" if row_state in {AR.AVAILABLE, AR.ABSENT}
+                      else "inferred"),
+        ))
+    facts.insert(0, fact(
+        "preflight.actions",
+        {
+            "state": state,
+            "counts": dict(report.get("counts") or {}),
+            "secrets_resolved": False,
+        },
+        source="ozagia.core.action_readiness",
+        observed_at=context.observed_at,
+        freshness=("current" if state == AR.AVAILABLE else
+                   "absent" if state == AR.ABSENT else "unknown"),
+        evidence=("observed" if state in {AR.AVAILABLE, AR.ABSENT}
+                  else "inferred"),
+    ))
+    return Observation(
+        readiness,
+        tuple(facts),
+        data=report,
+        reason=_line(report.get("reason") or "action readiness was observed",
+                     400),
+        error=report.get("error"),
+    )
+
+
 def default_providers(
         *, graph: Provider = graph_observation,
         goal: Provider = goal_observation,
@@ -2411,24 +2596,27 @@ def default_providers(
         resources: Provider = resources_observation,
         tests: Provider = tests_observation,
         linked: Provider = linked_observation,
-        research: Provider = research_observation) -> Providers:
+        research: Provider = research_observation,
+        actions: Provider = actions_observation) -> Providers:
     """The read-only default provider set (individual callables injectable)."""
     return Providers(graph=graph, goal=goal, capabilities=capabilities,
                      environment=environment, resources=resources, tests=tests,
-                     linked=linked, research=research)
+                     linked=linked, research=research, actions=actions)
 
 
 __all__ = [
-    "ASSESSMENTS", "DEFAULT_CAPABILITIES", "DEFAULT_LIMIT", "DEFAULT_TIMEOUT_MS",
-    "DEFERRED", "DIMENSIONS", "LINKED_DIMENSION", "MAX_CHECKOUTS",
+    "ACTIONS_DIMENSION", "ASSESSMENTS", "DEFAULT_CAPABILITIES",
+    "DEFAULT_LIMIT", "DEFAULT_TIMEOUT_MS", "DEFERRED", "DIMENSIONS",
+    "LINKED_DIMENSION", "MAX_ACTION_SELECTIONS", "MAX_CHECKOUTS",
     "MAX_CRITERIA", "MAX_FACTS", "MAX_LIMIT", "MAX_LINKED",
     "MAX_REPORT_BYTES", "MAX_RESEARCH_SESSIONS", "MAX_TIMEOUT_MS",
     "OPTIONAL_DIMENSIONS", "Observation", "PreflightError", "Provider",
     "ProviderContext", "Providers", "REPORT_VERSION", "REQUIRED_DIMENSIONS",
     "RESEARCH_DIMENSION", "SCHEMA_NAMESPACE", "SCHEMA_VERSION",
     "SAFE_GOAL_KINDS", "TEST_GOAL_KINDS", "UNSAFE_GOAL_KINDS", "Checkout",
-    "LinkedCheckout", "build_preflight", "capability_observation",
-    "default_providers", "environment_observation", "fact", "goal_identity",
+    "LinkedCheckout", "actions_observation", "build_preflight",
+    "capability_observation", "default_providers",
+    "environment_observation", "fact", "goal_identity",
     "goal_observation", "graph_observation", "linked_observation",
     "preflight_envelope", "read_graph_state", "report_hash", "report_json",
     "research_observation", "resources_observation", "tests_observation",
