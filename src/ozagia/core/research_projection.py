@@ -1411,11 +1411,22 @@ def projection_summary(report: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def attach_ocelot(projection: Mapping[str, Any], **fields: Any) -> dict[str, Any]:
+    """Add the optional Ocelot candidate section without mutating the input.
+
+    The implementation is the separate read-only
+    :mod:`ozagia.research.ocelot_projection` module.  The base projection does
+    not call Ocelot; this join is explicit and opt-in.
+    """
+    from ozagia.research.ocelot_projection import attach_ocelot as _attach
+    return _attach(projection, **fields)
+
+
 __all__ = [
     "DEFERRED", "MAX_CLAIMS", "MAX_EVIDENCE", "MAX_FACTS", "MAX_JOIN_BYTES",
     "MAX_REPORT_BYTES", "MAX_SESSIONS", "MAX_SOURCES", "NOT_ASSESSED", "OCELOT",
     "PROJECTION_VERSION", "ResearchProjectionError", "SCHEMA_NAMESPACE",
-    "SCHEMA_VERSION", "build_projection", "preflight_join", "projection_facts",
-    "projection_hash", "projection_json", "projection_readiness",
-    "projection_summary",
+    "SCHEMA_VERSION", "attach_ocelot", "build_projection", "preflight_join",
+    "projection_facts", "projection_hash", "projection_json",
+    "projection_readiness", "projection_summary",
 ]

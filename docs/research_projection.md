@@ -3,7 +3,9 @@
 Status: implemented in `src/ozagia/core/research_projection.py`, 2026-11-18.
 It is the read-only research slice of M5: retained research records become
 bounded facts about claims, sources, assumptions and evidence. It is not a
-truth assessment, a live research client, or the Ocelot adapter.
+truth assessment, a live research client, or the Ocelot adapter. The optional
+Ocelot join is a separate opt-in module; see
+[Ocelot research projection](ocelot_research.md).
 
 ## What it answers
 
@@ -184,7 +186,7 @@ A recorded claim cannot make the preflight green. A selected research session
 with no claim, assumption or evidence record and current sources can be
 `true`; otherwise the research dimension caps the assessment at `unknown`.
 
-## Ocelot (deferred)
+## Ocelot (deferred in the base projection)
 
 `research.engines.ocelot` is always:
 
@@ -198,6 +200,38 @@ treat its absence as an empty successful result. A future adapter must record
 the engine/version, input hashes, output, verifier and whether a result is an
 empirical support or a formal derivation before this field can become
 anything other than `unknown`.
+
+### Opt-in Ocelot join
+
+The optional adapter is a separate, explicit join; building a projection still
+does not call Ocelot, so `engines.ocelot` above remains `unknown`:
+
+```python
+from ozagia.core import research_projection as RP
+
+report = RP.build_projection(root)
+joined = RP.attach_ocelot(report)          # explicit; no install or download
+joined["ocelot"]["state"]                  # ready | not_installed | ...
+```
+
+`attach_ocelot` returns a copy. It adds one `ocelot` section with a
+source-anchored claim-shape operation, engine id and resolved version, input
+hashes (base projection hash, selected claim keys/claim-set hash, worker payload
+hash), an output hash, `verifier.state="not_verified"`, candidate clusters and
+analogies, coverage, and explicit omissions/unknowns. It never creates a
+support, truth, consensus or derivation edge. Empirical, conditional and formal
+claims are anchored separately, and no claim or evidence kind is merged or
+promoted. With a resolvable checkout, the join runs the existing optional
+Ocelot worker (in-process or subprocess); it writes nothing itself and never
+installs or downloads Ocelot.
+
+The base projection's records, schema and `hash` semantics are unchanged when
+the join is omitted. A non-`invalid` join re-seals the joined document in
+`hash`; an invalid join leaves the base hash unchanged. Absence or failure of
+Ocelot is an explicit `not_installed`/`unavailable`/`invalid` state, not an
+exception; exact source anchors remain available as a fallback. See
+[Ocelot research projection](ocelot_research.md) for the schema, states,
+bounds, provenance fields and tests.
 
 ## No live actions
 
@@ -219,6 +253,8 @@ hash-seed checks in the preflight suite.
   surface warning/issue codes, not factual accuracy.
 - Session discovery covers `<state>/research`; legacy sessions are read only
   when named explicitly.
-- Ocelot is absent and represented as an explicit unknown.
+- In the base projection Ocelot is absent and represented as an explicit
+  unknown; the opt-in join above is the only adapter and is never called by
+  `build_projection`.
 - There is no CLI/MCP surface for this projection in this slice; it is a Python
   API consumed by the optional preflight join.
