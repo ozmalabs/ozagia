@@ -40,6 +40,7 @@ empty MCP `roots` array selects only the anchor.
 ```sh
 ozagia federation search "shared cache" --root ~/work/service-a --limit 10
 ozagia federation node 'repo-id::sym:src/cache.py::Cache.get' --root ~/work/service-a
+ozagia federation check --root ~/work/service-a --repo ~/work/service-b
 ```
 
 Search results and node inspection retain the source repository and its
@@ -79,10 +80,19 @@ prints the same complete JSON representation.
 ## MCP tools
 
 The read-only tools `federation_status`, `federation_search`, and
-`federation_node` use the server workspace as their anchor. Each accepts an
+`federation_node`, and `federation_check` use the server workspace as their anchor. Each accepts an
 optional `roots` array to select explicit member roots. They are available on
 both the full and graph tool surfaces. They do not refresh indexes or invoke
 project adapters.
+
+`federation check` and `federation_check` run offline static checks for
+declared API relationships and code-to-infrastructure links against existing
+snapshots. The report preserves the source repository, relationship
+provenance, and missing or ambiguous evidence. A declaration alone does not
+verify schema compatibility, runtime behavior, or deployed infrastructure;
+unknown or unverifiable results remain unknown. Selected roots and declared
+links can disclose repository metadata to the caller, so use explicit
+membership where needed.
 
 ## Identity and freshness limits
 

@@ -5,6 +5,7 @@ Usage::
     ozagia federation status [--root R] [--repo R ...]
     ozagia federation search QUERY [--root R] [--repo R ...] [--limit N]
     ozagia federation node QUALIFIED_KEY [--root R] [--repo R ...]
+    ozagia federation check [--root R] [--repo R ...]
 
 Discovery is bounded by the federation core. This CLI never builds or refreshes
 member snapshots.
@@ -25,6 +26,7 @@ def _parser(prog: str) -> argparse.ArgumentParser:
         ("status", "show discovered repositories and snapshot freshness"),
         ("search", "search indexed snapshots without refreshing them"),
         ("node", "inspect a qualified node and its edges"),
+        ("check", "check declared cross-repository relationships"),
     ):
         item = sub.add_parser(name, help=help_text)
         if name == "search":
@@ -60,8 +62,11 @@ def run(argv: list[str] | None = None, *, prog: str = "ozagia federation") -> in
         result = F.status(root, roots=roots)
     elif args.command == "search":
         result = F.search(root, args.query, roots=roots, limit=args.limit)
-    else:
+    elif args.command == "node":
         result = F.node(root, args.qualified_key, roots=roots)
+    else:
+        from ozagia.core import cross_repo
+        result = cross_repo.check(root, roots=roots)
     print(_render(result, as_json=args.json))
     return 0 if not isinstance(result, dict) or result.get("ok", True) else 2
 
