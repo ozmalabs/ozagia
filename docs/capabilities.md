@@ -223,7 +223,9 @@ edges for one capability, paged.
 
 ## Not implemented here
 
-No capability readiness observation, no service envelope, no task preflight, no
-evidence spine, no model-side projection or negotiation, no daemon operation
-for capabilities, no cache and no mutation. Those are later work packages
-(M2/M3), and this document does not claim them.
+Capability readiness (installed, configured, reachable, trusted or permitted)
+is not observed. The service envelope, task preflight, read-only evidence
+collector, offline task profile and read-only model-side maps exist as separate
+packages; this catalogue only declares and joins their surfaces. Durable
+evidence writes, live prefetch delivery into a model turn, structured model
+edits and any daemon operation for capabilities remain unimplemented.

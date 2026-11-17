@@ -1172,10 +1172,9 @@ _TOOLS.extend([
 ])
 
 
-# The model-facing maps tool is registered at runtime, not in the static
-# `_TOOLS` table.  The M3 package is additive and read-only; keeping it out of
-# the static capability inventory avoids changing the existing declared tool
-# list while `docs/model_api.md` records this as an explicit inventory gap.
+# The model-facing maps tool (M3). It is declared in the static table so the
+# WP1 inventory and capability audit see the surface; its handler is present
+# only on the coding/combined full surface.
 _MODEL_API_TOOL: dict[str, Any] = {
     "name": "dev_maps",
     "description": (
@@ -1217,6 +1216,7 @@ _MODEL_API_TOOL: dict[str, Any] = {
                    "description": "fail instead of using an explicit fallback."},
     }),
 }
+_TOOLS.append(_MODEL_API_TOOL)
 
 
 # --------------------------------------------------------------------------- #
@@ -1373,6 +1373,7 @@ class DevMemoryServer:
             "dev_environment": self._environment,
             "dev_tools": self._dev_tools,
             "dev_capabilities": self._dev_capabilities,
+            "dev_maps": self._dev_maps,
             "goal_list": self._goal_list,
             "goal_show": self._goal_show,
             "goal_check": self._goal_check,
@@ -1395,8 +1396,6 @@ class DevMemoryServer:
         if mode == "combined":
             self._load_research_dev_context()
         self._load_research_fetch_tool()
-        if mode in {"coding", "combined"}:
-            self._load_model_api_tool()
 
     def _federation_handlers(self) -> dict[str, Callable[[dict[str, Any]], Any]]:
         return {
@@ -1543,32 +1542,11 @@ class DevMemoryServer:
             self._tools.append(spec)
             self._schemas[name] = spec["inputSchema"]
 
-    def _load_model_api_tool(self) -> None:
-        """Register the additive M3 `dev_maps` tool on the full surface.
-
-        This is deliberately a runtime registration: the M3 package owns no
-        new capability catalogue entry (that file is outside this package's
-        ownership), so the existing static `_TOOLS` declaration and the WP1
-        audit stay unchanged.  `docs/model_api.md` records the resulting
-        coverage gap explicitly.
-        """
-        if "dev_maps" in self._handlers or "dev_maps" in self._schemas:
-            return
-        if self.mem is None:
-            return
-        self._handlers["dev_maps"] = self._dev_maps
-        self._tools.append(_MODEL_API_TOOL)
-        self._schemas["dev_maps"] = _MODEL_API_TOOL["inputSchema"]
-
     def _load_adapter_tools(self) -> None:
         reg = registry(self.mem.raw_repo_root)
         for err in reg.errors:
             print(f"[{SERVER_NAME}] adapter error: {err}", file=sys.stderr)
         for name, (spec, handler) in reg.mcp_tools.items():
-            if name == _MODEL_API_TOOL["name"]:
-                print(f"[{SERVER_NAME}] adapter tool {name!r} clashes with the "
-                      f"built-in model map tool; ignored", file=sys.stderr)
-                continue
             if name in _SCHEMAS or name in self._schemas:
                 print(f"[{SERVER_NAME}] adapter tool {name!r} clashes with a "
                       f"built-in tool; ignored", file=sys.stderr)

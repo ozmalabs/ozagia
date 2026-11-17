@@ -339,6 +339,7 @@ _DOCS = {
     "graph": "doc:docs/memory_mcp.md",
     "graph_surface": "doc:docs/graph_surface.md",
     "intent": "doc:docs/intent.md",
+    "model_api": "doc:docs/model_api.md",
     "code_search": "doc:docs/code_search.md",
     "symbol_graph": "doc:docs/symbol_graph.md",
     "lsp": "doc:docs/lsp.md",
@@ -424,6 +425,7 @@ _TESTS = {
     "eval_retrieval": "test:tests/test_eval_retrieval.py",
     "self": "test:tests/test_self_graph.py",
     "structural": "test:tests/test_structural_intent_routing.py",
+    "model_api": "test:tests/test_model_api.py",
 }
 
 
@@ -889,6 +891,25 @@ _BUILTIN_DEFINITIONS: tuple[dict[str, Any], ...] = (
         authorization=_READ,
         tests=_tests("structural"),
         docs=_docs("intent"),
+    ),
+    _def(
+        id="cap:graph.model_maps",
+        domain="graph",
+        purpose=("Project bounded, versioned read-only maps for a model-facing "
+                 "view of the graph, outline, capabilities and work evidence."),
+        owner="ozagia.model_api",
+        side_effect="write",
+        exposure=["mcp"],
+        impl=["impl:ozagia.model_api.project.request_map"],
+        surfaces=["mcp:tool:dev_maps"],
+        prerequisites=["a host policy scoped to one checkout",
+                       "an existing graph snapshot for graph maps"],
+        limits=["default 64 KiB, 25 items and depth 2; hard 256 KiB, 200 and 4",
+                "writes only cache metadata under <.ozagia>/model_api/cache",
+                "never refreshes the graph or grants authority"],
+        authorization=_STATE,
+        tests=_tests("model_api"),
+        docs=_docs("model_api"),
     ),
     _def(
         id="cap:graph.after_refresh",

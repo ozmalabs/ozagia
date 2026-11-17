@@ -284,11 +284,11 @@ The tool uses the server workspace as the policy root and the server's own
 snapshot path, so `--dump` continues to work. It returns only this checkout's
 data and writes only `.ozagia/model_api/cache` metadata.
 
-`dev_maps` is registered at runtime rather than in the static `_TOOLS` table.
-The WP1 capability catalogue is outside this package's file ownership, so no
-`cap:` declaration was added. The static self-graph audit therefore does not
-list `mcp:tool:dev_maps`; this is an **explicit inventory coverage gap**, not
-a claim that the tool is declared. `docs/memory_mcp.md` documents the tool.
+`dev_maps` is declared in the static `_TOOLS` table and in the WP1 catalogue as
+`cap:graph.model_maps`, so `ozagia capabilities` and the self-graph audit list
+`mcp:tool:dev_maps` like any other built-in surface. The handler is loaded only
+on the coding/combined full surface; the graph surface and research mode do not
+expose it. The map cache is the only write, under `.ozagia/model_api/cache`.
 
 ## Explicit unknowns and deferred work
 
