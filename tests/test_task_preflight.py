@@ -675,3 +675,255 @@ def test_cli_does_not_write_goal_or_task_stores(project, tmp_path,
     assert code in (1, 2)
     assert after == before
     assert G.goals_path(project).is_file()
+
+
+# ---------------------------------------------------------------------------
+# Linked checkouts (read-only M5/WP7 slice)
+# ---------------------------------------------------------------------------
+
+
+def _linked_member(base: Path, name: str) -> tuple[Path, Path]:
+    root = base / name
+    _write(root / "pkg" / "core.py", CORE)
+    _git(root, "init", "-q")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "init")
+    dump = state_path(root, "graph.json")
+    build_index(root, dump, include_docs="none", include_git=False,
+                include_scripts=False)
+    return root.resolve(), dump
+
+
+def test_linked_dimension_is_absent_without_an_explicit_selection(tmp_path):
+    report = build(tmp_path)
+    assert list(report["dimensions"]) == list(TP.DIMENSIONS)
+    assert "linked" not in report
+    assert report["bounds"]["dimensions"] == len(TP.DIMENSIONS)
+
+    empty = build(tmp_path, linked_checkouts=[], research_sessions=[])
+    assert empty["dimensions"]["linked"]["readiness"] == "unknown"
+    assert empty["dimensions"]["research"]["readiness"] == "unknown"
+    assert empty["assessment"]["status"] == "unknown"
+
+
+def test_two_linked_checkouts_keep_unknown_stale_and_unauthorized_explicit(
+        project, tmp_path):
+    fresh, _ = _linked_member(tmp_path, "fresh")
+    stale, _ = _linked_member(tmp_path, "stale")
+    _write(stale / "pkg" / "core.py", CORE + "\n# changed\n")
+    unauthorized, _ = _linked_member(tmp_path, "unauthorized")
+    missing = (tmp_path / "missing").resolve()
+    report = build(project, linked_checkouts=[
+        {"root": fresh, "label": "fresh", "authorized": True,
+         "read_scope": ["pkg/**"]},
+        {"root": stale, "label": "stale", "authorized": "unknown",
+         "read_scope": ["pkg/**"]},
+        {"root": unauthorized, "label": "unauthorized", "authorized": False,
+         "read_scope": ["pkg/**"]},
+        {"root": missing, "label": "missing", "authorized": True,
+         "read_scope": ["pkg/**"]},
+    ])
+    linked = {row["label"]: row for row in report["linked"]["members"]}
+    assert linked["fresh"]["readiness"] is True
+    assert linked["fresh"]["index"]["state"] == "fresh"
+    assert linked["fresh"]["reference"]["state"] == "not_declared"
+
+    assert linked["stale"]["readiness"] == "unknown"
+    assert linked["stale"]["index"]["state"] == "stale"
+    assert linked["stale"]["index"]["freshness"] == "stale"
+    assert linked["stale"]["freshness"] == "unknown"
+    assert "authorization" in linked["stale"]["reason"]
+
+    assert linked["unauthorized"]["readiness"] is False
+    assert linked["unauthorized"]["authorization"]["state"] is False
+    assert linked["unauthorized"]["authorization"]["freshness"] == "absent"
+
+    assert linked["missing"]["readiness"] == "unknown"
+    assert linked["missing"]["index"]["state"] == "absent"
+    assert linked["missing"]["exists"] is False
+
+    assert report["linked"]["counts"] == {
+        "members": 4, "ready": 1, "unknown": 2, "failed": 1,
+        "stale": 1, "absent": 1, "unauthorized": 1,
+    }
+    assert report["dimensions"]["linked"]["readiness"] is False
+    assert report["assessment"]["status"] == "failed"
+    assert report["assessment"]["green"] is False
+    assert any("linked" in item["dimension"]
+               for item in report["assessment"]["reasons"])
+
+
+def test_linked_missing_authorization_and_scope_stay_unknown(project, tmp_path):
+    member, _ = _linked_member(tmp_path, "member")
+    no_auth = TP.linked_observation(context(
+        project, linked=(TP.LinkedCheckout.at(member, label="m"),)))
+    assert no_auth.readiness == "unknown"
+    assert "authorization" in no_auth.reason
+    no_scope = TP.linked_observation(context(
+        project, linked=(TP.LinkedCheckout.at(
+            member, label="m", authorized=True),)))
+    assert no_scope.readiness == "unknown"
+    assert "scope" in no_scope.reason
+
+
+def test_linked_identity_comes_from_the_caller_or_the_snapshot(project, tmp_path):
+    member, _ = _linked_member(tmp_path, "member")
+    repo = C.repo_id("acme", "service")
+    checkout = C.checkout_id(repo, "a" * 12)
+    snapshot = C.snapshot_id(checkout, "b" * 12)
+    observed = TP.linked_observation(context(
+        project,
+        linked=(TP.LinkedCheckout.at(
+            member, label="m", repo=repo, checkout=checkout,
+            snapshot=snapshot, authorized=True, read_scope=["src/**"]),)))
+    assert observed.readiness is True
+    identity = observed.data["members"][0]["identity"]
+    assert identity["repo"] == repo
+    assert identity["checkout"] == checkout
+    assert identity["snapshot"] == snapshot
+    assert identity["source"] == "caller"
+    assert identity["recorded"]["name"] == "member"
+
+
+def test_linked_reference_sync_error_is_unknown_and_never_synced(
+        project, tmp_path, monkeypatch):
+    member, _ = _linked_member(tmp_path, "member")
+    federation = state_path(project, "federation.json")
+    _write(federation, json.dumps({
+        "version": 1, "members": [str(member)],
+        "reference_repos": [{"path": str(member)}], "links": [],
+    }))
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("reference sync was called")
+
+    monkeypatch.setattr("ozagia.core.federation.sync_references", forbidden)
+    monkeypatch.setattr("ozagia.core.federation.request_reference_sync",
+                        forbidden)
+    monkeypatch.setattr("ozagia.core.reference_sync.sync_reference", forbidden)
+    observed = TP.linked_observation(context(
+        project, linked=(TP.LinkedCheckout.at(
+            member, label="m", authorized=True, read_scope=["src/**"]),)))
+    assert observed.readiness == "unknown"
+    member_row = observed.data["members"][0]
+    assert member_row["reference"]["role"] == "declared_reference"
+    assert member_row["reference"]["state"] == "not_checked"
+    assert member_row["reference"]["freshness"] == "unknown"
+    assert observed.data["reference"]["synced"] is False
+    assert "no Git fetch" in " ".join(observed.data["not_assessed"])
+
+
+def test_linked_selection_never_writes_or_refreshes(project, tmp_path,
+                                                    monkeypatch):
+    member, dump = _linked_member(tmp_path, "member")
+    before = {
+        path.relative_to(member).as_posix(): (
+            path.stat().st_size, path.stat().st_mtime_ns)
+        for path in member.rglob("*") if path.is_file()
+    }
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("linked observation attempted a mutating call")
+
+    monkeypatch.setattr("ozagia.core.federation.sync_references", forbidden)
+    monkeypatch.setattr("ozagia.core.federation.request_reference_sync",
+                        forbidden)
+    monkeypatch.setattr("ozagia.core.reference_sync.sync_reference", forbidden)
+    report = build(project, linked_checkouts=[{
+        "root": member, "label": "m", "authorized": True,
+        "read_scope": ["src/**"],
+    }])
+    assert report["linked"]["readiness"] is True
+    after = {
+        path.relative_to(member).as_posix(): (
+            path.stat().st_size, path.stat().st_mtime_ns)
+        for path in member.rglob("*") if path.is_file()
+    }
+    assert after == before
+    assert dump.is_file()
+    assert report["linked"]["reference"]["synced"] is False
+
+
+def test_linked_facts_are_bounded_and_the_dimension_is_dynamic(tmp_path):
+    first = tmp_path / "first"
+    first.mkdir()
+    second = tmp_path / "second"
+    second.mkdir()
+    report = build(tmp_path, linked_checkouts=[
+        {"root": first, "label": "a", "authorized": True,
+         "read_scope": ["src/**"]},
+        {"root": second, "label": "b", "authorized": True,
+         "read_scope": ["src/**"]},
+    ], max_facts=1)
+    assert report["bounds"]["dimensions"] == len(TP.DIMENSIONS) + 1
+    assert report["bounds"]["facts_total"] > 1
+    assert report["bounds"]["facts_returned"] == 1
+    assert report["bounds"]["facts_omitted"] > 0
+    assert report["dimensions"]["linked"]["readiness"] == "unknown"
+
+
+def test_linked_provider_can_be_injected(tmp_path):
+    calls: list[tuple[str, ...]] = []
+
+    def linked(ctx):
+        calls.append(tuple(member.label for member in ctx.linked))
+        return observation(False, reason="linked provider refused")
+
+    fake = providers(linked=linked)
+    report = build(tmp_path, fake=fake, linked_checkouts=[
+        {"root": tmp_path, "label": "a", "authorized": True,
+         "read_scope": ["src/**"]},
+    ])
+    assert calls == [("a",)]
+    assert report["dimensions"]["linked"]["readiness"] is False
+    assert report["assessment"]["status"] == "failed"
+
+
+def test_linked_input_validation(tmp_path):
+    with pytest.raises(TP.PreflightError):
+        TP.build_preflight(tmp_path, "g1", providers=providers(),
+                           linked_checkouts=[{"root": tmp_path, "bogus": 1}])
+    with pytest.raises(TP.PreflightError):
+        TP.build_preflight(tmp_path, "g1", providers=providers(),
+                           linked_checkouts=[
+                               {"root": tmp_path, "label": "a"},
+                               {"root": tmp_path, "label": "b"}])
+    with pytest.raises(TP.PreflightError):
+        TP.build_preflight(tmp_path, "g1", providers=providers(),
+                           linked_checkouts=[{
+                               "root": tmp_path, "authorized": "yes"}])
+    with pytest.raises(TP.PreflightError):
+        TP.build_preflight(tmp_path, "g1", providers=providers(),
+                           linked_checkouts=[
+                               {"root": tmp_path / str(index),
+                                "label": f"l{index}"}
+                               for index in range(TP.MAX_LINKED + 1)])
+
+
+def test_optional_joins_are_canonical_hashed_and_deterministic(project, tmp_path):
+    fixture = _linked_member(tmp_path, "member")
+    from ozagia.research.graph import ResearchGraph
+
+    graph = ResearchGraph.create("question", root=project)
+    claim = graph.record("Claim", wording="a declared claim",
+                         claim_type="inference", status="open")
+    report = build(
+        project,
+        linked_checkouts=[{"root": fixture[0], "label": "m",
+                           "authorized": True, "read_scope": ["src/**"]}],
+        research_sessions=[graph.investigation_id],
+    )
+    assert report["hash"] == TP.report_hash(report)
+    assert TP.report_json(report) == C.canonical_json(report)
+    assert report["linked"]["members"][0]["readiness"] is True
+    assert report["research"]["claims"][0]["id"] == claim["id"]
+    again = build(
+        project,
+        linked_checkouts=[{"root": fixture[0], "label": "m",
+                           "authorized": True, "read_scope": ["src/**"]}],
+        research_sessions=[graph.investigation_id],
+    )
+    assert again["hash"] == report["hash"]
+    envelope = TP.preflight_envelope(report)
+    assert S.validate(envelope) == envelope
+    assert envelope["provenance"]["inputs"] == [report["hash"]]

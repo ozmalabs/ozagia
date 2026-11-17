@@ -59,6 +59,12 @@ REPORT_VERSION = "1.0"
 DIMENSIONS = (
     "goal", "graph", "capabilities", "environment", "resources", "tests",
 )
+# Optional primary-scope dimensions are only present when the caller selects
+# linked checkouts or retained research sessions.  They are not part of
+# DIMENSIONS so existing readers keep the six-dimension shape and assessment.
+LINKED_DIMENSION = "linked"
+RESEARCH_DIMENSION = "research"
+OPTIONAL_DIMENSIONS = (LINKED_DIMENSION, RESEARCH_DIMENSION)
 REQUIRED_DIMENSIONS = DIMENSIONS
 ASSESSMENTS = ("green", "unknown", "failed")
 
@@ -79,6 +85,8 @@ MAX_LIMIT = 200
 MAX_CRITERIA = 50
 MAX_FACTS = 256
 MAX_CHECKOUTS = 8
+MAX_LINKED = 8
+MAX_RESEARCH_SESSIONS = 8
 MAX_SCOPE_ITEMS = 32
 MAX_CHANGED = 512
 MAX_TIMEOUT_MS = 600_000
@@ -287,21 +295,7 @@ class Checkout:
         if (not isinstance(label, str) or not label or len(label) > 64
                 or any(ord(char) < 0x20 for char in label)):
             raise PreflightError("checkout label must be a bounded string")
-        repo_id = _identity(repo, "repo", "repo")
-        checkout_id = _identity(checkout, "checkout", "checkout")
-        snapshot_id = _identity(snapshot, "snapshot", "snapshot")
-        if checkout_id is not None and repo_id is None:
-            raise PreflightError("a checkout identity needs its repo identity")
-        if snapshot_id is not None and checkout_id is None:
-            raise PreflightError("a snapshot identity needs its checkout identity")
-        if checkout_id is not None:
-            parsed = C.parse_id(checkout_id)
-            if parsed.components[:2] != C.parse_id(repo_id).components:
-                raise PreflightError("checkout does not belong to the repo")
-        if snapshot_id is not None:
-            parsed = C.parse_id(snapshot_id)
-            if parsed.components[:3] != C.parse_id(checkout_id).components:
-                raise PreflightError("snapshot does not belong to the checkout")
+        repo_id, checkout_id, snapshot_id = _identities(repo, checkout, snapshot)
         return cls(root=path, label=label, repo=repo_id, checkout=checkout_id,
                    snapshot=snapshot_id)
 
@@ -328,6 +322,182 @@ def _identity(value: Any, kind: str, what: str) -> str | None:
     return parsed.canonical
 
 
+def _identities(repo: Any, checkout: Any, snapshot: Any
+                ) -> tuple[str | None, str | None, str | None]:
+    repo_id = _identity(repo, "repo", "repo")
+    checkout_id = _identity(checkout, "checkout", "checkout")
+    snapshot_id = _identity(snapshot, "snapshot", "snapshot")
+    if checkout_id is not None and repo_id is None:
+        raise PreflightError("a checkout identity needs its repo identity")
+    if snapshot_id is not None and checkout_id is None:
+        raise PreflightError("a snapshot identity needs its checkout identity")
+    if checkout_id is not None:
+        parsed = C.parse_id(checkout_id)
+        if parsed.components[:2] != C.parse_id(repo_id).components:
+            raise PreflightError("checkout does not belong to the repo")
+    if snapshot_id is not None:
+        parsed = C.parse_id(snapshot_id)
+        if parsed.components[:3] != C.parse_id(checkout_id).components:
+            raise PreflightError("snapshot does not belong to the checkout")
+    return repo_id, checkout_id, snapshot_id
+
+
+@dataclass(frozen=True)
+class LinkedCheckout:
+    """One explicitly selected linked checkout and its caller-declared scope.
+
+    A path is not an identity or a permission.  ``authorized`` and
+    ``read_scope`` are declarations by the caller; they are never inferred from
+    a manifest, a sibling directory or a successful read.
+    """
+
+    root: Path
+    label: str = "linked[0]"
+    repo: str | None = None
+    checkout: str | None = None
+    snapshot: str | None = None
+    authorized: bool | str = "unknown"
+    read_scope: tuple[str, ...] = ()
+    symlinked: bool = False
+    exists: bool = False
+
+    @classmethod
+    def at(cls, root: str | Path, *, label: str = "linked[0]",
+           repo: str | None = None, checkout: str | None = None,
+           snapshot: str | None = None,
+           authorized: bool | str | None = None,
+           read_scope: Iterable[str] | None = None,
+           base: str | Path | None = None) -> "LinkedCheckout":
+        if (not isinstance(label, str) or not label or len(label) > 64
+                or any(ord(char) < 0x20 for char in label)):
+            raise PreflightError("linked checkout label must be a bounded string")
+        supplied = Path(root).expanduser()
+        if not supplied.is_absolute() and base is not None:
+            supplied = Path(base) / supplied
+        symlinked = supplied.is_symlink()
+        try:
+            path = supplied.resolve(strict=False)
+        except OSError as exc:
+            raise PreflightError(
+                f"linked checkout root cannot be resolved: {root}") from exc
+        if not path.is_dir():
+            # An explicitly selected member that is absent stays visible; it
+            # is not silently dropped or replaced by a path match.
+            exists = False
+        else:
+            exists = True
+        repo_id, checkout_id, snapshot_id = _identities(repo, checkout, snapshot)
+        try:
+            authorization = ("unknown" if authorized is None
+                             else C.readiness(authorized))
+        except C.ContractError as exc:
+            raise PreflightError(
+                "linked authorization must be true, false or 'unknown'") from exc
+        scope = _linked_scope(read_scope)
+        return cls(root=path, label=label, repo=repo_id, checkout=checkout_id,
+                   snapshot=snapshot_id, authorized=authorization,
+                   read_scope=scope, symlinked=symlinked, exists=exists)
+
+    def identity(self) -> dict[str, Any]:
+        return {
+            "label": self.label,
+            "root": self.root.as_posix(),
+            "repo": self.repo or "unknown",
+            "checkout": self.checkout or "unknown",
+            "snapshot": self.snapshot or "unknown",
+            "exists": self.exists,
+            "symlinked": self.symlinked,
+        }
+
+
+def _linked_scope(value: Iterable[str] | None) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, (str, bytes)):
+        raise PreflightError(
+            "linked read_scope must be an iterable of entries, not a string")
+    items = list(value)
+    if len(items) > MAX_SCOPE_ITEMS:
+        raise PreflightError(
+            f"linked read_scope exceeds {MAX_SCOPE_ITEMS} entries")
+    checked: list[str] = []
+    for item in items:
+        if not isinstance(item, str) or not item or len(item) > 256:
+            raise PreflightError(
+                "linked read_scope entries must be bounded strings")
+        if any(ord(char) < 0x20 for char in item):
+            raise PreflightError(
+                "linked read_scope entries contain control characters")
+        checked.append(item)
+    return tuple(sorted(dict.fromkeys(checked)))
+
+
+def _linked_checkouts(value: Any, *, base: Path
+                      ) -> tuple[LinkedCheckout, ...] | None:
+    if value is None:
+        return None
+    if isinstance(value, (str, bytes, Mapping)):
+        raise PreflightError(
+            "linked_checkouts must be an iterable of mappings or LinkedCheckout")
+    items = list(value)
+    if len(items) > MAX_LINKED:
+        raise PreflightError(
+            f"at most {MAX_LINKED} linked checkouts are allowed")
+    selected: list[LinkedCheckout] = []
+    for index, item in enumerate(items):
+        if isinstance(item, LinkedCheckout):
+            member = item
+        elif isinstance(item, Mapping):
+            allowed = {"root", "label", "repo", "checkout", "snapshot",
+                       "authorized", "read_scope"}
+            unknown = sorted(set(item) - allowed)
+            if unknown:
+                raise PreflightError(
+                    f"linked checkout has unknown fields: {unknown}")
+            if "root" not in item:
+                raise PreflightError("linked checkout needs a root")
+            member = LinkedCheckout.at(
+                item["root"], label=item.get("label", f"linked[{index}]"),
+                repo=item.get("repo"), checkout=item.get("checkout"),
+                snapshot=item.get("snapshot"),
+                authorized=item.get("authorized"),
+                read_scope=item.get("read_scope"), base=base)
+        else:
+            raise PreflightError(
+                "linked checkouts must be mappings or LinkedCheckout")
+        if any(existing.root == member.root for existing in selected):
+            raise PreflightError(
+                f"duplicate linked checkout root: {member.root}")
+        if any(existing.label == member.label for existing in selected):
+            raise PreflightError(
+                f"duplicate linked checkout label: {member.label}")
+        selected.append(member)
+    return tuple(selected)
+
+
+def _research_sessions(value: Any) -> tuple[str, ...] | None:
+    if value is None:
+        return None
+    if isinstance(value, (str, bytes)):
+        raise PreflightError(
+            "research_sessions must be an iterable of ids, not a string")
+    items = list(value)
+    if len(items) > MAX_RESEARCH_SESSIONS:
+        raise PreflightError(
+            f"at most {MAX_RESEARCH_SESSIONS} research sessions are allowed")
+    checked: list[str] = []
+    for item in items:
+        if (not isinstance(item, str) or not item or len(item) > 128
+                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}",
+                                    item)):
+            raise PreflightError(
+                "research session ids must match "
+                "[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
+        if item not in checked:
+            checked.append(item)
+    return tuple(sorted(checked))
+
+
 @dataclass(frozen=True)
 class ProviderContext:
     """Everything a provider may read, with no ambient authority."""
@@ -344,6 +514,8 @@ class ProviderContext:
     capability_trust: Mapping[str, bool | str]
     observed_at: int | str
     timeout_ms: int
+    linked: tuple[LinkedCheckout, ...] = ()
+    research_sessions: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -389,10 +561,19 @@ class Providers:
     environment: Provider
     resources: Provider
     tests: Provider
+    # Optional primary-scope providers.  They are used only when the caller
+    # selects linked checkouts or research sessions and an explicit provider
+    # was supplied; otherwise the read-only defaults below are used.
+    linked: Provider | None = None
+    research: Provider | None = None
 
     def __post_init__(self) -> None:
         for name in DIMENSIONS:
             if not callable(getattr(self, name)):
+                raise TypeError(f"provider {name} must be callable")
+        for name in OPTIONAL_DIMENSIONS:
+            provider = getattr(self, name)
+            if provider is not None and not callable(provider):
                 raise TypeError(f"provider {name} must be callable")
 
 
@@ -434,6 +615,42 @@ def _dimension_reason(observation: Observation, readiness: bool | str) -> str:
     stale = sorted({item.freshness for item in observation.facts
                     if item.freshness != "current"})
     return f"not current ({', '.join(stale)})"
+
+
+def _dimension_report(observation: Observation) -> dict[str, Any]:
+    readiness = _effective_readiness(observation)
+    return {
+        "readiness": readiness,
+        "required": True,
+        "reason": _dimension_reason(observation, readiness),
+        "data": dict(observation.data),
+        "facts": [item.to_dict() for item in observation.facts],
+        "truncated": (observation.truncated.to_dict()
+                      if observation.truncated is not None
+                      else C.truncation().to_dict()),
+        "error": observation.error,
+    }
+
+
+def _run_provider(name: str, provider: Provider, context: ProviderContext,
+                  *, timed_out: bool, timeout_ms: int
+                  ) -> tuple[Observation, bool]:
+    """Run one provider; return the observation and the timeout latch."""
+    if timed_out or context.deadline.expired():
+        return _timeout_observation(name, timeout_ms=timeout_ms), True
+    try:
+        observation = provider(context)
+    except PreflightError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - partial states survive
+        observation = _failed_observation(name, exc)
+    if not isinstance(observation, Observation):
+        observation = Observation(
+            "unknown",
+            reason=f"provider {name} returned "
+                   f"{type(observation).__name__}, not Observation",
+            error="internal")
+    return observation, False
 
 
 # ---------------------------------------------------------------------------
@@ -590,6 +807,9 @@ def build_preflight(root: str | Path, goal_id: str, *,
                     changed: Iterable[str] | None = None,
                     required_capabilities: Iterable[str] | None = None,
                     capability_trust: Mapping[str, Any] | None = None,
+                    linked_checkouts: (Iterable[Mapping[str, Any] | LinkedCheckout]
+                                       | None) = None,
+                    research_sessions: Iterable[str] | None = None,
                     providers: Providers | None = None,
                     timeout_ms: int | None = None,
                     clock: Callable[[], int] | None = None,
@@ -630,6 +850,8 @@ def build_preflight(root: str | Path, goal_id: str, *,
                 f"duplicate checkout label: {checkout.label}")
         selected.append(checkout)
 
+    linked_selected = _linked_checkouts(linked_checkouts, base=primary.root)
+    research_selected = _research_sessions(research_sessions)
     provider_set = providers or default_providers()
     if not isinstance(provider_set, Providers):
         raise TypeError("providers must be a task_preflight.Providers")
@@ -638,6 +860,7 @@ def build_preflight(root: str | Path, goal_id: str, *,
     timed_out = False
 
     checkout_reports: list[dict[str, Any]] = []
+    contexts: list[ProviderContext] = []
     for position, checkout in enumerate(selected):
         context = ProviderContext(
             checkout=checkout,
@@ -652,52 +875,55 @@ def build_preflight(root: str | Path, goal_id: str, *,
             capability_trust=trust,
             observed_at=observed,
             timeout_ms=timeout_value,
+            linked=tuple(linked_selected or ()),
+            research_sessions=research_selected,
         )
+        contexts.append(context)
         dimensions: dict[str, dict[str, Any]] = {}
         for dimension in DIMENSIONS:
-            if timed_out or deadline.expired():
-                timed_out = True
-                observation = _timeout_observation(dimension,
-                                                   timeout_ms=timeout_value)
-            else:
-                try:
-                    observation = getattr(provider_set, dimension)(context)
-                except PreflightError:
-                    raise
-                except Exception as exc:  # noqa: BLE001 - partial states survive
-                    observation = _failed_observation(dimension, exc)
-                if not isinstance(observation, Observation):
-                    observation = Observation(
-                        "unknown",
-                        reason=f"provider {dimension} returned "
-                               f"{type(observation).__name__}, not Observation",
-                        error="internal")
-            readiness = _effective_readiness(observation)
-            dimensions[dimension] = {
-                "readiness": readiness,
-                "required": True,
-                "reason": _dimension_reason(observation, readiness),
-                "data": dict(observation.data),
-                "facts": [item.to_dict() for item in observation.facts],
-                "truncated": (observation.truncated.to_dict()
-                              if observation.truncated is not None
-                              else C.truncation().to_dict()),
-                "error": observation.error,
-            }
+            observation, timed_out = _run_provider(
+                dimension, getattr(provider_set, dimension), context,
+                timed_out=timed_out, timeout_ms=timeout_value)
+            dimensions[dimension] = _dimension_report(observation)
         checkout_reports.append({
             **checkout.identity(),
             "dimensions": dimensions,
         })
 
+    # Linked and research are primary-scope joins: they describe the anchor's
+    # explicitly selected federation/research state, not each checkout's own
+    # goal.  They are added only when the caller selected them, so the base
+    # six-dimension report is byte-for-byte compatible.
+    if linked_selected is not None:
+        provider = provider_set.linked or linked_observation
+        observation, timed_out = _run_provider(
+            LINKED_DIMENSION, provider, contexts[0],
+            timed_out=timed_out, timeout_ms=timeout_value)
+        checkout_reports[0]["dimensions"][LINKED_DIMENSION] = (
+            _dimension_report(observation))
+    if research_selected is not None:
+        provider = provider_set.research or research_observation
+        observation, timed_out = _run_provider(
+            RESEARCH_DIMENSION, provider, contexts[0],
+            timed_out=timed_out, timeout_ms=timeout_value)
+        checkout_reports[0]["dimensions"][RESEARCH_DIMENSION] = (
+            _dimension_report(observation))
+
+    dimension_names = list(DIMENSIONS)
+    for name in OPTIONAL_DIMENSIONS:
+        if name in checkout_reports[0]["dimensions"]:
+            dimension_names.append(name)
     aggregated: dict[str, dict[str, Any]] = {}
-    for dimension in DIMENSIONS:
+    for dimension in dimension_names:
+        present = [row for row in checkout_reports
+                   if dimension in row["dimensions"]]
         values = [row["dimensions"][dimension]["readiness"]
-                  for row in checkout_reports]
+                  for row in present]
         readiness = _aggregate(values)
         reason = next((row["dimensions"][dimension]["reason"]
-                       for row in checkout_reports
+                       for row in present
                        if row["dimensions"][dimension]["readiness"] != readiness),
-                      checkout_reports[0]["dimensions"][dimension]["reason"])
+                      present[0]["dimensions"][dimension]["reason"])
         aggregated[dimension] = {
             "readiness": readiness,
             "required": True,
@@ -706,10 +932,10 @@ def build_preflight(root: str | Path, goal_id: str, *,
                 {"label": row["label"],
                  "readiness": row["dimensions"][dimension]["readiness"],
                  "reason": row["dimensions"][dimension]["reason"]}
-                for row in checkout_reports
+                for row in present
             ],
-            "data": checkout_reports[0]["dimensions"][dimension]["data"],
-            "data_checkout": checkout_reports[0]["label"],
+            "data": present[0]["dimensions"][dimension]["data"],
+            "data_checkout": present[0]["label"],
         }
 
     overall = _overall(aggregated)
@@ -731,6 +957,23 @@ def build_preflight(root: str | Path, goal_id: str, *,
             reason=criteria_truncation.reason or "limit")
     else:
         report_truncation = criteria_truncation
+
+    linked_data = (aggregated[LINKED_DIMENSION]["data"]
+                   if linked_selected is not None else None)
+    research_data = (aggregated[RESEARCH_DIMENSION]["data"]
+                     if research_selected is not None else None)
+    extra_omitted = 0
+    if isinstance(linked_data, Mapping):
+        extra_omitted += int((linked_data.get("truncated") or {}).get("omitted") or 0)
+    if isinstance(research_data, Mapping):
+        extra_omitted += int(
+            (research_data.get("truncated") or {}).get("omitted") or 0)
+    if extra_omitted:
+        report_truncation = C.truncation(
+            True,
+            omitted=report_truncation.omitted + extra_omitted,
+            reason=report_truncation.reason or "limit",
+        )
     unknowns = _unknowns(aggregated)
     report: dict[str, Any] = {
         "schema": {"namespace": SCHEMA_NAMESPACE, "version": SCHEMA_VERSION},
@@ -769,7 +1012,7 @@ def build_preflight(root: str | Path, goal_id: str, *,
         "deferred": list(DEFERRED),
         "bounds": {
             "checkouts": len(checkout_reports),
-            "dimensions": len(DIMENSIONS),
+            "dimensions": len(dimension_names),
             "criteria_total": len(all_criteria),
             "criteria_returned": len(criteria_page),
             "facts_total": facts_total,
@@ -783,6 +1026,72 @@ def build_preflight(root: str | Path, goal_id: str, *,
         "duration_ms": max(0, int(deadline.clock()) - started_ms),
         "truncated": report_truncation.to_dict(),
     }
+    if isinstance(linked_data, Mapping):
+        linked_section = {
+            "schema": {
+                "namespace": "ozagia.task_preflight.linked",
+                "version": "1.0",
+            },
+            "selection": "explicit",
+            "anchor": {"label": checkout_reports[0]["label"],
+                       "root": checkout_reports[0]["root"]},
+            "readiness": aggregated[LINKED_DIMENSION]["readiness"],
+            "reason": aggregated[LINKED_DIMENSION]["reason"],
+            "members": list(linked_data.get("members") or []),
+            "counts": dict(linked_data.get("counts") or {}),
+            "reference": dict(linked_data.get("reference") or {}),
+            "provenance": dict(linked_data.get("provenance") or {}),
+            "not_assessed": list(linked_data.get("not_assessed") or []),
+            "deferred": list(linked_data.get("deferred") or []),
+            "omissions": list(linked_data.get("omissions") or []),
+            "truncated": dict(linked_data.get("truncated")
+                              or C.truncation().to_dict()),
+        }
+        report["linked"] = linked_section
+        compact_linked = {
+            "members": len(linked_section["members"]),
+            "counts": linked_section["counts"],
+            "reference": linked_section["reference"],
+            "provenance": linked_section["provenance"],
+            "not_assessed": linked_section["not_assessed"],
+            "deferred": linked_section["deferred"],
+            "omissions": linked_section["omissions"],
+            "truncated": linked_section["truncated"],
+        }
+        checkout_reports[0]["dimensions"][LINKED_DIMENSION]["data"] = (
+            compact_linked)
+        aggregated[LINKED_DIMENSION]["data"] = compact_linked
+        report["bounds"]["linked_members"] = len(linked_section["members"])
+    if isinstance(research_data, Mapping):
+        research_section = dict(research_data)
+        research_section["readiness"] = aggregated[RESEARCH_DIMENSION]["readiness"]
+        research_section["reason"] = aggregated[RESEARCH_DIMENSION]["reason"]
+        report["research"] = research_section
+        compact_research = {
+            "projection": research_section.get("projection"),
+            "readiness": research_section["readiness"],
+            "reason": research_section["reason"],
+            "counts": research_section.get("counts"),
+            "engines": research_section.get("engines"),
+            "provenance": {"reader": "ozagia.core.task_preflight.research"},
+            "not_assessed": research_section.get("not_assessed"),
+            "deferred": research_section.get("deferred"),
+            "omissions": research_section.get("omissions"),
+            "truncated": research_section.get("truncated"),
+            "claims": len(research_section.get("claims") or []),
+            "sources": len(research_section.get("sources") or []),
+            "assumptions": len(research_section.get("assumptions") or []),
+            "evidence": len(research_section.get("evidence") or []),
+        }
+        checkout_reports[0]["dimensions"][RESEARCH_DIMENSION]["data"] = (
+            compact_research)
+        aggregated[RESEARCH_DIMENSION]["data"] = compact_research
+        report["bounds"]["research_sessions"] = len(
+            research_section.get("sessions") or [])
+        report["bounds"]["research_claims_returned"] = len(
+            research_section.get("claims") or [])
+        report["bounds"]["research_claims_total"] = int(
+            (research_section.get("counts") or {}).get("claims") or 0)
     report = _enforce_bytes(report)
     report["hash"] = C.content_hash(
         {key: value for key, value in report.items() if key != "hash"})
@@ -790,7 +1099,7 @@ def build_preflight(root: str | Path, goal_id: str, *,
 
 
 def _overall(dimensions: Mapping[str, Mapping[str, Any]]) -> str:
-    values = [dimensions[name]["readiness"] for name in DIMENSIONS]
+    values = [row["readiness"] for row in dimensions.values()]
     if any(value is False for value in values):
         return "failed"
     if any(value is not True for value in values):
@@ -801,8 +1110,7 @@ def _overall(dimensions: Mapping[str, Mapping[str, Any]]) -> str:
 def _assessment_reasons(
         dimensions: Mapping[str, Mapping[str, Any]]) -> list[dict[str, Any]]:
     reasons = []
-    for name in DIMENSIONS:
-        row = dimensions[name]
+    for name, row in dimensions.items():
         if row["readiness"] is True:
             continue
         reasons.append({
@@ -830,7 +1138,7 @@ def _unknowns(dimensions: Mapping[str, Mapping[str, Any]]) -> list[str]:
         "the graph snapshot was not refreshed",
         "no test was executed",
     }
-    for name in DIMENSIONS:
+    for name in dimensions:
         data = dimensions[name].get("data") or {}
         values = data.get("not_assessed")
         if isinstance(values, list):
@@ -846,22 +1154,23 @@ def _unknowns(dimensions: Mapping[str, Mapping[str, Any]]) -> list[str]:
 def _bound_facts(checkout_reports: list[dict[str, Any]],
                  max_facts: int) -> tuple[int, int]:
     """Keep a deterministic round-robin prefix of facts across dimensions."""
-    total = sum(len(checkout["dimensions"][name]["facts"])
-                for checkout in checkout_reports for name in DIMENSIONS)
+    total = sum(len(row["facts"])
+                for checkout in checkout_reports
+                for row in checkout["dimensions"].values())
     if total <= max_facts:
         return total, 0
     kept: dict[tuple[str, str], int] = {
         (checkout["label"], dimension): 0
-        for checkout in checkout_reports for dimension in DIMENSIONS
+        for checkout in checkout_reports
+        for dimension in checkout["dimensions"]
     }
     remaining = max_facts
     while remaining > 0:
         progressed = False
         for checkout in checkout_reports:
-            for dimension in DIMENSIONS:
+            for dimension, row in checkout["dimensions"].items():
                 key = (checkout["label"], dimension)
-                facts = checkout["dimensions"][dimension]["facts"]
-                if remaining > 0 and kept[key] < len(facts):
+                if remaining > 0 and kept[key] < len(row["facts"]):
                     kept[key] += 1
                     remaining -= 1
                     progressed = True
@@ -869,8 +1178,7 @@ def _bound_facts(checkout_reports: list[dict[str, Any]],
             break
     omitted = 0
     for checkout in checkout_reports:
-        for dimension in DIMENSIONS:
-            row = checkout["dimensions"][dimension]
+        for dimension, row in checkout["dimensions"].items():
             facts = row["facts"]
             allowance = kept[(checkout["label"], dimension)]
             omitted += len(facts) - allowance
@@ -892,9 +1200,24 @@ def _enforce_bytes(report: dict[str, Any]) -> dict[str, Any]:
 
     facts_dropped = 0
     criteria_dropped = 0
+    research_dropped = 0
+    research = report.get("research")
+    if isinstance(research, dict):
+        for key in ("evidence", "assumptions", "sources", "claims", "sessions"):
+            values = research.get(key)
+            while isinstance(values, list) and values and too_big():
+                values.pop()
+                research_dropped += 1
+        if research_dropped:
+            research["truncated"] = C.truncation(
+                True,
+                omitted=int((research.get("truncated") or {}).get("omitted") or 0)
+                + research_dropped,
+                reason="bytes").to_dict()
+            research.setdefault("omissions", []).append(
+                f"{research_dropped} research rows omitted by bytes")
     for checkout in report["checkouts"]:
-        for dimension in DIMENSIONS:
-            row = checkout["dimensions"][dimension]
+        for row in checkout["dimensions"].values():
             while row["facts"] and too_big():
                 row["facts"].pop()
                 row["facts_omitted"] = int(row.get("facts_omitted") or 0) + 1
@@ -913,7 +1236,7 @@ def _enforce_bytes(report: dict[str, Any]) -> dict[str, Any]:
         - criteria_dropped)
     report["bounds"]["bytes_truncated"] = True
     report["truncated"] = C.truncation(
-        True, omitted=facts_dropped + criteria_dropped,
+        True, omitted=facts_dropped + criteria_dropped + research_dropped,
         reason="bytes").to_dict()
     report["criteria"]["truncated"] = report["truncated"]
     report["bounds"]["report_bytes"] = len(
@@ -942,8 +1265,7 @@ def preflight_envelope(report: Mapping[str, Any]) -> dict[str, Any]:
     sources: dict[str, S.Source] = {}
     for checkout in report.get("checkouts") or []:
         dimensions = checkout.get("dimensions") or {}
-        for dimension in DIMENSIONS:
-            row = dimensions.get(dimension) or {}
+        for row in dimensions.values():
             for item in row.get("facts") or []:
                 source = item.get("source")
                 if (not isinstance(source, str) or source in sources
@@ -1648,28 +1970,466 @@ def tests_observation(
     )
 
 
+def _linked_graph_state(member: LinkedCheckout) -> dict[str, Any]:
+    """Read a member's own ``<root>/.ozagia/graph.json`` without refreshing it.
+
+    Unlike :func:`read_graph_state`, this deliberately ignores an absolute
+    ``OZAGIA_STATE_DIR``: it belongs to the anchor.  A linked checkout is read
+    from its own state directory, matching federation's membership rules.
+    """
+    path = member.root / ".ozagia" / "graph.json"
+    info: dict[str, Any] = {
+        "path": path.as_posix(),
+        "state": "absent",
+        "freshness": "absent",
+        "snapshot_head": None,
+        "head": None,
+        "snapshot_root": None,
+        "generated_at": None,
+        "root_mismatch": False,
+        "tree_changed": False,
+        "errors": [],
+        "observed_at": _mtime(path),
+        "reason": "no graph snapshot in the linked checkout",
+        "recorded_name": None,
+    }
+    if not member.exists:
+        info["reason"] = "the linked checkout root does not exist"
+        return info
+    if member.symlinked:
+        info.update({
+            "state": "unknown",
+            "freshness": "unknown",
+            "reason": "a symlinked linked checkout is not read",
+        })
+        return info
+    if not path.is_file():
+        return info
+    try:
+        from ozagia.core.memory import DevMemory
+
+        dev = DevMemory(dump=path, journal=member.root / ".ozagia" / "journal.jsonl",
+                        root=member.root)
+        staleness = dev.staleness()
+        repo: dict[str, Any] = {}
+        for node_id in dev.nodes_of_type("Repo"):
+            node = dev.node(node_id) or {}
+            attrs = node.get("attrs")
+            if isinstance(attrs, Mapping):
+                repo = dict(attrs)
+                break
+    except Exception as exc:  # noqa: BLE001 - a read failure is unknown
+        info.update({
+            "state": "error",
+            "freshness": "unknown",
+            "reason": _line(f"cannot read the linked graph snapshot: "
+                            f"{type(exc).__name__}: {exc}", 300),
+        })
+        return info
+    state = str(staleness.get("freshness") or "unknown")
+    errors = [str(item) for item in staleness.get("verification_errors") or []]
+    info.update({
+        "state": state,
+        "freshness": {"fresh": "current", "stale": "stale"}.get(
+            state, "unknown"),
+        "snapshot_head": _short(staleness.get("snapshot_head")),
+        "head": _short(staleness.get("head")),
+        "snapshot_root": staleness.get("snapshot_root"),
+        "generated_at": _text(repo.get("generated_at"), 64) or None,
+        "root_mismatch": bool(staleness.get("root_mismatch")),
+        "tree_changed": bool(staleness.get("tree_changed")),
+        "errors": errors[:4],
+        "recorded_name": _text(repo.get("name"), 128) or None,
+        "observed_at": _mtime(path),
+    })
+    if state == "fresh":
+        info["reason"] = "snapshot root, HEAD and working-tree digest match"
+    elif state == "stale":
+        details = []
+        if info["root_mismatch"]:
+            details.append("snapshot root differs")
+        if info["tree_changed"]:
+            details.append("working tree changed since the snapshot")
+        if (staleness.get("snapshot_head")
+                and staleness.get("snapshot_head") != staleness.get("head")):
+            details.append("HEAD moved since the snapshot")
+        info["reason"] = _line("; ".join(details) or "snapshot is stale", 300)
+    else:
+        info["reason"] = _line("; ".join(errors)
+                               or "graph freshness could not be verified", 300)
+    return info
+
+
+def _reference_index(anchor: Path) -> dict[str, Any]:
+    from ozagia.config import state_path
+
+    manifest = state_path(anchor, "federation.json")
+    try:
+        from ozagia.core import federation as FED
+
+        report = FED.reference_status(anchor)
+    except Exception as exc:  # noqa: BLE001 - unknown, never assumed synced
+        return {
+            "manifest": manifest.as_posix(),
+            "entries": {},
+            "declared": 0,
+            "errors": [_line(f"cannot read the reference manifest: "
+                             f"{type(exc).__name__}: {exc}", 300)],
+            "source": "ozagia.core.federation.reference_status",
+            "synced": False,
+        }
+    entries: dict[str, dict[str, Any]] = {}
+    for item in report.get("references") or []:
+        if not isinstance(item, Mapping) or not isinstance(item.get("path"), str):
+            continue
+        try:
+            key = Path(item["path"]).expanduser().resolve()
+        except (OSError, RuntimeError, ValueError):
+            continue
+        entries[key.as_posix()] = dict(item)
+    errors = [str(item) for item in report.get("errors") or [] if item]
+    return {
+        "manifest": manifest.as_posix(),
+        "entries": entries,
+        "declared": len(entries),
+        "errors": errors[:6],
+        "source": "ozagia.core.federation.reference_status",
+        "synced": False,
+    }
+
+
+def _linked_reference_state(member: LinkedCheckout, reference: Mapping[str, Any]
+                            ) -> dict[str, Any]:
+    if reference.get("errors"):
+        return {
+            "role": "unknown",
+            "state": "unknown",
+            "pin": None,
+            "updated": False,
+            "cached": False,
+            "checked_at": None,
+            "freshness": "unknown",
+            "evidence": "declared",
+            "reason": "the federation manifest is invalid",
+        }
+    entry = (reference.get("entries") or {}).get(member.root.as_posix())
+    if entry is None:
+        return {
+            "role": "member_only",
+            "state": "not_declared",
+            "pin": None,
+            "updated": False,
+            "cached": False,
+            "checked_at": None,
+            "freshness": "current",
+            "evidence": "observed",
+            "reason": "the member is selected but not a declared reference",
+        }
+    state = str(entry.get("state") or "not_checked")
+    sync = entry.get("sync") if isinstance(entry.get("sync"), Mapping) else {}
+    if state == "updated" or (sync or {}).get("index_state") == "stale_until_reindexed":
+        freshness = "stale"
+        reason = "a reference update left the snapshot stale until reindexed"
+    elif state in {"current", "pinned"}:
+        freshness = "current"
+        reason = "the cached reference state is current"
+    elif state == "error":
+        freshness = "unknown"
+        reason = "the last reference sync reported an error"
+    elif state == "pending":
+        freshness = "unknown"
+        reason = "a reference sync is pending"
+    else:
+        freshness = "unknown"
+        reason = "reference sync state is not verified"
+    return {
+        "role": "declared_reference",
+        "state": state,
+        "pin": entry.get("pin"),
+        "updated": bool((sync or {}).get("updated")),
+        "cached": bool((sync or {}).get("cached")),
+        "checked_at": (sync or {}).get("checked_at"),
+        "freshness": freshness,
+        "evidence": "declared",
+        "reason": reason,
+    }
+
+
+def _linked_member_row(member: LinkedCheckout, reference: Mapping[str, Any],
+                       observed_at: int | str) -> tuple[dict[str, Any], list[C.Fact]]:
+    index = _linked_graph_state(member)
+    auth = {
+        "state": member.authorized,
+        "read_scope": list(member.read_scope),
+        "scope_state": "declared" if member.read_scope else "unspecified",
+        "source": "caller",
+        "evidence": "declared",
+    }
+    if member.authorized is False:
+        auth["readiness"] = False
+        auth["freshness"] = "absent"
+        auth["reason"] = "the caller marked the linked checkout unauthorized"
+    elif member.authorized is not True:
+        auth["readiness"] = "unknown"
+        auth["freshness"] = "unknown"
+        auth["reason"] = "read authorization was not declared"
+    elif not member.read_scope:
+        auth["readiness"] = "unknown"
+        auth["freshness"] = "unknown"
+        auth["reason"] = "no read scope was declared"
+    else:
+        auth["readiness"] = True
+        auth["freshness"] = "current"
+        auth["reason"] = "the caller declared read authorization and scope"
+    ref = _linked_reference_state(member, reference)
+    freshness = C.join_freshness(index["freshness"], auth["freshness"])
+    freshness = C.join_freshness(freshness, ref["freshness"])
+    if auth["readiness"] is False:
+        readiness: bool | str = False
+        reason = auth["reason"]
+    elif auth["readiness"] is not True:
+        readiness = "unknown"
+        reason = auth["reason"]
+    elif index["state"] != "fresh":
+        readiness = "unknown"
+        reason = index["reason"]
+    elif ref["freshness"] != "current":
+        readiness = "unknown"
+        reason = ref["reason"]
+    else:
+        readiness = True
+        reason = "authorized, current and indexed"
+    identity = {
+        "repo": member.repo or "unknown",
+        "checkout": member.checkout or "unknown",
+        "snapshot": member.snapshot or "unknown",
+        "recorded": {
+            "name": index["recorded_name"],
+            "root": index["snapshot_root"],
+            "head": index["snapshot_head"],
+            "generated_at": index["generated_at"],
+        },
+        "source": ("caller" if member.repo or member.checkout or member.snapshot
+                   else "snapshot" if index["recorded_name"] else "unknown"),
+        "freshness": ("current" if index["state"] in {"fresh", "stale"}
+                      else "unknown"),
+        "evidence": ("observed" if index["recorded_name"] else "declared"),
+    }
+    row = {
+        **member.identity(),
+        "identity": identity,
+        "authorization": auth,
+        "reference": ref,
+        "index": index,
+        "freshness": freshness,
+        "evidence": ("observed" if index["state"] in {"fresh", "stale"}
+                     else "inferred"),
+        "readiness": readiness,
+        "reason": reason,
+    }
+    facts = [
+        fact(f"preflight.linked.identity.{member.label}",
+             {"repo": identity["repo"], "checkout": identity["checkout"],
+              "snapshot": identity["snapshot"],
+              "recorded": identity["recorded"]},
+             source=("ozagia.core.memory.DevMemory" if index["recorded_name"]
+                     else "ozagia.core.task_preflight"),
+             observed_at=index["observed_at"], freshness=identity["freshness"],
+             evidence=identity["evidence"]),
+        fact(f"preflight.linked.authorization.{member.label}",
+             {"authorized": auth["state"], "read_scope": auth["read_scope"],
+              "scope_state": auth["scope_state"], "reason": auth["reason"]},
+             source="ozagia.core.task_preflight", observed_at=observed_at,
+             freshness=auth["freshness"], evidence="declared"),
+        fact(f"preflight.linked.reference.{member.label}",
+             {"role": ref["role"], "state": ref["state"], "pin": ref["pin"],
+              "updated": ref["updated"], "cached": ref["cached"],
+              "checked_at": ref["checked_at"], "reason": ref["reason"]},
+             source=str(reference.get("source") or
+                        "ozagia.core.federation.reference_status"),
+             observed_at=observed_at, freshness=ref["freshness"],
+             evidence=ref["evidence"]),
+        fact(f"preflight.linked.index.{member.label}",
+             {"state": index["state"], "snapshot_head": index["snapshot_head"],
+              "head": index["head"], "generated_at": index["generated_at"],
+              "root_mismatch": index["root_mismatch"],
+              "tree_changed": index["tree_changed"],
+              "errors": index["errors"], "reason": index["reason"]},
+             source="ozagia.core.memory.DevMemory",
+             observed_at=index["observed_at"], freshness=index["freshness"],
+             evidence=("observed" if index["state"] in {"fresh", "stale", "error"}
+                       else "inferred")),
+    ]
+    return row, facts
+
+
+def linked_observation(context: ProviderContext) -> Observation:
+    """Explicitly selected linked checkouts: identity, access, sync and index.
+
+    This reads the anchor's reference *cache* and each member's existing graph
+    snapshot.  It never runs reference sync, Git fetch, reindex, network I/O or
+    any linked-project code.
+    """
+    members = tuple(context.linked)
+    reference = _reference_index(context.checkout.root)
+    rows: list[dict[str, Any]] = []
+    facts: list[C.Fact] = []
+    for member in members:
+        row, member_facts = _linked_member_row(
+            member, reference, context.observed_at)
+        rows.append(row)
+        facts.extend(member_facts)
+    readiness = _aggregate(row["readiness"] for row in rows)
+    counts = {
+        "members": len(rows),
+        "ready": sum(row["readiness"] is True for row in rows),
+        "unknown": sum(row["readiness"] == "unknown" for row in rows),
+        "failed": sum(row["readiness"] is False for row in rows),
+        "stale": sum(row["index"]["state"] == "stale" for row in rows),
+        "absent": sum(row["index"]["state"] == "absent" for row in rows),
+        "unauthorized": sum(row["authorization"]["state"] is False
+                            for row in rows),
+    }
+    if not rows:
+        reason = "no linked checkout was explicitly selected"
+        readiness = "unknown"
+    else:
+        reason = next((row["reason"] for row in rows
+                       if row["readiness"] != readiness),
+                      rows[0]["reason"])
+    summary = fact(
+        "preflight.linked",
+        {"members": len(rows), "readiness": readiness, "counts": counts,
+         "reference_synced": False},
+        source="ozagia.core.federation.reference_status",
+        observed_at=context.observed_at,
+        freshness=("current" if readiness is True else
+                   "absent" if readiness is False else "unknown"),
+        evidence="observed" if any(row["evidence"] == "observed" for row in rows)
+        else "inferred",
+    )
+    return Observation(
+        readiness,
+        (summary, *facts),
+        data={
+            "anchor": context.checkout.root.as_posix(),
+            "selection": "explicit",
+            "members": rows,
+            "counts": counts,
+            "reference": {
+                "manifest": reference["manifest"],
+                "declared": reference["declared"],
+                "errors": reference["errors"],
+                "source": reference["source"],
+                "synced": False,
+            },
+            "provenance": {
+                "reader": "ozagia.core.task_preflight.linked",
+                "anchor": context.checkout.root.as_posix(),
+                "manifest": reference["manifest"],
+                "selection": "explicit",
+                "observed_at": context.observed_at,
+                "sources": [
+                    "ozagia.core.task_preflight",
+                    "ozagia.core.memory.DevMemory",
+                    "ozagia.core.federation.reference_status",
+                ],
+                "synced": False,
+            },
+            "not_assessed": [
+                "linked checkout authorization and read scope are caller "
+                "declarations, not an observed ACL",
+                "reference sync state is the existing cached status; no Git "
+                "fetch, network call or reference sync was performed",
+                "linked snapshots were read and staleness-checked but not "
+                "refreshed or reindexed",
+                "cross-repository semantic links and API compatibility were not "
+                "evaluated",
+                "Ocelot is not connected; its absence is an explicit unknown",
+            ],
+            "deferred": [
+                "reference synchronization",
+                "linked checkout mutation",
+                "linked snapshot reindex",
+                "cross-repository API/code/IaC checks",
+            ],
+            "omissions": [],
+            "truncated": C.truncation().to_dict(),
+        },
+        reason=reason,
+    )
+
+
+def research_observation(context: ProviderContext) -> Observation:
+    """Retained research records as declared facts; never live research I/O."""
+    from ozagia.core import research_projection as RP
+
+    try:
+        projection = RP.build_projection(
+            context.checkout.root,
+            sessions=context.research_sessions,
+            observed_at=context.observed_at,
+            verify_sources=True,
+        )
+    except Exception as exc:  # noqa: BLE001 - unknown, never assumed green
+        return Observation(
+            "unknown",
+            (fact("preflight.research",
+                  {"state": "unknown", "reason": type(exc).__name__},
+                  source="ozagia.core.research_projection",
+                  freshness="unknown", evidence="inferred"),),
+            data={"sessions": [], "claims": [], "sources": [],
+                  "assumptions": [], "evidence": [],
+                  "engines": {"ocelot": {
+                      "state": "unknown",
+                      "reason": "the Ocelot adapter is deferred and was not "
+                                "imported or executed"}},
+                  "not_assessed": [
+                      "research projection failed; no claim or source was read",
+                  ]},
+            reason=_line(f"research projection failed: "
+                         f"{type(exc).__name__}: {exc}", 300),
+            error="unavailable",
+        )
+    join = RP.preflight_join(projection)
+    facts = RP.projection_facts(projection, limit=RP.MAX_FACTS)
+    readiness = join.get("readiness", "unknown")
+    reason = str(join.get("reason") or "research records are declarations")
+    return Observation(
+        readiness,
+        facts,
+        data=join,
+        reason=reason,
+    )
+
+
 def default_providers(
         *, graph: Provider = graph_observation,
         goal: Provider = goal_observation,
         capabilities: Provider = capability_observation,
         environment: Provider = environment_observation,
         resources: Provider = resources_observation,
-        tests: Provider = tests_observation) -> Providers:
+        tests: Provider = tests_observation,
+        linked: Provider = linked_observation,
+        research: Provider = research_observation) -> Providers:
     """The read-only default provider set (individual callables injectable)."""
     return Providers(graph=graph, goal=goal, capabilities=capabilities,
-                     environment=environment, resources=resources, tests=tests)
+                     environment=environment, resources=resources, tests=tests,
+                     linked=linked, research=research)
 
 
 __all__ = [
     "ASSESSMENTS", "DEFAULT_CAPABILITIES", "DEFAULT_LIMIT", "DEFAULT_TIMEOUT_MS",
-    "DEFERRED", "DIMENSIONS", "MAX_CHECKOUTS", "MAX_CRITERIA", "MAX_FACTS",
-    "MAX_LIMIT", "MAX_REPORT_BYTES", "MAX_TIMEOUT_MS", "Observation",
-    "PreflightError", "Provider", "ProviderContext", "Providers",
-    "REPORT_VERSION", "REQUIRED_DIMENSIONS", "SCHEMA_NAMESPACE",
-    "SCHEMA_VERSION", "SAFE_GOAL_KINDS", "TEST_GOAL_KINDS",
-    "UNSAFE_GOAL_KINDS", "Checkout", "build_preflight", "capability_observation",
+    "DEFERRED", "DIMENSIONS", "LINKED_DIMENSION", "MAX_CHECKOUTS",
+    "MAX_CRITERIA", "MAX_FACTS", "MAX_LIMIT", "MAX_LINKED",
+    "MAX_REPORT_BYTES", "MAX_RESEARCH_SESSIONS", "MAX_TIMEOUT_MS",
+    "OPTIONAL_DIMENSIONS", "Observation", "PreflightError", "Provider",
+    "ProviderContext", "Providers", "REPORT_VERSION", "REQUIRED_DIMENSIONS",
+    "RESEARCH_DIMENSION", "SCHEMA_NAMESPACE", "SCHEMA_VERSION",
+    "SAFE_GOAL_KINDS", "TEST_GOAL_KINDS", "UNSAFE_GOAL_KINDS", "Checkout",
+    "LinkedCheckout", "build_preflight", "capability_observation",
     "default_providers", "environment_observation", "fact", "goal_identity",
-    "goal_observation", "graph_observation", "preflight_envelope",
-    "read_graph_state", "report_hash", "report_json", "resources_observation",
-    "tests_observation",
+    "goal_observation", "graph_observation", "linked_observation",
+    "preflight_envelope", "read_graph_state", "report_hash", "report_json",
+    "research_observation", "resources_observation", "tests_observation",
 ]
