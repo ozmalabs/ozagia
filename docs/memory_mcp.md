@@ -278,9 +278,12 @@ their contents as supporting evidence for each other.
 | `dev_relay_plan` | Dry-run relay command/tunnel plan; no live process or socket. |
 | `dev_preflight_plan` | Build a dry-run, scrubbed emulator plan; never executes it. |
 | `dev_capabilities` | Read-only list/show/audit of Ozagia's declared capabilities and their observed CLI/MCP/daemon/toolchain/status surfaces. Bounded by `limit`/`cursor`; unknown coverage is explicit. |
+| `dev_maps` | Bounded read-only model-facing maps: `graph`, `outline`, `capabilities` or `work`/evidence. Returns structured v1 or L0-style plain output with schema/content hashes, source/snapshot identities, freshness, evidence/trust labels, omissions and truncation, configured/observed negotiation and explicit fallback. `limit`/`cursor` page a task-scoped result. Writes only bounded cache metadata under `.ozagia/model_api/cache`. |
 
 All tools are read-only except `dev_edit`, `dev_span_edit` and `dev_key_edit` (transactions, preview by
-default, backup on apply) and `dev_record` (one JSONL line). There is no shell
+default, backup on apply), `dev_record` (one JSONL line), and `dev_maps`
+(bounded cache metadata under `.ozagia/model_api/cache`; the repository graph
+is never written). There is no shell
 execution, no raw patch application, and no network access in the server. Running tests/builds stays with the coding agent (it already has
 a shell and a permission model).
 

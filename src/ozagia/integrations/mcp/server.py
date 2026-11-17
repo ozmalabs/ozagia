@@ -1172,6 +1172,53 @@ _TOOLS.extend([
 ])
 
 
+# The model-facing maps tool is registered at runtime, not in the static
+# `_TOOLS` table.  The M3 package is additive and read-only; keeping it out of
+# the static capability inventory avoids changing the existing declared tool
+# list while `docs/model_api.md` records this as an explicit inventory gap.
+_MODEL_API_TOOL: dict[str, Any] = {
+    "name": "dev_maps",
+    "description": (
+        "Read-only, bounded, versioned model-facing maps of this repository: "
+        "graph, outline, capabilities or work/evidence. Each map carries "
+        "schema/hash, source and snapshot identities, freshness, evidence and "
+        "trust labels, omissions and truncation, plus configured/observed "
+        "negotiation and explicit plain fallback. Bounded by limit/cursor. "
+        "The tool only reads existing owners and writes bounded cache metadata "
+        "under .ozagia/model_api/cache; it never refreshes the graph, starts a "
+        "daemon, imports target code or calls a model."),
+    "inputSchema": _schema({
+        "map": {"type": "string",
+                "enum": ["graph", "outline", "capabilities", "work"],
+                "default": "graph",
+                "description": "map type to project."},
+        "target": {"type": "string",
+                   "description": "graph key/path, outline target, or capability id."},
+        "goal": {"type": "string",
+                 "description": "goal id for map=work, e.g. g1 or goal:g1."},
+        "runs": {"type": "array", "items": {"type": "string"},
+                 "description": "optional task run ids for map=work (max 8)."},
+        "tests": {"type": "array", "items": {"type": "string"},
+                  "description": "optional test keys for map=work (max 16)."},
+        "format": {"type": "string", "enum": ["structured", "plain"],
+                   "default": "structured",
+                   "description": "structured v1 JSON or L0-style plain text."},
+        "limit": {"type": "integer", "default": 25,
+                  "description": "page size (default 25, max 200)."},
+        "cursor": {"type": "string",
+                   "description": "opaque page cursor from a previous page."},
+        "session": {"type": "string",
+                    "description": "host session label used for cache partition."},
+        "model": {"type": "string",
+                  "description": "host model label used for cache partition."},
+        "trace_id": {"type": "string",
+                     "description": "bounded redacted trace label."},
+        "strict": {"type": "boolean", "default": False,
+                   "description": "fail instead of using an explicit fallback."},
+    }),
+}
+
+
 # --------------------------------------------------------------------------- #
 # dispatch
 # --------------------------------------------------------------------------- #
@@ -1348,6 +1395,8 @@ class DevMemoryServer:
         if mode == "combined":
             self._load_research_dev_context()
         self._load_research_fetch_tool()
+        if mode in {"coding", "combined"}:
+            self._load_model_api_tool()
 
     def _federation_handlers(self) -> dict[str, Callable[[dict[str, Any]], Any]]:
         return {
@@ -1494,11 +1543,32 @@ class DevMemoryServer:
             self._tools.append(spec)
             self._schemas[name] = spec["inputSchema"]
 
+    def _load_model_api_tool(self) -> None:
+        """Register the additive M3 `dev_maps` tool on the full surface.
+
+        This is deliberately a runtime registration: the M3 package owns no
+        new capability catalogue entry (that file is outside this package's
+        ownership), so the existing static `_TOOLS` declaration and the WP1
+        audit stay unchanged.  `docs/model_api.md` records the resulting
+        coverage gap explicitly.
+        """
+        if "dev_maps" in self._handlers or "dev_maps" in self._schemas:
+            return
+        if self.mem is None:
+            return
+        self._handlers["dev_maps"] = self._dev_maps
+        self._tools.append(_MODEL_API_TOOL)
+        self._schemas["dev_maps"] = _MODEL_API_TOOL["inputSchema"]
+
     def _load_adapter_tools(self) -> None:
         reg = registry(self.mem.raw_repo_root)
         for err in reg.errors:
             print(f"[{SERVER_NAME}] adapter error: {err}", file=sys.stderr)
         for name, (spec, handler) in reg.mcp_tools.items():
+            if name == _MODEL_API_TOOL["name"]:
+                print(f"[{SERVER_NAME}] adapter tool {name!r} clashes with the "
+                      f"built-in model map tool; ignored", file=sys.stderr)
+                continue
             if name in _SCHEMAS or name in self._schemas:
                 print(f"[{SERVER_NAME}] adapter tool {name!r} clashes with a "
                       f"built-in tool; ignored", file=sys.stderr)
@@ -1742,6 +1812,60 @@ class DevMemoryServer:
             return {"ok": False, "error": str(e)}
         text = "\n".join(T.brief_lines(plan, model_family=family))
         return {"ok": True, "plan": plan, "text": text}
+
+    def _dev_maps(self, a: dict[str, Any]) -> Any:
+        """Bounded read-only M3 maps with cache metadata under `.ozagia/`.
+
+        The server's workspace is the host scope.  `session` and `model` are
+        cache-partition labels supplied by the client, not authentication; the
+        tool grants no permission and returns only this checkout's data.
+        """
+        from ozagia.model_api import HostPolicy, ModelAPIError, error_payload
+        from ozagia.model_api import make_request, request_map
+        root = Path(self.mem.raw_repo_root).resolve()
+        session = str(a.get("session") or "mcp")
+        model = str(a.get("model") or "unspecified")
+        try:
+            policy = HostPolicy(
+                root=root, session=session, model=model,
+                allowed_models=(model,), allowed_sessions=(session,),
+                snapshot_path=self.mem.dump)
+        except ModelAPIError as exc:
+            return error_payload(exc)
+        target: dict[str, Any] = {}
+        map_type = str(a.get("map") or "graph")
+        if a.get("target") not in (None, ""):
+            if map_type == "graph":
+                value = str(a["target"])
+                key_prefixes = ("file:", "sym:", "doc:", "test:", "seed:",
+                                "seed_item:", "text:", "json:")
+                target["key" if value.startswith(key_prefixes) else "path"] = value
+            elif map_type == "outline":
+                target["target"] = str(a["target"])
+            elif map_type == "capabilities":
+                target["capability"] = str(a["target"])
+        if map_type == "work":
+            if a.get("goal") not in (None, ""):
+                target["goal"] = str(a["goal"])
+            if a.get("runs"):
+                target["runs"] = list(a["runs"])
+            if a.get("tests"):
+                target["tests"] = list(a["tests"])
+        try:
+            limit = a.get("limit")
+            limit = 25 if limit is None else int(limit)
+            request = make_request(
+                map_type, scope={"session": session, "model": model},
+                target=target,
+                budgets={"max_items": limit},
+                cursor=a.get("cursor"), trace_id=a.get("trace_id"),
+                format=str(a.get("format") or "structured"),
+                strict=a.get("strict") is True)
+            return request_map(
+                request, policy,
+                configured_support={map_type: "supported"})
+        except (ModelAPIError, ValueError) as exc:
+            return error_payload(exc)
 
     def _dev_capabilities(self, a: dict[str, Any]) -> Any:
         """The declared-capability catalogue and its read-only audit.
