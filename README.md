@@ -9,6 +9,11 @@ Status: alpha. The library, the MCP server, the OpenCode capture plugin and
 the agent harnesses work; the Claude Code hooks are untested against a live
 Claude Code. Measurements are in `docs/results/`; plans in `docs/plans/`.
 
+The [Ozma protocol research](docs/research/ozma_protocol/README.md) is
+preserved here as a design basis for Ozagia's future model interfaces. Its
+historical drafts and implementation are reference material, not a claim of
+current protocol conformance.
+
 ## Install
 
 ```bash

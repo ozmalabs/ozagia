@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- `ozagia agent` reports its launch while the terminal would otherwise be
+  blank. The interactive TUI no longer waits for the graph: the snapshot
+  build/refresh and the daemon start run in the background and each phase
+  goes to `logs/launch_status.json`, which the TUI sidebar shows
+  (`OzAGIa G:building D:waiting 4s` → `G:fresh D:ready`). A session that ends
+  first cancels the preparation. A non-interactive run still waits and reports
+  the synchronous phases on stderr with a ticking status line (and a build
+  says why it rebuilt). The TUI brand is centred under the home-screen logo
+  instead of starting at the logo's left edge.
+
 - Model metadata sources (`ozagia.core.model_sources`, docs/model_sources.md):
   an explicit source registry and cache for models.dev, LiteLLM, OpenRouter
   and Epoch AI, with `sources`, `sync` and `import` commands. `sync` refuses

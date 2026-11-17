@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from ozagia.eval.agent import OPENCODE_GIT_DENY
+from ozagia.harness import launch_status
 from ozagia.harness import opencode as hop
 from ozagia.harness import session as hs
 from ozagia.harness.opencode import AgentError, git_exclude, run_agent
@@ -35,7 +35,9 @@ TEST = "from pkg.mod import add\n\n\ndef test_add():\n    assert add(1, 2) == 3\
 _STUB = r'''
 import json, os, socket, subprocess, sys, time
 rec = {"argv": sys.argv, "cwd": os.getcwd(), "pid": os.getpid(),
-       "env": {k: os.environ.get(k) for k in ("OZAGIA_DAEMON_SOCK", "PWD", "OPENCODE_CONFIG")}}
+       "started_at": time.time(),
+       "env": {k: os.environ.get(k) for k in ("OZAGIA_DAEMON_SOCK", "PWD", "OPENCODE_CONFIG",
+                                              "OZAGIA_LAUNCH_STATUS")}}
 cfg = os.environ.get("OPENCODE_CONFIG")
 rec["config"] = json.load(open(cfg)) if cfg and os.path.isfile(cfg) else None
 rec["plugin_present"] = os.path.isfile(os.path.join(os.getcwd(), ".opencode", "plugins", "ozagia.js"))
@@ -44,6 +46,9 @@ rec["git_status"] = subprocess.run(["git", "status", "--porcelain", "--untracked
 replies = []
 sock = os.environ.get("OZAGIA_DAEMON_SOCK")
 if sock:
+    deadline = time.monotonic() + 60
+    while not os.path.exists(sock) and time.monotonic() < deadline:
+        time.sleep(0.02)            # an interactive launch starts us before it is up
     c = socket.socket(socket.AF_UNIX)
     c.settimeout(30)
     c.connect(sock)
@@ -151,9 +156,7 @@ def test_run_agent_end_to_end(repo, stub, tmp_path):
 
     cfg = rec["config"]
     assert Path(rec["env"]["OPENCODE_CONFIG"]).parent == Path(res["log_dir"])
-    bash = cfg["permission"]["bash"]
-    assert bash["*"] == "allow"
-    assert all(bash[p] == "deny" for p in OPENCODE_GIT_DENY)
+    assert "permission" not in cfg  # Preserve the host's own shell policy.
     assert "model" not in cfg  # passed with -m instead
 
     assert res["exit_code"] == 0 and res["timed_out"] is False
@@ -255,7 +258,9 @@ def test_keep_plugin_and_existing_plugin(repo, stub, tmp_path):
 
 
 def test_interactive_uses_standalone_tui(repo, stub, tmp_path):
-    res = _run(repo, tmp_path, prompt=None, model="vllm/test-model")
+    phases = _Phases()
+    res = _run(repo, tmp_path, prompt=None, model="vllm/test-model", progress=phases,
+               background=False)
     rec = _record(stub)
     assert rec["argv"][1:] == ["--standalone", str(repo)]
     assert rec["config"]["model"] == "vllm/test-model"
@@ -264,6 +269,101 @@ def test_interactive_uses_standalone_tui(repo, stub, tmp_path):
     assert res["plugin_loaded"] is True
     assert res["transcript_path"] is None
     assert not (repo / PLUGIN_REL).exists()
+    # The launch says what it is doing, and the TUI starts after the daemon.
+    assert phases.of("note")[-1] == "opencode: starting the TUI"
+
+
+def test_run_agent_reports_the_phases_before_opencode(repo, stub, tmp_path):
+    phases = _Phases()
+    _run(repo, tmp_path, progress=phases)
+    assert [step.split(" for ")[0] for step in phases.of("step")] == [
+        "graph: making the snapshot current", "graph daemon: starting"]
+    assert phases.of("note")[-1] == "opencode: starting"
+
+
+def test_interactive_backgrounds_the_snapshot_for_the_tui(repo, stub, tmp_path):
+    phases = _Phases()
+    res = _run(repo, tmp_path, prompt=None, progress=phases)
+    rec = _record(stub)
+    assert res["background"] is True and res["interactive"] is True
+    # The TUI got the status path; it starts before the daemon is ready and
+    # the stub waits for the socket the launch promised.
+    assert rec["env"]["OZAGIA_LAUNCH_STATUS"] == res["launch_status"]
+    assert rec["env"]["OZAGIA_DAEMON_SOCK"] == res["sock"]
+    status = json.loads(Path(res["launch_status"]).read_text(encoding="utf-8"))
+    assert status["phase"] == "ready" and status["sock"] == res["sock"]
+    assert status["action"] == "built" and status["nodes"] == res["prep"]["nodes"]
+    assert res["prep"]["action"] == "built" and res["ready_s"] is not None
+    assert res["plugin_loaded"] is True
+    assert phases.of("note") == [
+        "opencode: starting the TUI (the graph builds in the background)"]
+
+
+def test_interactive_background_that_never_finishes_is_cancelled(repo, stub, tmp_path,
+                                                                 monkeypatch):
+    monkeypatch.setenv("STUB_MODE", "sleep")
+    # A prep interpreter that never gets to work: the TUI closes long before
+    # the snapshot is ready.
+    slow = tmp_path / "slow-python"
+    slow.write_text(f"#!/bin/sh\nsleep 30\nexec {sys.executable} \"$@\"\n", encoding="utf-8")
+    slow.chmod(0o755)
+    res = _run(repo, tmp_path, prompt=None, timeout_s=0.3, tool_python=str(slow))
+    assert res["background"] is True and res["timed_out"] is True
+    # The TUI exited before the daemon was ready: no daemon, no socket left,
+    # and the summary says why rather than inventing a graph state.
+    assert res["prep"] == {} and res["ready_s"] is None
+    assert not Path(res["sock"]).exists()
+    assert res["daemon_stats"] is None
+    summary = hop._summary(res)
+    assert "not ready (the session ended first)" in summary
+
+
+def test_graph_session_background_fills_in_the_report_and_status(repo, stub, tmp_path):
+    status = tmp_path / "launch_status.json"
+    with GraphSession(repo, log_dir=tmp_path / "logs", background=True,
+                      status_path=status) as s:
+        assert isinstance(s.sock, Path)
+        assert json.loads(status.read_text(encoding="utf-8"))["phase"] in (
+            "preparing", "building", "refreshing", "daemon", "ready")
+        deadline = time.monotonic() + 60
+        while s.ready_s is None and time.monotonic() < deadline:
+            assert s.error is None
+            time.sleep(0.02)
+        assert s.prep["action"] == "built" and s.ready_s is not None
+        assert s.sock.is_socket()
+        doc = json.loads(status.read_text(encoding="utf-8"))
+        while doc.get("phase") != "ready" and time.monotonic() < deadline:
+            time.sleep(0.01)        # the worker reports ready just after the daemon
+            doc = json.loads(status.read_text(encoding="utf-8"))
+        assert doc["phase"] == "ready" and doc["sock"] == str(s.sock)
+        assert doc["action"] == "built" and doc["nodes"] == s.prep["nodes"]
+        assert doc["daemon_pid"] == s.pid
+        assert doc["started_at"] <= doc["updated_at"]
+    assert not s.sock.exists()
+
+
+def test_prepare_snapshot_writes_its_phase_to_the_launch_status(repo, stub, tmp_path):
+    status = tmp_path / "launch_status.json"
+    hs.prepare_snapshot(repo, repo / ".ozagia" / "graph.json", log_dir=tmp_path / "logs",
+                        status_path=status)
+    doc = json.loads(status.read_text(encoding="utf-8"))
+    assert doc["phase"] == "building" and doc["detail"] == "no snapshot"
+
+
+def test_launch_status_merges_writers_bounds_text_and_reads_safely(tmp_path):
+    path = tmp_path / "launch_status.json"
+    launch_status.write(path, phase="preparing", root="/repo", started_at=1.0)
+    doc = launch_status.write(path, phase="building", detail="x" * 900)
+    assert doc["phase"] == "building" and doc["root"] == "/repo"
+    assert doc["started_at"] == 1.0 and doc["version"] == launch_status.VERSION
+    assert len(doc["detail"]) == launch_status.MAX_TEXT + 1
+    assert doc["detail"].endswith("…")
+    assert launch_status.read(path)["updated_at"] >= doc["started_at"]
+    assert launch_status.read(tmp_path / "missing.json") is None
+    bad = tmp_path / "bad.json"
+    bad.write_text("{nope", encoding="utf-8")
+    assert launch_status.read(bad) is None
+    assert launch_status.write(None, phase="ready") is None
 
 
 def test_missing_opencode_is_a_clear_error(repo, stub, tmp_path):
@@ -349,6 +449,49 @@ def test_graph_session_lifecycle(repo, stub, tmp_path):
     assert s.final_stats["by_op"].get("stats") == 1
     assert s.stats() == s.final_stats
     assert (tmp_path / "logs" / "daemon_journal.jsonl").is_file()
+
+
+class _Phases:
+    """Records what a launch reports through a `harness.progress.Progress`."""
+
+    def __init__(self) -> None:
+        self.events: list[tuple[str, str]] = []
+
+    def step(self, message: str) -> None:
+        self.events.append(("step", message))
+
+    def note(self, message: str) -> None:
+        self.events.append(("note", message))
+
+    def close(self) -> None:
+        self.events.append(("close", ""))
+
+    def of(self, kind: str) -> list[str]:
+        return [message for event, message in self.events if event == kind]
+
+
+def test_graph_session_reports_the_launch_phases(repo, stub, tmp_path):
+    phases = _Phases()
+    with GraphSession(repo, log_dir=tmp_path / "logs", progress=phases) as s:
+        assert s.prep["action"] == "built"
+    steps, notes = phases.of("step"), phases.of("note")
+    assert steps[0].startswith(f"graph: making the snapshot current for {repo}")
+    assert steps[0].endswith("(build=auto)")
+    assert notes[0].startswith("graph: built (") and " nodes)" in notes[0]
+    assert notes[0].endswith(": no snapshot")
+    assert steps[1] == "graph daemon: starting"
+    assert notes[1].startswith("graph daemon: ready in ")
+    assert not phases.of("close")               # a successful enter needs no cleanup
+
+
+def test_graph_session_clears_the_line_when_the_snapshot_fails(repo, stub, tmp_path):
+    phases = _Phases()
+    with pytest.raises(SessionError):
+        with GraphSession(repo, build="never", log_dir=tmp_path / "logs",
+                          progress=phases):
+            pass
+    assert phases.of("step") and not phases.of("note")
+    assert phases.of("close")
 
 
 def test_graph_session_build_never_needs_a_snapshot(repo, stub, tmp_path):

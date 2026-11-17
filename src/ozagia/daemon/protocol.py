@@ -160,6 +160,20 @@ Requests (`op`):
       for files outside the union of its claimed scopes) in
       `output`/`append`, counted in `meta.goal_hints`.
 
+    {"id": 14, "op": "structural", "input": {"kind": "resolve" |
+     "callers" | "callees" | "tests" | "outline", "target": "...",
+     "depth"?: 1..3, "budget_tokens"?: 100..400}}
+      -> {"id": 14, "ok": true, "result": {"ok", "kind", "target",
+          "results" | "text", "freshness", "coverage", "resources",
+          "truncated"}}
+      Bounded read-only projection over `DevMemory.symbol_graph`,
+      `tests_for` and `repo_map`. A stale or unverifiable graph yields no
+      results. `resources` are root-relative source files that the caller
+      must get read permission for before showing graph details. The native
+      OpenCode plugin registers this tool only when `permission.assert` is
+      available and asserts all returned resources. No edit, check, or
+      execution operation is exposed through this request.
+
 Sessions. `tool`, `after` and `read_check` with a `session` use that
 session's read ledger (`ozagia.intent.ledger`), keyed by (harness, session,
 `sub`). `sub` is optional: agents that share a session id send something
@@ -329,6 +343,7 @@ OPERATIONS = (
     "session_event",
     "shutdown",
     "stats",
+    "structural",
     "tool",
     "toolchain",
     "who",

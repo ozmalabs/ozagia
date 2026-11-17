@@ -120,6 +120,7 @@ class DaemonClient {
     this.session = undefined;
     this.tools = {};
     this.permissionAssert = false;
+    this.structuralToolAvailable = false;
     this.compactionHook = false;
     this.acks = new Map();          // session -> tokens of delivered reads
     this.resetPending = new Set();  // sessions whose compaction was not sent
@@ -301,7 +302,7 @@ function contextHook(client, cache) {
       let context = entry && entry.promptKey === promptKey ? entry.context : null;
       if (context === null) {
         const response = await client.request({ op: "hint", ...input, session,
-          harness: HARNESS }, HINT_TIMEOUT_MS);
+          harness: HARNESS, structural_tool: client.structuralToolAvailable }, HINT_TIMEOUT_MS);
         if (!response || response.ok !== true || typeof response.context !== "string") return;
         context = response.context.trim().slice(0, HINT_MAX_TOTAL_CHARS);
         if (session) {
@@ -440,7 +441,8 @@ function wrap(client, perm, name, tool, original) {
   return async function execute(input, c) {
     const session = c && c.sessionID;
     if (session && client.session !== session) client.session = session;
-    const base = { harness: HARNESS, session, tool: name, input };
+    const base = { harness: HARNESS, session, tool: name, input,
+      git_refs_passthrough: process.env.OZAGIA_GIT_REFS_PASSTHROUGH === "1" };
     const timeout = timeoutFor(name, input, client.timeoutMs);
     let res;
     let fallback = null;
@@ -714,19 +716,99 @@ export function profileMetadataEvent(event) {
       metadata: { tool: part.tool, status: state.status, duration_ms: durationMs },
     };
   }
+  // OpenCode 2.3 moved message metadata to durable session events. These
+  // payloads deliberately contain no message text or tool input/output.
+  const data = properties;
+  if (event.type === "session.step.ended") {
+    const sessionID = data.sessionID;
+    const messageID = data.assistantMessageID;
+    if (typeof sessionID !== "string" || typeof messageID !== "string") return undefined;
+    const tokens = data.tokens && typeof data.tokens === "object" ? data.tokens : {};
+    const cache = tokens.cache && typeof tokens.cache === "object" ? tokens.cache : {};
+    const created = profileMillis(data.started);
+    const completed = profileMillis(event.created);
+    const n = (v) => typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.trunc(v) : null;
+    return {
+      op: "profile_event", harness: HARNESS, session: sessionID, kind: "message",
+      event_id: messageID,
+      metadata: {
+        model: null,
+        tokens: { input: n(tokens.input), output: n(tokens.output), reasoning: n(tokens.reasoning),
+          cache_read: n(cache.read), cache_write: n(cache.write) },
+        timing_ms: { first_token: null, streamed: null,
+          completed: created !== undefined && completed !== undefined && completed >= created ? completed - created : null,
+          model_turn: created !== undefined && completed !== undefined && completed >= created ? completed - created : null },
+      },
+    };
+  }
+  if (event.type === "session.message.content.updated") {
+    const sessionID = data.sessionID;
+    const contents = Array.isArray(data.content) ? data.content : [];
+    for (const part of contents) {
+      if (!part || part.type !== "tool" || typeof part.id !== "string" || !part.id
+          || typeof part.name !== "string" || !/^[A-Za-z0-9_.-]{1,80}$/.test(part.name)) continue;
+      const state = part.state && typeof part.state === "object" ? part.state : {};
+      const status = state.status === "completed" ? "completed" : state.status === "error" ? "error" : null;
+      if (!status || typeof sessionID !== "string") continue;
+      const start = profileMillis(part.time?.ran ?? part.time?.created);
+      const completed = profileMillis(part.time?.completed);
+      return { op: "profile_event", harness: HARNESS, session: sessionID, kind: "tool",
+        event_id: part.id, metadata: { tool: part.name, status,
+          duration_ms: start !== undefined && completed !== undefined && completed >= start ? completed - start : null } };
+    }
+  }
   return undefined;
 }
 
 async function captureProfileEvents(ctx, client, signal) {
   try {
-    const events = ctx.event.subscribe({
-      types: ["message.updated", "message.part.updated"], signal,
-    });
+    const steps = new Map();
+    const events = ctx.event.subscribe({ types: [
+      "session.step.started", "session.step.first-token", "session.step.streamed",
+      "session.step.ended", "session.step.failed", "session.message.content.updated",
+    ], signal });
     for await (const event of events) {
-      const message = profileMetadataEvent(event);
-      if (!message) continue;
-      try { await client.request(message, 2000, false, false); }
-      catch { /* profiles are best-effort and never interrupt an agent turn */ }
+      const data = event && (event.properties || event.data || event);
+      if (data && typeof data.sessionID === "string" && typeof data.assistantMessageID === "string") {
+        const key = `${data.sessionID}\0${data.assistantMessageID}`;
+        if (event.type === "session.step.started") {
+          const model = data.model && typeof data.model === "object" ? data.model : {};
+          const provider = typeof model.providerID === "string" ? model.providerID : "";
+          const id = typeof model.id === "string" ? model.id : "";
+          steps.set(key, { model: provider && id ? `${provider}/${id}` : id || null,
+            started: profileMillis(data.started), first: null, streamed: null });
+          if (steps.size > 256) steps.delete(steps.keys().next().value);
+        } else if (event.type === "session.step.first-token" || event.type === "session.step.streamed") {
+          const step = steps.get(key);
+          if (step) step[event.type.endsWith("first-token") ? "first" : "streamed"] = profileMillis(event.created);
+        } else if (event.type === "session.step.failed") {
+          steps.delete(key);
+        }
+      }
+      const messages = event?.type === "session.message.content.updated"
+        ? (Array.isArray(data?.content) ? data.content : []).map((part) =>
+          profileMetadataEvent({ type: event.type, data: { sessionID: data.sessionID, content: [part] } }))
+        : [profileMetadataEvent(event)];
+      for (const message of messages) {
+        if (!message) continue;
+        if (message.kind === "message") {
+          const key = `${message.session}\0${message.event_id}`;
+          const step = steps.get(key);
+          if (step) {
+            const timing = message.metadata.timing_ms;
+            const elapsed = (stamp) => stamp !== null && step.started !== undefined && stamp >= step.started
+              ? Math.trunc(stamp - step.started) : null;
+            message.metadata.model = step.model;
+            timing.first_token = elapsed(step.first);
+            timing.streamed = elapsed(step.streamed);
+            timing.completed = elapsed(profileMillis(event.created));
+            timing.model_turn = timing.completed;
+            steps.delete(key);
+          }
+        }
+        try { await client.request(message, 2000, false, false); }
+        catch { /* profiles are best-effort and never interrupt an agent turn */ }
+      }
     }
   } catch { /* unsupported event API or an unloaded daemon: no profile events */ }
 }
@@ -761,7 +843,7 @@ export function createPlugin(options = {}) {
         const perm = ctx.permission && typeof ctx.permission.assert === "function"
           ? ctx.permission : null;
         client.permissionAssert = Boolean(perm);
-        if (ctx.tool && typeof ctx.tool.transform === "function") ctx.tool.transform((reg) => {
+        if (ctx.tool && typeof ctx.tool.transform === "function") await ctx.tool.transform((reg) => {
           const edit = reg.get("edit");
           const stringSchema = edit && edit.output;
           if (!stringSchema) return; // without a string schema a replaced tool would fail
@@ -794,7 +876,64 @@ export function createPlugin(options = {}) {
               });
             } catch { /* leave this tool as it was */ }
           }
+          // Native structural tools are available only when OpenCode exposes
+          // its permission assertion API. Every returned source path is
+          // asserted as a read resource before graph details reach the model.
+          if (perm && typeof reg.add === "function") {
+            try {
+              if (typeof reg.namespace === "function") reg.namespace({
+                name: "ozagia",
+                description: "Read-only repository graph queries; results require read permission for cited files.",
+              });
+              reg.add({
+                name: "structure",
+                description: "Query repository definitions, callers, callees, related tests, or a ranked module/repository outline. Graph results are available only for a fresh snapshot; coverage and syntactic resolution limits are reported. Cited file paths require the normal read permission before results are returned.",
+                options: { namespace: "ozagia", codemode: false },
+                input: {
+                  type: "object",
+                  properties: {
+                    kind: { type: "string", enum: ["resolve", "callers", "callees", "tests", "outline"] },
+                    target: { type: "string", minLength: 1, maxLength: 256 },
+                    depth: { type: "integer", minimum: 1, maximum: 3 },
+                  },
+                  required: ["kind", "target"],
+                  additionalProperties: false,
+                },
+                execute: async (input, c) => {
+                  const response = await client.request({ op: "structural", input }, timeoutMs);
+                  const result = response && response.result;
+                  if (!result || typeof result !== "object") throw new Error("ozagia: invalid structural response");
+                  const resources = Array.isArray(result.resources)
+                    ? [...new Set(result.resources.filter((item) => typeof item === "string" && item))].slice(0, 64)
+                    : [];
+                  if (resources.length) await ask(perm, {
+                    action: "read", resources, save: resources,
+                  }, c);
+                  return { content: JSON.stringify(result) };
+                },
+              });
+              client.structuralToolAvailable = true;
+              client.tools.ozagia_structure = { codemode: false, read_only: true };
+            } catch { /* unsupported registry API leaves the plugin usable */ }
+          }
         });
+        // V2 exposes the effective registry after transforms. Verify that the
+        // model-facing catalog contains the native tool before reporting it
+        // in hello; `plugin list` alone only proves importability.
+        if (perm && ctx.tool && typeof ctx.tool.list === "function") {
+          try {
+            const registered = await ctx.tool.list();
+            const visible = Array.isArray(registered)
+              && registered.some((item) => item && item.id === "ozagia_structure");
+            if (visible) client.tools.ozagia_structure = {
+              codemode: false, read_only: true, registered: true,
+            };
+            else {
+              client.structuralToolAvailable = false;
+              delete client.tools.ozagia_structure;
+            }
+          } catch { /* the read-only tool remains governed by OpenCode's catalog */ }
+        }
         client.hello(undefined);
         return () => profileAbort.abort();
       } catch { /* never break OpenCode startup */ }

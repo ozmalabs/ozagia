@@ -338,6 +338,7 @@ _DOCS = {
     "capabilities": "doc:docs/capabilities.md",
     "graph": "doc:docs/memory_mcp.md",
     "graph_surface": "doc:docs/graph_surface.md",
+    "intent": "doc:docs/intent.md",
     "code_search": "doc:docs/code_search.md",
     "symbol_graph": "doc:docs/symbol_graph.md",
     "lsp": "doc:docs/lsp.md",
@@ -422,6 +423,7 @@ _TESTS = {
     "eval_agent": "test:tests/test_eval_agent.py",
     "eval_retrieval": "test:tests/test_eval_retrieval.py",
     "self": "test:tests/test_self_graph.py",
+    "structural": "test:tests/test_structural_intent_routing.py",
 }
 
 
@@ -870,6 +872,23 @@ _BUILTIN_DEFINITIONS: tuple[dict[str, Any], ...] = (
         authorization=_READ,
         tests=_tests("proactive"),
         docs=_docs("graph"),
+    ),
+    _def(
+        id="cap:graph.structural_query",
+        domain="graph",
+        purpose=("Answer bounded structural questions about a fresh snapshot: "
+                 "resolve, callers, callees, related tests and outline."),
+        owner="ozagia.intent.structural",
+        side_effect="read",
+        exposure=["daemon"],
+        impl=["impl:ozagia.intent.structural.query"],
+        surfaces=["daemon:op:structural"],
+        prerequisites=["a daemon and a current graph snapshot"],
+        limits=["depth and budget_tokens bound the result",
+                "a stale or unverifiable graph yields no results"],
+        authorization=_READ,
+        tests=_tests("structural"),
+        docs=_docs("intent"),
     ),
     _def(
         id="cap:graph.after_refresh",

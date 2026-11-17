@@ -616,6 +616,20 @@ class DaemonState:
             return self.toolchain_op(msg)
         if op == "goals":
             return self.goals(msg)
+        if op == "structural":
+            args = msg.get("input")
+            if not isinstance(args, dict):
+                return {"ok": False, "error": "input must be an object"}
+            with self._graph_lock():
+                if _expired(msg):
+                    return {"ok": True, "expired": True, "result": {
+                        "ok": False, "error": "structural request expired",
+                        "resources": []}}
+                from ozagia.intent.structural import query
+                result = query(self.memory, args.get("kind"), args.get("target"),
+                               depth=args.get("depth", 1),
+                               budget_tokens=args.get("budget_tokens", 240))
+            return {"ok": True, "result": result}
         if op == "hint":
             prompt = msg.get("prompt")
             history = msg.get("history", [])
@@ -635,12 +649,16 @@ class DaemonState:
                 try:
                     hint = build_context(self.memory, prompt,
                                          history=[item["text"] for item in history],
-                                         budget_tokens=400, max_history_turns=2)
+                                         budget_tokens=400, max_history_turns=2,
+                                         structural_tool_available=(
+                                             msg.get("harness") == "opencode"
+                                             and msg.get("structural_tool") is True))
                     infra = hint.get("infra") or {}
                     result = {"context": hint.get("context", ""),
                               "meta": {
                                   "intent": "hint",
                                   "keys": hint.get("keys", []),
+                                  "structural_intent": hint.get("structural_intent"),
                                   "freshness": hint.get("freshness", "unknown"),
                                   "truncated": hint.get("truncated", False),
                                   "estimated_tokens": hint.get("estimated_tokens"),
@@ -702,15 +720,38 @@ class DaemonState:
                                      "ms": 0.0}}
                 if op == "tool":
                     is_pre = msg.get("preflight") is True
-                    granted = self._granted_plan(msg, tool, inp, harness,
-                                                 session, is_pre)
-                    body = intent.handle(self.memory, tool, inp,
-                                         harness=harness, session=session,
-                                         preflight=is_pre,
-                                         state=state, owners=self.owners,
-                                         granted_plan_id=granted)
-                    if is_pre:
-                        self._remember_plan(body, tool, inp, harness, session)
+                    # Interactive `ozagia agent` sessions leave ref-moving
+                    # git to OpenCode's built-in shell, whose permission
+                    # service remains the approval authority. Eval sessions
+                    # never set this flag and keep the intent refusal.
+                    if (tool == "shell" and msg.get("git_refs_passthrough") is True
+                            and isinstance(inp, dict)
+                            and isinstance(inp.get("command"), str)):
+                        from ozagia.intent.shell import classify
+                        if classify(inp["command"]).get("class") == "git_refs":
+                            body = {"handled": False,
+                                    "reason": "git refs delegated to OpenCode",
+                                    "meta": {"intent": "shell_passthrough",
+                                             "keys": [], "ms": 0.0}}
+                            if is_pre:
+                                body.update(
+                                    preflight=True,
+                                    permission=intent.permission_request(
+                                        self.memory, "shell", inp))
+                        else:
+                            body = None
+                    else:
+                        body = None
+                    if body is None:
+                        granted = self._granted_plan(msg, tool, inp, harness,
+                                                     session, is_pre)
+                        body = intent.handle(self.memory, tool, inp,
+                                             harness=harness, session=session,
+                                             preflight=is_pre,
+                                             state=state, owners=self.owners,
+                                             granted_plan_id=granted)
+                        if is_pre:
+                            self._remember_plan(body, tool, inp, harness, session)
                 else:
                     req_meta = msg.get("meta")
                     body = intent.after(self.memory, tool, inp,

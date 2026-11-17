@@ -262,6 +262,22 @@ def test_status_missing_daemon_is_absent_not_empty(
                for item in report["degraded"])
 
 
+def test_status_uses_explicit_session_socket_over_another_root_socket(
+    components: SimpleNamespace, monkeypatch, tmp_path: Path,
+) -> None:
+    session_sock = tmp_path / "session-missing.sock"
+    other_root_sock = tmp_path / "other-root.sock"
+    other_root_sock.touch()
+    monkeypatch.setenv("OZAGIA_DAEMON_SOCK", str(session_sock))
+    components.state["ping"] = "absent"
+
+    report = status_module.status(components.root)
+
+    assert report["daemon"]["state"] == "absent"
+    assert report["daemon"]["report"]["socket"] == str(session_sock)
+    assert components.calls[0][0] == str(session_sock)
+
+
 def test_status_unresponsive_daemon_is_unknown(components: SimpleNamespace) -> None:
     components.state["ping"] = "timeout"
 

@@ -262,4 +262,6 @@ def test_agent_research_flag_adds_the_mcp_server(tmp_path):
     assert entry["command"][-4:] == ["--root", str(tmp_path), "--mode", "research"]
     doc = json.loads(write_opencode_config(tmp_path / "c.json", mcp=entry).read_text())
     assert doc["mcp"]["ozagia"]["environment"]["OZAGIA_ROOT"] == str(tmp_path)
-    assert "git push*" in doc["permission"]["bash"]
+    # Interactive sessions leave shell approvals to OpenCode's permission
+    # service; only the eval config injects the ref-moving git deny list.
+    assert "permission" not in doc

@@ -171,9 +171,10 @@ daemon or imports target code. Its row is in `docs/memory_mcp.md`.
 tuple of the existing dispatch op strings: `after`, `goals`, `hello`, `hint`,
 `job_events`, `job_list`, `job_log`, `job_ps`, `job_start`, `job_stop`,
 `job_wait`, `owner_check`, `path_check`, `ping`, `profile_event`, `read_check`,
-`secrets`, `session_event`, `shutdown`, `stats`, `tool`, `toolchain`, `who`,
-`working_set`. It adds no operation and changes no dispatch behaviour; tests
-compare it with the `op` branches in `daemon/server.py` and `jobs.OPS`.
+`secrets`, `session_event`, `shutdown`, `stats`, `structural`, `tool`,
+`toolchain`, `who`, `working_set`. It adds no operation and changes no
+dispatch behaviour; tests compare it with the `op` branches in
+`daemon/server.py` and `jobs.OPS`.
 
 ## Determinism and bounds
 

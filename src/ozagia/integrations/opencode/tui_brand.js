@@ -1,5 +1,5 @@
-// ozAGIa TUI brand for OpenCode 2.3: renders "[ + ozAGIa ]" (green) under the
-// main logo on the home screen.
+// ozAGIa TUI brand for OpenCode 2.3: renders "[ + ozAGIa ]" (green) centred
+// under the main logo on the home screen.
 //
 // OpenCode 2.3 publishes no logo slot (`ctx.ui.slot` has home.footer and
 // friends, nothing at the logo), so this takes the render tree directly: it
@@ -56,10 +56,24 @@ function walk(node, depth, fn, budget) {
   for (const c of childrenOf(node)) walk(c, depth + 1, fn, budget);
 }
 
-// Find the home-screen logo. Returns { container, minX, mainMaxY } or null.
-// container = the box that holds the logo AND the prompt box (has a textarea
-// descendant). mainMaxY = bottom of the substantial logo rows (>= 10 cells),
-// so the brand lands in the free row between logo and prompt box.
+// Find the home-screen logo. Returns { container, minX, maxX, mainMaxY } or
+// null. container = the box that holds the logo AND the prompt box (has a
+// textarea descendant). mainMaxY = bottom row of the logo, so the brand lands
+// in the free row between logo and prompt box. minX..maxX is the logo's
+// horizontal extent: the brand is centred under it.
+//
+// The logo is the only text drawn one renderable per character, so find it by
+// shape: at least three stacked rows of cell-sized text, overlapping
+// horizontally, centred in the pane that holds the prompt. It must not be
+// found by screen position: the 2.3 home layout centres the logo, so on a
+// large terminal it sits near the middle of the screen (e.g. x=129, y=39 at
+// 297x90) while a small one puts it at (21, 6). An earlier fixed window of
+// x 8..72, y <= 12 only matched small terminals and silently did nothing on
+// large ones.
+const MIN_LOGO_CELLS = 4;  // the compact logo's rows are 4 cells wide
+const MIN_LOGO_ROWS = 3;   // compact layouts drop the logo's blank top row
+const CENTER_SLACK = 6;    // cells the centred logo may drift
+
 function findLogo(root) {
   const cells = [];
   const budget = { n: 0 };
@@ -69,7 +83,6 @@ function findLogo(root) {
       if (!id.startsWith("text-")) return;
       const x = node.x, y = node.y;
       if (typeof x !== "number" || typeof y !== "number") return;
-      if (y < 0 || y > 12 || x < 8 || x > 72) return;
       cells.push({ x, y, node });
     } catch {}
   }, budget);
@@ -79,11 +92,42 @@ function findLogo(root) {
     if (!byRow.has(c.y)) byRow.set(c.y, []);
     byRow.get(c.y).push(c);
   }
-  const main = [];
-  for (const list of byRow.values()) if (list.length >= 10) main.push(...list);
-  if (!main.length) return null;
-  const minX = Math.min(...main.map((c) => c.x));
-  const mainMaxY = Math.max(...main.map((c) => c.y));
+  // Candidate logo rows: enough cells at distinct columns. (Several text
+  // nodes can stack at one x while a surface is hidden; they do not count.)
+  const rows = [];
+  for (const [y, list] of byRow) {
+    const xs = [...new Set(list.map((c) => c.x))];
+    if (xs.length < MIN_LOGO_CELLS) continue;
+    rows.push({ y, minX: Math.min(...xs), maxX: Math.max(...xs), node: list[0].node });
+  }
+  rows.sort((a, b) => a.y - b.y);
+  // The logo is a run of consecutive rows that overlap in x. Keep every run:
+  // the longest one is usually the logo, but a graphic elsewhere must not hide
+  // a shorter valid logo.
+  const runs = [];
+  let run = [];
+  const consider = () => {
+    if (run.length < MIN_LOGO_ROWS) return;
+    runs.push({
+      rows: run.length,
+      minX: Math.min(...run.map((r) => r.minX)),
+      maxX: Math.max(...run.map((r) => r.maxX)),
+      maxY: Math.max(...run.map((r) => r.y)),
+      node: run[0].node,
+    });
+  };
+  for (const r of rows) {
+    const prev = run[run.length - 1];
+    if (prev && r.y === prev.y + 1 && r.minX <= prev.maxX && r.maxX >= prev.minX) {
+      run.push(r);
+    } else {
+      consider();
+      run = [r];
+    }
+  }
+  consider();
+  runs.sort((a, b) => b.rows - a.rows || a.maxY - b.maxY);
+
   const hasTextarea = (n) => {
     const b = { n: 0 };
     let found = false;
@@ -96,11 +140,22 @@ function findLogo(root) {
     go(n);
     return found;
   };
-  let n = main[0].node;
-  for (let i = 0; i < 8 && n; i++) {
-    n = n.parent;
-    if (!n) break;
-    if (hasTextarea(n)) return { container: n, minX, mainMaxY };
+  for (const best of runs) {
+    let n = best.node;
+    for (let i = 0; i < 8 && n; i++) {
+      n = n.parent;
+      if (!n) break;
+      if (!hasTextarea(n)) continue;
+      // Guard against a transcript that happens to stack cell-sized text
+      // nodes: the home logo is centred in the pane that holds the prompt.
+      const x0 = typeof n.x === "number" ? n.x : 0;
+      const w = typeof n.width === "number" ? n.width : 0;
+      if (w > 0 &&
+          Math.abs((best.minX + best.maxX) / 2 - (x0 + w / 2)) > CENTER_SLACK) {
+        break;
+      }
+      return { container: n, minX: best.minX, maxX: best.maxX, mainMaxY: best.maxY };
+    }
   }
   return null;
 }
@@ -140,12 +195,27 @@ const plugin = {
         }
         return;
       }
-      const { container, minX, mainMaxY } = logo;
-      const x = minX;
-      const y = mainMaxY + 1;
+      const { container, minX, maxX, mainMaxY } = logo;
+      // setPosition is parent-relative; logo coordinates are absolute. The
+      // brand is centred under the logo: the wordmark is 39 cells wide on a
+      // large terminal, so starting at the logo's left edge left the 12-cell
+      // label visibly off to one side. The extra cell of an odd difference
+      // goes to the right (floor).
+      const logoWidth = maxX - minX + 1;
+      const indent = Math.max(0, Math.floor((logoWidth - BRAND.length) / 2));
+      const x = minX + indent - (typeof container.x === "number" ? container.x : 0);
+      const y = mainMaxY + 1 - (typeof container.y === "number" ? container.y : 0);
       const posKey = `${x},${y}`;
       const attached = brand && brandParent === container && !brand._isDestroyed;
       if (attached && lastPos === posKey) return; // in place, nothing to do
+
+      if (brand && brandParent && brandParent !== container) {
+        // the home screen was rebuilt around a new container: drop the old node
+        try { if (!brand._isDestroyed) brandParent.remove(brand); } catch {}
+        brand = null;
+        brandParent = null;
+        lastPos = null;
+      }
 
       if (attached) {
         // the logo moved (e.g. resize): re-place the existing node

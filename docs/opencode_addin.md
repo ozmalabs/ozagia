@@ -218,12 +218,24 @@ per-session gap in the first slice.
 The normal `ozagia integrations opencode install --workdir <repo>` command
 installs a separate `.opencode/plugins/ozagia-profile/tui.js` companion. It
 uses OpenCode's supported `sidebar.content` slot and leaves the existing
-`.opencode/plugins/ozagia/tui.js` brand plugin alone. The server-side Ozagia
-plugin subscribes to OpenCode's `message.updated` and `message.part.updated`
-events, so host profiling does not depend on opening the sidebar. The TUI
-companion renders the report and status only. Neither plugin requires a change
-to the global `cli.json`. The optional Desktop GUI add-in offers the same report
-in its Profile tab through the add-in's `sessionProfile` RPC.
+`.opencode/plugins/ozagia/tui.js` brand plugin alone. On OpenCode 2.3, the
+server-side Ozagia plugin subscribes to `session.step.*` and
+`session.message.content.updated` events, so host profiling does not depend on
+opening the sidebar. It records only model, token, timing, and terminal tool
+metadata; message text and tool input/output are not copied. The TUI companion
+renders the report and status only. Neither plugin requires a change to the
+global `cli.json`. The optional Desktop GUI add-in offers the same report in
+its Profile tab through the add-in's `sessionProfile` RPC.
+
+While an `ozagia agent` launch is preparing the graph, the sidebar summary
+shows the launch phase instead of the profile counters: `OzAGIa G:checking
+D:waiting 0s`, `G:building`/`G:refreshing` (as the prep process reports it),
+`G:ready D:starting`, then the usual `G:fresh D:ready H.. P.. F.. U.. E..`.
+It reads the file named by `OZAGIA_LAUNCH_STATUS` (the session sets it in the
+TUI's environment) every 500 ms and stops once the phase is `ready` or
+`failed`, so the sidebar does not poll the launch file for the rest of the
+session. Without that variable (a standalone install, the Desktop add-in) the
+summary is the observed G/D line only.
 
 The report counts daemon-observed tool/after operations per harness and
 session, handled tools, passthrough, expiry, errors, plugin fallbacks, and the

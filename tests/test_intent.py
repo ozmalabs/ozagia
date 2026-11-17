@@ -769,6 +769,79 @@ def test_shell_grep_and_passthrough(mem, repo):
     assert _call(mem, "shell", command="find pkg-link -type f -name '*.py'")["handled"] is False
 
 
+def test_explicit_definition_grep_appends_fresh_structural_lookup(mem, repo):
+    result = _call(mem, "shell", command="grep -rn 'def helper' pkg")
+    assert result["handled"] and result["meta"]["intent"] == "shell_grep"
+    output = result["output"]
+    assert f"{repo}/pkg/mod.py:" in output
+    assert "  Line 5: def helper(a, b=1):" in output
+    assert "[ozagia] structural definitions (fresh snapshot;" in output
+    assert "sym:pkg/mod.py::helper" in output
+    assert "tag files parsed" in output
+    assert "read a definition by passing its sym: key to read" in output
+    assert "sym:pkg/mod.py::helper" in result["meta"]["keys"]
+    assert result["permission"]["resources"] == ["grep -rn 'def helper' pkg"]
+
+
+def test_bre_definition_search_uses_only_paths_with_grep_matches(mem, repo, tmp_path):
+    _write(repo / "other.py", "def helper():\n    return 99\n")
+    _git(repo, "add", "other.py")
+    _git(repo, "commit", "-q", "-m", "add duplicate symbol")
+    build_index(repo, mem.dump, include_docs="features", include_git=False)
+    scoped = DevMemory(mem.dump, tmp_path / "state" / "journal-2.jsonl", root=repo)
+
+    result = _call(scoped, "shell", command="grep -rn '^def \\|^class ' pkg")
+    assert "[ozagia] structural definitions (fresh snapshot;" in result["output"]
+    assert "sym:pkg/mod.py::helper" in result["output"]
+    assert "other.py::helper" not in result["output"]
+    assert str(repo / "other.py") not in result["output"]
+
+
+def test_definition_grep_keeps_shell_result_and_skips_stale_graph(mem, repo):
+    (repo / "pkg" / "mod.py").write_text(MOD + "# changed after index\n")
+    result = _call(mem, "shell", command="grep -rn 'def helper' pkg")
+    assert "  Line 5: def helper(a, b=1):" in result["output"]
+    assert "structural lookup unavailable: graph freshness is stale" in result["output"]
+
+
+def test_structural_query_routes_to_existing_fresh_graph_services(mem):
+    from ozagia.intent.structural import query
+
+    definitions = query(mem, "resolve", "helper")
+    assert definitions["ok"] and definitions["freshness"] == "fresh"
+    assert {row["id"] for row in definitions["results"]} == {
+        "pkg/mod.py::helper"}
+    assert definitions["coverage"].startswith("graph snapshot: fresh; tags ")
+    assert definitions["resources"] == ["pkg/mod.py"]
+
+    callers = query(mem, "callers", "helper")
+    assert callers["ok"]
+    assert any(row["id"] == "pkg/use.py::run" for row in callers["results"])
+
+    tests = query(mem, "tests", "helper")
+    assert tests["ok"]
+    assert any(row["file"] == "tests/test_mod.py" for row in tests["results"])
+    assert tests["resources"] == ["tests/test_mod.py"]
+
+    outline = query(mem, "outline", "pkg/mod.py", budget_tokens=100)
+    assert outline["ok"] and outline["text"]
+    assert "def helper" in outline["text"]
+    assert outline["resources"] == ["pkg/mod.py"]
+    assert "snapshot nodes" in outline["coverage"]
+
+
+def test_structural_outline_withholds_text_without_safe_citation(mem, monkeypatch):
+    from ozagia.intent import structural
+
+    monkeypatch.setattr(mem, "outline_target", lambda _target: {
+        "ok": True, "path": "../outside.py", "text": "private source"})
+    result = structural.query(mem, "outline", "pkg/mod.py")
+    assert result["ok"] is False
+    assert result["resources"] == []
+    assert result["text"] == ""
+    assert "no safe in-checkout citation" in result["error"]
+
+
 def test_shell_ls_refuses_truncated_or_unreadable_directory(mem, repo, monkeypatch):
     from ozagia.intent import run
     import os

@@ -125,7 +125,12 @@ function ProfileSidebar(props) {
   }
   const value = () => view();
   const session = () => value()?.profile?.sessions?.find((entry) => entry.session_id === props.sessionID);
-  const daemon = () => value()?.status?.daemon?.state || EMPTY;
+  const daemon = () => {
+    const state = value()?.status?.daemon?.state;
+    if (state === "absent") return "down";
+    if (state === "unknown") return "unresponsive";
+    return state || "unavailable";
+  };
   const graph = () => value()?.status?.doctor?.report?.snapshot?.state || EMPTY;
   const color = context.theme.text.base;
   const summary = () => {

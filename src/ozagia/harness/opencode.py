@@ -15,15 +15,23 @@
    `keep_plugin`) the lines this run added are removed again when their
    path is gone (the plugin's); the state dir's line stays while the state
    dir, which keeps the snapshot, exists.
-4. Opens a `GraphSession` (snapshot built or refreshed, daemon started).
+4. Opens a `GraphSession` (snapshot built or refreshed, daemon started). The
+   interactive TUI does not wait: `background` makes the session prepare the
+   snapshot and start the daemon while OpenCode runs, and each phase goes to
+   `<log_dir>/launch_status.json`, which the TUI sidebar reads
+   (`OZAGIA_LAUNCH_STATUS`). A non-interactive run waits for both first.
+   With `progress`, the synchronous phases are reported on stderr; `ozagia
+   agent` passes a `harness.progress.Spinner`. Library callers get no output
+   unless they ask for it.
 5. Installs the plugin into `<workdir>/.opencode/plugins/ozagia.js`.
    A plugin file that was already there is overwritten unless git tracks it,
    and is not removed afterwards, except one whose content is exactly
    `plugin_source()`: that one was left by a run killed before teardown, and
    is removed like a new one.
 6. Writes `OPENCODE_CONFIG` to `<run root>/logs/opencode_config.json`: the
-   eval's permission policy (`bash: {"*": "allow", <ref-moving git
-   commands>: "deny"}`, `eval.agent.OPENCODE_GIT_DENY`). In interactive mode
+   harness config. OpenCode's own permission service remains in charge of
+   shell approvals; the harness does not override the user's policy. Eval runs use
+   their separate restrictive config (`eval.agent.OPENCODE_GIT_DENY`).
    a `model` goes here too, because the TUI has no `--model` flag.
 7. Runs OpenCode in the workdir with `OZAGIA_DAEMON_SOCK`, `PWD` (OpenCode
    takes its project directory from it), `OPENCODE_CONFIG`, and with
@@ -70,6 +78,8 @@ from typing import Any, Iterator, Sequence
 from ozagia.config import config_path
 from ozagia.daemon.protocol import ENV_SOCK
 from ozagia.eval import agent as ea
+from ozagia.harness import launch_status
+from ozagia.harness.progress import NULL_PROGRESS, Progress
 from ozagia.harness.session import GraphSession, no_interrupt, run_group
 from ozagia.integrations.opencode import install as plugin
 
@@ -180,11 +190,9 @@ def mcp_server_entry(root: Path, mode: str, *, tool_python: str = sys.executable
 
 def write_opencode_config(path: Path, *, model: str | None = None,
                           mcp: dict[str, Any] | None = None) -> Path:
-    """The OPENCODE_CONFIG for one session: the eval's bash permission
-    policy, and with `mcp` the ozagia MCP server (`mcp_server_entry`)."""
+    """The OPENCODE_CONFIG for one harness session, and optional MCP server."""
     doc: dict[str, Any] = {
         "$schema": "https://opencode.ai/config.json",
-        "permission": {"bash": {"*": "allow", **{p: "deny" for p in ea.OPENCODE_GIT_DENY}}},
     }
     if model:
         doc["model"] = model
@@ -256,11 +264,21 @@ def _summary(res: dict[str, Any]) -> str:
     def yn(v: Any) -> str:
         return "unknown" if v is None else ("yes" if v else "no")
     prep = res.get("prep") or {}
+    if prep.get("action"):
+        graph = (f"{prep.get('action')} ({prep.get('nodes', '?')} nodes) in "
+                 f"{res.get('build_s')} s")
+    elif res.get("launch_error"):
+        graph = f"not ready: {res['launch_error']}"
+    else:
+        graph = "not ready (the session ended first)"
+    ready = res.get("ready_s")
+    daemon = f"daemon ready in {ready} s" if ready is not None else "daemon not ready"
+    if res.get("launch_error") and ready is None:
+        daemon = f"daemon not ready ({res['launch_error']})"
     lines = [
         f"ozagia agent: {'timed out' if res.get('timed_out') else 'exit ' + str(res['exit_code'])}"
         f" after {res['seconds']} s in {res['workdir']}",
-        f"  graph: {prep.get('action', '?')} ({prep.get('nodes', '?')} nodes) in "
-        f"{res.get('build_s')} s; daemon ready in {res.get('ready_s')} s",
+        f"  graph: {graph}; {daemon}",
         f"  plugin loaded: {yn(res.get('plugin_loaded'))}; captured calls: "
         f"{res.get('captured_calls')}; passthrough: {res.get('passthrough_calls')}; "
         f"fallbacks: {res.get('fallbacks')}",
@@ -286,19 +304,31 @@ def run_agent(workdir: str | Path, *, prompt: str | None = None, model: str | No
               timeout_s: float | None = None, extra_args: Sequence[str] = (),
               run_python: str | None = None, tool_python: str = sys.executable,
               build: str = "auto", runs_dir: str | Path | None = None,
-              quiet: bool = False, mcp_mode: str | None = None) -> dict[str, Any]:
+              quiet: bool = False, mcp_mode: str | None = None,
+              progress: Progress | None = None,
+              background: bool | None = None) -> dict[str, Any]:
     """Run one OpenCode session on `workdir` with the graph daemon and plugin
     (see the module docstring). Returns {exit_code, seconds, timed_out,
     transcript_path, stdout_path, stderr_path, daemon_stats, plugin_loaded,
     captured_calls, fallbacks, workdir, clone, run_root, log_dir, sock, prep,
     build_s, ready_s, interactive, ...}. `interactive` None means "no prompt".
     `mcp_mode` (coding, research, combined) also gives the session the ozagia
-    MCP server in that mode, e.g. the research tools."""
+    MCP server in that mode, e.g. the research tools. `progress` (a
+    `harness.progress.Progress`) sees the launch phases; it defaults to
+    silence. `background` (default: the interactive TUI; always off for a
+    non-interactive run) makes the snapshot current and starts the daemon
+    while the session runs, publishing the phases for the TUI sidebar; `False`
+    waits before OpenCode starts."""
     exe = find_opencode(opencode)
+    progress = progress if progress is not None else NULL_PROGRESS
     if mcp_mode is not None and mcp_mode not in MCP_MODES:
         raise AgentError(f"MCP mode must be one of {', '.join(MCP_MODES)}, got {mcp_mode!r}")
     if interactive is None:
         interactive = prompt is None
+    if background is None:
+        background = interactive
+    if not interactive:
+        background = False      # `opencode run` needs the daemon up front
     if not interactive and not prompt:
         raise AgentError("a non-interactive run needs a prompt")
     if base is not None and not clone:
@@ -310,6 +340,7 @@ def run_agent(workdir: str | Path, *, prompt: str | None = None, model: str | No
     run_root = ea.new_run_root(runs)
     log_dir = run_root / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
+    status_path = log_dir / "launch_status.json" if background else None
     work = source
     res: dict[str, Any] = {"exit_code": None, "seconds": 0.0, "timed_out": False,
                            "transcript_path": None, "stdout_path": None,
@@ -318,7 +349,10 @@ def run_agent(workdir: str | Path, *, prompt: str | None = None, model: str | No
                            "passthrough_calls": None, "fallbacks": None, "workdir": str(work), "source": str(source),
                            "clone": clone, "base": None, "run_root": str(run_root),
                            "log_dir": str(log_dir), "interactive": interactive,
+                           "background": background, "launch_status": (
+                               str(status_path) if status_path is not None else None),
                            "sock": None, "prep": None, "build_s": None, "ready_s": None,
+                           "launch_error": None,
                            "exclude": None, "plugin_path": None, "daemon_stop_error": None}
     with _sigterm_as_interrupt():
         if clone:
@@ -339,12 +373,19 @@ def run_agent(workdir: str | Path, *, prompt: str | None = None, model: str | No
             mcp=(mcp_server_entry(work, mcp_mode, tool_python=tool_python)
                  if mcp_mode else None))
         session = GraphSession(work, tool_python=tool_python, run_python=run_python,
-                               build=build, log_dir=log_dir, config=config_path(source))
+                               build=build, log_dir=log_dir, config=config_path(source),
+                               progress=progress, background=background,
+                               status_path=status_path)
         try:
             with session:
-                res.update(sock=str(session.sock), prep=session.prep,
-                           build_s=session.build_s, ready_s=session.ready_s,
+                res.update(sock=str(session.sock) if session.sock is not None else None,
                            daemon_pid=session.pid)
+                if background:
+                    progress.note("opencode: starting the TUI "
+                                  "(the graph builds in the background)")
+                else:
+                    progress.note("opencode: starting the TUI" if interactive
+                                  else "opencode: starting")
                 res.update(_with_plugin(exe, work, session, prompt=prompt, model=model,
                                         interactive=interactive, keep_plugin=keep_plugin,
                                         timeout_s=timeout_s, extra_args=extra_args,
@@ -356,6 +397,8 @@ def run_agent(workdir: str | Path, *, prompt: str | None = None, model: str | No
             res["daemon_stats"] = session.final_stats
             res["daemon_stop_error"] = session.stop_error
             res.update(ea.graph_stats_fields(session.final_stats))
+            res.update(prep=session.prep, build_s=session.build_s,
+                       ready_s=session.ready_s, launch_error=session.error)
             if clone and not quiet and sys.exc_info()[0] is not None:
                 print(f"ozagia agent: clone kept at {work}; remove it with: rm -rf {run_root}",
                       file=sys.stderr)
@@ -387,7 +430,10 @@ def _with_plugin(exe: str, work: Path, session: GraphSession, *, prompt: str | N
         # (the python shim first, when run_python is set).
         env = dict(os.environ, PATH=session.env.get("PATH", os.environ.get("PATH", "")))
         env.update({ENV_SOCK: str(session.sock), "PWD": str(work),
-                    "OPENCODE_CONFIG": str(config)})
+                    "OPENCODE_CONFIG": str(config),
+                    "OZAGIA_GIT_REFS_PASSTHROUGH": "1"})
+        if session.status_path is not None:
+            env[launch_status.ENV_LAUNCH_STATUS] = str(session.status_path)
         if interactive:
             argv = [exe, *TUI_ARGV, *extra_args, *(["--prompt", prompt] if prompt else []),
                     str(work)]

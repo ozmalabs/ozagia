@@ -23,6 +23,12 @@ def _untrusted_project_python(monkeypatch):
     (the shell running the suite may set the variable)."""
     monkeypatch.delenv("OZAGIA_TRUST_PROJECT_PYTHON", raising=False)
 
+
+@pytest.fixture(autouse=True)
+def _isolated_daemon_socket(monkeypatch):
+    """A developer's session socket must never become a test daemon target."""
+    monkeypatch.delenv("OZAGIA_DAEMON_SOCK", raising=False)
+
 # Module names before the extraction from Ocelot, mapped to their ozagia
 # modules. Historical sources still import the old names.
 _OLD_MODULES = {

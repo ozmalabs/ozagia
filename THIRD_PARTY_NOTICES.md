@@ -1,5 +1,13 @@
 # Third-party notices
 
+## Ozma protocol research
+
+The historical protocol specifications, documentation, selected source and
+tests under `docs/research/ozma_protocol/upstream/` were imported from the
+`ozma-ai/research` project. They are MIT licensed, copyright (c) 2026 Ozma Labs
+Pty Ltd. The complete original notice is preserved in
+`docs/research/ozma_protocol/LICENSE`.
+
 ## Ocelot
 
 The optional Ocelot reconciliation backend in

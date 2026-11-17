@@ -8,8 +8,11 @@ import pty
 import select
 import shutil
 import socket
+import socketserver
 import subprocess
 import sys
+import tempfile
+import threading
 import textwrap
 import time
 from datetime import datetime, timezone
@@ -382,6 +385,164 @@ def test_opencode_sdk_event_payloads_extract_session_and_metadata(tmp_path):
     assert persisted["tools"]["bash"]["completed"]["duration_ms_sum"] == 150
 
 
+def test_opencode_23_durable_event_payloads_extract_metadata_only(tmp_path):
+    node = shutil.which("node")
+    if not node:
+        return
+    source = Path(__file__).parents[1] / "src/ozagia/integrations/opencode/plugin.js"
+    plugin = tmp_path / "plugin.mjs"
+    plugin.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+    script = textwrap.dedent(f"""\
+        import {{ profileMetadataEvent }} from {json.dumps(plugin.as_uri())};
+        const message = profileMetadataEvent({{
+          type: "session.step.ended", created: 900,
+          data: {{sessionID: "ses-23", assistantMessageID: "msg-23",
+            tokens: {{input: 12, output: 5, reasoning: 2, cache: {{read: 3, write: 1}}}}}},
+        }});
+        const tool = profileMetadataEvent({{
+          type: "session.message.content.updated",
+          data: {{sessionID: "ses-23", messageID: "msg-23", content: [{{
+            type: "tool", id: "call-23", name: "bash", time: {{created: 200, ran: 220, completed: 350}},
+            state: {{status: "completed", input: {{secret: "no"}}, content: [{{text: "no"}}]}}
+          }}]}}
+        }});
+        console.log(JSON.stringify([message, tool]));
+    """)
+    completed = subprocess.run([node, "--input-type=module", "-e", script], capture_output=True,
+                               text=True, check=True)
+    message, tool = json.loads(completed.stdout)
+    assert message["metadata"]["tokens"]["input"] == 12
+    # Step duration is correlated from the separate started/ended events.
+    assert message["metadata"]["timing_ms"]["model_turn"] is None
+    assert tool["metadata"] == {"tool": "bash", "status": "completed", "duration_ms": 130}
+    serialized = json.dumps([message, tool])
+    assert "secret" not in serialized and '"no"' not in serialized
+
+
+def test_opencode_23_subscribes_to_supported_durable_event_types(tmp_path):
+    node = shutil.which("node")
+    if not node:
+        return
+    source = Path(__file__).parents[1] / "src/ozagia/integrations/opencode/plugin.js"
+    plugin = tmp_path / "plugin.mjs"
+    plugin.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+    script = textwrap.dedent(f"""\
+        import {{ createPlugin }} from {json.dumps(plugin.as_uri())};
+        process.env.OZAGIA_DAEMON_SOCK = "/no/daemon.sock";
+        let types;
+        const events = {{ subscribe(options) {{ types = options.types; return (async function*() {{}})(); }} }};
+        await createPlugin().setup({{ event: events }});
+        await new Promise((resolve) => setImmediate(resolve));
+        console.log(JSON.stringify(types));
+    """)
+    completed = subprocess.run([node, "--input-type=module", "-e", script], capture_output=True,
+                               text=True, check=True, timeout=10)
+    types = json.loads(completed.stdout)
+    assert "session.step.ended" in types
+    assert "session.message.content.updated" in types
+    assert "message.updated" not in types
+    assert "message.part.updated" not in types
+
+
+def test_opencode_23_event_subscription_persists_correlated_metadata_and_deduplicates(tmp_path):
+    node = shutil.which("node")
+    if not node:
+        return
+    source = Path(__file__).parents[1] / "src/ozagia/integrations/opencode/plugin.js"
+    plugin = tmp_path / "plugin.mjs"
+    plugin.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+    sockdir = Path(tempfile.mkdtemp(prefix="ozsess-"))
+    sock = sockdir / "daemon.sock"
+    responses = []
+    errors = []
+
+    class Handler(socketserver.StreamRequestHandler):
+        def handle(self):
+            try:
+                request = json.loads(self.rfile.readline())
+                if request.get("op") == "profile_event":
+                    response = store_profile_event(tmp_path, request)
+                    responses.append(response)
+                else:
+                    response = {"ok": True}
+                self.wfile.write((json.dumps({"id": request["id"], **response}) + "\n").encode())
+            except Exception as exc:  # surface fixture protocol failures in the test
+                errors.append(repr(exc))
+
+    class Server(socketserver.ThreadingUnixStreamServer):
+        daemon_threads = True
+        allow_reuse_address = True
+
+    server = Server(str(sock), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        script = textwrap.dedent(f"""\
+            import {{ createPlugin }} from {json.dumps(plugin.as_uri())};
+            process.env.OZAGIA_DAEMON_SOCK = {json.dumps(str(sock))};
+            const sessionID = "ses-opencode-23";
+            const events = [
+              {{type: "session.step.started", created: 1000, data: {{sessionID,
+                assistantMessageID: "msg-opencode-23", model: {{providerID: "vendor", id: "model-x"}}, started: 1000}}}},
+              {{type: "session.step.first-token", created: 1100, data: {{sessionID,
+                assistantMessageID: "msg-opencode-23"}}}},
+              {{type: "session.step.streamed", created: 1200, data: {{sessionID,
+                assistantMessageID: "msg-opencode-23"}}}},
+              // Actual 2.3 SessionStepEnded has no `started` field.
+              {{type: "session.step.ended", created: 1500, data: {{sessionID,
+                assistantMessageID: "msg-opencode-23", finish: "stop", cost: 0.01,
+                tokens: {{input: 21, output: 8, reasoning: 3, cache: {{read: 4, write: 2}}}}}}}},
+              {{type: "session.message.content.updated", created: 1600, data: {{sessionID,
+                messageID: "msg-opencode-23", content: [
+                  {{type: "tool", id: "call-bash", name: "bash", time: {{created: 1200, ran: 1220, completed: 1320}},
+                    state: {{status: "completed", input: {{secret: "must-not-persist"}}, content: [{{type: "text", text: "private-output"}}]}}}},
+                  {{type: "tool", id: "call-edit", name: "edit", time: {{created: 1390, ran: 1400, completed: 1450}},
+                    state: {{status: "error", input: {{secret: "must-not-persist"}}, content: [{{type: "text", text: "private-output"}}]}}}}
+                ]}}}}
+            ];
+            let drained;
+            const finished = new Promise((resolve) => {{ drained = resolve; }});
+            const keepAlive = setInterval(() => {{}}, 1000);
+            const event = {{subscribe(options) {{
+              if (!options.types.includes("session.step.ended")
+                  || !options.types.includes("session.message.content.updated")) throw new Error("wrong event filter");
+              return (async function*() {{ for (const item of [...events, ...events]) yield item; drained(); }})();
+            }}}};
+            await createPlugin().setup({{event}});
+            await finished;
+            clearInterval(keepAlive);
+            console.log("event stream drained");
+        """)
+        completed = subprocess.run([node, "--input-type=module", "-e", script], capture_output=True,
+                                   text=True, check=True, timeout=15)
+        assert "event stream drained" in completed.stdout
+        assert not errors, errors
+        assert len(responses) == 6
+        assert sum(bool(response.get("duplicate")) for response in responses) == 3
+
+        persisted = report(tmp_path)["sessions"][0]["host_profile"]
+        assert persisted["model_calls"] == 1
+        assert persisted["models"] == ["vendor/model-x"]
+        assert persisted["tokens"] == {
+            "input": 21, "output": 8, "reasoning": 3,
+            "cache_read": 4, "cache_write": 2,
+        }
+        assert persisted["timing_ms"] == {
+            "first_token": 100, "streamed": 200, "completed": 500, "model_turn": 500,
+        }
+        assert persisted["coverage"]["host_tool_calls"] == 2
+        assert persisted["tools"]["bash"]["completed"]["duration_ms_sum"] == 100
+        assert persisted["tools"]["edit"]["error"]["duration_ms_sum"] == 50
+        raw = json.dumps(persisted)
+        assert "must-not-persist" not in raw and "private-output" not in raw
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+        sock.unlink(missing_ok=True)
+        sockdir.rmdir()
+
+
 def test_store_profile_bounds_retention_and_rejects_oversized_input(tmp_path):
     for index in range(205):
         store_profile(tmp_path, {
@@ -535,7 +696,7 @@ def test_opencode_profile_sidebar_renders_in_isolated_pty_without_model(tmp_path
     assert b"OzAGIa G:" in output
     assert b"H1 P0 F0 U0" in output
     assert b"E0" in output
-    assert b"absent H1" in output  # valid degraded status JSON exits with code 1
+    assert b"down H1" in output  # daemon loss is explicit in the sidebar
 
 
 def test_opencode_profile_sidebar_shows_the_launch_phase(tmp_path):

@@ -59,6 +59,48 @@ def test_console_script_runs():
         assert name in proc.stdout
 
 
+def test_retitled_argv_names_the_process_but_keeps_the_venv():
+    exe = "/venv/bin/python"
+    assert cli._retitled_argv([exe, "/venv/bin/ozagia", "--version"], exe=exe) \
+        == ["/venv/bin/ozagia", "/venv/bin/ozagia", "--version"]
+    assert cli._retitled_argv([exe, "-I", "-m", "ozagia", "agent"], exe=exe) \
+        == ["/venv/bin/ozagia", "-I", "-m", "ozagia", "agent"]
+    assert cli._retitled_argv([exe, "-m", "ozagia.cli", "--help"], exe=exe) \
+        == ["/venv/bin/ozagia", "-m", "ozagia.cli", "--help"]
+
+
+def test_retitled_argv_ignores_other_programs():
+    exe = "/venv/bin/python"
+    assert cli._retitled_argv([exe, "-m", "pytest"], exe=exe) is None
+    assert cli._retitled_argv([exe, "/x/pytest"], exe=exe) is None
+    assert cli._retitled_argv(["/venv/bin/ozagia", "/venv/bin/ozagia"], exe=exe) is None
+    assert cli._retitled_argv([exe], exe=exe) is None
+    assert cli._retitled_argv([], exe=exe) is None
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="procfs")
+def test_retitle_process_reexecs_and_restores_the_interpreter(tmp_path):
+    """tmux reads argv[0]; CPython derives sys.executable/sys.prefix from it."""
+    script = tmp_path / "ozagia"
+    script.write_text(
+        "import sys\n"
+        "from ozagia.cli import _retitle_process\n"
+        "_retitle_process()\n"
+        "print(sys.executable)\n"
+        "print(sys.prefix)\n"
+        "with open('/proc/self/cmdline', 'rb') as f:\n"
+        "    print(f.read().split(b'\\0')[0].decode())\n",
+        encoding="utf-8")
+    proc = subprocess.run([sys.executable, str(script)],
+                          env=dict(os.environ, PYTHONPATH=str(SRC)),
+                          capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    exe, prefix, argv0 = proc.stdout.strip().splitlines()
+    assert exe == sys.executable          # restored for tool_python / subprocess
+    assert prefix == sys.prefix           # the venv is still the venv
+    assert Path(argv0) == Path(sys.executable).with_name("ozagia")
+
+
 def test_index_builds_then_refreshes(repo, capsys):
     assert cli.main(["index", "--root", str(repo)]) == 0
     out = capsys.readouterr().out
@@ -179,6 +221,7 @@ def test_install_targets_cover_the_parser_choices():
 
 def test_agent_maps_options_to_run_agent(repo, tmp_path, monkeypatch):
     from ozagia.harness import opencode as hop
+    from ozagia.harness.progress import Spinner
     seen: dict = {}
 
     def fake(workdir, **kw):
@@ -199,6 +242,9 @@ def test_agent_maps_options_to_run_agent(repo, tmp_path, monkeypatch):
     assert seen["keep_plugin"] is True and seen["timeout_s"] == 30.0
     assert seen["run_python"] == "/usr/bin/python3"
     assert seen["extra_args"] == ["--agent", "build"]
+    # Launch feedback goes to the (captured, not a terminal) stderr sink.
+    assert isinstance(seen["progress"], Spinner)
+    assert seen["progress"].enabled is False
 
 
 def test_agent_exit_codes(repo, monkeypatch, capsys):

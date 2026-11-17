@@ -193,6 +193,7 @@ def build_context(memory: Any, prompt: str, history: Iterable[str] = (), *,
                   max_history_turns: int = DEFAULT_HISTORY_TURNS,
                   results_per_query: int = DEFAULT_RESULTS_PER_QUERY,
                   single_query: bool = True,
+                  structural_tool_available: bool = False,
                   infra_share: float = 0.45,
                   infra_results: int = 6,
                   runtime_share: float = 0.2,
@@ -209,6 +210,40 @@ def build_context(memory: Any, prompt: str, history: Iterable[str] = (), *,
     tokens = max(0, int(budget_tokens))
     budget = tokens * 4
     history_list = list(history)
+    from ozagia.core.structural_intent import (
+        classify_structural_intent, structural_guidance)
+    structural_intent = classify_structural_intent(prompt)
+    if structural_intent is not None:
+        try:
+            freshness_info = memory.staleness()
+            freshness = str(freshness_info.get("freshness") or "unknown")
+        except Exception as exc:  # freshness checks must not break the caller
+            freshness_info = {"error": f"{type(exc).__name__}: {exc}"}
+            freshness = "unknown"
+        empty = {
+            "context": "", "results": [], "freshness": freshness,
+            "freshness_info": freshness_info, "queries": ["current"],
+            "truncated": False, "rendered_keys": [], "keys": [],
+            "estimated_tokens": 0, "token_estimate_method": "estimated_chars_div_4",
+            "structural_intent": structural_intent,
+            "infra": {"results": [], "edges": [], "related": [],
+                      "ambiguous": [], "matched_term_count": 0},
+            "runtime": {"items": [], "truncated": False},
+            "allocation": {"budget_chars": budget, "runtime_chars": 0,
+                           "infra_chars": 0, "code_chars": 0,
+                           "infra_share": min(1.0, max(0.0, float(infra_share)))},
+        }
+        if freshness != "fresh":
+            empty["reason"] = f"snapshot freshness is {freshness}"
+            return empty
+        if not structural_tool_available:
+            empty["reason"] = "permissioned structural tool is unavailable"
+            return empty
+        guidance = structural_guidance(structural_intent)
+        empty["context"] = guidance[:budget]
+        empty["estimated_tokens"] = (len(empty["context"]) + 3) // 4
+        empty["allocation"]["code_chars"] = len(empty["context"])
+        return empty
     result = retrieve_proactive_context(
         memory, prompt, history_list, max_chars=budget,
         max_history_turns=max_history_turns,

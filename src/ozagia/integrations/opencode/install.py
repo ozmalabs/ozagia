@@ -7,7 +7,8 @@ writes two of them:
 - `ozagia.js` -- the server plugin (a top-level file). It does nothing unless
   `OZAGIA_DAEMON_SOCK` is set in OpenCode's environment.
 - `ozagia/tui.js` -- the TUI brand plugin (in a subdirectory, the only place
-  the TUI process loads a plugin from). It renders `[ + ozAGIa ]` (green) under
+  the TUI process loads a plugin from). It renders `[ + ozAGIa ]` (green) centred
+  under
   the home-screen logo. It fails silently: if the render tree it pokes at has
   changed, it leaves the base TUI untouched.
 
@@ -26,8 +27,9 @@ plugin is a companion that has no daemon to talk to.
   runs out. A listed row proves the module imported with the right shape; it
   does not run `setup`.
 - a self-test in Node: import the file, call `setup` with a stub `ctx` and a
-  stub tool registry, and check that the six tools were replaced and took the
-  edit tool's output schema. OpenCode itself runs on Bun, so this is a proxy.
+  V2 tool editor, and check the six wrapped tools plus the permission-gated
+  read-only structural tool registration. OpenCode itself runs on Bun, so
+  this is a proxy for the host registry.
 
 CLI: `python -m ozagia.integrations.opencode install|uninstall|check --workdir W`.
 """
@@ -68,6 +70,7 @@ try {
   out.has_setup = !!plugin && typeof plugin.setup === "function";
   const schema = { kind: "string-schema" };
   const tools = {};
+  const nativeTools = {};
   for (const name of ["read", "grep", "glob", "edit", "write", "shell", "patch"]) {
     tools[name] = { name, description: name, output: name === "edit" ? schema : { kind: name },
                     execute: async () => "" };
@@ -76,15 +79,21 @@ try {
   const reg = {
     get: (name) => tools[name],
     update: (name, fn) => { const r = fn(tools[name]); if (r) tools[name] = r; },
+    namespace: () => {},
+    add: (definition) => { nativeTools[`ozagia_${definition.name}`] = definition; },
   };
   let transformed = false;
   await plugin.setup({ tool: { transform: (fn) => { transformed = true; fn(reg); },
-                               hook: () => {} } });
+                               hook: () => {} },
+                       permission: { assert: async () => {} } });
   out.transformed = transformed;
   out.replaced = Object.keys(tools).filter((k) => tools[k].execute !== original[k]);
   out.schema_swapped = ["read", "grep", "glob", "write", "shell"]
     .every((k) => tools[k].output === schema);
   out.patch_untouched = tools.patch.execute === original.patch;
+  out.native_tools = Object.keys(nativeTools);
+  out.structure_readonly = nativeTools.ozagia_structure
+    && nativeTools.ozagia_structure.options.codemode === false;
 } catch (err) {
   out.error = String((err && err.stack) || err);
 }
@@ -183,6 +192,8 @@ def self_test(path: str | Path, *, timeout: float = 60,
     doc["ok"] = bool(doc.get("imported") and doc.get("id") == PLUGIN_ID
                      and doc.get("transformed") and doc.get("schema_swapped")
                      and doc.get("patch_untouched")
+                     and doc.get("native_tools") == ["ozagia_structure"]
+                     and doc.get("structure_readonly")
                      and sorted(doc.get("replaced") or []) == sorted(REPLACED_TOOLS))
     return doc
 

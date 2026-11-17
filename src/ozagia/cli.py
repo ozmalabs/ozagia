@@ -67,11 +67,71 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any, Callable
 
 PROG = "ozagia"
+_RETITLE_ENV = "_OZAGIA_RETITLED"
+_PYTHON_ENV = "_OZAGIA_PYTHON"
+
+
+def _retitled_argv(argv: list[str],
+                   exe: str | None = None) -> list[str] | None:
+    """`argv` with argv[0] renamed to `ozagia`, or None if this is not the CLI.
+
+    The setuptools entry point and the installer's `python -I -m ozagia`
+    launcher both run the interpreter first, so `/proc/<pid>/cmdline` starts
+    with "python". tmux names a window after argv[0] of the pane's foreground
+    process group, so a plain `ozagia` shows up as "python". Re-exec with
+    argv[0]="<venv>/bin/ozagia" (setproctitle would add a C dependency to the
+    core). That path, not a bare "ozagia", keeps CPython's venv detection:
+    argv[0] is what `sys.executable` and `sys.prefix` are derived from.
+    """
+    if not argv:
+        return None
+    if exe is None:
+        exe = sys.executable
+    name = Path(exe).with_name(PROG)
+    if Path(argv[0]) in (Path(PROG), name):
+        return None
+    entry = Path(argv[1]).name if len(argv) > 1 else ""
+    module = any(argv[i] in ("-m", "--module")
+                 and argv[i + 1] in ("ozagia", "ozagia.cli")
+                 for i in range(len(argv) - 1))
+    if entry != PROG and not module:
+        return None
+    return [str(name), *argv[1:]]
+
+
+def _retitle_process() -> None:
+    """Re-exec once so tmux and ps name the process `ozagia`, not `python`."""
+    if not sys.platform.startswith("linux"):
+        return
+    if os.environ.pop(_RETITLE_ENV, None) == "1":
+        # the re-exec'd process: restore the interpreter path CPython lost
+        # when argv[0] stopped being the python binary
+        original = os.environ.pop(_PYTHON_ENV, None)
+        if original:
+            sys.executable = original
+        return
+    try:
+        raw = Path("/proc/self/cmdline").read_bytes()
+    except OSError:
+        return
+    argv = [part.decode("utf-8", "surrogateescape")
+            for part in raw.split(b"\0") if part]
+    new = _retitled_argv(argv)
+    if new is None:
+        return
+    os.environ[_RETITLE_ENV] = "1"
+    os.environ[_PYTHON_ENV] = sys.executable
+    try:
+        os.execv(sys.executable, new)
+    except OSError:
+        os.environ.pop(_RETITLE_ENV, None)
+        os.environ.pop(_PYTHON_ENV, None)
 
 
 def _version() -> str:
@@ -241,6 +301,7 @@ def _cmd_index(args: argparse.Namespace) -> int:
 
 def _cmd_agent(args: argparse.Namespace) -> int:
     from ozagia.harness.opencode import AgentError, run_agent
+    from ozagia.harness.progress import Spinner
     from ozagia.harness.session import SessionError
     prompt = args.prompt
     if args.prompt_file:
@@ -249,19 +310,26 @@ def _cmd_agent(args: argparse.Namespace) -> int:
         except OSError as exc:
             print(f"error: cannot read --prompt-file: {exc}", file=sys.stderr)
             return 2
+    # The snapshot build/refresh and the daemon start take seconds on a large
+    # repository; report them before the TUI takes the terminal.
+    progress = Spinner()
     try:
         res = run_agent(_root(args.workdir), prompt=prompt, model=args.model,
                         clone=args.clone, base=args.base, keep_plugin=args.keep_plugin,
                         timeout_s=args.timeout, extra_args=args.extra,
                         run_python=args.python, opencode=_opencode_exe(args.opencode),
-                        runs_dir=args.runs_dir, mcp_mode=args.mcp)
+                        runs_dir=args.runs_dir, mcp_mode=args.mcp, progress=progress)
     except (AgentError, SessionError) as exc:
+        progress.close()
         print(f"error: {exc}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:
+        progress.close()
         print("ozagia agent: interrupted; daemon stopped and plugin removed",
               file=sys.stderr)
         return 130
+    finally:
+        progress.close()
     if res.get("timed_out"):
         return 124
     code = res.get("exit_code")
@@ -867,7 +935,6 @@ def _cmd_preflight(args: argparse.Namespace) -> int:
 def _cmd_who(args: argparse.Namespace) -> int:
     """The sessions that edited a file, from the running daemon (which
     knows which sessions are live), else from the journals."""
-    import os
     from ozagia.config import state_path
     from ozagia.core import owners as O
     root = _root(args.root)
@@ -1381,7 +1448,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _opencode_exe(value: str | None) -> str:
-    import os
     if value == "system":
         return "opencode"
     return value or os.environ.get("OZAGIA_OPENCODE") or "opencode"
@@ -1411,6 +1477,7 @@ def _default_agent(argv: list[str]) -> list[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _retitle_process()
     argv = _default_agent(list(sys.argv[1:] if argv is None else argv))
     if argv[:2] == ["check", "iac"]:
         argv = ["iac", "check", *argv[2:]]

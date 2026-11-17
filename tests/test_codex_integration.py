@@ -15,7 +15,6 @@ from pathlib import Path
 
 import pytest
 
-from ozagia.daemon import protocol
 from ozagia.daemon.client import DaemonClient
 from ozagia.integrations.codex import hook
 
@@ -77,7 +76,11 @@ def live(tmp_path_factory):
         proc.kill()
         proc.wait(timeout=5)
         raise AssertionError(f"no ready line: {line!r}")
-    sock = protocol.socket_path(root)
+    # Resolve from this process's ready line. `socket_path()` honors the
+    # caller's OZAGIA_DAEMON_SOCK, which may point at a developer's live
+    # session because module-scoped fixtures run before function autouse
+    # fixtures sanitize the test environment.
+    sock = Path(line.removeprefix("ready ").strip())
     yield {"root": root, "proc": proc, "sock": sock}
     if proc.poll() is None:
         try:

@@ -645,6 +645,37 @@ def handle_shell(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
         res = render_shell_grep(memory, cls["pattern"], recs)
     except IntentError as e:
         raise Unhandled(str(e)) from None
+    # An explicit `grep 'def NAME'` / `grep 'class NAME'` is a high-confidence
+    # definition lookup. Keep every grep line and permission unchanged; append
+    # only a fresh, bounded graph answer with node-key read guidance.
+    try:
+        from ozagia.intent.structural import definition_hint
+        pattern = str(cls.get("pattern") or "")
+        def_search = ("^def " in pattern or "^class " in pattern
+                      or "^def \\|" in pattern or "^class \\|" in pattern)
+        matched_names = []
+        if def_search:
+            import re
+            for record in recs:
+                if not record or record[0] != ":":
+                    continue
+                found = re.match(r"\s*(?:async\s+)?(?:def|class)\s+([A-Za-z_]\w*)\b",
+                                 record[4])
+                if found and found.group(1) not in matched_names:
+                    matched_names.append(found.group(1))
+        root_path = Path(root).resolve()
+        matched_paths = sorted({Path(record[1]).resolve().relative_to(root_path).as_posix()
+                                for record in recs if record and record[0] == ":"
+                                and Path(record[1]).resolve().is_relative_to(root_path)})
+        hint, hint_keys = definition_hint(
+            memory, cls.get("pattern"), paths=matched_paths,
+            matched_names=matched_names if def_search else None)
+        if hint:
+            res["output"] += ("\n" if res.get("output") else "") + hint
+            res["keys"] = list(dict.fromkeys([*(res.get("keys") or []), *hint_keys]))
+            res["structural_hint"] = True
+    except Exception:  # noqa: BLE001 - graph augmentation never changes grep
+        pass
     res["intent"] = "shell_grep"
     return res
 

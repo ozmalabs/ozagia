@@ -141,6 +141,11 @@ def test_ops_round_trip(daemon):
         assert res["output"].split("\n")[0].endswith("pkg/mod.py, lines 1-6")
         assert "[ozagia] sym:pkg/mod.py::helper  tests: 0" in res["output"]
         assert res["meta"]["intent"] == "read_file"
+        structural = c.request("structural", input={"kind": "resolve",
+                                                     "target": "helper"})
+        assert structural["ok"] is True
+        assert "freshness" in structural["result"]
+        assert "resources" in structural["result"]
         res = c.tool("patch", {"patchText": ""})
         assert res["ok"] and res["handled"] is False
         res = c.after("shell", {"command": "true"}, "", session="ses_1")
@@ -156,6 +161,35 @@ def test_ops_round_trip(daemon):
         assert stats["uptime_s"] >= 0 and stats["max_ms"] >= stats["mean_ms"] > 0
         assert stats["lock_wait_count"] >= 1
         assert stats["lock_wait_ms_max"] >= stats["lock_wait_ms_mean"] >= 0
+
+
+def test_git_ref_commands_are_passthrough_only_for_interactive_opencode(daemon):
+    with DaemonClient(daemon["sock"], timeout=10) as c:
+        denied = c.request("tool", tool="shell",
+                           input={"command": "git switch -c task"})
+        assert denied["handled"] and denied["is_error"]
+        assert "changes git refs" in denied["output"]
+
+        preflight = c.request(
+            "tool", tool="shell", harness="opencode",
+            input={"command": "git switch -c task"},
+            git_refs_passthrough=True, preflight=True)
+        assert preflight["ok"] and preflight["handled"] is False
+        assert preflight["preflight"] is True
+        assert preflight["permission"]["action"] == "shell"
+
+        delegated = c.request(
+            "tool", tool="shell", harness="opencode",
+            input={"command": "git switch -c task"},
+            git_refs_passthrough=True)
+        assert delegated["ok"] and delegated["handled"] is False
+        assert "permission" not in delegated
+
+        # This only routes the call to OpenCode's built-in shell. The daemon
+        # still refuses the same operation when no interactive marker exists.
+        eval_call = c.request("tool", tool="shell", harness="opencode_eval",
+                              input={"command": "git commit -m x"})
+        assert eval_call["handled"] and eval_call["is_error"]
 
 
 def test_hint_round_trip_with_real_index(tmp_path):

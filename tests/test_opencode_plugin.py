@@ -62,6 +62,14 @@ const original = Object.fromEntries(Object.entries(tools).map(([k, t]) => [k, t.
 const reg = {
   get: (name) => tools[name] && { ...tools[name] },
   update: (name, fn) => { const t = { ...tools[name] }; const r = fn(t); tools[name] = r || t; },
+  list: async () => Object.entries(tools).map(([id, value]) => ({ id, ...value.options })),
+  ...(JSON.parse(process.env.HARNESS_CFG).nativeTools ? {
+    namespace: () => {},
+    add: (definition) => {
+      const name = `${definition.options.namespace}_${definition.name}`;
+      tools[name] = definition;
+    },
+  } : {}),
 };
 const plugin = cfg.timeoutMs ? mod.createPlugin({ requestTimeoutMs: cfg.timeoutMs }) : mod.default;
 const asserts = [];
@@ -81,7 +89,8 @@ const permission = cfg.permission === undefined ? undefined : {
 };
 const synthetic = [];
 const session = cfg.synthetic ? { synthetic: async (x) => { synthetic.push(x); } } : undefined;
-await plugin.setup({ tool: { transform: (fn) => fn(reg), hook: () => {} },
+await plugin.setup({ tool: { transform: (fn) => fn(reg), hook: () => {},
+                       list: () => reg.list() },
                      ...(permission ? { permission } : {}),
                      ...(session ? { session } : {}) });
 const results = [];
@@ -101,7 +110,7 @@ for (const call of cfg.calls || []) {
 await new Promise((r) => setTimeout(r, cfg.settleMs || 50));
 process.stdout.write(JSON.stringify({
   id: mod.default.id, has_setup: typeof mod.default.setup === "function",
-  results, calls, asserts, synthetic,
+  results, calls, asserts, synthetic, toolNames: Object.keys(tools),
   replaced: Object.keys(tools).filter((k) => tools[k].execute !== original[k]),
   schema_swapped: Object.fromEntries(Object.keys(tools).map((k) => [k, tools[k].output === schema])),
   descriptions: Object.fromEntries(Object.keys(tools).map((k) => [k, tools[k].description])),
@@ -260,6 +269,54 @@ def test_without_the_socket_env_nothing_is_replaced(tmp_path):
 
 
 @needs_node
+def test_native_structure_tool_is_read_permission_gated(tmp_path, daemon):
+    def script(req):
+        if req["op"] == "hello":
+            return {"ok": True}
+        if req["op"] == "structural":
+            return {"ok": True, "result": {
+                "ok": True, "kind": "callers", "target": "helper",
+                "results": [{"id": "pkg/use.py::run", "file": "pkg/use.py",
+                             "confidence": 1.0}],
+                "freshness": "fresh", "coverage": "tags 2/2 files parsed",
+                "resources": ["pkg/use.py"], "truncated": False}}
+        return _standard(req)
+
+    d = daemon(script)
+    out = _run(tmp_path, {"nativeTools": True, "permission": "allow",
+                          "calls": [{"tool": "ozagia_structure",
+                                     "input": {"kind": "callers", "target": "helper"}}]}, d.path)
+    assert out["results"][0]["ok"] is True
+    request = out["asserts"][-1]
+    assert request["action"] == "read"
+    assert request["resources"] == ["pkg/use.py"]
+    assert request["save"] == ["pkg/use.py"]
+    assert "pkg/use.py::run" in out["results"][0]["result"]["content"]
+    assert any(req["op"] == "structural" for req in d.requests)
+    hello = next(req for req in d.requests if req["op"] == "hello")
+    assert hello["tools"]["ozagia_structure"]["registered"] is True
+
+
+@needs_node
+def test_native_structure_tool_denial_withholds_graph_result(tmp_path, daemon):
+    d = daemon(lambda req: ({"ok": True} if req["op"] == "hello" else
+                            {"ok": True, "result": {"ok": True,
+                             "resources": ["pkg/use.py"], "results": []}}))
+    out = _run(tmp_path, {"nativeTools": True, "permission": "deny",
+                          "calls": [{"tool": "ozagia_structure",
+                                     "input": {"kind": "resolve", "target": "helper"}}]}, d.path)
+    assert out["results"][0]["ok"] is False
+    assert "Permission denied" in out["results"][0]["error"]
+
+
+@needs_node
+def test_native_structure_tool_is_not_registered_without_permission_api(tmp_path, daemon):
+    d = daemon()
+    out = _run(tmp_path, {"nativeTools": True}, d.path)
+    assert "ozagia_structure" not in out["toolNames"]
+
+
+@needs_node
 def test_default_export_has_the_plugin_shape(tmp_path):
     out = _run(tmp_path, {}, None)
     assert out["id"] == "ozagia" and out["has_setup"] is True
@@ -278,6 +335,61 @@ def test_handled_call_returns_the_daemon_output(tmp_path, daemon):
     assert tool["input"] == {"path": "pkg/mod.py"}
     assert tool["harness"] == "opencode" and tool["session"] == "ses_test"
     assert tool["tool"] == "read"
+
+
+@needs_node
+def test_git_ref_passthrough_marker_is_only_sent_when_harness_sets_it(
+        tmp_path, daemon, monkeypatch):
+    d = daemon()
+    monkeypatch.delenv("OZAGIA_GIT_REFS_PASSTHROUGH", raising=False)
+    _run(tmp_path, {"calls": [{"tool": "shell", "input": {
+        "command": "git switch -c task"}}]}, d.path)
+    request = next(r for r in d.requests if r["op"] == "tool")
+    assert request["git_refs_passthrough"] is False
+
+    monkeypatch.setenv("OZAGIA_GIT_REFS_PASSTHROUGH", "1")
+    _run(tmp_path, {"calls": [{"tool": "shell", "input": {
+        "command": "git commit -m task"}}]}, d.path)
+    request = [r for r in d.requests if r["op"] == "tool"][-1]
+    assert request["git_refs_passthrough"] is True
+
+
+@needs_node
+def test_passthrough_shell_uses_host_permission_before_builtin(tmp_path, daemon):
+    def preflight(req):
+        if req["op"] == "tool" and req.get("preflight"):
+            return {"ok": True, "handled": False, "preflight": True,
+                    "permission": {"action": "shell",
+                                   "resources": ["git switch -c task"],
+                                   "save": ["git switch -c task"]}}
+        if req["op"] == "tool":
+            return {"ok": True, "handled": False}
+        return _standard(req)
+
+    d = daemon(preflight)
+    out = _run(tmp_path, {"calls": [{"tool": "shell", "input": {
+        "command": "git switch -c task"}}], "permission": "allow"}, d.path)
+    assert [r.get("preflight") for r in d.requests if r["op"] == "tool"] == [True, None]
+    assert out["asserts"][0]["action"] == "shell"
+    assert out["calls"] == [["shell", {"command": "git switch -c task"}]]
+
+
+@needs_node
+def test_harness_uses_its_fixture_socket_when_host_socket_is_inherited(
+    tmp_path, daemon, monkeypatch,
+):
+    d = daemon()
+    host_socket = tmp_path / "host-daemon.sock"
+    host_daemon = StubDaemon(host_socket, _standard)
+    monkeypatch.setenv("OZAGIA_DAEMON_SOCK", str(host_socket))
+    try:
+        out = _run(tmp_path, {"calls": [READ]}, d.path)
+        assert out["results"][0]["result"]["output"] == "GRAPH read"
+        assert host_daemon.thread.is_alive()
+        assert not host_daemon.requests
+        assert any(req["op"] == "tool" for req in d.requests)
+    finally:
+        host_daemon.close()
 
 
 @needs_node
@@ -446,7 +558,10 @@ def test_a_slow_call_does_not_queue_the_next(tmp_path, daemon):
     d = daemon(script)
     (tmp_path / "plugin.mjs").write_text(oc.plugin_source(), encoding="utf-8")
     (tmp_path / "par.mjs").write_text(PARALLEL, encoding="utf-8")
-    env = dict(os.environ, OZAGIA_DAEMON_SOCK=str(d.path))
+    # Never inherit the developer's live daemon socket into a test process.
+    env = dict(os.environ)
+    env.pop("OZAGIA_DAEMON_SOCK", None)
+    env["OZAGIA_DAEMON_SOCK"] = str(d.path)
     proc = subprocess.run([NODE, str(tmp_path / "par.mjs")], cwd=tmp_path, env=env,
                           capture_output=True, text=True, timeout=60,
                           stdin=subprocess.DEVNULL)
@@ -559,6 +674,8 @@ def test_self_test_passes_on_the_packaged_plugin(tmp_path):
     res = oc.self_test(oc.install(tmp_path))
     assert res["ok"] is True, res
     assert sorted(res["replaced"]) == sorted(oc.REPLACED_TOOLS)
+    assert res["native_tools"] == ["ozagia_structure"]
+    assert res["structure_readonly"] is True
 
 
 def test_cli_install_and_uninstall(tmp_path, capsys):
@@ -585,9 +702,11 @@ def test_real_opencode_lists_the_installed_plugin(tmp_path):
 # --------------------------------------------------------------------------- #
 # The brand plugin borrows the text renderable's class from a live node and
 # pokes at getChildren / parent / add / setPosition / setPositionType, so the
-# stub implements exactly that surface. The logo is 3 rows x 12 cells (y=6..8,
-# x=21..32); >= 10 cells in a row counts as a "main" logo row, so the brand
-# must land at (minX, mainMaxY+1) = (21, 9), one row below the logo.
+# stub implements exactly that surface. Geometry comes from STUB_* env vars so
+# the same harness covers a compact left-aligned logo, a centred logo on a big
+# terminal, and an offset container. The default logo is 3 rows x 12 cells
+# (y=6..8, x=21..32), as wide as the brand, so the centred brand lands at
+# (minX, mainMaxY+1) = (21, 9).
 TUI_BRAND_STUB = r"""
 const mod = await import(new URL("file://" + process.argv[1]).href);
 const plugin = mod.default;
@@ -598,6 +717,8 @@ class Node {
     this.id = opts.id || "";
     this.x = opts.x ?? 0;
     this.y = opts.y ?? 0;
+    this.width = opts.width;
+    this.height = opts.height;
     this.parent = null;
     this._children = [];
     this._isDestroyed = false;
@@ -615,12 +736,21 @@ class TextCell extends Node {
 }
 class Textarea extends Node {}
 
+const num = (name, dflt) => process.env[name] === undefined ? dflt : Number(process.env[name]);
+const logoX = num("STUB_LOGO_X", 21), logoY = num("STUB_LOGO_Y", 6);
+const logoRows = num("STUB_LOGO_ROWS", 3), logoCells = num("STUB_LOGO_CELLS", 12);
+
 const out = { id: plugin && plugin.id, has_setup: typeof plugin.setup === "function" };
 const root = new Node(null, { id: "__root__" });
-const container = new Node(null, { id: "box-6" });
+const container = new Node(null, {
+  id: "box-6",
+  x: num("STUB_CONTAINER_X", 0), y: num("STUB_CONTAINER_Y", 0),
+  width: num("STUB_CONTAINER_WIDTH", 0) || undefined,
+  height: num("STUB_CONTAINER_HEIGHT", 0) || undefined,
+});
 root.add(container);
-for (let y = 6; y <= 8; y++)
-  for (let x = 21; x < 33; x++)
+for (let y = logoY; y < logoY + logoRows; y++)
+  for (let x = logoX; x < logoX + logoCells; x++)
     container.add(new TextCell(null, { id: "text-" + x + "-" + y, x, y }));
 container.add(new Textarea(null, { id: "textarea-1" }));
 
@@ -645,16 +775,21 @@ process.exit(0);
 """
 
 
-@needs_node
-def test_tui_brand_stub_injects_under_the_logo(tmp_path):
+def _run_brand_stub(tmp_path, **geometry):
     (tmp_path / "tui_brand.mjs").write_text(oc.tui_brand_source(), encoding="utf-8")
+    env = dict(os.environ, **{k: str(v) for k, v in geometry.items()})
     # cwd=tmp_path keeps the plugin's `.opencode/ozagia-brand.log` (written to
     # process.cwd()) out of the repository root.
     proc = subprocess.run([NODE, "--input-type=module", "-e", TUI_BRAND_STUB,
                            str(tmp_path / "tui_brand.mjs")],
                           cwd=str(tmp_path), capture_output=True, text=True,
-                          timeout=30, stdin=subprocess.DEVNULL)
-    doc = json.loads(proc.stdout.strip().splitlines()[-1])
+                          timeout=30, stdin=subprocess.DEVNULL, env=env)
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+@needs_node
+def test_tui_brand_stub_injects_under_the_logo(tmp_path):
+    doc = _run_brand_stub(tmp_path)
     assert doc["has_setup"] is True
     assert doc["id"] == oc.TUI_BRAND_ID
     assert "error" not in doc, doc
@@ -668,34 +803,84 @@ def test_tui_brand_stub_injects_under_the_logo(tmp_path):
     assert doc["brand_removed"] is True                      # cleanup detaches it
 
 
+@needs_node
+def test_tui_brand_stub_finds_a_centred_logo_on_a_large_terminal(tmp_path):
+    """The 2.3 home layout centres a 39-cell logo; at 297x90 it sits at (129, 39).
+
+    The 12-cell brand is centred under it, 13 cells in: (142, 43).
+    """
+    doc = _run_brand_stub(tmp_path,
+                          STUB_CONTAINER_WIDTH=297, STUB_CONTAINER_HEIGHT=87,
+                          STUB_LOGO_X=129, STUB_LOGO_Y=39,
+                          STUB_LOGO_ROWS=4, STUB_LOGO_CELLS=39)
+    assert "error" not in doc, doc
+    assert doc["brand_present"] is True, doc
+    calls = {name: arg for name, arg in doc["calls"]}
+    assert calls["setPosition"] == {"left": 142, "top": 43}
+
+
+@needs_node
+def test_tui_brand_stub_positions_relative_to_an_offset_container(tmp_path):
+    doc = _run_brand_stub(tmp_path,
+                          STUB_CONTAINER_X=10, STUB_CONTAINER_Y=20,
+                          STUB_CONTAINER_WIDTH=120, STUB_CONTAINER_HEIGHT=40,
+                          STUB_LOGO_X=51, STUB_LOGO_Y=25,
+                          STUB_LOGO_ROWS=4, STUB_LOGO_CELLS=39)
+    assert "error" not in doc, doc
+    assert doc["brand_present"] is True, doc
+    calls = {name: arg for name, arg in doc["calls"]}
+    # absolute 51 + 13 = 64, minus the container's x=10; top 29 - 20.
+    assert calls["setPosition"] == {"left": 54, "top": 9}
+
+
+@needs_node
+def test_tui_brand_stub_ignores_uncentred_text_rows(tmp_path):
+    """A transcript that stacks cell-sized text nodes is not the home logo."""
+    doc = _run_brand_stub(tmp_path,
+                          STUB_CONTAINER_WIDTH=120, STUB_CONTAINER_HEIGHT=40,
+                          STUB_LOGO_X=20, STUB_LOGO_Y=6,
+                          STUB_LOGO_ROWS=3, STUB_LOGO_CELLS=12)
+    assert "error" not in doc, doc
+    assert doc["brand_present"] is False, doc
+
+
 @pytest.mark.skipif(shutil.which("opencode") is None, reason="opencode not installed")
-def test_tui_brand_renders_under_the_logo_in_a_real_pty(tmp_path):
+@pytest.mark.parametrize("rows,cols", [(24, 80), (40, 120)])
+def test_tui_brand_renders_under_the_logo_in_a_real_pty(tmp_path, rows, cols):
     """The real OpenCode TUI paints `[ + ozAGIa ]` under the home-screen logo.
 
     Runs `opencode` in a headless PTY in a workdir with the brand plugin
     installed, lets the home screen (and the plugin's first injection) render,
-    then checks the captured stream. This is a TUI render check, not a model
-    call, so it needs no live-model approval -- only the `opencode` binary.
+    then checks the captured stream. The small and large sizes cover both logo
+    positions: at 80x24 the 39-cell logo spans x=21..59 and the 12-cell brand
+    starts 13 cells in at (34, 10); at 120x40 the logo spans x=41..79 and the
+    brand is at (54, 18). This is a TUI render check, not a model call, so it
+    needs no live-model approval -- only the `opencode` binary.
     """
     work = tmp_path / "w"
     work.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=work, check=True)
     oc.install(work)
-    env = dict(os.environ, TERM="xterm-256color", COLUMNS="80", LINES="24")
+    env = dict(os.environ, TERM="xterm-256color", COLUMNS=str(cols), LINES=str(rows))
     try:
-        proc = subprocess.run(["script", "-qec", "opencode", "/dev/null"],
-                              cwd=work, capture_output=True, timeout=15, env=env)
+        proc = subprocess.run(
+            ["script", "-qec", f"stty rows {rows} cols {cols}; opencode", "/dev/null"],
+            cwd=work, capture_output=True, timeout=15, env=env)
         data = proc.stdout.decode("utf-8", "replace")
     except subprocess.TimeoutExpired as e:
         data = (e.stdout or b"").decode("utf-8", "replace")
     assert "ozAGIa" in data
-    # The plugin fails silently: it must not log a hard failure.
+    # The brand fails silently: it must not log a hard failure.
     brand_log = work / ".opencode" / "ozagia-brand.log"
-    if brand_log.is_file():
-        hard = [ln for ln in brand_log.read_text(encoding="utf-8").splitlines()
-                if ln.startswith(("construct failed", "inject failed",
-                                  "reposition failed", "tick:"))]
-        assert not hard, hard
+    assert brand_log.is_file(), "the brand plugin never logged its setup"
+    text = brand_log.read_text(encoding="utf-8")
+    hard = [ln for ln in text.splitlines()
+            if ln.startswith(("construct failed", "inject failed",
+                              "reposition failed", "tick:"))]
+    assert not hard, hard
+    # Centred under the 39-cell logo: 13 cells in from its left edge.
+    injected = "(34,10)" if cols == 80 else "(54,18)"
+    assert f"injected at {injected}" in text, text
 
 
 # --------------------------------------------------------------------------- #

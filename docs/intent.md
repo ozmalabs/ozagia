@@ -904,6 +904,35 @@ call to the built-in, which asks for itself. The plugin then sends `after`
 with `meta.fallback: "permission: ..."`. A passthrough is asked once, by the built-in. A refusal (ref-moving
 git) or a tool error from preflight asks nothing, since it changes nothing.
 
+### Direct structural queries
+
+When OpenCode exposes `ctx.permission.assert`, the plugin registers the
+read-only `ozagia_structure` tool. It supports `resolve`, `callers`,
+`callees`, `tests`, and `outline` requests against the existing graph
+services. `outline` takes a repository file/symbol key or `repo`; a module
+file outline contains signatures and related tests, while `repo` returns a
+ranked repo map. The daemon withholds results for stale or unverifiable
+snapshots and reports tag or snapshot coverage, syntactic confidence, and
+truncation. Every cited path is passed to OpenCode's `read` permission check
+before the tool returns. If the host has no permission assertion API, the
+direct tool is not registered.
+
+At turn start, the context hook recognizes explicit questions such as “who
+calls `parse_config`?”, “which tests cover `parse_config`?”, and “public API
+of `src/pkg/mod.py`?”. On a fresh snapshot, and only after the plugin verifies
+the tool in OpenCode's active catalog, it adds a short instruction to call
+`ozagia_structure` with the operation and user-supplied target. It does not
+retrieve graph rows, source, or file paths at prompt time, where no read
+permission can be requested. Stale snapshots or a missing tool produce no
+structural prompt context.
+
+Shell grep also appends a small structural lookup for explicit Python
+definition patterns (including `grep -n '^def \\|^class ' ...`). It resolves
+only definitions in files that actually matched the command, so graph context
+cannot disclose an out-of-scope file. The grep source records and the original
+shell permission request remain intact. Other grep/sed patterns keep their
+normal captured or built-in behavior.
+
 ## Known limits
 
 - The shell resources come from ozagia's own split of the command

@@ -25,6 +25,15 @@ On enter:
    not print `ready` within `eval.agent.DAEMON_READY_TIMEOUT_S` is killed and
    `SessionError` is raised.
 
+With `background`, enter returns before either step: the daemon's socket path
+is reserved and both run in a thread, so `sock` names the daemon's future
+socket and `status_path` (a `harness.launch_status` document) receives
+`preparing`, the prep process's `building`/`refreshing`, then
+`daemon`/`ready`/`failed`. `prep`, `build_s`, `ready_s` and `daemon` fill in
+when the work finishes, and `close` cancels a preparation whose daemon has not
+started (it kills the prep process). The TUI uses this: it can start at once
+and show the phase in its sidebar.
+
 On exit (also after an exception or Ctrl-C): `stats` is recorded in
 `final_stats`, `shutdown` is sent (the daemon writes the snapshot), the
 process group is killed if it is still alive, and the socket is removed.
@@ -38,6 +47,11 @@ Subprocesses get `OZAGIA_ROOT=root`, `PYTHONDONTWRITEBYTECODE=1`, no inherited
 With `run_python`, a `bin/` shim under `log_dir` whose `python` is
 `run_python` goes first on the daemon's PATH (the daemon runs the agent's
 shell commands).
+
+With `progress`, enter reports each phase to it (`step` while the snapshot is
+made current, then the result; the same for the daemon) so a launch that
+takes seconds is not silent. `ozagia agent` passes a `progress.Spinner`; the
+default is silent.
 """
 from __future__ import annotations
 
@@ -51,24 +65,40 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 import ozagia
 from ozagia.config import ENV_STATE_DIR, state_path
 from ozagia.eval import agent as ea
+from ozagia.harness import launch_status
+from ozagia.harness.progress import NULL_PROGRESS, Progress
 
 BUILD_MODES = ("auto", "always", "never")
 DAEMON_JOURNAL = "daemon_journal.jsonl"
+# Seconds `close` waits for a backgrounded snapshot preparation to stop.
+CLOSE_JOIN_S = 10.0
 
-# argv: root, dump, mode. Prints one JSON line, the report.
+# argv: root, dump, mode, status path ("" for none). Prints one JSON line,
+# the report, and writes the launch phases to the status file when one is
+# given (read by the TUI sidebar; see ozagia.harness.launch_status).
 _PREP_CODE = r"""
 import json, sys, time
 from pathlib import Path
 root, dump, mode = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
+status = Path(sys.argv[4]) if len(sys.argv) > 4 and sys.argv[4] else None
+if status is not None:
+    from ozagia.harness.launch_status import write as write_status
+
+    def note(phase, **fields):
+        write_status(status, phase=phase, **fields)
+else:
+    def note(*args, **kwargs):
+        pass
 from ozagia.core.memory import DevMemory, build_index
 t0 = time.monotonic()
 
 def built(reason):
+    note("building", detail=reason)
     r = build_index(root, dump)
     return {"action": "built", "reason": reason, "nodes": r["nodes"],
             "edges": r["edges"], "types": r["types"]}
@@ -89,6 +119,7 @@ else:
     elif mem.version < 2 or st["root_mismatch"]:
         out = built("snapshot cannot be refreshed (version 1 or another root)")
     else:
+        note("refreshing")
         delta = mem.refresh()
         after = mem.staleness()
         unhandled = mem.unhandled_changes() if after["stale"] else []
@@ -151,37 +182,60 @@ def tool_env(root: str | Path, *, tool_python: str, config: str | Path | None = 
 
 
 def run_group(argv: list[str], *, cwd: str | Path, env: dict[str, str],
-              timeout_s: float | None, stdout: Any, stderr: Any) -> dict[str, Any]:
+              timeout_s: float | None, stdout: Any, stderr: Any,
+              cancel: threading.Event | None = None) -> dict[str, Any]:
     """Run argv in its own session and process group; stdin is /dev/null.
 
     The group is killed (SIGTERM, then SIGKILL after `KILL_GRACE_S`) on
-    timeout, on any exception including KeyboardInterrupt (then re-raised),
-    and after a normal exit if members are left. Returns {returncode,
-    timed_out, seconds}; returncode is None after a timeout."""
+    timeout, on `cancel`, on any exception including KeyboardInterrupt (then
+    re-raised), and after a normal exit if members are left. Returns
+    {returncode, timed_out, cancelled, seconds}; returncode is None after a
+    timeout or a cancellation."""
     started = time.monotonic()
     env = dict(env, PWD=str(Path(cwd).resolve()))
     proc = subprocess.Popen(argv, cwd=str(cwd), env=env, stdin=subprocess.DEVNULL,
                             stdout=stdout, stderr=stderr, start_new_session=True)
-    timed_out = False
+    timed_out = cancelled = False
+    code: int | None = None
     try:
-        code: int | None = proc.wait(timeout=timeout_s)
+        if cancel is None:
+            code = proc.wait(timeout=timeout_s)
+        else:
+            deadline = started + timeout_s if timeout_s is not None else None
+            while True:
+                try:
+                    code = proc.wait(timeout=0.1)
+                    break
+                except subprocess.TimeoutExpired:
+                    if cancel.is_set():
+                        cancelled = True
+                        break
+                    if deadline is not None and time.monotonic() >= deadline:
+                        timed_out = True
+                        break
     except subprocess.TimeoutExpired:
-        timed_out, code = True, None
+        timed_out = True
     except BaseException:
         with no_interrupt():
             ea._kill_group(proc)
         raise
     ea._kill_group(proc)
-    return {"returncode": code, "timed_out": timed_out,
+    return {"returncode": code, "timed_out": timed_out, "cancelled": cancelled,
             "seconds": round(time.monotonic() - started, 3)}
 
 
 def prepare_snapshot(root: str | Path, dump: str | Path, *, build: str = "auto",
                      tool_python: str = sys.executable, env: dict[str, str] | None = None,
                      log_dir: str | Path | None = None,
-                     timeout_s: float = ea.PREP_TIMEOUT_S) -> dict[str, Any]:
+                     timeout_s: float = ea.PREP_TIMEOUT_S,
+                     cancel: threading.Event | None = None,
+                     status_path: str | Path | None = None) -> dict[str, Any]:
     """Build or refresh the snapshot (see module docstring). Returns the report:
-    {action: built|refreshed|fresh|stale, nodes, edges, seconds, dump, ...}."""
+    {action: built|refreshed|fresh|stale, nodes, edges, seconds, dump, ...}.
+
+    `cancel` kills the prep process and its group; `status_path` is the
+    launch status file the prep process writes `building`/`refreshing` to
+    (see `harness.launch_status`)."""
     if build not in BUILD_MODES:
         raise SessionError(f"build must be one of {', '.join(BUILD_MODES)}, not {build!r}")
     root = Path(root).resolve()
@@ -191,9 +245,11 @@ def prepare_snapshot(root: str | Path, dump: str | Path, *, build: str = "auto",
         logs = Path(log_dir) if log_dir else Path(tmp)
         logs.mkdir(parents=True, exist_ok=True)
         out_p, err_p = logs / "prep.stdout.txt", logs / "prep.stderr.txt"
+        argv = [tool_python, "-c", _PREP_CODE, str(root), str(dump), build,
+                str(status_path) if status_path is not None else ""]
         with out_p.open("w", encoding="utf-8") as out, err_p.open("w", encoding="utf-8") as err:
-            res = run_group([tool_python, "-c", _PREP_CODE, str(root), str(dump), build],
-                            cwd=root, env=env, timeout_s=timeout_s, stdout=out, stderr=err)
+            res = run_group(argv, cwd=root, env=env, timeout_s=timeout_s,
+                            stdout=out, stderr=err, cancel=cancel)
         stdout = out_p.read_text(encoding="utf-8", errors="replace")
         stderr = err_p.read_text(encoding="utf-8", errors="replace")
     report: dict[str, Any] = {}
@@ -204,6 +260,8 @@ def prepare_snapshot(root: str | Path, dump: str | Path, *, build: str = "auto",
             except ValueError:
                 pass
             break
+    if res.get("cancelled"):
+        raise SessionError(f"snapshot preparation cancelled for {root}")
     if res["timed_out"]:
         raise SessionError(f"snapshot preparation timed out after {timeout_s} s")
     if res["returncode"] != 0 or "error" in report or "action" not in report:
@@ -221,15 +279,20 @@ def _daemon_argv(tool_python: str, root: Path, dump: Path, journal: Path,
 
 
 def start_daemon(root: Path, dump: Path, log_dir: Path, *, tool_python: str,
-                 env: dict[str, str]) -> tuple[ea.GraphDaemon, float]:
-    """Start the daemon on a fresh socket and wait for `ready`.
+                 env: dict[str, str],
+                 sock: str | Path | None = None,
+                 cancel: threading.Event | None = None) -> tuple[ea.GraphDaemon, float]:
+    """Start the daemon and wait for `ready`.
 
     Like `eval.agent.start_daemon`, which fixes the snapshot at
-    `<log_dir>/dev_graph.json`; this one serves `dump`. Returns (daemon,
-    seconds to ready); raises SessionError after killing a daemon that did
-    not get ready."""
+    `<log_dir>/dev_graph.json`; this one serves `dump`. `sock` names the
+    socket in advance, so a launch can tell the TUI where the daemon will be
+    before it is up (the default is a fresh temp path). `cancel` stops the
+    wait and kills the daemon: the launch is over. Returns (daemon, seconds
+    to ready); raises SessionError after killing a daemon that did not get
+    ready."""
     log_dir.mkdir(parents=True, exist_ok=True)
-    sock = ea._daemon_sock_path()
+    sock = Path(sock) if sock is not None else ea._daemon_sock_path()
     argv = _daemon_argv(tool_python, root, dump, log_dir / DAEMON_JOURNAL, sock)
     env = dict(env, PWD=str(root))
     started = time.monotonic()
@@ -260,11 +323,15 @@ def start_daemon(root: Path, dump: Path, log_dir: Path, *, tool_python: str,
 
     thread = threading.Thread(target=pump, name="ozagia-session-daemon", daemon=True)
     thread.start()
+    cancelled = False
     try:
         deadline = started + ea.DAEMON_READY_TIMEOUT_S
         while not ready.wait(0.05):
             if proc.poll() is not None:
                 ready.wait(0.5)  # let the pump read a last `ready` line, if any
+                break
+            if cancel is not None and cancel.is_set():
+                cancelled = True
                 break
             if time.monotonic() >= deadline:
                 break
@@ -277,6 +344,12 @@ def start_daemon(root: Path, dump: Path, log_dir: Path, *, tool_python: str,
     if seen.get("ready"):
         return (ea.GraphDaemon(proc, Path(seen["ready"]), thread),
                 round(time.monotonic() - started, 3))
+    if cancelled:
+        ea._kill_group(proc)
+        thread.join(timeout=ea.KILL_GRACE_S)
+        if sock.is_socket():
+            sock.unlink()
+        raise SessionError("daemon start cancelled")
     if proc.poll() is not None:
         error = (f"daemon exited before ready (exit {proc.returncode}): "
                  + ea._tail(stderr_path.read_text(encoding="utf-8", errors="replace"), 12))
@@ -289,19 +362,44 @@ def start_daemon(root: Path, dump: Path, log_dir: Path, *, tool_python: str,
     raise SessionError(f"{error.strip()} (logs: {log_dir})")
 
 
+def _prep_line(report: dict[str, Any]) -> str:
+    """One line for a snapshot report, as `ozagia index` words it."""
+    action = report.get("action", "?")
+    nodes = report.get("nodes", "?")
+    seconds = report.get("seconds")
+    spent = f" in {seconds} s" if seconds is not None else ""
+    # A build that took seconds says why: after a refresh left changes the
+    # graph cannot take in, that is the expensive part of a launch.
+    reason = report.get("reason")
+    why = f": {reason}" if reason and action == "built" else ""
+    return f"graph: {action} ({nodes} nodes){spent}{why}"
+
+
 class GraphSession:
     """A current snapshot and a running daemon for `root` (see module docstring).
 
     Attributes after enter: `sock`, `dump`, `prep` (the snapshot report),
     `build_s` (snapshot seconds), `ready_s` (daemon seconds to ready),
     `log_dir`, `env` (the tool env). After exit: `final_stats`,
-    `stop_error`."""
+    `stop_error`. `progress` (a `harness.progress.Progress`) sees the launch
+    phases; it defaults to silence.
+
+    With `background=True`, enter returns at once: the snapshot preparation
+    and daemon start run in a thread, `sock` names the daemon's future socket,
+    and `status_path` (a `harness.launch_status` document) reports the phases
+    for the TUI sidebar. `prep`, `build_s`, `ready_s` and `daemon` fill in
+    when the work finishes; `error` names a failure. `close` cancels work that
+    has not started the daemon yet.
+    """
 
     def __init__(self, root: str | Path, *, dump: str | Path | None = None,
                  state_dir: str | Path | None = None, tool_python: str = sys.executable,
                  run_python: str | None = None, build: str = "auto",
                  log_dir: str | Path | None = None,
-                 config: str | Path | None = None) -> None:
+                 config: str | Path | None = None,
+                 progress: Progress | None = None,
+                 background: bool = False,
+                 status_path: str | Path | None = None) -> None:
         if build not in BUILD_MODES:
             raise SessionError(f"build must be one of {', '.join(BUILD_MODES)}, not {build!r}")
         self.root = Path(root).resolve()
@@ -325,6 +423,12 @@ class GraphSession:
                         else Path(tempfile.mkdtemp(prefix="ozagia-session-")))
         self.env = tool_env(self.root, tool_python=tool_python, config=config,
                             state_dir=self.state_dir)
+        self.progress = progress if progress is not None else NULL_PROGRESS
+        self.background = background
+        self.status_path = Path(status_path) if status_path is not None else None
+        self.error: str | None = None
+        self._worker: threading.Thread | None = None
+        self._cancel = threading.Event()
         self.daemon: ea.GraphDaemon | None = None
         self.sock: Path | None = None
         self.prep: dict[str, Any] = {}
@@ -338,14 +442,78 @@ class GraphSession:
         if self.run_python:
             self.env["PATH"] = os.pathsep.join(
                 [str(ea.python_shim(self.log_dir, self.run_python)), self.env.get("PATH", "")])
-        self.prep = prepare_snapshot(self.root, self.dump, build=self.build,
+        if self.background:
+            return self._enter_background()
+        self.prep = self._phase(
+            f"graph: making the snapshot current for {self.root} "
+            f"(build={self.build})",
+            lambda: prepare_snapshot(self.root, self.dump, build=self.build,
                                      tool_python=self.tool_python, env=self.env,
-                                     log_dir=self.log_dir)
+                                     log_dir=self.log_dir))
         self.build_s = self.prep.get("seconds")
-        self.daemon, self.ready_s = start_daemon(self.root, self.dump, self.log_dir,
-                                                 tool_python=self.tool_python, env=self.env)
+        self.progress.note(_prep_line(self.prep))
+        self.daemon, self.ready_s = self._phase(
+            "graph daemon: starting",
+            lambda: start_daemon(self.root, self.dump, self.log_dir,
+                                 tool_python=self.tool_python, env=self.env))
+        self.progress.note(f"graph daemon: ready in {self.ready_s} s")
         self.sock = self.daemon.sock
         return self
+
+    def _enter_background(self) -> "GraphSession":
+        """Reserve the daemon socket, report `preparing`, and start the worker.
+
+        The caller gets a session at once, with a socket path the TUI can be
+        told about before the daemon exists (the plugin's calls fall back to
+        the built-ins until it does; the sidebar shows the phase).
+        """
+        self.sock = ea._daemon_sock_path()
+        self._status("preparing", root=str(self.root), pid=os.getpid(),
+                     sock=str(self.sock), started_at=time.time())
+        self._worker = threading.Thread(target=self._prepare_in_background,
+                                        name="ozagia-graph-prep", daemon=True)
+        self._worker.start()
+        return self
+
+    def _prepare_in_background(self) -> None:
+        """Make the snapshot current and start the daemon while the TUI runs."""
+        try:
+            self.prep = prepare_snapshot(self.root, self.dump, build=self.build,
+                                         tool_python=self.tool_python, env=self.env,
+                                         log_dir=self.log_dir, cancel=self._cancel,
+                                         status_path=self.status_path)
+            self.build_s = self.prep.get("seconds")
+            if self._cancel.is_set():
+                return
+            self._status("daemon", action=self.prep.get("action"),
+                         nodes=self.prep.get("nodes"), seconds=self.build_s)
+            self.daemon, self.ready_s = start_daemon(
+                self.root, self.dump, self.log_dir, tool_python=self.tool_python,
+                env=self.env, sock=self.sock, cancel=self._cancel)
+            self._status("ready", action=self.prep.get("action"),
+                         nodes=self.prep.get("nodes"), seconds=self.build_s,
+                         ready_s=self.ready_s, daemon_pid=self.pid,
+                         sock=str(self.sock))
+        except BaseException as exc:  # noqa: BLE001 - reported to the session
+            if self._cancel.is_set():
+                return
+            self.error = str(exc)
+            self._status("failed", error=self.error)
+
+    def _status(self, phase: str, **fields: Any) -> None:
+        """Publish one launch phase for the TUI sidebar (best effort)."""
+        if self.status_path is None:
+            return
+        launch_status.write(self.status_path, phase=phase, **fields)
+
+    def _phase(self, message: str, action: Callable[[], Any]) -> Any:
+        """Run `action` as one reported phase; clear the line on a failure."""
+        self.progress.step(message)
+        try:
+            return action()
+        except BaseException:
+            self.progress.close()
+            raise
 
     def __exit__(self, *exc: Any) -> None:
         self.close()
@@ -363,11 +531,18 @@ class GraphSession:
 
     def close(self) -> None:
         """Record stats, shut the daemon down, kill its group, remove the socket.
-        Idempotent."""
-        if self.daemon is None:
-            return
+        Idempotent. A background preparation that has not reached the daemon
+        is cancelled (its prep process is killed)."""
         with no_interrupt():
+            worker, self._worker = self._worker, None
+            if worker is not None:
+                self._cancel.set()
+                worker.join(timeout=CLOSE_JOIN_S)
             daemon, self.daemon = self.daemon, None
+            if daemon is None:
+                if self.sock is not None and self.sock.is_socket():
+                    self.sock.unlink()
+                return
             stopped = daemon.stop()
             self.final_stats = stopped.get("daemon_stats")
             self.stop_error = stopped.get("daemon_stop_error")

@@ -60,18 +60,26 @@ daemon failure).
    lines this run added are removed when their path is gone (the plugin's);
    the state dir's line stays while the state dir (with the snapshot) does.
 4. `GraphSession` makes the snapshot current and starts the daemon (below).
+   The interactive TUI does not wait for this: the snapshot build/refresh and
+   the daemon start run in the background while OpenCode runs, and the phases
+   go to `logs/launch_status.json` for the TUI sidebar. A non-interactive run
+   waits for both before starting `opencode run`.
 5. The plugin is written to `.opencode/plugins/ozagia.js`. A plugin file that
    was there before is overwritten unless git tracks it, and is not removed,
    except one whose content is exactly the packaged plugin: a run killed
    before its teardown left it, so it is removed like a new one.
-6. `logs/opencode_config.json` becomes `OPENCODE_CONFIG`: the eval's policy,
-   `permission.bash` with `"*": "allow"` and `deny` for `git commit*`,
-   `push*`, `stash*`, `branch*`, `checkout*`, `switch*`, `reset*`, `rebase*`,
-   `merge*`, `tag*`, `worktree*` and `git <sub>*` for every other
-   subcommand in `intent.shell.GIT_REF_MOVING` (`eval.agent.OPENCODE_GIT_DENY`).
+6. `logs/opencode_config.json` becomes `OPENCODE_CONFIG`. The harness does not
+   set a shell permission policy, so OpenCode applies the user's own approval
+   rules. Ref-moving git commands are delegated to OpenCode's built-in shell;
+   eval sessions keep their separate deny policy and the daemon's refusal.
 7. OpenCode runs in the workdir with `OZAGIA_DAEMON_SOCK`, `PWD` (OpenCode
    takes its project directory from it) and `OPENCODE_CONFIG` added to this
    process's environment, and with `--python`, the python shim first on PATH.
+   `OZAGIA_GIT_REFS_PASSTHROUGH=1` tells the plugin to let ref-moving git
+   commands reach that built-in shell, where OpenCode's permission service
+   remains authoritative.
+   The TUI also gets `OZAGIA_LAUNCH_STATUS`, the status file its sidebar
+   polls.
    - With a prompt: `opencode run --standalone --format json --auto --archived
      [-m M] [ARGS] <prompt>` in its own process group, stdin `/dev/null`,
      stdout to `logs/opencode.stdout.jsonl`, stderr to
@@ -81,7 +89,43 @@ daemon failure).
    line are removed unless `--keep-plugin`, then the daemon is stopped.
    SIGINT is held off during teardown. After a hard kill (SIGKILL) no
    teardown runs: the daemon, started with `--parent-pid`, exits by itself
-   within 2 s, and the next run removes the leftover plugin.
+   within 2 s, and the next run removes the leftover plugin. A background
+   preparation that has not reached the daemon is cancelled (its prep process
+   is killed); the summary then says `graph: not ready (the session ended
+   first)`.
+
+Interactive launch: the TUI starts at once and the sidebar (the
+`ozagia-profile` TUI plugin, `OzAGIa G:... D:...`) shows the phase until the
+snapshot is current and the daemon answers:
+
+```
+OzAGIa G:checking D:waiting 0s
+OzAGIa G:building D:waiting 4s
+OzAGIa G:ready D:starting 7s
+OzAGIa G:fresh D:ready H1 P0 F0 U0 E0 ...
+```
+
+`G:building` (or `refreshing`) comes from the prep process, which says why in
+the status document (`detail`); `failed` stays in the sidebar. While the
+daemon is not up, a tool call falls back to OpenCode's built-in tool (the
+plugin's normal degraded path), so send the first prompt after the line
+reads `ready`. A fresh snapshot reaches `ready` in well under a second; a
+first launch, or one after a change the refresh cannot reingest (a tracked
+file the build does not index, such as a plugin's `.js`), rebuilds first.
+
+A non-interactive run reports the synchronous phases on stderr, with a
+ticking frame while a phase runs (plain lines when stderr is not a terminal):
+
+```
+graph: making the snapshot current for /path/repo (build=auto) -
+graph: built (13746 nodes) in 7.2 s: stale after refresh: 1 changed file(s) refresh cannot take in
+graph daemon: starting |
+graph daemon: ready in 0.3 s
+opencode: starting
+```
+
+`run_agent(..., progress=...)` takes any `ozagia.harness.progress.Progress`;
+the library default is silent, so the eval drivers and tests are unaffected.
 
 The summary:
 
@@ -136,7 +180,11 @@ Arguments: `root`, `dump` (default `<state dir>/graph.json`), `state_dir`
 (sets `OZAGIA_STATE_DIR` for the subprocesses), `tool_python` (the
 interpreter ozagia runs in, default this one), `run_python`, `build`
 (`auto`, `always`, `never`), `log_dir` (default a new temp dir), `config`
-(becomes `OZAGIA_CONFIG`).
+(becomes `OZAGIA_CONFIG`), `progress` (a `harness.progress.Progress` for the
+launch lines; default silent), `background` (False: prepare the snapshot and
+start the daemon before returning; True: in a thread, with `sock` naming the
+future socket), `status_path` (a `harness.launch_status` document reporting
+the phases).
 
 Enter:
 
@@ -155,6 +203,14 @@ Enter:
    by itself if this process dies. No `ready` line within
    `eval.agent.DAEMON_READY_TIMEOUT_S` (120 s), or an early exit: the daemon
    is killed and `SessionError` names the reason and the log dir.
+
+With `background=True`, enter returns before both steps: `sock` is reserved
+first (so OpenCode can be told where the daemon will be), the two steps run in
+a thread, and `status_path` receives `preparing`, the prep process's
+`building`/`refreshing`, then `daemon`/`ready`/`failed`. `prep`, `build_s`,
+`ready_s` and `daemon` fill in later; `error` names a failure. `close`
+cancels a preparation that has not started the daemon (killing its prep
+process) and still stops a daemon that did start.
 
 Exit: `stats` goes to `final_stats`, `shutdown` makes the daemon write the
 snapshot, a surviving process group gets SIGTERM and then SIGKILL, and the

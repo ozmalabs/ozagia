@@ -2,7 +2,8 @@
 
 `plugin.js` is the server plugin (plain ES module, `node:` built-ins only);
 it hands built-in tool calls to the ozagia daemon. `tui_brand.js` is the TUI
-brand plugin; it renders `[ + ozAGIa ]` (green) under the home-screen logo and
+brand plugin; it renders `[ + ozAGIa ]` (green) centred under the home-screen
+logo and
 fails silently if the render tree it pokes at has changed.
 
 `install.py` copies `plugin.js` to `<workdir>/.opencode/plugins/ozagia.js` and
