@@ -604,6 +604,28 @@ def test_staleness_reports_moved_head(tmp_path: Path) -> None:
     assert "WARNING: snapshot is stale" in mem.brief()["markdown"]
 
 
+def test_forced_staleness_bypasses_but_does_not_replace_shared_memo(
+        tmp_path: Path) -> None:
+    _fixture(tmp_path)
+    _git(tmp_path, "init", "-q")
+    _commit_all(tmp_path)
+    out = tmp_path / "var" / "graph.json"
+    journal = tmp_path / "var" / "journal.jsonl"
+    build_index(tmp_path, out, include_docs="none", include_git=True)
+    mem = DevMemory(out, journal, root=tmp_path)
+
+    assert mem.staleness()["freshness"] == "fresh"
+    cached = mem._staleness_memo
+    assert cached is not None
+    _write(tmp_path / "domains" / "foo.py", "def changed():\n    return 1\n")
+
+    forced = mem.staleness(force=True)
+
+    assert forced["freshness"] == "stale"
+    assert forced["tree_changed"] is True
+    assert mem._staleness_memo is cached
+
+
 def test_staleness_marks_failed_digest_check_unknown(tmp_path: Path, monkeypatch) -> None:
     _fixture(tmp_path)
     _git(tmp_path, "init", "-q")

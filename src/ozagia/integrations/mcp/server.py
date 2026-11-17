@@ -1762,7 +1762,15 @@ class DevMemoryServer:
                 cursor=a.get("cursor"),
             )
         except (SG.SelfGraphError, K.CapabilityError, C.ContractError) as e:
-            return {"ok": False, "error": str(e)}
+            result = {"ok": False, "error": str(e)}
+            if "unknown capability" in str(e):
+                result["evidence_scope"] = {
+                    "lookup": "built_in_capability_catalogue",
+                    "repository_search_performed": False,
+                    "does_not_establish": [
+                        "repository-wide implementation absence"],
+                }
+            return result
 
     def _who(self, a: dict[str, Any]) -> Any:
         """The sessions that edited a file (`ozagia.core.owners.who`): from

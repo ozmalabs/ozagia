@@ -109,7 +109,7 @@ def retrieve_proactive_context(
     query_chars = max(0, int(max_query_chars))
     per_query = max(0, int(results_per_query))
     try:
-        freshness_info = memory.staleness()
+        freshness_info = memory.staleness(force=True)
         freshness = str(freshness_info.get("freshness") or "unknown")
     except Exception as exc:  # freshness checks must not break the caller
         freshness_info = {"error": f"{type(exc).__name__}: {exc}"}
@@ -215,7 +215,7 @@ def build_context(memory: Any, prompt: str, history: Iterable[str] = (), *,
     structural_intent = classify_structural_intent(prompt)
     if structural_intent is not None:
         try:
-            freshness_info = memory.staleness()
+            freshness_info = memory.staleness(force=True)
             freshness = str(freshness_info.get("freshness") or "unknown")
         except Exception as exc:  # freshness checks must not break the caller
             freshness_info = {"error": f"{type(exc).__name__}: {exc}"}

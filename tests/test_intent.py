@@ -831,6 +831,85 @@ def test_structural_query_routes_to_existing_fresh_graph_services(mem):
     assert "snapshot nodes" in outline["coverage"]
 
 
+def test_structural_query_forces_freshness_after_immediate_source_edit(
+        mem, repo, monkeypatch):
+    from ozagia.intent.structural import query
+
+    assert mem.staleness()["freshness"] == "fresh"
+    first = query(mem, "resolve", "helper")
+    assert first["freshness"] == "fresh"
+    assert mem._staleness_memo is not None
+
+    (repo / "pkg" / "mod.py").write_text(
+        "def renamed():\n    return 2\n", encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(mem, "symbol_graph",
+                        lambda *args, **kwargs: calls.append((args, kwargs)))
+    result = query(mem, "resolve", "renamed")
+
+    assert result["ok"] is False
+    assert result["freshness"] == "stale"
+    assert result["coverage"] == "unavailable"
+    assert result["resources"] == []
+    assert "structural results withheld" in result["error"]
+    assert calls == []
+
+
+def test_structural_query_fails_closed_when_forced_verification_is_unknown(
+        mem, monkeypatch):
+    from ozagia.intent import structural
+
+    assert mem.staleness()["freshness"] == "fresh"
+    calls = []
+    monkeypatch.setattr(M, "_tree_digest", lambda *_args, **_kwargs:
+                        (None, "fixture verification failure"))
+    monkeypatch.setattr(mem, "symbol_graph",
+                        lambda *args, **kwargs: calls.append((args, kwargs)))
+
+    result = structural.query(mem, "callers", "helper")
+
+    assert result["ok"] is False
+    assert result["freshness"] == "unknown"
+    assert result["coverage"] == "unavailable"
+    assert result["resources"] == []
+    assert calls == []
+
+
+def test_definition_hint_forces_freshness_after_immediate_source_edit(
+        mem, repo, monkeypatch):
+    from ozagia.intent.structural import definition_hint
+
+    assert mem.staleness()["freshness"] == "fresh"
+    (repo / "pkg" / "mod.py").write_text(
+        "def renamed():\n    return 2\n", encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(mem, "symbol_graph",
+                        lambda *args, **kwargs: calls.append((args, kwargs)))
+
+    hint, keys = definition_hint(mem, "def renamed")
+
+    assert "graph freshness is stale" in hint
+    assert keys == []
+    assert calls == []
+
+
+def test_structural_prompt_router_forces_freshness_after_immediate_source_edit(
+        mem, repo):
+    from ozagia.core.proactive_context import build_context
+
+    assert mem.staleness()["freshness"] == "fresh"
+    (repo / "pkg" / "mod.py").write_text(
+        "def renamed():\n    return 2\n", encoding="utf-8")
+
+    result = build_context(mem, "Who calls helper?",
+                           structural_tool_available=True)
+
+    assert result["freshness"] == "stale"
+    assert result["context"] == ""
+    assert result["results"] == []
+    assert result["reason"] == "snapshot freshness is stale"
+
+
 def test_structural_query_reports_warm_cache_reuse_not_missing_coverage(
         mem, monkeypatch):
     from ozagia.intent.structural import query

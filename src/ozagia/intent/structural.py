@@ -44,7 +44,7 @@ def definition_hint(memory: Any, pattern: Any, *, paths: list[str] | None = None
     if not names:
         return "", []
     try:
-        freshness = memory.staleness()
+        freshness = memory.staleness(force=True)
         state = str(freshness.get("freshness") or "unknown")
     except Exception:  # noqa: BLE001 - this hint is advisory
         return "", []
@@ -106,7 +106,7 @@ def query(memory: Any, kind: Any, target: Any, *, depth: Any = 1,
     if not isinstance(target, str) or not target.strip() or len(target) > 256:
         return {"ok": False, "error": "target must be a non-empty string of at most 256 characters"}
     try:
-        freshness = memory.staleness()
+        freshness = memory.staleness(force=True)
     except Exception:
         freshness = {"freshness": "unknown"}
     state = str(freshness.get("freshness") or "unknown")

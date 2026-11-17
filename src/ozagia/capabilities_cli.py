@@ -49,9 +49,13 @@ def _print(payload: Any) -> None:
     print(json.dumps(payload, indent=2, sort_keys=True, default=str))
 
 
-def _error(message: str, *, as_json: bool, code: str = "invalid_request") -> int:
+def _error(message: str, *, as_json: bool, code: str = "invalid_request",
+           evidence_scope: dict[str, Any] | None = None) -> int:
     if as_json:
-        _print({"ok": False, "code": code, "error": message})
+        result = {"ok": False, "code": code, "error": message}
+        if evidence_scope is not None:
+            result["evidence_scope"] = evidence_scope
+        _print(result)
     else:
         print(f"{PROG}: {message}", file=sys.stderr)
     return 2
@@ -169,7 +173,13 @@ def run(args: argparse.Namespace) -> int:
     except (SG.SelfGraphError, K.CapabilityError, C.ContractError) as exc:
         code = ("not_found" if "unknown capability" in str(exc)
                 else "invalid_request")
-        return _error(str(exc), as_json=bool(args.json), code=code)
+        scope = ({
+            "lookup": "built_in_capability_catalogue",
+            "repository_search_performed": False,
+            "does_not_establish": ["repository-wide implementation absence"],
+        } if code == "not_found" else None)
+        return _error(str(exc), as_json=bool(args.json), code=code,
+                      evidence_scope=scope)
     if args.json:
         _print(result)
         return 0

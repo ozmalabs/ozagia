@@ -38,7 +38,7 @@ class _Memory:
         self.freshness = freshness
         self.search_calls = 0
 
-    def staleness(self):
+    def staleness(self, *, force=False):
         return {"freshness": self.freshness}
 
     def code_search(self, *_args, **_kwargs):

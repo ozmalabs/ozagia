@@ -173,6 +173,15 @@ def test_projection_is_sorted_unique_and_hashed():
         "counts": first["audit"]["counts"],
     })
     assert first["coverage"]["exhaustive"] is False
+    coverage = first["coverage"]
+    assert coverage["counts_source"] == "generated surface inventory"
+    assert coverage["audited_observed_surfaces"] == sum(
+        count for kind, count in coverage["observed_by_kind"].items()
+        if kind in coverage["audited_surface_kinds"])
+    assert coverage["all_observed_surfaces"] == sum(
+        coverage["observed_by_kind"].values())
+    assert coverage["all_observed_surfaces"] >= coverage[
+        "audited_observed_surfaces"]
 
 
 def test_declared_surface_missing_is_a_finding_with_provenance():
@@ -479,6 +488,9 @@ def test_cli_list_show_and_audit(capsys):
     error = json.loads(capsys.readouterr().out)
     assert error["ok"] is False
     assert "unknown capability" in error["error"]
+    assert error["evidence_scope"]["lookup"] == \
+        "built_in_capability_catalogue"
+    assert error["evidence_scope"]["repository_search_performed"] is False
 
     assert cli.main(["capabilities", "audit", "--limit", "999"]) == 2
     assert "limit" in capsys.readouterr().err
@@ -543,6 +555,11 @@ def test_mcp_dev_capabilities_is_listed_and_bounded(tmp_path):
     missing_payload = json.loads(missing["result"]["content"][0]["text"])
     assert missing_payload["ok"] is False
     assert "unknown capability" in missing_payload["error"]
+    assert missing_payload["evidence_scope"] == {
+        "lookup": "built_in_capability_catalogue",
+        "repository_search_performed": False,
+        "does_not_establish": ["repository-wide implementation absence"],
+    }
 
     after = sorted(
         path.relative_to(tmp_path).as_posix()

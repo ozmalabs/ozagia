@@ -1352,6 +1352,18 @@ def _coverage(observations: Mapping[str, Any],
     return {
         "exhaustive": False,
         "audited_surface_kinds": list(REQUIRED_SURFACE_KINDS),
+        "count_semantics": (
+            "per-kind maps cover every inventory kind; audited totals include "
+            "only audited_surface_kinds"),
+        "counts_source": "generated surface inventory",
+        "audited_present_surfaces": sum(
+            count for kind, count in present_by_kind.items()
+            if kind in REQUIRED_SURFACE_KINDS),
+        "audited_observed_surfaces": sum(
+            count for kind, count in observed_by_kind.items()
+            if kind in REQUIRED_SURFACE_KINDS),
+        "all_present_surfaces": sum(present_by_kind.values()),
+        "all_observed_surfaces": sum(observed_by_kind.values()),
         "excluded_surface_kinds": {
             kind: {
                 "count": excluded[kind],

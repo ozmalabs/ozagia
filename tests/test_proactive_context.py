@@ -9,7 +9,7 @@ class Memory:
         self.freshness = freshness
         self.calls = []
 
-    def staleness(self):
+    def staleness(self, *, force=False):
         return {"freshness": self.freshness}
 
     def code_search(self, query, *, limit, include_snippet):

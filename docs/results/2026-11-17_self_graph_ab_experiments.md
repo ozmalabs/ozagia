@@ -58,6 +58,24 @@ by an unknown-duration span lost its dependency-only lower bound in `what_if`.
 The scheduler now reports the existing 500 ms lower bound while preserving the
 unknown overall makespan. All 69 critical-path and task-profile tests passed.
 
+The resumed audit found that the five-second staleness memo could label a
+structural answer fresh immediately after a tracked source edit. Structural
+queries, definition enrichment and proactive graph context now request an
+uncached freshness check; unknown and stale checks withhold graph results.
+The isolated measurement for a forced check had a 13.84 ms median on that
+fixture, compared with under 0.01 ms for a memo hit. This is a safety/latency
+tradeoff, not a broad benchmark. The integrated change passed 324 intent,
+context, memory and infrastructure tests.
+
+## Graph preparation follow-up
+
+An offline preparation follow-up measured three isolated runs: median cold
+build plus daemon readiness was 6.818 s, unchanged warm preparation 0.868 s,
+and one-file incremental refresh 1.164 s. The first lazy tag/symbol graph
+build cost a median 2.960 s outside the initial preparation measurement.
+These are fixture measurements, not end-to-end A/B results. Details are in
+`graph_intent_prep_profile_2026-11-18.md`.
+
 ## Live evaluation
 
 The general graph-intent pilot completed three paired tasks with one repetition
@@ -86,18 +104,17 @@ it should not be interpreted as proof that the cached graph had no tags.
 This pilot measures the broad graph-intent plugin, not the self-graph alone.
 The narrow self-graph comparison completed 24 sessions with no process errors,
 timeouts or recorded unsafe attempts. Its raw driver-time medians were 71.14 s
-baseline and 41.80 s with the capability MCP tool (12 sessions each), but
-answer validity and correctness are still being reviewed blind; these numbers
-are not a verified success or speedup claim. Preparation and per-task variation
-must also be included in the final comparison. The two pilots should not be
+baseline and 41.80 s with the capability MCP tool (12 sessions each). These
+numbers are descriptive, not a general speedup claim. Preparation and per-task
+variation are included in the scored report. The two pilots should not be
 combined: `graph_intent` includes additional services and graph preparation.
 
 An independent audit verified that raw model/tool/token counts reproduce the
 OpenCode event records and that the same capability CLI commands are available
 to both self-graph arms. It found that the runner's original answer extraction
 combined intermediate and final text, and that its score adapter did not gate
-timeouts, driver errors or final JSON format. Post-run scoring is being
-corrected and blinded; raw records are retained. The recorded first evidence
+timeouts, driver errors or final JSON format. Post-run final-message extraction
+and blinded scoring were performed separately; raw records are retained. The recorded first evidence
 event must not be called first *correct* evidence without independent review.
 
 At the 07:00 AEDT cutoff all 24 self-graph sessions had finished and no further
@@ -106,9 +123,26 @@ JSON-only responses; the other 15 used Markdown fences around parseable JSON.
 An independent blinded Luna review described all responses as addressing the
 task qualitatively, found no confidently critical false claim in a rapid review,
 and noted that some evidence was weak or only cited capability IDs. That is not
-a human verification or a substitute for per-assertion scoring. Raw results are
-in `/tmp/ozagia-self-graph-ab-full-cold-20261118/`; full correctness scoring
-remains incomplete. The planned expanded general A/B run was not started: an
+a human verification. After the cutoff was removed, blind per-assertion Luna
+scoring was completed before unmasking the arms. Baseline passed 12/12 sessions
+and 42/42 points; the self-graph arm passed 11/12 with one uncertain, scoring
+41/42 points. Three unsupported claim instances appeared in the self-graph arm;
+none were found in baseline. Mean setup-inclusive times were 69.3 s baseline
+and 56.7 s self-graph, with treatment faster in 9/12 pairs and a 57.2 s slower
+outlier. This is a small agent-scored pilot, not human verification or a
+general performance guarantee. Full scores, hashes and per-pair results are
+in `/tmp/ozagia-self-graph-ab-full-cold-20261118/final_report.md`.
+
+Follow-up on those unsupported claims found two ambiguity sources in actual
+MCP results: per-kind counts covered all inventory kinds while the audit covers
+only selected kinds, and a catalogue lookup miss did not explicitly distinguish
+itself from a repository-wide search. Additive metadata now identifies audited
+and all-kind totals and states the scope of an unknown-capability lookup. This
+does not establish the absence of implementations or guarantee that a model
+will interpret the information correctly. The integrated change passed 37
+self-graph/capability and 60 MCP/CLI tests.
+
+The planned expanded general A/B run was not started: an
 independent audit found that its proposed runner inherited global configuration
 and did not reliably pin subprocess imports or measurement boundaries. Those
 validity and isolation issues must be fixed before using that runner.

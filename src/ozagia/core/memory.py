@@ -2778,15 +2778,17 @@ class DevMemory:
 
     _STALENESS_TTL_S = 5.0
 
-    def staleness(self) -> dict[str, Any]:
+    def staleness(self, *, force: bool = False) -> dict[str, Any]:
         """Whether the snapshot still describes this checkout.
 
         Compares the snapshot's recorded root and HEAD with the process root
-        and `git rev-parse HEAD` now. One git call; memoised for a few seconds.
+        and `git rev-parse HEAD` now. Ordinary checks are memoised for a few
+        seconds; callers that must gate data against the current working tree
+        can force a verification that neither reads nor updates the memo.
         """
         now = time.monotonic()
         memo = self._staleness_memo
-        if memo is not None and now - memo[0] < self._STALENESS_TTL_S:
+        if not force and memo is not None and now - memo[0] < self._STALENESS_TTL_S:
             return dict(memo[1])
         repo: dict[str, Any] = {}
         for nid in self._nodes_of("Repo"):
@@ -2846,7 +2848,10 @@ class DevMemory:
             "verification_errors": verification_errors,
             "generated_at": repo.get("generated_at"),
         }
-        self._staleness_memo = (now, result)
+        # Forced checks are independent observations. Do not clear or replace
+        # the shared memo: another thread may be using its prior snapshot.
+        if not force:
+            self._staleness_memo = (now, result)
         return dict(result)
 
     def _tag_cache(self) -> Path:

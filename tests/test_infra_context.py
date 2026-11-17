@@ -19,7 +19,7 @@ class Memory:
     _in = {2: [{"src": 1, "tgt": 2, "type": "infra_selector",
                "attrs": {"provenance": "inferred"}}]}
 
-    def staleness(self):
+    def staleness(self, *, force=False):
         return {"freshness": "fresh"}
 
     def code_search(self, *args, **kwargs):
@@ -72,7 +72,7 @@ class RankMemory:
     }
     _out: dict = {}
 
-    def staleness(self):
+    def staleness(self, *, force=False):
         return {"freshness": "fresh"}
 
     def code_search(self, *args, **kwargs):
@@ -92,7 +92,7 @@ class AddressMemory:
     }
     _out: dict = {}
 
-    def staleness(self):
+    def staleness(self, *, force=False):
         return {"freshness": "fresh"}
 
     def code_search(self, *args, **kwargs):
@@ -110,7 +110,7 @@ class FamilyMemory:
     }
     _out: dict = {}
 
-    def staleness(self):
+    def staleness(self, *, force=False):
         return {"freshness": "fresh"}
 
     def code_search(self, *args, **kwargs):
@@ -128,7 +128,7 @@ class AmbiguousMemory:
     }
     _out: dict = {}
 
-    def staleness(self):
+    def staleness(self, *, force=False):
         return {"freshness": "fresh"}
 
     def code_search(self, *args, **kwargs):
@@ -188,7 +188,7 @@ class EnvironmentMemory:
         return [nid for nid, node in self.nodes.items()
                 if node.get("type") == type_name]
 
-    def staleness(self):
+    def staleness(self, *, force=False):
         return {"freshness": "fresh"}
 
     def code_search(self, *args, **kwargs):
