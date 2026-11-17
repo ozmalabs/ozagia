@@ -1,0 +1,124 @@
+{
+  "schema": "ozagia.selfgraph.scenarios.v1",
+  "description": "Offline M0 acceptance scenarios. These are data manifests for later work packages; M0 implements no projector, indexer, test runner or daemon.",
+  "status": "contract_only",
+  "scenarios": [
+    {
+      "id": "small-project",
+      "fixture": "tiny_project",
+      "purpose": "A source-only project with a package, a utility module and a check.",
+      "inputs": {"root": "tiny_project", "scope": ["src/", "tests/"]},
+      "expected": {
+        "facts": [
+          {"subject": "repo:example/tiny-project", "freshness": "unknown", "evidence": "declared"},
+          {"subject": "file:src/tiny/core.py", "freshness": "unknown", "evidence": "declared"}
+        ],
+        "readiness": {
+          "installed": true,
+          "configured": "unknown",
+          "reachable": "unknown",
+          "trusted": "unknown",
+          "permitted": "unknown"
+        }
+      }
+    },
+    {
+      "id": "indexed-sibling",
+      "fixture": "synthetic",
+      "purpose": "A second checkout of the same repo ID must be a move, not a match.",
+      "inputs": {
+        "repo": "repo:example/tiny-project",
+        "checkout_a": "checkout:example/tiny-project@aaaaaaaaaaaa",
+        "checkout_b": "checkout:example/tiny-project@bbbbbbbbbbbb"
+      },
+      "expected": {
+        "repo_identity": "same",
+        "checkout_identity": "different",
+        "report_as": "move",
+        "freshness": "stale"
+      }
+    },
+    {
+      "id": "missing-dependency",
+      "fixture": "synthetic",
+      "purpose": "A declared prerequisite that cannot be observed stays unknown, never false-success.",
+      "inputs": {
+        "capability": "cap:test.run",
+        "dimension": "installed",
+        "declared": true,
+        "observed": "absent"
+      },
+      "expected": {
+        "readiness": {"installed": false, "reachable": "unknown"},
+        "result": "not_assessed",
+        "freshness": "unknown"
+      }
+    },
+    {
+      "id": "failing-test",
+      "fixture": "tiny_project",
+      "purpose": "A failing check is evidence of failure, not evidence that the goal passed.",
+      "inputs": {
+        "mutation": "change tiny.core.add to return a - b",
+        "check": "check_core.py"
+      },
+      "expected": {
+        "result": "failed",
+        "evidence": "observed",
+        "goal_result": "failed",
+        "note": "a model assertion cannot replace the observed check"
+      }
+    },
+    {
+      "id": "stale-graph",
+      "fixture": "synthetic",
+      "purpose": "A stale parent cannot produce a current child.",
+      "inputs": {
+        "parent_freshness": "stale",
+        "child_freshness": "current"
+      },
+      "expected": {
+        "joined_freshness": "stale",
+        "result": "unknown",
+        "evidence": "inferred",
+        "note": "join_freshness never upgrades a child"
+      }
+    },
+    {
+      "id": "untrusted-tool",
+      "fixture": "synthetic",
+      "purpose": "Unknown is distinct from false and an untrusted tool is not permitted by label alone.",
+      "inputs": {
+        "capability": "cap:shell.run",
+        "trusted": "unknown",
+        "permitted": "unknown"
+      },
+      "expected": {
+        "readiness": {
+          "installed": "unknown",
+          "configured": "unknown",
+          "reachable": "unknown",
+          "trusted": "unknown",
+          "permitted": "unknown"
+        },
+        "result": "not_assessed",
+        "service_error": "unauthorized"
+      }
+    },
+    {
+      "id": "ozagia-inventory",
+      "fixture": "generated",
+      "purpose": "Ozagia's own surface inventory is generated live, not frozen as a blob.",
+      "inputs": {
+        "collector": "ozagia.core.inventory.collect_inventory",
+        "root": null
+      },
+      "expected": {
+        "deterministic": true,
+        "exhaustive": false,
+        "required_kinds": ["cli", "mcp", "daemon", "entrypoint", "settings"],
+        "coverage_note": "adapter and daemon coverage may be unknown"
+      }
+    }
+  ]
+}
