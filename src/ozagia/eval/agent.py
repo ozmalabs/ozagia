@@ -527,9 +527,81 @@ def _inside(path: str, root: Path | None) -> bool:
     return True
 
 
+BASE_GREP_TIMEOUT_S = 30
+# (repo realpath, base, top-level name) -> whether a tracked file imports it.
+_BASE_IMPORTS: dict[tuple[str, str, str], bool | None] = {}
+BASE_IMPORTS_MAX = 512
+
+
+def _import_patterns(top: str) -> list[str]:
+    """POSIX extended regexes for a line that imports ``top``."""
+    end = "([^[:alnum:]_]|$)"
+    return [
+        rf"^[[:space:]]*from[[:space:]]+{top}([[:space:].]|$)",
+        rf"^[[:space:]]*import[[:space:]]+(.*[^[:alnum:]_.])?{top}{end}",
+        rf"(import_module|__import__|importorskip)\([[:space:]]*[\"']{top}[.\"']",
+    ]
+
+
+def _read_patch(path: Path) -> str | None:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+
+def patch_adds_import(patch: str | None, module: str) -> bool:
+    """Whether a unified diff adds a line that imports the top-level name
+    of ``module`` (the `base_imports` patterns, on `+` lines)."""
+    top = str(module).split(".")[0]
+    if not patch or not top.isidentifier():
+        return False
+    pats = [re.compile(rf"^\s*from\s+{top}([\s.]|$)"),
+            re.compile(rf"^\s*import\s+(.*[^0-9A-Za-z_.])?{top}([^0-9A-Za-z_]|$)"),
+            re.compile(rf"(import_module|__import__|importorskip)\(\s*[\"']{top}[.\"']")]
+    for line in patch.splitlines():
+        if line.startswith("+") and not line.startswith("+++"):
+            text = line[1:]
+            if any(p.search(text) for p in pats):
+                return True
+    return False
+
+
+def base_imports(repo: str | Path, base: str, module: str) -> bool | None:
+    """Whether any tracked Python file at commit ``base`` of ``repo``
+    imports the top-level name of ``module``: an `import` or `from` line,
+    or `import_module`, `__import__` or `pytest.importorskip` with the
+    name as a string (`git grep` at the commit, bounded, cached per
+    repo, base and name). None when git cannot answer or the name is not
+    an identifier. Matches inside strings and comments count, so it errs
+    toward True (the import probe then decides)."""
+    top = str(module).split(".")[0]
+    if not top.isidentifier():
+        return None
+    key = (os.path.realpath(repo), str(base), top)
+    if key in _BASE_IMPORTS:
+        return _BASE_IMPORTS[key]
+    argv = ["git", "-C", str(repo), "grep", "-q", "-I", "-E"]
+    for pat in _import_patterns(top):
+        argv += ["-e", pat]
+    argv += [str(base), "--", "*.py", "*.pyi"]
+    try:
+        proc = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True,
+                              timeout=BASE_GREP_TIMEOUT_S, check=False)
+        got: bool | None = {0: True, 1: False}.get(proc.returncode)
+    except (OSError, subprocess.SubprocessError):
+        got = None
+    if len(_BASE_IMPORTS) >= BASE_IMPORTS_MAX:
+        _BASE_IMPORTS.pop(next(iter(_BASE_IMPORTS)))
+    _BASE_IMPORTS[key] = got
+    return got
+
+
 def check_validity(failure: dict[str, Any], *, base_passed: bool = False,
-                   python: str | None = None, workdir: Path | None = None
-                   ) -> dict[str, Any]:
+                   python: str | None = None, workdir: Path | None = None,
+                   repo: str | Path | None = None,
+                   base: str | None = None,
+                   break_patch: str | None = None) -> dict[str, Any]:
     """Whether a run is valid, as `{"valid", "invalid_reason",
     "validity_basis"}`. Only a `harness` or `environment` check can make a
     run invalid, and only when the agent cannot have caused it:
@@ -541,10 +613,14 @@ def check_validity(failure: dict[str, Any], *, base_passed: bool = False,
       itself is gone and lies outside the worktree. The run counts as a
       failure, with its class shown.
     - No validation (`--skip-validate`, or a report recorded before
-      validation): for `environment` with a `module`,
-      `import_probe(python, module)` decides: importable means the agent
-      broke it (a failure), not importable means the environment lacks it
-      (invalid). Without a module to probe, or for `harness`, invalid.
+      validation): for `environment` with a `module`, when ``repo`` and
+      ``base`` are given, no tracked file at ``base`` imports the module's
+      top-level name (`base_imports`) and the task's ``break_patch`` (its
+      text, when known) adds no such import (`patch_adds_import`), the
+      agent introduced the import: a failure. Otherwise `import_probe(python, module)` decides:
+      importable means the agent broke it (a failure), not importable
+      means the environment lacks it (invalid). Without a module to probe,
+      or for `harness`, invalid.
 
     A passing check is always valid."""
     cls = failure.get("class")
@@ -564,8 +640,17 @@ def check_validity(failure: dict[str, Any], *, base_passed: bool = False,
                                   "this interpreter: counted against the agent"}
     module = failure.get("module")
     if cls == "environment" and module and python:
-        got = import_probe(python, module)
         top = str(module).split(".")[0]
+        if repo is not None and base and base_imports(repo, base, top) is False \
+                and not patch_adds_import(break_patch, top):
+            return {"valid": True, "invalid_reason": None,
+                    "validity_basis": f"no validation; no tracked file at base "
+                                      f"{str(base)[:12]} imports {top}"
+                                      + (" and the break patch adds no such import"
+                                         if break_patch is not None else "")
+                                      + ": the agent introduced it, counted "
+                                        "against the agent"}
+        got = import_probe(python, module)
         if got is True:
             return {"valid": True, "invalid_reason": None,
                     "validity_basis": f"no validation, import probe: {top} imports "
@@ -697,7 +782,8 @@ def validation_summary(report: dict[str, Any] | None, *,
               for r in results if not r.get("ok")]
     return {"ran": True, "ok": bool(report.get("ok")), "tasks": len(results),
             "passed": len(results) - len(failed), "failed": failed,
-            "base": report.get("base"), "source": source or "preflight",
+            "base": report.get("base"), "base_commit": report.get("base_commit"),
+            "source": source or "preflight",
             "check_python": validation_python(report),
             "check_python_reason": report.get("check_python_reason")}
 
@@ -728,17 +814,136 @@ def _same_interpreter(a: str, b: str) -> bool:
     return os.path.abspath(a) == os.path.abspath(b)
 
 
+def resolve_base(repo: str | Path, base: str) -> str:
+    """The commit id `base` (a ref, `HEAD`, a short or full id) names in
+    `repo` now; HarnessError when it names none."""
+    proc = _git(["rev-parse", "--verify", "--quiet", f"{base}^{{commit}}"], repo,
+                check=False)
+    sha = proc.stdout.strip()
+    if proc.returncode != 0 or not sha:
+        raise HarnessError(f"base {base!r} is not a commit in {repo}")
+    return sha
+
+
+# Whether each module is found, without running it: one bounded
+# subprocess, isolated, from an empty directory outside any worktree.
+_FIND_SPECS = (
+    "import importlib.util as u, json, sys\n"
+    "out = {}\n"
+    "for m in sys.argv[1:]:\n"
+    "    try:\n"
+    "        out[m] = u.find_spec(m) is not None\n"
+    "    except Exception:\n"
+    "        out[m] = False\n"
+    "print(json.dumps(out))\n")
+
+
+def modules_found(python: str, modules: Iterable[str]) -> dict[str, bool] | None:
+    """{module: whether `python -I` finds it (`importlib.util.find_spec`, so
+    no module code runs)} for top-level identifiers, from an empty
+    temporary directory; None when the interpreter cannot be run."""
+    names = sorted({str(m).split(".")[0] for m in modules
+                    if str(m).split(".")[0].isidentifier()})
+    if not names:
+        return {}
+    tmp = tempfile.mkdtemp(prefix="ozagia_probe_")
+    try:
+        proc = subprocess.run([python, "-I", "-c", _FIND_SPECS, *names], cwd=tmp,
+                              stdin=subprocess.DEVNULL, capture_output=True,
+                              text=True, timeout=IMPORT_PROBE_TIMEOUT_S)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    try:
+        got = json.loads(proc.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return None
+    return {k: bool(v) for k, v in got.items()} if isinstance(got, dict) else None
+
+
+def check_requirements(repo: str | Path, tasks: list[dict[str, Any]],
+                       python: str) -> list[str]:
+    """The modules the checks of ``tasks`` need (`env_for` over their test
+    files, with the `-m` modules), judged for ``python`` alone; only the
+    `-m` modules when the import model cannot be read."""
+    from ozagia.core import environments as EN
+    files = list(dict.fromkeys(f for t in tasks for f in check_files(t)))
+    modules = list(dict.fromkeys(m for t in tasks for m in check_modules(t)))
+    cand = [{"path": python, "source": "check", "evidence": "the check interpreter",
+             "also": []}]
+    try:
+        doc = EN.env_for(repo, files, extra_modules=modules, cache_mode="read",
+                         candidates=cand, trust=True)
+    except (EN.EnvError, OSError):
+        return sorted({m.split(".")[0] for m in modules})
+    return list(doc["required"])
+
+
+def interpreter_state(repo: str | Path, tasks: list[dict[str, Any]],
+                      python: str) -> dict[str, Any]:
+    """What validation's verdict depends on in the check interpreter:
+    `signature` (`environments.interpreter_signature`: realpath, the
+    binary's and `pyvenv.cfg`'s mtimes, the scanned site-packages
+    directories' mtimes) and `modules` (`modules_found` for
+    `check_requirements`)."""
+    from ozagia.core import environments as EN
+    return {"signature": EN.interpreter_signature(python),
+            "modules": modules_found(python, check_requirements(repo, tasks, python))}
+
+
+def state_mismatch(state: Any, python: str) -> str | None:
+    """Why the check interpreter is no longer what a validation recorded
+    (`interpreter_state`), or None. Only stats and one `find_spec`
+    subprocess: the recorded directories are re-statted, not re-probed."""
+    from ozagia.core import environments as EN
+    if not isinstance(state, dict) or not isinstance(state.get("signature"), dict):
+        return ("the report records no check interpreter state (made before "
+                "interpreter states were recorded)")
+    sig = state["signature"]
+    dirs = sig.get("dirs") if isinstance(sig.get("dirs"), dict) else {}
+    now = EN.interpreter_signature(python, list(dirs))
+    if now != sig:
+        names = [label for k, label in (("real", "its resolved binary"),
+                                        ("mtime_ns", "its binary's mtime"),
+                                        ("cfg", "its pyvenv.cfg"))
+                 if now.get(k) != sig.get(k)]
+        names += [f"{d} (packages installed or removed)" for d in sorted(dirs)
+                  if now["dirs"].get(d) != dirs.get(d)]
+        return ("the check interpreter changed since validation: "
+                + "; ".join(names))
+    recorded = state.get("modules")
+    if isinstance(recorded, dict) and recorded:
+        want = [m for m, ok in recorded.items() if ok is True]
+        got = modules_found(python, want) if want else {}
+        if got is None:
+            return "the check interpreter cannot be run to check its modules"
+        gone = sorted(m for m in want if got.get(m) is not True)
+        if gone:
+            return ("module(s) the checks need no longer found under the check "
+                    "interpreter: " + ", ".join(gone))
+    return None
+
+
 def validation_mismatch(report: Any, *, base: str, python: str,
                         tasks: list[dict[str, Any]],
-                        tasks_dir: str | Path) -> str | None:
+                        tasks_dir: str | Path,
+                        base_commit: str | None = None) -> str | None:
     """Why a `validate_all` report cannot stand for a run with `base`,
-    `python` and `tasks`, or None when it can: the same base, the same
-    check interpreter, and every task present with the same check and
-    break patch (`task_fingerprint`, when the report has one)."""
+    `python` and `tasks`, or None when it can: the same base commit (the
+    report's `base_commit` against ``base_commit``, the run's base resolved
+    now; without it ``base`` is taken as a commit id), the same check
+    interpreter in the same state (`state_mismatch`), and every task
+    present with the same check and break patch (`task_fingerprint`, when
+    the report has one)."""
     if not isinstance(report, dict) or not isinstance(report.get("results"), list):
         return "not a `validate --out-json` report"
-    if report.get("base") != base:
-        return f"base {report.get('base')!r}, this run {base!r}"
+    want = base_commit or base
+    got = report.get("base_commit") or report.get("base")
+    if got != want:
+        shown = (f"base {report.get('base')!r} at {got}" if report.get("base_commit")
+                 else f"base {report.get('base')!r} (no commit id recorded)")
+        return f"{shown}, this run {base!r} at {want}"
     vp = validation_python(report)
     if vp is None or not _same_interpreter(vp, python):
         return f"check interpreter {vp!r}, this run {python!r}"
@@ -751,7 +956,7 @@ def validation_mismatch(report: Any, *, base: str, python: str,
                and by_id[t["id"]]["fingerprint"] != task_fingerprint(t, tasks_dir)]
     if changed:
         return "check or break patch changed since validation: " + ", ".join(sorted(changed))
-    return None
+    return state_mismatch(report.get("check_python_state"), python)
 
 
 def restrict_validation(report: dict[str, Any], task_ids: Iterable[str]) -> dict[str, Any]:
@@ -849,15 +1054,23 @@ def validate_all(repo: str | Path, tasks: list[dict[str, Any]], base: str, *,
                  python_reason: str | None = None,
                  run_root: Path | None = None, keep: bool = False) -> dict[str, Any]:
     """Validate every task. Without ``python`` the check interpreter is
-    ``default_check_python``'s choice."""
+    ``default_check_python``'s choice. ``base`` is resolved to a commit id
+    first (`base_commit`), and every task is validated at that commit. The
+    report records the check interpreter's state (`check_python_state`,
+    ``interpreter_state``), so a reused report is refused once the
+    interpreter changed (``validation_mismatch``)."""
     if python is None:
         python, python_reason = resolve_check_python(repo, tasks, None)
+    base_commit = resolve_base(repo, base)
     run_root = run_root or new_run_root()
-    results = [validate_task(repo, t, base, tasks_dir=tasks_dir, python=python,
+    results = [validate_task(repo, t, base_commit, tasks_dir=tasks_dir, python=python,
                              run_root=run_root, keep=keep) for t in tasks]
-    return {"version": 1, "base": base, "run_root": str(run_root),
+    state = interpreter_state(repo, tasks, python)
+    return {"version": 1, "base": base, "base_commit": base_commit,
+            "run_root": str(run_root),
             "check_python": python,
             "check_python_reason": python_reason or "explicit --python",
+            "check_python_state": state,
             "ok": all(r["ok"] for r in results), "results": results}
 
 
@@ -1997,7 +2210,8 @@ def run_one(repo: str | Path, task: dict[str, Any], arm: str, repeat: int,
         record.update(
             success=check["passed"],
             **check_validity(check["failure"], base_passed=base_passed,
-                             python=python, workdir=workdir),
+                             python=python, workdir=workdir, repo=repo, base=base,
+                             break_patch=_read_patch(patch)),
             **failure_fields(check["failure"]),
             **agent_test_fields(log_dir, workdir, _first_party(workdir)),
             check_returncode=check["returncode"],
@@ -2067,7 +2281,9 @@ def run_eval(repo: str | Path, tasks: list[dict[str, Any]], arms: Iterable[str],
     `validation` is the `validate_all` report for these tasks (the `run`
     preflight's, or a reused one; `validation_source` says which), None when
     validation did not run. It must match `base`, `python` and the tasks
-    (`validation_mismatch`, else HarnessError). Its tasks whose check passed
+    (`validation_mismatch`, else HarnessError): `base` is resolved to a
+    commit id (`base_commit`) once, and every run starts from that commit,
+    the one the validation must have used. Its tasks whose check passed
     on base are `validated_tasks`: for them an environment or harness check
     after the agent counts against the agent (`check_validity`). Without
     one, the import probe decides. The report records `validated`,
@@ -2085,10 +2301,12 @@ def run_eval(repo: str | Path, tasks: list[dict[str, Any]], arms: Iterable[str],
     if python is None:
         python, python_reason = resolve_check_python(repo, tasks, None)
     python_reason = python_reason or "explicit --python"
+    base_commit = resolve_base(repo, base)
     run_root = run_root or new_run_root()
     if validation is not None:
         why = validation_mismatch(validation, base=base, python=python,
-                                  tasks=tasks, tasks_dir=tasks_dir)
+                                  tasks=tasks, tasks_dir=tasks_dir,
+                                  base_commit=base_commit)
         if why:
             raise HarnessError(f"the validation report does not match this run: {why}")
         validation = restrict_validation(validation, (t["id"] for t in tasks))
@@ -2110,7 +2328,7 @@ def run_eval(repo: str | Path, tasks: list[dict[str, Any]], arms: Iterable[str],
                 want_repeat = (repeat_index and arm in timing.INDEX_ARMS
                                and not any(r.get("prep_repeat_ok") is not None
                                            for r in runs))
-                record = run_one(repo, task, arm, repeat, driver, base,
+                record = run_one(repo, task, arm, repeat, driver, base_commit,
                                  tasks_dir=tasks_dir, python=python,
                                  run_root=run_root, timeout_s=timeout_s,
                                  keep=keep, isolation=isolation,
@@ -2131,7 +2349,8 @@ def run_eval(repo: str | Path, tasks: list[dict[str, Any]], arms: Iterable[str],
     backend = describe() if callable(describe) else {"backend": driver.name,
                                                      "model": None}
     n = amortize_n(amortize, runs)
-    return {"version": 1, "base": base, "driver": driver.name,
+    return {"version": 1, "base": base, "base_commit": base_commit,
+            "driver": driver.name,
             "backend": backend,
             "total_cost_usd": round(sum(float(r.get("cost_usd") or 0)
                                         for r in runs), 6),
@@ -2195,13 +2414,16 @@ def aggregate(runs: list[dict[str, Any]], arms: Iterable[str], *,
     split them by `check_validity`, and `successes` and `success_rate`
     count the arm's valid runs. `paired_runs`, `paired_successes` and
     `paired_rate` cover only the (task, repeat) cells valid in every arm
-    (`paired_cells`), so arms compare over the same runs. The other means
-    cover every run. Each row also carries the per-component time means of
+    (`paired_cells`), so arms compare over the same runs. The time, token
+    and tool means (`mean_wall_s`, `mean_tokens_in`, ...) cover every run.
+    Each row also carries the per-component time means of
     `timing.summarize_arm` over the arm's valid runs, the same runs as
     `success_rate` (per_task_s, pay_once_s, amortized_s over `amortize`
-    tasks, default the number of tasks in `runs`), `timing_invalid_excluded`
-    (the invalid runs left out) and `per_task_all_runs_s` (per-task time
-    over every run)."""
+    tasks, default the number of tasks in `runs`; the components table),
+    `timing_invalid_excluded` (the invalid runs left out),
+    `per_task_all_runs_s` (per-task time over every run) and
+    `paired_timing` (`timing.headline_view` over the paired cells, the
+    runs of `paired_rate`: what the timing headline and its deltas use)."""
     arms = list(arms)
     cells = paired_cells(runs, arms)
     tasks_n = amortize_n(amortize, runs)
@@ -2237,13 +2459,17 @@ def aggregate(runs: list[dict[str, Any]], arms: Iterable[str], *,
             "localization_rate": round(sum(1 for r in mine if r.get("localized")) / n, 4)
             if n else None,
         })
-        # Timing covers the same runs as success_rate: the arm's valid runs.
-        # With invalid runs, per-task time over every run is kept beside it.
+        # The components table covers each arm's valid runs, the same runs
+        # as success_rate. The headline compares arms over the cells valid
+        # in every arm (`paired_timing`, the runs of paired_rate), and
+        # gives per-task time over every run beside it.
         rows[-1].update(timing.summarize_arm(valid, tasks_n, repeat))
         rows[-1]["timing_invalid_excluded"] = n - len(valid)
         rows[-1]["per_task_all_runs_s"] = (
             timing.summarize_arm(mine, tasks_n, repeat)["per_task_s"]
             if len(valid) < n else rows[-1]["per_task_s"])
+        rows[-1]["paired_timing"] = timing.headline_view(
+            timing.summarize_arm(both, tasks_n, repeat))
         if any("daemon_ok" in r for r in mine):
             rows[-1].update({
                 "mean_captured_calls": _mean((r.get("captured_calls") for r in mine), 1),
@@ -2623,7 +2849,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
     if args.validation:
         checked = _read_validation(args.validation)
         why = validation_mismatch(checked, base=base, python=python, tasks=tasks,
-                                  tasks_dir=spec["dir"])
+                                  tasks_dir=spec["dir"],
+                                  base_commit=resolve_base(args.repo, base))
         if why:
             print(f"refused: the validation report {args.validation} does not "
                   f"match this run ({why}); validate again, or pass the "
@@ -2691,7 +2918,8 @@ def read_check_log(path: Path) -> tuple[str, str, str] | None:
 
 def reclassify_run(record: dict[str, Any], log_dir: Path | None, *,
                    validated: Iterable[str] = (),
-                   repo: str | Path | None = None) -> dict[str, Any]:
+                   repo: str | Path | None = None,
+                   base: str | None = None) -> dict[str, Any]:
     """The W21 fields for a run recorded before failure classes, from its
     `check.log`: `failure_*`, `valid`, `invalid_reason`, `validity_basis`,
     the agent's last pytest, and `check_python` (the log's interpreter)
@@ -2699,7 +2927,15 @@ def reclassify_run(record: dict[str, Any], log_dir: Path | None, *,
     the record already has a class, or there is no readable check log.
     `validated`: the report's validated task ids (none in old reports, so
     the import probe decides, run now with the logged interpreter). `repo`
-    gives first-party names and the environment detail."""
+    gives first-party names and the environment detail; with `base` (a
+    commit id) too, an environment failure on a name no file at base
+    imports counts against the agent (`check_validity`; the break patch is
+    not known here).
+
+    A record without `check_returncode` whose `check.log` exists is a
+    check that timed out: the harness wrote the log after the process ran,
+    so the interpreter existed then. It is classified as a timeout, not by
+    today's filesystem (a since-deleted interpreter is not `harness`)."""
     if record.get("failure_class") is not None or log_dir is None:
         return {}
     got = read_check_log(Path(log_dir) / "check.log")
@@ -2710,14 +2946,17 @@ def reclassify_run(record: dict[str, Any], log_dir: Path | None, *,
     interpreter = record.get("check_python") or (argv[0] if argv else None)
     rc = record.get("check_returncode")
     first_party = _first_party(Path(repo)) if repo else None
-    # The record keeps no check timeout flag; a timed-out check has no
-    # exit code, which classifies as unknown or harness, not as a pass.
-    failure = F.classify(rc, False, out, err, command=argv,
+    # The record keeps no check timeout flag. A check that could not start
+    # wrote no log in the old harness, so no exit code with a log means
+    # the check ran and was killed at its timeout.
+    timed_out = rc is None
+    failure = F.classify(rc, timed_out, out, err, command=argv,
                          first_party=first_party, interpreter=interpreter,
                          root=repo, env_cache="read")
     fields: dict[str, Any] = {
         **check_validity(failure, base_passed=record.get("task") in set(validated),
-                         python=interpreter, workdir=None),
+                         python=interpreter, workdir=None,
+                         repo=repo if base else None, base=base),
         **failure_fields(failure),
         "classified_at_report": True}
     if record.get("agent_test_class") is None:
@@ -2726,6 +2965,20 @@ def reclassify_run(record: dict[str, Any], log_dir: Path | None, *,
         fields.update(check_python=interpreter,
                       check_python_reason="not recorded; read from the check log")
     return fields
+
+
+_COMMIT_ID = re.compile(r"[0-9a-f]{40}([0-9a-f]{24})?")
+
+
+def report_base_commit(report: dict[str, Any]) -> str | None:
+    """The commit a report's runs started from: `base_commit`, else `base`
+    when it is a full commit id (an old report's `HEAD` or branch name may
+    have moved since); None otherwise."""
+    got = report.get("base_commit")
+    if isinstance(got, str) and got:
+        return got
+    base = report.get("base")
+    return base if isinstance(base, str) and _COMMIT_ID.fullmatch(base) else None
 
 
 def rereport(report: dict[str, Any], *, logs_root: str | Path | None = None,
@@ -2745,13 +2998,15 @@ def rereport(report: dict[str, Any], *, logs_root: str | Path | None = None,
     arms = report.get("arms") or sorted({r.get("arm") for r in runs})
     out = dict(report)
     validated = report.get("validated_tasks") or []
+    base = report_base_commit(report)
     new_runs = []
     for r in runs:
         r = dict(r)
         log_dir = resolve_log_dir(r, logs_root)
         r["timing"] = timing.run_timing(r, log_dir)
         if not r["timing"].get("log_mismatch"):
-            r.update(reclassify_run(r, log_dir, validated=validated, repo=repo))
+            r.update(reclassify_run(r, log_dir, validated=validated, repo=repo,
+                                    base=base))
         new_runs.append(r)
     n = amortize_n(amortize, new_runs)
     out.pop("warm_index_s", None)

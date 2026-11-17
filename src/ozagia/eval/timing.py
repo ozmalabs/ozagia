@@ -912,52 +912,96 @@ def _has_hints(row: dict[str, Any]) -> bool:
     return row.get("mean_hint_in_model_s") is not None
 
 
+HEADLINE_KEYS = (
+    "per_task_s", "amortized_s", "amortize_n", "timing_runs", "timed_out_runs",
+    "timeout_tail_with_head_runs", "mean_setup_s", "setup_partial",
+    "setup_missing", "repeat_assumed_zero", "mean_model_s",
+    "mean_model_excl_hint_s", "mean_hint_in_model_s")
+
+
+def headline_view(row: dict[str, Any]) -> dict[str, Any]:
+    """The fields of a `summarize_arm` row that `headline` reads."""
+    return {k: row.get(k) for k in HEADLINE_KEYS}
+
+
+def _paired_view(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], str, int, bool]:
+    """(the rows the headline shows, the label of the runs they cover, the
+    number of cells valid in every arm when the headline uses them,
+    whether arms are compared). Arms are compared over the paired cells
+    (`paired_timing`) when some arm has valid runs outside them; when no
+    such cell has a per-task time in every arm they are shown over their
+    own valid runs, without deltas."""
+    if not all(isinstance(r.get("paired_timing"), dict) for r in rows) or \
+            all(r.get("paired_runs") == r.get("valid_runs") for r in rows):
+        return rows, "", 0, True
+    cells = int(rows[0].get("paired_runs") or 0)
+    if not cells or any(r["paired_timing"].get("per_task_s") is None for r in rows):
+        return rows, (", over each arm's own valid runs (no (task, repeat) cell "
+                      "valid in every arm has a per-task time in every arm, so "
+                      "arms are not compared)"), 0, False
+    label = (f", over the {cells} (task, repeat) cell{'s' if cells != 1 else ''} "
+             "valid in every arm")
+    return [{**r["paired_timing"], "arm": r["arm"]} for r in rows], label, cells, True
+
+
 def headline(rows: list[dict[str, Any]]) -> list[str]:
     """Per-task, model and amortized time per arm, each against the first
-    arm, with footnotes on what is unknown, partial or assumed."""
+    arm, with footnotes on what is unknown, partial or assumed. When arms
+    lose different runs to invalid checks, the figures and deltas cover
+    the (task, repeat) cells valid in every arm (`paired_timing`), and
+    each arm's own valid runs and every run are given beside them."""
     rows = [r for r in rows if r.get("per_task_s") is not None]
     if not rows:
         return []
     n = rows[0].get("amortize_n")
-    ref = rows[0]
+    view, over, cells, compare = _paired_view(rows)
+    ref = view[0]
 
     def against(row: dict[str, Any], key: str) -> str:
-        if row is ref or ref.get(key) is None or row.get(key) is None:
+        if not compare or row is ref or ref.get(key) is None or row.get(key) is None:
             return ""
         delta = row[key] - ref[key]
         return f" ({'+' if delta >= 0 else '-'}{abs(delta):.1f} s vs {ref['arm']})"
 
     per_task = ", ".join(f"{r['arm']} {_fmt(r['per_task_s'])} s{against(r, 'per_task_s')}"
-                         for r in rows)
-    lines = [f"- Per task (agent time, without setup and index): {per_task}."]
+                         for r in view)
+    lines = [f"- Per task (agent time, without setup and index){over}: {per_task}."]
+    again = (", over the same cells" if cells
+             else ", over each arm's own valid runs" if not compare else "")
     excluded = [f"{r['timing_invalid_excluded']} {r['arm']}" for r in rows
                 if r.get("timing_invalid_excluded")]
-    if excluded:
-        every = ", ".join(f"{r['arm']} {_fmt(r.get('per_task_all_runs_s'))} s"
-                          for r in rows)
+    every = ", ".join(f"{r['arm']} {_fmt(r.get('per_task_all_runs_s'))} s"
+                      for r in rows)
+    if cells:
+        own = ", ".join(f"{r['arm']} {_fmt(r['per_task_s'])} s" for r in rows)
+        lines.append(f"  - Over each arm's own valid runs (as success rate): {own}"
+                     + (f"; left out {', '.join(excluded)} invalid run(s)"
+                        if excluded else "")
+                     + f". Per task over every run: {every}.")
+    elif excluded:
         lines.append(f"  - Timing, like success, covers valid runs only: left out "
                      f"{', '.join(excluded)} invalid run(s). Per task over every "
                      f"run: {every}.")
     timed = [f"{r['timed_out_runs']} of {r['timing_runs']} {r['arm']}"
-             for r in rows if r.get("timed_out_runs")]
+             for r in view if r.get("timed_out_runs")]
     if timed:
-        with_head = sum(r.get("timeout_tail_with_head_runs") or 0 for r in rows)
+        with_head = sum(r.get("timeout_tail_with_head_runs") or 0 for r in view)
         lines.append(f"  - Runs killed at the timeout: {', '.join(timed)}; their "
                      "per-task time is the timeout, and the time after their last "
                      "event is the timeout tail"
                      + (f" (for {with_head} without a recorded driver start, the "
                         "tail also holds start-up and the first request)"
                         if with_head else "") + ".")
-    if any(_has_hints(r) for r in rows):
+    if any(_has_hints(r) for r in view):
         parts = []
-        for r in rows:
+        for r in view:
             if _has_hints(r):
                 parts.append(f"{r['arm']} {_fmt(r['mean_model_excl_hint_s'])} s "
                              f"without its {_fmt(r['mean_hint_in_model_s'])} s of "
                              "hint wait")
             elif r.get("mean_model_s") is not None:
                 parts.append(f"{r['arm']} {_fmt(r['mean_model_s'])} s")
-        lines.append(f"- Model time per task: {', '.join(parts)}. The hint wait is "
+        lines.append(f"- Model time per task{again}: {', '.join(parts)}. The hint wait is "
                      "the plugin waiting for the daemon's task hint before a model "
                      "request; it is in the per-task time above.")
 
@@ -969,8 +1013,8 @@ def headline(rows: list[dict[str, Any]]) -> list[str]:
 
     lines.append(f"- Amortized over {n} task{'s' if n != 1 else ''} on one revision "
                  f"((index cold + {n - 1 if n else 'N-1'} × index repeat) / {n} + "
-                 f"setup + per task): {', '.join(amort(r) for r in rows)}.")
-    for r in rows:
+                 f"setup + per task){again}: {', '.join(amort(r) for r in view)}.")
+    for r in view:
         if r.get("mean_setup_s") is None and r.get("per_task_s") is not None:
             lines.append(f"  - {r['arm']}: setup not recorded by this harness "
                          "version, so pay-once and amortized are unknown.")
@@ -1002,7 +1046,9 @@ def render_markdown_sections(rows: list[dict[str, Any]]) -> list[str]:
              "revision pays instead (snapshot load + refresh + tag cache). "
              "Pay-once = setup + index cold. Amortized = (index cold + "
              f"{n - 1} × index repeat) / {n} + setup + per task.", "",
-             "Valid runs only, as success (see Invalid runs).", "",
+             "Each arm's own valid runs, the runs of its success rate (see Invalid "
+             "runs); the headline compares arms over the (task, repeat) cells valid "
+             "in every arm.", "",
              "| arm | runs | runs with breakdown | timed out | setup | index cold | "
              "index repeat | model | model without hint | tools | in ozagia | "
              "in built-in | daemon overhead | other | timeout tail | hint waited | "

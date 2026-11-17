@@ -2028,8 +2028,11 @@ def _python_imports(sec: _Section) -> None:
         return
     if sec.expired():
         return
-    candidates = EN.discover(ctx.root)
     trusted = EN.trust_project_python(ctx.root)
+    # Lock-file tools are never run here, trusted or not: pdm may create
+    # `.venv` and `.pdm-python` in the repository, and the review writes
+    # nothing there. `.pdm-python` is still read as text.
+    candidates = EN.discover(ctx.root, trust=trusted, lock_tools=False)
     cache = EN.ProbeCache.for_root(ctx.root, "rw")
     probed: list[dict[str, Any]] = []
     for cand in candidates:

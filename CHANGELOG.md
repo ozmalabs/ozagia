@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- W23 fix round. Lock-file tools (`pdm info --python`, `poetry env info
+  --path`) run only for a trusted project and never in `read` cache mode;
+  `.pdm-python` is read as text and its target judged project-shipped like
+  any candidate, and `review-repo` never runs the tools. `validate` resolves
+  `--base` to a commit (`base_commit`) and records the check interpreter's
+  state (`check_python_state`: signature and required-module presence);
+  `--validation` reuse refuses a moved base or a changed interpreter. The
+  timing headline and its deltas cover the (task, repeat) cells valid in
+  every arm (`paired_timing`), labelled, with each arm's valid runs and
+  every run beside them. Without validation, an environment failure on a
+  module no file at base imports (and the break patch does not add) counts
+  against the agent. `report` treats a missing check exit code with a
+  check log as a timeout. `module_environment`'s memo is checked against
+  interpreter, site-packages and manifest mtimes, and `project_roots` is
+  cached per root.
 - Environments, failure classes and timing integrated (W23). The agent
   eval has one validation: `run`'s preflight by default, a reused `validate
   --out-json` report with `--validation` (same base, check interpreter and

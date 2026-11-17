@@ -123,13 +123,19 @@ def test_lock_file_tool_env(tmp_path: Path, fake_venv: Path) -> None:
         return str(venv)
 
     cands = EN.discover(root, which={"poetry": "/bin/poetry"}.get, tool=tool,
-                        command_docs=[], include_self=False)
+                        command_docs=[], include_self=False, trust=True)
     assert asked == [["poetry", "env", "info", "--path"]]
     assert [(c["source"], c["path"]) for c in cands] == [
         ("lock", str(venv / "bin" / "python"))]
     # Without the tool installed it is not asked.
     assert EN.discover(root, which=lambda _n: None, tool=tool, command_docs=[],
-                       include_self=False) == []
+                       include_self=False, trust=True) == []
+    assert len(asked) == 1
+    # Nor untrusted, nor in read mode, nor with lock_tools=False.
+    for kwargs in ({"trust": False}, {"trust": True, "cache_mode": "read"},
+                   {"trust": True, "lock_tools": False}):
+        assert EN.discover(root, which={"poetry": "/bin/poetry"}.get, tool=tool,
+                           command_docs=[], include_self=False, **kwargs) == []
     assert len(asked) == 1
 
 
@@ -696,12 +702,24 @@ def test_project_shipped_rule(tmp_path: Path, fake_venv: Path, monkeypatch) -> N
     (outside / "bin").mkdir(parents=True)
     (outside / "bin" / "python").symlink_to(fake_venv)
     monkeypatch.setenv("VIRTUAL_ENV", str(outside))
-    # pdm's answer points inside the root.
+    # pdm's answer (a trusted project: the tool runs) points inside the root.
     cands = EN.discover(root, which={"pdm": "/bin/pdm"}.get,
                         tool=lambda argv, cwd: str(root / "envs" / "bin" / "python"),
-                        command_docs=[], include_self=False)
+                        command_docs=[], include_self=False, trust=True)
     assert [(c["source"], c["project"]) for c in cands] == [
         ("virtual_env", False), ("lock", True)]
+    # Untrusted, `.pdm-python` is read as text: the same interpreter, judged
+    # project-shipped, and pdm is not asked.
+    (root / ".pdm-python").write_text("envs/bin/python\n", encoding="utf-8")
+
+    def no_tool(argv, cwd):
+        raise AssertionError(f"ran {argv}")
+
+    cands = EN.discover(root, which={"pdm": "/bin/pdm"}.get, tool=no_tool,
+                        command_docs=[], include_self=False, trust=False)
+    assert [(c["source"], c["project"], c["evidence"]) for c in cands] == [
+        ("virtual_env", False, f"$VIRTUAL_ENV={outside}"),
+        ("lock", True, "pdm.lock: .pdm-python (read as text)")]
     # A PATH entry that links into the root is the project's too.
     into = tmp_path / "bin2"
     into.mkdir()
@@ -985,3 +1003,221 @@ def test_failure_classes_use_the_real_environment_model(tmp_path: Path, monkeypa
     assert {"interpreter": str(venv_python), "version": doc["available_in"][0]["version"],
             "probe": "exec"} in doc["available_in"]
     assert str(venv_python) in ran
+
+
+# --------------------------------------------------------------------------- #
+# W23 fix round: lock tools, the project_roots cache, module_environment memo
+# --------------------------------------------------------------------------- #
+
+
+def _hostile_lock_repo(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """A git repo with pyproject.toml, pdm.lock, poetry.lock, no `.venv`, and
+    a committed `.pdm-python` naming `tools/python`: a script that logs its
+    arguments to a marker outside the repo and execs a real Python. Fake
+    `pdm` and `poetry` binaries log their calls and do what pdm does
+    without a venv (pdm: create `.venv/` and `.pdm-python` in the cwd).
+    Returns (repo, markers dir, fake bin dir)."""
+    markers = tmp_path / "markers"
+    markers.mkdir()
+    root = tmp_path / "hostile"
+    root.mkdir()
+    _write(root, "pyproject.toml", "[project]\nname = \"hostile\"\nversion = \"0\"\n")
+    _write(root, "pdm.lock", "")
+    _write(root, "poetry.lock", "")
+    _write(root, ".pdm-python", "tools/python\n")
+    (root / "tools").mkdir()
+    _script(root / "tools" / "python",
+            f'echo "$@" >> {markers}/pdm_python_ran\nexec {sys.executable} "$@"\n')
+    _write(root, "tests/test_learner.py", "import zzhostile_w23\n")
+    _git(root, "init", "-q")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "hostile")
+    fake_bin = tmp_path / "fakebin"
+    fake_bin.mkdir()
+    _script(fake_bin / "pdm",
+            f'echo "$@" >> {markers}/pdm_ran\n'
+            'mkdir -p .venv\necho /usr/bin/python3 > .pdm-python\n'
+            f'echo {sys.executable}\n')
+    _script(fake_bin / "poetry",
+            f'echo "$@" >> {markers}/poetry_ran\necho {tmp_path}/no-poetry-env\n')
+    return root, markers, fake_bin
+
+
+def _repo_status(root: Path) -> str:
+    return _git(root, "status", "--porcelain", "--ignored")
+
+
+def test_lock_tools_never_run_untrusted_and_write_nothing(
+        tmp_path: Path, monkeypatch, no_user_config: Path,
+        capsys: pytest.CaptureFixture[str]) -> None:
+    from ozagia.core import failures as F
+    from ozagia.core import repo_review as RR
+    from ozagia.core.memory import DevMemory, build_index
+    from ozagia.eval import agent as ae
+    from ozagia.integrations.mcp.server import DevMemoryServer
+    from ozagia.intent.run import failure_lines
+    root, markers, fake_bin = _hostile_lock_repo(tmp_path)
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    monkeypatch.delenv(EN.TRUST_ENV, raising=False)
+    monkeypatch.setenv("OZAGIA_STATE_DIR", str(tmp_path / "state"))
+    assert EN.trust_project_python(root) is False
+    # `.pdm-python` is read as text: its target is a candidate, judged
+    # project-shipped, and pdm is not asked.
+    cands = EN.discover(root, include_self=False)
+    lock = [c for c in cands if c["source"] == "lock"]
+    assert lock == [{"path": str(root / "tools" / "python"), "source": "lock",
+                     "evidence": "pdm.lock: .pdm-python (read as text)",
+                     "also": [], "project": True}]
+    out, err = _missing_module_log("zzhostile_w23")
+    # Every surface, untrusted.
+    assert cli.main(["env", "--root", str(root)]) == 0
+    assert cli.main(["env", "--root", str(root), "--for", "tests/test_learner.py"]) == 1
+    capsys.readouterr()
+    EN.env_for(root, ["tests/test_learner.py"])
+    EN.who_has(root, "zzhostile_w23")
+    EN.module_environment(root, "zzhostile_w23")
+    packet = RR.review_repo(root, sections=["dependencies"])
+    data = packet["sections"]["dependencies"]["data"]
+    assert {i["probe"] for i in data["interpreters"] if i["project"]} \
+        <= {"static", "failed"}
+    EN.clear_memo()
+    lines = failure_lines(root, {"exit_code": 2, "output_tail": out + err,
+                                 "command": "python -m pytest"},
+                          sys.executable, [])
+    assert lines and lines[0].startswith("failure class environment")
+    F.classify(2, False, out, err, command="python -m pytest", root=root)
+    graph = tmp_path / "g" / "graph.json"
+    build_index(root, graph)
+    server = DevMemoryServer(DevMemory(graph, tmp_path / "g" / "journal.jsonl",
+                                       root=root))
+    for arguments in ({}, {"module": "zzhostile_w23"},
+                      {"paths": ["tests/test_learner.py"]}):
+        resp = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                              "params": {"name": "dev_environment",
+                                         "arguments": arguments}})
+        assert resp["result"]["isError"] is False, resp
+    # `report --repo`: an old record classified from its check log.
+    log_dir = tmp_path / "logs" / "t-baseline-r1"
+    log_dir.mkdir(parents=True)
+    (log_dir / "check.log").write_text(
+        f"$ {sys.executable} -m pytest tests/test_learner.py\n\n{out}\n"
+        f"--- stderr ---\n{err}\n", encoding="utf-8")
+    EN.clear_memo()
+    got = ae.reclassify_run({"task": "t", "arm": "baseline", "repeat": 1,
+                             "check_returncode": 2}, log_dir, repo=root)
+    assert got["failure_class"] == "environment"
+    assert sorted(p.name for p in markers.iterdir()) == []
+    assert _repo_status(root) == ""
+    # The eval's check interpreter choice runs project interpreters by
+    # design (trust=True: it runs the repository's tests under the choice),
+    # but in `read` mode no lock tool runs and nothing is written.
+    EN.clear_memo()
+    task = {"id": "t", "check": {"argv": ["-m", "pytest", "tests/test_learner.py"],
+                                 "timeout_s": 5}}
+    ae.default_check_python(root, [task])
+    assert not (markers / "pdm_ran").exists() and not (markers / "poetry_ran").exists()
+    assert _repo_status(root) == ""
+
+
+def test_lock_tools_run_when_trusted_with_the_fake_binaries(
+        tmp_path: Path, monkeypatch, no_user_config: Path) -> None:
+    root, markers, fake_bin = _hostile_lock_repo(tmp_path)
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    monkeypatch.setenv(EN.TRUST_ENV, "1")
+    # Trusted: poetry is asked; pdm is not, `.pdm-python` already answers.
+    EN.discover(root, include_self=False)
+    assert (markers / "poetry_ran").read_text().split() == ["env", "info", "--path"]
+    assert not (markers / "pdm_ran").exists()
+    assert not (markers / "pdm_python_ran").exists()
+    # Without `.pdm-python`, pdm is asked (it then writes the repo, as pdm
+    # does: allowed only for a trusted project).
+    (root / ".pdm-python").unlink()
+    EN.discover(root, include_self=False)
+    assert (markers / "pdm_ran").read_text().split() == ["info", "--python"]
+    # Trusted but `read` mode: no tool runs.
+    for name in ("pdm_ran", "poetry_ran"):
+        (markers / name).unlink()
+    (root / ".pdm-python").unlink()
+    (root / ".venv").rmdir()
+    EN.discover(root, include_self=False, cache_mode="read")
+    assert sorted(p.name for p in markers.iterdir()) == []
+
+
+def test_pdm_python_is_read_as_text(tmp_path: Path, fake_venv: Path) -> None:
+    root = tmp_path / "proj"
+    root.mkdir()
+    assert EN.pdm_python(root) is None
+    (root / ".pdm-python").write_text(f"{fake_venv}\nignored\n", encoding="utf-8")
+    assert EN.pdm_python(root) == fake_venv
+    (root / ".pdm-python").write_text("no/such/python\n", encoding="utf-8")
+    assert EN.pdm_python(root) is None
+    (root / ".pdm-python").write_text("\n", encoding="utf-8")
+    assert EN.pdm_python(root) is None
+
+
+def test_project_roots_is_cached_per_root(tmp_path: Path, monkeypatch,
+                                          no_user_config: Path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    _write(root, "a.py", "")
+    _git(root, "init", "-q")
+    calls: list[Path] = []
+    real = EN.source_root
+    monkeypatch.setattr(EN, "source_root",
+                        lambda r: calls.append(Path(r)) or real(r))
+    assert EN.project_roots(root) == [root.resolve()]
+    assert EN.project_roots(root) == [root.resolve()]
+    assert len(calls) == 1
+    # A user config is present: the trust lookup on every memo hit uses
+    # the cache too.
+    _write(no_user_config, "ozagia/config.toml", "[environments]\n")
+    for _ in range(3):
+        assert EN.trust_project_python(root) is False
+    assert len(calls) == 1
+    # `.git` changed: recomputed.
+    st = (root / ".git").stat()
+    os.utime(root / ".git", ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+    EN.project_roots(root)
+    assert len(calls) == 2
+
+
+def test_module_environment_memo_follows_site_packages_and_manifests(
+        tmp_path: Path, monkeypatch, no_user_config: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _write(repo, "tests/test_a.py", "import zzmemo_w23\n")
+    _write(repo, "requirements.txt", "requests\n")
+    _write(repo, ".gitignore", ".venv/\n")
+    _git(repo, "init", "-q")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "init")
+    venv_python = make_venv(repo / ".venv", {"other": ["zzother_w23"]})
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    monkeypatch.delenv(EN.TRUST_ENV, raising=False)
+    monkeypatch.setenv("OZAGIA_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(EN, "_lock_candidates", lambda *a, **k: [])
+    first = EN.module_environment(repo, "zzmemo_w23")
+    assert first["cached"] is False and first["available_in"] == []
+    assert first["declared_in"] == []
+    assert EN.module_environment(repo, "zzmemo_w23")["cached"] is True
+    # `pip install` into the venv: its site-packages mtime changes.
+    site = next((repo / ".venv" / "lib").glob("python*/site-packages"))
+    _fake_dist(site, "zzmemo-w23", ["zzmemo_w23"])
+    got = EN.module_environment(repo, "zzmemo_w23")
+    assert got["cached"] is False
+    assert [a["interpreter"] for a in got["available_in"]] == [str(venv_python)]
+    assert EN.module_environment(repo, "zzmemo_w23")["cached"] is True
+    # A manifest edit (same size or not): recomputed.
+    req = repo / "requirements.txt"
+    req.write_text("requests\nzzmemo-w23\n", encoding="utf-8")
+    st = req.stat()
+    os.utime(req, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+    got = EN.module_environment(repo, "zzmemo_w23")
+    assert got["cached"] is False
+    assert got["declared_in"] == [{"file": "requirements.txt", "optional": False,
+                                   "group": got["declared_in"][0]["group"]}]
+    # The TTL still bounds it.
+    monkeypatch.setattr(EN, "MODULE_ENV_TTL_S", 0.0)
+    assert EN.module_environment(repo, "zzmemo_w23")["cached"] is False

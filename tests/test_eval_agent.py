@@ -1456,7 +1456,8 @@ def test_run_refuses_tasks_that_fail_validation(tmp_path, capsys):
     assert report["runs"][0]["success"] is True
     assert report["validated"] is True
     assert report["validation"] == {"ran": True, "ok": True, "tasks": 1, "passed": 1,
-                                    "failed": [], "base": base, "source": "preflight",
+                                    "failed": [], "base": base, "base_commit": base,
+                                    "source": "preflight",
                                     "check_python": _python(),
                                     "check_python_reason": "explicit --python"}
     assert report["validated_tasks"] == ["add-sign"]
@@ -1498,7 +1499,8 @@ def test_run_refuses_tasks_that_fail_validation(tmp_path, capsys):
                                   "results": [{"id": "t", "ok": False,
                                                "details": {"reason": "r"}}]}) == {
         "ran": True, "ok": False, "tasks": 1, "passed": 0,
-        "failed": [{"id": "t", "reason": "r"}], "base": "b", "source": "preflight",
+        "failed": [{"id": "t", "reason": "r"}], "base": "b", "base_commit": None,
+        "source": "preflight",
         "check_python": "p", "check_python_reason": None}
     # Bad arms are refused before any validation.
     capsys.readouterr()
@@ -1721,7 +1723,11 @@ def test_agent_caused_environment_failure_counts_after_validation(tmp_path, monk
     other_task = {**task, "check": {**task["check"], "timeout_s": 7}}
     for val, tasks, want in (
             ({**validation, "check_python": "/other/python"}, [task], "check interpreter"),
-            ({**validation, "base": "0" * 40}, [task], "base"),
+            ({**validation, "base_commit": "0" * 40}, [task], "base"),
+            ({k: v for k, v in validation.items() if k != "base_commit"} | {"base": "HEAD"},
+             [task], "no commit id recorded"),
+            ({k: v for k, v in validation.items() if k != "check_python_state"},
+             [task], "records no check interpreter state"),
             (validation, [other_task], "check or break patch changed"),
             ({**validation, "results": []}, [task], "not in the report")):
         with pytest.raises(ae.HarnessError, match=want):
@@ -1896,3 +1902,222 @@ def test_failed_repeat_index_is_recorded_not_raised(tmp_path):
     assert out["prep_repeat_ok"] is False and out["prep_repeat_s"] is None
     assert "cannot copy the snapshot" in out["prep_repeat_error"]
     assert not (log_dir / "repeat_index").exists()
+
+
+# ===================================================================================== #
+# W23 fix round: interpreter drift, a moved base, agent-added imports, timeouts
+# ===================================================================================== #
+def _drift_venv(root: Path) -> tuple[Path, Path]:
+    """A venv whose site-packages holds `zzdep_w23.py` and a `.pth` line for
+    this interpreter's site-packages (so pytest imports). Returns (python,
+    site-packages)."""
+    import sysconfig
+    from venv_fixture import make_venv
+    python = make_venv(root / "venv", {})
+    site = next((root / "venv" / "lib").glob("python*/site-packages"))
+    (site / "outer.pth").write_text(sysconfig.get_paths()["purelib"] + "\n",
+                                    encoding="utf-8")
+    (site / "zzdep_w23.py").write_text("VALUE = 1\n", encoding="utf-8")
+    return python, site
+
+
+def test_reused_validation_is_refused_after_interpreter_drift(tmp_path):
+    python, site = _drift_venv(tmp_path)
+    repo = tmp_path / "repo"
+    (repo / "pkg").mkdir(parents=True)
+    (repo / "tests").mkdir()
+    (repo / "pkg" / "mod.py").write_text(MOD_SRC, encoding="utf-8")
+    (repo / "tests" / "test_mod.py").write_text("import zzdep_w23  # noqa: F401\n"
+                                                + TEST_SRC, encoding="utf-8")
+    _git(repo, "init", "-q")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "base")
+    base = _git(repo, "rev-parse", "HEAD")
+    task = _task("add-sign", BREAK_SIGN)
+    tdir = _tasks_dir(tmp_path, [(task, BREAK_SIGN)])
+    validation = ae.validate_all(repo, [task], base, tasks_dir=tdir,
+                                 python=str(python), run_root=tmp_path / "val")
+    assert validation["ok"], validation
+    state = validation["check_python_state"]
+    assert str(site) in state["signature"]["dirs"]
+    assert state["modules"]["zzdep_w23"] is True and state["modules"]["pytest"] is True
+    # JSON round trip, as `--validation` reads it: still accepted.
+    reused = json.loads(json.dumps(validation))
+    assert ae.validation_mismatch(reused, base=base, python=str(python), tasks=[task],
+                                  tasks_dir=tdir, base_commit=base) is None
+    # The package is removed after validation: refused, with what changed.
+    (site / "zzdep_w23.py").unlink()
+    why = ae.validation_mismatch(reused, base=base, python=str(python), tasks=[task],
+                                 tasks_dir=tdir, base_commit=base)
+    assert why == (f"the check interpreter changed since validation: {site} "
+                   "(packages installed or removed)")
+    with pytest.raises(HarnessError, match="changed since validation"):
+        run_eval(repo, [task], ["baseline"], FakeDriver(), base, tasks_dir=tdir,
+                 python=str(python), run_root=tmp_path / "runs", validation=reused)
+    # A module that no longer imports although every recorded directory is
+    # unchanged (a path outside them): the find_spec check catches it.
+    fresh = {**reused, "check_python_state": {
+        "signature": ae.interpreter_state(repo, [task], str(python))["signature"],
+        "modules": {"pytest": True, "zz_gone_w23": True}}}
+    assert ae.validation_mismatch(fresh, base=base, python=str(python), tasks=[task],
+                                  tasks_dir=tdir, base_commit=base) == (
+        "module(s) the checks need no longer found under the check interpreter: "
+        "zz_gone_w23")
+
+
+def test_reused_validation_is_refused_after_the_base_ref_moved(tmp_path, capsys):
+    repo, first = _repo(tmp_path)
+    task = _task("add-sign", BREAK_SIGN)
+    tdir = _tasks_dir(tmp_path, [(task, BREAK_SIGN)])
+    validation = ae.validate_all(repo, [task], "HEAD", tasks_dir=tdir,
+                                 python=_python(), run_root=tmp_path / "val")
+    assert validation["base"] == "HEAD" and validation["base_commit"] == first
+    report = run_eval(repo, [task], ["baseline"], FakeDriver(), "HEAD", tasks_dir=tdir,
+                      python=_python(), run_root=tmp_path / "r1", validation=validation)
+    assert report["base_commit"] == first and report["runs"][0]["success"] is True
+    # A commit moves HEAD: the same `--base HEAD` is now another commit.
+    (repo / "tests" / "test_mod.py").write_text("import nonexistent_zz  # noqa\n"
+                                                + TEST_SRC, encoding="utf-8")
+    _git(repo, "commit", "-q", "-am", "moves HEAD")
+    second = _git(repo, "rev-parse", "HEAD")
+    with pytest.raises(HarnessError, match=f"base 'HEAD' at {first}, this run "
+                                           f"'HEAD' at {second}"):
+        run_eval(repo, [task], ["baseline"], FakeDriver(), "HEAD", tasks_dir=tdir,
+                 python=_python(), run_root=tmp_path / "r2", validation=validation)
+    # The CLI refuses it too.
+    val_json = tmp_path / "val.json"
+    val_json.write_text(json.dumps(validation), encoding="utf-8")
+    tasks = tdir / "tasks.json"
+    tasks.write_text(json.dumps({"version": 1, "base": "HEAD", "tasks": [task]}),
+                     encoding="utf-8")
+    assert main(["run", "--driver", "fake", "--repo", str(repo), "--tasks", str(tasks),
+                 "--python", _python(), "--arms", "baseline", "--validation",
+                 str(val_json), "--run-root", str(tmp_path / "r3")]) == 2
+    assert f"'HEAD' at {second}" in capsys.readouterr().err
+    with pytest.raises(HarnessError, match="is not a commit"):
+        ae.resolve_base(repo, "no-such-ref")
+
+
+class _ImportingDriver(FakeDriver):
+    """Fixes the break, and adds an import of a package never installed."""
+    name = "fake"
+
+    def run(self, workdir, prompt, arm, timeout_s, log_dir, **kw):
+        out = super().run(workdir, prompt, arm, timeout_s, log_dir, **kw)
+        mod = Path(workdir) / "pkg" / "mod.py"
+        mod.write_text("import yaml_not_installed_zz  # noqa: F401\n"
+                       + mod.read_text(encoding="utf-8"), encoding="utf-8")
+        return out
+
+
+def test_agent_added_import_counts_against_the_agent_without_validation(tmp_path):
+    repo, base = _repo(tmp_path)
+    task = _task("add-sign", BREAK_SIGN)
+    tdir = _tasks_dir(tmp_path, [(task, BREAK_SIGN)])
+    report = run_eval(repo, [task], ["baseline"], _ImportingDriver(), base,
+                      tasks_dir=tdir, python=_python(), run_root=tmp_path / "runs",
+                      validation=None)
+    (run,) = report["runs"]
+    assert run["failure_class"] == "environment"
+    assert run["failure_module"] == "yaml_not_installed_zz"
+    assert run["valid"] is True and run["success"] is False
+    assert run["validity_basis"] == (
+        f"no validation; no tracked file at base {base[:12]} imports "
+        "yaml_not_installed_zz and the break patch adds no such import: the agent "
+        "introduced it, counted against the agent")
+    # A module the base imports stays with the import probe (invalid when
+    # missing), and so does one the break patch adds.
+    (repo / "tests" / "test_mod.py").write_text("import yaml_not_installed_zz\n"
+                                                + TEST_SRC, encoding="utf-8")
+    _git(repo, "commit", "-q", "-am", "imports it")
+    moved = _git(repo, "rev-parse", "HEAD")
+    assert ae.base_imports(repo, moved, "yaml_not_installed_zz") is True
+    assert ae.base_imports(repo, base, "yaml_not_installed_zz") is False
+    assert ae.base_imports(repo, "no-such-ref", "yaml_not_installed_zz") is None
+    absent = {"class": "environment", "module": "yaml_not_installed_zz",
+              "detail": "missing module yaml_not_installed_zz"}
+    got = ae.check_validity(absent, python=_python(), repo=repo, base=moved)
+    assert got["valid"] is False and "import probe" in got["validity_basis"]
+    got = ae.check_validity(absent, python=_python(), repo=repo, base=base,
+                            break_patch=BREAK_IMPORT.replace("w21_absent_mod",
+                                                             "yaml_not_installed_zz"))
+    assert got["valid"] is False and "import probe" in got["validity_basis"]
+
+
+def test_base_import_patterns():
+    adds = ae.patch_adds_import
+    for line in ("import numpy", "import numpy as np", "import os, numpy",
+                 "from numpy import array", "from numpy.linalg import inv",
+                 "    import numpy.linalg", "np = importlib.import_module('numpy')",
+                 "pytest.importorskip(\"numpy\")"):
+        assert adds(f"--- a/x.py\n+++ b/x.py\n@@ -0,0 +1 @@\n+{line}\n", "numpy"), line
+    for line in ("import numpyx", "from numpyx import a", "import foo.numpy",
+                 "x = numpy", "from . import numpy"):
+        assert not adds(f"+{line}\n", "numpy"), line
+    assert not adds(" import numpy\n-import numpy\n", "numpy")
+    assert not adds(None, "numpy")
+
+
+def test_rereported_timeout_with_a_deleted_interpreter_is_a_timeout(tmp_path):
+    log_dir = tmp_path / "logs" / "t-baseline-r1"
+    log_dir.mkdir(parents=True)
+    gone = tmp_path / "gone" / "venv" / "bin" / "python"
+    (log_dir / "check.log").write_text(
+        f"$ {gone} -m pytest -q tests/test_mod.py\n\n....\n--- stderr ---\n\n",
+        encoding="utf-8")
+    record = {"task": "t", "arm": "baseline", "repeat": 1, "success": False,
+              "check_returncode": None}
+    got = ae.reclassify_run(record, log_dir)
+    assert got["failure_class"] == "timeout"
+    assert got["valid"] is True and got["invalid_reason"] is None
+    assert got["check_python"] == str(gone)
+
+
+def _timed(task, arm, rep, per_task, valid=True):
+    return {**_run(task, arm, rep, True), "valid": valid,
+            "timing": {"per_task_s": per_task, "setup": {"s": 1.0},
+                       "index": {"cold_s": 0.0}}}
+
+
+def test_timing_headline_compares_arms_over_cells_valid_in_every_arm():
+    from ozagia.eval import timing
+    runs = [_timed("t1", "baseline", 1, 100.0), _timed("t2", "baseline", 1, 300.0),
+            _timed("t1", "dev_memory", 1, 110.0),
+            _timed("t2", "dev_memory", 1, 290.0, valid=False)]
+    rows = aggregate(runs, ["baseline", "dev_memory"], amortize=2)
+    by = {r["arm"]: r for r in rows}
+    assert by["baseline"]["per_task_s"] == 200.0 and by["dev_memory"]["per_task_s"] == 110.0
+    assert by["dev_memory"]["paired_timing"]["per_task_s"] == 110.0
+    assert by["baseline"]["paired_timing"]["per_task_s"] == 100.0
+    lines = timing.headline(rows)
+    assert lines[0] == ("- Per task (agent time, without setup and index), over the 1 "
+                        "(task, repeat) cell valid in every arm: baseline 100.0 s, "
+                        "dev_memory 110.0 s (+10.0 s vs baseline).")
+    assert lines[1] == ("  - Over each arm's own valid runs (as success rate): "
+                        "baseline 200.0 s, dev_memory 110.0 s; left out 1 dev_memory "
+                        "invalid run(s). Per task over every run: baseline 200.0 s, "
+                        "dev_memory 200.0 s.")
+    amort = next(line for line in lines if line.startswith("- Amortized"))
+    assert amort.endswith(", over the same cells: baseline 101.0 s, dev_memory "
+                          "111.0 s (+10.0 s vs baseline).")
+    assert "-90.0" not in "\n".join(lines)
+    # The components table says which runs it covers.
+    md = "\n".join(timing.render_markdown_sections(rows))
+    assert "Each arm's own valid runs, the runs of its success rate" in md
+    # No cell valid in every arm: no deltas.
+    runs = [_timed("t1", "baseline", 1, 100.0),
+            _timed("t1", "dev_memory", 1, 110.0, valid=False),
+            _timed("t2", "baseline", 1, 300.0, valid=False),
+            _timed("t2", "dev_memory", 1, 290.0)]
+    lines = timing.headline(aggregate(runs, ["baseline", "dev_memory"], amortize=2))
+    assert "arms are not compared" in lines[0] and "vs baseline" not in "\n".join(lines)
+    # The same invalid cells in every arm: each arm's valid runs are the
+    # paired cells, and the headline is as before.
+    runs = [_timed("t1", "baseline", 1, 100.0), _timed("t1", "dev_memory", 1, 110.0),
+            _timed("t2", "baseline", 1, 300.0, valid=False),
+            _timed("t2", "dev_memory", 1, 290.0, valid=False)]
+    lines = timing.headline(aggregate(runs, ["baseline", "dev_memory"], amortize=2))
+    assert lines[0] == ("- Per task (agent time, without setup and index): baseline "
+                        "100.0 s, dev_memory 110.0 s (+10.0 s vs baseline).")
+    assert lines[1].startswith("  - Timing, like success, covers valid runs only: "
+                               "left out 1 baseline, 1 dev_memory invalid run(s).")

@@ -52,10 +52,17 @@ interpreter it links to are different candidates.
 2. `.venv`, `venv` and `.venv-*` in the root.
 3. When the root has none of those and is a git worktree or a clone of a
    local repository: the same directories in the source repository.
-4. The lock file's tool environment: `uv.lock` (`$UV_PROJECT_ENVIRONMENT`
-   or `.venv`), `poetry.lock` (`poetry env info --path`, only if `poetry` is
-   installed), `pdm.lock` (`.venv`, else `pdm info --python`). Tools run
-   with a 10 s timeout.
+4. The lock file's tool environment, read from the filesystem: `uv.lock`
+   (`$UV_PROJECT_ENVIRONMENT` or `.venv`), `pdm.lock` (`.venv`, else the
+   interpreter `.pdm-python` names, read as text, first line, relative
+   paths from the root). The tools themselves, `poetry env info --path`
+   for `poetry.lock` and `pdm info --python` for `pdm.lock` without a
+   `.venv` or `.pdm-python`, run only when the project is trusted (below),
+   the cache mode is not `read` and the tool is installed, with a 10 s
+   timeout: pdm runs the interpreter a committed `.pdm-python` names, and
+   creates `.venv` and `.pdm-python` in the repository when it finds none.
+   `review-repo` never runs them (it writes nothing into the repository),
+   and neither do the eval harness and `report`, which use `read`.
 5. Interpreters named in the command docs (`index.command_docs`, default
    `key_docs`): paths such as `.venv/bin/python` or `~/envs/x/bin/python3`,
    and versioned names such as `python3.12` on `PATH`. Only existing
@@ -69,8 +76,8 @@ A candidate is *project-shipped* when its path (with the directory
 resolved, the file not), its venv directory (the one holding `pyvenv.cfg`)
 or its resolved binary lies inside the root or the source repository. That
 covers the root's and the source repository's venvs, in-root paths named in
-the command docs, and a lock tool's answer (`pdm info --python`) pointing
-inside. The candidate path decides, not only where the binary resolves: a
+the command docs, and a `.pdm-python` target or a lock tool's answer
+pointing inside. The candidate path decides, not only where the binary resolves: a
 committed `.venv/bin/python` linking to a system interpreter, next to a
 committed `pyvenv.cfg` and a `.pth`, would run that `.pth` through the
 system interpreter.
@@ -194,9 +201,18 @@ discovery and probe pass gives `available_in` (`who_has`'s items) and
 dependencies below and the probes' distribution names), with `trusted`.
 Trust is the user's (`trust_project_python`) unless the caller passes it:
 an untrusted project venv is read statically, never run. Answers are
-memoized in-process for `MODULE_ENV_TTL_S` (300 s) per root, module, trust
-and cache mode, so the daemon, which classifies every captured pytest that
-did not pass, discovers once per module and not per run.
+memoized in-process per root, module, trust and cache mode for at most
+`MODULE_ENV_TTL_S` (300 s), and only while their stamp holds: each probed
+interpreter's signature (realpath, the mtimes of the binary, `pyvenv.cfg`
+and the site-packages directories its probe scanned) and the mtimes of the
+manifests read and of the root directory. A `pip install`, a removed
+distribution, a manifest edit or a new top-level manifest or venv
+recomputes the answer; a new manifest deeper in the tree waits for the TTL.
+Checking the stamp is stats only, so the daemon, which classifies every
+captured pytest that did not pass, discovers once per module and not per
+run. `project_roots` (two `git` calls) is cached per root while the mtime
+of `<root>/.git` is unchanged, so the trust lookup before the memo costs no
+subprocess.
 
 ## Declared dependencies
 

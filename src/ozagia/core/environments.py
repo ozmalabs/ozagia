@@ -46,9 +46,13 @@ Candidates, in order of evidence (`discover`):
 2. `.venv`, `venv` and `.venv-*` in the root;
 3. the same in the source repository's root, when the root is a git
    worktree or a local clone without its own;
-4. the environment of the lock file's tool (`uv.lock`: `.venv` or
-   `$UV_PROJECT_ENVIRONMENT`; `poetry.lock`: `poetry env info --path`;
-   `pdm.lock`: `pdm info --python`; each tool only when it is installed);
+4. the environment of the lock file's tool, read from the filesystem
+   (`uv.lock`: `.venv` or `$UV_PROJECT_ENVIRONMENT`; `pdm.lock`: `.venv`,
+   else the interpreter `.pdm-python` names, read as text). The tools
+   themselves (`poetry env info --path`, `pdm info --python`) run only
+   when the project is trusted, the cache mode is not `read` and the tool
+   is installed: pdm runs the interpreter a committed `.pdm-python` names
+   and may create `.venv` and `.pdm-python` in the repository;
 5. interpreters named in the project's command docs (`index.command_docs`);
 6. `python` and `python3` on `PATH`;
 7. the interpreter ozagia runs under.
@@ -369,6 +373,19 @@ def _valid(entry: Mapping[str, Any], python: str) -> bool:
     return sig == _signature(python, sig["dirs"])
 
 
+def interpreter_signature(python: str, dirs: Iterable[str] | None = None
+                          ) -> dict[str, Any]:
+    """What a probe of ``python`` depends on: {"real": its realpath,
+    "mtime_ns": the binary's mtime, "cfg": its venv's `pyvenv.cfg` mtime,
+    "dirs": {scanned directory: mtime}} (installing or removing a
+    distribution changes its site-packages mtime). Without ``dirs`` the
+    interpreter is probed (run, or read from the probe memo) for them."""
+    if dirs is None:
+        got = probe(python, cache=ProbeCache(None, "off"))
+        dirs = got.get("scanned") or [] if got.get("ok") else []
+    return _signature(os.path.abspath(python), dirs)
+
+
 _VERSION = re.compile(r"(\d+)\.(\d+)(?:\.(\d+))?")
 
 
@@ -594,6 +611,7 @@ _MEMO: dict[str, dict[str, Any]] = {}
 def clear_memo() -> None:
     _MEMO.clear()
     _MODULE_ENV_MEMO.clear()
+    _ROOTS_MEMO.clear()
 
 
 def probe(python: str, *, cache: ProbeCache | None = None,
@@ -751,9 +769,33 @@ def _run_tool(argv: Sequence[str], cwd: Path) -> str | None:
     return lines[-1].strip() if lines else None
 
 
+PDM_PYTHON_FILE = ".pdm-python"
+MAX_PDM_PYTHON_BYTES = 4096
+
+
+def pdm_python(root: Path) -> Path | None:
+    """The interpreter a `.pdm-python` file names, read as text (bounded;
+    a relative path is taken from the root), when it is an executable
+    file; else None. Nothing is run."""
+    text = _read_bounded(root / PDM_PYTHON_FILE, MAX_PDM_PYTHON_BYTES)
+    lines = (text or "").strip().splitlines()
+    if not lines or not lines[0].strip():
+        return None
+    raw = Path(os.path.expanduser(lines[0].strip()))
+    path = raw if raw.is_absolute() else root / raw
+    return path if _executable(path) else None
+
+
 def _lock_candidates(root: Path, *, which: Callable[[str], str | None],
-                     tool: Callable[[Sequence[str], Path], str | None]
+                     tool: Callable[[Sequence[str], Path], str | None],
+                     run_tools: bool = False
                      ) -> list[tuple[Path, str, str]]:
+    """Interpreters named by lock files. uv's venv and pdm's `.venv` and
+    `.pdm-python` are read from the filesystem. `poetry env info --path`
+    and `pdm info --python` are run only with ``run_tools`` (``discover``:
+    a trusted project, not in `read` mode): pdm runs the interpreter a
+    committed `.pdm-python` names and may create `.venv` and `.pdm-python`
+    in the repository."""
     out: list[tuple[Path, str, str]] = []
     if (root / "uv.lock").is_file():
         env = os.environ.get("UV_PROJECT_ENVIRONMENT")
@@ -761,18 +803,23 @@ def _lock_candidates(root: Path, *, which: Callable[[str], str | None],
         py = venv_python(venv)
         if py is not None:
             out.append((py, "lock", f"uv.lock: {venv}"))
-    if (root / "poetry.lock").is_file() and which("poetry"):
+    if run_tools and (root / "poetry.lock").is_file() and which("poetry"):
         answer = tool(["poetry", "env", "info", "--path"], root)
         py = venv_python(Path(answer)) if answer else None
         if py is not None:
             out.append((py, "lock", "poetry.lock: poetry env info --path"))
     if (root / "pdm.lock").is_file():
         py = venv_python(root / ".venv")
-        if py is None and which("pdm"):
+        evidence = "pdm.lock"
+        if py is None:
+            py = pdm_python(root)
+            evidence = f"pdm.lock: {PDM_PYTHON_FILE} (read as text)"
+        if py is None and run_tools and which("pdm"):
             answer = tool(["pdm", "info", "--python"], root)
             py = Path(answer) if answer and _executable(Path(answer)) else None
+            evidence = "pdm.lock: pdm info --python"
         if py is not None:
-            out.append((py, "lock", "pdm.lock"))
+            out.append((py, "lock", evidence))
     return out
 
 
@@ -824,12 +871,28 @@ def _inside(path: str | Path, roots: Iterable[Path]) -> bool:
     return any(p == r or r in p.parents for r in roots)
 
 
+# root realpath -> (stamp of `<root>/.git`, project roots). `source_root`
+# runs two git subprocesses; the answer only changes when `.git` does.
+_ROOTS_MEMO: dict[str, tuple[int | None, list[Path]]] = {}
+ROOTS_MEMO_MAX = 256
+
+
 def project_roots(root: str | Path) -> list[Path]:
     """The directories whose interpreters count as project-shipped: the
-    root and, for a worktree or clone, the source repository."""
+    root and, for a worktree or clone, the source repository. Cached per
+    root in this process, valid while the mtime of `<root>/.git` (a
+    directory, or a worktree's file) is unchanged."""
     root = Path(os.path.realpath(root))
+    stamp = _stat_ns(str(root / ".git"))
+    hit = _ROOTS_MEMO.get(str(root))
+    if hit is not None and hit[0] == stamp:
+        return list(hit[1])
     src = source_root(root)
-    return [root] + ([Path(os.path.realpath(src))] if src is not None else [])
+    out = [root] + ([Path(os.path.realpath(src))] if src is not None else [])
+    if len(_ROOTS_MEMO) >= ROOTS_MEMO_MAX:
+        _ROOTS_MEMO.pop(next(iter(_ROOTS_MEMO)))
+    _ROOTS_MEMO[str(root)] = (stamp, out)
+    return list(out)
 
 
 def is_project_shipped(python: str | Path, roots: Sequence[Path]) -> bool:
@@ -876,13 +939,22 @@ def trust_project_python(root: str | Path) -> bool:
 def discover(root: str | Path, *, which: Callable[[str], str | None] = shutil.which,
              tool: Callable[[Sequence[str], Path], str | None] = _run_tool,
              command_docs: Iterable[str] | None = None,
-             include_self: bool = True) -> list[dict[str, Any]]:
+             include_self: bool = True, trust: bool | None = None,
+             cache_mode: str = "rw",
+             lock_tools: bool | None = None) -> list[dict[str, Any]]:
     """Candidate interpreters for ``root``, in order of evidence. Each is
     {"path", "source", "evidence", "also", "project"} (``also``: other
     evidence for the same interpreter; ``project``: project-shipped, see
-    ``is_project_shipped``)."""
+    ``is_project_shipped``). Nothing in the root is run: the lock-file
+    tools (`poetry`, `pdm`) run only when ``lock_tools`` is true, by
+    default when the project is trusted (``trust``, None:
+    ``trust_project_python``) and ``cache_mode`` is not `read`."""
+    if cache_mode not in CACHE_MODES:
+        raise EnvError(f"unknown cache mode {cache_mode!r}")
     root = Path(root).resolve()
     roots = project_roots(root)
+    if lock_tools is None:
+        lock_tools = cache_mode != "read" and _trusted_flag(root, trust)
     found: list[tuple[Path, str, str]] = []
     env = os.environ.get("VIRTUAL_ENV")
     if env:
@@ -900,7 +972,7 @@ def discover(root: str | Path, *, which: Callable[[str], str | None] = shutil.wh
                 if py is not None:
                     found.append((py, "source_venv", f"{d.name} of the source "
                                                      f"repository {src}"))
-    found += _lock_candidates(root, which=which, tool=tool)
+    found += _lock_candidates(root, which=which, tool=tool, run_tools=lock_tools)
     if command_docs is None:
         command_docs = _config(root, "command_docs", ("README.md",))
     found += [(py, "command_docs", f"named in {doc}")
@@ -1915,9 +1987,10 @@ def probe_candidates(root: str | Path, *, cache_mode: str = "rw",
     """``discover`` then ``probe`` each: candidates with ``probe`` and
     ``project`` keys. ``trust`` None means ``trust_project_python``."""
     root = Path(root).resolve()
-    cands = list(candidates) if candidates is not None else discover(root)
-    cache = ProbeCache.for_root(root, cache_mode)
     trusted = trust_project_python(root) if trust is None else bool(trust)
+    cands = (list(candidates) if candidates is not None
+             else discover(root, trust=trusted, cache_mode=cache_mode))
+    cache = ProbeCache.for_root(root, cache_mode)
     return _probe_all(cands, cache, timeout, runner, root=root, trusted=trusted)
 
 
@@ -2049,12 +2122,25 @@ def who_has(root: str | Path, module: str, *, cache_mode: str = "rw",
 
 
 # In-process memo of `module_environment`: (root, top, trusted, cache_mode)
-# -> (monotonic time, answer). Discovery runs git and lock tools and reads
-# manifests, so a daemon that classifies every captured pytest asks at most
-# once per MODULE_ENV_TTL_S for the same module.
+# -> (monotonic time, stamp spec, stamp, answer). Discovery runs git and
+# reads manifests, so a daemon that classifies every captured pytest asks
+# at most once per MODULE_ENV_TTL_S for the same module, and only while
+# the stamp holds (`_module_env_stamp`: what `pip install` or a manifest
+# edit changes).
 MODULE_ENV_TTL_S = 300.0
 MODULE_ENV_MAX = 64
-_MODULE_ENV_MEMO: dict[tuple[str, str, bool, str], tuple[float, dict[str, Any]]] = {}
+_MODULE_ENV_MEMO: dict[tuple[str, str, bool, str],
+                       tuple[float, dict[str, Any], Any, dict[str, Any]]] = {}
+
+
+def _module_env_stamp(spec: Mapping[str, Any]) -> list[Any]:
+    """Stats a memoized `module_environment` answer depends on: each
+    probed interpreter's signature (realpath, mtimes of the binary, its
+    `pyvenv.cfg` and the site-packages directories it scanned), the mtimes
+    of the manifests read, and of the root directory (a new top-level
+    manifest or venv). Stats only, no subprocess."""
+    return [[_signature(path, dirs) for path, dirs in spec["interpreters"]],
+            [_stat_ns(p) for p in spec["files"]]]
 
 
 def module_environment(root: str | Path, module: str, *, cache_mode: str = "rw",
@@ -2069,8 +2155,10 @@ def module_environment(root: str | Path, module: str, *, cache_mode: str = "rw",
 
     Trust follows ``trust_project_python`` unless ``trust`` is given:
     untrusted project-shipped interpreters are read statically, never run.
-    Answers are memoized in-process for ``MODULE_ENV_TTL_S`` per root,
-    module, trust and cache mode (not with ``candidates`` or ``runner``)."""
+    Answers are memoized in-process per root, module, trust and cache mode
+    (not with ``candidates`` or ``runner``) for at most ``MODULE_ENV_TTL_S``,
+    and only while ``_module_env_stamp`` is unchanged: installing or
+    removing a distribution, or editing a manifest, recomputes it."""
     root = Path(root).resolve()
     top = str(module).split(".", 1)[0]
     trusted = _trusted_flag(root, trust)
@@ -2079,8 +2167,9 @@ def module_environment(root: str | Path, module: str, *, cache_mode: str = "rw",
     now = time.monotonic()
     if memo:
         hit = _MODULE_ENV_MEMO.get(key)
-        if hit is not None and now - hit[0] < MODULE_ENV_TTL_S:
-            return {**hit[1], "cached": True}
+        if hit is not None and now - hit[0] < MODULE_ENV_TTL_S \
+                and _module_env_stamp(hit[1]) == hit[2]:
+            return {**hit[3], "cached": True}
     probed = probe_candidates(root, cache_mode=cache_mode, timeout=timeout,
                               candidates=candidates, runner=runner, trust=trusted)
     ok_probes = [item["probe"] for item in probed if item["probe"].get("ok")]
@@ -2097,9 +2186,14 @@ def module_environment(root: str | Path, module: str, *, cache_mode: str = "rw",
     answer = {"module": top, "available_in": available,
               "declared_in": declared_in, "trusted": trusted}
     if memo:
+        read = (declared or {}).get("manifests", []) + (declared or {}).get("unparsed", [])
+        spec = {"interpreters": [(str(item["path"]),
+                                  list(item["probe"].get("scanned") or []))
+                                 for item in probed],
+                "files": [str(root)] + [str(root / rel) for rel in read]}
         if len(_MODULE_ENV_MEMO) >= MODULE_ENV_MAX:
             _MODULE_ENV_MEMO.pop(min(_MODULE_ENV_MEMO, key=lambda k: _MODULE_ENV_MEMO[k][0]))
-        _MODULE_ENV_MEMO[key] = (now, answer)
+        _MODULE_ENV_MEMO[key] = (now, spec, _module_env_stamp(spec), answer)
     return {**answer, "cached": False}
 
 

@@ -104,12 +104,23 @@ numpy ...`).
 - by default, a preflight: `validate` on the selected tasks with the run's
   check interpreter, in the run root;
 - with `--validation <validate --out-json file>`, that report instead of a
-  new preflight. It must have the same base, the same check interpreter
-  (compared by absolute path, not resolved: a venv's `bin/python` is a
-  symlink to an interpreter with other packages) and every selected task,
-  with an unchanged fingerprint where the report has one; otherwise `run`
-  refuses with exit 2 and the reason. Only the selected tasks' results are
-  kept;
+  new preflight. It must have the same base commit (`validate` and `run`
+  resolve `--base` to a commit id, `base_commit`, so a `HEAD` or branch
+  that moved since is refused; a report without `base_commit` matches only
+  a base given as that full id), the same check interpreter (compared by
+  absolute path, not resolved: a venv's `bin/python` is a symlink to an
+  interpreter with other packages) in the same state, and every selected
+  task, with an unchanged fingerprint where the report has one; otherwise
+  `run` refuses with exit 2 and the reason. The state is
+  `check_python_state`, recorded by `validate`: the interpreter's
+  signature (realpath, the mtimes of the binary, its `pyvenv.cfg` and every
+  site-packages directory its probe scanned; installing or removing a
+  package changes one) and whether each module the checks need
+  (`env_for`'s required modules of the check files, and `-m` modules) is
+  found (`importlib.util.find_spec` under `-I`, no module code run). On
+  reuse the recorded directories are re-statted and the found modules
+  checked again in one subprocess. A report without a state is refused.
+  Only the selected tasks' results are kept;
 - with `--skip-validate`, none (the two flags exclude each other).
 
 In the first two cases `run` refuses (exit 2, the failing tasks and their
@@ -122,7 +133,7 @@ agent counts against the agent (below). With `--skip-validate` the import
 probe decides. `run_eval(validation=...)` applies the same matching and
 raises `HarnessError` on a mismatch. The run report records `validated`,
 `validated_tasks` and `validation` (`ran`, `ok`, `tasks`, `passed`, the
-`failed` ids with their reasons, `base`, `source` (`preflight` or the
+`failed` ids with their reasons, `base`, `base_commit`, `source` (`preflight` or the
 reused file), `check_python`, `check_python_reason`; `{"ran": false,
 "reason": ...}` without one); the Markdown report says it too.
 
@@ -160,15 +171,22 @@ only when the agent cannot have caused it (`check_validity`, recorded as
   failure, unless the interpreter itself is gone and lies outside the
   worktree.
 - When validation was skipped, an `environment` check with a module is
-  probed: `<python> -I -c "import <top>"` from an empty temporary
-  directory outside the worktree. Importable means the agent broke it (a
-  failure); not importable means the environment lacks it (invalid). With
-  nothing to probe, or for `harness`, the run is invalid.
+  first checked against the base: when no tracked Python file at the base
+  commit imports the module's top-level name (`base_imports`: `git grep`
+  at the commit for `import`/`from` lines and `import_module`,
+  `__import__` or `importorskip` with the name; cached per repo, base and
+  name) and the task's break patch adds no such import, the agent
+  introduced it, and the run is a failure. Otherwise it is probed:
+  `<python> -I -c "import <top>"` from an empty temporary directory
+  outside the worktree. Importable means the agent broke it (a failure);
+  not importable means the environment lacks it (invalid). With nothing to
+  probe, or for `harness`, the run is invalid.
 
 A passing check is always valid. Invalid runs stay in the JSON with every
 field, but `aggregate` leaves them out of `successes` and `success_rate`
-(`runs` counts all, `valid_runs` and `invalid_runs` split them; the time,
-token and tool means still cover every run). Because each arm loses
+(`runs` counts all, `valid_runs` and `invalid_runs` split them; the
+wall, token and tool means such as `mean_wall_s` cover every run, and the
+per-component timing is described under Time per component). Because each arm loses
 different runs, `paired_runs`, `paired_successes` and `paired_rate` count
 only the (task, repeat) cells valid in every arm, so arms compare over the
 same runs. `paired` keeps `outcomes` in repeat order, with None for an
@@ -203,7 +221,8 @@ check files in `--repo`, and the module the check runs with `-m` (`pytest`).
 Candidates include the repo's `.venv`, `venv` and `.venv-*`, and the source
 repository's when `--repo` is a worktree or clone without one. The harness
 probes them by running them (`trust=True`): it runs the repository's tests
-under the chosen one anyway. If none has
+under the chosen one anyway. It reads `--repo` in `read` cache mode, so no
+lock-file tool (`pdm`, `poetry`) runs and nothing is written there. If none has
 everything, the one missing the fewest modules is used and the reason says
 which are missing. The choice and why are printed and recorded in the report
 and on every run (`check_python`, `check_python_reason`; `explicit --python`
@@ -542,12 +561,18 @@ second task on the same revision. Each run therefore gets a `timing` block
 (`src/ozagia/eval/timing.py`), and the report shows the components per arm, a
 per-task time without setup and index, and an amortized time.
 
-Timing covers the same runs as success: each arm's valid runs. Invalid
-runs (above) are left out of the components table, the per-tool table and
-the timing headline, so a run whose check never measured the agent does not
-move either number. When an arm has invalid runs, the headline also gives
-its per-task time over every run (`per_task_all_runs_s`;
-`timing_invalid_excluded` counts the runs left out), and every run's
+Timing leaves out invalid runs (above), so a run whose check never
+measured the agent does not move it. The components table and the per-tool
+table cover each arm's own valid runs, the runs of its `success_rate`, and
+say so. The timing headline and its `vs <arm>` deltas compare arms over the
+same runs: the (task, repeat) cells valid in every arm (`paired_cells`,
+the runs of `paired_rate`; `paired_timing` in each summary row). When the
+arms' valid runs are exactly those cells, the headline is the same as over
+each arm's valid runs; otherwise it is labelled `over the N (task, repeat)
+cells valid in every arm`, and a footnote gives each arm's own valid-run
+figure and per-task time over every run (`per_task_all_runs_s`;
+`timing_invalid_excluded` counts the runs left out). With no such cell
+the headline shows each arm's own valid runs without deltas. Every run's
 `timing` stays in the JSON. The header list starts with the check
 interpreter and why, whether and how validation ran, and success over valid
 runs with the invalid count and the paired rate, then the timing headline.
@@ -731,10 +756,17 @@ is classified from its `check.log` (`reclassify_run`, `classified_at_report:
 true`): the exit code is the record's `check_returncode`, the interpreter the
 log's first word (also recorded as `check_python`, "not recorded; read from
 the check log"), and validity follows `check_validity`: such reports have no
-validation, so the import probe decides, run now with that interpreter. The
-agent's last pytest is classified from `driver.stdout.txt` too. `--repo`
-supplies first-party names and the environment detail (read-only: no cache
-is written under the repo). Runs that already have a class keep it.
+validation, so the import probe decides, run now with that interpreter. A
+record without `check_returncode` whose `check.log` exists is a check that
+timed out (the old harness wrote the log after the process ran, so the
+interpreter existed then): it is classified `timeout`, not judged by
+today's filesystem. The agent's last pytest is classified from
+`driver.stdout.txt` too. `--repo` supplies first-party names and the
+environment detail (read-only: no cache is written under the repo, and no
+lock tool runs), and, with the report's `base_commit` (or a `base` that is
+a full commit id), the base-import test above; the break patch is not known
+there, so a break that adds an import of a missing package is counted
+against the agent. Runs that already have a class keep it.
 
 ## How a live run is approved and launched
 
