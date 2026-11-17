@@ -109,6 +109,11 @@ def _hooks_main(argv: list[str]) -> int:
     return main(argv, prog=f"{PROG} hooks")
 
 
+def _federation_main(argv: list[str]) -> int:
+    from ozagia.federation_cli import main
+    return main(argv, prog=f"{PROG} federation")
+
+
 # name -> (main(argv) -> int, help). Looked up at call time so tests can patch.
 DELEGATES: dict[str, tuple[str, str]] = {
     "daemon": ("_daemon_main", "the graph daemon: serve|ensure|ping|stats|shutdown "
@@ -124,6 +129,8 @@ DELEGATES: dict[str, tuple[str, str]] = {
                                  "(schema|get|values|set|migrate)"),
     "hooks": ("_hooks_main", "opt-in Git commit/push hooks "
                              "(install|uninstall|status)"),
+    "federation": ("_federation_main", "read-only federated graph queries "
+                                      "(status|search|node)"),
 }
 
 
