@@ -34,8 +34,8 @@ HTTP `fetch` out of the session. The tests compare the allowed/denied tool
 names with the server's `_TOOLS` table and the live preflight repeats that
 check. The direct-tool shape was also checked offline against OpenCode 2.3 with
 a synthetic OpenAI-compatible endpoint (no live model): the maps config exposed
-47 `ozagia_*` read tools and no `execute`, while the baseline exposed only the
-built-in read/glob/grep tools.
+the configured `ozagia_*` read tools and no `execute`, while the baseline
+exposed only the built-in read/glob/grep tools.
 
 ## Offline checks
 

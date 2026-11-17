@@ -212,18 +212,18 @@ def _mcp_surface(tool_python: str, source: Path, runtime: Path) -> dict[str, Any
     for required in ("dev_maps", "dev_capabilities"):
         if required not in names:
             raise RunRefused(f"the MCP server does not declare {required}")
-    unknown = [tool for tool in (*L.MCP_READ_TOOLS, *L.MCP_MUTATING_TOOLS) if tool not in names]
+    unknown = [tool for tool in (*L.MCP_READ_TOOLS, *L.MCP_DENIED_TOOLS) if tool not in names]
     if unknown:
         raise RunRefused(f"MCP permission list names unknown tools: {', '.join(unknown)}")
-    overlap = set(L.MCP_READ_TOOLS) & set(L.MCP_MUTATING_TOOLS)
+    overlap = set(L.MCP_READ_TOOLS) & set(L.MCP_DENIED_TOOLS)
     if overlap:
         raise RunRefused(f"MCP read/mutating lists overlap: {', '.join(sorted(overlap))}")
     return {"server": L.MCP_SERVER_NAME, "tool_count": len(names),
             "dev_maps": "dev_maps" in names, "dev_capabilities": "dev_capabilities" in names,
-            "read_tools": list(L.MCP_READ_TOOLS), "mutating_tools": list(L.MCP_MUTATING_TOOLS),
+            "read_tools": list(L.MCP_READ_TOOLS), "denied_tools": list(L.MCP_DENIED_TOOLS),
             "permission_actions": {
                 tool: L.mcp_permission_action(tool)
-                for tool in (*L.MCP_READ_TOOLS, *L.MCP_MUTATING_TOOLS)}}
+                for tool in (*L.MCP_READ_TOOLS, *L.MCP_DENIED_TOOLS)}}
 
 
 def _load_api_key(path: Path) -> str:
@@ -796,7 +796,7 @@ def _dry_run(args: argparse.Namespace) -> int:
                 "config_redacted_sha256": L.arm_shape_digest(arm),
                 "mcp_servers": 1 if arm == "maps" else 0,
                 "mcp_read_tools": list(L.MCP_READ_TOOLS) if arm == "maps" else [],
-                "mcp_mutating_tools_denied": list(L.MCP_MUTATING_TOOLS) if arm == "maps" else [],
+                "mcp_denied_tools": list(L.MCP_DENIED_TOOLS) if arm == "maps" else [],
                 "permissions": L.arm_permissions(arm),
             } for arm in L.ARMS
         },

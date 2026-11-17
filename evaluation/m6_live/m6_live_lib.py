@@ -75,6 +75,7 @@ MCP_READ_TOOLS = (
     "dev_query",
     "dev_recent",
     "dev_references",
+    "dev_rename_preview",
     "dev_repo_map",
     "dev_scip",
     "dev_search",
@@ -98,19 +99,22 @@ MCP_READ_TOOLS = (
     "job_log",
 )
 
-MCP_MUTATING_TOOLS = (
+MCP_DENIED_TOOLS = (
     "dev_edit",
     "dev_key_edit",
     "dev_record",
     "dev_refresh",
     "dev_review_repo",
+    "dev_replace",
     "dev_rule",
     "dev_secrets",
     "dev_seed",
     "dev_session_finish",
+    "dev_session_list",
     "dev_session_next",
     "dev_session_record",
     "dev_session_start",
+    "dev_session_state",
     "dev_span_edit",
     "dev_working_set",
     "goal_add",
@@ -474,7 +478,7 @@ def mcp_permission_action(tool: str) -> str:
 
 
 def mcp_permission_names() -> list[str]:
-    return [mcp_permission_action(tool) for tool in (*MCP_READ_TOOLS, *MCP_MUTATING_TOOLS)]
+    return [mcp_permission_action(tool) for tool in (*MCP_READ_TOOLS, *MCP_DENIED_TOOLS)]
 
 
 def _permission_rule(action: str, effect: str) -> dict[str, str]:
@@ -491,7 +495,7 @@ def arm_permissions(arm: str) -> list[dict[str, str]]:
         # fetch that the read-only task set must not have.
         for tool in MCP_READ_TOOLS:
             rules.append(_permission_rule(mcp_permission_action(tool), "allow"))
-        for tool in MCP_MUTATING_TOOLS:
+        for tool in MCP_DENIED_TOOLS:
             rules.append(_permission_rule(mcp_permission_action(tool), "deny"))
     return rules
 
@@ -677,7 +681,7 @@ def validate_arm_config(config: dict[str, Any], arm: str, *,
         for tool in MCP_READ_TOOLS:
             if permission_effect(config, mcp_permission_action(tool)) != "allow":
                 raise ValueError(f"MCP read tool is not allowed: {tool}")
-        for tool in MCP_MUTATING_TOOLS:
+        for tool in MCP_DENIED_TOOLS:
             if permission_effect(config, mcp_permission_action(tool)) != "deny":
                 raise ValueError(f"MCP mutating tool is not denied: {tool}")
 
