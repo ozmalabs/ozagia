@@ -225,7 +225,8 @@ edges for one capability, paged.
 
 Capability readiness (installed, configured, reachable, trusted or permitted)
 is not observed. The service envelope, task preflight, read-only evidence
-collector, offline task profile and read-only model-side maps exist as separate
-packages; this catalogue only declares and joins their surfaces. Durable
-evidence writes, live prefetch delivery into a model turn, structured model
-edits and any daemon operation for capabilities remain unimplemented.
+collector, durable evidence store, offline task profile and read-only
+model-side maps exist as separate packages; this catalogue only declares and
+joins their surfaces. Automatic evidence recording, live prefetch delivery into
+a model turn, structured model edits and any daemon operation for capabilities
+remain unimplemented.
