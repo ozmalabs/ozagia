@@ -13,7 +13,8 @@ dispatch produce false or missing references. The P0 gap in
 [`GRAPH_CODING_LANDSCAPE.md`](GRAPH_CODING_LANDSCAPE.md) is compiler-accurate
 navigation and diagnostics. `src/ozagia/lsp.py` is that layer:
 
-- definitions and references resolved by pyright, rust-analyzer or clangd;
+- definitions and references resolved by pyright, rust-analyzer, clangd,
+  kotlin-language-server or sourcekit-lsp;
 - push diagnostics after an edit, without running a build;
 - document symbols and hover;
 - call hierarchy (callers/callees) for symbol-level impact;
@@ -65,10 +66,15 @@ candidate wins.
 | `c` / `cpp` | `clangd` | uses `compile_commands.json`/`compile_flags.txt` when present |
 | `typescript` | `typescript-language-server --stdio` | absent in this environment |
 | `javascript` | `typescript-language-server --stdio` | same server, JS language id |
+| `kotlin` | `kotlin-language-server` | stdio is the default; no arguments |
+| `swift` | `sourcekit-lsp` | stdio is the default; needs a Swift toolchain and ideally a package |
 
-Aliases (`py`, `rs`, `c++`, `cc`, `ts`, `tsx`, `js`, ...) are normalized.
-`detect_language(path)` maps suffixes; `.h` maps to `c`, `.hpp`/`.cxx` to
-`cpp`, `.tsx`/`.jsx` to their LSP language ids.
+Aliases (`py`, `rs`, `c++`, `cc`, `ts`, `tsx`, `js`, `kt`, `kts`, `swift`,
+...) are normalized. `detect_language(path)` maps suffixes; `.h` maps to `c`,
+`.hpp`/`.cxx` to `cpp`, `.tsx`/`.jsx` to their LSP language ids, and
+`.kt`/`.kts`/`.swift` to `kotlin`/`swift`. The didOpen `languageId` for a
+Kotlin or Swift file is `kotlin` or `swift` even when the client's language
+argument was an alias.
 
 `server_candidates(language, root)` and `available_servers(root)` are
 read-only registry snapshots. **`available` means the binary was found, not
@@ -235,6 +241,8 @@ The default suite proves:
   and unique request ids, including a non-ASCII source body framed by UTF-8
   bytes;
 - initialize ordering and `didOpen` before the first query;
+- Kotlin/Swift suffix detection, alias resolution and didOpen `languageId`
+  values through the fake server (no real Kotlin/Swift server is started);
 - shared-client reuse via `get_client` and process cleanup via `close_all`;
 - definition/location normalization, document symbols, hover;
 - references and `symbol_impact` grouping without writes, including the
@@ -310,8 +318,8 @@ OZAGIA_LIVE_LSP=1 .venv/bin/python -m pytest tests/test_lsp_migrated.py -q -rs
   `compile_commands.json`/`compile_flags.txt`. The client times out honestly
   rather than inventing answers.
 - This environment has pyright and clangd; rust-analyzer is a rustup shim
-  without the component, and no TypeScript server is installed. Availability
-  means "binary found".
+  without the component, and no TypeScript, Kotlin or Swift server is installed
+  by the default venv. Availability means "binary found".
 - Call hierarchy depends on server support and on a hierarchy item at the
   exact position. An empty `items` list is reported, not guessed.
 - Cold indexing is not a readiness barrier. References retry an empty answer,
@@ -333,4 +341,9 @@ OZAGIA_LIVE_LSP=1 .venv/bin/python -m pytest tests/test_lsp_migrated.py -q -rs
 - No cross-repo/external-library graph; that is the SCIP workstream.
 - The fake-server tests prove protocol correctness, not language-server
   compatibility. The live tests are optional and skip aggressively.
+- Kotlin and Swift servers are registry entries only in this environment: no
+  `kotlin-language-server` or `sourcekit-lsp` binary is installed, so no live
+  Kotlin/Swift session is exercised. The candidate list honestly reports them
+  absent. `sourcekit-lsp` also needs a Swift toolchain and, for useful results,
+  a Swift package or build setup.
 - No new dependencies; stdlib only (`subprocess`, `threading`, `json`, ...).

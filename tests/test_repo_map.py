@@ -13,6 +13,7 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
 
 from conftest import load_module_at
 
@@ -61,6 +62,64 @@ def test_rust_and_lua_tags() -> None:
                                 "local n = add(1, 2)\n")
     assert any(t["kind"] == "def" and t["name"] == "add" for t in lua)
     assert any(t["kind"] == "ref" and t["name"] == "add" for t in lua)
+
+
+def test_kotlin_and_swift_files_are_listed_and_tagged(tmp_path: Path,
+                                                      monkeypatch) -> None:
+    from ozagia.index.tag_languages import backend_status
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "Main.kt").write_text(
+        "package demo\n"
+        "\n"
+        "class GreetingService(private val prefix: String) {\n"
+        "    fun greet(name: String): String = buildString(name)\n"
+        "}\n",
+        encoding="utf-8")
+    (root / "App.swift").write_text(
+        "protocol Greeter {\n"
+        "    func greet(name: String) -> String\n"
+        "}\n"
+        "\n"
+        "struct User {\n"
+        "    let id: Int\n"
+        "}\n",
+        encoding="utf-8")
+    monkeypatch.setattr(repo_map_module, "SOURCE_DIRS", (".",))
+    files = repo_map_module._source_files(root)
+    assert {"Main.kt", "App.swift"} <= set(files)
+
+    expected: dict[str, str] = {}
+    kotlin = backend_status("kotlin")
+    swift = backend_status("swift")
+    if kotlin["available"]:
+        expected["Main.kt"] = "GreetingService"
+    if swift["available"]:
+        expected["App.swift"] = "Greeter"
+    if not expected:
+        pytest.skip("neither tree-sitter-kotlin nor tree-sitter-swift is "
+                    f"installed (kotlin={kotlin['error']}; "
+                    f"swift={swift['error']})")
+
+    cache_path = tmp_path / "var" / "tags.json"
+    cache, stats = update_tag_cache(root, cache_path=cache_path,
+                                    files=list(expected))
+    assert stats["failed"] == 0, stats["errors"]
+    assert stats["parsed"] == len(expected)
+    for rel, symbol in expected.items():
+        tags = cache["files"][rel]["tags"]
+        assert any(tag["kind"] == "def" and tag["name"] == symbol
+                   for tag in tags), (rel, tags)
+
+    mapped = repo_map(root, task="", budget_tokens=500,
+                      cache_path=cache_path, files=list(expected))
+    assert mapped["ok"] is True
+    assert {entry["path"] for entry in mapped["files"]} == set(expected)
+    if "Main.kt" in expected:
+        assert "GreetingService" in mapped["markdown"]
+    if "App.swift" in expected:
+        assert "Greeter" in mapped["markdown"]
 
 
 def test_incremental_cache(tmp_path: Path) -> None:
