@@ -1,15 +1,19 @@
-# Model-facing maps (M3)
+# Model-facing maps (M3) and structured edit/interaction (M4)
 
-Status: implemented subset of M3, 2026-11-18, in `src/ozagia/model_api/`.
-This is a **read-only** model boundary: a map is a bounded view over owners
-that already exist. It is not a new graph store, a transport, a permission, a
-model call or a protocol authority. The later M4 edit/interaction path is not
-implemented here.
+Status: implemented subsets of M3 and M4, 2026-11-18, in
+`src/ozagia/model_api/`. The M3 map boundary is **read-only**: a map is a
+bounded view over owners that already exist. It is not a new graph store, a
+transport, a permission, a model call or a protocol authority. M4 adds one
+bounded structured edit proposal and one more-context request; the edit is
+previewed first and only reaches the existing transaction after host
+authorization, while the interaction is still only a bounded map read.
 
 The package is standard-library only. It does not import a target project,
 refresh a snapshot, run a test, start a daemon, install anything, call a model
-or write outside `<root>/.ozagia/`. The only write is bounded cache metadata
-under `<root>/.ozagia/model_api/cache/`.
+or write outside `<root>/.ozagia/` except the single explicit authorized edit
+(the target file, with its backup under `<root>/.ozagia/edits/backups/`).
+Other state writes are bounded cache and action metadata under
+`<root>/.ozagia/model_api/`.
 
 ## What is implemented
 
@@ -21,6 +25,8 @@ under `<root>/.ozagia/model_api/cache/`.
 | `cache.py` | Inspectable cache keys and entries under the repository state directory. |
 | `negotiate.py` | Deterministic capability/support matrix, representation choice, explicit fallback and redacted trace. |
 | `errors.py` | Typed service errors plus stable model-API reasons. |
+| `edit.py` | One M4 `replace_body` proposal, deterministic parsing, host policy and base checks, preview/apply through the existing Python edit transaction, idempotency ledger and the read-only evidence join. |
+| `interact.py` | One M4 more-context request translated to an existing map request; no authority and no scope widening. |
 
 Initial map types:
 
@@ -288,19 +294,236 @@ data and writes only `.ozagia/model_api/cache` metadata.
 `cap:graph.model_maps`, so `ozagia capabilities` and the self-graph audit list
 `mcp:tool:dev_maps` like any other built-in surface. The handler is loaded only
 on the coding/combined full surface; the graph surface and research mode do not
-expose it. The map cache is the only write, under `.ozagia/model_api/cache`.
+expose it. For `dev_maps`, the map cache is the only write, under
+`.ozagia/model_api/cache`.
+
+## M4: structured edit and interaction
+
+M4 is a narrow layer over the existing edit transaction and the M3 maps. It
+adds no new edit engine, no patch fallback, no command runner, no model call
+and no authority.
+
+### Edit proposal
+
+```json
+{
+  "schema": {"namespace": "ozagia.model_api.edit_proposal", "version": "1.0"},
+  "proposal_version": "1.0",
+  "action_id": "act-0001",
+  "node": {"kind": "symbol", "key": "sym:pkg/core.py::add"},
+  "operation": "replace_body",
+  "body": "return a + b\n",
+  "base_sha256": "<64 lowercase hex>",
+  "snapshot": "snapshot:acme/demo@0123456789ab@<graph hash>",
+  "scope": {"root": "/abs/checkout", "session": "s1", "model": "m1",
+            "repo": "repo:acme/demo",
+            "checkout": "checkout:acme/demo@0123456789ab"},
+  "checks": ["test:tests/test_core.py::test_add"],
+  "claims": [{"text": "the add helper still behaves the same"}]
+}
+```
+
+- The only operation is `replace_body` on a canonical Python symbol node
+  `sym:<repo-relative .py>::<qualname>`. The target file and qualname are
+  derived from the node key; there is no separate line range, file, diff,
+  patch, hunk, command, adapter engine or second operation.
+- `body` is function/class body source. It is never evaluated, imported or
+  executed. A model-supplied `command` or other unknown field is refused.
+- `base_sha256` is over the file's raw bytes (BOM included). A preview is
+  refused when it no longer matches.
+- `snapshot` and `checkout` are optional. If present they must match the
+  host-supplied expected identity; a host that cannot verify one refuses the
+  proposal rather than inventing a match.
+- `scope` may match or narrow the host policy. It cannot switch the root,
+  session, model, repo or allowed path, and a proposal does not get to add
+  `paths`. `session`/`model` labels are not authentication.
+- `checks` are selected `test:` keys for the evidence join; M4 never runs
+  them. `claims` are bounded free text kept as `declared` data. Neither field
+  grants permission or changes the operation.
+
+Bounds are hard, not caller-raisable:
+
+| Value | Bound |
+| --- | --- |
+| proposal JSON | 64 KiB canonical UTF-8 |
+| proposal depth / nodes | 8 / 512 |
+| body | 16 KiB UTF-8 |
+| action id | 128 characters, `[A-Za-z0-9][A-Za-z0-9_.:@-]*` |
+| checks / claims | 16 / 8 |
+| claim text | 300 characters |
+| selected target file | existing adapter limit, 2 MiB |
+
+Unknown non-`x-` fields, duplicate JSON keys, floats, NaN/infinity, a BOM,
+control characters, lone CRs, absolute paths and `..` components fail closed.
+An `x-` extension is preserved in the proposal hash but is never interpreted
+as an operation, command or authority.
+
+Typed failures use the shared service codes plus one stable reason:
+
+| Condition | Service code | Reason |
+| --- | --- | --- |
+| malformed JSON/shape/action/body/base/snapshot/scope | `invalid_request` / `invalid_value` / `unknown_field` | `malformed_proposal`, `proposal_schema_mismatch` |
+| wrong schema or proposal version | `unsupported_version` | `unsupported_version` |
+| non-symbol node, non-Python file, unsupported operation | `unsupported` | `unsupported_operation` |
+| non-canonical symbol key/kind | `invalid_request` | `node_mismatch` |
+| absolute path, `..`, state-dir symlink escape | `forbidden` | `path_escape` |
+| payload/body/check/claim-list over bound | `budget_exceeded` | `proposal_over_budget` |
+| file bytes no longer match `base_sha256` | `stale` | `changed_base` |
+| root/repo/path outside policy | `forbidden` | `cross_scope` |
+| session/model not allowed | `forbidden` | `session_not_allowed`, `model_not_allowed` |
+| snapshot/checkout absent or mismatched | `unknown` / `stale` | `scope_unverifiable`, `snapshot_mismatch`, `checkout_mismatch` |
+| symbol/file not found | `not_found` | `target_not_found` |
+| edited source would not parse | `invalid_value` | `parse_failed` |
+
+### Preview, authorization and the existing transaction
+
+`handle_edit(proposal, policy, ...)` previews by default. A preview reads the
+file through `ozagia.edit.txn.read_source`, checks the base hash, and calls the
+built-in Python adapter (`ozagia.edit.code_edit.apply_edit_script`) with
+`write=False` and exactly one `replace_body` op. It writes no file and creates
+no backup. The response carries the node, operation, base/new hashes, bounded
+diff view, selected checks, claims, effective scope and `authority.granted=false`.
+
+The preview also returns a `preview_hash` over the proposal hash, host root,
+session/model, repo/checkout/snapshot, file, node, operation, base hash and body
+hash. `apply=True` requires:
+
+1. a host-constructed `EditAuthorization(granted=True, actor=..., reason=...)`;
+2. the exact `preview_hash`; and
+3. the current file bytes still matching `base_sha256`.
+
+Missing authorization is `forbidden` / `write_declined`; a missing or different
+preview is `preview_required` or `stale` / `preview_mismatch`. The apply then
+re-reads the file and calls the same adapter with `write=True`. That path keeps
+the existing `edit/txn.py` semantics: backup under
+`<root>/.ozagia/edits/backups/`, temp file in the target directory, `fsync`,
+a re-read base check immediately before `os.replace`, and an atomic write. M4
+does not change those semantics and has no text-patch fallback. It also refuses
+to write when the state directory or the edit backup directory is a symlink
+escaping the root.
+
+An applied response still says `authority.granted=false`; its
+`transaction.authorized=true` records that the *host* authorized the write, not
+that a model or proposal has permission. This layer does not add a permission
+prompt, MCP tool, daemon operation or CLI command. A host adapter must construct
+`EditAuthorization` from its existing edit permissions.
+
+### Action idempotency
+
+A successful apply is recorded under
+`<root>/.ozagia/model_api/actions/<sha256(action_id)>.json`. The entry stores
+the action/proposal/preview hashes, file/node/operation, base/new hashes,
+backup path, caller-injected `applied_at`, authorization actor/reason, selected
+checks, claims and scope. It does **not** store the body or the diff.
+
+Replaying the same `action_id` with the same proposal, preview and effective
+scope returns the recorded outcome (`replayed=true`, `applied=false`) without a
+second write or backup. Reusing the id for a different proposal or effective
+scope is `conflict` / `action_conflict`. A failed apply is not recorded as
+applied, so a retry after the base is restored or a new preview is legitimate. Entries are canonical
+JSON, mode `0600`, capped at 128 files/64 KiB each and pruned oldest-first.
+There is no cross-process lock; concurrent applies are last-writer-wins at the
+ledger, while the transaction's own base check protects the file. A ledger
+write failure after a successful edit is reported as an applied action with
+`ledger.state="failed"` and a warning; it is not hidden.
+
+### Action evidence
+
+`action_evidence(action, root=..., goal=..., checks=..., sources=...,
+observed_at=...)` joins the applied action and its selected test keys to
+`ozagia.core.evidence.collect_evidence`. It reads the goal store, run
+manifests, the working-set test record and interpreter candidates. It does not
+run a test, execute a command, refresh the graph, write a goal/task/evidence
+record or invent an interpreter. It returns the evidence report plus a bounded
+action/check/claim section and a local assessment.
+
+- A check result is taken from the recorded test outcome. A `passed`/`failed`
+  result counts for this action only when the record's time (epoch
+  milliseconds) is at or after the caller-injected `applied_at`; otherwise it
+  is `unknown` with `stale`/`unknown` freshness. A test `error` is `unknown`,
+  not a failed assertion. A missing row is `not_assessed`.
+- Claims always stay `result=declared`, `freshness=unknown`,
+  `evidence=declared`, `authority=none`. They never make an assessment pass.
+- The local assessment is `not_assessed` for a preview or an edit with no
+  checks, `declared` when only claims exist, `failed` when an observed selected
+  check failed, `unknown` when a check is unknown/stale/unlinked or the file no
+  longer matches the recorded new hash, and `passed` only when the action was
+  applied/replayed, every selected check passed with current observed evidence,
+  and the file is still at the recorded hash.
+- `passed` here is a bounded evidence status, not proof that the edited bytes
+  were executed: the test record does not record the bytes or interpreter it
+  ran. The response says so in `not_assessed`. Goal-level green remains the
+  job of `ozagia.core.task_preflight`; the M4 fixture refreshes the graph,
+  records a post-action test result, and then builds a preflight report with
+  deterministic fake providers.
+- `handle_edit(..., evidence_goal=...)` attaches the same evidence block to an
+  applied response. An evidence-collection failure is attached as a typed
+  error without turning the already-applied edit into a failure.
+
+### Interaction request
+
+```json
+{
+  "schema": {"namespace": "ozagia.model_api.interact", "version": "1.0"},
+  "request_version": "1.0",
+  "request_id": "ctx-0001",
+  "reason": "need the callers of add",
+  "map": "graph",
+  "scope": {"root": "/abs/checkout", "session": "s1", "model": "m1",
+            "repo": "repo:acme/demo"},
+  "target": {"key": "sym:pkg/core.py::add"},
+  "budgets": {"max_items": 5, "max_depth": 2},
+  "format": "structured"
+}
+```
+
+`parse_interact_request` bounds the request to 32 KiB, depth 6 and 256 nodes,
+refuses duplicate keys/floats/unknown fields and translates it into one v1
+`schema.make_request`. `request_interact` then uses the ordinary
+`request_map` path, so the same host policy checks apply: one of the host's
+allowed map types, one target/page cursor, the same root/session/model, path
+prefixes, budgets and snapshot verification. It cannot request a new
+projector, several maps in one call, a command, a mutation or a wider scope.
+The response is the ordinary map response plus `kind="interact"` and an
+`interaction` block with the request id, bounded reason, map, target, cursor
+and `authority.granted=false`. A malformed or refused interaction returns the
+normal typed error with a plain-tool fallback; it never becomes an empty
+successful map.
 
 ## Explicit unknowns and deferred work
 
 - No live model, model call, network call, daemon start, install, test run or
   target-project import is performed or tested. No observed model support is
   claimed.
-- M4 structured edit/interaction proposals, host validation to
-  `edit/txn.py`, and model-generated success verdicts are **not implemented**.
+- M4 supports exactly one Python operation (`replace_body`) on one canonical
+  symbol in one `.py` file. There is no rename/delete/import/insert/span
+  operation, no other language, no multi-file proposal, no adapter edit engine
+  and no raw diff/patch fallback.
+- M4 has no MCP tool, CLI command, daemon operation or permission prompt of its
+  own. The host adapter must construct `EditAuthorization` from its existing
+  edit policy; this doc does not claim that the MCP or daemon surfaces are
+  already wired to it.
+- M4 verifies the symbol target against the canonical node key and the
+  working file. It does not prove that the symbol existed in the named graph
+  snapshot; snapshot identity is checked only against a host-supplied expected
+  identity, and the graph is not refreshed.
+- A preview returns a bounded (16 KiB) unified diff of the target file so the
+  host and model can review the change. That diff is project content; M4 does
+  not apply an additional secret redactor to source lines. A host with stricter
+  content rules should omit or further redact `diff_view`.
+- The action ledger is a local idempotency cache, not durable evidence. It has
+  no cross-process lock, retention beyond 128 entries, crash recovery or
+  encryption; it stores metadata and hashes, never the body.
+- `action_evidence` does not execute a check. A recorded test result is not
+  proof that the edited bytes or the selected interpreter were used, and a
+  model claim is never a verdict. Goal green remains a `task_preflight`
+  assessment, not an M4 success claim.
 - Capability readiness, trust and permission are not observed by the
   capabilities map. Implementation/test/doc checks remain static.
 - The graph map reads an existing snapshot; it never refreshes, reingests or
-  builds one. An absent or stale snapshot is explicit.
+  builds one. An absent or stale snapshot is explicit. M4 does not refresh the
+  graph after an edit; the host must do that separately before relying on a
+  new symbol/test node.
 - The work map joins recorded evidence only. It does not re-evaluate whether a
   criterion's evidence is still current, and it does not prove that a test
   passed. It does not record which interpreter ran a test.
@@ -312,7 +535,7 @@ expose it. The map cache is the only write, under `.ozagia/model_api/cache`.
   no compaction hook, cross-process lock, daemon-side cache or shared cache.
 - Map scope includes the absolute root path; maps are host-internal artifacts.
 - No CLI surface, daemon operation, durable map record or retention policy is
-  added in this slice.
+  added for maps in this slice.
 - The MCP `session`/`model` labels are cache partitions, not identities.
   Multi-user or multi-workspace isolation requires the host to run separate
   servers/policies.
@@ -321,11 +544,24 @@ expose it. The map cache is the only write, under `.ozagia/model_api/cache`.
 
 ```sh
 PYTHONPATH=$PWD/src .venv/bin/python -m pytest -q \
-  tests/test_model_api.py tests/test_capabilities.py tests/test_self_graph.py \
+  tests/test_model_api_edit.py tests/test_model_api.py \
+  tests/test_capabilities.py tests/test_self_graph.py \
   tests/test_evidence.py tests/test_contracts.py tests/test_graph_surface.py \
   tests/test_mcp_server.py
 .venv/bin/ruff check src tests
 ```
+
+`tests/test_model_api_edit.py` covers: deterministic parse/hash round trips,
+preview/apply through the existing transaction, backup and state-directory
+containment, stale base, declined and missing authorization, preview
+binding/mismatch, a concurrent-change partial failure and retry, duplicate-id
+idempotency and conflicting action ids, snapshot/checkout/root/scope
+mismatches, wrong versions, unsupported operations and node kinds, path
+escapes, oversized/depth/duplicate-key payloads, unparseable bodies, no
+command execution, a state-directory symlink escape, claims-only and
+unavailable/stale checks, action-ledger metadata, and the end-to-end fake-model
+flow (proposal → preview → authorized transaction → graph refresh → captured
+test record → evidence join → task-preflight goal assessment).
 
 `tests/test_model_api.py` covers: schema/hash round trips, plain/structured
 fact and omission agreement, source identities and freshness, outline
