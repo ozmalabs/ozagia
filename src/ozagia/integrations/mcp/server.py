@@ -585,6 +585,48 @@ _TOOLS: list[dict[str, Any]] = [
     },
 ]
 
+# Federation tools are read-only and independent of the single-repository
+# graph surface. Their repository membership is visible in every response.
+_TOOLS.extend([
+    {
+        "name": "federation_status",
+        "description": (
+            "Read-only status of indexed repositories in the bounded sibling "
+            "federation, or in explicitly supplied roots. Reports membership "
+            "and snapshot freshness; it never indexes or refreshes repositories. "
+            "Automatic sibling discovery exposes repository metadata to this client."),
+        "inputSchema": _schema({
+            "roots": {"type": "array", "items": {"type": "string"},
+                      "description": "Optional explicit member roots."},
+        }),
+    },
+    {
+        "name": "federation_search",
+        "description": (
+            "Read-only lexical search over discovered or explicitly selected "
+            "repository snapshots. Results retain repository provenance; search "
+            "does not create precise cross-repository symbol edges."),
+        "inputSchema": _schema({
+            "query": {"type": "string"},
+            "roots": {"type": "array", "items": {"type": "string"},
+                      "description": "Optional explicit member roots."},
+            "limit": {"type": "integer", "default": 20},
+        }, ["query"]),
+    },
+    {
+        "name": "federation_node",
+        "description": (
+            "Read-only inspection of a qualified federated node and its "
+            "snapshot-local edges. Use the qualified key returned by federation "
+            "search; node/edge inspection does not infer cross-repository links."),
+        "inputSchema": _schema({
+            "qualified_key": {"type": "string"},
+            "roots": {"type": "array", "items": {"type": "string"},
+                      "description": "Optional explicit member roots."},
+        }, ["qualified_key"]),
+    },
+])
+
 
 # LSP tools are appended here to keep the base tool table readable.
 def _lsp_pos_schema(*, new_name: bool = False) -> dict[str, Any]:
@@ -1087,7 +1129,10 @@ class DevMemoryServer:
             from ozagia.integrations.mcp.graph_surface import (
                 GRAPH_TOOLS, GraphSurface)
             self._handlers = GraphSurface(memory).handlers()
+            self._handlers.update(self._federation_handlers())
             self._tools = list(GRAPH_TOOLS)
+            self._tools.extend(t for t in _TOOLS
+                               if t["name"].startswith("federation_"))
             self._schemas = {t["name"]: t["inputSchema"] for t in self._tools}
             self._load_adapter_tools()
             if mode == "combined":
@@ -1101,6 +1146,7 @@ class DevMemoryServer:
             "dev_architecture": self._architecture,
             "dev_scip": self._scip,
             "dev_code_search": self._code_search,
+            **self._federation_handlers(),
             "dev_lsp_status": self._lsp_status,
             "dev_definition": self._lsp_definition,
             "dev_references": self._lsp_references,
@@ -1173,6 +1219,34 @@ class DevMemoryServer:
         if mode == "combined":
             self._load_research_dev_context()
         self._load_research_fetch_tool()
+
+    def _federation_handlers(self) -> dict[str, Callable[[dict[str, Any]], Any]]:
+        return {
+            "federation_status": self._federation_status,
+            "federation_search": self._federation_search,
+            "federation_node": self._federation_node,
+        }
+
+    def _federation_call(self, operation: str, *args: Any,
+                         roots: list[str] | None = None,
+                         **kwargs: Any) -> Any:
+        from ozagia.core import federation as F
+        selected = [str(Path(root).expanduser().resolve()) for root in roots] \
+            if roots else None
+        return getattr(F, operation)(self.workspace, *args,
+                                     roots=selected, **kwargs)
+
+    def _federation_status(self, a: dict[str, Any]) -> Any:
+        return self._federation_call("status", roots=a.get("roots"))
+
+    def _federation_search(self, a: dict[str, Any]) -> Any:
+        return self._federation_call("search", str(a["query"]),
+                                     roots=a.get("roots"),
+                                     limit=a.get("limit", 20))
+
+    def _federation_node(self, a: dict[str, Any]) -> Any:
+        return self._federation_call("node", str(a["qualified_key"]),
+                                     roots=a.get("roots"))
 
     def _load_research_fetch_tool(self) -> None:
         """`research_fetch` (`ozagia.research.fallback`) in every mode of the
