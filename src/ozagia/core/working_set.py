@@ -1214,10 +1214,11 @@ def _reference_status_lines(root: Path, *, schedule_sync: bool = False) -> list[
                 pin_state = "unknown"
         else:
             pin_state = "not pinned"
-        label = reference.get("name") or (member.get("name") if member else None)
+        label = member.get("name") if member else None
         if not isinstance(label, str) or not label.strip():
             label = f"reference {index}"
-        label = " ".join(label.split())[:40]
+        label = re.sub(r"[^A-Za-z0-9 ._-]", "", " ".join(label.split()))[:40]
+        label = label or f"reference {index}"
         parts = [f"snapshot {snapshot_state}", f"pin {pin_state}"]
         if sync_state == "error":
             parts.append("last sync failed")
