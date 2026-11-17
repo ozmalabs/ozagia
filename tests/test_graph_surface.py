@@ -50,7 +50,7 @@ FULL_SURFACE_TOOLS = [
     "dev_check_iac", "dev_ops_record", "dev_ops_resume", "dev_live_import",
     "dev_live_diff", "dev_live_save", "dev_aws_cli_check",
     "dev_relay_plan", "dev_preflight_plan", "dev_runtime_status",
-    "dev_runtime_logs", "research_fetch",
+    "dev_runtime_logs", "research_fetch", "dev_maps",
 ]
 VERBS = ["find", "node", "expand", "impact", "edit", "create", "check", "note"]
 FEDERATION_TOOLS = ["federation_status", "federation_search", "federation_node", "federation_check"]
