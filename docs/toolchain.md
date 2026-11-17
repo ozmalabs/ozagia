@@ -228,13 +228,17 @@ allow_network = false
 allow_sudo = false
 probe_versions = true
 probe_sudo = true
+brief = true
 preferred = { pdf = ["pypdf", "pdftotext"] }
 ```
 
 All three approval values default to false. `allow_install` gates install
 previews; `allow_network` gates options that would download packages;
-`allow_sudo` gates options that need root. Environment variables override a
-configured or default value when set to `1`, `true` or `yes`:
+`allow_sudo` gates options that need root. `brief` (default true) lets the
+session brief add its bounded `[ozagia] tools:` block for dirty non-code
+files; `brief = false` turns that off without disabling the CLI or the
+daemon op. Environment variables override a configured or default value when
+set to `1`, `true` or `yes`:
 
 ```bash
 OZAGIA_ALLOW_INSTALL=true
@@ -383,8 +387,88 @@ requiring network/credentials, not as installable.
 
 The brief caps the providers per capability (at most a few, with an `... and
 N more`/`+N more` marker) and adds one line saying that extra tools and MCP
-servers cost context and accuracy. The integration into the daemon/session
-brief is a separate workstream; this module only produces the lines.
+servers cost context and accuracy.
+
+## Daemon op
+
+The daemon's read-only `toolchain` op plans tools for a request without
+touching the graph:
+
+```json
+{"id": 1, "op": "toolchain",
+ "capabilities": ["pdf"], "paths": ["docs/report.pdf"],
+ "model_family": "claude", "probe_versions": false, "probe_sudo": false,
+ "refresh": false}
+```
+
+`capabilities` and `paths` may each be one string or a bounded list (at most
+32 capabilities of 80 characters / 64 paths of 2,000 characters); unknown
+capabilities and malformed flags are answered `{ok: false, error}`, never an
+exception. `probe_versions` and `probe_sudo` default to false, so an ordinary
+request runs only local presence checks (`shutil.which`, `find_spec`), reads
+the `[tools]` config and reports the host; no version or sudo command runs.
+`text` is `tool_plan_text(plan)` normally, and the compact
+`brief_lines(plan, model_family=...)` text when `model_family` is given. The
+answer is `{ok: true, plan, text, cached}`; the plan is advisory and nothing
+is installed.
+
+Plans are cached in the daemon's memory for 60 seconds, at most 32 entries,
+keyed by root, capabilities, paths, model family and the two probe flags.
+`refresh: true` bypasses the read (and rebuilds the entry). The cache is
+per daemon, so it never serves one repository's plan for another. `stats`
+adds:
+
+| Counter | Meaning |
+| --- | --- |
+| `toolchain_plans` | plans served, including cache hits |
+| `toolchain_cache_hits` | answers served from the cache |
+| `toolchain_errors` | invalid requests and failed plans |
+
+The op does not take the graph lock: it reads no graph state, and a version
+probe (only when explicitly requested) is bounded to 2 seconds per tool.
+
+## Session brief
+
+At session start, `ozagia.core.working_set.session_brief` reads the dirty
+files from `git status --porcelain`. When their extensions name an
+external-tool capability (`.pdf`, images, office documents, audio, video,
+archives, diagrams, data files, HTML, Terraform, ...), it adds a small block
+before the goal lines:
+
+```text
+[ozagia] tools: pdf in the changed files; advisory, nothing installed
+pdf: missing; fitz, ghostscript, ...; installation not approved
+```
+
+The block uses `toolchain.brief_lines` filtered to one line per capability,
+at most four lines including the header. It is inferred, not requested:
+ordinary code changes (and clean trees) add nothing. The brief always passes
+`probe_versions=False` and `probe_sudo=False`, even when the `[tools]`
+config enables those probes elsewhere: a session start runs no version or
+sudo command, makes no network call and installs nothing. Set
+`[tools] brief = false` (repository or legacy config;
+`toolchain.brief_enabled(root)` reads it) to turn the block off. The block is
+part of the brief's `max_chars` budget and is dropped first when the text
+would not fit; the mandatory MCP tools line and the goal reserve still fit.
+
+## MCP tool
+
+The full/coding MCP surface includes `dev_tools` (read-only):
+
+| Argument | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `capabilities` | array of strings | `[]` | capability or group ids (`pdf`, `documents`, `media`, ...) |
+| `paths` | array of strings | `[]` | files whose extensions infer a capability |
+| `model_family` | string | none | `claude`, `codex`, `gemini`, `cursor`, `aider`, `openhands` or `local` |
+| `probe_versions` | boolean | false | run the bounded `--version` probes |
+| `probe_sudo` | boolean | false | run the `sudo -n true` usability check |
+
+Its description says: *Use before PDF/document/media/browser work to see
+installed/missing tools and approval/install previews.* The handler returns
+`{ok, plan, text}` where `text` is the compact `brief_lines` form. It is not
+in the graph-only surface (that surface has no `dev_*` tools), and it adds no
+other tool's behaviour to the coding mode. No install, network or model call
+happens.
 
 ## What is not checked
 

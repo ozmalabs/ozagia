@@ -83,6 +83,56 @@ def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def test_dev_tools_is_listed_and_plans_paths(monkeypatch, server) -> None:
+    out = _serve(monkeypatch, server,
+                 b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n')
+    tools = {tool["name"]: tool for tool in out[0]["result"]["tools"]}
+    assert "dev_tools" in tools
+    schema = tools["dev_tools"]["inputSchema"]
+    assert set(schema["properties"]) == {
+        "capabilities", "paths", "model_family", "probe_versions", "probe_sudo"}
+    assert schema["properties"]["probe_versions"]["default"] is False
+    assert schema["properties"]["probe_sudo"]["default"] is False
+    # The tool is additive: the existing coding surface is unchanged.
+    assert {"dev_context", "dev_working_set", "dev_environment"} <= set(tools)
+
+    from ozagia.core import toolchain as T
+    calls = []
+    real = T.tool_plan
+
+    def fake_plan(root, **kwargs):
+        calls.append(dict(kwargs))
+        kwargs.setdefault("which",
+                          lambda name: "/usr/bin/uv" if name == "uv" else None)
+        kwargs.setdefault("module_finder", lambda name: None)
+        kwargs.setdefault("environ", {})
+        return real(root, **kwargs)
+
+    monkeypatch.setattr(T, "tool_plan", fake_plan)
+
+    def no_command(*_args, **_kwargs):
+        raise AssertionError("version/sudo probes must be off by default")
+
+    monkeypatch.setattr(T, "_run_command", no_command)
+
+    payload = json.dumps(_call("dev_tools", {
+        "capabilities": ["pdf"], "paths": ["docs/report.pdf"],
+    })).encode() + b"\n"
+    out = _serve(monkeypatch, server, payload)
+    result = json.loads(out[0]["result"]["content"][0]["text"])
+
+    assert result["ok"] is True
+    assert result["plan"]["request"]["capabilities"] == ["pdf"]
+    assert result["plan"]["request"]["inferred"] == ["pdf"]
+    assert result["text"].startswith("[ozagia] tools:")
+    assert "pdf" in result["text"]
+    assert calls[0]["probe_versions"] is False
+    assert calls[0]["probe_sudo"] is False
+    assert all(not option["would_run"]
+               for capability in result["plan"]["capabilities"]
+               for option in capability["install"])
+
+
 def test_blank_line_is_skipped_and_ping_answered(monkeypatch, server) -> None:
     out = _serve(monkeypatch, server, b"\n" + PING)
     assert out == [{"jsonrpc": "2.0", "id": 5, "result": {}}]

@@ -28,9 +28,10 @@ package managers, sudo usability and the ``[tools]`` approval settings. The
 approval defaults are all false; ``ozagia/config.toml`` (or the legacy config
 file, read through :func:`ozagia.config.load_config_section`) can set
 ``allow_install``, ``allow_network``, ``allow_sudo``, ``probe_versions``,
-``probe_sudo`` and ``preferred``. ``OZAGIA_ALLOW_INSTALL``,
+``probe_sudo``, ``preferred`` and ``brief``. ``OZAGIA_ALLOW_INSTALL``,
 ``OZAGIA_ALLOW_NETWORK`` and ``OZAGIA_ALLOW_SUDO`` override them when set to
-``1``, ``true`` or ``yes``.
+``1``, ``true`` or ``yes``. ``brief = false`` turns off the session brief's
+``[ozagia] tools:`` block (:func:`brief_enabled`).
 
 ``sudo -n true`` is only a non-interactive usability check. It can update the
 sudo timestamp (within the configured timeout), which may make a later
@@ -88,7 +89,10 @@ APPROVAL_ENV = {
 }
 APPROVAL_KEYS = ("allow_install", "allow_network", "allow_sudo")
 PROBE_KEYS = ("probe_versions", "probe_sudo")
-CONFIG_KEYS = frozenset({*APPROVAL_KEYS, *PROBE_KEYS, "preferred"})
+#: Boolean ``[tools]`` key: whether the session brief may add a tools block.
+BRIEF_KEY = "brief"
+CONFIG_KEYS = frozenset(
+    {*APPROVAL_KEYS, *PROBE_KEYS, "preferred", BRIEF_KEY})
 BLOCK_ORDER = ("install", "network", "sudo", "manager")
 MODEL_FAMILY_ALIASES = {
     "claude": "claude", "claude-code": "claude", "anthropic": "claude",
@@ -1238,7 +1242,7 @@ def _validate_tools_table(table: Mapping[str, Any], source: str
                 f"tools.{key}", source,
                 "unknown [tools] key; ignored"))
             continue
-        if key in (*APPROVAL_KEYS, *PROBE_KEYS):
+        if key in (*APPROVAL_KEYS, *PROBE_KEYS, BRIEF_KEY):
             if not isinstance(value, bool):
                 errors.append(_config_error(
                     f"tools.{key}", source,
@@ -1336,6 +1340,10 @@ def _tools_config(root: Path) -> dict[str, Any]:
         else:
             values[key] = False if key in APPROVAL_KEYS else True
             sources[key] = "default"
+    values[BRIEF_KEY] = clean.get(BRIEF_KEY, True)
+    sources[BRIEF_KEY] = (
+        section.source_of(BRIEF_KEY) or
+        ("merged" if BRIEF_KEY in section.values else "default"))
     values["preferred"] = clean.get("preferred", {})
     sources["preferred"] = (
         section.source_of("preferred") or
@@ -1351,6 +1359,20 @@ def _tools_config(root: Path) -> dict[str, Any]:
         "unknown": unknown_deduped,
         "values": values,
     }
+
+
+def brief_enabled(root: str | Path) -> bool:
+    """Whether the session brief may add its ``[ozagia] tools:`` block.
+
+    ``[tools] brief = false`` (repository or legacy config) turns it off; it
+    is on by default. A broken config falls back to on, like the other
+    ``[tools]`` settings, and never raises here.
+    """
+    try:
+        config = _tools_config(Path(root).resolve())
+        return bool(config["values"].get(BRIEF_KEY, True))
+    except Exception:  # noqa: BLE001 - a brief must not fail for config
+        return True
 
 
 def _approval(config: Mapping[str, Any],
