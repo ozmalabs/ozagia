@@ -467,3 +467,412 @@ def test_profile_bytes_are_identical_across_hash_seeds():
                       outcome="completed", input_tokens=10,
                       output_tokens=2),
         ]))
+
+
+# ---------------------------------------------------------------------------
+# WP4 adapters
+# ---------------------------------------------------------------------------
+
+
+def run_manifest(**overrides):
+    value = {
+        "schema": 1,
+        "run_id": "run1",
+        "status": "ok",
+        "started_at": "2026-01-01T00:00:00+00:00",
+        "finished_at": "2026-01-01T00:00:10+00:00",
+        "duration_s": 10.0,
+        "spec": {
+            "id": "demo", "version": 1, "title": "Demo",
+            "tools": ["read", "test"], "requires_graph": True,
+        },
+        "steps": [
+            {"id": "s1", "tool": "read", "status": "ok", "elapsed_s": 1.5},
+            {"id": "s2", "tool": "test", "status": "ok", "elapsed_s": 2.5},
+        ],
+        "artifacts": [
+            {"path": "src/a.py", "sha256": "a" * 64, "size": 10},
+        ],
+        "budget": {
+            "used": {"tokens": 100, "cost_usd": 0.001, "wall_s": 10,
+                     "memory_mb": 64, "disk_mb": 2, "pids": 4},
+        },
+    }
+    value.update(overrides)
+    return value
+
+
+def run_record(manifest=None):
+    manifest = manifest or run_manifest()
+    return {"schema": 1, "run_id": manifest["run_id"],
+            "state": "complete", "manifest": manifest}
+
+
+def goal_record(**overrides):
+    value = {
+        "id": "g1", "version": 1, "status": "met",
+        "criteria": [
+            {
+                "id": "c1", "kind": "test_passes",
+                "args": {"key": "test:tests/test_a.py::test_a"},
+                "last": {"status": "pass", "at": 1767225600},
+            },
+        ],
+    }
+    value.update(overrides)
+    return value
+
+
+def sample_test_record():
+    return {
+        "runs": [{
+            "ts": 1767225600, "selectors": ["tests/test_a.py"],
+            "failed": [], "errors": [], "complete": True, "filtered": False,
+            "source": "captured",
+        }],
+        "tests": {},
+    }
+
+
+def test_task_run_adapter_preserves_ids_and_declares_only_step_order():
+    spans = P.adapt_task_run(run_record(), parents=())
+    assert spans[0].id.startswith("task.task-run1-run-")
+    assert spans[0].parents == ()
+    assert spans[1].id.startswith("task.task-run1-step-s1-")
+    assert spans[2].parents == (spans[1].id,)
+    assert spans[1].parents == ()
+    assert P.edges_from_spans(spans) == [{
+        "from": spans[1].id, "to": spans[2].id,
+        "kind": "finish_to_start",
+    }]
+    assert spans[0].duration_ms == 10_000
+    assert spans[0].clock == "system"
+    assert spans[1].duration_ms == 1_500
+    assert spans[1].clock == "monotonic"
+
+
+def test_task_run_adapter_keeps_missing_duration_unknown():
+    manifest = run_manifest(steps=[
+        {"id": "s1", "tool": "read", "status": "ok"},
+    ])
+    spans = P.adapt_task_run(run_record(manifest))
+    step = spans[1]
+    assert step.duration_ms is None
+    assert step.clock == "unknown"
+    assert step.measurement == "unknown"
+    profile = P.build_task_profile_from_records(
+        P.TaskRecords(run=run_record(manifest)),
+        scope={"task": "task:demo", "run": "run:run1"})
+    assert profile["data"]["coverage"]["unknown_duration"] == 1
+
+
+def test_goal_adapter_preserves_criterion_results_without_durations():
+    goal = goal_record(criteria=[
+        {"id": "c1", "kind": "test_passes",
+         "args": {"key": "test:tests/test_a.py::test_a"},
+         "last": {"status": "pass", "at": 1767225600}},
+        {"id": "c2", "kind": "file_exists", "args": {"key": "file:a.py"}},
+    ])
+    spans = P.adapt_goal_record(goal)
+    assert spans[0].outcome == "completed"
+    assert spans[0].result == "passed"
+    assert spans[1].result == "passed"
+    assert spans[1].evidence == "declared"
+    assert spans[2].result == "not_assessed"
+    assert spans[2].outcome == "pending"
+    assert all(span.duration_ms is None for span in spans)
+
+
+def test_test_record_adapter_links_a_deciding_run_but_not_runs_to_each_other():
+    spans = P.adapt_test_record(sample_test_record(), keys=["test:tests/test_a.py::test_a"])
+    run_span = spans[0]
+    key_span = spans[1]
+    assert run_span.clock == "system"
+    assert run_span.duration_ms is None
+    assert key_span.parents == (run_span.id,)
+    assert key_span.result == "passed"
+    unknown = P.adapt_test_record(
+        {"runs": [], "tests": {}}, keys=["test:tests/test_b.py::test_b"])
+    assert unknown[0].parents is None
+    assert unknown[0].result == "unknown"
+
+
+def test_session_adapter_uses_only_declared_edges_and_wall_clock():
+    session = {
+        "session_id": "s1", "version": 1,
+        "nodes": [
+            {"id": "s1", "kind": "session", "type": "Session",
+             "ts": "2026-01-01T00:00:00+00:00"},
+            {"id": "n2", "kind": "step", "type": "Step",
+             "ts": "2026-01-01T00:00:01+00:00"},
+            {"id": "n3", "kind": "attempt", "type": "Attempt",
+             "ts": "2026-01-01T00:00:02+00:00"},
+            {"id": "n4", "kind": "verification", "type": "Verification",
+             "passed": False, "ts": "2026-01-01T00:00:03+00:00"},
+        ],
+        "edges": [
+            {"src": "s1", "type": "has_step", "tgt": "n2"},
+            {"src": "n2", "type": "attempt", "tgt": "n3"},
+            {"src": "n3", "type": "verification", "tgt": "n4"},
+        ],
+    }
+    spans = P.adapt_session_record(session)
+    by_id = {span.id: span for span in spans}
+    assert spans[0].parents == ()
+    assert by_id[spans[1].id].parents == (spans[0].id,)
+    assert by_id[spans[2].id].parents == (spans[1].id,)
+    assert by_id[spans[3].id].parents == (spans[2].id,)
+    assert by_id[spans[3].id].result == "failed"
+    assert all(span.clock == "system" for span in spans)
+    assert all(span.duration_ms is None for span in spans)
+
+
+def test_daemon_and_evaluation_adapters_keep_measured_components_parallel():
+    daemon = P.adapt_daemon_evidence([
+        {"seq": 1, "tool": "read", "handled": True, "ms": 12.5,
+         "waited_s": 0.5},
+    ])
+    assert daemon[0].duration_ms == 12
+    assert daemon[0].clock == "monotonic"
+    assert daemon[0].queue_wait_ms == 500
+    evaluation = {
+        "run_id": "e1", "status": "ok", "wall_s": 5.0,
+        "tokens_in": 100, "tokens_out": 20, "cost_usd": 0.002,
+        "model": "demo/model",
+        "timing": {"model": {"s": 2.0}, "tools": {"s": 1.0}},
+    }
+    spans = P.adapt_evaluation_record(evaluation)
+    assert len(spans) == 3
+    assert spans[0].duration_ms == 5_000
+    assert spans[1].parents == ()
+    assert spans[2].parents == ()
+    assert spans[1].input_tokens == 100
+    assert spans[1].output_tokens == 20
+    assert P.edges_from_spans(spans) == []
+
+
+# ---------------------------------------------------------------------------
+# WP4 post-run report
+# ---------------------------------------------------------------------------
+
+
+def task_records(**overrides):
+    value = {
+        "run": run_record(),
+        "goal": goal_record(),
+        "test_record": sample_test_record(),
+    }
+    value.update(overrides)
+    return P.TaskRecords(**value)
+
+
+def test_task_report_answers_criteria_work_and_selections():
+    report = P.build_task_report(
+        task_records(), criterion_freshness={"c1": "current"},
+        snapshot="snapshot:demo")
+    assert report["schema"] == {"namespace": "ozagia.task_report",
+                                "version": "1.0"}
+    assert report["outcome"]["status"] == "passed"
+    assert report["outcome"]["criteria_status"] == "passed"
+    assert report["outcome"]["criteria"]["items"][0]["test"]["outcome"] == (
+        "passed")
+    work = report["work"]
+    assert work["planned"]["steps"] == 2
+    assert work["executed"]["steps"] == 2
+    assert work["changed"]["count"] == 1
+    assert work["changed"]["files"][0]["path"] == "src/a.py"
+    assert report["selections"]["tools"] == ["read", "test"]
+    assert report["snapshot"]["id"] == "snapshot:demo"
+    assert report["measurements"]["tokens"]["total"] == 100
+    assert report["measurements"]["cost"]["micros"] == 1_000
+    assert report["execution_critical_path"]["duration_ms"] == 10_000
+    assert len(report["execution_critical_path"]["path"]) == 1
+    assert report["execution_critical_path"]["path"][0].startswith(
+        "task.task-run1-run-")
+    assert report["coverage"]["complete"] is True
+    assert report["outcome"]["complete"] is True
+    assert report["coverage"]["evidence_timing"]["timing_complete"] is False
+    assert report["coverage"]["goal"] == "present"
+    assert report["not_assessed"]
+    P.task_report_json(report)
+    P.task_report_hash(report)
+
+
+def test_task_report_schema_is_versioned_and_the_document_has_no_floats():
+    schema = P.task_report_schema()
+    assert schema["namespace"] == "ozagia.task_report"
+    assert schema["version"] == "1.0"
+    assert schema["sensitivity"] == "internal"
+    assert len(P.task_report_schema_fingerprint()) == 64
+    report = P.build_task_report(
+        task_records(), criterion_freshness={"c1": "current"})
+
+    def walk(value):
+        assert not isinstance(value, float)
+        if isinstance(value, dict):
+            for item in value.values():
+                walk(item)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item)
+
+    walk(report)
+    tampered = dict(report)
+    tampered["surprise"] = 1
+    with pytest.raises(P.TaskReportError):
+        P.validate_task_report(tampered)
+    tampered = dict(report)
+    tampered["hash"] = "0" * 64
+    with pytest.raises(P.TaskReportError):
+        P.validate_task_report(tampered)
+
+
+def test_task_report_is_regenerable_from_the_same_retained_records():
+    records = task_records()
+    first = P.build_task_report(
+        records, criterion_freshness={"c1": "current"}, created_at=1)
+    second = P.build_task_report(
+        records, criterion_freshness={"c1": "current"}, created_at=2)
+    assert P.task_report_json(first) != P.task_report_json(second)
+    assert P.task_report_hash(first) == P.task_report_hash(second)
+    body = {key: value for key, value in first.items() if key != "created_at"}
+    rebuilt = P.validate_task_report({**body, "hash": P.task_report_hash(body)})
+    assert P.task_report_hash(rebuilt) == P.task_report_hash(first)
+
+
+def test_task_report_marks_a_failed_partial_run_and_unknown_criteria():
+    manifest = run_manifest(
+        status="failed", stop="gate_failed",
+        stop_detail="the gate failed",
+        steps=[{"id": "s1", "tool": "read", "status": "error",
+                "elapsed_s": 1.0, "summary": "failed read"}],
+        budget={"used": {}},
+    )
+    goal = goal_record(status="open", criteria=[
+        {"id": "c1", "kind": "file_exists", "args": {"key": "file:a.py"},
+         "last": {"status": "unknown", "reason": "not checked"}},
+        {"id": "c2", "kind": "file_exists", "args": {"key": "file:b.py"}},
+    ])
+    report = P.build_task_report(P.TaskRecords(
+        run=run_record(manifest), goal=goal))
+    assert report["outcome"]["status"] == "failed"
+    assert report["outcome"]["criteria_status"] == "unknown"
+    assert report["outcome"]["complete"] is False
+    assert report["failures"][0]["kind"] == "stop"
+    assert report["blocked"] == []
+    assert report["work"]["executed"]["failed"] == 1
+    assert report["coverage"]["complete"] is False
+    assert report["coverage"]["test_record"] == "not_requested"
+    assert report["outcome"]["criteria"]["counts"] == {
+        "not_assessed": 1, "unknown": 1}
+
+
+def test_task_report_keeps_an_incomplete_run_incomplete():
+    manifest = run_manifest(status="ok")
+    report = P.build_task_report(P.TaskRecords(
+        run={"schema": 1, "run_id": "run1", "state": "incomplete",
+             "manifest": manifest}))
+    assert report["outcome"]["run_status"] == "incomplete"
+    assert report["outcome"]["status"] == "incomplete"
+    assert report["outcome"]["complete"] is False
+
+
+def test_task_report_keeps_a_partial_run_without_a_manifest_incomplete():
+    report = P.build_task_report(P.TaskRecords(run={
+        "schema": 1, "run_id": "partial", "state": "incomplete",
+        "manifest": None, "errors": ["manifest is missing"],
+    }))
+    assert report["run"]["run_id"] == "partial"
+    assert report["outcome"]["run_status"] == "incomplete"
+    assert report["outcome"]["status"] == "incomplete"
+    assert report["outcome"]["complete"] is False
+    assert report["coverage"]["run"] == "incomplete"
+    assert report["work"]["planned"]["steps"] == 0
+    assert report["sources"][0]["source_id"] == "partial"
+
+
+def test_task_report_redacts_a_secret_canary_from_json_and_text():
+    canary = "sk-abcdefghijklmnop"
+    manifest = run_manifest(
+        status="failed", stop="gate_failed",
+        stop_detail=f"request used Authorization: Bearer {canary}",
+        what_was_not_assessed=[f"leaked {canary}"],
+    )
+    goal = goal_record(criteria=[
+        {"id": "c1", "kind": "file_exists", "args": {"key": "file:a.py"},
+         "last": {"status": "fail", "reason": f"token={canary}"}},
+        {"id": "c2", "kind": "test_passes",
+         "args": {"key": f"test:tests/{canary}.py::test_x"}},
+    ])
+    report = P.build_task_report(P.TaskRecords(
+        run=run_record(manifest), goal=goal))
+    text = P.task_report_json(report)
+    assert canary not in text
+    assert canary not in P.format_task_report(report)
+    assert "[redacted]" in text
+
+
+def test_task_report_trims_to_the_byte_bound_and_marks_it():
+    goal = goal_record(criteria=[
+        {"id": f"c{index}", "kind": "file_exists",
+         "args": {"key": f"file:src/file_{index}.py"},
+         "last": {"status": "pass", "at": 1767225600}}
+        for index in range(50)
+    ])
+    report = P.build_task_report(P.TaskRecords(
+        run=run_record(), goal=goal, test_record=sample_test_record()),
+        criterion_freshness={f"c{index}": "current" for index in range(50)},
+        max_bytes=16384)
+    assert len(P.task_report_json(report).encode("utf-8")) <= 16384
+    assert report["truncated"]["reason"] == "bytes"
+    assert report["truncated"]["omitted"] > 0
+    assert report["outcome"]["complete"] is False
+
+
+def test_task_report_drops_absolute_or_escaping_artifact_paths():
+    manifest = run_manifest(artifacts=[
+        {"path": "/etc/passwd"},
+        {"path": "../outside"},
+        {"path": "src/a.py", "sha256": "a" * 64},
+    ])
+    report = P.build_task_report(P.TaskRecords(
+        run=run_record(manifest)))
+    assert report["work"]["changed"]["count"] == 1
+    assert report["work"]["changed"]["files"][0]["path"] == "src/a.py"
+
+
+def test_task_report_cli_reads_only_the_state_directory(tmp_path: Path,
+                                                         capsys):
+    from ozagia import tasks_cli
+
+    root = tmp_path / "repo"
+    run_dir = root / ".ozagia" / "tasks" / "run1"
+    run_dir.mkdir(parents=True)
+    manifest = run_manifest()
+    (run_dir / "manifest.json").write_text(
+        json.dumps(manifest), encoding="utf-8")
+    goal_dir = root / ".ozagia" / "goals"
+    goal_dir.mkdir(parents=True)
+    (goal_dir / "goals.json").write_text(json.dumps({
+        "version": 1, "next_id": 2, "goals": [goal_record()],
+    }), encoding="utf-8")
+
+    code = tasks_cli.main([
+        "report", "run1", "--root", str(root), "--goal", "goal:g1",
+        "--criterion-freshness", "c1=current", "--json",
+    ])
+    assert code == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["outcome"]["status"] == "passed"
+    assert report["scope"]["goal"] == "goal:g1"
+    assert report["run"]["run_id"] == "run1"
+    regenerated = P.build_task_report_from_root(
+        root, "run1", goal_id="g1", criterion_freshness={"c1": "current"})
+    assert regenerated["hash"] == report["hash"]
+    profile = P.build_task_profile_from_root(root, "run1", goal_id="g1")
+    assert profile["scope"]["run"] == "run:run1"
+    P.validate_profile(profile)
+
+    code = tasks_cli.main(["report", "missing", "--root", str(root)])
+    assert code == 2
+    assert "cannot read task run" in capsys.readouterr().err

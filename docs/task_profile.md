@@ -1,16 +1,22 @@
-# Task profiles and timing DAGs (WP3)
+# Task profiles, timing DAGs and post-run reports (WP3/WP4)
 
-Status: offline primitives, 2026-11-17. This document describes
+Status: WP3 offline primitives implemented 2026-11-17; the WP4 adapters, report
+and CLI described below were added on 2026-11-18. This document describes
 `src/ozagia/core/task_profile.py`, `src/ozagia/core/critical_path.py`,
-`tests/test_task_profile.py` and `tests/test_critical_path.py`.
+`src/ozagia/core/prefetch.py`, `src/ozagia/tasks_cli.py`,
+`tests/test_task_profile.py`, `tests/test_critical_path.py` and
+`tests/test_prefetch.py`.
 
-This is the WP3 slice of M2a: profile assembly, a fake-clock timing DAG,
-critical paths, what-if scheduling and bounded report primitives over
-**injected synthetic records**. It does not read a task, goal, daemon,
-session or graph store, does not read a clock, does not call a model, does not
-import a target project, does not start a daemon and does not write a file.
-There is no CLI, MCP tool, daemon operation or prefetch planner in this change.
-WP4 owns the adapters to real records and the user-facing report.
+The WP3 slice is profile assembly, a fake-clock timing DAG, critical paths,
+what-if scheduling and bounded report primitives over **injected synthetic
+records**. It does not read a task, goal, daemon, session or graph store, does
+not read a clock, does not call a model, does not import a target project, does
+not start a daemon and does not write a file.
+
+WP4 adds read-only adapters over retained task/goal/test/session/daemon/eval
+records, a bounded regenerable `ozagia.task_report` v1.0 document with a
+readable rendering, and the `ozagia-tasks report` CLI. It still does not run a
+test, refresh a graph, start a daemon, call a model or write a record.
 
 ## Why two modules
 
@@ -438,48 +444,163 @@ violations still raise the contract errors (`contract.float_not_allowed`,
 - `CycleError`, `InvalidNodeError`, `UnknownNodeError`,
   `CriticalPathBoundsError`.
 
-## What WP4 still has to wire
+## WP4 adapters: retained records to spans
 
-WP3 deliberately stops before the real system. WP4 must:
+`TaskRecords` is the injected record set:
 
-1. **Map real records to spans.** Join existing task, goal, daemon, session,
-   harness, resource and evaluation records into stable run identities and
-   spans. Preserve source IDs and schema versions; a missing record is
-   `unknown`, not a fabricated event.
-2. **Populate scope, snapshot, inputs and provenance.** Use the real task,
-   goal, checkout and snapshot identities, with the existing owner stores as
-   authority. Do not reinterpret unqualified graph keys.
-3. **Classify clocks per source.** Use monotonic deltas where the source
-   actually provides them; mark wall-clock-only cross-process ordering as
-   `system` and do not derive durations from it.
-4. **Respect redaction and permission boundaries.** No prompts, secrets,
-   raw logs, tool inputs/outputs or unrestricted paths in a profile. Model
-   names and token/cost counters are metadata, not content. Re-check scope
-   before serving a retained report.
-5. **Persist and regenerate.** Store profiles/reports under the state
-   directory with atomic writes, bounded retention and cursors. A report must
-   be derivable again from retained permitted records.
-6. **Render and expose.** Add the read-only task report surface (CLI and/or
-   task action) with bounded JSON and a readable rendering. WP3 provides no
-   CLI, MCP tool or daemon operation.
-7. **Handle partial, resumed, failed and cancelled runs.** Distinguish a
-   repeated run from a resumed run; never merge runs with different scope or
-   acceptance criteria. Preserve unknown criteria evidence.
-8. **Add the prefetch planner.** Profile and critical path land first; WP4
-   can then plan read-only prefetch, measure overlap/waste and report savings.
-   Prefetch must use existing authorization, be cancellable and never execute
-   a model, test, install or network fetch as speculation.
-9. **Compare only compatible runs.** Same task, acceptance criteria,
-   revision/snapshot, environment and measurement coverage; otherwise label
-   the comparison incompatible rather than comparing apples to oranges.
-10. **Validate speed profiles.** A fast/resource-limited profile is an
-    assumption to test per provider/model; do not route work or change model
-    selection because a simulation recommends it.
+| Field | Source | Adapter |
+| --- | --- | --- |
+| `run` | `tasks.show_run` (or a bare manifest) | `adapt_task_run` |
+| `goal` | a goal record | `adapt_goal_record` |
+| `test_record` | `working_set.load_test_record` | `adapt_test_record` |
+| `session` | a `DevSession` data mapping | `adapt_session_record` |
+| `daemon` | daemon journal/response timing mappings | `adapt_daemon_evidence` |
+| `evaluation` | an eval run record | `adapt_evaluation_record` |
+| `prefetch` | a `ozagia.prefetch_ledger` report | passed through to the report |
 
-## Not implemented here
+`task_profile_spans(records)` combines them; `task_execution_spans(records)`
+keeps only the run, daemon and evaluation work that has measured timing.
 
-No live task/goal/daemon/session wiring, no persisted profile store, no CLI or
-MCP surface, no daemon operation, no prefetch, no model call, no target
-project import, no network call, no install, no snapshot rewrite, no report
-rendering and no run comparison. The only inputs are caller-supplied records
-and estimates; the only outputs are canonical in-memory values and hashes.
+A task run with no manifest (a partial or interrupted run directory) becomes a
+single unknown root span and a report with `coverage.run="incomplete"`; no
+step, duration or outcome is fabricated.
+
+Every span ID is produced by `source_span_id(source, *parts)`: a readable
+sanitized prefix plus a short SHA-256 suffix. The original source ID and schema
+version are kept in the report's `sources` section; they are not guessed from
+the span ID. The readable part passes through the same redactor as free-text
+labels, and the digest is not reversible. Facts that are absent from a record
+stay absent, never zero.
+
+### Source clocks and edges
+
+| Source | Clock | Duration | Edges |
+| --- | --- | --- | --- |
+| task run | `system` for the ISO start/finish pair; the supplied `duration_s` is the run total | measured; missing stays unknown | run root is separate; steps are chained in the runner's declared sequential manifest order |
+| task step | `monotonic` when `elapsed_s` exists (the runner measured it with `time.monotonic`) | measured or unknown | previous step → next step; no root-containment edge |
+| goal | unknown | none | goal root → criterion |
+| test record | `system` (epoch seconds) | none | a test key links to the deciding run only when the record names it |
+| session | `system` (ISO wall clock) | none | only the session's explicit graph edges (`has_*`, `attempt`, `edit`, `verification`, `decision`, `next`) |
+| daemon | `monotonic` when `ms`/`duration_ms` exists, else `system` timestamp | measured or unknown | none |
+| evaluation | unknown clock; supplied timing components are measured durations | measured where present | each timing component is a separate root because components can overlap; no finish-to-start edge from timestamp or containment |
+
+The runner's step order is a declared property of its loop, not an edge
+inferred from elapsed timestamps. Two spans that overlap or finish in a
+particular order are still independent unless a record declares a parent.
+
+The full profile includes evidence spans with no measured duration, so its
+critical path is often `unknown` with a labelled lower bound. The report also
+computes `execution_critical_path` over the measured run/daemon/eval subset;
+that is the observed execution path, not a claim about evidence spans.
+
+## Post-run task report
+
+`build_task_report(records, ...)` returns the bounded `ozagia.task_report`
+v1.0 document. `build_task_report_from_root(root, run_id, ...)` first collects
+retained records with `TaskSources` defaults; `collect_task_records` exposes
+that read-only join separately.
+
+The report carries:
+
+- `outcome`: run status, criteria status, whether every criterion is current,
+  per-criterion result/freshness/evidence/test join, and a `complete` flag that
+  is true only for a completed run, every criterion current and passed, a
+  non-truncated report, and a timing-complete execution profile. The full
+  profile's evidence spans usually have unknown durations; `coverage` reports
+  that separately as `evidence_timing`.
+- `work`: requested task/goal/criteria, planned steps, executed/failed/skipped
+  counts, changed files with hashes and sizes, and verified items;
+- `selections`: recorded model(s), harness(es), tools and environment; no
+  reason is invented when a record does not provide one;
+- `snapshot`: the manifest preflight snapshot state mapped to contract
+  freshness, with only allowlisted details;
+- `failures`, `fallbacks`, `blocked`, `skipped`: stop, preflight, step and
+  test-plan records;
+- `measurements`: executor-reported token/cost/resource counters, per-step and
+  evaluation stage timing, and explicit measurement state;
+- `critical_path` and `execution_critical_path`;
+- `prefetch`: hits, unused/wasted preparation and overhead from a supplied
+  ledger, or `state="not_recorded"`;
+- `sources`, `coverage`, `not_assessed`, `bounds`, `truncated` and `hash`.
+
+`task_report_json` returns canonical JSON. `task_report_hash` is SHA-256 over
+the report without `hash` and `created_at`, so a caller-injected build time does
+not change the identity of the regenerated document. `validate_task_report`
+checks the namespace, version, required fields, canonical form and hash.
+`format_task_report` is a bounded readable rendering.
+
+Bounds: 50 criteria, 100 changed files, 32 sources, 128 KiB by default (1 MiB
+hard). The byte trim drops list items deterministically and changes
+`truncated.reason` to `bytes`; a profile that was already truncated is marked
+at the report level too.
+
+### Redaction and regeneration
+
+The report is assembled from an allowlist: labels, source IDs, hashes, counters
+and short redacted reasons. It contains no prompts, tool inputs/outputs, file
+contents or raw logs. A best-effort secret-pattern redactor runs over the few
+free-text fields; tests include a secret canary and assert it never appears in
+the JSON or the text rendering.
+
+The same `TaskRecords` always produce the same report bytes, and
+`build_task_report_from_root` rereads the same retained manifest, goal, test,
+session, daemon and evaluation records. A report is therefore regenerable
+without a persisted profile store.
+
+## CLI
+
+```text
+ozagia-tasks report [RUN] [--root R] [--goal G] [--session S]
+                    [--evaluation E] [--snapshot ID]
+                    [--criterion-freshness ID=STATE ...] [--max-bytes N]
+                    [--json]
+```
+
+`RUN` defaults to the newest recorded run. Exit `0` means the report outcome is
+`passed`; exit `1` means the report was produced but the outcome is failed,
+cancelled, incomplete or unknown; exit `2` means invalid input or a missing
+run. `--json` prints the canonical report text; the default prints the readable
+rendering. The command reads only existing records; it does not execute the
+run, tests or a model. Existing `validate`, `run`, `list` and `show` behavior
+is unchanged.
+
+## WP4 public API (additive)
+
+`core/task_profile.py` adds:
+
+- `TaskRecords`, `TaskSources`, `TaskReportError`;
+- `adapt_task_run`, `adapt_goal_record`, `adapt_test_record`,
+  `adapt_session_record`, `adapt_daemon_evidence`,
+  `adapt_evaluation_record`, `task_profile_spans`,
+  `task_execution_spans`, `source_span_id`, `redact_task_text`;
+- `build_task_profile_from_records`, `collect_task_records`,
+  `build_task_profile_from_root`, `build_task_report`,
+  `build_task_report_from_root`, `validate_task_report`,
+  `task_report_json`, `task_report_hash`, `task_report_schema`,
+  `task_report_schema_fingerprint`, `format_task_report`;
+- `default_run_source`, `default_goal_source`, `default_test_record_source`,
+  `default_session_source`, `default_daemon_source`,
+  `default_evaluation_source`.
+
+Existing WP3 names and behavior are unchanged.
+
+## Remaining WP4 boundaries
+
+- No persisted profile/report store, retention or cursor. The report is
+  regenerated from retained owner records.
+- No run-to-run comparison; compatibility rules for comparing two reports are
+  not implemented.
+- No live prefetch delivery into a model turn; `core/prefetch.py` plans and
+  accounts only. See [prefetch](prefetch.md).
+- No evaluation owner store: the default evaluation source reads
+  `.ozagia/eval/<id>.json` if a caller names one, and otherwise the report says
+  the evaluation was not recorded.
+- Daemon records are joined only when a journal record names the run or
+  session. The journal does not carry every harness action.
+- Session timestamps are wall clock, so a session contributes no duration.
+- The report does not re-evaluate goal criteria or prove a snapshot current;
+  `criterion_freshness` is an explicit caller injection.
+- Interpreter selection is not recorded by a task run or a test record; the
+  report says so instead of guessing.
+- What-if/alternate-profile scheduling remains the WP3 API; WP4 does not route
+  work or change model selection.
