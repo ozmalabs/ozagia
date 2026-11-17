@@ -755,6 +755,9 @@ class _Section:
         self.not_checked: list[dict[str, str]] = []
         self.data: dict[str, Any] = {}
         self.modes: dict[str, str] = {}
+        # check -> what its population depends on besides the tree (the
+        # probed interpreters); --compare compares only equal ones.
+        self.populations: dict[str, Any] = {}
         # check -> {file: reason} for files the check could not read or
         # parse; their findings are not reported as resolved by --compare.
         self.skipped_files: dict[str, dict[str, str]] = {}
@@ -772,6 +775,11 @@ class _Section:
     def mode(self, check: str, mode: str) -> None:
         """How a check found its population (`graph`, `filename`)."""
         self.modes[check] = mode
+
+    def population(self, check: str, value: Any) -> None:
+        """What a check's population depends on besides the tree (JSON
+        data): reviews with different values are not compared."""
+        self.populations[check] = value
 
     def skip_file(self, checks: str | Iterable[str], rel: str,
                   reason: str) -> None:
@@ -880,6 +888,7 @@ class _Section:
             "id_files": {fid: self.files_of.get(fid, [])
                          for fid in sorted(f["id"] for f in ordered)},
             "modes": dict(sorted(self.modes.items())),
+            "populations": dict(sorted(self.populations.items())),
             "skipped_files": {check: dict(sorted(files.items()))
                               for check, files in sorted(
                                   self.skipped_files.items())},
@@ -2001,7 +2010,12 @@ def _where(entries: Sequence[Mapping[str, Any]]) -> str:
 def _python_imports(sec: _Section) -> None:
     """Third-party imports against the manifests and the interpreters found
     (`core.environments`): undeclared imports, imports declared only in an
-    optional file, and tests no found interpreter can import."""
+    optional file, and tests no found interpreter can import.
+
+    Project-shipped interpreters are read statically unless the user trusts
+    them (`environments.trust_project_python`). The probed set (path, probe
+    kind, version) is the population of all three checks: `--compare`
+    does not compare reviews that probed different sets."""
     from ozagia.config import GENERIC_SKIP_DIRS
     from ozagia.core import environments as EN
     ctx = sec.ctx
@@ -2012,11 +2026,57 @@ def _python_imports(sec: _Section) -> None:
         for check in _IMPORT_CHECKS:
             sec.skip(check, "no tracked Python files")
         return
+    if sec.expired():
+        return
+    candidates = EN.discover(ctx.root)
+    trusted = EN.trust_project_python(ctx.root)
+    cache = EN.ProbeCache.for_root(ctx.root, "rw")
+    probed: list[dict[str, Any]] = []
+    for cand in candidates:
+        if sec.expired():
+            break
+        timeout = max(0.1, min(EN.PROBE_TIMEOUT_S, ctx.deadline - ctx.clock()))
+        probed.append(EN.probe_one(cand, trusted=trusted, cache=cache,
+                                   timeout=timeout))
+    try:
+        cache.save()
+    except OSError:
+        pass
+    if sec.truncated:
+        return
+    EN.merge_system_site(probed)
+    ok = [item for item in probed if item["probe"].get("ok")]
+    sec.data["interpreters"] = [
+        {"path": item["path"], "source": item["source"],
+         "version": item["probe"].get("version"), "ok": bool(item["probe"].get("ok")),
+         "probe": EN.probe_kind(item), "project": bool(item.get("project"))}
+        for item in probed][:MAX_DATA_ITEMS]
+    sec.data["trust_project_python"] = trusted
+    for check in _IMPORT_CHECKS:
+        sec.population(check, EN.population(probed))
+    probes = [item["probe"] for item in ok]
 
     def read(rel: str) -> str | None:
         return sec.read(rel, *_IMPORT_CHECKS)
 
-    model = EN.ImportModel(ctx.root, ctx.files, read=read)
+    model = EN.ImportModel(ctx.root, ctx.files, read=read,
+                           blobs=EN.blob_ids(ctx.root),
+                           cache=EN.ImportCache.for_root(ctx.root, "rw"),
+                           provided=EN.provided_names(probes))
+    try:
+        _import_checks(sec, model, py, ok, probes)
+    finally:
+        model.save_cache()
+        if model.cache is not None:
+            sec.data["import_cache"] = {"hits": model.cache.hits,
+                                        "misses": model.cache.misses}
+
+
+def _import_checks(sec: _Section, model: Any, py: Sequence[str],
+                   ok: Sequence[Mapping[str, Any]],
+                   probes: Sequence[Mapping[str, Any]]) -> None:
+    from ozagia.core import environments as EN
+    ctx = sec.ctx
     declared = EN.declared_dependencies(ctx.root, ctx.files, read=ctx.text)
     # module -> {rel: kind}
     usage: dict[str, dict[str, str]] = defaultdict(dict)
@@ -2027,15 +2087,6 @@ def _python_imports(sec: _Section) -> None:
         for top, info in model.third_party(rel).items():
             usage[top][rel] = info["kind"]
             lines[(top, rel)] = info["line"]
-    candidates = EN.discover(ctx.root)
-    cache = EN.ProbeCache.for_root(ctx.root, "read")
-    probed = [{**c, "probe": EN.probe(c["path"], cache=cache)} for c in candidates]
-    ok = [item for item in probed if item["probe"].get("ok")]
-    sec.data["interpreters"] = [
-        {"path": item["path"], "source": item["source"],
-         "version": item["probe"].get("version"), "ok": bool(item["probe"].get("ok"))}
-        for item in probed][:MAX_DATA_ITEMS]
-    probes = [item["probe"] for item in ok]
 
     def importers(top: str, keep: Callable[[str, str], bool]) -> list[str]:
         return sorted(rel for rel, kind in usage[top].items() if keep(rel, kind))
@@ -2107,22 +2158,25 @@ def _python_imports(sec: _Section) -> None:
         if sec.expired():
             return
         need = model.requirements([rel], lazy_required=False)
-        required = list(need["required"]) + list(need["stdlib"])
-        if not need["required"]:
+        if not need["required"] and not need["conditional"]:
             continue
         gaps = sorted(((len(m), n, item["path"], item["probe"].get("version"), m)
                        for n, item in enumerate(ok)
-                       for m in [[x for x in required
-                                  if not EN.provides(item["probe"], x)]]),
+                       for m in [EN.assess(item["probe"], need["required"], (),
+                                           need["stdlib"],
+                                           need["conditional"])["missing"]]),
                       key=lambda row: (row[0], row[1]))
         if gaps[0][0] == 0:
             continue
         best_missing = gaps[0][4]
+        static = [item["path"] for item in ok if item["probe"].get("probe") == "static"]
         sec.add("test_env_gap", "minor", [_file_key(rel)],
                 f"no found interpreter can import the dependencies of {rel}",
                 evidence=[f"{path} (Python {version}): missing {', '.join(m)}"
                           for _n, _o, path, version, m in gaps[:3]]
-                + [f"{len(need['closure'])} file(s) read for its imports"],
+                + [f"{len(need['closure'])} file(s) read for its imports"]
+                + ([f"read statically, not run: {', '.join(static[:3])}"]
+                   if static else []),
                 confidence="medium",
                 note="only the interpreters found on this machine were probed "
                      "(ozagia env); a CI image may have them",
@@ -2194,7 +2248,24 @@ def _check_state(packet: Mapping[str, Any],
             files[str(finding.get("id"))] = _key_files(finding.get("keys") or [])
     return {"check": check, "ids": ids,
             "mode": (section.get("modes") or {}).get(check),
+            "population": (section.get("populations") or {}).get(check),
             "skipped": skipped, "files": files}
+
+
+# Finding types whose ids can appear or vanish only because the population
+# changed (another interpreter set): not compared at all when it differs.
+# For the other types with a population a resolution is held instead.
+POPULATION_NOT_COMPARED = frozenset({"test_env_gap"})
+
+
+def check_population(packet: Mapping[str, Any], ftype: str) -> Any:
+    """The population a packet's check behind ``ftype`` recorded (the
+    probed interpreter set), or None."""
+    state = _check_state(packet, ftype) if ftype in FINDING_TYPES else None
+    return None if state is None else state["population"]
+
+
+_UNSET: Any = object()
 
 
 def _type_ids(packet: Mapping[str, Any], ftype: str) -> list[str] | None:
@@ -2206,7 +2277,8 @@ def _type_ids(packet: Mapping[str, Any], ftype: str) -> list[str] | None:
 
 def finding_state(packet: Mapping[str, Any], finding_id: str, *,
                   type: str | None = None,  # noqa: A002 - the goal system's name
-                  keys: Iterable[str] | None = None) -> str:
+                  keys: Iterable[str] | None = None,
+                  population: Any = _UNSET) -> str:
     """Whether a finding is ``present``, ``absent`` or ``not_checked`` in a
     packet, by the rules ``compare_packets`` uses.
 
@@ -2214,7 +2286,10 @@ def finding_state(packet: Mapping[str, Any], finding_id: str, *,
     Absent: the check that produces ``type`` ran to completion over its full
     population: it is in ``checked``, its mode (for graph-dependent checks)
     is ``graph``, and it skipped no file the finding is about (with
-    ``keys``) or no file at all (without). A missing test record leaves
+    ``keys``) or no file at all (without). With ``population`` (what the
+    packet the finding came from recorded, ``check_population``) the check
+    must also have run over the same population (for the import checks:
+    the same probed interpreters). A missing test record leaves
     ``failing_tests`` unchecked. Anything else, including an unknown
     ``type``, is not_checked.
     """
@@ -2228,6 +2303,8 @@ def finding_state(packet: Mapping[str, Any], finding_id: str, *,
     if state is None:
         return "not_checked"
     if state["mode"] is not None and state["mode"] != FULL_MODE:
+        return "not_checked"
+    if population is not _UNSET and population != state["population"]:
         return "not_checked"
     if state["skipped"]:
         if keys is None:
@@ -2243,8 +2320,10 @@ def compare_packets(current: Mapping[str, Any],
 
     A finding type is compared only when the check that produces it ran to
     completion in both packets over the same population: same root, same
-    mode (graph or file names) and, for a resolved id, no file of the
-    finding skipped by the current run (unreadable, too large, binary, a
+    mode (graph or file names), the same population where a check records
+    one (the probed interpreters of the import checks: `test_env_gap` is
+    not compared, a resolved import finding is held) and, for a resolved
+    id, no file of the finding skipped by the current run (unreadable, too large, binary, a
     symlink or unparseable). The others are listed in ``not_compared`` or
     ``held``, so their findings are not reported as resolved.
     """
@@ -2277,12 +2356,21 @@ def compare_packets(current: Mapping[str, Any],
                 f"the check ran in {before['mode'] or 'default'} mode before "
                 f"and in {now['mode'] or 'default'} mode now")})
             continue
+        population_changed = now["population"] != before["population"]
+        if population_changed and ftype in POPULATION_NOT_COMPARED:
+            not_compared.append({**entry, "reason": (
+                "the check ran over another set of probed interpreters "
+                "(path, probe kind, version) than before")})
+            continue
         a, b = set(now["ids"]), set(before["ids"])
         new += sorted(a - b)
         unchanged += sorted(a & b)
         for fid in sorted(b - a):
             files = before["files"].get(fid)
-            if files is None and now["skipped"]:
+            if population_changed:
+                reason = ("the check ran over another set of probed "
+                          "interpreters than before")
+            elif files is None and now["skipped"]:
                 reason = ("the current run skipped files and the finding's "
                           "files are not recorded")
             elif files and set(files) & now["skipped"]:
@@ -2809,7 +2897,7 @@ __all__ = [
     "FINDING_TYPES", "PACKET_SCHEMA", "PreflightError", "RepoReviewError",
     "SCHEMA", "SECTIONS", "SEVERITIES", "atomic_write", "brief",
     "compact_packet", "compare_packets", "exit_code", "finding_id",
-    "finding_state", "prune_packets",
+    "check_population", "finding_state", "prune_packets",
     "format_packet", "format_refusal", "load_packet", "packet_json",
     "preflight", "review_repo", "reviews_dir", "run_model_pass",
     "save_compact", "save_packet", "validate_model_output",

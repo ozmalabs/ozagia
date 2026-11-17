@@ -1370,11 +1370,20 @@ def test_default_check_python_is_the_env_that_has_the_imports(tmp_path, monkeypa
         encoding="utf-8")
     venv_python = make_venv(repo / ".venv", {"fake-numpy": ["zzfake_numpy", "pytest"]})
     monkeypatch.setattr(EN, "_lock_candidates", lambda *a, **k: [])
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
     task = _task("np", BREAK_SIGN, node="tests/test_np.py::test_np")
     EN.clear_memo()
     chosen = ae.default_check_python(repo, [task], cache_mode="off")
     assert chosen["python"] == str(venv_python)
     assert chosen["missing"] == []
+    # The repo's .venv is project-shipped: the harness runs it (trust=True),
+    # the plain model reads it statically.
+    EN.clear_memo()
+    doc = EN.env_for(repo, ["tests/test_np.py"], cache_mode="off")
+    assert doc["best"]["probe"] == "static" and doc["trusted"] is False
+    EN.clear_memo()
+    doc = EN.env_for(repo, ["tests/test_np.py"], cache_mode="off", trust=True)
+    assert doc["best"]["probe"] == "exec"
     assert "root_venv" in chosen["reason"] and "zzfake_numpy" in chosen["reason"]
     assert ae.resolve_check_python(repo, [task], "/x/python") == (
         "/x/python", "explicit --python")
@@ -1431,13 +1440,26 @@ def test_run_refuses_tasks_that_fail_validation(tmp_path, capsys):
     # Only the good task: validated, then run.
     assert main([*argv, "--task-ids", "add-sign", "--run-root", str(tmp_path / "r2"),
                  "--out-json", str(out_json)]) == 0
-    assert json.loads(out_json.read_text())["runs"][0]["success"] is True
-    # --skip-validate starts anyway.
+    report = json.loads(out_json.read_text())
+    assert report["runs"][0]["success"] is True
+    assert report["validated"] is True
+    assert report["validation"] == {"ran": True, "ok": True, "tasks": 1, "passed": 1,
+                                    "failed": [], "base": base,
+                                    "check_python": _python()}
+    assert "Validated before the run: yes, 1 of 1" in ae.render_markdown(report)
+    # --skip-validate starts anyway, and the report says so.
     assert main([*argv, "--skip-validate", "--run-root", str(tmp_path / "r3"),
                  "--out-json", str(out_json)]) == 0
     report = json.loads(out_json.read_text())
     assert [r["task"] for r in report["runs"]] == ["add-sign", "comment-only"]
     assert report["check_python_reason"] == "explicit --python"
+    assert report["validated"] is False and report["validation"]["ran"] is False
+    assert "Validated before the run: no" in ae.render_markdown(report)
+    assert ae.validation_summary({"ok": False, "base": "b", "check_python": "p",
+                                  "results": [{"id": "t", "ok": False,
+                                               "details": {"reason": "r"}}]}) == {
+        "ran": True, "ok": False, "tasks": 1, "passed": 0,
+        "failed": [{"id": "t", "reason": "r"}], "base": "b", "check_python": "p"}
     # Bad arms are refused before any validation.
     capsys.readouterr()
     assert main([*argv, "--arms", "nope", "--run-root", str(tmp_path / "r4")]) == 2

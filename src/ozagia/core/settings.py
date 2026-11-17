@@ -1156,6 +1156,14 @@ _SETTINGS: tuple[Setting, ...] = (
         check=_check_bool,
     ),
     Setting(
+        "environments.trust_project_python", "boolean", False, "user",
+        "Allow running the project's own Python interpreters to probe them "
+        "(user config only; docs/environments.md).",
+        section="environments", name="trust_project_python",
+        validation="true or false",
+        check=_check_bool,
+    ),
+    Setting(
         "jobs.enabled", "boolean", False, "repo",
         "Allow background jobs in the daemon for this repository.",
         section="jobs", name="enabled",

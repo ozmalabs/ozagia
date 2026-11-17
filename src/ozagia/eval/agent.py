@@ -417,10 +417,13 @@ def default_check_python(repo: str | Path, tasks: list[dict[str, Any]],
     """The interpreter for the checks of ``tasks``: the best of
     ``environments.env_for`` over their test files in the source repo (and
     the modules they run with `-m`), else this interpreter. Returns
-    {"python", "reason", "missing"}."""
+    {"python", "reason", "missing"}. Project-shipped interpreters are run
+    to probe them (``trust=True``): the harness runs the repository's
+    tests under the chosen one anyway."""
     from ozagia.core import environments as EN
     files = list(dict.fromkeys(f for t in tasks for f in check_files(t)))
     modules = list(dict.fromkeys(m for t in tasks for m in check_modules(t)))
+    env_kwargs.setdefault("trust", True)
     try:
         doc = EN.env_for(repo, files, extra_modules=modules, **env_kwargs)
     except (EN.EnvError, OSError) as exc:
@@ -442,6 +445,22 @@ def default_check_python(repo: str | Path, tasks: list[dict[str, Any]],
                           + ", ".join(top["missing"])}
     return {"python": sys.executable, "missing": None,
             "reason": "env_for: no interpreter could be probed; this interpreter"}
+
+
+def validation_summary(report: dict[str, Any] | None) -> dict[str, Any]:
+    """What a run report says about the preflight: {"ran": false} without
+    one, else whether every task passed, the counts, the failed ids with
+    their reasons and the interpreter the checks ran under."""
+    if report is None:
+        return {"ran": False, "reason": "not validated (--skip-validate or "
+                                        "run_eval called without a preflight)"}
+    results = report.get("results") or []
+    failed = [{"id": r.get("id"), "reason": (r.get("details") or {}).get("reason")}
+              for r in results if not r.get("ok")]
+    return {"ran": True, "ok": bool(report.get("ok")), "tasks": len(results),
+            "passed": len(results) - len(failed), "failed": failed,
+            "base": report.get("base"),
+            "check_python": report.get("check_python")}
 
 
 def resolve_check_python(repo: str | Path, tasks: list[dict[str, Any]],
@@ -1619,12 +1638,15 @@ def run_eval(repo: str | Path, tasks: list[dict[str, Any]], arms: Iterable[str],
              repeats: int = 1, python: str | None = None,
              python_reason: str | None = None, run_root: Path | None = None,
              keep: bool = False, timeout_s: int = 900,
-             max_total_usd: float | None = None) -> dict[str, Any]:
+             max_total_usd: float | None = None,
+             validation: dict[str, Any] | None = None) -> dict[str, Any]:
     """Run every task × arm × repeat. `max_total_usd` stops the run once the
     reported cost of finished sessions exceeds it (a soft cap: the session
     that crosses it still completes). Without `python` the checks run under
     `default_check_python`'s choice; each run records the interpreter and
-    why (`check_python`, `check_python_reason`)."""
+    why (`check_python`, `check_python_reason`). `validation` is the
+    preflight's `validate_all` report, None when it did not run: the report
+    records `validated` and `validation` (``validation_summary``)."""
     arms = list(arms)
     check_arms(arms, driver)
     if repeats < 1:
@@ -1671,6 +1693,8 @@ def run_eval(repo: str | Path, tasks: list[dict[str, Any]], arms: Iterable[str],
                                         for r in runs), 6),
             "stopped": stopped,
             "check_python": python, "check_python_reason": python_reason,
+            "validated": validation is not None,
+            "validation": validation_summary(validation),
             "arms": ordered_arms, "repeats": repeats,
             "tasks": [t["id"] for t in sorted(tasks, key=lambda t: t["id"])],
             "run_root": str(run_root),
@@ -1782,6 +1806,14 @@ def paired(runs: list[dict[str, Any]], arms: Iterable[str]) -> dict[str, Any]:
     return out
 
 
+def _validation_line(summary: dict[str, Any] | None) -> str:
+    if not summary or not summary.get("ran"):
+        return "no" + (f" ({summary['reason']})" if summary and summary.get("reason")
+                       else "")
+    return (f"yes, {summary.get('passed')} of {summary.get('tasks')} task(s) "
+            f"passed with `{summary.get('check_python')}`")
+
+
 def render_markdown(report: dict[str, Any]) -> str:
     lines = [
         "# Agent end-to-end evaluation",
@@ -1798,6 +1830,8 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"- Arms: {', '.join(report['arms'])}",
         f"- Repeats per task and arm: {report['repeats']}",
         f"- Tasks: {len(report['tasks'])}",
+        "- Validated before the run: "
+        + _validation_line(report.get("validation")),
         "",
         "## Per arm",
         "",
@@ -1922,6 +1956,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     run_root = _run_root(args)
     python, reason = resolve_check_python(args.repo, tasks, args.python)
     print(f"check python: {python} ({reason})")
+    checked: dict[str, Any] | None = None
     if not args.skip_validate:
         # A check that does not pass on base or does not fail after the
         # break measures the harness, not the agent.
@@ -1938,7 +1973,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
                       tasks_dir=spec["dir"], repeats=args.repeats,
                       python=python, python_reason=reason, run_root=run_root,
                       keep=args.keep, timeout_s=args.timeout_s,
-                      max_total_usd=args.max_total_usd)
+                      max_total_usd=args.max_total_usd, validation=checked)
     _write(args.out_json, json.dumps(report, indent=2, sort_keys=True) + "\n")
     _write(args.out_md, render_markdown(report))
     for row in report["summary"]:

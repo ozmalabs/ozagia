@@ -6,8 +6,8 @@
   `ozagia env [--for PATH ...] [--json] [--no-cache]` and the MCP tool
   `dev_environment` list a project's interpreters ($VIRTUAL_ENV, root and
   source-repo venvs, lock-file tool envs, command docs, PATH), probe each with
-  `python -I -c` (bounded, cached under the state dir by interpreter path and
-  site-packages mtime) and rank them for given files by their third-party
+  `python -I -c` (bounded, cached under the state dir by interpreter path,
+  `pyvenv.cfg` and site-packages mtimes) and rank them for given files by their third-party
   imports, including the transitive first-party closure and conftests of
   tests. `who_has(root, module)` names the interpreters that have a module.
   The manifest readers moved to `ozagia.core.manifests` and now say which
@@ -16,7 +16,21 @@
   harness defaults `--python` to the interpreter `env_for` picks for the
   checks' test files in `--repo` and records it per run (`check_python`,
   `check_python_reason`); `run` validates the selected tasks first and
-  refuses with exit 2 unless `--skip-validate`.
+  refuses with exit 2 unless `--skip-validate`, and the report records
+  `validated` and a `validation` summary.
+  Interpreters the project ships (root or source-repo venvs, in-root doc
+  paths, a lock tool's answer inside) are run only with
+  `OZAGIA_TRUST_PROJECT_PYTHON=1` or user-level `[environments]
+  trust_project_python = true`; otherwise they are read statically from
+  `pyvenv.cfg` and site-packages. Probes run with a minimal environment.
+  Imports after a function-level `pytest.importorskip` are guarded; imports
+  under version/platform tests are `conditional` and evaluated per
+  interpreter where possible. Parsed imports are cached by git blob id, and
+  `--compare` treats the probed interpreter set as part of the import
+  checks' population.
+- `config._SENSITIVE_KEY` matches option names and `key=value` arguments,
+  not substrings of paths (`tests/test_tokenizer.py` and a checkout under
+  `…/environments/` are accepted in a command argv).
 
 - Ocelot test-impact and architecture-pattern candidates:
   `ocelot_code.change_shape` records changed files, graph symbols, edge

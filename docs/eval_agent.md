@@ -91,7 +91,11 @@ after the break.
 refuses to start (exit 2, the failing tasks and their reasons on stderr) when
 any check does not pass on base, the patch does not apply or the check still
 passes after the break. `--skip-validate` starts anyway. A check that fails
-on base scores every arm as a failure for a reason no agent can fix.
+on base scores every arm as a failure for a reason no agent can fix. The
+report records whether the preflight ran (`validated`) and its summary
+(`validation`: `ran`, `ok`, `tasks`, `passed`, the `failed` ids with their
+reasons, `base` and `check_python`; `{"ran": false, "reason": ...}` with
+`--skip-validate`); the Markdown report says it too.
 
 ### The check interpreter
 
@@ -101,7 +105,9 @@ on base scores every arm as a failure for a reason no agent can fix.
 interpreter that can import every third-party module of the selected tasks'
 check files in `--repo`, and the module the check runs with `-m` (`pytest`).
 Candidates include the repo's `.venv`, `venv` and `.venv-*`, and the source
-repository's when `--repo` is a worktree or clone without one. If none has
+repository's when `--repo` is a worktree or clone without one. The harness
+probes them by running them (`trust=True`): it runs the repository's tests
+under the chosen one anyway. If none has
 everything, the one missing the fewest modules is used and the reason says
 which are missing. The choice and why are printed and recorded in the report
 and on every run (`check_python`, `check_python_reason`; `explicit --python`

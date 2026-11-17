@@ -913,7 +913,9 @@ _TOOLS.append({
     }),
 })
 # Python environments (`ozagia.core.environments`): interpreters are probed
-# with `python -I -c`; project code is not run.
+# by running `python -I -c` (their site setup runs); project-shipped ones are
+# read as text unless the user trusts them (OZAGIA_TRUST_PROJECT_PYTHON or the
+# user-level config).
 _TOOLS.append({
     "name": "dev_environment",
     "description": (
@@ -927,7 +929,10 @@ _TOOLS.append({
         "they import) resolves, best first, and per import which interpreters "
         "have it and which manifest declares it. With `module`: the "
         "interpreters that can import it. Use it before running tests with a "
-        "`python` you have not checked."),
+        "`python` you have not checked. Interpreters the project ships (venvs "
+        "in the root or the source repository) are not run unless the user "
+        "trusts them; they are read from pyvenv.cfg and site-packages instead "
+        "(`probe: static`)."),
     "inputSchema": _schema({
         "paths": {"type": "array", "items": {"type": "string"},
                   "description": "Root-relative files or directories, e.g. tests/test_x.py."},

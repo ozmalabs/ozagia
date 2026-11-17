@@ -254,6 +254,18 @@ or `off`. The legacy loader treats an unset `enabled` as automatic; the
 registry default is `true`. `lint.trust_project_venv` is user-only and is
 read by the linter from the user config, not the repository config.
 
+### environments
+
+| key | type | default | scope | restart |
+|---|---|---|---|---|
+| `environments.trust_project_python` | boolean | `false` | user | no |
+
+User-only: whether `ozagia env`, `dev_environment` and the repo review may
+run interpreters the project ships to probe them
+([environments.md](environments.md#what-is-run)). `OZAGIA_TRUST_PROJECT_PYTHON=1`
+does the same for one process. The `[environments]` profile tables of a
+legacy `.ozagia.toml` are unrelated.
+
 ### jobs
 
 | Key | Type | Default | Scope | Restart |

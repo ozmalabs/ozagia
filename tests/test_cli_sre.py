@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 
 from ozagia import cli
@@ -79,6 +80,11 @@ def test_cli_environment_profiles_are_declarative(tmp_path, capsys):
 
 
 def test_cli_runtime_status_and_foreground_service(tmp_path, capsys):
+    # The command names an interpreter under tmp_path, so the checkout's
+    # path (its directory names) cannot affect the argv checks.
+    python = tmp_path / "bin" / "python"
+    python.parent.mkdir()
+    python.symlink_to(os.path.realpath(sys.executable))
     (tmp_path / ".ozagia.toml").write_text(
         f"""
 [relays.local]
@@ -87,7 +93,7 @@ allowed_kinds = ["local"]
 max_timeout_s = 20
 
 [runtime.services.echo]
-command = [{json.dumps(sys.executable)}, "-c", "print('cli-ok')"]
+command = [{json.dumps(str(python))}, "-c", "print('cli-ok')"]
 mode = "foreground"
 description = "Echo service"
 

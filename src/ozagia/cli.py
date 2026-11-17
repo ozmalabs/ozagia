@@ -1121,8 +1121,12 @@ def build_parser() -> argparse.ArgumentParser:
                     "environment profiles",
         description="Without a subcommand: the project's Python interpreters, "
                     "what each provides, and with --for the interpreters that "
-                    "can import those files, best first. Interpreters are only "
-                    "probed with `python -I -c`; project code is not run.")
+                    "can import those files, best first. Interpreters are probed "
+                    "by running `python -I -c`, which runs their site setup "
+                    "(.pth files, sitecustomize); interpreters the project ships "
+                    "(venvs in the root or the source repository) are only read "
+                    "as text unless OZAGIA_TRUST_PROJECT_PYTHON=1 or the user "
+                    "config sets [environments] trust_project_python = true.")
     env.add_argument("--root", dest="env_root", default=None,
                      help="repository root")
     env.add_argument("--for", dest="env_for", nargs="+", action="extend",

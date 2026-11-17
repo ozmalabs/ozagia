@@ -16,6 +16,13 @@ def _no_host_cgroups(monkeypatch):
     """Tests never create or write the host's real cgroup hierarchy."""
     monkeypatch.setenv("OZAGIA_CGROUPS", "0")
 
+
+@pytest.fixture(autouse=True)
+def _untrusted_project_python(monkeypatch):
+    """Project-shipped interpreters are not trusted unless a test says so
+    (the shell running the suite may set the variable)."""
+    monkeypatch.delenv("OZAGIA_TRUST_PROJECT_PYTHON", raising=False)
+
 # Module names before the extraction from Ocelot, mapped to their ozagia
 # modules. Historical sources still import the old names.
 _OLD_MODULES = {

@@ -396,6 +396,20 @@ _SENSITIVE_KEY = re.compile(
     r"api[_-]?key|authorization|environment|env_vars?)",
     re.IGNORECASE,
 )
+# An argv element is credential-like when it is an option (`-x`, `--x`,
+# `--x=v`) or a `key=value` whose name contains a credential word; a
+# path that happens to contain one (`tests/test_tokenizer.py`,
+# `.../environments/.venv/bin/python`) is not.
+_OPTION_NAME = re.compile(r"--?(?P<name>[A-Za-z][A-Za-z0-9_.-]*)(?:=|\Z)")
+_KEY_VALUE = re.compile(r"(?P<name>[A-Za-z][A-Za-z0-9_.-]*)=")
+
+
+def _sensitive_arg(arg: str) -> bool:
+    """Whether one argv element names a credential (see above)."""
+    match = _OPTION_NAME.match(arg) or _KEY_VALUE.match(arg)
+    return bool(match and _SENSITIVE_KEY.search(match.group("name")))
+
+
 _SHELL_META = re.compile(r"[;&|`$<>\\\n\r]")
 _SHELL_EXECUTABLES = {"sh", "bash", "dash", "zsh", "fish", "cmd", "powershell"}
 _HOST_PORT = re.compile(
@@ -491,7 +505,7 @@ def _command_argv(value: Any, *, key: str, where: str) -> tuple[str, ...]:
             raise ConfigError(f"{where}: {key} must not use a shell command string")
         if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", arg):
             raise ConfigError(f"{where}: {key} must not contain environment assignments")
-        if _SENSITIVE_KEY.search(arg):
+        if _sensitive_arg(arg):
             raise ConfigError(f"{where}: {key} must not contain credential-like arguments")
         total += len(arg.encode("utf-8"))
         if total > 32 * 1_024:

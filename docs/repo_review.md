@@ -233,7 +233,8 @@ otherwise (the goal system's `review_resolved` closes it).
 - **undeclared_import** (minor): a module imported (at import time or inside
   a function) that no Python manifest declares. Imports guarded by
   `try: ... except ImportError`, `if TYPE_CHECKING` or
-  `pytest.importorskip` are not counted. The import name is matched to
+  `pytest.importorskip` (at module level, or earlier in the same function)
+  are not counted. The import name is matched to
   distribution names by normalization, a table of known aliases (`yaml` is
   PyYAML, `PIL` is Pillow, ...) and the distributions the probed
   interpreters install it from; a mismatch the three miss is a false
@@ -249,10 +250,30 @@ otherwise (the goal system's `review_resolved` closes it).
   import-time dependencies (its module-level imports, those of the
   first-party modules it imports, transitively, and of the `conftest.py`
   files pytest loads). The evidence lists the three interpreters missing the
-  fewest modules. Only interpreters on this machine are probed (with
-  `python -I -c`, never importing the project), using the probe cache
-  read-only; a CI image may have what they lack. Not checked when no
-  interpreter could be probed. `data.interpreters` lists those probed.
+  fewest modules. A version or platform test an import is under is
+  evaluated per interpreter where it can be. Only interpreters on this
+  machine are probed; a CI image may have what they lack. Not checked when
+  no interpreter could be probed. `data.interpreters` lists those probed,
+  each with its probe kind.
+
+Probing runs an interpreter (`python -I -c`, which runs its `site` setup).
+Interpreters the repository ships (venvs in the root or the source
+repository, in-root paths named in the command docs) are not run unless the
+user trusts them with `OZAGIA_TRUST_PROJECT_PYTHON=1` or `[environments]
+trust_project_python = true` in the user-level config; they are read from
+`pyvenv.cfg` and site-packages instead (`probe: static`,
+[environments.md](environments.md#what-is-run)). Without trust the review
+runs no binary the repository controls. `data.trust_project_python` says
+which applied.
+
+The probe set (path, probe kind, version) is recorded per check in the
+section's `populations`. `--compare` does not compare `test_env_gap` with a
+review that probed another set (it is listed in `not_compared`), and holds
+resolved `undeclared_import` and `optional_only_import` ids; a goal's
+`review_resolved` stays unknown for such a review. Parsed imports and
+probes are cached in the state directory (`environments/imports.json` by
+git blob id, `environments/probes.json`), and the budget is checked before
+discovery and between probes.
 
 ## Packet
 

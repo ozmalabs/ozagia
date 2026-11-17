@@ -635,6 +635,87 @@ def test_dependency_import_checks_degrade(repo: Path, monkeypatch) -> None:
     assert not _of(packet, "undeclared_import")
 
 
+def test_import_checks_record_the_probed_set_and_compare_by_it(
+        repo: Path, monkeypatch) -> None:
+    _import_repo(repo)
+    _stub_interpreters(monkeypatch, {"zz_plot"}, set())
+    first = RR.review_repo(repo, sections=["dependencies"])
+    section = first["sections"]["dependencies"]
+    expected = [["/stub/env0/bin/python", "exec", "3.13.0"],
+                ["/stub/env1/bin/python", "exec", "3.13.0"]]
+    assert section["populations"] == {"optional_only_imports": expected,
+                                      "test_environments": expected,
+                                      "undeclared_imports": expected}
+    assert RR.check_population(first, "test_env_gap") == expected
+    gap = _of(first, "test_env_gap")[0]
+    undeclared = _of(first, "undeclared_import")[0]
+    # Another interpreter set (an active venv, another ozagia install), and
+    # the lazy import is gone.
+    _write(repo, "tests/test_dev.py",
+           "import zz_devtool\nfrom pkg.uses_plot import zz_plot\n\n\n"
+           "def test_d():\n    assert zz_plot\n")
+    _commit(repo, "no lazy import")
+    _stub_interpreters(monkeypatch, {"zz_plot", "zz_devtool"})
+    second = RR.review_repo(repo, sections=["dependencies"])
+    assert not _of(second, "test_env_gap") and not _of(second, "undeclared_import")
+    diff = RR.compare_packets(second, first)
+    assert {e["type"]: e["reason"] for e in diff["not_compared"]}["test_env_gap"] \
+        .startswith("the check ran over another set of probed interpreters")
+    assert gap["id"] not in diff["resolved"]
+    held = {h["id"]: h["reason"] for h in diff["held"]}
+    assert "probed interpreters" in held[undeclared["id"]]
+    assert undeclared["id"] not in diff["resolved"]
+    # A goal anchored on the first packet cannot be closed by the second.
+    assert RR.finding_state(second, gap["id"], type="test_env_gap",
+                            keys=gap["keys"]) == "absent"
+    assert RR.finding_state(second, gap["id"], type="test_env_gap", keys=gap["keys"],
+                            population=RR.check_population(first, "test_env_gap")) \
+        == "not_checked"
+    # The same set again: compared as usual.
+    third = RR.review_repo(repo, sections=["dependencies"])
+    diff = RR.compare_packets(third, second)
+    assert "test_env_gap" not in {e["type"] for e in diff["not_compared"]}
+    assert RR.finding_state(third, gap["id"], type="test_env_gap", keys=gap["keys"],
+                            population=RR.check_population(second, "test_env_gap")) \
+        == "absent"
+
+
+def test_import_checks_respect_the_budget_around_probes(repo: Path,
+                                                         monkeypatch) -> None:
+    from ozagia.core import environments as EN
+    _import_repo(repo)
+    now = [0.0]
+    timeouts: list[float] = []
+    paths = [f"/stub/slow{n}/bin/python" for n in range(3)]
+    monkeypatch.setattr(EN, "discover", lambda root, **_k: [
+        {"path": p, "source": "path", "evidence": p, "also": []} for p in paths])
+
+    def slow_probe(python, *, timeout, **_k):
+        timeouts.append(timeout)
+        now[0] += 25.0
+        return {"ok": False, "path": python, "error": "probe timed out"}
+
+    monkeypatch.setattr(EN, "probe", slow_probe)
+    packet = RR.review_repo(repo, sections=["dependencies"], budget_s=40,
+                            clock=lambda: now[0])
+    section = packet["sections"]["dependencies"]
+    assert len(timeouts) == 2 and all(t <= EN.PROBE_TIMEOUT_S for t in timeouts)
+    assert section["truncated_reason"] == "budget"
+    assert "test_environments" not in section["checked"]
+
+
+def test_import_checks_cache_parsed_imports(repo: Path, monkeypatch) -> None:
+    _import_repo(repo)
+    _stub_interpreters(monkeypatch, {"zz_plot"})
+    first = RR.review_repo(repo, sections=["dependencies"])
+    cold = first["sections"]["dependencies"]["data"]["import_cache"]
+    assert cold["misses"] > 0
+    second = RR.review_repo(repo, sections=["dependencies"])
+    warm = second["sections"]["dependencies"]["data"]["import_cache"]
+    assert warm["misses"] == 0 and warm["hits"] >= cold["misses"]
+    assert [f["id"] for f in second["findings"]] == [f["id"] for f in first["findings"]]
+
+
 # --------------------------------------------------------------------------- #
 # compare across changed populations
 # --------------------------------------------------------------------------- #

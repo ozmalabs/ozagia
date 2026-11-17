@@ -423,8 +423,8 @@ def test_who_has(tmp_path: Path) -> None:
     out = EN.who_has(tmp_path, "numpy.linalg",
                      candidates=_cands("/e/a", "/e/b", "/e/c", "/e/d"),
                      runner=runner, cache_mode="off")
-    assert out == [{"interpreter": "/e/a", "version": "3.13.0"},
-                   {"interpreter": "/e/d", "version": "3.13.0"}]
+    assert out == [{"interpreter": "/e/a", "version": "3.13.0", "probe": "exec"},
+                   {"interpreter": "/e/d", "version": "3.13.0", "probe": "exec"}]
     assert EN.who_has(tmp_path, "zz_none", candidates=_cands("/e/a"),
                       runner=runner, cache_mode="off") == []
 
@@ -496,3 +496,420 @@ def test_mcp_dev_environment(tmp_path: Path, fake_venv: Path, monkeypatch) -> No
     listing = call({})
     assert listing["ok"] and listing["interpreters"][0]["path"] == str(fake_venv)
     assert call({"paths": ["../x.py"]})["ok"] is False
+
+
+# --------------------------------------------------------------------------- #
+# trust: what is run
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def no_user_config(tmp_path_factory: pytest.TempPathFactory, monkeypatch) -> Path:
+    """An empty user-level config dir (XDG_CONFIG_HOME)."""
+    xdg = tmp_path_factory.mktemp("xdg")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    return xdg
+
+
+def _site(venv: Path) -> Path:
+    v = f"python{sys.version_info[0]}.{sys.version_info[1]}"
+    site = venv / "lib" / v / "site-packages"
+    site.mkdir(parents=True, exist_ok=True)
+    return site
+
+
+def _fake_dist(site: Path, name: str, tops: list[str] | None,
+               record: list[str] | None = None) -> None:
+    info = site / f"{name}-1.0.dist-info"
+    info.mkdir()
+    (info / "METADATA").write_text(
+        f"Metadata-Version: 2.1\nName: {name}\nVersion: 1.0\n", encoding="utf-8")
+    if tops is not None:
+        (info / "top_level.txt").write_text("\n".join(tops) + "\n", encoding="utf-8")
+    if record is not None:
+        (info / "RECORD").write_text("\n".join(f"{r},," for r in record) + "\n",
+                                     encoding="utf-8")
+
+
+def _shipped_script_repo(tmp_path: Path, marker: Path) -> Path:
+    """A git repo that commits a shell script as `.venv/bin/python` (next to
+    a pyvenv.cfg and site-packages) and names `tools/python` in README."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    venv = root / ".venv"
+    (venv / "bin").mkdir(parents=True)
+    _script(venv / "bin" / "python", f"echo venv >> {marker}\nexit 1\n")
+    (venv / "pyvenv.cfg").write_text(
+        "home = /usr/bin\ninclude-system-site-packages = false\n"
+        "version = 3.12.4\n", encoding="utf-8")
+    _fake_dist(_site(venv), "zz-shipped", ["zz_shipped"])
+    (root / "tools").mkdir()
+    _script(root / "tools" / "python", f"echo tools >> {marker}\nexit 1\n")
+    _write(root, "README.md", "Run `tools/python -m pytest`.\n")
+    _write(root, "tests/test_s.py", "import zz_shipped\n")
+    _git(root, "init", "-q")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "ship a python")
+    return root
+
+
+def test_committed_script_python_is_not_run_untrusted(
+        tmp_path: Path, monkeypatch, no_user_config: Path,
+        capsys: pytest.CaptureFixture[str]) -> None:
+    from ozagia.core import repo_review as RR
+    marker = tmp_path / "ran"
+    root = _shipped_script_repo(tmp_path, marker)
+    monkeypatch.setenv("OZAGIA_STATE_DIR", str(tmp_path / "state"))
+    cands = EN.discover(root, which=lambda _n: None, include_self=False)
+    assert [(c["source"], c["project"]) for c in cands] == [
+        ("root_venv", True), ("command_docs", True)]
+    assert EN.trust_project_python(root) is False
+    doc = EN.environments(root, cache_mode="off")
+    by_source = {e["source"]: e for e in doc["interpreters"]}
+    assert by_source["root_venv"]["probe"] == "static"
+    assert by_source["root_venv"]["version"] == "3.12.4"
+    assert "not run" in by_source["command_docs"]["error"]
+    found = EN.env_for(root, ["tests/test_s.py"], cache_mode="off")
+    assert found["best"]["path"] == str(root / ".venv" / "bin" / "python")
+    assert found["best"]["probe"] == "static" and found["trusted"] is False
+    assert cli.main(["env", "--root", str(root), "--for", "tests/test_s.py"]) == 0
+    out = capsys.readouterr().out
+    assert "read statically, not run" in out and EN.TRUST_ENV in out
+    packet = RR.review_repo(root, sections=["dependencies"])
+    data = packet["sections"]["dependencies"]["data"]
+    assert {i["probe"] for i in data["interpreters"] if i["project"]} \
+        <= {"static", "failed"}
+    assert data["trust_project_python"] is False
+    assert not marker.exists()
+    # Trusted (the variable): both are run.
+    EN.clear_memo()
+    monkeypatch.setenv(EN.TRUST_ENV, "1")
+    doc = EN.environments(root, cache_mode="off")
+    assert doc["trusted"] is True
+    assert sorted(marker.read_text().split()) == ["tools", "venv"]
+
+
+def test_symlinked_system_python_with_a_committed_pth_is_not_run(
+        tmp_path: Path, monkeypatch, no_user_config: Path) -> None:
+    """`.venv/bin/python` links to a system interpreter (its realpath is
+    outside the root), but the committed pyvenv.cfg and .pth would run."""
+    marker = tmp_path / "pth_ran"
+    root = tmp_path / "repo"
+    venv = root / ".venv"
+    (venv / "bin").mkdir(parents=True)
+    base = os.path.realpath(sys.executable)
+    (venv / "bin" / "python").symlink_to(base)
+    (venv / "pyvenv.cfg").write_text(
+        f"home = {os.path.dirname(base)}\ninclude-system-site-packages = false\n"
+        f"version = {sys.version_info[0]}.{sys.version_info[1]}.0\n",
+        encoding="utf-8")
+    site = _site(venv)
+    (site / "zz.pth").write_text(
+        f"import pathlib; pathlib.Path({str(marker)!r}).write_text('pth')\n",
+        encoding="utf-8")
+    _fake_dist(site, "zz-linked", ["zz_linked"])
+    cands = EN.discover(root, which=lambda _n: None, command_docs=[],
+                        include_self=False)
+    assert cands[0]["project"] is True
+    assert not EN.is_project_shipped(base, [root])
+    out = EN.probe_candidates(root, cache_mode="off", candidates=cands)
+    assert out[0]["probe"]["probe"] == "static"
+    assert "zz_linked" in out[0]["probe"]["modules"]
+    assert not marker.exists()
+    # Trusted: run, and the .pth runs with it (what trust allows).
+    EN.clear_memo()
+    out = EN.probe_candidates(root, cache_mode="off", candidates=cands, trust=True)
+    assert out[0]["probe"]["ok"] and out[0]["probe"]["probe"] == "exec"
+    assert marker.read_text() == "pth"
+
+
+def test_static_probe_reads_dist_info_as_text(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    venv = root / ".venv"
+    (venv / "bin").mkdir(parents=True)
+    _script(venv / "bin" / "python", "exit 1\n")
+    (venv / "pyvenv.cfg").write_text(
+        "home = /opt/py/bin\nversion_info = 3.11.9.final.0\n"
+        "include-system-site-packages = true\n", encoding="utf-8")
+    site = _site(venv)
+    _fake_dist(site, "numpy", ["numpy"])
+    _fake_dist(site, "python-chess", None, record=["chess/__init__.py",
+                                                    "python_chess-1.0.dist-info/METADATA",
+                                                    "single_mod.py", "../../bin/tool"])
+    (site / "plainpkg").mkdir()
+    (site / "plainpkg" / "__init__.py").write_text("", encoding="utf-8")
+    extra = tmp_path / "editable_src"
+    (extra / "editpkg").mkdir(parents=True)
+    (site / "x.pth").write_text(f"{extra}\nimport os; os.exit(3)\n", encoding="utf-8")
+    raw = EN.static_probe(str(venv / "bin" / "python"))
+    assert raw["ok"] and raw["probe"] == "static" and raw["version"] == "3.11.9"
+    mods = raw["modules"]
+    assert mods["numpy"] == ["numpy"]
+    assert mods["chess"] == ["python-chess"] and mods["single_mod"] == ["python-chess"]
+    assert mods["plainpkg"] == [] and mods["editpkg"] == []
+    assert raw["distributions"] == 2 and raw["system_site_packages"] is True
+    assert str(extra) in raw["scanned"]
+    # Not a venv: nothing to read, and nothing is run.
+    (root / "tools").mkdir()
+    lone = _script(root / "tools" / "python", "exit 1\n")
+    assert "not run" in EN.static_probe(lone)["error"]
+    # include-system-site-packages: the base's packages from a run candidate
+    # in `home`.
+    probed = [{"path": str(venv / "bin" / "python"),
+               "probe": EN._normalize_probe(str(venv / "bin" / "python"), raw,
+                                            "static")},
+              {"path": "/opt/py/bin/python3",
+               "probe": {"ok": True, "probe": "exec", "path": "/opt/py/bin/python3",
+                         "modules": {"sysonly": ["sysonly"]}, "stdlib": ["json"]}}]
+    EN.merge_system_site(probed)
+    assert "sysonly" in probed[0]["probe"]["modules"]
+    assert probed[0]["probe"]["system_site_from"] == "/opt/py/bin/python3"
+
+
+def test_trust_from_user_config_not_the_repo(tmp_path: Path, monkeypatch,
+                                             no_user_config: Path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    assert EN.trust_project_python(root) is False
+    _write(no_user_config, "ozagia/config.toml",
+           "[environments]\ntrust_project_python = true\n")
+    assert EN.trust_project_python(root) is True
+    # A user config inside the root does not count.
+    _write(root, "xdg/ozagia/config.toml",
+           "[environments]\ntrust_project_python = true\n")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(root / "xdg"))
+    assert EN.trust_project_python(root) is False
+    # Nor does the repository's own config.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "none"))
+    _write(root, ".ozagia.toml", "[environments]\ntrust_project_python = true\n")
+    assert EN.trust_project_python(root) is False
+    monkeypatch.setenv(EN.TRUST_ENV, "1")
+    assert EN.trust_project_python(root) is True
+
+
+def test_project_shipped_rule(tmp_path: Path, fake_venv: Path, monkeypatch) -> None:
+    root = tmp_path / "proj"
+    (root / "envs" / "bin").mkdir(parents=True)
+    _script(root / "envs" / "bin" / "python", "exit 1\n")
+    (root / "pdm.lock").write_text("", encoding="utf-8")
+    outside = tmp_path / "outside"
+    (outside / "bin").mkdir(parents=True)
+    (outside / "bin" / "python").symlink_to(fake_venv)
+    monkeypatch.setenv("VIRTUAL_ENV", str(outside))
+    # pdm's answer points inside the root.
+    cands = EN.discover(root, which={"pdm": "/bin/pdm"}.get,
+                        tool=lambda argv, cwd: str(root / "envs" / "bin" / "python"),
+                        command_docs=[], include_self=False)
+    assert [(c["source"], c["project"]) for c in cands] == [
+        ("virtual_env", False), ("lock", True)]
+    # A PATH entry that links into the root is the project's too.
+    into = tmp_path / "bin2"
+    into.mkdir()
+    (into / "python3").symlink_to(root / "envs" / "bin" / "python")
+    assert EN.is_project_shipped(into / "python3", [root])
+    assert EN.is_self(sys.executable)
+
+
+def test_probe_environment_is_scrubbed(tmp_path: Path, monkeypatch) -> None:
+    dump = tmp_path / "env.txt"
+    python = _script(tmp_path / "python", f"env > {dump}\nexit 1\n")
+    for key, value in {"SECRET_TOKEN": "x", "OZAGIA_STATE_DIR": "/s",
+                       "PYTHONPATH": "/p", "VIRTUAL_ENV": "/v", "AWS_PROFILE": "a",
+                       "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
+                       "TMPDIR": str(tmp_path)}.items():
+        monkeypatch.setenv(key, value)
+    assert EN.run_probe(python)["ok"] is False
+    keys = {line.split("=", 1)[0] for line in dump.read_text().splitlines()
+            if "=" in line}
+    assert keys - {"PWD", "SHLVL", "_", "OLDPWD"} <= {"PATH", "HOME", "LANG",
+                                                      "LC_ALL", "TMPDIR"}
+    assert {"LANG", "LC_ALL", "TMPDIR", "PATH"} <= keys
+    assert "SECRET_TOKEN" not in keys and "OZAGIA_STATE_DIR" not in keys
+
+
+def test_failed_probes_are_remembered_for_the_run(tmp_path: Path) -> None:
+    calls: list[str] = []
+
+    def runner(python: str, *, timeout: float) -> dict[str, Any]:
+        calls.append(python)
+        return {"ok": False, "error": "probe timed out after 10 s"}
+
+    cache = EN.ProbeCache(tmp_path / "probes.json", "rw")
+    for _ in range(3):
+        assert EN.probe("/e/hangs", cache=cache, runner=runner)["ok"] is False
+    assert calls == ["/e/hangs"]
+    cache.save()
+    assert not (tmp_path / "probes.json").exists()
+
+
+def test_pyvenv_cfg_is_in_the_cache_signature(tmp_path: Path) -> None:
+    python = make_venv(tmp_path / "v", {"alpha": ["alpha"]})
+    state = tmp_path / "probes.json"
+    cache = EN.ProbeCache(state, "rw")
+    EN.probe(str(python), cache=cache)
+    cache.save()
+    EN.clear_memo()
+    assert EN.probe(str(python), cache=EN.ProbeCache(state, "read"))["cached"] == "file"
+    cfg = tmp_path / "v" / "pyvenv.cfg"
+    cfg.write_text(cfg.read_text().replace("include-system-site-packages = false",
+                                           "include-system-site-packages = true"))
+    later = cfg.stat().st_mtime + 5
+    os.utime(cfg, (later, later))
+    EN.clear_memo()
+    again = EN.probe(str(python), cache=EN.ProbeCache(state, "read"))
+    assert again["cached"] is False and again["ok"]
+
+
+# --------------------------------------------------------------------------- #
+# import kinds: function-level importorskip, version and platform branches
+# --------------------------------------------------------------------------- #
+
+
+def test_function_importorskip_and_conditional_imports() -> None:
+    text = (
+        "import sys, pytest\n"
+        "def test_a():\n"
+        "    import substrate_rs as early\n"
+        "    pytest.importorskip('substrate_rs')\n"
+        "    import substrate_rs\n"
+        "    from substrate_rs.x import y\n"
+        "def test_b():\n"
+        "    import substrate_rs\n"
+        "if sys.version_info >= (3, 11):\n    import tomllib\n"
+        "else:\n    import tomli\n"
+        "if sys.platform == 'win32':\n    import win32api\n"
+        "elif sys.platform.startswith('linux'):\n    import zz_linux\n"
+        "if platform.system() == 'Darwin':\n    import zz_mac\n"
+        "def f():\n    if sys.version_info[:2] < (3, 9):\n        import zz_old\n")
+    recs = EN.file_imports(text)
+    kinds = [(r["module"], r["line"], r["kind"]) for r in recs if r["module"]]
+    assert kinds == [
+        ("sys", 1, "module"), ("pytest", 1, "module"),
+        ("substrate_rs", 3, "lazy"), ("substrate_rs", 4, "guarded"),
+        ("substrate_rs", 5, "guarded"), ("substrate_rs.x", 6, "guarded"),
+        ("substrate_rs", 8, "lazy"),
+        ("tomllib", 10, "conditional"), ("tomli", 12, "conditional"),
+        ("win32api", 14, "conditional"), ("zz_linux", 16, "conditional"),
+        ("zz_mac", 18, "conditional"), ("zz_old", 21, "conditional")]
+    by = {r["module"]: r for r in recs}
+    assert by["tomli"]["cond"] == [{"kind": "version", "op": ">=", "value": [3, 11],
+                                    "slice": None, "negate": True}]
+    assert by["tomli"]["base"] == "module" and by["zz_old"]["base"] == "lazy"
+    assert by["zz_mac"]["cond"] == [{"kind": "unknown"}]
+    # elif: the negated first test and the second one.
+    assert [c["kind"] for c in by["zz_linux"]["cond"]] == ["platform", "platform"]
+    ev = EN.evaluate_conditions
+    assert ev(by["tomli"]["cond"], (3, 10, 1)) is True
+    assert ev(by["tomli"]["cond"], (3, 13, 0)) is False
+    assert ev(by["tomllib"]["cond"], None) is None
+    assert ev(by["win32api"]["cond"], (3, 13), platform="linux") is False
+    assert ev(by["zz_linux"]["cond"], (3, 13), platform="linux") is True
+    assert ev(by["zz_old"]["cond"], (3, 8, 2)) is True
+    assert ev(by["zz_mac"]["cond"], (3, 13)) is None
+
+
+def _versioned_runner(table: dict[str, tuple[str, set[str]]]):
+    def runner(python: str, *, timeout: float) -> dict[str, Any]:
+        version, mods = table[python]
+        return {"ok": True, "version": version, "executable": python,
+                "prefix": python, "base_prefix": "/usr", "stdlib": [],
+                "scanned": [], "distributions": len(mods),
+                "modules": {m: [m] for m in mods}}
+    return runner
+
+
+def test_env_for_evaluates_conditions_per_interpreter(tmp_path: Path,
+                                                      monkeypatch) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    _write(tmp_path, "tests/test_c.py",
+           "import sys, pytest\n"
+           "if sys.version_info >= (3, 11):\n    import tomllib\n"
+           "else:\n    import tomli\n"
+           "if sys.platform == 'win32':\n    import win32api\n"
+           "if platform.system() == 'Darwin':\n    import zz_mac\n"
+           "def test_x():\n    pytest.importorskip('substrate_rs')\n"
+           "    import substrate_rs\n")
+    model = EN.ImportModel(tmp_path, ["tests/test_c.py"])
+    runner = _versioned_runner({"/e/py310": ("3.10.4", {"pytest"}),
+                                "/e/py313": ("3.13.1", {"pytest"}),
+                                "/e/py310t": ("3.10.4", {"pytest", "tomli", "zz_mac"})})
+    doc = EN.env_for(tmp_path, ["tests/test_c.py"],
+                     candidates=_cands("/e/py310", "/e/py313", "/e/py310t"),
+                     runner=runner, cache_mode="off", model=model)
+    by = {e["path"]: e for e in doc["interpreters"]}
+    assert doc["required"] == ["pytest"]
+    assert by["/e/py313"]["complete"] and by["/e/py313"]["missing_optional"] == [
+        "substrate_rs", "zz_mac"]
+    assert by["/e/py310"]["missing"] == ["tomli"]
+    assert by["/e/py310t"]["complete"]
+    # Both complete; py310t misses fewer optional imports.
+    assert doc["best"]["path"] == "/e/py310t"
+    assert doc["imports"]["tomli"]["conditional"] is True
+    assert "win32api" in doc["conditional"]
+
+
+def test_anywhere_fallback_yields_to_installed_distributions(tmp_path: Path) -> None:
+    files = {"domains/__init__.py": "", "domains/chess.py": "import chess as pc\n",
+             "domains/worlds.py": "import chess\n",
+             "tests/test_chess.py": "import chess\n",
+             "tools/helpers/only_here.py": "x = 1\n",
+             "scripts/run.py": "import only_here\n"}
+    for rel, text in files.items():
+        _write(tmp_path, rel, text)
+    model = EN.ImportModel(tmp_path, sorted(files))
+    # No interpreter provides chess: the old rule (a module of that name in
+    # the tree).
+    assert model.is_first_party("chess", "tests/test_chess.py")
+    runner = _stub_probe({"/e/with": {"chess"}, "/e/without": set()})
+    doc = EN.env_for(tmp_path, ["tests/test_chess.py"],
+                     candidates=_cands("/e/without", "/e/with"), runner=runner,
+                     cache_mode="off", model=model)
+    assert doc["required"] == ["chess"]
+    assert doc["best"]["path"] == "/e/with"
+    assert [e["missing"] for e in doc["interpreters"]] == [[], ["chess"]]
+    assert model.third_party("domains/worlds.py") == {
+        "chess": {"kind": "module", "line": 1}}
+    # A tree-only module nobody installs stays first-party.
+    assert model.is_first_party("only_here", "scripts/run.py")
+
+
+# --------------------------------------------------------------------------- #
+# the import cache
+# --------------------------------------------------------------------------- #
+
+
+def test_import_cache_by_blob_id(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    _write(root, "a.py", "import numpy\n")
+    _write(root, "b.py", "import requests\n")
+    _git(root, "init", "-q")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "x")
+    blobs = EN.blob_ids(root)
+    assert set(blobs) == {"a.py", "b.py"}
+    path = tmp_path / "state" / "imports.json"
+    first = EN.ImportModel(root, blobs=blobs, cache=EN.ImportCache(path, "rw"))
+    assert first.third_party("a.py") == {"numpy": {"kind": "module", "line": 1}}
+    first.third_party("b.py")
+    first.save_cache()
+    assert first.cache.misses == 2 and path.is_file()
+
+    def refuse(rel: str) -> str:
+        raise AssertionError(f"read {rel}")
+
+    again = EN.ImportModel(root, blobs=EN.blob_ids(root), read=refuse,
+                           cache=EN.ImportCache(path, "read"))
+    assert again.third_party("a.py") == {"numpy": {"kind": "module", "line": 1}}
+    assert again.cache.hits == 1
+    # A file changed in the working tree has no blob id: it is read.
+    _write(root, "a.py", "import scipy  # changed\n")
+    blobs = EN.blob_ids(root)
+    assert "a.py" not in blobs and "b.py" in blobs
+    fresh = EN.ImportModel(root, blobs=blobs, cache=EN.ImportCache(path, "rw"))
+    assert set(fresh.third_party("a.py")) == {"scipy"}
+    # Save keeps only the blobs of the current tree.
+    fresh.third_party("b.py")
+    fresh.save_cache()
+    doc = json.loads(path.read_text())
+    assert set(doc["blobs"]) == {blobs["b.py"]}
+    assert EN.blob_ids(tmp_path / "nogit") == {}

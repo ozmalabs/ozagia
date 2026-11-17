@@ -795,10 +795,17 @@ def _review_anchor(root: Path, packet_arg: str, finding_id: str) -> dict[str, An
     ftype, keys = info
     keys = [k for k in keys if isinstance(k, str) and len(k) <= MAX_KEY_CHARS
             and _safe_key_path(k)][:MAX_KEYS]
+    from ozagia.core.repo_review import check_population
+    anchor = {"generated_at": packet.get("generated_at"),
+              "head_commit": packet.get("head_commit"),
+              "sha256": _sha(raw)}
+    population = check_population(packet, ftype)
+    if population is not None:
+        # The probed interpreters of an import check: a later review over
+        # another set cannot decide the criterion.
+        anchor["population"] = population
     return {"packet": stored, "type": _clip(ftype, 100), "keys": keys,
-            "anchor": {"generated_at": packet.get("generated_at"),
-                       "head_commit": packet.get("head_commit"),
-                       "sha256": _sha(raw)}}
+            "anchor": anchor}
 
 
 def _safe_key_path(key: str) -> bool:
@@ -1387,7 +1394,8 @@ class Evaluator:
         if status is not None:
             return _result(status, ev, f"{sev.get('reason')}; run ozagia review-repo "
                            "--save again")
-        state = finding_state(packet, fid, type=args["type"], keys=keys)
+        state = finding_state(packet, fid, type=args["type"], keys=keys,
+                              population=anchor.get("population"))
         ev["state"] = state
         if state == "present":
             return _result("fail", ev, f"finding {fid} is still in the review of "

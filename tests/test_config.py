@@ -409,3 +409,35 @@ command_allowlist = [["python"], ["python"]]
 """)
     with pytest.raises(ConfigError, match="contains duplicates"):
         load_project_config(tmp_path)
+
+
+def _service_command(tmp_path: Path, argv: list[str]):
+    import json
+    _write(tmp_path / ".ozagia.toml",
+           f"[runtime.services.api]\ncommand = {json.dumps(argv)}\n")
+    return load_project_config(tmp_path)
+
+
+@pytest.mark.parametrize("argv", [
+    ["/srv/environments/app/.venv/bin/python", "-m", "app"],
+    ["python", "tests/test_tokenizer.py"],
+    ["python", "/srv/secrets-free/app.py"],
+    ["python", "--config=/etc/app/secret_store.toml"],
+    ["python", "-m", "pytest", "tests/test_environment_vars.py"],
+])
+def test_command_argv_accepts_paths_with_credential_words(tmp_path, argv):
+    config = _service_command(tmp_path, argv)
+    assert config.runtime_services[0].command == tuple(argv)
+
+
+@pytest.mark.parametrize("argv, message", [
+    (["python", "--token=x"], "credential-like"),
+    (["python", "--password", "x"], "credential-like"),
+    (["python", "-api-key=x"], "credential-like"),
+    (["python", "api-key=x"], "credential-like"),
+    (["python", "--environment", "prod"], "credential-like"),
+    (["python", "API_KEY=abc"], "environment assignments|credential-like"),
+])
+def test_command_argv_refuses_credential_options(tmp_path, argv, message):
+    with pytest.raises(ConfigError, match=message):
+        _service_command(tmp_path, argv)
