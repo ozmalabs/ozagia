@@ -422,6 +422,313 @@ python = "ruff"
     assert cfg.unmapped == ()
 
 
+def test_versioned_environments_only(tmp_path: Path) -> None:
+    config = _write_repo_config(tmp_path, """
+[environments.dev]
+paths = ["envs/dev"]
+namespaces = ["dev"]
+account_alias = "development"
+region = "us-east-1"
+cluster = "dev-cluster"
+risk = "low"
+pipelines = ["deploy-dev"]
+""")
+    cfg = load_project_config(tmp_path)
+    assert cfg.source == config.resolve()
+    assert cfg.sources == (config.resolve(),)
+    assert cfg.unmapped == ()
+    [environment] = cfg.environments
+    assert environment.name == "dev"
+    assert environment.paths == ("envs/dev",)
+    assert environment.namespaces == ("dev",)
+    assert environment.account_alias == "development"
+    assert environment.region == "us-east-1"
+    assert environment.cluster == "dev-cluster"
+    assert environment.risk == "low"
+    assert environment.pipelines == ("deploy-dev",)
+
+
+def test_versioned_services_only(tmp_path: Path) -> None:
+    config = _write_repo_config(tmp_path, """
+[services.api]
+chart = "charts/api"
+values_globs = ["charts/api/values.*.yaml"]
+buildspec = "buildspec.yml"
+pipeline = "pipelines/api.yaml"
+namespace = "api"
+paths = ["services/api"]
+""")
+    cfg = load_project_config(tmp_path)
+    assert cfg.source == config.resolve()
+    assert cfg.unmapped == ()
+    [service] = cfg.services
+    assert service.name == "api"
+    assert service.chart == "charts/api"
+    assert service.values_globs == ("charts/api/values.*.yaml",)
+    assert service.buildspec == "buildspec.yml"
+    assert service.pipeline == "pipelines/api.yaml"
+    assert service.namespace == "api"
+    assert service.environment is None
+    assert service.paths == ("services/api",)
+
+
+def test_versioned_relays_only(tmp_path: Path) -> None:
+    config = _write_repo_config(tmp_path, """
+[relays.prod]
+specs = [
+  { kind = "local", name = "base" },
+  { kind = "ssh", options = { host = "internal.example", port = 22 } },
+]
+allowed_kinds = ["local", "ssh"]
+max_timeout_s = 600
+command_allowlist = [["uptime"], ["kubectl", "get"]]
+max_output_bytes = 2048
+""")
+    cfg = load_project_config(tmp_path)
+    assert cfg.source == config.resolve()
+    assert cfg.unmapped == ()
+    [relay] = cfg.relays
+    assert relay.name == "prod"
+    assert relay.allowed_kinds == ("local", "ssh")
+    assert relay.max_timeout_s == 600
+    assert relay.command_allowlist == (("uptime",), ("kubectl", "get"))
+    assert relay.max_output_bytes == 2048
+    assert [(spec.kind, spec.options) for spec in relay.specs] == [
+        ("local", ()),
+        ("ssh", (("host", "internal.example"), ("port", 22))),
+    ]
+
+
+def test_versioned_runtime_only(tmp_path: Path) -> None:
+    config = _write_repo_config(tmp_path, """
+[relays.local]
+specs = [{ kind = "local" }]
+allowed_kinds = ["local"]
+
+[runtime.services.api]
+command = ["python", "-m", "app"]
+workdir = "services/api"
+mode = "background"
+description = "API service"
+
+[runtime.tunnels.database]
+relay = "local"
+target = "db.internal.example:5432"
+local_port = 0
+description = "Payments database"
+""")
+    cfg = load_project_config(tmp_path)
+    assert cfg.source == config.resolve()
+    assert cfg.unmapped == ()
+    [service] = cfg.runtime_services
+    assert service.name == "api"
+    assert service.command == ("python", "-m", "app")
+    assert service.workdir == "services/api"
+    assert service.mode == "background"
+    assert service.description == "API service"
+    [tunnel] = cfg.runtime_tunnels
+    assert tunnel.name == "database"
+    assert tunnel.relay == "local"
+    assert tunnel.target == "db.internal.example:5432"
+    assert tunnel.local_port == 0
+
+
+def test_legacy_project_models_are_unchanged(tmp_path: Path) -> None:
+    legacy = _write(tmp_path / ".ozagia.toml", """
+[environments.dev]
+paths = ["envs/dev"]
+
+[services.api]
+chart = "charts/api"
+
+[relays.local]
+specs = [{ kind = "local" }]
+
+[runtime.services.api]
+command = ["python", "-m", "app"]
+
+[runtime.tunnels.database]
+relay = "local"
+target = "db.example:5432"
+""")
+    cfg = load_project_config(tmp_path)
+    assert cfg.source == legacy.resolve()
+    assert cfg.sources == (legacy.resolve(),)
+    assert cfg.unmapped == ()
+    assert [item.name for item in cfg.environments] == ["dev"]
+    assert [item.name for item in cfg.services] == ["api"]
+    assert [item.name for item in cfg.relays] == ["local"]
+    assert [item.name for item in cfg.runtime_services] == ["api"]
+    assert [item.name for item in cfg.runtime_tunnels] == ["database"]
+
+
+def test_project_models_merge_by_name_with_legacy_entries_winning_whole(
+        tmp_path: Path) -> None:
+    legacy = _write(tmp_path / ".ozagia.toml", """
+[index]
+source_dirs = ["src"]
+
+[environments.dev]
+paths = ["envs/legacy"]
+region = "us-east-1"
+
+[services.api]
+chart = "charts/legacy"
+environment = "staging"
+
+[relays.prod]
+specs = [{ kind = "local" }]
+allowed_kinds = ["local"]
+
+[runtime.services.api]
+command = ["python", "legacy"]
+relay = "backup"
+
+[runtime.tunnels.database]
+relay = "prod"
+target = "legacy.example:5432"
+""")
+    repo = _write_repo_config(tmp_path, """
+[environments.dev]
+paths = ["envs/versioned"]
+cluster = "versioned-cluster"
+
+[environments.staging]
+paths = ["envs/staging"]
+
+[services.api]
+chart = "charts/versioned"
+values_globs = ["charts/versioned/**"]
+environment = "dev"
+
+[services.worker]
+chart = "charts/worker"
+environment = "dev"
+
+[relays.prod]
+specs = [{ kind = "ssh", options = { host = "versioned.example" } }]
+allowed_kinds = ["ssh"]
+
+[relays.backup]
+specs = [{ kind = "local" }]
+
+[runtime.services.api]
+command = ["python", "versioned"]
+workdir = "services/versioned"
+
+[runtime.services.worker]
+command = ["python", "worker"]
+relay = "prod"
+
+[runtime.tunnels.database]
+relay = "backup"
+target = "versioned.example:5432"
+
+[runtime.tunnels.cache]
+relay = "prod"
+target = "cache.example:6379"
+""")
+    cfg = load_project_config(tmp_path)
+    assert cfg.source == legacy.resolve()
+    assert cfg.sources == (legacy.resolve(), repo.resolve())
+    assert cfg.unmapped == ()
+
+    # Same-named entries are wholly legacy: versioned sub-keys are ignored.
+    assert [(item.name, item.paths, item.region, item.cluster)
+            for item in cfg.environments] == [
+        ("dev", ("envs/legacy",), "us-east-1", None),
+        ("staging", ("envs/staging",), None, None),
+    ]
+    assert [(item.name, item.chart, item.values_globs, item.environment)
+            for item in cfg.services] == [
+        ("api", "charts/legacy", (), "staging"),
+        ("worker", "charts/worker", (), "dev"),
+    ]
+    assert [(item.name, item.allowed_kinds,
+             tuple(spec.kind for spec in item.specs))
+            for item in cfg.relays] == [
+        ("prod", ("local",), ("local",)),
+        ("backup", ("local",), ("local",)),
+    ]
+    assert [(item.name, item.command, item.workdir, item.relay)
+            for item in cfg.runtime_services] == [
+        ("api", ("python", "legacy"), None, "backup"),
+        ("worker", ("python", "worker"), None, "prod"),
+    ]
+    assert [(item.name, item.relay, item.target)
+            for item in cfg.runtime_tunnels] == [
+        ("database", "prod", "legacy.example:5432"),
+        ("cache", "prod", "cache.example:6379"),
+    ]
+
+
+@pytest.mark.parametrize("text", [
+    '[environments.dev]\npaths = ["a"]\n[environments.dev]\npaths = ["b"]\n',
+    '[runtime.services.api]\ncommand = ["a"]\n'
+    '[runtime.services.api]\ncommand = ["b"]\n',
+])
+@pytest.mark.parametrize("where", ["repo", "legacy"])
+def test_duplicate_project_model_names_in_one_file_are_an_error(
+        tmp_path: Path, text: str, where: str) -> None:
+    if where == "repo":
+        path = _write_repo_config(tmp_path, text)
+    else:
+        path = _write(tmp_path / ".ozagia.toml", text)
+    with pytest.raises(ConfigError) as excinfo:
+        load_project_config(tmp_path)
+    assert str(path.resolve()) in str(excinfo.value)
+    assert "Cannot declare" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("text, message", [
+    ('[environments.dev]\ncredentials = "nope"\n', "unknown key"),
+    ('[services.api]\nsecret = "nope"\n', "unknown key"),
+    ('[services.api]\nenvironment = "missing"\n', "not configured"),
+    ('[relays.prod]\nspecs = []\n', "1 to 16"),
+    ('[relays.prod]\nspecs = [{ kind = "local" }]\n'
+     '[runtime.services.api]\ncommand = []\n', "non-empty argv"),
+    ('[relays.local]\nspecs = [{ kind = "local" }]\n'
+     '[runtime.services.api]\ncommand = ["python", "x; bad"]\n',
+     "unsafe argv"),
+    ('[relays.local]\nspecs = [{ kind = "local" }]\n'
+     '[runtime.tunnels.db]\nrelay = "local"\ntarget = "db.example:0"\n',
+     "outside 1..65535"),
+    ('[relays.local]\nspecs = [{ kind = "local" }]\n'
+     '[runtime.tunnels.db]\nrelay = "local"\ntarget = "db.example:22"\n'
+     'local_port = 65536\n', "outside 0..65535"),
+])
+def test_invalid_versioned_project_model_values_name_the_versioned_file(
+        tmp_path: Path, text: str, message: str) -> None:
+    _write(tmp_path / ".ozagia.toml", '[index]\nsource_dirs = ["src"]\n')
+    path = _write_repo_config(tmp_path, text)
+    with pytest.raises(ConfigError) as excinfo:
+        load_project_config(tmp_path)
+    assert str(path.resolve()) in str(excinfo.value)
+    assert message in str(excinfo.value)
+
+
+def test_unknown_sections_and_nested_tables_stay_unmapped(
+        tmp_path: Path) -> None:
+    _write_repo_config(tmp_path, """
+[environments.dev]
+paths = ["envs/dev"]
+
+[runtime.services.api]
+command = ["python", "-m", "app"]
+
+[unknown_group]
+value = true
+
+[index]
+nested = { value = true }
+""")
+    cfg = load_project_config(tmp_path)
+    assert cfg.unmapped == (
+        ("index.nested", "nested table is not mapped"),
+        ("unknown_group", "not part of the project configuration"),
+    )
+
+
 def test_versioned_config_with_empty_derived_values_keeps_the_defaults(
         tmp_path: Path) -> None:
     (tmp_path / "src").mkdir()
@@ -583,8 +890,11 @@ paths = ["envs/dev"]
     assert {
         "hints", "models", "ui", "testing.mode",
         "review.min_reviewers", "index.color", "iac.remote_states",
-        "environments",
     } <= keys
+    # The project-model sections are mapped now.
+    assert "environments" not in keys
+    assert not {key for key in keys if key.startswith(
+        ("environments.", "services.", "relays.", "runtime."))}
     # `[security]` is read by its own module from both files now.
     assert "security" not in keys
     assert not {key for key in keys if key.startswith("security.")}
@@ -665,6 +975,39 @@ def test_cache_invalidation_includes_content_digests_for_both_files(
     os.utime(repo, ns=(st.st_atime_ns, st.st_mtime_ns))
     cfg = load_project_config(tmp_path)
     assert cfg.test_dirs == ("sss",)
+
+
+def test_cache_invalidation_covers_project_model_sections(
+        tmp_path: Path) -> None:
+    _write(tmp_path / ".ozagia.toml", """
+[relays.local]
+specs = [{ kind = "local" }]
+
+[runtime.services.api]
+command = ["python", "legacy"]
+""")
+    repo = _write_repo_config(tmp_path, """
+[environments.dev]
+paths = ["envs/one"]
+
+[runtime.services.worker]
+command = ["python", "one"]
+""")
+    cfg = load_project_config(tmp_path)
+    assert [item.name for item in cfg.runtime_services] == ["api", "worker"]
+    assert cfg.environments[0].paths == ("envs/one",)
+
+    # Same path, mtime and size: only the content digest can notice the edit.
+    st = repo.stat()
+    repo.write_text(
+        '[environments.dev]\npaths = ["envs/two"]\n\n'
+        '[runtime.services.worker]\ncommand = ["python", "two"]\n',
+        encoding="utf-8")
+    os.utime(repo, ns=(st.st_atime_ns, st.st_mtime_ns))
+    cfg = load_project_config(tmp_path)
+    assert cfg.environments[0].paths == ("envs/two",)
+    assert [item.command for item in cfg.runtime_services] == [
+        ("python", "legacy"), ("python", "two")]
 
 
 def test_adapters_from_the_versioned_config_import_from_the_root(

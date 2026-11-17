@@ -150,7 +150,14 @@ def test_doctor_reports_both_config_paths_precedence_and_unmapped(
     repo = tmp_path / "ozagia" / "config.toml"
     repo.parent.mkdir()
     repo.write_text(
-        '[index]\nskip_dirs = ["vendor"]\n\n[hints]\nlibrary = "strict"\n',
+        '[index]\nskip_dirs = ["vendor"]\n\n'
+        '[environments.dev]\npaths = ["envs/dev"]\n\n'
+        '[services.api]\nchart = "charts/api"\n\n'
+        '[relays.local]\nspecs = [{ kind = "local" }]\n\n'
+        '[runtime.services.api]\ncommand = ["python", "-m", "app"]\n\n'
+        '[runtime.tunnels.database]\n'
+        'relay = "local"\ntarget = "db.example:5432"\n\n'
+        '[hints]\nlibrary = "strict"\n',
         encoding="utf-8")
 
     assert cli.main(["doctor", "--root", str(tmp_path), "--json"]) == 0
@@ -179,6 +186,31 @@ def test_doctor_reports_both_config_paths_precedence_and_unmapped(
     assert "precedence=legacy > repo" in text
     assert "unmapped=1" in text
     assert "strict" not in text and "vendor" not in text
+
+
+def test_doctor_does_not_report_versioned_project_models_as_unmapped(
+        tmp_path, monkeypatch, capsys):
+    _isolate_settings(tmp_path, monkeypatch)
+    repo = tmp_path / "ozagia" / "config.toml"
+    repo.parent.mkdir()
+    repo.write_text(
+        '[environments.dev]\npaths = ["envs/dev"]\n\n'
+        '[services.api]\nenvironment = "dev"\n\n'
+        '[relays.local]\nspecs = [{ kind = "local" }]\n\n'
+        '[runtime.services.api]\ncommand = ["python", "-m", "app"]\n\n'
+        '[runtime.tunnels.database]\n'
+        'relay = "local"\ntarget = "db.example:5432"\n',
+        encoding="utf-8")
+
+    assert cli.main(["doctor", "--root", str(tmp_path), "--json"]) == 0
+    config = json.loads(capsys.readouterr().out)["config"]
+    assert config["valid"] is True
+    assert config["active_source"] == "repo"
+    assert config["unmapped"] == []
+    assert config["unmapped_count"] == 0
+
+    assert cli.main(["doctor", "--root", str(tmp_path)]) == 0
+    assert "unmapped=0" in capsys.readouterr().out
 
 
 def test_doctor_text_reports_a_missing_repo_config(

@@ -169,6 +169,20 @@ project config maps these groups and keys into the fields above:
     [lint]           enabled, timeout_s, python, rust
     [iac]            roots, skip_globs
     [review] layers
+    [environments.NAME] all environment fields
+    [services.NAME]     all service fields
+    [relays.NAME]       specs, allowed_kinds, max_timeout_s, command_allowlist,
+                        max_output_bytes
+    [runtime.services.NAME]
+    [runtime.tunnels.NAME]
+
+The project-model tables (`[environments]`, `[services]`, `[relays]` and
+`[runtime]`) are merged by named entry: a legacy entry wins as a whole over a
+versioned entry with the same name, and versioned-only entries are appended.
+Keys are never combined across the two files for one entry, so a legacy relay
+chain cannot acquire a versioned `allowed_kinds`, and a legacy runtime command
+cannot acquire a versioned relay. Unknown fields are rejected by the legacy
+parser with the offending file's path.
 
 `[security]` is consumed by `ozagia.core.security` from both files through
 :func:`load_config_section`; its supported keys are `enabled`, `tools`,
@@ -190,7 +204,7 @@ import subprocess
 import tomllib
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 ENV_ROOT = "OZAGIA_ROOT"
 ENV_STATE_DIR = "OZAGIA_STATE_DIR"
@@ -501,7 +515,11 @@ _PROJECT_CONFIG_KEYS: dict[str, tuple[str, str]] = {
     "iac.skip_globs": ("iac", "skip_globs"),
     "review.layers": ("review", "layers"),
 }
-_PROJECT_CONFIG_SECTIONS = frozenset(_KEYS) | {"testing"}
+#: Tables whose named entries are project models rather than flat settings.
+#: They are validated by `_parse` (the legacy parser) and merged by name, so
+#: the legacy entry stays the unit of precedence.
+_PROJECT_MODEL_SECTIONS = frozenset({"environments", "services", "relays", "runtime"})
+_PROJECT_CONFIG_SECTIONS = frozenset(_KEYS) | _PROJECT_MODEL_SECTIONS | {"testing"}
 
 #: Registry groups another module reads. Reported once per group, never
 #: mapped into ProjectConfig and never copied into the legacy shape.
@@ -950,7 +968,16 @@ def _uncovered(dirs: list[str]) -> list[str]:
     return out
 
 
-def _parse(root: Path, source: Path | None, data: dict[str, Any]) -> ProjectConfig:
+def _parse(root: Path, source: Path | None, data: dict[str, Any], *,
+           extra_environment_names: Iterable[str] = (),
+           extra_relay_names: Iterable[str] = ()) -> ProjectConfig:
+    """Validate and resolve the legacy-shaped project configuration.
+
+    `extra_*_names` name entries supplied by the other configuration file, so
+    a service or runtime entry can reference an environment or relay that only
+    the other file defines. They affect the cross-reference check only; the
+    entries themselves are still validated in the file that defines them.
+    """
     where = str(source) if source is not None else "defaults"
     for section, table in data.items():
         if section in {"environments", "services", "relays"}:
@@ -984,6 +1011,7 @@ def _parse(root: Path, source: Path | None, data: dict[str, Any]) -> ProjectConf
     runtime = data.get("runtime", {})
     relay_configs = _relay_configs(data.get("relays"), where=where)
     relay_names = {relay.name for relay in relay_configs}
+    known_relay_names = relay_names | set(extra_relay_names)
 
     def dirs(key: str, default: list[str]) -> tuple[str, ...]:
         got = _str_list(index, key, where)
@@ -1130,7 +1158,8 @@ def _parse(root: Path, source: Path | None, data: dict[str, Any]) -> ProjectConf
             region=env_scalar("region"), cluster=env_scalar("cluster"),
             risk=env_scalar("risk"), pipelines=env_list("pipelines"),
         ))
-    environment_names = {item.name for item in environments}
+    environment_names = (
+        {item.name for item in environments} | set(extra_environment_names))
 
     services: list[ServiceConfig] = []
     for name, table in _table_entries(
@@ -1182,7 +1211,7 @@ def _parse(root: Path, source: Path | None, data: dict[str, Any]) -> ProjectConf
         relay = None
         if "relay" in table:
             relay = _config_name(table["relay"], key="relay", where=section)
-            if relay not in relay_names:
+            if relay not in known_relay_names:
                 raise ConfigError(f"{section}: relay {relay!r} is not configured")
         mode = table.get("mode", "background")
         if not isinstance(mode, str) or mode not in {"background", "foreground"}:
@@ -1204,7 +1233,7 @@ def _parse(root: Path, source: Path | None, data: dict[str, Any]) -> ProjectConf
         if "relay" not in table or "target" not in table:
             raise ConfigError(f"{section}: relay and target are required")
         relay = _config_name(table["relay"], key="relay", where=section)
-        if relay not in relay_names:
+        if relay not in known_relay_names:
             raise ConfigError(f"{section}: relay {relay!r} is not configured")
         target = table["target"]
         if not isinstance(target, str) or len(target) > 259:
@@ -1410,6 +1439,17 @@ def _project_config_values(
         if section in _OWNED_SECTIONS:
             unmapped.append((section, _OWNED_SECTIONS[section]))
             continue
+        if section in _PROJECT_MODEL_SECTIONS:
+            # Named tables are passed through in the legacy shape; `_parse`
+            # applies the same field, argv, port and cross-reference rules.
+            # Both files are validated separately, so an error keeps the
+            # path of the file that defines the entry.
+            if not isinstance(table, dict):
+                message = ("must be a table" if section == "runtime"
+                           else "must contain named tables")
+                raise ConfigError(f"{source}: [{section}] {message}")
+            out[section] = table
+            continue
         if section not in _PROJECT_CONFIG_SECTIONS:
             unmapped.append(
                 (section, "not part of the project configuration"))
@@ -1489,15 +1529,63 @@ def _legacy_values(
     return parsed, tuple(unmapped)
 
 
+def _table(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _raw_names(data: dict[str, Any], section: str) -> frozenset[str]:
+    """Names in one project-model table, before field validation."""
+    table = data.get(section)
+    return frozenset(table) if isinstance(table, dict) else frozenset()
+
+
+def _merge_named_entries(legacy_table: Any,
+                         new_table: Any) -> dict[str, Any]:
+    """Named project-model entries, legacy entries first and whole.
+
+    A legacy entry wins over a versioned entry with the same name. Its fields
+    are never combined with that versioned entry's fields: overridden entries
+    keep the legacy meaning. Versioned-only entries are appended in their
+    file's order.
+    """
+    merged = _table(legacy_table)
+    for name, value in _table(new_table).items():
+        merged.setdefault(name, value)
+    return merged
+
+
+def _merge_runtime(legacy_runtime: Any, new_runtime: Any) -> dict[str, Any]:
+    """`[runtime]` with per-name services and tunnels; other keys are setdefault."""
+    merged = _table(legacy_runtime)
+    for name, value in _table(new_runtime).items():
+        if name in _RUNTIME_KEYS:
+            merged[name] = _merge_named_entries(merged.get(name), value)
+        else:
+            merged.setdefault(name, value)
+    return merged
+
+
 def _merge_legacy(new_data: dict[str, Any],
                   legacy_data: dict[str, Any]) -> dict[str, Any]:
     """Legacy-shaped data with new-config values only where legacy omits one.
 
-    The legacy file keeps its project-model sections (environments, services,
-    relays, runtime) unchanged; `_parse` still validates them.
+    Flat tables merge per key (`legacy` wins). Project-model tables merge per
+    named entry: `[environments.NAME]`, `[services.NAME]`, `[relays.NAME]`,
+    `[runtime.services.NAME]` and `[runtime.tunnels.NAME]`. A legacy entry
+    replaces the versioned entry with the same name as a whole; versioned-only
+    entries are added. `_parse` validates each file before this merge, so an
+    invalid versioned entry keeps the versioned file's path in its error.
     """
     merged = dict(legacy_data)
     for section, table in new_data.items():
+        if section in {"environments", "services", "relays"}:
+            merged[section] = _merge_named_entries(
+                merged.get(section), table)
+            continue
+        if section == "runtime":
+            merged[section] = _merge_runtime(
+                merged.get(section), table)
+            continue
         existing = merged.get(section)
         if not isinstance(existing, dict):
             existing = {}
@@ -1535,9 +1623,13 @@ def load_project_config(root: str | Path | None = None) -> ProjectConfig:
 
     The legacy file supplies every key it defines; the versioned
     `<root>/ozagia/config.toml` supplies the supported keys it leaves unset.
-    Cached per resolved root, both configuration paths, their mtimes and the
-    content digests, so editing either file or changing `$OZAGIA_CONFIG` takes
-    effect on the next call. Raises ConfigError for a malformed file.
+    Project models merge by named entry: a legacy `[environments.NAME]`,
+    `[services.NAME]`, `[relays.NAME]`, `[runtime.services.NAME]` or
+    `[runtime.tunnels.NAME]` entry wins as a whole, and versioned-only entries
+    are added. Cached per resolved root, both configuration paths, their mtimes
+    and the content digests, so editing either file or changing
+    `$OZAGIA_CONFIG` takes effect on the next call. Raises ConfigError for a
+    malformed file.
     """
     root_p = Path(root).resolve() if root is not None else repo_root()
     sources = config_sources(root_p)
@@ -1554,16 +1646,28 @@ def load_project_config(root: str | Path | None = None) -> ProjectConfig:
     legacy_data, legacy_unmapped = _legacy_values(
         _toml_data(sources.legacy, legacy_raw)
         if sources.legacy is not None else {}, source=sources.legacy)
-    if sources.legacy is not None:
-        _parse(root_p, sources.legacy, legacy_data)
-
     new_data: dict[str, Any] = {}
     new_unmapped: tuple[tuple[str, str], ...] = ()
     if repo_path is not None:
         new_data, new_unmapped = _project_config_values(
             _toml_data(repo_path, new_raw), source=repo_path)
-        if new_data:
-            _parse(root_p, repo_path, new_data)
+
+    # Each file is validated from its own text, so an invalid versioned entry
+    # names the versioned path even when a legacy entry overrides it. Names
+    # from the other file are allowed for cross-references only: a versioned
+    # service may use a legacy environment or relay, and vice versa.
+    extra_environments = (_raw_names(legacy_data, "environments")
+                          | _raw_names(new_data, "environments"))
+    extra_relays = (_raw_names(legacy_data, "relays")
+                    | _raw_names(new_data, "relays"))
+    if sources.legacy is not None:
+        _parse(root_p, sources.legacy, legacy_data,
+               extra_environment_names=extra_environments,
+               extra_relay_names=extra_relays)
+    if repo_path is not None and new_data:
+        _parse(root_p, repo_path, new_data,
+               extra_environment_names=extra_environments,
+               extra_relay_names=extra_relays)
     unmapped = tuple(sorted(set(legacy_unmapped) | set(new_unmapped)))
 
     if repo_path is None:
