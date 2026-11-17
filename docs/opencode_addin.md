@@ -1,10 +1,10 @@
 # OpenCode add-in
 
 **Status:** preview-first add-in (plan item 8 follow-on; task-class catalogue
-for plan item 11; explicit apply/run controls from the "Not yet" list). The
-package lives in [`addins/opencode/`](../addins/opencode/); this page records
-its design, the CLI mapping, the GUI surface and the API gaps found while
-building it.
+for plan item 11; explicit apply/run controls from the "Not yet" list;
+read-only external-tool readiness and install previews). The package lives in
+[`addins/opencode/`](../addins/opencode/); this page records its design, the CLI
+mapping, the GUI surface and the API gaps found while building it.
 
 The plan item is [item 8, OpenCode add-in MVP](plans/2026-11-16_ui_and_agent_features.md),
 with the task-class catalogue from item 11, explicit action apply from item 14
@@ -23,13 +23,15 @@ surfaces, both preview-first and explicitly confirmed:
 
 Everything else remains read-only: no setting write, service start/stop
 without a previewed action, graph rebuild, index build, edit/write/patch tool,
-model call, provider call, network fetch or arbitrary shell.
+model call, provider call, network fetch or arbitrary shell. The Tools tab only
+reads the static registry, host facts and a bounded plan; install commands are
+display text with `would_run: false`.
 
 ```text
 ozagia CLI JSON  ->  server part (RPC)  ->  GUI Solid panel / settings page
 python -m ...        spawn, validate        graph / status / testing /
                                              research / actions / tasks /
-                                             settings
+                                             tools / settings
 ```
 
 ## Package and loading
@@ -135,6 +137,9 @@ schema and these methods:
 | `worktreeCheck()` | `{}` | `python -m ozagia.worktree_cli check --root ROOT --json` | Worktrees, expected branches, drift, findings. |
 | `policyCheck()` | `{kind, message?, target?, force?, tags?}` | `python -m ozagia.worktree_cli policy --for KIND --root ROOT --json` | `kind` is `commit`, `merge` or `push`. |
 | `resourcesCheck()` | `{kind?, memoryMb?, diskMb?, path?}` | `python -m ozagia.resources_cli check --for KIND --root ROOT --json` | `kind` defaults to `job`; admission only. |
+| `toolchainEnv()` | `{probeSudo?}` | `python -m ozagia.toolchain_cli env --root ROOT --json [--no-sudo]` | Host, managers, Python, sudo and `[tools]` approval facts. |
+| `toolchainList()` | `{}` | `python -m ozagia.toolchain_cli list --json` | Static registry; the CLI has no `--root` flag for `list`. |
+| `toolchainPlan()` | `{capabilities?, paths?, probeVersions?, probeSudo?}` | `python -m ozagia.toolchain_cli plan --root ROOT [--capability ID ...] [--path P ...] --json [--no-versions] [--no-sudo]` | Read-only readiness and install previews; every option has `would_run: false`. |
 | `testingPlan()` | `{base?, head?, task?, changed?}` | `python -m ozagia.testing_cli plan --root ROOT --json` | `changed` is a string or string array; repeats `--changed`. |
 | `researchView()` | `{investigation, view}` | `python -m ozagia.research_ui_cli --root ROOT --investigation ID --view VIEW --format json` | Read-only research projection; backs the Research tab. |
 | `settingsSchema()` | `{}` | `python -m ozagia.settings_cli schema --json` | Registry entries with type, default, scope, validation and env names. |
@@ -176,6 +181,14 @@ Input rules:
   under `<root>/ozagia/tasks` for a repo override or the package `task_specs`
   tree for a built-in. A missing, mismatched or out-of-library path returns a
   structured `task_path_invalid` envelope with no run;
+- `toolchainPlan` accepts at most 16 capability/group ids and 32 paths.
+  Capability ids must match `^[a-z][a-z0-9_-]{0,31}$`, so an id can never look
+  like an option or an arbitrary argument. Paths are at most 2000 characters
+  with no control characters; they are used only for extension inference and
+  are never opened. Duplicate ids and paths are removed. `probeVersions: false`
+  adds `--no-versions` and `probeSudo: false` adds `--no-sudo`; nothing else is
+  accepted. The CLI has no `--model-family` flag, so the model brief in the GUI
+  is rendered locally from `native_for`/`preferred_by` metadata;
 - the handler repeats the validation in TypeScript, so a caller that bypasses
   the JSON-schema validator still gets `{ ok: false, error: { code:
   "invalid_input" } }` rather than an unbounded argv.
@@ -204,19 +217,20 @@ per-session gap in the first slice.
 - `Style` with a small prefixed stylesheet (`ozagia-*`), so the panel does not
   depend on host internals;
 - one `Panel` with id `ozagia`, region `side`, width 430, a mobile menu view and
-  tabs `graph`, `status`, `testing`, `research`, `actions`, `tasks`;
+  tabs `graph`, `status`, `testing`, `research`, `actions`, `tasks`, `tools`;
 - one `SettingsPage` with id `ozagia-settings` and the host's
   `SettingsLayout`, `SettingsSection` and `SettingsRow` components;
-- nine `Command`s: open graph, status, testing, research, actions, tasks and
-  settings, check worktree and plan tests.
+- ten `Command`s: open graph, status, testing, research, actions, tasks, tools
+  and settings, check worktree and plan tests.
 
 The graph tab is pinned and is the panel's fallback. Status, testing, research,
-actions and tasks are listed when their stored tab ids are open; their commands
-call `ctx.layout.open(`${ctx.id}:${tab}`, session, { background: true })`. The
-settings command calls `ctx.layout.settings("ozagia-settings")`; it does not
-need a routed session. Panel commands are disabled when no session is routed.
-The commands themselves only open panels or run read-only checks; mutation
-stays inside the Actions and Tasks tabs and their explicit confirmations.
+actions, tasks and tools are listed when their stored tab ids are open; their
+commands call `ctx.layout.open(`${ctx.id}:${tab}`, session, { background:
+true })`. The settings command calls `ctx.layout.settings("ozagia-settings")`;
+it does not need a routed session. Panel commands are disabled when no session
+is routed. The commands themselves only open panels or run read-only checks;
+mutation stays inside the Actions and Tasks tabs and their explicit
+confirmations.
 
 Labels are rendered as Solid text/attributes. There is no `innerHTML`; recorded
 node/edge labels, findings, file paths and error text are escaped by the
@@ -406,6 +420,56 @@ an empty successful catalogue.
 The tab does not approve a mutating step, copy a class into `ozagia/tasks/` or
 call `task_library_cli copy`. Run is the only execution surface.
 
+### Tools
+
+The Tools tab is the read-only surface for external-tool availability over the
+landed `core.toolchain` registry and CLIs from [toolchain](toolchain.md). It
+loads `toolchainList` and `toolchainEnv` together, then `toolchainPlan` on an
+explicit **Plan tools** action:
+
+- environment card: OS/architecture and distribution, WSL/container hints,
+  managers with paths, Python version/executable, venv and uv state, sudo
+  availability and whether non-interactive sudo was probed, the three `[tools]`
+  approval gates with their sources, and configuration errors (an unknown or
+  invalid `[tools]` key is shown, not hidden);
+- registry card: registry version, capability/tool/group counts and the group
+  list from the static `list --json` document; this document is not probed;
+- inputs: comma/space separated capability or group ids and newline/comma
+  separated paths for extension inference. At most 16 capabilities and 32 paths
+  are accepted locally and remotely; capability ids are lower-case registry ids
+  (`^[a-z][a-z0-9_-]{0,31}$`), paths are at most 2000 characters and may not
+  contain control characters. Two checkboxes control the CLI's only probe
+  switches: bounded `--version` probes (`--no-versions`) and the
+  `sudo -n true` usability check (`--no-sudo`). Both are off by default in the
+  GUI so opening the tab does not start probes; the environment card then says
+  what was not checked;
+- capability cards: `ready`, `missing`, `blocked`, `remote` and `unprobed`
+  counts; available tools with kind, version, path/module and `provides`;
+  missing tools; remote/MCP providers named as requiring network (and
+  credentials when relevant) but never connected or authenticated; local Node
+  libraries marked "presence not checked" rather than guessed; and the
+  recommended path/tool when one exists;
+- install previews: at most eight per capability with the exact command, the
+  manager and install kind, `requires_sudo`/`requires_network`, `would_run:
+  false`, the `blocked_by` list (`install`, `network`, `sudo`, `manager`) and
+  the human-readable blockers. The tab has no install or apply control; a
+  preview with no blocker is still text and says so;
+- model brief: a compact multi-line brief rendered locally from the plan
+  (environment, per-capability readiness, useful providers and `provides`, and
+  the exact recommended command only when installation is approved). A
+  model-family hint (`claude`, `codex`, `gemini`, `cursor`, `aider`,
+  `openhands`, `local`) uses the registry's `native_for`/`preferred_by`
+  metadata. There is no model call and no CLI flag; the CLI has no
+  `--model-family` option. **Copy brief** only writes the text to the
+  clipboard.
+
+The plan's own `not_assessed` list is shown verbatim: versions are not checked
+against a range, repository availability and network reachability are not
+checked, remote credentials are not checked, and nothing is installed. A
+missing tool is a report, not an error. The tab does not call
+`toolchain_cli explain`, install a package, start a package manager, set a gate
+or write `[tools]` configuration.
+
 ## Mutation surface and guarantees
 
 The add-in is narrower than the full plan item. Apart from `actionApply` and
@@ -417,7 +481,8 @@ The add-in is narrower than the full plan item. Apart from `actionApply` and
 - write a setting, or call `settings_cli set` (the Settings page only reads);
 - approve a mutating task step, copy a task class into `ozagia/tasks/` or call
   `task_library_cli copy`;
-- download artifacts, install Ocelot, fetch references or call a model;
+- download artifacts, install Ocelot or an external tool, fetch references or
+  call a model;
 - build or refresh the graph snapshot or a research investigation;
 - run tests or apply a test plan outside a task's `test` step;
 - expose an arbitrary shell, direct edit/write/patch tool or caller-supplied
@@ -428,19 +493,20 @@ pending token (bounded, `0600`, ten-minute TTL), an apply's audit record and the
 task run's `manifest.json`, `events.jsonl`, `artifacts.json` and optional
 `output` under `.ozagia/tasks/`. No other repository file is written.
 
-The graph, status, testing, research and settings panels read existing JSON. The
-worktree/policy/resource commands on the RPC are checks, not actions. The action
-preview is the landed `core.actions` preview: it reads runtime state and returns
-a token, but never constructs a manager that could mutate state. Apply is the
-landed `core.actions.apply`: it re-checks the token, preconditions and arguments,
-consumes the token and dispatches through the verified managers. The task
-catalogue only reads the library; its copied command is text. A task run is the
-landed `tasks_cli run --executor local --allow-exec`: it resolves the spec path
-from the library, runs only the declared read-only tools and never approves a
-mutation. The CLI paths themselves are documented in [view](view.md),
-[status](status.md), [worktree](worktree.md), [resources](resources.md),
-[testing](testing.md), [settings](settings.md), [actions](actions.md),
-[task library](task_library.md) and [research UI](research_ui.md).
+The graph, status, testing, research, settings and tools panels read existing
+JSON. The worktree/policy/resource commands on the RPC are checks, not actions.
+The action preview is the landed `core.actions` preview: it reads runtime state
+and returns a token, but never constructs a manager that could mutate state.
+Apply is the landed `core.actions.apply`: it re-checks the token, preconditions
+and arguments, consumes the token and dispatches through the verified managers.
+The task catalogue only reads the library; its copied command is text. A task
+run is the landed `tasks_cli run --executor local --allow-exec`: it resolves the
+spec path from the library, runs only the declared read-only tools and never
+approves a mutation. The CLI paths themselves are documented in
+[view](view.md), [status](status.md), [worktree](worktree.md),
+[resources](resources.md), [testing](testing.md), [settings](settings.md),
+[actions](actions.md), [task library](task_library.md),
+[research UI](research_ui.md) and [toolchain](toolchain.md).
 
 ## Build and tests
 
@@ -457,12 +523,14 @@ npm run build
   argument builder, optional flags, bounds and enum rejection, task-id
   validation, the copy-command and redacted task-run builders, action/argument
   matching, apply token validation and command/error redaction, task path
-  resolution and no-fallback behaviour, RPC schema shape, confirmation gating,
+  resolution and no-fallback behaviour, toolchain capability/path bounds and
+  repeated flags, the model brief, RPC schema shape, confirmation gating,
   `changed` repetition, credential redaction/tail capping, and the subprocess
   wrapper (JSON parse, exit 1, redacted exit errors, timeout, cancellation and
   stdout cap). It is offline and does not load `@opencode/plugin`;
   `tests/load-ts.cjs` transpiles `src/runner.ts` and the pure task-command,
-  mutation and schema modules with the installed TypeScript package.
+  toolchain-brief, mutation and schema modules with the installed TypeScript
+  package.
 - `npm run build` uses `gui()` from `@opencode/plugin/gui/vite` and emits one
   CommonJS file at `dist/gui-experimental.cjs`. The bundle keeps `solid-js`,
   `solid-js/web`, `@opencode/plugin/gui` and `@opencode/plugin/rpc` external and
@@ -474,19 +542,22 @@ directory plugin loads without a build. `node_modules/` is ignored.
 Local verification on 2026-11-17 (Node 20.5.1, npm 9.8.0, Vite 7.3.8):
 
 - `npm run typecheck`: passed.
-- `node --test tests/*.test.cjs`: 38 tests passed, 0 failed, offline.
-- `npm run build`: one `dist/gui-experimental.cjs` (112.77 kB, 25.78 kB gzip).
+- `node --test tests/*.test.cjs`: 49 tests passed, 0 failed, offline.
+- `npm run build`: one `dist/gui-experimental.cjs` (143.14 kB, 32.96 kB gzip).
 - The Node suite exercises apply argv/display separation and token scrubbing,
   task id resolution, library path containment and no-fallback behaviour,
-  input/argv bounds, task timeout selection, the RPC schemas and the GUI
-  confirmation predicates with a fake interpreter. It does not run
+  input/argv bounds, task timeout selection, toolchain argv/display separation,
+  capability/path bounds, the model brief, no-shell execution, the RPC schemas
+  and the GUI confirmation predicates with a fake interpreter. It does not run
   `actions_cli apply` or a real task against this checkout.
 - Earlier slices' runner smoke tests covered `status`, `apertures`,
   `worktreeCheck`, `policyCheck`, `resourcesCheck`, `testingPlan`,
   `settingsSchema`, `settingsValues`, `actionsList`, `actionPreview` and
   `researchView`; the task library commands were read directly and through the
-  builder (`list`, `validate`, `show`). The new handlers use the same wrapper
-  and the pure builders tested by the Node suite.
+  builder (`list`, `validate`, `show`). The toolchain `list`, `env --no-sudo`
+  and `plan --capability documents --no-sudo --no-versions --json` were read
+  directly while building. The new handlers use the same wrapper and the pure
+  builders tested by the Node suite.
 - Vite printed its engine warning because this host has Node 20.5.1 (Vite 7
   asks for 20.19+ or 22.12+); the build still completed.
 
@@ -506,9 +577,9 @@ known gaps or host dependencies, not hidden behaviour:
    `ctx.layout`, `ctx.toast`, `ctx.client`, `ctx.ui`), so it should work wherever
    those are provided.
 3. **Panel layout breadth.** The panel is a side panel with a pinned graph tab
-   and command-opened status/testing/research/actions/tasks tabs. The settings
-   page is a separate Settings contribution. There is no slot-based embedded
-   view.
+   and command-opened status/testing/research/actions/tasks/tools tabs. The
+   settings page is a separate Settings contribution. There is no slot-based
+   embedded view.
 4. **Per-session root.** As above, the root is per plugin/server instance, not
    per routed session. `options.root` is the override.
 5. **Exactly two mutation surfaces.** `actionApply` and `taskRun` are the only
@@ -520,7 +591,8 @@ known gaps or host dependencies, not hidden behaviour:
    asynchronous CLI calls, so a long task can be cancelled only by aborting the
    host request, not by a cancel button. The local executor remains read-only:
    mutating, model and unimplemented tools are blocked and there is no
-   `--approve` path in the add-in.
+   `--approve` path in the add-in. The Tools tab adds no install or apply
+   method; install commands are preview text only.
 6. **Research writes.** The Research tab is a projection only. Reference merge,
    screening revision, adjudication, fetch apply and manuscript controls are not
    exposed.
@@ -533,6 +605,16 @@ known gaps or host dependencies, not hidden behaviour:
    design, so the host validates transport shape but not every CLI payload
    field. The GUI narrows defensively and renders section errors instead of
    assuming a report.
+10. **Toolchain scope.** The Tools tab reports what `core.toolchain` knows. Remote
+    MCP/API providers are named but not connected or authenticated; credentials,
+    quotas, network reachability and permissions are not checked. Version output
+    is not compared with a minimum. The registry covers the documented
+    capabilities and may not name a repository's local alternative. Probe
+    versions and the `sudo -n true` check default to off in the GUI to avoid
+    starting probes on tab open; enable them for a fuller plan. The tab has no
+    install/apply control and does not run `toolchain_cli explain`. A default
+    plan from the current working tree is not supplied automatically because
+    this slice has no host path input; enter paths in the tab.
 
 ## Related documentation
 
@@ -543,4 +625,4 @@ known gaps or host dependencies, not hidden behaviour:
 - ozagia: [status](status.md), [view](view.md), [worktree](worktree.md),
   [resources](resources.md), [testing](testing.md), [settings](settings.md),
   [actions](actions.md), [task library](task_library.md),
-  [research UI](research_ui.md).
+  [research UI](research_ui.md), [toolchain](toolchain.md).

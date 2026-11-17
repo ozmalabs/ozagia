@@ -274,6 +274,237 @@ export interface ResourcesCheckReport {
   [key: string]: unknown
 }
 
+export interface ToolchainDistro {
+  available?: boolean
+  id?: string | null
+  name?: string | null
+  pretty_name?: string | null
+  version?: string | null
+  version_id?: string | null
+  id_like?: string[]
+  source?: string | null
+}
+
+export interface ToolchainPlatform {
+  system?: string
+  release?: string
+  version?: string
+  machine?: string
+  arch?: string
+  family?: string
+  distro?: ToolchainDistro
+  wsl?: boolean
+  container?: boolean
+  container_hints?: string[]
+}
+
+export interface ToolchainPython {
+  executable?: string
+  version?: string
+  venv?: boolean
+  uv?: boolean
+}
+
+export interface ToolchainManager {
+  executable?: string
+  family?: string
+  kind?: string
+  path?: string
+}
+
+export interface ToolchainSudo {
+  path?: string | null
+  available?: boolean
+  noninteractive?: boolean
+  probed?: boolean
+  note?: string
+}
+
+export interface ToolchainApproval {
+  allow_install?: boolean
+  allow_network?: boolean
+  allow_sudo?: boolean
+  sources?: Record<string, string>
+  environment_overrides?: string[]
+}
+
+export interface ToolchainConfigIssue {
+  key?: string
+  source?: string
+  message?: string
+}
+
+export interface ToolchainConfig {
+  section?: string
+  paths?: { legacy?: string | null; repo?: string | null }
+  sources?: Record<string, string>
+  errors?: ToolchainConfigIssue[]
+  unknown?: ToolchainConfigIssue[]
+  values?: Record<string, unknown>
+}
+
+export interface ToolchainEnvironment {
+  schema?: string
+  schema_version?: number
+  registry_version?: string
+  root?: string
+  platform?: ToolchainPlatform
+  python?: ToolchainPython
+  managers?: Record<string, ToolchainManager>
+  sudo?: ToolchainSudo
+  approval?: ToolchainApproval
+  config?: ToolchainConfig
+  probe?: { versions?: boolean; sudo?: boolean; sources?: Record<string, string> }
+  probe_versions?: boolean
+  probe_sudo?: boolean
+  preferred?: Record<string, string[]>
+}
+
+export interface ToolchainTool {
+  id: string
+  title?: string
+  kind?: string
+  format?: string
+  path?: string | null
+  module?: string | null
+  probe?: string | null
+  version?: string | null
+  provides?: string[]
+  writes?: boolean
+  distribution?: string | null
+  extra?: string | null
+  install_kind?: string
+  remote?: boolean
+  credentialed?: boolean
+  probeable?: boolean
+  requires?: string[]
+  missing_requirements?: string[]
+  usable?: boolean
+  requires_network?: boolean
+  native_for?: string[]
+  preferred_by?: string[]
+  workflows?: string[]
+  recommended?: boolean
+  preferred?: boolean
+  note?: string
+}
+
+export interface ToolchainInstall {
+  tool?: string
+  manager?: string
+  executable?: string
+  path?: string | null
+  package?: string
+  command?: string
+  available?: boolean
+  requires_sudo?: boolean
+  requires_network?: boolean
+  blocked_by?: string[]
+  blocked_reasons?: string[]
+  would_run?: boolean
+  recommended?: boolean
+  extra?: string | null
+  install_kind?: string
+  notes?: string
+}
+
+export interface ToolchainCapabilityReport {
+  id: string
+  title?: string
+  description?: string
+  group?: string | null
+  ready?: boolean
+  installable?: boolean
+  blocked?: boolean
+  preferred?: string[]
+  recommended_tool?: string | null
+  recommended_path?: string | null
+  recommended_install?: ToolchainInstall | null
+  available?: ToolchainTool[]
+  missing?: ToolchainTool[]
+  remote?: ToolchainTool[]
+  unprobed?: ToolchainTool[]
+  install?: ToolchainInstall[]
+}
+
+export interface ToolchainRequest {
+  capabilities?: string[]
+  groups?: string[]
+  explicit?: string[]
+  inferred?: string[]
+  paths?: string[]
+  unmatched_paths?: Array<{ path?: string; suffix?: string }>
+}
+
+export interface ToolchainSummary {
+  capabilities?: number
+  ready?: number
+  missing?: number
+  blocked?: number
+  installable?: number
+  available_tools?: number
+  usable_tools?: number
+  missing_tools?: number
+  remote_providers?: number
+  unprobed_providers?: number
+}
+
+export interface ToolchainPlan {
+  schema?: string
+  schema_version?: number
+  registry_version?: string
+  root?: string
+  request?: ToolchainRequest
+  summary?: ToolchainSummary
+  capabilities?: ToolchainCapabilityReport[]
+  environment?: ToolchainEnvironment
+  not_assessed?: string[]
+}
+
+export interface ToolchainRegistryCapability {
+  id: string
+  title?: string
+  description?: string
+  extensions?: string[]
+  tools?: string[]
+  note?: string
+  group?: string | null
+}
+
+export interface ToolchainRegistryGroup {
+  id: string
+  title?: string
+  description?: string
+  capabilities?: string[]
+  subtypes?: string[]
+}
+
+export interface ToolchainRegistryTool extends ToolchainTool {
+  capabilities?: string[]
+  probes?: string[]
+  version_args?: string[]
+  installs?: Array<{
+    manager?: string
+    package?: string
+    command?: string
+    requires_sudo?: boolean
+    requires_network?: boolean
+    notes?: string
+    extra?: string | null
+    kind?: string
+  }>
+}
+
+export interface ToolchainRegistry {
+  schema?: string
+  schema_version?: number
+  registry_version?: string
+  capabilities?: Record<string, ToolchainRegistryCapability>
+  groups?: Record<string, ToolchainRegistryGroup>
+  tools?: Record<string, ToolchainRegistryTool>
+  managers?: Record<string, ToolchainManager & { id?: string; executables?: string[]; command?: string; requires_sudo?: boolean; description?: string }>
+}
+
 export interface TestSelection {
   file: string
   node_ids?: string[]
@@ -571,6 +802,19 @@ export interface ActionApplyInput extends ActionPreviewInput {
 export interface TaskRunInput {
   id: string
   inputs?: Record<string, string>
+}
+
+/** `toolchainEnv` only controls the bounded sudo usability probe. */
+export interface ToolchainEnvInput {
+  probeSudo?: boolean
+}
+
+/** `toolchainPlan` names capabilities/paths and controls the two probe types. */
+export interface ToolchainPlanInput {
+  capabilities?: string | string[]
+  paths?: string | string[]
+  probeVersions?: boolean
+  probeSudo?: boolean
 }
 
 export interface TaskRunStep {

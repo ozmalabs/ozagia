@@ -2,7 +2,7 @@
   "name": "ozagia-opencode",
   "version": "0.1.0",
   "private": true,
-  "description": "Preview-first ozagia graph, status, testing, research, settings, action and task surfaces for OpenCode Desktop",
+  "description": "Preview-first ozagia graph, status, testing, research, settings, action, task and toolchain surfaces for OpenCode Desktop",
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
