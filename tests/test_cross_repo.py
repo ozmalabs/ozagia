@@ -167,3 +167,56 @@ def test_malformed_attrs_report_unknown_comparison(tmp_path, monkeypatch):
 
     assert result["result"] == "unknown"
     assert result["reason"] == "operation_identity_missing"
+
+
+def test_reference_sync_failures_and_pending_state_make_checks_unknown(
+        tmp_path, monkeypatch):
+    code, contract = tmp_path / "code", tmp_path / "contract"
+    code.mkdir()
+    contract.mkdir()
+    _snapshot(code, "code", [_node(1, "api:client", "ApiOperation",
+                                      {"method": "GET", "path": "/pets"})])
+    _snapshot(contract, "contract", [_node(1, "api:provider", "ApiOperation",
+                                              {"method": "GET", "path": "/pets"})])
+    _manifest(code, [{"source": "code::api:client", "target": "contract::api:provider",
+                      "relation": "same_api_operation", "provenance": "registry"}])
+    monkeypatch.setattr(federation, "_freshness", lambda _: ("fresh", None))
+
+    for sync_state, sync, expected_member_error in (
+            ("error", {"state": "error", "reason": "fetch_failed"}, "sync_error"),
+            ("pending", {"state": "pending"}, "sync_pending"),
+            ("updated", {"state": "updated", "updated": True,
+                          "index_state": "stale_until_reindexed"}, "index_stale"),
+            ("not_checked", None, "sync_unknown")):
+        monkeypatch.setattr(federation, "reference_status", lambda _root,
+                            sync_state=sync_state, sync=sync: {
+            "references": [{"path": str(contract), "pin": None,
+                            "state": sync_state, "sync": sync}],
+            "errors": [],
+        })
+
+        report = cross_repo.check(code, roots=[contract])
+
+        contract_member = next(m for m in report["members"]
+                               if m.get("reference"))
+        assert contract_member["sync_state"] == sync_state
+        assert report["checks"][0]["result"] == "unknown"
+        assert report["checks"][0]["member_states"][1] == expected_member_error
+        assert expected_member_error in {error["state"] for error in report["member_errors"]}
+        assert report["overall"] == "unknown"
+
+
+def test_reference_manifest_errors_make_empty_report_unknown(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    root.mkdir()
+    _snapshot(root, "root", [])
+    monkeypatch.setattr(federation, "_freshness", lambda _: ("fresh", None))
+    monkeypatch.setattr(federation, "reference_status", lambda _root: {
+        "references": [], "errors": ["invalid reference declaration"]
+    })
+
+    report = cross_repo.check(root, roots=[])
+
+    assert report["overall"] == "unknown"
+    assert report["reference_errors"] == 1
+    assert report["member_errors"][0]["state"] == "reference_manifest_error"

@@ -17,6 +17,13 @@ is unverifiable, `fail` when a verified comparison mismatches, and `complete`
 when all available checks are verified with no mismatch. These labels describe
 static evidence only.
 
+Declared reference members include their pin and cached sync status. A failed
+or pending sync, an unverified sync, or an updated checkout whose graph still
+needs reindexing makes its checks unknown and the overall report unknown (or
+incomplete when its snapshot is unavailable). The report reads references
+under the no-sync context; run the explicit sync operation or a session brief
+to request the bounded background update.
+
 Supported declarations are:
 
 - `produces_api`, `consumes_api`, `tests_api`: source must be `Symbol`, `File`,

@@ -41,8 +41,20 @@ def check(root: str | Path | None = None,
     selected = federation._root(root)
     if roots is not None:
         roots = tuple(roots)
-    members = federation._members(selected, roots)
+    # Checking stored evidence is read-only; synchronization is requested by
+    # the session brief or an explicit sync command, not by this report.
+    with federation.without_reference_sync():
+        members = federation._members(selected, roots)
     link_report = federation._declared_links(selected, members)
+    reference_report = federation.reference_status(selected)
+    references: dict[Path, dict[str, Any]] = {}
+    for reference in reference_report.get("references", []):
+        if not isinstance(reference, dict) or not isinstance(reference.get("path"), str):
+            continue
+        try:
+            references[Path(reference["path"]).expanduser().resolve()] = reference
+        except (OSError, RuntimeError, ValueError):
+            continue
     nodes: dict[str, dict[str, Any]] = {}
     member_states: dict[str, str] = {}
     public_members = []
@@ -50,8 +62,12 @@ def check(root: str | Path | None = None,
     for item in members:
         nodes.update(_member_nodes(item))
         state, detail = federation._freshness(item)
+        reference = references.get(item["root"])
+        sync = reference.get("sync") if reference else None
+        sync_details = sync if isinstance(sync, dict) else {}
+        sync_state = reference.get("state") if reference else None
         member_states[item["alias"]] = state
-        public_members.append({
+        public_member = {
             "id": item["alias"], "name": item["label"],
             "root": str(item["root"]), "snapshot": str(item["snapshot_path"]),
             "state": state, "detail": detail,
@@ -59,10 +75,41 @@ def check(root: str | Path | None = None,
             "generated_at": item["attrs"].get("generated_at"),
             "nodes": len((item["snapshot"] or {}).get("nodes", [])),
             "edges": len((item["snapshot"] or {}).get("edges", [])),
-        })
+        }
+        if reference:
+            public_member.update({"reference": True, "pin": reference.get("pin"),
+                                  "sync_state": sync_state, "sync": sync})
+        public_members.append(public_member)
         if state != "fresh":
             member_errors.append({"id": item["alias"], "root": str(item["root"]),
                                  "state": state, "detail": detail or item["error"]})
+        if reference:
+            if sync_state == "error":
+                member_states[item["alias"]] = "sync_error"
+                member_errors.append({"id": item["alias"], "root": str(item["root"]),
+                                      "state": "sync_error",
+                                      "detail": sync_details.get("reason", "reference sync failed")})
+            elif sync_state == "pending":
+                member_states[item["alias"]] = "sync_pending"
+                member_errors.append({"id": item["alias"], "root": str(item["root"]),
+                                      "state": "sync_pending",
+                                      "detail": "reference update is still running"})
+            elif sync_state == "updated" or (isinstance(sync, dict)
+                                               and sync.get("index_state") == "stale_until_reindexed"):
+                member_states[item["alias"]] = "index_stale"
+                member_errors.append({"id": item["alias"], "root": str(item["root"]),
+                                      "state": "index_stale",
+                                      "detail": "reference snapshot needs reindexing"})
+            elif sync_state not in {"current", "pinned"}:
+                member_states[item["alias"]] = "sync_unknown"
+                member_errors.append({"id": item["alias"], "root": str(item["root"]),
+                                      "state": "sync_unknown",
+                                      "detail": "reference sync state is not verified"})
+
+    reference_errors = reference_report.get("errors", [])
+    if reference_errors:
+        member_errors.append({"state": "reference_manifest_error",
+                              "detail": "reference manifest has invalid entries"})
 
     checks: list[dict[str, Any]] = []
     for link in link_report["links"]:
@@ -157,7 +204,9 @@ def check(root: str | Path | None = None,
     return {"ok": True, "root": str(selected), "checks": checks,
             "counts": counts, "link_state": link_report["state"],
             "members": public_members, "member_errors": member_errors,
-            "overall": overall, "errors": errors, "configuration": configuration,
+            "overall": overall, "errors": errors,
+            "reference_errors": len(reference_errors),
+            "configuration": configuration,
             "note": "Static evidence only; API compatibility, test execution, and deployment state are not verified."}
 
 
