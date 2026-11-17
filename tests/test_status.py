@@ -347,6 +347,41 @@ def test_status_snapshot_state_is_explicit(
                for item in report["degraded"])
 
 
+def test_status_reports_merged_runtime_names_from_both_configs(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    for name in ("OZAGIA_CONFIG", "OZAGIA_ROOT", "OZAGIA_STATE_DIR"):
+        monkeypatch.delenv(name, raising=False)
+    root = tmp_path / "repo"
+    root.mkdir()
+    legacy = root / ".ozagia.toml"
+    legacy.write_text(
+        '[relays.local]\nspecs = [{ kind = "local" }]\n\n'
+        '[runtime.services.api]\ncommand = ["python", "-m", "app"]\n',
+        encoding="utf-8")
+    repo = root / "ozagia" / "config.toml"
+    repo.parent.mkdir()
+    repo.write_text(
+        '[runtime.services.worker]\ncommand = ["python", "-m", "worker"]\n\n'
+        '[runtime.tunnels.database]\n'
+        'relay = "local"\ntarget = "db.example:5432"\n',
+        encoding="utf-8")
+
+    config_section, project = status_module._config_status(root)
+    assert config_section["state"] == "configured"
+    assert config_section["report"]["source"] == str(legacy.resolve())
+    assert config_section["report"]["runtime_services"] == ["api", "worker"]
+    assert config_section["report"]["runtime_tunnels"] == ["database"]
+
+    degraded: list[dict[str, str]] = []
+    runtime_section = status_module._runtime_status(root, project, degraded)
+    assert degraded == []
+    assert {(item["kind"], item["name"])
+            for item in runtime_section["report"]["items"]} == {
+        ("service", "api"), ("service", "worker"), ("tunnel", "database"),
+    }
+
+
 def test_status_invalid_config_is_a_hard_error(
     components: SimpleNamespace, monkeypatch, capsys,
 ) -> None:

@@ -78,8 +78,9 @@ restricted by file scope.
 
 The registry file is now also read by the runtime project loader
 (`ozagia.config.load_project_config`), which supplies `ProjectConfig` for the
-index, memory, adapters, reads, tests, lint, jobs, IaC and review layers. It
-merges two sources, highest priority first:
+index, memory, adapters, reads, tests, lint, jobs, IaC, review, environment,
+service, relay and runtime layers. It merges two sources, highest priority
+first:
 
 1. the legacy file: `$OZAGIA_CONFIG`, `<root>/.ozagia.toml` or
    `<state dir>/config.toml`;
@@ -87,7 +88,22 @@ merges two sources, highest priority first:
 
 The legacy file wins for **every key it defines**, so an existing project keeps
 its exact behaviour. The registry file supplies only the supported keys the
-legacy file leaves unset, key by key. `ozagia.config.config_path()` returns
+legacy file leaves unset, key by key.
+
+`[environments]`, `[services]`, `[relays]` and `[runtime]` are project models,
+not flat settings, so their precedence unit is the **named entry**:
+`[environments.NAME]`, `[services.NAME]`, `[relays.NAME]`,
+`[runtime.services.NAME]` and `[runtime.tunnels.NAME]`. A legacy entry wins as
+a whole over a versioned entry with the same name; the versioned entry's fields
+are ignored rather than merged into it. Versioned-only names are appended in
+their file's order. Keys are never combined across files for one entry, so a
+legacy relay chain cannot acquire a versioned `allowed_kinds`, and a legacy
+runtime command cannot acquire a versioned relay. Entries in one file are
+validated by the same parser as the legacy file: duplicate names, unknown
+fields, unsafe argv, relay specs, ports and cross-references keep the same
+messages and limits, and the error names the file that defines the entry.
+
+`ozagia.config.config_path()` returns
 the legacy file when present, else `ozagia/config.toml`;
 `ozagia.config.config_sources()` reports both paths, which one is active
 (`legacy` or `repo`), their precedence and the files that supplied the loaded
@@ -118,6 +134,11 @@ The project loader consumes these registry keys:
 | `lint` | `enabled`, `timeout_s`, `python`, `rust` (`auto` means unset) |
 | `iac` | `roots`, `skip_globs` |
 | `review` | `layers` |
+| `environments` | one named table per environment; every legacy environment field |
+| `services` | one named table per service; every legacy service field |
+| `relays` | one named table per relay; `specs`, `allowed_kinds`, `max_timeout_s`, `command_allowlist`, `max_output_bytes` |
+| `runtime.services` | one named table per service; `command`, `workdir`, `relay`, `mode`, `description` |
+| `runtime.tunnels` | one named table per tunnel; `relay`, `target`, `local_port`, `description` |
 
 Empty `index.map_dirs`, `index.import_roots`, `index.path_prefixes` and
 `index.command_docs` mean "derive the project default", matching the registry
@@ -127,7 +148,10 @@ executor implements: `affected` and `smoke` mean `affected`; `none`, `off`,
 
 `[security]` is consumed by `ozagia.core.security` from either file (legacy
 wins per key) through `ozagia.config.load_config_section`; its supported keys
-are not reported as unmapped. Everything else stays with its own module:
+are not reported as unmapped. `[environments]`, `[services]`, `[relays]` and
+`[runtime]` are consumed by `ProjectConfig` from either file with the named-entry
+precedence above, so they are not reported as unmapped either; their fields
+are validated by the legacy parser. Everything else stays with its own module:
 `hints.*` is read by `ozagia.core.library_hints`, `models.*` by
 `ozagia.core.models`, and the `ui`, `resources`, `worktrees`, `markdown`,
 `files` and `tasks` groups by their modules. The project loader reports those
@@ -181,15 +205,37 @@ roots = ["infra"]
 [review]
 layers = ["src/core", "src/api"]
 
+[environments.dev]
+paths = ["envs/dev"]
+region = "us-east-1"
+
+[services.api]
+chart = "charts/api"
+environment = "dev"
+
+[relays.local]
+specs = [{ kind = "local" }]
+
+[runtime.services.api]
+command = ["python", "-m", "app"]
+workdir = "services/api"
+
+[runtime.tunnels.database]
+relay = "local"
+target = "db.internal.example:5432"
+
 [hints]
 library = "strict"
 ```
 
 `load_project_config()` uses `src` from the legacy file, `tests`/`spec`,
-`docs`, the memory skip, testing, lint, jobs, IaC and review values from the
-versioned file, and reports `hints` in `unmapped` (the hints module reads it).
-`ozagia.core.security.load_config()` reads `block_secrets` and
-`secret_allowlist` from the versioned `[security]` table because the legacy
+`docs`, the memory skip, testing, lint, jobs, IaC, review, environment, service,
+relay and runtime values from the versioned file, and reports `hints` in
+`unmapped` (the hints module reads it). The versioned `[environments.dev]`,
+`[services.api]`, `[relays.local]`, `[runtime.services.api]` and
+`[runtime.tunnels.database]` entries are added because the legacy file defines
+none of those names. `ozagia.core.security.load_config()` reads `block_secrets`
+and `secret_allowlist` from the versioned `[security]` table because the legacy
 file does not define them. `config_path()` returns `.ozagia.toml`;
 `config_sources()` reports both files with
 `precedence == ("legacy", "repo")`.
@@ -714,9 +760,11 @@ Unsupported keys are reported, never guessed:
 - `unknown`: not a legacy key or not a known section; a close suggestion is
   included when one exists.
 - `unmapped`: a known legacy setting with no registry equivalent yet, such
-  as `[environments]`, `[services]`, `[relays]`, `[runtime]`,
-  `iac.remote_states` or `lint.trust_project_venv`. It stays in
-  `.ozagia.toml`.
+  as `iac.remote_states` or `lint.trust_project_venv`. The project models
+  `[environments]`, `[services]`, `[relays]` and `[runtime]` are reported
+  here too because the settings registry has no typed keys for them, even
+  though `load_project_config` now reads them from either file. They stay in
+  `.ozagia.toml` unless copied by hand.
 - `conflict`: `ozagia/config.toml` already has a different value. The
   existing value is kept and named in the report; resolve it with
   `ozagia config set` and preview again.
@@ -729,8 +777,11 @@ migrated repository behaves as before; values the legacy file does not define
 now come from `ozagia/config.toml`. Removing the legacy file is a separate
 step and is safe only after checking the migration report:
 
-- `[environments]`, `[services]`, `[relays]` and `[runtime]` are still legacy
-  project models and are not part of the registry yet.
+- `[environments]`, `[services]`, `[relays]` and `[runtime]` are read from
+  either file by `ozagia.config.load_project_config`, with legacy entries
+  winning by name. `config migrate` does not copy them because the settings
+  registry has no typed keys for them; copy those tables by hand if the legacy
+  file is going away.
 - `ozagia.core.security` reads `[security]` from both files with legacy
   precedence, so the migrated `[security]` table keeps working after the legacy
   file is removed.
@@ -756,11 +807,12 @@ Example JSON shape:
 The migration is not a replacement for the existing loaders, but the project
 loader now reads the migrated file: `ozagia.config` merges
 `ozagia/config.toml` under `.ozagia.toml` for the graph, index, memory,
-adapters, reads, tests, lint, jobs, IaC and review, and
-`ozagia.core.security` reads `[security]` from both with legacy precedence. The
-legacy file is kept and keeps priority so behaviour does not change during the
-transition; hints, models and the legacy project-model sections still need
-their existing files and loaders.
+adapters, reads, tests, lint, jobs, IaC, review, environments, services,
+relays and runtime, and `ozagia.core.security` reads `[security]` from both
+with legacy precedence. The legacy file is kept and keeps priority so
+behaviour does not change during the transition; hints and models still need
+their existing files and loaders, and the project-model tables must be copied
+by hand if the legacy file is removed.
 
 ## JSON shapes
 
@@ -803,11 +855,13 @@ moved yet:
 
 - `.ozagia.toml` and `ozagia/config.toml` are both read by
   `ozagia.config.load_project_config` for the index, memory, adapters, reads,
-  jobs, tests, lint, IaC and review layers, and by
-  `ozagia.core.security.load_config` for `[security]`. The legacy file keeps
-  priority for every key it defines; the registry file supplies the remaining
-  supported keys. `ozagia config migrate` copies the registry subset into
-  `ozagia/config.toml` and keeps the legacy file.
+  jobs, tests, lint, IaC and review layers, and for the environments, services,
+  relays and runtime project models (merged by named entry, legacy entries
+  winning whole), and by `ozagia.core.security.load_config` for `[security]`.
+  The legacy file keeps priority for every key it defines; the registry file
+  supplies the remaining supported keys. `ozagia config migrate` copies the
+  registry subset into `ozagia/config.toml` and keeps the legacy file; the
+  project-model tables are not part of the registry subset.
 - `ozagia.core.resources` still reads `ozagia/resources.toml` or `[resources]`
   from `ozagia/config.toml`. The canonical registry locations match its nested
   `limits`, `admission` and `worktrees` tables.

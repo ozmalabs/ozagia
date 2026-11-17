@@ -39,9 +39,57 @@ credential-like command arguments, environment assignments, and repository
 escaping workdirs are rejected. Config models contain no environment values or
 credentials. Treat the config file itself as reviewed executable policy.
 
+## Where the definitions live
+
+These tables are read from both project configuration files:
+
+1. the legacy file: `$OZAGIA_CONFIG`, `<root>/.ozagia.toml` or
+   `<state dir>/config.toml`;
+2. the versioned `<root>/ozagia/config.toml`.
+
+They are **merged**, not legacy-only. The unit of precedence is the named
+entry: a legacy `[relays.NAME]`, `[runtime.services.NAME]` or
+`[runtime.tunnels.NAME]` entry (and `[environments.NAME]` or `[services.NAME]`)
+wins as a whole over a versioned entry with the same name. Fields from the two
+files are never combined for one entry, so a versioned relay policy or workdir
+cannot silently change the meaning of a legacy service. Versioned-only names are
+added. `ozagia.config.config_path()` still reports the legacy file when it
+exists, and `ozagia doctor` reports both paths and the precedence. `status` and
+the runtime managers show the merged service and tunnel names.
+
+For example, keep the relay in the legacy file and add services and tunnels in
+the versioned file:
+
+```toml
+# .ozagia.toml (legacy; wins for names it defines)
+[relays.local]
+specs = [{ kind = "local" }]
+
+[runtime.services.api]
+command = ["python", "-m", "app"]
+workdir = "services/api"
+```
+
+```toml
+# ozagia/config.toml (versioned; adds versioned-only names)
+[runtime.services.worker]
+command = ["python", "-m", "worker"]
+workdir = "services/worker"
+
+[runtime.tunnels.database]
+relay = "local"                 # resolved against the merged relay names
+target = "db.internal.example:5432"
+```
+
+A service or tunnel in either file may reference a relay defined only in the
+other file; unknown relays are still rejected. Duplicate names within one file
+are a TOML error, and invalid fields, argv, specs or ports name the file that
+defines the entry. `ozagia config migrate` does not copy these tables because
+the settings registry has no typed keys for them; copy them by hand if the
+legacy file is removed.
+
 ## Configuration and runtime state
 
-Configuration lives in `.ozagia.toml` (or the configured project file).
 Observed state is separate, normally under `.ozagia/runtime/`:
 
 - `state.json` is versioned, atomically replaced, bounded, and mode `0600`;
