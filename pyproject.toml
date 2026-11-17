@@ -40,6 +40,15 @@ edit-yaml = ["ruamel.yaml>=0.18,<1"]
 research = ["sympy>=1.14,<2", "lark>=1.2,<2"]
 all = ["ozagia[treesitter,lsp,research,iac-yaml,openapi-yaml]"]
 dev = ["ozagia[all]", "pytest>=8", "ruff>=0.6"]
+# Optional, task-specific libraries. These are deliberately not part of
+# `all` or `dev`: the core stays standard-library only and a missing extra is
+# reported by `ozagia-toolchain`, not imported at startup.
+pdf = ["pypdf>=5", "pdfplumber>=0.11", "reportlab>=4"]
+ocr = ["pytesseract>=0.3"]
+image = ["Pillow>=10"]
+office = ["python-docx>=1", "openpyxl>=3", "python-pptx>=1"]
+media = ["faster-whisper>=1", "opencv-python>=4"]
+data = ["pandas>=2"]
 
 [project.scripts]
 ozagia = "ozagia.cli:main"
@@ -62,6 +71,7 @@ ozagia-hooks = "ozagia.hooks_cli:main"
 ozagia-console = "ozagia.console:main"
 ozagia-security = "ozagia.security_cli:main"
 ozagia-library-hints = "ozagia.library_hints_cli:main"
+ozagia-toolchain = "ozagia.toolchain_cli:main"
 ozagia-review = "ozagia.code_review_cli:main"
 ozagia-ocelot = "ozagia.integrations.ocelot.__main__:main"
 ozagia-worktree = "ozagia.worktree_cli:main"

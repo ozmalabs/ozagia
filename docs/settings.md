@@ -883,6 +883,15 @@ moved yet:
 - `ozagia.core.library_hints` reads the `hints` group on each handled edit and
   write (with `$OZAGIA_LIBRARY_HINTS=0` as a hard local opt-out); the daemon
   sums its `meta` counters.
+- `ozagia.core.toolchain` reads `[tools]` from both configuration files
+  through `ozagia.config.load_config_section` (the versioned
+  `ozagia/config.toml` is the intended location). `allow_install`,
+  `allow_network`, `allow_sudo`, `probe_versions`, `probe_sudo` and a
+  capability-to-tool `preferred` map are supported; the approval values
+  default to false and `OZAGIA_ALLOW_INSTALL`, `OZAGIA_ALLOW_NETWORK` and
+  `OZAGIA_ALLOW_SUDO` override them for one process. `ozagia-toolchain`
+  reports installed and missing external tools and previews installs without
+  running them. See `docs/toolchain.md`.
 - `ozagia.core.security` reads `[security]` from both `.ozagia.toml` and
   `ozagia/config.toml` through `ozagia.config.load_config_section`, with the
   legacy file winning per key. A malformed legacy file is forgiving; an

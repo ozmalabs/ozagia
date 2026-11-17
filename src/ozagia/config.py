@@ -532,6 +532,7 @@ _OWNED_SECTIONS = {
     "markdown": "read by the Markdown routing modules",
     "files": "read by the file-ledger and cleanup modules",
     "tasks": "read by the bounded-task modules",
+    "tools": "read by ozagia.core.toolchain",
 }
 
 #: Individual registry keys another module reads, or with no mapping.

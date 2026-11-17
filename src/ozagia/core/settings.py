@@ -129,6 +129,7 @@ from typing import Any, Callable, Iterable, Mapping
 from ozagia.config import (
     REPO_CONFIG_DIRNAME,
     REPO_CONFIG_FILENAME,
+    _OWNED_SECTIONS,
     repo_root,
     state_dir,
 )
@@ -1550,6 +1551,12 @@ def _parse_layer(data: Mapping[str, Any], path: Path, layer: str) -> tuple[
                 raise SettingsError(f"{path}: TOML keys must be strings")
             dotted = f"{prefix}.{name}" if prefix else name
             if isinstance(raw, Mapping):
+                # A top-level table owned by another module (for example
+                # [tools], read by ozagia.core.toolchain) is not a settings
+                # group. Skip it instead of reporting its keys as unknown.
+                if (not prefix and dotted in _OWNED_SECTIONS
+                        and not _is_known_table(dotted)):
+                    continue
                 if (prefix, name) in _BY_STORAGE:
                     raise SettingsError(
                         f"{path}: [{dotted}] must be a value, not a table")

@@ -50,6 +50,7 @@ glibc) and macOS (arm64, x64). `ozagia self check --tui` verifies the install;
 |---|---|---|
 | Library | `from ozagia.core.memory import DevMemory, build_index` | works |
 | MCP server | `ozagia mcp`: any MCP client (OpenCode, Claude Code, Cursor, ...) gets the graph tools next to its own | works |
+| External tools | `ozagia-toolchain`: capability readiness and missing-tool diagnosis for documents/PDF/OCR/office, media, browser/research, data, ops, design and communication work; optional `pdf`/`ocr`/`image`/`office`/`media`/`data` extras; install previews with approval, network and sudo gates ([docs/toolchain.md](docs/toolchain.md)) | discovery only; never installs |
 | OpenCode plugin | captures `read`/`grep`/`glob`/`edit`/`write`/`shell` and carries out their intent on the graph daemon; `ozagia install opencode` | works (OpenCode 2.3, live smoke runs) |
 | Claude Code hooks | partial capture: graph context after each tool, git ref refusal; `ozagia install claude` | implemented, untested live |
 | Codex hooks | graph context after shell commands and patches, git ref refusal, a session brief, the MCP server and an `AGENTS.md` section; `ozagia install codex` ([docs/codex.md](docs/codex.md)) | implemented, untested live |
