@@ -180,10 +180,23 @@ def test_first_party_from_root_and_from_output(tmp_path):
     assert F.classify(2, False, third, "")["class"] == "environment"
 
 
-def test_environment_beats_a_first_party_import_error():
-    both = FIRST_PARTY_IMPORT + "E   ModuleNotFoundError: No module named 'yaml'\n"
+def test_a_first_party_collection_error_beats_an_environment_one():
+    """Two collection errors, one of a third-party module: the run is
+    `environment` only when every failing item is, so `collection` wins and
+    the items keep each cause."""
+    yaml_block = ("________ ERROR collecting tests/test_cfg.py ________\n"
+                  "tests/test_cfg.py:1: in <module>\n    import yaml\n"
+                  "E   ModuleNotFoundError: No module named 'yaml'\n")
+    both = FIRST_PARTY_IMPORT.replace("======== short test summary info ========\n",
+                                      yaml_block + "======== short test summary info "
+                                      "========\n").replace(
+        "ERROR tests/test_core.py\n", "ERROR tests/test_core.py\nERROR tests/test_cfg.py\n")
     got = F.classify(2, False, both, "", first_party={"pkg", "tests"})
-    assert got["class"] == "environment" and got["module"] == "yaml"
+    assert got["class"] == "collection" and got["module"] == "pkg.missing"
+    assert "1 more with an environment cause (yaml)" in got["detail"]
+    assert got["items"] == [
+        {"node": "tests/test_core.py", "class": "collection", "module": "pkg.missing"},
+        {"node": "tests/test_cfg.py", "class": "environment", "module": "yaml"}]
 
 
 @pytest.mark.parametrize("out,rc,detail", [
@@ -439,3 +452,319 @@ def test_daemon_records_the_class_of_a_captured_run(mem, repo, tmp_path, no_who_
         "environment", "w21_absent_mod")
     raw = (repo / ".ozagia" / "working_set" / "tests.json").read_text()
     assert "third-party" not in raw and "No module named" not in raw
+
+
+# --------------------------------------------------------------------------- #
+# W21 review: real pytest runs in temp repos
+# --------------------------------------------------------------------------- #
+def _real_pytest(root: Path, *args: str) -> tuple[int, str, str]:
+    """pytest with this interpreter in `root` (its own rootdir, no
+    inherited `PYTEST_*` options)."""
+    import os
+    import subprocess
+    if not (root / "pytest.ini").exists():
+        (root / "pytest.ini").write_text("[pytest]\n")
+    env = {k: v for k, v in os.environ.items() if not k.startswith("PYTEST")}
+    env.update(PYTHONDONTWRITEBYTECODE="1", COLUMNS="250")
+    proc = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p",
+                           "no:cacheprovider", *args], cwd=root, env=env,
+                          capture_output=True, text=True, timeout=120)
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+TRIGGER_PKG = '''\
+def f():
+    print("optional speedups off: ModuleNotFoundError: No module named 'ujson'")
+    return 1
+'''
+TRIGGER_TESTS = '''\
+import logging
+import subprocess
+import sys
+
+from mypkg import f
+
+
+def test_stdout_import_line():
+    assert f() == 2
+
+
+def test_diff_line():
+    assert ["a", "ImportError: No module named 'foo'"] == ["a", "b"]
+
+
+def test_trigger_lines():
+    print("user: not found")
+    print("bash: pytest: command not found")
+    print("error: No module named pytest")
+    print("tool: error: unrecognized arguments: --bogus")
+    print("/usr/bin/python3: No module named pytest")
+    sys.stderr.write("/usr/bin/python3: can't open file '/w/tools/gen.py'\\n")
+    logging.getLogger("t").error("ModuleNotFoundError: No module named 'yaml'")
+    assert 1 == 2
+
+
+def test_config_open():
+    try:
+        open("config")
+    except FileNotFoundError as e:
+        print(f"FileNotFoundError: {e!s}")
+    assert False, "config missing"
+
+
+def test_subprocess_python3():
+    r = subprocess.run(["python3", "/nonexistent/w21_helper.py"],
+                       capture_output=True, text=True)
+    print(r.stderr)
+    try:
+        subprocess.run(["w21-no-such-tool"])
+    except FileNotFoundError as e:
+        print(f"FileNotFoundError: {e!s}")
+    assert r.returncode == 0
+'''
+
+
+@pytest.fixture
+def trigger_repo(tmp_path):
+    root = tmp_path / "trig"
+    (root / "mypkg").mkdir(parents=True)
+    (root / "mypkg" / "__init__.py").write_text(TRIGGER_PKG)
+    (root / "tests").mkdir()
+    (root / "tests" / "test_triggers.py").write_text(TRIGGER_TESTS)
+    return root
+
+
+def test_trigger_strings_in_captured_output_and_diffs_do_not_decide(trigger_repo,
+                                                                      no_who_has):
+    """Captured stdout/stderr/log lines and assertion-diff lines that look
+    like environment or harness causes: every test failed an assertion,
+    and so does the run."""
+    rc, out, err = _real_pytest(trigger_repo, "tests")
+    assert rc == 1, out + err
+    for needle in ("No module named 'ujson'", "Captured stdout call",
+                   "Captured log call", "can't open file", "command not found"):
+        assert needle in out + err, needle
+    got = F.classify(rc, False, out, err,
+                     command=[sys.executable, "-m", "pytest", "tests"],
+                     interpreter=sys.executable, root=trigger_repo)
+    assert got["class"] == "assertion", got
+    assert "5 failed with assertion output" == got["detail"]
+    assert [i["class"] for i in got["items"]] == ["assertion"] * 5
+    assert {i["node"] for i in got["items"]} == {
+        f"tests/test_triggers.py::{n}" for n in (
+            "test_stdout_import_line", "test_diff_line", "test_trigger_lines",
+            "test_config_open", "test_subprocess_python3")}
+    # The same with no exit code (an agent's piped run) and with `--tb=short`.
+    assert F.classify(None, False, out, err, root=trigger_repo)["class"] == "assertion"
+    rc, out, err = _real_pytest(trigger_repo, "--tb=short", "tests")
+    assert F.classify(rc, False, out, err, root=trigger_repo)["class"] == "assertion"
+
+
+def test_trigger_strings_through_the_eval_check(trigger_repo, tmp_path, no_who_has):
+    from ozagia.eval import agent as ae
+    res = ae.run_check(trigger_repo, {"argv": ["-m", "pytest", "-q", "-p",
+                                               "no:cacheprovider", "tests"],
+                                      "timeout_s": 120},
+                       sys.executable, tmp_path / "check.log")
+    assert res["failure"]["class"] == "assertion", res["failure"]
+    assert ae.check_validity(res["failure"])["valid"] is True
+
+
+def test_trigger_strings_through_the_daemon(trigger_repo, tmp_path, monkeypatch,
+                                            no_who_has):
+    monkeypatch.setattr(M, "SOURCE_DIRS", (".",))
+    monkeypatch.setattr(M, "TEST_DIRS", ("tests",))
+    monkeypatch.setattr(M, "DOC_GLOBS", ("README.md",))
+    monkeypatch.setattr(M, "ALL_DOC_GLOBS", ("README.md",))
+    monkeypatch.setattr(M, "IMPORT_ROOTS", ())
+    clear_config_cache()
+    dump = tmp_path / "state" / "graph.json"
+    build_index(trigger_repo, dump, include_docs="features", include_git=False)
+    mem = DevMemory(dump, tmp_path / "state" / "journal.jsonl", root=trigger_repo)
+    res = _shell(mem, f"{sys.executable} -m pytest -q tests")
+    line = _class_line(res["output"])
+    assert line.startswith("[ozagia] failure class assertion: 5 failed"), line
+    assert "failure item" not in res["output"]
+
+
+def test_a_chained_import_error_is_the_wrapping_exception(tmp_path):
+    root = tmp_path / "chain"
+    (root / "tests").mkdir(parents=True)
+    (root / "tests" / "test_c.py").write_text(
+        "def load():\n    try:\n        import w21_absent_backend  # noqa: F401\n"
+        "    except ImportError as e:\n        raise RuntimeError('no backend') from e\n\n\n"
+        "def test_load():\n    load()\n")
+    rc, out, err = _real_pytest(root, "tests")
+    assert "No module named 'w21_absent_backend'" in out
+    got = F.classify(rc, False, out, err, root=root)
+    assert got["class"] == "error" and got["items"][0]["class"] == "error", got
+
+
+MIX_TESTS = '''\
+def test_run():
+    assert 1 == 2
+
+
+def test_yaml():
+    import w21_absent_mod  # noqa: F401
+'''
+
+
+def test_assertion_and_environment_in_one_run(tmp_path, no_who_has):
+    root = tmp_path / "mix"
+    (root / "tests").mkdir(parents=True)
+    (root / "tests" / "test_mix.py").write_text(MIX_TESTS)
+    rc, out, err = _real_pytest(root, "tests")
+    got = F.classify(rc, False, out, err, root=root)
+    assert got["class"] == "assertion", got
+    assert got["detail"] == ("1 failed with assertion output; 1 more with an "
+                             "environment cause (w21_absent_mod)")
+    assert got["items"] == [
+        {"node": "tests/test_mix.py::test_run", "class": "assertion"},
+        {"node": "tests/test_mix.py::test_yaml", "class": "environment",
+         "module": "w21_absent_mod"}]
+    # Only the environment test failing: the run is environment.
+    rc, out, err = _real_pytest(root, "tests/test_mix.py::test_yaml")
+    got = F.classify(rc, False, out, err, root=root)
+    assert got["class"] == "environment" and got["module"] == "w21_absent_mod"
+
+
+def test_daemon_marks_the_environment_test_of_a_mixed_run(mem, repo, tmp_path,
+                                                         no_who_has):
+    from ozagia.daemon.server import DaemonState
+    (repo / "tests" / "test_mix.py").write_text(MIX_TESTS)
+    st = DaemonState(repo, mem, tmp_path / "j.jsonl")
+    msg = {"op": "tool", "tool": "shell", "harness": "opencode", "session": "s1",
+           "input": {"command": f"{sys.executable} -m pytest -q tests/test_mix.py"}}
+    resp = st.dispatch(msg)
+    st.record(msg, resp, 1.0)
+    out = resp["output"]
+    assert _class_line(out).startswith("[ozagia] failure class assertion: ")
+    assert ("[ozagia] failure item environment test:tests/test_mix.py::test_yaml, "
+            "module w21_absent_mod") in out.splitlines()
+    run = W.load_test_record(repo)["runs"][-1]
+    assert run["failure_class"] == "assertion"
+    assert run["failure_items"] == [{"key": "test:tests/test_mix.py::test_yaml",
+                                     "class": "environment",
+                                     "module": "w21_absent_mod"}]
+
+
+def test_exit_zero_with_harness_text_is_passed(tmp_path):
+    root = tmp_path / "ok"
+    (root / "tests").mkdir(parents=True)
+    (root / "tests" / "test_ok.py").write_text(
+        "import subprocess\nimport sys\n\n\ndef test_ok():\n"
+        "    r = subprocess.run(['python3', '/nonexistent/w21_helper.py'],\n"
+        "                       capture_output=True, text=True)\n"
+        "    sys.stdout.write(r.stderr)\n"
+        "    print(\"FileNotFoundError: [Errno 2] No such file or directory: 'python3'\")\n"
+        "    assert True\n")
+    rc, out, err = _real_pytest(root, "-s", "tests")
+    assert rc == 0 and "can't open file" in out
+    got = F.classify(rc, False, out, err, command=["python3", "-m", "pytest"],
+                     interpreter="python3", root=root)
+    assert got["class"] == "passed"
+    from ozagia.eval import agent as ae
+    assert ae.check_validity(got)["valid"] is True
+    # A run that started: exit 127 from the code under test is not harness.
+    started = "..F\n1 failed, 2 passed in 0.1s\n"
+    assert F.classify(127, False, started, "")["class"] != "harness"
+    # A run that did not start still is.
+    got = F.classify(2, False, "", "python3: can't open file '/w/check.py': "
+                     "[Errno 2] No such file or directory\n")
+    assert got["class"] == "harness"
+
+
+def test_namespace_packages_are_first_party(tmp_path):
+    root = tmp_path / "ns"
+    (root / "acme" / "proj").mkdir(parents=True)
+    (root / "acme" / "proj" / "__init__.py").write_text("")
+    (root / "docs").mkdir()
+    (root / "docs" / "notes.txt").write_text("")
+    (root / "tests").mkdir()
+    (root / "tests" / "test_ns.py").write_text(
+        "from acme.proj.newmod import thing  # noqa: F401\n\n\n"
+        "def test_x():\n    pass\n")
+    assert {"acme", "tests"} <= F.first_party_names(root)
+    assert "docs" not in F.first_party_names(root)
+    rc, out, err = _real_pytest(root, "tests")
+    got = F.classify(rc, False, out, err, root=root)
+    assert got["class"] == "collection" and got["module"] == "acme.proj.newmod", got
+    # Deeper than FIRST_PARTY_DEPTH is not searched.
+    deep = tmp_path / "deep"
+    path = deep / "a" / "b" / "c" / "d"
+    path.mkdir(parents=True)
+    (path / "m.py").write_text("")
+    assert "a" not in F.first_party_names(deep)
+
+
+def test_detail_and_module_are_bounded():
+    err = ("ERROR: usage: __main__.py [options] [file_or_dir] [file_or_dir] [...]\n"
+           "__main__.py: error: unrecognized arguments: " + "x" * 20_000 + "\n")
+    got = F.classify(4, False, "", err)
+    assert got["class"] == "environment"
+    assert len(got["detail"]) <= F.DETAIL_CHARS
+    from ozagia.eval import agent as ae
+    fields = ae.failure_fields(got)
+    assert len(fields["failure_detail"]) <= F.DETAIL_CHARS
+    assert len(ae.check_validity(got)["invalid_reason"]) <= F.DETAIL_CHARS + 30
+    long_mod = "m" * 500
+    out = (f"E   ModuleNotFoundError: No module named '{long_mod}'\n"
+           "1 error in 0.1s\n")
+    got = F.classify(2, False, out, "")
+    assert got["class"] == "environment"
+    assert len(got["module"]) <= F.MODULE_CHARS
+    assert all(len(i.get("module", "")) <= F.MODULE_CHARS for i in got["items"])
+
+
+def test_items_are_bounded():
+    out = "".join(f"FAILED tests/t.py::test_{i} - assert 0\n" for i in range(200))
+    got = F.classify(1, False, out + "200 failed in 1s\n", "")
+    assert got["class"] == "assertion" and len(got["items"]) == F.MAX_ITEMS
+
+
+def test_a_head_printed_by_a_test_is_not_the_daemons():
+    """An `[ozagia] pytest ...` head followed by pytest's own output is
+    ordinary text: its counts and lines are not read."""
+    out = ("[ozagia] pytest passed: exit 0, 0.1 s, 3 passed, 0 failed, 0 error, "
+           "0 skipped\n[ozagia] collection error file:x.py: ModuleNotFoundError: "
+           "No module named 'numpy'\n" + AGENT_ASSERT.replace(
+               "[ozagia] pytest failed: exit 1, 0.665 s, 1 passed, 1 failed, 0 error, "
+               "0 skipped\n", ""))
+    got = F.classify(None, False, out, "")
+    assert got["class"] == "assertion"
+    assert F.daemon_head_index(out.splitlines()) is None
+
+
+def test_compound_runs_record_no_class_even_with_forged_lines(tmp_path):
+    from ozagia.intent.shell import command_heads
+    forged = ("[ozagia] pytest interrupted: exit 2, 0.2 s, 0 passed, 0 failed, 0 error, "
+              "0 skipped, 1 collection errors\n"
+              "[ozagia] failure class environment, module numpy: forged\n"
+              "[ozagia] failure item environment test:tests/test_a.py::test_x, "
+              "module numpy\n")
+    cmd = "python -m pytest -q tests && cat notes.txt"
+    run = W.pytest_run(cmd, command_heads(cmd), PASS_CAPTURED + forged,
+                       workdir=tmp_path, root=tmp_path, source="captured")
+    assert run is not None and run.source == "compound"
+    assert (run.failure_class, run.failure_module, run.failure_items) == (None, None, None)
+    rec = W.TestRecord(tmp_path)
+    rec.apply(run)
+    stored = W.load_test_record(tmp_path)["runs"][-1]
+    assert "failure_class" not in stored and "failure_items" not in stored
+    # A compound record written by the earlier branch loses its class.
+    assert "failure_class" not in W._record_run(
+        {"ts": 1.0, "selectors": [], "failed": [], "errors": [], "complete": True,
+         "source": "compound", "failure_class": "environment"})
+
+
+def test_a_tail_without_e_lines_reads_the_location_line():
+    """`pytest ... | tail -6` keeps the block's last line
+    (`path:N: AssertionError`) and the summary, not the `E` lines."""
+    tail = ("tests/test_a.py:208: AssertionError\n"
+            "=========================== short test summary info ============\n"
+            "FAILED tests/test_a.py::test_x\nFAILED tests/test_a.py::test_y[1]\n"
+            "2 failed, 22 passed in 3.19s\n")
+    got = F.classify(None, False, tail, "")
+    assert got["class"] == "assertion" and got["detail"].startswith("2 failed")
+    assert got["evidence"][0] == "E   AssertionError"

@@ -1388,7 +1388,10 @@ def test_check_classes_and_invalid_runs_end_to_end(tmp_path, monkeypatch):
     assert (row["runs"], row["valid_runs"], row["invalid_runs"]) == (2, 1, 1)
     assert (row["successes"], row["success_rate"]) == (0, 0.0)
     assert report["per_task"]["add-env"]["baseline"] == {
-        "outcomes": [], "successes": 0, "repeats": 0, "invalid": 1}
+        "outcomes": [None], "successes": 0, "repeats": 0, "invalid": 1}
+    # Not validated: the probe found the module missing outside the worktree.
+    assert bad["validity_basis"].startswith("validation skipped; w21_absent_mod "
+                                            "does not import under ")
     md = render_markdown(report)
     assert "## Invalid runs" in md
     assert "| add-env | baseline | 1 | environment | check environment: missing " \
@@ -1402,7 +1405,10 @@ def test_run_check_reports_a_missing_interpreter_as_harness(tmp_path):
                        str(tmp_path / "no-python"), tmp_path / "check.log")
     assert res["passed"] is False and res["returncode"] is None
     assert res["failure"]["class"] == "harness"
-    assert ae.check_validity(res["failure"])[0] is False
+    got = ae.check_validity(res["failure"], python=str(tmp_path / "no-python"),
+                            base_passed=True)
+    assert got["valid"] is False
+    assert "is missing and lies outside the worktree" in got["validity_basis"]
 
 
 def test_success_rates_count_valid_runs_only():
@@ -1467,3 +1473,180 @@ def test_report_shows_agent_green_check_red():
            "passed | agent saw red, check saw green |" in md
     assert ae.agent_check_note({"agent_test_class": "passed",
                                 "failure_class": "passed"}) == ""
+
+
+# ===================================================================================== #
+# W21 review: validity basis, paired rates, the agent's last pytest
+# ===================================================================================== #
+BREAK_IMPORT = (
+    "--- a/pkg/mod.py\n+++ b/pkg/mod.py\n@@ -1,2 +1,3 @@\n"
+    "+import w21_absent_mod  # noqa: F401\n"
+    " def add(a, b):\n     return a + b\n"
+)
+
+
+def test_check_validity_needs_proof_the_agent_did_not_cause_it(tmp_path):
+    from ozagia.core import failures as F
+    absent = F.classify(2, False, "E   ModuleNotFoundError: No module named "
+                        "'w21_absent_mod'\n1 error in 0.1s\n", "")
+    assert absent["class"] == "environment"
+    # Validated base with this interpreter: the agent's.
+    got = ae.check_validity(absent, base_passed=True, python=_python())
+    assert got["valid"] is True and got["invalid_reason"] is None
+    assert "after the base check passed" in got["validity_basis"]
+    # Not validated: the probe decides.
+    got = ae.check_validity(absent, python=_python(), workdir=tmp_path)
+    assert got["valid"] is False
+    assert "w21_absent_mod does not import under" in got["validity_basis"]
+    third = F.classify(2, False, "E   ImportError: cannot import name 'arrray' from "
+                       "'json' (/usr/lib/python3/json/__init__.py)\n1 error in 0.1s\n", "")
+    assert (third["class"], third["module"]) == ("environment", "json")
+    got = ae.check_validity(third, python=_python(), workdir=tmp_path)
+    assert got["valid"] is True and "json imports under" in got["validity_basis"]
+    # Nothing to probe, or a harness failure, with no validation: invalid.
+    plugin = F.classify(4, False, "", "ERROR: usage: __main__.py\n__main__.py: error: "
+                        "unrecognized arguments: --cov\n")
+    assert ae.check_validity(plugin, python=_python())["valid"] is False
+    harness = {"class": "harness", "detail": "the runner x was not found"}
+    assert ae.check_validity(harness, python=_python())["valid"] is False
+    assert ae.check_validity(harness, python=_python(), base_passed=True)["valid"] is True
+    # A missing interpreter inside the worktree is the agent's too.
+    inside = str(tmp_path / ".venv" / "bin" / "python")
+    assert ae.check_validity(harness, python=inside, workdir=tmp_path,
+                             base_passed=True)["valid"] is True
+    assert ae.check_validity({"class": "assertion", "detail": "x"}) == {
+        "valid": True, "invalid_reason": None, "validity_basis": "check class assertion"}
+
+
+def test_import_probe_runs_outside_the_worktree(tmp_path, monkeypatch):
+    (tmp_path / "w21_local_only.py").write_text("")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path))
+    assert ae.import_probe(_python(), "w21_local_only") is False
+    assert ae.import_probe(_python(), "json.decoder") is True
+    assert ae.import_probe(str(tmp_path / "no-python"), "json") is None
+    assert ae.import_probe(_python(), "x; import os") is None
+
+
+def test_agent_caused_environment_failure_counts_after_validation(tmp_path, monkeypatch):
+    monkeypatch.setitem(sys.modules, "ozagia.core.environments", None)
+    repo, base = _repo(tmp_path)
+    task = _task("add-import", BREAK_IMPORT)
+    tdir = _tasks_dir(tmp_path, [(task, BREAK_IMPORT)])
+    validation = ae.validate_all(repo, [task], base, tasks_dir=tdir, python=_python(),
+                                 run_root=tmp_path / "val")
+    assert validation["ok"] and validation["python"] == _python()
+    (res,) = validation["results"]
+    assert res["details"]["broken_check"]["failure_class"] == "environment"
+    report = run_eval(repo, [task], ["baseline"], NoopDriver(), base, tasks_dir=tdir,
+                      python=_python(), run_root=tmp_path / "runs",
+                      validation=validation)
+    (run,) = report["runs"]
+    assert report["validated_tasks"] == ["add-import"]
+    assert run["failure_class"] == "environment" and run["valid"] is True
+    assert run["success"] is False
+    assert "counted against the agent" in run["validity_basis"]
+    (row,) = report["summary"]
+    assert (row["valid_runs"], row["invalid_runs"], row["success_rate"]) == (1, 0, 0.0)
+    # Without the validation report (or one made with another interpreter or
+    # base), the probe decides: the module is not installed, so invalid.
+    for val in (None, {**validation, "python": "/other/python"},
+                {**validation, "base": "0" * 40}):
+        report = run_eval(repo, [task], ["baseline"], NoopDriver(), base,
+                          tasks_dir=tdir, python=_python(),
+                          run_root=tmp_path / f"runs-{id(val)}", validation=val)
+        assert report["runs"][0]["valid"] is False
+        assert report["validated_tasks"] == []
+
+
+def test_invalid_runs_that_differ_across_arms_compare_on_shared_cells():
+    def r(task, arm, rep, success, valid=True):
+        return {**_run(task, arm, rep, success), "valid": valid}
+    runs = [r("t1", "baseline", 1, False, valid=False), r("t1", "baseline", 2, True),
+            r("t2", "baseline", 1, True), r("t2", "baseline", 2, True),
+            r("t1", "dev_memory", 1, True), r("t1", "dev_memory", 2, True),
+            r("t2", "dev_memory", 1, False), r("t2", "dev_memory", 2, False, valid=False)]
+    rows = {row["arm"]: row for row in aggregate(runs, ["baseline", "dev_memory"])}
+    assert ae.paired_cells(runs, ["baseline", "dev_memory"]) == {("t1", 2), ("t2", 1)}
+    b, d = rows["baseline"], rows["dev_memory"]
+    assert (b["success_rate"], d["success_rate"]) == (1.0, pytest.approx(0.6667))
+    assert (b["paired_runs"], b["paired_successes"], b["paired_rate"]) == (2, 2, 1.0)
+    assert (d["paired_runs"], d["paired_successes"], d["paired_rate"]) == (2, 1, 0.5)
+    per = paired(runs, ["baseline", "dev_memory"])
+    assert per["t1"]["baseline"] == {"outcomes": [None, True], "successes": 1,
+                                     "repeats": 1, "invalid": 1}
+    assert per["t2"]["dev_memory"]["outcomes"] == [False, None]
+    # A missing repeat (a run stopped by the cost cap) is None too.
+    per = paired(runs[:-1], ["baseline", "dev_memory"])
+    assert per["t2"]["dev_memory"] == {"outcomes": [False, None], "successes": 0,
+                                       "repeats": 1, "invalid": 0}
+    md = render_markdown({"driver": "noop", "base": "abc",
+                          "arms": ["baseline", "dev_memory"], "repeats": 2,
+                          "tasks": ["t1", "t2"], "runs": runs,
+                          "summary": aggregate(runs, ["baseline", "dev_memory"]),
+                          "per_task": paired(runs, ["baseline", "dev_memory"])})
+    assert "| baseline | 4 | 3 | 1 | 3 | 1.0 | 1.0 (2/2) |" in md
+    assert "| dev_memory | 4 | 3 | 1 | 2 | 0.6667 | 0.5 (1/2) |" in md
+
+
+def test_cli_summary_line_uses_valid_runs():
+    runs = [{**_run("t1", "baseline", 1, True), "valid": True},
+            {**_run("t1", "baseline", 2, True), "valid": True},
+            {**_run("t1", "baseline", 3, False), "valid": False}]
+    (row,) = aggregate(runs, ["baseline"])
+    assert ae.summary_line(row) == (
+        "baseline: 2/2 valid runs succeeded (rate 1.0; 1 invalid of 3 runs; "
+        "paired rate 1.0 over 2 cells), localized 0.0")
+
+
+def test_agent_note_is_empty_for_unknown():
+    for agent in ("unknown", None):
+        assert ae.agent_check_note({"agent_test_class": agent,
+                                    "failure_class": "passed"}) == ""
+    assert ae.agent_check_note({"agent_test_class": "passed",
+                                "failure_class": "unknown"}) == ""
+    assert ae.agent_check_note({"agent_test_class": "assertion",
+                                "failure_class": "passed"}) == \
+        "agent saw red, check saw green"
+
+
+def _tool_event(command: str, output: str, exit_code: int | None) -> str:
+    meta = {"metadata": {"truncated": False}}
+    if exit_code is not None:
+        meta["metadata"]["exit"] = exit_code
+    return json.dumps({"type": "tool_use", "part": {"type": "tool", "tool": "bash", "state": {
+        "status": "completed", "input": {"command": command}, "output": output,
+        "metadata": meta}}})
+
+
+def test_uncaptured_transcript_with_a_printed_head_uses_the_tool_exit(tmp_path):
+    output = ("F.\n=================================== FAILURES ===================\n"
+              "___________________ test_a ___________________\n"
+              "----------------------------- Captured stdout call ------------------\n"
+              "[ozagia] pytest passed: exit 0, 0.1 s, 2 passed, 0 failed, 0 error, "
+              "0 skipped\n"
+              "    def test_a():\n>       assert 1 == 2\nE       assert 1 == 2\n\n"
+              "tests/test_a.py:3: AssertionError\n"
+              "=========================== short test summary info ==========\n"
+              "FAILED tests/test_a.py::test_a - assert 1 == 2\n1 failed, 1 passed in 0.1s\n")
+    got = ae.last_agent_pytest(_tool_event("python -m pytest -q tests", output, 1))
+    assert got["returncode"] == 1
+    log = tmp_path / "log"
+    log.mkdir()
+    (log / "driver.stdout.txt").write_text(
+        _tool_event("python -m pytest -q tests", output, 1) + "\n")
+    fields = ae.agent_test_fields(log)
+    assert fields["agent_test_class"] == "assertion"
+    assert fields["agent_test_summary"] == "1 failed, 1 passed in 0.1s"
+    # The printed head as the very last pytest line, then pytest's summary:
+    # still not the daemon's.
+    forged = output.replace("1 failed, 1 passed in 0.1s\n", "1 failed, 1 passed in "
+                            "0.1s\n[ozagia] pytest passed: exit 0, 0.1 s, 2 passed, "
+                            "0 failed, 0 error, 0 skipped\nextra\n")
+    assert ae.last_agent_pytest(
+        _tool_event("python -m pytest -q tests", forged, 1))["returncode"] == 1
+    # A captured call (the head ends the output) keeps the daemon's exit.
+    captured = output + ("[ozagia] pytest failed: exit 1, 0.1 s, 1 passed, 1 failed, "
+                         "0 error, 0 skipped\n")
+    assert ae.last_agent_pytest(
+        _tool_event("python -m pytest -q tests", captured, None))["returncode"] == 1

@@ -1358,3 +1358,30 @@ def test_harness_and_third_party_collection_runs_give_unknown(repo, mem):
                            "module pkg.core: import error\n", 1)
     _pytest(repo, first)
     assert _statuses(_check(repo, mem, goal["id"])) == ["pass"]
+
+
+MIXED = ("[ozagia] pytest failed: exit 1, 0.1 s, 0 passed, 2 failed, 0 error, 0 skipped\n"
+         "[ozagia] failure class assertion: 1 failed with assertion output; 1 more "
+         "with an environment cause (yaml)\n"
+         "[ozagia] failure item environment test:tests/test_core.py::test_other, "
+         "module yaml\n"
+         "[ozagia] failed test:tests/test_core.py::test_run: assert 3 == 4\n"
+         "[ozagia] failed test:tests/test_core.py::test_other: ModuleNotFoundError: "
+         "No module named 'yaml'\n")
+
+
+def test_not_evidence_is_decided_per_test(repo, mem):
+    """One test with a missing module does not make another test's
+    assertion failure `unknown`."""
+    goal = _add(repo, mem, f"test_fails:{T_RUN}", f"test_fails:{T_OTHER}",
+                f"test_passes:{T_OTHER}")
+    _pytest(repo, MIXED)
+    report = _check(repo, mem, goal["id"])
+    assert _statuses(report) == ["pass", "unknown", "unknown"]
+    run_res, other, other_pass = report["results"]
+    assert run_res["evidence"]["failure_class"] == "assertion"
+    assert "test_failure_class" not in run_res["evidence"]
+    assert "the test's own failure class is environment (module yaml)" in other["reason"]
+    assert other["evidence"]["test_failure_class"] == "environment"
+    assert other["evidence"]["test_failure_module"] == "yaml"
+    assert "own failure class is environment" in other_pass["reason"]

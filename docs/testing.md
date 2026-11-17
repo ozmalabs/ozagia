@@ -111,31 +111,56 @@ broken config.
 
 `ozagia.core.failures.classify(returncode, timed_out, stdout, stderr, *,
 command, first_party, interpreter, root)` gives a pytest (or other command)
-result one class, with the lines that matched as `evidence` and a one-line
-`detail`. It runs nothing and reads at most the first 16,000 and last
-48,000 characters of each stream. The rules, first match wins:
+result one class, with the lines that decided it as `evidence`, a one-line
+`detail` (at most 300 characters) and `items`, the class of each failing
+item (`[{"node", "class", "module"?}]`, at most 50). It runs nothing and
+reads at most the first 16,000 and last 48,000 characters of each stream.
+
+The output is parsed into structure first, and only the places where
+pytest states a cause are read: collection-error blocks and the conftest
+`ImportError` block, each failed or errored test's block (its exception
+`E` line: the first exception line of the last exception in the block;
+deeper-indented `E` lines after it, such as assertion diffs, are
+continuations), the reason after ` - ` in the short summary's
+`FAILED`/`ERROR` lines, pytest's own startup and usage errors at column 0,
+and the daemon's `[ozagia] failed test:`/`error test:`/`collection error`
+lines when they follow its head and run to the end of the text.
+`Captured stdout/stderr/log` sections, warnings and anything else the code
+under test prints are skipped, so they cannot decide the class.
+
+Each failing item gets a class from its own cause: `environment` (an
+import error of a module that is not first-party, a missing shared
+library, a `FileNotFoundError` for a bare program name raised through
+`subprocess`), `collection` (in a collection block: a first-party import
+error, a syntax error, any other cause; anywhere: `fixture 'x' not
+found`), `assertion` (`assert`, `AssertionError`, `Failed:`) or `error`.
+The run's class, first match wins:
 
 | Class | Matches |
 | --- | --- |
-| `harness` | The runner itself failed: `FileNotFoundError`/`PermissionError` or `command not found` naming the command's program or the interpreter, `can't open file`, exit 126 or 127, a missing working directory. |
+| `harness` | Only when the exit code is None, 126 or 127, or nothing shows pytest started, and never for exit 0: `FileNotFoundError`/`PermissionError` or `command not found` naming the command's program or the interpreter, `can't open file`, exit 126/127 with no pytest output, a missing working directory. |
 | `timeout` | The run timed out, whatever it printed. |
-| `passed` | Exit 0 (checked here, before the rules below). |
-| `environment` | `ModuleNotFoundError`/`ImportError` for a module that is not first-party (`module` names it), `No module named pytest`, `unrecognized arguments` (a plugin that is not installed), a missing shared library or executable. |
-| `collection` | An import error of a first-party module, a syntax error during collection, `fixture 'x' not found`, `found no collectors` / `not found` for a node id, no tests collected, any other collection error. |
-| `assertion` | Failed tests with assertion output (`E   assert`, `AssertionError`, `Failed:`). |
-| `error` | Failed or errored tests without assertion output, `INTERNALERROR`, any other non-zero exit. |
+| `passed` | Exit 0. |
+| `environment` | Startup: `No module named pytest` from the interpreter, `unrecognized arguments` in pytest's usage error (a plugin that is not installed), a missing executable for exit 127. Items: every failing item has an environment cause. |
+| `collection` | A failing item is `collection`; or, with no items, `found no collectors` / `not found` for a node id, no tests collected (exit 5). |
+| `assertion` | A failing item is `assertion` (and none is `collection`). |
+| `error` | The other failing items, a usage error, `INTERNALERROR`, any other non-zero exit. |
 | `passed` | Exit code unknown, and a pytest summary with passes only. |
 | `unknown` | No exit code and nothing the rules read. |
 
-So `ModuleNotFoundError: No module named 'numpy'` with `found no
-collectors` for the node ids in that file is `environment`: the import
-error is the cause, the missing collectors follow from it. A first-party
-`ImportError` is `collection`, unless a third-party one is also present.
+So `ModuleNotFoundError: No module named 'numpy'` in a collection block
+with `found no collectors` for the node ids in that file is
+`environment`: the import error is the cause, the missing collectors
+follow from it. A run where one test fails an assertion and another hits
+a missing module is `assertion`, with `1 more with an environment cause
+(yaml)` in the detail and both in `items`.
 
 First-party names: the caller passes them (`first_party`); the daemon and
 the eval harness pass `first_party_names(root, import_roots)`, the
-top-level modules and packages (directories holding `.py` files) in the
-root and in each configured import root (`src` by default when it exists).
+top-level modules and packages (directories holding Python code, found up
+to three levels deep so a namespace package such as `acme/proj/__init__.py`
+counts) in the root and in each configured import root (`src` by default
+when it exists).
 Without `first_party`, they come from `root`; without a root, from the
 relative paths of the output's traceback frames (`tests/test_x.py:6:`
 gives `tests`, `src/pkg/a.py` gives `pkg`). A module that is not
@@ -147,21 +172,33 @@ when `ozagia.core.environments.who_has(root, module)` (W20) is importable,
 the interpreters that have the module (`available_in`, the one that ran
 excluded). Without W20, or when it raises, that detail is left out.
 
-A captured pytest that did not pass gets a line right after its head:
+A captured pytest that did not pass gets a line right after its head, and
+when the run is not `environment` as a whole, a `failure item` line for
+each failing test or collection error whose own cause is an environment
+one (at most 20):
 
 ```
 [ozagia] pytest interrupted: exit 2, 0.23 s, 0 passed, 0 failed, 0 error, 0 skipped, 1 collection errors
 [ozagia] failure class environment, module numpy: missing module numpy (third-party) under /usr/bin/python3; available in /repo/.venv/bin/python
 ```
 
-The test record (`<state dir>/working_set/tests.json`) keeps, for
-captured and compound runs, `failure_class` and `failure_module` (read
-from that line, or `passed` for a head with status passed), and no other
-output text. Records written before have neither field and load as before.
-Goal criteria `test_passes`/`test_fails` give `unknown` with the class and
-module when the deciding run's class is `environment` or `harness`, or
-`collection` of a module that is not first-party; a pass still decides
-(see `docs/goals.md`).
+```
+[ozagia] pytest failed: exit 1, 0.1 s, 0 passed, 2 failed, 0 error, 0 skipped
+[ozagia] failure class assertion: 1 failed with assertion output; 1 more with an environment cause (yaml)
+[ozagia] failure item environment test:tests/test_a.py::test_yaml, module yaml
+```
+
+The test record (`<state dir>/working_set/tests.json`) keeps, for captured
+runs only, `failure_class`, `failure_module` and `failure_items` (read
+from those lines after the daemon's own head, the last one in the text, or
+`passed` for a head with status passed), and no other output text.
+Compound runs (`pytest ... && cat notes.txt`) get no class: their other
+commands could print a head. Records written before have none of the
+fields and load as before. Goal criteria `test_passes`/`test_fails` decide
+per test: `unknown` when the test's own item is `environment`, or the
+whole run is `environment` or `harness` (or `collection` of a module that
+is not first-party); a test that failed an assertion in the same run
+still decides, and a pass still decides (see `docs/goals.md`).
 
 ## Planning
 

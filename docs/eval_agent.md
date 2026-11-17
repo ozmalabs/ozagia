@@ -79,7 +79,8 @@ For each task and arm, `run_eval` does the following:
    classified (see Failure classes below): `failure_class`,
    `failure_evidence`, `failure_detail` and, when known, `failure_module`.
    A run whose check class is `harness` or `environment` gets `valid: false`
-   and an `invalid_reason`.
+   and an `invalid_reason` only when the agent cannot have caused it (see
+   Failure classes); every run records why in `validity_basis`.
 9. `localized` is true if any `expected_files` entry is in `files_changed`.
 10. Removes the workdir, unless `--keep`. Cleanup problems are listed in
     `cleanup_warnings` on the run record.
@@ -89,44 +90,75 @@ journal) stay in `<run_root>/logs/`. Only workdirs are removed.
 
 `validate` runs check, then break, then check on a worktree at `base`. It reports
 `ok` only when the check passes on base, the patch applies, and the check fails
-after the break. Each check in `details` carries its `failure_class` and
+after the break. Its JSON (`--out-json`) records the `python` it used; `run
+--validation <that file>` (same `--python` and base) marks the tasks whose
+check passed on base as validated (`validated_tasks` in the report). Each check in `details` carries its `failure_class` and
 `failure_detail`, and a task that does not pass on base prints the base
 check's class (`base check environment: missing module numpy ...`).
 
 ### Failure classes
 
-`ozagia.core.failures.classify` gives every check one class, by rules in
+`ozagia.core.failures.classify` gives every check one class from the
+places where pytest states a cause (failure and collection blocks, the
+short summary, startup errors; captured output is skipped), by rules in
 this order: `harness` (the interpreter, the runner or the workdir is
-missing), `timeout`, `environment` (an import error of a third-party
-module, `No module named pytest`, a missing plugin's `unrecognized
-arguments`, a missing executable or shared library), `collection` (an
-import error of a first-party module, a syntax error, a missing fixture,
-no collectors for a named node id), `assertion`, `error` (exceptions that
-are not assertions, other non-zero exits), `passed`, and `unknown` when
-nothing is known. First-party names are the workdir's top-level modules
-and packages, in the root and its configured import roots. When
+missing; only when the run may not have started, never for exit 0),
+`timeout`, `passed`, `environment` (`No module named pytest`, a missing
+plugin's `unrecognized arguments`, or every failing test and collection
+error has an environment cause: an import error of a third-party module,
+a missing executable or shared library), `collection` (an import error of
+a first-party module, a syntax error, a missing fixture, no collectors
+for a named node id), `assertion`, `error` (exceptions that are not
+assertions, other non-zero exits), and `unknown` when nothing is known.
+`failure_items` lists each failing item's class. First-party names are
+the workdir's top-level modules and packages (namespace packages
+included), in the root and its configured import roots. When
 `ozagia.core.environments.who_has` (W20) is importable, an `environment`
 result also lists the interpreters that have the module
 (`failure_available_in`).
 
-A check that fails as `harness` or `environment` says nothing about the
-agent: the run is invalid. Invalid runs stay in the JSON with every field,
-but `aggregate` leaves them out of `successes` and `success_rate` (`runs`
-counts all, `valid_runs` and `invalid_runs` split them; the time, token and
-tool means still cover every run), and `paired` leaves them out of
-`outcomes` and `repeats` and counts them in `invalid`. The Markdown report
-shows valid and invalid runs per arm, an "Invalid runs" section with each
-run's class and reason, and `N/M (K invalid)` per task.
+A check that fails as `harness` or `environment` makes the run invalid
+only when the agent cannot have caused it (`check_validity`, recorded as
+`validity_basis`):
+
+- When the task was validated with this interpreter (its check passed on
+  base), an environment failure after the agent is the agent's: a new
+  import of an uninstalled package, `cannot import name X from numpy`. The
+  run counts as a failure, with its class shown. So does a harness
+  failure, unless the interpreter itself is gone and lies outside the
+  worktree.
+- When validation was skipped, an `environment` check with a module is
+  probed: `<python> -I -c "import <top>"` from an empty temporary
+  directory outside the worktree. Importable means the agent broke it (a
+  failure); not importable means the environment lacks it (invalid). With
+  nothing to probe, or for `harness`, the run is invalid.
+
+A passing check is always valid. Invalid runs stay in the JSON with every
+field, but `aggregate` leaves them out of `successes` and `success_rate`
+(`runs` counts all, `valid_runs` and `invalid_runs` split them; the time,
+token and tool means still cover every run). Because each arm loses
+different runs, `paired_runs`, `paired_successes` and `paired_rate` count
+only the (task, repeat) cells valid in every arm, so arms compare over the
+same runs. `paired` keeps `outcomes` in repeat order, with None for an
+invalid or missing repeat, and counts valid repeats in `repeats` and
+invalid ones in `invalid`. The Markdown report shows valid and invalid
+runs and the paired rate per arm, an "Invalid runs" section with each
+run's class, reason and basis, and `N/M (K invalid)` per task. The console
+prints `<arm>: S/V valid runs succeeded (rate R; I invalid of N runs;
+paired rate P over C cells)`.
 
 The agent's own last pytest is classified too, from `driver.stdout.txt`
 (OpenCode's JSON events: the last `tool_use` of tool `shell` or `bash`
 whose command runs pytest): `agent_test_class` and `agent_test_summary`
 (the daemon's `[ozagia] pytest ...` head, else pytest's summary line). Its
-exit code is the daemon's head when the call was captured, else the tool's
-`metadata.exit` for a command with no pipe, else unknown (the summary
-decides). Drivers without such events (Claude's JSON, native) give None.
+exit code is the daemon's head when the call was captured (the head is
+in the block of `[ozagia]` lines that ends the output; a head a test
+printed is followed by pytest's own output and is ignored), else the
+tool's `metadata.exit` for a command with no pipe, else unknown (the
+summary decides). Drivers without such events (Claude's JSON, native) give None.
 The "Agent tests and check" section puts the two side by side and flags
-`agent saw green, check saw red` (and the reverse), the shape of the
+`agent saw green, check saw red` (and the reverse; nothing when either
+class is `unknown`), the shape of the
 2026-11-17 Ocelot eval, where the check's interpreter lacked `numpy`.
 
 ## Drivers
