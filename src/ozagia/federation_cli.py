@@ -1,0 +1,95 @@
+"""Queries over discovered or explicitly selected repository graphs.
+
+Usage::
+
+    ozagia federation status [--root R] [--repo R ...]
+    ozagia federation search QUERY [--root R] [--repo R ...] [--limit N]
+    ozagia federation node QUALIFIED_KEY [--root R] [--repo R ...]
+    ozagia federation check [--root R] [--repo R ...]
+    ozagia federation sync [--root R] [--repo R ...]
+
+Queries automatically fast-forward only checkouts explicitly declared in
+``reference_repos``; ``--no-sync`` opts out. Indexes are not refreshed after
+a checkout update.
+"""
+from __future__ import annotations
+
+import argparse
+from contextlib import nullcontext
+import json
+import sys
+from pathlib import Path
+from typing import Any
+
+
+def _parser(prog: str) -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog=prog, description=__doc__.splitlines()[0])
+    sub = parser.add_subparsers(dest="command", required=True)
+    for name, help_text in (
+        ("status", "show discovered repositories and snapshot freshness"),
+        ("search", "search indexed snapshots without refreshing them"),
+        ("node", "inspect a qualified node and its edges"),
+        ("check", "check declared cross-repository relationships"),
+        ("sync", "fast-forward explicitly designated reference repositories"),
+    ):
+        item = sub.add_parser(name, help=help_text)
+        if name == "search":
+            item.add_argument("query")
+            item.add_argument("--limit", type=int, default=20)
+        elif name == "node":
+            item.add_argument("qualified_key")
+        item.add_argument("--root", default=None,
+                          help="discovery anchor (default: current repository)")
+        item.add_argument("--repo", action="append", default=None, dest="roots",
+                          help="explicit federation member; repeat to select several")
+        item.add_argument("--json", action="store_true",
+                          help="print the complete JSON result")
+        if name != "sync":
+            item.add_argument("--no-sync", action="store_true",
+                              help="do not update designated reference checkouts")
+    return parser
+
+
+def _render(result: Any, *, as_json: bool) -> str:
+    if as_json:
+        return json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True)
+    # Core results are JSON-serializable and carry per-repository provenance.
+    # Keep output lossless until the shape is finalized by the federation API.
+    return json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True)
+
+
+def run(argv: list[str] | None = None, *, prog: str = "ozagia federation") -> int:
+    args = _parser(prog).parse_args(argv)
+    from ozagia.config import repo_root
+    from ozagia.core import federation as F
+
+    root = Path(args.root).expanduser().resolve() if args.root else repo_root()
+    roots = [Path(value).expanduser().resolve() for value in args.roots] if args.roots else None
+    if args.command == "sync":
+        result = F.sync_references(root, roots=roots, force=True)
+    else:
+        context = F.without_reference_sync() if args.no_sync else nullcontext()
+        with context:
+            if args.command == "status":
+                result = F.status(root, roots=roots)
+            elif args.command == "search":
+                result = F.search(root, args.query, roots=roots, limit=args.limit)
+            elif args.command == "node":
+                result = F.node(root, args.qualified_key, roots=roots)
+            else:
+                from ozagia.core import cross_repo
+                result = cross_repo.check(root, roots=roots)
+    print(_render(result, as_json=args.json))
+    return 0 if not isinstance(result, dict) or result.get("ok", True) else 2
+
+
+def main(argv: list[str] | None = None, *, prog: str = "ozagia federation") -> int:
+    try:
+        return run(argv, prog=prog)
+    except (OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

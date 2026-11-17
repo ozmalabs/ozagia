@@ -5,10 +5,13 @@ worktree is likely to fit. The observation commands are read-only. The daemon's
 background jobs use kernel enforcement where possible: on Linux with a
 delegated cgroup v2 hierarchy, each job gets its own `ozagia/job-<id>` cgroup
 with `memory.max` and `pids.max`, plus child rlimits and a verified-process-group
-watchdog. Without delegation, a permission failure or a non-Linux host, the job
-falls back to `rlimit+watch` and the record names the reason. The watchdog only
-signals processes ozagia started, and only while the job's process group is
-verified; `cgroup.kill` reaches only the job's own cgroup.
+watchdog. Disk writes are attributed from the cgroup's `io.stat`, falling back
+to the process group's `/proc/<pid>/io`, so the `disk_mb` budget is enforced
+against bytes this job wrote where Linux exposes them. Without delegation, a
+permission failure or a non-Linux host, the job falls back to `rlimit+watch` and
+the record names the reason. The watchdog only signals processes ozagia started,
+and only while the job's process group is verified; `cgroup.kill` reaches only
+the job's own cgroup.
 
 ## What is observed
 
@@ -20,16 +23,47 @@ verified; `cgroup.kill` reaches only the job's own cgroup.
   disk.
 - **CPU/load:** one/five/fifteen-minute load averages and the CPU count.
 - **Pressure:** Linux `/proc/pressure/{cpu,memory,io}` when available.
-- **Process groups:** RSS per process group, and the largest groups by RSS.
-  These are host-wide observations; they are not automatically attributed to a
-  session. Only the executable name is reported, never the argument list,
-  which may contain secrets.
+- **Process groups:** RSS and attributed storage I/O per process group, and
+  the largest groups by RSS. These are host-wide observations; they are not
+  automatically attributed to a session. Only the executable name is reported,
+  never the argument list, which may contain secrets. Group I/O is the sum of
+  the readable members' `/proc/<pid>/io` `read_bytes`/`write_bytes`; a member
+  whose file is unreadable is skipped, and `disk_source` is `proc.io` only
+  when at least one member was readable.
 - **History:** a bounded JSONL store under `.ozagia/resources/history.jsonl`
   with p50/p90/max memory, disk, duration and exit codes per key.
 
 The history key is either a task class or `command_key(argv)`, which stores the
 command head and a hash, never raw arguments. It is intended for expected-use
 estimates, not for auditing commands.
+
+## Disk write attribution
+
+A job's writes are read from the kernel, not inferred from file sizes:
+
+| Source | Where | Fields | Notes |
+| --- | --- | --- | --- |
+| cgroup | `<job cgroup>/io.stat` | `io_read_mb`, `io_write_mb`, `io_source: "cgroup.io.stat"`, bounded `io_devices` | Preferred. Summed over devices. Missing file is `None`, not an error. |
+| process group | `/proc/<pid>/io` for each group member | `disk_read_mb`, `disk_write_mb`, `disk_source: "proc.io"` | Fallback. Readable members are summed; unreadable members are skipped. |
+| filesystem | `statvfs` on the job's cwd | `disk_used_mb` (free-space drop) | Host pressure only; used for the reserve and as the `disk_mb` fallback when neither attribution source is readable. |
+
+`read_bytes`/`write_bytes` and `io.stat`'s `rbytes`/`wbytes` count bytes the
+kernel sent to or fetched from storage. They are not allocated blocks:
+overwrites count again, cached writes may not have reached storage yet, and
+I/O through a path ozagia cannot attribute (another process, another cgroup)
+is not included. The cgroup value wins when both exist, and the final
+`io.stat` read before cleanup can raise the job's `peak_disk_write_mb`. The
+process-group fallback sums the members alive at that sample, so a very short
+child that exits between samples may be missed; a cgroup's cumulative
+`io.stat` does not have that gap.
+
+A watchdog sample records `disk_write_mb` (the current attributed total),
+`peak_disk_write_mb`, `disk_source`, `disk_free_gb` and `disk_used_mb`. When
+`disk_mb` is set and attribution is present, the budget is checked against the
+attributed writes and the breach event is `kind: "disk_write"` with
+`budget_mb`, `observed_mb` and `source`. When attribution is absent, the same
+budget uses the free-space drop and reports `kind: "disk"`; a reserve breach
+also stays `kind: "disk"`. One breach produces one event.
 
 ## Commands
 
@@ -132,14 +166,19 @@ A cgroup failure never fails the job. The record's `cgroup` object carries
 **cgroup v2 (`core.cgroup`).** On Linux the daemon detects cgroup v2 at
 `/sys/fs/cgroup` by reading `cgroup.controllers`, `cgroup.subtree_control` and
 the available controller files. It creates `ozagia/` and a per-job
-`ozagia/job-<id>`, enables `+memory +pids` where permitted, writes
-`memory.max` (bytes) and `pids.max`, and puts the child in the group before
-exec (the parent also attaches the PID as a check). It reads `memory.peak`
-(falling back to `memory.current`), `memory.events` (`oom`, `oom_kill`),
-`pids.current` and `pids.max`. The group is removed after the job's process
-group is empty; a group that cannot be proven empty is left alone. The cgroup
-path is checked against `<base>/ozagia/job-*` before removal, so a stale record
-cannot remove an unrelated cgroup.
+`ozagia/job-<id>`, enables `+memory +pids` (and `+io` when the parent exposes
+it) where permitted, writes `memory.max` (bytes) and `pids.max`, and puts the
+child in the group before exec (the parent also attaches the PID as a check).
+It reads `memory.peak` (falling back to `memory.current`), `memory.events`
+(`oom`, `oom_kill`), `pids.current`, `pids.max` and `io.stat`. `io.stat` is
+summed over devices into `io_read_mb`/`io_write_mb` with
+`io_source: "cgroup.io.stat"`; the record keeps the busiest few devices in a
+bounded breakdown. A missing `io.stat` (io controller not delegated) is
+`None`, not an error, and the watchdog uses `/proc/<pid>/io` instead. The
+group is removed after the job's process group is empty; a group that cannot
+be proven empty is left alone. The cgroup path is checked against
+`<base>/ozagia/job-*` before removal, so a stale record cannot remove an
+unrelated cgroup.
 
 Delegation is required: the daemon's user must be able to create a child
 cgroup and write the parent's `cgroup.subtree_control`. A systemd user session
@@ -158,15 +197,19 @@ The remaining layers always apply:
   cgroup or watchdog because that rlimit counts every process of the real UID,
   not the job's process group.
 - **Watchdog.** After the spawn, a thread samples the job's process group
-  (aggregate RSS and process count) and the cwd filesystem every
-  `sample_s` seconds. It keeps the peak RSS and, with a cgroup, also polls the
-  cgroup's peak and OOM counters. Exceeding `memory_mb`, `pids`, `wall_s` or
-  `disk_mb` (a drop in free space since the first sample), or falling below the
-  disk reserve (`reserve_disk_gb`, raised to `reserve_disk_pct` of the
-  filesystem total), triggers one event. The `disk_mb` delta is best-effort:
-  another process writing to the same filesystem counts toward it. The
-  watchdog remains active with a cgroup because wall time and disk budgets
-  have no cgroup equivalent.
+  (aggregate RSS, process count and `/proc/<pid>/io`) and the cwd filesystem
+  every `sample_s` seconds. It keeps the peak RSS and attributed write total
+  and, with a cgroup, also polls the cgroup's peak, OOM counters and
+  `io.stat`; a cgroup value is preferred over the process-group sum. Exceeding
+  `memory_mb`, `pids`, `wall_s` or `disk_mb` triggers one event. The disk
+  budget is enforced against attributed writes when either source is readable
+  (`kind: "disk_write"`). A fall below the disk reserve always stays
+  `kind: "disk"`. Only when no attribution is readable does the watchdog use
+  the free-space drop since its first sample (`kind: "disk"`); that fallback
+  is host pressure, and another process writing to the same filesystem counts
+  toward it. The reserve is `reserve_disk_gb`, raised to `reserve_disk_pct`
+  of the filesystem total. The watchdog remains active with a cgroup because
+  wall time and the process-group I/O fallback have no cgroup equivalent.
 - **Verified groups only.** The watchdog's verifier checks that the record is
   this daemon's, still running, not marked `group_gone`, has an unreaped
   leader (so the pgid cannot be reused), and that `/proc` start times still
@@ -184,10 +227,17 @@ The remaining layers always apply:
 
 The job record returned by `job_start`, `job_list`, `job_wait` and `job_log`
 carries `limits`, `enforcement` (`cgroup+rlimit`, `rlimit+watch` or `off`),
-`cgroup`, `admission`, `peak_memory_mb` and `resource_events`. An event names
-its `kind` (`memory`, `pids`, `wall`, `disk`, `oom` or `unverified`), the limit
-and observed value, the verifier result and the action (`sigterm`, `sigkill`,
-`cgroup.kill`, `cgroup_oom` or `not_signalled`).
+`cgroup`, `admission`, `peak_memory_mb`, `peak_disk_write_mb`,
+`disk_write_source` and `resource_events`. `disk_write_source` is
+`cgroup.io.stat` when the job had a readable cgroup `io.stat`, `proc.io` when
+only the process-group sum was readable, and `None` when neither was. A cgroup
+value is preferred and its final counter is read before the group is removed,
+so `peak_disk_write_mb` can be raised at finish. An event names its `kind`
+(`memory`, `pids`, `wall`, `disk_write`, `disk`, `oom` or `unverified`), the
+limit and observed value, the verifier result and the action (`sigterm`,
+`sigkill`, `cgroup.kill`, `cgroup_oom` or `not_signalled`). `disk_write` means
+the attributed write budget was exceeded and names its `source`; `disk` is
+either the reserve breach or the fallback free-space delta.
 
 ## Feedback to the session
 
@@ -199,8 +249,10 @@ that only reads the reply does not need to parse the log.
 
 Daemon `stats` exposes `jobs_resource_killed`, `resource_events`,
 `resource_peak_mb`, `cgroup_jobs`, `cgroup_fallbacks` and `cgroup_oom_kills` at
-the top level and in the nested `jobs` counters. `job_events` still reports job
-ends, not resource events; the job record and log are the resource surfaces.
+the top level, and the full job counters (including
+`resource_peak_disk_write_mb`) in the nested `jobs` object. `job_events` still
+reports job ends, not resource events; the job record and log are the resource
+surfaces.
 
 ## Example refusal
 
@@ -225,23 +277,29 @@ ends, not resource events; the job record and log are the resource surfaces.
 - **Attribution is bounded.** `status` can show the largest process groups, but
   it cannot prove which session started an arbitrary process. Jobs and services
   that ozagia starts carry verified process groups and can be attributed.
-- **Disk is filesystem-level.** Free space is exact; per-process or per-job
-  disk usage is best-effort and is not claimed when writes cannot be
-  attributed.
-- **cgroups are an enforcement layer, not an observer.** A per-job
+- **Disk writes are attributed where Linux exposes them.** Free space is
+  exact. Per-job writes are exact for the job's cgroup (`io.stat`) or process
+  group (`/proc/<pid>/io` when cgroups are absent or the io controller is not
+  delegated), as the kernel counts bytes sent to storage. They are not retained
+  blocks: a rewrite counts again, page-cache bytes may not be counted yet, and
+  a process writing through a path ozagia cannot attribute is not counted. The
+  watchdog's `disk_mb` check uses the attributed total, not the filesystem free
+  space, whenever one is readable.
+- **cgroups are an enforcement and accounting layer.** A per-job
   `memory.max`/`pids.max` only exists when cgroup v2 is mounted and delegated;
   the daemon reports `cgroup+rlimit` when it worked, and `rlimit+watch` with a
   `cgroup.reason` when it did not. There is no global cgroup tree cleanup: an
   empty `ozagia/job-*` group is removed after its job ends, and a populated one
-  is left for the kernel and its owner. cgroup accounting counts resident
-  memory charged to the group, including page cache; `memory.peak` can be
-  higher than the watchdog's RSS sum. No exact per-process disk enforcement
-  exists, with or without cgroups.
-- **No exact per-job disk enforcement.** `disk_mb` is an admission and
-  expected-use budget. The watchdog also stops a job when free space drops by
-  more than `disk_mb` since its first sample, and when the filesystem falls
-  below the configured reserve. It cannot prove that this job wrote those
-  bytes; other processes can contribute.
+  is left for the kernel and its owner. cgroup memory accounting counts
+  resident memory charged to the group, including page cache; `memory.peak`
+  can be higher than the watchdog's RSS sum. Disk write accounting is exact for
+  the group when `io.stat` is available; there is no per-file attribution.
+- **The free-space delta is host pressure.** When neither `io.stat` nor
+  `/proc/<pid>/io` is readable, the watchdog still stops a job when free space
+  drops by more than `disk_mb` since its first sample, or when the filesystem
+  falls below the configured reserve. Those events keep `kind: "disk"` because
+  another process on the filesystem can contribute; they are not proof that
+  this job wrote the bytes. A reserve breach is always `kind: "disk"`.
 - **`RLIMIT_NPROC` is not used by the job wrapper.** It is per real UID and
   would count unrelated processes of the same user. The cgroup's `pids.max`
   (or the watchdog's process-count check without one) is per job. The helper

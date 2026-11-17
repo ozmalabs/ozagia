@@ -60,7 +60,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 PROG = "ozagia"
 
@@ -113,6 +113,11 @@ def _hooks_main(argv: list[str]) -> int:
     return main(argv, prog=f"{PROG} hooks")
 
 
+def _federation_main(argv: list[str]) -> int:
+    from ozagia.federation_cli import main
+    return main(argv, prog=f"{PROG} federation")
+
+
 # name -> (main(argv) -> int, help). Looked up at call time so tests can patch.
 DELEGATES: dict[str, tuple[str, str]] = {
     "daemon": ("_daemon_main", "the graph daemon: serve|ensure|ping|stats|shutdown "
@@ -128,6 +133,8 @@ DELEGATES: dict[str, tuple[str, str]] = {
                                  "(schema|get|values|set|migrate)"),
     "hooks": ("_hooks_main", "opt-in Git commit/push hooks "
                              "(install|uninstall|status)"),
+    "federation": ("_federation_main", "read-only federated graph queries "
+                                      "(status|search|node)"),
 }
 
 
@@ -143,6 +150,28 @@ def _root(value: str | None) -> Path:
 
 
 
+def _config_summary(config: dict[str, Any]) -> str:
+    """One text line naming both config files, precedence and unmapped count.
+
+    The JSON report carries the detail and the unmapped key reasons; the text
+    line names paths and counts only, never values.
+    """
+    state = "valid" if config.get("valid") else "invalid"
+    legacy = config.get("legacy_path") or "none"
+    repo = config.get("repo_path") or "none"
+    if config.get("repo_path") and not config.get("repo_exists"):
+        repo += " (missing)"
+    active = config.get("active_source") or "defaults"
+    precedence = " > ".join(config.get("precedence") or []) or "defaults"
+    count = int(config.get("unmapped_count") or 0)
+    shown = len(config.get("unmapped") or [])
+    unmapped = (f"{shown} of {count}…" if config.get("unmapped_truncated")
+                else str(count))
+    return (f"Config: {state} (legacy={legacy}; repo={repo}; "
+            f"active={active}; precedence={precedence}; "
+            f"unmapped={unmapped})")
+
+
 def _cmd_doctor(args: argparse.Namespace) -> int:
     from ozagia.doctor import diagnose
     report = diagnose(_root(args.root))
@@ -152,7 +181,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         print(f"Repository: {report['root']}")
         print(f"Snapshot: {report['snapshot']['state']} ({report['snapshot']['path']})")
         config = report["config"]
-        print(f"Config: {'valid' if config['valid'] else 'invalid'} ({config['path']})")
+        print(_config_summary(config))
         settings = report.get("settings") or {}
         if settings:
             if settings.get("valid"):

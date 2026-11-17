@@ -3,6 +3,8 @@ seed/rule tools that only appear when the snapshot has Seed/Rule nodes."""
 from __future__ import annotations
 
 import json
+import os
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -204,3 +206,61 @@ def test_add_mcp_tool_requires_a_name() -> None:
     reg.add_mcp_tool({"name": "dev_x"}, lambda m, a: None)
     assert reg.mcp_tools["dev_x"][0]["inputSchema"] == {"type": "object",
                                                         "properties": {}}
+
+
+def test_registry_cache_invalidates_on_either_config_file(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OZAGIA_CONFIG", raising=False)
+    monkeypatch.delenv("OZAGIA_ADAPTERS", raising=False)
+    root = tmp_path / "repo"
+    root.mkdir()
+    suffix = uuid.uuid4().hex
+    module_a = f"cfg_cache_a_{suffix}"
+    module_b = f"cfg_cache_b_{suffix}"
+    _write(root / f"{module_a}.py", """
+def register(registry):
+    registry.add_graph_query("which", lambda memory: "a")
+""")
+    _write(root / f"{module_b}.py", """
+def register(registry):
+    registry.add_graph_query("which", lambda memory: "b")
+""")
+    legacy = root / ".ozagia.toml"
+    _write(legacy, '[index]\nsource_dirs = ["src"]\n')
+    repo = root / "ozagia" / "config.toml"
+
+    # No config file defines adapters yet.
+    first = adapters.registry(root, reload=True)
+    assert "which" not in first.graph_queries
+
+    # Creating the non-active repo config invalidates the cache.
+    _write(repo, f'[adapters]\nmodules = ["{module_b}:register"]\n')
+    second = adapters.registry(root)
+    assert second is not first
+    assert second.graph_queries["which"](None) == "b"
+
+    # Editing that non-active file also invalidates it.
+    _write(repo, f'[adapters]\nmodules = ["{module_a}:register"]\n')
+    third = adapters.registry(root)
+    assert third is not second
+    assert third.graph_queries["which"](None) == "a"
+
+    # The cache identity includes content digests, not only mtime and size.
+    st = repo.stat()
+    _write(repo, f'[adapters]\nmodules = ["{module_b}:register"]\n')
+    os.utime(repo, ns=(st.st_atime_ns, st.st_mtime_ns))
+    digest_reload = adapters.registry(root)
+    assert digest_reload is not third
+    assert digest_reload.graph_queries["which"](None) == "b"
+
+    # A legacy adapters table takes precedence over the versioned one.
+    _write(legacy, f'[index]\nsource_dirs = ["src"]\n\n'
+                   f'[adapters]\nmodules = ["{module_b}:register"]\n')
+    fourth = adapters.registry(root)
+    assert fourth is not digest_reload
+    assert fourth.graph_queries["which"](None) == "b"
+
+    # reload=True still rebuilds even when nothing changed.
+    fifth = adapters.registry(root, reload=True)
+    assert fifth is not fourth
+    assert fifth.graph_queries["which"](None) == "b"

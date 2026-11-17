@@ -546,9 +546,11 @@ A refusal is structured, not a traceback:
 #### Enforcement and own OOM
 
 - Limits: memory, process count, wall time, optional per-file size, and a
-  best-effort disk budget for the job's worktree/cwd.
+  disk write budget for the job's process group/cgroup.
 - Mechanism: cgroup v2 `memory.max`/`pids.max` when delegated; otherwise
-  `resource.setrlimit` plus a watchdog sampling RSS and the filesystem.
+  `resource.setrlimit` plus a watchdog sampling RSS and the filesystem. Disk
+  writes are attributed from cgroup `io.stat` when available, otherwise from
+  the group's `/proc/<pid>/io`; the free-space delta is the fallback.
 - Kill order: SIGTERM to the verified process group, grace period, SIGKILL.
   Verify the PID start token and process-group ownership first, exactly as
   jobs do today. A stale token is never signalled.
@@ -557,9 +559,12 @@ A refusal is structured, not a traceback:
   shell or desktop. Restore the value for reused processes where possible.
 - Keep an OS reserve (memory/disk). If the host is already below the reserve,
   refuse new work rather than starting something that will fail.
-- Disk enforcement is best-effort: a process can write through paths ozagia
-  cannot attribute. The watchdog stops a job when its worktree/filesystem
-  crosses the reserve and reports the evidence; it does not claim exact usage.
+- Disk enforcement is exact where the kernel exposes attribution: a job's
+  cgroup `io.stat`, or its process group's `/proc/<pid>/io`, counts the bytes
+  the group sent to storage (not retained blocks). A process can still write
+  through paths ozagia cannot attribute, and the io controller may not be
+  delegated; then the watchdog uses the worktree/filesystem free-space delta
+  and reports host pressure rather than exact per-job usage.
 - Feed a `resource_event` back to the originating session: job id, session,
   command class, peak/limit, host headroom, action taken, and the suggested
   retry. The daemon adds a `[ozagia]` line; MCP `job_wait`/`job_log` and the
@@ -1683,12 +1688,12 @@ bundle) against OpenCode 2.3.0. A concurrent TUI-brand merge added
 `.opencode/plugins/ozagia/tui.js`; the harness exclude patterns and tests were
 updated for it.
 
-Not yet: the live OpenCode Desktop smoke test; add-in apply/mutation controls
-and an executable task launcher; exact per-job disk accounting; command-derived
-path extraction for `patch`/`shell`; live/multi-model review; model/tool
-adapters and an injected test runner; rewiring legacy loaders to
-`ozagia/config.toml`; action apply UI; live security-tool matrix/DAST; library
-hints in code review/repo scan and non-handled edits.
+Not yet: the live OpenCode Desktop smoke test; live model/provider adapters for
+review, generation and tool use (the injected reviewer/test-runner and local
+executor seams exist); live security-tool matrix/DAST; `ozagia config migrate`
+still cannot emit `[environments]`, `[services]`, `[relays]` or `[runtime]`
+because the settings registry has no typed keys for them, so those tables must
+be copied by hand.
 
 ### Parallel workstreams (2026-11-16)
 
@@ -1822,6 +1827,76 @@ Three agents start from `b8c77a1`:
 Status: all merged: `action-integrations` as `d39c455`, `cleanup-retention`
 as `72347d3`, and `ocelot-impact` as `3577c67`. The final full suite is
 `4180 passed, 21 skipped`; ruff passes.
+
+### Parallel wave 9 (2026-11-17)
+
+Three agents start from the current main:
+
+| Worktree | Branch | Scope |
+| --- | --- | --- |
+| `~/ozmadev/ozagia-wt/config-rewire` | `feat/config-rewire` | Load supported `ozagia/config.toml` values into `ProjectConfig` without breaking `.ozagia.toml` |
+| `~/ozmadev/ozagia-wt/hints-integration` | `feat/hints-integration` | Library hints in code review, repo scan and built-in edits |
+| `~/ozmadev/ozagia-wt/task-executor` | `feat/task-executor` | Safe local executor for bounded read/grep/glob/graph/test steps |
+
+The same review/merge/full-suite gate applies. The live Desktop smoke test and
+model-provider adapters remain host/provider-dependent.
+
+Status: `hints-integration` merged as `3648304` (`fed25bd`); `config-rewire`
+merged as `a9b95a3` (`504cff0`); `task-executor` merged as `33bfcfa`
+(`93f1f69`). Each passed its targeted suite and a full suite on its own tree;
+the merged tree passed the final suite (`4241 passed, 21 skipped`) and ruff.
+Wave 9 is complete. Wave 10 completed its follow-ups: command-derived
+`patch`/`shell` paths, exact per-job disk write attribution, injected
+multi-reviewer/test-runner seams, and the remaining config migration gaps.
+Live Desktop and live model-provider adapters remain host/provider-dependent.
+
+The config migration follow-ups are closed: `[security]` loads from both
+files with legacy precedence, doctor prints both paths/precedence/unmapped
+counts, and the adapter cache is keyed on both files. `[environments]`,
+`[services]`, `[relays]` and `[runtime]` remain legacy project models.
+
+### Parallel wave 10 (2026-11-17)
+
+Four agents start from `345aecf`:
+
+| Worktree | Branch | Scope |
+| --- | --- | --- |
+| `~/ozmadev/ozagia-wt/disk-accounting` | `feat/disk-accounting` | Exact per-job disk write attribution (cgroup `io.stat`, `/proc/<pid>/io`, watchdog and job records) |
+| `~/ozmadev/ozagia-wt/call-paths` | `feat/call-paths` | Command-derived paths for `patch`/`shell` in the file ledger, refresh and hints |
+| `~/ozmadev/ozagia-wt/review-runners` | `feat/review-runners` | Injected multi-reviewer reconciliation and injected test runner |
+| `~/ozmadev/ozagia-wt/config-remainder` | `feat/config-remainder` | `[security]` from the versioned config, doctor text, adapter cache |
+
+The same review/merge/full-suite gate applies. Live model/provider adapters and
+the live Desktop smoke test remain host/provider-dependent.
+
+Status: all four branches merged — `review-runners` as `552f3d5` (`895ddfe`),
+`disk-accounting` as `0f8cefc` (`625c043`), `config-remainder` as `608107e`
+(`cd3e5d0`) and `call-paths` as `260c28b` (`68c220f`). Each passed its
+targeted suite and a full suite on its own tree; the merged tree passed the
+final suite (`4313 passed, 21 skipped`) and ruff. Wave 10 is complete.
+
+### Parallel wave 11 (2026-11-17)
+
+Two agents start from `a0a1913`:
+
+| Worktree | Branch | Scope |
+| --- | --- | --- |
+| `~/ozmadev/ozagia-wt/addin-mutations` | `feat/addin-mutations` | Preview-first `actionApply` and `taskRun` RPCs, GUI confirmation, redacted tokens and local task executor |
+| `~/ozmadev/ozagia-wt/runtime-config` | `feat/runtime-config` | `[environments]`, `[services]`, `[relays]`, `[runtime]` from `ozagia/config.toml` with legacy precedence |
+
+The same review/merge/full-suite gate applies. The live Desktop smoke test,
+live model/provider adapters and live security-tool matrix/DAST remain
+host/provider-dependent.
+
+Status: both branches merged — `addin-mutations` as `8a1fdbf` (`ef74675`) and
+`runtime-config` as `b9d421d` (`bfe9a31`). Targeted suites passed; the add-in
+passed typecheck, 38/38 Node tests and the CJS build; the merged tree passed
+the final Python suite (`4336 passed, 21 skipped`) and ruff. Wave 11 is
+complete. The add-in is no longer strictly read-only: it has exactly two
+preview-first mutation paths (`actionApply` with a one-time token, and
+`taskRun` through the local read-only executor), both requiring an explicit
+second confirmation. Runtime project models merge by named entry, with legacy
+entries winning as a whole.
 
 ### Library-first workstream (2026-11-16)
 

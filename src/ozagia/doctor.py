@@ -5,10 +5,14 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from ozagia.config import ConfigError, config_path, load_project_config, state_path
+from ozagia.config import (
+    ConfigError, config_sources, load_project_config, state_path,
+)
 
 #: Bound the per-key settings detail in the doctor report.
 SETTINGS_NON_DEFAULT_LIMIT = 50
+#: Bound the versioned-config keys the project loader did not map.
+CONFIG_UNMAPPED_LIMIT = 20
 
 
 def _settings_report(root: Path) -> dict[str, Any]:
@@ -76,16 +80,47 @@ def diagnose(root: str | Path) -> dict[str, Any]:
     """Inspect local configuration and snapshot without building or starting servers."""
     root = Path(root).resolve()
     result: dict[str, Any] = {"root": str(root), "root_exists": root.is_dir()}
-    cfg_path = config_path(root)
-    cfg_label = str(cfg_path) if cfg_path else None
-    cfg_present = bool(cfg_path and cfg_path.is_file())
+    cfg = None
+    config: dict[str, Any] = {
+        "path": None, "present": False, "valid": False,
+        "legacy_path": None, "legacy_kind": None,
+        "repo_path": None, "repo_exists": False,
+        "active_source": None, "precedence": [], "sources": [],
+        "unmapped": [], "unmapped_count": 0, "unmapped_truncated": False,
+    }
     try:
-        cfg = load_project_config(root)
-        result["config"] = {"path": cfg_label, "present": cfg_present,
-                            "valid": True, "adapters_configured": list(cfg.adapters)}
+        sources = config_sources(root)
     except (ConfigError, OSError) as exc:
-        result["config"] = {"path": cfg_label, "present": cfg_present,
-                            "valid": False, "error": str(exc)}
+        config["error"] = str(exc)
+    else:
+        config.update({
+            "legacy_path": (str(sources.legacy)
+                            if sources.legacy is not None else None),
+            "legacy_kind": sources.legacy_kind,
+            "repo_path": str(sources.repo_config),
+            "repo_exists": sources.repo_exists,
+            "active_source": sources.active_kind,
+            "path": str(sources.active) if sources.active is not None else None,
+            "present": bool(sources.active is not None
+                            and sources.active.is_file()),
+            "precedence": list(sources.precedence),
+            "sources": [str(path) for path in sources.paths],
+        })
+        try:
+            cfg = load_project_config(root)
+        except (ConfigError, OSError) as exc:
+            config["error"] = str(exc)
+        else:
+            unmapped = [{"key": key, "reason": reason}
+                        for key, reason in cfg.unmapped]
+            config.update({
+                "valid": True,
+                "adapters_configured": list(cfg.adapters),
+                "unmapped": unmapped[:CONFIG_UNMAPPED_LIMIT],
+                "unmapped_count": len(unmapped),
+                "unmapped_truncated": len(unmapped) > CONFIG_UNMAPPED_LIMIT,
+            })
+    result["config"] = config
 
     try:
         result["settings"] = _settings_report(root)

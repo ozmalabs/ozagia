@@ -36,7 +36,8 @@ FULL_SURFACE_TOOLS = [
     "dev_neighbours", "dev_stats", "dev_changed", "dev_refresh", "dev_record",
     "dev_session_start", "dev_session_record", "dev_session_state",
     "dev_session_next", "dev_session_finish", "dev_session_list",
-    "dev_who", "dev_recent", "dev_lsp_status", "dev_definition", "dev_references",
+    "dev_who", "dev_recent", "federation_status", "federation_search", "federation_node", "federation_check",
+    "dev_lsp_status", "dev_definition", "dev_references",
     "dev_callers", "dev_callees", "dev_symbol_impact", "dev_rename_preview",
     "dev_diagnostics", "dev_hover", "dev_document_symbols",
     "dev_symbol_callers", "dev_symbol_callees", "dev_symbol_graph_impact",
@@ -51,6 +52,7 @@ FULL_SURFACE_TOOLS = [
     "dev_runtime_logs", "research_fetch",
 ]
 VERBS = ["find", "node", "expand", "impact", "edit", "create", "check", "note"]
+FEDERATION_TOOLS = ["federation_status", "federation_search", "federation_node", "federation_check"]
 
 CORE = '''\
 """Core helpers."""
@@ -199,9 +201,9 @@ def _keys(obj: Any) -> set[str]:
 # --------------------------------------------------------------------------- #
 # surface switch
 # --------------------------------------------------------------------------- #
-def test_graph_surface_lists_only_the_verbs(server) -> None:
+def test_graph_surface_lists_verbs_and_federation_tools(server) -> None:
     tools = _rpc(server, "tools/list")["result"]["tools"]
-    assert [t["name"] for t in tools] == VERBS
+    assert [t["name"] for t in tools] == VERBS + FEDERATION_TOOLS
     reply = _rpc(server, "tools/call", {"name": "dev_context",
                                         "arguments": {"task": "x"}})
     assert reply["error"]["code"] == -32602
@@ -210,7 +212,7 @@ def test_graph_surface_lists_only_the_verbs(server) -> None:
 def test_graph_surface_lists_adapter_tools(repo, seed_adapter) -> None:
     srv = DevMemoryServer(_memory(repo), surface="graph")
     names = [t["name"] for t in _rpc(srv, "tools/list")["result"]["tools"]]
-    assert names == VERBS + ["dev_graph_query"]
+    assert names == VERBS + FEDERATION_TOOLS + ["dev_graph_query"]
     hits = call(srv, "find", query="greet_rule")["hits"]
     assert hits[0]["key"] == "seed_item:demo::Rule::greet_rule"
     assert call(srv, "node", key=hits[0]["key"])["ok"] is True

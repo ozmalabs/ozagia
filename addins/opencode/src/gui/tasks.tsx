@@ -8,11 +8,17 @@ import type {
   TaskEntry,
   TaskListReport,
   TaskResources,
+  TaskRunReport,
   TaskValidateReport,
 } from "../types"
 import { invoke } from "./client"
 import type { definition } from "./definition"
-import { taskRunCommand } from "./task-command"
+import {
+  AUTOMATIC_TASK_INPUTS,
+  taskRunExecCommand,
+  taskRunInputIssue,
+  taskRunCommand,
+} from "./task-command"
 import { Badge, Card, Empty, FailureView, Loading, Metric } from "./ui"
 
 const DOMAINS = ["all", "research", "coding", "ops"] as const
@@ -45,6 +51,28 @@ function rootMissing(...envelopes: Array<Envelope | undefined>): boolean {
   return envelopes.some((envelope) => envelope?.error?.code === "root_missing")
 }
 
+type RunStage = "idle" | "confirm" | "running"
+
+function outputTail(report: TaskRunReport, max = 4000): string {
+  const value = report.output?.value
+  if (value === undefined || value === null) return ""
+  let text: string
+  try {
+    text = typeof value === "string" ? value : JSON.stringify(value, null, 2)
+  } catch {
+    text = String(value)
+  }
+  if (!text) return ""
+  return text.length > max ? `${text.slice(0, max)}\n… (truncated)` : text
+}
+
+function findingsCount(report: TaskRunReport): number | null {
+  const value = report.output?.value
+  if (!value || typeof value !== "object") return null
+  const candidate = (value as { findings?: unknown }).findings
+  return Array.isArray(candidate) ? candidate.length : null
+}
+
 function budgetRows(budget?: TaskBudget): Array<[string, string]> {
   if (!budget) return []
   return [
@@ -73,6 +101,9 @@ export function TasksTab() {
   const [detailBusy, setDetailBusy] = createSignal(false)
   const [detailNonce, setDetailNonce] = createSignal(0)
   const [copyState, setCopyState] = createSignal<"idle" | "copied" | "failed">("idle")
+  const [runInputs, setRunInputs] = createSignal<Record<string, string>>({})
+  const [runStage, setRunStage] = createSignal<RunStage>("idle")
+  const [runResult, setRunResult] = createSignal<Envelope<TaskRunReport> | null>(null)
 
   const [snapshot, { refetch }] = createResource<TasksSnapshot>(async () => {
     const [list, validation] = await Promise.all([
@@ -130,6 +161,59 @@ export function TasksTab() {
     })
   }
 
+  const runRequired = (): string[] =>
+    (detailData()?.spec.inputs ?? []).filter(
+      (name) => !AUTOMATIC_TASK_INPUTS.has(name),
+    )
+
+  const runAutomatic = (): string[] =>
+    (detailData()?.spec.inputs ?? []).filter((name) => AUTOMATIC_TASK_INPUTS.has(name))
+
+  const runIssue = (): string | null => taskRunInputIssue(runInputs(), runRequired())
+
+  const resetRun = () => {
+    const next: Record<string, string> = {}
+    for (const name of runRequired()) next[name] = ""
+    setRunInputs(next)
+    setRunStage("idle")
+    setRunResult(null)
+  }
+
+  const execCommand = (): string => {
+    const current = detailData()
+    const root = validation()?.root
+    if (!current || !root) return ""
+    return taskRunExecCommand({
+      path: current.entry.path,
+      root,
+      inputs: runRequired(),
+    })
+  }
+
+  const setRunInput = (name: string, value: string) => {
+    setRunInputs((current) => ({ ...current, [name]: value }))
+    setRunStage("idle")
+    setRunResult(null)
+  }
+
+  const confirmRun = () => {
+    if (runIssue() || runStage() === "running") return
+    setRunStage("confirm")
+  }
+
+  const cancelRun = () => setRunStage("idle")
+
+  const executeRun = async () => {
+    const current = detailData()
+    if (!current || runStage() !== "confirm" || runIssue()) return
+    setRunStage("running")
+    const envelope = await invoke<TaskRunReport>(ctx, () =>
+      ctx.client.rpc(Ozagia).taskRun({ id: current.entry.id, inputs: runInputs() }),
+    )
+    setRunResult(envelope)
+    setRunStage("idle")
+  }
+
   const missingRoot = () => rootMissing(listEnvelope(), validationEnvelope())
   const detailsAvailable = () => validation()?.ok !== false
   const listFailed = () => {
@@ -173,6 +257,7 @@ export function TasksTab() {
         if (request !== detailRequest) return
         setDetail(envelope)
         setDetailBusy(false)
+        resetRun()
       },
     )
   })
@@ -181,16 +266,19 @@ export function TasksTab() {
     if (!detailsAvailable()) return
     setSelectedId(id)
     setCopyState("idle")
+    resetRun()
   }
 
   const refresh = () => {
     setDetail(null)
     setCopyState("idle")
+    resetRun()
     void refetch()
   }
 
   const retryDetail = () => {
     setCopyState("idle")
+    resetRun()
     setDetailNonce((value) => value + 1)
   }
 
@@ -210,7 +298,9 @@ export function TasksTab() {
       <div class="ozagia-head">
         <div>
           <div class="ozagia-title">Tasks</div>
-          <div class="ozagia-sub">Browse versioned task classes; nothing is run or applied</div>
+          <div class="ozagia-sub">
+            Browse task classes; Run is a separate, confirmed local-executor call
+          </div>
         </div>
         <button class="ozagia-button" type="button" onClick={refresh}>
           Refresh
@@ -336,7 +426,8 @@ export function TasksTab() {
             <Show when={!report().ok}>
               <div class="ozagia-note" style={{ "margin-top": "6px" }}>
                 An invalid library is reported, never hidden. Fix the named override or spec;
-                this panel does not write a file or run a task.
+                this panel does not write a file, and Run stays unavailable until validation
+                passes.
               </div>
             </Show>
           </Card>
@@ -537,8 +628,9 @@ export function TasksTab() {
                 </Show>
                 <Show when={writeScope().length > 0}>
                   <div class="ozagia-note" style={{ "margin-top": "6px" }}>
-                    A task with a write scope previews mutations and stops for approval; this
-                    panel never applies one.
+                    A task with a write scope previews mutations and stops for approval. The
+                    local executor blocks mutating tools, and the Run control never passes{" "}
+                    <code>--approve</code>.
                   </div>
                 </Show>
               </Card>
@@ -662,8 +754,8 @@ export function TasksTab() {
                   <div class="ozagia-note" style={{ "margin-top": "6px" }}>
                     This is a <code>tasks_cli run --dry-run</code> preview with a placeholder
                     for each declared input. It never passes <code>--allow-exec</code>. The
-                    add-in does not run it, apply a task or call a model. Substitute the
-                    configured interpreter for <code>python</code> if it differs.
+                    add-in does not run this copied text; use the explicit Run control below.
+                    Substitute the configured interpreter for <code>python</code> if it differs.
                   </div>
                   <Show when={copyState() === "failed"}>
                     <div class="ozagia-note" style={{ "margin-top": "4px" }}>
@@ -673,6 +765,153 @@ export function TasksTab() {
                   </Show>
                 </Show>
               </Card>
+
+              <Card title="Run task (local executor)">
+                <Show
+                  when={validation()?.root}
+                  fallback={
+                    <Empty>
+                      The repository root was not reported, so the library cannot be resolved.
+                    </Empty>
+                  }
+                >
+                  <div class="ozagia-metrics">
+                    <Metric label="task" value={entry().id} />
+                    <Metric label="executor" value="local" />
+                    <Metric label="approval" value="not passed" />
+                  </div>
+
+                  <Show
+                    when={runRequired().length > 0}
+                    fallback={
+                      <div class="ozagia-note">
+                        This task declares no user inputs. The runner supplies its context.
+                      </div>
+                    }
+                  >
+                    <For each={runRequired()}>
+                      {(name) => (
+                        <label class="ozagia-field" style={{ "margin-top": "6px" }}>
+                          <span>{name}</span>
+                          <input
+                            class="ozagia-input"
+                            value={runInputs()[name] ?? ""}
+                            onInput={(event) => setRunInput(name, event.currentTarget.value)}
+                            placeholder={`value for ${name}`}
+                            spellcheck={false}
+                          />
+                        </label>
+                      )}
+                    </For>
+                  </Show>
+
+                  <Show when={runAutomatic().length > 0}>
+                    <div class="ozagia-note" style={{ "margin-top": "4px" }}>
+                      {`Runner-supplied inputs: ${runAutomatic().join(", ")}.`}
+                    </div>
+                  </Show>
+
+                  <Show when={runIssue()}>
+                    {(issue) => (
+                      <div class="ozagia-note" style={{ "margin-top": "6px" }}>
+                        {issue()}
+                      </div>
+                    )}
+                  </Show>
+
+                  <Show when={runStage() === "idle"}>
+                    <div class="ozagia-row" style={{ "margin-top": "8px" }}>
+                      <button
+                        class="ozagia-button"
+                        type="button"
+                        disabled={!!runIssue()}
+                        onClick={confirmRun}
+                      >
+                        Run task…
+                      </button>
+                      <span class="ozagia-note">
+                        Opens a confirmation; nothing runs on selection.
+                      </span>
+                    </div>
+                  </Show>
+
+                  <Show when={runStage() === "confirm"}>
+                    <div class="ozagia-sep" />
+                    <div class="ozagia-sub">Confirm run</div>
+                    <p class="ozagia-note">
+                      {`About to run ${entry().id} through the read-only local executor.`}
+                    </p>
+                    <pre class="ozagia-pre">{execCommand()}</pre>
+                    <div class="ozagia-note" style={{ "margin-top": "6px" }}>
+                      Input values are passed in argv and shown here as{" "}
+                      <code>&lt;redacted&gt;</code>. This call never passes{" "}
+                      <code>--approve</code>; mutating, model and unimplemented tools stay
+                      blocked by <code>LocalExecutor</code>. It runs{" "}
+                      <code>tasks_cli run --executor local --allow-exec</code>.
+                    </div>
+                    <div class="ozagia-row" style={{ "margin-top": "8px" }}>
+                      <button class="ozagia-button" type="button" onClick={cancelRun}>
+                        Cancel
+                      </button>
+                      <button class="ozagia-button" type="button" onClick={() => void executeRun()}>
+                        Run task
+                      </button>
+                    </div>
+                  </Show>
+
+                  <Show when={runStage() === "running"}>
+                    <Loading label={`Running ${entry().id} through the local executor…`} />
+                  </Show>
+                </Show>
+              </Card>
+
+              <Show when={runResult() && !runResult()!.ok}>
+                <FailureView envelope={runResult()!} />
+              </Show>
+
+              <Show when={runResult()?.ok && runResult()?.data}>
+                {(report) => (
+                  <Card
+                    title="Run result"
+                    state={report().status}
+                    error={report().ok ? null : report().stop_detail ?? "task did not finish ok"}
+                  >
+                    <div class="ozagia-metrics">
+                      <Metric label="status" value={report().status ?? "—"} />
+                      <Metric label="stop" value={report().stop ?? "—"} />
+                      <Metric label="exit" value={runResult()?.exitCode ?? "—"} />
+                      <Metric label="steps" value={(report().steps ?? []).length} />
+                      <Show when={findingsCount(report()) !== null}>
+                        <Metric label="findings" value={findingsCount(report()) ?? 0} />
+                      </Show>
+                    </div>
+                    <dl class="ozagia-grid">
+                      <dt>run</dt>
+                      <dd>{report().run_id ?? "—"}</dd>
+                      <dt>executed</dt>
+                      <dd>{report().executed ? "yes" : "no"}</dd>
+                      <dt>detail</dt>
+                      <dd>{report().stop_detail ?? "—"}</dd>
+                    </dl>
+                    <Show when={(report().what_was_not_assessed ?? []).length > 0}>
+                      <details class="ozagia-details">
+                        <summary>What the run did not assess</summary>
+                        <ul class="ozagia-list">
+                          <For each={report().what_was_not_assessed ?? []}>
+                            {(item) => <li>{item}</li>}
+                          </For>
+                        </ul>
+                      </details>
+                    </Show>
+                    <Show when={outputTail(report())}>
+                      <details class="ozagia-details" open>
+                        <summary>Output tail</summary>
+                        <pre class="ozagia-pre">{outputTail(report())}</pre>
+                      </details>
+                    </Show>
+                  </Card>
+                )}
+              </Show>
             </>
           )
         }}

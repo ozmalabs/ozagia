@@ -7,7 +7,9 @@ review packet that states what was checked and what was not.
 
 The first slice is deliberately narrow: it never builds the graph, never runs
 tests or linters, and never writes into the repository. The only write is an
-explicitly requested `--out` file.
+explicitly requested `--out` file. Optional caller-supplied reviewers and a
+caller-supplied test runner are seams: their output is merged into a packet
+copy, labelled unverified, and never treated as proof.
 
 ## Usage
 
@@ -18,6 +20,7 @@ python -m ozagia.code_review_cli \
   [--graph .ozagia/graph.json] \
   [--ocelot [--ocelot-root PATH] [--ocelot-mode auto|inprocess|subprocess]] \
   [--ocelot-impact] [--ocelot-patterns] \
+  [--library-hints|--no-library-hints] \
   [--json] \
   [--out review-packet.json] \
   [--fail-on blocking|major|never]
@@ -49,6 +52,7 @@ Operational flags:
 --ocelot-timeout S     worker timeout in seconds (default 120)
 --ocelot-impact        optional ocelot.impact candidate test sets (default off)
 --ocelot-patterns      optional ocelot.patterns candidate patterns (default off)
+--no-library-hints     omit the advisory library_hints section (default: on)
 ```
 
 Python API:
@@ -63,6 +67,7 @@ packet = R.review_range(root, "main..HEAD", ocelot=True,
                         ocelot_root="/path/to/ocelot", ocelot_mode="auto")
 packet = R.review_range(root, "main..HEAD", ocelot_impact=True,
                         ocelot_patterns=True)
+packet = R.review_range(root, "main..HEAD", library_hints=False)
 status = R.exit_code(packet, "blocking")
 ```
 
@@ -111,6 +116,7 @@ and a confidence note. Agreement between reviewers is never treated as proof.
 | `scope_creep` | Generated file changed (`package-lock.json`, lockfiles, `dist/`, `vendor/`, minified assets, generated markers). | minor |
 | `security_sensitive` | Sensitive path token, or an added dangerous construct (`eval(`, `exec(`, `os.system(`, `shell=True`, `pickle.loads(`, unsafe YAML load). A review flag, not a vulnerability claim. | minor |
 | `performance_risk` | File above the large-file threshold. A size flag, not a measured regression. | minor |
+| `test_failure` | A caller-supplied injected test runner reported a non-zero exit code. Evidence is the test plan; the runner's result is unverified. | blocking |
 | `unknown` | Binary file changed; `git diff --check` whitespace error. | note / minor |
 | `duplicate_logic`, `contract_mismatch` | Not assessed in this slice; listed in `not_assessed`. | - |
 
@@ -192,10 +198,34 @@ Important fields:
                 "executed": false, "truth_assessed": false,
                 "not_run_reason": "..."},
   "tests_executed": false,
+  "test_execution": {"status": "injected", "source": "runner",
+                     "verified": false, "selected": ["tests/test_app.py"],
+                     "exit_code": 0,
+                     "counts": {"passed": 1, "failed": 0, "skipped": 0},
+                     "output_excerpt": "...", "truth_assessed": false},
   "summary": {"findings": 0, "blocking": 0, "major": 0, "minor": 0, "note": 0},
   "omissions": [],
   "not_assessed": [],
-  "model_review": {"status": "not_run", "truth_assessed": false},
+  "model_review": {"status": "injected", "reviewer_count": 2,
+                   "reviewers": [{"name": "critic", "status": "ok",
+                                  "findings": 1, "error": null,
+                                  "finding_ids": ["CR-004"]},
+                                 {"name": "security_reviewer",
+                                  "status": "ok", "findings": 1,
+                                  "error": null,
+                                  "finding_ids": ["CR-004"]}],
+                   "findings": 1, "agreement": 1, "dissent": 0,
+                   "agreement_detail": [{"finding": "CR-004",
+                                         "type": "missing_test",
+                                         "file": "src/app.py",
+                                         "reviewers": ["critic",
+                                                       "security_reviewer"],
+                                         "count": 2}],
+                   "dissent_detail": [],
+                   "truth_assessed": false},
+  "library_hints": {"requested": true, "mode": "gentle", "state": "ready",
+                    "files": ["src/app.py"], "hints": [], "counts": {},
+                    "recorded": false, "truth_assessed": false},
   "security": {"provided": true, "findings": [], "truth_assessed": false},
   "ocelot": {"requested": true, "state": "not_installed",
              "clusters": [], "truth_assessed": false},
@@ -207,7 +237,9 @@ Important fields:
 `ocelot` is present only when clustering, impact or patterns is requested. When
 only impact/patterns are requested, the `ocelot` section is a container with
 `state: "not_requested"` and empty finding clusters; the requested parts are
-nested under `ocelot.impact` and `ocelot.patterns`.
+nested under `ocelot.impact` and `ocelot.patterns`. `test_execution` is absent
+until `run_injected_tests` is called, and `model_review` is `not_run` until a
+reviewer is injected.
 
 ## Optional security findings
 
@@ -296,6 +328,56 @@ candidate test set is not a completeness or coverage claim. Every pattern has
 `candidate: true` and `truth_assessed: false`; it is not an anti-pattern or
 defect verdict. See `docs/ocelot_code.md` for the shapes and clustering rules.
 
+## Library hints
+
+The packet includes an advisory `library_hints` section by default. It runs
+`ozagia.core.library_hints.hints_for_paths` over the changed source files
+(tests, docs, generated files, binaries and deleted files are skipped) and
+reads the base commit's text for modified and renamed files, so gentle mode
+reports only new or changed symbols. The review records no hint events and
+writes nothing.
+
+```json
+{
+  "schema": 1,
+  "rule_version": "2026.11.1",
+  "requested": true,
+  "mode": "gentle",
+  "state": "ready",
+  "files": ["src/retry.py"],
+  "hints": [{
+    "hint_id": "...",
+    "file": "src/retry.py",
+    "symbol": "_retry",
+    "language": "python",
+    "capability": "retry",
+    "package": "tenacity",
+    "availability": "declared",
+    "confidence": "medium",
+    "evidence": "bounded attempts, sleep, backoff, name `_retry`",
+    "message": "[ozagia] library hint: ..."
+  }],
+  "counts": {"hints": 1, "suppressed": 0, "files": 1, "truncated": false},
+  "recorded": false,
+  "truth_assessed": false
+}
+```
+
+Every hint has a package, capability, availability (`stdlib`, `declared`,
+`installed` or `known`), confidence and file/symbol evidence. Evidence is
+short rule labels, never source text. The per-file cap is
+`[hints] max_per_edit`; the packet caps the list at 10. `state` is `ready`,
+`no_hints`, `no_files`, `off`, `disabled` or `error`. `off` comes from
+`[hints] library = "off"` or `$OZAGIA_LIBRARY_HINTS=0`; `disabled` means the
+caller passed `library_hints=False` (CLI: `--no-library-hints`). Hints read
+the working tree for the named files, so a dirty file or a reviewed head that
+is not the checkout gets the section's `source: "working_tree"` caveat.
+
+A hint is a candidate: the review does not refactor, install a package or
+change a dependency, and `not_assessed` records that the match is heuristic
+and covers only the changed files. The section never adds findings or changes
+`exit_code`.
+
 ## Test plan
 
 The packet includes a deterministic `test_plan` from
@@ -310,11 +392,99 @@ A repository may set `[testing.tasks] code_review = "none"` when a review
 should record that no test selection is needed. The packet still reports the
 policy and the reason; it never invents a pass.
 
+## Optional injected test runner
+
+The module never starts a test process. A caller that already owns test
+execution may inject one runner for the packet's existing plan:
+
+```python
+from ozagia.core.code_review import run_injected_tests
+
+def runner(plan):
+    # The caller runs the selected tests in its own sandbox and owns the
+    # process, timeout, network and approval policy.
+    return {
+        "exit_code": 1,
+        "passed": 3,
+        "failed": 2,
+        "skipped": 0,
+        "errors": 0,              # optional
+        "output": "...",          # optional, excerpted
+        "duration_s": 4.5,        # optional
+    }
+
+packet = run_injected_tests(packet, runner)
+```
+
+The runner is called only when `test_plan` exists, is not refused and has a
+non-empty `selected_files`. Otherwise the copy records
+`test_execution.status` as `skipped` or `refused`, keeps the plan's own
+`not_run_reason` as `reason`, and does not call the runner. A missing plan says
+so explicitly. No test result is invented.
+
+The runner receives a deep copy of the plan. Its result is validated:
+`exit_code` must be an integer in `0..255`; `passed`, `failed` and `skipped`
+must be non-negative integers, with optional non-negative `errors`; `output`
+must be a string and is capped at `MAX_TEST_OUTPUT_LINES` (100) lines and
+`MAX_TEST_OUTPUT_BYTES` (8192) bytes; optional `duration_s` must be a
+non-negative finite number. Unknown keys are dropped. A non-mapping result, a
+missing/invalid field or a runner exception becomes a structured
+`test_execution.status: "error"` entry with a bounded `error`; it never raises
+out of the review.
+
+A successful result records:
+
+```json
+{
+  "status": "injected",
+  "source": "runner",
+  "verified": false,
+  "selected": ["tests/test_app.py"],
+  "exit_code": 1,
+  "counts": {"passed": 3, "failed": 2, "skipped": 0, "errors": 0},
+  "output_excerpt": "...",
+  "output_truncated": false,
+  "duration_s": 4.5,
+  "note": "results were supplied by a caller-run test runner; they are unverified and were not independently checked",
+  "truth_assessed": false
+}
+```
+
+The copy gains `tests_executed: true`; `test_plan.executed` becomes `true`,
+`test_plan.not_run_reason` is cleared, and `not_assessed` replaces the "tests
+were planned but not run" entry with a bounded note that the results are
+caller-supplied and unverified.
+
+When `exit_code != 0`, the packet also gains a blocking `test_failure` finding:
+
+```json
+{
+  "type": "test_failure",
+  "severity": "blocking",
+  "file": null,
+  "line": null,
+  "message": "injected test runner reported 2 failed test(s) with exit code 1",
+  "evidence": ["test_plan"],
+  "graph_keys": [],
+  "confidence": "low",
+  "confidence_note": "injected test runner; not independently verified"
+}
+```
+
+That finding participates in `exit_code(packet)`, so the default `blocking`
+threshold returns `1`. A zero exit code adds no finding and changes no
+existing finding. Either way `truth_assessed` stays `false`: a passing run is
+not independent verification, a subset does not prove correctness, and the
+module did not observe the command, environment or test process. This module
+does not run tests, git or a subprocess.
+
 ## Optional model review
 
-This slice does not call a model. `packet["model_review"]` records
-`status: "not_run"` and the reason. The seam for a later independent-review
-slice is:
+This module does not call a model. `packet["model_review"]` starts as
+`status: "not_run"` with the reason. A caller can inject one or more reviewers;
+the module normalizes and merges their findings into a copy of the packet.
+
+Single reviewer:
 
 ```python
 from ozagia.core.code_review import review_range, run_injected_review
@@ -322,32 +492,108 @@ from ozagia.core.code_review import review_range, run_injected_review
 def runner(packet):
     # The caller owns the provider, budget, approval and network policy.
     return [...]
+    # [{"type": "missing_test", "severity": "major",
+    #   "file": "src/app.py", "line": 1, "message": "...",
+    #   "evidence": ["..."], "graph_keys": []}]
 
 packet = run_injected_review(review_range(root, "main..HEAD"), runner)
 ```
 
-Injected findings are labelled `source: "model"`, get the same validation and
-id assignment, and remain unverified. `run_injected_review` does not call a
-model itself and does not set `truth_assessed` to true, regardless of how many
-reviewers agree.
+Several reviewers:
+
+```python
+from ozagia.core.code_review import run_injected_reviews
+
+def critic(packet):
+    return [...]
+
+def security_reviewer(packet):
+    return [...]
+
+packet = run_injected_reviews(
+    packet, {"critic": critic, "security": security_reviewer})
+# A sequence also works; each name comes from __name__ or the callable type.
+# packet = run_injected_reviews(packet, [critic, security_reviewer])
+```
+
+Each runner receives its own deep copy of the original packet. Mapping order
+does not matter: reviewers and findings are ordered deterministically. A
+runner exception or invalid top-level return becomes a per-reviewer
+`status: "error"` entry with a bounded message; the review still returns.
+
+Findings are normalized with the same type, severity, message, evidence,
+graph-key and id rules as deterministic findings, labelled `source: "model"`,
+and carry `reviewers` (sorted names) and `agreement` (the number of reviewers
+that reported that exact finding). A finding reported by one reviewer also
+carries `reviewer`; a merged finding drops that singular field. Exact
+duplicates across reviewers collapse into one finding; reviewer-specific
+findings remain. No finding is kept without a message.
+
+`model_review` then has this shape:
+
+```json
+{
+  "status": "injected",
+  "reviewer_count": 2,
+  "reviewers": [{"name": "critic", "status": "ok", "findings": 1,
+                 "error": null, "finding_ids": ["CR-004"]},
+                {"name": "security_reviewer", "status": "ok",
+                 "findings": 1, "error": null,
+                 "finding_ids": ["CR-004"]}],
+  "findings": 1,
+  "accepted_findings": 2,
+  "duplicate_findings": 1,
+  "agreement": 1,
+  "dissent": 0,
+  "agreement_detail": [{"finding": "CR-004", "type": "missing_test",
+                        "file": "src/app.py",
+                        "reviewers": ["critic", "security_reviewer"],
+                        "count": 2}],
+  "dissent_detail": [],
+  "detail_truncated": false,
+  "errors": [],
+  "truth_assessed": false,
+  "note": "injected reviewer output is unverified; agreement is not correctness and is not proof"
+}
+```
+
+`agreement` counts findings reported by two or more reviewers; `dissent`
+counts findings reported by exactly one. Both detail lists are capped at
+`MAX_REVIEW_DETAIL` (20) and `detail_truncated` says whether anything was
+omitted. `run_injected_review` also keeps the single-reviewer `runner` field
+for compatibility.
+
+Agreement is not correctness and is not proof. Injected findings remain
+unverified, `truth_assessed` is always `false`, and the module does not know
+whether a reviewer used a model, which model, or what provider policy applied.
+The caller owns live gating (`OZAGIA_EVAL_LIVE`), provider adapters, budgets,
+retries, redaction and approval. No provider SDK is imported and no model call
+is made here.
 
 ## Limits and non-goals
 
 Not in this slice:
 
 - commit/merge/push policy checks beyond the worktree and branch expectation;
-- live or optional model calls, or multi-model agreement (optional Ocelot
-  structural clustering is available separately and never changes the
-  findings or their truth status);
+- live model/provider adapters, automatic model calls or a provider SDK. A
+  caller may inject one or many reviewers through `run_injected_reviews`; the
+  merge is local and `truth_assessed` stays `false`. The caller owns live
+  gating (`OZAGIA_EVAL_LIVE`), credentials, budgets, retries, redaction and
+  approval. Optional Ocelot structural clustering remains separate and never
+  changes findings or their truth status;
 - proven test impact or architecture-pattern verdicts. Optional Ocelot impact
   and pattern sections return candidate clusters only, and no test runs;
-- running tests, builds, linters or type checkers (a test plan is recorded,
-  but nothing is executed; only resource admission is checked);
+- running tests, builds, linters or type checkers in this module. A test plan
+  is recorded, and a caller may inject a runner through `run_injected_tests`;
+  that result is caller-supplied, unverified, and not asserted by this module.
+  Only resource admission is checked here;
 - semantic signature/behaviour compatibility, duplicate-logic detection, or
   contract-mismatch detection;
 - `markdown_route` and file-ledger integration for the output path;
 - writing any repository file. `--out` is the caller's explicit path;
-- fetching, network access, graph builds or graph reingestion.
+- fetching, network access, graph builds or graph reingestion;
+- refactoring, dependency installation or the claim that a library hint is
+  better in every context.
 
 Binary content, generated output, and changes in files absent from the graph
 are reported as not assessed rather than guessed.
@@ -362,6 +608,13 @@ PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_code_review.py
 The tests build temporary git repositories with base/head commits, a deleted
 file, a missing test, conflict markers, binary, large and generated files,
 whitespace errors, a fresh graph, a stale graph, a missing graph, a wrong
-branch, an unresolved merge, a resource refusal, CLI JSON/exit codes and the
-injected-runner seam. Ocelot tests use an explicit missing checkout and an
-injected clusterer; no test uses a model, the network or an install.
+branch, an unresolved merge, a resource refusal, CLI JSON/exit codes, the
+injected-runner seam and the advisory library-hints section (default, cap,
+off, imported-package suppression and no file contents). Ocelot tests use an
+explicit missing checkout and an injected clusterer. Multi-reviewer tests
+cover duplicate agreement, single-reviewer dissent, reviewer errors, invalid
+and empty output, deterministic ordering and the absence of a truth claim.
+Injected test-runner tests cover success, a blocking failure finding and exit
+code, refused/no-plan/empty-plan skips, malformed results, the output cap,
+deep-copy isolation and the absence of a subprocess or network call. No test
+uses a model, the network, an install or a real test runner.

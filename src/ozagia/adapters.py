@@ -171,6 +171,22 @@ _REGISTRY: Registry | None = None
 _REGISTRY_KEY: tuple | None = None
 
 
+def _config_file_key(path: Path | None) -> tuple[str, int, int]:
+    """``(path, mtime_ns, size)`` for one configuration reload key.
+
+    A missing file keeps its path with zero mtime/size, so creating it changes
+    the key. Stat only: the project-config loader already reads and caches the
+    contents by digest.
+    """
+    if path is None:
+        return ("", 0, 0)
+    try:
+        stat = path.stat()
+    except OSError:
+        return (str(path), 0, 0)
+    return (str(path), stat.st_mtime_ns, stat.st_size)
+
+
 def _import_ref(ref: str, base: Path | None) -> Callable[..., Any]:
     module, _, attr = ref.partition(":")
     if not module or not attr:
@@ -195,27 +211,38 @@ def _import_ref(ref: str, base: Path | None) -> Callable[..., Any]:
 def registry(root: str | Path | None = None, *, reload: bool = False) -> Registry:
     """The adapter registry for `root`, loaded once per process.
 
-    It is loaded again when the root, the configuration file (or its mtime)
-    or `$OZAGIA_ADAPTERS` changes.
+    It is loaded again when the root, either project configuration file
+    (legacy or ``ozagia/config.toml``; path, mtime, size and content digest)
+    or `$OZAGIA_ADAPTERS` changes. Editing the non-active file therefore
+    invalidates the cache even when the other file supplies the active
+    configuration.
     """
     global _REGISTRY, _REGISTRY_KEY
-    from ozagia.config import ConfigError, load_project_config
+    from ozagia.config import (
+        ConfigError, config_sources, load_project_config, repo_root,
+    )
 
-    root_p = Path(root).resolve() if root is not None else None
+    root_p = Path(root).resolve() if root is not None else repo_root()
     cfg = None
     cfg_error = None
     try:
         cfg = load_project_config(root_p)
     except ConfigError as e:
         cfg_error = f"config: {e}"
-    cfg_key = None
-    if cfg is not None and cfg.source is not None:
+    if cfg is not None:
+        cfg_key: tuple = cfg.source_signatures
+    else:
         try:
-            cfg_key = (str(cfg.source), cfg.source.stat().st_mtime_ns)
-        except OSError:
-            cfg_key = (str(cfg.source), 0)
+            sources = config_sources(root_p)
+        except ConfigError:
+            env_config = os.environ.get("OZAGIA_CONFIG")
+            env_path = Path(env_config).expanduser() if env_config else None
+            cfg_key = ("unresolved", _config_file_key(env_path))
+        else:
+            cfg_key = (_config_file_key(sources.legacy),
+                       _config_file_key(sources.repo_config))
     env = os.environ.get(ENV_ADAPTERS, "")
-    key = (str(root_p) if root_p else None, cfg_key, env)
+    key = (str(root_p), cfg_key, env)
     if _REGISTRY is not None and not reload and _REGISTRY_KEY == key:
         return _REGISTRY
     reg = Registry()

@@ -14,6 +14,60 @@ from ozagia.core import code_review as R
 from ozagia.core.memory import _tree_digest
 
 
+HINT_RETRY = '''import time
+
+
+def _retry(fn):
+    delay = 1
+    for attempt in range(3):
+        try:
+            return fn()
+        except Exception:
+            time.sleep(delay)
+            delay *= 2
+    raise RuntimeError("failed")
+'''
+
+HINT_IMPORTED = '''import time
+import tenacity
+
+
+def _retry(fn):
+    delay = 1
+    for attempt in range(3):
+        try:
+            return fn()
+        except Exception:
+            time.sleep(delay)
+            delay *= 2
+'''
+
+HINT_MIXED = '''import sys
+import time
+
+
+def _retry(fn):
+    delay = 1
+    for attempt in range(3):
+        try:
+            return fn()
+        except Exception:
+            time.sleep(delay)
+            delay *= 2
+    raise RuntimeError("failed")
+
+
+def main():
+    args = sys.argv[1:]
+    if not args:
+        print("usage: app [--verbose]")
+        return 2
+    if args[0].startswith("--"):
+        return 1
+    return 0
+'''
+
+
 # --------------------------------------------------------------------------- #
 # helpers
 # --------------------------------------------------------------------------- #
@@ -217,6 +271,18 @@ def _findings(packet: dict[str, Any], *, ftype: str | None = None,
     return out
 
 
+def _hint_repo(tmp_path: Path, text: str = HINT_RETRY) -> dict[str, Any]:
+    repo = _init_repo(tmp_path / "hint-repo")
+    (repo / "src").mkdir()
+    (repo / "src" / "app.py").write_text(
+        "def placeholder():\n    return 0\n", encoding="utf-8")
+    base = _commit(repo, "base")
+    (repo / "src" / "app.py").write_text(text, encoding="utf-8")
+    head = _commit(repo, "hint change")
+    return {"repo": repo, "base": base, "head": head,
+            "range": f"{base}..{head}"}
+
+
 # --------------------------------------------------------------------------- #
 # no graph: file-level diff checks
 # --------------------------------------------------------------------------- #
@@ -343,6 +409,85 @@ def test_testing_task_override_can_select_none_for_review(review_repo):
     assert packet["test_plan"]["mode"] == "none"
     assert packet["test_plan"]["selected_files"] == []
     assert packet["tests_executed"] is False
+
+
+def test_packet_includes_bounded_library_hints(tmp_path):
+    repo = _hint_repo(tmp_path)
+    packet = R.review_range(repo["repo"], repo["range"])
+
+    section = packet["library_hints"]
+    assert section["requested"] is True
+    assert section["state"] == "ready"
+    assert section["recorded"] is False
+    assert section["truth_assessed"] is False
+    assert section["counts"]["hints"] >= 1
+    hint = next(item for item in section["hints"]
+                if item["capability"] == "retry")
+    assert hint["file"] == "src/app.py"
+    assert hint["symbol"] == "_retry"
+    assert hint["package"]
+    assert hint["availability"] in ("stdlib", "declared", "installed", "known")
+    assert hint["confidence"] in ("low", "medium", "high")
+    assert "evidence" in hint and "time.sleep" not in hint["evidence"]
+    # Evidence and the packet never carry file contents.
+    raw = json.dumps(packet, sort_keys=True)
+    assert "time.sleep" not in raw
+    assert "for attempt in range" not in raw
+    assert packet["summary"]["library_hints"] >= 1
+    assert packet["summary"]["library_hints_state"] == "ready"
+    assert any(entry.get("area") == "library-hints"
+               for entry in packet["not_assessed"])
+    text = R.format_packet(packet)
+    assert "library hints: ready" in text
+    assert "src/app.py::_retry" in text
+
+
+def test_library_hint_cap_and_off_setting(tmp_path):
+    repo = _hint_repo(tmp_path, HINT_MIXED)
+    (repo["repo"] / "ozagia" / "config.toml").write_text(
+        "[hints]\n"
+        'library = "gentle"\n'
+        "max_per_edit = 1\n",
+        encoding="utf-8",
+    )
+    packet = R.review_range(repo["repo"], repo["range"])
+    section = packet["library_hints"]
+    assert len(section["hints"]) == 1
+    assert section["hints"][0]["capability"] == "retry"
+    assert section["counts"]["suppressed"] >= 1
+
+    (repo["repo"] / "ozagia" / "config.toml").write_text(
+        "[hints]\n"
+        'library = "off"\n',
+        encoding="utf-8",
+    )
+    packet = R.review_range(repo["repo"], repo["range"])
+    section = packet["library_hints"]
+    assert section["state"] == "off"
+    assert section["hints"] == []
+    assert section["counts"]["hints"] == 0
+    assert "not checked" in R.format_packet(packet)
+
+
+def test_library_hints_are_suppressed_when_the_package_is_imported(tmp_path):
+    repo = _hint_repo(tmp_path, HINT_IMPORTED)
+    packet = R.review_range(repo["repo"], repo["range"])
+    section = packet["library_hints"]
+    assert section["hints"] == []
+    assert section["state"] == "no_hints"
+    assert section["counts"]["suppressed"] >= 1
+
+
+def test_cli_can_disable_library_hints(tmp_path, capsys):
+    repo = _hint_repo(tmp_path)
+    code = CLI.main([
+        "--root", str(repo["repo"]), "--range", repo["range"],
+        "--json", "--fail-on", "never", "--no-library-hints",
+    ])
+    assert code == 0
+    packet = json.loads(capsys.readouterr().out)
+    assert packet["library_hints"]["state"] == "disabled"
+    assert packet["library_hints"]["hints"] == []
 
 
 def test_stale_graph_is_reported_and_not_used(review_repo):
@@ -607,6 +752,151 @@ def test_injected_review_is_unverified(review_repo):
     assert "unverified" in model[0]["confidence_note"]
 
 
+def _shared_reviewer_finding() -> dict[str, Any]:
+    return {
+        "type": "missing_test",
+        "severity": "major",
+        "file": "src/newmod.py",
+        "line": 1,
+        "message": "both reviewers think a test is missing",
+        "evidence": ["injected prompt output"],
+    }
+
+
+def test_multi_reviewer_agreement_is_annotated_not_truth(review_repo):
+    packet = R.review_range(
+        review_repo["repo"], review_repo["range"], max_file_bytes=1024)
+    before = json.dumps(packet["findings"], sort_keys=True)
+
+    def alpha(value):
+        assert value["truth_assessed"] is False
+        return [
+            _shared_reviewer_finding(),
+            {
+                "type": "scope_creep",
+                "severity": "minor",
+                "file": "src/space.py",
+                "message": "alpha-only concern",
+            },
+        ]
+
+    def beta(value):
+        assert value["truth_assessed"] is False
+        return [_shared_reviewer_finding()]
+
+    result = R.run_injected_reviews(packet, {"beta": beta, "alpha": alpha})
+    review = result["model_review"]
+
+    assert json.dumps(packet["findings"], sort_keys=True) == before
+    assert review["status"] == "injected"
+    assert review["truth_assessed"] is False
+    assert result["truth_assessed"] is False
+    assert review["reviewer_count"] == 2
+    assert [entry["name"] for entry in review["reviewers"]] == [
+        "alpha", "beta"]
+    assert [entry["status"] for entry in review["reviewers"]] == ["ok", "ok"]
+    assert review["reviewers"][0]["findings"] == 2
+    assert review["reviewers"][1]["findings"] == 1
+    assert review["findings"] == 2
+    assert review["accepted_findings"] == 3
+    assert review["duplicate_findings"] == 1
+    assert review["agreement"] == 1
+    assert review["dissent"] == 1
+    assert review["errors"] == []
+    assert "not correctness" in review["note"]
+
+    model = [item for item in result["findings"]
+             if item.get("source") == "model"]
+    assert len(model) == 2
+    shared = [item for item in model if item.get("agreement") == 2]
+    assert len(shared) == 1
+    assert shared[0]["reviewers"] == ["alpha", "beta"]
+    assert shared[0]["id"].startswith("CR-")
+    dissent = [item for item in model if item.get("agreement") == 1]
+    assert len(dissent) == 1
+    assert dissent[0]["reviewers"] == ["alpha"]
+    assert dissent[0]["reviewer"] == "alpha"
+    assert "reviewer" not in shared[0]
+    assert review["agreement_detail"] == [{
+        "finding": shared[0]["id"],
+        "type": "missing_test",
+        "file": "src/newmod.py",
+        "reviewers": ["alpha", "beta"],
+        "count": 2,
+    }]
+    assert review["dissent_detail"][0]["finding"] == dissent[0]["id"]
+    assert review["dissent_detail"][0]["reviewer"] == "alpha"
+    assert result["summary"]["findings"] == len(result["findings"])
+    assert all(item["message"].strip() for item in result["findings"])
+
+    # Reviewer order must not depend on mapping insertion order.
+    again = R.run_injected_reviews(packet, [beta, alpha])
+    assert again["findings"] == result["findings"]
+    assert again["model_review"] == review
+
+
+def test_multi_reviewer_errors_are_bounded_and_do_not_crash(review_repo):
+    packet = R.review_range(
+        review_repo["repo"], review_repo["range"], max_file_bytes=1024)
+
+    def boom(value):
+        raise RuntimeError("provider unavailable " + "x" * 2000)
+
+    def empty(value):
+        return [None, "not a finding", {}, {"message": "   "}]
+
+    def invalid(value):
+        return "not a sequence of findings"
+
+    result = R.run_injected_reviews(
+        packet, {"boom": boom, "empty": empty, "invalid": invalid})
+    review = result["model_review"]
+    entries = {entry["name"]: entry for entry in review["reviewers"]}
+
+    assert review["status"] == "injected"
+    assert review["truth_assessed"] is False
+    assert result["truth_assessed"] is False
+    assert review["findings"] == 0
+    assert review["agreement"] == 0
+    assert review["dissent"] == 0
+    assert entries["boom"]["status"] == "error"
+    assert "RuntimeError" in entries["boom"]["error"]
+    assert len(entries["boom"]["error"]) <= R.MAX_REVIEWER_ERROR_CHARS
+    assert entries["invalid"]["status"] == "error"
+    assert "sequence" in entries["invalid"]["error"]
+    assert entries["empty"]["status"] == "ok"
+    assert entries["empty"]["findings"] == 0
+    assert len(review["errors"]) == 2
+    assert all(item["message"].strip() for item in result["findings"])
+
+
+def test_single_injected_review_keeps_its_shape(review_repo):
+    packet = R.review_range(
+        review_repo["repo"], review_repo["range"], max_file_bytes=1024)
+
+    def named_runner(value):
+        return [{
+            "type": "performance_risk",
+            "severity": "minor",
+            "file": "src/space.py",
+            "message": "single reviewer finding",
+        }]
+
+    result = R.run_injected_review(packet, named_runner)
+    review = result["model_review"]
+    assert review["status"] == "injected"
+    assert review["runner"] == "named_runner"
+    assert review["reviewer_count"] == 1
+    assert review["reviewers"][0]["name"] == "named_runner"
+    assert review["reviewers"][0]["finding_ids"] == [
+        item["id"] for item in result["findings"]
+        if item.get("source") == "model"]
+    assert review["findings"] == 1
+    assert review["agreement"] == 0
+    assert review["dissent"] == 1
+    assert result["truth_assessed"] is False
+
+
 # --------------------------------------------------------------------------- #
 # optional Ocelot clustering
 # --------------------------------------------------------------------------- #
@@ -756,3 +1046,236 @@ def test_cli_ocelot_impact_and_pattern_flags(review_repo, capsys):
     assert "impact" in packet["ocelot"]
     assert "patterns" in packet["ocelot"]
     assert packet["ocelot"]["truth_assessed"] is False
+
+
+# --------------------------------------------------------------------------- #
+# optional injected test runner
+# --------------------------------------------------------------------------- #
+
+
+def _test_packet(review_repo) -> dict[str, Any]:
+    packet = R.review_range(
+        review_repo["repo"], review_repo["range"], max_file_bytes=1024)
+    packet["findings"] = []
+    packet["summary"] = {}
+    return packet
+
+
+def test_injected_test_runner_records_a_success(
+        review_repo):
+    packet = _test_packet(review_repo)
+    original = json.dumps(packet, sort_keys=True)
+    selected = list(packet["test_plan"]["selected_files"])
+    assert "tests/test_app.py" in selected
+
+    def runner(plan):
+        assert plan["executed"] is False
+        assert plan["selected_files"] == selected
+        plan["selected_files"] = ["mutated/inside/the/copy.py"]
+        plan["executed"] = True
+        return {
+            "exit_code": 0,
+            "passed": 4,
+            "failed": 0,
+            "skipped": 2,
+            "errors": 1,
+            "output": "4 passed, 2 skipped\n",
+            "duration_s": 1.25,
+            "unknown_key": "dropped",
+        }
+
+    result = R.run_injected_tests(packet, runner)
+
+    assert json.dumps(packet, sort_keys=True) == original
+    assert packet["tests_executed"] is False
+    assert result["tests_executed"] is True
+    assert result["test_plan"]["executed"] is True
+    assert result["test_plan"]["selected_files"] == selected
+    assert not result["test_plan"].get("not_run_reason")
+    execution = result["test_execution"]
+    assert execution["status"] == "injected"
+    assert execution["source"] == "runner"
+    assert execution["verified"] is False
+    assert execution["selected"] == selected
+    assert execution["exit_code"] == 0
+    assert execution["counts"] == {
+        "passed": 4, "failed": 0, "skipped": 2, "errors": 1}
+    assert execution["output_excerpt"] == "4 passed, 2 skipped\n"
+    assert execution["output_truncated"] is False
+    assert execution["duration_s"] == 1.25
+    assert "unknown_key" not in execution
+    assert "unverified" in execution["note"]
+    assert result["truth_assessed"] is False
+    assert not [item for item in result["findings"]
+                if item.get("type") == "test_failure"]
+    assert R.exit_code(result) == 0
+    reasons = [entry["reason"] for entry in result["not_assessed"]
+               if entry.get("area") == "tests"]
+    assert len(reasons) == 1
+    assert "unverified" in reasons[0]
+    assert "does not prove correctness" in reasons[0]
+    text = R.format_packet(result)
+    assert "tests were run by an injected runner (unverified)" in text
+    assert "test execution: injected by runner" in text
+
+
+def test_injected_test_failure_adds_a_blocking_finding(review_repo):
+    packet = _test_packet(review_repo)
+
+    def runner(plan):
+        return {
+            "exit_code": 2,
+            "passed": 1,
+            "failed": 3,
+            "skipped": 0,
+        }
+
+    result = R.run_injected_tests(packet, runner)
+    failures = [item for item in result["findings"]
+                if item["type"] == "test_failure"]
+    assert len(failures) == 1
+    failure = failures[0]
+    assert failure["severity"] == "blocking"
+    assert failure["evidence"] == ["test_plan"]
+    assert failure["confidence"] == "low"
+    assert failure["confidence_note"] == (
+        "injected test runner; not independently verified")
+    assert "3" in failure["message"]
+    assert "2" in failure["message"]
+    assert failure["type"] in R.FINDING_TYPES
+    assert R.exit_code(result) == 1
+    assert result["summary"]["blocking"] == 1
+    assert result["test_execution"]["exit_code"] == 2
+
+
+def test_injected_test_runner_skips_without_a_runnable_plan(review_repo,
+                                                           monkeypatch):
+    packet = _test_packet(review_repo)
+    calls: list[Any] = []
+
+    def runner(plan):
+        calls.append(plan)
+        return {"exit_code": 0, "passed": 0, "failed": 0, "skipped": 0}
+
+    no_plan = R.run_injected_tests(
+        {**packet, "test_plan": None}, runner)
+    assert no_plan["test_execution"]["status"] == "skipped"
+    assert no_plan["test_execution"]["reason"] == (
+        "no test plan in the packet; no test was run")
+    assert no_plan["tests_executed"] is False
+
+    empty_plan = R.run_injected_tests({
+        **packet,
+        "test_plan": {
+            "selected_files": [],
+            "refused": False,
+            "not_run_reason": "nothing was selected for this change",
+        },
+    }, runner)
+    assert empty_plan["test_execution"]["status"] == "skipped"
+    assert empty_plan["test_execution"]["reason"] == (
+        "nothing was selected for this change")
+    assert empty_plan["test_plan"]["selected_files"] == []
+    assert empty_plan["tests_executed"] is False
+
+    refused_plan = R.run_injected_tests({
+        **packet,
+        "test_plan": {
+            "selected_files": ["tests/test_app.py"],
+            "refused": True,
+            "not_run_reason": "the test policy refused to select tests",
+        },
+    }, runner)
+    assert refused_plan["test_execution"]["status"] == "refused"
+    assert refused_plan["test_execution"]["reason"] == (
+        "the test policy refused to select tests")
+    assert refused_plan["tests_executed"] is False
+    assert calls == []
+
+
+@pytest.mark.parametrize("bad", [
+    "not a mapping",
+    {"exit_code": 1},
+    {"exit_code": 256, "passed": 0, "failed": 0, "skipped": 0},
+    {"exit_code": True, "passed": 0, "failed": 0, "skipped": 0},
+    {"exit_code": -1, "passed": 0, "failed": 0, "skipped": 0},
+    {"exit_code": 0, "passed": -1, "failed": 0, "skipped": 0},
+    {"exit_code": 0, "passed": 0, "failed": 0},
+    {"exit_code": 0, "passed": 0, "failed": 0, "skipped": 0,
+     "errors": "one"},
+    {"exit_code": 0, "passed": 0, "failed": 0, "skipped": 0,
+     "output": 3},
+    {"exit_code": 0, "passed": 0, "failed": 0, "skipped": 0,
+     "duration_s": "fast"},
+])
+def test_injected_test_runner_rejects_malformed_results(review_repo, bad):
+    packet = _test_packet(review_repo)
+    result = R.run_injected_tests(packet, lambda plan: bad)
+
+    execution = result["test_execution"]
+    assert execution["status"] == "error"
+    assert execution["error"]
+    assert execution["verified"] is False
+    assert result["tests_executed"] is False
+    assert result["test_plan"]["executed"] is False
+    assert result["truth_assessed"] is False
+    assert any(entry.get("area") == "tests"
+               for entry in result["not_assessed"])
+
+
+def test_injected_test_runner_catches_runner_exceptions(review_repo):
+    packet = _test_packet(review_repo)
+
+    def runner(plan):
+        raise ValueError("the fake runner broke")
+
+    result = R.run_injected_tests(packet, runner)
+    execution = result["test_execution"]
+    assert execution["status"] == "error"
+    assert "ValueError" in execution["error"]
+    assert "the fake runner broke" in execution["error"]
+    assert result["tests_executed"] is False
+    assert R.exit_code(result) == 0
+
+
+def test_injected_test_output_is_capped(review_repo):
+    packet = _test_packet(review_repo)
+
+    def runner(plan):
+        return {
+            "exit_code": 0,
+            "passed": 1,
+            "failed": 0,
+            "skipped": 0,
+            "output": "line\n" * 5000 + "x" * 20000,
+        }
+
+    result = R.run_injected_tests(packet, runner)
+    execution = result["test_execution"]
+    assert execution["output_truncated"] is True
+    assert len(execution["output_excerpt"].splitlines()) <= (
+        R.MAX_TEST_OUTPUT_LINES)
+    assert len(execution["output_excerpt"].encode("utf-8")) <= (
+        R.MAX_TEST_OUTPUT_BYTES)
+
+
+def test_injected_test_runner_uses_no_process_or_network(
+        review_repo, monkeypatch):
+    import socket
+
+    packet = _test_packet(review_repo)
+
+    def blocked(*_args, **_kwargs):
+        raise AssertionError("process or network access attempted")
+
+    monkeypatch.setattr(R.subprocess, "run", blocked)
+    monkeypatch.setattr(R.os, "system", blocked)
+    monkeypatch.setattr(socket, "create_connection", blocked)
+    monkeypatch.setattr(socket.socket, "connect", blocked, raising=False)
+
+    def runner(plan):
+        return {"exit_code": 0, "passed": 1, "failed": 0, "skipped": 0,
+                "output": "ok"}
+
+    result = R.run_injected_tests(packet, runner)
+    assert result["test_execution"]["status"] == "injected"

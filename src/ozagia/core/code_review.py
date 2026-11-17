@@ -10,13 +10,17 @@ The packet says what was checked and what was not. A deterministic finding is
 evidence, not proof: ``truth_assessed`` is always false, and every finding
 carries its evidence and a confidence note.
 
-Optional independent model review is a seam, not an implementation here. See
-:func:`run_injected_review`: the caller supplies the runner and owns its
-network, provider and approval behaviour.
+Optional independent model review and test execution are seams, not
+implementations here. See :func:`run_injected_review`,
+:func:`run_injected_reviews` and :func:`run_injected_tests`: the caller
+supplies the runner(s) and owns network, provider, test-process and approval
+behaviour. Reviewer agreement and caller-supplied test results are never
+treated as proof.
 """
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import subprocess
@@ -24,6 +28,7 @@ import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence
 
+from ozagia.core import library_hints as LH
 from ozagia.core import ocelot_code
 from ozagia.core import resources
 from ozagia.core import testing as test_plans
@@ -57,6 +62,7 @@ FINDING_TYPES = (
     "contract_mismatch",
     "security_sensitive",
     "performance_risk",
+    "test_failure",
     "unknown",
 )
 
@@ -66,6 +72,21 @@ MAX_ITEMS = 100
 MAX_WHITESPACE_FINDINGS = 50
 MAX_CONFLICT_FINDINGS = 50
 MAX_SENSITIVE_FINDINGS = 50
+# Library hints in a packet: changed source files inspected, hints shown. The
+# per-file cap is the configured ``hints.max_per_edit``.
+MAX_LIBRARY_HINT_FILES = 40
+MAX_LIBRARY_HINTS = 10
+
+# Injected reviewers: reviewer error text and agreement/dissent detail are
+# bounded so a misbehaving caller cannot grow the packet without limit.
+MAX_REVIEWER_ERROR_CHARS = 500
+MAX_REVIEW_DETAIL = 20
+
+# Injected test results: output is an excerpt, never a full log.
+MAX_TEST_OUTPUT_LINES = 100
+MAX_TEST_OUTPUT_BYTES = 8192
+MAX_TEST_ERROR_CHARS = 500
+MAX_TEST_NOTE_CHARS = 300
 
 # Extensions treated as executable source. A diff that changes one of these
 # without a test is reported, unless a covering test is recorded.
@@ -1045,6 +1066,22 @@ def _finding(ftype: str, severity: str, file: str | None, line: int | None,
     }
 
 
+def _finding_sort_key(item: Mapping[str, Any]) -> tuple[Any, ...]:
+    def line_key(value: Any) -> int:
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    return (
+        SEVERITY_RANK.get(str(item.get("severity")), 99),
+        str(item.get("type") or ""),
+        str(item.get("file") or ""),
+        line_key(item.get("line")),
+        str(item.get("message") or ""),
+    )
+
+
 def _finalize_findings(findings: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     unique: dict[tuple[Any, ...], dict[str, Any]] = {}
     for raw in findings:
@@ -1056,22 +1093,7 @@ def _finalize_findings(findings: Sequence[Mapping[str, Any]]) -> list[dict[str, 
                tuple(item["evidence"]), tuple(item["graph_keys"]))
         unique.setdefault(key, item)
 
-    def line_key(value: Any) -> int:
-        try:
-            return int(value or 0)
-        except (TypeError, ValueError):
-            return 0
-
-    ordered = sorted(
-        unique.values(),
-        key=lambda item: (
-            SEVERITY_RANK.get(str(item.get("severity")), 99),
-            str(item.get("type") or ""),
-            str(item.get("file") or ""),
-            line_key(item.get("line")),
-            str(item.get("message") or ""),
-        ),
-    )
+    ordered = sorted(unique.values(), key=_finding_sort_key)
     for number, item in enumerate(ordered, start=1):
         item["id"] = f"CR-{number:03d}"
         item["type"] = str(item.get("type") or "unknown")
@@ -1081,6 +1103,23 @@ def _finalize_findings(findings: Sequence[Mapping[str, Any]]) -> list[dict[str, 
         if item["severity"] not in SEVERITY_RANK:
             item["severity"] = "note"
     return ordered
+
+
+def _recompute_summary(packet: dict[str, Any]) -> None:
+    findings = packet.get("findings") or []
+    summary = dict(packet.get("summary") or {})
+    summary.update({
+        "findings": len(findings),
+        "blocking": sum(1 for item in findings
+                        if item.get("severity") == "blocking"),
+        "major": sum(1 for item in findings
+                     if item.get("severity") == "major"),
+        "minor": sum(1 for item in findings
+                     if item.get("severity") == "minor"),
+        "note": sum(1 for item in findings
+                    if item.get("severity") == "note"),
+    })
+    packet["summary"] = summary
 
 
 def _fallback_tests(source: str, repo_tests: Iterable[str]) -> list[str]:
@@ -1442,6 +1481,124 @@ def _plan_tests(root: Path, base_commit: str, head_commit: str,
     return plan
 
 
+def _library_hint_files(files: Sequence[Mapping[str, Any]]
+                        ) -> list[Mapping[str, Any]]:
+    """Changed source files the hint layer may read, in diff order."""
+    out: list[Mapping[str, Any]] = []
+    for item in files:
+        if item.get("deleted") or item.get("binary") or item.get("generated"):
+            continue
+        if item.get("file_kind") != "source":
+            continue
+        path = item.get("path")
+        if isinstance(path, str) and path:
+            out.append(item)
+        if len(out) >= MAX_LIBRARY_HINT_FILES:
+            break
+    return out
+
+
+def _library_before_text(root: Path, base: str,
+                         files: Sequence[Mapping[str, Any]]
+                         ) -> dict[str, str]:
+    """The base commit's text for each changed source file, bounded.
+
+    ``None``/absent for an added file is what ``hints_for_paths`` expects.
+    A failed or oversized read is skipped; hints are advisory.
+    """
+    before: dict[str, str] = {}
+    for item in files:
+        path = str(item.get("path") or "")
+        old = str(item.get("old_path") or path)
+        if not path or not old:
+            continue
+        size = _blob_size(root, base, old)
+        if size is None or size > LH.MAX_FILE_BYTES:
+            continue
+        proc = _git(root, ["show", f"{base}:{old}"])
+        if proc.returncode != 0:
+            continue
+        data = proc.stdout
+        if len(data) > LH.MAX_FILE_BYTES or b"\0" in data[:8192]:
+            continue
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        before[path] = text[1:] if text.startswith("\ufeff") else text
+    return before
+
+
+def _library_hints_section(root: Path, base: str,
+                           files: Sequence[dict[str, Any]], *,
+                           requested: bool) -> dict[str, Any]:
+    """The ``library_hints`` packet section. Advisory, read-only, bounded.
+
+    The detector reads the named changed files and the manifests beside them.
+    It never records events here (a review writes nothing) and its evidence is
+    rule labels plus file/symbol names, never file contents.
+    """
+    try:
+        settings = LH.settings_for(root)
+    except Exception:  # noqa: BLE001 - a hint preference must never fail
+        settings = LH.HintSettings()
+    section: dict[str, Any] = {
+        "schema": LH.SCHEMA,
+        "rule_version": LH.RULE_VERSION,
+        "requested": bool(requested),
+        "mode": settings.mode,
+        "state": "disabled",
+        "files": [],
+        "hints": [],
+        "counts": {"hints": 0, "suppressed": 0, "files": 0,
+                   "truncated": False},
+        "recorded": False,
+        "truth_assessed": False,
+        "source": "working_tree",
+        "note": ("capability hints from a curated registry; the named files "
+                 "are read from the working tree, so a dirty or non-checkout "
+                 "head may differ; no refactor, dependency change, model or "
+                 "network call was made"),
+    }
+    if not requested:
+        section["note"] = "library hints were disabled for this review"
+        return section
+    if settings.mode == "off":
+        section["state"] = "off"
+        section["note"] = ("library hints are off (settings or "
+                           "OZAGIA_LIBRARY_HINTS); no check was made")
+        return section
+    selected = _library_hint_files(files)
+    section["files"] = [str(item["path"]) for item in selected]
+    section["counts"]["files"] = len(selected)
+    if not selected:
+        section["state"] = "no_files"
+        return section
+    try:
+        before = _library_before_text(root, base, selected)
+        got = LH.hints_for_paths(
+            root, [str(item["path"]) for item in selected],
+            mode=settings.mode, before=before, settings=settings,
+            record=False, max_per_edit=settings.max_per_edit)
+    except Exception as exc:  # noqa: BLE001 - a review must report, not crash
+        section["state"] = "error"
+        section["error"] = f"{type(exc).__name__}: {exc}"
+        return section
+    hints = [dict(item) for item in (got.get("hints") or [])
+             if isinstance(item, Mapping)]
+    suppressed = [dict(item) for item in (got.get("suppressed") or [])
+                  if isinstance(item, Mapping)]
+    truncated = len(hints) > MAX_LIBRARY_HINTS
+    section["hints"] = hints[:MAX_LIBRARY_HINTS]
+    section["counts"].update({
+        "hints": len(section["hints"]),
+        "suppressed": len(suppressed),
+        "truncated": truncated,
+    })
+    section["state"] = "ready" if section["hints"] else "no_hints"
+    return section
+
+
 def _security_section(report: Mapping[str, Any]) -> dict[str, Any]:
     """Copy supplied security findings without running or renumbering them."""
     raw_findings = report.get("findings")
@@ -1548,7 +1705,9 @@ def _packet(root: Path, pre: Mapping[str, Any], graph_info: Mapping[str, Any],
             not_assessed: Sequence[Mapping[str, Any]],
             test_plan: Mapping[str, Any] | None = None,
             security_report: Mapping[str, Any] | None = None,
-            ocelot_section: Mapping[str, Any] | None = None) -> dict[str, Any]:
+            ocelot_section: Mapping[str, Any] | None = None,
+            library_hints_section: Mapping[str, Any] | None = None
+            ) -> dict[str, Any]:
     range_info = dict(pre.get("range") or {})
     packet = {
         "schema": PACKET_SCHEMA,
@@ -1601,9 +1760,21 @@ def _packet(root: Path, pre: Mapping[str, Any], graph_info: Mapping[str, Any],
                       "slice; no model was called",
             "truth_assessed": False,
         },
+        "library_hints": dict(library_hints_section)
+        if library_hints_section is not None else {
+            "requested": False,
+            "state": "disabled",
+            "hints": [],
+            "truth_assessed": False,
+        },
         "truth_assessed": False,
         "root": str(root),
     }
+    if library_hints_section is not None:
+        packet["summary"]["library_hints"] = len(
+            library_hints_section.get("hints") or [])
+        packet["summary"]["library_hints_state"] = library_hints_section.get(
+            "state")
     if security_report is not None:
         section = _security_section(security_report)
         packet["security"] = section
@@ -1641,7 +1812,8 @@ def review_diff(root: str | Path, *, base: str, head: str = "HEAD",
                 ocelot_impact: Any = False,
                 ocelot_patterns: Any = False,
                 ocelot_impact_clusterer: Any = None,
-                ocelot_patterns_clusterer: Any = None
+                ocelot_patterns_clusterer: Any = None,
+                library_hints: bool = True
                 ) -> dict[str, Any]:
     """Review ``base..head`` deterministically and return a review packet.
 
@@ -1773,9 +1945,26 @@ def review_diff(root: str | Path, *, base: str, head: str = "HEAD",
                     f"{patterns_section.get('state')}; exact signature/"
                     "overlap patterns were reported and no install was "
                     "attempted.")
+    library_section = _library_hints_section(
+        root_path, base_sha, files, requested=library_hints)
+    if library_section["state"] in {"disabled", "off"}:
+        not_assessed.append({
+            "area": "library-hints",
+            "reason": (
+                "library hints were not checked; no library-reuse signal was "
+                "assessed"),
+        })
+    else:
+        not_assessed.append({
+            "area": "library-hints",
+            "reason": (
+                "capability hints are heuristic and cover only the changed "
+                "source files; no refactor or dependency change was made"),
+        })
     packet = _packet(root_path, pre, graph_info, files, diff_info,
                      final_findings, omissions, not_assessed,
-                     test_plan, security_report, ocelot_section)
+                     test_plan, security_report, ocelot_section,
+                     library_section)
     return packet
 
 
@@ -1802,72 +1991,597 @@ class ReviewRunner(Protocol):
         ...
 
 
+def _copy_packet(packet: Mapping[str, Any]) -> dict[str, Any]:
+    return json.loads(json.dumps(dict(packet)))
+
+
+def _bounded_text(value: Any, limit: int) -> str:
+    text = "" if value is None else str(value)
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)] + "..."
+
+
+def _string_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, Mapping):
+        return []
+    if isinstance(value, (set, frozenset)):
+        try:
+            return [str(entry) for entry in sorted(value, key=str)]
+        except TypeError:
+            return [str(entry) for entry in value]
+    try:
+        values = list(value)
+    except TypeError:
+        return []
+    return [str(entry) for entry in values]
+
+
+def _runner_name(runner: Any) -> str:
+    name = getattr(runner, "__name__", None)
+    if isinstance(name, str) and name.strip():
+        return name.strip()
+    return type(runner).__name__
+
+
+def _reviewer_pairs(runners: Any) -> list[tuple[str, Any]] | None:
+    pairs: list[tuple[str, Any]] = []
+    if isinstance(runners, Mapping):
+        pairs = [(str(name), runner) for name, runner in runners.items()]
+    elif callable(runners):
+        pairs = [(_runner_name(runners), runners)]
+    elif (isinstance(runners, Sequence)
+          and not isinstance(runners, (str, bytes, bytearray))):
+        pairs = [(_runner_name(runner), runner) for runner in runners]
+    else:
+        return None
+    # Sort before naming so mapping insertion order cannot change the packet.
+    ordered = sorted(enumerate(pairs), key=lambda pair: (pair[1][0], pair[0]))
+    counts: dict[str, int] = {}
+    result: list[tuple[str, Any]] = []
+    for _, (base, runner) in ordered:
+        base = base.strip() or "reviewer"
+        counts[base] = counts.get(base, 0) + 1
+        name = base if counts[base] == 1 else f"{base}#{counts[base]}"
+        result.append((name, runner))
+    return result
+
+
+def _reviewer_finding(item: Any, reviewer: str) -> dict[str, Any] | None:
+    if not isinstance(item, Mapping):
+        return None
+    message = str(item.get("message") or "").strip()
+    if not message:
+        return None
+    ftype = str(item.get("type") or "unknown")
+    severity = str(item.get("severity") or "note").casefold()
+    line = item.get("line")
+    if isinstance(line, str) and line.isdigit():
+        line = int(line)
+    if isinstance(line, bool) or not isinstance(line, int):
+        line = None
+    return {
+        "id": None,
+        "type": ftype if ftype in FINDING_TYPES else "unknown",
+        "severity": severity if severity in SEVERITY_RANK else "note",
+        "file": item.get("file") if isinstance(item.get("file"), str) else None,
+        "line": line,
+        "message": message,
+        "evidence": _string_list(item.get("evidence")),
+        "graph_keys": _string_list(item.get("graph_keys")),
+        "confidence": str(item.get("confidence") or "low"),
+        "confidence_note": str(
+            item.get("confidence_note")
+            or "injected reviewer output; unverified and not proof"),
+        "source": "model",
+        "reviewer": reviewer,
+        "reviewers": [reviewer],
+        "agreement": 1,
+    }
+
+
+def _finding_identity(item: Mapping[str, Any]) -> tuple[Any, ...]:
+    line = item.get("line")
+    if isinstance(line, bool):
+        line = None
+    if line is not None:
+        try:
+            line = int(line)
+        except (TypeError, ValueError):
+            line = None
+    return (
+        str(item.get("type") or ""),
+        str(item.get("severity") or ""),
+        "" if item.get("file") is None else str(item.get("file")),
+        line,
+        str(item.get("message") or ""),
+        tuple(_string_list(item.get("evidence"))),
+        tuple(_string_list(item.get("graph_keys"))),
+    )
+
+
+def _normalise_reviewer_output(
+        raw: Any, reviewer: str) -> tuple[list[dict[str, Any]], str | None]:
+    if raw is None:
+        return [], None
+    if isinstance(raw, Mapping):
+        values = [raw]
+    elif isinstance(raw, (str, bytes, bytearray)):
+        return [], (
+            "reviewer output must be a sequence of findings, got "
+            f"{type(raw).__name__}")
+    else:
+        try:
+            values = list(raw)
+        except TypeError:
+            return [], (
+                "reviewer output must be a sequence of findings, got "
+                f"{type(raw).__name__}")
+    seen: set[tuple[Any, ...]] = set()
+    findings: list[dict[str, Any]] = []
+    for value in values:
+        item = _reviewer_finding(value, reviewer)
+        if item is None:
+            continue
+        key = _finding_identity(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        findings.append(item)
+    findings.sort(key=_finding_sort_key)
+    return findings, None
+
+
+def _merge_reviewer_findings(
+        existing: Sequence[Mapping[str, Any]],
+        reviewer_findings: Sequence[tuple[str, Sequence[Mapping[str, Any]]]],
+) -> tuple[list[dict[str, Any]], dict[tuple[Any, ...], str],
+           dict[str, set[tuple[Any, ...]]],
+           dict[tuple[Any, ...], set[str]]]:
+    records: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for raw in existing:
+        if not isinstance(raw, Mapping):
+            continue
+        item = dict(raw)
+        item["graph_keys"] = sorted(set(_string_list(item.get("graph_keys"))))
+        item["evidence"] = list(
+            dict.fromkeys(_string_list(item.get("evidence"))))
+        records.setdefault(_finding_identity(item), item)
+    names: dict[tuple[Any, ...], set[str]] = {}
+    per_reviewer: dict[str, set[tuple[Any, ...]]] = {}
+    for reviewer, findings in reviewer_findings:
+        keys = per_reviewer.setdefault(reviewer, set())
+        for finding in findings:
+            key = _finding_identity(finding)
+            records.setdefault(key, dict(finding))
+            names.setdefault(key, set()).add(reviewer)
+            keys.add(key)
+    combined: list[dict[str, Any]] = []
+    for key, item in records.items():
+        labels = sorted(names.get(key) or ())
+        if labels:
+            item["reviewers"] = labels
+            item["agreement"] = len(labels)
+            if len(labels) == 1:
+                item["reviewer"] = labels[0]
+            else:
+                item.pop("reviewer", None)
+        combined.append(item)
+    final = _finalize_findings(combined)
+    id_by_key = {_finding_identity(item): str(item["id"]) for item in final}
+    return final, id_by_key, per_reviewer, names
+
+
+def _reviewer_error(name: str, error: str) -> dict[str, Any]:
+    return {
+        "name": name,
+        "status": "error",
+        "findings": 0,
+        "error": _bounded_text(error, MAX_REVIEWER_ERROR_CHARS),
+        "finding_ids": [],
+    }
+
+
+def run_injected_reviews(
+        packet: Mapping[str, Any],
+        runners: (Mapping[str, ReviewRunner] | Sequence[ReviewRunner]
+                  | ReviewRunner),
+) -> dict[str, Any]:
+    """Run injected reviewers and merge their findings into a packet copy.
+
+    ``runners`` is a mapping of reviewer name to callable, or a sequence of
+    callables named from ``__name__``/their type. Reviewers are ordered by
+    name and each receives its own deep copy of the original packet, so one
+    reviewer cannot modify another's input or the source packet. A reviewer
+    exception or an invalid top-level return becomes a per-reviewer
+    ``status: "error"`` entry; it never aborts the review.
+
+    Exact duplicate findings across reviewers collapse to one finding with a
+    ``reviewers`` label and an ``agreement`` count. Agreement, dissent and
+    reviewer errors are recorded, but ``truth_assessed`` stays false: more
+    than one reviewer saying the same thing is not correctness, and no
+    finding is proof.
+    """
+    pairs = _reviewer_pairs(runners)
+    result = _copy_packet(packet)
+    if pairs is None:
+        result["model_review"] = {
+            "status": "error",
+            "error": ("runners must be a mapping of names to callables or a "
+                      "sequence of callables"),
+            "reviewers": [],
+            "reviewer_count": 0,
+            "findings": 0,
+            "agreement": 0,
+            "dissent": 0,
+            "truth_assessed": False,
+            "note": "no reviewer was called",
+        }
+        result["truth_assessed"] = False
+        return result
+
+    entries: list[dict[str, Any]] = []
+    accepted: list[tuple[str, Sequence[Mapping[str, Any]]]] = []
+    accepted_count = 0
+    for name, runner in pairs:
+        if not callable(runner):
+            entries.append(_reviewer_error(
+                name, "reviewer is not callable; it was not run"))
+            continue
+        try:
+            raw = runner(_copy_packet(packet))
+        except Exception as exc:  # noqa: BLE001 - a reviewer is an external edge
+            entries.append(_reviewer_error(
+                name, f"{type(exc).__name__}: {exc}"))
+            continue
+        findings, error = _normalise_reviewer_output(raw, name)
+        if error is not None:
+            entries.append(_reviewer_error(name, error))
+            continue
+        accepted.append((name, findings))
+        accepted_count += len(findings)
+        entries.append({
+            "name": name,
+            "status": "ok",
+            "findings": len(findings),
+            "error": None,
+            "finding_ids": [],
+        })
+
+    final, id_by_key, per_reviewer, names = _merge_reviewer_findings(
+        list(result.get("findings") or []), accepted)
+    order = {str(item["id"]): number
+             for number, item in enumerate(final)}
+    for entry in entries:
+        ids = [id_by_key[key] for key in per_reviewer.get(entry["name"], ())
+               if key in id_by_key]
+        entry["finding_ids"] = sorted(
+            set(ids), key=lambda value: order.get(value, 0))
+
+    groups: list[tuple[dict[str, Any], list[str]]] = []
+    for item in final:
+        labels = sorted(names.get(_finding_identity(item)) or ())
+        if labels:
+            groups.append((item, labels))
+    agreement_detail: list[dict[str, Any]] = []
+    dissent_detail: list[dict[str, Any]] = []
+    agreement = 0
+    dissent = 0
+    for item, labels in groups:
+        if len(labels) > 1:
+            agreement += 1
+            if len(agreement_detail) < MAX_REVIEW_DETAIL:
+                agreement_detail.append({
+                    "finding": item["id"],
+                    "type": item["type"],
+                    "file": item.get("file"),
+                    "reviewers": labels,
+                    "count": len(labels),
+                })
+        else:
+            dissent += 1
+            if len(dissent_detail) < MAX_REVIEW_DETAIL:
+                dissent_detail.append({
+                    "finding": item["id"],
+                    "type": item["type"],
+                    "file": item.get("file"),
+                    "reviewer": labels[0],
+                })
+
+    result["findings"] = final
+    _recompute_summary(result)
+    section: dict[str, Any] = {
+        "status": "injected",
+        "reviewer_count": len(entries),
+        "reviewers": entries,
+        "findings": len(groups),
+        "accepted_findings": accepted_count,
+        "duplicate_findings": max(0, accepted_count - len(groups)),
+        "agreement": agreement,
+        "dissent": dissent,
+        "agreement_detail": agreement_detail,
+        "dissent_detail": dissent_detail,
+        "detail_truncated": (
+            agreement > len(agreement_detail)
+            or dissent > len(dissent_detail)),
+        "errors": [{"reviewer": entry["name"], "error": entry["error"]}
+                   for entry in entries if entry["status"] == "error"],
+        "truth_assessed": False,
+        "note": ("injected reviewer output is unverified; agreement is not "
+                 "correctness and is not proof"),
+    }
+    if len(entries) == 1:
+        section["runner"] = entries[0]["name"]
+    if not entries:
+        section["note"] = "no reviewer was supplied; no model was called"
+    result["model_review"] = section
+    result["truth_assessed"] = False
+    return result
+
+
 def run_injected_review(packet: Mapping[str, Any],
                         runner: ReviewRunner) -> dict[str, Any]:
     """Merge one injected reviewer's findings into a copy of the packet.
 
-    Reviewer output is labelled ``model`` and remains unverified. Agreement
-    between reviewers is still not proof, so ``truth_assessed`` stays false.
+    This is the single-reviewer compatibility wrapper over
+    :func:`run_injected_reviews`. Reviewer output is labelled ``model`` and
+    remains unverified. Agreement between reviewers is still not proof, so
+    ``truth_assessed`` stays false.
     """
-    snapshot = json.loads(json.dumps(dict(packet)))
-    raw = runner(json.loads(json.dumps(snapshot)))
-    result = json.loads(json.dumps(snapshot))
-    added: list[dict[str, Any]] = []
-    for item in raw or []:
-        if not isinstance(item, Mapping):
+    return run_injected_reviews(packet, [runner])
+
+
+# --------------------------------------------------------------------------- #
+# optional injected test execution (no test process in this module)
+# --------------------------------------------------------------------------- #
+
+
+class TestRunner(Protocol):
+    """A caller-supplied test executor for an existing ``test_plan``.
+
+    The callable receives a deep copy of one plan and returns a result
+    mapping. It may run a test command; this module never does. The caller
+    owns the process, sandbox, timeout, network and approval policy.
+    """
+
+    def __call__(self, plan: Mapping[str, Any]) -> Mapping[str, Any]:
+        ...
+
+
+def _plan_selected(plan: Mapping[str, Any]) -> list[str]:
+    raw = plan.get("selected_files") or []
+    if isinstance(raw, (str, bytes, bytearray, Mapping)):
+        return []
+    try:
+        values = list(raw)
+    except TypeError:
+        return []
+    return list(dict.fromkeys(
+        path for path in values
+        if isinstance(path, str) and path.strip()))
+
+
+def _plan_reason(plan: Mapping[str, Any], fallback: str) -> str:
+    reason = plan.get("not_run_reason")
+    if isinstance(reason, str) and reason.strip():
+        return reason.strip()
+    return fallback
+
+
+def _without_tests_not_assessed(packet: Mapping[str, Any]) -> list[Any]:
+    kept: list[Any] = []
+    for entry in packet.get("not_assessed") or []:
+        if isinstance(entry, Mapping) and entry.get("area") == "tests":
             continue
-        ftype = str(item.get("type") or "unknown")
-        severity = str(item.get("severity") or "note").casefold()
-        message = str(item.get("message") or "").strip()
-        if not message:
-            continue
-        evidence = item.get("evidence") or []
-        if isinstance(evidence, str):
-            evidence = [evidence]
-        graph_keys = item.get("graph_keys") or []
-        if isinstance(graph_keys, str):
-            graph_keys = [graph_keys]
-        line = item.get("line")
-        if isinstance(line, str) and line.isdigit():
-            line = int(line)
-        if not isinstance(line, int):
-            line = None
-        added.append({
-            "id": None,
-            "type": ftype if ftype in FINDING_TYPES else "unknown",
-            "severity": severity if severity in SEVERITY_RANK else "note",
-            "file": item.get("file") if isinstance(item.get("file"), str) else None,
-            "line": line,
-            "message": message,
-            "evidence": [str(value) for value in evidence],
-            "graph_keys": [str(value) for value in graph_keys],
-            "confidence": str(item.get("confidence") or "low"),
-            "confidence_note": str(
-                item.get("confidence_note")
-                or "injected reviewer output; unverified and not proof"),
-            "source": "model",
-        })
-    combined = list(result.get("findings") or []) + added
-    result["findings"] = _finalize_findings(combined)
-    result["model_review"] = {
-        "status": "injected",
-        "runner": getattr(runner, "__name__", type(runner).__name__),
-        "findings": len(added),
+        kept.append(entry)
+    return kept
+
+
+def _test_execution_skipped(result: dict[str, Any], name: str, status: str,
+                            reason: str, selected: Sequence[str]
+                            ) -> dict[str, Any]:
+    result["test_execution"] = {
+        "status": status,
+        "source": name,
+        "verified": False,
+        "selected": list(selected),
+        "reason": reason,
+        "note": "no test was run",
         "truth_assessed": False,
-        "note": "injected reviewer output is unverified; agreement is not "
-                "proof",
     }
-    result["summary"] = {
-        "findings": len(result["findings"]),
-        "blocking": sum(1 for item in result["findings"]
-                        if item.get("severity") == "blocking"),
-        "major": sum(1 for item in result["findings"]
-                     if item.get("severity") == "major"),
-        "minor": sum(1 for item in result["findings"]
-                     if item.get("severity") == "minor"),
-        "note": sum(1 for item in result["findings"]
-                    if item.get("severity") == "note"),
+    result["truth_assessed"] = False
+    return result
+
+
+def _test_execution_error(result: dict[str, Any], name: str,
+                          error: str, selected: Sequence[str]
+                          ) -> dict[str, Any]:
+    detail = _bounded_text(error, MAX_TEST_ERROR_CHARS)
+    result["test_execution"] = {
+        "status": "error",
+        "source": name,
+        "verified": False,
+        "selected": list(selected),
+        "error": detail,
+        "note": ("the injected test result was rejected; no test result was "
+                 "recorded"),
+        "truth_assessed": False,
     }
+    not_assessed = _without_tests_not_assessed(result)
+    not_assessed.append({
+        "area": "tests",
+        "reason": _bounded_text(
+            f"the injected test runner failed or returned a malformed "
+            f"result ({error}); no test result was recorded",
+            MAX_TEST_NOTE_CHARS),
+    })
+    result["not_assessed"] = not_assessed
+    result["truth_assessed"] = False
+    return result
+
+
+def _bounded_output(text: str) -> tuple[str, bool]:
+    truncated = False
+    lines = text.splitlines()
+    if len(lines) > MAX_TEST_OUTPUT_LINES:
+        text = "\n".join(lines[:MAX_TEST_OUTPUT_LINES])
+        truncated = True
+    encoded = text.encode("utf-8")
+    if len(encoded) > MAX_TEST_OUTPUT_BYTES:
+        text = encoded[:MAX_TEST_OUTPUT_BYTES].decode("utf-8", "ignore")
+        truncated = True
+    return text, truncated
+
+
+def _is_count(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _validate_test_result(
+        raw: Any) -> tuple[dict[str, Any] | None, str | None]:
+    if not isinstance(raw, Mapping):
+        return None, (
+            "the result must be a mapping, got "
+            f"{type(raw).__name__}")
+    exit_code = raw.get("exit_code")
+    if isinstance(exit_code, bool) or not isinstance(exit_code, int):
+        return None, "exit_code must be an integer"
+    if not 0 <= exit_code <= 255:
+        return None, "exit_code must be between 0 and 255"
+    counts: dict[str, int] = {}
+    for key in ("passed", "failed", "skipped"):
+        if key not in raw:
+            return None, f"missing count: {key}"
+        value = raw[key]
+        if not _is_count(value):
+            return None, f"{key} must be a non-negative integer"
+        counts[key] = value
+    if "errors" in raw:
+        value = raw["errors"]
+        if not _is_count(value):
+            return None, "errors must be a non-negative integer"
+        counts["errors"] = value
+    output = raw.get("output")
+    if output is None:
+        output = ""
+    if not isinstance(output, str):
+        return None, "output must be a string"
+    excerpt, output_truncated = _bounded_output(output)
+    execution: dict[str, Any] = {
+        "status": "injected",
+        "verified": False,
+        "exit_code": exit_code,
+        "counts": counts,
+        "output_excerpt": excerpt,
+        "output_truncated": output_truncated,
+        "note": ("results were supplied by a caller-run test runner; they "
+                 "are unverified and were not independently checked"),
+        "truth_assessed": False,
+    }
+    if "duration_s" in raw and raw["duration_s"] is not None:
+        duration = raw["duration_s"]
+        if (isinstance(duration, bool)
+                or not isinstance(duration, (int, float))):
+            return None, "duration_s must be a non-negative finite number"
+        try:
+            finite = math.isfinite(duration) and duration >= 0
+        except (OverflowError, ValueError):
+            finite = False
+        if not finite:
+            return None, "duration_s must be a non-negative finite number"
+        execution["duration_s"] = float(duration)
+    return execution, None
+
+
+def run_injected_tests(packet: Mapping[str, Any],
+                       runner: TestRunner) -> dict[str, Any]:
+    """Record one injected test runner's result against a packet's plan.
+
+    Tests run only when the packet has a ``test_plan`` that is not refused and
+    has a non-empty ``selected_files``. Otherwise the copy records
+    ``test_execution.status`` ``skipped`` or ``refused`` with the plan's own
+    reason and nothing is invented.
+
+    A malformed result (or a runner exception) becomes a structured
+    ``status: "error"`` entry instead of an exception. A non-zero exit code
+    adds a blocking ``test_failure`` finding so :func:`exit_code` can fail.
+    ``truth_assessed`` stays false: the results are caller-supplied and were
+    not independently verified here. This module does not run tests, git or a
+    subprocess.
+    """
+    result = _copy_packet(packet)
+    name = _runner_name(runner)
+    plan = result.get("test_plan")
+    if not isinstance(plan, Mapping):
+        return _test_execution_skipped(
+            result, name, "skipped",
+            "no test plan in the packet; no test was run", [])
+    selected = _plan_selected(plan)
+    if bool(plan.get("refused")):
+        return _test_execution_skipped(
+            result, name, "refused",
+            _plan_reason(
+                plan,
+                "the test plan refused to select tests; no test was run"),
+            selected)
+    if not selected:
+        return _test_execution_skipped(
+            result, name, "skipped",
+            _plan_reason(
+                plan,
+                "the test plan selected no test files; no test was run"),
+            selected)
+    if not callable(runner):
+        return _test_execution_error(
+            result, name, "runner is not callable", selected)
+    try:
+        raw = runner(_copy_packet(plan))
+    except Exception as exc:  # noqa: BLE001 - a test runner is an external edge
+        return _test_execution_error(
+            result, name, f"{type(exc).__name__}: {exc}", selected)
+    execution, error = _validate_test_result(raw)
+    if execution is None:
+        return _test_execution_error(
+            result, name, str(error), selected)
+    execution["source"] = name
+    execution["selected"] = list(selected)
+    result["test_execution"] = execution
+    result["tests_executed"] = True
+    plan_copy = dict(plan)
+    plan_copy["executed"] = True
+    plan_copy["not_run_reason"] = None
+    plan_copy["claim"] = (
+        "tests were executed by a caller-supplied runner; results are "
+        "unverified")
+    plan_copy["truth_assessed"] = False
+    result["test_plan"] = plan_copy
+    not_assessed = _without_tests_not_assessed(result)
+    not_assessed.append({
+        "area": "tests",
+        "reason": _bounded_text(
+            "test results were supplied by a caller-run test runner; they are "
+            "unverified, and a passing run does not prove correctness",
+            MAX_TEST_NOTE_CHARS),
+    })
+    result["not_assessed"] = not_assessed
+    if execution["exit_code"] != 0:
+        failure = _finding(
+            "test_failure", "blocking", None, None,
+            (f"injected test runner reported "
+             f"{execution['counts']['failed']} failed test(s) with exit code "
+             f"{execution['exit_code']}"),
+            evidence=["test_plan"],
+            confidence="low",
+            confidence_note=(
+                "injected test runner; not independently verified"),
+        )
+        result["findings"] = _finalize_findings(
+            list(result.get("findings") or []) + [failure])
+        _recompute_summary(result)
     result["truth_assessed"] = False
     return result
 
@@ -1964,12 +2678,73 @@ def format_packet(packet: Mapping[str, Any]) -> str:
         f"added lines, {diff.get('deletions', 0)} deleted lines")
     test_plan = packet.get("test_plan") or {}
     if test_plan:
+        executed = bool(packet.get("tests_executed")
+                        or test_plan.get("executed"))
         lines.append(
             f"test plan: {test_plan.get('mode')} "
             f"({len(test_plan.get('selected_files') or [])} selected, "
-            f"fallback={test_plan.get('fallback_used')}); tests were not run"
+            f"fallback={test_plan.get('fallback_used')}); "
+            + ("tests were run by an injected runner (unverified)"
+               if executed else "tests were not run")
             + (f" - {test_plan['not_run_reason']}"
-               if test_plan.get("not_run_reason") else ""))
+               if not executed and test_plan.get("not_run_reason") else ""))
+    execution = packet.get("test_execution")
+    if isinstance(execution, Mapping):
+        if execution.get("status") == "injected":
+            counts = execution.get("counts") or {}
+            lines.append(
+                f"test execution: injected by {execution.get('source')}, "
+                f"exit {execution.get('exit_code')}, "
+                f"{counts.get('passed', 0)} passed, "
+                f"{counts.get('failed', 0)} failed, "
+                f"{counts.get('skipped', 0)} skipped"
+                + (f", {counts['errors']} error(s)"
+                   if "errors" in counts else "")
+                + "; results are unverified")
+            if execution.get("output_truncated"):
+                lines.append("  output excerpt was truncated")
+        else:
+            reason = execution.get("reason") or execution.get("error") or ""
+            lines.append(
+                f"test execution: {execution.get('status')}"
+                + (f" - {reason}" if reason else "")
+                + "; no test result was recorded")
+    model_review = packet.get("model_review")
+    if isinstance(model_review, Mapping) and model_review.get("status") == "injected":
+        reviewers = model_review.get("reviewers") or []
+        errors = model_review.get("errors") or []
+        lines.append(
+            f"model review: injected, {len(reviewers)} reviewer(s), "
+            f"{model_review.get('findings', 0)} finding(s), "
+            f"agreement={model_review.get('agreement', 0)}, "
+            f"dissent={model_review.get('dissent', 0)}"
+            + (f", {len(errors)} reviewer error(s)" if errors else "")
+            + "; unverified, agreement is not correctness")
+        for entry in reviewers:
+            if not isinstance(entry, Mapping):
+                continue
+            detail = (f" ({entry['error']})"
+                      if entry.get("error") else "")
+            lines.append(
+                f"  {entry.get('name')}: {entry.get('status')}, "
+                f"{entry.get('findings', 0)} finding(s){detail}")
+    library = packet.get("library_hints")
+    if isinstance(library, Mapping):
+        hints = library.get("hints") or []
+        if library.get("state") in {"disabled", "off"}:
+            lines.append(
+                f"library hints: {library.get('state')}; not checked")
+        else:
+            lines.append(
+                f"library hints: {library.get('state')}, {len(hints)} "
+                f"candidate(s) from {library.get('counts', {}).get('files', 0)} "
+                "file(s); advisory only, nothing was refactored")
+            for hint in hints:
+                lines.append(
+                    f"  {hint.get('file')}::{hint.get('symbol')} "
+                    f"{hint.get('capability')} -> {hint.get('package')} "
+                    f"({hint.get('availability')}, "
+                    f"{hint.get('confidence')})")
     ocelot = packet.get("ocelot")
     if isinstance(ocelot, Mapping):
         clusters = ocelot.get("clusters") or []
@@ -2076,8 +2851,10 @@ def format_refusal(report: Mapping[str, Any]) -> str:
 
 __all__ = [
     "CodeReviewError", "DEFAULT_MAX_FILE_BYTES", "FAIL_ON", "FINDING_TYPES",
-    "OcelotClusterer", "PACKET_SCHEMA", "PreflightError", "ReviewRunner",
-    "SCHEMA", "SEVERITIES", "atomic_write", "exit_code", "format_packet",
-    "format_refusal", "packet_json", "parse_range", "preflight",
-    "review_diff", "review_range", "run_injected_review",
+    "MAX_REVIEW_DETAIL", "MAX_REVIEWER_ERROR_CHARS", "MAX_TEST_OUTPUT_BYTES",
+    "MAX_TEST_OUTPUT_LINES", "OcelotClusterer", "PACKET_SCHEMA",
+    "PreflightError", "ReviewRunner", "SCHEMA", "SEVERITIES", "TestRunner",
+    "atomic_write", "exit_code", "format_packet", "format_refusal",
+    "packet_json", "parse_range", "preflight", "review_diff", "review_range",
+    "run_injected_review", "run_injected_reviews", "run_injected_tests",
 ]

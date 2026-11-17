@@ -2,7 +2,10 @@ import { isAbsolute, resolve } from "node:path"
 import { Plugin } from "@opencode/plugin"
 import { Ozagia } from "./rpc.js"
 import {
+  DEFAULT_TASK_TIMEOUT_MS,
   InputError,
+  MAX_TASK_TIMEOUT_MS,
+  actionApplySpec,
   actionPreviewSpec,
   actionsListSpec,
   aperturesSpec,
@@ -10,6 +13,7 @@ import {
   researchViewSpec,
   resourcesCheckSpec,
   runOzagia,
+  runTask,
   settingsSchemaSpec,
   settingsValuesSpec,
   statusSpec,
@@ -43,6 +47,11 @@ function optionTimeout(value: unknown): number {
   return Math.min(MAX_TIMEOUT_MS, Math.max(MIN_TIMEOUT_MS, Math.trunc(value)))
 }
 
+function optionTaskTimeout(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return DEFAULT_TASK_TIMEOUT_MS
+  return Math.min(MAX_TASK_TIMEOUT_MS, Math.max(MIN_TIMEOUT_MS, Math.trunc(value)))
+}
+
 function runnerConfig(options: Record<string, unknown>, directory: string): RunnerConfig {
   const python = optionText(options.python) ?? DEFAULT_PYTHON
   const configuredRoot = optionText(options.root)
@@ -56,6 +65,7 @@ function runnerConfig(options: Record<string, unknown>, directory: string): Runn
     python,
     root,
     timeoutMs: optionTimeout(options.timeoutMs),
+    taskTimeoutMs: optionTaskTimeout(options.taskTimeoutMs),
   }
 }
 
@@ -117,6 +127,15 @@ export default Plugin.define({
         run(() => actionsListSpec(), context.signal),
       actionPreview: async (input, context) =>
         run(() => actionPreviewSpec(config.root, input as Record<string, unknown>), context.signal),
+      actionApply: async (input, context) =>
+        run(() => actionApplySpec(config.root, input as Record<string, unknown>), context.signal),
+      taskRun: async (input, context) => {
+        try {
+          return await runTask(config, input, context.signal)
+        } catch (error) {
+          return invalid(error)
+        }
+      },
     })
 
     return async () => {

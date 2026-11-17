@@ -126,11 +126,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
-from ozagia.config import repo_root, state_dir
+from ozagia.config import (
+    REPO_CONFIG_DIRNAME,
+    REPO_CONFIG_FILENAME,
+    repo_root,
+    state_dir,
+)
 
 SCHEMA = 1
-REPO_CONFIG_DIRNAME = "ozagia"
-REPO_CONFIG_FILENAME = "config.toml"
 ENV_USER_CONFIG = "OZAGIA_USER_CONFIG"
 ENV_STATE_DIR = "OZAGIA_STATE_DIR"
 
@@ -2192,6 +2195,17 @@ def validate_value(key: str, value: Any) -> Any:
     return _coerce_value(setting, value, where=setting.key)
 
 
+def validate_file_value(key: str, value: Any, *, where: str = "") -> Any:
+    """Validate one raw TOML value without the CLI string coercion.
+
+    File layers are strict about types: a TOML string is not accepted where
+    the registry declares a string_list. ``where`` names the file and table in
+    error messages.
+    """
+    setting = _setting_for_key(key)
+    return _validate(setting, value, where=where or setting.key)
+
+
 def set_values(root: str | Path | None, values: Mapping[str, Any],
                scope: str = "repo", dry_run: bool = True) -> dict[str, Any]:
     """Validate and write several settings in one atomic update.
@@ -2404,6 +2418,7 @@ __all__ = [
     "set_values",
     "testing_overrides",
     "user_config_path",
+    "validate_file_value",
     "validate_value",
     "values",
 ]

@@ -166,16 +166,61 @@ tool output. The edit result carries:
 
 A hint failure never fails the edit. `off` and
 `$OZAGIA_LIBRARY_HINTS=0` produce no hints, no `meta` counters and no events.
-Built-in (non-handled) edits are not hooked yet; that remains a gap.
 
-`ozagia daemon` sums those `meta` counters into
-`stats.library_hints`, `stats.library_hint_files` and
-`stats.library_hints_suppressed`.
+Built-in edits, writes and patches are covered by the daemon's `after` path.
+For `after` of `edit`, `write` or `patch`, the daemon takes the changed paths
+(`meta.edited_files`, the path the tool names, or the patch's files) and
+merges the paths the patch text parses to when the meta list is absent or
+incomplete (`ozagia.intent.call_paths.patch_paths`). It skips a file it just
+annotated for the same session and unchanged content, and appends at most
+`hints.max_per_edit` `[ozagia] library hint:` lines. The answer carries:
 
-`hints_for_paths(root, paths, ...)` is the library surface for later code
-review and repo-scan sections. It takes the explicit changed paths and
-optional before-text. Without before-text, every symbol in the named files is
-treated as new/changed because the caller already selected those files.
+- `meta.library_hints_builtin`: hints shown after the built-in call;
+- `meta.library_hint_builtin_files`: files that produced one;
+- `meta.library_hints_suppressed`: candidates suppressed.
+
+A failure in the hint layer is logged and never fails the tool. A failed
+built-in edit (`builtin_error`) and an edit miss get no hints, and `off` /
+`$OZAGIA_LIBRARY_HINTS=0` short-circuit before any read. Hints from a handled
+call are not repeated by a later `after` for the same unchanged file. Shell is
+not a library-hint tool: command-derived shell paths feed the created-file
+ledger and the working set, never the hint layer.
+
+`ozagia daemon` sums the handled counters into `stats.library_hints`,
+`stats.library_hint_files` and `stats.library_hints_suppressed`, and the
+built-in counters into `stats.library_hints_builtin` and
+`stats.library_hint_builtin_files`.
+
+## Code review and repository scan
+
+Both surfaces are read-only and never record hint events.
+
+`ozagia.core.code_review` adds a `library_hints` packet section by default for
+the changed source files (not tests, docs, generated or binary files, and not
+deleted files). It reads the base commit's text for modified and renamed files
+so gentle mode reports only new or changed symbols. Per-file hints respect
+`hints.max_per_edit`; the packet caps the list at 10 and records whether it was
+truncated. A hint has the file, symbol, capability, package, availability,
+confidence and rule-label evidence; no file contents are stored. The packet
+reports `state` (`ready`, `no_hints`, `no_files`, `off`, `disabled` or `error`),
+`recorded: false` and `truth_assessed: false`. `--no-library-hints` removes the
+check; `[hints] library = "off"` and `$OZAGIA_LIBRARY_HINTS=0` leave it off.
+
+`ozagia.core.repo_scan` adds a `library_reuse` category. It samples at most 20
+source files per scan: changed files first, then the highest-churn and
+highest-degree indexed files. At most five hints become opportunities, each
+carrying a file, capability, package, availability and confidence. The report
+also has a `library_hints` object with the mode, state, sampled files and
+counts. No hint means an explicit no-candidate note, not a clean bill; the
+category is absent when hints are disabled with `--no-library-hints` or the
+settings. The global `not_assessed` list always says that library reuse is
+heuristic and that no refactor or dependency change was made.
+
+`hints_for_paths(root, paths, ...)` is the library surface used by both: it
+takes the explicit file list and optional before-text. Without before-text,
+every symbol in the named files is treated as new/changed because the caller
+already selected those files.
+
 
 ## Limits and non-goals
 
@@ -199,5 +244,7 @@ ruff check src tests
 
 The tests cover the retry/tenacity example, declared/imported suppression,
 standard-library preference, gentle versus strict, off mode, the per-file cap,
-deterministic ordering, metadata-only events, the CLI and the intent/daemon
-counters. They use no network and install nothing.
+deterministic ordering, metadata-only events, the CLI, the intent/daemon
+counters, the built-in `after` path (including opt-out and deduplication), the
+code-review packet section and the repository scan's `library_reuse` category.
+They use no network and install nothing.

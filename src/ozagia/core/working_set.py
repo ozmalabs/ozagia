@@ -40,7 +40,11 @@ failing in the root's record (`load_test_record`, kept in
 `<state dir>/working_set/tests.json` so it outlives the daemon; it holds
 test ids, outcomes, times and the rerun prefix, never failure messages or
 command lines), each with the time of the first run that failed it,
-running jobs, and the MCP tools to prefer, at most `BRIEF_MAX_CHARS`.
+running jobs, linked reference checkout snapshot and pin status, and the MCP
+tools to prefer, at most `BRIEF_MAX_CHARS`. Reference status is bounded; it
+warns when a linked index is missing, stale, unknown, or awaiting reindex after
+a sync. Daemon session briefs request a bounded background update; hook
+fallbacks only report status.
 The brief, and the working set text the daemon renders, also list the
 open and claimed goals with unmet criteria (`ozagia.core.goals`).
 
@@ -1236,12 +1240,106 @@ def _git(root: Path, *args: str) -> str | None:
     return proc.stdout if proc.returncode == 0 else None
 
 
+def _reference_status_lines(root: Path, *, schedule_sync: bool = False) -> list[str]:
+    """Render bounded reference freshness and optionally schedule its update."""
+    try:
+        from ozagia.core import federation
+        reference_report = federation.reference_status(root)
+        references = (reference_report.get("references")
+                      or reference_report.get("reference_repos") or [])
+        reference_errors = reference_report.get("errors") or []
+        if not isinstance(references, list):
+            references = []
+        if not references and not reference_errors:
+            return []
+        request_errors: list[Any] = []
+        if schedule_sync:
+            # This API schedules a bounded background worker and returns
+            # immediately; the brief never waits for network or checkout work.
+            request_report = federation.request_reference_sync(root, limit=6)
+            request_errors = request_report.get("errors", [])
+            reference_report = federation.reference_status(root)
+            references = (reference_report.get("references")
+                          or reference_report.get("reference_repos") or references)
+            reference_errors = reference_report.get("errors") or reference_errors
+        with federation.without_reference_sync():
+            report = federation.status(root)
+    except Exception:  # noqa: BLE001 - session brief must remain available
+        return ["linked reference status unavailable; verify before relying on it"]
+
+    root_status: dict[Path, dict[str, Any]] = {}
+    for member in report.get("members", []):
+        if not isinstance(member, dict) or not isinstance(member.get("root"), str):
+            continue
+        try:
+            root_status[Path(member["root"]).expanduser().resolve()] = member
+        except (OSError, RuntimeError, ValueError):
+            continue
+
+    lines = ["linked reference snapshot status (updates run in bounded background work):"]
+    if reference_errors or request_errors:
+        count = len(reference_errors) + len(request_errors)
+        lines.append(f"  {count} reference manifest or update error(s); verify declared paths")
+    omitted = max(0, len(references) - 6)
+    for index, reference in enumerate(references[:6], 1):
+        if not isinstance(reference, dict):
+            lines.append(f"  reference {index}: invalid manifest entry")
+            continue
+        raw_path = reference.get("path")
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            lines.append(f"  reference {index}: path missing; snapshot unknown")
+            continue
+        path = Path(raw_path).expanduser()
+        if not path.is_absolute():
+            path = root / path
+        try:
+            member = root_status.get(path.resolve())
+        except (OSError, RuntimeError, ValueError):
+            member = None
+        snapshot_state = str(member.get("state", "unknown")) if member else "missing"
+        sync = reference.get("sync")
+        sync_state = (sync.get("state") if isinstance(sync, dict)
+                      else reference.get("state"))
+        pin = reference.get("pin")
+        head = (sync.get("head") if isinstance(sync, dict) else None)
+        if not isinstance(head, str) or not head:
+            head = member.get("head") if member else None
+        if isinstance(pin, str) and pin:
+            if isinstance(head, str) and head:
+                pin_state = "match" if head == pin else "mismatch"
+            elif sync_state == "pinned":
+                pin_state = "match"
+            else:
+                pin_state = "unknown"
+        else:
+            pin_state = "not pinned"
+        label = member.get("name") if member else None
+        if not isinstance(label, str) or not label.strip():
+            label = f"reference {index}"
+        label = re.sub(r"[^A-Za-z0-9 ._-]", "", " ".join(label.split()))[:40]
+        label = label or f"reference {index}"
+        parts = [f"snapshot {snapshot_state}", f"pin {pin_state}"]
+        if sync_state == "error":
+            parts.append("last sync failed")
+        elif sync_state == "updated" or (isinstance(sync, dict) and sync.get("updated")):
+            parts.append("index stale until reindexed")
+        elif sync_state == "pending":
+            parts.append("sync pending")
+        elif sync_state == "not_checked":
+            parts.append("sync not checked")
+        lines.append(f"  {label}: {', '.join(parts)}")
+    if omitted:
+        lines.append(f"  ... {omitted} more reference checkout(s)")
+    return lines
+
+
 def session_brief(root: str | Path, max_chars: int = BRIEF_MAX_CHARS, *,
                   tests: list[tuple[str, dict[str, Any]]] | None = None,
                   last_test: dict[str, Any] | None = None,
                   jobs: list[dict[str, Any]] | None = None,
                   jobs_enabled: bool | None = None,
-                  goal_lines: list[str] | None = None) -> str:
+                  goal_lines: list[str] | None = None,
+                  schedule_reference_sync: bool = False) -> str:
     """Dirty files, the last commits, the tests still failing in the root's
     test record (each with the time of the first run that failed it),
     then the open and claimed goals with unmet criteria
@@ -1273,6 +1371,8 @@ def session_brief(root: str | Path, max_chars: int = BRIEF_MAX_CHARS, *,
     if len(goal_block) < 2:
         goal_block = []
     lines = [BRIEF_HEADER]
+    lines.extend(_reference_status_lines(root,
+                                         schedule_sync=schedule_reference_sync))
     branch = _git(root, "rev-parse", "--abbrev-ref", "HEAD")
     status = _git(root, "status", "--porcelain=v1", "--untracked-files=normal")
     if status is not None:

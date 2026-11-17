@@ -60,6 +60,48 @@ secret_allowlist = [
 silence; the caller asked for the scan. `block_secrets` is the only global
 switch for the commit/push gate.
 
+### Precedence and files
+
+The same table is read from two files through
+`ozagia.config.load_config_section`:
+
+1. the legacy file: `$OZAGIA_CONFIG`, `<root>/.ozagia.toml` or the state
+   directory's `config.toml` (highest priority);
+2. the versioned `<root>/ozagia/config.toml`.
+
+The legacy file wins per key; the versioned file supplies only the keys the
+legacy file leaves unset. Every key shown above is supported in either file:
+
+```toml
+# ozagia/config.toml: used for the keys .ozagia.toml does not define
+[security]
+enabled = true
+tools = ["bandit"]
+exclude = ["tests/**", "vendor/**"]
+block_secrets = true
+secret_allowlist = ["path:tests/fixtures/**"]
+```
+
+`ozagia.core.security.load_config(root)` returns the effective values plus
+`sources` (per key: `legacy`, `repo` or `default`), `files` (both paths),
+`error`/`errors`, and `legacy_error`/`repo_error`. A malformed legacy file
+stays forgiving: its values are skipped and no exception is raised. A
+malformed or invalid versioned file is reported rather than silently ignored;
+`load_config_strict(root)` raises `ConfigError`. A scan still completes and
+includes the error in `config.error`, `config.errors` and its warnings. Values
+from the versioned file are type-checked like the registry (booleans, string
+lists, `fail_on`, and an integer `max_findings`, capped at 1000). A legacy
+value with the wrong type is ignored, as before. Unknown or nested `[security]`
+keys are ignored by the scan and reported in `ProjectConfig.unmapped` and by
+`ozagia doctor`.
+
+`ozagia doctor` text names both configuration paths, the active source, the
+precedence and a bounded unmapped count (for example `unmapped=20 of 25…`); it
+never prints setting values or secrets. `ozagia.adapters.registry` keys its
+reload cache on both files (path, `mtime_ns`, size and content digest), so
+editing the non-active `ozagia/config.toml` invalidates it; `reload=True` still
+forces a rebuild.
+
 ## Graph-derived rules
 
 The scan loads `.ozagia/graph.json` read-only. A missing, stale or unverified
@@ -290,5 +332,5 @@ The tests cover graph sink paths, secret redaction/fingerprinting, hardcoded
 keys/TLS, dependency inventory, injected tool provenance, unavailable tools,
 the network gate, dedupe/caps, CLI exit codes, the staged commit gate, push
 range gate, allowlists, one-time overrides, disabled gates, binary/large-file
-skips and code-review/repo-scan integration. No test uses the network or a
-model.
+skips, legacy/versioned `[security]` precedence and malformed-file handling,
+and code-review/repo-scan integration. No test uses the network or a model.

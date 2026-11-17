@@ -132,6 +132,21 @@ def test_config_defaults_and_validation(tmp_path, layout):
             load_project_config(tmp_path)
 
 
+def test_versioned_config_supplies_tests_settings(tmp_path, layout):
+    root, _mem = _make(tmp_path, None, {
+        "ozagia/config.toml": '[testing]\ncaptured = "affected"\ncache = true\n'})
+    cfg = load_project_config(root)
+    assert (cfg.tests_select, cfg.tests_cache) == ("affected", True)
+
+
+def test_legacy_tests_select_wins_over_the_versioned_config(tmp_path, layout):
+    root, _mem = _make(
+        tmp_path, '[tests]\nselect = "all"\n',
+        {"ozagia/config.toml": '[testing]\ncaptured = "affected"\ncache = true\n'})
+    cfg = load_project_config(root)
+    assert (cfg.tests_select, cfg.tests_cache) == ("all", True)
+
+
 def test_default_config_runs_everything_and_writes_nothing(tmp_path, layout):
     root, mem = _make(tmp_path, None)
     for _ in range(2):

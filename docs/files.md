@@ -79,9 +79,13 @@ manifests are kept (oldest pruned) and each is capped at 5000 files with a
   `_reason` input field (else `unknown`). An edit of an existing file is not
   recorded as a creation. Key edits are not creations.
 - `after` for a built-in `edit`, `write`, `patch` or `shell` records the
-  newly created files among `meta.changed_paths`, plus the file an edit or
-  write names. It runs one bounded `git status` pathspec check for those
-  paths only, never a whole-repository scan.
+  newly created files among `meta.changed_paths`/`edited_files`, plus the
+  file an edit or write names. When those lists are absent or incomplete, a
+  `patch` contributes the files its patch text parses to, and a `shell`
+  contributes the write targets its command line names (see below). The
+  lists are merged, deduplicated and capped at 20 paths. It runs one bounded
+  `git status` pathspec check for those paths only, never a whole-repository
+  scan.
 - `session_event` `start` writes the manifest; `end` records the delta.
   `compact` does nothing. A missing baseline uses the unattributed fallback
   described above.
@@ -102,6 +106,47 @@ Programmatic entry points: `record_file(root, rel, ...)` for one file,
 `record_paths(root, paths, ...)` for several, `scan_new_files(root, ...)`
 for untracked/added files (`paths=` restricts it), and
 `session_snapshot(root, session, ...)` / `session_delta(root, session, ...)`.
+
+## Command-derived paths
+
+`ozagia.intent.call_paths` derives the paths a `shell` command or apply_patch
+`patch` names, without running anything. The daemon uses them for the ledger,
+the session working set and the library hints when the harness's meta does
+not name the files, or names only some. They are read-only, deterministic,
+bounded (64 paths by default, at most 256) and never scan the repository.
+
+`command_paths(command, cwd=..., root=...)` recognises:
+
+- output redirections `>`, `>>`, `>|`, `<>`, `&>`, `&>>` and a descriptor
+  form such as `2>` or `10>>`; descriptor duplications (`2>&1`, `>&2`) are
+  not files;
+- `tee`, `touch`, `mkdir`, `rm`, `rmdir`, `truncate`;
+- `cp`, `mv`, `install`, `ln` (their path operands, sources included);
+- `sed -i`/`--in-place` and `perl -i` (the in-place files, not the script);
+- `dd of=FILE`;
+- `git apply` and `patch` when a patch file is named (an argument, `-i`, or
+  an input redirect): the unified diff's file headers give the targets.
+  `git apply -` (stdin) and the non-writing `--check`, `--stat`, `--cached`
+  and `--index` forms give nothing.
+
+Compound commands and pipelines are split with the intent layer's shell
+tokenizer. A literal `cd DIR &&`, `cd DIR;` or `cd DIR` inside a subshell
+changes the directory for the commands after it, and a shell's `-c` script
+is parsed once more. Relative paths resolve against the call's `cwd`
+(`workdir`) and are returned relative to the repository root. Absolute paths
+outside the root, `..` escapes, symlinks leaving the root, `.git`, the state
+directory (`.ozagia`) and NUL/newline names are rejected. Duplicates keep
+their first position.
+
+The extractor deliberately does not guess. `python -c`, `node -e`, `xargs`,
+`eval`, `find -exec`, `watch`, command substitution and wildcard, brace or
+tilde words yield no path from the code they would run. A command whose
+paths depend on an unparsed script therefore contributes nothing; the
+session-end manifest remains the fallback. `patch_paths(inp, ...)` uses
+`intent.patch.parse_patch` for the apply_patch format and falls back to
+explicit `path`/`filePath`/`files` keys only when the patch text is absent or
+unparseable. Any parse error or unsafe path is ignored, so bookkeeping never
+fails the tool call.
 
 ## Commands
 
@@ -265,8 +310,9 @@ list, and apply ignores anything that was not in its plan.
   cache/build trees, `.git` and `.ozagia`. A file that never appears in the
   manifest (beyond its 5000-file or 64 MiB hash budget, or created after the
   session end) is not attributed.
-- A built-in `patch` or `shell` that creates a file outside
-  `meta.changed_paths` is not recorded until a session delta sees it.
+- A built-in `patch` or `shell` whose patch text or command line the
+  extractor cannot read (an arbitrary script, command substitution, a patch
+  piped or heredoc'd on stdin) is not recorded until a session delta sees it.
 - Move pairing is by content hash and size: a move that also changes content
   appears as a delete plus a new file.
 - The ledger, manifests, cleanup plans, purge plans and trash manifests are

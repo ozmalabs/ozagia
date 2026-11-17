@@ -1,15 +1,29 @@
 # OpenCode add-in
 
-**Status:** read-only add-in extension (plan item 8 follow-on; task-class
-catalogue for plan item 11). The package lives in
-[`addins/opencode/`](../addins/opencode/); this page records its design, the
-CLI mapping, the GUI surface and the API gaps found while building it.
+**Status:** preview-first add-in (plan item 8 follow-on; task-class catalogue
+for plan item 11; explicit apply/run controls from the "Not yet" list). The
+package lives in [`addins/opencode/`](../addins/opencode/); this page records
+its design, the CLI mapping, the GUI surface and the API gaps found while
+building it.
 
 The plan item is [item 8, OpenCode add-in MVP](plans/2026-11-16_ui_and_agent_features.md),
-with the task-class catalogue from item 11. It reuses the presentation layer
-from items 1 and 6: the same apertures, view model and status snapshot that the
-CLI and static HTML export use. The add-in does not import Python and does not
-duplicate graph queries in TypeScript.
+with the task-class catalogue from item 11, explicit action apply from item 14
+and an executable task launcher for items 10–11. It reuses the presentation
+layer from items 1 and 6: the same apertures, view model and status snapshot
+that the CLI and static HTML export use. The add-in does not import Python and
+does not duplicate graph queries in TypeScript.
+
+The add-in is no longer strictly read-only. It has exactly two mutating
+surfaces, both preview-first and explicitly confirmed:
+
+- `actionApply` consumes the one-time token from an action preview and runs
+  `actions_cli apply`;
+- `taskRun` resolves a library task by id and runs it through
+  `tasks_cli run --executor local --allow-exec`.
+
+Everything else remains read-only: no setting write, service start/stop
+without a previewed action, graph rebuild, index build, edit/write/patch tool,
+model call, provider call, network fetch or arbitrary shell.
 
 ```text
 ozagia CLI JSON  ->  server part (RPC)  ->  GUI Solid panel / settings page
@@ -44,7 +58,8 @@ Local install (absolute path, object form for options):
       "options": {
         "python": "/home/matt/ozmadev/ozagia/.venv/bin/python",
         "root": "/home/matt/ozmadev/ozagia",
-        "timeoutMs": 20000
+        "timeoutMs": 20000,
+        "taskTimeoutMs": 900000
       }
     }
   ]
@@ -54,11 +69,11 @@ Local install (absolute path, object form for options):
 The object form uses the same local-path resolution as the string entry.
 
 `python` defaults to `python3`, `root` to the plugin location directory
-(`ctx.location.directory`), and `timeoutMs` to 20000 ms with a 1000–120000 ms
-clamp. A relative `root` is resolved against the location directory. The
-interpreter must be able to import `ozagia`; a bare checkout is not on
-`sys.path`, so use an installed environment or set `PYTHONPATH` for the OpenCode
-process.
+(`ctx.location.directory`), `timeoutMs` to 20000 ms with a 1000–120000 ms
+clamp, and `taskTimeoutMs` to 900000 ms with a 1000–900000 ms clamp. A relative
+`root` is resolved against the location directory. The interpreter must be able
+to import `ozagia`; a bare checkout is not on `sys.path`, so use an installed
+environment or set `PYTHONPATH` for the OpenCode process.
 
 The GUI is experimental. It is built and typed against `@opencode/plugin`
 2.3.0, the version whose `gui()` Vite preset, `Panel`, `Command`, `Style`,
@@ -87,8 +102,11 @@ Every handler builds a fixed argument array and calls `runOzagia` in
 - no shell;
 - `stdio: ["ignore", "pipe", "pipe"]` (closed stdin);
 - `cwd = root`;
-- a wall-clock timeout that sends `SIGKILL`;
+- a wall-clock timeout that sends `SIGKILL` (20 s for read-only CLIs;
+  `taskTimeoutMs`, at most 15 minutes, for a task run);
 - an 8 MiB stdout cap and a 64 KiB stderr tail;
+- exact-value scrubbing for confirmation tokens and task input values of eight
+  or more characters before any command display or error tail is returned;
 - JSON parsing, with a structured error envelope for every failure.
 
 Exit status 0 and 1 are accepted. The read-only CLIs use 1 for a report that
@@ -126,7 +144,9 @@ schema and these methods:
 | `tasksValidate()` | `{}` | `python -m ozagia.task_library_cli validate --root ROOT --json` | Library validation: ok, counts, errors, warnings, issues and loaded entries. |
 | `tasksCatalog()` | `{}` | `python -m ozagia.task_library_cli catalog --root ROOT --json` | Domain counts and the same catalogue metadata, for clients that prefer one object. |
 | `actionsList()` | `{}` | `python -m ozagia.actions_cli list --json` | Action catalogue with mutating/destructive/live-gated flags. |
-| `actionPreview()` | `{action, name?, live?, network?, maxBytes?, scope?, wait?, idleTimeout?}` | `python -m ozagia.actions_cli preview ACTION --root ROOT ... --json` | Preview only; returns the operation, argv, risks and token. No `actionApply` exists. |
+| `actionPreview()` | `{action, name?, live?, network?, maxBytes?, scope?, wait?, idleTimeout?}` | `python -m ozagia.actions_cli preview ACTION --root ROOT ... --json` | Preview only; returns the operation, argv, risks and a one-time token. |
+| `actionApply()` | `{action, confirm, ...the same bounded arguments}` | `python -m ozagia.actions_cli apply ACTION --confirm TOKEN --root ROOT ... --json` | Explicit apply; the token is argv-only and displayed as `<redacted>`. |
+| `taskRun()` | `{id, inputs?}` | `task_library_cli show ID --root ROOT --json` then `tasks_cli run PATH --executor local --allow-exec --root ROOT --input NAME=VALUE ... --json` | Resolves the path from the library; no approve flag. |
 
 Input rules:
 
@@ -136,12 +156,26 @@ Input rules:
   `^[A-Za-z][A-Za-z0-9_.-]{0,63}$` before it reaches argv;
 - every string has a maximum length; changed-file lists are capped at 500;
   depth is an integer 0–32; memory/disk values are finite and non-negative;
-- `actionPreview` validates the action against the fifteen published names and
-  rejects an argument the chosen action does not accept (for example `live` on
-  `daemon.status`, or `scope` on `service.start`). `name` is required for
-  service and tunnel actions and is bounded to 128 characters with no control
-  characters; `maxBytes` is an integer 0–65536; `wait` is 0–600 s and
-  `idleTimeout` is 0–86400 s;
+- `actionPreview` validates the action against the fifteen published names
+  (`integration.install`, `integration.uninstall` and `integration.verify`
+  remain CLI-only) and rejects an argument the chosen action does not accept
+  (for example `live` on `daemon.status`, or `scope` on `service.start`).
+  `name` is required for service and tunnel actions and is bounded to 128
+  characters with no control characters; `maxBytes` is an integer 0–65536;
+  `wait` is 0–600 s and `idleTimeout` is 0–86400 s;
+- `actionApply` repeats those action/argument checks and requires `confirm` to
+  match `core.actions._TOKEN`: `^[A-Za-z0-9_-]{20,128}$`, which also rejects
+  control characters and spaces. The token is not trimmed or echoed;
+- `taskRun` validates `id` with the library regex, takes at most 16 inputs,
+  requires names to match `^[A-Za-z][A-Za-z0-9_.-]{0,63}$`, and requires string
+  values of at most 4096 characters with no NUL or control characters. The
+  whole argument vector is capped at 64 KiB. The handler rejects an invalid
+  request before spawning anything;
+- the task spec path is never accepted from the caller. It comes from
+  `task_library_cli show`, must be absolute and named `<id>.toml`, and must sit
+  under `<root>/ozagia/tasks` for a repo override or the package `task_specs`
+  tree for a built-in. A missing, mismatched or out-of-library path returns a
+  structured `task_path_invalid` envelope with no run;
 - the handler repeats the validation in TypeScript, so a caller that bypasses
   the JSON-schema validator still gets `{ ok: false, error: { code:
   "invalid_input" } }` rather than an unbounded argv.
@@ -149,7 +183,10 @@ Input rules:
 `command` in the envelope is a short display string such as
 `python3 -m ozagia.view_cli --aperture architecture --format json`. Free-form
 values (paths, commit messages, changed files, action target names) are not
-echoed there.
+echoed there. The apply display always says `--confirm <redacted>`, and a task
+run display names input keys with `<redacted>` values. The runner also scrubs
+the exact token (and input values of eight or more characters) from any error
+tail, in addition to the credential-shape redaction.
 
 ### Root selection
 
@@ -178,7 +215,8 @@ actions and tasks are listed when their stored tab ids are open; their commands
 call `ctx.layout.open(`${ctx.id}:${tab}`, session, { background: true })`. The
 settings command calls `ctx.layout.settings("ozagia-settings")`; it does not
 need a routed session. Panel commands are disabled when no session is routed.
-No command mutates anything.
+The commands themselves only open panels or run read-only checks; mutation
+stays inside the Actions and Tasks tabs and their explicit confirmations.
 
 Labels are rendered as Solid text/attributes. There is no `innerHTML`; recorded
 node/edge labels, findings, file paths and error text are escaped by the
@@ -285,22 +323,34 @@ empty state. Write previews and applies remain CLI-only.
 
 ### Actions
 
-The Actions tab reads `actionsList` and shows every action with `read-only`,
-`mutating`, `destructive` and `live-gated` badges. Selecting an action shows only
-its documented arguments: target name, integration name/scope, service-log byte
-cap, daemon wait/idle timeout, and the tunnel live/network gates. Preview calls
-`actionPreview` and renders:
+The Actions tab reads `actionsList` and shows every action this add-in
+supports, with `read-only`, `mutating`, `destructive` and `live-gated` badges.
+Selecting an action shows only its documented arguments: target name,
+integration name/scope, service-log byte cap, daemon wait/idle timeout, and the
+tunnel live/network gates. Preview calls `actionPreview` and renders:
 
 - operation, expected effect, current state and manager call;
 - the exact argv as a JSON array (no shell);
 - preconditions, risks and notes;
-- the one-time confirmation token, clearly labelled display-only.
+- the one-time confirmation token, clearly labelled.
 
-The tab has no Apply button and the RPC has no `actionApply` method. Applying
-requires the separate `actions_cli apply` command after a person reviews the
-operation, argv and risks. A preview writes one pending token under
-`.ozagia/actions/pending` (mode `0600`, ten-minute TTL); it starts, stops,
-signals and connects nothing.
+After a preview with a token, the **Apply action** card repeats the action,
+kind and risks, requires an explicit checkbox confirmation, and calls
+`actionApply` with the same bounded arguments plus the token. Preview never
+applies by itself, and editing the form does not silently retarget the token:
+the apply call reuses the exact arguments that produced the preview. The result
+shows state, `ok`, mode, an error string, the structured result, the audit note
+and any audit warning. A refused or failed apply is rendered as a structured
+error, not hidden.
+
+The token is argv-only. The GUI command shape is
+`python -m ozagia.actions_cli apply ACTION --confirm <redacted> --json`; the
+actual RPC carries the token, and the runner scrubs it from the display command
+and error tails. The token remains visible in the preview card because a person
+needs to see what was issued; it is never copied into command text. A preview
+writes one pending token under `.ozagia/actions/pending` (mode `0600`,
+ten-minute TTL). Apply re-checks the preconditions, consumes the token and
+performs the action through the landed managers.
 
 ### Tasks
 
@@ -324,45 +374,73 @@ then the selected class through `tasksShow`:
   `python -m ozagia.tasks_cli run PATH --dry-run --root ROOT ... --json`
   command. Each declared, non-automatic input becomes an editable
   `--input NAME=<value>` placeholder. It never contains `--allow-exec` or
-  `--approve`, and the add-in never executes it.
+  `--approve`, and the add-in never executes the copied text;
+- run: a **Run task (local executor)** form fills the declared inputs; inputs
+  the runner supplies (`repo_root`, `run_id`, `state_dir`) are listed rather
+  than asked for. The first click opens a confirmation showing the task id and
+  the exact redacted command; only the second click calls `taskRun`. Nothing
+  runs on selection, input edits or refresh.
+
+The run RPC resolves the task with `task_library_cli show` and takes
+`entry.path` from that JSON. It never accepts a caller path and has no fallback
+for a missing or invalid one. The path must be absolute, named `<id>.toml`, and
+inside `<root>/ozagia/tasks` (repo override) or the package `task_specs` tree
+(built-in). Inputs are bounded to 16 names, the library alphabet, 4096-character
+strings without control characters, and 64 KiB of total argv. The task call uses
+the `taskTimeoutMs` budget (default and maximum 15 minutes), while
+`LocalExecutor`'s pytest runner is itself capped at 900 s. The call never passes
+`--approve`, so mutating, model and unimplemented tools remain blocked.
+
+The result shows run id, status, stop reason, exit code, executed flag, step
+count, a findings count when the output exposes one, the explicit
+`what_was_not_assessed` list and a bounded output tail (4000 characters).
 
 `list` refuses an invalid library without printing JSON. The tab therefore
 falls back to the entries that `validate` still reports, and labels the state
 "catalogue read from validate"; the validation card carries the actual errors.
-`show` also refuses an invalid library, so the detail and copy cards stay
+`show` also refuses an invalid library, so the detail, copy and run cards stay
 hidden until validation passes, and the tab says why. A missing root, a broken
 interpreter or a failed `show` is shown as a structured error with retry, not as
 an empty successful catalogue.
 
-The tab does not run a task, approve a mutation, copy a class into
-`ozagia/tasks/` or write any file. Browsing, copying the display command and
-editing the repository configuration remain separate, explicit actions.
+The tab does not approve a mutating step, copy a class into `ozagia/tasks/` or
+call `task_library_cli copy`. Run is the only execution surface.
 
-## Read-only guarantees
+## Mutation surface and guarantees
 
-This slice is intentionally narrower than the full plan item. It does **not**:
+The add-in is narrower than the full plan item. Apart from `actionApply` and
+`taskRun`, it does **not**:
 
-- commit, merge, push, stage, edit, create or delete files;
-- apply a process/connection action, or start, stop, signal or autostart a
-  daemon, service, tunnel or job (the Actions tab only previews);
+- commit, merge, push, stage, edit, create or delete repository files;
+- start, stop, signal or autostart a daemon, service, tunnel or job without a
+  previewed action and its one-time token;
 - write a setting, or call `settings_cli set` (the Settings page only reads);
-- run a bounded task, call `tasks_cli run`, approve a mutating step, copy a
-  task class into `ozagia/tasks/` or call `task_library_cli copy`;
+- approve a mutating task step, copy a task class into `ozagia/tasks/` or call
+  `task_library_cli copy`;
 - download artifacts, install Ocelot, fetch references or call a model;
 - build or refresh the graph snapshot or a research investigation;
-- run tests or apply a test plan;
-- write repository files. A preview's pending token is the only state-dir write,
-  and it is bounded, `0600` and expires.
+- run tests or apply a test plan outside a task's `test` step;
+- expose an arbitrary shell, direct edit/write/patch tool or caller-supplied
+  spec path.
 
-The graph, status, testing, research and tasks panels read existing JSON. The
+The state-dir writes are the ones the landed CLIs already own: a preview's
+pending token (bounded, `0600`, ten-minute TTL), an apply's audit record and the
+task run's `manifest.json`, `events.jsonl`, `artifacts.json` and optional
+`output` under `.ozagia/tasks/`. No other repository file is written.
+
+The graph, status, testing, research and settings panels read existing JSON. The
 worktree/policy/resource commands on the RPC are checks, not actions. The action
 preview is the landed `core.actions` preview: it reads runtime state and returns
-a token, but never constructs a manager that could mutate state. The task
-catalogue only reads the library; its copied command is text. The CLI paths
-themselves are read-only by design (see [view](view.md), [status](status.md),
-[worktree](worktree.md), [resources](resources.md), [testing](testing.md),
-[settings](settings.md), [actions](actions.md), [task library](task_library.md)
-and [research UI](research_ui.md)).
+a token, but never constructs a manager that could mutate state. Apply is the
+landed `core.actions.apply`: it re-checks the token, preconditions and arguments,
+consumes the token and dispatches through the verified managers. The task
+catalogue only reads the library; its copied command is text. A task run is the
+landed `tasks_cli run --executor local --allow-exec`: it resolves the spec path
+from the library, runs only the declared read-only tools and never approves a
+mutation. The CLI paths themselves are documented in [view](view.md),
+[status](status.md), [worktree](worktree.md), [resources](resources.md),
+[testing](testing.md), [settings](settings.md), [actions](actions.md),
+[task library](task_library.md) and [research UI](research_ui.md).
 
 ## Build and tests
 
@@ -377,12 +455,14 @@ npm run build
 - `npm run typecheck` runs `tsc --noEmit` over `src` and `vite.config.ts`.
 - `npm test` runs `node --test tests/*.test.cjs`. The suite covers every
   argument builder, optional flags, bounds and enum rejection, task-id
-  validation, the copy-command builder and its shell quoting, action/argument
-  matching, `changed` repetition, credential redaction/tail capping, and the
-  subprocess wrapper (JSON parse, exit 1, redacted exit errors, timeout,
-  cancellation and stdout cap). It is offline and does not load
-  `@opencode/plugin`; `tests/load-ts.cjs` transpiles `src/runner.ts` and the pure
-  task-command module with the installed TypeScript package.
+  validation, the copy-command and redacted task-run builders, action/argument
+  matching, apply token validation and command/error redaction, task path
+  resolution and no-fallback behaviour, RPC schema shape, confirmation gating,
+  `changed` repetition, credential redaction/tail capping, and the subprocess
+  wrapper (JSON parse, exit 1, redacted exit errors, timeout, cancellation and
+  stdout cap). It is offline and does not load `@opencode/plugin`;
+  `tests/load-ts.cjs` transpiles `src/runner.ts` and the pure task-command,
+  mutation and schema modules with the installed TypeScript package.
 - `npm run build` uses `gui()` from `@opencode/plugin/gui/vite` and emits one
   CommonJS file at `dist/gui-experimental.cjs`. The bundle keeps `solid-js`,
   `solid-js/web`, `@opencode/plugin/gui` and `@opencode/plugin/rpc` external and
@@ -391,22 +471,22 @@ npm run build
 `dist/gui-experimental.cjs` and `package-lock.json` are committed so a local
 directory plugin loads without a build. `node_modules/` is ignored.
 
-Local verification on 2026-11-16 (Node 20.5.1, npm 9.8.0, Vite 7.3.8):
+Local verification on 2026-11-17 (Node 20.5.1, npm 9.8.0, Vite 7.3.8):
 
 - `npm run typecheck`: passed.
-- `node --test tests/*.test.cjs`: 20 tests passed, 0 failed, offline.
-- `npm run build`: one `dist/gui-experimental.cjs` (100.26 kB, 22.93 kB gzip).
-- A direct runner smoke test against this worktree returned valid JSON for
-  `settingsSchema`, `settingsValues`, `actionsList` and `actionPreview`;
-  `researchView` correctly returned a structured missing-investigation error.
-  Earlier checks covered `status`, `apertures`, `worktreeCheck`, `policyCheck`,
-  `resourcesCheck` and `testingPlan`. The task library commands were read
-  directly and through the builder: `list` returned 13 entries, `validate`
-  returned `ok: true` with one expected `evidence_table` warning, and `show`
-  returned the `diff_review` entry and spec.
-- The server registration was exercised with a mock `ctx.rpc.register` in the
-  earlier slice; the new handlers use the same wrapper and the pure builders
-  tested by the Node suite.
+- `node --test tests/*.test.cjs`: 38 tests passed, 0 failed, offline.
+- `npm run build`: one `dist/gui-experimental.cjs` (112.77 kB, 25.78 kB gzip).
+- The Node suite exercises apply argv/display separation and token scrubbing,
+  task id resolution, library path containment and no-fallback behaviour,
+  input/argv bounds, task timeout selection, the RPC schemas and the GUI
+  confirmation predicates with a fake interpreter. It does not run
+  `actions_cli apply` or a real task against this checkout.
+- Earlier slices' runner smoke tests covered `status`, `apertures`,
+  `worktreeCheck`, `policyCheck`, `resourcesCheck`, `testingPlan`,
+  `settingsSchema`, `settingsValues`, `actionsList`, `actionPreview` and
+  `researchView`; the task library commands were read directly and through the
+  builder (`list`, `validate`, `show`). The new handlers use the same wrapper
+  and the pure builders tested by the Node suite.
 - Vite printed its engine warning because this host has Node 20.5.1 (Vite 7
   asks for 20.19+ or 22.12+); the build still completed.
 
@@ -431,12 +511,16 @@ known gaps or host dependencies, not hidden behaviour:
    view.
 4. **Per-session root.** As above, the root is per plugin/server instance, not
    per routed session. `options.root` is the override.
-5. **No mutation surface.** There is no setting write, action apply, service
-   start/stop, tunnel start, review run, bounded-task run or reindex RPC. The
-   plan item lists those commands, but they remain behind their existing CLI
-   layers and confirmation flows. In particular, `actionPreview` returns a token
-   and the add-in deliberately has no `actionApply`, and the Tasks tab browses
-   the task library but has no run, approve or copy-into-repository method.
+5. **Exactly two mutation surfaces.** `actionApply` and `taskRun` are the only
+   methods that can change local state; there is still no setting write, direct
+   service/tunnel management outside a previewed action, review run, task
+   approve, copy-into-repository or reindex RPC. The Actions tab requires a
+   preview token plus a second checkbox confirmation; the Tasks tab requires a
+   second Run confirmation and never auto-runs. Action apply and task run are
+   asynchronous CLI calls, so a long task can be cancelled only by aborting the
+   host request, not by a cancel button. The local executor remains read-only:
+   mutating, model and unimplemented tools are blocked and there is no
+   `--approve` path in the add-in.
 6. **Research writes.** The Research tab is a projection only. Reference merge,
    screening revision, adjudication, fetch apply and manuscript controls are not
    exposed.

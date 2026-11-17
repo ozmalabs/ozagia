@@ -321,6 +321,43 @@ def test_runtime_context_is_read_only_and_never_creates_state(tmp_path):
     assert (tmp_path / "state" / "state.json").read_bytes() == before
 
 
+def test_merged_config_feeds_runtime_managers_and_status(tmp_path):
+    _write_config(tmp_path, """
+[relays.local]
+specs = [{ kind = "local" }]
+
+[runtime.services.api]
+command = ["python", "-m", "app"]
+""")
+    repo = tmp_path / "ozagia" / "config.toml"
+    repo.parent.mkdir()
+    repo.write_text("""
+[runtime.services.worker]
+command = ["python", "-m", "worker"]
+
+[runtime.tunnels.database]
+relay = "local"
+target = "db.example.test:5432"
+""", encoding="utf-8")
+    config = load_project_config(tmp_path)
+    assert [item.name for item in config.runtime_services] == ["api", "worker"]
+    assert [item.name for item in config.runtime_tunnels] == ["database"]
+
+    fake = FakeProcesses()
+    services = ServiceManager(
+        config, state_dir=tmp_path / "service-state",
+        process_factory=fake.factory, identity_reader=fake.identity)
+    assert [item["name"] for item in services.list()] == ["api", "worker"]
+
+    tunnels = TunnelManager(config, state_dir=tmp_path / "tunnel-state")
+    assert [item["name"] for item in tunnels.list()] == ["database"]
+
+    payload = runtime_status(config, state_dir=tmp_path / "missing-state")
+    assert [item["name"] for item in payload["services"]] == ["api", "worker"]
+    assert [item["name"] for item in payload["tunnels"]] == ["database"]
+    assert payload["relays"] == [{"name": "local", "kinds": ["local"]}]
+
+
 def test_runtime_status_and_logs_are_read_only_and_never_claim_connectivity(
     tmp_path, monkeypatch,
 ):

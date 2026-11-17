@@ -138,3 +138,152 @@ def test_doctor_reports_invalid_settings_without_crashing(
 
     assert cli.main(["doctor", "--root", str(tmp_path)]) == 0
     assert "Settings: invalid" in capsys.readouterr().out
+
+
+def test_doctor_reports_both_config_paths_precedence_and_unmapped(
+        tmp_path, monkeypatch, capsys):
+    from ozagia.doctor import CONFIG_UNMAPPED_LIMIT
+
+    _isolate_settings(tmp_path, monkeypatch)
+    legacy = tmp_path / ".ozagia.toml"
+    legacy.write_text('[index]\nsource_dirs = ["src"]\n', encoding="utf-8")
+    repo = tmp_path / "ozagia" / "config.toml"
+    repo.parent.mkdir()
+    repo.write_text(
+        '[index]\nskip_dirs = ["vendor"]\n\n'
+        '[environments.dev]\npaths = ["envs/dev"]\n\n'
+        '[services.api]\nchart = "charts/api"\n\n'
+        '[relays.local]\nspecs = [{ kind = "local" }]\n\n'
+        '[runtime.services.api]\ncommand = ["python", "-m", "app"]\n\n'
+        '[runtime.tunnels.database]\n'
+        'relay = "local"\ntarget = "db.example:5432"\n\n'
+        '[hints]\nlibrary = "strict"\n',
+        encoding="utf-8")
+
+    assert cli.main(["doctor", "--root", str(tmp_path), "--json"]) == 0
+    config = json.loads(capsys.readouterr().out)["config"]
+    assert config["valid"] is True
+    assert config["path"] == str(legacy.resolve())
+    assert config["legacy_path"] == str(legacy.resolve())
+    assert config["legacy_kind"] == "root"
+    assert config["repo_path"] == str(repo.resolve())
+    assert config["repo_exists"] is True
+    assert config["active_source"] == "legacy"
+    assert config["precedence"] == ["legacy", "repo"]
+    assert config["sources"] == [str(legacy.resolve()), str(repo.resolve())]
+    assert config["unmapped"] == [
+        {"key": "hints", "reason": "read by ozagia.core.library_hints"}]
+    assert config["unmapped_count"] == 1
+    assert config["unmapped_truncated"] is False
+    assert CONFIG_UNMAPPED_LIMIT >= 1
+
+    # Text mode names both files, the active one, precedence and the count.
+    assert cli.main(["doctor", "--root", str(tmp_path)]) == 0
+    text = capsys.readouterr().out
+    assert f"legacy={legacy.resolve()}" in text
+    assert f"repo={repo.resolve()}" in text
+    assert "active=legacy" in text
+    assert "precedence=legacy > repo" in text
+    assert "unmapped=1" in text
+    assert "strict" not in text and "vendor" not in text
+
+
+def test_doctor_does_not_report_versioned_project_models_as_unmapped(
+        tmp_path, monkeypatch, capsys):
+    _isolate_settings(tmp_path, monkeypatch)
+    repo = tmp_path / "ozagia" / "config.toml"
+    repo.parent.mkdir()
+    repo.write_text(
+        '[environments.dev]\npaths = ["envs/dev"]\n\n'
+        '[services.api]\nenvironment = "dev"\n\n'
+        '[relays.local]\nspecs = [{ kind = "local" }]\n\n'
+        '[runtime.services.api]\ncommand = ["python", "-m", "app"]\n\n'
+        '[runtime.tunnels.database]\n'
+        'relay = "local"\ntarget = "db.example:5432"\n',
+        encoding="utf-8")
+
+    assert cli.main(["doctor", "--root", str(tmp_path), "--json"]) == 0
+    config = json.loads(capsys.readouterr().out)["config"]
+    assert config["valid"] is True
+    assert config["active_source"] == "repo"
+    assert config["unmapped"] == []
+    assert config["unmapped_count"] == 0
+
+    assert cli.main(["doctor", "--root", str(tmp_path)]) == 0
+    assert "unmapped=0" in capsys.readouterr().out
+
+
+def test_doctor_text_reports_a_missing_repo_config(
+        tmp_path, monkeypatch, capsys):
+    _isolate_settings(tmp_path, monkeypatch)
+    legacy = tmp_path / ".ozagia.toml"
+    legacy.write_text('[index]\nsource_dirs = ["src"]\n', encoding="utf-8")
+    repo = tmp_path / "ozagia" / "config.toml"
+
+    assert cli.main(["doctor", "--root", str(tmp_path)]) == 0
+    text = capsys.readouterr().out
+    assert f"legacy={legacy.resolve()}" in text
+    assert f"repo={repo.resolve()} (missing)" in text
+    assert "active=legacy" in text
+    assert "precedence=legacy" in text
+    assert "unmapped=0" in text
+
+
+def test_doctor_active_source_is_the_versioned_config_without_a_legacy_file(
+        tmp_path, monkeypatch, capsys):
+    _isolate_settings(tmp_path, monkeypatch)
+    repo = tmp_path / "ozagia" / "config.toml"
+    repo.parent.mkdir()
+    repo.write_text('[index]\nsource_dirs = ["src"]\n', encoding="utf-8")
+
+    assert cli.main(["doctor", "--root", str(tmp_path), "--json"]) == 0
+    config = json.loads(capsys.readouterr().out)["config"]
+    assert config["legacy_path"] is None
+    assert config["active_source"] == "repo"
+    assert config["path"] == str(repo.resolve())
+    assert config["precedence"] == ["repo"]
+
+
+def test_doctor_bounds_the_unmapped_config_keys(
+        tmp_path, monkeypatch, capsys):
+    from ozagia.doctor import CONFIG_UNMAPPED_LIMIT
+
+    _isolate_settings(tmp_path, monkeypatch)
+    repo = tmp_path / "ozagia" / "config.toml"
+    repo.parent.mkdir()
+    unknown = "\n".join(f"unknown_{index} = true"
+                        for index in range(CONFIG_UNMAPPED_LIMIT + 5))
+    repo.write_text(f"[index]\n{unknown}\n", encoding="utf-8")
+
+    # The project config ignores the unknown keys (and reports them), so the
+    # project-config validity and the exit status are unchanged.
+    assert cli.main(["doctor", "--root", str(tmp_path), "--json"]) == 0
+    config = json.loads(capsys.readouterr().out)["config"]
+    assert config["valid"] is True
+    assert len(config["unmapped"]) == CONFIG_UNMAPPED_LIMIT
+    assert config["unmapped_count"] == CONFIG_UNMAPPED_LIMIT + 5
+    assert config["unmapped_truncated"] is True
+
+    assert cli.main(["doctor", "--root", str(tmp_path)]) == 0
+    text = capsys.readouterr().out
+    assert (f"unmapped={CONFIG_UNMAPPED_LIMIT} of "
+            f"{CONFIG_UNMAPPED_LIMIT + 5}…") in text
+    # The Config line is bounded: no unmapped key names or values are dumped.
+    config_line = next(line for line in text.splitlines()
+                       if line.startswith("Config:"))
+    assert "unknown_0" not in config_line
+
+
+def test_doctor_reports_an_invalid_versioned_config(tmp_path, monkeypatch,
+                                                   capsys):
+    _isolate_settings(tmp_path, monkeypatch)
+    repo = tmp_path / "ozagia" / "config.toml"
+    repo.parent.mkdir()
+    repo.write_text('[index]\nsource_dirs = ["../outside"]\n',
+                    encoding="utf-8")
+
+    assert cli.main(["doctor", "--root", str(tmp_path), "--json"]) == 2
+    config = json.loads(capsys.readouterr().out)["config"]
+    assert config["valid"] is False
+    assert config["active_source"] == "repo"
+    assert str(repo.resolve()) in config["error"]

@@ -126,6 +126,95 @@ def test_process_group_usage_current_process() -> None:
     assert report["process_count"] >= 1
 
 
+def _fake_proc(tmp_path: Path, entries: list[tuple[int, int, str | None]]) -> Path:
+    """A fake /proc with stat and optional io files for (pid, pgid, io)."""
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    for pid, pgid, io in entries:
+        directory = proc / str(pid)
+        directory.mkdir()
+        fields = " ".join(["0"] * 20)
+        (directory / "stat").write_text(
+            f"{pid} (demo) S 1 {pgid} {fields}\n", encoding="ascii")
+        if io is not None:
+            (directory / "io").write_text(io, encoding="ascii")
+    return proc
+
+
+def _io_text(read_bytes: int, write_bytes: int) -> str:
+    return (f"rchar: 0\nwchar: 0\nsyscr: 0\nsyscw: 0\n"
+            f"read_bytes: {read_bytes}\n"
+            f"write_bytes: {write_bytes}\n"
+            f"cancelled_write_bytes: 0\n")
+
+
+def test_process_usage_reads_proc_io(tmp_path: Path, monkeypatch) -> None:
+    proc = _fake_proc(tmp_path, [(111, 77, _io_text(2 * 1024 * 1024,
+                                                    3 * 1024 * 1024))])
+    monkeypatch.setattr(R, "PROC_ROOT", proc)
+    usage = R.process_usage(111)
+    assert usage is not None
+    assert usage["io_read_mb"] == 2.0
+    assert usage["io_write_mb"] == 3.0
+
+    # A read failure for one process is not fatal and reports no attribution.
+    (proc / "111" / "io").unlink()
+    (proc / "111" / "io").mkdir()
+    usage = R.process_usage(111)
+    assert usage is not None
+    assert usage["io_read_mb"] is None
+    assert usage["io_write_mb"] is None
+
+
+def test_process_usage_proc_io_permission_failure_is_not_fatal(
+        tmp_path: Path, monkeypatch) -> None:
+    proc = _fake_proc(tmp_path, [(112, 77, _io_text(1024, 2048))])
+    monkeypatch.setattr(R, "PROC_ROOT", proc)
+    original = Path.read_text
+
+    def deny_io(path: Path, *args, **kwargs):
+        if path.name == "io":
+            raise PermissionError("permission denied")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", deny_io)
+    usage = R.process_usage(112)
+    assert usage is not None
+    assert usage["pid"] == 112
+    assert usage["io_read_mb"] is None
+    assert usage["io_write_mb"] is None
+
+
+def test_process_group_usage_sums_readable_proc_io(
+        tmp_path: Path, monkeypatch) -> None:
+    proc = _fake_proc(tmp_path, [
+        (201, 77, _io_text(1024 * 1024, 2 * 1024 * 1024)),
+        (202, 77, _io_text(2 * 1024 * 1024, 1024 * 1024)),
+        (203, 77, None),                 # unreadable member: skipped
+        (204, 88, _io_text(4096, 8192)),
+        (205, 99, None),                 # no readable member in this group
+    ])
+    monkeypatch.setattr(R, "PROC_ROOT", proc)
+    group = R.process_group_usage(77)
+    assert group["process_count"] == 3
+    assert group["disk_read_mb"] == 3.0
+    assert group["disk_write_mb"] == 3.0
+    assert group["disk_source"] == "proc.io"
+    assert group["disk_processes"] == 2
+
+    other = R.process_group_usage(88)
+    assert other["disk_read_mb"] == round(4096 / (1024 * 1024), 4)
+    assert other["disk_write_mb"] == round(8192 / (1024 * 1024), 4)
+    assert other["disk_source"] == "proc.io"
+
+    unavailable = R.process_group_usage(99)
+    assert unavailable["process_count"] == 1
+    assert unavailable["disk_read_mb"] is None
+    assert unavailable["disk_write_mb"] is None
+    assert unavailable["disk_source"] is None
+    assert unavailable["disk_processes"] == 0
+
+
 def test_resources_cli_status_json(tmp_path: Path, capsys) -> None:
     if not Path("/proc/meminfo").exists():
         pytest.skip("Linux memory counters are unavailable")
@@ -303,6 +392,96 @@ def test_watchdog_disk_pids_and_wall_limits() -> None:
         disk_probe=lambda: {"free_gb": 50.0}, clock=lambda: next(ticks))
     wall.sample_once()
     assert killed[-1]["kind"] == "wall" and killed[-1]["limit_s"] == 5.0
+
+
+def test_watchdog_enforces_attributed_disk_writes() -> None:
+    samples = [
+        {"pgid": 4242, "memory_mb": 1.0, "process_count": 1,
+         "disk_read_mb": 1.0, "disk_write_mb": 64.0,
+         "disk_source": "proc.io"},
+        {"pgid": 4242, "memory_mb": 1.0, "process_count": 1,
+         "disk_read_mb": 1.0, "disk_write_mb": 192.0,
+         "disk_source": "proc.io"},
+    ]
+    killed: list[dict] = []
+    seen: list[dict] = []
+    watchdog = R.ResourceWatchdog(
+        R.ResourceLimits(disk_mb=100), pgid=4242, verify=lambda: True,
+        killer=killed.append, sampler=lambda pgid: samples.pop(0),
+        disk_probe=lambda: {"free_gb": 50.0},
+        on_sample=seen.append)
+    first = watchdog.sample_once()
+    assert killed == []
+    assert first["disk_write_mb"] == 64.0
+    assert first["disk_source"] == "proc.io"
+    assert first["peak_disk_write_mb"] == 64.0
+    assert watchdog.peak_disk_write_mb == 64.0
+
+    second = watchdog.sample_once()
+    assert len(killed) == 1
+    event = killed[0]
+    assert event["kind"] == "disk_write"
+    assert event["budget_mb"] == 100
+    assert event["observed_mb"] == 192.0
+    assert event["source"] == "proc.io"
+    assert second["peak_disk_write_mb"] == 192.0
+    assert seen[-1]["disk_write_mb"] == 192.0
+    assert "bytes sent to storage" in R.describe_resource_event(event)
+
+
+def test_watchdog_prefers_cgroup_attribution_over_proc_io() -> None:
+    killed: list[dict] = []
+    cgroup_write = [1.0]
+    watchdog = R.ResourceWatchdog(
+        R.ResourceLimits(disk_mb=10), pgid=7, verify=lambda: True,
+        killer=killed.append,
+        sampler=lambda pgid: {
+            "memory_mb": 1.0, "process_count": 1,
+            "disk_write_mb": 1000.0, "disk_source": "proc.io"},
+        disk_attributor=lambda: {
+            "io_write_mb": cgroup_write[0], "io_source": "cgroup.io.stat"},
+        disk_probe=lambda: {"free_gb": 50.0})
+    first = watchdog.sample_once()
+    assert killed == []
+    assert first["disk_write_mb"] == 1.0
+    assert first["disk_source"] == "cgroup.io.stat"
+    assert first["peak_disk_write_mb"] == 1.0
+
+    cgroup_write[0] = 20.0
+    watchdog.sample_once()
+    assert killed[-1]["kind"] == "disk_write"
+    assert killed[-1]["observed_mb"] == 20.0
+    assert killed[-1]["source"] == "cgroup.io.stat"
+
+
+def test_watchdog_uses_free_space_delta_only_without_attribution() -> None:
+    """An attributed job never gets the host free-space delta as a budget."""
+    probes = iter([{"free_gb": 50.0}, {"free_gb": 49.0}])
+    killed: list[dict] = []
+    attributed = R.ResourceWatchdog(
+        R.ResourceLimits(disk_mb=100), pgid=7, verify=lambda: True,
+        killer=killed.append,
+        sampler=lambda pgid: {
+            "memory_mb": 1.0, "process_count": 1,
+            "disk_write_mb": 10.0, "disk_source": "proc.io"},
+        disk_probe=lambda: next(probes))
+    attributed.sample_once()
+    attributed.sample_once()
+    assert killed == []                    # 10 MiB written, 1 GiB free drop
+    assert attributed.disk_used_mb == 1024.0
+
+    probes = iter([{"free_gb": 50.0}, {"free_gb": 49.0}])
+    killed.clear()
+    fallback = R.ResourceWatchdog(
+        R.ResourceLimits(disk_mb=100), pgid=7, verify=lambda: True,
+        killer=killed.append,
+        sampler=lambda pgid: {"memory_mb": 1.0, "process_count": 1},
+        disk_probe=lambda: next(probes))
+    fallback.sample_once()
+    fallback.sample_once()
+    assert killed[-1]["kind"] == "disk"
+    assert killed[-1]["budget_mb"] == 100
+    assert "free-space drop" in R.describe_resource_event(killed[-1])
 
 
 def test_watchdog_never_signals_an_unverified_or_stale_group() -> None:

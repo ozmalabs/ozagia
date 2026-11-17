@@ -28,6 +28,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from ozagia.config import (
+    ConfigError, SECURITY_KEYS, SECURITY_SECTION, load_config_section,
+    repo_config_path,
+)
+
 SCHEMA = "ozagia.security.report.v1"
 SCHEMA_VERSION = 1
 ADVISORY = (
@@ -2371,9 +2376,12 @@ def _run_tools(names: Sequence[str], root: Path,
 # --------------------------------------------------------------------------- #
 # scan orchestration
 # --------------------------------------------------------------------------- #
-def _load_security_config(root: Path) -> dict[str, Any]:
-    path = root / ".ozagia.toml"
-    config: dict[str, Any] = {
+_SECURITY_BOOL_KEYS = ("enabled", "allow_network", "block_secrets")
+_SECURITY_LIST_KEYS = ("tools", "exclude", "secret_allowlist")
+
+
+def _security_defaults() -> dict[str, Any]:
+    return {
         "enabled": True,
         "tools": [],
         "allow_network": False,
@@ -2383,44 +2391,161 @@ def _load_security_config(root: Path) -> dict[str, Any]:
         "block_secrets": True,
         "secret_allowlist": [],
     }
-    if not path.is_file():
-        return config
+
+
+def _apply_legacy_security_value(
+        config: dict[str, Any], key: str, value: Any) -> None:
+    """Overlay one legacy value with the historical forgiving coercion.
+
+    A wrong type is ignored instead of failing, as `.ozagia.toml` has always
+    been read this way. The versioned file is validated strictly instead.
+    """
+    if key in _SECURITY_BOOL_KEYS:
+        if isinstance(value, bool):
+            config[key] = value
+        return
+    if key == "fail_on":
+        fail_on = str(value or "").lower()
+        if fail_on in FAIL_ON:
+            config[key] = fail_on
+        return
+    if key == "max_findings":
+        cap = _safe_int(value, DEFAULT_MAX_FINDINGS)
+        config[key] = max(1, min(cap, MAX_FINDINGS))
+        return
+    if key in _SECURITY_LIST_KEYS and isinstance(value, list):
+        config[key] = [str(item) for item in value if isinstance(item, str)]
+
+
+def _validate_repo_security_value(
+        key: str, value: Any, *, path: Path) -> Any:
+    """Validate one `[security]` value from the versioned config."""
+    from ozagia.core import settings as settings_registry
+
     try:
-        data = tomllib.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, tomllib.TOMLDecodeError):
+        return settings_registry.validate_file_value(
+            f"{SECURITY_SECTION}.{key}", value,
+            where=f"{path}: [{SECURITY_SECTION}] {key}")
+    except (settings_registry.SettingsError, ValueError) as exc:
+        message = str(exc)
+        if str(path) not in message:
+            message = f"{path}: {message}"
+        raise ValueError(message) from exc
+
+
+def _assign_repo_security_value(
+        config: dict[str, Any], key: str, value: Any) -> None:
+    if key in _SECURITY_BOOL_KEYS:
+        config[key] = bool(value)
+    elif key in _SECURITY_LIST_KEYS:
+        config[key] = [str(item) for item in value]
+    elif key == "max_findings":
+        config[key] = max(1, min(int(value), MAX_FINDINGS))
+    else:  # fail_on
+        config[key] = str(value)
+
+
+def _load_security_config(root: Path) -> dict[str, Any]:
+    """Merge `[security]` from both config files, legacy keys winning.
+
+    The returned dict keeps the historical keys. It also reports diagnostics:
+    ``sources`` (per supported key), ``files`` (both configuration paths),
+    ``error``/``errors`` and the per-file ``legacy_error``/``repo_error``.
+    A broken legacy file is forgiving (its values are skipped); a broken or
+    invalid versioned file is reported in the dict and makes
+    :func:`load_config_strict` raise :class:`ConfigError`.
+    """
+    config = _security_defaults()
+    try:
+        section = load_config_section(root, SECURITY_SECTION)
+    except ConfigError as exc:
+        message = str(exc)
+        config.update({
+            "sources": {key: "default" for key in SECURITY_KEYS},
+            "files": {"legacy": None,
+                      "repo": str(repo_config_path(root))},
+            "error": message,
+            "errors": [message],
+            "legacy_error": None,
+            "repo_error": message,
+        })
         return config
-    section = data.get("security")
-    if not isinstance(section, Mapping):
-        return config
-    if isinstance(section.get("enabled"), bool):
-        config["enabled"] = section["enabled"]
-    tools_value = section.get("tools")
-    if isinstance(tools_value, list):
-        config["tools"] = [str(item) for item in tools_value
-                           if isinstance(item, str)]
-    if isinstance(section.get("allow_network"), bool):
-        config["allow_network"] = section["allow_network"]
-    fail_on = str(section.get("fail_on") or "").lower()
-    if fail_on in FAIL_ON:
-        config["fail_on"] = fail_on
-    exclude = section.get("exclude")
-    if isinstance(exclude, list):
-        config["exclude"] = [str(item) for item in exclude
-                             if isinstance(item, str)]
-    cap = _safe_int(section.get("max_findings"), DEFAULT_MAX_FINDINGS)
-    config["max_findings"] = max(1, min(cap, MAX_FINDINGS))
-    if isinstance(section.get("block_secrets"), bool):
-        config["block_secrets"] = section["block_secrets"]
-    allowlist = section.get("secret_allowlist")
-    if isinstance(allowlist, list):
-        config["secret_allowlist"] = [str(item) for item in allowlist
-                                      if isinstance(item, str)]
+
+    errors: list[str] = []
+    repo_errors: list[str] = []
+    legacy_errors: list[str] = []
+    for item in section.errors:
+        message = f"{item.path}: {item.message}"
+        errors.append(message)
+        if item.kind == "repo":
+            repo_errors.append(message)
+        else:
+            legacy_errors.append(message)
+
+    applied: dict[str, str] = {}
+    validated_repo: dict[str, Any] = {}
+    for key, value in section.values_by_source.get("repo", {}).items():
+        if key not in SECURITY_KEYS:
+            continue
+        try:
+            validated_repo[key] = _validate_repo_security_value(
+                key, value, path=section.repo)
+        except ValueError as exc:
+            message = str(exc)
+            repo_errors.append(message)
+            errors.append(message)
+
+    for key, value in section.values.items():
+        if key not in SECURITY_KEYS:
+            continue
+        source = section.sources.get(key, "repo")
+        if source == "legacy":
+            _apply_legacy_security_value(config, key, value)
+            applied[key] = "legacy"
+            continue
+        if key not in validated_repo:
+            continue
+        _assign_repo_security_value(config, key, validated_repo[key])
+        applied[key] = "repo"
+
+    repo_error = repo_errors[0] if repo_errors else None
+    legacy_error = legacy_errors[0] if legacy_errors else None
+    config.update({
+        "sources": {key: applied.get(key, "default") for key in SECURITY_KEYS},
+        "files": {
+            "legacy": str(section.legacy) if section.legacy is not None else None,
+            "repo": str(section.repo),
+        },
+        "error": repo_error or legacy_error,
+        "errors": errors,
+        "legacy_error": legacy_error,
+        "repo_error": repo_error,
+    })
     return config
 
 
 def load_config(root: str | Path = ".") -> dict[str, Any]:
-    """The effective ``[security]`` settings; no scan and no writes."""
+    """The effective ``[security]`` settings; no scan and no writes.
+
+    Both ``.ozagia.toml`` (or the state/env legacy file) and
+    ``ozagia/config.toml`` are read, with the legacy file winning per key. A
+    broken or invalid versioned file is reported in ``error``/``errors``
+    instead of being silently ignored; the dict API is unchanged.
+    """
     return _load_security_config(Path(root).expanduser().resolve())
+
+
+def load_config_strict(root: str | Path = ".") -> dict[str, Any]:
+    """Like :func:`load_config`, but raise for a broken versioned config.
+
+    A malformed legacy file stays forgiving exactly as :func:`load_config`
+    does. Use this entry point when a caller must not run with defaults after
+    an invalid ``ozagia/config.toml``.
+    """
+    config = load_config(root)
+    if config.get("repo_error"):
+        raise ConfigError(str(config["repo_error"]))
+    return config
 
 
 def _finalize_findings(findings: Sequence[Mapping[str, Any]],
@@ -2533,6 +2658,9 @@ def scan(root: str | Path = ".", *, graph_path: str | Path | None = None,
     if staged and diff:
         raise SecurityError("choose at most one of --staged or --diff")
     config = _load_security_config(root_path)
+    warnings: list[str] = []
+    if config.get("error"):
+        warnings.append(f"security configuration: {config['error']}")
     requested = (list(tools) if tools is not None else list(config["tools"]))
     requested = list(dict.fromkeys(name for name in requested if name))
     for name in requested:
@@ -2551,7 +2679,6 @@ def scan(root: str | Path = ".", *, graph_path: str | Path | None = None,
     patterns = tuple(exclude) if exclude is not None else tuple(
         config["exclude"])
 
-    warnings: list[str] = []
     index = _load_graph(root_path, graph_path)
     if not index.info.get("available"):
         warnings.append(
@@ -2656,6 +2783,10 @@ def scan(root: str | Path = ".", *, graph_path: str | Path | None = None,
             "tools": requested,
             "block_secrets": bool(config["block_secrets"]),
             "secret_allowlist": list(config["secret_allowlist"]),
+            "error": config.get("error"),
+            "errors": list(config.get("errors") or []),
+            "sources": dict(config.get("sources") or {}),
+            "files": dict(config.get("files") or {}),
         },
         "inputs": {
             "files_scanned": files_scanned,
@@ -2957,6 +3088,8 @@ def scan_secrets(root: str | Path = ".", *, staged: bool = False,
     changed, binary, notes, truncated = _secret_changed_files(
         root_path, staged=staged, range_spec=range_spec)
     notes = list(notes)
+    if config.get("error"):
+        notes.append(f"security configuration: {config['error']}")
     skipped: list[dict[str, Any]] = []
     if truncated:
         notes.append(
@@ -3035,6 +3168,12 @@ def scan_secrets(root: str | Path = ".", *, staged: bool = False,
         "mode": "staged" if staged else "diff",
         "range": range_spec,
         "block_secrets": block,
+        "config": {
+            "error": config.get("error"),
+            "errors": list(config.get("errors") or []),
+            "sources": dict(config.get("sources") or {}),
+            "files": dict(config.get("files") or {}),
+        },
         "gate": {
             "enabled": block,
             "reason": None if block else (
