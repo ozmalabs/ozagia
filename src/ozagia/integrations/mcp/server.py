@@ -1003,6 +1003,34 @@ _TOOLS.append({
                    "description": "A module name, e.g. numpy: which interpreters have it."},
     }),
 })
+# External tools (`ozagia.core.toolchain`): discovery and install previews,
+# never an install and never the network. Version and sudo probes are off by
+# default; paths infer capabilities from their extensions.
+_TOOLS.append({
+    "name": "dev_tools",
+    "description": (
+        "Use before PDF/document/media/browser work to see installed/missing "
+        "tools and approval/install previews. Pass capabilities (pdf, ocr, "
+        "office, image, audio, video, archive, diagram, data, browser, ops, "
+        "design, communication; or groups documents, media, web) and/or paths "
+        "whose extensions infer them. Reports the environment, managers, "
+        "installed tools with versions when probed, missing tools and the "
+        "package-manager commands that would install them (would_run is always "
+        "false). It never installs, never uses the network and never calls a "
+        "model; version and sudo probes are off by default."),
+    "inputSchema": _schema({
+        "capabilities": {"type": "array", "items": {"type": "string"},
+                         "description": "Capability or group ids, e.g. pdf or documents."},
+        "paths": {"type": "array", "items": {"type": "string"},
+                  "description": "Root-relative files whose extensions infer a capability, e.g. report.pdf."},
+        "model_family": {"type": "string",
+                         "description": "claude, codex, gemini, cursor, aider, openhands or local; picks that family's preferred tool in the text."},
+        "probe_versions": {"type": "boolean", "default": False,
+                           "description": "Run bounded --version probes (default: no)."},
+        "probe_sudo": {"type": "boolean", "default": False,
+                       "description": "Run the sudo -n true usability check (default: no)."},
+    }),
+})
 # Goals (`ozagia.core.goals`): repo-level records in `.ozagia/goals/`, whose
 # targets and criteria are graph keys; criteria are checked against the
 # graph, the working tree and the test record.
@@ -1248,6 +1276,7 @@ class DevMemoryServer:
             "dev_files_explain": self._files_explain,
             "dev_review_repo": self._review_repo,
             "dev_environment": self._environment,
+            "dev_tools": self._dev_tools,
             "goal_list": self._goal_list,
             "goal_show": self._goal_show,
             "goal_check": self._goal_check,
@@ -1633,6 +1662,37 @@ class DevMemoryServer:
             return {"ok": True, **EN.environments(root)}
         except EN.EnvError as exc:
             return {"ok": False, "error": str(exc)}
+
+    def _dev_tools(self, a: dict[str, Any]) -> Any:
+        """External tools for a capability or path (`core.toolchain`).
+
+        Read-only: no install, no network, no model call. Version and sudo
+        probes are off unless the caller asks for them.
+        """
+        from ozagia.core import toolchain as T
+        root = self._files_root()
+        capabilities = a.get("capabilities") or []
+        if isinstance(capabilities, str):
+            capabilities = [capabilities]
+        paths = a.get("paths") or []
+        if isinstance(paths, str):
+            paths = [paths]
+        family = a.get("model_family")
+        if family is not None and not isinstance(family, str):
+            return {"ok": False, "error": "model_family must be a string"}
+        family = (family or "").strip() or None
+        if family and len(family) > 64:
+            return {"ok": False,
+                    "error": "model_family exceeds the 64-character limit"}
+        try:
+            plan = T.tool_plan(
+                root, capabilities=capabilities, paths=paths,
+                probe_versions=a.get("probe_versions") is True,
+                probe_sudo=a.get("probe_sudo") is True)
+        except (T.ToolchainError, OSError, ValueError) as e:
+            return {"ok": False, "error": str(e)}
+        text = "\n".join(T.brief_lines(plan, model_family=family))
+        return {"ok": True, "plan": plan, "text": text}
 
     def _who(self, a: dict[str, Any]) -> Any:
         """The sessions that edited a file (`ozagia.core.owners.who`): from

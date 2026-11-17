@@ -246,6 +246,105 @@ def test_session_brief_since_last_session(tmp_path):
     assert len(short) <= 300 and short.endswith(W.MCP_TOOLS_LINE)
 
 
+def test_session_brief_tools_block_for_dirty_pdf(tmp_path, monkeypatch):
+    from ozagia.core import toolchain as T
+
+    _write(tmp_path / "ozagia" / "config.toml",
+           "[tools]\nallow_install = true\nallow_network = true\n"
+           "probe_versions = true\nprobe_sudo = true\n")
+
+    def git(_root, *args):
+        if args[:2] == ("rev-parse", "--abbrev-ref"):
+            return "main"
+        if args and args[0] == "status":
+            return " M docs/report.pdf\n?? notes.txt\n M pkg/small.py\n"
+        return ""
+
+    monkeypatch.setattr(W, "_git", git)
+    calls = []
+    real = T.tool_plan
+
+    def plan(root, **kwargs):
+        calls.append(dict(kwargs))
+        kwargs.setdefault("which",
+                          lambda name: "/usr/bin/uv" if name == "uv" else None)
+        kwargs.setdefault("module_finder", lambda name: None)
+        kwargs.setdefault("environ", {})
+        return real(root, **kwargs)
+
+    monkeypatch.setattr(T, "tool_plan", plan)
+
+    def no_command(*_args, **_kwargs):
+        raise AssertionError("the session brief must not probe versions/sudo")
+
+    monkeypatch.setattr(T, "_run_command", no_command)
+
+    text = W.session_brief(tmp_path, jobs_enabled=False)
+
+    assert "[ozagia] tools:" in text
+    assert "pdf" in text
+    # The approval config makes the preview name the command, not just say
+    # "installation not approved"; it is still never run.
+    assert "uv pip install 'ozagia[pdf]'" in text
+    assert "would_run" not in text
+    assert calls and calls[0]["probe_versions"] is False
+    assert calls[0]["probe_sudo"] is False
+    assert text.index("[ozagia] tools:") < text.index(W.MCP_TOOLS_LINE)
+
+
+def test_session_brief_tools_block_is_quiet_for_code_and_opt_out(
+        tmp_path, monkeypatch):
+    from ozagia.core import toolchain as T
+
+    status = {"value": " M pkg/small.py\n?? tests/test_a.py\n"}
+
+    def git(_root, *args):
+        if args[:2] == ("rev-parse", "--abbrev-ref"):
+            return "main"
+        if args and args[0] == "status":
+            return status["value"]
+        return ""
+
+    monkeypatch.setattr(W, "_git", git)
+
+    def no_plan(*_args, **_kwargs):
+        raise AssertionError("code-only or opted-out briefs must not plan tools")
+
+    monkeypatch.setattr(T, "tool_plan", no_plan)
+    assert "[ozagia] tools:" not in W.session_brief(tmp_path, jobs_enabled=False)
+    status["value"] = ""
+    assert "[ozagia] tools:" not in W.session_brief(tmp_path, jobs_enabled=False)
+    status["value"] = " M docs/report.pdf\n"
+    _write(tmp_path / "ozagia" / "config.toml", "[tools]\nbrief = false\n")
+    assert "[ozagia] tools:" not in W.session_brief(tmp_path, jobs_enabled=False)
+
+
+def test_session_brief_tools_block_fits_the_char_cap(tmp_path, monkeypatch):
+    from ozagia.core import toolchain as T
+
+    def git(_root, *args):
+        if args[:2] == ("rev-parse", "--abbrev-ref"):
+            return "main"
+        if args and args[0] == "status":
+            return " M docs/report.pdf\n"
+        return ""
+
+    monkeypatch.setattr(W, "_git", git)
+    real = T.tool_plan
+
+    def plan(root, **kwargs):
+        kwargs.setdefault("which", lambda name: None)
+        kwargs.setdefault("module_finder", lambda name: None)
+        kwargs.setdefault("environ", {})
+        return real(root, **kwargs)
+
+    monkeypatch.setattr(T, "tool_plan", plan)
+    text = W.session_brief(tmp_path, 300, tests=[], jobs_enabled=False)
+    assert len(text) <= 300
+    assert text.endswith(W.MCP_TOOLS_LINE)
+    assert "[ozagia] tools:" not in text
+
+
 def test_session_brief_shows_bounded_reference_freshness(
         tmp_path, monkeypatch):
     from contextlib import nullcontext
@@ -361,6 +460,104 @@ def test_devsession_line(tmp_path):
 # --------------------------------------------------------------------------- #
 # the daemon
 # --------------------------------------------------------------------------- #
+def test_daemon_toolchain_op_plans_caches_and_validates(daemon, monkeypatch):
+    from ozagia.core import toolchain as T
+
+    real = T.tool_plan
+    calls = []
+
+    def fake_plan(root, **kwargs):
+        calls.append(dict(kwargs))
+        kwargs.setdefault("which",
+                          lambda name: "/usr/bin/uv" if name == "uv" else None)
+        kwargs.setdefault("module_finder", lambda name: None)
+        kwargs.setdefault("environ", {})
+        return real(root, **kwargs)
+
+    monkeypatch.setattr(T, "tool_plan", fake_plan)
+    st = daemon.state
+
+    first = daemon({"op": "toolchain", "paths": "docs/report.pdf"})
+    assert first["ok"] is True and first["cached"] is False
+    assert first["plan"]["request"]["inferred"] == ["pdf"]
+    assert first["text"].startswith("[ozagia] toolchain plan")
+    # Neither probe runs unless the request asks for it.
+    assert calls[0]["probe_versions"] is False
+    assert calls[0]["probe_sudo"] is False
+
+    hit = daemon({"op": "toolchain", "paths": ["docs/report.pdf"]})
+    assert hit["ok"] is True and hit["cached"] is True
+    assert hit["plan"] == first["plan"] and hit["text"] == first["text"]
+    assert len(calls) == 1
+
+    refreshed = daemon({"op": "toolchain", "paths": ["docs/report.pdf"],
+                        "refresh": True})
+    assert refreshed["cached"] is False and len(calls) == 2
+
+    # An entry older than the TTL is rebuilt.
+    key = next(iter(st.toolchain_cache))
+    st.toolchain_cache[key] = (0.0, *st.toolchain_cache[key][1:])
+    expired = daemon({"op": "toolchain", "paths": ["docs/report.pdf"]})
+    assert expired["cached"] is False and len(calls) == 3
+
+    family = daemon({"op": "toolchain", "capabilities": ["browser"],
+                     "model_family": "codex"})
+    assert family["ok"] is True and family["text"].startswith("[ozagia] tools:")
+    assert calls[-1]["capabilities"] == ["browser"]
+
+    probed = daemon({"op": "toolchain", "capabilities": ["pdf"],
+                     "probe_versions": True, "probe_sudo": True})
+    assert probed["ok"] is True
+    assert calls[-1]["probe_versions"] is True
+    assert calls[-1]["probe_sudo"] is True
+
+    errors = st.stats()["toolchain_errors"]
+    for fields in (
+            {"capabilities": {"pdf": True}},
+            {"capabilities": ["pdf"] * (T.MAX_CAPABILITIES + 1)},
+            {"paths": 3},
+            {"paths": ["x" * (T.MAX_PATH_CHARS + 1)]},
+            {"probe_versions": "yes"},
+            {"model_family": 5},
+    ):
+        reply = daemon({"op": "toolchain", **fields})
+        assert reply["ok"] is False and reply["error"]
+    unknown = daemon({"op": "toolchain", "capabilities": ["nope"]})
+    assert unknown["ok"] is False and "unknown capability" in unknown["error"]
+
+    stats = st.stats()
+    assert stats["toolchain_errors"] == errors + 7
+    assert stats["toolchain_plans"] == 6
+    assert stats["toolchain_cache_hits"] == 1
+
+
+def test_daemon_toolchain_cache_is_per_root(daemon, monkeypatch, tmp_path):
+    from ozagia.core import toolchain as T
+    from ozagia.daemon.server import DaemonState
+
+    roots = []
+    real = T.tool_plan
+
+    def fake_plan(root, **kwargs):
+        roots.append(str(root))
+        kwargs.setdefault("which", lambda name: None)
+        kwargs.setdefault("module_finder", lambda name: None)
+        kwargs.setdefault("environ", {})
+        return real(root, **kwargs)
+
+    monkeypatch.setattr(T, "tool_plan", fake_plan)
+    other_root = tmp_path / "other-root"
+    other_root.mkdir()
+    other = DaemonState(other_root, daemon.state.memory, tmp_path / "other.jsonl")
+
+    first = daemon({"op": "toolchain", "paths": ["a.pdf"]})
+    second = other.dispatch({"op": "toolchain", "paths": ["a.pdf"]})
+
+    assert first["ok"] is True and first["cached"] is False
+    assert second["ok"] is True and second["cached"] is False
+    assert len(roots) == 2 and roots[0] != roots[1]
+
+
 def test_daemon_tracks_edits_tests_and_reads_across_compaction(daemon, repo):
     base = {"harness": "claude", "session": "ses_w"}
     # A built-in Read the hook reports (recorded by the ledger).

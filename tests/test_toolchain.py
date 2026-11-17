@@ -857,3 +857,25 @@ preferred = { pdf = ["pypdf", "qpdf"] }
     capability = plan["capabilities"][0]
     assert capability["preferred"] == ["pypdf", "qpdf"]
     assert capability["available"][0]["preferred"] is True
+
+
+def test_brief_config_opt_out_and_default(tmp_path: Path) -> None:
+    assert T.brief_enabled(tmp_path) is True
+    _config(tmp_path, "[tools]\nbrief = false\n")
+    assert T.brief_enabled(tmp_path) is False
+    environment = T.detect_environment(
+        tmp_path, which=FakeWhich(), module_finder=FakeFinder(),
+        probe_versions=False, probe_sudo=False, environ={},
+        os_release_path=_os_release(tmp_path))
+    assert environment["config"]["values"]["brief"] is False
+    assert environment["config"]["sources"]["brief"] == "repo"
+    # A wrong type is reported and leaves the block on, like other settings.
+    _config(tmp_path, '[tools]\nbrief = "no"\n')
+    assert T.brief_enabled(tmp_path) is True
+    environment = T.detect_environment(
+        tmp_path, which=FakeWhich(), module_finder=FakeFinder(),
+        probe_versions=False, probe_sudo=False, environ={},
+        os_release_path=_os_release(tmp_path))
+    assert any(item["key"] == "tools.brief"
+               and "must be true or false" in item["message"]
+               for item in environment["config"]["errors"])

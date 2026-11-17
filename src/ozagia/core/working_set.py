@@ -41,10 +41,14 @@ failing in the root's record (`load_test_record`, kept in
 test ids, outcomes, times and the rerun prefix, never failure messages or
 command lines), each with the time of the first run that failed it,
 running jobs, linked reference checkout snapshot and pin status, and the MCP
-tools to prefer, at most `BRIEF_MAX_CHARS`. Reference status is bounded; it
-warns when a linked index is missing, stale, unknown, or awaiting reindex after
-a sync. Daemon session briefs request a bounded background update; hook
-fallbacks only report status.
+tools to prefer, at most `BRIEF_MAX_CHARS`. When the dirty files name an
+external-tool capability (`.pdf`, `.png`, office/media files, ...), a small
+`[ozagia] tools:` block from `ozagia.core.toolchain` says what is installed,
+what is missing and what installing would involve; it runs no version or sudo
+probes and never installs. `[tools] brief = false` turns it off. Reference
+status is bounded; it warns when a linked index is missing, stale, unknown, or
+awaiting reindex after a sync. Daemon session briefs request a bounded
+background update; hook fallbacks only report status.
 The brief, and the working set text the daemon renders, also list the
 open and claimed goals with unmet criteria (`ozagia.core.goals`).
 
@@ -103,6 +107,8 @@ BRIEF_DIRTY_FILES = 15
 BRIEF_COMMITS = 3
 BRIEF_TESTS = 5
 BRIEF_JOBS = 5
+# The tools block's lines, including its `[ozagia] tools:` header.
+BRIEF_TOOL_LINES = 4
 # The goal lines' reserved share of the brief: at most 1/N of its cap.
 BRIEF_GOAL_SHARE = 3
 GIT_TIMEOUT_S = 3
@@ -1333,6 +1339,68 @@ def _reference_status_lines(root: Path, *, schedule_sync: bool = False) -> list[
     return lines
 
 
+def _dirty_paths(dirty: Iterable[str]) -> list[str]:
+    """The paths named by `git status --porcelain` lines.
+
+    A rename reports its new path; status codes and the separating space are
+    dropped. Git quotes paths with special characters, so one pair of outer
+    quotes is removed. Only extensions are inspected later, so an odd quoting
+    edge case costs a tools line, not correctness.
+    """
+    paths: list[str] = []
+    for line in dirty:
+        rest = line[3:] if len(line) > 3 else ""
+        if " -> " in rest:
+            rest = rest.split(" -> ", 1)[1]
+        rest = rest.strip()
+        if len(rest) >= 2 and rest[0] == rest[-1] == '"':
+            rest = rest[1:-1]
+        if rest:
+            paths.append(rest)
+    return paths
+
+
+def tool_brief_lines(root: str | Path, paths: Iterable[str], *,
+                     max_lines: int = BRIEF_TOOL_LINES) -> list[str]:
+    """A bounded `[ozagia] tools:` block for paths that name a capability.
+
+    The capability inference is the toolchain registry's own
+    (`ozagia.core.toolchain.infer_capabilities`), so ordinary code paths add
+    nothing. No version or sudo probe runs, and nothing is installed: the
+    plan's install options are previews. A broken config or plan omits the
+    block rather than failing the brief. `[tools] brief = false` opts out.
+    """
+    if max_lines < 1:
+        return []
+    try:
+        from ozagia.core import toolchain as T
+        capabilities, _unmatched = T.infer_capabilities(list(paths))
+        if not capabilities or not T.brief_enabled(root):
+            return []
+        plan = T.tool_plan(root, capabilities=capabilities,
+                           probe_versions=False, probe_sudo=False)
+        brief = T.brief_lines(plan)
+    except Exception:  # noqa: BLE001 - the brief goes without the tools block
+        return []
+    # brief_lines' own header/trailers describe the full report; the session
+    # brief keeps one line per capability (its indented remote-provider
+    # detail is left out to stay small).
+    body = [
+        line for line in brief
+        if not line.startswith(("[ozagia] tools: ", "keep the provider count:",
+                                "not checked:"))
+        and not line.startswith(" ")
+    ]
+    shown = capabilities[:max_lines - 1]
+    if not body or not shown:
+        return []
+    header = "[ozagia] tools: " + ", ".join(shown)
+    if len(capabilities) > len(shown):
+        header += f", +{len(capabilities) - len(shown)} more"
+    header += " in the changed files; advisory, nothing installed"
+    return [header, *body[:max_lines - 1]]
+
+
 def session_brief(root: str | Path, max_chars: int = BRIEF_MAX_CHARS, *,
                   tests: list[tuple[str, dict[str, Any]]] | None = None,
                   last_test: dict[str, Any] | None = None,
@@ -1341,17 +1409,20 @@ def session_brief(root: str | Path, max_chars: int = BRIEF_MAX_CHARS, *,
                   goal_lines: list[str] | None = None,
                   schedule_reference_sync: bool = False) -> str:
     """Dirty files, the last commits, the tests still failing in the root's
-    test record (each with the time of the first run that failed it),
+    test record (each with the time of the first run that failed it), a
+    bounded `[ozagia] tools:` block when the dirty files name a non-code
+    capability (PDF, images, office, media, ...; no version or sudo probes),
     then the open and claimed goals with unmet criteria
     (`ozagia.core.goals.brief_lines`; `goal_lines` replaces them), running
     jobs, and the MCP tools to prefer.
 
-    Over `max_chars`, the tools line and the goal lines (their reserved
-    share: at most `max_chars // BRIEF_GOAL_SHARE`) are kept, and the
-    text before them (header, git, failing tests) is cut at its end;
-    running jobs follow when room is left. `tests` defaults to the
-    persisted record (`load_test_record`); `last_test` is accepted and
-    unused (each test carries its own time)."""
+    Over `max_chars`, the MCP tools line stays and the goal lines keep
+    their reserved share (at most `max_chars // BRIEF_GOAL_SHARE`) when they
+    fit; the tools block is dropped first, then running jobs, then the goal
+    lines, and the text before them (header, git, failing tests) is cut at
+    its end. `tests` defaults to the persisted record
+    (`load_test_record`); `last_test` is accepted and unused (each test
+    carries its own time)."""
     root = Path(root)
     share = max_chars // BRIEF_GOAL_SHARE
     if goal_lines is None:
@@ -1375,6 +1446,7 @@ def session_brief(root: str | Path, max_chars: int = BRIEF_MAX_CHARS, *,
                                          schedule_sync=schedule_reference_sync))
     branch = _git(root, "rev-parse", "--abbrev-ref", "HEAD")
     status = _git(root, "status", "--porcelain=v1", "--untracked-files=normal")
+    dirty: list[str] = []
     if status is not None:
         dirty = [x for x in status.splitlines() if x.strip()]
         head = f"branch {branch.strip()}; " if branch else ""
@@ -1387,6 +1459,8 @@ def session_brief(root: str | Path, max_chars: int = BRIEF_MAX_CHARS, *,
                 lines.append(f"  ... and {more} more")
         else:
             lines.append(f"{head}working tree clean")
+    tool_block = (tool_brief_lines(
+        root, _dirty_paths(dirty[:BRIEF_DIRTY_FILES])) if dirty else [])
     log = _git(root, "log", f"-{BRIEF_COMMITS}", "--format=%h %s")
     if log and log.strip():
         lines.append("recent commits:")
@@ -1406,24 +1480,30 @@ def session_brief(root: str | Path, max_chars: int = BRIEF_MAX_CHARS, *,
         from ozagia.daemon.jobs import jobs_enabled as _enabled
         jobs_enabled = _enabled(root)
     tools = MCP_TOOLS_LINE + (" " + JOBS_LINE if jobs_enabled else "")
-    text = "\n".join([*lines, *goal_block, *job_block, tools])
+    text = "\n".join([*lines, *tool_block, *goal_block, *job_block, tools])
     if len(text) <= max_chars:
         return text
     # Keep the goals' reserved share and the tools line; cut the text
-    # before them at its end; jobs only when they still fit.
+    # before them at its end. The tools block goes first, then jobs.
+    tool_text = "".join(x + "\n" for x in tool_block)
     goals_text = "".join(x + "\n" for x in goal_block)
     jobs_text = "".join(x + "\n" for x in job_block)
     sep = "\n...\n"
-    keep = max_chars - len(tools) - len(goals_text) - len(jobs_text) - len(sep)
+    keep = (max_chars - len(tools) - len(goals_text) - len(tool_text)
+            - len(jobs_text) - len(sep))
     if keep < min(200, max_chars // 4):
         jobs_text = ""
+        keep = (max_chars - len(tools) - len(goals_text) - len(tool_text)
+                - len(sep))
+    if keep < 0:
+        tool_text = ""
         keep = max_chars - len(tools) - len(goals_text) - len(sep)
     if keep < 0:
         goals_text = ""
         keep = max_chars - len(tools) - len(sep)
     head_text = "\n".join(lines)
-    return (head_text[:max(keep, 0)].rstrip() + sep + goals_text + jobs_text
-            + tools)[:max_chars]
+    return (head_text[:max(keep, 0)].rstrip() + sep + tool_text + goals_text
+            + jobs_text + tools)[:max_chars]
 
 
 __all__ = ["BRIEF_HEADER", "BRIEF_MAX_CHARS", "HEADER", "JOBS_LINE", "MAX_FILES",
@@ -1432,5 +1512,5 @@ __all__ = ["BRIEF_HEADER", "BRIEF_MAX_CHARS", "HEADER", "JOBS_LINE", "MAX_FILES"
            "TestRun", "View", "WorkingSet", "apply_test_run", "devsession_line",
            "job_lines", "key_file", "load_test_record", "merge_views",
            "failing_lines", "parse_failures", "pytest_head", "rerun_command",
-           "run_record", "session_brief", "pytest_run", "recorded_outcome",
-           "text_meta", "working_set_text"]
+           "run_record", "session_brief", "tool_brief_lines", "pytest_run",
+           "recorded_outcome", "text_meta", "working_set_text"]

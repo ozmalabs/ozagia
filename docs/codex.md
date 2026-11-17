@@ -358,6 +358,13 @@ session whose working set changed last in the repository, of any harness
 unless `harness` is given (the header names it). Counters:
 `stats.working_sets_served`, `working_set_chars`, `session_briefs_served`.
 
+For dirty files whose extensions name an external-tool capability (PDF,
+images, office documents, media, ...), the session brief also adds a bounded
+`[ozagia] tools:` block: what is installed, what is missing and the install
+preview. It runs no version or sudo probe and installs nothing; the setting
+`[tools] brief = false` turns it off (docs/toolchain.md, "Session brief").
+The MCP tool `dev_tools` returns the same plan for capabilities or paths.
+
 ## Patch check
 
 `ozagia.intent.patch` ports Codex's apply_patch parser and matcher

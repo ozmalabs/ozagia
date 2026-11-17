@@ -904,9 +904,10 @@ moved yet:
 - `ozagia.core.toolchain` reads `[tools]` from both configuration files
   through `ozagia.config.load_config_section` (the versioned
   `ozagia/config.toml` is the intended location). `allow_install`,
-  `allow_network`, `allow_sudo`, `probe_versions`, `probe_sudo` and a
-  capability-to-tool `preferred` map are supported; the approval values
-  default to false and `OZAGIA_ALLOW_INSTALL`, `OZAGIA_ALLOW_NETWORK` and
+  `allow_network`, `allow_sudo`, `probe_versions`, `probe_sudo`, `brief` and
+  a capability-to-tool `preferred` map are supported; the approval values
+  default to false, `brief` defaults to true and
+  `OZAGIA_ALLOW_INSTALL`, `OZAGIA_ALLOW_NETWORK` and
   `OZAGIA_ALLOW_SUDO` override them for one process. `ozagia-toolchain`
   reports installed and missing external tools and previews installs without
   running them. See `docs/toolchain.md`.

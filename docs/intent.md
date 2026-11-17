@@ -230,6 +230,20 @@ keys, test ids and job ids only, marked as untrusted data), Codex and Claude Cod
 `SessionStart` with source `compact`, Kiro prints it on `PostCompact`. The
 MCP tool `dev_working_set` returns it too (docs/codex.md, "Working set").
 
+The read-only `toolchain` op plans external tools for a capability or a path
+(`ozagia.core.toolchain`, docs/toolchain.md, "Daemon op"): the installed and
+missing tools, the detected managers, sudo/approval state and install
+previews (`would_run: false`; nothing is installed). `probe_versions` and
+`probe_sudo` default to false, so the op normally runs only local presence
+checks (`which`/`find_spec`) and reads `[tools]` config. Plans are cached for
+60 seconds (at most 32 entries, keyed by root and request; `refresh`
+bypasses), never across roots.
+`stats` adds `toolchain_plans` (plans served, cache hits included),
+`toolchain_cache_hits` and `toolchain_errors`. The session brief may add a
+bounded `[ozagia] tools:` block for dirty non-code files; it always disables
+both probes and respects `[tools] brief = false`. The MCP tool `dev_tools`
+returns the same plan.
+
 A `write` that replaces an existing file of which the session's ledger
 holds only part (an outline's head, some ranges) of the current text
 appends `[ozagia] warning: <rel> was replaced as a whole, but this session

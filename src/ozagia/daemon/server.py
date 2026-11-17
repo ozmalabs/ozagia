@@ -99,6 +99,16 @@ state dir); the ledger copies reads into it. The `working_set` op renders
 it; `stats` adds `working_sets_served`, `working_set_chars` and
 `session_briefs_served`.
 
+Toolchain (`ozagia.core.toolchain`): the read-only `toolchain` op plans the
+external tools a capability or a path needs (`pdf`, `office`, `image`, ...),
+reports installed and missing ones, and previews what installing a missing
+one would involve. It never installs, never uses the network and, unless the
+request sets `probe_versions`/`probe_sudo`, runs no version or sudo probe.
+Plans are cached in memory for `TOOLCHAIN_CACHE_TTL_S` (at most
+`TOOLCHAIN_CACHE_MAX`, keyed by root and request; `refresh` bypasses the
+cache). `stats` adds `toolchain_plans` (plans served, cache hits included),
+`toolchain_cache_hits` and `toolchain_errors` (invalid or failed requests).
+
 Created-file ledger (`ozagia.core.files`): a handled `write` (or `edit`
 that creates the file) records it from the intent layer, with the reserved
 `_reason` as its reason; `after` for `edit`, `write`, `patch` and `shell`
@@ -159,6 +169,7 @@ import stat
 import sys
 import threading
 import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
@@ -173,6 +184,13 @@ EDIT_INTENTS = frozenset({"edit", "write", "edit_key"})
 LINTED_TOOLS = frozenset({"edit", "write", "patch", "replace"})
 # `replace` preflight plans remembered at most (oldest dropped first).
 REPLACE_PLANS_KEPT = 256
+# Toolchain plans (`ozagia.core.toolchain`): the daemon's bounded TTL cache,
+# keyed by root, capabilities, paths, model family and probe flags. Probing
+# the host is cheap but not free; a session that asks twice gets one answer.
+TOOLCHAIN_CACHE_TTL_S = 60.0
+TOOLCHAIN_CACHE_MAX = 32
+TOOLCHAIN_MODEL_FAMILY_CHARS = 64
+TOOLCHAIN_CAPABILITY_CHARS = 80
 # Built-in tools whose `after` can have created files (file ledger).
 FILE_LEDGER_TOOLS = frozenset({"edit", "write", "patch", "shell"})
 # Files one session delta records at most, and paths an after scan checks at
@@ -339,6 +357,43 @@ def _research_fetch_counters(root: Path) -> dict[str, int]:
         return {"research_fetches": 0, "research_fetch_cache_hits": 0}
 
 
+def _bounded_strings(value: Any, name: str, *, limit: int,
+                     max_chars: int) -> list[str]:
+    """A string or list of strings, deduplicated and bounded.
+
+    The daemon validates before `ozagia.core.toolchain.tool_plan` sees the
+    request, so a malformed request is an `{ok: false}` answer, not an
+    exception through the socket.
+    """
+    if value is None:
+        return []
+    items = [value] if isinstance(value, str) else value
+    if not isinstance(items, (list, tuple)):
+        raise ValueError(f"{name} must be a string or a list of strings")
+    if len(items) > limit:
+        raise ValueError(f"at most {limit} {name} may be requested")
+    cleaned: list[str] = []
+    for item in items:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError(f"{name} must be non-empty strings")
+        text = item.strip()
+        if len(text) > max_chars:
+            raise ValueError(
+                f"a {name} entry exceeds the {max_chars}-character limit")
+        if "\x00" in text:
+            raise ValueError(f"{name} must not contain NUL bytes")
+        if text not in cleaned:
+            cleaned.append(text)
+    return cleaned
+
+
+def _toolchain_flag(msg: dict[str, Any], name: str) -> bool:
+    value = msg.get(name, False)
+    if not isinstance(value, bool):
+        raise ValueError(f"{name} must be true or false")
+    return value
+
+
 class DaemonState:
     """What the request handlers share: the graph, the lock, the counters."""
 
@@ -413,6 +468,15 @@ class DaemonState:
         self.test_record = TestRecord(root)
         self.working = {"working_sets_served": 0, "working_set_chars": 0,
                         "session_briefs_served": 0}
+        # Toolchain plans (`ozagia.core.toolchain`): plans served (including
+        # cache hits), hits, and invalid or failed requests. The cache is per
+        # daemon, so one root's plan is never served for another.
+        self.toolchain_counts = {"toolchain_plans": 0,
+                                 "toolchain_cache_hits": 0,
+                                 "toolchain_errors": 0}
+        self.toolchain_cache: OrderedDict[
+            tuple[str, tuple[str, ...], tuple[str, ...], str, bool, bool],
+            tuple[float, dict[str, Any], str]] = OrderedDict()
         from ozagia.core.owners import Owners
         # Live sessions and ownership warnings (`ozagia.core.owners`).
         self.owners = Owners(root, daemon_journal=journal)
@@ -513,6 +577,8 @@ class DaemonState:
             return self.jobs.dispatch(op, msg)
         if op == "working_set":
             return self.working_set(msg)
+        if op == "toolchain":
+            return self.toolchain_op(msg)
         if op == "goals":
             return self.goals(msg)
         if op == "hint":
@@ -1164,6 +1230,76 @@ class DaemonState:
         except Exception:  # noqa: BLE001 - the text goes without goals
             return []
 
+    def toolchain_op(self, msg: dict[str, Any]) -> dict[str, Any]:
+        """The `toolchain` op: which external tools a task needs and what
+        installing the missing ones would involve (`ozagia.core.toolchain`).
+
+        Inputs: `capabilities` and/or `paths` (a string or a bounded list),
+        `model_family`, `probe_versions` and `probe_sudo` (false by default),
+        and `refresh` to bypass the cache. The answer is
+        `{ok, plan, text, cached}`; the plan is advisory and nothing is
+        installed. Plans are cached in memory for `TOOLCHAIN_CACHE_TTL_S`,
+        at most `TOOLCHAIN_CACHE_MAX`, keyed by root and request.
+        """
+        from ozagia.core import toolchain as T
+        try:
+            capabilities = _bounded_strings(
+                msg.get("capabilities"), "capabilities",
+                limit=T.MAX_CAPABILITIES, max_chars=TOOLCHAIN_CAPABILITY_CHARS)
+            paths = _bounded_strings(
+                msg.get("paths"), "paths", limit=T.MAX_PATHS,
+                max_chars=T.MAX_PATH_CHARS)
+            family_raw = msg.get("model_family")
+            if family_raw is not None and not isinstance(family_raw, str):
+                raise ValueError("model_family must be a string")
+            family = (family_raw or "").strip() or None
+            if family and len(family) > TOOLCHAIN_MODEL_FAMILY_CHARS:
+                raise ValueError(
+                    "model_family exceeds the "
+                    f"{TOOLCHAIN_MODEL_FAMILY_CHARS}-character limit")
+            probe_versions = _toolchain_flag(msg, "probe_versions")
+            probe_sudo = _toolchain_flag(msg, "probe_sudo")
+            refresh = _toolchain_flag(msg, "refresh")
+        except ValueError as exc:
+            with self._stats_lock:
+                self.toolchain_counts["toolchain_errors"] += 1
+            return {"ok": False, "error": str(exc)}
+        key = (str(self.root), tuple(capabilities), tuple(paths),
+               family or "", probe_versions, probe_sudo)
+        if not refresh:
+            with self._stats_lock:
+                cached = self.toolchain_cache.get(key)
+                if cached is not None:
+                    if time.monotonic() - cached[0] <= TOOLCHAIN_CACHE_TTL_S:
+                        self.toolchain_cache.move_to_end(key)
+                        self.toolchain_counts["toolchain_plans"] += 1
+                        self.toolchain_counts["toolchain_cache_hits"] += 1
+                        return {"ok": True, "plan": cached[1],
+                                "text": cached[2], "cached": True}
+                    del self.toolchain_cache[key]
+        try:
+            plan = T.tool_plan(
+                self.root, capabilities=capabilities, paths=paths,
+                probe_versions=probe_versions, probe_sudo=probe_sudo)
+            text = ("\n".join(T.brief_lines(plan, model_family=family))
+                    if family else T.tool_plan_text(plan))
+        except T.ToolchainError as exc:
+            with self._stats_lock:
+                self.toolchain_counts["toolchain_errors"] += 1
+            return {"ok": False, "error": str(exc)}
+        except Exception as exc:  # noqa: BLE001 - the op must not kill a socket
+            with self._stats_lock:
+                self.toolchain_counts["toolchain_errors"] += 1
+            return {"ok": False, "error": (
+                f"toolchain plan failed: {type(exc).__name__}: {exc}")}
+        with self._stats_lock:
+            self.toolchain_cache[key] = (time.monotonic(), plan, text)
+            self.toolchain_cache.move_to_end(key)
+            while len(self.toolchain_cache) > TOOLCHAIN_CACHE_MAX:
+                self.toolchain_cache.popitem(last=False)
+            self.toolchain_counts["toolchain_plans"] += 1
+        return {"ok": True, "plan": plan, "text": text, "cached": False}
+
     def working_set(self, msg: dict[str, Any]) -> dict[str, Any]:
         """The `working_set` op: the session's working set as text, or with
         `since: true` the session-start brief (`ozagia.core.working_set`).
@@ -1622,6 +1758,10 @@ class DaemonState:
                 # handed back after a compaction (or to dev_working_set),
                 # their characters, and session-start briefs from the daemon.
                 **self.working,
+                # Toolchain plans (`ozagia.core.toolchain`): plans served
+                # (cache hits included), cache hits, and invalid/failed
+                # requests.
+                **self.toolchain_counts,
                 # Affected-test selection and the test-result cache: subset
                 # runs, tests not run because no change reached them, tests
                 # answered from the cache, and runs that fell back to the
