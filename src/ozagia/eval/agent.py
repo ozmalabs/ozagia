@@ -54,6 +54,10 @@ Usage:
     .venv/bin/python -m ozagia.eval.agent validate
     .venv/bin/python -m ozagia.eval.agent run --driver fake \\
         --arms baseline,dev_memory --out-json out.json --out-md out.md
+    .venv/bin/python -m ozagia.eval.agent report --in out.json --out-md out.md
+
+`report` recomputes each run's per-component timing (ozagia.eval.timing)
+from the run JSON and its logs, so earlier runs can be re-reported.
 """
 from __future__ import annotations
 
@@ -76,6 +80,7 @@ from typing import Any, Iterable
 from ozagia.config import STATE_DIRNAME, config_path, repo_root
 from ozagia.core import failures as F
 from ozagia.daemon.protocol import ENV_SOCK
+from ozagia.eval import timing
 from ozagia.integrations.opencode import install as opencode_plugin
 from ozagia.intent.shell import GIT_REF_MOVING
 
@@ -1489,6 +1494,80 @@ def prepare_dev_memory(workdir: Path, tool_python: str,
     return {"prep_s": res["seconds"], "prep_ok": ok, "prep_error": error}
 
 
+# The repeat cost of the index: what a later session on an indexed checkout
+# does instead of a build (as the daemon's `after_refresh` does): load the
+# snapshot, reingest the files changed since it (none here: the tree is the
+# one prep just indexed) and bring the tag cache up to date. Each step is
+# timed in the subprocess, so interpreter start-up is not counted.
+_REPEAT_CODE = (
+    "import json, sys, time\n"
+    "from pathlib import Path\n"
+    "from ozagia.core.memory import DevMemory\n"
+    "from ozagia.core.repo_map import update_tag_cache\n"
+    "work, dump = Path(sys.argv[1]), Path(sys.argv[2])\n"
+    "t0 = time.monotonic()\n"
+    "mem = DevMemory(dump, dump.parent / 'journal.jsonl', root=work)\n"
+    "t1 = time.monotonic()\n"
+    "pending = mem.pending_changes()\n"
+    "mem.reingest(pending)\n"
+    "t2 = time.monotonic()\n"
+    "update_tag_cache(work, cache_path=work / '.ozagia' / 'tags.json')\n"
+    "t3 = time.monotonic()\n"
+    "print(json.dumps({'load_s': round(t1 - t0, 3), 'refresh_s': round(t2 - t1, 3),\n"
+    "                  'tags_s': round(t3 - t2, 3), 'pending': len(pending)}))\n"
+)
+
+
+def measure_repeat_index(workdir: Path, tool_python: str, log_dir: Path, *,
+                         config: Path | None = None) -> dict[str, Any]:
+    """The repeat index cost on the tree prep just indexed, outside every timer.
+
+    Runs `_REPEAT_CODE` on a copy of the run's snapshot (`dev_graph.json`),
+    in `<log_dir>/repeat_index/`, which is removed afterwards, so the
+    snapshot the daemon loads is not touched. The tag cache is the run's own
+    (unchanged tree: nothing to rewrite). Returns `prep_repeat_s` (load +
+    refresh + tag cache), `prep_repeat_parts`, `prep_repeat_ok` and
+    `prep_repeat_error`; the output goes to `prep_repeat.log`."""
+    out: dict[str, Any] = {"prep_repeat_s": None, "prep_repeat_parts": None,
+                           "prep_repeat_ok": False, "prep_repeat_error": None}
+    scratch = log_dir / "repeat_index"
+    try:
+        scratch.mkdir(parents=True, exist_ok=True)
+        dump = scratch / "dev_graph.json"
+        shutil.copyfile(log_dir / "dev_graph.json", dump)
+    except OSError as exc:
+        shutil.rmtree(scratch, ignore_errors=True)
+        out["prep_repeat_error"] = f"cannot copy the snapshot: {exc}"
+        return out
+    try:
+        env = _tool_env(workdir, config, tool_python=tool_python)
+        res = spawn_group([tool_python, "-c", _REPEAT_CODE, str(workdir), str(dump)],
+                          cwd=workdir, env=env, timeout_s=PREP_TIMEOUT_S)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    (log_dir / "prep_repeat.log").write_text(
+        f"{res['stdout']}\n--- stderr ---\n{res['stderr']}\n", encoding="utf-8")
+    parts = None
+    if res["returncode"] == 0 and not res["timed_out"]:
+        for line in reversed(res["stdout"].splitlines()):
+            try:
+                doc = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(doc, dict) and "load_s" in doc:
+                parts = doc
+                break
+    if parts is None:
+        out["prep_repeat_error"] = (
+            f"timed out after {PREP_TIMEOUT_S} s" if res["timed_out"]
+            else _tail(res["stderr"], 12) or f"exit {res['returncode']}, no timings")
+        return out
+    out.update(prep_repeat_ok=True, prep_repeat_parts=parts,
+               prep_repeat_s=round(sum(float(parts[k]) for k in
+                                       ("load_s", "refresh_s", "tags_s")), 3))
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # graph_intent: the graph daemon for one run
 # --------------------------------------------------------------------------- #
@@ -1815,19 +1894,25 @@ def run_one(repo: str | Path, task: dict[str, Any], arm: str, repeat: int,
             run_root: Path, timeout_s: int, keep: bool,
             isolation: str = "worktree",
             tool_python: str | None = None,
-            base_passed: bool = False) -> dict[str, Any]:
+            base_passed: bool = False,
+            repeat_index: bool = False) -> dict[str, Any]:
     """One task × arm × repeat. `base_passed`: validation ran with `python`
-    and the task's check passed on base (`check_validity`)."""
+    and the task's check passed on base (`check_validity`). `repeat_index`
+    measures the repeat index cost (`measure_repeat_index`,
+    `prep_repeat_s`) right after prep; run_eval asks for it once per run
+    root."""
     tool_python = tool_python or sys.executable
     config = config_path(repo)
     tid = task["id"]
     name = f"{tid}-{arm}-r{repeat}"
     log_dir = run_root / "logs" / name
+    setup_started = time.monotonic()
     workdir = make_workdir(repo, base, run_root, name, isolation=isolation)
     cleanup: list[str] = []
     record: dict[str, Any] = {"task": tid, "arm": arm, "repeat": repeat,
                               "driver": driver.name, "prep_s": 0.0,
                               "prep_ok": None, "prep_error": None,
+                              "setup_workdir_s": None, "plugin_install_s": None,
                               "cleanup_warnings": cleanup}
     graph = arm == GRAPH_ARM
     # A driver that runs the intent layer itself (native) needs no daemon
@@ -1848,10 +1933,17 @@ def run_one(repo: str | Path, task: dict[str, Any], arm: str, repeat: int,
                           files_changed=[], localized=False, wall_s=0.0)
             return record
         write_arm_config(workdir, arm, tool_python, log_dir, config=config)
+        # Workdir, break patch and arm config: setup, outside every timer.
+        record["setup_workdir_s"] = round(time.monotonic() - setup_started, 3)
         if arm in ("dev_memory", GRAPH_ARM):
             prep = prepare_dev_memory(workdir, tool_python, log_dir, config=config)
             record.update(prep_s=prep["prep_s"], prep_ok=prep["prep_ok"],
                           prep_error=prep["prep_error"])
+            if repeat_index and prep["prep_ok"]:
+                # What a later session on this revision pays instead of a
+                # build: snapshot load + refresh + tag cache (not a rebuild).
+                record.update(measure_repeat_index(workdir, tool_python, log_dir,
+                                                   config=config))
         run_kwargs: dict[str, Any] = {}
         if uses_daemon:
             started = start_daemon(workdir, tool_python, log_dir, config=config,
@@ -1862,13 +1954,18 @@ def run_one(repo: str | Path, task: dict[str, Any], arm: str, repeat: int,
                           daemon_ready_s=started["daemon_ready_s"])
             # Installed before the "before" snapshot and removed after the
             # "after" one; _snapshot also never lists it.
+            install_started = time.monotonic()
             opencode_plugin.install(workdir)
+            record["plugin_install_s"] = round(time.monotonic() - install_started, 3)
             plugin_installed = True
             run_kwargs["extra_env"] = {ENV_SOCK: str(started["sock"])}
         elif graph and config is not None:
             # The loop's graph must use the layout prep built it with.
             run_kwargs["extra_env"] = {"OZAGIA_CONFIG": str(config)}
         before = _snapshot(workdir)
+        # System wall clock, as the driver's event timestamps are: splits
+        # the time before the first event from the time after the last.
+        record["driver_started_at"] = round(time.time(), 3)
         result = driver.run(workdir, task["prompt"], arm, timeout_s, log_dir,
                             patch_path=patch, **run_kwargs)
         after = _snapshot(workdir)
@@ -1923,6 +2020,7 @@ def run_one(repo: str | Path, task: dict[str, Any], arm: str, repeat: int,
             cleanup.extend(remove_workdir(repo, workdir, run_root))
         else:
             record["workdir"] = str(workdir)
+        record["timing"] = timing.run_timing(record, log_dir)
 
 
 def check_arms(arms: list[str], driver: Any) -> None:
@@ -1949,7 +2047,9 @@ def run_eval(repo: str | Path, tasks: list[dict[str, Any]], arms: Iterable[str],
              keep: bool = False, timeout_s: int = 900,
              max_total_usd: float | None = None,
              validation: dict[str, Any] | None = None,
-             validation_source: str | None = None) -> dict[str, Any]:
+             validation_source: str | None = None,
+             repeat_index: bool = True,
+             amortize: int | None = None) -> dict[str, Any]:
     """Run every task × arm × repeat. `max_total_usd` stops the run once the
     reported cost of finished sessions exceeds it (a soft cap: the session
     that crosses it still completes). Without `python` the checks run under
@@ -1963,11 +2063,17 @@ def run_eval(repo: str | Path, tasks: list[dict[str, Any]], arms: Iterable[str],
     on base are `validated_tasks`: for them an environment or harness check
     after the agent counts against the agent (`check_validity`). Without
     one, the import probe decides. The report records `validated`,
-    `validation` (``validation_summary``) and `validated_tasks`."""
+    `validation` (``validation_summary``) and `validated_tasks`.
+
+    `repeat_index` measures the repeat index cost once, in the first run
+    that preps (see run_one). `amortize` is the N of the report's amortized
+    view (default: the number of tasks run)."""
     arms = list(arms)
     check_arms(arms, driver)
     if repeats < 1:
         raise HarnessError("repeats must be at least 1")
+    if amortize is not None and amortize < 1:
+        raise HarnessError("--amortize must be at least 1")
     if python is None:
         python, python_reason = resolve_check_python(repo, tasks, None)
     python_reason = python_reason or "explicit --python"
@@ -1993,11 +2099,15 @@ def run_eval(repo: str | Path, tasks: list[dict[str, Any]], arms: Iterable[str],
             for repeat in range(1, repeats + 1):
                 if stopped:
                     break
+                want_repeat = (repeat_index and arm in timing.INDEX_ARMS
+                               and not any(r.get("prep_repeat_ok") is not None
+                                           for r in runs))
                 record = run_one(repo, task, arm, repeat, driver, base,
                                  tasks_dir=tasks_dir, python=python,
                                  run_root=run_root, timeout_s=timeout_s,
                                  keep=keep, isolation=isolation,
-                                 base_passed=task["id"] in validated)
+                                 base_passed=task["id"] in validated,
+                                 repeat_index=want_repeat)
                 record.update(check_python=python,
                               check_python_reason=python_reason)
                 runs.append(record)
@@ -2012,6 +2122,7 @@ def run_eval(repo: str | Path, tasks: list[dict[str, Any]], arms: Iterable[str],
     describe = getattr(driver, "describe", None)
     backend = describe() if callable(describe) else {"backend": driver.name,
                                                      "model": None}
+    n = amortize_n(amortize, runs)
     return {"version": 1, "base": base, "driver": driver.name,
             "backend": backend,
             "total_cost_usd": round(sum(float(r.get("cost_usd") or 0)
@@ -2024,9 +2135,20 @@ def run_eval(repo: str | Path, tasks: list[dict[str, Any]], arms: Iterable[str],
             "tasks": [t["id"] for t in sorted(tasks, key=lambda t: t["id"])],
             "run_root": str(run_root),
             "validated_tasks": sorted(validated),
+            "amortize_n": n,
+            "index_repeat_s": timing.repeat_index(runs),
             "runs": runs,
-            "summary": aggregate(runs, ordered_arms),
+            "summary": aggregate(runs, ordered_arms, amortize=n),
             "per_task": paired(runs, ordered_arms)}
+
+
+def amortize_n(amortize: int | None, runs: list[dict[str, Any]]) -> int:
+    """N of the amortized view: `amortize`, else the number of tasks run."""
+    if amortize is not None:
+        if amortize < 1:
+            raise HarnessError("--amortize must be at least 1")
+        return amortize
+    return max(1, len({r.get("task") for r in runs}))
 
 
 # --------------------------------------------------------------------------- #
@@ -2059,15 +2181,20 @@ def paired_cells(runs: list[dict[str, Any]], arms: Iterable[str]) -> set[tuple[A
     return {c for c, got in have.items() if c not in bad and got >= set(arms)}
 
 
-def aggregate(runs: list[dict[str, Any]], arms: Iterable[str]) -> list[dict[str, Any]]:
+def aggregate(runs: list[dict[str, Any]], arms: Iterable[str], *,
+              amortize: int | None = None) -> list[dict[str, Any]]:
     """Per arm: `runs` counts every run, `valid_runs` and `invalid_runs`
     split them by `check_validity`, and `successes` and `success_rate`
     count the arm's valid runs. `paired_runs`, `paired_successes` and
     `paired_rate` cover only the (task, repeat) cells valid in every arm
     (`paired_cells`), so arms compare over the same runs. The other means
-    cover every run."""
+    cover every run. Each row also carries the per-component time means of
+    `timing.summarize_arm` (per_task_s, pay_once_s, amortized_s over
+    `amortize` tasks, default the number of tasks in `runs`)."""
     arms = list(arms)
     cells = paired_cells(runs, arms)
+    tasks_n = amortize_n(amortize, runs)
+    repeat = timing.repeat_index(runs)
     rows = []
     for arm in arms:
         mine = [r for r in runs if r["arm"] == arm]
@@ -2099,6 +2226,7 @@ def aggregate(runs: list[dict[str, Any]], arms: Iterable[str]) -> list[dict[str,
             "localization_rate": round(sum(1 for r in mine if r.get("localized")) / n, 4)
             if n else None,
         })
+        rows[-1].update(timing.summarize_arm(mine, tasks_n, repeat))
         if any("daemon_ok" in r for r in mine):
             rows[-1].update({
                 "mean_captured_calls": _mean((r.get("captured_calls") for r in mine), 1),
@@ -2211,6 +2339,11 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"- Tasks: {len(report['tasks'])}",
         "- Validated before the run: "
         + _validation_line(report.get("validation")),
+        *timing.headline(report["summary"]),
+        *([f"- Warning: the logs of {len(report['log_mismatches'])} run(s) do not "
+           "match their record, so their components are unknown: "
+           + ", ".join(b["run"] for b in report["log_mismatches"]) + "."]
+          if report.get("log_mismatches") else []),
         "",
         "## Per arm",
         "",
@@ -2240,6 +2373,7 @@ def render_markdown(report: dict[str, Any]) -> str:
               "value. MCP calls count calls to the ozagia MCP server. "
               "Prep (dev_memory snapshot and tag cache) runs before the driver timer; "
               "mean prep s is 0 for baseline."]
+    lines += timing.render_markdown_sections(report["summary"])
     graph_rows = [row for row in report["summary"] if "mean_captured_calls" in row]
     if graph_rows:
         lines += ["", "## Graph daemon and plugin", "",
@@ -2465,11 +2599,95 @@ def _cmd_run(args: argparse.Namespace) -> int:
                       python=python, python_reason=reason, run_root=run_root,
                       keep=args.keep, timeout_s=args.timeout_s,
                       max_total_usd=args.max_total_usd, validation=checked,
-                      validation_source=source)
+                      validation_source=source,
+                      repeat_index=not args.no_repeat_index,
+                      amortize=args.amortize)
     _write(args.out_json, json.dumps(report, indent=2, sort_keys=True) + "\n")
     _write(args.out_md, render_markdown(report))
     for row in report["summary"]:
         print(summary_line(row))
+    return 0
+
+
+def resolve_log_dir(record: dict[str, Any], logs_root: str | Path | None) -> Path | None:
+    """A run's log dir: its recorded `log_dir`, or with `logs_root`, the
+    directory of the same name under `<logs_root>/logs/` (a run root) or
+    `<logs_root>/` (a logs dir). The run name is `<task>-<arm>-r<repeat>`."""
+    recorded = record.get("log_dir")
+    name = (Path(recorded).name if recorded
+            else f"{record.get('task')}-{record.get('arm')}-r{record.get('repeat')}")
+    if logs_root is not None:
+        root = Path(logs_root)
+        for cand in (root / "logs" / name, root / name):
+            if cand.is_dir():
+                return cand
+        return None
+    return Path(recorded) if recorded else None
+
+
+def rereport(report: dict[str, Any], *, logs_root: str | Path | None = None,
+             amortize: int | None = None) -> dict[str, Any]:
+    """`report` with every run's `timing` recomputed from its logs, and the
+    summary and per-task tables rebuilt. Other run fields are kept. The
+    repeat index cost is not re-measured: it is taken from `prep_repeat_s`
+    where a run recorded one. Runs whose logs do not match their record
+    (`timing.logs_mismatch`: a reused run root) get no model/tool
+    breakdown and are listed in `log_mismatches`."""
+    runs = report.get("runs")
+    if not isinstance(runs, list):
+        raise HarnessError("report JSON has no 'runs' list")
+    arms = report.get("arms") or sorted({r.get("arm") for r in runs})
+    out = dict(report)
+    new_runs = []
+    for r in runs:
+        r = dict(r)
+        r["timing"] = timing.run_timing(r, resolve_log_dir(r, logs_root))
+        new_runs.append(r)
+    n = amortize_n(amortize, new_runs)
+    out.pop("warm_index_s", None)
+    out.update(runs=new_runs, amortize_n=n,
+               index_repeat_s=timing.repeat_index(new_runs),
+               log_mismatches=log_mismatches(new_runs),
+               summary=aggregate(new_runs, arms, amortize=n),
+               per_task=paired(new_runs, arms))
+    out.setdefault("tasks", sorted({r.get("task") for r in new_runs}))
+    return out
+
+
+def log_mismatches(runs: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """Runs whose logs are not theirs: [{run, log_dir, reason}]."""
+    out = []
+    for r in runs:
+        reason = (r.get("timing") or {}).get("log_mismatch")
+        if reason:
+            out.append({"run": f"{r.get('task')}-{r.get('arm')}-r{r.get('repeat')}",
+                        "log_dir": str(r.get("log_dir")), "reason": reason})
+    return out
+
+
+def _cmd_report(args: argparse.Namespace) -> int:
+    try:
+        report = json.loads(Path(args.in_json).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise HarnessError(f"cannot read {args.in_json}: {exc}") from exc
+    if not isinstance(report, dict):
+        raise HarnessError(f"{args.in_json}: expected a report object")
+    out = rereport(report, logs_root=args.logs_root, amortize=args.amortize)
+    _write(args.out_json, json.dumps(out, indent=2, sort_keys=True) + "\n")
+    _write(args.out_md, render_markdown(out))
+    for line in timing.headline(out["summary"]):
+        print(line)
+    bad = out["log_mismatches"]
+    if bad:
+        print(f"warning: the logs of {len(bad)} run(s) do not match their record "
+              "(a reused run root? pass --logs-root); their components are unknown:",
+              file=sys.stderr)
+        for b in bad:
+            print(f"  {b['run']}: {b['reason']}", file=sys.stderr)
+    missing = sum(1 for r in out["runs"] if (r.get("timing") or {}).get("model") is None)
+    if missing:
+        print(f"{missing} of {len(out['runs'])} run(s) have no model/tool breakdown "
+              "(see timing.reasons in the JSON)")
     return 0
 
 
@@ -2531,7 +2749,25 @@ def build_parser() -> argparse.ArgumentParser:
                            "validating again; it must have the same base, every "
                            "selected task unchanged and the same check "
                            "interpreter, else `run` refuses with exit 2")
+    r.add_argument("--amortize", type=int, default=None, metavar="N",
+                   help="N of the amortized view (pay-once / N + per task; "
+                        "default: the number of tasks run)")
+    r.add_argument("--no-repeat-index", action="store_true",
+                   help="skip the repeat index cost (snapshot load + refresh + "
+                        "tag cache) measured once per run root")
     r.set_defaults(func=_cmd_run)
+
+    rep = sub.add_parser("report", help="recompute timing and the report from a "
+                                        "run JSON and its logs")
+    rep.add_argument("--in", dest="in_json", required=True, help="run JSON")
+    rep.add_argument("--logs-root", default=None,
+                     help="where the run logs are now: a run root (with logs/) "
+                          "or a logs dir (default: each run's recorded log_dir)")
+    rep.add_argument("--amortize", type=int, default=None, metavar="N",
+                     help="N of the amortized view (default: the number of tasks)")
+    rep.add_argument("--out-md", default=None)
+    rep.add_argument("--out-json", default=None)
+    rep.set_defaults(func=_cmd_report)
     return p
 
 

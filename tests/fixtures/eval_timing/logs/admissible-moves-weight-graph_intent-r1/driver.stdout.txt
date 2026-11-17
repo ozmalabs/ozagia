@@ -1,0 +1,50 @@
+{"part": {"type": "step-start"}, "timestamp": 1794838659422, "type": "step_start"}
+{"part": {"state": {"status": "completed", "time": {"end": 1794838663982, "start": 1794838659426}}, "tool": "shell", "type": "tool"}, "timestamp": 1794838663982, "type": "tool_use"}
+{"part": {"cost": 0, "reason": "tool-calls", "tokens": {"cache": {"read": 0, "write": 0}, "input": 7323, "output": 28, "reasoning": 0}, "type": "step-finish"}, "timestamp": 1794838664005, "type": "step_finish"}
+{"part": {"type": "step-start"}, "timestamp": 1794838667422, "type": "step_start"}
+{"part": {"state": {"status": "completed", "time": {"end": 1794838668045, "start": 1794838667761}}, "tool": "grep", "type": "tool"}, "timestamp": 1794838668045, "type": "tool_use"}
+{"part": {"state": {"status": "completed", "time": {"end": 1794838668069, "start": 1794838667425}}, "tool": "grep", "type": "tool"}, "timestamp": 1794838668069, "type": "tool_use"}
+{"part": {"cost": 0, "reason": "tool-calls", "tokens": {"cache": {"read": 4352, "write": 0}, "input": 5274, "output": 86, "reasoning": 0}, "type": "step-finish"}, "timestamp": 1794838668091, "type": "step_finish"}
+{"part": {"type": "step-start"}, "timestamp": 1794838669933, "type": "step_start"}
+{"part": {"state": {"status": "completed", "time": {"end": 1794838670255, "start": 1794838669937}}, "tool": "read", "type": "tool"}, "timestamp": 1794838670255, "type": "tool_use"}
+{"part": {"cost": 0, "reason": "tool-calls", "tokens": {"cache": {"read": 6528, "write": 0}, "input": 3278, "output": 42, "reasoning": 0}, "type": "step-finish"}, "timestamp": 1794838670278, "type": "step_finish"}
+{"part": {"type": "step-start"}, "timestamp": 1794838673419, "type": "step_start"}
+{"part": {"state": {"status": "completed", "time": {"end": 1794838673540, "start": 1794838673422}}, "tool": "shell", "type": "tool"}, "timestamp": 1794838673540, "type": "tool_use"}
+{"part": {"cost": 0, "reason": "tool-calls", "tokens": {"cache": {"read": 9472, "write": 0}, "input": 5725, "output": 28, "reasoning": 0}, "type": "step-finish"}, "timestamp": 1794838673562, "type": "step_finish"}
+{"part": {"type": "step-start"}, "timestamp": 1794838675011, "type": "step_start"}
+{"part": {"state": {"status": "completed", "time": {"end": 1794838675254, "start": 1794838675014}}, "tool": "grep", "type": "tool"}, "timestamp": 1794838675254, "type": "tool_use"}
+{"part": {"cost": 0, "reason": "tool-calls", "tokens": {"cache": {"read": 13056, "write": 0}, "input": 2253, "output": 40, "reasoning": 0}, "type": "step-finish"}, "timestamp": 1794838675277, "type": "step_finish"}
+{"part": {"type": "step-start"}, "timestamp": 1794838675847, "type": "step_start"}
+{"part": {"state": {"status": "completed", "time": {"end": 1794838675971, "start": 1794838675850}}, "tool": "read", "type": "tool"}, "timestamp": 1794838675971, "type": "tool_use"}
+{"part": {"cost": 0, "reason": "tool-calls", "tokens": {"cache": {"read": 14976, "write": 0}, "input": 578, "output": 28, "reasoning": 0}, "type": "step-finish"}, "timestamp": 1794838675993, "type": "step_finish"}
+{"part": {"type": "step-start"}, "timestamp": 1794838678515, "type": "step_start"}
+{"part": {"state": {"status": "completed", "time": {"end": 1794838678660, "start": 1794838678517}}, "tool": "read", "type": "tool"}, "timestamp": 1794838678660, "type": "tool_use"}
+{"part": {"cost": 0, "reason": "tool-calls", "tokens": {"cache": {"read": 15104, "write": 0}, "input": 4327, "output": 28, "reasoning": 0}, "type": "step-finish"}, "timestamp": 1794838678682, "type": "step_finish"}
+{"part": {"type": "step-start"}, "timestamp": 1794838682234, "type": "step_start"}
+{"part": {"text": "(scrubbed)", "time": {"end": 1794838684291, "start": 1794838682238}, "type": "text"}, "timestamp": 1794838684291, "type": "text"}
+{"part": {"state": {"status": "completed", "time": {"end": 1794838684356, "start": 1794838684163}}, "tool": "grep", "type": "tool"}, "timestamp": 1794838684356, "type": "tool_use"}
+{"part": {"cost": 0, "reason": "tool-calls", "tokens": {"cache": {"read": 15360, "write": 0}, "input": 6300, "output": 195, "reasoning": 0}, "type": "step-finish"}, "timestamp": 1794838684384, "type": "step_finish"}
+{"part": {"type": "step-start"}, "timestamp": 1794838686772, "type": "step_start"}
+{"part": {"state": {"status": "completed", "time": {"end": 1794838688771, "start": 1794838686774}}, "tool": "edit", "type": "tool"}, "timestamp": 1794838688771, "type": "tool_use"}
+{"part": {"cost": 0, "reason": "tool-calls", "tokens": {"cache": {"read": 19200, "write": 0}, "input": 3870, "output": 85, "reasoning": 0}, "type": "step-finish"}, "timestamp": 1794838688819, "type": "step_finish"}
+{"part": {"type": "step-start"}, "timestamp": 1794838689981, "type": "step_start"}
+{"part": {"text": "(scrubbed)", "time": {"end": 1794838690606, "start": 1794838689984}, "type": "text"}, "timestamp": 1794838690606, "type": "text"}
+{"part": {"state": {"status": "completed", "time": {"end": 1794838691258, "start": 1794838690219}}, "tool": "shell", "type": "tool"}, "timestamp": 1794838691258, "type": "tool_use"}
+{"part": {"cost": 0, "reason": "tool-calls", "tokens": {"cache": {"read": 21504, "write": 0}, "input": 1752, "output": 56, "reasoning": 0}, "type": "step-finish"}, "timestamp": 1794838691280, "type": "step_finish"}
+{"part": {"type": "step-start"}, "timestamp": 1794838692367, "type": "step_start"}
+{"part": {"state": {"status": "completed", "time": {"end": 1794838693509, "start": 1794838692370}}, "tool": "shell", "type": "tool"}, "timestamp": 1794838693509, "type": "tool_use"}
+{"part": {"cost": 0, "reason": "tool-calls", "tokens": {"cache": {"read": 22912, "write": 0}, "input": 470, "output": 36, "reasoning": 0}, "type": "step-finish"}, "timestamp": 1794838693568, "type": "step_finish"}
+{"part": {"type": "step-start"}, "timestamp": 1794838694053, "type": "step_start"}
+{"part": {"text": "(scrubbed)", "time": {"end": 1794838694640, "start": 1794838694194}, "type": "text"}, "timestamp": 1794838694640, "type": "text"}
+{"part": {"state": {"status": "completed", "time": {"end": 1794838695110, "start": 1794838694376}}, "tool": "shell", "type": "tool"}, "timestamp": 1794838695110, "type": "tool_use"}
+{"part": {"cost": 0, "reason": "tool-calls", "tokens": {"cache": {"read": 23040, "write": 0}, "input": 451, "output": 64, "reasoning": 0}, "type": "step-finish"}, "timestamp": 1794838695132, "type": "step_finish"}
+{"part": {"type": "step-start"}, "timestamp": 1794838695600, "type": "step_start"}
+{"part": {"state": {"status": "completed", "time": {"end": 1794838699025, "start": 1794838695602}}, "tool": "shell", "type": "tool"}, "timestamp": 1794838699025, "type": "tool_use"}
+{"part": {"cost": 0, "reason": "tool-calls", "tokens": {"cache": {"read": 23168, "write": 0}, "input": 426, "output": 54, "reasoning": 0}, "type": "step-finish"}, "timestamp": 1794838699048, "type": "step_finish"}
+{"part": {"type": "step-start"}, "timestamp": 1794838702687, "type": "step_start"}
+{"part": {"text": "(scrubbed)", "time": {"end": 1794838703722, "start": 1794838702689}, "type": "text"}, "timestamp": 1794838703722, "type": "text"}
+{"part": {"state": {"status": "completed", "time": {"end": 1794838704224, "start": 1794838703496}}, "tool": "shell", "type": "tool"}, "timestamp": 1794838704224, "type": "tool_use"}
+{"part": {"cost": 0, "reason": "tool-calls", "tokens": {"cache": {"read": 23296, "write": 0}, "input": 5963, "output": 110, "reasoning": 0}, "type": "step-finish"}, "timestamp": 1794838704247, "type": "step_finish"}
+{"part": {"type": "step-start"}, "timestamp": 1794838706388, "type": "step_start"}
+{"part": {"text": "(scrubbed)", "time": {"end": 1794838711380, "start": 1794838706392}, "type": "text"}, "timestamp": 1794838711380, "type": "text"}
+{"part": {"cost": 0, "reason": "stop", "tokens": {"cache": {"read": 26112, "write": 0}, "input": 3329, "output": 474, "reasoning": 0}, "type": "step-finish"}, "timestamp": 1794838711403, "type": "step_finish"}

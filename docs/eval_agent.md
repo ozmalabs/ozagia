@@ -84,6 +84,8 @@ For each task and arm, `run_eval` does the following:
 9. `localized` is true if any `expected_files` entry is in `files_changed`.
 10. Removes the workdir, unless `--keep`. Cleanup problems are listed in
     `cleanup_warnings` on the run record.
+11. Computes the run's `timing` from the record and its logs (see Time per
+    component).
 
 Logs (driver stdout and stderr, check output, transcripts, the dev-memory snapshot and
 journal) stay in `<run_root>/logs/`. Only workdirs are removed.
@@ -398,6 +400,9 @@ The change snapshot is taken after prep.
 
 Prep time is recorded as `prep_s` on each run and reported as "mean prep s" per arm.
 The driver's `wall_s` does not include it. The baseline arm has `prep_s = 0`.
+In the per-component report prep is the `index` component, cold once per
+revision, with the repeat cost of a later session measured apart (see Time per
+component).
 Before this change the snapshot build (about 100 s on this tree) ran inside the
 session's wall time, so dev_memory sessions were timed unfairly.
 
@@ -526,6 +531,188 @@ $PY -m ozagia.eval.agent run --driver noop --arms baseline \
     --python $PY --out-json evaluation/agent_e2e/dry_run_noop.json \
     --out-md evaluation/agent_e2e/dry_run_noop.md
 ```
+
+## Time per component
+
+Total wall time is the wrong measure for comparing arms. An arm that saves 30 s
+of agent time per task and spends 35 s once on an index is faster from the
+second task on the same revision. Each run therefore gets a `timing` block
+(`src/ozagia/eval/timing.py`), and the report shows the components per arm, a
+per-task time without setup and index, and an amortized time.
+
+| component | what it is | source | kind |
+|---|---|---|---|
+| setup | workdir creation, break patch and arm config (`setup_workdir_s`); plugin install (`plugin_install_s`); daemon start to `ready`, including the snapshot load (`daemon_ready_s`) | harness timers | per session |
+| index | prep (`build_index` and `update_tag_cache`), cold (`prep_s`); `repeat_s`: what a later session on the same revision pays instead (`prep_repeat_s`, below) | harness timers | cold once per revision, repeat per later session |
+| model | per step, the wait from the previous step's end (its `step_finish` or last tool end) to the step's first tool start, or to its `step_finish` when it calls no tool, plus the step's last tool end to its `step_finish`; prefill and generation together | driver events | per task |
+| tools | the union of the tool calls' `state.time` intervals; per tool name the split below | driver events, daemon journal | per task |
+| other | driver wall minus model, tools and timeout tail, never below 0 | difference | per task |
+| timeout tail | for a run killed at its timeout, the time after its last event (`timeout_tail_s`) | difference | per task |
+| check | the task check (`check_s`) | harness timer | not agent time |
+
+`per_task_s` = model + tools + other + timeout tail, which is the driver wall
+unless the driver's clock runs past it. Every eval task is its own OpenCode
+session, with its own workdir, plugin install and daemon start, so setup is a
+per-session cost and is not amortized. The amortized time per task for N tasks
+(sessions) on one revision is
+
+    (index cold + (N - 1) × index repeat) / N + setup + per task
+
+with N from `--amortize N` (default: the number of tasks run). `pay_once_s` =
+setup + index cold is what a first task pays on top of its per-task time. When a
+run root has no repeat measurement (older runs, `--no-repeat-index`), the
+repeat cost counts as 0 and the headline says the amortized time is a lower
+bound. When no setup part is recorded (older runs), setup, pay-once and
+amortized are blank (unknown), not 0. When only some parts are recorded, the
+sum is shown with `*` and a footnote names the missing parts (a lower bound).
+The report's headline (in the header list, once) compares per-task, model and
+amortized time between arms, never the sum of everything.
+
+The repeat index cost is measured once per run root, in the first run that
+preps, right after prep and outside every timer (`measure_repeat_index` in
+`agent.py`). It does what a later session on an indexed checkout does instead
+of a build, as the daemon's `after_refresh` does: load the snapshot
+(`DevMemory`), reingest the files changed since it (`pending_changes` +
+`reingest`, none here since the tree is the one just indexed) and bring the tag
+cache up to date (`update_tag_cache`). It runs on a copy of the run's snapshot,
+which is removed afterwards, so the daemon's snapshot is not touched. Each step
+is timed inside the subprocess (`prep_repeat_parts`: `load_s`, `refresh_s`,
+`tags_s`, `pending`), and `prep_repeat_s` is their sum; output in
+`prep_repeat.log`. On the Ocelot eval base (54e5eb5) it takes about 6.3 s
+(load 2.1 s, refresh 1.6 s, tag cache 2.6 s) against 52.3 s for the cold prep.
+A changed revision costs more than the unchanged-tree figure (reingest and tag
+cache of the changed files: about 9 s for 3 changed domain files). The snapshot
+load is also inside `daemon_ready_s`, so for graph_intent it is counted in both
+setup and repeat. `--no-repeat-index` skips the measurement.
+
+### Model time and its limits
+
+OpenCode (`--format json`) prints `step_start` after it has the response
+stream and has taken its per-step snapshot. In the live Ocelot runs the median
+time from `step_start` to the first tool start was 3–4 ms in two log sets and
+236 ms in a third, while the gap since the previous `step_finish` was seconds.
+So the model time of a step starts at the previous step's end: `pre_step_s` is
+the gap before `step_start`, `in_step_s` the rest up to the first tool. The
+time from a step's last tool end to its `step_finish` (4–15 s per log set) is
+also model time (`post_tool_s`): the turn closing after the tool results are
+in. The three include OpenCode's per-step bookkeeping (its snapshot), which
+cannot be separated. The first step has no observable start, so its wait is in
+other. OpenCode reports no per-token timing, so prefill and generation are one
+number (`split: "combined"`). Tokens per step: `input_uncached` is OpenCode's
+`tokens.input` (which excludes cache reads), `input_cached` is
+`tokens.cache.read`.
+
+For graph_intent, model time also holds the plugin's wait for the daemon's
+task hint before each model request (at most 6 s per hint). `model.hint_waited_s`
+is that wait for the hints that started after the driver's first event (the
+first hint, before the first request, is in other); `model_excl_hint_s` is model
+time without it. The components table shows both, and the headline's model line
+uses model without hint for arms with hints and names the hint wait.
+
+The native loop's transcript has per-step request `ms` (non-streaming, so
+also combined) and per-tool `ms` with `handled`; its tool time in built-in
+includes ozagia's after-processing, which shares the timer. For `claude`,
+model time is `duration_api_ms` of the JSON result, tools are unknown and
+other includes them (untested live). `fake` and `noop` have no events: model,
+tools and other are null and per task is the driver wall.
+
+### Tool time split
+
+The plugin writes up to three journal entries per call: a `*_preflight` entry
+(permission request), the deciding `tool` entry (`handled` true or false) and,
+for a call left to the built-in, an `after` entry (awaited inside the call).
+`journal_calls` groups them into calls: a decision takes the oldest waiting
+preflight of its tool, and an `after` entry joins the latest decided call. A
+preflight that never gets a decision is a call refused at the permission step
+(OpenCode's "Permission denied") and becomes a call of its own: one still
+waiting when another preflight of the tool arrives more than 1 s later
+(preflights within 1 s are parallel calls), or at the end of the journal.
+
+Per tool name, the driver's calls are paired in start order with these journal
+calls:
+
+- in ozagia: preflight + decision `ms` of handled calls. This includes
+  commands the daemon runs itself, such as a captured `pytest`.
+- in built-in: a passed-through or refused call's duration minus its daemon
+  `ms`.
+- daemon overhead: preflight + decision + after `ms` of passed-through and
+  refused calls (and after `ms` of handled ones). For passthrough shells this
+  is mostly `after_refresh` (about 0.43 s per call on Ocelot), real time the
+  baseline does not pay.
+- plugin and IPC: a handled call's duration minus its daemon `ms` (socket,
+  JSON, the permission check in OpenCode).
+
+The pairing is trusted (`matched: true`) only when the counts agree and every
+pair is plausible: the daemon's `ms` fit in the call's duration + 0.25 s, and
+every journal `ts` of the call (whole seconds) lies within the call's seconds
+± 1 s. A call still running at the timeout leaves a decision with no driver
+event, and a lost preflight shifts every later pair; either fails one of these
+checks. Then the row has `matched: false` and `mismatch` gives the reason
+(`timing.tools.mismatches` per run): ozagia and overhead come from the journal
+totals, built-in is the rest, plugin and IPC is unknown. The components table
+lists the runs with an unpaired tool. Journal `ts` are the daemon host's local
+time; a report made in another time zone shows up as a whole-quarter-hour
+offset, which is removed (`tools.journal_offset_s`). The per-name values are
+sums over calls; with parallel calls they can exceed the tools union. Without
+a daemon (baseline, dev_memory) every tool is built-in time, except MCP tools
+named `ozagia...`, which are ozagia time.
+
+Other daemon ops are totalled in `timing.daemon_ops`. `other.hint_waited_s`
+sums `min(ms, 6 s)` over all hints, and `hint_daemon_s` the daemon's full time.
+A hint that runs past 6 s keeps the daemon busy and shows up as overhead on the
+next calls.
+
+### Clocks
+
+Three clocks are involved: the harness's monotonic timer (driver wall, setup,
+prep, check), OpenCode's `Date.now()` (event and tool times) and the daemon's
+own timer (journal `ms`). Differences between them are clipped at 0 per call
+and in other; when model + tools exceed the harness wall, other is 0 and
+`other.clock_note` gives the excess. `other.startup_shutdown_s` is the wall
+minus the event span. New runs record `driver_started_at` (system wall clock,
+the same source as OpenCode's timestamps), which splits that into `head_s`
+(before the first event: start-up, plugin load, the first hint and the first
+request) and `tail_s` (after the last event: exit).
+
+### Timed-out runs
+
+A run killed at its timeout has `timed_out: true`, and the table counts them
+per arm ("timed out"). The time after its last event is an unanswered request
+or a tool still running (the journal of one such run shows a shell decided
+after the driver's last event), so it goes to `timeout_tail_s` instead of
+other. Its per-task time is the timeout. For runs without `driver_started_at`
+(older runs) the head cannot be told apart, so the tail is the wall minus the
+event span, start-up included (`other.timeout_tail_includes_head`, and the
+headline says how many runs this applies to).
+
+### Missing logs
+
+Every component that cannot be computed is null, with the reason in
+`timing.reasons`: no log dir, no `driver.stdout.txt`, no step events, logs that
+are not this run's (below), no `daemon_journal.jsonl` for a daemon run (tools
+then have durations but no split), or setup parts an older harness did not
+record. Timing never fails a run.
+
+### Re-reporting earlier runs
+
+```
+$PY -m ozagia.eval.agent report --in <run>.json [--logs-root <run root or logs dir>] \
+    [--amortize N] --out-md <out>.md [--out-json <out>.json]
+```
+
+`report` recomputes every run's `timing` from the JSON and the logs and
+rebuilds the summary and the markdown; the input file is not changed.
+`--logs-root` points at where the logs are now, when the run root was moved
+or reused: runs are found by name under `<logs-root>/logs/` or `<logs-root>/`.
+Without it each run's recorded `log_dir` is read, which a later run may have
+reused. So for OpenCode runs the logs must match the record: the number of
+`tool_use` events against `tool_calls`, the uncached input tokens against
+`tokens_in`, and, where recorded, the first event within the run's wall of
+`driver_started_at`. A run whose logs do not match gets no model, tools or
+other (`timing.log_mismatch`, `log_mismatches` in the JSON); `report` prints a
+warning listing these runs and the markdown header names them. The repeat
+index cost cannot be recomputed from logs; it is used only where a run
+recorded `prep_repeat_s`.
 
 ## How a live run is approved and launched
 

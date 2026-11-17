@@ -104,8 +104,9 @@ costs from per-task costs.
   - setup: workdir creation, plugin install, daemon start (pay-once per
     session);
   - index: graph build and tag cache (pay-once per repo revision; reported
-    as cold, plus a warm re-index of the same tree measured once per run
-    root so the incremental cost is known);
+    as cold, plus the repeat cost a later session on the same revision
+    pays instead of a build (snapshot load + refresh + tag cache), measured
+    once per run root);
   - model: time from each step start to its first tool call or finish
     (prefill plus generation), split into prefill and generation when the
     driver reports token timing, else total; with uncached and cached
@@ -116,7 +117,9 @@ costs from per-task costs.
   - check: the task check (not counted against the agent).
 - Report: per arm, mean of each component; a "per task" total that
   excludes pay-once components; and an amortized view for N tasks on the
-  same revision (`index / N + per-task`), N given by `--amortize` (default
+  same revision (`(index cold + (N - 1) * index repeat) / N + setup +
+  per-task`; setup is per session, every task being its own session), N
+  given by `--amortize` (default
   the number of tasks run). The headline compares per-task time and
   amortized time, never the plain sum.
 - Raw component timings are in the JSON per run, so other views can be
