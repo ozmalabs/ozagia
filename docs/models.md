@@ -13,7 +13,10 @@ success rate and cost (plan item 12).
 The advisory model graph — curated families, model-space distance, bounded
 similarity edges and task/tool matching — lives in `ozagia.core.model_graph`
 and is documented in [model_graph.md](model_graph.md). It does not change
-`models.resolve`.
+`models.resolve`. Cached provider metadata (models.dev, LiteLLM, OpenRouter
+and Epoch AI) is an explicit, opt-in layer documented in
+[model_sources.md](model_sources.md); it is never fetched while listing or
+resolving a model.
 
 The module is standard-library only and does not import the target project.
 `python -m ozagia.models_cli` is the command entry point until the main CLI is
@@ -211,14 +214,26 @@ because the registry cannot prove it is local.
 ```text
 python -m ozagia.models_cli list [--root R] [--json]
 python -m ozagia.models_cli show MODEL_ID [--root R] [--json]
+                                [--source SOURCE]... [--no-sources]
+                                [--with-metadata]
 python -m ozagia.models_cli resolve [--task CLASS] [--root R] [--json]
-python -m ozagia.models_cli graph [--root R] [--json]
+python -m ozagia.models_cli graph [--root R] [--json] [--source SOURCE]...
+                                  [--no-sources]
 python -m ozagia.models_cli similar MODEL_ID [--limit N] [--root R] [--json]
+                                    [--source SOURCE]... [--no-sources]
 python -m ozagia.models_cli match [--task CLASS] [...] [--root R] [--json]
+                                  [--source SOURCE]... [--no-sources]
+python -m ozagia.models_cli sources [--root R] [--json]
+python -m ozagia.models_cli sync SOURCE [--allow-network] [--timeout S]
+                                 [--max-bytes N] [--root R] [--json]
+python -m ozagia.models_cli import SOURCE PATH [--root R] [--json]
 ```
 
-`graph`, `similar` and `match` are the advisory model-graph commands; see
-[model_graph.md](model_graph.md) for their filters and JSON shape.
+`graph`, `similar`, `match` and `show` are the advisory model-graph commands;
+see [model_graph.md](model_graph.md) for their filters and JSON shape. They
+use valid cached metadata by default, with `--no-sources` to disable it.`sources`, `sync` and `import` manage the cache documented in
+[model_sources.md](model_sources.md). `sync` exits `2` unless
+`--allow-network` is given; `import` is offline.
 
 Examples:
 
@@ -277,14 +292,17 @@ it beats the explicit default on success rate and cost.
 ## Limits and integration notes
 
 - `opencode models` supplies ids only; context, cost and capabilities remain
-  unknown until a richer source or an explicit metadata schema is added.
+  unknown until cached external metadata is imported (see
+  [model_sources.md](model_sources.md)) or an explicit metadata schema is
+  added.
 - Locality is explicit configuration, not provider-name inference.
 - `ozagia/models.toml` is not read yet. Defaults and task pins live in
   `[models]` in `ozagia/config.toml`, as this slice specifies.
 - The advisory model graph reads `[model_graph]` directly through
   `load_config_section`; it is not part of the typed settings registry. Its
-  profiles are curated approximations and its matching is advisory. See
-  [model_graph.md](model_graph.md).
+  profiles are curated approximations and its matching is advisory. Cached
+  metadata is explicit; see [model_graph.md](model_graph.md) and
+  [model_sources.md](model_sources.md).
 - The settings registry validates `[models.tasks]`/`[models.by_task_class]`
   and `[models.local]` as dynamic tables. `core.models` still reads `[models]`
   directly and ignores unrelated sections.

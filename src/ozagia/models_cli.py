@@ -10,6 +10,9 @@ Examples::
     python -m ozagia.models_cli list --root . --json
     python -m ozagia.models_cli show local/qwen
     python -m ozagia.models_cli resolve --task diff_review --root . --json
+    python -m ozagia.models_cli sources --root .
+    python -m ozagia.models_cli import models-dev ./snapshot.json --root .
+    python -m ozagia.models_cli graph --source models-dev --root . --json
 """
 from __future__ import annotations
 
@@ -20,6 +23,7 @@ from pathlib import Path
 
 from ozagia.config import repo_root
 from ozagia.core import model_graph as G
+from ozagia.core import model_sources as S
 from ozagia.core import models as M
 
 
@@ -44,6 +48,89 @@ def _warnings(warnings: tuple[str, ...]) -> None:
         print(f"warning: {warning}", file=sys.stderr)
 
 
+def _source_selection(args: argparse.Namespace) -> tuple[str, ...]:
+    """Sources requested on the command line, in registry precedence order."""
+    if getattr(args, "no_sources", False):
+        return ()
+    selected = tuple(getattr(args, "sources", None) or S.DEFAULT_ORDER)
+    for source_id in selected:
+        S.get_source(source_id)
+    return selected
+
+
+def _merge_sources(root: Path, args: argparse.Namespace,
+                   item: M.Catalog) -> S.MergedExternal:
+    selected = _source_selection(args)
+    return S.merge_cached(
+        root, selected, model_ids=[record.id for record in item.records])
+
+
+def _print_source_summary(report: S.MergedExternal) -> None:
+    if not report.order:
+        print("sources: disabled")
+        return
+    parts: list[str] = []
+    for entry in report.sources:
+        status = entry.get("status", "unknown")
+        age = entry.get("age_s")
+        label = f"{entry.get('source')}={status}"
+        if age is not None and status in {"ok", "stale"}:
+            label += f"(age={int(age)}s)"
+        parts.append(label)
+    print("sources: " + ", ".join(parts))
+    if report.not_assessed:
+        print("sources_not_assessed: " + ", ".join(report.not_assessed))
+
+
+def _print_sources(report: dict) -> None:
+    print(f"sources: {len(report['sources'])}")
+    for entry in report["sources"]:
+        age = entry.get("age_s")
+        age_text = f"{int(age)}s" if age is not None else "unknown"
+        print(f"{entry['id']}  status={entry['status']}  "
+              f"stale={_yes(entry.get('stale'))}  age={age_text}  "
+              f"license={entry.get('license')}  role={entry.get('role')}")
+        print(f"  url: {entry.get('url')}")
+        print("  fields: " + (", ".join(entry.get("fields", [])) or "-"))
+        if entry.get("description"):
+            print(f"  description: {entry['description']}")
+        if entry.get("not_assessed"):
+            print("  not_assessed: yes")
+    if report["not_assessed"]:
+        print("not_assessed: " + ", ".join(report["not_assessed"]))
+    _warnings(tuple(report.get("warnings", ())))
+
+
+def _yes(value: object) -> str:
+    return "yes" if value is True else ("no" if value is False else "unknown")
+
+
+def _print_sync(report: dict) -> None:
+    print(f"source: {report['source']}")
+    print(f"status: {report['status']}  origin={report.get('origin')}")
+    print(f"bytes: {report.get('bytes')}  sha256: {report.get('sha256')}")
+    print(f"fetched_at: {report.get('fetched_at')}")
+    print(f"cache: {report.get('cache_path')}")
+    if report.get("fallback_used"):
+        print("fallback_used: yes")
+    _warnings(tuple(report.get("warnings", ())))
+
+
+def _print_metadata(metadata: dict | None,
+                    report: S.MergedExternal | None = None) -> None:
+    if not metadata:
+        print("metadata: none")
+        return
+    print("metadata:")
+    for key in sorted(metadata):
+        value = metadata[key]
+        if isinstance(value, list):
+            value = ", ".join(str(item) for item in value) or "-"
+        print(f"  {key}: {value}")
+    if report is not None:
+        _print_source_summary(report)
+
+
 def _print_list(item: M.Catalog) -> None:
     discovery = item.discovery
     detail = f" ({discovery.message})" if discovery.message else ""
@@ -60,7 +147,9 @@ def _print_list(item: M.Catalog) -> None:
     _warnings(item.warnings)
 
 
-def _print_show(record: M.ModelRecord, node: G.ModelNode | None = None) -> None:
+def _print_show(record: M.ModelRecord, node: G.ModelNode | None = None,
+                *, metadata: dict | None = None,
+                report: S.MergedExternal | None = None) -> None:
     print(f"id: {record.id}")
     print(f"provider: {record.provider}")
     print(f"model: {record.model}")
@@ -76,6 +165,8 @@ def _print_show(record: M.ModelRecord, node: G.ModelNode | None = None) -> None:
           + (", ".join(record.references) if record.references else "-"))
     if node is not None:
         _print_profile(node)
+    if report is not None:
+        _print_metadata(metadata, report)
 
 
 def _print_profile(node: G.ModelNode) -> None:
@@ -207,6 +298,22 @@ def _print_resolve(item: M.Resolution) -> None:
     _warnings(item.warnings)
 
 
+def _add_source_args(parser: argparse.ArgumentParser, *,
+                     metadata: bool = False) -> None:
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--source", action="append", default=[], metavar="SOURCE",
+        dest="sources",
+        help="cached metadata source (repeatable; default: all active)")
+    group.add_argument(
+        "--no-sources", action="store_true",
+        help="disable cached metadata and use curated profiles only")
+    if metadata:
+        parser.add_argument(
+            "--with-metadata", action="store_true",
+            help="print provenance and the cached metadata for this model")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ozagia-models",
@@ -222,12 +329,35 @@ def build_parser() -> argparse.ArgumentParser:
     show.add_argument("model_id")
     show.add_argument("--root", default=None)
     show.add_argument("--json", action="store_true")
+    _add_source_args(show, metadata=True)
 
     resolve = sub.add_parser(
         "resolve", help="choose the model for a task class or the default")
     resolve.add_argument("--task", default=None, metavar="CLASS")
     resolve.add_argument("--root", default=None)
     resolve.add_argument("--json", action="store_true")
+
+    sources = sub.add_parser(
+        "sources", help="list metadata sources and their cache state")
+    sources.add_argument("--root", default=None)
+    sources.add_argument("--json", action="store_true")
+
+    sync = sub.add_parser(
+        "sync", help="fetch and cache one metadata source (needs "
+                     "--allow-network)")
+    sync.add_argument("source")
+    sync.add_argument("--root", default=None)
+    sync.add_argument("--allow-network", action="store_true")
+    sync.add_argument("--timeout", type=float, default=S.DEFAULT_TIMEOUT_S)
+    sync.add_argument("--max-bytes", type=int, default=None)
+    sync.add_argument("--json", action="store_true")
+
+    import_parser = sub.add_parser(
+        "import", help="validate and cache a local metadata snapshot")
+    import_parser.add_argument("source")
+    import_parser.add_argument("path")
+    import_parser.add_argument("--root", default=None)
+    import_parser.add_argument("--json", action="store_true")
 
     graph = sub.add_parser(
         "graph", help="show the bounded model graph and its profiles")
@@ -238,6 +368,7 @@ def build_parser() -> argparse.ArgumentParser:
     graph.add_argument("--top-k", type=int, default=G.DEFAULT_TOP_K)
     graph.add_argument("--threshold", type=float,
                        default=G.DEFAULT_SIMILARITY_THRESHOLD)
+    _add_source_args(graph)
 
     similar = sub.add_parser(
         "similar", help="nearest models in model space")
@@ -245,6 +376,7 @@ def build_parser() -> argparse.ArgumentParser:
     similar.add_argument("--limit", type=int, default=5)
     similar.add_argument("--root", default=None)
     similar.add_argument("--json", action="store_true")
+    _add_source_args(similar)
 
     match = sub.add_parser(
         "match", help="rank models for advisory task requirements")
@@ -264,6 +396,7 @@ def build_parser() -> argparse.ArgumentParser:
     match.add_argument("--limit", type=int, default=5)
     match.add_argument("--root", default=None)
     match.add_argument("--json", action="store_true")
+    _add_source_args(match)
     return parser
 
 
@@ -279,6 +412,46 @@ def main(argv: list[str] | None = None) -> int:
                 _print_list(item)
             return 0
 
+        if args.command == "sources":
+            report = S.source_status(root)
+            if args.json:
+                _print_json(report)
+            else:
+                _print_sources(report)
+            return 0
+
+        if args.command == "sync":
+            try:
+                report = S.sync(
+                    root, args.source, allow_network=args.allow_network,
+                    timeout_s=args.timeout, max_bytes=args.max_bytes)
+            except S.SourceError as exc:
+                if args.json:
+                    _print_json(exc.to_dict())
+                else:
+                    print(f"error: {exc}", file=sys.stderr)
+                return 2
+            if args.json:
+                _print_json(report)
+            else:
+                _print_sync(report)
+            return 0
+
+        if args.command == "import":
+            try:
+                report = S.import_file(root, args.source, args.path)
+            except S.SourceError as exc:
+                if args.json:
+                    _print_json(exc.to_dict())
+                else:
+                    print(f"error: {exc}", file=sys.stderr)
+                return 2
+            if args.json:
+                _print_json(report)
+            else:
+                _print_sync(report)
+            return 0
+
         if args.command == "show":
             item = M.catalog(root)
             record = item.get(args.model_id)
@@ -286,10 +459,15 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"error: model {args.model_id!r} is not listed or "
                       "configured", file=sys.stderr)
                 return 2
-            graph_item = G.graph(root, catalog=item)
+            with_metadata = (args.with_metadata or bool(args.sources)
+                             or args.no_sources)
+            merged = _merge_sources(root, args, item)
+            graph_item = G.graph(
+                root, catalog=item, external=merged.external)
             node = graph_item.get(record.id)
+            metadata = merged.external.get(record.id)
             if args.json:
-                _print_json({
+                payload = {
                     "schema": M.SCHEMA,
                     "root": str(root),
                     "model": record.to_dict(),
@@ -297,47 +475,73 @@ def main(argv: list[str] | None = None) -> int:
                                 if node is not None else None),
                     "discovery": item.discovery.to_dict(),
                     "warnings": list(graph_item.warnings),
-                })
+                }
+                if with_metadata:
+                    payload["metadata"] = metadata
+                    payload["sources"] = merged.to_dict()
+                _print_json(payload)
             else:
-                _print_show(record, node)
+                _print_show(
+                    record, node,
+                    metadata=metadata if with_metadata else None,
+                    report=merged if with_metadata else None)
                 _warnings(graph_item.warnings)
             return 0
 
         if args.command == "graph":
-            item = G.graph(
-                root, max_nodes=args.max_nodes, max_edges=args.max_edges,
+            item = M.catalog(root)
+            merged = _merge_sources(root, args, item)
+            graph_item = G.graph(
+                root, catalog=item, external=merged.external,
+                max_nodes=args.max_nodes, max_edges=args.max_edges,
                 top_k=args.top_k, similarity_threshold=args.threshold)
             if args.json:
-                _print_json(item.to_dict())
+                payload = graph_item.to_dict()
+                payload["sources"] = merged.to_dict()
+                _print_json(payload)
             else:
-                _print_graph(item)
+                _print_graph(graph_item)
+                _print_source_summary(merged)
             return 0
 
         if args.command == "similar":
-            results = G.neighbours(root, args.model_id, limit=args.limit)
+            item = M.catalog(root)
+            merged = _merge_sources(root, args, item)
+            graph_item = G.graph(
+                root, catalog=item, external=merged.external)
+            results = graph_item.neighbours(args.model_id, limit=args.limit)
             if args.json:
                 _print_json({
                     "schema": G.SCHEMA,
                     "root": str(root),
                     "model": args.model_id,
                     "similar": list(results),
+                    "sources": merged.to_dict(),
                 })
             else:
                 _print_similar(args.model_id, results)
+                _print_source_summary(merged)
             return 0
 
         if args.command == "match":
+            item = M.catalog(root)
+            merged = _merge_sources(root, args, item)
             req = G.requirements(
                 root, task=args.task, capabilities=args.capability,
                 tool_formats=args.tool_format, local_only=args.local,
                 min_context=args.min_context, max_cost=args.max_cost,
                 size=args.size, type=args.type,
                 modalities_in=args.modality)
-            item = G.match(root, req, limit=args.limit)
+            result = G.match(
+                root, req, limit=args.limit, catalog=item,
+                external=merged.external)
             if args.json:
-                _print_json(item.to_dict())
+                payload = result.to_dict()
+                payload["sources"] = merged.to_dict()
+                _print_json(payload)
             else:
-                _print_match(item)
+                _print_match(result)
+                _print_source_summary(merged)
             return 0
 
         resolution = M.resolve(root, args.task)
@@ -346,6 +550,12 @@ def main(argv: list[str] | None = None) -> int:
         else:
             _print_resolve(resolution)
         return 0
+    except S.SourceError as exc:
+        if getattr(args, "json", False):
+            _print_json(exc.to_dict())
+        else:
+            print(f"error: {exc}", file=sys.stderr)
+        return 2
     except (M.ModelError, OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

@@ -1,0 +1,53 @@
+{
+  "openai": {
+    "id": "openai",
+    "name": "OpenAI",
+    "models": {
+      "gpt-5": {
+        "id": "gpt-5",
+        "name": "GPT-5",
+        "family": "gpt",
+        "type": "chat",
+        "open_weights": false,
+        "release_date": "2025-08-07",
+        "knowledge": "2024-10-01",
+        "attachment": true,
+        "tool_call": true,
+        "reasoning": true,
+        "structured_output": true,
+        "computer_use": false,
+        "modalities": {"input": ["text", "image"], "output": ["text"]},
+        "limit": {"context": 400000, "input": 272000, "output": 128000},
+        "cost": {"input": 1.25, "output": 10.0}
+      },
+      "embed-1": {
+        "id": "embed-1",
+        "name": "Embed 1",
+        "family": "embed",
+        "type": "embedding",
+        "open_weights": false,
+        "modalities": {"input": ["text"], "output": ["embedding"]},
+        "limit": {"context": 8192, "output": 0},
+        "cost": {"input": 0.02, "output": 0}
+      }
+    }
+  },
+  "acme": {
+    "id": "acme",
+    "name": "Acme",
+    "models": {
+      "widget": {
+        "id": "widget",
+        "name": "Widget",
+        "family": "widget",
+        "type": "decision",
+        "open_weights": true,
+        "tool_call": true,
+        "reasoning": true,
+        "modalities": {"input": ["text"], "output": ["text"]},
+        "limit": {"context": 64000, "output": 8000},
+        "cost": {"input": 0.5, "output": 1.5}
+      }
+    }
+  }
+}

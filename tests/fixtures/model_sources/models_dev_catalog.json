@@ -1,0 +1,45 @@
+{
+  "providers": {
+    "openai": {
+      "id": "openai",
+      "name": "OpenAI",
+      "models": {
+        "gpt-5": {
+          "id": "gpt-5",
+          "canonical_model_id": "openai/gpt-5-2025-08-07",
+          "limit": {"context": 400000},
+          "cost": {"input": 1.25, "output": 10.0}
+        }
+      }
+    },
+    "azure": {
+      "id": "azure",
+      "name": "Azure OpenAI",
+      "models": {
+        "gpt-5": {
+          "id": "gpt-5",
+          "canonical_model_id": "openai/gpt-5-2025-08-07",
+          "limit": {"context": 200000},
+          "cost": {"input": 2.0, "output": 20.0}
+        }
+      }
+    }
+  },
+  "models": {
+    "openai/gpt-5-2025-08-07": {
+      "id": "openai/gpt-5-2025-08-07",
+      "family": "gpt",
+      "type": "chat",
+      "open_weights": false,
+      "release_date": "2025-08-07",
+      "knowledge": "2024-10-01",
+      "attachment": true,
+      "tool_call": true,
+      "reasoning": true,
+      "structured_output": true,
+      "modalities": {"input": ["text", "image"], "output": ["text"]},
+      "limit": {"context": 400000, "output": 128000},
+      "cost": {"input": 1.25, "output": 10.0}
+    }
+  }
+}
