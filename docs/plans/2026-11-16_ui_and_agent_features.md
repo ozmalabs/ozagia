@@ -1688,11 +1688,12 @@ bundle) against OpenCode 2.3.0. A concurrent TUI-brand merge added
 `.opencode/plugins/ozagia/tui.js`; the harness exclude patterns and tests were
 updated for it.
 
-Not yet: the live OpenCode Desktop smoke test; add-in apply/mutation controls
-and an executable task launcher; live model/provider adapters for review and
-generation (the injected multi-reviewer and test-runner seams exist);
-`[environments]`, `[services]`, `[relays]` and `[runtime]` as legacy project
-models; action apply UI; live security-tool matrix/DAST.
+Not yet: the live OpenCode Desktop smoke test; live model/provider adapters for
+review, generation and tool use (the injected reviewer/test-runner and local
+executor seams exist); live security-tool matrix/DAST; `ozagia config migrate`
+still cannot emit `[environments]`, `[services]`, `[relays]` or `[runtime]`
+because the settings registry has no typed keys for them, so those tables must
+be copied by hand.
 
 ### Parallel workstreams (2026-11-16)
 
@@ -1886,6 +1887,16 @@ Two agents start from `a0a1913`:
 The same review/merge/full-suite gate applies. The live Desktop smoke test,
 live model/provider adapters and live security-tool matrix/DAST remain
 host/provider-dependent.
+
+Status: both branches merged — `addin-mutations` as `8a1fdbf` (`ef74675`) and
+`runtime-config` as `b9d421d` (`bfe9a31`). Targeted suites passed; the add-in
+passed typecheck, 38/38 Node tests and the CJS build; the merged tree passed
+the final Python suite (`4336 passed, 21 skipped`) and ruff. Wave 11 is
+complete. The add-in is no longer strictly read-only: it has exactly two
+preview-first mutation paths (`actionApply` with a one-time token, and
+`taskRun` through the local read-only executor), both requiring an explicit
+second confirmation. Runtime project models merge by named entry, with legacy
+entries winning as a whole.
 
 ### Library-first workstream (2026-11-16)
 
