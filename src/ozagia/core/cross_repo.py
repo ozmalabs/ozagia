@@ -22,6 +22,11 @@ def _member_nodes(item: dict[str, Any]) -> dict[str, dict[str, Any]]:
             if isinstance(node, dict) and isinstance(node.get("key"), str)}
 
 
+def _attrs(node: dict[str, Any] | None) -> dict[str, Any]:
+    value = node.get("attrs") if isinstance(node, dict) else None
+    return value if isinstance(value, dict) else {}
+
+
 def check(root: str | Path | None = None,
           roots: Iterable[str | Path] | None = None) -> dict[str, Any]:
     """Check explicitly declared cross-repository API and code/IaC links.
@@ -37,9 +42,25 @@ def check(root: str | Path | None = None,
     members = federation._members(selected, roots)
     link_report = federation._declared_links(selected, members)
     nodes: dict[str, dict[str, Any]] = {}
-    member_by_alias = {item["alias"]: item for item in members}
+    member_states: dict[str, str] = {}
+    public_members = []
+    member_errors = []
     for item in members:
         nodes.update(_member_nodes(item))
+        state, detail = federation._freshness(item)
+        member_states[item["alias"]] = state
+        public_members.append({
+            "id": item["alias"], "name": item["label"],
+            "root": str(item["root"]), "snapshot": str(item["snapshot_path"]),
+            "state": state, "detail": detail,
+            "head": item["attrs"].get("head"),
+            "generated_at": item["attrs"].get("generated_at"),
+            "nodes": len((item["snapshot"] or {}).get("nodes", [])),
+            "edges": len((item["snapshot"] or {}).get("edges", [])),
+        })
+        if state != "fresh":
+            member_errors.append({"id": item["alias"], "root": str(item["root"]),
+                                 "state": state, "detail": detail or item["error"]})
 
     checks: list[dict[str, Any]] = []
     for link in link_report["links"]:
@@ -50,23 +71,26 @@ def check(root: str | Path | None = None,
         result = "unknown"
         reason = "unsupported_relation"
         comparison: dict[str, Any] = {}
+        comparison_scope = "none"
         relation = link["type"]
         if relation in _API_COVERAGE:
             if source_type not in _CODE_TYPES or target_type != "ApiOperation":
                 reason = "unsupported_endpoint_types"
             else:
                 result, reason = "declared", "explicit_api_coverage_link"
+                comparison_scope = "explicit_link_presence_only"
         elif relation == "same_api_operation":
             if source_type != "ApiOperation" or target_type != "ApiOperation":
                 reason = "unsupported_endpoint_types"
             else:
-                a = (source.get("attrs") or {})
-                b = (target.get("attrs") or {})
+                a = _attrs(source)
+                b = _attrs(target)
                 fields = ("method", "path")
                 if not all(isinstance(a.get(f), str) and isinstance(b.get(f), str)
                            and a.get(f) and b.get(f) for f in fields):
                     reason = "operation_identity_missing"
                 else:
+                    comparison_scope = "method_and_path_equality"
                     comparison = {field: {"source": a[field], "target": b[field]}
                                   for field in fields}
                     result = "pass" if all(a[f] == b[f] for f in fields) else "fail"
@@ -75,9 +99,10 @@ def check(root: str | Path | None = None,
             if source_type not in _CODE_TYPES or target_type != "InfraResource":
                 reason = "unsupported_endpoint_types"
             else:
-                a, b = source.get("attrs") or {}, target.get("attrs") or {}
+                a, b = _attrs(source), _attrs(target)
                 left, right = a.get("service"), b.get("service")
                 if isinstance(left, str) and left and isinstance(right, str) and right:
+                    comparison_scope = "service_attribute_equality"
                     comparison = {"service": {"source": left, "target": right}}
                     result = "pass" if left == right else "fail"
                     reason = "service_identity_matches" if result == "pass" else "service_identity_mismatch"
@@ -87,9 +112,7 @@ def check(root: str | Path | None = None,
         # A stale, missing, invalid, or unverifiable snapshot cannot support a
         # positive result, even when the stored link and attrs line up.
         aliases = (source_key.partition("::")[0], target_key.partition("::")[0])
-        states = [member_by_alias.get(alias, {}).get("error") or
-                  federation._freshness(member_by_alias[alias])[0]
-                  if alias in member_by_alias else "missing" for alias in aliases]
+        states = [member_states.get(alias, "missing") for alias in aliases]
         evaluated_result = result
         if any(state != "fresh" for state in states):
             result, reason = "unknown", "member_snapshot_not_verified_fresh"
@@ -98,6 +121,7 @@ def check(root: str | Path | None = None,
                        "target_type": target_type, "result": result,
                        "evaluated_result": evaluated_result,
                        "reason": reason, "comparison": comparison,
+                       "comparison_scope": comparison_scope,
                        "provenance": link.get("provenance"),
                        "source_manifest": link.get("source_manifest"),
                        "member_states": states})
@@ -108,9 +132,20 @@ def check(root: str | Path | None = None,
                        "detail": message, "provenance": None})
     counts = {state: sum(c["result"] == state for c in checks)
               for state in ("pass", "fail", "declared", "unknown")}
+    if any(error["state"] in {"missing", "invalid"} for error in member_errors):
+        overall = "incomplete"
+    elif member_errors or counts["unknown"]:
+        overall = "unknown"
+    elif not checks:
+        overall = "no_checks"
+    elif counts["fail"]:
+        overall = "fail"
+    else:
+        overall = "complete"
     return {"ok": True, "root": str(selected), "checks": checks,
             "counts": counts, "link_state": link_report["state"],
-            "errors": errors,
+            "members": public_members, "member_errors": member_errors,
+            "overall": overall, "errors": errors,
             "note": "Static snapshot evidence only; API compatibility, test execution, and deployment state are not verified."}
 
 

@@ -5,9 +5,17 @@ read-only report over the selected existing federation snapshots. It uses only
 explicit links in the anchor's `.ozagia/federation.json`; it does not match
 names or invent relationships. `roots` follows federation selection rules.
 Each result includes qualified endpoints, relation, source manifest and
-provenance. Invalid declarations become unknown checks. Any non-fresh member
-snapshot makes an otherwise positive check unknown; current federation
-freshness is conservative and may be `unknown` when only Git HEAD was checked.
+provenance. The report also includes each member's state and `member_errors`,
+even when there are no declared links. Invalid declarations become unknown
+checks. Any non-fresh member snapshot makes a comparison's `result` unknown;
+`evaluated_result` retains the static comparison and `comparison_scope` says
+which attributes were compared. Current federation freshness is conservative
+and may be `unknown` when only Git HEAD was checked. `overall` is `no_checks`
+when there is no evidence and all selected members are usable, `incomplete`
+when a member is missing or invalid, `unknown` when member freshness/evidence
+is unverifiable, `fail` when a verified comparison mismatches, and `complete`
+when all available checks are verified with no mismatch. These labels describe
+static evidence only.
 
 Supported declarations are:
 
