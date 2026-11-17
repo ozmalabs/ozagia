@@ -45,6 +45,57 @@ def test_discover_includes_current_and_indexed_immediate_siblings(tmp_path: Path
                for m in report["members"])
 
 
+def test_discover_does_not_follow_symlink_sibling(tmp_path: Path) -> None:
+    root = tmp_path / "workspace" / "alpha"
+    outside = tmp_path / "outside" / "linked"
+    root.mkdir(parents=True)
+    outside.mkdir(parents=True)
+    _snapshot(root, "alpha")
+    _snapshot(outside, "linked")
+    (root.parent / "linked").symlink_to(outside, target_is_directory=True)
+
+    report = federation.discover(root)
+
+    assert [m["root"] for m in report["members"]] == [str(root.resolve())]
+
+
+def test_absolute_state_dir_applies_only_to_anchor(tmp_path: Path, monkeypatch) -> None:
+    root, sibling = tmp_path / "root", tmp_path / "sibling"
+    state = tmp_path / "external-state"
+    root.mkdir()
+    sibling.mkdir()
+    monkeypatch.setenv("OZAGIA_STATE_DIR", str(state))
+    state.mkdir()
+    assert not (root / ".ozagia" / "graph.json").exists()
+    _snapshot(sibling, "sibling")
+    # The anchor's graph lives at its configured absolute state directory.
+    graph = {
+        "version": 2,
+        "nodes": [{"id": 0, "type": "Repo", "key": "repo:",
+                   "attrs": {"name": "root", "root": str(root), "head": "deadbeef"}}],
+        "edges": [],
+    }
+    (state / "graph.json").write_text(json.dumps(graph), encoding="utf-8")
+
+    report = federation.discover(root)
+
+    assert [(m["id"], m["snapshot"]) for m in report["members"]] == [
+        ("root", str(state / "graph.json")),
+        ("sibling", str(sibling / ".ozagia" / "graph.json")),
+    ]
+
+
+def test_explicit_nonexistent_root_is_reported(tmp_path: Path) -> None:
+    root, missing = tmp_path / "root", tmp_path / "not-created"
+    root.mkdir()
+    _snapshot(root, "root")
+
+    report = federation.status(root, roots=[missing])
+
+    assert report["members"][1]["root"] == str(missing.resolve())
+    assert report["members"][1]["state"] == "missing"
+
+
 def test_search_and_node_qualify_colliding_keys_and_preserve_edges(tmp_path: Path) -> None:
     root = tmp_path / "a"
     other = tmp_path / "b"
@@ -52,6 +103,11 @@ def test_search_and_node_qualify_colliding_keys_and_preserve_edges(tmp_path: Pat
     other.mkdir()
     _snapshot(root)
     _snapshot(other)
+    graph_path = root / ".ozagia" / "graph.json"
+    graph = json.loads(graph_path.read_text(encoding="utf-8"))
+    graph["nodes"].append({"id": 3, "type": "Opaque", "key": "opaque:key_only_token",
+                           "attrs": {"name": "unrelated"}})
+    graph_path.write_text(json.dumps(graph), encoding="utf-8")
 
     results = federation.search(root, "widget", roots=[other])
     assert results["n"] == 4
@@ -67,6 +123,29 @@ def test_search_and_node_qualify_colliding_keys_and_preserve_edges(tmp_path: Pat
         "source": {"id": file_hits[0]["qualified_key"].split("::", 1)[0],
                    "root": file_hits[0]["source"]["root"]},
     }]
+    key_result = federation.search(root, "key_only_token", roots=[other])
+    assert [hit["key"] for hit in key_result["results"]] == ["opaque:key_only_token"]
+
+
+def test_real_build_index_snapshot_is_discoverable_and_searchable(
+        tmp_path: Path, monkeypatch) -> None:
+    from ozagia.core.memory import build_index
+
+    root = tmp_path / "built-repo"
+    (root / "pkg").mkdir(parents=True)
+    (root / "pkg" / "widget.py").write_text(
+        "def calculate_widget(value):\n    return value\n", encoding="utf-8")
+    monkeypatch.delenv("OZAGIA_STATE_DIR", raising=False)
+    monkeypatch.setenv("OZAGIA_ADAPTERS", "")
+    build_index(root, root / ".ozagia" / "graph.json", include_docs="none",
+                include_git=False, include_scripts=False)
+
+    report = federation.discover(root, roots=[])
+    hits = federation.search(root, "calculate_widget", roots=[])
+
+    assert report["members"][0]["state"] == "unknown"
+    assert any(hit["key"] == "sym:pkg/widget.py::calculate_widget"
+               for hit in hits["results"])
 
 
 def test_explicit_missing_and_invalid_members_are_reported(tmp_path: Path) -> None:
