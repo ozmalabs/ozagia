@@ -30,6 +30,12 @@ Supported declarations are:
   `ApiCodeReference`) and target an `InfraResource`. It compares `service`
   attributes only when both snapshots provide them. Missing service identity is
   unknown. A match does not prove the service is deployed or healthy.
+- `configured_by`: source must be a Python `File` and target a Kubernetes
+  `InfraResource`. The `configuration` report reads both current source files
+  and compares literal required environment reads with declared container
+  environment names. See [federation](federation.md) for uncertainty and
+  freshness limits. A missing name is a source observation, not a verified
+  deployment failure.
 
 Unknown relations, unsupported node types, missing endpoints and unavailable
 comparison attributes are unknown. This is static evidence, not provider

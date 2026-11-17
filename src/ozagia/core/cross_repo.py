@@ -39,6 +39,8 @@ def check(root: str | Path | None = None,
     unsupported endpoint types are reported as unknown.
     """
     selected = federation._root(root)
+    if roots is not None:
+        roots = tuple(roots)
     members = federation._members(selected, roots)
     link_report = federation._declared_links(selected, members)
     nodes: dict[str, dict[str, Any]] = {}
@@ -64,6 +66,8 @@ def check(root: str | Path | None = None,
 
     checks: list[dict[str, Any]] = []
     for link in link_report["links"]:
+        if link["type"] == "configured_by":
+            continue  # Evaluated by the dedicated current-source checker below.
         source_key, target_key = link["source"], link["target"]
         source, target = nodes.get(source_key), nodes.get(target_key)
         source_type = source.get("type") if source else None
@@ -126,18 +130,26 @@ def check(root: str | Path | None = None,
                        "source_manifest": link.get("source_manifest"),
                        "member_states": states})
 
-    errors = list(link_report["errors"])
+    errors = list(dict.fromkeys(link_report["errors"] + link_report.get("member_errors", [])))
     for message in errors:
         checks.append({"result": "unknown", "reason": "invalid_declared_link",
                        "detail": message, "provenance": None})
     counts = {state: sum(c["result"] == state for c in checks)
               for state in ("pass", "fail", "declared", "unknown")}
+    from ozagia.core import cross_config
+
+    configuration = cross_config.check(selected, roots) if any(
+        link["type"] == "configured_by" for link in link_report["links"]
+    ) else None
     if any(error["state"] in {"missing", "invalid"} for error in member_errors):
         overall = "incomplete"
-    elif member_errors or counts["unknown"]:
+    elif member_errors or counts["unknown"] or (configuration and configuration["status"] == "unknown"):
         overall = "unknown"
-    elif not checks:
+    elif not checks and not configuration:
         overall = "no_checks"
+    elif configuration and any(item["status"] == "observed_missing"
+                               for item in configuration["results"]):
+        overall = "findings"
     elif counts["fail"]:
         overall = "fail"
     else:
@@ -145,8 +157,8 @@ def check(root: str | Path | None = None,
     return {"ok": True, "root": str(selected), "checks": checks,
             "counts": counts, "link_state": link_report["state"],
             "members": public_members, "member_errors": member_errors,
-            "overall": overall, "errors": errors,
-            "note": "Static snapshot evidence only; API compatibility, test execution, and deployment state are not verified."}
+            "overall": overall, "errors": errors, "configuration": configuration,
+            "note": "Static evidence only; API compatibility, test execution, and deployment state are not verified."}
 
 
 __all__ = ["check"]

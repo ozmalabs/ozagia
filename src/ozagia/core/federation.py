@@ -235,7 +235,7 @@ def _declared_links(root: Path, members: list[dict[str, Any]]) -> dict[str, Any]
         valid.append({"source": source, "target": target, "type": relation,
                       "provenance": provenance, "source_manifest": str(path)})
     _declared, member_errors = _manifest_members(root)
-    return {"path": str(path), "state": "ok" if not errors else "partial",
+    return {"path": str(path), "state": "ok" if not errors and not member_errors else "partial",
             "links": valid, "errors": errors, "member_errors": member_errors}
 
 

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ozagia.core import cross_config, federation
+from ozagia.core import cross_config, cross_repo, federation
 
 
 def _snapshot(root: Path, repo: str, nodes: list[dict]) -> None:
@@ -81,6 +81,17 @@ def test_reports_observed_missing_but_not_deployment_failure(tmp_path, monkeypat
     assert result["results"][0]["status"] == "observed_missing"
     assert result["results"][0]["missing_variables"] == ["TOKEN"]
     assert "deployed" in result["disclaimer"]
+    combined = cross_repo.check(root)
+    assert combined["configuration"]["results"][0]["missing_variables"] == ["TOKEN"]
+    assert combined["overall"] == "unknown"
+
+
+def test_environment_assignment_is_not_a_required_read(tmp_path, monkeypatch):
+    root, _ = _fixture(tmp_path, code="os.environ['TOKEN'] = 'value'\n", env=[])
+    _fresh_git(monkeypatch)
+    result = cross_config.check(root)["results"][0]
+    assert result["status"] == "unknown"
+    assert result["required_variables"] == []
 
 
 def test_optional_getenv_is_not_required_and_remains_unknown(tmp_path, monkeypatch):

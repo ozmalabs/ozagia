@@ -138,6 +138,21 @@ def test_empty_links_with_verified_member_reports_no_checks(tmp_path, monkeypatc
     assert report["member_errors"] == []
 
 
+def test_invalid_member_declaration_is_reported(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    root.mkdir()
+    _snapshot(root, "root", [])
+    (root / ".ozagia" / "federation.json").write_text(
+        json.dumps({"version": 1, "links": [], "members": [42]}), encoding="utf-8")
+    monkeypatch.setattr(federation, "_freshness", lambda _: ("fresh", None))
+
+    report = cross_repo.check(root)
+
+    assert report["link_state"] == "partial"
+    assert report["overall"] == "unknown"
+    assert any("members[0]" in error for error in report["errors"])
+
+
 def test_malformed_attrs_report_unknown_comparison(tmp_path, monkeypatch):
     a, b = tmp_path / "a", tmp_path / "b"
     a.mkdir()

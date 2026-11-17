@@ -108,8 +108,9 @@ both the full and graph tool surfaces. They do not refresh indexes or invoke
 project adapters.
 
 `federation check` and `federation_check` run offline static checks for
-declared API relationships and code-to-infrastructure links against existing
-snapshots. The report preserves the source repository, relationship
+declared API relationships and code-to-infrastructure links. API identity
+checks use existing snapshots; the configuration check below also reads the
+linked current source files. The report preserves the source repository, relationship
 provenance, and missing or ambiguous evidence. A declaration alone does not
 verify schema compatibility, runtime behavior, or deployed infrastructure;
 unknown or unverifiable results remain unknown. Selected roots and declared
@@ -118,8 +119,10 @@ membership where needed.
 
 ## Static code-to-Kubernetes configuration observations
 
-`ozagia.core.cross_config.check(root, roots=None)` provides a read-only static
-observation for explicitly declared `configured_by` federation links. It
+`ozagia federation check` and `federation_check` include the read-only static
+configuration report under `configuration` for explicitly declared
+`configured_by` federation links. The same report is available from
+`ozagia.core.cross_config.check(root, roots=None)`. It
 accepts a link from a Python `File` node to a Kubernetes `InfraResource`, reads
 the current Python source and referenced JSON manifest (or YAML when the
 optional safe YAML parser is installed), then compares literal

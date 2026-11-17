@@ -50,7 +50,8 @@ def _python_env(text: str) -> tuple[set[str], list[str]]:
     names: set[str] = set()
     unknown: list[str] = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.Subscript) and _is_os_environ(node.value):
+        if (isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Load)
+                and _is_os_environ(node.value)):
             key = node.slice
             if isinstance(key, ast.Constant) and isinstance(key.value, str) and key.value:
                 names.add(key.value)
