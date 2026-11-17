@@ -1,0 +1,2165 @@
+{
+  "version": 1,
+  "held_out_from_prompts": true,
+  "scoring_rule": "Every required group must match at least one alternative as a case-insensitive exact substring of the final answer (including a canonical rendering of a JSON object). No forbidden phrase may match. There is no model judge and no partial credit inside a required group.",
+  "tasks": {
+    "selfgraph-readiness-separation": {
+      "required": [
+        {
+          "id": "dimension_installed",
+          "any": [
+            "installed"
+          ],
+          "evidence": [
+            "docs/capabilities.md"
+          ],
+          "source": "does not claim `installed`"
+        },
+        {
+          "id": "dimension_configured",
+          "any": [
+            "configured"
+          ],
+          "evidence": [
+            "docs/capabilities.md"
+          ],
+          "source": "`configured`"
+        },
+        {
+          "id": "dimension_reachable",
+          "any": [
+            "reachable"
+          ],
+          "evidence": [
+            "docs/capabilities.md"
+          ],
+          "source": "`reachable`"
+        },
+        {
+          "id": "dimension_trusted",
+          "any": [
+            "trusted"
+          ],
+          "evidence": [
+            "docs/capabilities.md"
+          ],
+          "source": "`trusted`"
+        },
+        {
+          "id": "dimension_permitted",
+          "any": [
+            "permitted"
+          ],
+          "evidence": [
+            "docs/capabilities.md"
+          ],
+          "source": "`permitted`"
+        },
+        {
+          "id": "readiness_not_observed",
+          "any": [
+            "readiness is not observed",
+            "readiness is not claimed",
+            "does not claim readiness"
+          ],
+          "evidence": [
+            "docs/capabilities.md"
+          ],
+          "source": "Readiness is not observed."
+        },
+        {
+          "id": "coverage_not_exhaustive",
+          "any": [
+            "coverage.exhaustive is false",
+            "coverage is not exhaustive",
+            "not exhaustive",
+            "coverage.exhaustive` is always `false"
+          ],
+          "evidence": [
+            "docs/capabilities.md"
+          ],
+          "source": "`coverage.exhaustive` is always `false`"
+        },
+        {
+          "id": "unknown_is_not_absence",
+          "any": [
+            "unknown coverage is not treated as absence",
+            "absent observation is a stated unknown",
+            "not proof that a capability is missing",
+            "absence is not proof"
+          ],
+          "evidence": [
+            "docs/capabilities.md"
+          ],
+          "source": "unknown coverage is not treated as absence"
+        }
+      ],
+      "forbidden": [
+        {
+          "phrase": "readiness is observed",
+          "contrary": {
+            "path": "docs/capabilities.md",
+            "source": "Readiness is not observed."
+          }
+        },
+        {
+          "phrase": "coverage is exhaustive",
+          "contrary": {
+            "path": "docs/capabilities.md",
+            "source": "`coverage.exhaustive` is always `false`"
+          }
+        },
+        {
+          "phrase": "absence proves a capability is missing",
+          "contrary": {
+            "path": "docs/capabilities.md",
+            "source": "not proof that a capability is missing"
+          }
+        },
+        {
+          "phrase": "the catalogue proves a capability is installed",
+          "contrary": {
+            "path": "docs/capabilities.md",
+            "source": "does not claim `installed`"
+          }
+        }
+      ]
+    },
+    "maps-types-and-budgets": {
+      "required": [
+        {
+          "id": "type_graph",
+          "any": [
+            "graph"
+          ],
+          "evidence": [
+            "docs/model_api.md"
+          ],
+          "source": "**`graph`**"
+        },
+        {
+          "id": "type_outline",
+          "any": [
+            "outline"
+          ],
+          "evidence": [
+            "docs/model_api.md"
+          ],
+          "source": "**`outline`**"
+        },
+        {
+          "id": "type_capabilities",
+          "any": [
+            "capabilities"
+          ],
+          "evidence": [
+            "docs/model_api.md"
+          ],
+          "source": "**`capabilities`**"
+        },
+        {
+          "id": "type_work",
+          "any": [
+            "work"
+          ],
+          "evidence": [
+            "docs/model_api.md"
+          ],
+          "source": "**`work`**"
+        },
+        {
+          "id": "default_bytes",
+          "any": [
+            "64 kib",
+            "64 kibibytes",
+            "65536"
+          ],
+          "evidence": [
+            "docs/model_api.md"
+          ],
+          "source": "| map JSON bytes | 64 KiB | 256 KiB |"
+        },
+        {
+          "id": "hard_bytes",
+          "any": [
+            "256 kib",
+            "256 kibibytes",
+            "262144"
+          ],
+          "evidence": [
+            "docs/model_api.md"
+          ],
+          "source": "| map JSON bytes | 64 KiB | 256 KiB |"
+        },
+        {
+          "id": "default_items",
+          "any": [
+            "25"
+          ],
+          "evidence": [
+            "docs/model_api.md"
+          ],
+          "source": "| items per page | 25 | 200 |"
+        },
+        {
+          "id": "hard_items",
+          "any": [
+            "200"
+          ],
+          "evidence": [
+            "docs/model_api.md"
+          ],
+          "source": "| items per page | 25 | 200 |"
+        },
+        {
+          "id": "default_depth",
+          "any": [
+            "depth 2",
+            "depth = 2",
+            "depth: 2",
+            "max_depth 2",
+            "\"depth\": 2",
+            "depth\": 2",
+            "max_depth: 2",
+            "\"depth\":2",
+            "\"max_depth\":2",
+            "max_depth:2"
+          ],
+          "evidence": [
+            "docs/model_api.md"
+          ],
+          "source": "| graph neighbourhood depth | 2 | 4 |"
+        },
+        {
+          "id": "hard_depth",
+          "any": [
+            "depth 4",
+            "depth = 4",
+            "depth: 4",
+            "max_depth 4",
+            "\"depth\": 4",
+            "depth\": 4",
+            "max_depth: 4",
+            "\"depth\":4",
+            "\"max_depth\":4",
+            "max_depth:4"
+          ],
+          "evidence": [
+            "docs/model_api.md"
+          ],
+          "source": "| graph neighbourhood depth | 2 | 4 |"
+        }
+      ],
+      "forbidden": [
+        {
+          "phrase": "maps are a new graph store",
+          "contrary": {
+            "path": "docs/model_api.md",
+            "source": "It is not a new graph store"
+          }
+        },
+        {
+          "phrase": "a map grants permission",
+          "contrary": {
+            "path": "docs/plans/2026-11-17_self_graph_service_unification_model_api.md",
+            "source": "No protocol fingerprint grants permission."
+          }
+        },
+        {
+          "phrase": "maps have no bounds",
+          "contrary": {
+            "path": "docs/model_api.md",
+            "source": "Map pages are capped by caller budgets and hard bounds:"
+          }
+        }
+      ]
+    },
+    "maps-unsupported-and-fallback": {
+      "required": [
+        {
+          "id": "unsupported_is_explicit",
+          "any": [
+            "unsupported",
+            "not supported"
+          ],
+          "evidence": [
+            "docs/plans/2026-11-17_self_graph_service_unification_model_api.md"
+          ],
+          "source": "An `unsupported` capability or schema"
+        },
+        {
+          "id": "documented_fallback",
+          "any": [
+            "documented fallback",
+            "explicit fallback",
+            "fallback"
+          ],
+          "evidence": [
+            "docs/plans/2026-11-17_self_graph_service_unification_model_api.md"
+          ],
+          "source": "triggers a documented fallback"
+        },
+        {
+          "id": "never_empty_success",
+          "any": [
+            "never becomes an empty successful result",
+            "never an empty successful result",
+            "not an empty successful result"
+          ],
+          "evidence": [
+            "docs/plans/2026-11-17_self_graph_service_unification_model_api.md"
+          ],
+          "source": "it never becomes an empty successful result"
+        },
+        {
+          "id": "fail_closed",
+          "any": [
+            "fail closed",
+            "fails closed"
+          ],
+          "evidence": [
+            "docs/plans/2026-11-17_self_graph_service_unification_model_api.md"
+          ],
+          "source": "malformed/oversized/cross-scope/stale references fail closed"
+        },
+        {
+          "id": "wrong_namespace_or_version",
+          "any": [
+            "wrong namespace",
+            "wrong major",
+            "different major version"
+          ],
+          "evidence": [
+            "docs/model_api.md"
+          ],
+          "source": "wrong namespace/type"
+        }
+      ],
+      "forbidden": [
+        {
+          "phrase": "empty successful result is acceptable",
+          "contrary": {
+            "path": "docs/plans/2026-11-17_self_graph_service_unification_model_api.md",
+            "source": "it never becomes an empty successful result"
+          }
+        },
+        {
+          "phrase": "stale reference is served as current",
+          "contrary": {
+            "path": "docs/plans/2026-11-17_self_graph_service_unification_model_api.md",
+            "source": "malformed/oversized/cross-scope/stale references fail closed"
+          }
+        },
+        {
+          "phrase": "fallback transfers authority",
+          "contrary": {
+            "path": "docs/plans/2026-11-17_self_graph_service_unification_model_api.md",
+            "source": "The host, not model text, determines allowed actions."
+          }
+        }
+      ]
+    },
+    "work-map-join-and-redaction": {
+      "required": [
+        {
+          "id": "joins_goal",
+          "any": [
+            "goal"
+          ],
+          "evidence": [
+            "docs/model_api.md"
+          ],
+          "source": "join over a goal"
+        },
+        {
+          "id": "joins_criteria",
+          "any": [
+            "criteria",
+            "criterion"
+          ],
+          "evidence": [
+            "docs/model_api.md"
+          ],
+          "source": "criteria"
+        },
+        {
+          "id": "joins_runs",
+          "any": [
+            "run manifests",
+            "run"
+          ],
+          "evidence": [
+            "docs/model_api.md"
+          ],
+          "source": "run manifests"
+        },
+        {
+          "id": "joins_tests",
+          "any": [
+            "test record",
+            "tests"
+          ],
+          "evidence": [
+            "docs/model_api.md"
+          ],
+          "source": "test record"
+        },
+        {
+          "id": "joins_interpreters",
+          "any": [
+            "interpreter candidates",
+            "interpreter"
+          ],
+          "evidence": [
+            "docs/model_api.md"
+          ],
+          "source": "interpreter candidates"
+        },
+        {
+          "id": "stores_hashes",
+          "any": [
+            "hashes",
+            "hash"
+          ],
+          "evidence": [
+            "docs/model_api.md"
+          ],
+          "source": "It stores hashes"
+        },
+        {
+          "id": "stores_redacted_metadata",
+          "any": [
+            "redacted metadata",
+            "redacted"
+          ],
+          "evidence": [
+            "docs/model_api.md"
+          ],
+          "source": "redacted metadata"
+        },
+        {
+          "id": "omits_prompts",
+          "any": [
+            "prompts",
+            "prompt"
+          ],
+          "evidence": [
+            "docs/model_api.md"
+          ],
+          "source": "not prompts"
+        },
+        {
+          "id": "omits_secrets",
+          "any": [
+            "secrets",
+            "secret"
+          ],
+          "evidence": [
+            "docs/model_api.md"
+          ],
+          "source": "secrets"
+        },
+        {
+          "id": "omits_task_output",
+          "any": [
+            "task output",
+            "raw task output"
+          ],
+          "evidence": [
+            "docs/model_api.md"
+          ],
+          "source": "task output"
+        },
+        {
+          "id": "omits_raw_logs",
+          "any": [
+            "raw logs",
+            "logs"
+          ],
+          "evidence": [
+            "docs/model_api.md"
+          ],
+          "source": "raw logs"
+        }
+      ],
+      "forbidden": [
+        {
+          "phrase": "stores prompts",
+          "contrary": {
+            "path": "docs/model_api.md",
+            "source": "not prompts"
+          }
+        },
+        {
+          "phrase": "stores secret values",
+          "contrary": {
+            "path": "docs/model_api.md",
+            "source": "secrets"
+          }
+        },
+        {
+          "phrase": "stores raw logs",
+          "contrary": {
+            "path": "docs/model_api.md",
+            "source": "raw logs"
+          }
+        }
+      ]
+    },
+    "evidence-grades-and-limits": {
+      "required": [
+        {
+          "id": "grade_declared",
+          "any": [
+            "declared"
+          ],
+          "evidence": [
+            "docs/evidence.md"
+          ],
+          "source": "| `declared` |"
+        },
+        {
+          "id": "grade_observed",
+          "any": [
+            "observed"
+          ],
+          "evidence": [
+            "docs/evidence.md"
+          ],
+          "source": "| `observed` |"
+        },
+        {
+          "id": "grade_verified",
+          "any": [
+            "verified"
+          ],
+          "evidence": [
+            "docs/evidence.md"
+          ],
+          "source": "| `verified` |"
+        },
+        {
+          "id": "declared_never_current",
+          "any": [
+            "declared cannot be current",
+            "declared is never current",
+            "never current",
+            "never. also freshness"
+          ],
+          "evidence": [
+            "docs/evidence.md"
+          ],
+          "source": "Never. Also `freshness=\"unknown\"`."
+        },
+        {
+          "id": "verified_not_reexecuted",
+          "any": [
+            "verified never means the test was re-executed",
+            "does not mean the test was re-executed",
+            "not that the test was re-executed"
+          ],
+          "evidence": [
+            "docs/evidence.md"
+          ],
+          "source": "`verified` never means the test was re-executed"
+        },
+        {
+          "id": "interpreter_link_unknown",
+          "any": [
+            "those links stay unknown",
+            "interpreter link is unknown",
+            "interpreter remains unknown",
+            "does not name the interpreter"
+          ],
+          "evidence": [
+            "docs/evidence.md"
+          ],
+          "source": "those links stay unknown"
+        },
+        {
+          "id": "not_correctness",
+          "any": [
+            "does not decide that the work is correct",
+            "does not prove correctness",
+            "not that the work is correct"
+          ],
+          "evidence": [
+            "docs/evidence.md"
+          ],
+          "source": "does not decide that the work is correct"
+        }
+      ],
+      "forbidden": [
+        {
+          "phrase": "verified means the test was re-executed",
+          "contrary": {
+            "path": "docs/evidence.md",
+            "source": "`verified` never means the test was re-executed"
+          }
+        },
+        {
+          "phrase": "declared is current",
+          "contrary": {
+            "path": "docs/evidence.md",
+            "source": "Never. Also `freshness=\"unknown\"`."
+          }
+        },
+        {
+          "phrase": "verified proves correctness",
+          "contrary": {
+            "path": "docs/evidence.md",
+            "source": "does not decide that the work is correct"
+          }
+        }
+      ]
+    },
+    "preflight-green-rules": {
+      "required": [
+        {
+          "id": "every_required_dimension_true",
+          "any": [
+            "every required dimension is true",
+            "all required dimensions are true",
+            "every required dimension true"
+          ],
+          "evidence": [
+            "docs/task_preflight.md"
+          ],
+          "source": "`green` only when **every** required dimension is `true`"
+        },
+        {
+          "id": "every_fact_current",
+          "any": [
+            "every fact it used is current",
+            "every fact is current",
+            "all facts are current"
+          ],
+          "evidence": [
+            "docs/task_preflight.md"
+          ],
+          "source": "every fact it used is `current`"
+        },
+        {
+          "id": "plan_is_not_result",
+          "any": [
+            "a plan is not a result",
+            "plan is not a result"
+          ],
+          "evidence": [
+            "docs/task_preflight.md"
+          ],
+          "source": "A plan is not a result."
+        },
+        {
+          "id": "plan_is_not_executed_test",
+          "any": [
+            "test plan is not an executed test",
+            "plan is not an executed test"
+          ],
+          "evidence": [
+            "docs/task_preflight.md"
+          ],
+          "source": "a test plan is not an executed test"
+        },
+        {
+          "id": "graph_not_refreshed",
+          "any": [
+            "graph was not refreshed",
+            "does not refresh the graph",
+            "graph is not refreshed"
+          ],
+          "evidence": [
+            "docs/task_preflight.md"
+          ],
+          "source": "the graph was not refreshed"
+        },
+        {
+          "id": "missing_interpreter_failed",
+          "any": [
+            "missing interpreter",
+            "absent interpreter"
+          ],
+          "evidence": [
+            "docs/task_preflight.md"
+          ],
+          "source": "A missing interpreter"
+        },
+        {
+          "id": "stale_graph_unknown",
+          "any": [
+            "stale graph",
+            "stale snapshot"
+          ],
+          "evidence": [
+            "docs/task_preflight.md"
+          ],
+          "source": "A stale graph, an unknown"
+        }
+      ],
+      "forbidden": [
+        {
+          "phrase": "a planned test counts as passed",
+          "contrary": {
+            "path": "docs/task_preflight.md",
+            "source": "A plan is not a result."
+          }
+        },
+        {
+          "phrase": "preflight refreshes the graph",
+          "contrary": {
+            "path": "docs/task_preflight.md",
+            "source": "the graph was not refreshed"
+          }
+        },
+        {
+          "phrase": "missing interpreter can be green",
+          "contrary": {
+            "path": "docs/task_preflight.md",
+            "source": "A missing interpreter, an absent graph, a failing/absent required capability"
+          }
+        },
+        {
+          "phrase": "stale graph can be green",
+          "contrary": {
+            "path": "docs/task_preflight.md",
+            "source": "A stale graph, an unknown"
+          }
+        }
+      ]
+    },
+    "action-readiness-mapping": {
+      "required": [
+        {
+          "id": "available_true",
+          "any": [
+            "available -> true",
+            "available: true",
+            "available means true",
+            "available → true",
+            "\"available\":true",
+            "\"available\": true",
+            "available\":true"
+          ],
+          "evidence": [
+            "docs/task_preflight.md"
+          ],
+          "source": "- `available` -> `true`"
+        },
+        {
+          "id": "absent_false",
+          "any": [
+            "absent -> false",
+            "absent: false",
+            "absent means false",
+            "absent → false",
+            "\"absent\":false",
+            "\"absent\": false",
+            "absent\":false"
+          ],
+          "evidence": [
+            "docs/task_preflight.md"
+          ],
+          "source": "- `absent` -> `false`"
+        },
+        {
+          "id": "blocked_unknown_unknown",
+          "any": [
+            "blocked or unknown -> unknown",
+            "blocked: unknown",
+            "blocked or unknown",
+            "blocked → unknown",
+            "\"blocked\":\"unknown\"",
+            "\"blocked\": \"unknown\"",
+            "blocked\":\"unknown\""
+          ],
+          "evidence": [
+            "docs/task_preflight.md"
+          ],
+          "source": "- `blocked` or `unknown` -> `\"unknown\"`"
+        },
+        {
+          "id": "tunnel_start_blocked",
+          "any": [
+            "tunnel.start is always blocked",
+            "tunnel.start always blocked",
+            "tunnel.start is blocked"
+          ],
+          "evidence": [
+            "docs/task_preflight.md"
+          ],
+          "source": "`tunnel.start` is always `blocked`"
+        },
+        {
+          "id": "unresolved_secret",
+          "any": [
+            "unresolved secret reference",
+            "unresolved secret"
+          ],
+          "evidence": [
+            "docs/task_preflight.md"
+          ],
+          "source": "an unresolved secret reference"
+        },
+        {
+          "id": "no_preview_apply",
+          "any": [
+            "does not call actions.preview/actions.apply",
+            "does not call actions.preview",
+            "does not call apply",
+            "does not call preview"
+          ],
+          "evidence": [
+            "docs/task_preflight.md"
+          ],
+          "source": "It does not call `actions.preview`/`actions.apply`"
+        },
+        {
+          "id": "no_start_stop_signal",
+          "any": [
+            "start/stop/signal",
+            "does not start/stop/signal",
+            "never starts, stops or signals"
+          ],
+          "evidence": [
+            "docs/task_preflight.md"
+          ],
+          "source": "start/stop/signal a process"
+        }
+      ],
+      "forbidden": [
+        {
+          "phrase": "blocked action is available",
+          "contrary": {
+            "path": "docs/task_preflight.md",
+            "source": "- `blocked` or `unknown` -> `\"unknown\"`"
+          }
+        },
+        {
+          "phrase": "unresolved secret can be available",
+          "contrary": {
+            "path": "docs/task_preflight.md",
+            "source": "an unresolved secret reference"
+          }
+        },
+        {
+          "phrase": "preflight starts a service",
+          "contrary": {
+            "path": "docs/task_preflight.md",
+            "source": "start/stop/signal a process"
+          }
+        }
+      ]
+    },
+    "prefetch-allowed-and-refused": {
+      "required": [
+        {
+          "id": "allowed_affected_tests",
+          "any": [
+            "affected_tests"
+          ],
+          "evidence": [
+            "docs/prefetch.md"
+          ],
+          "source": "`affected_tests`"
+        },
+        {
+          "id": "allowed_environment",
+          "any": [
+            "environment_readiness"
+          ],
+          "evidence": [
+            "docs/prefetch.md"
+          ],
+          "source": "`environment_readiness`"
+        },
+        {
+          "id": "allowed_graph",
+          "any": [
+            "graph_neighborhood"
+          ],
+          "evidence": [
+            "docs/prefetch.md"
+          ],
+          "source": "`graph_neighborhood`"
+        },
+        {
+          "id": "forbidden_model",
+          "any": [
+            "model_call"
+          ],
+          "evidence": [
+            "docs/prefetch.md"
+          ],
+          "source": "`model_call`"
+        },
+        {
+          "id": "forbidden_test",
+          "any": [
+            "test"
+          ],
+          "evidence": [
+            "docs/prefetch.md"
+          ],
+          "source": "`test`"
+        },
+        {
+          "id": "forbidden_install",
+          "any": [
+            "install"
+          ],
+          "evidence": [
+            "docs/prefetch.md"
+          ],
+          "source": "`install`"
+        },
+        {
+          "id": "forbidden_network",
+          "any": [
+            "network"
+          ],
+          "evidence": [
+            "docs/prefetch.md"
+          ],
+          "source": "`network`"
+        },
+        {
+          "id": "forbidden_write",
+          "any": [
+            "write"
+          ],
+          "evidence": [
+            "docs/prefetch.md"
+          ],
+          "source": "`write`"
+        },
+        {
+          "id": "bound_concurrency",
+          "any": [
+            "max_concurrency 4",
+            "concurrency 4",
+            "max_concurrency: 4",
+            "max_concurrency = 4",
+            "\"max_concurrency\":4",
+            "\"max_concurrency\": 4",
+            "max_concurrency\":4"
+          ],
+          "evidence": [
+            "docs/prefetch.md"
+          ],
+          "source": "\"max_concurrency\": 4"
+        },
+        {
+          "id": "bound_time",
+          "any": [
+            "2000",
+            "2 s",
+            "2 seconds"
+          ],
+          "evidence": [
+            "docs/prefetch.md"
+          ],
+          "source": "\"max_total_ms\": 2000"
+        },
+        {
+          "id": "bound_io",
+          "any": [
+            "8388608",
+            "8 mib"
+          ],
+          "evidence": [
+            "docs/prefetch.md"
+          ],
+          "source": "\"max_io_bytes\": 8388608"
+        },
+        {
+          "id": "refused_unauthorized",
+          "any": [
+            "unauthorized"
+          ],
+          "evidence": [
+            "docs/prefetch.md"
+          ],
+          "source": "`unauthorized`"
+        },
+        {
+          "id": "refused_untrusted",
+          "any": [
+            "untrusted"
+          ],
+          "evidence": [
+            "docs/prefetch.md"
+          ],
+          "source": "`untrusted`"
+        },
+        {
+          "id": "refused_stale",
+          "any": [
+            "stale"
+          ],
+          "evidence": [
+            "docs/prefetch.md"
+          ],
+          "source": "`stale`"
+        },
+        {
+          "id": "no_speculative_start",
+          "any": [
+            "no speculative start",
+            "never speculatively starts",
+            "no speculative execution"
+          ],
+          "evidence": [
+            "docs/prefetch.md"
+          ],
+          "source": "There is no speculative start in any mode."
+        }
+      ],
+      "forbidden": [
+        {
+          "phrase": "prefetch runs tests",
+          "contrary": {
+            "path": "docs/prefetch.md",
+            "source": "`test`"
+          }
+        },
+        {
+          "phrase": "prefetch performs network fetches",
+          "contrary": {
+            "path": "docs/prefetch.md",
+            "source": "`network`"
+          }
+        },
+        {
+          "phrase": "prefetch writes files",
+          "contrary": {
+            "path": "docs/prefetch.md",
+            "source": "`write`"
+          }
+        },
+        {
+          "phrase": "prefetch starts a model",
+          "contrary": {
+            "path": "docs/prefetch.md",
+            "source": "`model_call`"
+          }
+        }
+      ]
+    },
+    "capability-audit-directions": {
+      "required": [
+        {
+          "id": "declared_not_observed",
+          "any": [
+            "declared_surface_not_observed",
+            "declared surface not observed"
+          ],
+          "evidence": [
+            "docs/capabilities.md"
+          ],
+          "source": "`declared_surface_not_observed`"
+        },
+        {
+          "id": "observed_not_declared",
+          "any": [
+            "observed_surface_undeclared",
+            "observed surface undeclared"
+          ],
+          "evidence": [
+            "docs/capabilities.md"
+          ],
+          "source": "`observed_surface_undeclared`"
+        },
+        {
+          "id": "not_exhaustive",
+          "any": [
+            "coverage.exhaustive is always false",
+            "coverage.exhaustive is false",
+            "coverage is not exhaustive",
+            "not exhaustive"
+          ],
+          "evidence": [
+            "docs/capabilities.md"
+          ],
+          "source": "`coverage.exhaustive` is always `false`"
+        },
+        {
+          "id": "readiness_not_observed",
+          "any": [
+            "readiness is not observed",
+            "does not observe readiness"
+          ],
+          "evidence": [
+            "docs/capabilities.md"
+          ],
+          "source": "Readiness is not observed."
+        },
+        {
+          "id": "no_daemon_probe",
+          "any": [
+            "does not start or ping a daemon",
+            "does not start a daemon",
+            "does not ping a daemon"
+          ],
+          "evidence": [
+            "docs/capabilities.md"
+          ],
+          "source": "The audit does not start or ping a daemon."
+        },
+        {
+          "id": "partial_states_survive",
+          "any": [
+            "observation_unavailable",
+            "partial",
+            "unknown"
+          ],
+          "evidence": [
+            "docs/capabilities.md"
+          ],
+          "source": "`observation_unavailable` finding"
+        }
+      ],
+      "forbidden": [
+        {
+          "phrase": "audit is exhaustive",
+          "contrary": {
+            "path": "docs/capabilities.md",
+            "source": "`coverage.exhaustive` is always `false`"
+          }
+        },
+        {
+          "phrase": "audit proves runtime behavior",
+          "contrary": {
+            "path": "docs/capabilities.md",
+            "source": "A symbol present in the source AST is evidence that the module defines it, not that the runtime path is correct"
+          }
+        },
+        {
+          "phrase": "audit starts a daemon",
+          "contrary": {
+            "path": "docs/capabilities.md",
+            "source": "The audit does not start or ping a daemon."
+          }
+        }
+      ]
+    },
+    "ocelot-readonly-boundary": {
+      "required": [
+        {
+          "id": "ocelot_unknown",
+          "any": [
+            "explicit unknown",
+            "state: unknown",
+            "\"state\": \"unknown\"",
+            "ocelot is unknown",
+            "\"state\":\"unknown\""
+          ],
+          "evidence": [
+            "docs/research_projection.md"
+          ],
+          "source": "`research.engines.ocelot` is always:"
+        },
+        {
+          "id": "not_imported_or_executed",
+          "any": [
+            "no ocelot module was imported or executed",
+            "not imported or executed",
+            "does not import or execute ocelot"
+          ],
+          "evidence": [
+            "docs/research_projection.md"
+          ],
+          "source": "no Ocelot module was imported or executed"
+        },
+        {
+          "id": "optional_deferred",
+          "any": [
+            "optional",
+            "deferred"
+          ],
+          "evidence": [
+            "docs/task_preflight.md"
+          ],
+          "source": "the optional Ocelot adapter is deferred"
+        },
+        {
+          "id": "records_engine",
+          "any": [
+            "engine"
+          ],
+          "evidence": [
+            "docs/plans/2026-11-17_self_graph_service_unification_model_api.md"
+          ],
+          "source": "Record the engine/version"
+        },
+        {
+          "id": "records_input_hashes",
+          "any": [
+            "input hashes"
+          ],
+          "evidence": [
+            "docs/plans/2026-11-17_self_graph_service_unification_model_api.md"
+          ],
+          "source": "input hashes"
+        },
+        {
+          "id": "records_verifier",
+          "any": [
+            "verifier"
+          ],
+          "evidence": [
+            "docs/plans/2026-11-17_self_graph_service_unification_model_api.md"
+          ],
+          "source": "verifier"
+        },
+        {
+          "id": "empirical_vs_formal",
+          "any": [
+            "empirical support",
+            "formal derivation",
+            "conditional formal derivation"
+          ],
+          "evidence": [
+            "docs/plans/2026-11-17_self_graph_service_unification_model_api.md"
+          ],
+          "source": "keep empirical support and conditional formal derivation distinct"
+        }
+      ],
+      "forbidden": [
+        {
+          "phrase": "ocelot proves correctness",
+          "contrary": {
+            "path": "docs/ocelot.md",
+            "source": "a candidate signal, never a truth verdict"
+          }
+        },
+        {
+          "phrase": "ocelot is bundled",
+          "contrary": {
+            "path": "docs/ocelot.md",
+            "source": "ozagia does not bundle it"
+          }
+        },
+        {
+          "phrase": "formal proof and empirical result are the same",
+          "contrary": {
+            "path": "docs/plans/2026-11-17_self_graph_service_unification_model_api.md",
+            "source": "keep empirical support and conditional formal derivation distinct"
+          }
+        }
+      ]
+    },
+    "edit-transaction-safety": {
+      "required": [
+        {
+          "id": "preview_default",
+          "any": [
+            "write=false is a pure preview",
+            "preview is the default",
+            "previews by default",
+            "preview by default"
+          ],
+          "evidence": [
+            "docs/cst_edit.md"
+          ],
+          "source": "`write=False` is a pure preview"
+        },
+        {
+          "id": "base_hash",
+          "any": [
+            "base_sha256"
+          ],
+          "evidence": [
+            "docs/cst_edit.md"
+          ],
+          "source": "`base_sha256`"
+        },
+        {
+          "id": "backup",
+          "any": [
+            "backup"
+          ],
+          "evidence": [
+            "src/ozagia/edit/txn.py"
+          ],
+          "source": "writes the bytes that were read to a backup"
+        },
+        {
+          "id": "temp_same_directory",
+          "any": [
+            "temporary file in the target directory",
+            "temp file in the same directory",
+            "same directory"
+          ],
+          "evidence": [
+            "src/ozagia/edit/txn.py"
+          ],
+          "source": "temp file in the same directory"
+        },
+        {
+          "id": "atomic_replace",
+          "any": [
+            "os.replace"
+          ],
+          "evidence": [
+            "src/ozagia/edit/txn.py"
+          ],
+          "source": "os.replace"
+        },
+        {
+          "id": "reread_before_replace",
+          "any": [
+            "re-reads the target just before replacing it",
+            "re-read before replacing",
+            "re-reads the target"
+          ],
+          "evidence": [
+            "src/ozagia/edit/txn.py"
+          ],
+          "source": "re-reads the target just before replacing it"
+        },
+        {
+          "id": "concurrent_change_refused",
+          "any": [
+            "refuses if it changed since the read",
+            "refuses if the file changed",
+            "changed since the read"
+          ],
+          "evidence": [
+            "src/ozagia/edit/txn.py"
+          ],
+          "source": "refuses if it changed since the read"
+        }
+      ],
+      "forbidden": [
+        {
+          "phrase": "preview writes the file",
+          "contrary": {
+            "path": "docs/cst_edit.md",
+            "source": "`write=False` is a pure preview"
+          }
+        },
+        {
+          "phrase": "uses a text-patch fallback",
+          "contrary": {
+            "path": "docs/cst_edit.md",
+            "source": "There is no silent text-patch fallback."
+          }
+        },
+        {
+          "phrase": "replacement is not atomic",
+          "contrary": {
+            "path": "src/ozagia/edit/txn.py",
+            "source": "os.replace"
+          }
+        }
+      ]
+    },
+    "mcp-server-readonly-contract": {
+      "required": [
+        {
+          "id": "stdio",
+          "any": [
+            "stdio"
+          ],
+          "evidence": [
+            "src/ozagia/integrations/mcp/server.py"
+          ],
+          "source": "stdio MCP server"
+        },
+        {
+          "id": "json_rpc",
+          "any": [
+            "json-rpc"
+          ],
+          "evidence": [
+            "src/ozagia/integrations/mcp/server.py"
+          ],
+          "source": "JSON-RPC error codes"
+        },
+        {
+          "id": "stdlib_only",
+          "any": [
+            "stdlib-only",
+            "standard library only",
+            "standard-library only"
+          ],
+          "evidence": [
+            "src/ozagia/integrations/mcp/server.py"
+          ],
+          "source": "deliberately stdlib-only"
+        },
+        {
+          "id": "read_only_graph",
+          "any": [
+            "read-only over the graph",
+            "read-only graph",
+            "read-only"
+          ],
+          "evidence": [
+            "src/ozagia/integrations/mcp/server.py"
+          ],
+          "source": "READ-ONLY over"
+        },
+        {
+          "id": "append_only_journal",
+          "any": [
+            "append-only journal",
+            "append only journal"
+          ],
+          "evidence": [
+            "src/ozagia/integrations/mcp/server.py"
+          ],
+          "source": "one small append-only journal"
+        },
+        {
+          "id": "journal_contents",
+          "any": [
+            "decisions and verifications",
+            "decisions",
+            "verifications"
+          ],
+          "evidence": [
+            "src/ozagia/integrations/mcp/server.py"
+          ],
+          "source": "for decisions and verifications"
+        }
+      ],
+      "forbidden": [
+        {
+          "phrase": "server mutates the graph automatically",
+          "contrary": {
+            "path": "src/ozagia/integrations/mcp/server.py",
+            "source": "READ-ONLY over"
+          }
+        },
+        {
+          "phrase": "journal is rewritten in place",
+          "contrary": {
+            "path": "src/ozagia/integrations/mcp/server.py",
+            "source": "append-only journal"
+          }
+        },
+        {
+          "phrase": "depends on the mcp package",
+          "contrary": {
+            "path": "src/ozagia/integrations/mcp/server.py",
+            "source": "no `mcp` package dependency"
+          }
+        }
+      ]
+    },
+    "daemon-socket-and-scope": {
+      "required": [
+        {
+          "id": "default_socket",
+          "any": [
+            "<state dir>/daemon.sock",
+            ".ozagia/daemon.sock",
+            "daemon.sock"
+          ],
+          "evidence": [
+            "src/ozagia/daemon/protocol.py"
+          ],
+          "source": "`<state dir>/daemon.sock`"
+        },
+        {
+          "id": "override",
+          "any": [
+            "ozagia_daemon_sock"
+          ],
+          "evidence": [
+            "src/ozagia/daemon/protocol.py"
+          ],
+          "source": "`$OZAGIA_DAEMON_SOCK` overrides it"
+        },
+        {
+          "id": "unix_socket",
+          "any": [
+            "unix socket",
+            "unix-domain socket"
+          ],
+          "evidence": [
+            "src/ozagia/daemon/protocol.py"
+          ],
+          "source": "It listens on a Unix socket"
+        },
+        {
+          "id": "one_repository",
+          "any": [
+            "one target repository",
+            "one repository",
+            "serves one"
+          ],
+          "evidence": [
+            "src/ozagia/daemon/protocol.py"
+          ],
+          "source": "A daemon serves one target repository."
+        }
+      ],
+      "forbidden": [
+        {
+          "phrase": "one daemon serves many repositories",
+          "contrary": {
+            "path": "src/ozagia/daemon/protocol.py",
+            "source": "A daemon serves one target repository."
+          }
+        },
+        {
+          "phrase": "socket path cannot be overridden",
+          "contrary": {
+            "path": "src/ozagia/daemon/protocol.py",
+            "source": "`$OZAGIA_DAEMON_SOCK` overrides it"
+          }
+        }
+      ]
+    },
+    "live-eval-approval-gate": {
+      "required": [
+        {
+          "id": "live_flag",
+          "any": [
+            "--live"
+          ],
+          "evidence": [
+            "docs/eval_agent.md"
+          ],
+          "source": "- the command includes `--live`, and"
+        },
+        {
+          "id": "env_flag",
+          "any": [
+            "ozagia_eval_live=1"
+          ],
+          "evidence": [
+            "docs/eval_agent.md"
+          ],
+          "source": "`OZAGIA_EVAL_LIVE=1`"
+        },
+        {
+          "id": "refuses",
+          "any": [
+            "refuse",
+            "refuses",
+            "will not run"
+          ],
+          "evidence": [
+            "docs/eval_agent.md"
+          ],
+          "source": "refuse to run unless **both** of these hold"
+        },
+        {
+          "id": "approval",
+          "any": [
+            "approval",
+            "approved",
+            "person's approval",
+            "person approval"
+          ],
+          "evidence": [
+            "docs/plans/2026-11-17_self_graph_service_unification_model_api.md"
+          ],
+          "source": "Live model drivers require `--live`, `OZAGIA_EVAL_LIVE=1` and a person's approval."
+        }
+      ],
+      "forbidden": [
+        {
+          "phrase": "live runs without approval",
+          "contrary": {
+            "path": "docs/plans/2026-11-17_self_graph_service_unification_model_api.md",
+            "source": "a person's approval"
+          }
+        },
+        {
+          "phrase": "env flag alone is enough",
+          "contrary": {
+            "path": "docs/eval_agent.md",
+            "source": "refuse to run unless **both** of these hold"
+          }
+        }
+      ]
+    },
+    "secrets-by-reference": {
+      "required": [
+        {
+          "id": "by_reference",
+          "any": [
+            "passed by reference",
+            "by reference"
+          ],
+          "evidence": [
+            "docs/secrets.md"
+          ],
+          "source": "Secrets are passed by reference"
+        },
+        {
+          "id": "never_by_value",
+          "any": [
+            "never by value",
+            "not by value"
+          ],
+          "evidence": [
+            "docs/secrets.md"
+          ],
+          "source": "never by value"
+        },
+        {
+          "id": "reference_form",
+          "any": [
+            "secret://"
+          ],
+          "evidence": [
+            "docs/secrets.md"
+          ],
+          "source": "`secret://...`"
+        },
+        {
+          "id": "never_in_model_messages",
+          "any": [
+            "model messages"
+          ],
+          "evidence": [
+            "docs/secrets.md"
+          ],
+          "source": "model messages"
+        },
+        {
+          "id": "never_in_logs",
+          "any": [
+            "logs"
+          ],
+          "evidence": [
+            "docs/secrets.md"
+          ],
+          "source": "logs"
+        },
+        {
+          "id": "never_in_cli_output",
+          "any": [
+            "cli output"
+          ],
+          "evidence": [
+            "docs/secrets.md"
+          ],
+          "source": "CLI output"
+        },
+        {
+          "id": "never_in_configuration",
+          "any": [
+            "configuration"
+          ],
+          "evidence": [
+            "docs/secrets.md"
+          ],
+          "source": "Configuration"
+        }
+      ],
+      "forbidden": [
+        {
+          "phrase": "logs contain resolved values",
+          "contrary": {
+            "path": "docs/secrets.md",
+            "source": "CLI output, logs and model messages carry a `secret://...` reference."
+          }
+        },
+        {
+          "phrase": "job records contain secret values",
+          "contrary": {
+            "path": "docs/secrets.md",
+            "source": "never by value. Configuration, job records,"
+          }
+        },
+        {
+          "phrase": "model messages contain secret values",
+          "contrary": {
+            "path": "docs/secrets.md",
+            "source": "CLI output, logs and model messages carry a `secret://...` reference."
+          }
+        }
+      ]
+    },
+    "snapshot-staleness": {
+      "required": [
+        {
+          "id": "root_differs",
+          "any": [
+            "root differs",
+            "root changed",
+            "different root"
+          ],
+          "evidence": [
+            "docs/memory_mcp.md"
+          ],
+          "source": "when the root differs"
+        },
+        {
+          "id": "head_moved",
+          "any": [
+            "head moved",
+            "head changed",
+            "git rev-parse head"
+          ],
+          "evidence": [
+            "docs/memory_mcp.md"
+          ],
+          "source": "when `git rev-parse HEAD` moved"
+        },
+        {
+          "id": "tree_changed",
+          "any": [
+            "working tree changed",
+            "tree changed",
+            "working tree"
+          ],
+          "evidence": [
+            "docs/memory_mcp.md"
+          ],
+          "source": "when the working tree changed since the build"
+        },
+        {
+          "id": "digest_failure_unknown",
+          "any": [
+            "unknown",
+            "freshness is unknown"
+          ],
+          "evidence": [
+            "docs/memory_mcp.md"
+          ],
+          "source": "If the digest cannot be computed, `freshness` is `unknown`"
+        }
+      ],
+      "forbidden": [
+        {
+          "phrase": "unknown is treated as fresh",
+          "contrary": {
+            "path": "docs/memory_mcp.md",
+            "source": "If the digest cannot be computed, `freshness` is `unknown`"
+          }
+        },
+        {
+          "phrase": "timestamp alone proves freshness",
+          "contrary": {
+            "path": "docs/memory_mcp.md",
+            "source": "It is stale when the root differs, when"
+          }
+        }
+      ]
+    },
+    "code-search-signals": {
+      "required": [
+        {
+          "id": "bm25",
+          "any": [
+            "bm25"
+          ],
+          "evidence": [
+            "docs/code_search.md"
+          ],
+          "source": "BM25 over"
+        },
+        {
+          "id": "pagerank",
+          "any": [
+            "pagerank"
+          ],
+          "evidence": [
+            "docs/code_search.md"
+          ],
+          "source": "repo-map PageRank"
+        },
+        {
+          "id": "rrf",
+          "any": [
+            "reciprocal rank fusion",
+            "rrf"
+          ],
+          "evidence": [
+            "docs/code_search.md"
+          ],
+          "source": "Reciprocal Rank Fusion"
+        },
+        {
+          "id": "no_embeddings",
+          "any": [
+            "no embeddings",
+            "does not use embeddings"
+          ],
+          "evidence": [
+            "docs/code_search.md"
+          ],
+          "source": "no embeddings"
+        },
+        {
+          "id": "no_model",
+          "any": [
+            "no model",
+            "does not call a model"
+          ],
+          "evidence": [
+            "docs/code_search.md"
+          ],
+          "source": "no model"
+        },
+        {
+          "id": "no_network",
+          "any": [
+            "no network",
+            "does not use the network"
+          ],
+          "evidence": [
+            "docs/code_search.md"
+          ],
+          "source": "no network"
+        },
+        {
+          "id": "cache_path",
+          "any": [
+            ".ozagia/tags.json",
+            "tags.json"
+          ],
+          "evidence": [
+            "docs/code_search.md"
+          ],
+          "source": "`cache_path=None` resolves to `<root>/.ozagia/tags.json`"
+        }
+      ],
+      "forbidden": [
+        {
+          "phrase": "uses embeddings",
+          "contrary": {
+            "path": "docs/code_search.md",
+            "source": "no embeddings"
+          }
+        },
+        {
+          "phrase": "calls a model",
+          "contrary": {
+            "path": "docs/code_search.md",
+            "source": "no model"
+          }
+        },
+        {
+          "phrase": "performs network fetches",
+          "contrary": {
+            "path": "docs/code_search.md",
+            "source": "no network"
+          }
+        }
+      ]
+    },
+    "mcp-graph-surface": {
+      "required": [
+        {
+          "id": "surface_full",
+          "any": [
+            "full"
+          ],
+          "evidence": [
+            "docs/graph_surface.md"
+          ],
+          "source": "`full` (default)"
+        },
+        {
+          "id": "surface_graph",
+          "any": [
+            "graph"
+          ],
+          "evidence": [
+            "docs/graph_surface.md"
+          ],
+          "source": "`graph`"
+        },
+        {
+          "id": "verb_find",
+          "any": [
+            "find"
+          ],
+          "evidence": [
+            "docs/graph_surface.md"
+          ],
+          "source": "`find`, `node`"
+        },
+        {
+          "id": "verb_node",
+          "any": [
+            "node"
+          ],
+          "evidence": [
+            "docs/graph_surface.md"
+          ],
+          "source": "`find`, `node`"
+        },
+        {
+          "id": "verb_expand",
+          "any": [
+            "expand"
+          ],
+          "evidence": [
+            "docs/graph_surface.md"
+          ],
+          "source": "`expand`"
+        },
+        {
+          "id": "verb_impact",
+          "any": [
+            "impact"
+          ],
+          "evidence": [
+            "docs/graph_surface.md"
+          ],
+          "source": "`impact`"
+        },
+        {
+          "id": "verb_edit",
+          "any": [
+            "edit"
+          ],
+          "evidence": [
+            "docs/graph_surface.md"
+          ],
+          "source": "`edit`"
+        },
+        {
+          "id": "verb_create",
+          "any": [
+            "create"
+          ],
+          "evidence": [
+            "docs/graph_surface.md"
+          ],
+          "source": "`create`"
+        },
+        {
+          "id": "verb_check",
+          "any": [
+            "check"
+          ],
+          "evidence": [
+            "docs/graph_surface.md"
+          ],
+          "source": "`check`"
+        },
+        {
+          "id": "verb_note",
+          "any": [
+            "note"
+          ],
+          "evidence": [
+            "docs/graph_surface.md"
+          ],
+          "source": "`note`"
+        },
+        {
+          "id": "dev_call_refused",
+          "any": [
+            "-32602",
+            "unknown tool",
+            "json-rpc error"
+          ],
+          "evidence": [
+            "docs/graph_surface.md"
+          ],
+          "source": "A `dev_*` call is answered with JSON-RPC error -32602"
+        },
+        {
+          "id": "env_override",
+          "any": [
+            "ozagia_surface"
+          ],
+          "evidence": [
+            "docs/graph_surface.md"
+          ],
+          "source": "OZAGIA_SURFACE=graph"
+        }
+      ],
+      "forbidden": [
+        {
+          "phrase": "dev_* call works on graph surface",
+          "contrary": {
+            "path": "docs/graph_surface.md",
+            "source": "A `dev_*` call is answered with JSON-RPC error -32602"
+          }
+        },
+        {
+          "phrase": "graph surface uses integer ids",
+          "contrary": {
+            "path": "docs/graph_surface.md",
+            "source": "never by an integer id"
+          }
+        }
+      ]
+    },
+    "linked-checkout-readonly-join": {
+      "required": [
+        {
+          "id": "caller_declarations",
+          "any": [
+            "caller declarations",
+            "caller-supplied",
+            "explicit declarations"
+          ],
+          "evidence": [
+            "docs/task_preflight.md"
+          ],
+          "source": "Both are caller declarations"
+        },
+        {
+          "id": "path_not_permission",
+          "any": [
+            "a path is not an identity or permission",
+            "path is not a permission",
+            "path is not identity"
+          ],
+          "evidence": [
+            "docs/task_preflight.md"
+          ],
+          "source": "a path is not an identity or permission"
+        },
+        {
+          "id": "no_discover",
+          "any": [
+            "does not call federation.discover",
+            "not call federation.discover",
+            "does not discover"
+          ],
+          "evidence": [
+            "docs/task_preflight.md"
+          ],
+          "source": "It does not call `federation.discover`"
+        },
+        {
+          "id": "no_refresh",
+          "any": [
+            "does not refresh",
+            "not refresh",
+            "does not refresh or rebuild"
+          ],
+          "evidence": [
+            "docs/task_preflight.md"
+          ],
+          "source": "it does not refresh or rebuild a member snapshot"
+        },
+        {
+          "id": "unknown_states",
+          "any": [
+            "unknown",
+            "unverified"
+          ],
+          "evidence": [
+            "docs/task_preflight.md"
+          ],
+          "source": "unverified or unknown state is `unknown`"
+        },
+        {
+          "id": "missing_retained",
+          "any": [
+            "retained",
+            "not dropped",
+            "missing member"
+          ],
+          "evidence": [
+            "docs/task_preflight.md"
+          ],
+          "source": "A missing member is retained in the report, not dropped."
+        }
+      ],
+      "forbidden": [
+        {
+          "phrase": "a readable path grants authorization",
+          "contrary": {
+            "path": "docs/task_preflight.md",
+            "source": "a path is not an identity or permission"
+          }
+        },
+        {
+          "phrase": "preflight fetches a linked repository",
+          "contrary": {
+            "path": "docs/task_preflight.md",
+            "source": "It does not call `federation.discover`"
+          }
+        },
+        {
+          "phrase": "missing member is dropped",
+          "contrary": {
+            "path": "docs/task_preflight.md",
+            "source": "A missing member is retained in the report, not dropped."
+          }
+        }
+      ]
+    },
+    "core-boundaries": {
+      "required": [
+        {
+          "id": "stdlib_only",
+          "any": [
+            "standard library only",
+            "standard-library only",
+            "stdlib-only"
+          ],
+          "evidence": [
+            "AGENTS.md"
+          ],
+          "source": "The core uses the standard library only."
+        },
+        {
+          "id": "no_target_import",
+          "any": [
+            "never imports a target project",
+            "does not import a target project",
+            "never import the target"
+          ],
+          "evidence": [
+            "AGENTS.md"
+          ],
+          "source": "ozagia never imports a target project"
+        },
+        {
+          "id": "state_dir_boundary",
+          "any": [
+            "state dir",
+            "state directory",
+            ".ozagia"
+          ],
+          "evidence": [
+            "AGENTS.md"
+          ],
+          "source": "outside its state dir"
+        },
+        {
+          "id": "explicit_edit_exception",
+          "any": [
+            "except the edit the caller asked for",
+            "explicit caller-authorized edits",
+            "the edit the caller asked for"
+          ],
+          "evidence": [
+            "AGENTS.md"
+          ],
+          "source": "except the edit the caller asked for"
+        }
+      ],
+      "forbidden": [
+        {
+          "phrase": "ozagia imports the target project",
+          "contrary": {
+            "path": "AGENTS.md",
+            "source": "ozagia never imports a target project"
+          }
+        },
+        {
+          "phrase": "arbitrary writes are allowed",
+          "contrary": {
+            "path": "AGENTS.md",
+            "source": "Never write into the target repository outside its state dir, except the"
+          }
+        },
+        {
+          "phrase": "requires third-party core dependencies",
+          "contrary": {
+            "path": "AGENTS.md",
+            "source": "The core uses the standard library only."
+          }
+        }
+      ]
+    }
+  }
+}

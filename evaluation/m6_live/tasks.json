@@ -1,0 +1,272 @@
+{
+  "version": 1,
+  "study": "ozagia-m6-live-maps-local-qwen",
+  "read_only": true,
+  "constraints": [
+    "Answer from the checked-out repository only.",
+    "Do not edit, create or delete files.",
+    "Do not run shell commands, tests, package managers or network requests.",
+    "Do not use a language server, indexer or daemon beyond the tools provided to the arm.",
+    "Return one concise JSON object with the requested keys; no prose outside it."
+  ],
+  "tasks": [
+    {
+      "id": "selfgraph-readiness-separation",
+      "category": "self_graph",
+      "prompt": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. Explain how this repository's capability catalogue separates declared capability facts from readiness, and what it says about coverage and missing observations. Give the readiness dimensions and one short coverage statement. Return JSON with keys dimensions (array of strings) and coverage (string).",
+      "answer_contract": {
+        "format": "json",
+        "keys": [
+          "dimensions",
+          "coverage"
+        ],
+        "note": "Use the repository's exact vocabulary for the dimensions."
+      }
+    },
+    {
+      "id": "maps-types-and-budgets",
+      "category": "model_api",
+      "prompt": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. List the four implemented read-only map types and report the default and hard caps for map bytes, page items and graph neighbourhood depth. Return JSON with keys types (array), defaults (object) and hard_caps (object).",
+      "answer_contract": {
+        "format": "json",
+        "keys": [
+          "types",
+          "defaults",
+          "hard_caps"
+        ],
+        "note": "Use exact map type names and integers or KiB values."
+      }
+    },
+    {
+      "id": "maps-unsupported-and-fallback",
+      "category": "model_api",
+      "prompt": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. Describe what a map client receives when it asks for an unsupported capability or schema, and what happens to stale, cross-scope or malformed references. State the fallback rule and one thing that must never happen. Return JSON with keys unsupported (string), stale_or_cross_scope (string) and never (string).",
+      "answer_contract": {
+        "format": "json",
+        "keys": [
+          "unsupported",
+          "stale_or_cross_scope",
+          "never"
+        ]
+      }
+    },
+    {
+      "id": "work-map-join-and-redaction",
+      "category": "model_api",
+      "prompt": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. Describe what the work/evidence map joins together and what it deliberately omits from its records. Return JSON with keys joins (array) and omits (array).",
+      "answer_contract": {
+        "format": "json",
+        "keys": [
+          "joins",
+          "omits"
+        ]
+      }
+    },
+    {
+      "id": "evidence-grades-and-limits",
+      "category": "evidence",
+      "prompt": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. Explain the durable evidence store's evidence grades and what its strongest grade does not mean. Also state one link the recorded test outcome cannot establish. Return JSON with keys grades (array), strongest_grade_limit (string) and unknown_link (string).",
+      "answer_contract": {
+        "format": "json",
+        "keys": [
+          "grades",
+          "strongest_grade_limit",
+          "unknown_link"
+        ]
+      }
+    },
+    {
+      "id": "preflight-green-rules",
+      "category": "preflight",
+      "prompt": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. State exactly when a task preflight may report green, and name at least three things it refuses to upgrade into evidence. Return JSON with keys green_when (string) and refuses (array). Include one missing-tool example and one stale-data example.",
+      "answer_contract": {
+        "format": "json",
+        "keys": [
+          "green_when",
+          "refuses"
+        ]
+      }
+    },
+    {
+      "id": "action-readiness-mapping",
+      "category": "actions",
+      "prompt": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. Explain how the task preflight maps observed service and tunnel readiness states into its own tri-state, which operation is always blocked in that read-only join, and which mutating calls the join avoids. Return JSON with keys mapping (object), always_blocked (string) and avoids (array).",
+      "answer_contract": {
+        "format": "json",
+        "keys": [
+          "mapping",
+          "always_blocked",
+          "avoids"
+        ]
+      }
+    },
+    {
+      "id": "prefetch-allowed-and-refused",
+      "category": "prefetch",
+      "prompt": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. For the offline prefetch planner, list at least three allowed read-only work kinds, at least four forbidden work kinds, the main time/IO/concurrency bounds, and the refusal states for unsafe or stale candidates. Return JSON with keys allowed (array), forbidden (array), bounds (object) and refused (array).",
+      "answer_contract": {
+        "format": "json",
+        "keys": [
+          "allowed",
+          "forbidden",
+          "bounds",
+          "refused"
+        ]
+      }
+    },
+    {
+      "id": "capability-audit-directions",
+      "category": "self_graph",
+      "prompt": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. What two mismatch directions does the capability audit report, how exhaustive is its coverage, and what does it explicitly not observe or start? Return JSON with keys directions (array), coverage (string) and limits (array).",
+      "answer_contract": {
+        "format": "json",
+        "keys": [
+          "directions",
+          "coverage",
+          "limits"
+        ]
+      }
+    },
+    {
+      "id": "ocelot-readonly-boundary",
+      "category": "ocelot",
+      "prompt": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. How is Ocelot represented in the read-only research and preflight path, and what must a future optional adapter record so its result is not confused with a formal proof? Return JSON with keys state (string), not_done (array) and adapter_records (array).",
+      "answer_contract": {
+        "format": "json",
+        "keys": [
+          "state",
+          "not_done",
+          "adapter_records"
+        ]
+      }
+    },
+    {
+      "id": "edit-transaction-safety",
+      "category": "safety",
+      "prompt": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. Describe the file edit transaction's safety guarantees from preview through replacement. Cover the default mode, base-hash check, backup, atomic replacement and what happens if the file changes during the transaction. Return JSON with keys preview (string), guards (array) and write (string).",
+      "answer_contract": {
+        "format": "json",
+        "keys": [
+          "preview",
+          "guards",
+          "write"
+        ]
+      }
+    },
+    {
+      "id": "mcp-server-readonly-contract",
+      "category": "safety",
+      "prompt": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. Describe the MCP server's dependency and transport shape, its behaviour toward the graph, and the only persistent state it appends. Return JSON with keys transport (string), graph_access (string) and state (string).",
+      "answer_contract": {
+        "format": "json",
+        "keys": [
+          "transport",
+          "graph_access",
+          "state"
+        ]
+      }
+    },
+    {
+      "id": "daemon-socket-and-scope",
+      "category": "navigation",
+      "prompt": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. Where does the graph daemon listen by default, what environment variable overrides the socket path, and how many target repositories does one daemon serve? Return JSON with keys default (string), override (string) and scope (string).",
+      "answer_contract": {
+        "format": "json",
+        "keys": [
+          "default",
+          "override",
+          "scope"
+        ]
+      }
+    },
+    {
+      "id": "live-eval-approval-gate",
+      "category": "safety",
+      "prompt": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. What two gates must be present before a live model driver runs in the existing agent evaluation harness, and what does the harness do when either is missing? Return JSON with keys gates (array) and missing (string).",
+      "answer_contract": {
+        "format": "json",
+        "keys": [
+          "gates",
+          "missing"
+        ]
+      }
+    },
+    {
+      "id": "secrets-by-reference",
+      "category": "safety",
+      "prompt": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. Describe how secrets cross this system's boundaries and name the places where a resolved value must never appear. Return JSON with keys passing (string), reference_form (string) and never_in (array).",
+      "answer_contract": {
+        "format": "json",
+        "keys": [
+          "passing",
+          "reference_form",
+          "never_in"
+        ]
+      }
+    },
+    {
+      "id": "snapshot-staleness",
+      "category": "navigation",
+      "prompt": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. When does a dev-memory snapshot count as stale relative to its checkout, and what freshness is reported when the tree digest cannot be computed? Return JSON with keys stale_when (array) and digest_failure (string).",
+      "answer_contract": {
+        "format": "json",
+        "keys": [
+          "stale_when",
+          "digest_failure"
+        ]
+      }
+    },
+    {
+      "id": "code-search-signals",
+      "category": "navigation",
+      "prompt": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. Which retrieval signals does the code-search surface combine, what does it explicitly not use, and where does its default cache live? Return JSON with keys signals (array), excluded (array) and cache (string).",
+      "answer_contract": {
+        "format": "json",
+        "keys": [
+          "signals",
+          "excluded",
+          "cache"
+        ]
+      }
+    },
+    {
+      "id": "mcp-graph-surface",
+      "category": "navigation",
+      "prompt": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. Name the MCP server's two tool surfaces, the eight graph-surface verbs, and what a full-surface dev_* call receives on the graph surface. Return JSON with keys surfaces (array), verbs (array) and dev_call (string). Also state how the surface is selected.",
+      "answer_contract": {
+        "format": "json",
+        "keys": [
+          "surfaces",
+          "verbs",
+          "dev_call"
+        ]
+      }
+    },
+    {
+      "id": "linked-checkout-readonly-join",
+      "category": "safety",
+      "prompt": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. How does the task preflight treat a selected linked checkout's authorization and read scope, and which federation or refresh operations does it avoid? Return JSON with keys authorization (string), forbidden_operations (array) and unknown_when (string).",
+      "answer_contract": {
+        "format": "json",
+        "keys": [
+          "authorization",
+          "forbidden_operations",
+          "unknown_when"
+        ]
+      }
+    },
+    {
+      "id": "core-boundaries",
+      "category": "safety",
+      "prompt": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. State this project's core dependency rule, its rule about target projects, and its write boundary. Return JSON with keys dependencies (string), target_imports (string) and writes (string).",
+      "answer_contract": {
+        "format": "json",
+        "keys": [
+          "dependencies",
+          "target_imports",
+          "writes"
+        ]
+      }
+    }
+  ]
+}
