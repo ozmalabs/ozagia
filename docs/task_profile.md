@@ -326,8 +326,9 @@ separate. A schedule is capped at 512 stages by default (`max_nodes` in
 explicitly rather than receive a silently partial one.
 
 - `dependency_lower_bound_ms`: longest dependency path with the resolved
-  durations and no resource limits. This is the same quantity as
-  `critical_path`.
+  durations and no resource limits. Unknown durations contribute zero to this
+  numeric lower bound; `status` and `unresolved` still show that the schedule
+  is incomplete. This matches `critical_path.lower_bound_ms`.
 - `makespan_ms`: a deterministic greedy list schedule with the profile's
   global and per-class concurrency limits. It is a simulation, not an optimum.
 - `resource_wait_total_ms` and `bottlenecks`: time spent ready but waiting for

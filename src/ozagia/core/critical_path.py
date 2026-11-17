@@ -1377,11 +1377,10 @@ def what_if(dag: Dag, profile: ScheduleProfile, *,
     )
     dependency = critical_path(Dag(resolved_nodes, dag.edges),
                                on_cycle="raise")
-    dependency_lower_bound = dependency["duration_ms"]
-    if dependency_lower_bound == UNKNOWN:
-        dependency_lower_bound_ms: int | str = UNKNOWN
-    else:
-        dependency_lower_bound_ms = dependency_lower_bound
+    # Keep the numeric dependency-only lower bound even when exact durations
+    # are incomplete. critical_path() reports exactness separately in
+    # duration_ms and preserves the zero-for-unknown lower bound explicitly.
+    dependency_lower_bound_ms = dependency["lower_bound_ms"]
 
     path_set = set(driving_path)
     per_stage = [

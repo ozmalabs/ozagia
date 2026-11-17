@@ -181,6 +181,13 @@ class Source:
 def provenance(sources: Iterable[Source] = (), *,
                inputs: Iterable[str] = ()) -> dict[str, Any]:
     """Build the bounded, sorted provenance mapping used by an envelope."""
+    if isinstance(inputs, (str, bytes)):
+        raise C.SchemaError("provenance inputs must be an iterable of strings")
+    try:
+        input_values = iter(inputs)
+    except TypeError as exc:
+        raise C.SchemaError(
+            "provenance inputs must be an iterable of strings") from exc
     rows: dict[str, dict[str, Any]] = {}
     count = 0
     for item in sources:
@@ -192,7 +199,7 @@ def provenance(sources: Iterable[Source] = (), *,
                 f"provenance exceeds {MAX_PROVENANCE_SOURCES} sources")
         rows[C.canonical_json(item.to_dict())] = item.to_dict()
     checked_inputs: list[str] = []
-    for value in inputs:
+    for value in input_values:
         if not isinstance(value, str) or not value or len(value) > C.MAX_TEXT:
             raise C.SchemaError("provenance inputs must be bounded strings")
         if any(ord(c) < 0x20 for c in value):
@@ -214,7 +221,9 @@ def _validate_provenance(value: Any) -> dict[str, Any]:
     unknown = sorted(set(value) - {"sources", "inputs"})
     if unknown:
         raise C.UnknownFieldError(f"unknown provenance fields: {unknown}")
-    raw_sources = value.get("sources") or []
+    # Do not use ``or`` defaults here: falsey malformed values such as ``0``
+    # and ``""`` must be rejected rather than normalized into empty lists.
+    raw_sources = value.get("sources", [])
     if isinstance(raw_sources, (str, bytes)) or not isinstance(
             raw_sources, Iterable):
         raise C.SchemaError("provenance.sources must be a list")
@@ -233,7 +242,7 @@ def _validate_provenance(value: Any) -> dict[str, Any]:
             freshness=item.get("freshness", "current"),
             evidence=item.get("evidence", "observed"),
         ))
-    return provenance(sources, inputs=value.get("inputs") or ())
+    return provenance(sources, inputs=value.get("inputs", ()))
 
 
 # ---------------------------------------------------------------------------

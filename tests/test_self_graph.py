@@ -7,6 +7,7 @@ import os
 import socket
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -278,7 +279,17 @@ def test_real_unreadable_handler_map_is_unknown(monkeypatch):
     assert report["audit"]["state"] == "partial"
 
 
-def test_daemon_operation_omitted_from_the_docstring_is_synthesized():
+def test_daemon_operation_omitted_from_inventory_is_synthesized(monkeypatch):
+    original = SG._inventory_observation
+
+    def without_hint(root):
+        observation = original(root)
+        observation["surfaces"] = [
+            item for item in observation["surfaces"]
+            if item.get("id") != "daemon:op:hint"]
+        return observation
+
+    monkeypatch.setattr(SG, "_inventory_observation", without_hint)
     observations = SG.collect_observations()
     surfaces = {surface["id"]: surface
                 for surface in observations["surfaces"]}
@@ -299,6 +310,41 @@ def test_daemon_operation_omitted_from_the_docstring_is_synthesized():
                    if item["subject"] == "daemon:op:hint")
     assert finding["kind"] == "daemon_operation_undocumented"
     assert finding["severity"] == "coverage"
+
+
+def test_ast_symbol_cache_tracks_source_content(tmp_path):
+    source = tmp_path / "symbols.py"
+    source.write_text("def before():\n    pass\n", encoding="utf-8")
+    assert SG._ast_symbols(source) == ({"before"}, None)
+    source.write_text("def after():\n    pass\n", encoding="utf-8")
+    assert SG._ast_symbols(source) == ({"after"}, None)
+
+
+def test_ast_symbol_cache_bounds_concurrent_parse_errors(tmp_path):
+    paths = []
+    for index in range(SG.MAX_AST_SYMBOL_CACHE + 32):
+        path = tmp_path / f"invalid_{index}.py"
+        path.write_text("def broken(:\n", encoding="utf-8")
+        paths.append(path)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(SG._ast_symbols, paths))
+    assert all(names == set() and error.startswith("SyntaxError:")
+               for names, error in results)
+    with SG._AST_SYMBOL_CACHE_LOCK:
+        assert len(SG._AST_SYMBOL_CACHE) <= SG.MAX_AST_SYMBOL_CACHE
+
+
+def test_all_real_daemon_operations_are_documented_and_cross_checked():
+    observations = SG.collect_observations()
+    surfaces = {surface["id"]: surface
+                for surface in observations["surfaces"]}
+    for operation in protocol.OPERATIONS:
+        surface = surfaces[f"daemon:op:{operation}"]
+        assert surface["details"]["documented"] is True
+        assert surface["details"]["cross_checked"] is True
+    assert observations["emitters"]["daemon"]["inventory_missing"] == []
+    assert not any(item["kind"] == "daemon_operation_undocumented"
+                   for item in SG.build_self_graph()["audit"]["findings"])
 
 
 def test_inventory_gap_directions_are_reported():
@@ -328,6 +374,30 @@ def test_inventory_gap_directions_are_reported():
     assert kinds["tool_without_handler"]["provenance"]["observation"] == (
         "inventory-gap")
     assert kinds["handler_without_tool_declaration"]["severity"] == "error"
+
+
+def test_tool_without_handler_is_reported_even_when_capability_declares_it():
+    surface_id = "mcp:tool:dev_missing_handler"
+    capability = K.build_catalogue([_record(surface_id)])
+    gaps = {
+        "declared_not_observed": [{
+            "id": surface_id, "kind": "mcp", "name": "dev_missing_handler",
+            "reason": "tool schema has no handler",
+        }],
+        "observed_not_declared": [],
+        "unverified": [],
+    }
+    report = SG.build_self_graph(
+        capabilities=capability,
+        observations=_observations([], gaps=gaps))
+    findings = report["audit"]["findings"]
+    assert any(item["kind"] == "declared_surface_not_observed"
+               and item["subject"] == surface_id for item in findings)
+    tool_gap = next(item for item in findings
+                    if item["kind"] == "tool_without_handler"
+                    and item["subject"] == surface_id)
+    assert tool_gap["severity"] == "error"
+    assert tool_gap["provenance"]["observation"] == "inventory-gap"
 
 
 def test_duplicate_surface_declarations_are_reported():
@@ -369,9 +439,9 @@ def test_list_show_and_audit_views_are_bounded_and_paginated():
 
     audit = SG.audit_self_graph(limit=1)
     assert audit["action"] == "audit"
-    assert len(audit["findings"]) == 1
-    assert audit["truncation"]["truncated"] is True
-    assert audit["counts"]["findings"] >= 1
+    assert audit["findings"] == []
+    assert audit["truncation"]["truncated"] is False
+    assert audit["counts"]["findings"] == 0
 
 
 @pytest.mark.parametrize("kwargs", [
@@ -399,7 +469,7 @@ def test_cli_list_show_and_audit(capsys):
     assert cli.main(["capabilities", "audit", "--json", "--limit", "1"]) == 0
     audited = json.loads(capsys.readouterr().out)
     assert audited["action"] == "audit"
-    assert len(audited["findings"]) == 1
+    assert audited["findings"] == []
 
     assert cli.main(["capabilities", "list"]) == 0
     text = capsys.readouterr().out
@@ -457,7 +527,7 @@ def test_mcp_dev_capabilities_is_listed_and_bounded(tmp_path):
                    "arguments": {"action": "audit", "limit": 1}}})
     audit_payload = json.loads(audited["result"]["content"][0]["text"])
     assert audit_payload["action"] == "audit"
-    assert len(audit_payload["findings"]) == 1
+    assert audit_payload["findings"] == []
 
     shown = server_instance.handle({
         "jsonrpc": "2.0", "id": 4, "method": "tools/call",

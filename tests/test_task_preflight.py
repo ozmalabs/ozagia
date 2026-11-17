@@ -557,6 +557,21 @@ def test_report_wraps_in_the_service_envelope(tmp_path):
     assert len(S.envelope_hash(envelope)) == 64
 
 
+def test_report_envelope_rejects_stale_embedded_hash(tmp_path):
+    report = build(tmp_path)
+    report["goal"]["status"] = "complete"
+    with pytest.raises(TP.PreflightError, match="hash does not match") as caught:
+        TP.preflight_envelope(report)
+    assert caught.value.code == "invalid_value"
+
+
+def test_report_envelope_derives_provenance_hash_when_missing(tmp_path):
+    report = build(tmp_path)
+    report.pop("hash")
+    envelope = TP.preflight_envelope(report)
+    assert envelope["provenance"]["inputs"] == [TP.report_hash(report)]
+
+
 def test_typed_request_errors(tmp_path):
     with pytest.raises(TP.PreflightError) as caught:
         TP.build_preflight(tmp_path, "Not A Goal")

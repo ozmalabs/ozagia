@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import threading
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -75,6 +76,7 @@ MAX_GRAPH_NODES = 2_000
 MAX_GRAPH_EDGES = 4_000
 MAX_ERROR_TEXT = 300
 MAX_CURSOR = 64
+MAX_AST_SYMBOL_CACHE = 256
 
 _STATUS_SOURCE = "src/ozagia/core/status.py"
 _TOOLCHAIN_SOURCE = "src/ozagia/core/toolchain.py"
@@ -86,6 +88,12 @@ _DISPATCH_SOURCE = "src/ozagia/daemon/server.py"
 _STATUS_ENVELOPE = frozenset({
     "schema", "checked_at", "root", "ok", "errors", "degraded",
 })
+
+# Source-content keyed by a fresh digest on every read. This avoids reparsing
+# the same package files across repeated self-graph requests while ensuring a
+# source edit immediately invalidates the cached symbol list.
+_AST_SYMBOL_CACHE: dict[str, tuple[str, frozenset[str], str | None]] = {}
+_AST_SYMBOL_CACHE_LOCK = threading.Lock()
 
 
 class SelfGraphError(ValueError):
@@ -156,9 +164,21 @@ def _module_file(parts: Sequence[str]) -> tuple[Path | None, tuple[str, ...]]:
 
 def _ast_symbols(path: Path) -> tuple[set[str], str | None]:
     try:
-        tree = ast.parse(path.read_text(encoding="utf-8"))
+        source = path.read_bytes()
+        digest = hashlib.sha256(source).hexdigest()
     except (OSError, SyntaxError, UnicodeError) as exc:
         return set(), _clean_error(exc)
+    cache_key = str(path.resolve())
+    with _AST_SYMBOL_CACHE_LOCK:
+        cached = _AST_SYMBOL_CACHE.get(cache_key)
+    if cached is not None and cached[0] == digest:
+        return set(cached[1]), cached[2]
+    try:
+        tree = ast.parse(source.decode("utf-8"))
+    except (OSError, SyntaxError, UnicodeError) as exc:
+        error = _clean_error(exc)
+        _cache_ast_symbols(cache_key, digest, (), error)
+        return set(), error
     names: set[str] = set()
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
@@ -168,7 +188,18 @@ def _ast_symbols(path: Path) -> tuple[set[str], str | None]:
                 for child in node.body:
                     if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
                         names.add(child.name)
-    return names, None
+    _cache_ast_symbols(cache_key, digest, names, None)
+    return set(names), None
+
+
+def _cache_ast_symbols(key: str, digest: str, names: Iterable[str],
+                       error: str | None) -> None:
+    """Insert one parse result and evict atomically within the cache bound."""
+    with _AST_SYMBOL_CACHE_LOCK:
+        if (key not in _AST_SYMBOL_CACHE
+                and len(_AST_SYMBOL_CACHE) >= MAX_AST_SYMBOL_CACHE):
+            _AST_SYMBOL_CACHE.pop(next(iter(_AST_SYMBOL_CACHE)))
+        _AST_SYMBOL_CACHE[key] = (digest, frozenset(names), error)
 
 
 def _probe_implementation(impl_id: str) -> dict[str, Any]:
@@ -869,8 +900,6 @@ def _findings(observations: Mapping[str, Any],
     # The inventory also compares a tool schema with its handler map.  Keep
     # those two independent contradictions visible even when a capability
     # declaration already covers the surface id.
-    declared_surfaces = {surface for capability in capabilities
-                         for surface in capability.surfaces}
     gaps = observations.get("gaps")
     if isinstance(gaps, Mapping):
         for gap in gaps.get("observed_not_declared") or []:
@@ -888,7 +917,7 @@ def _findings(observations: Mapping[str, Any],
             if not isinstance(gap, Mapping):
                 continue
             subject = str(gap.get("id") or "")
-            if (not subject or subject in declared_surfaces
+            if (not subject
                     or subject in ("mcp:handlers", "mcp:graph:handlers")):
                 continue
             add("tool_without_handler", "error", "missing", subject,

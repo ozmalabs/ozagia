@@ -137,6 +137,14 @@ def test_provenance_is_sorted_and_bounded():
                       for index in range(S.MAX_PROVENANCE_SOURCES + 1)])
 
 
+@pytest.mark.parametrize("field,value", [
+    ("sources", 0), ("sources", ""), ("inputs", 0), ("inputs", False),
+])
+def test_provenance_rejects_falsey_values_with_wrong_types(field, value):
+    with pytest.raises(C.SchemaError):
+        make_env(provenance={field: value})
+
+
 # ---------------------------------------------------------------------------
 # Typed errors and validation
 # ---------------------------------------------------------------------------

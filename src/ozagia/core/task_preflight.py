@@ -934,6 +934,11 @@ def report_hash(report: Mapping[str, Any]) -> str:
 
 def preflight_envelope(report: Mapping[str, Any]) -> dict[str, Any]:
     """Wrap a preflight report in the versioned WP2 service envelope."""
+    digest = report_hash(report)
+    if "hash" in report and report["hash"] != digest:
+        raise PreflightError(
+            "preflight report hash does not match its contents",
+            code="invalid_value")
     sources: dict[str, S.Source] = {}
     for checkout in report.get("checkouts") or []:
         dimensions = checkout.get("dimensions") or {}
@@ -949,7 +954,6 @@ def preflight_envelope(report: Mapping[str, Any]) -> dict[str, Any]:
                     observed_at=item.get("observed_at"),
                     freshness=item.get("freshness", "current"),
                     evidence=item.get("evidence", "observed"))
-    digest = report.get("hash") or report_hash(report)
     return S.ok(
         "task_preflight", dict(report),
         side_effect="read",

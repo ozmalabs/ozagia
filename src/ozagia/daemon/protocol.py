@@ -174,6 +174,41 @@ Requests (`op`):
       available and asserts all returned resources. No edit, check, or
       execution operation is exposed through this request.
 
+    {"id": 14, "op": "hint", "prompt": "...", "history": []}
+      -> {"id": 14, "ok": true, "context": "...",
+          "meta": {"intent": "hint", "keys": [...], "freshness": "...",
+                   "truncated": false, "estimated_tokens": 123, ...}}
+      Read-only proactive context from the current graph. `prompt` is
+      required and at most 12,000 characters; `history` is optional, with at
+      most six user/assistant text records of at most 2,000 characters each.
+      The daemon uses its graph lock and a 400-token context budget. A graph
+      or context error is returned as an empty context with
+      `meta.intent: "hint_error"`; an expired `deadline_ms` returns an empty
+      context with `expired: true`.
+
+    {"id": 15, "op": "secrets", "action": "providers"}
+      -> {"id": 15, "ok": true, "providers": [...],
+          "storage": "memory-only", "redact_output": true}
+      Secret operations are scoped to the requesting `harness` (default
+      `opencode`) and, where values are stored, its required `session`.
+      `action` is one of `providers`, `capture`, `capture_text`, `list`,
+      `forget` or `check`. `capture` supplies `value` and optional `label` /
+      `ttl_s`; `capture_text` supplies `text` and returns references for
+      detected values; `list` returns metadata only; `forget` supplies `ref`;
+      `check` supplies a bounded non-empty `refs` list. Values are held in
+      memory for the session, and the daemon never returns captured values.
+      `session_event` with `event: "end"` clears that session's captures.
+
+    {"id": 16, "op": "toolchain", "capabilities": [...], "paths": [...],
+     "probe_versions": false, "probe_sudo": false}
+      -> {"id": 16, "ok": true, "plan": {...}, "text": "...",
+          "cached": false}
+      Read-only, advisory plan for external tools required by the requested
+      capabilities or paths. `model_family` is optional; `refresh` bypasses
+      the daemon's in-memory cache. Version or sudo probes run only when
+      their respective flags are true. The plan never installs anything;
+      its source is `ozagia.core.toolchain.tool_plan`.
+
 Sessions. `tool`, `after` and `read_check` with a `session` use that
 session's read ledger (`ozagia.intent.ledger`), keyed by (harness, session,
 `sub`). `sub` is optional: agents that share a session id send something

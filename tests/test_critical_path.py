@@ -409,6 +409,17 @@ def test_missing_duration_blocks_descendants_without_becoming_zero():
     ]
 
 
+def test_dependency_lower_bound_survives_unknown_model_duration():
+    dag = make_dag([
+        node("prep", 500),
+        node("call", None, kind="model_call", resource_class="model"),
+    ], [("prep", "call")])
+    report = CP.what_if(dag, fast_profile())
+    assert report["makespan_ms"] == "unknown"
+    assert report["lower_bound_ms"] == 500
+    assert report["dependency_lower_bound_ms"] == 500
+
+
 def test_report_schemas_are_valid_versioned_records():
     for schema in (CP.CRITICAL_PATH_SCHEMA, CP.WHAT_IF_SCHEMA,
                    CP.COMPARISON_SCHEMA):
