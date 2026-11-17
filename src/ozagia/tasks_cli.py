@@ -1,4 +1,4 @@
-"""``python -m ozagia.tasks_cli``: validate, preview and run bounded tasks.
+"""``python -m ozagia.tasks_cli``: validate, preview, run and report tasks.
 
 ``run`` is a preview unless ``--allow-exec`` is passed. By default the CLI
 supplies no executor and never calls a model or a tool: a test or host
@@ -6,6 +6,11 @@ integration must inject one through :func:`main` (``executor=...``). Without
 one, an ``--allow-exec`` run is refused and records the refusal. Passing
 ``--executor local`` (or ``--local``) selects the built-in read-only
 :class:`ozagia.core.task_exec.LocalExecutor`.
+
+``report`` is read-only: it joins retained task, goal, test, session, daemon
+and evaluation records into a bounded, regenerable
+:mod:`ozagia.core.task_profile` report. It does not run tests, refresh the
+graph, start a daemon or call a model.
 """
 from __future__ import annotations
 
@@ -17,6 +22,7 @@ from typing import Any
 
 from ozagia.config import repo_root
 from ozagia.core import task_exec
+from ozagia.core import task_profile as TP
 from ozagia.core import tasks as T
 
 
@@ -43,7 +49,7 @@ def _inputs(values: list[str] | None) -> dict[str, str]:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ozagia-tasks",
-        description="validate, preview and run bounded tasks")
+        description="validate, preview, run and report bounded tasks")
     sub = parser.add_subparsers(dest="command", required=True)
 
     validate = sub.add_parser("validate", help="validate a task specification")
@@ -77,7 +83,56 @@ def build_parser() -> argparse.ArgumentParser:
     show.add_argument("run", nargs="?", default=None)
     show.add_argument("--root", default=None)
     show.add_argument("--json", action="store_true")
+
+    report = sub.add_parser(
+        "report", help="build a bounded post-run task report")
+    report.add_argument("run", nargs="?", default=None,
+                        help="run id (default: the newest recorded run)")
+    report.add_argument("--root", default=None)
+    report.add_argument("--goal", default=None,
+                        help="goal id to join (goal:g1 or g1)")
+    report.add_argument("--session", default=None,
+                        help="session id to join")
+    report.add_argument("--evaluation", default=None,
+                        help="retained evaluation id to join")
+    report.add_argument("--snapshot", default="unknown",
+                        help="snapshot identity recorded in the profile")
+    report.add_argument("--criterion-freshness", action="append", default=None,
+                        metavar="ID=STATE",
+                        help="injected criterion freshness; repeatable")
+    report.add_argument("--max-bytes", type=int, default=None)
+    report.add_argument("--json", action="store_true")
     return parser
+
+
+def _freshness(values: list[str] | None) -> dict[str, str] | None:
+    if not values:
+        return None
+    from ozagia.core.contracts import FRESHNESS
+
+    result: dict[str, str] = {}
+    for text in values:
+        name, sep, value = text.partition("=")
+        if not sep or not name or value not in FRESHNESS:
+            raise ValueError(
+                f"--criterion-freshness must be ID=STATE with STATE one of "
+                f"{', '.join(FRESHNESS)}, got {text!r}")
+        if name in result:
+            raise ValueError(
+                f"--criterion-freshness {name!r} is given more than once")
+        result[name] = value
+    return result
+
+
+def _local_id(value: str | None, prefix: str) -> str | None:
+    if value is None:
+        return None
+    text = value.strip()
+    if text.startswith(prefix + ":"):
+        text = text[len(prefix) + 1:]
+    if not text:
+        raise ValueError(f"{prefix} id must not be empty")
+    return text
 
 
 def main(argv: list[str] | None = None, *,
@@ -131,6 +186,29 @@ def main(argv: list[str] | None = None, *,
             else:
                 print(T.format_show(report))
             return 0
+        if args.command == "report":
+            root = _root(args.root)
+            run_id = args.run
+            if run_id is None:
+                runs = T.list_runs(root, limit=1)
+                if not runs:
+                    raise T.TaskRunError(f"no task runs under {root}")
+                run_id = runs[0]["run_id"]
+            report = TP.build_task_report_from_root(
+                root, run_id,
+                goal_id=_local_id(args.goal, "goal"),
+                session_id=args.session,
+                evaluation_id=args.evaluation,
+                snapshot=args.snapshot,
+                criterion_freshness=_freshness(args.criterion_freshness),
+                max_bytes=(args.max_bytes if args.max_bytes is not None
+                           else TP.DEFAULT_MAX_REPORT_BYTES))
+            if args.json:
+                print(TP.task_report_json(report))
+            else:
+                print(TP.format_task_report(report))
+            return (0 if report.get("outcome", {}).get("status") == "passed"
+                    else 1)
     except T.TaskSpecError as exc:
         for error in exc.errors:
             print(f"error: {error}", file=sys.stderr)
