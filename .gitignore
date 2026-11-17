@@ -6,6 +6,7 @@ dist/
 bundles/
 .opencode/
 /session-*.md
+.ab-exp-*/
 *.egg-info/
 .pytest_cache/
 .ruff_cache/

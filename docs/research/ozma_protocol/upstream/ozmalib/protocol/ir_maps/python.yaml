@@ -1,0 +1,20 @@
+# Ozma IR map — Python
+# Substitutions are applied to code output only.
+# Keep this minimal: each added symbol must earn its place by improving
+# compression or grammar-compliance at target model scale.
+name: python
+description: Python keyword → IR symbol substitutions
+version: "1.0"
+
+substitutions:
+  # (from_word, to_symbol, bidirectional_hint)
+  # Most impactful per-token saving + unambiguous grammar role
+  def:    ƒ
+  return: →
+  import: ←
+
+# Presentation modes:
+#   alphabet  — "X=Y X=Y X=Y" (default, most compact, leaks on low-compliance models)
+#   rewrite   — "Write `ƒ` instead of `def`. Write `→` instead of `return`."
+#   directive — "Apply: def→ƒ, return→→, import→←. Everything else is normal Python."
+#   example   — "Example: `ƒ foo():` not `def foo():`"

@@ -1,0 +1,68 @@
+[project]
+name = "ozmalib"
+version = "0.1.0"
+description = "Ozma research library — tree-sitter code compression, conditional hints, rules, and IR for LLM agents"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.12"
+dependencies = [
+    "tree-sitter>=0.23",
+    "tree-sitter-python>=0.23",
+    "tree-sitter-javascript>=0.23",
+    "tree-sitter-c-sharp>=0.23",
+    "tree-sitter-go>=0.23",
+    "tree-sitter-rust>=0.23",
+    "tree-sitter-java>=0.23",
+    "tree-sitter-kotlin>=0.23",
+    "tree-sitter-swift>=0.0.1",
+    "tree-sitter-ruby>=0.23",
+    "tree-sitter-php>=0.23",
+    "tree-sitter-sql>=0.3",
+    "tree-sitter-html>=0.23",
+    "tree-sitter-css>=0.23",
+    "tree-sitter-yaml>=0.6",
+    "tree-sitter-c>=0.23",
+    "tree-sitter-cpp>=0.23",
+    "tree-sitter-lua>=0.1",
+    "tree-sitter-scala>=0.23",
+    "tree-sitter-elixir>=0.3",
+    "tree-sitter-haskell>=0.23",
+    "tree-sitter-bash>=0.23",
+    "tree-sitter-ocaml>=0.23",
+    "tree-sitter-nix>=0.1",
+    "tree-sitter-dart-orchard>=0.1",
+    "tree-sitter-hcl>=0.1",
+    "pyyaml>=6.0",
+    "tiktoken>=0.12.0",
+    "mcp>=1.0",
+    "onnxruntime>=1.24.4",
+    "transformers>=5.5.4",
+]
+
+[project.scripts]
+ozma = "ozmalib.dev.loop:_cli_main"
+ozma-stats = "ozmalib.cli.stats:main"
+
+[project.optional-dependencies]
+retrieval = ["chromadb>=1.0"]
+watch = ["watchdog>=4.0"]
+web = ["playwright>=1.40"]
+agent = ["mss>=9.0", "pyautogui>=0.9.54", "pillow>=10.0", "pyatspi>=2.46"]
+tui = ["textual>=0.80"]
+test = ["pytest>=9.0.3"]
+authoring = ["python-docx>=1.2"]
+lora = ["unsloth>=2025.3", "datasets>=3.0", "trl>=0.16"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ozmalib*"]
+
+[tool.setuptools.package-data]
+"ozmalib.hints" = ["data/*.yaml", "data/*.yml"]
+"ozmalib.checks" = ["data/*.yaml", "data/*.yml"]
+"ozmalib.rules" = ["data/*.yaml", "data/*.yml"]
+"ozmalib.web" = ["*.js"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
