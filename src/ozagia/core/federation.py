@@ -35,6 +35,7 @@ _REFERENCE_SYNC_RESULTS: dict[Path, list[dict[str, Any]]] = {}
 _REFERENCE_SYNC_PENDING: dict[Path, list[dict[str, Any]]] = {}
 _REFERENCE_SYNC_THREADS: dict[Path, threading.Thread] = {}
 _REFERENCE_SYNC_LOCK = threading.Lock()
+_REFERENCE_SYNC_CURSOR: dict[Path, int] = {}
 
 
 @contextmanager
@@ -132,26 +133,42 @@ def _reference_specs(root: Path) -> tuple[list[dict[str, Any]], list[str]]:
     return specs, errors
 
 
-def _sync_references(root: Path, roots: Iterable[str | Path] | None) -> list[dict[str, Any]]:
-    specs, errors = _reference_specs(root)
+def _reference_batch(root: Path, specs: list[dict[str, Any]], *,
+                     roots: Iterable[str | Path] | None = None,
+                     limit: int = 6) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     selected = ({Path(p).expanduser().resolve() for p in roots}
                 if roots is not None else None)
+    matching = [spec for spec in specs
+                if selected is None or spec["root"] in selected]
+    if len(matching) <= limit:
+        return matching, []
+    with _REFERENCE_SYNC_LOCK:
+        start = _REFERENCE_SYNC_CURSOR.get(root, 0) % len(matching)
+        ordered = matching[start:] + matching[:start]
+        batch = ordered[:limit]
+        deferred = ordered[limit:]
+        _REFERENCE_SYNC_CURSOR[root] = (start + len(batch)) % len(matching)
+    return batch, deferred
+
+
+def _sync_references(root: Path, roots: Iterable[str | Path] | None) -> list[dict[str, Any]]:
+    specs, errors = _reference_specs(root)
     results: list[dict[str, Any]] = []
     if _SYNC_ENABLED.get():
         from ozagia.core.reference_sync import sync_reference
-        matching = [spec for spec in specs
-                    if selected is None or spec["root"] in selected]
-        for spec in matching[:6]:
+        batch, deferred = _reference_batch(root, specs, roots=roots)
+        for spec in batch:
             results.append(sync_reference(spec["root"], pin=spec["pin"]))
-        if len(matching) > 6:
-            results.append({"state": "deferred", "reason": "reference_limit",
-                            "detail": "automatic sync checks at most six references per query",
-                            "updated": False})
+        results.extend({"root": str(spec["root"]), "pin": spec["pin"],
+                        "state": "pending", "reason": "reference_batch_limit",
+                        "updated": False} for spec in deferred)
     else:
         from ozagia.core.reference_sync import cached_status
+        selected = ({Path(p).expanduser().resolve() for p in roots}
+                    if roots is not None else None)
         matching = [spec for spec in specs
                     if selected is None or spec["root"] in selected]
-        for spec in matching[:6]:
+        for spec in matching:
             cached = cached_status(spec["root"])
             prior = next((item for item in reversed(cached)
                           if item.get("pin") == spec["pin"]), None)
@@ -171,8 +188,12 @@ def reference_status(root: str | Path | None = None) -> dict[str, Any]:
     entries = []
     for spec in specs:
         cached = cached_status(spec["root"])
-        item = next((entry for entry in reversed(cached)
-                     if entry.get("pin") == spec["pin"]), None)
+        last = next((entry for entry in reversed(_REFERENCE_SYNC_RESULTS.get(selected, []))
+                     if entry.get("root") == str(spec["root"])
+                     and entry.get("pin") == spec["pin"]), None)
+        item = (last if last and last.get("state") == "pending" else
+                next((entry for entry in reversed(cached)
+                      if entry.get("pin") == spec["pin"]), None))
         is_pending = any(p["path"] == str(spec["root"])
                          for p in _REFERENCE_SYNC_PENDING.get(selected, []))
         entries.append({"path": str(spec["root"]), "pin": spec["pin"],
@@ -188,9 +209,13 @@ def request_reference_sync(root: str | Path | None = None, *, limit: int = 6
     """Schedule bounded reference updates and return immediately (no Git I/O here)."""
     selected = _root(root)
     specs, errors = _reference_specs(selected)
-    selected_specs = specs[:max(0, int(limit))]
+    selected_specs, deferred_specs = _reference_batch(
+        selected, specs, limit=max(0, int(limit)))
     pending = [{"path": str(item["root"]), "pin": item["pin"], "state": "pending"}
                for item in selected_specs]
+    pending.extend({"path": str(item["root"]), "pin": item["pin"],
+                    "state": "pending", "reason": "reference_batch_limit"}
+                   for item in deferred_specs)
     with _REFERENCE_SYNC_LOCK:
         active = _REFERENCE_SYNC_THREADS.get(selected)
         if active and active.is_alive():
@@ -203,7 +228,11 @@ def request_reference_sync(root: str | Path | None = None, *, limit: int = 6
             try:
                 roots = [item["root"] for item in selected_specs]
                 report = sync_references(selected, roots=roots, force=False)
-                _REFERENCE_SYNC_RESULTS[selected] = report["references"]
+                completed = list(report["references"])
+                completed.extend({"root": str(item["root"]), "pin": item["pin"],
+                                  "state": "pending", "reason": "reference_batch_limit",
+                                  "updated": False} for item in deferred_specs)
+                _REFERENCE_SYNC_RESULTS[selected] = completed
             finally:
                 _REFERENCE_SYNC_PENDING[selected] = []
 
@@ -213,7 +242,7 @@ def request_reference_sync(root: str | Path | None = None, *, limit: int = 6
         thread.start()
     return {"root": str(selected), "state": "pending", "references": pending,
             "errors": errors,
-            "omitted": max(0, len(specs) - len(selected_specs))}
+            "omitted": len(deferred_specs)}
 
 
 def sync_references(root: str | Path | None = None,

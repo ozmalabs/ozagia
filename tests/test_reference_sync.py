@@ -104,7 +104,7 @@ def test_pin_preserves_checkout_and_reports_mismatch(tmp_path: Path) -> None:
 
 def test_automatic_sync_only_selected_designated_references(tmp_path: Path,
                                                            capsys) -> None:
-    anchor, first, second = tmp_path / "anchor", tmp_path / "first", tmp_path / "second"
+    anchor = tmp_path / "anchor"
     anchor.mkdir()
     _origin1, seed1, repo1 = _repo_pair(tmp_path / "one")
     _origin2, seed2, repo2 = _repo_pair(tmp_path / "two")
@@ -133,3 +133,28 @@ def test_automatic_sync_only_selected_designated_references(tmp_path: Path,
     assert _git(repo2, "rev-parse", "HEAD") != expected2
     status = federation.reference_status(anchor)
     assert status["references"][0]["state"] == "current"
+
+
+def test_automatic_reference_batches_rotate_without_starvation(tmp_path: Path) -> None:
+    anchor = tmp_path / "anchor"
+    anchor.mkdir()
+    repositories: list[Path] = []
+    references = []
+    targets = []
+    for index in range(8):
+        _origin, seed, repository = _repo_pair(tmp_path / f"pair-{index}")
+        repositories.append(repository)
+        references.append({"path": str(repository)})
+        targets.append(_publish(seed, f"update-{index}"))
+    _manifest(anchor, references=references)
+
+    first = federation.status(anchor)
+    first_results = first["reference_sync"]
+    assert sum(item["state"] == "updated" for item in first_results) == 6
+    assert sum(item["state"] == "pending" for item in first_results) == 2
+
+    second = federation.status(anchor)
+    assert all(_git(repository, "rev-parse", "HEAD") == target
+               for repository, target in zip(repositories, targets))
+    assert sum(item["state"] == "updated" and not item.get("cached")
+               for item in second["reference_sync"]) == 2
