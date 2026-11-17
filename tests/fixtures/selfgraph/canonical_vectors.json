@@ -1,0 +1,66 @@
+{
+  "schema": "ozagia.selfgraph.canonical_vectors.v1",
+  "description": "Positive canonical JSON vectors for ozagia.core.contracts. Each value is restricted to dict[str, ...], list, str, bool, null and signed 64-bit int; floats are deliberately absent.",
+  "vectors": [
+    {
+      "name": "empty_object",
+      "value": {},
+      "json": "{}",
+      "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    {
+      "name": "nested_ordering",
+      "value": {"z": [3, {"b": 2, "a": 1}], "a": {"d": 4, "c": 3}},
+      "json": "{\"a\":{\"c\":3,\"d\":4},\"z\":[3,{\"a\":1,\"b\":2}]}",
+      "sha256": "5ae9b221c1bdde0bd3c4b76b26ed1ad57bede709e0dc80ee55727e4b0374c714"
+    },
+    {
+      "name": "unicode_text",
+      "value": {"message": "héllo ☃", "path": "café/東京"},
+      "json": "{\"message\":\"héllo ☃\",\"path\":\"café/東京\"}",
+      "sha256": "19854ad3a59dd6b6a612a619b278593f4f4539966c41720f1d1d8c127bb5a0a0"
+    },
+    {
+      "name": "scalars",
+      "value": {"t": true, "f": false, "n": null, "i": -42},
+      "json": "{\"f\":false,\"i\":-42,\"n\":null,\"t\":true}",
+      "sha256": "75f2425ec3d1d40e2f321ce5f8508cfbe172e7594f6fc6e2620301a0d9bda4b0"
+    },
+    {
+      "name": "string_escapes",
+      "value": {"quote": "a\"b", "backslash": "a\\b", "control": "a\nb"},
+      "json": "{\"backslash\":\"a\\\\b\",\"control\":\"a\\nb\",\"quote\":\"a\\\"b\"}",
+      "sha256": "2c07c3b62384dbc6fa6817d6063ea05f92e0fbf3dbf17a4a6dc1e23ed30596d8"
+    },
+    {
+      "name": "int64_bounds",
+      "value": {"max": 9223372036854775807, "min": -9223372036854775808},
+      "json": "{\"max\":9223372036854775807,\"min\":-9223372036854775808}",
+      "sha256": "161a1dcda7bae00f28f0ba32675f218fd4977065d2aa0439cf451c6d066dbbfb"
+    },
+    {
+      "name": "list_root",
+      "value": ["b", 1, null, true],
+      "json": "[\"b\",1,null,true]",
+      "sha256": "91c29089143d575ad9d97a311a50e4aefec6e097229950165efa1814df0ea5d4"
+    },
+    {
+      "name": "unicode_key_sort",
+      "value": {"é": 1, "a": 2, "Z": 3, "ä": 4},
+      "json": "{\"Z\":3,\"a\":2,\"ä\":4,\"é\":1}",
+      "sha256": "115a71ae3b8e4b4b7a52ae13c04408c6690cf99f11bd65ec318c9183af46162c"
+    },
+    {
+      "name": "nested_unicode",
+      "value": {"東京": ["café", "☃"]},
+      "json": "{\"東京\":[\"café\",\"☃\"]}",
+      "sha256": "f7856abdba645b3f5875495c257fd2f3b0dd36848fb4134bef6bc636ad076f15"
+    },
+    {
+      "name": "empty_string",
+      "value": "",
+      "json": "\"\"",
+      "sha256": "12ae32cb1ec02d01eda3581b127c1fee3b0dc53572ed6baf239721a03d82e126"
+    }
+  ]
+}
