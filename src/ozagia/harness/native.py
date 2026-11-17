@@ -294,7 +294,8 @@ def _parse_args(raw: Any) -> tuple[dict[str, Any] | None, str | None]:
     if raw is None or (isinstance(raw, str) and not raw.strip()):
         return {}, None
     try:
-        value = json.loads(raw)
+        from ozagia.harness.structured_output import loads_model_json
+        value = loads_model_json(raw) if isinstance(raw, str) else json.loads(raw)
     except (TypeError, ValueError) as e:
         return None, f"tool arguments are not valid JSON: {e}"
     if not isinstance(value, dict):

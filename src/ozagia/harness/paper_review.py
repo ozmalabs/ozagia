@@ -162,7 +162,9 @@ def _context_sha256(messages: Iterable[Mapping[str, Any]]) -> str:
 
 def _parse_json_object(text: str) -> dict[str, Any]:
     """Parse a JSON object, tolerating a fenced or prefixed model reply."""
-    body = text.strip()
+    from ozagia.harness.structured_output import normalize_json_response
+
+    body = normalize_json_response(text).strip()
     if body.startswith("```"):
         first_newline = body.find("\n")
         body = body[first_newline + 1:] if first_newline >= 0 else body[3:]
