@@ -75,6 +75,8 @@ def _candidate_roots(root: Path, roots: Iterable[str | Path] | None) -> list[Pat
         except OSError:
             siblings = []
         candidates.extend(sorted(siblings, key=lambda p: p.name.casefold()))
+        declared, _errors = _manifest_members(root)
+        candidates.extend(declared)
     else:
         candidates.extend(Path(p).expanduser() for p in roots)
     result: list[Path] = []
@@ -87,17 +89,51 @@ def _candidate_roots(root: Path, roots: Iterable[str | Path] | None) -> list[Pat
     return result
 
 
+def _manifest_members(root: Path) -> tuple[list[Path], list[str]]:
+    """Read explicitly linked checkout paths from the anchor manifest."""
+    path = state_path(root, "federation.json")
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return [], []
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return [], [f"cannot read manifest: {type(exc).__name__}: {exc}"]
+    if (not isinstance(raw, dict) or raw.get("version") != 1
+            or not isinstance(raw.get("links"), list)):
+        return [], ["expected {version: 1, links: [...]} manifest"]
+    if "members" not in raw:
+        return [], []
+    values = raw["members"]
+    if not isinstance(values, list):
+        return [], ["members must be an array of directory strings"]
+    members: list[Path] = []
+    errors: list[str] = []
+    for index, value in enumerate(values):
+        if not isinstance(value, str) or not value.strip():
+            errors.append(f"members[{index}] must be a non-empty directory string")
+            continue
+        candidate = Path(value).expanduser()
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        resolved = candidate.resolve()
+        members.append(resolved)
+        if resolved.exists() and not resolved.is_dir():
+            errors.append(f"members[{index}] is not a directory: {resolved}")
+    return members, errors
+
+
 def _members(root: str | Path | None, roots: Iterable[str | Path] | None
              ) -> list[dict[str, Any]]:
     selected = _root(root)
     entries: list[dict[str, Any]] = []
+    declared_roots, _ = _manifest_members(selected)
     for path in _candidate_roots(selected, roots):
-        if roots is None and not path.is_dir():
+        if roots is None and not path.is_dir() and path not in declared_roots:
             continue
         snapshot, error = _read_snapshot(path, selected)
         # Automatic discovery includes only immediate siblings with a graph;
         # explicit roots are retained even when their snapshot is unavailable.
-        if roots is None and path != selected and error:
+        if roots is None and path != selected and error and path not in declared_roots:
             continue
         attrs = _repo_attrs(snapshot)
         label = str(attrs.get("name") or path.name or "repo")
@@ -162,14 +198,17 @@ def _declared_links(root: Path, members: list[dict[str, Any]]) -> dict[str, Any]
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return {"path": str(path), "state": "absent", "links": [], "errors": []}
+        return {"path": str(path), "state": "absent", "links": [], "errors": [],
+                "member_errors": []}
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        message = f"cannot read manifest: {type(exc).__name__}: {exc}"
         return {"path": str(path), "state": "invalid", "links": [],
-                "errors": [f"cannot read manifest: {type(exc).__name__}: {exc}"]}
+                "errors": [message], "member_errors": [message]}
     if (not isinstance(raw, dict) or raw.get("version") != 1
             or not isinstance(raw.get("links"), list)):
+        message = "expected {version: 1, links: [...]} manifest"
         return {"path": str(path), "state": "invalid", "links": [],
-                "errors": ["expected {version: 1, links: [...]} manifest"]}
+                "errors": [message], "member_errors": [message]}
     known: set[str] = set()
     for member in members:
         snapshot = member["snapshot"]
@@ -195,8 +234,9 @@ def _declared_links(root: Path, members: list[dict[str, Any]]) -> dict[str, Any]
             continue
         valid.append({"source": source, "target": target, "type": relation,
                       "provenance": provenance, "source_manifest": str(path)})
+    _declared, member_errors = _manifest_members(root)
     return {"path": str(path), "state": "ok" if not errors else "partial",
-            "links": valid, "errors": errors}
+            "links": valid, "errors": errors, "member_errors": member_errors}
 
 
 def discover(root: str | Path | None = None,
