@@ -228,5 +228,5 @@ is not observed. The service envelope, task preflight, read-only evidence
 collector, durable evidence store, offline task profile and read-only
 model-side maps exist as separate packages; this catalogue only declares and
 joins their surfaces. Automatic evidence recording, live prefetch delivery into
-a model turn, structured model edits and any daemon operation for capabilities
-remain unimplemented.
+a model turn, MCP/daemon wiring for structured edits and any daemon operation
+for capabilities remain unimplemented.
