@@ -277,6 +277,7 @@ their contents as supporting evidence for each other.
 | `dev_aws_cli_check` | Offline AWS CLI service/operation check using local models. |
 | `dev_relay_plan` | Dry-run relay command/tunnel plan; no live process or socket. |
 | `dev_preflight_plan` | Build a dry-run, scrubbed emulator plan; never executes it. |
+| `dev_capabilities` | Read-only list/show/audit of Ozagia's declared capabilities and their observed CLI/MCP/daemon/toolchain/status surfaces. Bounded by `limit`/`cursor`; unknown coverage is explicit. |
 
 All tools are read-only except `dev_edit`, `dev_span_edit` and `dev_key_edit` (transactions, preview by
 default, backup on apply) and `dev_record` (one JSONL line). There is no shell

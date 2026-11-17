@@ -304,6 +304,36 @@ PROTOCOL_VERSION = 1
 ENV_SOCK = "OZAGIA_DAEMON_SOCK"
 SOCK_NAME = "daemon.sock"
 TOOLS = ("read", "grep", "glob", "edit", "write", "patch", "shell", "replace")
+# The request vocabulary dispatched by `ozagia.daemon.server`.  This tuple is
+# declarative: it changes no dispatch behaviour.  It lets the self-graph and
+# tests compare the documented protocol vocabulary with the server's `op`
+# branches without starting a daemon.  Keep it in sync with server.py.
+OPERATIONS = (
+    "after",
+    "goals",
+    "hello",
+    "hint",
+    "job_events",
+    "job_list",
+    "job_log",
+    "job_ps",
+    "job_start",
+    "job_stop",
+    "job_wait",
+    "owner_check",
+    "path_check",
+    "ping",
+    "profile_event",
+    "read_check",
+    "secrets",
+    "session_event",
+    "shutdown",
+    "stats",
+    "tool",
+    "toolchain",
+    "who",
+    "working_set",
+)
 HARNESSES = ("opencode", "claude", "codex", "kiro", "native")
 # The largest request or response line a peer must accept, in bytes.
 MAX_MESSAGE_BYTES = 16 * 1024 * 1024

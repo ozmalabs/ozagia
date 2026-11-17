@@ -1056,6 +1056,28 @@ _TOOLS.append({
                        "description": "Run the sudo -n true usability check (default: no)."},
     }),
 })
+_TOOLS.append({
+    "name": "dev_capabilities",
+    "description": (
+        "Read-only catalogue of Ozagia's declared capabilities and a coverage "
+        "audit against the observed CLI, MCP, daemon, toolchain and status "
+        "surfaces. action=list pages capabilities, action=show returns one "
+        "capability with its nodes/edges, action=audit reports declared and "
+        "observed surfaces that do not match. Bounded by limit/cursor. It "
+        "never probes, starts a daemon, refreshes a graph, imports target code "
+        "or calls a model."),
+    "inputSchema": _schema({
+        "action": {"type": "string", "enum": ["list", "show", "audit"],
+                   "default": "list",
+                   "description": "list capabilities, show one, or audit."},
+        "id": {"type": "string",
+               "description": "capability id for action=show, e.g. cap:graph.context."},
+        "limit": {"type": "integer", "default": 25,
+                  "description": "page size (default 25, max 200)."},
+        "cursor": {"type": "string",
+                   "description": "opaque next cursor from a previous page."},
+    }),
+})
 # Goals (`ozagia.core.goals`): repo-level records in `.ozagia/goals/`, whose
 # targets and criteria are graph keys; criteria are checked against the
 # graph, the working tree and the test record.
@@ -1303,6 +1325,7 @@ class DevMemoryServer:
             "dev_review_repo": self._review_repo,
             "dev_environment": self._environment,
             "dev_tools": self._dev_tools,
+            "dev_capabilities": self._dev_capabilities,
             "goal_list": self._goal_list,
             "goal_show": self._goal_show,
             "goal_check": self._goal_check,
@@ -1719,6 +1742,27 @@ class DevMemoryServer:
             return {"ok": False, "error": str(e)}
         text = "\n".join(T.brief_lines(plan, model_family=family))
         return {"ok": True, "plan": plan, "text": text}
+
+    def _dev_capabilities(self, a: dict[str, Any]) -> Any:
+        """The declared-capability catalogue and its read-only audit.
+
+        Nothing is probed, started or written: the projection joins the
+        built-in catalogue to the already-generated surface inventory.
+        """
+        from ozagia.capabilities_cli import payload
+        from ozagia.core import capabilities as K
+        from ozagia.core import contracts as C
+        from ozagia.core import self_graph as SG
+        action = a.get("action") or "list"
+        try:
+            return payload(
+                str(action),
+                capability_id=a.get("id"),
+                limit=a.get("limit"),
+                cursor=a.get("cursor"),
+            )
+        except (SG.SelfGraphError, K.CapabilityError, C.ContractError) as e:
+            return {"ok": False, "error": str(e)}
 
     def _who(self, a: dict[str, Any]) -> Any:
         """The sessions that edited a file (`ozagia.core.owners.who`): from
