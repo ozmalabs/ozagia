@@ -246,6 +246,93 @@ def test_session_brief_since_last_session(tmp_path):
     assert len(short) <= 300 and short.endswith(W.MCP_TOOLS_LINE)
 
 
+def test_session_brief_shows_bounded_reference_freshness(
+        tmp_path, monkeypatch):
+    from contextlib import nullcontext
+    from ozagia.core import federation
+
+    reference = tmp_path.parent / "private-reference-path"
+    monkeypatch.setattr(federation, "reference_status", lambda _root: {
+        "references": [
+            {"path": str(reference), "name": "shared-contract", "pin": "wanted"},
+            {"path": str(tmp_path / "updated"), "name": "updated-lib",
+             "sync": {"state": "updated", "updated": True}},
+        ]
+    }, raising=False)
+    monkeypatch.setattr(federation, "without_reference_sync", nullcontext,
+                        raising=False)
+    monkeypatch.setattr(federation, "status", lambda _root: {
+        "members": [
+            {"root": str(reference), "name": "shared-contract",
+             "state": "stale", "head": "other"},
+            {"root": str(tmp_path / "updated"), "name": "updated-lib",
+             "state": "unknown", "head": None},
+        ]
+    })
+
+    text = W.session_brief(tmp_path, jobs_enabled=False)
+
+    assert "shared-contract: snapshot stale, pin mismatch" in text
+    assert "updated-lib: snapshot unknown, pin not pinned, index stale until reindexed" in text
+    assert str(reference) not in text
+    assert "updates run in bounded background work" in text
+
+
+def test_session_brief_reports_reference_status_api_failure(tmp_path, monkeypatch):
+    from ozagia.core import federation
+
+    def fail(_root):
+        raise RuntimeError("should not leak this path or exception")
+
+    monkeypatch.setattr(federation, "reference_status", fail, raising=False)
+
+    text = W.session_brief(tmp_path, jobs_enabled=False)
+
+    assert "linked reference status unavailable; verify before relying on it" in text
+    assert "should not leak" not in text
+
+
+def test_session_brief_surfaces_manifest_errors_without_paths(tmp_path, monkeypatch):
+    from contextlib import nullcontext
+    from ozagia.core import federation
+
+    monkeypatch.setattr(federation, "reference_status", lambda _root: {
+        "references": [], "errors": ["members[0] invalid path: /secret/path"]
+    }, raising=False)
+    monkeypatch.setattr(federation, "without_reference_sync", nullcontext,
+                        raising=False)
+    monkeypatch.setattr(federation, "status", lambda _root: {"members": []})
+
+    text = W.session_brief(tmp_path, jobs_enabled=False)
+
+    assert "reference manifest or update error(s)" in text
+    assert "/secret/path" not in text
+
+
+def test_daemon_brief_schedules_bounded_reference_update(tmp_path, monkeypatch):
+    from contextlib import nullcontext
+    from ozagia.core import federation
+
+    calls = []
+    monkeypatch.setattr(federation, "reference_status", lambda _root: {
+        "references": [{"path": str(tmp_path / "ref"), "pin": "abc",
+                        "state": "pending", "sync": {"state": "pending"}}]
+    }, raising=False)
+    monkeypatch.setattr(federation, "request_reference_sync",
+                        lambda _root, limit: (calls.append(limit) or {"errors": []}),
+                        raising=False)
+    monkeypatch.setattr(federation, "without_reference_sync", nullcontext,
+                        raising=False)
+    monkeypatch.setattr(federation, "status", lambda _root: {"members": []})
+
+    text = W.session_brief(tmp_path, jobs_enabled=False,
+                           schedule_reference_sync=True)
+
+    assert calls == [6]
+    assert "reference 1: snapshot missing, pin unknown, sync pending" in text
+    assert "updates run in bounded background work" in text
+
+
 def test_test_record_persists(tmp_path):
     rec = W.TestRecord(tmp_path)
     rec.apply(_run("pytest", "[ozagia] failed test:tests/a.py::test_x: no\n"

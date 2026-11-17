@@ -1186,6 +1186,7 @@ class DaemonState:
             tests, last = self.test_record.view()
             text = W.session_brief(self.root, cap, tests=tests, last_test=last,
                                    jobs=self._running_jobs(),
+                                   schedule_reference_sync=True,
                                    goal_lines=self._goal_lines(
                                        harness, session,
                                        cap // W.BRIEF_GOAL_SHARE))
