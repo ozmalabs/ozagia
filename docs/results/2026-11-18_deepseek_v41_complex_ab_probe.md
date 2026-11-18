@@ -141,3 +141,39 @@ Caveats:
    `[ozagia]` note.
 3. Use repeated paired runs before drawing speed conclusions; one-shot
    variance is larger than the observed differences.
+
+## Outline-guidance rerun — 2026-11-18
+
+The outline directive and shell-guidance text landed at `1abb195`. The same
+three arms were rerun once each on that commit.
+
+| Measure | baseline | ozagia | graph_native |
+| --- | ---: | ---: | ---: |
+| Hidden checks | **7/7** | **7/7** | **7/7** |
+| Wall time | 224.9 s | 268.1 s | 186.5 s |
+| Graph prep | 0 s | 7.25 s | 0 s |
+| Model steps | 32 | 38 | 18 |
+| Edits | 20 | 24 | 20 |
+| Reads | 17 | 11 | 13 |
+| Shell calls | 11 | 25 | 7 |
+| Shell file reads (`cat/sed/head/tail`) | 5 | 15 | 1 |
+| Input / output tokens | 72,132 / 9,315 | 64,205 / 9,276 | 65,169 / 8,175 |
+| Cache-read tokens | 1,562,368 | 1,664,256 | 790,400 |
+| Explicit Ozagia tools | 0 | 0 | 0 |
+
+The outline change reduced the Ozagia arm's shell calls (69 -> 25 in the
+previous run) but did not remove the bypass: it used `cat`, `sed` and `head`
+for every initial file inspection, so no read result returned the new
+"outline only" directive. The treatment still never selected
+`ozagia_structure` or an Ozagia MCP tool. The prompt-only `graph_native` arm
+was fastest in this shot, again with all checks passing.
+
+This is now a shell-read steering problem, not an outline-text problem:
+- The plugin's task-context guidance should say to use `read` for repository
+  files and reserve shell for tests/commands.
+- A stronger option is to intercept pure `cat`/`sed -n`/`head`/`tail` file
+  reads and redirect them to the read path (or return the outline plus the
+  redirect), rather than executing them as ordinary shell.
+
+Once again this is one shot per arm; the wall-time ordering changed between
+runs (baseline 674 s -> 205 s -> 225 s), so it is not a speed result.
