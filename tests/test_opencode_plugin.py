@@ -89,7 +89,7 @@ const permission = cfg.permission === undefined ? undefined : {
 };
 const synthetic = [];
 const hooks = {};
-const session = (cfg.synthetic || cfg.context) ? {
+const session = (cfg.synthetic || cfg.context || cfg.contexts) ? {
   synthetic: async (x) => { synthetic.push(x); },
   hook: async (name, fn) => { hooks[name] = fn; },
 } : undefined;
@@ -113,10 +113,12 @@ for (const call of cfg.calls || []) {
 }
 await new Promise((r) => setTimeout(r, cfg.settleMs || 50));
 const contextEvents = [];
-if (cfg.context && hooks.context) {
-  const event = cfg.context;
-  await hooks.context(event);
-  contextEvents.push(event);
+const contextInputs = cfg.contexts || (cfg.context ? [cfg.context] : []);
+for (const event of contextInputs) {
+  if (hooks.context) {
+    await hooks.context(event);
+    contextEvents.push(event);
+  }
 }
 process.stdout.write(JSON.stringify({
   id: mod.default.id, has_setup: typeof mod.default.setup === "function",
@@ -227,15 +229,17 @@ def sockdir():
     shutil.rmtree(path, ignore_errors=True)
 
 
-def _run(tmp_path: Path, cfg: dict, sock: Path | None) -> dict:
+def _run(tmp_path: Path, cfg: dict, sock: Path | None,
+         env: dict[str, str] | None = None) -> dict:
     (tmp_path / "plugin.mjs").write_text(oc.plugin_source(), encoding="utf-8")
     (tmp_path / "harness.mjs").write_text(HARNESS, encoding="utf-8")
-    env = dict(os.environ, HARNESS_CFG=json.dumps(cfg))
-    env.pop("OZAGIA_DAEMON_SOCK", None)
+    environment = dict(os.environ, HARNESS_CFG=json.dumps(cfg))
+    environment.update(env or {})
+    environment.pop("OZAGIA_DAEMON_SOCK", None)
     if sock is not None:
-        env["OZAGIA_DAEMON_SOCK"] = str(sock)
-    proc = subprocess.run([NODE, str(tmp_path / "harness.mjs")], cwd=tmp_path, env=env,
-                          capture_output=True, text=True, timeout=60,
+        environment["OZAGIA_DAEMON_SOCK"] = str(sock)
+    proc = subprocess.run([NODE, str(tmp_path / "harness.mjs")], cwd=tmp_path,
+                          env=environment, capture_output=True, text=True, timeout=60,
                           stdin=subprocess.DEVNULL)
     assert proc.returncode == 0, proc.stderr
     return json.loads(proc.stdout.strip().splitlines()[-1])
@@ -1381,4 +1385,177 @@ def test_context_hook_adds_task_and_tool_guidance(tmp_path, sockdir):
     assert "[ozagia task context]" in text
     assert "ozagia_structure" in text
     assert "dev_maps" in text
-    assert "GRAPH CONTEXT" in text
+
+
+@needs_node
+def test_context_hook_repo_map_sends_budget_and_injects_the_map(tmp_path, sockdir):
+    hints: list[dict] = []
+
+    def script(req):
+        if req["op"] == "hint":
+            hints.append(req)
+            return {"ok": True, "context": "REPO MAP BODY\npkg/mod.py  score=1.0",
+                    "meta": {"repo_map": {"delivered": True, "tokens": 500,
+                                          "freshness": "fresh", "files": ["pkg/mod.py"]}}}
+        return {"ok": True}
+
+    daemon = StubDaemon(sockdir / "repo-map.sock", script)
+    try:
+        out = _run(tmp_path, {"context": {
+            "sessionID": "ses_test", "system": [],
+            "messages": [{"role": "user", "parts": [
+                {"type": "text", "text": "Fix the retry loop"}]}],
+        }}, daemon.path, env={"OZAGIA_REPO_MAP_TOKENS": "500"})
+    finally:
+        daemon.close()
+    assert hints and hints[0]["repo_map_tokens"] == 500
+    systems = out["contextEvents"][0]["system"]
+    text = "\n".join(part.get("text", "") for part in systems if isinstance(part, dict))
+    assert "[ozagia task context]" in text
+    assert "ranked repo map" in text
+    assert "taken from a verified snapshot" in text
+    assert "read or ozagia_structure" in text
+    assert "REPO MAP BODY" in text
+
+
+@needs_node
+def test_context_hook_repo_map_refreshes_on_each_model_request(tmp_path, sockdir):
+    hints: list[dict] = []
+    calls = 0
+
+    def script(req):
+        nonlocal calls
+        if req["op"] == "hint":
+            calls += 1
+            hints.append(req)
+            return {"ok": True, "context": f"REPO MAP {calls}",
+                    "meta": {"repo_map": {"delivered": True, "freshness": "fresh"}}}
+        return {"ok": True}
+
+    request = {
+        "sessionID": "ses_test", "system": [],
+        "messages": [{"role": "user", "parts": [
+            {"type": "text", "text": "Fix the retry loop"}]}],
+    }
+    daemon = StubDaemon(sockdir / "repo-map-refresh.sock", script)
+    try:
+        out = _run(tmp_path, {"contexts": [request, dict(request, system=[])]},
+                   daemon.path, env={"OZAGIA_REPO_MAP_TOKENS": "500"})
+    finally:
+        daemon.close()
+    assert len(hints) == 2
+    assert all(req["repo_map_tokens"] == 500 for req in hints)
+    texts = ["\n".join(part.get("text", "") for part in event["system"]
+                       if isinstance(part, dict))
+             for event in out["contextEvents"]]
+    assert "REPO MAP 1" in texts[0] and "REPO MAP 2" in texts[1]
+
+
+@needs_node
+def test_context_hook_repo_map_keeps_a_large_budgeted_map(tmp_path, sockdir):
+    body = "REPO MAP START\n" + ("x" * 7000) + "\nREPO MAP END"
+
+    def script(req):
+        if req["op"] == "hint":
+            return {"ok": True, "context": body,
+                    "meta": {"repo_map": {"delivered": True, "freshness": "fresh"}}}
+        return {"ok": True}
+
+    daemon = StubDaemon(sockdir / "repo-map-large.sock", script)
+    try:
+        out = _run(tmp_path, {"context": {
+            "sessionID": "ses_test", "system": [],
+            "messages": [{"role": "user", "parts": [
+                {"type": "text", "text": "Fix the retry loop"}]}],
+        }}, daemon.path, env={"OZAGIA_REPO_MAP_TOKENS": "8000"})
+    finally:
+        daemon.close()
+    text = "\n".join(part.get("text", "")
+                     for part in out["contextEvents"][0]["system"]
+                     if isinstance(part, dict))
+    assert "REPO MAP START" in text and "REPO MAP END" in text
+
+
+@needs_node
+def test_context_hook_repo_map_skips_an_empty_or_stale_answer(tmp_path, sockdir):
+    hints: list[dict] = []
+
+    def script(req):
+        if req["op"] == "hint":
+            hints.append(req)
+            return {"ok": True, "context": "",
+                    "meta": {"repo_map": {
+                        "delivered": False,
+                        "reason": "snapshot freshness is stale",
+                        "freshness": "stale"}}}
+        return {"ok": True}
+
+    daemon = StubDaemon(sockdir / "repo-map-skip.sock", script)
+    try:
+        out = _run(tmp_path, {"context": {
+            "sessionID": "ses_test", "system": [],
+            "messages": [{"role": "user", "parts": [
+                {"type": "text", "text": "Fix the retry loop"}]}],
+        }}, daemon.path, env={"OZAGIA_REPO_MAP_TOKENS": "500"})
+    finally:
+        daemon.close()
+    assert hints and hints[0]["repo_map_tokens"] == 500
+    systems = out["contextEvents"][0]["system"]
+    text = "\n".join(part.get("text", "") for part in systems if isinstance(part, dict))
+    assert text == ""
+    assert "No task-specific graph context" not in text
+
+
+@needs_node
+def test_context_hook_on_demand_hint_keeps_its_prompt_cache(tmp_path, sockdir):
+    hints: list[dict] = []
+
+    def script(req):
+        if req["op"] == "hint":
+            hints.append(req)
+            return {"ok": True, "context": "ON DEMAND CONTEXT"}
+        return {"ok": True}
+
+    request = {
+        "sessionID": "ses_test", "system": [],
+        "messages": [{"role": "user", "parts": [
+            {"type": "text", "text": "Find the callers of main"}]}],
+    }
+    daemon = StubDaemon(sockdir / "on-demand.sock", script)
+    try:
+        out = _run(tmp_path, {"contexts": [request, dict(request, system=[])]},
+                   daemon.path)
+    finally:
+        daemon.close()
+    assert len(hints) == 1
+    assert "repo_map_tokens" not in hints[0]
+    for event in out["contextEvents"]:
+        text = "\n".join(part.get("text", "") for part in event["system"]
+                         if isinstance(part, dict))
+        assert "ON DEMAND CONTEXT" in text
+
+
+@needs_node
+def test_context_hook_ignores_an_out_of_range_repo_map_budget(tmp_path, sockdir):
+    hints: list[dict] = []
+
+    def script(req):
+        if req["op"] == "hint":
+            hints.append(req)
+            return {"ok": True, "context": "ORDINARY CONTEXT"}
+        return {"ok": True}
+
+    daemon = StubDaemon(sockdir / "bad-repo-map.sock", script)
+    try:
+        out = _run(tmp_path, {"context": {
+            "sessionID": "ses_test", "system": [],
+            "messages": [{"role": "user", "parts": [
+                {"type": "text", "text": "Find the callers of main"}]}],
+        }}, daemon.path, env={"OZAGIA_REPO_MAP_TOKENS": "100"})
+    finally:
+        daemon.close()
+    assert hints and "repo_map_tokens" not in hints[0]
+    text = "\n".join(part.get("text", "")
+                     for part in out["contextEvents"][0]["system"]
+                     if isinstance(part, dict))
+    assert "ORDINARY CONTEXT" in text
