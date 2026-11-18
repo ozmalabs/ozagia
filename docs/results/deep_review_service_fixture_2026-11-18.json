@@ -1,0 +1,52 @@
+{
+  "candidate_artifact_bytes": 2113,
+  "checked_python_files": 4,
+  "expected": 4,
+  "false_negative": 0,
+  "false_positive": 0,
+  "fixture_files": 4,
+  "limitations": [
+    "hand-seeded labels",
+    "Python static patterns only",
+    "no runtime validation",
+    "single local timing sample"
+  ],
+  "precision": 1.0,
+  "predicted": 4,
+  "recall": 1.0,
+  "rules": {
+    "materialized_range": {
+      "false_negative": 0,
+      "false_positive": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "true_positive": 1
+    },
+    "mutable_default_argument": {
+      "false_negative": 0,
+      "false_positive": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "true_positive": 1
+    },
+    "repeated_nested_iteration": {
+      "false_negative": 0,
+      "false_positive": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "true_positive": 1
+    },
+    "silently_suppressed_exception": {
+      "false_negative": 0,
+      "false_positive": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "true_positive": 1
+    }
+  },
+  "schema_version": 1,
+  "scope": "synthetic seeded service checkout; offline static candidates; not production accuracy",
+  "source_bytes": 995,
+  "static_scan_seconds": 0.00226,
+  "true_positive": 4
+}

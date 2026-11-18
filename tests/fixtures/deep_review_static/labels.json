@@ -1,0 +1,18 @@
+{
+  "schema_version": 2,
+  "description": "Reviewed synthetic positive examples and independent near misses. Empty expected labels are reviewed negatives for all four rules exercised by this corpus; this small corpus measures pattern noise, not production precision.",
+  "cases": [
+    {"id": "nested_same_iter", "file": "nested_same_iter/case.py", "expected": ["repeated_nested_iteration"]},
+    {"id": "nested_distinct_iter", "file": "nested_distinct_iter/case.py", "expected": []},
+    {"id": "empty_broad_handler", "file": "empty_broad_handler/case.py", "expected": ["silently_suppressed_exception"]},
+    {"id": "reported_broad_handler", "file": "reported_broad_handler/case.py", "expected": []},
+    {"id": "mutable_list_default", "file": "mutable_list_default/case.py", "expected": ["mutable_default_argument"]},
+    {"id": "immutable_default", "file": "immutable_default/case.py", "expected": []},
+    {"id": "eager_range_list", "file": "eager_range_list/case.py", "expected": ["materialized_range"]},
+    {"id": "direct_range_iteration", "file": "direct_range_iteration/case.py", "expected": []},
+    {"id": "nested_mapping_lookup", "file": "nested_mapping_lookup/case.py", "expected": []},
+    {"id": "exception_reported_with_context", "file": "exception_reported_with_context/case.py", "expected": []},
+    {"id": "immutable_frozen_default", "file": "immutable_frozen_default/case.py", "expected": []},
+    {"id": "range_streamed_to_writer", "file": "range_streamed_to_writer/case.py", "expected": []}
+  ]
+}

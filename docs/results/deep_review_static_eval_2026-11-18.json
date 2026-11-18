@@ -1,0 +1,82 @@
+{
+  "case_false_alarm_rate": 0.0,
+  "case_predictions": {
+    "direct_range_iteration": [],
+    "eager_range_list": [
+      "materialized_range"
+    ],
+    "empty_broad_handler": [
+      "silently_suppressed_exception"
+    ],
+    "exception_reported_with_context": [],
+    "immutable_default": [],
+    "immutable_frozen_default": [],
+    "mutable_list_default": [
+      "mutable_default_argument"
+    ],
+    "nested_distinct_iter": [],
+    "nested_mapping_lookup": [],
+    "nested_same_iter": [
+      "repeated_nested_iteration"
+    ],
+    "range_streamed_to_writer": [],
+    "reported_broad_handler": []
+  },
+  "cases": 12,
+  "corpus_sha256": "4d3a4f5f9ea9c0ab66c12132fd416507b8c818c2896122298b60042ffe9b4014",
+  "expected": 4,
+  "false_alarm_cases": 0,
+  "false_negative": 0,
+  "false_positive": 0,
+  "negative_cases": 8,
+  "noise_rate": 0.0,
+  "positive_cases": 4,
+  "precision": 1.0,
+  "predicted": 4,
+  "recall": 1.0,
+  "rules": {
+    "materialized_range": {
+      "false_negative": 0,
+      "false_positive": 0,
+      "false_positive_rate": 0.0,
+      "negative_cases": 11,
+      "precision": 1.0,
+      "recall": 1.0,
+      "true_negative": 11,
+      "true_positive": 1
+    },
+    "mutable_default_argument": {
+      "false_negative": 0,
+      "false_positive": 0,
+      "false_positive_rate": 0.0,
+      "negative_cases": 11,
+      "precision": 1.0,
+      "recall": 1.0,
+      "true_negative": 11,
+      "true_positive": 1
+    },
+    "repeated_nested_iteration": {
+      "false_negative": 0,
+      "false_positive": 0,
+      "false_positive_rate": 0.0,
+      "negative_cases": 11,
+      "precision": 1.0,
+      "recall": 1.0,
+      "true_negative": 11,
+      "true_positive": 1
+    },
+    "silently_suppressed_exception": {
+      "false_negative": 0,
+      "false_positive": 0,
+      "false_positive_rate": 0.0,
+      "negative_cases": 11,
+      "precision": 1.0,
+      "recall": 1.0,
+      "true_negative": 11,
+      "true_positive": 1
+    }
+  },
+  "schema_version": 2,
+  "scope": "reviewed synthetic Python positives and independent near misses for selected deep-review static rules; offline",
+  "true_positive": 4
+}

@@ -1,0 +1,20 @@
+{
+  "schema_version": 2,
+  "description": "Change-set labels for the whole-repo versus range comparison. The appended source text is deliberately kept out of the checkout copy until the evaluator creates the second deterministic commit.",
+  "cases": [],
+  "complete_subjects": ["security", "tests-and-coverage"],
+  "range": {
+    "description": "Second deterministic commit appends a shell-command candidate to the checkout gateway. Change-set labels cover the range-added security and test findings; whole-repo labels are separate.",
+    "complete_subjects": ["security", "tests-and-coverage"],
+    "changes": [
+      {
+        "file": "src/checkout/gateway.py",
+        "append": "\n\ndef run_shell(command):\n    return os.system(command)\n"
+      }
+    ],
+    "expected": [
+      {"id": "changed_gateway_shell", "file": "src/checkout/gateway.py", "subject": "security", "type": "security_sensitive"},
+      {"id": "changed_gateway_untested", "file": "src/checkout/gateway.py", "subject": "tests-and-coverage", "type": "missing_test"}
+    ]
+  }
+}

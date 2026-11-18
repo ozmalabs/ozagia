@@ -1,0 +1,115 @@
+{
+  "schema": "ozagia.deep_review.phase4_summary.v1",
+  "date": "2026-11-18",
+  "kind": "curated summary of offline evaluator results; not raw evaluator JSON",
+  "scope": "synthetic deep-review fixtures; single-host samples; no live model, network, target import or test execution",
+  "fixtures": {
+    "report": "tests/fixtures/deep_review_service",
+    "report_labels": "tests/fixtures/deep_review_service/labels.json",
+    "range_labels": "tests/fixtures/deep_review_range/labels.json"
+  },
+  "report_evaluator": {
+    "basis": "per report; two reports",
+    "findings": 8,
+    "expected": 8,
+    "true_positive": 8,
+    "false_positive": 0,
+    "false_negative": 0,
+    "precision": 1.0,
+    "recall": 1.0,
+    "false_positive_rate": 0.0,
+    "report_noise_ratio": 0.0,
+    "reports": 2,
+    "report_files": 16,
+    "report_bytes": 88802,
+    "duration_s": 1.47,
+    "python_tracemalloc_peak_bytes": 11054753,
+    "process_rss_high_water_bytes": 34402304
+  },
+  "range_comparison": {
+    "full_findings": 10,
+    "range_findings": 12,
+    "comparison": {
+      "new": 2,
+      "resolved": 0,
+      "unchanged": 10
+    },
+    "range_change_set": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "false_positive_rate": 0.0,
+      "report_noise_ratio": 0.0
+    },
+    "whole_repo_change_set_recall_on_range_only_labels": 0.0,
+    "range_graph_freshness": "missing",
+    "commits_deterministic": true
+  },
+  "model_pass_comparison": {
+    "runner": "scripted fake runner; no live provider",
+    "baseline_deterministic_precision": 1.0,
+    "baseline_deterministic_recall": 1.0,
+    "accepted_candidates": 6,
+    "deduplicated_candidates": 3,
+    "unique_candidates": 3,
+    "supported_candidates": 2,
+    "candidate_precision": 0.667,
+    "candidate_recall": 0.25,
+    "added_noise_candidates": 1,
+    "added_noise_rate": 0.333,
+    "duplicate_rate": 0.5,
+    "usage": {
+      "runs": 2,
+      "prompt_tokens": 200,
+      "completion_tokens": 40,
+      "total_tokens": 240
+    },
+    "deterministic_findings_unchanged": true,
+    "live_provider_calls": 0,
+    "network": false,
+    "truth_assessed": false
+  },
+  "graph_comparison": {
+    "graph_less_findings": 8,
+    "graph_aware_findings": 16,
+    "labeled_precision": {
+      "graph_less": 1.0,
+      "graph_aware": 1.0
+    },
+    "labeled_recall": {
+      "graph_less": 1.0,
+      "graph_aware": 1.0
+    },
+    "precision_all_predictions": {
+      "graph_less": 1.0,
+      "graph_aware": 0.667
+    },
+    "report_noise_ratio": {
+      "graph_less": 0.0,
+      "graph_aware": 0.333
+    },
+    "unlabeled_graph_added_pairs": 4,
+    "priority_graph": {
+      "graph_less_freshness": "error",
+      "graph_aware_freshness": "fresh",
+      "graph_aware_nodes": 17,
+      "graph_aware_edges": 32
+    },
+    "direct_symbol_evidence": {
+      "graph_less": 0,
+      "graph_aware": 4
+    },
+    "finding_ids": {
+      "added": 8,
+      "removed": 0,
+      "shared": 8
+    },
+    "same_commit_hashes": true
+  },
+  "limitations": [
+    "Synthetic fixtures and hand-seeded labels are regression evidence, not production accuracy.",
+    "Durations and memory are single-host samples; tracemalloc excludes native allocations and process RSS is not isolated to one report.",
+    "The model-pass comparison uses a scripted runner and does not measure live model quality.",
+    "The graph fixture has no inter-function call edges, so graph-added unreferenced-symbol candidates are partly a fixture artifact; added findings and noise do not prove quality improvement.",
+    "Realistic-corpus comparisons, human review of top findings and published go/no-go thresholds remain."
+  ]
+}

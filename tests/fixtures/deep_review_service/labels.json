@@ -1,0 +1,23 @@
+{
+  "schema_version": 2,
+  "description": "Reviewed labels for seeded service source findings; labels denote candidate patterns, not confirmed defects. complete_subjects lists subjects whose labels are exhaustive for this synthetic checkout.",
+  "complete_subjects": [
+    "performance",
+    "failure-modes",
+    "data-structures",
+    "scalability",
+    "tests-and-coverage"
+  ],
+  "cases": [
+    {"id": "catalog_search", "file": "src/catalog/search.py", "subject": "performance", "expected": ["repeated_nested_iteration"]},
+    {"id": "catalog_cache", "file": "src/catalog/cache.py", "subject": "data-structures", "expected": ["mutable_default_argument"]},
+    {"id": "checkout_gateway", "file": "src/checkout/gateway.py", "subject": "failure-modes", "expected": ["silently_suppressed_exception"]},
+    {"id": "batch_export", "file": "src/batch/export.py", "subject": "scalability", "expected": ["materialized_range"]}
+  ],
+  "report_findings": [
+    {"id": "catalog_search_untested", "file": "src/catalog/search.py", "subject": "tests-and-coverage", "type": "untested_module"},
+    {"id": "catalog_cache_untested", "file": "src/catalog/cache.py", "subject": "tests-and-coverage", "type": "untested_module"},
+    {"id": "checkout_gateway_untested", "file": "src/checkout/gateway.py", "subject": "tests-and-coverage", "type": "untested_module"},
+    {"id": "batch_export_untested", "file": "src/batch/export.py", "subject": "tests-and-coverage", "type": "untested_module"}
+  ]
+}

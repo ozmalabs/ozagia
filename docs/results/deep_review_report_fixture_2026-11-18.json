@@ -1,0 +1,57 @@
+{
+  "comparison": {
+    "new": 0,
+    "resolved": 0,
+    "stable_ids": true,
+    "unchanged": 8
+  },
+  "environment": {
+    "preflight": "passed",
+    "status": "admitted"
+  },
+  "first_report": {
+    "findings": 8,
+    "status": "partial",
+    "subjects": {
+      "architecture": "unknown",
+      "correctness": "unknown",
+      "data-structures": "partial",
+      "dependencies": "partial",
+      "documents-and-api": "partial",
+      "failure-modes": "partial",
+      "operations": "partial",
+      "performance": "partial",
+      "scalability": "partial",
+      "security": "partial",
+      "tests-and-coverage": "partial"
+    }
+  },
+  "fixture": "deep_review_service",
+  "limitations": [
+    "The second report compares the same frozen fixture against the first report.",
+    "Stable finding IDs do not validate finding truth or severity.",
+    "Host timing and resource admission vary; report timings are intentionally omitted.",
+    "No model, network, target import, index refresh, or test execution."
+  ],
+  "reports": 2,
+  "schema_version": 1,
+  "scope": "full offline report pipeline on a temporary synthetic checkout",
+  "second_report": {
+    "findings": 8,
+    "status": "partial",
+    "subjects": {
+      "architecture": "unknown",
+      "correctness": "unknown",
+      "data-structures": "partial",
+      "dependencies": "partial",
+      "documents-and-api": "partial",
+      "failure-modes": "partial",
+      "operations": "partial",
+      "performance": "partial",
+      "scalability": "partial",
+      "security": "partial",
+      "tests-and-coverage": "partial"
+    }
+  },
+  "status": "partial"
+}

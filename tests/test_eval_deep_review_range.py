@@ -1,0 +1,96 @@
+import json
+
+import pytest
+
+from ozagia.eval import deep_review_comparison
+from ozagia.eval.deep_review_comparison import (
+    DEFAULT_FIXTURE,
+    DEFAULT_RANGE_LABELS,
+    evaluate_range,
+)
+
+
+def _stable(result):
+    stable = json.loads(json.dumps(result))
+    for key in ("duration", "peak_memory"):
+        stable.pop(key, None)
+    for report in stable.get("reports", {}).values():
+        report.pop("duration_s", None)
+        report.pop("python_peak_bytes", None)
+        report.pop("report_bytes", None)
+    stable.get("range_graph", {}).pop("reason", None)
+    return stable
+
+
+def test_range_comparison_finds_change_set_findings_and_counts_delta():
+    result = evaluate_range()
+    assert result["environment"]["status"] == "admitted"
+    assert result["commits"]["base"] != result["commits"]["head"]
+    assert result["changed_files"] == ["src/checkout/gateway.py"]
+    change_set = result["change_set"]
+    assert change_set["expected"] == 2
+    assert change_set["full"]["recall"] == 0.0
+    assert change_set["full"]["true_positive"] == 0
+    assert change_set["range"]["recall"] == 1.0
+    assert change_set["range"]["true_positive"] == 2
+    assert change_set["range"]["precision"] == 1.0
+    assert change_set["range"]["false_positive_rate"] == 0.0
+    assert change_set["range"]["report_noise_ratio"] == 0.0
+    assert change_set["full_signals_on_changed_files"]
+    assert any(row["type"] == "security_sensitive"
+               for row in change_set["range_signals_on_changed_files"])
+    assert result["comparison"]["new"] >= 2
+    assert result["comparison"]["resolved"] == 0
+    assert result["finding_ids"]["added_by_range"] == result["comparison"]["new"]
+    assert result["range_graph"]["freshness"] == "missing"
+    assert result["reports"]["full"]["findings"] < result["reports"]["range"]["findings"]
+    assert result["duration"]["total_s"] >= 0
+
+
+def test_range_comparison_is_deterministic_across_repeated_runs():
+    first = evaluate_range()
+    second = evaluate_range()
+    assert _stable(first) == _stable(second)
+
+
+def test_range_comparison_empty_findings_are_not_scored_as_success(monkeypatch):
+    def build(_root, _out, **_kwargs):
+        return {"manifest": {"complete": True, "status": "complete",
+                             "subjects": {}, "comparison": {}},
+                "findings": []}
+
+    monkeypatch.setattr(deep_review_comparison, "build_deep_review", build)
+    result = evaluate_range()
+    assert result["change_set"]["range"]["predicted"] == 0
+    assert result["change_set"]["range"]["true_positive"] == 0
+    assert result["change_set"]["range"]["recall"] == 0.0
+    assert result["change_set"]["range"]["precision"] is None
+    assert result["change_set"]["range"]["report_noise_ratio"] is None
+    assert result["comparison"] == {"new": 0, "resolved": 0, "unchanged": 0}
+
+
+def test_range_comparison_rejects_missing_or_malformed_range_labels(tmp_path):
+    with pytest.raises(ValueError, match="missing"):
+        evaluate_range(DEFAULT_FIXTURE, labels=tmp_path / "absent.json")
+    # The whole-repo labels deliberately have no range section.
+    with pytest.raises(ValueError, match="has no range section"):
+        evaluate_range(DEFAULT_FIXTURE,
+                       labels=DEFAULT_FIXTURE / "labels.json")
+    bad = tmp_path / "labels.json"
+    bad.write_text(json.dumps({
+        "schema_version": 2,
+        "cases": [],
+        "range": {"changes": [{"file": "a.py", "append": "x"}],
+                  "expected": [{"file": "/abs.py", "type": "x"}]},
+    }), encoding="utf-8")
+    with pytest.raises(ValueError, match="must stay inside"):
+        evaluate_range(DEFAULT_FIXTURE, labels=bad)
+
+
+def test_range_default_labels_live_outside_the_scanned_fixture():
+    labels = json.loads(DEFAULT_RANGE_LABELS.read_text(encoding="utf-8"))
+    assert labels["range"]["expected"]
+    assert DEFAULT_RANGE_LABELS.parent != DEFAULT_FIXTURE
+    # The scanned checkout's own labels must not contain the scripted shell text.
+    fixture_labels = (DEFAULT_FIXTURE / "labels.json").read_text(encoding="utf-8")
+    assert "os.system" not in fixture_labels
