@@ -1396,7 +1396,7 @@ class DevMemoryServer:
                     self._handlers.pop(name, None)
         self._tools = [t for t in _TOOLS if t["name"] in self._handlers]
         self._schemas = {t["name"]: t["inputSchema"] for t in self._tools}
-        if mode in {"coding", "combined"}:
+        if mode in {"coding", "combined"} and self.mem is not None:
             self._load_adapter_tools()
             self._load_sre_tools()
         if mode in {"research", "combined"}:

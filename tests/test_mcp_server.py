@@ -509,3 +509,21 @@ def test_dev_files_tools_read_the_ledger(server, tmp_path: Path) -> None:
     reply = server.handle(_call("dev_files_explain", {"path": "../outside.md"}))
     payload = json.loads(reply["result"]["content"][0]["text"])
     assert payload["ok"] is False
+
+
+def test_server_without_memory_still_builds_the_coding_tool_list() -> None:
+    """A server may be started before a snapshot exists; static tools must load.
+
+    Adapter and SRE tool discovery needs a repository root, so it is skipped
+    when there is no memory. The static coding handlers (including the
+    capability view) must still be available and listed.
+    """
+    from ozagia.integrations.mcp.server import DevMemoryServer
+
+    memoryless = DevMemoryServer(None)
+    assert memoryless.mem is None
+    listed = memoryless.handle(
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    names = {tool["name"] for tool in listed["result"]["tools"]}
+    assert "dev_capabilities" in names
+    assert "dev_context" in names
