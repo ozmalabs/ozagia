@@ -277,6 +277,7 @@ def test_outline_for_large_structured_files(mem, repo):
     assert res["meta"]["intent"] == "read_structured_outline"
     out = res["output"].splitlines()
     assert out[0].startswith(f"Read file {repo / 'big.json'}, outline of ")
+    assert "outline only" in out[1] and "offset=<line>" in out[1]
     assert "[ozagia] json:big.json#" in out
     assert any(ln.startswith('- "rows": array, 800 items') for ln in out)
     assert any(ln.startswith('    "tags": array, 2 items') for ln in out)

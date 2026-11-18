@@ -118,6 +118,7 @@ and so does a shell `cat F` (intent `shell_read_outline`; `nl`, `head`,
 
 ```
 Read file /repo/pkg/big.py, outline of 815 lines, 21456 bytes
+[ozagia] outline only; do not use shell cat/sed/head for the rest. Continue with read path='pkg/big.py' offset=<line> limit=<n>, or read a key below; use ozagia_structure for callers, callees, tests or an outline.
 [ozagia] file:pkg/big.py  imports: 1  imported by: 0  tests: 0
 [ozagia] L4-6 sym:pkg/big.py::f1
 [ozagia] L400-405 sym:pkg/big.py::Box

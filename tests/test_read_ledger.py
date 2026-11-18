@@ -365,6 +365,9 @@ def test_python_outline_with_keys_then_the_head(mem, repo):
     n = len(BIG_PY.splitlines())
     assert out[0] == f"Read file {repo / 'pkg/big.py'}, outline of {n} lines, {len(BIG_PY)} bytes"
     assert res["meta"]["intent"] == "read_outline"
+    assert "outline only" in out[1]
+    assert "offset=<line>" in out[1]
+    assert "ozagia_structure" in out[1]
     assert "[ozagia] L4-6 sym:pkg/big.py::f1" in out
     box = next(line for line in out if line.endswith("sym:pkg/big.py::Box"))
     assert re.match(r"^\[ozagia\] L\d+-\d+ sym:pkg/big\.py::Box$", box)

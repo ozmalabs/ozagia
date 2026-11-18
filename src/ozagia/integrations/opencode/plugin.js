@@ -97,7 +97,9 @@ const TOOL_GUIDANCE = "Ozagia tools: use ozagia_structure for a symbol, callers,
   + "callees, related tests or an outline; use the Ozagia MCP tools "
   + "(dev_context, dev_code_search, dev_maps, dev_capabilities) for repository "
   + "context, capability maps and recorded work evidence. They are read-only and "
-  + "permission-gated; prefer them over broad searches for structural questions.";
+  + "permission-gated; prefer them over broad searches for structural questions. "
+  + "If a read returns an outline, continue with read offset/limit (or a listed "
+  + "key), not shell cat/sed/head.";
 const WORKING_SET_MARKER = "[ozagia working set]";
 const WORKING_SET_TIMEOUT_MS = 3000;
 const WORKING_SET_MAX_CHARS = 7000;

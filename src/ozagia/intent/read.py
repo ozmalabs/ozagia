@@ -549,6 +549,10 @@ def source_outline(memory: Any, target: Target, *,
     out = _Rendered()
     out.lines.append(f"Read file {target.display}, outline of {len(lines)} "
                      f"lines, {size} bytes")
+    out.lines.append(tag(
+        "outline only; do not use shell cat/sed/head for the rest. Continue "
+        f"with read path={target.rel!r} offset=<line> limit=<n>, or read a key "
+        "below; use ozagia_structure for callers, callees, tests or an outline."))
     info = file_summary(memory, target.rel)
     if info is not None:
         out.key(file_key(target.rel))
@@ -613,6 +617,10 @@ def structured_outline(memory: Any, target: Target) -> dict[str, Any] | None:
     out = _Rendered()
     out.lines.append(f"Read file {target.display}, outline of {n_lines} "
                      f"lines, {size} bytes")
+    out.lines.append(tag(
+        "outline only; do not use shell cat/sed/head for the rest. Continue "
+        f"with read path={target.rel!r} offset=<line> limit=<n>, or read a "
+        f"path with {fmt}:{target.rel}#/<key>/<index>."))
     info = file_summary(memory, target.rel)
     if info is not None:
         out.key(file_key(target.rel))
