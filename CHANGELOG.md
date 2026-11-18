@@ -2,6 +2,46 @@
 
 ## Unreleased
 
+- `ozagia profile` (and `ozagia-profile`) reads existing cProfile/pstats,
+  Speedscope/py-spy, Chrome/Node CPU, folded/collapsed stack, OTLP JSON trace
+  and metric, and Prometheus text artifacts. It normalizes durations, sample
+  counts, metric values and histogram buckets, maps active frames to tag-cache
+  definitions, adds syntactic callers/impact from the symbol graph, and reports
+  hotspots, paths, files/modules, telemetry operations, metrics and optional
+  baseline regressions. `ozagia profile run --allow-exec` adds opt-in guided
+  collection for cProfile, py-spy and Node under resource admission and
+  rlimits. Artifact ingestion never starts a profiler, imports the target,
+  calls a model or uses the network; `--out` is the only repository write (a
+  missing tag cache may be built under the state directory).
+- `ozagia deep-review` writes an offline-by-default, subject-based report
+  directory: `README.md`, `00-method-and-scope.md`, eleven subject files,
+  `findings.json`, `findings-index.md` and `manifest.json`. It composes
+  repository review, security and static Python checks, dependency and
+  operations inventories, documentation checks, optional `--range` change
+  review and baseline comparison; the manifest records coverage, budgets,
+  truncation, graph freshness, evidence hashes and output hashes, with
+  `exhaustive` and `truth_assessed` false. `--fail-on` is `never` by default
+  (exit 0 for a report, 1 for a gate match, 2 for invalid or refused input).
+  The optional `--model-pass` requires `--live` and `OZAGIA_EVAL_LIVE=1` and
+  writes advisory, unverified candidates to `model-review.json` without
+  changing findings or exit status.
+- Deep review additions: a `--profile change`/`review-change` compact preset
+  (full review plus `HEAD~1..HEAD`, default max 20 findings, `--fail-on never`
+  unless explicit); explicit `--security-tool`/`--security-network` with
+  requested-tool and per-tool status/version/error/finding/report-hash
+  provenance; bounded `evidence/` excerpts and `sbom.json` with CVE state
+  unknown; optional exact-version matching or introduced/fixed OSV-style
+  SemVer range matching against an explicit local advisory file (ranges support
+  Node/Rust and `v`-prefixed Go, while Python remains exact-version only);
+  graph content hash and per-subject report hashes; exact-ID baseline
+  comparison with `identity_policy`, `move_policy`, `move_mapping: unknown` and
+  subject/severity deltas; a read-only `ozagia-status` reviews section; and
+  model-pass time/request/token/cost budgets, role mapping and opt-in Ocelot
+  candidate clustering. Model candidates remain advisory and unverified.
+- `ozagia deep-review --profile-report PATH` consumes measured profile reports
+  and artifacts. Hotspots and baseline regressions become performance findings
+  with observed evidence; telemetry error spans become failure-mode findings;
+  metric inventory is attached to the performance/scalability manifest.
 - `ozagia agent` reports its launch while the terminal would otherwise be
   blank. The interactive TUI no longer waits for the graph: the snapshot
   build/refresh and the daemon start run in the background and each phase

@@ -46,8 +46,35 @@ glibc) and macOS (arm64, x64). `ozagia self check --tui` verifies the install;
   whole repository (`ozagia review-repo`: import cycles, test gaps, dead
   symbols, stale doc references, security hygiene, ops sources, lock files),
   with stable finding ids and graph keys. No model calls.
+- **Deep review**: `ozagia deep-review` composes an offline-by-default,
+  subject-based report across security, performance, failure modes, data
+  structures, scalability, architecture, tests, dependencies, operations,
+  docs/API and correctness; per-subject coverage, bounded `evidence/` excerpts,
+  `findings.json`, a manifest, baseline deltas and a caller-selected
+  `--fail-on` gate.
+  `--profile change` (alias `review-change`) is a compact `HEAD~1..HEAD` range
+  preset; `--range` adds change-set review and `--profile-report` adds measured
+  profile evidence. External scanners run only when named with `--security-tool`;
+  `--security-network` is a separate opt-in, and per-tool provenance is
+  recorded. Dependencies include local licence/version inventory, optional
+  exact-version matching or OSV-style introduced/fixed SemVer ranges against an
+  explicit local advisory file (range matching supports Node/Rust and
+  `v`-prefixed Go; Python, Ruby and Composer are exact-version only; Ruby
+  matches only Bundler `GEM` source pins, not Git/path pins), and `sbom.json` with CVE state
+  unknown. `ozagia-status` has a read-only `reviews`
+  section. An optional `--model-pass` (requires `--live` and
+  `OZAGIA_EVAL_LIVE=1`) writes advisory, unverified, role-mapped candidates to
+  `model-review.json` under time/request/token/cost budgets, with optional
+  Ocelot candidate clustering; candidates never block. ([docs/deep_review.md](docs/deep_review.md))
 - **Evals**: a leakage-checked retrieval eval, a break/fix agent eval with
   selectable agent backends (OpenCode, Claude Code), and an index bench.
+- **Profiles**: `ozagia profile` reads existing cProfile, Speedscope/py-spy,
+  Chrome/Node CPU, folded `perf`, OTLP trace/metric and Prometheus text
+  artifacts; joins active frames to graph symbols, callers and impact; and
+  reports hotspots, paths, service operations, metrics and baseline changes.
+  `ozagia profile run --allow-exec` collects one explicitly approved cProfile,
+  py-spy or Node run under the resource policy. Offline by default
+  ([docs/profiling.md](docs/profiling.md)).
 
 ## Ways to use it
 
