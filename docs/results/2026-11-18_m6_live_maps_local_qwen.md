@@ -98,3 +98,47 @@ errors), `manifest.json`, `source_manifest.json`, `schedule.json`. The source
 manifest SHA-256 is `200f465dbee80dda7253e12145bd82429ced846677adbb9daa9439975ec43b6b`.
 No credentials or raw logs are retained. The harness, corpus, assertions and
 preregistration are committed under `evaluation/m6_live/`.
+
+## Post-fix follow-up — 2026-11-18
+
+After the output-clarity fixes landed at source commit
+`406eb1e4079dca7b653047b8d8f33b81fa1270fa` (tree
+`5984682b54bbb8d7f151ab0d9632d51a7b3036ba`), the same frozen 20-task corpus,
+assertions, schedule and thresholds were run again on the local model. This is
+a **post-fix exploratory follow-up, not a new preregistration**; its results
+are not pooled with the frozen v1 run above.
+
+- 40 sessions completed; 0 timeouts, 0 driver errors, 0 setup errors,
+  0 permission denials.
+- Source manifest SHA-256:
+  `5fc02ffba5a77b42fdbd3b5ea7b4b59f6821825e670c6a6f0f1372cb7f90e03b`.
+
+| Outcome | Result |
+| --- | --- |
+| Primary: maps success non-inferior to baseline | **True** — baseline 7/20, maps 7/20 |
+| Secondary: maps median setup-inclusive time ≥10% lower | **False** — 6 both-verified pairs only; baseline 20,400.0 ms, maps 33,703.5 ms; −652 per mille (maps slower) |
+| Insufficient pairs (fewer than 10 both verified) | **True** |
+
+| Arm | Verified | Median setup | Median driver | Median setup-inclusive | Tokens in/out/cache-read | Tool calls | MCP calls | `dev_maps` calls |
+| --- | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: |
+| baseline | 7/20 | 143 ms | 20,667 ms | 20,807.5 ms | 601,866 / 20,312 / 1,594,944 | 162 | 0 | 0 |
+| maps | 7/20 | 9,797 ms | 26,175 ms | 35,908 ms | 676,821 / 17,749 / 1,947,456 | 141 | 50 | 1 |
+
+The output fixes changed the observable answers, especially for
+`capability-audit-directions` (both arms now verified) and
+`mcp-server-readonly-contract` (both arms now verified). `dev_maps` was used
+once, on `work-map-join-and-redaction`; that arm still failed only on the
+exact phrase "secrets", not on its map output.
+
+Remaining failures are still dominated by exact-substring phrasing, not
+missing product facts: for example the maps arm answered
+`code-search-signals` with "embeddings, a model, the network" while the scorer
+requires "no embeddings", "no model", "no network" (the code-search output now
+contains those literal strings); and the action-readiness answer said
+"starting/stopping/signaling" while the scorer requires "start/stop/signal".
+Those are scorer/answer-format limitations, not Ozagia output defects under
+the user's rule that product fixes should precede scorer changes.
+
+Artifacts: `/tmp/ozagia-m6-live-v2/` (`summary.json`, `report.md`,
+`runs.jsonl`, `manifest.json`, `source_manifest.json`, `schedule.json`).
+
