@@ -1285,12 +1285,19 @@ def _strict_bool(value: Any, name: str) -> bool:
 
 
 def _digest_excludes(root: Path, dump: str | Path | None) -> tuple[str, ...]:
-    """Root-relative prefixes ozagia itself writes: the state directory and
-    the snapshot's directory (or the snapshot file, if it is at the root)."""
+    """Root-relative prefixes ozagia itself or its harness writes.
+
+    The state directory and the snapshot directory are not repository
+    knowledge. OpenCode's goal plugin also writes runtime session state under
+    ``.opencode/goals/``; that is tool metadata, not a source change, so it
+    must not make a fresh snapshot stale. Tracked files under ``.opencode``
+    still count through ``git diff HEAD``.
+    """
     out: list[str] = []
     srel = state_rel(root)
     if srel:
         out.append(srel + "/")
+    out.append(".opencode/goals/")
     if dump is not None:
         try:
             rel = Path(dump).resolve().relative_to(Path(root).resolve())

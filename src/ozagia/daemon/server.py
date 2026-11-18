@@ -538,6 +538,7 @@ class DaemonState:
         self.repo_map_skipped = 0
         self.repo_map_tokens = 0
         self.repo_map_files = 0
+        self.repo_map_last_skip: str | None = None
 
     # -- requests ------------------------------------------------------------ #
     def dispatch(self, msg: dict[str, Any]) -> dict[str, Any]:
@@ -813,6 +814,7 @@ class DaemonState:
         state = self._bounded_reason(freshness) or "unknown"
         with self._stats_lock:
             self.repo_map_skipped += 1
+            self.repo_map_last_skip = self._bounded_reason(reason)
         return {
             "ok": True,
             "context": "",
@@ -2130,6 +2132,7 @@ class DaemonState:
                 "repo_map_skipped": self.repo_map_skipped,
                 "repo_map_tokens": self.repo_map_tokens,
                 "repo_map_files": self.repo_map_files,
+                "repo_map_last_skip": self.repo_map_last_skip,
                 # Secrets (`ozagia.core.secrets`): session captures, status
                 # checks, response redactions and errors. No value is kept in
                 # the store, a record, a log or a response.

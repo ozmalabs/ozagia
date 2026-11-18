@@ -822,6 +822,13 @@ def test_staleness_ignores_pristine_opencode_outputs_only(tmp_path: Path) -> Non
     assert DevMemory(out, tmp_path / ".ozagia" / "journal.jsonl").staleness()[
         "tree_changed"] is False
 
+    # OpenCode's goal plugin writes runtime session state under
+    # .opencode/goals; it is not repository content.
+    goals = tmp_path / ".opencode" / "goals" / "state.json"
+    _write(goals, '{"session": "runtime-only"}\n')
+    assert DevMemory(out, tmp_path / ".ozagia" / "journal.jsonl").staleness()[
+        "tree_changed"] is False
+
     profile = tmp_path / TUI_PROFILE_REL
     profile.write_text(profile.read_text(encoding="utf-8").replace(
         sys.executable, "/alternate/python"), encoding="utf-8")

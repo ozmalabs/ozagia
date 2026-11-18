@@ -113,6 +113,7 @@ def test_repo_map_hint_skips_a_stale_snapshot(tmp_path):
     assert stats['repo_map_skipped'] == 1
     assert stats['repo_map_tokens'] == 0
     assert stats['repo_map_files'] == 0
+    assert stats['repo_map_last_skip'] == 'snapshot freshness is stale'
 
 
 def test_repo_map_hint_skips_unknown_freshness(tmp_path):
