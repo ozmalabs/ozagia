@@ -88,7 +88,11 @@ const permission = cfg.permission === undefined ? undefined : {
   },
 };
 const synthetic = [];
-const session = cfg.synthetic ? { synthetic: async (x) => { synthetic.push(x); } } : undefined;
+const hooks = {};
+const session = (cfg.synthetic || cfg.context) ? {
+  synthetic: async (x) => { synthetic.push(x); },
+  hook: async (name, fn) => { hooks[name] = fn; },
+} : undefined;
 await plugin.setup({ tool: { transform: (fn) => fn(reg), hook: () => {},
                        list: () => reg.list() },
                      ...(permission ? { permission } : {}),
@@ -108,12 +112,19 @@ for (const call of cfg.calls || []) {
   }
 }
 await new Promise((r) => setTimeout(r, cfg.settleMs || 50));
+const contextEvents = [];
+if (cfg.context && hooks.context) {
+  const event = cfg.context;
+  await hooks.context(event);
+  contextEvents.push(event);
+}
 process.stdout.write(JSON.stringify({
   id: mod.default.id, has_setup: typeof mod.default.setup === "function",
   results, calls, asserts, synthetic, toolNames: Object.keys(tools),
   replaced: Object.keys(tools).filter((k) => tools[k].execute !== original[k]),
   schema_swapped: Object.fromEntries(Object.keys(tools).map((k) => [k, tools[k].output === schema])),
   descriptions: Object.fromEntries(Object.keys(tools).map((k) => [k, tools[k].description])),
+  contextEvents,
 }) + "\n");
 process.exit(0);
 """
@@ -1347,3 +1358,27 @@ def test_webfetch_after_uses_the_short_hint_timeout(tmp_path, daemon):
     # HINT_TIMEOUT_MS (6 s), not the 30 s request default.
     (budget,) = budgets
     assert 0 < budget <= 6000
+
+
+@needs_node
+def test_context_hook_adds_task_and_tool_guidance(tmp_path, sockdir):
+    def script(req):
+        if req["op"] == "hint":
+            return {"ok": True, "context": "GRAPH CONTEXT"}
+        return {"ok": True}
+
+    daemon = StubDaemon(sockdir / "context.sock", script)
+    try:
+        out = _run(tmp_path, {"context": {
+            "sessionID": "ses_test", "system": [],
+            "messages": [{"role": "user", "parts": [
+                {"type": "text", "text": "Find the callers of main"}]}],
+        }}, daemon.path)
+    finally:
+        daemon.close()
+    systems = out["contextEvents"][0]["system"]
+    text = "\n".join(part.get("text", "") for part in systems if isinstance(part, dict))
+    assert "[ozagia task context]" in text
+    assert "ozagia_structure" in text
+    assert "dev_maps" in text
+    assert "GRAPH CONTEXT" in text
