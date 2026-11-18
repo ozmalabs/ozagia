@@ -84,3 +84,60 @@ Owner-facing harness and logs: `/home/matt/.local/state/ozagia-ab/`
 (`result-*.json`, `logs-*`, `check.py`, `run.py`). The worktrees are
 disposable and contain the two implementations. The hidden checks were
 executed against each worktree with `PYTHONPATH=<worktree>/src`.
+
+## Post-fix three-arm rerun — 2026-11-18
+
+After the tool-usage guidance and MCP constructor fix landed at source
+`1ea8539`, the same task and hidden checks were run once per arm with
+`opencode-go/deepseek-v4.1-flash`. A third prompt-only control used the exact
+same plain baseline but prefixed the prompt with `You are graph native`.
+
+| Measure | baseline | ozagia | graph_native |
+| --- | ---: | ---: | ---: |
+| Hidden checks | **7/7** | **7/7** | **7/7** |
+| Wall time | 205.2 s | 759.8 s | 212.6 s |
+| Graph prep | 0 s | 7.30 s | 0 s |
+| Model steps | 30 | 62 | 26 |
+| Edits | 16 | 24 | 20 |
+| Reads | 11 | 3 | 18 |
+| Greps/globs | 0 | 0 | 7 + 1 |
+| Shell calls | 15 | **69** | 5 |
+| Input / output tokens | 36,569 / 7,662 | 106,315 / 14,160 | 63,667 / 9,408 |
+| Cache-read tokens | 688,896 | 3,877,888 | 1,100,544 |
+| Explicit Ozagia tools | 0 | 1 (`job_list`, unrelated) | 0 |
+| Outputs containing `[ozagia]` | 0 | 62 | 0 |
+
+All three implementations pass the independent checks. The prompt-only
+"graph native" control was close to baseline (212.6 s vs 205.2 s) and did not
+show a benefit in this shot. The Ozagia arm was much slower and far more
+shell-heavy: it made only 3 read calls and 69 shell calls, while baseline made
+11 reads and 15 shell calls.
+
+The likely cause is the plugin's read interception: large files return an
+outline plus the first section, with a note to call `read` with `offset` or
+`limit`. The model instead used shell commands to inspect the remaining file
+content. That is a product UX problem, not a model-speed result. The explicit
+`ozagia_structure` tool was still not selected; the new guidance did not change
+that in this task.
+
+Caveats:
+
+- One shot per arm. Baseline itself varied from 674 s to 205 s across runs, so
+  the wall-time differences are not attributable to the treatment.
+- The `[ozagia]` count includes the shell `CONTEXT_NOTE`, so it overstates
+  graph-context use; a harness should count only actual graph annotations or
+  the task-context injection.
+- The prompt prefix is not evidence for or against a "graph native" persona;
+  one shot only.
+- The valid comparison is still success and tool-selection behavior, not speed.
+
+### Next improvements
+
+1. Make outline reads direct the model to `read` with `offset`/`limit` or
+   `ozagia_structure`, and make shell fallback less attractive for file
+   inspection. Measure the read/shell ratio.
+2. Treat explicit-tool selection as a separate product metric: a task is not a
+   successful Ozagia treatment merely because a shell output carried the
+   `[ozagia]` note.
+3. Use repeated paired runs before drawing speed conclusions; one-shot
+   variance is larger than the observed differences.
