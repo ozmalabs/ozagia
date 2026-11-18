@@ -8,6 +8,7 @@ Multiple blocks, other languages and malformed JSON remain unchanged.
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -28,6 +29,39 @@ class RecoveredJSON:
     suffix: str
 
 
+def _reject_constant(value: str) -> None:
+    """Reject Python's non-standard NaN and Infinity JSON extensions."""
+    raise ValueError(f"non-standard JSON constant {value}")
+
+
+def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Reject duplicate object names instead of silently taking the last."""
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON object key {key!r}")
+        result[key] = value
+    return result
+
+
+def _finite_float(value: str) -> float:
+    """Reject syntactically valid numbers that overflow Python to infinity."""
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError("JSON number is outside the supported finite range")
+    return parsed
+
+
+def _loads_strict_json(text: str) -> Any:
+    """Decode RFC JSON without non-finite constants or duplicate names."""
+    try:
+        return json.loads(text, parse_constant=_reject_constant,
+                          parse_float=_finite_float,
+                          object_pairs_hook=_unique_object)
+    except RecursionError as exc:
+        raise ValueError("JSON nesting exceeds the decoder limit") from exc
+
+
 def recover_fenced_json(text: str) -> RecoveredJSON | None:
     """Recover one valid JSON block; reject extra or ambiguous fenced blocks."""
     matches = list(_FENCED_JSON.finditer(text))
@@ -41,7 +75,7 @@ def recover_fenced_json(text: str) -> RecoveredJSON | None:
         return None
     body = match.group("body")
     try:
-        json.loads(body)
+        _loads_strict_json(body)
     except (ValueError, RecursionError):
         return None
     return RecoveredJSON(body=body, prefix=prefix, suffix=suffix)
@@ -55,4 +89,4 @@ def normalize_json_response(text: str) -> str:
 
 def loads_model_json(text: str) -> Any:
     """Parse an explicitly JSON-valued model response or tool argument."""
-    return json.loads(normalize_json_response(text))
+    return _loads_strict_json(normalize_json_response(text))

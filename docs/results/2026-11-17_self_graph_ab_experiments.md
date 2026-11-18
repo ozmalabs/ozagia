@@ -154,6 +154,13 @@ fenced response with separately retained introductory prose. This measures
 recoverable formatting only; it does not change the original strict-format
 result or establish factual correctness.
 
+Follow-up fuzzing found the standard JSON decoder accepted duplicate keys and
+non-finite values in structured model responses. The structured-output
+consumers now reject those ambiguous/non-standard values, including numeric
+overflow, while preserving valid fenced JSON and surrounding prose recovery.
+All 24 saved pilot answers still parse under the stricter decoder; 160 focused
+structured-output, native and review-driver tests passed.
+
 The first general graph-intent pilot used disposable copies without `.git`.
 All three attempted structural queries correctly reported graph freshness as
 unknown, so those paired runs are **invalid for evaluating graph retrieval**.

@@ -769,23 +769,18 @@ def run_review_matrix(
 # --------------------------------------------------------------------------- #
 def _parse_json_object(text: str) -> dict[str, Any]:
     """Parse a JSON object from model content, tolerating a fenced block."""
-    from ozagia.harness.structured_output import normalize_json_response
+    from ozagia.harness.structured_output import loads_model_json
 
-    body = normalize_json_response(text).strip()
-    if body.startswith("```"):
-        first_newline = body.find("\n")
-        body = body[first_newline + 1:] if first_newline >= 0 else body[3:]
-        if body.rstrip().endswith("```"):
-            body = body.rstrip()[:-3]
     try:
-        value = json.loads(body)
+        value = loads_model_json(text)
     except ValueError:
+        body = text.strip()
         start, end = body.find("{"), body.rfind("}")
         if start < 0 or end <= start:
             raise ReviewDriverError(
                 "model output is not a JSON object") from None
         try:
-            value = json.loads(body[start:end + 1])
+            value = loads_model_json(body[start:end + 1])
         except ValueError:
             raise ReviewDriverError(
                 "model output is not a JSON object") from None
