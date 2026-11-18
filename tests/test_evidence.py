@@ -134,6 +134,11 @@ def test_collects_goal_criteria_runs_tests_and_environment(project):
     assert len(run["output_digest"]) == 64
     assert run["events"]["types"]["log"] == 1
     assert report["coverage"]["complete"] is False
+    assert E.INTERPRETER_LINK_UNKNOWN in report["not_assessed"]
+    assert E.INTERPRETER_LINK_UNKNOWN in report["coverage"]["unknowns"]
+    assert E.INTERPRETER_LINK_UNKNOWN == (
+        "the interpreter link is unknown; a task run or test record does not "
+        "name the interpreter it used")
     assert report["deferred"]
 
 

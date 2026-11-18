@@ -493,9 +493,10 @@ _TOOLS: list[dict[str, Any]] = [
     {
         "name": "dev_record",
         "description": (
-            "Append a decision or verification receipt to the shared dev "
-            "journal. Use it after a scoped test/build command so the next "
-            "agent/session can see what was tried and what passed."),
+            "Append a decision or verification receipt to the shared, "
+            "append-only journal of decisions and verifications. Use it after "
+            "a scoped test/build command so the next agent/session can see "
+            "what was tried and what passed."),
         "inputSchema": _schema({
             "kind": {"type": "string", "enum": ["decision", "verification"],
                      "default": "decision"},
@@ -1062,8 +1063,10 @@ _TOOLS.append({
         "Read-only catalogue of Ozagia's declared capabilities and a coverage "
         "audit against the observed CLI, MCP, daemon, toolchain and status "
         "surfaces. action=list pages capabilities, action=show returns one "
-        "capability with its nodes/edges, action=audit reports declared and "
-        "observed surfaces that do not match. Bounded by limit/cursor. It "
+        "capability with its nodes/edges, action=audit reports the two "
+        "mismatch directions (declared_surface_not_observed and "
+        "observed_surface_undeclared) plus explicit coverage and readiness "
+        "limits and the current unknown findings. Bounded by limit/cursor. It "
         "never probes, starts a daemon, refreshes a graph, imports target code "
         "or calls a model."),
     "inputSchema": _schema({
@@ -1179,12 +1182,17 @@ _MODEL_API_TOOL: dict[str, Any] = {
     "name": "dev_maps",
     "description": (
         "Read-only, bounded, versioned model-facing maps of this repository: "
-        "graph, outline, capabilities or work/evidence. Each map carries "
-        "schema/hash, source and snapshot identities, freshness, evidence and "
-        "trust labels, omissions and truncation, plus configured/observed "
-        "negotiation and explicit plain fallback. Bounded by limit/cursor. "
-        "The tool only reads existing owners and writes bounded cache metadata "
-        "under .ozagia/model_api/cache; it never refreshes the graph, starts a "
+        "graph, outline, capabilities or work/evidence. Use it to orient "
+        "before reading or editing: map=graph for a key's bounded "
+        "neighbourhood, map=outline for signatures/headings, map=capabilities "
+        "for the declared capability audit including its directions and "
+        "limits, and map=work to join a goal's recorded evidence plus the "
+        "explicit omissions of that join. Each map carries schema/hash, source "
+        "and snapshot identities, freshness, evidence and trust labels, "
+        "omissions and truncation, plus configured/observed negotiation and "
+        "explicit plain fallback. Bounded by limit/cursor. The tool only reads "
+        "existing owners and writes bounded cache metadata under "
+        ".ozagia/model_api/cache; it never refreshes the graph, starts a "
         "daemon, imports target code or calls a model."),
     "inputSchema": _schema({
         "map": {"type": "string",

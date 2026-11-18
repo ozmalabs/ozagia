@@ -38,11 +38,20 @@ Initial map types:
   value-bearing formats are refused because their outline can expose values.
 - **`capabilities`** — the WP1 catalogue joined to observed surfaces through
   `ozagia.core.self_graph`. Coverage is explicitly not exhaustive; readiness
-  and permission are not observed. `audit.graph_truncated` repeats any
-  self-graph projection truncation.
+  and permission are not observed. `audit.directions` states the two mismatch
+  directions (`declared_surface_not_observed`/`declared_not_observed` and
+  `observed_surface_undeclared`/`observed_not_declared`), `audit.limits` states
+  the readiness/coverage/no-probe limits, and `coverage.statement` is
+  "coverage.exhaustive is always false; unknown coverage is not treated as
+  absence". `audit.graph_truncated` repeats any self-graph projection
+  truncation.
 - **`work`** — the WP2 `ozagia.core.evidence` join over a goal, criteria, run
   manifests, test record and interpreter candidates. It stores hashes and
-  redacted metadata, not prompts, secrets, task output or raw logs.
+  redacted metadata, not prompts, secrets, task output or raw logs. Its
+  `not_assessed` list states that task output is not collected (only
+  manifests, hashes and redacted metadata) and that the interpreter link for a
+  recorded test run is unknown, in addition to the evidence report's own
+  omissions.
 
 Every map carries source identities, repository/checkout/snapshot identity
 (where the host can derive it), freshness, evidence and trust labels,
@@ -526,7 +535,10 @@ successful map.
   new symbol/test node.
 - The work map joins recorded evidence only. It does not re-evaluate whether a
   criterion's evidence is still current, and it does not prove that a test
-  passed. It does not record which interpreter ran a test.
+  passed. Its `not_assessed` list says that task output is not collected (only
+  manifests, hashes and redacted metadata), that the interpreter link for a
+  recorded test run is unknown, and that a recorded test record does not name
+  the interpreter it used.
 - Outline output is signatures/headings plus a best-effort secret-pattern
   redactor. It is not a content security boundary; value-bearing formats are
   refused, but a source docstring can still contain prose.

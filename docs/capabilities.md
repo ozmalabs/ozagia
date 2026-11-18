@@ -97,15 +97,46 @@ The audit reports both directions required by M1:
 
 * **Declared but not observed** — a capability declares a surface that the
   observed surface set does not contain. This is the missing documented handler
-  direction (`declared_surface_not_observed`).
+  direction, kind `declared_surface_not_observed` (alias
+  `declared_not_observed`).
 * **Observed but not declared** — a surface exists in the runtime/static
-  inventory and no capability declares it
-  (`observed_surface_undeclared`), with the inventory source, kind and coverage
+  inventory and no capability declares it, kind `observed_surface_undeclared`
+  (alias `observed_not_declared`), with the inventory source, kind and coverage
   in its provenance.
 
 Each finding carries `kind`, `severity`, `state`, `subject`, `reason` and
 `provenance`. Duplicate findings are merged and their provenance lists every
 affected capability.
+
+The bounded `audit` view states both directions even when it reports zero
+findings, so a caller does not have to infer them from the code:
+
+```json
+{
+  "directions": [
+    {"kind": "declared_surface_not_observed",
+     "alias": "declared_not_observed",
+     "meaning": "a declared surface is absent from the observed inventory"},
+    {"kind": "observed_surface_undeclared",
+     "alias": "observed_not_declared",
+     "meaning": "an observed surface has no capability declaration"}
+  ],
+  "limits": [
+    "readiness is not observed; installed, configured, reachable, trusted and permitted are separate observations",
+    "coverage.exhaustive is always false; unknown coverage is not treated as absence",
+    "the audit does not start or ping a daemon, refresh the graph, import target code or call a model"
+  ],
+  "coverage": {
+    "exhaustive": false,
+    "statement": "coverage.exhaustive is always false; unknown coverage is not treated as absence"
+  }
+}
+```
+
+The same statements appear in the CLI text form and in the `dev_capabilities`
+`action=audit` result. The audit hash still covers `state`, `findings` and
+`counts`; `directions`, `limits` and `coverage.statement` are constant
+descriptions and are not findings.
 
 Partial and error states survive:
 
@@ -133,7 +164,9 @@ declarations. `settings`, `entrypoint` and `adapter` surfaces are counted but no
 treated as capability declarations: configuration keys and packaging targets
 are not capabilities, and adapters are project-supplied. CLI namespace parents
 (a parser with subcommands) are counted but not reported as undeclared leaves.
-`coverage.exhaustive` is always `false`.
+`coverage.exhaustive` is always `false`; the report states this in
+`coverage.statement` as "coverage.exhaustive is always false; unknown coverage
+is not treated as absence".
 
 ## Commands
 
@@ -193,20 +226,21 @@ edges for one capability, paged.
 
 ## Explicit unknowns and coverage gaps
 
-* **Readiness is not observed.** The catalogue says what is declared and which
-  surfaces exist; it does not claim `installed`, `configured`, `reachable`,
-  `trusted` or `permitted` for any capability. Those stay with the existing
-  owners (`core/status.py`, `core/toolchain.py`, `core/environments.py`).
+* **Readiness is not observed; installed, configured, reachable, trusted and
+  permitted are separate observations.** The catalogue says what is declared
+  and which surfaces exist; it does not claim those states for any capability.
+  They stay with the existing owners (`core/status.py`, `core/toolchain.py`,
+  `core/environments.py`).
 * **MCP maps are static AST views.** The runtime map depends on mode, surface
   selection, adapter tools, SRE tools and dynamically loaded research tools.
   Adapter tools are reported as unknown coverage/out of declaration scope;
   research tools are internal in the catalogue and named as a documented
   unknown rather than guessed from `_TOOLS`.
 * **Daemon operations are code-level declarations, not a live probe.** The
-  audit does not start or ping a daemon. The protocol docstring currently
-  omits `hint`, `secrets` and `toolchain`; those are synthesized from
-  `OPERATIONS` and reported as `daemon_operation_undocumented` coverage
-  findings.
+  audit does not start or ping a daemon, refresh the graph, import target code
+  or call a model. The protocol docstring currently omits `hint`, `secrets` and
+  `toolchain`; those are synthesized from `OPERATIONS` and reported as
+  `daemon_operation_undocumented` coverage findings.
 * **Implementation checks are static.** A symbol present in the source AST is
   evidence that the module defines it, not that the runtime path is correct,
   reachable or safe. Dynamic dispatch, decorators and adapter-provided
@@ -217,9 +251,10 @@ edges for one capability, paged.
 * **Settings, entry points and adapters are excluded from declaration
   coverage.** They are counted in `coverage.excluded_surface_kinds` with a
   reason; unknown coverage is not treated as absence.
-* **The catalogue is not exhaustive.** `coverage.exhaustive` is false. An
-  undeclared surface is a real finding; an absent observation is a stated
-  unknown, not proof that a capability is missing.
+* **The catalogue is not exhaustive.** `coverage.exhaustive` is always `false`;
+  unknown coverage is not treated as absence. An undeclared surface is a real
+  finding; an absent observation is a stated unknown, not proof that a
+  capability is missing.
 
 ## Not implemented here
 

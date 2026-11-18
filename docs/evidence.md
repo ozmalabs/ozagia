@@ -135,7 +135,8 @@ trusted interpreter candidate is present. A mixed goal or a failed join stays
   `invalid`; an incomplete run as `incomplete`. None is upgraded.
 - **Test record** — test key, outcome, recorded time and the recorded run's
   `complete`/`filtered`/`source`. The test record does not carry the
-  interpreter or a task run id, so those links stay unknown.
+  interpreter or a task run id, so the collector states: "the interpreter link
+  is unknown; a task run or test record does not name the interpreter it used."
 - **Interpreter / environment** — path, discovery source, project-shipped and
   trust flags, existence and freshness. Discovery does not probe imports or
   run the interpreter.
@@ -271,7 +272,9 @@ report's `deferred` list still describes the collector; `attach_store` adds
   probe imports, install tools, start a daemon or call a model.
 - The test record does not name the interpreter that ran a test, and a
   working-set test run is not linked to a task run id. Both links remain
-  unknown unless the owners add them.
+  unknown unless the owners add them. The collector's `not_assessed` and
+  `coverage.unknowns` carry the canonical sentence: "the interpreter link is
+  unknown; a task run or test record does not name the interpreter it used."
 - `verified` means the recorded joins agree, not that the interpreter is
   importable, the package set is complete or the result is reproducible.
 - Only runs named by the observer are joined; unrelated runs are not scanned.

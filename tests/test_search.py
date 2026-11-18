@@ -118,6 +118,17 @@ def test_symbol_and_doc_comment_queries(tmp_path: Path) -> None:
                          files=files)
     assert symbol["ok"] is True
     assert symbol["n"] >= 1
+    assert symbol["signals"] == [
+        "BM25 lexical ranking",
+        "repo-map PageRank structural prior",
+        "Reciprocal Rank Fusion (RRF)",
+    ]
+    assert symbol["excluded"] == [
+        "no embeddings",
+        "no model",
+        "no network",
+        "no dependencies beyond the standard library and repo-map",
+    ]
     top = symbol["results"][0]
     assert top["path"] == "a.py"
     assert "alpha" in {s["name"] for s in top["symbols"]}
@@ -204,6 +215,18 @@ def test_empty_query_is_a_clear_result(tmp_path: Path) -> None:
     assert result["results"] == []
     assert result["n"] == 0
     assert "empty" in result["note"].lower()
+    assert result["signals"][0] == "BM25 lexical ranking"
+    assert "no embeddings" in result["excluded"]
+
+    stopwords = code_search(tmp_path, "the and of",
+                            cache_path=_cache(tmp_path), files=files)
+    assert stopwords["ok"] is True and stopwords["n"] == 0
+    assert stopwords["signals"] and stopwords["excluded"]
+
+    limited = code_search(tmp_path, "alpha", cache_path=_cache(tmp_path),
+                          files=files, limit=0)
+    assert limited["ok"] is True and limited["n"] == 0
+    assert limited["signals"] and limited["excluded"]
 
 
 def test_deterministic_across_repeats_and_file_order(tmp_path: Path) -> None:
@@ -294,6 +317,12 @@ def _run_queries(module, root: Path, cache_path: Path,
             for q in IDENTITY_QUERIES]
 
 
+def _without_description(rows: list[dict]) -> list[dict]:
+    """Drop the additive self-description before comparing with the baseline."""
+    return [{key: value for key, value in row.items()
+             if key not in ("signals", "excluded")} for row in rows]
+
+
 def _side(cache_path: Path) -> Path:
     return search_side_cache_path(cache_path)
 
@@ -309,7 +338,7 @@ def test_search_matches_base_cold_warm_and_partially_stale(
     # Cold: no side file yet.
     expected = _run_queries(base, root, base_cache, files)
     actual = _run_queries(search_module, root, new_cache, files)
-    assert actual == expected
+    assert _without_description(actual) == _without_description(expected)
     assert search_module.LAST_BUILD["side_cache"] == "absent"
     assert _side(new_cache).exists()
 
@@ -320,7 +349,8 @@ def test_search_matches_base_cold_warm_and_partially_stale(
                                      cache_path=new_cache, files=files)
     assert search_module.LAST_BUILD["side_cache"] == "loaded"
     assert search_module.LAST_BUILD["tokenized"] == 0
-    assert warm == expected[0]
+    assert _without_description([warm]) == _without_description([expected[0]])
+    assert warm["signals"] and warm["excluded"]
 
     # Partially stale: one file edited, the other side rows are reused.
     (root / "helpers.py").write_text(
@@ -328,7 +358,7 @@ def test_search_matches_base_cold_warm_and_partially_stale(
         "def helper_9(x):\n    return needle_extra(x)\n", encoding="utf-8")
     expected = _run_queries(base, root, base_cache, files)
     actual = _run_queries(search_module, root, new_cache, files)
-    assert actual == expected
+    assert _without_description(actual) == _without_description(expected)
     assert search_module.LAST_BUILD["tokenized"] == 1
     assert search_module.LAST_BUILD["reused"] == len(files) - 1
 
@@ -351,7 +381,7 @@ def test_side_cache_version_key_and_corruption_are_ignored(
     for name, doc in cases.items():
         side.write_bytes(marshal.dumps(doc))
         actual = _run_queries(search_module, root, cache, files)
-        assert actual == expected, name
+        assert _without_description(actual) == _without_description(expected), name
         assert search_module.LAST_BUILD["side_cache"] == (
             "ignored: version or key mismatch"), name
         assert search_module.LAST_BUILD["tokenized"] == len(files), name
@@ -360,7 +390,7 @@ def test_side_cache_version_key_and_corruption_are_ignored(
 
     side.write_bytes(b"\x00not marshal data\xff")
     actual = _run_queries(search_module, root, cache, files)
-    assert actual == expected
+    assert _without_description(actual) == _without_description(expected)
     assert search_module.LAST_BUILD["side_cache"] == "ignored: unreadable"
     assert search_module.LAST_BUILD["tokenized"] == len(files)
 

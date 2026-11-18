@@ -44,6 +44,13 @@ MAX_OUTLINE_TEXT = 8192
 MAX_RELATIONS_PER_PAGE = 400
 MAX_NEIGHBOUR_ITEMS = 20
 
+# Bounded omissions the work map states in addition to the evidence report's
+# own not_assessed list.  They describe what the joined owners do not collect.
+WORK_MAP_NOT_ASSESSED = (
+    "task output is not collected; only manifests, hashes and redacted metadata",
+    "the interpreter link for a recorded test run is unknown",
+)
+
 _TYPE_ORDER = (
     "Repo", "File", "Symbol", "Test", "Doc", "Seed", "Rule", "Failure",
     "Commit",
@@ -1356,11 +1363,15 @@ def _project_capabilities_source(request: Mapping[str, Any],
                 "hash": audit.get("hash"),
                 "counts": dict(audit.get("counts") or {}),
                 "findings": len(audit.get("findings") or []),
+                "directions": [dict(item) for item in SG.MISMATCH_DIRECTIONS],
+                "limits": list(SG.AUDIT_LIMITS),
                 "graph_truncated": dict(
                     (report.get("graph") or {}).get("truncated") or {}),
             },
             "coverage": {
                 "exhaustive": bool(coverage.get("exhaustive")),
+                "statement": (coverage.get("statement")
+                              or SG.COVERAGE_STATEMENT),
                 "audited_surface_kinds": list(
                     coverage.get("audited_surface_kinds") or []),
                 "excluded_surface_kinds": dict(
@@ -1626,7 +1637,8 @@ def _project_work_source(request: Mapping[str, Any],
         return _absent_page(
             request=request, decision=decision, source=source,
             snapshot=source.snapshot_ref, store=store,
-            messages=[source.reason or "the evidence join is unavailable"])
+            messages=[source.reason or "the evidence join is unavailable"],
+            extra={"not_assessed": list(WORK_MAP_NOT_ASSESSED)})
     report = source.data
     goal = str((request.get("target") or {}).get("goal") or "")
     items, relations = _work_items(report, goal)
@@ -1657,6 +1669,10 @@ def _project_work_source(request: Mapping[str, Any],
     if goal_state == "absent":
         notices.append("the requested goal is absent; no criterion evidence "
                        "was invented")
+    not_assessed = list(report.get("not_assessed") or [])
+    for item in WORK_MAP_NOT_ASSESSED:
+        if item not in not_assessed:
+            not_assessed.append(item)
     data = _data(
         map_type="work", state=state, freshness=source.freshness,
         source=source, items=page_items, relations=page_relations,
@@ -1682,7 +1698,7 @@ def _project_work_source(request: Mapping[str, Any],
                 "interpreters": dict(coverage.get("interpreters") or {}),
                 "unknowns": list(coverage.get("unknowns") or []),
             },
-            "not_assessed": list(report.get("not_assessed") or []),
+            "not_assessed": not_assessed,
             "deferred": list(report.get("deferred") or []),
             "notices": notices,
         })

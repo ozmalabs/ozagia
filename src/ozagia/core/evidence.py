@@ -72,6 +72,12 @@ DEFERRED = (
     "writing to the goal, task, session or graph stores",
 )
 
+# Canonical wording for the one link the collectors cannot observe.
+INTERPRETER_LINK_UNKNOWN = (
+    "the interpreter link is unknown; a task run or test record does not name "
+    "the interpreter it used"
+)
+
 _SECRET_PATTERNS = (
     re.compile(r"(?:sk|rk|pk)-[A-Za-z0-9_-]{12,}"),
     re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"),
@@ -559,7 +565,7 @@ def collect_evidence(root: str | Path, goal_id: str, *,
         "not_assessed": sorted({
             "the collector does not re-evaluate whether a criterion's evidence "
             "is still current",
-            "a task run or test record does not record the interpreter it used",
+            INTERPRETER_LINK_UNKNOWN,
             "only runs named by the caller are joined",
             "hashes and redacted references only; prompts, secrets and raw "
             "logs are not collected",
@@ -913,7 +919,7 @@ def _result_counts(criteria: Sequence[Mapping[str, Any]]) -> dict[str, int]:
 def _coverage_unknowns(notes: Sequence[str]) -> list[str]:
     unknown = [
         "the collector does not prove a criterion's evidence is still current",
-        "the interpreter used by a recorded test run is not recorded",
+        INTERPRETER_LINK_UNKNOWN,
         "run and test evidence is metadata and hashes, not a result",
         "durable evidence writes are deferred",
     ]
@@ -1007,7 +1013,8 @@ def attach_store(report: Mapping[str, Any], root: str | Path, *,
 
 
 __all__ = [
-    "DEFERRED", "EVIDENCE_KINDS", "EvidenceError", "MAX_CRITERIA",
+    "DEFERRED", "EVIDENCE_KINDS", "EvidenceError", "INTERPRETER_LINK_UNKNOWN",
+    "MAX_CRITERIA",
     "MAX_INTERPRETERS", "MAX_LABELS", "MAX_REPORT_BYTES", "MAX_RUNS",
     "MAX_TEST_KEYS", "REPORT_VERSION", "SCHEMA_NAMESPACE", "SCHEMA_VERSION",
     "Sources", "attach_store", "collect_evidence", "default_goal_source",

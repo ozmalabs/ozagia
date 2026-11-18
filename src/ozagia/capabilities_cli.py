@@ -154,6 +154,19 @@ def _format_audit(result: dict[str, Any]) -> str:
         lines.append(
             f"truncated: {truncation['omitted']} more findings; next --cursor "
             f"{truncation['next_cursor']}")
+    directions = result.get("directions") or []
+    if directions:
+        lines.append("directions:")
+        lines.extend(
+            f"  {item['kind']} (alias {item['alias']}): {item['meaning']}"
+            for item in directions)
+    limits = result.get("limits") or []
+    if limits:
+        lines.append("limits:")
+        lines.extend(f"  {item}" for item in limits)
+    statement = (result.get("coverage") or {}).get("statement")
+    if statement:
+        lines.append(f"coverage: {statement}")
     unknowns = (result.get("coverage") or {}).get("unknowns") or []
     if unknowns:
         lines.append("unknowns:")

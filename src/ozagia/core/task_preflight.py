@@ -113,6 +113,17 @@ UNSAFE_RESULT_REASON = (
     "reported as declared evidence")
 NO_TEST_REASON = "no test was run by this preflight"
 
+# The report states its own assessment rules so a reader does not have to infer
+# them from the provider implementations.  These are descriptions, not inputs:
+# they never change a dimension or the assessment.
+RULES = (
+    "green requires every required dimension is true and every fact it used is "
+    "current",
+    "a plan is not a result; a test plan is not an executed test",
+    "a stale graph or missing interpreter cannot be green",
+    "the preflight does not refresh the graph",
+)
+
 DEFERRED = (
     "durable evidence writes",
     "goal, task, session and graph store writes",
@@ -1054,6 +1065,7 @@ def build_preflight(root: str | Path, goal_id: str, *,
                 "the graph was not refreshed; freshness is reported, not fixed",
             ],
         },
+        "rules": list(RULES),
         "not_assessed": unknowns,
         "deferred": list(DEFERRED),
         "bounds": {
@@ -2612,7 +2624,7 @@ __all__ = [
     "MAX_REPORT_BYTES", "MAX_RESEARCH_SESSIONS", "MAX_TIMEOUT_MS",
     "OPTIONAL_DIMENSIONS", "Observation", "PreflightError", "Provider",
     "ProviderContext", "Providers", "REPORT_VERSION", "REQUIRED_DIMENSIONS",
-    "RESEARCH_DIMENSION", "SCHEMA_NAMESPACE", "SCHEMA_VERSION",
+    "RESEARCH_DIMENSION", "RULES", "SCHEMA_NAMESPACE", "SCHEMA_VERSION",
     "SAFE_GOAL_KINDS", "TEST_GOAL_KINDS", "UNSAFE_GOAL_KINDS", "Checkout",
     "LinkedCheckout", "actions_observation", "build_preflight",
     "capability_observation", "default_providers",
