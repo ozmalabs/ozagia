@@ -41,6 +41,7 @@ import json
 import math
 import os
 import re
+import stat
 import time
 from collections import Counter, defaultdict
 from pathlib import Path, PurePosixPath
@@ -479,8 +480,84 @@ def _graph_file(root: Path, graph_path: str | Path | None) -> Path:
     return path.resolve()
 
 
+def _open_graph_nofollow(path: str | Path) -> int:
+    """Open a regular graph path without following any path symlink."""
+    if (os.name != "posix" or not hasattr(os, "O_NOFOLLOW")
+            or not hasattr(os, "O_DIRECTORY")
+            or os.open not in os.supports_dir_fd):
+        raise OSError("safe no-follow graph reads are unavailable")
+    absolute = Path(os.path.abspath(path))
+    parts = absolute.parts
+    if not parts or parts[0] != "/" or len(parts) < 2:
+        raise OSError("graph path must be absolute")
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+    def open_file() -> int:
+        parent_fd = os.open("/", directory_flags)
+        try:
+            for component in parts[1:-1]:
+                next_fd = os.open(component, directory_flags, dir_fd=parent_fd)
+                os.close(parent_fd)
+                parent_fd = next_fd
+            return os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW,
+                           dir_fd=parent_fd)
+        finally:
+            os.close(parent_fd)
+
+    descriptor = open_file()
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise OSError("graph snapshot is not a regular file")
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _graph_file_identity(st: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+
+
+def _read_graph_nofollow(path: str | Path, *, max_bytes: int | None = None
+                         ) -> tuple[bytes, os.stat_result]:
+    """Read a regular graph file through pinned no-follow directory handles."""
+    descriptor = _open_graph_nofollow(path)
+    try:
+        before = os.fstat(descriptor)
+        if max_bytes is not None and before.st_size > max_bytes:
+            raise OSError("graph snapshot exceeds the bounded read limit")
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            request = 65536 if max_bytes is None else min(
+                65536, max_bytes + 1 - total)
+            chunk = os.read(descriptor, request)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if max_bytes is not None and total > max_bytes:
+                raise OSError("graph snapshot exceeds the bounded read limit")
+        after = os.fstat(descriptor)
+        if _graph_file_identity(before) != _graph_file_identity(after):
+            raise OSError("graph snapshot changed while being read")
+        current = _open_graph_nofollow(path)
+        try:
+            if (_graph_file_identity(before)
+                    != _graph_file_identity(os.fstat(current))):
+                raise OSError("graph snapshot path changed while being read")
+        finally:
+            os.close(current)
+        return b"".join(chunks), before
+    finally:
+        os.close(descriptor)
+
+
 def _load_graph(root: Path, graph_file: Path,
-                head: str) -> tuple[dict[str, Any], Any, dict[str, Any] | None]:
+                head: str, *, snapshot_data: dict[str, Any] | None = None,
+                allow_project_adapters: bool = True
+                ) -> tuple[dict[str, Any], Any, dict[str, Any] | None]:
     """(info, DevMemory or None, index or None). The index is None unless
     the snapshot is fresh for this checkout."""
     info: dict[str, Any] = {
@@ -488,14 +565,34 @@ def _load_graph(root: Path, graph_file: Path,
         "usable": False, "snapshot_head": None, "snapshot_root": None,
         "generated_at": None, "nodes": 0, "edges": 0, "reason": None,
     }
-    if not graph_file.is_file():
+    try:
+        snapshot_bytes = None
+        snapshot_stat = None
+        if snapshot_data is None:
+            snapshot_bytes, snapshot_stat = _read_graph_nofollow(graph_file)
+            snapshot_data = json.loads(snapshot_bytes)
+        if not isinstance(snapshot_data, dict):
+            raise ValueError("graph snapshot root is not an object")
+        from ozagia.core.memory import DevMemory
+        dev = DevMemory(dump=graph_file, root=root,
+                        snapshot_data=snapshot_data)
+        staleness = dev.staleness(
+            allow_project_adapters=allow_project_adapters)
+        if snapshot_stat is not None:
+            current = _open_graph_nofollow(graph_file)
+            try:
+                current_stat = os.fstat(current)
+            finally:
+                os.close(current)
+            if (_graph_file_identity(snapshot_stat)
+                    != _graph_file_identity(current_stat)):
+                info.update(available=True, freshness="unknown",
+                            reason="graph snapshot changed during freshness verification")
+                return info, None, None
+    except FileNotFoundError:
         info["reason"] = (f"no graph snapshot at {graph_file}; run "
                           "`ozagia index` or pass --index")
         return info, None, None
-    try:
-        from ozagia.core.memory import DevMemory
-        dev = DevMemory(dump=graph_file, root=root)
-        staleness = dev.staleness()
     except (OSError, ValueError, KeyError, TypeError) as exc:
         info.update(available=True, freshness="error",
                     reason=f"cannot read graph snapshot: {exc}")
@@ -541,15 +638,19 @@ def _load_graph(root: Path, graph_file: Path,
     return info, dev, CR._graph_index(dev)
 
 
-def _default_indexer(root: Path, graph_file: Path) -> dict[str, Any]:
+def _default_indexer(root: Path, graph_file: Path, *,
+                     timeout_s: float | None = None) -> dict[str, Any]:
     """Build or refresh the snapshot the way `ozagia index` does."""
     import sys
     from ozagia.config import config_path
     from ozagia.harness.session import prepare_snapshot, tool_env
     env = tool_env(root, tool_python=sys.executable, config=config_path(root))
-    report = prepare_snapshot(root, graph_file, build="auto", env=env)
+    options = {} if timeout_s is None else {"timeout_s": timeout_s}
+    report = prepare_snapshot(root, graph_file, build="auto", env=env,
+                              **options)
     if report.get("still_stale"):
-        report = prepare_snapshot(root, graph_file, build="always", env=env)
+        report = prepare_snapshot(root, graph_file, build="always", env=env,
+                                  **options)
     return report
 
 
@@ -591,7 +692,8 @@ class _Context:
                  graph_info: dict[str, Any], dev: Any,
                  index: dict[str, Any] | None, *, layers: Sequence[str],
                  deadline: float, clock: Callable[[], float],
-                 churn_days: int, cap: int) -> None:
+                 churn_days: int, cap: int, cache_mode: str = "rw",
+                 trust_project_python: bool | None = None) -> None:
         self.root = root
         self.head = head
         self.files = files
@@ -604,6 +706,8 @@ class _Context:
         self.clock = clock
         self.churn_days = churn_days
         self.cap = cap
+        self.cache_mode = cache_mode
+        self.trust_project_python = trust_project_python
         self._text: dict[str, str | None] = {}
         self._cached_bytes = 0
         self.real_root = root.resolve()
@@ -2028,12 +2132,15 @@ def _python_imports(sec: _Section) -> None:
         return
     if sec.expired():
         return
-    trusted = EN.trust_project_python(ctx.root)
+    trusted = (EN.trust_project_python(ctx.root)
+               if ctx.trust_project_python is None
+               else ctx.trust_project_python)
     # Lock-file tools are never run here, trusted or not: pdm may create
     # `.venv` and `.pdm-python` in the repository, and the review writes
     # nothing there. `.pdm-python` is still read as text.
-    candidates = EN.discover(ctx.root, trust=trusted, lock_tools=False)
-    cache = EN.ProbeCache.for_root(ctx.root, "rw")
+    candidates = EN.discover(ctx.root, trust=trusted, lock_tools=False,
+                             cache_mode=ctx.cache_mode)
+    cache = EN.ProbeCache.for_root(ctx.root, ctx.cache_mode)
     probed: list[dict[str, Any]] = []
     for cand in candidates:
         if sec.expired():
@@ -2064,7 +2171,7 @@ def _python_imports(sec: _Section) -> None:
 
     model = EN.ImportModel(ctx.root, ctx.files, read=read,
                            blobs=EN.blob_ids(ctx.root),
-                           cache=EN.ImportCache.for_root(ctx.root, "rw"),
+                           cache=EN.ImportCache.for_root(ctx.root, ctx.cache_mode),
                            provided=EN.provided_names(probes))
     try:
         _import_checks(sec, model, py, ok, probes)
@@ -2476,6 +2583,9 @@ def review_repo(root: str | Path, *,
                 max_findings_per_section: int = MAX_FINDINGS_PER_SECTION,
                 memory_mb: float = DEFAULT_MEMORY_MB,
                 disk_mb: float = DEFAULT_DISK_MB,
+                cache_mode: str = "rw",
+                trust_project_python: bool | None = None,
+                allow_project_adapters: bool = True,
                 indexer: Callable[[Path, Path], Mapping[str, Any]] | None = None,
                 clock: Callable[[], float] = time.monotonic) -> dict[str, Any]:
     """Review the checkout at ``root`` and return a repo-review packet.
@@ -2485,7 +2595,11 @@ def review_repo(root: str | Path, *,
     ``budget_s`` bounds the wall-clock time of the sections; a section cut
     short says so. ``index`` rebuilds the graph first with ``indexer``
     (default: the same build as ``ozagia index``). Raises PreflightError when
-    preflight refuses the run. No model is called.
+    preflight refuses the run. ``cache_mode`` is ``rw`` (default), ``read``
+    (use existing environment caches without writing), or ``off`` (no cache
+    reads or writes). ``trust_project_python`` overrides the user setting for
+    interpreter probes; ``False`` always prevents running project interpreters.
+    No model is called.
     """
     for name, value in (("budget_s", budget_s), ("memory_mb", memory_mb),
                         ("disk_mb", disk_mb)):
@@ -2496,6 +2610,10 @@ def review_repo(root: str | Path, *,
         raise RepoReviewError("churn_days must be >= 1")
     if max_findings_per_section < 1:
         raise RepoReviewError("max_findings_per_section must be >= 1")
+    if cache_mode not in {"rw", "read", "off"}:
+        raise RepoReviewError("cache_mode must be rw, read, or off")
+    if trust_project_python is not None and not isinstance(trust_project_python, bool):
+        raise RepoReviewError("trust_project_python must be true, false, or None")
     wanted = _sections_arg(sections)
     previous: Mapping[str, Any] | None = None
     if compare is not None:
@@ -2534,7 +2652,9 @@ def review_repo(root: str | Path, *,
                                            if k in report}}
         except Exception as exc:  # noqa: BLE001 - reported, then degrade
             index_report = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
-    graph_info, dev, graph_index = _load_graph(path, graph_file, head)
+    graph_info, dev, graph_index = _load_graph(
+        path, graph_file, head,
+        allow_project_adapters=allow_project_adapters)
     graph_info["indexed"] = index_report
     try:
         from ozagia.config import load_project_config
@@ -2546,7 +2666,8 @@ def review_repo(root: str | Path, *,
     ctx = _Context(path, head, files, graph_info, dev, graph_index,
                    layers=layers, deadline=started + float(budget_s),
                    clock=clock, churn_days=int(churn_days),
-                   cap=int(max_findings_per_section))
+                   cap=int(max_findings_per_section), cache_mode=cache_mode,
+                   trust_project_python=trust_project_python)
 
     section_out: dict[str, Any] = {}
     findings: list[dict[str, Any]] = []

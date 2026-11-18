@@ -66,6 +66,53 @@ def test_packet_shape_and_ids(repo: Path) -> None:
         f["id"] for f in packet["findings"]]
 
 
+def test_review_cache_mode_off_does_not_create_environment_caches(repo: Path,
+                                                                  monkeypatch) -> None:
+    from ozagia.core import environments as EN
+
+    monkeypatch.setattr(EN, "discover", lambda *args, **kwargs: [])
+    state = repo / ".ozagia" / "environments"
+    packet = RR.review_repo(repo, sections=["dependencies"], budget_s=8,
+                            cache_mode="off")
+    assert packet["preflight"]["ok"] is True
+    assert not (state / "probes.json").exists()
+    assert not (state / "imports.json").exists()
+
+
+def test_review_cache_mode_rejects_unknown_value(repo: Path) -> None:
+    with pytest.raises(RR.RepoReviewError, match="cache_mode"):
+        RR.review_repo(repo, sections=["architecture"], cache_mode="write")
+
+
+def test_review_can_override_project_interpreter_trust(repo: Path, monkeypatch) -> None:
+    from ozagia.core import environments as EN
+
+    observed = []
+
+    def discover(root, *, trust, lock_tools, cache_mode, **kwargs):
+        observed.append((trust, lock_tools, cache_mode))
+        return [{"path": str(repo / ".venv" / "bin" / "python"),
+                 "source": "root_venv", "project": True}]
+
+    def probe_one(candidate, *, trusted, **kwargs):
+        observed.append(("probe", trusted))
+        return {**candidate, "probe": {"ok": False, "error": "not probed"}}
+
+    monkeypatch.setattr(EN, "trust_project_python", lambda _root: True)
+    monkeypatch.setattr(EN, "discover", discover)
+    monkeypatch.setattr(EN, "probe_one", probe_one)
+    packet = RR.review_repo(repo, sections=["dependencies"], budget_s=8,
+                            cache_mode="off", trust_project_python=False)
+    assert packet["preflight"]["ok"] is True
+    assert (False, False, "off") in observed
+    assert ("probe", False) in observed
+
+
+def test_review_trust_override_must_be_boolean_or_none(repo: Path) -> None:
+    with pytest.raises(RR.RepoReviewError, match="trust_project_python"):
+        RR.review_repo(repo, sections=["architecture"], trust_project_python="yes")
+
+
 def test_architecture_cycles_and_layers(repo: Path) -> None:
     packet = RR.review_repo(repo, sections=["architecture"])
     assert list(packet["sections"]) == ["architecture"]
@@ -200,6 +247,36 @@ def test_stale_graph_degrades(repo: Path) -> None:
     assert rebuilt["graph"]["freshness"] == "fresh"
     assert rebuilt["graph"]["indexed"] == {"ok": True, "action": "built"}
     assert "sym:src/pkg/new.py::fresh_code" in _keys(rebuilt, "unreferenced_symbol")
+
+
+def test_graph_loader_rejects_symlink_snapshot(repo: Path, tmp_path: Path) -> None:
+    graph_file = repo / ".ozagia" / "graph.json"
+    outside = tmp_path / "outside-graph.json"
+    outside.write_bytes(graph_file.read_bytes())
+    graph_file.unlink()
+    graph_file.symlink_to(outside)
+
+    info, dev, graph_index = RR._load_graph(repo, graph_file, "a" * 40)
+
+    assert info["freshness"] == "error"
+    assert "cannot read graph snapshot" in info["reason"]
+    assert dev is None
+    assert graph_index is None
+
+
+def test_graph_loader_rejects_symlink_state_directory(repo: Path,
+                                                       tmp_path: Path) -> None:
+    state = repo / ".ozagia"
+    moved = tmp_path / "state"
+    state.rename(moved)
+    state.symlink_to(moved, target_is_directory=True)
+
+    info, dev, graph_index = RR._load_graph(
+        repo, state / "graph.json", "a" * 40)
+
+    assert info["freshness"] == "error"
+    assert dev is None
+    assert graph_index is None
 
 
 def test_missing_graph_and_failed_index(repo: Path) -> None:

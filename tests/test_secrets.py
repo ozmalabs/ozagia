@@ -807,6 +807,7 @@ def test_detect_text_tokens_assignments_and_refs() -> None:
         "token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789\n"
         "api_key = \"sk-proj-abcdefghijklmnopqrstuvwxyz0123456789\"\n"
         "password: \"hunter2hunter2\"\n"
+        "token: unquoted-secret-value-12345\n"
         "existing = secret://env/TOKEN\n"
         "example AKIAIOSFODNN7EXAMPLE\n"
         "short = \"abc\"\n"
@@ -814,12 +815,13 @@ def test_detect_text_tokens_assignments_and_refs() -> None:
     capture = S.detect_text(
         text, ref_factory=lambda value, label: store.capture(
             value, harness="h", session="s", label=label))
-    assert capture.detected == 3
-    assert capture.captured == 3
+    assert capture.detected == 4
+    assert capture.captured == 4
     assert capture.withheld == 0
     assert "ghp_ABCDEF" not in capture.text
     assert "sk-proj-" not in capture.text
     assert "hunter2hunter2" not in capture.text
+    assert "unquoted-secret-value-12345" not in capture.text
     assert "secret://env/TOKEN" in capture.text
     assert "AKIAIOSFODNN7EXAMPLE" in capture.text
     assert "abc" in capture.text

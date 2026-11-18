@@ -14,14 +14,17 @@ the report.
 """
 from __future__ import annotations
 
+import ast
 import fnmatch
 import hashlib
+import io
 import json
 import math
 import os
 import re
 import shutil
 import subprocess
+import tokenize
 import tomllib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -181,7 +184,9 @@ _SECRET_RULES: tuple[SecretRule, ...] = (
 _SECRET_ASSIGN = re.compile(
     r"(?i)\b(?P<label>api[_-]?key|apikey|secret|client[_-]?secret|"
     r"access[_-]?token|refresh[_-]?token|auth[_-]?token|password|passwd|"
-    r"private[_-]?key)\b\s*[:=]\s*[\"'](?P<value>[^\"']{8,})[\"']")
+    r"token|private[_-]?key|signing[_-]?key)\b\s*[:=]\s*"
+    r"(?:(?P<quote>[\"'])(?P<quoted>.*?)(?P=quote)|"
+    r"(?P<bare>[^\s,;#]+))")
 _PLACEHOLDER = re.compile(
     r"(?i)(?:example|sample|dummy|placeholder|changeme|change-me|redacted|"
     r"your[-_]|<|>|\$\{|\{\{|os\.environ|process\.env|getenv|env\[|"
@@ -220,9 +225,12 @@ class SecretHit:
     value: str  # internal only; never serialized
 
 
-def _line_secret_hits(text: str, *, start_line: int = 1) -> list[SecretHit]:
+def _line_secret_hits(text: str, *, start_line: int = 1,
+                      ignored_lines: set[int] | None = None) -> list[SecretHit]:
     hits: list[SecretHit] = []
     for number, line in enumerate(text.splitlines(), start=start_line):
+        if ignored_lines and number in ignored_lines:
+            continue
         for rule in _SECRET_RULES:
             if rule.multiline:
                 continue
@@ -234,6 +242,12 @@ def _line_secret_hits(text: str, *, start_line: int = 1) -> list[SecretHit]:
                 if rule.value_group and (_PLACEHOLDER.search(value)
                                          or not _looks_opaque(value)):
                     continue
+                if rule.name == "generic_high_entropy" and (
+                        re.match(r"(?i)^//(?:env|file|keyring|pass|op|session)/",
+                                 value)
+                        or re.fullmatch(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+",
+                                        value)):
+                    continue
                 if rule.name == "url_credentials" and _PLACEHOLDER.search(value):
                     continue
                 hits.append(SecretHit(
@@ -243,15 +257,19 @@ def _line_secret_hits(text: str, *, start_line: int = 1) -> list[SecretHit]:
     return hits
 
 
-def secret_hits(text: str, *, start_line: int = 1) -> list[SecretHit]:
+def secret_hits(text: str, *, start_line: int = 1,
+                ignored_lines: set[int] | None = None) -> list[SecretHit]:
     """Find secret-like values in text without retaining them in output."""
-    hits = _line_secret_hits(text, start_line=start_line)
+    hits = _line_secret_hits(text, start_line=start_line,
+                             ignored_lines=ignored_lines)
     for rule in _SECRET_RULES:
         if not rule.multiline:
             continue
         for match in rule.pattern.finditer(text):
             value = match.group(0)
             line = start_line + text.count("\n", 0, match.start())
+            if ignored_lines and line in ignored_lines:
+                continue
             hits.append(SecretHit(
                 rule=rule.name, kind=rule.kind, severity=rule.severity,
                 confidence=rule.confidence, line=line,
@@ -261,6 +279,103 @@ def secret_hits(text: str, *, start_line: int = 1) -> list[SecretHit]:
         unique.setdefault((hit.rule, hit.line, hit.fingerprint), hit)
     return sorted(unique.values(),
                   key=lambda item: (item.line, item.rule, item.fingerprint))
+
+
+def _python_non_code_lines(text: str) -> set[int]:
+    """Lines that contain only comments, docstrings or declarative rule data.
+
+    Security rule registries are data describing dangerous syntax, not code
+    paths that execute that syntax. Excluding only those declarations avoids
+    self-matches while leaving the scanner's normal checks enabled elsewhere
+    in the same module.
+    """
+    ignored: set[int] = set()
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        tree = None
+    try:
+        for token in tokenize.generate_tokens(io.StringIO(text).readline):
+            if (token.type == tokenize.COMMENT
+                    and not token.line[:token.start[1]].strip()):
+                ignored.add(token.start[0])
+    except (tokenize.TokenError, IndentationError):
+        pass
+    if tree is None:
+        return ignored
+
+    def add_docstring(node: ast.AST) -> None:
+        body = getattr(node, "body", None)
+        if not isinstance(body, list) or not body:
+            return
+        first = body[0]
+        if (isinstance(first, ast.Expr)
+                and isinstance(first.value, ast.Constant)
+                and isinstance(getattr(first.value, "value", None), str)):
+            ignored.update(range(first.lineno, first.end_lineno + 1))
+
+    def literal_data(value: ast.AST) -> bool:
+        if isinstance(value, ast.Constant):
+            return True
+        if isinstance(value, (ast.Tuple, ast.List, ast.Set)):
+            return all(literal_data(item) for item in value.elts)
+        if isinstance(value, ast.Dict):
+            return all(key is not None and literal_data(key)
+                       and literal_data(item)
+                       for key, item in zip(value.keys, value.values))
+        if isinstance(value, ast.UnaryOp) and isinstance(
+                value.op, (ast.UAdd, ast.USub, ast.Invert)):
+            return literal_data(value.operand)
+        return False
+
+    def literal_rule_registry(value: ast.AST) -> bool:
+        """Recognize only tuples of declarative calls to the rule factory.
+
+        Rule declarations are calls rather than literal containers, so the
+        generic data check intentionally does not cover them. Keep this narrow:
+        computed arguments or arbitrary calls make the assignment executable
+        input to the scanner and therefore leave it subject to normal checks.
+        """
+        if not isinstance(value, (ast.Tuple, ast.List)) or not value.elts:
+            return False
+        for item in value.elts:
+            if not (isinstance(item, ast.Call)
+                    and isinstance(item.func, ast.Name)
+                    and item.func.id == "_r"
+                    and all(literal_data(arg) for arg in item.args)
+                    and all(keyword.arg is not None
+                            and literal_data(keyword.value)
+                            for keyword in item.keywords)):
+                return False
+        return True
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                             ast.AsyncFunctionDef)):
+            add_docstring(node)
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        names = {target.id for target in targets if isinstance(target, ast.Name)}
+        registry_name = any(
+            re.search(r"(?i)(?:_RULES|_TOKENS|_PATTERNS)$", name)
+            for name in names)
+        if (registry_name and (literal_data(node.value)
+                               or (any(name.upper().endswith("_RULES")
+                                       for name in names)
+                                   and literal_rule_registry(node.value)))):
+            ignored.update(range(node.lineno, node.end_lineno + 1))
+    return ignored
+
+
+def _non_code_lines(rel: str, text: str) -> set[int]:
+    if Path(rel).suffix.lower() in {".py", ".pyi"}:
+        return _python_non_code_lines(text)
+    ignored: set[int] = set()
+    for number, line in enumerate(text.splitlines(), 1):
+        if re.match(r"^\s*(?:#|//|/\*|\*/|<!--|--\s)", line):
+            ignored.add(number)
+    return ignored
 
 
 def credential_file_hit(rel: str) -> SecretHit | None:
@@ -309,8 +424,11 @@ def secret_finding(rel: str, hit: SecretHit,
                "value_withheld": True})
 
 
-def _secret_findings(rel: str, text: str) -> list[dict[str, Any]]:
-    return [secret_finding(rel, hit) for hit in secret_hits(text)]
+def _secret_findings(rel: str, text: str,
+                     ignored_lines: set[int] | None = None
+                     ) -> list[dict[str, Any]]:
+    return [secret_finding(rel, hit) for hit in
+            secret_hits(text, ignored_lines=ignored_lines)]
 
 
 
@@ -1122,6 +1240,7 @@ def _ci_findings(rel: str, text: str) -> list[dict[str, Any]]:
 def _scan_source(rel: str, text: str, index: GraphIndex,
                  warnings: list[str]) -> list[dict[str, Any]]:
     lines = text.splitlines()
+    non_code_lines = _non_code_lines(rel, text)
     out: list[dict[str, Any]] = []
     graph_usable = index.usable
 
@@ -1171,6 +1290,8 @@ def _scan_source(rel: str, text: str, index: GraphIndex,
             if path else None))
 
     for number, line in enumerate(lines, start=1):
+        if number in non_code_lines:
+            continue
         for rule in _RULES:
             if not rule.pattern.search(line):
                 continue
@@ -1252,7 +1373,7 @@ def _scan_source(rel: str, text: str, index: GraphIndex,
                     not_assessed=["runtime reachability",
                                   "egress controls and DNS policy"]))
 
-    out.extend(_secret_findings(rel, text))
+    out.extend(_secret_findings(rel, text, non_code_lines))
     # Framework-specific configuration checks.
     if re.search(r"\bFlask\s*\(\s*__name__\s*\)", text):
         if not re.search(r"(?i)Talisman|after_request|secure_headers|"
@@ -2283,6 +2404,9 @@ def _run_tool(spec: ToolSpec, root: Path,
         "network_required": spec.network,
         "status": "error",
         "version": None,
+        # Digest only: scanner output can contain sensitive snippets and must
+        # never be copied wholesale into the durable review report.
+        "report_hash": None,
         "exit_code": None,
         "database": {"status": "unreported"},
         "findings": 0,
@@ -2290,18 +2414,22 @@ def _run_tool(spec: ToolSpec, root: Path,
         "error": None,
     }
     try:
-        result["version"] = _tool_version(spec, root, runner, warnings)
+        version = _tool_version(spec, root, runner, warnings)
+        result["version"] = redact_text(str(version))[:200] if version else None
         invoked = _invoke(command, root=root, timeout=TOOL_TIMEOUT_S,
                           runner=runner)
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
-        result["error"] = f"{type(exc).__name__}: {exc}"[:300]
+        result["error"] = redact_text(f"{type(exc).__name__}: {exc}")[:300]
         return result, []
     exit_code = int(invoked.get("returncode", 1))
     result["exit_code"] = exit_code
     if invoked.get("version"):
-        result["version"] = str(invoked["version"])[:200]
+        result["version"] = redact_text(str(invoked["version"]))[:200]
+    output = str(invoked.get("stdout") or "")
+    result["report_hash"] = "sha256:" + hashlib.sha256(
+        output.encode("utf-8", errors="replace")).hexdigest()
     parsed, database, error = _parse_tool_output(
-        spec, str(invoked.get("stdout") or ""),
+        spec, output,
         version=result["version"], command=command, exit_code=exit_code,
         root=root)
     if invoked.get("database"):
@@ -2320,7 +2448,7 @@ def _run_tool(spec: ToolSpec, root: Path,
             database = {"status": "reported", "time": str(value)[:80]}
     result["database"] = database
     if error:
-        result["error"] = error
+        result["error"] = redact_text(str(error))[:300]
         return result, []
     result["status"] = "ok"
     result["findings"] = len(parsed)

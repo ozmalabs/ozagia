@@ -1311,7 +1311,8 @@ def _digest_excludes(root: Path, dump: str | Path | None) -> tuple[str, ...]:
 
 def _tree_digest(root: Path, *, dump: str | Path | None = None,
                  include_docs: str = "features",
-                 adapter_paths: Iterable[str] = ()
+                 adapter_paths: Iterable[str] = (),
+                 watch_globs: Iterable[str] | None = None,
                  ) -> tuple[str | None, str | None]:
     """(digest, error) for the working tree under `root`.
 
@@ -1336,16 +1337,21 @@ def _tree_digest(root: Path, *, dump: str | Path | None = None,
     try:
         diff = subprocess.run(
             ["git", "-C", str(root), "diff", "HEAD", "--no-color",
-             "--no-ext-diff"],
-            capture_output=True, timeout=60, check=False)
+             "--no-ext-diff", "--no-textconv"],
+            capture_output=True, timeout=60, check=False,
+            stdin=subprocess.DEVNULL,
+            env={**os.environ, "GIT_OPTIONAL_LOCKS": "0",
+                 "GIT_PAGER": "cat"})
         paths = _build_untracked_paths(root, dump=dump,
                                        include_docs=include_docs)
         if paths is None:
             return None, "cannot enumerate build-indexed untracked files"
         # Files an adapter indexer reads from disk (`watch`), ignored or not.
-        from ozagia.adapters import registry
         from ozagia.core.adapter_state import watched_files
-        paths = list(paths) + watched_files(root, registry(root).watch_globs)
+        if watch_globs is None:
+            from ozagia.adapters import registry
+            watch_globs = registry(root).watch_globs
+        paths = list(paths) + watched_files(root, watch_globs)
     except (OSError, subprocess.SubprocessError) as e:
         return None, str(e)
     if diff.returncode != 0:
@@ -1391,9 +1397,13 @@ def _build_untracked_paths(root: Path, *, dump: str | Path | None,
                     *_digest_pathspecs()]
     try:
         ordinary = subprocess.run(args, capture_output=True, timeout=60,
-                                  check=False)
+                                  check=False, stdin=subprocess.DEVNULL,
+                                  env={**os.environ, "GIT_OPTIONAL_LOCKS": "0",
+                                       "GIT_PAGER": "cat"})
         ignored = subprocess.run(ignored_args, capture_output=True, timeout=60,
-                                 check=False)
+                                 check=False, stdin=subprocess.DEVNULL,
+                                 env={**os.environ, "GIT_OPTIONAL_LOCKS": "0",
+                                      "GIT_PAGER": "cat"})
         if ordinary.returncode or ignored.returncode:
             return None
         state = state_rel(root)
@@ -1436,7 +1446,9 @@ def _build_untracked_paths(root: Path, *, dump: str | Path | None,
                  "-z", "--stdin"],
                 input=b"\0".join(p.encode("utf-8", errors="surrogateescape")
                                   for p in sorted(expanded_ignored)) + b"\0",
-                capture_output=True, timeout=60, check=False)
+                capture_output=True, timeout=60, check=False,
+                env={**os.environ, "GIT_OPTIONAL_LOCKS": "0",
+                     "GIT_PAGER": "cat"})
             if check.returncode not in (0, 1):
                 return None
             ignored_expanded = {p.decode("utf-8", errors="surrogateescape")
@@ -1512,6 +1524,8 @@ class DevMemory:
     # snapshot. Set it when the server runs in a worktree other than the one
     # the snapshot was built from.
     root: Path | None = None
+    snapshot_data: dict[str, Any] | None = field(default=None, repr=False,
+                                                 compare=False)
 
     def __post_init__(self) -> None:
         self.dump = Path(self.dump)
@@ -1525,11 +1539,12 @@ class DevMemory:
             "replace_previews": 0, "replace_applies": 0, "replace_files": 0}
         if self.root is not None:
             self.root = Path(self.root)
-        if not self.dump.exists():
+        if self.snapshot_data is None and not self.dump.exists():
             raise FileNotFoundError(
                 f"no dev-memory snapshot at {self.dump}; run "
                 f"`python -m ozagia.core.memory build` first")
-        self.raw = json.loads(self.dump.read_text(encoding="utf-8"))
+        self.raw = (self.snapshot_data if self.snapshot_data is not None else
+                    json.loads(self.dump.read_text(encoding="utf-8")))
         self.version = int(self.raw.get("version") or 1)
         self.nodes = {int(n["id"]): n for n in self.raw.get("nodes", [])}
         self.edges = self.raw.get("edges", [])
@@ -2785,7 +2800,8 @@ class DevMemory:
 
     _STALENESS_TTL_S = 5.0
 
-    def staleness(self, *, force: bool = False) -> dict[str, Any]:
+    def staleness(self, *, force: bool = False,
+                  allow_project_adapters: bool = True) -> dict[str, Any]:
         """Whether the snapshot still describes this checkout.
 
         Compares the snapshot's recorded root and HEAD with the process root
@@ -2795,7 +2811,8 @@ class DevMemory:
         """
         now = time.monotonic()
         memo = self._staleness_memo
-        if not force and memo is not None and now - memo[0] < self._STALENESS_TTL_S:
+        if (allow_project_adapters and not force and memo is not None
+                and now - memo[0] < self._STALENESS_TTL_S):
             return dict(memo[1])
         repo: dict[str, Any] = {}
         for nid in self._nodes_of("Repo"):
@@ -2819,11 +2836,30 @@ class DevMemory:
         # The working tree is compared by digest (see `_tree_digest`). Older
         # snapshots without a digest are not judged on it.
         snapshot_tree = repo.get("tree_digest") or None
+        adapter_inputs_unknown = False
+        watch_globs = None
+        if not allow_project_adapters:
+            # Freshness checks must not load project adapters: their configured
+            # module references execute Python. Read configuration as data and
+            # omit their watch globs; if any extension source is configured,
+            # report freshness as unknown instead of claiming a complete tree
+            # comparison.
+            try:
+                from importlib.metadata import entry_points
+                from ozagia.config import load_project_config
+                config = load_project_config(root)
+                adapter_inputs_unknown = bool(
+                    config.adapters or os.environ.get("OZAGIA_ADAPTERS")
+                    or entry_points(group="ozagia.adapters"))
+            except Exception:
+                adapter_inputs_unknown = True
+            watch_globs = ()
         tree_now, tree_err = _tree_digest(
             Path(root), dump=self.dump,
             include_docs=self._build_opts.get("include_docs", "features"),
             adapter_paths=(set(self._adapter_info.get("files", ()))
-                           | set((self._adapter_info.get("stamps") or {}).keys())))
+                           | set((self._adapter_info.get("stamps") or {}).keys())),
+            watch_globs=watch_globs)
         tree_changed = bool(snapshot_tree and tree_now
                             and snapshot_tree != tree_now)
         verification_errors: list[str] = []
@@ -2838,6 +2874,9 @@ class DevMemory:
         elif tree_now is None:
             verification_errors.append(
                 f"cannot compute working-tree digest: {tree_err or 'unknown error'}")
+        if adapter_inputs_unknown:
+            verification_errors.append(
+                "adapter watch inputs were not loaded during safe freshness verification")
         stale = bool(root_mismatch or (head and snapshot_head != head)
                      or tree_changed)
         freshness = ("stale" if stale else
@@ -2857,7 +2896,7 @@ class DevMemory:
         }
         # Forced checks are independent observations. Do not clear or replace
         # the shared memo: another thread may be using its prior snapshot.
-        if not force:
+        if not force and allow_project_adapters:
             self._staleness_memo = (now, result)
         return dict(result)
 

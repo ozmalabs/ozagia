@@ -483,7 +483,7 @@ def test_openai_runner_parses_output_and_never_returns_the_key(
     runner = review.openai_runner(
         base_url="https://review.invalid/v1", model="model-a",
         api_key_env="OZAGIA_REVIEW_TEST_KEY", http_json=fake_http,
-        timeout=12.5, temperature=0.0)
+        timeout=12.5, temperature=0.0, max_tokens=321)
     messages = [{"role": "system", "content": "system prompt"},
                 {"role": "user", "content": "user prompt"}]
     result = runner("model-b", messages)
@@ -503,6 +503,7 @@ def test_openai_runner_parses_output_and_never_returns_the_key(
     assert requests[0]["body"]["model"] == "model-b"
     assert requests[0]["body"]["messages"] == messages
     assert requests[0]["body"]["temperature"] == 0.0
+    assert requests[0]["body"]["max_tokens"] == 321
     assert requests[0]["body"]["response_format"] == {"type": "json_object"}
     assert requests[0]["headers"]["Authorization"] == f"Bearer {secret}"
     assert secret not in json.dumps(requests[0]["body"])

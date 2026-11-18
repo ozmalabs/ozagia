@@ -1487,8 +1487,12 @@ def detect_text(text: str, *, max_secrets: int = DEFAULT_DETECT_LIMIT,
             add(span[0], span[1], value, label, rule.kind)
 
     for match in security_module._SECRET_ASSIGN.finditer(scan_text):
-        value = match.group("value")
-        span = match.span("value")
+        # The assignment pattern distinguishes quoted and bare branches so
+        # capture_text can replace only the secret bytes while preserving the
+        # surrounding syntax.
+        group = "quoted" if match.group("quote") is not None else "bare"
+        value = match.group(group)
+        span = match.span(group)
         if not security_module._looks_opaque(value):
             continue
         add(span[0], span[1], value, str(match.group("label")).lower(),

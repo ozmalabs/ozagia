@@ -56,6 +56,41 @@ JSON_RESPONSE_FORMAT = {"type": "json_object"}
 # Roles named by the structured-review plan. An unknown role is still a
 # reviewer: it gets a generic prompt instead of being rejected.
 ROLE_PROMPTS: dict[str, str] = {
+    "security": (
+        "You are a security reviewer. Examine trust boundaries, input handling, "
+        "authorization, secret exposure, dependency risks and unsafe operations. "
+        "Report only concrete, checkable candidates and state what evidence is missing."
+    ),
+    "performance": (
+        "You are a performance reviewer. Examine computational hot paths, repeated "
+        "work, blocking operations, caching and likely resource costs. Distinguish "
+        "measured behavior from static hypotheses."
+    ),
+    "failures": (
+        "You are a failure-mode reviewer. Examine error handling, timeouts, retries, "
+        "cancellation, partial writes and recovery. Identify concrete failure paths "
+        "and the conditions needed to verify them."
+    ),
+    "data": (
+        "You are a data-structure reviewer. Examine invariants, mutation boundaries, "
+        "serialization and consistency across related structures. Report candidate "
+        "invariant gaps with a precise target."
+    ),
+    "scalability": (
+        "You are a scalability reviewer. Examine unbounded growth, fan-out, queues, "
+        "contention and resource limits. State the growth or load assumption behind "
+        "each candidate."
+    ),
+    "architecture": (
+        "You are an architecture reviewer. Examine module boundaries, coupling, "
+        "dependency direction, ownership and cross-component invariants. Avoid "
+        "style-only findings."
+    ),
+    "tests": (
+        "You are a test reviewer. Examine coverage of behavior, edge cases, failure "
+        "paths and important invariants. Report specific untested risks, not raw "
+        "coverage guesses."
+    ),
     "methods": (
         "You are a methods reviewer. Examine the study or argument design: "
         "question-to-method fit, sampling and data collection, measurement, "
@@ -388,10 +423,10 @@ def _normalize_runner_result(raw: Any) -> dict[str, Any]:
 
 def _call_model_runner(model_runner: Callable[..., Any], model: str,
                        messages: list[dict[str, str]]) -> Any:
+    kwargs = {}
     if _accepts_kwarg(model_runner, "response_format"):
-        return model_runner(model, messages,
-                            response_format=dict(JSON_RESPONSE_FORMAT))
-    return model_runner(model, messages)
+        kwargs["response_format"] = dict(JSON_RESPONSE_FORMAT)
+    return model_runner(model, messages, **kwargs)
 
 
 def _normalize_validation(value: Any) -> dict[str, Any]:
@@ -892,6 +927,7 @@ def openai_runner(
     api_key_file: str | Path | None = None,
     timeout: float = 300,
     temperature: float | None = 0.0,
+    max_tokens: int | None = None,
     http_json: Callable[..., Any] | None = None,
 ) -> Callable[..., dict[str, Any]]:
     """Build a ``model_runner`` for an OpenAI-compatible chat endpoint.
@@ -906,6 +942,10 @@ def openai_runner(
         raise ReviewDriverError("model is required")
     if http_json is not None and not callable(http_json):
         raise ReviewDriverError("http_json must be callable")
+    if (max_tokens is not None and
+            (isinstance(max_tokens, bool) or not isinstance(max_tokens, int)
+             or max_tokens < 1)):
+        raise ReviewDriverError("max_tokens must be a positive integer")
     endpoint = base_url.rstrip("/")
     if not endpoint.endswith("/chat/completions"):
         endpoint += "/chat/completions"
@@ -926,6 +966,8 @@ def openai_runner(
         }
         if temperature is not None:
             body["temperature"] = temperature
+        if max_tokens is not None:
+            body["max_tokens"] = max_tokens
         if format_value:
             body["response_format"] = dict(format_value)
         try:
@@ -991,6 +1033,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--round", default=DEFAULT_ROUND)
     parser.add_argument("--max-workers", type=int, default=DEFAULT_MAX_WORKERS)
     parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument("--max-tokens", type=int, default=None,
+                        help="maximum completion tokens per reviewer")
     return parser
 
 
@@ -1022,6 +1066,7 @@ def main(argv: list[str] | None = None) -> int:
             api_key_env=args.api_key_env,
             api_key_file=args.api_key_file,
             temperature=args.temperature,
+            max_tokens=args.max_tokens,
         )
         result = run_review_matrix(
             plan, packet, model_runner=runner, roles=role_names,

@@ -24,6 +24,13 @@ OPENAI_KEY = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"
 SECRETS = (AWS_KEY, GITHUB_KEY, OPENAI_KEY)
 
 
+def test_redact_text_redacts_unquoted_secret_assignments():
+    value = "unquoted-secret-value-12345"
+    redacted = S.redact_text(f"token: {value}")
+    assert value not in redacted
+    assert "<redacted:" in redacted
+
+
 # --------------------------------------------------------------------------- #
 # helpers
 # --------------------------------------------------------------------------- #
@@ -489,6 +496,76 @@ def test_crypto_and_tls_rules(sec_repo: Path) -> None:
     tls = _finding(report, "tls-verify-false")
     assert tls["category"] == "owasp:a02"
     assert tls["cwe"] == ["cwe:295"]
+
+
+def test_scanner_ignores_rule_data_and_non_executable_examples() -> None:
+    source = '''\
+_DANGEROUS_TOKENS = ("eval(", "shell=True", "curl https://x | bash")
+_RULES = (
+    _r("eval", r"(?<![\\w.])eval\\s*\\("),
+    _r("weak-password-hash", r"(?i)\\b(?:md5|sha1)\\b"),
+)
+
+def run(user_input):
+    """Example only: eval(user_input); curl https://x | bash"""
+    # curl https://x | bash
+    eval(user_input)
+'''
+    findings = S._scan_source(
+        "src/example.py", source, S.GraphIndex(info={}), [])
+    assert [item["source"]["rule"] for item in findings] == ["eval"]
+    assert findings[0]["line"] == 10
+
+    workflow_example = "# curl https://example.test/install | bash\non: push\n"
+    findings = S._scan_source(
+        ".github/workflows/release.yml", workflow_example,
+        S.GraphIndex(info={}), [])
+    assert not findings
+
+    active_installer = '''\
+script = f"curl -fsSL {url} | bash"
+subprocess.run(["bash", "-c", script])
+'''
+    findings = S._scan_source(
+        "src/installer.py", active_installer, S.GraphIndex(info={}), [])
+    assert any(item["source"]["rule"] == "curl-pipe-shell"
+               for item in findings)
+
+    computed_registry = "_DANGEROUS_TOKENS = (eval(user_input),)\n"
+    findings = S._scan_source(
+        "src/registry.py", computed_registry, S.GraphIndex(info={}), [])
+    assert any(item["source"]["rule"] == "eval" for item in findings)
+
+    computed_rule_registry = (
+        '_RULES = (_r("computed", eval(user_input)),)\n')
+    findings = S._scan_source(
+        "src/rule_registry.py", computed_rule_registry,
+        S.GraphIndex(info={}), [])
+    assert any(item["source"]["rule"] == "eval" for item in findings)
+
+
+def test_secret_scan_ignores_docstrings_but_keeps_live_assignments() -> None:
+    source = '''\
+"""Examples: secret://keyring/SERVICE/ACCOUNT"""
+def load():
+    """Example: API_KEY = \"aB3-xY7-zQ2-wP9\"""
+    API_KEY = "aB3-xY7-zQ2-wP9"
+'''
+    ignored = S._python_non_code_lines(source)
+    hits = S.secret_hits(source, ignored_lines=ignored)
+    assert [(hit.rule, hit.line) for hit in hits] == [
+        ("generic_high_entropy", 4)]
+
+
+def test_generic_secret_rule_rejects_reference_and_expression_shapes() -> None:
+    text = '''\
+secret = self.resolve
+secret: //keyring/SERVICE/ACCOUNT
+API_KEY = "aB3-xY7-zQ2-wP9"
+'''
+    hits = S.secret_hits(text)
+    assert [(hit.rule, hit.line) for hit in hits] == [
+        ("generic_high_entropy", 3)]
 
 
 def test_dependency_inventory_without_scanner(sec_repo: Path) -> None:
