@@ -477,9 +477,19 @@ def test_guided_cprofile_run_writes_artifact_and_report(tmp_path):
                     "    return total\n\n"
                     "spin()\n")
     out = root / "collection"
+    # This exercises collection, not the host's free-space admission policy.
+    # Supply explicit test floors so the result does not depend on the size or
+    # current occupancy of the filesystem running the suite.
+    from copy import deepcopy
+    from ozagia.core.resources import DEFAULT_POLICY
+    policy = deepcopy(DEFAULT_POLICY)
+    policy["reserve_disk_pct"] = 0
+    policy["reserve_disk_gb"] = 0
+    policy["admission"]["min_free_disk_pct"] = 0
+    policy["admission"]["min_free_disk_gb"] = 0
     profile, run = P.run_collection(
         root, tool="cprofile", command=[sys.executable, str(script)],
-        out_dir=out, allow_exec=True, timeout_s=30)
+        out_dir=out, allow_exec=True, timeout_s=30, policy=policy)
     assert run["returncode"] == 0
     assert run["timed_out"] is False
     assert Path(run["artifact"]["path"]).is_file()
