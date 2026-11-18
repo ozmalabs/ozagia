@@ -800,10 +800,12 @@ def _sidebar_pty_output(tmp_path, extra_env: dict[str, str] | None = None) -> by
 
 def test_opencode_profile_sidebar_renders_in_isolated_pty_without_model(tmp_path):
     output = _sidebar_pty_output(tmp_path)
-    assert b"OzAGIa G:" in output
-    assert b"H1 P0 F0 U0" in output
-    assert b"E0" in output
-    assert b"down H1" in output  # daemon loss is explicit in the sidebar
+    assert b"Ozagia" in output
+    assert b"Status:" in output
+    assert b"Graph:" in output
+    assert b"Session:" in output
+    assert b"1 tool" in output
+    assert b"P0 F0" not in output
 
 
 def test_opencode_profile_sidebar_shows_the_launch_phase(tmp_path):
@@ -813,6 +815,9 @@ def test_opencode_profile_sidebar_shows_the_launch_phase(tmp_path):
         "updated_at": time.time(), "root": str(tmp_path), "sock": None,
     }), encoding="utf-8")
     output = _sidebar_pty_output(tmp_path, {"OZAGIA_LAUNCH_STATUS": str(status)})
-    assert b"OzAGIa G:building D:waiting" in output
-    # The launch line replaces the profile counters until the snapshot is ready.
-    assert b"H1 P0 F0 U0" not in output
+    assert b"Ozagia" in output
+    assert b"Status: starting" in output
+    assert b"Graph: building" in output
+    assert b"Daemon: waiting" in output
+    # The launch block replaces the metrics until the snapshot is ready.
+    assert b"Status: offline" not in output

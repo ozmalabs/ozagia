@@ -95,23 +95,34 @@ daemon failure).
    first)`.
 
 Interactive launch: the TUI starts at once and the sidebar (the
-`ozagia-profile` TUI plugin, `OzAGIa G:... D:...`) shows the phase until the
-snapshot is current and the daemon answers:
+`ozagia-profile` TUI plugin) shows the phase until the snapshot is current and
+the daemon answers:
 
 ```
-OzAGIa G:checking D:waiting 0s
-OzAGIa G:building D:waiting 4s
-OzAGIa G:ready D:starting 7s
-OzAGIa G:fresh D:ready H1 P0 F0 U0 E0 ...
+Ozagia
+Status: starting
+Graph: checking · 0s
+Daemon: waiting
+
+Ozagia
+Status: starting
+Graph: building · 4s
+Daemon: waiting
+
+Ozagia
+Status: online
+Graph: fresh
+Model: vllm/qwen3.8-27b
+Session: 366 tools · 268 model calls
 ```
 
-`G:building` (or `refreshing`) comes from the prep process, which says why in
-the status document (`detail`); `failed` stays in the sidebar. While the
+`Graph: building` (or `refreshing`) comes from the prep process, which says why
+in the status document (`detail`); `failed` stays in the sidebar. While the
 daemon is not up, a tool call falls back to OpenCode's built-in tool (the
-plugin's normal degraded path), so send the first prompt after the line
-reads `ready`. A fresh snapshot reaches `ready` in well under a second; a
-first launch, or one after a change the refresh cannot reingest (a tracked
-file the build does not index, such as a plugin's `.js`), rebuilds first.
+plugin's normal degraded path), so send the first prompt after the line reads
+`ready`. A fresh snapshot reaches `ready` in well under a second; a first
+launch, or one after a change the refresh cannot reingest (a tracked file the
+build does not index, such as a plugin's `.js`), rebuilds first.
 
 A non-interactive run reports the synchronous phases on stderr, with a
 ticking frame while a phase runs (plain lines when stderr is not a terminal):

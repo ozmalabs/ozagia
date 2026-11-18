@@ -3,9 +3,9 @@
 The interactive `ozagia agent` session does not wait for the snapshot: it
 starts the build/refresh and the daemon in the background so the TUI appears
 at once. `GraphSession` writes each phase here, and the TUI profile sidebar
-(`ozagia-profile`, whose summary is `OzAGIa G:... D:...`) reads the path from
-`OZAGIA_LAUNCH_STATUS` in OpenCode's environment and shows `G:building 4s`
-while the graph is not ready.
+(`ozagia-profile`) reads the path from `OZAGIA_LAUNCH_STATUS` in OpenCode's
+environment and shows `Ozagia / Status: starting / Graph: building · 4s /
+Daemon: waiting` while the graph is not ready.
 
 One launch writes one file, under that run's log directory (a new launch has a
 new file, so concurrent sessions do not fight over it). Writes replace the

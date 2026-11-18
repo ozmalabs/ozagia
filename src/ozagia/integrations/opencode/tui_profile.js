@@ -27,21 +27,24 @@ function readLaunch(path) {
   }
 }
 
-// One line for the sidebar while the launch is not ready. `ready` falls back
-// to the usual profile/status summary; a failure stays visible.
-function launchLine(launch, nowMs) {
+// One block for the sidebar while the launch is not ready. `ready` falls back
+// to the usual status/metrics block; a failure stays visible.
+function launchLines(launch, nowMs) {
   const phase = launch && launch.phase;
   if (!phase || phase === "ready") return undefined;
   const started = Number(launch.started_at);
   const elapsed = Number.isFinite(started)
     ? Math.max(0, Math.round(nowMs / 1000 - started)) : 0;
-  if (phase === "failed") return `OzAGIa G:failed D:down ${elapsed}s`;
+  if (phase === "failed") {
+    return ["Ozagia", "Status: offline", "Graph: failed", "Daemon: down"];
+  }
   const graph = phase === "building" ? "building"
     : phase === "refreshing" ? "refreshing"
     : phase === "daemon" ? "ready"
     : "checking";
   const daemon = phase === "daemon" ? "starting" : "waiting";
-  return `OzAGIa G:${graph} D:${daemon} ${elapsed}s`;
+  return ["Ozagia", "Status: starting", `Graph: ${graph} · ${elapsed}s`,
+          `Daemon: ${daemon}`];
 }
 
 function runPython(python, root, args, timeoutMs = 8000) {
@@ -125,26 +128,65 @@ function ProfileSidebar(props) {
   }
   const value = () => view();
   const session = () => value()?.profile?.sessions?.find((entry) => entry.session_id === props.sessionID);
-  const daemon = () => {
-    const state = value()?.status?.daemon?.state;
-    if (state === "absent") return "down";
-    if (state === "unknown") return "unresponsive";
-    return state || "unavailable";
+  const count = (number) => Number.isFinite(number)
+    ? Math.max(0, Math.round(number)).toLocaleString("en-US") : "?";
+  const statusText = (state) => {
+    if (state === "running") return "online";
+    if (state === "absent") return "offline";
+    if (state === "unknown") return "unavailable";
+    return state || "unknown";
   };
-  const graph = () => value()?.status?.doctor?.report?.snapshot?.state || EMPTY;
+  const graphText = (snapshot, details) => {
+    const state = snapshot?.state || EMPTY;
+    if (state !== "stale") return state;
+    let reason;
+    if (details?.root_mismatch) reason = "different root";
+    else if (details?.tree_changed) reason = "working tree changed";
+    else if (details?.head && details?.snapshot_head && details.head !== details.snapshot_head) {
+      reason = "HEAD moved";
+    }
+    return reason ? `stale · ${reason}` : "stale";
+  };
+  const sessionText = (record) => {
+    const profile = value()?.profile;
+    const daemon = record?.daemon_profile || {};
+    const tools = daemon.tool_calls_observed ?? record?.tool_calls_observed
+      ?? record?.tools;
+    const calls = record?.host_profile?.model_calls;
+    const errors = daemon.errors ?? record?.errors;
+    if (tools == null && calls == null) {
+      return profile?.journal === "absent" ? "Session: no journal" : "Session: no activity yet";
+    }
+    const parts = [];
+    if (tools != null) {
+      parts.push(`${count(tools)} ${tools === 1 ? "tool" : "tools"}`);
+    }
+    if (calls != null) {
+      parts.push(`${count(calls)} model ${calls === 1 ? "call" : "calls"}`);
+    }
+    if (Number.isFinite(errors) && errors > 0) {
+      parts.push(`${count(errors)} error${errors === 1 ? "" : "s"}`);
+    }
+    return `Session: ${parts.join(" · ")}`;
+  };
   const color = context.theme.text.base;
-  const summary = () => {
-    const during = launchLine(launch(), Date.now());
+  const lines = () => {
+    const during = launchLines(launch(), Date.now());
     if (during) return during;
+    const status = value()?.status;
+    const snapshot = status?.doctor?.report?.snapshot;
     const record = session();
-    const observed = record?.daemon_profile
-      ? `H${record.daemon_profile.handled} P${record.daemon_profile.passthrough} F${record.daemon_profile.failures} U${record.daemon_profile.unknown} E${record.daemon_profile.errors}`
-      : record && record.activity_source !== "unknown"
-        ? `H${record.handled} P${record.passthrough} F${record.failures} U${record.unknown} E${record.errors}`
-        : value()?.profile?.journal === "absent" ? "no journal" : "calls unknown";
-    return `OzAGIa G:${graph()} D:${daemon()} ${observed}`;
+    const result = [
+      "Ozagia",
+      `Status: ${statusText(status?.daemon?.state)}`,
+      `Graph: ${graphText(snapshot, snapshot?.details)}`,
+    ];
+    const model = record?.host_profile?.models?.[0];
+    if (model) result.push(`Model: ${model}`);
+    result.push(sessionText(record));
+    return result;
   };
-  return jsx("text", { fg: color, get children() { return summary(); } });
+  return jsx("text", { fg: color, get children() { return lines().join("\n"); } });
 }
 
 export default Plugin.define({

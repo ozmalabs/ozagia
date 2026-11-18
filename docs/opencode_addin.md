@@ -227,15 +227,38 @@ renders the report and status only. Neither plugin requires a change to the
 global `cli.json`. The optional Desktop GUI add-in offers the same report in
 its Profile tab through the add-in's `sessionProfile` RPC.
 
-While an `ozagia agent` launch is preparing the graph, the sidebar summary
-shows the launch phase instead of the profile counters: `OzAGIa G:checking
-D:waiting 0s`, `G:building`/`G:refreshing` (as the prep process reports it),
-`G:ready D:starting`, then the usual `G:fresh D:ready H.. P.. F.. U.. E..`.
+While an `ozagia agent` launch is preparing the graph, the sidebar shows the
+launch phase instead of the status metrics:
+
+```
+Ozagia
+Status: starting
+Graph: building · 4s
+Daemon: waiting
+```
+
 It reads the file named by `OZAGIA_LAUNCH_STATUS` (the session sets it in the
 TUI's environment) every 500 ms and stops once the phase is `ready` or
 `failed`, so the sidebar does not poll the launch file for the rest of the
 session. Without that variable (a standalone install, the Desktop add-in) the
-summary is the observed G/D line only.
+block is the live status only. Once ready it shows:
+
+```
+Ozagia
+Status: online
+Graph: stale · working tree changed
+Model: vllm/qwen3.8-27b
+Session: 366 tools · 268 model calls
+```
+
+`Status` is `online` when the graph daemon answers, `offline` when no daemon is
+configured, and `unavailable`/`unknown` when the probe cannot establish it.
+`Graph` reports the snapshot state and, when stale, the reason recorded by the
+doctor (`working tree changed`, `HEAD moved` or `different root`). The session
+line reports the observed tool and model-call counts for this session and adds
+an error count only when one was recorded. The previous `H/P/F/U/E` counters
+are gone; the detailed outcome counts remain available through the session
+profile report and CLI.
 
 The report counts daemon-observed tool/after operations per harness and
 session, handled tools, passthrough, expiry, errors, plugin fallbacks, and the
