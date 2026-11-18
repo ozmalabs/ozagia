@@ -79,6 +79,21 @@ LAST_BUILD: dict[str, Any] = {}
 MAX_SNIPPET_CHARS = 240
 MAX_SYMBOLS = 8
 
+# The two rankings that are fused, and what this search deliberately does not
+# use.  Every successful result states both so a caller does not have to infer
+# them from the implementation.
+SEARCH_SIGNALS = (
+    "BM25 lexical ranking",
+    "repo-map PageRank structural prior",
+    "Reciprocal Rank Fusion (RRF)",
+)
+SEARCH_EXCLUDED = (
+    "no embeddings",
+    "no model",
+    "no network",
+    "no dependencies beyond the standard library and repo-map",
+)
+
 _STOPWORDS = frozenset({
     "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from",
     "in", "into", "is", "it", "of", "on", "or", "that", "the", "this", "to",
@@ -515,7 +530,12 @@ def code_search(root: str | Path, query: str, *, limit: int = 20,
         rrf_k: RRF constant. Default 60.
 
     Returns:
-        ``{ok, query, results, n, bm25, rrf_k, fusion, index}``. Each result is
+        ``{ok, query, results, n, bm25, rrf_k, fusion, index, signals,
+        excluded}``. ``signals`` names the two fused rankings (BM25 and the
+        repo-map PageRank prior, combined by RRF); ``excluded`` names what the
+        search does not use (embeddings, a model, the network, or dependencies
+        beyond the standard library and repo-map). Both are present on every
+        result, including an empty query and a zero-result page. Each result is
         ``{path, score, bm25, bm25_rank, graph, graph_rank, symbols,
         line?, snippet?}``. ``score`` is the fused score
         ``1/(rrf_k+bm25_rank) + GRAPH_WEIGHT/(rrf_k+graph_rank)``; the graph
@@ -531,7 +551,9 @@ def code_search(root: str | Path, query: str, *, limit: int = 20,
     rrf_k = max(1, int(rrf_k))
     limit = max(0, int(limit))
     meta = {"bm25": {"k1": k1, "b": b}, "rrf_k": rrf_k,
-            "fusion": {"rrf_k": rrf_k, "graph_weight": GRAPH_WEIGHT}}
+            "fusion": {"rrf_k": rrf_k, "graph_weight": GRAPH_WEIGHT},
+            "signals": list(SEARCH_SIGNALS),
+            "excluded": list(SEARCH_EXCLUDED)}
 
     terms = _query_terms(raw_query)
     if not raw_query.strip():

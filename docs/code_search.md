@@ -54,10 +54,28 @@ The first four keyword arguments are the integration surface; `k1`, `b`, and
     "n": 1,
     "bm25": {"k1": 1.5, "b": 0.75},   # configuration, not a score
     "rrf_k": 60,
+    "signals": [
+        "BM25 lexical ranking",
+        "repo-map PageRank structural prior",
+        "Reciprocal Rank Fusion (RRF)"
+    ],
+    "excluded": [
+        "no embeddings",
+        "no model",
+        "no network",
+        "no dependencies beyond the standard library and repo-map"
+    ],
     "index": {"files": 6825, "terms": 218398},
 }
 ```
 
+- `signals` names the two rankings that are fused (BM25 and the repo-map
+  PageRank structural prior) and the fusion rule (RRF). `excluded` names what
+  the search deliberately does not use: embeddings, a model, the network, or
+  dependencies beyond the standard library and the existing repo-map.
+- Both fields are present on every successful result, including an empty
+  query, a query with no searchable terms and a `limit=0` page. They describe
+  the implementation; they are not scores and do not change ranking.
 - `results[].score` is the fused RRF score. `bm25` and `graph` are the raw
   component scores, so a caller can see why a file ranked where it did.
 - `symbols` contains matched definition tags from the repo-map cache, ranked
@@ -79,7 +97,12 @@ An empty or whitespace-only query is a normal result, not an error:
 
 ```python
 {"ok": True, "query": "   ", "results": [], "n": 0,
- "empty": True, "note": "empty query; nothing to search"}
+ "empty": True, "note": "empty query; nothing to search",
+ "signals": ["BM25 lexical ranking",
+             "repo-map PageRank structural prior",
+             "Reciprocal Rank Fusion (RRF)"],
+ "excluded": ["no embeddings", "no model", "no network",
+              "no dependencies beyond the standard library and repo-map"]}
 ```
 
 No index or tag-cache work is done in that case. A non-empty query that
@@ -183,7 +206,9 @@ function.
 - **MCP:** expose `dev_code_search(query, limit=20, include_snippet=True)`
   returning the result dict. Keep `path`, `score`, `bm25`, `graph`, `symbols`,
   `line`, and `snippet`; agents need the snippet and the matched symbol, not
-  just a path. Pass the shared `.ozagia/tags.json` cache path or rely on
+  just a path. Also keep `signals` and `excluded`: they tell the model which
+  retrieval signals produced the ranking and that embeddings/a model/network
+  were not used. Pass the shared `.ozagia/tags.json` cache path or rely on
   the `<root>/var` default.
 - **CLI:** a `code-search QUERY` verb with `--limit`, `--no-snippet`, and
   `--json`; text mode can print `path:line  snippet` plus the per-component

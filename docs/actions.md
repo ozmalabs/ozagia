@@ -255,12 +255,28 @@ fits its mode (for example `service.run` for a foreground service) while the
 other verbs remain explicitly `blocked`.
 
 `tunnel.start` is always `blocked` in readiness because live and network gates
-are operations, not configuration:
+are operations, not configuration: tunnel.start is always blocked unless
+explicit live and network gates are supplied.
 
 - `--allow-live` and `--allow-network` must be passed explicitly at apply;
 - the one-time confirmation token must come from a preview;
 - the relay policy, lease state, target reachability and remote authorization
   are not tested by readiness.
+
+### Stated limits
+
+Every readiness report includes these statements in `not_assessed`, in every
+state (`available`, `blocked`, `unknown` or `absent`):
+
+- "tunnel.start is always blocked unless explicit live and network gates are
+  supplied" — readiness never satisfies the gates itself; apply still needs
+  the explicit flags and a token.
+- "an unresolved secret reference keeps readiness unknown or blocked" — a
+  reference is reported, never resolved.
+- "readiness does not call actions.preview or actions.apply" — no token is
+  created and no operation is performed.
+- "readiness never starts, stops or signals a process" — process state is the
+  existing read-only runtime observation.
 
 ### What is joined
 

@@ -453,6 +453,39 @@ def test_list_show_and_audit_views_are_bounded_and_paginated():
     assert audit["counts"]["findings"] == 0
 
 
+def test_audit_states_its_directions_limits_and_coverage_even_with_no_findings():
+    audit = SG.audit_self_graph()
+    assert audit["findings"] == []
+    assert audit["directions"] == [
+        {
+            "kind": "declared_surface_not_observed",
+            "alias": "declared_not_observed",
+            "meaning": "a declared surface is absent from the observed "
+                       "inventory",
+        },
+        {
+            "kind": "observed_surface_undeclared",
+            "alias": "observed_not_declared",
+            "meaning": "an observed surface has no capability declaration",
+        },
+    ]
+    assert audit["limits"] == [
+        "readiness is not observed; installed, configured, reachable, trusted "
+        "and permitted are separate observations",
+        "coverage.exhaustive is always false; unknown coverage is not treated "
+        "as absence",
+        "the audit does not start or ping a daemon, refresh the graph, import "
+        "target code or call a model",
+    ]
+    assert audit["coverage"]["exhaustive"] is False
+    assert audit["coverage"]["statement"] == (
+        "coverage.exhaustive is always false; unknown coverage is not treated "
+        "as absence")
+    counts = audit["counts"]
+    assert counts["findings"] == 0
+    assert counts["capabilities"] > 0
+
+
 @pytest.mark.parametrize("kwargs", [
     {"limit": 0}, {"limit": -1}, {"limit": 201}, {"limit": True},
     {"limit": "3"}, {"cursor": "x"}, {"cursor": ""}, {"cursor": "9" * 65},
@@ -479,6 +512,17 @@ def test_cli_list_show_and_audit(capsys):
     audited = json.loads(capsys.readouterr().out)
     assert audited["action"] == "audit"
     assert audited["findings"] == []
+    assert [row["kind"] for row in audited["directions"]] == [
+        "declared_surface_not_observed", "observed_surface_undeclared"]
+    assert audited["limits"]
+    assert audited["coverage"]["statement"].startswith(
+        "coverage.exhaustive is always false")
+
+    assert cli.main(["capabilities", "audit"]) == 0
+    text = capsys.readouterr().out
+    assert "declared_surface_not_observed" in text
+    assert "readiness is not observed" in text
+    assert "coverage.exhaustive is always false" in text
 
     assert cli.main(["capabilities", "list"]) == 0
     text = capsys.readouterr().out
@@ -540,6 +584,12 @@ def test_mcp_dev_capabilities_is_listed_and_bounded(tmp_path):
     audit_payload = json.loads(audited["result"]["content"][0]["text"])
     assert audit_payload["action"] == "audit"
     assert audit_payload["findings"] == []
+    assert [row["alias"] for row in audit_payload["directions"]] == [
+        "declared_not_observed", "observed_not_declared"]
+    assert audit_payload["limits"]
+    assert audit_payload["coverage"]["statement"] == (
+        "coverage.exhaustive is always false; unknown coverage is not treated "
+        "as absence")
 
     shown = server_instance.handle({
         "jsonrpc": "2.0", "id": 4, "method": "tools/call",

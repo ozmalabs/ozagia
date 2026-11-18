@@ -109,6 +109,15 @@ unknown; it never upgrades a recorded pass.
    every non-true dimension and each checkout's reason.
 5. `assessment.notes` states that a test plan is not an executed test and that
    the graph was not refreshed.
+6. The report also carries a bounded top-level `rules` list with the same
+   assessment rules in canonical words:
+   - "green requires every required dimension is true and every fact it used
+     is current";
+   - "a plan is not a result; a test plan is not an executed test";
+   - "a stale graph or missing interpreter cannot be green";
+   - "the preflight does not refresh the graph".
+   `rules` is descriptive only: it is not an input, does not change a
+   dimension or the assessment, and is covered by the report hash.
 
 A missing interpreter, an absent graph, a failing/absent required capability
 and a failing criterion are `false` (failed). A stale graph, an unknown
@@ -165,6 +174,12 @@ omission; `criteria.truncated` is the page-specific envelope and
   "criteria": {"total": 2, "counts": {"passed": 1, "failed": 1},
                "items": ["..."], "truncated": {"...": "..."}},
   "assessment": {"status": "failed", "green": false, "reasons": ["..."]},
+  "rules": [
+    "green requires every required dimension is true and every fact it used is current",
+    "a plan is not a result; a test plan is not an executed test",
+    "a stale graph or missing interpreter cannot be green",
+    "the preflight does not refresh the graph"
+  ],
   "not_assessed": ["..."],
   "deferred": ["..."],
   "linked": {"schema": {"...": "..."}, "readiness": "unknown",

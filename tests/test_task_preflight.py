@@ -506,6 +506,23 @@ def test_fact_truncation_sets_the_envelope(tmp_path):
     assert report["bounds"]["facts_returned"] == 1
 
 
+def test_report_states_its_rules_and_hash_is_deterministic(tmp_path):
+    first = build(tmp_path)
+    second = build(tmp_path)
+    assert first["rules"] == [
+        "green requires every required dimension is true and every fact it "
+        "used is current",
+        "a plan is not a result; a test plan is not an executed test",
+        "a stale graph or missing interpreter cannot be green",
+        "the preflight does not refresh the graph",
+    ]
+    assert first["rules"] == list(TP.RULES)
+    assert first["rules"] == second["rules"]
+    assert first["hash"] == second["hash"]
+    assert first["hash"] == TP.report_hash(first)
+    assert first["assessment"]["status"] == second["assessment"]["status"]
+
+
 def test_report_is_canonical_and_hashed(tmp_path):
     report = build(tmp_path)
     text = TP.report_json(report)

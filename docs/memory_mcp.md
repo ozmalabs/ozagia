@@ -263,7 +263,7 @@ their contents as supporting evidence for each other.
 | `dev_graph_query` | Ocelot adapter tool: run a raw substrate DSL Term (read-only) over the snapshot. |
 | `dev_stats` | Check snapshot freshness/histograms. |
 | `dev_changed` | Working-tree changes, linked to graph files. |
-| `dev_record` | Append a decision/verification receipt. |
+| `dev_record` | Append a decision/verification receipt to the shared, append-only journal of decisions and verifications. |
 | `dev_session_start` | Start a replayable Task→Plan→Step→Edit→Verify graph. |
 | `dev_session_record` | Append `plan` / `step` / `attempt` / `edit` / `verification` / `decision`. |
 | `dev_session_state` | Session graph snapshot + next action. |
@@ -277,8 +277,8 @@ their contents as supporting evidence for each other.
 | `dev_aws_cli_check` | Offline AWS CLI service/operation check using local models. |
 | `dev_relay_plan` | Dry-run relay command/tunnel plan; no live process or socket. |
 | `dev_preflight_plan` | Build a dry-run, scrubbed emulator plan; never executes it. |
-| `dev_capabilities` | Read-only list/show/audit of Ozagia's declared capabilities and their observed CLI/MCP/daemon/toolchain/status surfaces. Bounded by `limit`/`cursor`; unknown coverage is explicit. |
-| `dev_maps` | Bounded read-only model-facing maps: `graph`, `outline`, `capabilities` or `work`/evidence. Returns structured v1 or L0-style plain output with schema/content hashes, source/snapshot identities, freshness, evidence/trust labels, omissions and truncation, configured/observed negotiation and explicit fallback. `limit`/`cursor` page a task-scoped result. Writes only bounded cache metadata under `.ozagia/model_api/cache`. |
+| `dev_capabilities` | Read-only list/show/audit of Ozagia's declared capabilities and their observed CLI/MCP/daemon/toolchain/status surfaces. The audit states both mismatch directions (`declared_surface_not_observed`/`declared_not_observed` and `observed_surface_undeclared`/`observed_not_declared`, with meaning) plus explicit coverage and readiness limits (`coverage.statement`, `limits`). Bounded by `limit`/`cursor`; unknown coverage is explicit. |
+| `dev_maps` | Bounded read-only model-facing maps: `graph`, `outline`, `capabilities` or `work`/evidence. Use it to orient before reading or editing: `map=graph` for a key's bounded neighbourhood, `map=outline` for signatures/headings, `map=capabilities` for the declared-capability audit including its directions and limits, and `map=work` for a goal's recorded evidence plus the explicit omissions of that join (task output is not collected; the interpreter link is unknown). Returns structured v1 or L0-style plain output with schema/content hashes, source/snapshot identities, freshness, evidence/trust labels, omissions and truncation, configured/observed negotiation and explicit fallback. `limit`/`cursor` page a task-scoped result. Writes only bounded cache metadata under `.ozagia/model_api/cache`. |
 
 All tools are read-only except `dev_edit`, `dev_span_edit` and `dev_key_edit` (transactions, preview by
 default, backup on apply), `dev_record` (one JSONL line), and `dev_maps`

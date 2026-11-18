@@ -252,6 +252,12 @@ def test_capabilities_map_is_explicitly_not_exhaustive(repo: Path) -> None:
     assert len(data["items"]) == 3
     assert data["counts"]["total"] > 3
     assert data["coverage"]["exhaustive"] is False
+    assert data["coverage"]["statement"] == (
+        "coverage.exhaustive is always false; unknown coverage is not treated "
+        "as absence")
+    assert [row["kind"] for row in data["audit"]["directions"]] == [
+        "declared_surface_not_observed", "observed_surface_undeclared"]
+    assert data["audit"]["limits"]
     assert data["not_assessed"]
     assert data["audit"]["state"] in {"current", "partial", "unknown"}
     assert data["source_identities"]["catalogue"]["hash"]
@@ -307,6 +313,24 @@ def test_work_map_is_redacted_and_keeps_absent_test_record(repo: Path) -> None:
     assert kinds["test_record"]["freshness"] == "absent"
     assert instance["data"]["coverage"]["test_record"] == "absent"
     assert instance["data"]["deferred"]
+    not_assessed = instance["data"]["not_assessed"]
+    assert (
+        "task output is not collected; only manifests, hashes and redacted "
+        "metadata" in not_assessed)
+    assert "the interpreter link for a recorded test run is unknown" in (
+        not_assessed)
+    assert len(not_assessed) <= 16
+    assert not_assessed == list(dict.fromkeys(not_assessed))
+
+    again = _instance(request_map(
+        make_request("work", target={"goal": "g1"}),
+        _policy(repo), configured_support=_support("work"),
+        evidence_sources=sources))
+    assert again["data"]["not_assessed"] == not_assessed
+    assert response["map_hash"] == request_map(
+        make_request("work", target={"goal": "g1"}),
+        _policy(repo), configured_support=_support("work"),
+        evidence_sources=sources)["map_hash"]
 
 
 def test_absent_work_goal_is_explicit_and_strict_fails(repo: Path) -> None:

@@ -94,6 +94,23 @@ def _forbid_mutation(monkeypatch) -> None:
     monkeypatch.setattr(secrets.SecretValue, "reveal", forbidden)
 
 
+GUARANTEES = (
+    "tunnel.start is always blocked unless explicit live and network gates "
+    "are supplied",
+    "an unresolved secret reference keeps readiness unknown or blocked",
+    "readiness does not call actions.preview or actions.apply",
+    "readiness never starts, stops or signals a process",
+)
+
+
+def _assert_guarantees(report: dict) -> None:
+    """Every readiness report states the same read-only guarantees."""
+    for item in GUARANTEES:
+        assert item in report["not_assessed"]
+    assert len(report["not_assessed"]) >= len(GUARANTEES)
+    assert report["provenance"]["wrote"] is False
+
+
 def test_configured_background_service_is_available_and_writes_nothing(
         tmp_path, monkeypatch):
     _write_config(tmp_path)
@@ -131,6 +148,7 @@ def test_configured_background_service_is_available_and_writes_nothing(
     assert _snapshot(tmp_path) == before
     assert not state_path(tmp_path, "actions").exists()
     assert not state_path(tmp_path, "runtime").exists()
+    _assert_guarantees(report)
 
 
 def test_unconfigured_service_is_absent_and_never_available(tmp_path, monkeypatch):
@@ -148,6 +166,7 @@ def test_unconfigured_service_is_absent_and_never_available(tmp_path, monkeypatc
     assert report["counts"]["operations"]["absent"] == 1
     assert not state_path(tmp_path, "actions").exists()
     assert not state_path(tmp_path, "runtime").exists()
+    _assert_guarantees(report)
 
 
 def test_live_gated_tunnel_is_blocked_and_reports_its_gates(
@@ -172,6 +191,7 @@ def test_live_gated_tunnel_is_blocked_and_reports_its_gates(
     assert target["lease"]["held"] is False
     assert not state_path(tmp_path, "actions").exists()
     assert not state_path(tmp_path, "runtime").exists()
+    _assert_guarantees(report)
 
 
 def test_stale_process_identity_is_blocked_and_readiness_does_not_reconcile(
@@ -238,6 +258,7 @@ def test_unresolved_secret_reference_is_unknown_and_never_resolved(
     assert report["provenance"]["secrets_resolved"] is False
     assert not state_path(tmp_path, "actions").exists()
     assert not state_path(tmp_path, "runtime").exists()
+    _assert_guarantees(report)
 
 
 def test_session_secret_reference_blocks_a_runtime_service(

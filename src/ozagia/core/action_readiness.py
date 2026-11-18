@@ -819,6 +819,11 @@ def readiness(root: str | Path, *, selections: Any = None,
             "log content was not read; only presence and size metadata",
             "no confirmation token, audit record or runtime record was created",
             "daemon and integration actions are outside this join",
+            "tunnel.start is always blocked unless explicit live and network "
+            "gates are supplied",
+            "an unresolved secret reference keeps readiness unknown or blocked",
+            "readiness does not call actions.preview or actions.apply",
+            "readiness never starts, stops or signals a process",
         ],
         "deferred": [
             "action preview and one-time confirmation tokens",

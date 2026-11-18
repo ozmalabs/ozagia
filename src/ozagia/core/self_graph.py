@@ -70,6 +70,36 @@ EDGE_STATE_RANK = {
     "undeclared": 4, "unknown": 5,
 }
 
+# The audit's two mismatch directions, named canonically.  The alias is the
+# inventory-gap spelling of the same direction.  They are constants because the
+# audit view states them even when it reports zero findings.
+MISMATCH_DIRECTIONS = (
+    {
+        "kind": "declared_surface_not_observed",
+        "alias": "declared_not_observed",
+        "meaning": "a declared surface is absent from the observed inventory",
+    },
+    {
+        "kind": "observed_surface_undeclared",
+        "alias": "observed_not_declared",
+        "meaning": "an observed surface has no capability declaration",
+    },
+)
+
+AUDIT_LIMITS = (
+    "readiness is not observed; installed, configured, reachable, trusted and "
+    "permitted are separate observations",
+    "coverage.exhaustive is always false; unknown coverage is not treated as "
+    "absence",
+    "the audit does not start or ping a daemon, refresh the graph, import "
+    "target code or call a model",
+)
+
+COVERAGE_STATEMENT = (
+    "coverage.exhaustive is always false; unknown coverage is not treated as "
+    "absence"
+)
+
 DEFAULT_LIMIT = 25
 MAX_LIMIT = 200
 MAX_GRAPH_NODES = 2_000
@@ -1351,6 +1381,7 @@ def _coverage(observations: Mapping[str, Any],
             "emitter is unknown")
     return {
         "exhaustive": False,
+        "statement": COVERAGE_STATEMENT,
         "audited_surface_kinds": list(REQUIRED_SURFACE_KINDS),
         "count_semantics": (
             "per-kind maps cover every inventory kind; audited totals include "
@@ -1555,6 +1586,8 @@ def audit_self_graph(*, capabilities: Sequence[K.Capability] | None = None,
         **_report_common(report, "audit"),
         "state": report["audit"]["state"],
         "hash": report["audit"]["hash"],
+        "directions": [dict(item) for item in MISMATCH_DIRECTIONS],
+        "limits": list(AUDIT_LIMITS),
         "findings": page,
         "truncation": truncation.to_dict(),
         "counts": {
@@ -1591,8 +1624,9 @@ def self_graph_hash(report: Mapping[str, Any]) -> str:
 
 
 __all__ = [
-    "AUDIT_STATES", "DEFAULT_LIMIT", "EDGE_STATES", "EDGE_TYPES",
-    "EXCLUDED_SURFACE_KINDS", "MAX_LIMIT", "NODE_KINDS",
+    "AUDIT_LIMITS", "AUDIT_STATES", "COVERAGE_STATEMENT", "DEFAULT_LIMIT",
+    "EDGE_STATES", "EDGE_TYPES",
+    "EXCLUDED_SURFACE_KINDS", "MAX_LIMIT", "MISMATCH_DIRECTIONS", "NODE_KINDS",
     "OBSERVATION_NAMESPACE", "REPORT_VERSION", "REQUIRED_SURFACE_KINDS",
     "SCHEMA_NAMESPACE", "SCHEMA_VERSION", "SelfGraphError", "SURFACE_KINDS",
     "audit_self_graph", "build_self_graph", "capability_list",
