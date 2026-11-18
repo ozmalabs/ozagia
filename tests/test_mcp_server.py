@@ -429,6 +429,33 @@ def test_arguments_must_be_an_object(server) -> None:
     assert resp["error"]["code"] == -32602
 
 
+@pytest.mark.parametrize(("mode", "surface", "first_tool"), [
+    ("coding", "full", "dev_context"),
+    ("combined", "graph", "find"),
+    ("research", "full", None),
+])
+def test_initialize_advertises_coding_guidance(server, mode, surface, first_tool) -> None:
+    memory = server.mem if first_tool else None
+    instance = DevMemoryServer(memory, mode=mode, surface=surface)
+    result = instance.handle({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+    })["result"]
+    resources = instance.handle({
+        "jsonrpc": "2.0", "id": 2, "method": "resources/list",
+    })["result"]["resources"]
+    if first_tool:
+        assert first_tool in result["instructions"]
+        if mode == "coding" and surface == "full":
+            assert "dev_maps" in result["instructions"]
+            assert "dev_capabilities" in result["instructions"]
+        assert "resources" in result["capabilities"]
+        assert resources[0]["uri"] in result["instructions"]
+    else:
+        assert "instructions" not in result
+        assert "resources" not in result["capabilities"]
+        assert resources == []
+
+
 def test_initialize_negotiates_protocol_version(server) -> None:
     echoed = server.handle({"jsonrpc": "2.0", "id": 1,
                             "method": "initialize",
