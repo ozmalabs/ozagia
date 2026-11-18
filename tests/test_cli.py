@@ -247,6 +247,53 @@ def test_agent_maps_options_to_run_agent(repo, tmp_path, monkeypatch):
     assert seen["progress"].enabled is False
 
 
+def test_agent_repo_map_flag_defaults_and_passes_the_budget(repo, monkeypatch):
+    from ozagia.harness import opencode as hop
+    seen: list = []
+
+    def fake(workdir, **kw):
+        seen.append(kw.get("repo_map_tokens"))
+        return {"exit_code": 0, "timed_out": False}
+
+    monkeypatch.setattr(hop, "run_agent", fake)
+    assert cli.main(["agent", "--root", str(repo), "--prompt", "x"]) == 0
+    assert cli.main(["agent", "--root", str(repo), "--prompt", "x",
+                     "--repo-map"]) == 0
+    assert cli.main(["agent", "--root", str(repo), "--prompt", "x",
+                     "--repo-map", "--repo-map-tokens", "2500"]) == 0
+    assert seen == [None, 1500, 2500]
+
+
+def test_agent_repo_map_bounds_and_dependency(repo, capsys):
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["agent", "--root", str(repo), "--prompt", "x",
+                  "--repo-map", "--repo-map-tokens", "199"])
+    assert exc.value.code == 2
+    assert "between 200 and 8000" in capsys.readouterr().err
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["agent", "--root", str(repo), "--prompt", "x",
+                  "--repo-map", "--repo-map-tokens", "8001"])
+    assert exc.value.code == 2
+    assert "between 200 and 8000" in capsys.readouterr().err
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["agent", "--root", str(repo), "--prompt", "x",
+                  "--repo-map-tokens", "500"])
+    assert exc.value.code == 2
+    assert "--repo-map-tokens needs --repo-map" in capsys.readouterr().err
+
+
+def test_agent_help_describes_opt_in_repo_map(capsys):
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["agent", "--help"])
+    assert exc.value.code == 0
+    text = " ".join(capsys.readouterr().out.split())
+    assert "bounded, task-ranked repository map in the first model request" in text
+    assert "off by default" in text
+    assert "200..8000" in text and "default: 1500" in text
+
+
 def test_agent_exit_codes(repo, monkeypatch, capsys):
     from ozagia.harness import opencode as hop
     results = iter([{"timed_out": True, "exit_code": None},

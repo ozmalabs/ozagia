@@ -4,6 +4,7 @@
     ozagia index [--root R] [--rebuild]
     ozagia agent [--workdir W] [--prompt TEXT | --prompt-file F] [--model M]
                  [--mcp coding|research|combined | --research]
+                 [--repo-map [--repo-map-tokens N]]
                  [--clone [--base REV]] [--keep-plugin] [--timeout S]
                  [--python P] [--runs-dir D] [-- <extra opencode args>]
     ozagia daemon serve|ensure|ping|stats|shutdown ... (python -m ozagia.daemon)
@@ -318,7 +319,8 @@ def _cmd_agent(args: argparse.Namespace) -> int:
                         clone=args.clone, base=args.base, keep_plugin=args.keep_plugin,
                         timeout_s=args.timeout, extra_args=args.extra,
                         run_python=args.python, opencode=_opencode_exe(args.opencode),
-                        runs_dir=args.runs_dir, mcp_mode=args.mcp, progress=progress)
+                        runs_dir=args.runs_dir, mcp_mode=args.mcp, progress=progress,
+                        repo_map_tokens=args.repo_map_tokens)
     except (AgentError, SessionError) as exc:
         progress.close()
         print(f"error: {exc}", file=sys.stderr)
@@ -1152,6 +1154,13 @@ def build_parser() -> argparse.ArgumentParser:
                     help="same as --mcp combined")
     ag.add_argument("--runs-dir", default=None,
                     help="where run roots (logs, clones) go (default: <tmp>/ozagia_agent)")
+    ag.add_argument("--repo-map", action="store_true",
+                    help="send a bounded, task-ranked repository map in the first "
+                         "model request (off by default)")
+    ag.add_argument("--repo-map-tokens", type=_repo_map_budget, default=None,
+                    metavar="N",
+                    help="repo-map token budget with --repo-map, 200..8000 "
+                         "(default: 1500)")
 
     for name, (_fn, text) in DELEGATES.items():
         sub.add_parser(name, help=text, add_help=False)
@@ -1453,12 +1462,26 @@ def _opencode_exe(value: str | None) -> str:
     return value or os.environ.get("OZAGIA_OPENCODE") or "opencode"
 
 
+def _repo_map_budget(value: str) -> int:
+    """Argparse type for --repo-map-tokens: an integer in the runner's range."""
+    from ozagia.harness.opencode import AgentError, validate_repo_map_tokens
+    try:
+        tokens = int(value)
+    except ValueError:
+        tokens = None
+    try:
+        return validate_repo_map_tokens(tokens)
+    except AgentError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
+
+
 _COMMANDS = frozenset({"index", "agent", "install", "who", "replace",
                        "review-repo", "goal", "capabilities",
                        "task-preflight", *DELEGATES})
 # Agent options that may lead a bare `ozagia ...` (the TUI).
 _AGENT_FLAGS = frozenset({"--research", "--mcp", "--model", "-m", "--workdir",
-                          "--root", "--clone", "--prompt", "--prompt-file"})
+                          "--root", "--clone", "--prompt", "--prompt-file",
+                          "--repo-map", "--repo-map-tokens"})
 
 
 def _default_agent(argv: list[str]) -> list[str]:
@@ -1500,6 +1523,11 @@ def main(argv: list[str] | None = None) -> int:
         args.extra = extra
         if args.base and not args.clone:
             parser.error("--base needs --clone")
+        if args.repo_map_tokens is not None and not args.repo_map:
+            parser.error("--repo-map-tokens needs --repo-map")
+        if args.repo_map and args.repo_map_tokens is None:
+            from ozagia.harness.opencode import REPO_MAP_DEFAULT_TOKENS
+            args.repo_map_tokens = REPO_MAP_DEFAULT_TOKENS
         return _cmd_agent(args)
     if args.command == "job":
         return _cmd_job(args)

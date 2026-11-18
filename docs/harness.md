@@ -40,6 +40,8 @@ ozagia agent                                                       # the TUI
 | `--python P` | `python` in the agent's shell commands (and the daemon's) is P |
 | `--opencode EXE` | the opencode executable (default `opencode` on PATH) |
 | `--runs-dir D` | where run roots go (default `<tmp>/ozagia_agent`) |
+| `--repo-map` | send a bounded, task-ranked repository map in the first model request; off by default |
+| `--repo-map-tokens N` | repo-map budget for `--repo-map`, 200..8000 (default 1500); needs `--repo-map` |
 | `-- ARGS` | passed to opencode before the prompt |
 
 Exit status: opencode's exit code; 124 after a timeout; 130 after Ctrl-C; 2
@@ -77,7 +79,9 @@ daemon failure).
    process's environment, and with `--python`, the python shim first on PATH.
    `OZAGIA_GIT_REFS_PASSTHROUGH=1` tells the plugin to let ref-moving git
    commands reach that built-in shell, where OpenCode's permission service
-   remains authoritative.
+   remains authoritative. With `--repo-map`, `OZAGIA_REPO_MAP_TOKENS` carries
+   the budget; without it the variable is absent from the OpenCode process's
+   environment even when the caller's environment sets it.
    The TUI also gets `OZAGIA_LAUNCH_STATUS`, the status file its sidebar
    polls.
    - With a prompt: `opencode run --standalone --format json --auto --archived
@@ -153,6 +157,46 @@ ozagia agent: exit 0 after 41.2 s in /path/repo
 `fallbacks` its `stats.fallbacks` (the plugin's fallback reports, expired
 requests and failed requests; the `eval.agent.graph_stats_fields` fields). `run_agent` returns these and the
 paths as a dict.
+
+### Repo-map delivery (opt-in)
+
+```bash
+ozagia agent --repo-map --repo-map-tokens 1200 --prompt "fix the retry loop"
+```
+
+`--repo-map` is off by default. When on, the runner validates the budget
+(200..8000; default 1500), sets `OZAGIA_REPO_MAP_TOKENS` for the OpenCode
+process only, and puts `repo_map_tokens` in the result. The plugin reads the
+variable once and sends that value on its existing `hint` request. The daemon:
+
+1. calls `memory.staleness(force=True)` before doing any map work;
+2. serves `memory.repo_map(prompt, budget_tokens=N)` only when the result says
+   `freshness == "fresh"` and the snapshot is not stale;
+3. wraps the markdown map in a short header naming the ranked map, the
+   snapshot's freshness and the budget, followed by a one-line instruction to
+   verify paths and symbols with `read` or `ozagia_structure`;
+4. answers an empty context for a stale, unknown, empty or failed map, with a
+   bounded reason in `meta.repo_map` and no stale text.
+
+A delivered answer carries `meta.repo_map = {delivered: true, tokens: N,
+estimated_tokens, files: [top paths], freshness, graph_hash, cache, truncated:
+false}`. A skip carries `{delivered: false, reason, freshness}`. The daemon
+counts `repo_map_delivered`, `repo_map_skipped`, `repo_map_tokens` (estimated
+tokens delivered) and `repo_map_files` (top paths delivered) in `stats`.
+
+In repo-map mode the plugin asks on model requests instead of caching the
+first answer for the whole prompt, so a new task gets a new map. A skipped or
+empty map adds nothing to `[ozagia task context]`; it never injects the
+ordinary "no task-specific context" line or a stale map. Without
+`--repo-map`, the ordinary hint and its once-per-prompt cache are unchanged.
+The map adds no tool and changes no file; ordinary search and reads remain
+available. See [repo_map.md](repo_map.md).
+
+The summary adds one line when the mode is on:
+
+```
+  repo map: 1200 tokens; delivered 4, skipped 0
+```
 
 ### Interactive mode and the plugin's environment
 

@@ -37,7 +37,8 @@ import json, os, socket, subprocess, sys, time
 rec = {"argv": sys.argv, "cwd": os.getcwd(), "pid": os.getpid(),
        "started_at": time.time(),
        "env": {k: os.environ.get(k) for k in ("OZAGIA_DAEMON_SOCK", "PWD", "OPENCODE_CONFIG",
-                                              "OZAGIA_LAUNCH_STATUS")}}
+                                              "OZAGIA_LAUNCH_STATUS",
+                                              "OZAGIA_REPO_MAP_TOKENS")}}
 cfg = os.environ.get("OPENCODE_CONFIG")
 rec["config"] = json.load(open(cfg)) if cfg and os.path.isfile(cfg) else None
 rec["plugin_present"] = os.path.isfile(os.path.join(os.getcwd(), ".opencode", "plugins", "ozagia.js"))
@@ -174,6 +175,40 @@ def test_run_agent_end_to_end(repo, stub, tmp_path):
     assert _exclude_lines(repo).count(EXCLUDES[2]) == 1
     assert res["exclude_removed"] == [*EXCLUDES[:2], PROFILE_EXCLUDE]
     assert _git(repo, "status", "--porcelain") == ""
+
+
+def test_repo_map_budget_is_passed_to_opencode_and_reported(repo, stub, tmp_path):
+    res = _run(repo, tmp_path, repo_map_tokens=500)
+    rec = _record(stub)
+    assert rec["env"]["OZAGIA_REPO_MAP_TOKENS"] == "500"
+    assert res["repo_map_tokens"] == 500
+    assert res["daemon_stats"]["repo_map_delivered"] == 0
+    assert res["daemon_stats"]["repo_map_skipped"] == 0
+    summary = hop._summary(res)
+    assert "repo map: 500 tokens; delivered 0, skipped 0" in summary
+
+
+def test_repo_map_is_off_without_the_option_even_if_inherited(repo, stub, tmp_path,
+                                                              monkeypatch):
+    monkeypatch.setenv("OZAGIA_REPO_MAP_TOKENS", "900")
+    res = _run(repo, tmp_path)
+    rec = _record(stub)
+    assert rec["env"]["OZAGIA_REPO_MAP_TOKENS"] is None
+    assert res["repo_map_tokens"] is None
+    assert "repo map:" not in hop._summary(res)
+
+
+@pytest.mark.parametrize("value", [199, 8001, True, "1500", 1500.0])
+def test_run_agent_rejects_invalid_repo_map_budgets(repo, value):
+    with pytest.raises(AgentError, match="repo_map_tokens must be an integer"):
+        run_agent(repo, prompt="x", repo_map_tokens=value)
+
+
+def test_run_agent_accepts_the_repo_map_bounds(repo, stub, tmp_path):
+    low = _run(repo, tmp_path, repo_map_tokens=200)
+    high = _run(repo, tmp_path, repo_map_tokens=8000)
+    assert low["repo_map_tokens"] == 200
+    assert high["repo_map_tokens"] == 8000
 
 
 def test_second_run_is_idempotent_and_refreshes(repo, stub, tmp_path):

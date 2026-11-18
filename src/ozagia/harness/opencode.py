@@ -35,7 +35,11 @@
    a `model` goes here too, because the TUI has no `--model` flag.
 7. Runs OpenCode in the workdir with `OZAGIA_DAEMON_SOCK`, `PWD` (OpenCode
    takes its project directory from it), `OPENCODE_CONFIG`, and with
-   `run_python`, a PATH whose first entry is a `python` shim.
+   `run_python`, a PATH whose first entry is a `python` shim. With
+   `repo_map_tokens`, `OZAGIA_REPO_MAP_TOKENS` is set too (and removed from
+   the inherited environment otherwise), so the plugin asks the daemon for a
+   bounded, ranked repository map on each model request. Without it the
+   plugin's ordinary once-per-prompt hint is unchanged.
    - Prompt given: `opencode run --standalone --format json --auto --archived
      [-m model] [extra args] <prompt>`, its own process group, stdout and
      stderr to files in the logs, killed after `timeout_s`.
@@ -89,6 +93,10 @@ EXCLUDE_PATTERNS = ("/" + plugin.PLUGIN_REL.as_posix(),
                     "/" + plugin.TUI_BRAND_REL.as_posix(),
                     "/" + plugin.TUI_PROFILE_REL.as_posix(), "/.ozagia/")
 RUNS_DIRNAME = "ozagia_agent"
+REPO_MAP_ENV = "OZAGIA_REPO_MAP_TOKENS"
+REPO_MAP_DEFAULT_TOKENS = 1500
+REPO_MAP_MIN_TOKENS = 200
+REPO_MAP_MAX_TOKENS = 8000
 # Seconds the TUI gets to exit after SIGTERM before SIGKILL.
 TUI_KILL_GRACE_S = ea.KILL_GRACE_S
 
@@ -105,6 +113,18 @@ def find_opencode(opencode: str = "opencode") -> str:
             f"OpenCode executable {opencode!r} not found on PATH. Install OpenCode "
             "(https://opencode.ai) or put it on PATH, then retry.")
     return exe
+
+
+def validate_repo_map_tokens(value: Any) -> int:
+    """An integer repo-map budget in [200, 8000], else AgentError."""
+    tokens: int | None = None
+    if isinstance(value, int) and not isinstance(value, bool):
+        tokens = value
+    if tokens is None or not REPO_MAP_MIN_TOKENS <= tokens <= REPO_MAP_MAX_TOKENS:
+        raise AgentError(
+            f"repo_map_tokens must be an integer between {REPO_MAP_MIN_TOKENS} "
+            f"and {REPO_MAP_MAX_TOKENS}, got {value!r}")
+    return tokens
 
 
 def _git(args: list[str], cwd: Path) -> subprocess.CompletedProcess:
@@ -283,6 +303,16 @@ def _summary(res: dict[str, Any]) -> str:
         f"{res.get('captured_calls')}; passthrough: {res.get('passthrough_calls')}; "
         f"fallbacks: {res.get('fallbacks')}",
     ]
+    if res.get("repo_map_tokens") is not None:
+        stats = res.get("daemon_stats") or {}
+
+        def count(name: str) -> str:
+            value = stats.get(name)
+            return "unknown" if value is None else str(value)
+
+        lines.append(
+            f"  repo map: {res['repo_map_tokens']} tokens; delivered "
+            f"{count('repo_map_delivered')}, skipped {count('repo_map_skipped')}")
     if prep.get("still_stale"):
         lines.append("  note: the snapshot was refreshed but HEAD moved since it was built; "
                      "`ozagia index --rebuild` updates git history")
@@ -306,7 +336,8 @@ def run_agent(workdir: str | Path, *, prompt: str | None = None, model: str | No
               build: str = "auto", runs_dir: str | Path | None = None,
               quiet: bool = False, mcp_mode: str | None = None,
               progress: Progress | None = None,
-              background: bool | None = None) -> dict[str, Any]:
+              background: bool | None = None,
+              repo_map_tokens: int | None = None) -> dict[str, Any]:
     """Run one OpenCode session on `workdir` with the graph daemon and plugin
     (see the module docstring). Returns {exit_code, seconds, timed_out,
     transcript_path, stdout_path, stderr_path, daemon_stats, plugin_loaded,
@@ -318,7 +349,13 @@ def run_agent(workdir: str | Path, *, prompt: str | None = None, model: str | No
     silence. `background` (default: the interactive TUI; always off for a
     non-interactive run) makes the snapshot current and starts the daemon
     while the session runs, publishing the phases for the TUI sidebar; `False`
-    waits before OpenCode starts."""
+    waits before OpenCode starts. `repo_map_tokens` (200..8000) opts into the
+    bounded repo-map delivery: the OpenCode process gets
+    `OZAGIA_REPO_MAP_TOKENS`, and the result and summary report the daemon's
+    delivered/skipped counts. Without it no repo-map variable is passed and
+    the plugin's ordinary hint is unchanged."""
+    if repo_map_tokens is not None:
+        repo_map_tokens = validate_repo_map_tokens(repo_map_tokens)
     exe = find_opencode(opencode)
     progress = progress if progress is not None else NULL_PROGRESS
     if mcp_mode is not None and mcp_mode not in MCP_MODES:
@@ -352,7 +389,7 @@ def run_agent(workdir: str | Path, *, prompt: str | None = None, model: str | No
                            "background": background, "launch_status": (
                                str(status_path) if status_path is not None else None),
                            "sock": None, "prep": None, "build_s": None, "ready_s": None,
-                           "launch_error": None,
+                           "launch_error": None, "repo_map_tokens": repo_map_tokens,
                            "exclude": None, "plugin_path": None, "daemon_stop_error": None}
     with _sigterm_as_interrupt():
         if clone:
@@ -389,7 +426,8 @@ def run_agent(workdir: str | Path, *, prompt: str | None = None, model: str | No
                 res.update(_with_plugin(exe, work, session, prompt=prompt, model=model,
                                         interactive=interactive, keep_plugin=keep_plugin,
                                         timeout_s=timeout_s, extra_args=extra_args,
-                                        config=config, log_dir=log_dir))
+                                        config=config, log_dir=log_dir,
+                                        repo_map_tokens=repo_map_tokens))
         finally:
             if not keep_plugin:
                 with no_interrupt():
@@ -410,7 +448,7 @@ def run_agent(workdir: str | Path, *, prompt: str | None = None, model: str | No
 def _with_plugin(exe: str, work: Path, session: GraphSession, *, prompt: str | None,
                  model: str | None, interactive: bool, keep_plugin: bool,
                  timeout_s: float | None, extra_args: Sequence[str], config: Path,
-                 log_dir: Path) -> dict[str, Any]:
+                 log_dir: Path, repo_map_tokens: int | None = None) -> dict[str, Any]:
     """Install the plugin, run OpenCode, remove the plugin (in `finally`)."""
     path = plugin.plugin_path(work)
     existed = path.exists()
@@ -432,6 +470,11 @@ def _with_plugin(exe: str, work: Path, session: GraphSession, *, prompt: str | N
         env.update({ENV_SOCK: str(session.sock), "PWD": str(work),
                     "OPENCODE_CONFIG": str(config),
                     "OZAGIA_GIT_REFS_PASSTHROUGH": "1"})
+        if repo_map_tokens is None:
+            # Off by default even when the caller's environment sets it.
+            env.pop(REPO_MAP_ENV, None)
+        else:
+            env[REPO_MAP_ENV] = str(repo_map_tokens)
         if session.status_path is not None:
             env[launch_status.ENV_LAUNCH_STATUS] = str(session.status_path)
         if interactive:
@@ -465,5 +508,8 @@ def _with_plugin(exe: str, work: Path, session: GraphSession, *, prompt: str | N
                 plugin.uninstall(work)
 
 
-__all__ = ["AgentError", "EXCLUDE_PATTERNS", "RUN_ARGV", "TUI_ARGV", "find_opencode",
-           "git_exclude", "git_unexclude", "run_agent", "write_opencode_config"]
+__all__ = ["AgentError", "EXCLUDE_PATTERNS", "REPO_MAP_DEFAULT_TOKENS",
+           "REPO_MAP_ENV", "REPO_MAP_MAX_TOKENS", "REPO_MAP_MIN_TOKENS",
+           "RUN_ARGV", "TUI_ARGV", "find_opencode", "git_exclude",
+           "git_unexclude", "run_agent", "validate_repo_map_tokens",
+           "write_opencode_config"]

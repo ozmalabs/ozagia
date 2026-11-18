@@ -204,6 +204,12 @@ LIBRARY_HINT_TOOLS = frozenset({"edit", "write", "patch"})
 LIBRARY_HINT_FILES = 20
 LIBRARY_HINT_DEDUPE_S = 300.0
 LIBRARY_HINT_SEEN_KEPT = 512
+# Ranked repo-map delivery in `hint`: the accepted token budget, the paths
+# named in `meta.repo_map.files`, and the reason text's bound.
+REPO_MAP_MIN_TOKENS = 200
+REPO_MAP_MAX_TOKENS = 8000
+REPO_MAP_FILES_SHOWN = 10
+REPO_MAP_REASON_CHARS = 120
 # `$OZAGIA_FILE_LEDGER=0` turns the daemon's ledger scans off.
 ENV_FILE_LEDGER = "OZAGIA_FILE_LEDGER"
 # `meta` counters the daemon sums into its stats.
@@ -525,6 +531,13 @@ class DaemonState:
         self.library_seen: dict[tuple[str, str, str], tuple[int, int, float]] = {}
         # Goal lines added after edits (`ozagia.core.goals.edit_hints`).
         self.goal_hints = 0
+        # Ranked repo-map delivery (`hint` with `repo_map_tokens`): maps
+        # delivered, requests skipped (stale/empty/error), and the estimated
+        # tokens and file paths of the delivered maps.
+        self.repo_map_delivered = 0
+        self.repo_map_skipped = 0
+        self.repo_map_tokens = 0
+        self.repo_map_files = 0
 
     # -- requests ------------------------------------------------------------ #
     def dispatch(self, msg: dict[str, Any]) -> dict[str, Any]:
@@ -641,10 +654,20 @@ class DaemonState:
                            or not isinstance(item.get("text"), str)
                            or len(item["text"]) > 2000 for item in history)):
                 return {"ok": False, "error": "history must contain at most six bounded user/assistant messages"}
+            repo_map_tokens = msg.get("repo_map_tokens")
+            if repo_map_tokens is not None and (
+                    isinstance(repo_map_tokens, bool)
+                    or not isinstance(repo_map_tokens, int)
+                    or not REPO_MAP_MIN_TOKENS <= repo_map_tokens <= REPO_MAP_MAX_TOKENS):
+                return {"ok": False, "error": (
+                    "repo_map_tokens must be an integer between "
+                    f"{REPO_MAP_MIN_TOKENS} and {REPO_MAP_MAX_TOKENS}")}
             with self._graph_lock():
                 if _expired(msg):
                     return {"ok": True, "context": "", "expired": True,
                             "meta": {"intent": "hint_expired", "keys": []}}
+                if repo_map_tokens is not None:
+                    return self._repo_map_hint(prompt, repo_map_tokens)
                 from ozagia.core.proactive_context import build_context
                 try:
                     hint = build_context(self.memory, prompt,
@@ -778,6 +801,108 @@ class DaemonState:
                 body = self._library_hints_after(op, tool, inp, msg, body)
             return {"ok": True, **self._job_meta(body)}
         return {"ok": False, "error": f"unknown op {op!r}"}
+
+    # -- ranked repo map ----------------------------------------------------- #
+    @staticmethod
+    def _bounded_reason(value: Any) -> str:
+        text = " ".join(str(value or "").split())
+        return text[:REPO_MAP_REASON_CHARS]
+
+    def _repo_map_skip(self, reason: Any, freshness: Any) -> dict[str, Any]:
+        """An empty hint that says why no repo map was served."""
+        state = self._bounded_reason(freshness) or "unknown"
+        with self._stats_lock:
+            self.repo_map_skipped += 1
+        return {
+            "ok": True,
+            "context": "",
+            "meta": {
+                "intent": "hint_repo_map_skipped",
+                "keys": [],
+                "repo_map": {
+                    "delivered": False,
+                    "reason": self._bounded_reason(reason),
+                    "freshness": state,
+                },
+            },
+        }
+
+    def _repo_map_hint(self, prompt: str, tokens: int) -> dict[str, Any]:
+        """The `hint` answer for `repo_map_tokens`: a bounded map from a
+        snapshot verified fresh now, or an empty context and a reason.
+
+        Called with the graph lock held. A staleness check that cannot
+        establish freshness is a skip, never a stale map.
+        """
+        try:
+            snapshot = self.memory.staleness(force=True)
+        except Exception:  # noqa: BLE001 - a hint must never block the agent
+            return self._repo_map_skip("snapshot freshness is unknown",
+                                       "unknown")
+        if not isinstance(snapshot, dict):
+            return self._repo_map_skip("snapshot freshness is unknown",
+                                       "unknown")
+        freshness = self._bounded_reason(
+            snapshot.get("freshness")
+            or ("stale" if snapshot.get("stale") is True else "unknown"))
+        if freshness != "fresh" or snapshot.get("stale") is True:
+            state = "stale" if freshness == "fresh" else freshness
+            return self._repo_map_skip(f"snapshot freshness is {state}", state)
+        try:
+            result = self.memory.repo_map(prompt, budget_tokens=tokens)
+        except Exception as exc:  # noqa: BLE001
+            return self._repo_map_skip(
+                f"repo map unavailable ({type(exc).__name__})", freshness)
+        if not isinstance(result, dict) or result.get("ok") is False:
+            return self._repo_map_skip("repo map unavailable", freshness)
+        markdown = result.get("markdown")
+        if not isinstance(markdown, str) or not markdown.strip():
+            return self._repo_map_skip("repo map is empty", freshness)
+        paths: list[str] = []
+        files = result.get("files")
+        for item in files if isinstance(files, list) else ():
+            path = item.get("path") if isinstance(item, dict) else item
+            if isinstance(path, str) and path and path not in paths:
+                paths.append(path[:256])
+            if len(paths) >= REPO_MAP_FILES_SHOWN:
+                break
+        cache = result.get("cache") if isinstance(result.get("cache"), dict) else {}
+        graph_hash = cache.get("root_hash") or result.get("root_hash")
+        header = (
+            "[ozagia repo map] This is a ranked repo map for this task, from a "
+            f"verified snapshot (freshness: {freshness}, budget: {tokens} tokens)."
+        )
+        instruction = (
+            "[ozagia] Verify paths and symbols with read or ozagia_structure "
+            "before relying on them; ordinary search and reads remain available."
+        )
+        body = markdown.strip()
+        estimate = result.get("estimated_tokens")
+        if isinstance(estimate, int) and not isinstance(estimate, bool) and estimate > 0:
+            estimated_tokens = min(estimate, tokens)
+        else:
+            estimated_tokens = max(1, len(body) // 4)
+        context = f"{header}\n\n{body}\n\n{instruction}"
+        meta = {
+            "delivered": True,
+            "tokens": tokens,
+            "estimated_tokens": estimated_tokens,
+            "files": paths,
+            "freshness": freshness,
+            "graph_hash": str(graph_hash)[:64] if graph_hash else None,
+            "cache": {key: cache.get(key) for key in
+                      ("root_hash", "cached_files", "parsed", "reused")},
+            "truncated": False,
+        }
+        with self._stats_lock:
+            self.repo_map_delivered += 1
+            self.repo_map_tokens += estimated_tokens
+            self.repo_map_files += len(paths)
+        return {
+            "ok": True,
+            "context": context,
+            "meta": {"intent": "hint_repo_map", "keys": [], "repo_map": meta},
+        }
 
     # -- secrets ------------------------------------------------------------- #
     def _secret_stat(self, name: str, n: int = 1) -> None:
@@ -1998,6 +2123,13 @@ class DaemonState:
                 "library_hint_builtin_files": self.library_hint_builtin_files,
                 # Goal lines added after edits (`ozagia.core.goals`).
                 "goal_hints": self.goal_hints,
+                # Ranked repo-map delivery in `hint`: maps delivered,
+                # requests skipped, and the estimated tokens and top file
+                # paths of the delivered maps.
+                "repo_map_delivered": self.repo_map_delivered,
+                "repo_map_skipped": self.repo_map_skipped,
+                "repo_map_tokens": self.repo_map_tokens,
+                "repo_map_files": self.repo_map_files,
                 # Secrets (`ozagia.core.secrets`): session captures, status
                 # checks, response redactions and errors. No value is kept in
                 # the store, a record, a log or a response.
