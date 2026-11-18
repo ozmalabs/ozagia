@@ -79,6 +79,64 @@ def _call(name: str, arguments: Any, req_id: int = 1) -> dict[str, Any]:
             "params": {"name": name, "arguments": arguments}}
 
 
+def test_deep_review_rejects_reviews_symlink_escape(tmp_path: Path, seed_adapter):
+    _fixture(tmp_path)
+    out = tmp_path / "var" / "dev_graph.json"
+    build_index(tmp_path, out, include_docs="none", include_git=False,
+                include_scripts=False)
+    mem = DevMemory(out, tmp_path / "var" / "journal.jsonl", root=tmp_path)
+    server = DevMemoryServer(mem)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (tmp_path / ".ozagia").mkdir()
+    (tmp_path / ".ozagia" / "reviews").symlink_to(outside, target_is_directory=True)
+
+    result = server._deep_review({})
+
+    assert result["ok"] is False
+    assert "escapes" in result["error"]
+    assert list(outside.iterdir()) == []
+
+
+def test_deep_review_returns_repo_preflight_refusal(server, monkeypatch):
+    from ozagia.core import deep_review
+    from ozagia.core.repo_review import PreflightError
+
+    monkeypatch.setattr(deep_review, "build_deep_review",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            PreflightError("resource admission refused", {"ok": False})))
+    result = server._deep_review({})
+    assert result["ok"] is False
+    assert "resource admission refused" in result["error"]
+
+
+def test_dev_profile_reads_one_artifact_without_writing(server, tmp_path: Path) -> None:
+    artifact = {
+        "shared": {"frames": [
+            {"name": "add", "file": "domains/foo.py", "line": 4},
+        ]},
+        "profiles": [{
+            "type": "sampled", "name": "test", "unit": "microseconds",
+            "samples": [[0], [0]], "weights": [10, 20],
+        }],
+    }
+    _write(tmp_path / "app.speedscope", json.dumps(artifact))
+    before = sorted(path.relative_to(tmp_path).as_posix()
+                    for path in tmp_path.rglob("*"))
+    reply = server.handle(_call("dev_profile", {
+        "path": "app.speedscope", "no_graph": True, "top": 2}))
+    payload = json.loads(reply["result"]["content"][0]["text"])
+    assert payload["ok"] is True
+    assert payload["measurement"]["total_self"] == 30
+    assert payload["hotspots"][0]["name"] == "add"
+    after = sorted(path.relative_to(tmp_path).as_posix()
+                   for path in tmp_path.rglob("*"))
+    assert before == after
+    escaped = server.handle(_call("dev_profile", {"path": "../outside"}))
+    escaped_payload = json.loads(escaped["result"]["content"][0]["text"])
+    assert escaped_payload["ok"] is False
+
+
 def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 

@@ -1,9 +1,34 @@
 # Deep review orchestrator — plan (2026-11-18)
 
-Status: design plan, not implemented. This document turns Ozagia's existing
+Status: implemented in part, 2026-11-18. This document turned Ozagia's existing
 review, security, architecture, test, evidence and model-review building blocks
 into one `ozagia deep-review` run that produces a multi-file, subject-based
-report.
+report. Phase 0 and Phase 1 are implemented. Phase 2 is largely implemented:
+optional allowlisted scanners with an explicit network gate and per-tool
+provenance, conservative trust-boundary candidates, offline dependency, licence
+and version inventory with deterministic SBOM and CVE state unknown, runbook and
+observability declarations, bounded lexical IaC/config candidates,
+documentation/API coverage (including literal local module imports), and
+fresh-graph range blast radius. Local OSV-style introduced/fixed range matching
+is implemented for Node and Rust strict SemVer pins and Go `v`-prefixed strict
+SemVer pins; range events are limited to introduced/fixed. Python, Ruby,
+Composer and Maven remain exact-version only; Gradle `gradle.lockfile` inventory
+and conservative Maven coordinate matching are supported, with repository
+origin unknown. Ruby Bundler `Gemfile.lock` inventory and
+exact local-advisory matching for registry (`GEM`) pins are supported; Git and
+path source pins are inventory-only. Composer `composer.lock` inventory and
+conservative exact local-advisory matching are supported. Broader SCA coverage
+and advisory-dataset completeness, licence-expression/compliance assessment
+and semantic IaC validation remain. Phase 3 is partial: the optional gated `--model-pass` has
+strict validation, role-to-subject mapping, time/request/token/cost budgets,
+redaction, dedupe, narrow deterministic corroboration and optional Ocelot
+candidate clustering with exact fallback; truth/severity promotion and live
+quality evaluation remain. Phase 4 is partial: synthetic comparison harnesses,
+baseline and status integration, a `review_my_change` task, a bounded
+working-checkout smoke and an unfilled human-review annotation sheet exist; a
+clean realistic-corpus comparison with completed human labels and published
+go/no-go thresholds remains. The design below is unchanged; each phase section
+marks what is implemented and what remains.
 
 The goal is not another linter. It is an **evidence-first review atlas**: every
 subject gets its own Markdown file, every finding carries locations, evidence,
@@ -134,6 +159,10 @@ Every subject file starts with scope and status, then a findings table, then
 subject metrics, evidence, omissions and next actions. The README links to
 each file and shows a scorecard: subject, status (`complete|partial|unknown`),
 findings by severity, confidence mix and coverage.
+
+Subject metrics are derived from finding/coverage counts and an explicit
+allowlist of numeric or fixed status fields from each collector. They are
+bounded and never render raw paths, logs, names or arbitrary collector values.
 
 ### Finding contract
 
@@ -315,6 +344,8 @@ and change-set semantics (breaking public API, missing migration, test impact).
 
 ### Phase 0 — contract and skeleton (first slice)
 
+**Status: implemented** (2026-11-18).
+
 - `core/deep_review/contract.py`, `orchestrator.py`, `collect.py`,
   `reports.py`; `deep_review_cli.py`; `ozagia deep-review` command.
 - Compose existing `repo_review` sections, `security`, `architecture` and
@@ -329,14 +360,39 @@ and change-set semantics (breaking public API, missing migration, test impact).
 
 ### Phase 1 — performance, failure modes, data and scalability analyzers
 
+**Status: implemented for the static analyzers, fixtures, cross-subject dedupe,
+blast-radius ranking, and the explicit opt-in `--run-bench` argv interface.**
+
 - Static analyzers with graph-aware evidence and explicit confidence.
 - Fixtures for each pattern; cross-subject dedupe and blast-radius ranking.
-- Optional `--run-bench`/safe command interface with timeouts and recorded
-  results; default remains static.
+- Optional `--run-bench` argv interface with timeouts and recorded summary
+  artifact; default remains static. Results omit argv and captured streams.
 - Acceptance: seeded findings land in the right subject/file; missing
   evidence is `unknown`; no model/network; deterministic report hashes.
 
 ### Phase 2 — security depth, dependencies and operations
+
+**Status: largely implemented.** Implemented: optional allowlisted scanners
+with explicit `--security-tool`/`--security-network` gates and per-tool
+provenance; conservative Python trust-boundary candidates; offline
+manifest/lockfile/licence/version inventory with deterministic SBOM and
+opt-in exact-version or supported OSV-style range matching against explicit
+local advisory data, including exact-version-only RubyGems-source Bundler and
+Composer matching (overall CVE
+state remains unknown); runbook links/topics, observability declarations,
+bounded Kubernetes/Compose YAML structural checks when optional PyYAML is
+installed, bounded literal Terraform ingress checks in an isolated subprocess
+when optional `python-hcl2` is installed, and lexical IaC/config candidates; docs/API
+coverage and stale-reference candidates; fresh-graph range blast radius and
+security-impact candidates; Gradle lockfile inventory and exact local Maven
+coordinate matching (repository provenance remains unknown); read-only profile
+reports. Remaining: broader
+offline SCA coverage and advisory-dataset completeness, broader licence-expression
+coverage and legal compliance assessment (a bounded caller-policy evaluator
+for SPDX `AND`/`OR` expressions is implemented),
+broader semantic IaC/config validation (Terraform module/provider evaluation
+and broader config families remain), runtime telemetry verification and broader
+observability checks.
 
 - Trust-boundary/authz/dataflow candidates, optional allowlisted scanners,
   offline SCA/SBOM/licence inventory, IaC/config checks, runbook/observability
@@ -345,6 +401,15 @@ and change-set semantics (breaking public API, missing migration, test impact).
   a clean scan still reports `truth_assessed=false` and coverage limits.
 
 ### Phase 3 — model review, verification and Ocelot
+
+**Status: partial.** Implemented: separately gated `--model-pass` with strict
+schema validation, role-to-subject mapping, dedupe, candidate severity `note`,
+redaction, `truth_assessed: false`, time/request/token/cost budgets, and
+advisory `model-review.json` candidates that never block. Optional `--ocelot`
+clusters model candidates only, with exact fallback and no install, network or
+model call. Narrow deterministic corroboration records exact cited subject/type
+matches but confirms rule identity only. Remaining: promotion of model wording,
+impact and severity, and live-model quality evaluation.
 
 - `--model-pass` with the existing independent role matrix: security,
   performance, failures, data, scalability, architecture, tests. Compact
@@ -355,6 +420,23 @@ and change-set semantics (breaking public API, missing migration, test impact).
   intact; no secrets in packets.
 
 ### Phase 4 — evaluation and rollout
+
+**Status: partial.** Implemented: seeded static, fixture, end-to-end report and
+comparison harnesses (range, scripted model-pass, graph-aware versus
+graph-less); baseline and status integration; `--fail-on`; a `review_my_change`
+task; documentation and capability integration; a bounded working-checkout
+smoke and an unfilled human-review annotation sheet. Synthetic results are in
+`docs/results/deep_review_phase4_2026-11-18.md`; the working-checkout run and
+sample sheet are in `docs/results/deep_review_real_checkout_2026-11-18.md` and
+`docs/results/deep_review_real_checkout_review_sample_2026-11-18.md`. A frozen
+HEAD smoke and its caveats are recorded in
+`docs/results/deep_review_frozen_head_smoke_2026-11-18.md`, with an unfilled
+top-ten human annotation sheet at
+`docs/results/deep_review_frozen_head_annotation_sheet_2026-11-18.md`. Remaining:
+clean frozen realistic-corpus precision/recall and cost comparisons, completed
+human review, and validation of the proposed go/no-go thresholds in
+`docs/results/deep_review_go_no_go_proposal_2026-11-18.md`. That proposal is
+reviewable but unvalidated and does not authorize a blocking default.
 
 - Seeded corpus and realistic fixture repositories; measure recall, precision,
   false-positive rate, report-noise ratio, duration, memory and report size.

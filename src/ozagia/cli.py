@@ -11,6 +11,8 @@
     ozagia bg run|wait|list|log|stop ...          (ozagia.daemon.jobcli)
     ozagia mcp ...                                (ozagia.integrations.mcp.server)
     ozagia eval ...                               (python -m ozagia.eval.agent)
+    ozagia profile ingest|compare|formats ...     (offline profiler/telemetry
+                                                   artifacts joined to the graph)
     ozagia check ...                              (python -m ozagia.check)
     ozagia install opencode|claude|codex|kiro [--workdir W] [...]
     ozagia self info|check|upgrade|uninstall ... (ozagia.selfinstall)
@@ -74,6 +76,14 @@ from pathlib import Path
 from typing import Any, Callable
 
 PROG = "ozagia"
+DEEP_REVIEW_PROFILES = (
+    "full", "security", "performance", "failure-modes", "data-structures",
+    "scalability", "architecture", "tests", "dependencies", "operations",
+    "docs", "change", "review-change",
+)
+DEEP_REVIEW_CHANGE_PROFILES = frozenset({"change", "review-change"})
+DEEP_REVIEW_CHANGE_DEFAULT_RANGE = "HEAD~1..HEAD"
+DEEP_REVIEW_CHANGE_MAX_FINDINGS = 20
 _RETITLE_ENV = "_OZAGIA_RETITLED"
 _PYTHON_ENV = "_OZAGIA_PYTHON"
 
@@ -188,6 +198,16 @@ def _federation_main(argv: list[str]) -> int:
     return main(argv, prog=f"{PROG} federation")
 
 
+def _profile_main(argv: list[str]) -> int:
+    from ozagia.profile_cli import main
+    return main(argv, prog=f"{PROG} profile")
+
+
+def _profile_run_main(argv: list[str]) -> int:
+    from ozagia.profile_cli import main
+    return main(["run", *argv], prog=f"{PROG} profile-run")
+
+
 # name -> (main(argv) -> int, help). Looked up at call time so tests can patch.
 DELEGATES: dict[str, tuple[str, str]] = {
     "daemon": ("_daemon_main", "the graph daemon: serve|ensure|ping|stats|shutdown "
@@ -205,6 +225,8 @@ DELEGATES: dict[str, tuple[str, str]] = {
                              "(install|uninstall|status)"),
     "federation": ("_federation_main", "read-only federated graph queries "
                                       "(status|search|node)"),
+    "profile": ("_profile_main", "ingest profiler/telemetry artifacts and join "
+                                 "them to the graph (ingest|compare|formats)"),
 }
 
 
@@ -1104,6 +1126,258 @@ def _cmd_review_repo(args: argparse.Namespace) -> int:
     return RR.exit_code(packet, args.fail_on)
 
 
+def _git_probe(root: Path, *args: str):
+    """Run a read-only git probe, or return None when git cannot be started."""
+    import subprocess
+
+    try:
+        return subprocess.run(
+            ["git", "-C", str(root), *args], capture_output=True, text=True,
+            timeout=5, check=False, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _deep_review_change_range(root: Path, requested: str | None):
+    """Resolve the ``change`` preset's range, or return a clear refusal."""
+    inside = _git_probe(root, "rev-parse", "--is-inside-work-tree")
+    if (inside is None or inside.returncode != 0
+            or inside.stdout.strip() != "true"):
+        return None, ("--profile change requires a Git repository; "
+                      "pass --root or use --profile full")
+    if requested:
+        return requested, None
+    head = _git_probe(root, "rev-parse", "--verify", "--quiet",
+                      "HEAD^{commit}")
+    if head is None or head.returncode != 0 or not head.stdout.strip():
+        return None, (f"cannot resolve the default range "
+                      f"{DEEP_REVIEW_CHANGE_DEFAULT_RANGE}: the repository has "
+                      "no committed HEAD; pass --range BASE..HEAD")
+    previous = _git_probe(root, "rev-parse", "--verify", "--quiet",
+                          "HEAD~1^{commit}")
+    if previous is None or previous.returncode != 0 or not previous.stdout.strip():
+        return None, (f"cannot resolve the default range "
+                      f"{DEEP_REVIEW_CHANGE_DEFAULT_RANGE}: the repository has "
+                      "no previous commit; pass --range BASE..HEAD")
+    return DEEP_REVIEW_CHANGE_DEFAULT_RANGE, None
+
+
+def _cmd_deep_review(args: argparse.Namespace) -> int:
+    from ozagia.core.deep_review import build_deep_review, DeepReviewError
+    from ozagia.core.repo_review import RepoReviewError
+    from datetime import datetime, timezone
+    root = _root(args.root)
+    if not root.is_dir():
+        print(f"error: review root is not a directory: {root}", file=sys.stderr)
+        return 2
+    profile = args.profile
+    range_spec = args.range_spec
+    max_findings = args.max_findings
+    if profile in DEEP_REVIEW_CHANGE_PROFILES:
+        range_spec, change_error = _deep_review_change_range(root, range_spec)
+        if change_error:
+            print(f"error: {change_error}", file=sys.stderr)
+            return 2
+        # The preset is the established full review plus a change-set range;
+        # core/deep_review keeps no extra profile or preset semantics.
+        profile = "full"
+        if max_findings is None:
+            max_findings = DEEP_REVIEW_CHANGE_MAX_FINDINGS
+    out = args.out or (root / ".ozagia" / "reviews" /
+                       ("deep-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")))
+    # Reports are writes into the reviewed repository. Keep those under its
+    # state directory; an explicitly supplied destination outside the target
+    # remains available for callers who want to store reports elsewhere.
+    resolved_out = Path(out).resolve()
+    state_dir = (root / ".ozagia").resolve()
+    try:
+        resolved_out.relative_to(root)
+        inside_root = True
+    except ValueError:
+        inside_root = False
+    if inside_root:
+        try:
+            resolved_out.relative_to(state_dir)
+        except ValueError:
+            print("error: --out inside the repository must be under .ozagia/", file=sys.stderr)
+            return 2
+    bench_commands = None
+    if args.run_bench is not None:
+        try:
+            bench_commands = [json.loads(value) for value in args.run_bench]
+            if any(not isinstance(command, list) for command in bench_commands):
+                raise ValueError("each --run-bench value must be a JSON array of strings")
+        except (json.JSONDecodeError, ValueError) as exc:
+            print(f"error: invalid --run-bench command: {exc}", file=sys.stderr)
+            return 2
+    try:
+        security_options = {}
+        if args.security_tool:
+            security_options["security_tools"] = args.security_tool
+        if args.security_network:
+            security_options["security_network"] = True
+        if args.local_advisories is not None:
+            security_options["local_advisories"] = args.local_advisories
+        if args.license_policy is not None:
+            security_options["license_policy"] = args.license_policy
+        result = build_deep_review(root, resolved_out, profile=profile,
+                                   budget_s=args.budget_s, index=args.index,
+                                   range_spec=range_spec,
+                                   baseline=args.baseline, fail_on=args.fail_on,
+                                   max_findings=max_findings,
+                                   profile_reports=args.profile_report,
+                                   bench_commands=bench_commands,
+                                   bench_timeout_s=args.bench_timeout_s,
+                                   **security_options)
+    except (DeepReviewError, RepoReviewError, OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if args.model_pass:
+        import hashlib
+        import os
+        from ozagia.core.deep_review.model_pass import run_model_pass
+        from ozagia.core.deep_review.orchestrator import _write
+        from ozagia.core.deep_review.verification import (
+            verify_model_candidates, verify_python_mutable_default,
+        )
+        from ozagia.core.security import redact_text
+        model_result = None
+        if not args.live or os.environ.get("OZAGIA_EVAL_LIVE") != "1":
+            model_result = {"status": "unavailable", "runs": [], "errors": [{
+                "stage": "gate",
+                "error": "model review requires --live and OZAGIA_EVAL_LIVE=1",
+            }], "findings": [], "truth_assessed": False}
+        elif not args.model or not args.base_url:
+            model_result = {"status": "unavailable", "runs": [], "errors": [{
+                "stage": "configuration",
+                "error": "--model and --base-url are required for model review",
+            }], "findings": [], "truth_assessed": False}
+        else:
+            try:
+                from ozagia.harness.review import openai_runner
+                runner = openai_runner(base_url=args.base_url, model=args.model,
+                                       max_tokens=args.max_tokens)
+                pass_options = {"roles": args.model_role} if args.model_role else {}
+                if args.model_budget_s is not None:
+                    pass_options["deadline_s"] = args.model_budget_s
+                if args.model_max_requests is not None:
+                    pass_options["max_requests"] = args.model_max_requests
+                if args.model_token_budget is not None:
+                    pass_options["max_tokens"] = args.model_token_budget
+                if args.model_cost_budget is not None:
+                    pass_options["max_cost_usd"] = args.model_cost_budget
+                pass_options["ocelot"] = args.ocelot
+                model_result = run_model_pass(
+                    result["findings"], model_runner=runner, models=args.model,
+                    root=root, **pass_options)
+            except Exception as exc:
+                # The deterministic report is already complete and remains the
+                # authoritative output if provider setup or execution fails.
+                model_result = {"status": "unavailable", "runs": [],
+                                "errors": [{"stage": "model",
+                                            "error": f"{type(exc).__name__}: model review failed"}],
+                                "findings": [], "truth_assessed": False}
+        # Harness exceptions can contain endpoint details, response excerpts,
+        # or credentials supplied by a provider. Keep only their exception type;
+        # locally constructed gate/configuration and budget messages are fixed
+        # text and remain useful.
+        for error in model_result.get("errors", []):
+            if isinstance(error, dict):
+                if error.get("error_type"):
+                    error["error"] = (f"{error.get('error_type') or 'ProviderError'}: "
+                                      "model review failed")
+                else:
+                    error["error"] = redact_text(str(error.get("error") or
+                                                     "model review failed"))[:500]
+        # Verify candidates against the complete canonical deterministic
+        # artifact. ``result['findings']`` may be a top-N view; findings.json
+        # retains the full set and is the only promotion evidence source.
+        try:
+            deterministic_rows = json.loads(
+                (resolved_out / "findings.json").read_text(encoding="utf-8"))
+            if not isinstance(deterministic_rows, list):
+                raise ValueError("findings.json must contain a list")
+            verification = verify_model_candidates(
+                model_result.get("findings", []), deterministic_rows)
+        except (OSError, ValueError, json.JSONDecodeError):
+            verification = {
+                "schema": "ozagia.deep_review.model_verification.v1",
+                "decisions": [], "corroborated": 0,
+                "unverified": len(model_result.get("findings", [])),
+                "truth_assessed": False,
+                "error": "deterministic findings could not be read; no candidates corroborated",
+            }
+        model_result["verification"] = verification
+        # Machine-check only bounded assertion payloads. These results attach
+        # to model candidates and never promote their wording or severity.
+        checked_assertions = 0
+        for candidate in model_result.get("findings", []):
+            if not isinstance(candidate, dict):
+                continue
+            candidate["assertion_verifications"] = []
+            assertions = candidate.get("assertions", [])
+            if not isinstance(assertions, list):
+                continue
+            for assertion in assertions:
+                if checked_assertions >= 32:
+                    candidate["assertion_verification_omitted"] = True
+                    break
+                candidate["assertion_verifications"].append(
+                    verify_python_mutable_default(root, assertion)
+                    if isinstance(assertion, dict) else {
+                        "state": "unverified",
+                        "assertion": "python.mutable_default",
+                        "reason": "malformed assertion payload",
+                        "truth_assessed": False,
+                    })
+                checked_assertions += 1
+        model_result["assertion_verification_note"] = (
+            "A verified_assertion result confirms only the exact hash-pinned "
+            "Python mutable-default fact. It does not verify model wording, "
+            "impact, severity, or overall truth; it never changes deterministic "
+            "findings or blocking status. At most 32 assertions are checked.")
+        model_result["verification_note"] = (
+            "Corroboration requires a unique cited deterministic finding with "
+            "exact subject and type. It confirms rule identity only; it does "
+            "not verify candidate wording, impact, severity, or truth. "
+            "Deterministic findings and their severity/status are unchanged.")
+        try:
+            model_text = json.dumps(model_result, sort_keys=True, indent=2) + "\n"
+            _write(resolved_out / "model-review.json", model_text)
+            manifest = result["manifest"]
+            manifest["model_review"] = {
+                "status": model_result["status"],
+                "report": "model-review.json",
+                "report_hash": "sha256:" + hashlib.sha256(model_text.encode()).hexdigest(),
+                "candidate_findings": len(model_result.get("findings", [])),
+                "verification": {
+                    "corroborated": verification["corroborated"],
+                    "unverified": verification["unverified"],
+                    "truth_assessed": False,
+                },
+                "validation": model_result.get("validation"),
+                "budgets": model_result.get("budgets"),
+                "ocelot": ({
+                    "requested": bool((model_result.get("ocelot") or {}).get("requested")),
+                    "available": bool((model_result.get("ocelot") or {}).get("available")),
+                    "state": (model_result.get("ocelot") or {}).get("state"),
+                    "cluster_count": (model_result.get("ocelot") or {}).get("cluster_count"),
+                    "error": (model_result.get("ocelot") or {}).get("error"),
+                } if isinstance(model_result.get("ocelot"), dict) else None),
+                "truth_assessed": False,
+            }
+            _write(resolved_out / "manifest.json",
+                   json.dumps(manifest, sort_keys=True, indent=2) + "\n")
+        except OSError as exc:
+            print(f"warning: model review artifact could not be written: {exc}",
+                  file=sys.stderr)
+    if args.json:
+        print(json.dumps(result["manifest"], sort_keys=True, indent=2))
+    else:
+        print(f"deep review written to {result['out']}")
+    return 1 if result["failed"] else 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog=PROG, description=__doc__.splitlines()[0])
     p.add_argument("--version", action="version", version=f"{PROG} {_version()}")
@@ -1164,6 +1438,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     for name, (_fn, text) in DELEGATES.items():
         sub.add_parser(name, help=text, add_help=False)
+    # The explicit collection surface is also reachable as `ozagia profile run`;
+    # this hidden entry point keeps the capability audit one surface per
+    # top-level command.
+    sub.add_parser("profile-run", help=argparse.SUPPRESS, add_help=False)
 
     ins = sub.add_parser("install", help="install an integration into a workdir",
                          description="Install the OpenCode plugin, the Claude Code hooks, "
@@ -1438,6 +1716,72 @@ def build_parser() -> argparse.ArgumentParser:
                     help="also write a compact packet for model reviewers under "
                          "<state dir>/reviews/ (no model is called)")
 
+    dr = sub.add_parser("deep-review", help="compose an offline subject-based review report")
+    dr.add_argument("--root", default=None, help="repository root")
+    dr.add_argument("--out", default=None, help="report directory (default: <root>/.ozagia/reviews/deep-<UTC stamp>)")
+    dr.add_argument("--profile", default="full", choices=DEEP_REVIEW_PROFILES,
+                    help=("full, one subject profile, or 'change' "
+                          "(alias 'review-change') for a full-profile review of "
+                          "--range, defaulting to HEAD~1..HEAD"))
+    dr.add_argument("--index", action="store_true", help="refresh graph before review")
+    dr.add_argument("--security-tool", action="append", default=None,
+                    metavar="NAME",
+                    help="explicitly run one allowlisted security scanner; "
+                         "repeatable (default: no external scanners)")
+    dr.add_argument("--security-network", action="store_true",
+                    help="explicitly allow a requested scanner that requires "
+                         "network access (default: refuse)")
+    dr.add_argument("--local-advisories", default=None, metavar="PATH",
+                    help="match exact locked versions against this local JSON "
+                         "advisory dataset; no download, ranges or clean verdict")
+    dr.add_argument("--license-policy", default=None, metavar="PATH",
+                    help="evaluate declared lockfile licenses against a local "
+                         "allow/deny policy; ambiguous values remain unknown")
+    dr.add_argument("--range", dest="range_spec", default=None,
+                    metavar="BASE..HEAD", help="include deterministic review of a commit range")
+    dr.add_argument("--profile-report", action="append", default=None,
+                    metavar="PATH",
+                    help="register a measured profile report (or artifact) as "
+                         "performance/scalability evidence; repeatable")
+    dr.add_argument("--run-bench", action="append", default=None,
+                    metavar="JSON_ARGV",
+                    help="explicitly run a caller-supplied argv vector, encoded "
+                         "as a JSON string array; repeatable, no shell")
+    dr.add_argument("--bench-timeout-s", type=float, default=30.0,
+                    help="maximum seconds per benchmark command (default: 30; "
+                         "also bounded by --budget-s)")
+    dr.add_argument("--baseline", default=None, help="previous report directory")
+    dr.add_argument("--fail-on", default="never", choices=("blocking", "major", "never"))
+    dr.add_argument("--budget-s", type=float, default=60.0)
+    dr.add_argument("--max-findings", type=int, default=None)
+    dr.add_argument("--model-pass", action="store_true",
+                    help="run optional independent model reviewers; requires --live and OZAGIA_EVAL_LIVE=1")
+    dr.add_argument("--live", action="store_true",
+                    help="explicitly enable model calls (also requires OZAGIA_EVAL_LIVE=1)")
+    dr.add_argument("--model", default=None, help="provider model name for --model-pass")
+    dr.add_argument("--max-tokens", type=int, default=None,
+                    help="maximum completion tokens per model reviewer")
+    dr.add_argument("--base-url", default=None, help="OpenAI-compatible API base URL")
+    dr.add_argument("--model-role", action="append", default=None,
+                    choices=("security", "performance", "failures", "data",
+                             "scalability", "architecture", "tests"))
+    dr.add_argument("--model-budget-s", type=float, default=None,
+                    help="overall wall-clock budget for the model pass "
+                         "(default: 120 seconds)")
+    dr.add_argument("--model-max-requests", type=int, default=None,
+                    help="maximum number of model reviewer requests "
+                         "(default: 32)")
+    dr.add_argument("--model-token-budget", type=int, default=None,
+                    help="optional total token cap across model reviewer runs "
+                         "when the provider reports usage")
+    dr.add_argument("--model-cost-budget", type=float, default=None,
+                    help="optional total cost cap in USD across model reviewer "
+                         "runs when the provider reports usage")
+    dr.add_argument("--ocelot", action="store_true",
+                    help="opt in to Ocelot clustering of model candidates "
+                         "(no install, network or model call; exact fallback)")
+    dr.add_argument("--json", action="store_true")
+
     preflight = sub.add_parser("preflight", help="dry-run IaC emulator plan")
     psub = preflight.add_subparsers(dest="action", required=True)
     plan = psub.add_parser("plan", help="print an ordered, scrubbed plan")
@@ -1476,7 +1820,7 @@ def _repo_map_budget(value: str) -> int:
 
 
 _COMMANDS = frozenset({"index", "agent", "install", "who", "replace",
-                       "review-repo", "goal", "capabilities",
+                       "review-repo", "goal", "capabilities", "profile-run",
                        "task-preflight", *DELEGATES})
 # Agent options that may lead a bare `ozagia ...` (the TUI).
 _AGENT_FLAGS = frozenset({"--research", "--mcp", "--model", "-m", "--workdir",
@@ -1504,6 +1848,8 @@ def main(argv: list[str] | None = None) -> int:
     argv = _default_agent(list(sys.argv[1:] if argv is None else argv))
     if argv[:2] == ["check", "iac"]:
         argv = ["iac", "check", *argv[2:]]
+    if argv[:1] == ["profile-run"]:
+        return _profile_run_main(argv[1:])
     if argv and argv[0] in DELEGATES:
         return _delegate(argv[0])(argv[1:])
     extra: list[str] = []
@@ -1561,6 +1907,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_replace(args)
     if args.command == "review-repo":
         return _cmd_review_repo(args)
+    if args.command == "deep-review":
+        return _cmd_deep_review(args)
     if args.command == "capabilities":
         from ozagia.capabilities_cli import run as _capabilities_run
         return _capabilities_run(args)

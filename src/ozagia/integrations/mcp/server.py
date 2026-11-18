@@ -1001,6 +1001,56 @@ _TOOLS.append({
                          "description": "Top findings to return (at most 50)."},
     }),
 })
+
+_TOOLS.append({
+    "name": "dev_deep_review",
+    "description": ("Compose a bounded offline subject-based review report. "
+                    "Writes only below .ozagia/reviews; does not run tests or models."),
+    "inputSchema": _schema({
+        "profile": {"type": "string", "default": "full",
+                    "description": ("full, security, performance, failure-modes, "
+                                    "data-structures, scalability, architecture, "
+                                    "tests, dependencies, operations, or docs.")},
+        "budget_s": {"type": "number", "default": 30,
+                     "description": "Collection budget in seconds (maximum 300)."},
+        "max_findings": {"type": "integer", "default": 20,
+                         "description": "Maximum findings in the returned summary (maximum 50)."},
+        "profile_reports": {"type": "array", "items": {"type": "string"},
+                            "maxItems": 8,
+                            "description": "Measured profile reports/artifacts under the workspace."},
+    }),
+})
+
+# Application profiles (`ozagia.core.profile`): read one existing cProfile,
+# speedscope, Chrome, collapsed-stack or OTLP JSON artifact and join its active
+# frames to the graph. The artifact is data; it is never executed.
+_TOOLS.append({
+    "name": "dev_profile",
+    "description": (
+        "Read one existing profiler or OTLP JSON trace artifact and return "
+        "bounded hotspots joined to graph symbols, callers and impact. It does "
+        "not start a profiler, import the target, call a model or write a "
+        "report. Use this to explain measured hot paths and performance "
+        "regressions; a hotspot is evidence, not a causal verdict."),
+    "inputSchema": _schema({
+        "path": {"type": "string",
+                 "description": "Repo-relative or absolute path to the artifact."},
+        "format": {"type": "string", "default": "auto",
+                   "enum": ["auto", "cprofile", "speedscope",
+                            "chrome_cpuprofile", "collapsed", "otlp_json"]},
+        "top": {"type": "integer", "default": 10,
+                "description": "Hotspots to return (1..50)."},
+        "sort": {"type": "string", "default": "self",
+                 "enum": ["self", "inclusive", "calls", "impact"]},
+        "interval_us": {"type": "integer", "description":
+                        "Microseconds per sample when the artifact uses counts."},
+        "weight_unit": {"type": "string", "default": "auto",
+                        "enum": ["auto", "samples", "microseconds",
+                                 "milliseconds", "seconds"]},
+        "no_graph": {"type": "boolean", "default": False,
+                     "description": "Skip the tag-cache/symbol-graph join."},
+    }, ["path"]),
+})
 # Python environments (`ozagia.core.environments`): interpreters are probed
 # by running `python -I -c` (their site setup runs); project-shipped ones are
 # read as text unless the user trusts them (OZAGIA_TRUST_PROJECT_PYTHON or the
@@ -1378,6 +1428,8 @@ class DevMemoryServer:
             "dev_files_list": self._files_list,
             "dev_files_explain": self._files_explain,
             "dev_review_repo": self._review_repo,
+            "dev_deep_review": self._deep_review,
+            "dev_profile": self._profile,
             "dev_environment": self._environment,
             "dev_tools": self._dev_tools,
             "dev_capabilities": self._dev_capabilities,
@@ -1752,6 +1804,132 @@ class DevMemoryServer:
         for item in out["top_findings"]:
             item["goal"] = tracked.get(str(item.get("id")))
         return out
+
+    def _deep_review(self, a: dict[str, Any]) -> Any:
+        """Bounded deep-review report, with output confined to state reviews."""
+        from datetime import datetime, timezone
+        from ozagia.core.deep_review import build_deep_review
+        from ozagia.core.repo_review import RepoReviewError
+        root = Path(self.mem.raw_repo_root if self.mem else self.workspace).resolve()
+        try:
+            budget = float(a.get("budget_s", 30))
+            if not math.isfinite(budget) or budget < 0:
+                return {"ok": False, "error": "budget_s must be a finite number >= 0"}
+            budget = min(budget, 300.0)
+            limit = min(max(int(a.get("max_findings", 20)), 0), 50)
+            state_dir = (root / ".ozagia").resolve()
+            reviews_dir = (state_dir / "reviews").resolve()
+            if reviews_dir.parent != state_dir:
+                return {"ok": False, "error": "review output escapes .ozagia/reviews"}
+            out_dir = reviews_dir / (
+                "deep-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ"))
+            # `.ozagia/reviews` may itself be a symlink. Keep this MCP write
+            # inside the resolved reviews directory, even in that case.
+            if out_dir.resolve().parent != reviews_dir:
+                return {"ok": False, "error": "review output escapes .ozagia/reviews"}
+            profile_reports = []
+            for raw in a.get("profile_reports") or []:
+                if not isinstance(raw, str) or not raw:
+                    return {"ok": False, "error": "profile_reports must be strings"}
+                candidate = Path(raw)
+                if not candidate.is_absolute():
+                    candidate = root / candidate
+                try:
+                    candidate = candidate.resolve()
+                    candidate.relative_to(root)
+                except (OSError, ValueError):
+                    return {"ok": False, "error":
+                            "profile report must stay inside the workspace"}
+                if not candidate.is_file():
+                    return {"ok": False, "error": f"profile report is not a file: {candidate}"}
+                profile_reports.append(str(candidate))
+            result = build_deep_review(
+                root, out_dir, profile=str(a.get("profile", "full")),
+                budget_s=budget, max_findings=limit,
+                profile_reports=profile_reports or None)
+        except (RepoReviewError, OSError, ValueError, TypeError, OverflowError) as exc:
+            return {"ok": False, "error": str(exc)}
+        # The orchestrator already ranks and bounds its returned findings.
+        # Preserve that order (do not regroup by subject) and report how many
+        # findings exist in total so the caller can tell the list is partial.
+        top_findings = list(result.get("findings") or [])[:limit]
+        manifest = result.get("manifest") or {}
+        truncation = manifest.get("truncation") or {}
+        max_findings = truncation.get("max_findings") or {}
+        findings_total = max_findings.get("total", manifest.get("findings"))
+        if "truncated" in max_findings:
+            findings_truncated = bool(max_findings["truncated"])
+        elif isinstance(findings_total, int):
+            findings_truncated = len(top_findings) < findings_total
+        else:
+            findings_truncated = len(top_findings) < limit
+        return {"ok": True, "out": result["out"], "manifest": manifest,
+                "top_findings": top_findings,
+                "findings_total": findings_total,
+                "findings_truncated": findings_truncated}
+
+    def _profile(self, a: dict[str, Any]) -> Any:
+        """Read one profiler/telemetry artifact and return a bounded summary."""
+        from ozagia.core.profile import (GraphIndex, build_report_from_profile,
+                                        ingest_file)
+        root = Path(self.mem.raw_repo_root if self.mem else self.workspace).resolve()
+        raw = a.get("path")
+        if not isinstance(raw, str) or not raw:
+            return {"ok": False, "error": "path is required"}
+        path = Path(raw)
+        if not path.is_absolute():
+            path = root / path
+        try:
+            path = path.resolve()
+            path.relative_to(root)
+        except (OSError, ValueError):
+            return {"ok": False, "error": "profile path must stay inside the workspace"}
+        if not path.is_file():
+            return {"ok": False, "error": f"profile artifact is not a file: {path}"}
+        try:
+            top = min(max(int(a.get("top", 10)), 1), 50)
+            interval_us = a.get("interval_us")
+            if interval_us is not None:
+                interval_us = int(interval_us)
+            graph = (None if a.get("no_graph") is True
+                     else GraphIndex.open(root, refresh=False))
+            profile = ingest_file(
+                path, root=root, format=str(a.get("format", "auto")),
+                interval_us=interval_us,
+                weight_unit=str(a.get("weight_unit", "auto")))
+            report = build_report_from_profile(
+                profile, root, graph=graph, top=top,
+                sort=str(a.get("sort", "self")))
+        except (OSError, ValueError, TypeError, OverflowError) as exc:
+            return {"ok": False, "error": str(exc)}
+        hotspots = []
+        for row in report["hotspots"]:
+            graph_row = dict(row.get("graph") or {})
+            impact_files = list(graph_row.get("impact_files") or [])
+            graph_row["impact_files"] = impact_files[:5]
+            graph_row["impact_files_truncated"] = len(impact_files) > 5
+            hotspots.append({**row, "graph": graph_row})
+        telemetry = report.get("telemetry")
+        if telemetry:
+            telemetry = {**telemetry,
+                         "operations": (telemetry.get("operations") or [])[:top]}
+        return {
+            "ok": True,
+            "report_hash": report.get("report_hash"),
+            "source": report.get("source"),
+            "measurement": report.get("measurement"),
+            "coverage": report.get("coverage"),
+            "graph": report.get("graph"),
+            "hotspots": hotspots,
+            "paths": (report.get("paths") or [])[:top],
+            "files": (report.get("files") or [])[:top],
+            "modules": (report.get("modules") or [])[:top],
+            "telemetry": telemetry,
+            "callouts": report.get("callouts"),
+            "warnings": report.get("warnings"),
+            "omissions": report.get("omissions"),
+            "not_assessed": report.get("not_assessed"),
+        }
 
     def _environment(self, a: dict[str, Any]) -> Any:
         """Interpreters and what they can import (`core.environments`)."""

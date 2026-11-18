@@ -1,0 +1,118 @@
+id = "review_my_change"
+version = 1
+title = "Review my change"
+objective = "Review the caller-supplied change for correctness, security, resilience, test impact and contract risk. Use only supplied repository evidence and read-only tools; return actionable findings and explicit unknowns."
+inputs = ["diff"]
+tools = ["read", "grep", "graph_search"]
+write_scope = []
+requires_graph = true
+stop = ["gate_failed", "budget_exhausted", "resource_limit", "no_progress", "repeated_state"]
+output = "change_review.v1"
+
+[worktree]
+base = "main"
+require_clean = false
+require_up_to_date = false
+
+[resources]
+memory_mb = 1024
+disk_mb = 512
+pids = 64
+wall_s = 300
+
+[budget]
+tokens = 40000
+model_calls = 0
+cost_usd = 0.0
+wall_s = 300
+
+[gates]
+before = ["worktree_expected", "branch_expected", "resources_fit", "snapshot_fresh"]
+after = ["schema_valid", "evidence_present"]
+
+[approval]
+mutate = "deny"
+network = "deny"
+
+[output_schema]
+type = "object"
+required = ["summary", "findings", "not_assessed"]
+additionalProperties = false
+
+[output_schema.properties.summary]
+type = "string"
+minLength = 1
+
+[output_schema.properties.findings]
+type = "array"
+
+[output_schema.properties.findings.items]
+type = "object"
+required = ["file", "line", "severity", "issue_type", "evidence", "recommendation"]
+additionalProperties = false
+
+[output_schema.properties.findings.items.properties.file]
+type = "string"
+minLength = 1
+
+[output_schema.properties.findings.items.properties.line]
+type = "integer"
+minimum = 0
+
+[output_schema.properties.findings.items.properties.severity]
+type = "string"
+enum = ["blocking", "major", "minor", "note"]
+
+[output_schema.properties.findings.items.properties.issue_type]
+type = "string"
+enum = ["correctness", "security", "failure_mode", "data_integrity", "performance", "scalability", "architecture", "missing_test", "contract_change", "other"]
+
+[output_schema.properties.findings.items.properties.evidence]
+type = "string"
+minLength = 1
+
+[output_schema.properties.findings.items.properties.recommendation]
+type = "string"
+minLength = 1
+
+[output_schema.properties.not_assessed]
+type = "array"
+
+[output_schema.properties.not_assessed.items]
+type = "string"
+
+[[steps]]
+id = "scope-change"
+tool = "grep"
+goal = "Identify changed files, hunks and symbols from the caller-supplied diff; do not infer unprovided changes."
+paths = ["."]
+
+[steps.budget]
+tokens = 8000
+
+[[steps]]
+id = "inspect-context"
+tool = "read"
+goal = "Read the changed code and the smallest relevant surrounding definitions, tests and project contracts."
+paths = ["."]
+
+[steps.budget]
+tokens = 12000
+
+[[steps]]
+id = "trace-impact"
+tool = "graph_search"
+goal = "Trace callers, callees, dependents and covering tests for changed symbols; report graph gaps as not assessed."
+paths = ["."]
+
+[steps.budget]
+tokens = 12000
+
+[[steps]]
+id = "review-change"
+tool = "read"
+goal = "Report only evidence-backed change findings, with file and line, practical recommendation and explicit unassessed areas. Do not edit files or claim tests ran unless evidence says they ran."
+paths = ["."]
+
+[steps.budget]
+tokens = 8000

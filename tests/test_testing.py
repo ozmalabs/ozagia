@@ -11,6 +11,7 @@ import pytest
 
 from ozagia import testing_cli
 from ozagia.core import testing as T
+from ozagia.core import test_coverage as TC
 from ozagia.core import settings as S
 from ozagia.core.memory import _tree_digest
 
@@ -401,6 +402,55 @@ def test_plan_is_deterministic(repo) -> None:
     first = T.plan(repo["root"], changed=["src/app.py"])
     second = T.plan(repo["root"], changed=["src/app.py"])
     assert first == second
+
+
+def test_coverage_report_composes_fresh_plan_links(repo) -> None:
+    root = repo["root"]
+    plan = T.plan(root, changed=["src/app.py"])
+    coverage = TC.report(root, plan)
+    assert coverage["schema"] == TC.SCHEMA
+    assert coverage["graph"]["freshness"] == "fresh"
+    assert coverage["subjects"] == [{
+        "file": "src/app.py",
+        "exists": True,
+        "state": "linked",
+        "linked_tests": ["tests/test_app.py"],
+        "selected_tests": ["tests/test_app.py"],
+    }]
+    assert coverage["executed"] is False
+    assert coverage["truth_assessed"] is False
+
+
+@pytest.mark.parametrize(("freshness", "expected"), [
+    ("missing", "graph_missing"),
+    ("stale", "graph_stale"),
+    ("unknown", "graph_unknown"),
+])
+def test_coverage_report_preserves_unusable_graph_state(
+        tmp_path: Path, freshness: str, expected: str) -> None:
+    source = tmp_path / "module.py"
+    source.write_text("value = 1\n", encoding="utf-8")
+    view = TC.report(tmp_path, {
+        "changed_files": ["module.py"],
+        "selected_files": ["tests/test_module.py"],
+        "graph": {"freshness": freshness},
+    })
+    assert view["subjects"][0]["state"] == expected
+    assert view["subjects"][0]["linked_tests"] == []
+    assert view["subjects"][0]["selected_tests"] == []
+
+
+def test_coverage_report_distinguishes_unlinked_and_missing_subject(
+        tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "module.py"
+    source.write_text("value = 1\n", encoding="utf-8")
+    monkeypatch.setattr(T, "_load_graph", lambda *a, **k: (
+        {"freshness": "fresh"}, {"file_tests": {}}))
+    base = {"graph": {"freshness": "fresh"}, "selected_files": []}
+    unlinked = TC.report(tmp_path, {**base, "changed_files": ["module.py"]})
+    missing = TC.report(tmp_path, {**base, "changed_files": ["gone.py"]})
+    assert unlinked["subjects"][0]["state"] == "unlinked"
+    assert missing["subjects"][0]["state"] == "missing_subject"
 
 
 # --------------------------------------------------------------------------- #

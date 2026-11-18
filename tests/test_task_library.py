@@ -14,7 +14,8 @@ RESEARCH = {
     "paper_triage", "claim_extract", "reference_screen", "evidence_table",
     "theory_compare", "manuscript_check",
 }
-CODING = {"diff_review", "test_triage", "impact_analysis", "repo_scan"}
+CODING = {"diff_review", "test_triage", "impact_analysis", "repo_scan",
+          "review_my_change"}
 OPS = {"log_inspect", "model_classify", "config_validate"}
 
 
@@ -57,7 +58,7 @@ def _write_unknown(root: Path, task_id: str = "not_a_task") -> Path:
 # --------------------------------------------------------------------------- #
 def test_every_builtin_validates_through_core_tasks() -> None:
     paths = sorted(L.builtin_dir().rglob("*.toml"))
-    assert len(paths) == 13
+    assert len(paths) == 14
     seen: set[str] = set()
     for path in paths:
         spec = T.load_spec(path)
@@ -80,20 +81,37 @@ def test_domains_and_ids_are_unique() -> None:
     catalog = L.catalog()
     assert [domain["id"] for domain in catalog["domains"]] == [
         "research", "coding", "ops"]
-    assert [domain["count"] for domain in catalog["domains"]] == [6, 4, 3]
+    assert [domain["count"] for domain in catalog["domains"]] == [6, 5, 3]
     assert set(catalog["domains"][0]["task_ids"]) == RESEARCH
     assert set(catalog["domains"][1]["task_ids"]) == CODING
     assert set(catalog["domains"][2]["task_ids"]) == OPS
     ids = [task["id"] for task in catalog["tasks"]]
-    assert len(ids) == len(set(ids)) == 13
-    assert catalog["counts"] == {"builtin": 13, "repo": 0, "total": 13}
+    assert len(ids) == len(set(ids)) == 14
+    assert catalog["counts"] == {"builtin": 14, "repo": 0, "total": 14}
+
+
+def test_review_my_change_is_discoverable_and_offline_read_only() -> None:
+    task = L.get_task("review_my_change")
+
+    assert task.domain == "coding"
+    assert task.source == "builtin"
+    assert task.spec.inputs == ("diff",)
+    assert set(task.spec.tools) == {"read", "grep", "graph_search"}
+    assert task.spec.requires_graph is True
+    assert task.spec.write_scope == ()
+    assert task.spec.budget.model_calls == 0
+    assert task.spec.approval.mutate == "deny"
+    assert task.spec.approval.network == "deny"
+    assert task.spec.output == "change_review.v1"
+    assert "not_assessed" in task.spec.output_schema["required"]
 
 
 def test_list_show_and_catalog_metadata() -> None:
     tasks = L.list_tasks()
-    assert len(tasks) == 13
+    assert len(tasks) == 14
     assert [task["id"] for task in tasks if task["domain"] == "coding"] == [
-        "diff_review", "impact_analysis", "repo_scan", "test_triage"]
+        "diff_review", "impact_analysis", "repo_scan", "review_my_change",
+        "test_triage"]
 
     coding = L.list_tasks(domain="coding")
     assert {task["id"] for task in coding} == CODING
@@ -121,7 +139,7 @@ def test_list_show_and_catalog_metadata() -> None:
     catalog = L.catalog()
     assert catalog["schema"] == L.SCHEMA
     assert catalog["root"] is None
-    assert catalog["counts"]["total"] == 13
+    assert catalog["counts"]["total"] == 14
     assert "evidence_table" in {
         task["id"] for task in catalog["tasks"]
         if task["domain"] == "research"
@@ -135,7 +153,7 @@ def test_builtin_issue_codes_are_structured() -> None:
     report = L.validate_library()
     assert report["ok"] is True
     assert report["errors"] == []
-    assert report["counts"] == {"builtin": 13, "repo": 0, "total": 13}
+    assert report["counts"] == {"builtin": 14, "repo": 0, "total": 14}
     assert all(issue["severity"] == "warning" for issue in report["issues"])
     assert any("approval.mutate" in warning for warning in report["warnings"])
 
@@ -150,7 +168,7 @@ def test_repo_override_replaces_builtin(tmp_path: Path) -> None:
                     title="Paper triage (local)")
     report = L.validate_library(root)
     assert report["ok"], report
-    assert report["counts"] == {"builtin": 13, "repo": 1, "total": 13}
+    assert report["counts"] == {"builtin": 14, "repo": 1, "total": 14}
 
     task = L.get_task("paper_triage", root=root)
     assert task.source == "repo"
@@ -167,7 +185,7 @@ def test_repo_override_replaces_builtin(tmp_path: Path) -> None:
     assert listed["claim_extract"]["source"] == "builtin"
 
     catalog = L.catalog(root)
-    assert catalog["counts"] == {"builtin": 13, "repo": 1, "total": 13}
+    assert catalog["counts"] == {"builtin": 14, "repo": 1, "total": 14}
     assert catalog["domains"][0]["count"] == 6
 
 
@@ -385,7 +403,7 @@ def test_cli_list_show_catalog_validate(tmp_path: Path,
     root.mkdir()
     assert task_library_cli.main(["list", "--root", str(root)]) == 0
     human = capsys.readouterr().out
-    assert "Task classes: 13" in human
+    assert "Task classes: 14" in human
     assert "research (6)" in human
     assert "paper_triage" in human
 
@@ -398,7 +416,7 @@ def test_cli_list_show_catalog_validate(tmp_path: Path,
     assert task_library_cli.main(
         ["catalog", "--root", str(root), "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["counts"]["total"] == 13
+    assert payload["counts"]["total"] == 14
 
     assert task_library_cli.main(
         ["show", "diff_review", "--root", str(root), "--json"]) == 0
@@ -414,7 +432,7 @@ def test_cli_list_show_catalog_validate(tmp_path: Path,
 
     assert task_library_cli.main(["validate", "--root", str(root)]) == 0
     human = capsys.readouterr().out
-    assert "ok: 13 task classes" in human
+    assert "ok: 14 task classes" in human
 
     assert task_library_cli.main(
         ["validate", "--root", str(root), "--json"]) == 0

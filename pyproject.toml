@@ -38,10 +38,11 @@ treesitter = [
 lsp = ["pyright>=1.1.400"]
 openapi-yaml = ["PyYAML>=6"]
 iac-yaml = ["PyYAML>=6"]
+iac-hcl = ["python-hcl2>=7.3,<9"]
 edit-yaml = ["ruamel.yaml>=0.18,<1"]
 research = ["sympy>=1.14,<2", "lark>=1.2,<2"]
 keyring = ["keyring>=24"]
-all = ["ozagia[treesitter,lsp,research,iac-yaml,openapi-yaml]"]
+all = ["ozagia[treesitter,lsp,research,iac-yaml,iac-hcl,openapi-yaml]"]
 dev = ["ozagia[all]", "pytest>=8", "ruff>=0.6"]
 # Optional, task-specific libraries. These are deliberately not part of
 # `all` or `dev`: the core stays standard-library only and a missing extra is
@@ -85,6 +86,7 @@ ozagia-files = "ozagia.files_cli:main"
 ozagia-mcp = "ozagia.integrations.mcp.server:main"
 ozagia-research = "ozagia.research.service:main"
 ozagia-edit = "ozagia.edit.code_edit:main"
+ozagia-profile = "ozagia.profile_cli:main"
 ozagia-symbols = "ozagia.core.symbol_graph:main"
 ozagia-eval = "ozagia.eval.agent:main"
 ozagia-eval-retrieval = "ozagia.eval.retrieval:main"
@@ -109,4 +111,4 @@ src = ["src", "tests"]
 select = ["E", "F", "W"]
 ignore = ["E501", "E731"]
 # Fixtures with significant trailing whitespace.
-per-file-ignores = { "tests/test_markdown_edit.py" = ["W291"] }
+per-file-ignores = { "tests/test_markdown_edit.py" = ["W291"], "tests/fixtures/deep_review/*.py" = ["F821", "E722"], "tests/fixtures/deep_review_service/**/*.py" = ["F821"], "tests/fixtures/deep_review_static/**/*.py" = ["F821"] }

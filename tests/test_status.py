@@ -24,7 +24,7 @@ from ozagia.daemon.client import (
 KEYS = {
     "schema", "checked_at", "root", "ok", "errors", "degraded",
     "workspace", "resources", "files", "runtime", "daemon", "doctor",
-    "config",
+    "config", "reviews",
 }
 
 
@@ -238,6 +238,7 @@ def test_status_all_present(components: SimpleNamespace) -> None:
     assert report["daemon"]["report"]["timeout_s"] == 0.5
     assert report["doctor"]["state"] == "ok"
     assert report["doctor"]["report"]["snapshot"]["state"] == "fresh"
+    assert report["reviews"]["state"] == "absent"
     assert report["config"]["state"] == "configured"
     assert report["config"]["path"] == str(components.cfg_path)
     assert report["config"]["report"]["runtime_services"] == ["api"]

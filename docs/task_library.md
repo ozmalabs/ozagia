@@ -11,7 +11,7 @@ executor supplied by the caller.
 
 ## Catalogue
 
-Thirteen classes at library version 1:
+Fourteen classes at library version 1:
 
 | Domain | Task class | Inputs | Output | Writes | Purpose |
 | --- | --- | --- | --- | --- | --- |
@@ -25,6 +25,7 @@ Thirteen classes at library version 1:
 | Coding | `test_triage` | `failure_log` | `test_triage.v1` | none | Failing test to cause, covering tests and a bounded proposed fix. |
 | Coding | `impact_analysis` | `diff` | `impact_report.v1` | none | Changed graph keys, dependents, covering tests and a risk rating. |
 | Coding | `repo_scan` | none | `repo_scan.v1` | none | Advisory opportunities with expected effect, effort, risk and evidence. |
+| Coding | `review_my_change` | `diff` | `change_review.v1` | none | Evidence-backed review of a supplied change with impact tracing and explicit unknowns. |
 | Ops | `log_inspect` | `log_path` | `failure_clusters.v1` | none | Failure clusters, evidence lines and proposed fixes. |
 | Ops | `model_classify` | `task_class`, `privacy`, `input_size` | `model_choice.v1` | none | A model recommendation with confidence and reason, from local config. |
 | Ops | `config_validate` | `config_path` | `config_check.v1` | none | Invalid keys, conflicts and suggested values. |
@@ -35,6 +36,13 @@ is `evidence_table`, which has `write_scope = ["history"]` and
 approved. `diff_review`, `impact_analysis` and `repo_scan` need a fresh graph
 snapshot because they use graph tools; the other classes work with ordinary
 file reads.
+
+`review_my_change` is the reusable agent task for a current change. It accepts
+the caller's diff, allows a dirty worktree, requires a fresh graph snapshot,
+and uses only read/grep/graph tools. It declares zero model calls, denies
+network and mutation, and asks the agent to report evidence and unknowns rather
+than claim tests ran. Browse it with `ozagia tasks show review_my_change` or
+`ozagia tasks list --json`; callers still supply the executor and diff.
 
 ## Locations
 
@@ -148,16 +156,18 @@ Examples:
 
 ```console
 $ python -m ozagia.task_library_cli list --domain coding
-Task classes: 4 (4 built-in, 0 repo overrides)
+Task classes: 5 (5 built-in, 0 repo overrides)
 
-coding (4)
+coding (5)
   diff_review  v1  Diff review
       Review a diff for correctness, test coverage and contract risk, ...
+  review_my_change  v1  Review my change
+      Review a supplied diff with graph impact, evidence and explicit unknowns, ...
 
 $ python -m ozagia.task_library_cli validate --json
 {
   "ok": true,
-  "counts": {"builtin": 13, "repo": 0, "total": 13},
+  "counts": {"builtin": 14, "repo": 0, "total": 14},
   ...
 }
 ```

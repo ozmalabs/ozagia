@@ -2,9 +2,10 @@
 
 This module composes checks that already exist: worktree/branch checks, host
 resources, the created-file ledger, runtime services and tunnels, the graph
-daemon, diagnostics and project configuration. It is not a second service
-manager and it never builds an index, starts a daemon or process, opens a
-tunnel or writes to the repository or its state directory.
+daemon, diagnostics, project configuration and the newest deep-review manifest.
+It is not a second service manager and it never builds an index, starts a
+daemon or process, opens a tunnel, creates a review, prunes one, or writes to
+the repository or its state directory.
 
 Absence and ignorance are distinct. A missing daemon is ``absent`` (a known
 fact: nothing is listening); a daemon that does not answer in time is
@@ -14,6 +15,10 @@ state that says why.
 """
 from __future__ import annotations
 
+import json
+import os
+import stat
+import time
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
@@ -52,6 +57,12 @@ TEXT_WORKTREE_LIMIT = 10
 TEXT_RUNTIME_LIMIT = 10
 TEXT_FINDING_LIMIT = 5
 SNAPSHOT_STATES = ("missing", "stale", "invalid", "unknown")
+REVIEW_DIR_PREFIX = "deep-"
+REVIEW_MANIFEST_NAME = "manifest.json"
+REVIEW_MANIFEST_SCHEMA = "ozagia.deep_review.manifest.v1"
+REVIEW_MANIFEST_MAX_BYTES = 1_000_000
+REVIEW_SCAN_LIMIT = 256
+REVIEW_SUBJECT_LIMIT = 32
 
 
 def _now() -> str:
@@ -305,6 +316,230 @@ def _doctor_status(
     return _section("degraded", report)
 
 
+def _read_review_manifest(path: Path, limit: int) -> bytes:
+    """Read at most ``limit`` bytes without following a symlink."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    with os.fdopen(fd, "rb") as handle:
+        return handle.read(limit + 1)
+
+
+def _review_manifest_summary(
+    data: Any,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """The bounded summary of a deep-review manifest, or why it is invalid."""
+    if not isinstance(data, Mapping):
+        return None, "manifest is not a JSON object"
+    if data.get("schema") != REVIEW_MANIFEST_SCHEMA:
+        return None, f"manifest schema is not {REVIEW_MANIFEST_SCHEMA!r}"
+    status = data.get("status")
+    if not isinstance(status, str):
+        return None, "manifest status is not a string"
+    flags: dict[str, bool] = {}
+    for key in ("complete", "exhaustive", "truth_assessed"):
+        value = data.get(key)
+        if not isinstance(value, bool):
+            return None, f"manifest {key} is not a boolean"
+        flags[key] = value
+    findings = data.get("findings")
+    if isinstance(findings, bool) or not isinstance(findings, int) or findings < 0:
+        return None, "manifest findings is not a non-negative integer"
+    subjects = data.get("subjects")
+    if not isinstance(subjects, Mapping):
+        return None, "manifest subjects is not an object"
+    names = list(subjects)
+    if not all(isinstance(name, str) for name in names):
+        return None, "manifest subjects has a non-string key"
+    names.sort()
+    subject_status: dict[str, str] = {}
+    for name in names:
+        row = subjects[name]
+        if not isinstance(row, Mapping):
+            return None, f"manifest subject {name!r} is not an object"
+        subject_state = row.get("status")
+        if not isinstance(subject_state, str):
+            return None, f"manifest subject {name!r} has no string status"
+        if len(subject_status) < REVIEW_SUBJECT_LIMIT:
+            subject_status[name] = subject_state
+    manifest_root = data.get("root")
+    if manifest_root is not None and not isinstance(manifest_root, str):
+        return None, "manifest root is not a string"
+    return {
+        "manifest_root": manifest_root,
+        "status": status,
+        "complete": flags["complete"],
+        "exhaustive": flags["exhaustive"],
+        "truth_assessed": flags["truth_assessed"],
+        "findings": findings,
+        "subject_count": len(names),
+        "subjects": subject_status,
+        "subjects_truncated": len(names) > REVIEW_SUBJECT_LIMIT,
+    }, None
+
+
+def _reviews_status(
+    root: Path, degraded: list[dict[str, str]],
+) -> dict[str, Any]:
+    """Read the newest deep-review manifest, never writing or refreshing it."""
+    state_root = root / ".ozagia"
+    reviews_root = state_root / "reviews"
+    report: dict[str, Any] = {
+        "root": str(root),
+        "reviews_root": str(reviews_root),
+        "latest": None,
+        "manifest": None,
+        "manifest_root": None,
+        "age_s": None,
+        "status": None,
+        "complete": None,
+        "exhaustive": None,
+        "truth_assessed": None,
+        "findings": None,
+        "subject_count": None,
+        "subjects": {},
+        "subjects_truncated": False,
+    }
+
+    def unknown(
+        code: str, message: str, error: str | None = None,
+    ) -> dict[str, Any]:
+        degraded.append(_issue("reviews", code, message))
+        return _section("unknown", report, error=error or message)
+
+    try:
+        state_info = state_root.lstat()
+    except FileNotFoundError:
+        return _section("absent", report)
+    except OSError as exc:
+        return unknown(
+            "reviews.unreadable",
+            f"state directory could not be read: {exc}", str(exc))
+    if stat.S_ISLNK(state_info.st_mode):
+        return unknown(
+            "reviews.escape",
+            f"state directory is a symlink; refusing to follow it: {state_root}")
+    if not stat.S_ISDIR(state_info.st_mode):
+        return unknown(
+            "reviews.ambiguous",
+            f"state path is not a directory: {state_root}")
+    try:
+        reviews_info = reviews_root.lstat()
+    except FileNotFoundError:
+        return _section("absent", report)
+    except OSError as exc:
+        return unknown(
+            "reviews.unreadable",
+            f"reviews directory could not be read: {exc}", str(exc))
+    if stat.S_ISLNK(reviews_info.st_mode):
+        return unknown(
+            "reviews.escape",
+            f"reviews directory is a symlink; refusing to follow it: "
+            f"{reviews_root}")
+    if not stat.S_ISDIR(reviews_info.st_mode):
+        return unknown(
+            "reviews.ambiguous",
+            f"reviews path is not a directory: {reviews_root}")
+    try:
+        with os.scandir(reviews_root) as entries:
+            latest_name: str | None = None
+            count = 0
+            for entry in entries:
+                if not entry.name.startswith(REVIEW_DIR_PREFIX):
+                    continue
+                count += 1
+                if count > REVIEW_SCAN_LIMIT:
+                    return unknown(
+                        "reviews.ambiguous",
+                        f"more than {REVIEW_SCAN_LIMIT} review directories "
+                        f"under {reviews_root}; the newest is ambiguous")
+                if latest_name is None or entry.name > latest_name:
+                    latest_name = entry.name
+    except OSError as exc:
+        return unknown(
+            "reviews.unreadable",
+            f"reviews directory could not be read: {exc}", str(exc))
+    if latest_name is None:
+        return _section("absent", report)
+    latest = reviews_root / latest_name
+    report["latest"] = str(latest)
+    try:
+        latest_info = latest.lstat()
+    except OSError as exc:
+        return unknown(
+            "reviews.unreadable",
+            f"newest review could not be read: {exc}", str(exc))
+    if stat.S_ISLNK(latest_info.st_mode):
+        return unknown(
+            "reviews.escape",
+            f"newest review is a symlink; refusing to follow it: {latest}")
+    if not stat.S_ISDIR(latest_info.st_mode):
+        return unknown(
+            "reviews.ambiguous",
+            f"newest review path is not a directory: {latest}")
+    try:
+        base = reviews_root.resolve(strict=True)
+        resolved = latest.resolve(strict=True)
+    except OSError as exc:
+        return unknown(
+            "reviews.unreadable",
+            f"newest review could not be resolved: {exc}", str(exc))
+    if resolved.parent != base:
+        return unknown(
+            "reviews.escape",
+            f"newest review resolves outside {reviews_root}: {latest}")
+    manifest = latest / REVIEW_MANIFEST_NAME
+    report["manifest"] = str(manifest)
+    try:
+        manifest_info = manifest.lstat()
+    except FileNotFoundError:
+        return unknown(
+            "reviews.manifest",
+            f"newest review has no {REVIEW_MANIFEST_NAME}: {latest}",
+            f"{REVIEW_MANIFEST_NAME} is missing")
+    except OSError as exc:
+        return unknown(
+            "reviews.manifest",
+            f"review manifest could not be read: {exc}", str(exc))
+    if stat.S_ISLNK(manifest_info.st_mode):
+        return unknown(
+            "reviews.escape",
+            f"review manifest is a symlink; refusing to follow it: {manifest}")
+    if not stat.S_ISREG(manifest_info.st_mode):
+        return unknown(
+            "reviews.manifest",
+            f"review manifest is not a regular file: {manifest}")
+    if manifest_info.st_size > REVIEW_MANIFEST_MAX_BYTES:
+        return unknown(
+            "reviews.manifest",
+            f"review manifest exceeds {REVIEW_MANIFEST_MAX_BYTES} bytes: "
+            f"{manifest}")
+    try:
+        raw = _read_review_manifest(manifest, REVIEW_MANIFEST_MAX_BYTES)
+    except OSError as exc:
+        return unknown(
+            "reviews.unreadable",
+            f"review manifest could not be read: {exc}", str(exc))
+    if len(raw) > REVIEW_MANIFEST_MAX_BYTES:
+        return unknown(
+            "reviews.manifest",
+            f"review manifest grew beyond {REVIEW_MANIFEST_MAX_BYTES} bytes: "
+            f"{manifest}")
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return unknown(
+            "reviews.manifest",
+            f"review manifest is not UTF-8 JSON: {exc}", str(exc))
+    summary, error = _review_manifest_summary(data)
+    if summary is None:
+        return unknown(
+            "reviews.manifest",
+            f"review manifest is invalid: {error}", error)
+    report.update(summary)
+    report["age_s"] = max(0.0, round(time.time() - manifest_info.st_mtime, 1))
+    return _section("ok", report)
+
+
 def status(
     root: str | Path,
     *,
@@ -341,6 +576,7 @@ def status(
     runtime = _runtime_status(root_path, project, degraded)
     daemon = _daemon_status(root_path, timeout=timeout, degraded=degraded)
     doctor = _doctor_status(root_path, degraded)
+    reviews = _reviews_status(root_path, degraded)
 
     return {
         "schema": SCHEMA,
@@ -355,6 +591,7 @@ def status(
         "runtime": runtime,
         "daemon": daemon,
         "doctor": doctor,
+        "reviews": reviews,
         "config": config,
     }
 
@@ -493,6 +730,23 @@ def format_status(report: Mapping[str, Any]) -> str:
     else:
         lines.append(f"doctor: {doctor.get('state')} "
                      f"({_text(doctor.get('error'))})")
+
+    reviews = report.get("reviews") or {}
+    reviews_report = reviews.get("report")
+    if isinstance(reviews_report, Mapping):
+        if reviews.get("state") == "absent":
+            lines.append("reviews: absent (no deep-review report)")
+        else:
+            lines.append(
+                f"reviews: {_text(reviews.get('state'))} "
+                f"latest={_text(reviews_report.get('latest'))} "
+                f"age={_text(reviews_report.get('age_s'), 's')} "
+                f"status={_text(reviews_report.get('status'))} "
+                f"findings={_text(reviews_report.get('findings'))} "
+                f"subjects={_text(reviews_report.get('subject_count'))}")
+    else:
+        lines.append(f"reviews: {reviews.get('state')} "
+                     f"({_text(reviews.get('error'))})")
 
     config = report.get("config") or {}
     config_path_text = config.get("path") or "no configuration file"
