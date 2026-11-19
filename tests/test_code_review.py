@@ -577,20 +577,23 @@ def test_review_refuses_configured_process_filter_without_executing_it(tmp_path)
     (repo / "sample.txt").write_text("changed after filter setup\n",
                                      encoding="utf-8")
 
-    report = R.review_range(repo, f"{base}..HEAD")
-    assert report["range"]["spec"] == f"{base}..HEAD"
+    with pytest.raises(R.CodeReviewError, match="filter|worktree check failed"):
+        R.review_range(repo, f"{base}..HEAD")
     assert not marker.exists()
 
 
 def test_review_refuses_local_git_config_includes_before_status(tmp_path):
     repo = _init_repo(tmp_path / "filter-include")
+    (repo / ".gitattributes").write_text("*.txt filter=marker\n")
+    (repo / "sample.txt").write_text("sample\n")
+    _git(repo, "add", ".")
     external = tmp_path / "included.gitconfig"
     external.write_text('[filter "marker"]\n process = /tmp/should-not-run\n',
                         encoding="utf-8")
     _git(repo, "config", "include.path", str(external))
 
-    result = R._git(repo, ["status", "--porcelain=v2"])
-    assert result.returncode == 0
+    with pytest.raises(R.CodeReviewError, match="filter"):
+        R._git(repo, ["status", "--porcelain=v2"])
 
 
 def test_wrong_branch_refuses(review_repo):

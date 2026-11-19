@@ -171,6 +171,62 @@ def _quote_config(value: str) -> str:
         "\n", "\\n").replace("\t", "\\t") + '"'
 
 
+def _effective_config(root: Path, timeout: float) -> list[tuple[str, str]]:
+    """Inspect effective config without using it for worktree conversion."""
+    env = {key: value for key, value in os.environ.items()
+           if not key.startswith("GIT_")}
+    env.update({"GIT_OPTIONAL_LOCKS": "0", "GIT_PAGER": "cat"})
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "config", "--null", "--list"],
+            capture_output=True, timeout=min(timeout, 5), env=env,
+            stdin=subprocess.DEVNULL, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise UnsafeGitConfig("cannot inspect effective Git config") from exc
+    if result.returncode:
+        raise UnsafeGitConfig("cannot inspect effective Git config")
+    entries = []
+    for item in result.stdout.split(b"\0"):
+        if item:
+            key, _, value = item.partition(b"\n")
+            try:
+                entries.append((key.decode("utf-8").lower(), value.decode("utf-8")))
+            except UnicodeError as exc:
+                raise UnsafeGitConfig("Git config is not valid UTF-8") from exc
+    return entries
+
+
+def _has_filter_attributes(root: Path, timeout: float) -> bool:
+    """Check worktree paths without asking Git to convert their contents."""
+    env = {key: value for key, value in os.environ.items()
+           if not key.startswith("GIT_")}
+    env["GIT_OPTIONAL_LOCKS"] = "0"
+    env["GIT_PAGER"] = "cat"
+    prefix = ["git", "-c", "core.fsmonitor=false", "-C", str(root)]
+    try:
+        paths = subprocess.run(
+            [*prefix, "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+            capture_output=True, timeout=timeout, env=env,
+            stdin=subprocess.DEVNULL, check=False)
+        if paths.returncode or len(paths.stdout) > 16 * 1024 * 1024:
+            raise UnsafeGitConfig("cannot safely enumerate Git filter attributes")
+        if not paths.stdout:
+            return False
+        attrs = subprocess.run(
+            [*prefix, "check-attr", "-z", "--stdin", "filter"],
+            input=paths.stdout, capture_output=True, timeout=timeout,
+            env=env, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise UnsafeGitConfig("cannot inspect Git filter attributes") from exc
+    if attrs.returncode or len(attrs.stdout) > 64 * 1024 * 1024:
+        raise UnsafeGitConfig("cannot safely inspect Git filter attributes")
+    fields = attrs.stdout.split(b"\0")
+    if (len(fields) - 1) % 3:
+        raise UnsafeGitConfig("invalid Git filter attribute response")
+    return any(fields[i] not in (b"unspecified", b"unset")
+               for i in range(2, len(fields) - 1, 3))
+
+
 def run_isolated_worktree_git(root: str | Path, args: Sequence[str], *,
                               timeout: float = 20,
                               input_data: bytes | None = None):
@@ -196,6 +252,10 @@ def run_isolated_worktree_git(root: str | Path, args: Sequence[str], *,
     entries = _config_entries(config, env, timeout)
     worktree_config = git_dir / "config.worktree"
     entries.extend(_config_entries(worktree_config, env, timeout))
+    effective_entries = _effective_config(root_path, timeout)
+    if (any(key.startswith("filter.") for key, _value in effective_entries)
+            and _has_filter_attributes(root_path, timeout)):
+        raise UnsafeGitConfig("configured Git filters cannot be safely evaluated")
     values: dict[str, list[str]] = {}
     for key, value in entries:
         values.setdefault(key, []).append(value)
@@ -238,12 +298,15 @@ def run_isolated_worktree_git(root: str | Path, args: Sequence[str], *,
                         "\tfsmonitor = false"]
         if object_format == "sha256":
             config_lines.extend(("[extensions]", "\tobjectFormat = sha256"))
+        effective_values = dict(effective_entries)
         for key in ("core.filemode", "core.ignorecase", "core.symlinks",
-                    "core.precomposeunicode"):
-            if key in values:
+                    "core.precomposeunicode", "core.autocrlf", "core.eol",
+                    "core.safecrlf", "core.checkroundtripencoding",
+                    "core.attributesfile"):
+            if key in effective_values:
                 config_lines.extend((f"[{key.split('.')[0]}]",
                                      f"\t{key.split('.', 1)[1]} = "
-                                     f"{_quote_config(values[key][-1])}"))
+                                     f"{_quote_config(effective_values[key])}"))
         (safe_dir / "config").write_text("\n".join(config_lines) + "\n",
                                          encoding="utf-8")
         (safe_dir / "objects" / "info" / "alternates").write_text(
@@ -264,6 +327,10 @@ def run_isolated_worktree_git(root: str | Path, args: Sequence[str], *,
         info_exclude = common_dir / "info" / "exclude"
         if info_exclude.exists():
             _copy_regular(info_exclude, safe_dir / "info" / "exclude",
+                          limit=1024 * 1024)
+        info_attributes = common_dir / "info" / "attributes"
+        if info_attributes.exists():
+            _copy_regular(info_attributes, safe_dir / "info" / "attributes",
                           limit=1024 * 1024)
         stash_log = common_dir / "logs" / "refs" / "stash"
         if stash_log.exists():

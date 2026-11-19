@@ -5,7 +5,9 @@ import os
 import subprocess
 from pathlib import Path
 
-from ozagia.core import fingerprint, memory
+import pytest
+
+from ozagia.core import fingerprint, git_safety, memory
 
 
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess:
@@ -47,8 +49,7 @@ def test_fingerprint_status_does_not_execute_configured_process_filter(tmp_path)
 
     result = fingerprint.tree_fingerprint(root)
 
-    assert result is not None
-    assert result["dirty"]
+    assert result is None
     assert not marker.exists()
 
 
@@ -57,8 +58,8 @@ def test_memory_tree_digest_diff_does_not_execute_configured_process_filter(tmp_
 
     digest, error = memory._tree_digest(root, include_docs="none", watch_globs=())
 
-    assert digest is not None
-    assert error is None
+    assert digest is None
+    assert "filter" in error
     assert not marker.exists()
 
 
@@ -71,5 +72,35 @@ def test_memory_changed_status_does_not_execute_configured_process_filter(tmp_pa
 
     result = mem.changed()
 
-    assert result["ok"] is True
+    assert result["ok"] is False
+    assert "filter" in result["error"]
     assert not marker.exists()
+
+
+def test_crlf_conversion_matches_git_after_stat_change(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root, "init", "-q")
+    _git(root, "config", "core.autocrlf", "true")
+    sample = root / "sample.txt"
+    sample.write_bytes(b"hello\r\n")
+    _git(root, "add", ".")
+    _git(root, "commit", "-q", "-m", "initial")
+    sample.write_bytes(b"hello\r\n")
+    assert git_safety.run_git(root, ["status", "--porcelain"]).stdout == b""
+    assert git_safety.run_git(root, ["diff", "HEAD"]).stdout == b""
+    assert _git(root, "status", "--porcelain").stdout == b""
+
+
+def test_included_filter_is_refused_without_execution(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root, "init", "-q")
+    (root / ".gitattributes").write_text("*.txt filter=external\n")
+    (root / "sample.txt").write_text("sample\n")
+    _git(root, "add", ".")
+    included = tmp_path / "included.gitconfig"
+    included.write_text('[filter "external"]\n clean = /bin/false\n')
+    _git(root, "config", "include.path", str(included))
+    with pytest.raises(git_safety.UnsafeGitConfig, match="filter"):
+        git_safety.run_git(root, ["status", "--porcelain"])
