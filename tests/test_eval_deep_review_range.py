@@ -1,10 +1,11 @@
 import json
+import os
 import shutil
 from pathlib import Path
 
 import pytest
 
-from ozagia.eval import deep_review_comparison
+from ozagia.eval import deep_review_comparison, deep_review_report
 from ozagia.eval.deep_review_comparison import (
     DEFAULT_FIXTURE,
     DEFAULT_RANGE_LABELS,
@@ -38,6 +39,59 @@ def _stable(result):
         report.pop("report_bytes", None)
     stable.get("range_graph", {}).pop("reason", None)
     return stable
+
+
+def test_eval_checkout_does_not_copy_or_run_source_git_hooks(tmp_path, monkeypatch):
+    if os.name != "posix":
+        pytest.skip("pre-commit hook fixture requires POSIX")
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "app.py").write_text("value = 1\n", encoding="utf-8")
+    hook = source / ".git" / "hooks" / "pre-commit"
+    hook.parent.mkdir(parents=True)
+    marker = tmp_path / "hook-ran"
+    hook.write_text(f"#!/bin/sh\nprintf ran > {marker}\n", encoding="utf-8")
+    hook.chmod(0o755)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.hooksPath")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", str(hook.parent))
+
+    root, _head = deep_review_comparison._init_checkout(source, workspace, "copy")
+
+    assert not marker.exists()
+    assert not (root / ".git" / "hooks" / "pre-commit").exists()
+
+
+def test_report_evaluator_does_not_run_source_git_hooks(tmp_path, monkeypatch):
+    if os.name != "posix":
+        pytest.skip("pre-commit hook fixture requires POSIX")
+    from ozagia.core.repo_review import PreflightError
+
+    source = tmp_path / "fixture"
+    source.mkdir()
+    (source / "app.py").write_text("value = 1\n", encoding="utf-8")
+    (source / "labels.json").write_text(
+        json.dumps({"cases": [], "report_findings": [],
+                    "complete_subjects": []}), encoding="utf-8")
+    hook = source / ".git" / "hooks" / "pre-commit"
+    hook.parent.mkdir(parents=True)
+    marker = tmp_path / "report-hook-ran"
+    hook.write_text(f"#!/bin/sh\nprintf ran > {marker}\n", encoding="utf-8")
+    hook.chmod(0o755)
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.hooksPath")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", str(hook.parent))
+    monkeypatch.setattr(
+        deep_review_report, "build_deep_review",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(PreflightError(
+            "stop after checkout", {"ok": False, "checks": []})))
+
+    result = deep_review_report.evaluate(source)
+
+    assert result["environment"]["status"] == "preflight_refused"
+    assert not marker.exists()
 
 
 def test_range_comparison_finds_change_set_findings_and_counts_delta():

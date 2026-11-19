@@ -29,14 +29,16 @@ from ozagia.eval.deep_review_labels import (
     load_labels,
     score_report_findings,
 )
+from ozagia.eval._safe_git import command as safe_git_command
 
 DEFAULT_FIXTURE = Path(__file__).resolve().parents[3] / "tests" / "fixtures" / "deep_review_service"
 
 
 def _git(root: Path, *args: str) -> None:
-    subprocess.run(["git", "-C", str(root), *args], check=True,
+    command, env = safe_git_command(root, *args)
+    subprocess.run(command, check=True,
                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                   stderr=subprocess.PIPE, text=True, timeout=20)
+                   stderr=subprocess.PIPE, text=True, timeout=20, env=env)
 
 
 def _preflight_failure(exc: PreflightError) -> dict[str, Any]:
@@ -156,7 +158,8 @@ def evaluate(fixture: str | Path = DEFAULT_FIXTURE, *, budget_s: float = 60,
     with tempfile.TemporaryDirectory(prefix="ozagia-deep-review-eval-") as tmp:
         workspace = Path(tmp)
         root = workspace / "repo"
-        shutil.copytree(source, root, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        shutil.copytree(source, root, ignore=shutil.ignore_patterns(
+            "__pycache__", "*.pyc", ".git"))
         _git(root, "init", "-q")
         _git(root, "add", "--all")
         _git(root, "-c", "user.name=Fixture Evaluation", "-c",

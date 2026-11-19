@@ -89,6 +89,14 @@ def test_model_candidate_scoring_handles_empty_inputs_with_null_rates():
     assert score["reason"] == "no model candidates were produced"
 
 
+def test_model_candidate_precision_is_unknown_without_evaluable_labels():
+    score = score_model_candidates(
+        [{"title": "candidate", "evidence": []}], [], [])
+    assert score["candidates"] == 1
+    assert score["candidate_precision"] is None
+    assert score["candidate_recall"] is None
+
+
 def test_model_candidate_scoring_accounts_for_pass_deduplication():
     candidates = [
         {"title": "First", "evidence": [{"citation_ids": ["f1"]}]},
@@ -122,7 +130,7 @@ def test_model_pass_comparison_handles_empty_deterministic_findings(monkeypatch)
     assert with_model["deterministic_findings"] == 0
     assert with_model["candidate_metrics"]["unique_candidates"] >= 1
     assert with_model["candidate_metrics"]["candidate_recall"] is None
-    assert with_model["candidate_metrics"]["candidate_precision"] == 0.0
+    assert with_model["candidate_metrics"]["candidate_precision"] is None
     assert result["deterministic_repeat"] is True
 
 

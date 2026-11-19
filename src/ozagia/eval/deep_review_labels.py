@@ -452,6 +452,16 @@ def score_report_findings(findings: Iterable[Mapping[str, Any]],
     sections = report_manifest.get("subjects")
     sections = sections if isinstance(sections, Mapping) else {}
     unavailable: dict[str, str] = {}
+    truncation = report_manifest.get("truncation")
+    truncation = truncation if isinstance(truncation, Mapping) else {}
+    normalization_omitted = truncation.get("normalization_findings_omitted", 0)
+    max_finding_truncation = truncation.get("max_findings")
+    global_coverage_failure = None
+    if isinstance(normalization_omitted, int) and normalization_omitted > 0:
+        global_coverage_failure = "finding normalization omitted rows"
+    elif (isinstance(max_finding_truncation, Mapping)
+          and max_finding_truncation.get("truncated") is True):
+        global_coverage_failure = "returned findings were limited by max_findings"
 
     def graph_is_fresh() -> bool:
         graph = report_manifest.get("prioritization_graph")
@@ -478,6 +488,8 @@ def score_report_findings(findings: Iterable[Mapping[str, Any]],
         return False
 
     def unavailable_reason(subject: str, label: Mapping[str, Any] | None) -> str | None:
+        if global_coverage_failure:
+            return global_coverage_failure
         row = sections.get(subject)
         if not isinstance(row, Mapping):
             return "subject report is missing"

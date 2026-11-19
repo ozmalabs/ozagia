@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import shutil
 import subprocess
@@ -33,6 +32,7 @@ from typing import Any, Callable, Iterable, Mapping
 from ozagia.core.deep_review.model_pass import run_model_pass
 from ozagia.core.deep_review.orchestrator import build_deep_review
 from ozagia.core.repo_review import PreflightError
+from ozagia.eval._safe_git import command as safe_git_command
 from ozagia.eval.deep_review_labels import (
     expected_findings,
     label_metadata,
@@ -56,10 +56,11 @@ _FIXED_GIT_ENV = {
 
 
 def _git(root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+    command, env = safe_git_command(root, *args)
     return subprocess.run(
-        ["git", "-C", str(root), *args], check=check, stdin=subprocess.DEVNULL,
+        command, check=check, stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=20,
-        env={**os.environ, **_FIXED_GIT_ENV},
+        env={**env, **_FIXED_GIT_ENV},
     )
 
 
@@ -69,7 +70,8 @@ def _revision(root: Path) -> str:
 
 def _init_checkout(source: Path, workspace: Path, name: str) -> tuple[Path, str]:
     root = workspace / name
-    shutil.copytree(source, root, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    shutil.copytree(source, root, ignore=shutil.ignore_patterns(
+        "__pycache__", "*.pyc", ".git"))
     _git(root, "init", "-q", "-b", "main")
     _git(root, "add", "--all")
     _git(root, "commit", "-qm", "fixture-base")
@@ -574,7 +576,8 @@ def score_model_candidates(candidates: Iterable[Mapping[str, Any]],
     noise = unique_count - supported_count
     duplicate_count = max(observed_duplicates, int(deduplicated))
     accepted_count = accepted if accepted is not None else total
-    reason = None if unique_count else "no model candidates were produced"
+    reason = ("no model candidates were produced" if not unique_count else
+              "no reviewed labels are available for this run" if not expected_rows else None)
     return {
         "candidates": total,
         "accepted_candidates": accepted_count,
@@ -585,7 +588,7 @@ def score_model_candidates(candidates: Iterable[Mapping[str, Any]],
         "covered_labels": len(covered),
         "expected_labels": len(expected_rows),
         "candidate_precision": (supported_count / unique_count
-                                if unique_count else None),
+                                if unique_count and expected_rows else None),
         "candidate_recall": (len(covered) / len(expected_rows)
                              if expected_rows else None),
         "added_noise_rate": noise / unique_count if unique_count else None,

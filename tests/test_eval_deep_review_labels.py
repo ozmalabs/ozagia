@@ -172,6 +172,55 @@ def test_graph_dependent_label_is_not_scored_without_fresh_graph():
     assert score["coverage_reasons"]["architecture"] == "label requires a fresh graph"
 
 
+def test_one_missing_required_check_disables_multi_label_subject_metrics():
+    expected = [
+        {"path": "a.py", "type": "rule_a", "subject": "subject-a",
+         "required_checks": ["check_a"]},
+        {"path": "b.py", "type": "rule_b", "subject": "subject-a",
+         "required_checks": ["check_b"]},
+    ]
+    report = {"prioritization_graph": {"freshness": "fresh"},
+              "subjects": {"subject-a": {
+                  "status": "partial", "checks": ["check_a"],
+                  "omitted": [{"check": "check_b", "reason": "not checked"}],
+                  "skipped": [], "unknown": [],
+              }}}
+
+    score = score_report_findings(
+        [_finding("1", "a.py", "rule_a", "subject-a")], expected,
+        complete_subjects={"subject-a"}, report_manifest=report)
+
+    assert score["unavailable_subjects"] == ["subject-a"]
+    assert score["expected"] == 0
+    assert score["predicted"] == 1
+    assert score["true_positive"] == 0
+    assert score["false_negative"] == 0
+    assert score["false_positive"] is None
+    assert score["unlabeled"] == 1
+
+
+@pytest.mark.parametrize("truncation", [
+    {"normalization_findings_omitted": 1},
+    {"max_findings": {"truncated": True}},
+])
+def test_global_finding_truncation_makes_label_coverage_unavailable(truncation):
+    expected = [{"path": "a.py", "type": "rule_a", "subject": "subject-a",
+                 "required_checks": ["static scan"]}]
+    report = {"truncation": truncation,
+              "subjects": {"subject-a": {"status": "complete",
+                                           "checks": ["static scan"],
+                                           "omitted": [], "skipped": [],
+                                           "unknown": []}}}
+
+    score = score_report_findings(
+        [], expected, complete_subjects={"subject-a"}, report_manifest=report)
+
+    assert score["expected"] == 0
+    assert score["excluded_expected"] == 1
+    assert score["recall"] is None
+    assert score["coverage_reasons"]["subject-a"]
+
+
 @pytest.mark.parametrize("payload, message", [
     ({"cases": "not-a-list"}, "cases must be a list"),
     ({"cases": [{"id": "x", "file": "/abs.py", "expected": []}]},
