@@ -490,6 +490,7 @@ def score_report_findings(findings: Iterable[Mapping[str, Any]],
     """
     expected_rows = [dict(item) for item in expected]
     finding_rows = list(findings)
+    all_subject_rows = list(all_subjects or [])
     complete = {str(subject) for subject in complete_subjects}
     relevant_subjects = complete | {
         str(item["subject"]) for item in expected_rows if item.get("subject") is not None
@@ -501,7 +502,7 @@ def score_report_findings(findings: Iterable[Mapping[str, Any]],
         # An unscoped label may belong to any report section; assess each one
         # rather than inventing an "unknown" section that can never be checked.
         relevant_subjects.update(str(subject) for subject in sections)
-        relevant_subjects.update(str(subject) for subject in (all_subjects or []))
+        relevant_subjects.update(str(subject) for subject in all_subject_rows)
         # Predictions can contain subjects absent from a malformed or partial
         # manifest. They are still candidates for an unscoped label, so their
         # missing coverage cannot be ignored when scoring that label.
@@ -664,7 +665,7 @@ def score_report_findings(findings: Iterable[Mapping[str, Any]],
     score = score_findings(
         finding_rows, scored_expected,
         complete_subjects=scored_complete,
-        all_subjects=all_subjects)
+        all_subjects=all_subject_rows)
     score["unavailable_subjects"] = sorted(unavailable)
     score["coverage_reasons"] = dict(sorted(unavailable.items()))
     score["excluded_expected"] = len(expected_rows) - len(scored_expected)

@@ -610,3 +610,19 @@ def test_nested_lockfile_omissions_exclude_labeled_path(filename, contents):
                                   report_manifest={"subjects": {"dependencies": section}})
     assert score["excluded_expected"] == 1
     assert score["recall"] is None
+
+
+def test_subjectless_report_retains_generator_subjects_in_breakdown():
+    expected = [{"path": "a.py", "type": "rule", "subject": None}]
+    section = {"status": "complete", "checks": ["scan"],
+               "omitted": [], "skipped": [], "unknown": []}
+    report = {"prioritization_graph": {"freshness": "fresh"},
+              "subjects": {"security": section, "operations": section}}
+    score = score_report_findings(
+        [_finding("1", "a.py", "rule", "security")], expected,
+        complete_subjects={"security"}, report_manifest=report,
+        all_subjects=(subject for subject in ("security", "operations")))
+
+    assert score["recall"] == 1.0
+    assert "operations" in score["subjects"]
+    assert score["subjects"]["operations"]["precision"] is None
