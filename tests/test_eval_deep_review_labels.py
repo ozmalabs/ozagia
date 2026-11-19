@@ -240,6 +240,20 @@ def test_unscoped_omission_excludes_check_specific_label(omission):
     assert score["coverage_reasons"]["security"] == "required coverage was interrupted"
 
 
+@pytest.mark.parametrize("field", ["skipped", "unknown"])
+def test_unscoped_interruption_in_other_coverage_fields_excludes_label(field):
+    expected = [{"path": "a.py", "type": "rule", "subject": "security",
+                 "required_checks": ["scan"]}]
+    section = {"status": "partial", "checks": ["scan"], "omitted": [],
+               "skipped": [], "unknown": []}
+    section[field] = [{"reason": "collector failed"}]
+    score = score_report_findings([], expected, complete_subjects={"security"},
+                                  report_manifest={"subjects": {"security": section}})
+    assert score["excluded_expected"] == 1
+    assert score["recall"] is None
+    assert score["coverage_reasons"]["security"] == "required coverage was interrupted"
+
+
 def test_labeled_path_omission_disables_recall_even_when_check_ran():
     expected = [{"path": "src/target.py", "type": "rule", "subject": "performance",
                  "required_checks": ["python_ast_static_checks"]}]

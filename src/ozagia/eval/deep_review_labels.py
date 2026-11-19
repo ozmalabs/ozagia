@@ -519,12 +519,13 @@ def score_report_findings(findings: Iterable[Mapping[str, Any]],
         return [item for item in value if isinstance(item, Mapping)] if isinstance(value, list) else []
 
     def has_interruption_omission(row: Mapping[str, Any]) -> bool:
-        value = row.get("omitted") or []
-        values = value if isinstance(value, list) else [value]
-        for item in values:
-            reason = (item.get("reason", "") if isinstance(item, Mapping) else item)
-            reason = str(reason).lower()
-            if any(marker in reason for marker in
+        for field in ("omitted", "skipped", "unknown"):
+            value = row.get(field) or []
+            values = value if isinstance(value, list) else [value]
+            for item in values:
+                reason = (item.get("reason", "") if isinstance(item, Mapping) else item)
+                reason = str(reason).lower()
+                if any(marker in reason for marker in
                    ("budget exhausted", "timed out", "time limit",
                     "resource admission refused", "file limit reached",
                     "file-count limit reached",
@@ -538,7 +539,7 @@ def score_report_findings(findings: Iterable[Mapping[str, Any]],
                     "documentation/api analyzer unavailable:",
                     "data-structure analyzer unavailable:",
                     "profile report analyzer unavailable:")):
-                return True
+                    return True
         return False
 
     def label_path_omitted(label: Mapping[str, Any], row: Mapping[str, Any]) -> bool:
