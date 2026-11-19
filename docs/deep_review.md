@@ -186,6 +186,8 @@ manifests and lockfiles that were read. Components carry an
 were not assessed. It is inventory data, not a validated compliance SBOM or a
 vulnerability result.
 
+Lockfile inventories report when their package cap may omit entries, so advisory and SBOM coverage remains visibly partial.
+
 npm lockfile v1 inventory traverses nested installed dependencies as well as
 top-level entries. Inventory limits still apply, and an oversized package list
 is explicitly marked as truncated.

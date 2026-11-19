@@ -505,7 +505,7 @@ def _gradle_lock_packages(text: str) -> tuple[list[dict[str, Any]], list[str], i
     return rows, omissions, entries
 
 
-def _lock_inventory(rel: str, text: str) -> dict[str, Any] | None:
+def _lock_inventory_raw(rel: str, text: str) -> dict[str, Any] | None:
     name = PurePosixPath(rel).name
     try:
         if name in ("package-lock.json", "npm-shrinkwrap.json"):
@@ -645,6 +645,23 @@ def _lock_inventory(rel: str, text: str) -> dict[str, Any] | None:
     except (ValueError, TypeError, RecursionError, tomllib.TOMLDecodeError):
         return None
     return None
+
+
+def _lock_inventory(rel: str, text: str) -> dict[str, Any] | None:
+    """Record possible package truncation for every supported lock format."""
+    result = _lock_inventory_raw(rel, text)
+    if result is None:
+        return None
+    packages = result.get("packages")
+    entries = result.get("entries")
+    omissions = result.setdefault("omissions", [])
+    if (isinstance(packages, list) and len(packages) == MAX_ITEMS
+            and isinstance(entries, int) and entries > len(packages)
+            and not any("inventory truncated" in str(item) for item in omissions)):
+        # Some formats count unsupported entries separately, so do not assert
+        # that every additional entry would have produced a package row.
+        omissions.append(f"{rel}: package inventory may be truncated at {MAX_ITEMS} entries")
+    return result
 
 
 def _pinned_requirements(text: str) -> list[dict[str, Any]]:

@@ -263,3 +263,18 @@ def test_cve_state_is_unknown_and_sbom_is_deterministic(tmp_path):
                 for item in first["sbom"]["metadata"]["properties"]}
     assert metadata["ozagia:cve_state"] == "unknown"
     assert build_sbom(first, root_name=tmp_path.name) == first["sbom"]
+
+
+def test_cargo_inventory_reports_possible_package_truncation(tmp_path):
+    entries = "".join(
+        f'[[package]]\nname = "package-{i}"\nversion = "1.0.0"\n'
+        for i in range(501))
+    (tmp_path / "Cargo.lock").write_text(entries, encoding="utf-8")
+
+    result = analyze(tmp_path)
+    lock = result["inventory"]["lockfiles"][0]
+
+    assert lock["entries"] == 501
+    assert len(lock["packages"]) == 500
+    assert any("package inventory may be truncated" in reason
+               for reason in lock["omissions"])
