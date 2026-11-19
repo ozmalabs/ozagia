@@ -994,7 +994,8 @@ def _open_excerpt_source(root: Path, rel: str, *,
         for component in relative.parts[:-1]:
             parent_fd = os.open(component, flags, dir_fd=parent_fd)
             descriptors.append(parent_fd)
-        file_fd = os.open(relative.parts[-1], os.O_RDONLY | nofollow,
+        file_fd = os.open(relative.parts[-1], os.O_RDONLY | nofollow |
+                          getattr(os, "O_NONBLOCK", 0),
                           dir_fd=parent_fd)
         file_stat = os.fstat(file_fd)
         if not stat.S_ISREG(file_stat.st_mode):
@@ -1358,26 +1359,18 @@ def build_deep_review(root, out, *, profile="full", budget_s=60, index=False,
                 cache_key = str(lexical)
                 if cache_key not in evidence_hash_cache:
                     metadata = None
-                    try:
-                        candidate = lexical.resolve()
-                        candidate.relative_to(root)
-                        # Never follow a symlink for evidence hashing. Read at
-                        # most the cap; larger inputs are recorded as omitted.
-                        path_part = lexical
-                        symlinked = False
-                        while path_part != root and path_part != path_part.parent:
-                            if path_part.is_symlink():
-                                symlinked = True
-                                break
-                            path_part = path_part.parent
-                        if not symlinked and candidate.is_file():
-                            with candidate.open("rb") as handle:
+                    fd, omission = _open_excerpt_source(root, str(file_path))
+                    if fd is not None:
+                        try:
+                            with os.fdopen(fd, "rb") as handle:
                                 content = handle.read(_EVIDENCE_HASH_LIMIT + 1)
                             metadata = ({"hash": "sha256:" + hashlib.sha256(content).hexdigest()}
                                         if len(content) <= _EVIDENCE_HASH_LIMIT else
                                         {"hash_omitted": "file exceeds 1 MiB evidence hash limit"})
-                    except (OSError, ValueError):
-                        pass
+                        except OSError:
+                            pass
+                    elif omission and "exceeds" in omission:
+                        metadata = {"hash_omitted": "file exceeds 1 MiB evidence hash limit"}
                     evidence_hash_cache[cache_key] = metadata
                 if evidence_hash_cache[cache_key]:
                     evidence[0].update(evidence_hash_cache[cache_key])

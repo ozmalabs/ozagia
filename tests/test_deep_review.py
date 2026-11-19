@@ -745,26 +745,69 @@ def test_evidence_hash_is_bounded_and_skips_symlink(tmp_path, monkeypatch):
     assert "hash" not in by_type["linked"]["evidence"][0]
 
 
+def test_excerpt_reader_refuses_fifo_without_waiting(tmp_path):
+    import os
+    import pytest
+    import ozagia.core.deep_review.orchestrator as orchestrator
+
+    if not hasattr(os, "mkfifo") or not hasattr(os, "O_NONBLOCK"):
+        pytest.skip("non-blocking FIFO unavailable")
+    os.mkfifo(tmp_path / "pipe")
+    descriptor, omission = orchestrator._open_excerpt_source(tmp_path, "pipe")
+    assert descriptor is None
+    assert omission == "source file is not a regular file"
+
+
+def test_evidence_hash_refuses_swapped_ancestor(tmp_path, monkeypatch):
+    import os
+    import ozagia.core.deep_review.orchestrator as orchestrator
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "pkg").mkdir()
+    (root / "pkg" / "file.py").write_text("safe", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "file.py").write_text("private", encoding="utf-8")
+    original_open = os.open
+    swapped = False
+
+    def swap_open(path, flags, *args, **kwargs):
+        nonlocal swapped
+        if path == "pkg" and kwargs.get("dir_fd") is not None and not swapped:
+            swapped = True
+            (root / "pkg").rename(root / "old-pkg")
+            (root / "pkg").symlink_to(outside, target_is_directory=True)
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", swap_open)
+    descriptor, omission = orchestrator._open_excerpt_source(root, "pkg/file.py")
+    assert swapped
+    assert descriptor is None
+    assert omission is not None
+
+
 def test_evidence_file_hash_is_read_once_per_path(tmp_path, monkeypatch):
     import ozagia.core.deep_review.orchestrator as orchestrator
     target = tmp_path / "same.py"
     target.write_text("pass\n", encoding="utf-8")
-    original_open = type(target).open
+    original_open = orchestrator._open_excerpt_source
     reads = []
 
-    def counted_open(path, *args, **kwargs):
-        if path == target:
+    def counted_open(root, path, *args, **kwargs):
+        if path == "same.py":
             reads.append(path)
-        return original_open(path, *args, **kwargs)
+        return original_open(root, path, *args, **kwargs)
 
-    monkeypatch.setattr(type(target), "open", counted_open)
+    monkeypatch.setattr(orchestrator, "_open_excerpt_source", counted_open)
     raw = [{"section": "architecture", "type": f"finding_{n}",
             "keys": [f"rule:r{n}:same.py"], "file": "same.py"}
            for n in range(3)]
     monkeypatch.setattr(orchestrator.collect, "collect", lambda *a, **k: {
         "findings": raw, "sections": {}, "graph": {"freshness": "unknown"}})
     result = build_deep_review(tmp_path, tmp_path / "report")
-    assert len(reads) == 1
+    # One read fingerprints the plan input and one hashes finding evidence.
+    assert len(reads) == 2
     assert all(item["evidence"][0]["hash"].startswith("sha256:")
                for item in result["findings"])
 
