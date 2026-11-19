@@ -361,9 +361,14 @@ and change-set semantics (breaking public API, missing migration, test impact).
 ### Phase 1 — performance, failure modes, data and scalability analyzers
 
 **Status: implemented for the static analyzers, fixtures, cross-subject dedupe,
-blast-radius ranking, and the explicit opt-in `--run-bench` argv interface.**
+blast-radius ranking, bounded parallel analyzer collection, and the explicit
+opt-in `--run-bench` argv interface.**
 
 - Static analyzers with graph-aware evidence and explicit confidence.
+- Independent static, dependency, operations, docs, data and supplied-profile
+  analyzers use at most six isolated `python -I -B` workers, a shared deadline
+  and fixed merge order; timed-out or failed lanes remain explicit coverage
+  omissions.
 - Fixtures for each pattern; cross-subject dedupe and blast-radius ranking.
 - Optional `--run-bench` argv interface with timeouts and recorded summary
   artifact; default remains static. Results omit argv and captured streams.

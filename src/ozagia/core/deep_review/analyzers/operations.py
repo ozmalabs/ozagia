@@ -14,7 +14,6 @@ import json
 import math
 import os
 import re
-import signal as os_signal
 import subprocess
 import sys
 import time
@@ -797,19 +796,13 @@ def _hcl_subprocess_main() -> None:
 def _stop_hcl_worker(process) -> bool:
     """Kill and reap the parser worker with bounded waits only."""
     if process.poll() is None:
-        if os.name == "posix":
-            try:
-                os.killpg(process.pid, os_signal.SIGKILL)
-            except (ProcessLookupError, PermissionError, OSError):
-                try:
-                    process.kill()
-                except OSError:
-                    pass
-        else:
-            try:
-                process.kill()
-            except OSError:
-                pass
+        # The parser inherits the analyzer worker's process group. Kill only
+        # this child here; the outer review timeout can then terminate the
+        # analyzer and any nested workers together as one process tree.
+        try:
+            process.kill()
+        except OSError:
+            pass
     try:
         process.wait(timeout=1.0)
     except subprocess.TimeoutExpired:
@@ -852,8 +845,7 @@ def _terraform_hcl_batch(files: list[tuple[str, str]]) -> dict[str, dict]:
     try:
         process = subprocess.Popen(
             command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            start_new_session=(os.name == "posix"))
+            stderr=subprocess.DEVNULL)
         started = True
         try:
             raw, _stderr = process.communicate(

@@ -6,7 +6,9 @@ import hashlib
 import multiprocessing
 import os
 import subprocess
+import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -14,6 +16,20 @@ import pytest
 def _reasons(values):
     return [str(value.get("reason", value) if isinstance(value, dict) else value)
             for value in values or []]
+
+
+def _parallel_probe(output_dir, name, delay_s):
+    output_dir = Path(output_dir)
+    start = time.monotonic_ns()
+    (output_dir / f"{name}.start").write_text(str(start), encoding="ascii")
+    time.sleep(delay_s)
+    end = time.monotonic_ns()
+    (output_dir / f"{name}.end").write_text(str(end), encoding="ascii")
+    return name
+
+
+def _parallel_failure():
+    raise ValueError("deliberate analyzer failure")
 
 
 def _disable_resource_admission(root):
@@ -93,6 +109,153 @@ def test_analyzer_preflight_timeout_is_killable_and_reported(tmp_path, monkeypat
     assert packet["preflight"]["ok"] is False
     assert "timed out" in packet["preflight"]["reason"]
     assert packet["graph"]["freshness"] == "unknown"
+
+
+def test_parallel_analyzers_overlap_spawn_workers_and_merge_in_task_order(
+        tmp_path, monkeypatch):
+    import ozagia.core.deep_review.collect as collector
+
+    methods = []
+
+    def inline_bounded_call(function, *args, timeout, start_method=None,
+                            **kwargs):
+        methods.append((threading.current_thread().name, start_method))
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(collector, "_bounded_call", inline_bounded_call)
+    tasks = [
+        ("second", _parallel_probe, (tmp_path, "second", 0.4), {}),
+        ("first", _parallel_probe, (tmp_path, "first", 0.4), {}),
+    ]
+    results = collector._parallel_analyzers(
+        tasks, started=time.monotonic(), budget_s=5)
+
+    assert list(results) == ["second", "first"]
+    assert results == {"second": (True, "second"),
+                       "first": (True, "first")}
+    first = (int((tmp_path / "first.start").read_text(encoding="ascii")),
+             int((tmp_path / "first.end").read_text(encoding="ascii")))
+    second = (int((tmp_path / "second.start").read_text(encoding="ascii")),
+              int((tmp_path / "second.end").read_text(encoding="ascii")))
+    assert max(first[0], second[0]) < min(first[1], second[1])
+    assert len(methods) == 2
+    assert all(name.startswith("ozagia-review") and method == "spawn"
+               for name, method in methods)
+
+
+def test_parallel_analyzer_budget_timeout_and_failure_are_isolated(
+        tmp_path, monkeypatch):
+    import ozagia.core.deep_review.collect as collector
+
+    def bounded_call(function, *args, timeout, start_method=None, **kwargs):
+        if args and isinstance(args[-1], (int, float)) and args[-1] > timeout:
+            raise TimeoutError(f"collector timed out after {timeout:g} seconds")
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(collector, "_bounded_call", bounded_call)
+
+    tasks = [
+        ("slow", _parallel_probe, (tmp_path, "slow", 5.0), {}),
+        ("failure", _parallel_failure, (), {}),
+        ("quick", _parallel_probe, (tmp_path, "quick", 0.05), {}),
+    ]
+    started = time.monotonic()
+    results = collector._parallel_analyzers(
+        tasks, started=started, budget_s=2.0)
+    elapsed = time.monotonic() - started
+
+    assert isinstance(results["slow"][1], TimeoutError)
+    assert results["failure"][0] is False
+    assert isinstance(results["failure"][1], ValueError)
+    assert results["quick"] == (True, "quick")
+    assert elapsed < 3.5
+
+
+def test_parallel_failure_merges_explicit_coverage_omission(tmp_path, monkeypatch):
+    import ozagia.core.deep_review.collect as collector
+
+    packet = {"findings": [], "sections": {},
+              "graph": {"freshness": "fresh"}}
+    monkeypatch.setattr(collector, "_analyzer_preflight",
+                        lambda *args, **kwargs: (packet, None))
+    monkeypatch.setattr(collector, "_parallel_analyzers",
+                        lambda tasks, **kwargs: {"static": (
+                            False, TimeoutError("budget elapsed"))})
+
+    result = collector.collect(tmp_path, profile="performance", budget_s=5)
+
+    reasons = _reasons(result["sections"]["performance"]["not_checked"])
+    assert any("static Python analysis unavailable: TimeoutError: budget elapsed"
+               in reason for reason in reasons)
+
+
+def test_safe_worker_ignores_target_controlled_ozagia_shadow(tmp_path):
+    import ozagia.core.deep_review.collect as collector
+    from ozagia.core.deep_review.analyzers import data
+
+    marker = tmp_path / "target-imported"
+    fake_package = tmp_path / "ozagia"
+    fake_package.mkdir()
+    (fake_package / "__init__.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('ran')\n",
+        encoding="utf-8")
+
+    result = collector._safe_subprocess_call(
+        data.analyze, (tmp_path,), {"budget_s": 2.0}, timeout=5.0)
+
+    assert isinstance(result, dict)
+    assert not marker.exists()
+
+
+def test_safe_worker_group_signal_falls_back_to_direct_process(
+        monkeypatch):
+    import signal
+    import ozagia.core.deep_review.collect as collector
+
+    if os.name != "posix":
+        pytest.skip("process-group signaling requires POSIX")
+
+    class Worker:
+        pid = 12345
+
+        def __init__(self):
+            self.calls = []
+
+        def terminate(self):
+            self.calls.append("terminate")
+
+        def kill(self):
+            self.calls.append("kill")
+
+    def denied(*_args):
+        raise PermissionError("group signal denied")
+
+    monkeypatch.setattr(collector.os, "killpg", denied)
+    term_worker = Worker()
+    collector._signal_safe_worker(term_worker, signal.SIGTERM)
+    assert term_worker.calls == ["terminate"]
+
+    kill_worker = Worker()
+    collector._signal_safe_worker(kill_worker, signal.SIGKILL, force=True)
+    assert kill_worker.calls == ["kill"]
+
+
+def test_safe_worker_timeout_bounds_a_child_that_never_reads_stdin(
+        tmp_path, monkeypatch):
+    import ozagia.core.deep_review.collect as collector
+    from ozagia.core.deep_review.analyzers import data
+
+    fake_python = tmp_path / "fake-python"
+    fake_python.write_text("#!/bin/sh\nexec /bin/sleep 10\n", encoding="utf-8")
+    fake_python.chmod(0o755)
+    monkeypatch.setattr(collector.sys, "executable", str(fake_python))
+    started = time.monotonic()
+
+    with pytest.raises(TimeoutError, match="timed out"):
+        collector._safe_subprocess_call(
+            data.analyze, ("x" * 2_000_000,), {}, timeout=0.1)
+
+    assert time.monotonic() - started < 2
 
 
 def test_bounded_collector_timeout_kills_subprocess_descendants(tmp_path):

@@ -330,7 +330,7 @@ def test_hcl_worker_uses_isolated_python_and_explicit_analyzer_path(monkeypatch)
     assert argv[:3] == [sys.executable, "-I", "-B"]
     assert argv[-1] == str(operations.Path(operations.__file__).resolve().parents[4])
     assert "sys.path.insert(0, sys.argv[1])" in argv[4]
-    assert kwargs["start_new_session"] is (operations.os.name == "posix")
+    assert "start_new_session" not in kwargs
     assert result["main.tf"]["parsed"] is True
 
 

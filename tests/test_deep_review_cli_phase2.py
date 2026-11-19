@@ -108,6 +108,10 @@ def test_docs_collect_reports_missing_coverage_api(tmp_path, monkeypatch):
     monkeypatch.setattr(
         collector.analyzers, "analyze_docs_api",
         lambda root, *, budget_s: ([], ["README.md"], []))
+    monkeypatch.setattr(
+        collector, "_parallel_analyzers",
+        lambda tasks, **kwargs: {key: (True, function(*args, budget_s=5))
+                                 for key, function, args, _options in tasks})
 
     packet = collector.collect(tmp_path, profile="docs", budget_s=5)
     section = packet["sections"]["docs"]

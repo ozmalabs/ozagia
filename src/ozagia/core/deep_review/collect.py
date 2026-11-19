@@ -1,5 +1,6 @@
 """Adapters over the existing whole repository review."""
 import json
+from concurrent.futures import ThreadPoolExecutor
 import multiprocessing
 import os
 import pickle
@@ -36,6 +37,208 @@ _ALL_COVERAGE_SECTIONS = (
 )
 _ANALYZER_TIMEOUT_S = 30.0
 _MAX_ANALYZER_RESULT_BYTES = 8_000_000
+_MAX_ANALYZER_REQUEST_BYTES = 16_000_000
+_MAX_PARALLEL_ANALYZERS = 6
+_SAFE_WORKER_SCRIPT = r'''
+import importlib
+import json
+import pathlib
+import sys
+
+trusted_root, module_name, qualified_name = sys.argv[1:]
+sys.path.insert(0, trusted_root)
+if not module_name.startswith("ozagia.") or "<locals>" in qualified_name:
+    raise RuntimeError("untrusted analyzer target")
+
+def restore(value):
+    if isinstance(value, list):
+        return [restore(item) for item in value]
+    if isinstance(value, dict):
+        if set(value) == {"__ozagia_path__"}:
+            return pathlib.Path(value["__ozagia_path__"])
+        if set(value) == {"__ozagia_tuple__"}:
+            return tuple(restore(item) for item in value["__ozagia_tuple__"])
+        return {key: restore(item) for key, item in value.items()}
+    return value
+
+def encode(value):
+    if isinstance(value, pathlib.Path):
+        return {"__ozagia_path__": str(value)}
+    if isinstance(value, tuple):
+        return {"__ozagia_tuple__": [encode(item) for item in value]}
+    if isinstance(value, list):
+        return [encode(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): encode(item) for key, item in value.items()}
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    raise TypeError("analyzer transport returned a non-JSON value")
+
+try:
+    request = json.load(sys.stdin)
+    module = importlib.import_module(module_name)
+    target = module
+    for part in qualified_name.split("."):
+        target = getattr(target, part)
+    result = target(*restore(request["args"]), **restore(request["kwargs"]))
+    print(json.dumps({"ok": True, "result": encode(result)},
+                     separators=(",", ":"), allow_nan=False))
+except BaseException as exc:
+    print(json.dumps({"ok": False, "error_type": type(exc).__name__,
+                      "error": str(exc)[:1000]}, separators=(",", ":")))
+'''
+
+
+def _transport_encode(value):
+    """Encode analyzer arguments into bounded JSON-safe transport values."""
+    if isinstance(value, Path):
+        return {"__ozagia_path__": str(value)}
+    if isinstance(value, tuple):
+        return {"__ozagia_tuple__": [_transport_encode(item) for item in value]}
+    if isinstance(value, list):
+        return [_transport_encode(item) for item in value]
+    if isinstance(value, dict):
+        if not all(isinstance(key, str) for key in value):
+            raise TypeError("analyzer transport mapping keys must be strings")
+        return {key: _transport_encode(item) for key, item in value.items()}
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    raise TypeError(f"unsupported analyzer transport value: {type(value).__name__}")
+
+
+def _transport_decode(value):
+    """Restore only the explicit Path/tuple transport markers."""
+    if isinstance(value, list):
+        return [_transport_decode(item) for item in value]
+    if isinstance(value, dict):
+        if set(value) == {"__ozagia_path__"}:
+            return Path(value["__ozagia_path__"])
+        if set(value) == {"__ozagia_tuple__"}:
+            return tuple(_transport_decode(item)
+                         for item in value["__ozagia_tuple__"])
+        return {key: _transport_decode(item) for key, item in value.items()}
+    return value
+
+
+def _signal_safe_worker(process, sig, *, force=False):
+    """Signal a worker group, falling back to its direct process on error."""
+    if os.name == "posix" and process.pid is not None:
+        try:
+            os.killpg(process.pid, sig)
+            return
+        except OSError:
+            # If group signalling is unavailable or denied, still stop and
+            # reap the worker itself. Its descendants may outlive this fallback.
+            pass
+    try:
+        process.kill() if force else process.terminate()
+    except OSError:
+        pass
+
+
+def _safe_subprocess_call(function, args, kwargs, timeout):
+    """Run an Ozagia callable in isolated mode from the trusted package path."""
+    module_name = getattr(function, "__module__", "")
+    qualified_name = getattr(function, "__qualname__", "")
+    if (not module_name.startswith("ozagia.") or not qualified_name
+            or "<locals>" in qualified_name):
+        raise RuntimeError("isolated analyzer must be a top-level ozagia callable")
+    try:
+        request = json.dumps(
+            {"args": _transport_encode(args), "kwargs": _transport_encode(kwargs)},
+            separators=(",", ":"), allow_nan=False).encode("utf-8")
+    except (TypeError, ValueError, UnicodeEncodeError, RecursionError) as exc:
+        raise RuntimeError(f"analyzer request could not be encoded: {exc}") from exc
+    if len(request) > _MAX_ANALYZER_REQUEST_BYTES:
+        raise RuntimeError("analyzer request exceeded size limit")
+    trusted_root = Path(__file__).resolve().parents[3]
+    command = [sys.executable, "-I", "-B", "-c", _SAFE_WORKER_SCRIPT,
+               str(trusted_root), module_name, qualified_name]
+    try:
+        process = subprocess.Popen(
+            command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, start_new_session=(os.name == "posix"))
+    except OSError as exc:
+        raise RuntimeError(f"isolated analyzer could not start: {exc}") from exc
+
+    output = bytearray()
+    overflow = []
+
+    def drain_stdout():
+        try:
+            while True:
+                chunk = process.stdout.read(65536)
+                if not chunk:
+                    break
+                if len(output) + len(chunk) > _MAX_ANALYZER_RESULT_BYTES:
+                    overflow.append(True)
+                elif not overflow:
+                    output.extend(chunk)
+        except OSError:
+            pass
+
+    reader = threading.Thread(target=drain_stdout, daemon=True,
+                              name="ozagia-analyzer-output")
+    reader.start()
+
+    def send_request():
+        try:
+            process.stdin.write(request)
+            process.stdin.flush()
+        except OSError:
+            pass
+        finally:
+            try:
+                process.stdin.close()
+            except OSError:
+                pass
+
+    writer = threading.Thread(target=send_request, daemon=True,
+                              name="ozagia-analyzer-input")
+    writer.start()
+    try:
+        try:
+            process.wait(timeout=max(0.0, float(timeout)))
+        except subprocess.TimeoutExpired as exc:
+            _signal_safe_worker(process, signal.SIGTERM)
+            try:
+                process.wait(timeout=0.5)
+            except subprocess.TimeoutExpired:
+                _signal_safe_worker(process, getattr(signal, "SIGKILL", signal.SIGTERM),
+                                    force=True)
+                process.wait(timeout=1.0)
+            raise TimeoutError(f"collector timed out after {timeout:g} seconds") from exc
+        reader.join(1.0)
+        if reader.is_alive():
+            raise RuntimeError("isolated analyzer output reader did not finish")
+        writer.join(1.0)
+        if writer.is_alive():
+            raise RuntimeError("isolated analyzer input writer did not finish")
+        if overflow:
+            raise RuntimeError("collector result exceeded size limit")
+        if process.returncode != 0:
+            raise RuntimeError(
+                f"isolated analyzer exited with status {process.returncode}")
+        try:
+            response = json.loads(output.decode("utf-8"))
+        except (UnicodeError, ValueError) as exc:
+            raise RuntimeError("isolated analyzer returned invalid JSON") from exc
+        if not isinstance(response, dict) or not response.get("ok"):
+            error_type = response.get("error_type", "AnalyzerError") if isinstance(response, dict) else "AnalyzerError"
+            message = response.get("error", "analyzer failed") if isinstance(response, dict) else "analyzer failed"
+            raise RuntimeError(f"{error_type}: {message}")
+        return _transport_decode(response.get("result"))
+    finally:
+        if process.poll() is None:
+            _signal_safe_worker(process, signal.SIGTERM)
+            try:
+                process.wait(timeout=0.5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=1.0)
+        writer.join(1.0)
+        if process.stdout:
+            process.stdout.close()
 
 
 def _isolated_call_child(send, function, args, kwargs):
@@ -75,21 +278,36 @@ def _signal_isolated(process, sig, *, force=False):
             process.terminate()
 
 
-def _bounded_call(function, *args, timeout, **kwargs):
+def _bounded_call(function, *args, timeout, start_method=None, **kwargs):
     """Run an in-process analyzer with a hard wall-clock bound.
 
     A process boundary is required because analyzer-level budget checks cannot
     interrupt a parser or filesystem operation that stops making progress.
-    One child at a time keeps concurrency bounded to one and makes collector
-    ordering/output deterministic.
+    Ozagia callables use an isolated Python subprocess and JSON transport. A
+    legacy local callable is accepted only from the main thread when no other
+    threads are active, for test injection compatibility.
     """
     timeout = max(0.0, float(timeout))
     if timeout <= 0:
         raise TimeoutError("collector timed out: no review budget remained")
+    module_name = getattr(function, "__module__", "")
+    qualified_name = getattr(function, "__qualname__", "")
+    if (module_name.startswith("ozagia.") and qualified_name
+            and "<locals>" not in qualified_name):
+        return _safe_subprocess_call(function, args, kwargs, timeout)
+    if not (module_name.startswith("test_") or module_name.startswith("tests.")):
+        raise RuntimeError(
+            "isolated analyzer must be an Ozagia callable; arbitrary modules are refused")
+    if (threading.current_thread() is not threading.main_thread()
+            or threading.active_count() > 1):
+        raise RuntimeError("non-Ozagia analyzer call refused in a multithreaded process")
     methods = multiprocessing.get_all_start_methods()
     if not methods:
         raise RuntimeError("process isolation is unavailable")
-    context = multiprocessing.get_context("fork" if "fork" in methods else "spawn")
+    method = start_method or ("fork" if "fork" in methods else "spawn")
+    if method not in methods:
+        method = "spawn" if "spawn" in methods else methods[0]
+    context = multiprocessing.get_context(method)
     receive, send = context.Pipe(duplex=False)
     process = context.Process(target=_isolated_call_child,
                               args=(send, function, args, kwargs), daemon=True)
@@ -158,6 +376,85 @@ def _bounded_call(function, *args, timeout, **kwargs):
                 _signal_isolated(process, getattr(signal, "SIGKILL", signal.SIGTERM),
                                  force=True)
                 process.join(1.0)
+
+
+def _parallel_analyzers(tasks, *, started: float, budget_s: float):
+    """Run independent analyzers concurrently in spawn-isolated processes.
+
+    Threads only supervise process creation and completion. Each analyzer is
+    executed in a fresh spawned process, so no process is forked from a worker
+    thread. Results are returned in task order regardless of completion order.
+    """
+    if not tasks:
+        return {}
+    deadline = started + max(0.0, float(budget_s))
+
+    if len(tasks) == 1:
+        key, function, args, kwargs = tasks[0]
+        remaining = max(0.0, deadline - time.monotonic())
+        if remaining <= 0:
+            return {key: (False, TimeoutError(
+                "review budget exhausted before analyzer started"))}
+        options = dict(kwargs)
+        code = getattr(function, "__code__", None)
+        if code is not None and "budget_s" in code.co_varnames:
+            options["budget_s"] = remaining
+        # Keep the caller's thread and use the existing killable process
+        # boundary. If collection was invoked from another thread, require
+        # spawn to avoid forking a multithreaded process.
+        method = (None if threading.current_thread() is threading.main_thread()
+                  else "spawn")
+        try:
+            value = _bounded_call(
+                function, *args, timeout=min(remaining, _ANALYZER_TIMEOUT_S),
+                start_method=method, **options)
+            return {key: (True, value)}
+        except BaseException as exc:
+            return {key: (False, exc)}
+
+    def invoke(task):
+        key, function, args, kwargs = task
+        remaining = max(0.0, deadline - time.monotonic())
+        if remaining <= 0:
+            raise TimeoutError("review budget exhausted before analyzer started")
+        options = dict(kwargs)
+        code = getattr(function, "__code__", None)
+        if code is not None and "budget_s" in code.co_varnames:
+            options["budget_s"] = remaining
+        return _bounded_call(
+            function, *args, timeout=min(remaining, _ANALYZER_TIMEOUT_S),
+            start_method="spawn", **options)
+
+    results = {}
+    with ThreadPoolExecutor(max_workers=min(len(tasks), _MAX_PARALLEL_ANALYZERS),
+                            thread_name_prefix="ozagia-review") as pool:
+        futures = [(task[0], pool.submit(invoke, task)) for task in tasks]
+        for key, future in futures:
+            try:
+                results[key] = (True, future.result())
+            except BaseException as exc:  # collector failure is coverage data
+                results[key] = (False, exc)
+    return results
+
+
+def _analyze_docs(root, *, budget_s):
+    """Normalize current and legacy docs analyzer results in the worker."""
+    analyze_with_coverage = getattr(docs_api, "analyze_with_coverage", None)
+    if callable(analyze_with_coverage):
+        result = analyze_with_coverage(root, budget_s=budget_s)
+        return {
+            "findings": result.get("findings", []),
+            "checked": result.get("checked", []),
+            "skipped": result.get("skipped", []),
+            "coverage": result.get("coverage"),
+            "coverage_gap": None,
+        }
+    findings, checked, skipped = analyzers.analyze_docs_api(
+        root, budget_s=budget_s)
+    return {"findings": findings, "checked": checked, "skipped": skipped,
+            "coverage": None,
+            "coverage_gap": ("docs_api.analyze_with_coverage is unavailable; "
+                             "documentation/API coverage facts were not collected")}
 
 
 def _coverage(packet, section):
@@ -483,16 +780,67 @@ def collect(root, *, profile="full", budget_s=60, index=False,
                 {"reason": f"security scan unavailable: {type(exc).__name__}: {exc}"}
             ] + unknown_not_checked
     enabled = profile == "full" or profile in _ANALYZER_PROFILES
+    tasks = []
     if enabled:
-        remaining = max(0.0, float(budget_s) - (time.monotonic() - started))
-        try:
-            static, checked, skipped = _bounded_call(
-                analyzers.analyze_static, root, budget_s=remaining,
-                timeout=min(remaining, _ANALYZER_TIMEOUT_S))
-        except Exception as exc:  # noqa: BLE001 - coverage instead of crash
-            targets = (_ANALYZER_PROFILES if profile == "full" else (profile,))
-            _record_unavailable(packet, targets, "static Python analysis", exc)
-        else:
+        tasks.append(("static", analyzers.analyze_static, (root,), {}))
+    if profile == "full" or profile == "dependencies":
+        options = {}
+        if local_advisories is not None:
+            options["local_advisories"] = local_advisories
+        if license_policy is not None:
+            options["license_policy"] = license_policy
+        tasks.append(("dependencies", dependencies.analyze, (root,), options))
+    if profile == "full" or profile == "operations":
+        tasks.append(("operations", operations.analyze, (root,), {}))
+    if profile == "full" or profile == "docs":
+        tasks.append(("docs", _analyze_docs, (root,), {}))
+    if profile == "full" or profile == "data-structures":
+        tasks.append(("data", data.analyze, (root,), {}))
+    if (profile_reports and
+            (profile == "full" or profile in {"performance", "scalability",
+                                              "failure-modes"})):
+        tasks.append(("profiles", profiles.analyze,
+                      (root, list(profile_reports)), {}))
+
+    # Task order is also merge order. Workers may finish in any order, but no
+    # packet or finding ordering depends on scheduler timing.
+    analyzer_results = _parallel_analyzers(
+        tasks, started=started, budget_s=budget_s)
+    for name, ok, result in (
+            ("static", "static" in analyzer_results, analyzer_results.get("static")),
+            ("dependencies", "dependencies" in analyzer_results, analyzer_results.get("dependencies")),
+            ("operations", "operations" in analyzer_results, analyzer_results.get("operations")),
+            ("docs", "docs" in analyzer_results, analyzer_results.get("docs")),
+            ("data", "data" in analyzer_results, analyzer_results.get("data")),
+            ("profiles", "profiles" in analyzer_results, analyzer_results.get("profiles"))):
+        if not ok:
+            continue
+        succeeded, value = result
+        if not succeeded:
+            exc = value
+            if name == "static":
+                targets = (_ANALYZER_PROFILES if profile == "full"
+                           else (profile,))
+                _record_unavailable(packet, targets, "static Python analysis", exc)
+            elif name == "dependencies":
+                _record_unavailable(packet, ("dependencies",),
+                                    "dependency analyzer", exc)
+            elif name == "operations":
+                _record_unavailable(packet, ("ops",), "operations analyzer", exc)
+            elif name == "docs":
+                _record_unavailable(packet, ("docs",),
+                                    "documentation/API analyzer", exc)
+            elif name == "data":
+                _record_unavailable(packet, ("data-structures",),
+                                    "data-structure analyzer", exc)
+            else:
+                _record_unavailable(
+                    packet, ("performance", "scalability", "failure-modes"),
+                    "profile report analyzer", exc)
+            continue
+
+        if name == "static":
+            static, checked, skipped = value
             if profile != "full":
                 static = [item for item in static if item.get("section") == profile]
             packet.setdefault("findings", []).extend(static)
@@ -509,20 +857,8 @@ def collect(root, *, profile="full", budget_s=60, index=False,
                         "Only selected Python patterns are checked; other patterns and languages are unassessed."}]
                         + ([] if checked else [{"reason": "no supported Python files were found"}]))
                 current["files_checked"] = checked
-    if profile == "full" or profile == "dependencies":
-        remaining = max(0.0, float(budget_s) - (time.monotonic() - started))
-        try:
-            dependency_options = {"budget_s": remaining}
-            if local_advisories is not None:
-                dependency_options["local_advisories"] = local_advisories
-            if license_policy is not None:
-                dependency_options["license_policy"] = license_policy
-            dependency_result = _bounded_call(
-                dependencies.analyze, root, **dependency_options,
-                timeout=min(remaining, _ANALYZER_TIMEOUT_S))
-        except Exception as exc:  # noqa: BLE001 - coverage instead of crash
-            _record_unavailable(packet, ("dependencies",), "dependency analyzer", exc)
-        else:
+        elif name == "dependencies":
+            dependency_result = value
             packet.setdefault("findings", []).extend(dependency_result["findings"])
             current = packet.setdefault("sections", {}).setdefault("dependencies", {})
             current["checked"] = list(current.get("checked", []))
@@ -532,39 +868,27 @@ def collect(root, *, profile="full", budget_s=60, index=False,
                                        + dependency_result["not_checked"])
             inventory = dependency_result["inventory"]
             current["inventory"] = inventory
-            # The orchestrator writes sbom.json; collection only passes the
-            # deterministic SBOM, CVE state and conflicts through the packet.
             current["sbom"] = dependency_result.get("sbom")
             current["cve_state"] = dependency_result.get("cve_state")
             current["local_advisories"] = dependency_result.get("local_advisories")
             current["license_policy"] = inventory.get("license_policy")
             current["version_conflicts"] = inventory.get("version_conflicts", [])
-    if profile == "full" or profile == "operations":
-        remaining = max(0.0, float(budget_s) - (time.monotonic() - started))
-        try:
-            operations_result = _bounded_call(
-                operations.analyze, root, budget_s=remaining,
-                timeout=min(remaining, _ANALYZER_TIMEOUT_S))
-        except Exception as exc:  # noqa: BLE001 - coverage instead of crash
-            _record_unavailable(packet, ("ops",), "operations analyzer", exc)
-        else:
+        elif name == "operations":
+            operations_result = value
             packet.setdefault("findings", []).extend(operations_result["findings"])
             sections = packet.setdefault("sections", {})
-            # Repo review and the deep-review contract call this section "ops".
-            # Merge any legacy "operations" coverage (older callers/tests) into
-            # that canonical record instead of keeping two competing sections.
             current = sections.setdefault("ops", {})
             legacy = sections.get("operations")
             if isinstance(legacy, dict) and legacy is not current:
                 for key in ("checked", "not_checked", "skipped", "unknown"):
                     values = list(current.get(key, []))
-                    for value in legacy.get(key, []):
-                        if value not in values:
-                            values.append(value)
+                    for item in legacy.get(key, []):
+                        if item not in values:
+                            values.append(item)
                     if values:
                         current[key] = values
-                for key, value in legacy.items():
-                    current.setdefault(key, value)
+                for key, item in legacy.items():
+                    current.setdefault(key, item)
             current["checked"] = list(current.get("checked", []))
             if operations_result["checked"]:
                 current["checked"].append("operational_file_inventory")
@@ -577,88 +901,44 @@ def collect(root, *, profile="full", budget_s=60, index=False,
             current["inventory"] = operations_result["inventory"]
             if legacy is not None:
                 sections["operations"] = current
-    if profile == "full" or profile == "docs":
-        remaining = max(0.0, float(budget_s) - (time.monotonic() - started))
-        try:
-            analyze_with_coverage = getattr(
-                docs_api, "analyze_with_coverage", None)
-            coverage = None
-            coverage_available = False
-            coverage_gap = None
-            if callable(analyze_with_coverage):
-                coverage_available = True
-                docs_result = _bounded_call(
-                    analyze_with_coverage, root, budget_s=remaining,
-                    timeout=min(remaining, _ANALYZER_TIMEOUT_S))
-                docs_findings = docs_result.get("findings", [])
-                checked = docs_result.get("checked", [])
-                skipped = docs_result.get("skipped", [])
-                coverage = docs_result.get("coverage")
-            else:
-                # Older analyzer builds only expose the triple-return API.
-                # Keep collecting findings but say that the richer coverage
-                # facts are unavailable rather than silently overstating them.
-                docs_findings, checked, skipped = _bounded_call(
-                    analyzers.analyze_docs_api, root, budget_s=remaining,
-                    timeout=min(remaining, _ANALYZER_TIMEOUT_S))
-                coverage_gap = ("docs_api.analyze_with_coverage is unavailable; "
-                                "documentation/API coverage facts were not collected")
-        except Exception as exc:  # noqa: BLE001 - coverage instead of crash
-            _record_unavailable(packet, ("docs",), "documentation/API analyzer", exc)
-        else:
-            packet.setdefault("findings", []).extend(docs_findings)
+        elif name == "docs":
+            docs_result = value
+            packet.setdefault("findings", []).extend(docs_result["findings"])
             current = packet.setdefault("sections", {}).setdefault("docs", {})
             current["checked"] = list(current.get("checked", []))
-            if checked:
+            if docs_result["checked"]:
                 current["checked"].append("local_documented_api_references")
-            current["not_checked"] = list(current.get("not_checked", [])) + skipped
-            current["api_docs_files_checked"] = checked
-            if coverage_available:
-                current["doc_coverage"] = coverage
-            if coverage_gap is not None:
-                current["api_coverage_gap"] = coverage_gap
-    if profile == "full" or profile == "data-structures":
-        remaining = max(0.0, float(budget_s) - (time.monotonic() - started))
-        try:
-            data_result = _bounded_call(
-                data.analyze, root, budget_s=remaining,
-                timeout=min(remaining, _ANALYZER_TIMEOUT_S))
-        except Exception as exc:  # noqa: BLE001 - coverage instead of crash
-            _record_unavailable(packet, ("data-structures",),
-                                "data-structure analyzer", exc)
-        else:
+            current["not_checked"] = (list(current.get("not_checked", []))
+                                       + docs_result["skipped"])
+            current["api_docs_files_checked"] = docs_result["checked"]
+            if docs_result["coverage"] is not None:
+                current["doc_coverage"] = docs_result["coverage"]
+            if docs_result["coverage_gap"] is not None:
+                current["api_coverage_gap"] = docs_result["coverage_gap"]
+        elif name == "data":
+            data_result = value
             packet.setdefault("findings", []).extend(data_result.get("findings", []))
             current = packet.setdefault("sections", {}).setdefault("data-structures", {})
             current["checked"] = list(current.get("checked", []))
             if data_result.get("checked"):
                 current["checked"].append("source_data_model_inventory")
-            current["not_checked"] = list(current.get("not_checked", [])) + data_result.get("not_checked", [])
+            current["not_checked"] = (list(current.get("not_checked", []))
+                                       + data_result.get("not_checked", []))
             current["data_inventory"] = data_result.get("inventory", {})
             current["data_files_checked"] = data_result.get("checked", [])
-    if (profile_reports and
-            (profile == "full" or profile in {"performance", "scalability",
-                                              "failure-modes"})):
-        remaining = max(0.0, float(budget_s) - (time.monotonic() - started))
-        try:
-            profile_result = _bounded_call(
-                profiles.analyze, root, list(profile_reports), budget_s=remaining,
-                timeout=min(remaining, _ANALYZER_TIMEOUT_S))
-        except Exception as exc:  # noqa: BLE001 - coverage instead of crash
-            _record_unavailable(
-                packet, ("performance", "scalability", "failure-modes"),
-                "profile report analyzer", exc)
         else:
+            profile_result = value
             packet.setdefault("findings", []).extend(profile_result["findings"])
-            for section, data_result in profile_result["sections"].items():
+            for section, result_section in profile_result["sections"].items():
                 current = packet.setdefault("sections", {}).setdefault(section, {})
                 current["checked"] = (list(current.get("checked", []))
-                                      + list(data_result.get("checked", [])))
+                                      + list(result_section.get("checked", [])))
                 current["not_checked"] = (list(current.get("not_checked", []))
-                                          + list(data_result.get("not_checked", [])))
+                                          + list(result_section.get("not_checked", [])))
                 for key in ("profile_reports", "profile_report_hashes",
                             "profile_metrics"):
-                    if key in data_result:
-                        current[key] = data_result[key]
+                    if key in result_section:
+                        current[key] = result_section[key]
     return packet
 
 

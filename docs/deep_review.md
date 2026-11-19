@@ -464,10 +464,17 @@ impact or severity, and does not promote a finding to blocking.
 
 `--budget-s` is a cooperative end-to-end time budget. Collection receives the
 remaining time; normalization and evidence hashing check the deadline between
-findings, and graph loading has a subprocess timeout. Static analyzers run
-sequentially in isolated child processes with bounded result frames and timeouts;
-a failed or timed-out analyzer is recorded as unavailable. Hashing reads at most
-1 MiB per distinct evidence file. Python cannot preempt a filesystem operation
+findings, and graph loading has a subprocess timeout. Independent static,
+dependency, operations, docs, data and supplied-profile analyzers run with a
+maximum of six concurrent workers. Each worker uses a fresh isolated Python
+subprocess with `-I -B`, bounded JSON request/result frames and the shared review
+deadline; results are merged in a fixed analyzer order. A single analyzer uses
+the same isolated process wrapper. No collector process inherits project
+`sys.path` entries or executes project code.
+Repository review and the security scanner retain their existing collection
+path. A failed or timed-out analyzer is recorded as unavailable without
+discarding successful lanes. Hashing reads at most 1 MiB
+per distinct evidence file. Python cannot preempt a filesystem operation
 already in progress, nor report composition and the atomic write for one
 artifact. The report is therefore finished after the deadline when needed to
 leave a readable artifact set; the manifest records elapsed time, overrun,
