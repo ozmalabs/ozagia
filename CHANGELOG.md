@@ -2,6 +2,36 @@
 
 ## Unreleased
 
+- Repo map retrieval now scores exact definition names and path segments above
+  substring hits, demotes tests/docs/vendored files, and fuses the graph/name
+  ranking with bounded BM25 content candidates using confidence-weighted rank
+  fusion instead of flat reciprocal-rank fusion. It caps the task header,
+  drops candidates below 18% of the top fused score (at most 32 files), and
+  spends the same token budget on one full body, compact outlines,
+  matched-line snippets for lexical hits, and cheap listings. A per-file
+  confidence score now gates low-confidence files: below 35% of the top score
+  at small budgets (30% above), a file must add task evidence not already
+  covered. The evaluator also reports line-IDF-weighted evidence coverage and
+  density (unique task terms plus matched definitions per 1000 tokens). On the
+  23-task SWE-bench Verified stratified baseline, `dev_repo_map` reached
+  0.935/0.967/0.967 file recall, 0.899/0.957/0.967 content recall,
+  0.087/0.068/0.059 precision, 0.193/0.338/0.387 evidence coverage and
+  90.07/104.18/104.05 evidence per 1k tokens at 500/900/1500, with all runs
+  within budget. A 10-task Django holdout scored 0.900/0.900/0.900 recall and
+  0.700/0.900/0.900 content recall. `min_confidence=0` restores the
+  recall-first gate; `content_search=False` preserves the graph-only map.
+- Hugging Face benchmark ingestion (`ozagia-eval-benchmarks`): explicit
+  `--allow-network` fetch/import of tagged datasets, cached dataset revisions,
+  SWE-bench Verified/Lite gold-file task conversion, safe GitHub archive
+  checkouts, and per-repo retrieval verification. File localization only; no
+  target tests, target code or model calls. Licence metadata is recorded as
+  unknown when the dataset card does not state one.
+- Disk admission is work-aware and absolute. The default free-space check uses
+  `resources.min_free_disk_gb`, `resources.reserve_disk_gb` and the requested or
+  historical p90 disk size; `reserve_disk_pct` now defaults to 0 and
+  `min_free_disk_pct` is removed. A large filesystem with a low percentage free
+  is no longer refused when the requested work fits. A host-floor refusal now
+  reports the actual GiB shortfall.
 - `ozagia profile` (and `ozagia-profile`) reads existing cProfile/pstats,
   Speedscope/py-spy, Chrome/Node CPU, folded/collapsed stack, OTLP JSON trace
   and metric, and Prometheus text artifacts. It normalizes durations, sample
