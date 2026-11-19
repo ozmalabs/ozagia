@@ -275,6 +275,7 @@ report's `deferred` list still describes the collector; `attach_store` adds
   unknown unless the owners add them. The collector's `not_assessed` and
   `coverage.unknowns` carry the canonical sentence: "the interpreter link is
   unknown; a task run or test record does not name the interpreter it used."
+  When a record does not name its interpreter, those links stay unknown.
 - `verified` means the recorded joins agree, not that the interpreter is
   importable, the package set is complete or the result is reproducible.
 - Only runs named by the observer are joined; unrelated runs are not scanned.
