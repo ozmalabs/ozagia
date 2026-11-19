@@ -527,6 +527,7 @@ def score_report_findings(findings: Iterable[Mapping[str, Any]],
             if any(marker in reason for marker in
                    ("budget exhausted", "timed out", "time limit",
                     "resource admission refused", "file limit reached",
+                    "file-count limit reached",
                     "read limit reached", "remaining files not checked",
                     "remaining documentation not checked",
                     "review budget", "no review budget remained",
@@ -541,10 +542,18 @@ def score_report_findings(findings: Iterable[Mapping[str, Any]],
         for field in ("omitted", "skipped", "unknown"):
             value = row.get(field) or []
             values = value if isinstance(value, list) else [value]
-            if any(isinstance(item, Mapping)
-                   and (item.get("path") == path or item.get("file") == path)
-                   for item in values):
-                return True
+            for item in values:
+                if isinstance(item, Mapping):
+                    if item.get("path") == path or item.get("file") == path:
+                        return True
+                    reason = item.get("reason")
+                else:
+                    reason = item
+                # Operations and dependency analyzers report path-specific
+                # omissions as "<path>: <reason>" rather than a path field.
+                # Match the complete prefix, not a substring of another path.
+                if isinstance(reason, str) and reason.startswith(path + ": "):
+                    return True
         return False
 
     def unavailable_reason(subject: str, label: Mapping[str, Any] | None) -> str | None:

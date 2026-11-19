@@ -250,6 +250,36 @@ def test_labeled_path_omission_disables_recall_even_when_check_ran():
     assert score["coverage_reasons"]["performance"] == "labeled source path was omitted"
 
 
+@pytest.mark.parametrize("omission", ["deploy/app.yaml: unreadable",
+                                      {"reason": "deploy/app.yaml: unreadable"}])
+def test_reason_encoded_source_path_omission_disables_recall(omission):
+    expected = [{"path": "deploy/app.yaml", "type": "rule", "subject": "operations",
+                 "required_checks": ["static_iac_config_candidates"]}]
+    report = {"subjects": {"operations": {
+        "status": "partial", "checks": ["static_iac_config_candidates"],
+        "omitted": [omission], "skipped": [], "unknown": [],
+    }}}
+    score = score_report_findings([], expected, complete_subjects={"operations"},
+                                  report_manifest=report)
+    assert score["excluded_expected"] == 1
+    assert score["recall"] is None
+    assert score["coverage_reasons"]["operations"] == "labeled source path was omitted"
+
+
+def test_file_count_limit_interrupts_check_specific_coverage():
+    expected = [{"path": "deploy/app.yaml", "type": "rule", "subject": "operations",
+                 "required_checks": ["static_iac_config_candidates"]}]
+    report = {"subjects": {"operations": {
+        "status": "partial", "checks": ["static_iac_config_candidates"],
+        "omitted": [{"reason": "file-count limit reached (500)"}],
+        "skipped": [], "unknown": [],
+    }}}
+    score = score_report_findings([], expected, complete_subjects={"operations"},
+                                  report_manifest=report)
+    assert score["excluded_expected"] == 1
+    assert score["coverage_reasons"]["operations"] == "required coverage was interrupted"
+
+
 @pytest.mark.parametrize("truncation", [
     {"normalization_findings_omitted": 1},
     {"max_findings": {"truncated": True}},
