@@ -374,3 +374,18 @@ def test_yarn_explicit_git_and_local_selectors_do_not_match_registry_advisories(
                if finding["type"] == "local_advisory_exact_version_match"]
     assert matches == ["safe"]
     assert "secret.example" not in json.dumps(result)
+
+
+def test_yarn_npm_aliases_match_the_target_not_the_alias(tmp_path):
+    (tmp_path / "yarn.lock").write_text(
+        '"alias@npm:lodash@^1.0.0":\n  version "1.2.3"\n'
+        '"other@npm:@scope/lib@^1.0.0":\n  version "1.2.3"\n'
+        '"normal@npm:^1.0.0":\n  version "1.2.3"\n', encoding="utf-8")
+    advisory = {"schema": "ozagia.local_advisories.v1", "advisories": [
+        {"id": f"NPM-{i}", "ecosystem": "node", "package": name,
+         "affected_versions": ["1.2.3"]}
+        for i, name in enumerate(("lodash", "@scope/lib", "normal", "alias"))]}
+    result = analyze(tmp_path, local_advisories=advisory)
+    matches = {finding["dependency"] for finding in result["findings"]
+               if finding["type"] == "local_advisory_exact_version_match"}
+    assert matches == {"lodash", "@scope/lib", "normal"}

@@ -279,7 +279,11 @@ def _yarn_name(selector: str) -> str | None:
     if not value:
         return None
     if "@npm:" in value:
-        value = value.split("@npm:", 1)[0]
+        descriptor, reference = value.split("@npm:", 1)
+        # Berry descriptors use npm:<range> for ordinary packages, but an
+        # npm:<package>@<range> reference names the real alias target.
+        alias = re.fullmatch(r"((?:@[^/@\s]+/)?[^/@\s]+)@[^@\s]+", reference)
+        value = alias.group(1) if alias else descriptor
     if value.startswith("@"):
         split = value.rfind("@")
         return value[:split] if split > 0 else value
@@ -722,6 +726,13 @@ def _lock_inventory(rel: str, text: str) -> dict[str, Any] | None:
     packages = result.get("packages")
     entries = result.get("entries")
     omissions = result.setdefault("omissions", [])
+    # Format parsers use a basename in diagnostics. Attribute those messages
+    # to the actual lockfile so coverage scoring can identify nested paths.
+    basename = PurePosixPath(rel).name
+    if rel != basename:
+        omissions[:] = [rel + item[len(basename):]
+                        if isinstance(item, str) and item.startswith(basename + ":")
+                        else item for item in omissions]
     if (isinstance(packages, list) and len(packages) == MAX_ITEMS
             and isinstance(entries, int) and entries > len(packages)
             and not any("inventory truncated" in str(item) for item in omissions)):

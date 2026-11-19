@@ -496,3 +496,26 @@ def test_nested_npm_inventory_omission_excludes_labeled_path():
     assert score["excluded_expected"] == 1
     assert score["recall"] is None
     assert score["coverage_reasons"]["dependencies"] == "labeled source path was omitted"
+
+
+@pytest.mark.parametrize(("filename", "contents"), [
+    ("Gemfile.lock", "GEM\n  specs:\n    bad row\n"),
+    ("composer.lock", '{"packages": "invalid"}'),
+    ("gradle.lockfile", "not-a-coordinate=runtimeClasspath\n"),
+])
+def test_nested_lockfile_omissions_exclude_labeled_path(filename, contents):
+    from ozagia.core.deep_review.analyzers.dependencies import _lock_inventory
+
+    path = "nested/" + filename
+    inventory = _lock_inventory(path, contents)
+    assert inventory is not None
+    assert any(reason.startswith(path + ":") for reason in inventory["omissions"])
+    expected = [{"path": path, "type": "rule", "subject": "dependencies",
+                 "required_checks": ["inventory"]}]
+    section = {"status": "partial", "checks": ["inventory"],
+               "omitted": [{"reason": reason} for reason in inventory["omissions"]],
+               "skipped": [], "unknown": []}
+    score = score_report_findings([], expected, complete_subjects={"dependencies"},
+                                  report_manifest={"subjects": {"dependencies": section}})
+    assert score["excluded_expected"] == 1
+    assert score["recall"] is None
