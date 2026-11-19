@@ -334,6 +334,7 @@ def score_findings(findings: Iterable[Mapping[str, Any]],
     matched_expected: set[int] = set()
     matched_actual: set[tuple[str, str, str]] = set()
     ambiguous_complete: set[str] = set()
+    ambiguous_subjects: set[str] = set()
     checked_wildcards: set[tuple[str, str]] = set()
 
     # Reserve exact-subject predictions before matching subjectless labels.
@@ -354,10 +355,11 @@ def score_findings(findings: Iterable[Mapping[str, Any]],
                             and (row["path"], row["type"]) == group)
             # If some but not all of these interchangeable predictions can
             # match, subject attribution is not established by the labels.
-            if (0 < wildcards < len(available)
-                    and any(key[2] not in complete for key in available)):
-                ambiguous_complete.update(key[2] for key in available
-                                          if key[2] in complete)
+            if 0 < wildcards < len(available) and len({key[2] for key in available}) > 1:
+                ambiguous_subjects.update(key[2] for key in available)
+                if any(key[2] not in complete for key in available):
+                    ambiguous_complete.update(key[2] for key in available
+                                              if key[2] in complete)
         candidates = sorted(
             key for key in actual_rows
             if key[0] == label["path"] and key[1] == label["type"]
@@ -383,7 +385,8 @@ def score_findings(findings: Iterable[Mapping[str, Any]],
         # precision true positive to the finding's subject, not to "unknown".
         tp = sum(1 for key in subject_actual if key in matched_actual)
         fn = len(subject_expected) - matched_labels
-        is_complete = subject in complete
+        ambiguous = subject in ambiguous_subjects
+        is_complete = subject in complete and not ambiguous
         unmatched = [key for key in subject_actual if key not in matched_actual]
         fp = len(unmatched) if is_complete else None
         predicted = len(subject_actual)
@@ -391,12 +394,12 @@ def score_findings(findings: Iterable[Mapping[str, Any]],
         recall = (_ratio(matched_labels, len(subject_expected))
                   if subject_expected else None)
         fdr = _ratio(fp or 0, predicted) if is_complete and predicted else None
-        noise = _ratio(len(unmatched), predicted) if predicted else None
+        noise = _ratio(len(unmatched), predicted) if predicted and not ambiguous else None
         notes: list[str] = []
         if not subject_expected:
             notes.append("no reviewed labels for this subject")
-        if subject in ambiguous_complete:
-            notes.append("subjectless labels match predictions across coverage boundaries")
+        if ambiguous:
+            notes.append("subjectless labels match predictions in multiple subjects")
         elif not is_complete:
             notes.append("subject is not marked as completely labelled")
         if not predicted:
@@ -405,10 +408,10 @@ def score_findings(findings: Iterable[Mapping[str, Any]],
             "complete": is_complete,
             "expected": len(subject_expected),
             "predicted": predicted,
-            "true_positive": tp,
+            "true_positive": None if ambiguous else tp,
             "false_positive": fp,
             "false_negative": fn,
-            "unmatched": len(unmatched),
+            "unmatched": None if ambiguous else len(unmatched),
             "precision": precision,
             "recall": recall,
             "false_positive_rate": None,
@@ -466,6 +469,7 @@ def score_findings(findings: Iterable[Mapping[str, Any]],
         "complete_subjects": sorted(complete),
         "declared_complete_subjects": sorted(declared_complete),
         "ambiguous_precision_subjects": sorted(ambiguous_complete),
+        "ambiguous_subject_attribution": sorted(ambiguous_subjects),
         "subjects": subject_rows,
         "metric_definitions": dict(METRIC_DEFINITIONS),
     }

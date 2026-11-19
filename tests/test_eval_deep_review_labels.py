@@ -352,3 +352,18 @@ def test_wildcard_matching_all_candidates_keeps_complete_precision():
     score = score_findings(findings, expected, complete_subjects={"a"})
     assert score["precision"] == 1.0
     assert score["ambiguous_precision_subjects"] == []
+
+
+def test_wildcard_match_between_complete_subjects_preserves_aggregate_only():
+    findings = [_finding("1", "a.py", "rule", "a"),
+                _finding("2", "a.py", "rule", "b")]
+    expected = [{"path": "a.py", "type": "rule", "subject": None}]
+    score = score_findings(findings, expected, complete_subjects={"a", "b"})
+    assert score["precision"] == 0.5
+    assert score["false_positive"] == 1
+    assert score["ambiguous_subject_attribution"] == ["a", "b"]
+    for subject in ("a", "b"):
+        assert score["subjects"][subject]["precision"] is None
+        assert score["subjects"][subject]["true_positive"] is None
+        assert score["subjects"][subject]["false_positive"] is None
+        assert score["subjects"][subject]["report_noise_ratio"] is None
