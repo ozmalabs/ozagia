@@ -40,11 +40,26 @@ def _is_sha256_value(value: Any) -> bool:
 
 
 def _hash_output_artifact(path: Path) -> str:
-    """Hash a generated artifact with constant memory use."""
+    """Hash a stable regular artifact without following a final symlink."""
+    if not hasattr(os, "O_NOFOLLOW"):
+        raise DeepReviewError("safe output artifact hashing is unavailable")
     digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while chunk := handle.read(_OUTPUT_HASH_CHUNK_SIZE):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0))
+    with os.fdopen(fd, "rb") as handle:
+        before = os.fstat(handle.fileno())
+        if not stat.S_ISREG(before.st_mode):
+            raise DeepReviewError("output artifact is not a regular file")
+        remaining = before.st_size
+        while remaining:
+            chunk = handle.read(min(remaining, _OUTPUT_HASH_CHUNK_SIZE))
+            if not chunk:
+                raise DeepReviewError("output artifact changed while hashing")
             digest.update(chunk)
+            remaining -= len(chunk)
+        after = os.fstat(handle.fileno())
+        if (before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
+                after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+            raise DeepReviewError("output artifact changed while hashing")
     return "sha256:" + digest.hexdigest()
 _PRIORITY_GRAPH_BYTE_LIMIT = 32 * 1024 * 1024
 _EXCERPT_CONTEXT_LINES = 5

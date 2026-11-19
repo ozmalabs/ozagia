@@ -612,6 +612,35 @@ def test_output_artifact_hashing_streams_large_files(tmp_path):
         "sha256:" + hashlib.sha256(contents).hexdigest())
 
 
+def test_output_artifact_hashing_rejects_fifo_without_blocking(tmp_path):
+    import os
+    import subprocess
+    import sys
+
+    fifo = tmp_path / "report.json"
+    os.mkfifo(fifo)
+    result = subprocess.run(
+        [sys.executable, "-c", (
+            "from pathlib import Path; "
+            "from ozagia.core.deep_review.orchestrator import _hash_output_artifact; "
+            "_hash_output_artifact(Path(__import__('sys').argv[1]))"), str(fifo)],
+        capture_output=True, timeout=5, check=False)
+    assert result.returncode != 0
+    assert b"not a regular file" in result.stderr
+
+
+def test_output_artifact_hashing_rejects_symlink(tmp_path):
+    import pytest
+    from ozagia.core.deep_review.orchestrator import _hash_output_artifact
+
+    target = tmp_path / "target"
+    target.write_text("content")
+    link = tmp_path / "report.json"
+    link.symlink_to(target)
+    with pytest.raises(OSError):
+        _hash_output_artifact(link)
+
+
 def test_identity_keys_are_not_fabricated_as_file_locations(tmp_path, monkeypatch):
     import ozagia.core.deep_review.orchestrator as orchestrator
     packet = {
