@@ -734,14 +734,15 @@ def test_probe_environment_is_scrubbed(tmp_path: Path, monkeypatch) -> None:
     for key, value in {"SECRET_TOKEN": "x", "OZAGIA_STATE_DIR": "/s",
                        "PYTHONPATH": "/p", "VIRTUAL_ENV": "/v", "AWS_PROFILE": "a",
                        "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
+                       "LC_CTYPE": "C.UTF-8",
                        "TMPDIR": str(tmp_path)}.items():
         monkeypatch.setenv(key, value)
     assert EN.run_probe(python)["ok"] is False
     keys = {line.split("=", 1)[0] for line in dump.read_text().splitlines()
             if "=" in line}
     assert keys - {"PWD", "SHLVL", "_", "OLDPWD"} <= {"PATH", "HOME", "LANG",
-                                                      "LC_ALL", "TMPDIR"}
-    assert {"LANG", "LC_ALL", "TMPDIR", "PATH"} <= keys
+                                                      "LC_ALL", "LC_CTYPE", "TMPDIR"}
+    assert {"LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "PATH"} <= keys
     assert "SECRET_TOKEN" not in keys and "OZAGIA_STATE_DIR" not in keys
 
 

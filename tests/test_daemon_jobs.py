@@ -322,8 +322,8 @@ def test_reads_are_tail_capped(table):
 def test_partial_line_waits_for_its_end(table):
     t = table()
     job = t.start(command="printf 'a\\nb'; sleep 0.5; printf 'c\\n'; sleep 30")
-    time.sleep(0.3)
-    assert t.log(job["id"])["output"] == "a"
+    first = t.wait(job["id"], until="log:^a$", deadline_s=10)
+    assert first["met"] and first["output"] == "a"
     got = t.wait(job["id"], until="log:^bc$", deadline_s=10)
     assert got["met"] and got["output"] == "bc"
     t.stop(job["id"], grace_s=1)
