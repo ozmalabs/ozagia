@@ -132,6 +132,23 @@ def _runbook_topics(text: str) -> list[str]:
                   if pattern.search(text))
 
 
+def _dockerfile_healthcheck(text: str) -> tuple[str, int | None]:
+    """Identify the last stage's explicit healthcheck declaration.
+
+    A base image or an explicitly selected build target may supply different
+    behavior, so absence only describes instructions in the last stage.
+    """
+    healthcheck = None
+    for line_no, line in enumerate(text.splitlines(), 1):
+        if re.match(r"^\s*FROM\s+", line, re.I):
+            healthcheck = None
+        elif match := re.match(r"^\s*HEALTHCHECK\s+(.*?)\s*$", line, re.I):
+            value = match.group(1)
+            healthcheck = ("disabled" if re.match(r"^NONE(?:\s*(?:#.*)?)?$", value, re.I)
+                           else "declared", line_no)
+    return healthcheck if healthcheck is not None else ("absent", None)
+
+
 def _observability(configs: dict[str, str],
                    runbooks: dict[str, str]) -> dict[str, object]:
     declarations = {}
@@ -1128,13 +1145,22 @@ def analyze(root: str | Path, *, budget_s: float = 10.0) -> dict:
                 configs[rel] = content
             if is_runbook:
                 runbooks[rel] = content
-            if name in {"Dockerfile", "Containerfile"} and not re.search(r"(?im)^\s*HEALTHCHECK\s+", content):
-                findings.append({
-                    "section": "operations", "type": "container_healthcheck_absent",
-                    "severity": "note", "confidence": "low", "keys": [f"file:{rel}"],
-                    "summary": f"{rel} has no HEALTHCHECK instruction; container health is not declared here.",
-                    "recommendation": "If this image is long-running, define an appropriate HEALTHCHECK or document the external health check.",
-                })
+            if name in {"Dockerfile", "Containerfile"}:
+                healthcheck, line_no = _dockerfile_healthcheck(content)
+                if healthcheck != "declared":
+                    finding = {
+                        "section": "operations",
+                        "type": "container_healthcheck_absent" if healthcheck == "absent"
+                        else "container_healthcheck_disabled",
+                        "severity": "note", "confidence": "low", "keys": [f"file:{rel}"],
+                        "summary": (f"{rel} has no HEALTHCHECK instruction in its final stage; "
+                                    "an inherited or external health check may exist." if healthcheck == "absent"
+                                    else f"{rel} explicitly disables HEALTHCHECK in its final stage."),
+                        "recommendation": "If this image is long-running, define an appropriate HEALTHCHECK or document the external health check.",
+                    }
+                    if line_no is not None:
+                        finding["line"] = line_no
+                    findings.append(finding)
         if count > MAX_FILES or time.monotonic() >= deadline:
             break
 

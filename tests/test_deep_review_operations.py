@@ -29,6 +29,35 @@ def test_healthcheck_presence_and_absent_runbook_are_coverage_only(tmp_path):
                for item in result["not_checked"])
 
 
+def test_multistage_healthcheck_only_reports_final_stage(tmp_path):
+    (tmp_path / "Dockerfile").write_text(
+        "FROM alpine AS build\nHEALTHCHECK CMD true\n"
+        "FROM alpine AS final\nCMD app\n", encoding="utf-8")
+
+    finding = analyze(tmp_path)["findings"][0]
+
+    assert finding["type"] == "container_healthcheck_absent"
+    assert "inherited or external health check may exist" in finding["summary"]
+
+
+def test_explicit_disabled_healthcheck_is_not_treated_as_declaration(tmp_path):
+    (tmp_path / "Dockerfile").write_text(
+        "FROM alpine\nHEALTHCHECK CMD true\nHEALTHCHECK NONE\n", encoding="utf-8")
+
+    finding = analyze(tmp_path)["findings"][0]
+
+    assert finding["type"] == "container_healthcheck_disabled"
+    assert finding["line"] == 3
+
+
+def test_last_stage_with_healthcheck_is_not_flagged(tmp_path):
+    (tmp_path / "Dockerfile").write_text(
+        "FROM alpine AS build\nHEALTHCHECK NONE\n"
+        "FROM alpine AS final\nHEALTHCHECK CMD true\n", encoding="utf-8")
+
+    assert analyze(tmp_path)["findings"] == []
+
+
 def test_unrecognized_repository_is_not_claimed_clean(tmp_path):
     (tmp_path / "app.py").write_text("pass\n", encoding="utf-8")
 

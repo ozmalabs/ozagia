@@ -340,7 +340,9 @@ evidence or subject contents. See [status](status.md).
 - **Operations:** inventory of common deployment configuration and runbook
   files, local runbook links and recognized operational topics, declared
   logging/metrics/tracing/observability signals, and a
-  Dockerfile-without-`HEALTHCHECK` candidate. Bounded lexical IaC/config rules
+  Dockerfile healthcheck candidates for a missing final-stage declaration or an
+  explicit `HEALTHCHECK NONE`. Base-image inheritance, alternate build targets,
+  and external health checks remain unknown. Bounded lexical IaC/config rules
   flag Terraform public ingress, container privileged mode, Kubernetes
   `hostNetwork`/`hostPath`, and Compose all-interface port binds. Explicit
   telemetry disable settings are reported with rule IDs. Selected plain JSON
@@ -632,12 +634,16 @@ part of the fixture.
 ## Metric definitions
 
 - **Precision**: true positives divided by predictions whose subject has
-  complete reviewed labels. Predictions outside a completely labelled subject
-  are not counted.
+  complete reviewed labels. Neither matched nor unmatched predictions outside
+  a completely labelled subject are counted in this metric.
 - **Recall**: matched reviewed labels divided by reviewed labels.
-- **False-positive rate**: false positives divided by predictions in
-  completely labelled subjects. This is a corpus-local false-discovery
-  proportion, not a population rate.
+- **False-positive rate**: false positives divided by all actual negatives.
+  This remains unknown for report-label comparisons because the labels do not
+  enumerate a negative universe. The `false_positive_rate` field is retained
+  but now returns null rather than the formerly mislabeled discovery rate.
+- **False-discovery rate**: false positives divided by predictions in
+  completely labelled subjects; this corpus-local measure is available as
+  `false_discovery_rate` when its denominator is nonzero.
 - **Report-noise ratio**: unmatched reported `(path, type, subject)` pairs
   divided by all reported pairs. Unlabeled subjects contribute to noise but not
   to false positives.
