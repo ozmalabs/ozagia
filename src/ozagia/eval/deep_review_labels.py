@@ -491,10 +491,16 @@ def score_report_findings(findings: Iterable[Mapping[str, Any]],
     expected_rows = [dict(item) for item in expected]
     complete = {str(subject) for subject in complete_subjects}
     relevant_subjects = complete | {
-        str(item.get("subject") or "unknown") for item in expected_rows
+        str(item["subject"]) for item in expected_rows if item.get("subject") is not None
     }
     sections = report_manifest.get("subjects")
     sections = sections if isinstance(sections, Mapping) else {}
+    unscoped_labels = [item for item in expected_rows if item.get("subject") is None]
+    if unscoped_labels:
+        # An unscoped label may belong to any report section; assess each one
+        # rather than inventing an "unknown" section that can never be checked.
+        relevant_subjects.update(str(subject) for subject in sections)
+        relevant_subjects.update(str(subject) for subject in (all_subjects or []))
     unavailable: dict[str, str] = {}
     truncation = report_manifest.get("truncation")
     truncation = truncation if isinstance(truncation, Mapping) else {}
@@ -624,7 +630,7 @@ def score_report_findings(findings: Iterable[Mapping[str, Any]],
     for label in expected_rows:
         labels_by_subject.setdefault(str(label.get("subject") or "unknown"), []).append(label)
     for subject in relevant_subjects:
-        labels = labels_by_subject.get(subject, [])
+        labels = labels_by_subject.get(subject, []) + unscoped_labels
         if labels:
             reasons = [unavailable_reason(subject, label) for label in labels]
             reasons = [reason for reason in reasons if reason]
@@ -637,7 +643,7 @@ def score_report_findings(findings: Iterable[Mapping[str, Any]],
 
     # A label without a subject may match any report section. If any labelled
     # section is unavailable, its negative result cannot be attributed safely.
-    exclude_unscoped = any(item.get("subject") is None for item in expected_rows) and bool(unavailable)
+    exclude_unscoped = bool(unscoped_labels) and (bool(unavailable) or not relevant_subjects)
     scored_expected = [item for item in expected_rows
                        if (str(item.get("subject") or "unknown") not in unavailable
                            and not (exclude_unscoped and item.get("subject") is None))]

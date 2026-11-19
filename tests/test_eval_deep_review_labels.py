@@ -176,7 +176,7 @@ def test_graph_dependent_label_is_not_scored_without_fresh_graph():
 def test_excluded_subjectless_label_does_not_create_false_positives():
     expected = [{"path": "a.py", "type": "rule", "subject": None}]
     report = {"prioritization_graph": {"freshness": "fresh"},
-              "subjects": {"security": {"status": "complete", "checks": ["scan"],
+              "subjects": {"security": {"status": "unknown", "checks": [],
                                          "omitted": [], "skipped": [], "unknown": []}}}
     score = score_report_findings(
         [_finding("1", "a.py", "rule", "security")], expected,
@@ -188,6 +188,21 @@ def test_excluded_subjectless_label_does_not_create_false_positives():
     assert score["unlabeled"] == 1
     assert "subjectless" in score["precision_coverage_reason"]
 
+
+
+def test_subjectless_label_is_scored_when_all_sections_are_covered():
+    expected = [{"path": "a.py", "type": "rule", "subject": None}]
+    report = {"prioritization_graph": {"freshness": "fresh"},
+              "subjects": {"security": {"status": "complete", "checks": ["scan"],
+                                         "omitted": [], "skipped": [], "unknown": []}}}
+    score = score_report_findings(
+        [_finding("1", "a.py", "rule", "security")], expected,
+        complete_subjects={"security"}, report_manifest=report)
+
+    assert score["excluded_expected"] == 0
+    assert score["true_positive"] == 1
+    assert score["recall"] == 1.0
+    assert score["precision"] == 1.0
 
 def test_one_missing_required_check_disables_multi_label_subject_metrics():
     expected = [
