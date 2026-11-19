@@ -306,6 +306,10 @@ evidence or subject contents. See [status](status.md).
   materialized ranges and eager sequence conversion), plus a bounded inventory
   of Python data models and JSON/TOML keys for the data subject. Other
   languages and patterns remain unassessed.
+  The failure-modes report includes a derived FMEA table for supported static
+  candidates. It records the matched symptom/rule and mitigation, links to the
+  finding evidence, and labels runtime trigger conditions unknown. It does not
+  assign likelihood or criticality.
 - **Architecture:** the existing repository-review architecture checks
   (hubs, cycles, coupling and related graph signals). Results depend on graph
   coverage and freshness.

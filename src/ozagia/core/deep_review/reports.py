@@ -197,6 +197,55 @@ def _bounded_metric(value):
     return round(value, 3)
 
 
+_FMEA_RULES = {
+    "unbounded_exception_retry": {
+        "symptom": "An exception handler may continue an unconditional loop.",
+        "detection": "Static AST rule matched: unconditional loop with an exception-handler continue.",
+    },
+    "silently_suppressed_exception": {
+        "symptom": "An exception handler may suppress an exception without reporting it.",
+        "detection": "Static AST rule matched: a bare or broad handler contains only pass.",
+    },
+}
+
+
+def _fmea_cell(value, *, limit=320):
+    """Bound and escape a field in the derived FMEA view."""
+    text = str(value or "Unknown")
+    if len(text) > limit:
+        text = text[:limit - 1] + "…"
+    return _cell(text)
+
+
+def _render_failure_fmea(findings):
+    """Render an evidence-linked FMEA view without changing source findings."""
+    if not findings:
+        return []
+    rows = ["## Failure-mode analysis", "",
+            "Static review candidates only; no runtime criticality or likelihood is assigned.",
+            "", "| Finding | Symptom | Trigger | Detection | Mitigation | Evidence |",
+            "| --- | --- | --- | --- | --- | --- |"]
+    for finding in findings:
+        kind = str(finding.get("type", ""))
+        rule = _FMEA_RULES.get(kind)
+        symptom = rule["symptom"] if rule else "Unknown (no supported symptom mapping)."
+        detection = (rule["detection"] if rule
+                     else "Unknown (no supported detection mapping).")
+        trigger = "Unknown (static source inspection does not establish runtime trigger conditions)."
+        mitigation = finding.get("recommendation") or "Unknown (no mitigation recorded)."
+        evidence_items = finding.get("evidence")
+        has_evidence = (isinstance(evidence_items, list)
+                        and any(isinstance(item, Mapping) for item in evidence_items))
+        evidence = (f"See evidence details for {_fmea_cell(finding.get('id', 'finding'))}."
+                    if has_evidence
+                    else "Unknown (source finding has no evidence items).")
+        rows.append("| " + " | ".join((
+            _fmea_cell(finding.get("id", "finding")),
+            _fmea_cell(symptom), _fmea_cell(trigger), _fmea_cell(detection),
+            _fmea_cell(mitigation), _fmea_cell(evidence))) + " |")
+    return rows
+
+
 def _subject_metrics(subject, findings, source_section, *, status,
                      checks, skipped, unknown, omissions):
     """Build a numeric/status-only metric view from allowlisted fields."""
@@ -266,6 +315,8 @@ def render_subject(subject, findings, *, status, omissions, checks=(), skipped=(
         rows.append("| " + " | ".join(_cell(f.get(key, "")) for key in
                     ("id", "severity", "type")) + " | " + _cell(views) + " | " +
                      _cell(loc) + " |")
+    if subject == "failure-modes":
+        rows.extend([""] + _render_failure_fmea(findings))
     metric_rows = _subject_metrics(
         subject, findings, metrics, status=status, checks=checks,
         skipped=skipped, unknown=unknown, omissions=omissions)

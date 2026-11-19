@@ -21,6 +21,48 @@ def test_subject_report_shows_coverage_evidence_and_integrity():
     assert '<a id="finding-dr-a1"></a>' in report
 
 
+def test_failure_mode_report_renders_bounded_fmea_with_unknowns_and_evidence_link():
+    finding = {
+        "id": "dr-retry",
+        "subject": "failure-modes",
+        "type": "unbounded_exception_retry",
+        "severity": "minor",
+        "confidence": "low",
+        "evidence_kind": "inferred",
+        "recommendation": "Bound retries and use a deadline.",
+        "evidence": [{"source": "static", "method": "AST scan"}],
+        "locations": [{"path": "src/worker.py", "symbol": "run"}],
+    }
+    report = render_subject(
+        "failure-modes", [finding], status="partial", omissions=[],
+        checks=["Python static patterns"])
+
+    assert "## Failure-mode analysis" in report
+    assert "Static review candidates only; no runtime criticality or likelihood is assigned." in report
+    assert "An exception handler may continue an unconditional loop." in report
+    assert "static source inspection does not establish runtime trigger conditions" in report
+    assert "Static AST rule matched: unconditional loop with an exception-handler continue." in report
+    assert "Bound retries and use a deadline." in report
+    assert "See evidence details for dr-retry." in report
+    # Rendering is a view; it does not add FMEA fields to canonical source data.
+    assert set(finding) == {
+        "id", "subject", "type", "severity", "confidence", "evidence_kind",
+        "recommendation", "evidence", "locations"}
+
+
+def test_failure_mode_fmea_marks_unsupported_fields_unknown_and_bounds_text():
+    report = render_subject(
+        "failure-modes", [{"id": "x" * 500, "type": "unhandled_error",
+                           "evidence": [], "recommendation": ""}],
+        status="partial", omissions=[])
+
+    assert "no supported symptom mapping" in report
+    assert "no supported detection mapping" in report
+    assert "no mitigation recorded" in report
+    assert "source finding has no evidence items" in report
+    assert len(report) < 10_000
+
+
 def test_subject_metrics_are_allowlisted_bounded_and_path_free():
     report = render_subject(
         "data-structures", [], status="complete", omissions=[],
