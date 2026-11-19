@@ -1079,3 +1079,24 @@ def test_cli_save(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert cli.main(["review-repo", "--root", str(repo), "--section",
                      "dependencies", "--save"]) == 0
     assert "saved: " in capsys.readouterr().out
+
+
+def test_source_read_rejects_ancestor_swap(tmp_path, monkeypatch):
+    root = tmp_path / "checkout"
+    directory = root / "source"
+    directory.mkdir(parents=True)
+    (directory / "file.py").write_text("safe", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "file.py").write_text("secret", encoding="utf-8")
+    original = RR._read_graph_nofollow
+
+    def swapped(path, *, max_bytes=None):
+        directory.rename(root / "moved")
+        directory.symlink_to(outside, target_is_directory=True)
+        return original(path, max_bytes=max_bytes)
+
+    monkeypatch.setattr(RR, "_read_graph_nofollow", swapped)
+    content, reason = RR.read_text(root, "source/file.py")
+    assert content is None
+    assert reason is not None

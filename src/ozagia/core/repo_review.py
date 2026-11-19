@@ -676,9 +676,12 @@ def read_text(root: Path, rel: str, *, real_root: Path | None = None
             return None, "resolves outside the root"
         if not path.is_file():
             return None, "missing"
-        if path.stat().st_size > MAX_READ_BYTES:
-            return None, "over the read limit"
-        data = path.read_bytes()
+        try:
+            data, _ = _read_graph_nofollow(real_root / rel, max_bytes=MAX_READ_BYTES)
+        except OSError as exc:
+            if "exceeds the bounded read limit" in str(exc):
+                return None, "over the read limit"
+            raise
     except OSError as exc:
         return None, f"unreadable: {type(exc).__name__}"
     if b"\0" in data[:8192]:
