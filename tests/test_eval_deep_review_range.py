@@ -106,7 +106,8 @@ def test_range_comparison_finds_change_set_findings_and_counts_delta():
     assert change_set["range"]["recall"] == 1.0
     assert change_set["range"]["true_positive"] == 2
     assert change_set["range"]["precision"] == 1.0
-    assert change_set["range"]["false_positive_rate"] == 0.0
+    assert change_set["range"]["false_positive_rate"] is None
+    assert change_set["range"]["false_discovery_rate"] == 0.0
     assert change_set["range"]["report_noise_ratio"] == 0.0
     assert change_set["full_signals_on_changed_files"]
     assert any(row["type"] == "security_sensitive"

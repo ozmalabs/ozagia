@@ -34,6 +34,7 @@ from ozagia.core.deep_review.orchestrator import build_deep_review
 from ozagia.core.repo_review import PreflightError
 from ozagia.eval._safe_git import command as safe_git_command
 from ozagia.eval.deep_review_labels import (
+    METRIC_DEFINITIONS,
     expected_findings,
     label_metadata,
     load_labels,
@@ -356,6 +357,7 @@ def evaluate_range(fixture: str | Path = DEFAULT_FIXTURE, *, budget_s: float = 6
             },
             "change_set": {
                 "scope": "range-added findings only",
+                "metric_definitions": dict(METRIC_DEFINITIONS),
                 "expected": len(expected),
                 "full": {
                     "expected": full_score["expected"],
@@ -369,6 +371,7 @@ def evaluate_range(fixture: str | Path = DEFAULT_FIXTURE, *, budget_s: float = 6
                     "recall": full_score["recall"],
                     "precision": full_score["precision"],
                     "false_positive_rate": full_score["false_positive_rate"],
+                    "false_discovery_rate": full_score["false_discovery_rate"],
                     "report_noise_ratio": full_score["report_noise_ratio"],
                 },
                 "range": {
@@ -386,6 +389,8 @@ def evaluate_range(fixture: str | Path = DEFAULT_FIXTURE, *, budget_s: float = 6
                     "precision": range_score["precision"] if range_score else None,
                     "false_positive_rate": (range_score["false_positive_rate"]
                                              if range_score else None),
+                    "false_discovery_rate": (range_score["false_discovery_rate"]
+                                              if range_score else None),
                     "report_noise_ratio": (range_score["report_noise_ratio"]
                                            if range_score else None),
                 },
@@ -829,6 +834,7 @@ def _quality_row(score: Mapping[str, Any]) -> dict[str, Any]:
         "precision": score["precision"],
         "recall": score["recall"],
         "false_positive_rate": score["false_positive_rate"],
+        "false_discovery_rate": score["false_discovery_rate"],
         "report_noise_ratio": score["report_noise_ratio"],
         "precision_all_predictions": (score["true_positive"] / predicted
                                       if predicted else None),
@@ -904,7 +910,7 @@ def evaluate_graph(fixture: str | Path = DEFAULT_FIXTURE, *, budget_s: float = 6
             "quality": {
                 "scope": "reviewed labels are complete only for the listed complete_subjects",
                 "metric_definitions": {
-                    "precision": "true positives / predictions in completely labelled subjects",
+                    **METRIC_DEFINITIONS,
                     "precision_all_predictions": (
                         "true positives / every reported (path, type, subject) "
                         "pair; unlabeled graph-added pairs count as misses"

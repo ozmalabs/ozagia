@@ -28,8 +28,11 @@ METRIC_DEFINITIONS = {
     ),
     "recall": "matched reviewed labels / reviewed labels",
     "false_positive_rate": (
-        "false positives / predictions in completely labelled subjects; this "
-        "is a corpus-local false-discovery proportion, not a population rate"
+        "false positives / all actual negatives; unavailable because the "
+        "reviewed labels do not enumerate a negative universe"
+    ),
+    "false_discovery_rate": (
+        "false positives / predictions in completely labelled subjects"
     ),
     "report_noise_ratio": (
         "reported (path, type, subject) pairs with no reviewed label / all "
@@ -350,15 +353,19 @@ def score_findings(findings: Iterable[Mapping[str, Any]],
             if (label.get("subject") or "unknown") == subject
         ]
         subject_actual = [key for key in actual_rows if key[2] == subject]
-        tp = sum(1 for index in subject_expected if index in matched_expected)
-        fn = len(subject_expected) - tp
+        matched_labels = sum(1 for index in subject_expected if index in matched_expected)
+        # Subjectless labels can match a finding in any subject. Attribute a
+        # precision true positive to the finding's subject, not to "unknown".
+        tp = sum(1 for key in subject_actual if key in matched_actual)
+        fn = len(subject_expected) - matched_labels
         is_complete = subject in complete
         unmatched = [key for key in subject_actual if key not in matched_actual]
         fp = len(unmatched) if is_complete else None
         predicted = len(subject_actual)
         precision = _ratio(tp, predicted) if is_complete else None
-        recall = _ratio(tp, len(subject_expected)) if subject_expected else None
-        fpr = _ratio(fp or 0, predicted) if is_complete and predicted else None
+        recall = (_ratio(matched_labels, len(subject_expected))
+                  if subject_expected else None)
+        fdr = _ratio(fp or 0, predicted) if is_complete and predicted else None
         noise = _ratio(len(unmatched), predicted) if predicted else None
         notes: list[str] = []
         if not subject_expected:
@@ -377,7 +384,8 @@ def score_findings(findings: Iterable[Mapping[str, Any]],
             "unmatched": len(unmatched),
             "precision": precision,
             "recall": recall,
-            "false_positive_rate": fpr,
+            "false_positive_rate": None,
+            "false_discovery_rate": fdr,
             "report_noise_ratio": noise,
             "notes": notes,
         }
@@ -393,6 +401,7 @@ def score_findings(findings: Iterable[Mapping[str, Any]],
     tp_total = len(matched_expected)
     expected_total = len(expected_rows)
     predicted_total = len(actual_rows)
+    complete_tp_total = sum(1 for key in matched_actual if key[2] in complete)
     fp_total = sum(
         1 for key in actual_rows
         if key not in matched_actual and key[2] in complete
@@ -419,11 +428,12 @@ def score_findings(findings: Iterable[Mapping[str, Any]],
         "locationless_findings": locationless,
         "unmatched": unmatched_total,
         "unmatched_pairs": unmatched_preview,
-        "precision": _ratio(tp_total, tp_total + fp_total)
-        if complete and tp_total + fp_total else None,
+        "precision": _ratio(complete_tp_total, complete_tp_total + fp_total)
+        if complete_tp_total + fp_total else None,
         "recall": _ratio(tp_total, expected_total) if expected_total else None,
-        "false_positive_rate": _ratio(fp_total, tp_total + fp_total)
-        if complete and tp_total + fp_total else None,
+        "false_positive_rate": None,
+        "false_discovery_rate": _ratio(fp_total, complete_tp_total + fp_total)
+        if complete_tp_total + fp_total else None,
         "report_noise_ratio": _ratio(unmatched_total, predicted_total)
         if predicted_total else None,
         "complete_subjects": sorted(complete),

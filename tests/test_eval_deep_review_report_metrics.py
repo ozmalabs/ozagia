@@ -49,7 +49,8 @@ def test_report_evaluator_scores_reviewed_labels_and_reports_measurements():
     assert metrics["false_negative"] == 0
     assert metrics["precision"] == 1.0
     assert metrics["recall"] == 1.0
-    assert metrics["false_positive_rate"] == 0.0
+    assert metrics["false_positive_rate"] is None
+    assert metrics["false_discovery_rate"] == 0.0
     assert metrics["report_noise_ratio"] == 0.0
     assert metrics["complete_subjects"] == [
         "data-structures", "failure-modes", "performance", "scalability",

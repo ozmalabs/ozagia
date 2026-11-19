@@ -61,7 +61,8 @@ def test_complete_subject_scores_precision_recall_fpr_and_noise():
     assert score["false_negative"] == 1
     assert score["precision"] == pytest.approx(2 / 3)
     assert score["recall"] == pytest.approx(2 / 3)
-    assert score["false_positive_rate"] == pytest.approx(1 / 3)
+    assert score["false_positive_rate"] is None
+    assert score["false_discovery_rate"] == pytest.approx(1 / 3)
     assert score["report_noise_ratio"] == pytest.approx(1 / 3)
     assert score["subjects"]["subject-a"]["false_positive"] == 1
 
@@ -276,3 +277,25 @@ def test_missing_labels_and_invalid_json_are_rejected(tmp_path):
     path.write_text("{not json", encoding="utf-8")
     with pytest.raises(ValueError, match="invalid deep-review labels JSON"):
         load_labels(path)
+
+
+def test_precision_excludes_matches_in_incomplete_subjects():
+    expected = [{"path": "a.py", "type": "a", "subject": "complete"},
+                {"path": "b.py", "type": "b", "subject": "partial"}]
+    findings = [_finding("1", "extra.py", "extra", "complete"),
+                _finding("2", "b.py", "b", "partial")]
+    score = score_findings(findings, expected, complete_subjects={"complete"})
+    assert score["true_positive"] == 1
+    assert score["recall"] == 0.5
+    assert score["precision"] == 0.0
+    assert score["false_positive_rate"] is None
+    assert score["false_discovery_rate"] == 1.0
+
+
+def test_subjectless_label_counts_for_prediction_subject_precision():
+    expected = [{"path": "a.py", "type": "a", "subject": None}]
+    findings = [_finding("1", "a.py", "a", "complete")]
+    score = score_findings(findings, expected, complete_subjects={"complete"})
+    assert score["precision"] == 1.0
+    assert score["subjects"]["complete"]["precision"] == 1.0
+    assert score["subjects"]["unknown"]["recall"] == 1.0
