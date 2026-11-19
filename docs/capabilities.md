@@ -226,10 +226,11 @@ edges for one capability, paged.
 
 ## Explicit unknowns and coverage gaps
 
-* **Readiness is not observed; installed, configured, reachable, trusted and
-  permitted are separate observations.** The catalogue says what is declared
-  and which surfaces exist; it does not claim those states for any capability.
-  They stay with the existing owners (`core/status.py`, `core/toolchain.py`,
+* **Readiness is not observed.** Installed, configured, reachable, trusted and
+  permitted are separate observations. The catalogue says what is declared
+  and which surfaces exist; it does not claim `installed`, `configured`,
+  `reachable`, `trusted` or `permitted` for any capability. They stay with the
+  existing owners (`core/status.py`, `core/toolchain.py`,
   `core/environments.py`).
 * **MCP maps are static AST views.** The runtime map depends on mode, surface
   selection, adapter tools, SRE tools and dynamically loaded research tools.
@@ -237,10 +238,10 @@ edges for one capability, paged.
   research tools are internal in the catalogue and named as a documented
   unknown rather than guessed from `_TOOLS`.
 * **Daemon operations are code-level declarations, not a live probe.** The
-  audit does not start or ping a daemon, refresh the graph, import target code
-  or call a model. The protocol docstring currently omits `hint`, `secrets` and
-  `toolchain`; those are synthesized from `OPERATIONS` and reported as
-  `daemon_operation_undocumented` coverage findings.
+  audit does not start or ping a daemon. It does not refresh the graph, import
+  target code or call a model. The protocol docstring currently omits `hint`,
+  `secrets` and `toolchain`; those are synthesized from `OPERATIONS` and
+  reported as `daemon_operation_undocumented` coverage findings.
 * **Implementation checks are static.** A symbol present in the source AST is
   evidence that the module defines it, not that the runtime path is correct,
   reachable or safe. Dynamic dispatch, decorators and adapter-provided
