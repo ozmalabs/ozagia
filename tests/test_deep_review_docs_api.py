@@ -154,3 +154,18 @@ def test_data_structure_profile_integrates_inventory_with_static_coverage(tmp_pa
     assert "source_data_model_inventory" in section["checked"]
     assert section["data_inventory"]["models"][0]["name"] == "Item"
     assert section["data_inventory"]["documents"][0]["file"] == "settings.json"
+
+
+def test_referenced_module_under_symlinked_directory_is_not_read(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "api.py").write_text("secret_name = 1\n", encoding="utf-8")
+    (root / "pkg").symlink_to(outside, target_is_directory=True)
+    (root / "README.md").write_text("from pkg.api import secret_name\n", encoding="utf-8")
+
+    result = analyze_with_coverage(root)
+
+    assert any(item.get("path") == "pkg/api.py" for item in result["skipped"])
+    assert result["coverage"]["documented_symbols_checked"] == 0

@@ -17,6 +17,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from ._bounded_read import read_text as _read_text
+
 MAX_FILES = 3000
 MAX_FILE_BYTES = 1_000_000
 MAX_TOTAL_BYTES = 20_000_000
@@ -50,11 +52,10 @@ def _looks_local(root: Path, module: str) -> bool:
     return False
 
 
-def _public_names(path: Path) -> set[str] | None:
+def _public_names(path: Path, root: Path) -> set[str] | None:
     try:
-        if path.stat().st_size > MAX_FILE_BYTES:
-            return None
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        source, _ = _read_text(path, MAX_FILE_BYTES, root=root)
+        tree = ast.parse(source, filename=str(path))
     except (OSError, UnicodeError, SyntaxError, ValueError):
         return None
     names = set()
@@ -162,15 +163,14 @@ def analyze_with_coverage(root: str | Path, *, budget_s: float = 10.0) -> dict[s
                 break
             files_seen += 1
             try:
-                size = p.stat().st_size
-                if size > MAX_FILE_BYTES or size > MAX_TOTAL_BYTES - total_bytes:
-                    skipped.append({"path": p.relative_to(root).as_posix(), "reason": "documentation size limit reached"})
-                    continue
-                text = p.read_text(encoding="utf-8")
+                text, size = _read_text(p, min(MAX_FILE_BYTES, MAX_TOTAL_BYTES - total_bytes), root=root)
             except (OSError, UnicodeError):
                 skipped.append({"path": p.relative_to(root).as_posix(), "reason": "documentation unavailable"})
                 continue
-            total_bytes += len(text.encode("utf-8"))
+            except ValueError:
+                skipped.append({"path": p.relative_to(root).as_posix(), "reason": "documentation size limit reached"})
+                continue
+            total_bytes += size
             docs.append((p, text))
         if time.monotonic() >= deadline or files_seen >= MAX_FILES:
             break
@@ -226,7 +226,7 @@ def analyze_with_coverage(root: str | Path, *, budget_s: float = 10.0) -> dict[s
                 continue
             local_imports += 1
             if source not in cache:
-                cache[source] = _public_names(source)
+                cache[source] = _public_names(source, root)
             names = cache[source]
             module_rel = source.relative_to(root).as_posix()
             if names is None:
