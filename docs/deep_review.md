@@ -341,7 +341,8 @@ evidence or subject contents. See [status](status.md).
   files, local runbook links and recognized operational topics, declared
   logging/metrics/tracing/observability signals, and a
   Dockerfile healthcheck candidates for a missing final-stage declaration or an
-  explicit `HEALTHCHECK NONE`. Base-image inheritance, alternate build targets,
+  explicit `HEALTHCHECK NONE`, accounting for literal named-stage inheritance.
+  External base-image inheritance, alternate build targets,
   and external health checks remain unknown. Bounded lexical IaC/config rules
   flag Terraform public ingress, container privileged mode, Kubernetes
   `hostNetwork`/`hostPath`, and Compose all-interface port binds. Explicit

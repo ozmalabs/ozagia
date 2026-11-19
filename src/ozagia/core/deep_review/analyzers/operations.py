@@ -139,13 +139,22 @@ def _dockerfile_healthcheck(text: str) -> tuple[str, int | None]:
     behavior, so absence only describes instructions in the last stage.
     """
     healthcheck = None
+    stages = {}
+    stage_name = None
     for line_no, line in enumerate(text.splitlines(), 1):
-        if re.match(r"^\s*FROM\s+", line, re.I):
-            healthcheck = None
+        if match := re.match(
+                r"^\s*FROM\s+(?:--platform=\S+\s+)?(\S+)(?:\s+AS\s+(\S+))?",
+                line, re.I):
+            base, stage_name = match.groups()
+            healthcheck = stages.get(base.lower())
+            if healthcheck and healthcheck[0] in {"disabled", "inherited_disabled"}:
+                healthcheck = ("inherited_disabled", healthcheck[1])
         elif match := re.match(r"^\s*HEALTHCHECK\s+(.*?)\s*$", line, re.I):
             value = match.group(1)
             healthcheck = ("disabled" if re.match(r"^NONE(?:\s*(?:#.*)?)?$", value, re.I)
                            else "declared", line_no)
+        if stage_name is not None:
+            stages[stage_name.lower()] = healthcheck
     return healthcheck if healthcheck is not None else ("absent", None)
 
 
@@ -1155,6 +1164,8 @@ def analyze(root: str | Path, *, budget_s: float = 10.0) -> dict:
                         "severity": "note", "confidence": "low", "keys": [f"file:{rel}"],
                         "summary": (f"{rel} has no HEALTHCHECK instruction in its final stage; "
                                     "an inherited or external health check may exist." if healthcheck == "absent"
+                                    else f"{rel} inherits a disabled HEALTHCHECK from an earlier stage."
+                                    if healthcheck == "inherited_disabled"
                                     else f"{rel} explicitly disables HEALTHCHECK in its final stage."),
                         "recommendation": "If this image is long-running, define an appropriate HEALTHCHECK or document the external health check.",
                     }

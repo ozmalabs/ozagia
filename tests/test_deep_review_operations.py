@@ -58,6 +58,22 @@ def test_last_stage_with_healthcheck_is_not_flagged(tmp_path):
     assert analyze(tmp_path)["findings"] == []
 
 
+def test_final_stage_inherits_healthcheck_from_named_stage(tmp_path):
+    (tmp_path / "Dockerfile").write_text(
+        "FROM alpine AS base\nHEALTHCHECK CMD true\n"
+        "FROM --platform=linux/amd64 BASE AS final\n", encoding="utf-8")
+    assert analyze(tmp_path)["findings"] == []
+
+
+def test_final_stage_inherits_disabled_healthcheck(tmp_path):
+    (tmp_path / "Dockerfile").write_text(
+        "FROM alpine AS base\nHEALTHCHECK NONE\nFROM base AS final\n", encoding="utf-8")
+    finding = analyze(tmp_path)["findings"][0]
+    assert finding["type"] == "container_healthcheck_disabled"
+    assert "inherits" in finding["summary"]
+    assert finding["line"] == 2
+
+
 def test_unrecognized_repository_is_not_claimed_clean(tmp_path):
     (tmp_path / "app.py").write_text("pass\n", encoding="utf-8")
 
