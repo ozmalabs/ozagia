@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 
 from . import failure_modes
+from ._bounded_read import read_text as _read_text
 
 SUBJECTS = ("performance", "failure-modes", "data-structures", "scalability")
 SKIP_DIRS = {".git", ".ozagia", ".venv", "venv", "node_modules", "__pycache__", ".tox"}
@@ -156,14 +157,11 @@ def analyze(root, *, budget_s=60):
                 continue
             rel = file_path.relative_to(root).as_posix()
             try:
-                size = file_path.stat().st_size
-                if size > MAX_SOURCE_BYTES:
-                    skipped.append({"path": rel, "reason": "source exceeds 1 MB limit"})
-                    continue
-                if size > MAX_TOTAL_BYTES - total_bytes:
-                    skipped.append({"path": rel, "reason": "total source read limit reached"})
-                    return findings, checked, skipped
-                text = file_path.read_text(encoding="utf-8")
+                text, size = _read_text(
+                    file_path, min(MAX_SOURCE_BYTES, MAX_TOTAL_BYTES - total_bytes))
+            except ValueError:
+                skipped.append({"path": rel, "reason": "source or total read limit reached"})
+                continue
             except (OSError, UnicodeError) as exc:
                 skipped.append({"path": rel, "reason": f"source unavailable: {type(exc).__name__}"})
                 continue

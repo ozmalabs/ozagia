@@ -14,6 +14,8 @@ import time
 import tomllib
 from pathlib import Path
 
+from ._bounded_read import read_text as _read_text
+
 MAX_FILES = 2000
 MAX_FILE_BYTES = 512_000
 MAX_TOTAL_BYTES = 12_000_000
@@ -132,15 +134,15 @@ def analyze(root: str | Path, *, budget_s: float = 10.0) -> dict:
             count += 1
             rel = path.relative_to(root).as_posix()
             try:
-                size = path.stat().st_size
-                if size > MAX_FILE_BYTES or size > MAX_TOTAL_BYTES - total:
-                    unknown.append({"path": rel, "reason": "file or total byte limit reached"})
-                    continue
-                source = path.read_text(encoding="utf-8")
+                source, size = _read_text(
+                    path, min(MAX_FILE_BYTES, MAX_TOTAL_BYTES - total))
+            except ValueError:
+                unknown.append({"path": rel, "reason": "file or total byte limit reached"})
+                continue
             except (OSError, UnicodeError):
                 unknown.append({"path": rel, "reason": "unreadable or non-UTF-8 file"})
                 continue
-            total += len(source.encode("utf-8"))
+            total += size
             if suffix == ".py":
                 try:
                     found_models, found_schemas = _python_models(rel, source)

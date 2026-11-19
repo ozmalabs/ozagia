@@ -20,6 +20,8 @@ import time
 from pathlib import Path
 from urllib.parse import unquote
 
+from ._bounded_read import read_text as _read_text
+
 MAX_FILES = 3000
 MAX_FILE_BYTES = 1_000_000
 MAX_TOTAL_BYTES = 20_000_000
@@ -1167,15 +1169,15 @@ def analyze(root: str | Path, *, budget_s: float = 10.0) -> dict:
             if not (is_config or is_yaml_candidate or is_runbook):
                 continue
             try:
-                size = path.stat().st_size
-                if size > MAX_FILE_BYTES or size > MAX_TOTAL_BYTES - total:
-                    omissions.append(f"{rel}: exceeds read size limit")
-                    continue
-                content = path.read_text(encoding="utf-8")
+                content, size = _read_text(
+                    path, min(MAX_FILE_BYTES, MAX_TOTAL_BYTES - total))
+            except ValueError:
+                omissions.append(f"{rel}: exceeds read size limit")
+                continue
             except (OSError, UnicodeError):
                 omissions.append(f"{rel}: unreadable")
                 continue
-            total += len(content.encode("utf-8"))
+            total += size
             is_config = is_config or (is_yaml_candidate and bool(_K8S_KIND.search(content)))
             if not (is_config or is_runbook):
                 continue
