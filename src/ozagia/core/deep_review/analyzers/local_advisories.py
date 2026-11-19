@@ -365,6 +365,7 @@ def match_local_advisories(
     composer_provenance_skipped = 0
     cargo_provenance_skipped = 0
     npm_provenance_skipped = 0
+    python_provenance_skipped = 0
     maven_provenance_unknown = 0
     maven_unknown_pins: set[tuple[str, str, str]] = set()
     if isinstance(lockfiles, list):
@@ -383,6 +384,10 @@ def match_local_advisories(
                 if not isinstance(row, Mapping):
                     continue
                 name, version = row.get("name"), row.get("version")
+                if (ecosystem == "python" and row.get("provenance") in
+                        {"git", "workspace-or-path", "direct-url"}):
+                    python_provenance_skipped += 1
+                    continue
                 # Cargo package names and versions are not globally unique
                 # across registries, Git forks, and local workspace sources.
                 if (ecosystem == "rust" and row.get("provenance") is not None
@@ -576,6 +581,9 @@ def match_local_advisories(
             + (f" {npm_provenance_skipped} npm pins were excluded because their "
                "source is not known to be the npm registry."
                if npm_provenance_skipped else "")
+            + (f" {python_provenance_skipped} Python pins were excluded because "
+               "they use a direct Git, path, or URL source."
+               if python_provenance_skipped else "")
             + (f" {cargo_provenance_skipped} Cargo pins were excluded because their "
                "source is not known to be crates.io."
                if cargo_provenance_skipped else "")

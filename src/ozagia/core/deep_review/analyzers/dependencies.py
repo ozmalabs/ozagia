@@ -528,6 +528,25 @@ def _npm_lock_row(name: str, value: Mapping[str, Any]) -> dict[str, Any]:
     return row
 
 
+def _python_non_registry_source(package: Mapping[str, Any]) -> str | None:
+    """Classify explicit direct sources without retaining sensitive URLs."""
+    source = package.get("source")
+    if isinstance(source, Mapping):
+        kind = source.get("type")
+        if kind == "git" or "git" in source:
+            return "git"
+        if kind in {"directory", "file"} or any(
+                key in source for key in ("directory", "editable", "path")):
+            return "workspace-or-path"
+        if kind == "url" or "url" in source:
+            return "direct-url"
+    if "git" in package:
+        return "git"
+    if any(key in package for key in ("path", "file", "editable")):
+        return "workspace-or-path"
+    return None
+
+
 def _lock_inventory_raw(rel: str, text: str) -> dict[str, Any] | None:
     name = PurePosixPath(rel).name
     try:
@@ -605,6 +624,9 @@ def _lock_inventory_raw(rel: str, text: str) -> dict[str, Any] | None:
                         continue
                     row = {"name": package["name"],
                            "version": package.get("version")}
+                    provenance = _python_non_registry_source(package)
+                    if provenance:
+                        row["provenance"] = provenance
                     license_text = _license_value(package.get("license"))
                     if license_text:
                         row["license"] = license_text
@@ -625,7 +647,12 @@ def _lock_inventory_raw(rel: str, text: str) -> dict[str, Any] | None:
                     version = None
                     if isinstance(value, dict):
                         version = _exact_version(str(value.get("version") or ""))
-                    rows.append({"name": dep_name, "version": version})
+                    row = {"name": dep_name, "version": version}
+                    if isinstance(value, dict):
+                        provenance = _python_non_registry_source(value)
+                        if provenance:
+                            row["provenance"] = provenance
+                    rows.append(row)
             return {"file": rel, "ecosystem": "python", "format": "pipenv",
                     "entries": len(rows), "packages": sorted(
                         rows, key=lambda item: (item["name"],

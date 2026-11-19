@@ -203,6 +203,8 @@ rows contain `id`, `ecosystem`, `package`, and either
 `{"events":[{"introduced":"1.2.0"},{"fixed":"1.4.0"}]}` sequences
 (optional `severity` and `summary`). It is never fetched or refreshed.
 Matching uses parsed lockfile pins only; manifest ranges are never evaluated.
+Python lock entries with explicit Git, local path, or direct URL sources are
+excluded from registry advisory matching; absent source metadata remains unknown.
 Cargo lock entries retain a coarse source classification; advisory matching
 excludes Git, workspace/path and non-crates.io registry entries because the
 same name and version can identify different packages. Range events are

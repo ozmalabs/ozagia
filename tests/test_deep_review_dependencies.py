@@ -333,3 +333,28 @@ def test_npm_advisories_respect_alias_names_and_source_provenance(tmp_path):
     assert matches == ["actual"]
     assert any("4 npm pins were excluded" in item["reason"] for item in result["not_checked"])
     assert "private.example" not in json.dumps(result)
+
+
+def test_python_direct_sources_do_not_match_registry_advisories(tmp_path):
+    (tmp_path / "uv.lock").write_text(
+        'version = 1\n'
+        '[[package]]\nname = "registry-demo"\nversion = "1.2.3"\n'
+        'source = { registry = "https://pypi.org/simple" }\n'
+        '[[package]]\nname = "fork-demo"\nversion = "1.2.3"\n'
+        'source = { git = "https://secret.example/fork" }\n'
+        '[[package]]\nname = "local-demo"\nversion = "1.2.3"\n'
+        'source = { editable = "." }\n'
+        '[[package]]\nname = "url-demo"\nversion = "1.2.3"\n'
+        'source = { url = "https://secret.example/package.whl" }\n', encoding="utf-8")
+    advisories = {"schema": "ozagia.local_advisories.v1", "advisories": [
+        {"id": f"PY-{i}", "ecosystem": "python", "package": name,
+         "affected_versions": ["1.2.3"]}
+        for i, name in enumerate(("registry-demo", "fork-demo", "local-demo", "url-demo"))
+    ]}
+
+    result = analyze(tmp_path, local_advisories=advisories)
+    matches = [item["dependency"] for item in result["findings"]
+               if item["type"] == "local_advisory_exact_version_match"]
+    assert matches == ["registry-demo"]
+    assert any("3 Python pins were excluded" in item["reason"] for item in result["not_checked"])
+    assert "secret.example" not in json.dumps(result)
