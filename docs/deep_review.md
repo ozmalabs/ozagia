@@ -348,7 +348,9 @@ evidence or subject contents. See [status](status.md).
   `hostNetwork`/`hostPath`, and Compose all-interface port binds. Explicit
   telemetry disable settings are reported with rule IDs. Selected plain JSON
   Kubernetes manifests and selected Kubernetes/Compose YAML receive bounded
-  structural checks for literal security settings. YAML checks use PyYAML from
+  structural checks for literal security settings, including host PID/IPC
+  namespaces and explicitly configured root UIDs. Pod defaults can be
+  overridden by individual containers. YAML checks use PyYAML from
   the optional `iac-yaml` extra. Terraform ingress checks use `python-hcl2`
   from the optional `iac-hcl` extra in a time- and memory-bounded subprocess.
   If a parser is absent or parsing is ambiguous, the report marks structural

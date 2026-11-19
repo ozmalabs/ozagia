@@ -452,6 +452,43 @@ def test_kubernetes_json_security_context_checks_are_exact_and_structural(tmp_pa
         "/spec/template/spec/containers/0/securityContext/capabilities/add")
 
 
+def test_kubernetes_host_namespaces_and_root_uid_are_explicit(tmp_path):
+    (tmp_path / "pod.json").write_text(
+        '{"apiVersion":"v1","kind":"Pod","spec":{'
+        '"hostPID":true,"hostIPC":true,"securityContext":{"runAsUser":0},'
+        '"containers":[{"name":"api","securityContext":{"runAsUser":0}},'
+        '{"name":"other","securityContext":{"runAsUser":false}}],'
+        '"initContainers":[{"name":"init","securityContext":{"runAsUser":"0"}}]}}',
+        encoding="utf-8")
+
+    findings = analyze(tmp_path)["findings"]
+    selected = [item for item in findings if item.get("rule_id") in {
+        "iac.kubernetes.host_pid", "iac.kubernetes.host_ipc", "iac.kubernetes.root_user"}]
+    assert {(item["rule_id"], item["json_pointer"]) for item in selected} == {
+        ("iac.kubernetes.host_pid", "/spec/hostPID"),
+        ("iac.kubernetes.host_ipc", "/spec/hostIPC"),
+        ("iac.kubernetes.root_user", "/spec/securityContext/runAsUser"),
+        ("iac.kubernetes.root_user", "/spec/containers/0/securityContext/runAsUser"),
+    }
+    assert all(item["truth_assessed"] is False for item in selected)
+
+
+def test_kubernetes_yaml_host_namespace_evidence_uses_structural_pointer(tmp_path):
+    pytest.importorskip("yaml")
+    (tmp_path / "pod.yaml").write_text(
+        "apiVersion: v1\nkind: Pod\nspec:\n  hostPID: true\n"
+        "  containers:\n  - name: api\n    securityContext:\n      runAsUser: 0\n",
+        encoding="utf-8")
+
+    findings = analyze(tmp_path)["findings"]
+    selected = [item for item in findings if item.get("rule_id") in {
+        "iac.kubernetes.host_pid", "iac.kubernetes.root_user"}]
+    assert {(item["rule_id"], item["yaml_pointer"]) for item in selected} == {
+        ("iac.kubernetes.host_pid", "/spec/hostPID"),
+        ("iac.kubernetes.root_user", "/spec/containers/0/securityContext/runAsUser"),
+    }
+
+
 def test_json_kubernetes_candidates_require_exact_boolean_and_object_paths(tmp_path):
     (tmp_path / "pod.json").write_text(
         '{"apiVersion":"v1","kind":"Pod","metadata":{"annotations":'

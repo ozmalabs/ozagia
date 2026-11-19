@@ -294,6 +294,11 @@ def _kubernetes_object_findings(rel: str, document: object, *,
             add("iac.kubernetes.host_network", pod_path + ("hostNetwork",),
                 f"{rel} sets Kubernetes hostNetwork to true in {kind} pod spec.",
                 "Review port collisions and node-network exposure; use a pod network unless host networking is required.")
+        for field, rule in (("hostPID", "host_pid"), ("hostIPC", "host_ipc")):
+            if pod_spec.get(field) is True:
+                add(f"iac.kubernetes.{rule}", pod_path + (field,),
+                    f"{rel} sets {field} to true in the {kind} pod spec, sharing a host namespace.",
+                    "Use an isolated pod namespace unless sharing the host namespace is required.")
         pod_security = pod_spec.get("securityContext")
         if (isinstance(pod_security, dict)
                 and pod_security.get("runAsNonRoot") is False):
@@ -301,6 +306,12 @@ def _kubernetes_object_findings(rel: str, document: object, *,
                 pod_path + ("securityContext", "runAsNonRoot"),
                 f"{rel} explicitly permits root execution in the {kind} pod spec.",
                 "Set runAsNonRoot to true when the workload supports a non-root user.")
+        if (isinstance(pod_security, dict)
+                and type(pod_security.get("runAsUser")) is int
+                and pod_security["runAsUser"] == 0):
+            add("iac.kubernetes.root_user", pod_path + ("securityContext", "runAsUser"),
+                f"{rel} sets the {kind} pod's default runAsUser to UID 0; individual containers may override it.",
+                "Use a non-root UID when the workload supports it and review container overrides.")
         volumes = pod_spec.get("volumes")
         if isinstance(volumes, list):
             for index, volume in enumerate(volumes):
@@ -317,6 +328,13 @@ def _kubernetes_object_findings(rel: str, document: object, *,
                 if not isinstance(container, dict):
                     continue
                 security_context = container.get("securityContext")
+                if (isinstance(security_context, dict)
+                        and type(security_context.get("runAsUser")) is int
+                        and security_context["runAsUser"] == 0):
+                    add("iac.kubernetes.root_user",
+                        pod_path + (container_field, index, "securityContext", "runAsUser"),
+                        f"{rel} sets a {kind} container's runAsUser to UID 0.",
+                        "Use a non-root UID when the workload supports it.")
                 if (isinstance(security_context, dict)
                         and security_context.get("privileged") is True):
                     add("iac.container.privileged_mode",
