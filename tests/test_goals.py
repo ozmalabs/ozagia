@@ -75,19 +75,19 @@ def _memory(root: Path) -> DevMemory:
     return DevMemory(dump, state_path(root, "journal.jsonl"), root=root)
 
 
-def test_fingerprint_git_commands_disable_optional_index_writes(monkeypatch,
-                                                                tmp_path):
-    observed = {}
+def test_fingerprint_git_commands_disable_optional_index_writes(monkeypatch, repo):
+    observed = []
+    original_run = subprocess.run
 
     def run(command, **kwargs):
-        observed["command"] = command
-        observed["env"] = kwargs["env"]
-        return subprocess.CompletedProcess(command, 0, stdout=b"", stderr=b"")
+        observed.append(kwargs.get("env", {}))
+        return original_run(command, **kwargs)
 
-    monkeypatch.setattr(FP.subprocess, "run", run)
-    assert FP._git(tmp_path, "status") == b""
-    assert observed["env"]["GIT_OPTIONAL_LOCKS"] == "0"
-    assert observed["env"]["GIT_PAGER"] == "cat"
+    monkeypatch.setattr(FP.GS.subprocess, "run", run)
+    assert FP._git(repo, "status", "--porcelain") is not None
+    assert observed
+    assert all(env.get("GIT_OPTIONAL_LOCKS") == "0" for env in observed)
+    assert all(env.get("GIT_PAGER") == "cat" for env in observed)
 
 
 @pytest.fixture()
