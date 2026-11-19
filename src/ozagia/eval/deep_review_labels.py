@@ -550,6 +550,10 @@ def score_report_findings(findings: Iterable[Mapping[str, Any]],
     def unavailable_reason(subject: str, label: Mapping[str, Any] | None) -> str | None:
         if global_coverage_failure:
             return global_coverage_failure
+        collectors = truncation.get("collectors")
+        if (subject == "security" and isinstance(collectors, Mapping)
+                and collectors.get("security_findings_omitted") is True):
+            return "security scanner omitted findings"
         row = sections.get(subject)
         if not isinstance(row, Mapping):
             return "subject report is missing"

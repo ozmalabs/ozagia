@@ -272,6 +272,26 @@ def test_global_finding_truncation_makes_label_coverage_unavailable(truncation):
     assert score["coverage_reasons"]["subject-a"]
 
 
+def test_security_scanner_finding_truncation_invalidates_security_score_only():
+    expected = [{"path": "a.py", "type": "rule", "subject": "security",
+                 "required_checks": ["scan"]},
+                {"path": "b.py", "type": "rule", "subject": "performance",
+                 "required_checks": ["scan"]}]
+    section = {"status": "complete", "checks": ["scan"],
+               "omitted": [], "skipped": [], "unknown": []}
+    report = {"truncation": {"collectors": {"security_findings_omitted": True}},
+              "subjects": {"security": section, "performance": section}}
+
+    score = score_report_findings([], expected,
+                                  complete_subjects={"security", "performance"},
+                                  report_manifest=report)
+
+    assert score["excluded_expected"] == 1
+    assert score["expected"] == 1
+    assert score["false_negative"] == 1
+    assert score["coverage_reasons"] == {"security": "security scanner omitted findings"}
+
+
 @pytest.mark.parametrize("payload, message", [
     ({"cases": "not-a-list"}, "cases must be a list"),
     ({"cases": [{"id": "x", "file": "/abs.py", "expected": []}]},
