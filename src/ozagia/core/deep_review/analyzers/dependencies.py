@@ -11,6 +11,7 @@ import json
 import math
 import os
 import re
+import stat
 import time
 import tomllib
 from pathlib import Path, PurePosixPath
@@ -88,10 +89,19 @@ def _walk(root: Path, deadline: float):
 
 
 def _read(path: Path, remaining: int) -> str | None:
+    limit = min(MAX_FILE_BYTES, remaining)
+    if limit < 0 or not hasattr(os, "O_NOFOLLOW"):
+        return None
     try:
-        if path.stat().st_size > min(MAX_FILE_BYTES, remaining):
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        fd = os.open(path, flags)
+        with os.fdopen(fd, "rb") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                return None
+            content = stream.read(limit + 1)
+        if len(content) > limit:
             return None
-        return path.read_text(encoding="utf-8")
+        return content.decode("utf-8")
     except (OSError, UnicodeError):
         return None
 

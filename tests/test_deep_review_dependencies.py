@@ -3,6 +3,18 @@ import json
 from ozagia.core.deep_review.analyzers.dependencies import analyze, build_sbom
 
 
+def test_inventory_read_enforces_actual_byte_limit_and_refuses_symlinks(tmp_path):
+    from ozagia.core.deep_review.analyzers.dependencies import _read
+
+    source = tmp_path / "source"
+    source.write_bytes(b"abcde")
+    assert _read(source, 5) == "abcde"
+    assert _read(source, 4) is None
+    link = tmp_path / "link"
+    link.symlink_to(source)
+    assert _read(link, 5) is None
+
+
 def test_inventory_reports_python_manifest_and_lock(tmp_path):
     (tmp_path / "pyproject.toml").write_text(
         '[project]\ndependencies = ["requests>=2", "httpx"]\n', encoding="utf-8")
