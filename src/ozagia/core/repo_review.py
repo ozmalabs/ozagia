@@ -499,7 +499,8 @@ def _open_graph_nofollow(path: str | Path) -> int:
                 next_fd = os.open(component, directory_flags, dir_fd=parent_fd)
                 os.close(parent_fd)
                 parent_fd = next_fd
-            return os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW,
+            return os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW |
+                           getattr(os, "O_NONBLOCK", 0),
                            dir_fd=parent_fd)
         finally:
             os.close(parent_fd)

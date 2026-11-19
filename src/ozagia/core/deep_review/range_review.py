@@ -322,30 +322,27 @@ def _packet_blast_radius(root: str, packet: Mapping[str, Any], *,
     from ozagia.core import repo_review
     try:
         path = repo_review._graph_file(Path(root), None)
-        if not path.is_file() or path.stat().st_size > MAX_GRAPH_BYTES:
-            return blast_radius_facts(
-                None, changed, freshness="absent",
-                reason="blast radius omitted: graph snapshot is missing or exceeds the read bound")
-        head = str(packet.get("head_commit") or "")
-        info, _dev, _index = repo_review._load_graph(
-            Path(root), path, head, allow_project_adapters=False)
-        actual = _graph_freshness(info)
-        if actual != "fresh":
-            return blast_radius_facts(
-                None, changed, freshness=actual,
-                reason=f"blast radius omitted: graph is {actual}: {info.get('reason')}")
-        with path.open("rb") as handle:
-            payload = handle.read(MAX_GRAPH_BYTES + 1)
-        if len(payload) > MAX_GRAPH_BYTES:
-            return blast_radius_facts(
-                None, changed, freshness="unknown",
-                reason="blast radius omitted: graph snapshot exceeds the read bound")
+        payload, _snapshot_stat = repo_review._read_graph_nofollow(
+            path, max_bytes=MAX_GRAPH_BYTES)
         graph = json.loads(payload)
         if not isinstance(graph, dict):
             return blast_radius_facts(
                 None, changed, freshness="unknown",
                 reason="blast radius omitted: graph snapshot root is not an object")
+        head = str(packet.get("head_commit") or "")
+        info, _dev, _index = repo_review._load_graph(
+            Path(root), path, head, snapshot_data=graph,
+            allow_project_adapters=False)
+        actual = _graph_freshness(info)
+        if actual != "fresh":
+            return blast_radius_facts(
+                None, changed, freshness=actual,
+                reason=f"blast radius omitted: graph is {actual}: {info.get('reason')}")
         return blast_radius_facts(graph, changed, freshness="fresh")
+    except FileNotFoundError:
+        return blast_radius_facts(
+            None, changed, freshness="absent",
+            reason="blast radius omitted: graph snapshot is missing")
     except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
         return blast_radius_facts(
             None, changed, freshness="unknown",

@@ -151,6 +151,26 @@ def test_packet_blast_radius_reads_a_verified_fresh_graph(monkeypatch, tmp_path)
     assert any("missing" in reason for reason in facts["omissions"])
 
 
+def test_blast_radius_uses_same_graph_data_that_was_verified(monkeypatch, tmp_path):
+    from ozagia.core import repo_review
+
+    graph_file = tmp_path / "graph.json"
+    graph_file.write_text(json.dumps(_graph()), encoding="utf-8")
+    monkeypatch.setattr(repo_review, "_graph_file", lambda root, path: graph_file)
+
+    def verify(root, path, head, **kwargs):
+        assert kwargs["snapshot_data"] == _graph()
+        graph_file.write_text(json.dumps({"nodes": [], "edges": []}), encoding="utf-8")
+        return {"freshness": "fresh", "usable": True}, None, None
+
+    monkeypatch.setattr(repo_review, "_load_graph", verify)
+    packet = {"graph": {"freshness": "fresh", "usable": True},
+              "head_commit": "a" * 40, "files": [{"path": "a.py"}]}
+    facts = range_review._packet_blast_radius(str(tmp_path), packet)
+    assert facts["status"] == "available"
+    assert facts["callers"]["reachable_symbols"] == 2
+
+
 def test_security_impact_uses_only_fresh_graph_and_reports_bounded_evidence(
         monkeypatch, tmp_path):
     from ozagia.core import repo_review

@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
+import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -17,6 +20,20 @@ from review_fixture import (  # noqa: F401 - shared fixture helpers
     FILES, _commit, _git, _graph, _rich_repo, _write, make_repo)
 
 HAS_YAML = importlib.util.find_spec("yaml") is not None
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="requires FIFOs")
+def test_graph_fifo_is_rejected_without_blocking(tmp_path):
+    path = tmp_path / "graph.json"
+    os.mkfifo(path)
+    code = ("from ozagia.core.repo_review import _read_graph_nofollow\n"
+            "import sys\n"
+            "try:\n _read_graph_nofollow(sys.argv[1])\n"
+            "except OSError: sys.exit(0)\n"
+            "sys.exit(1)\n")
+    result = subprocess.run([sys.executable, "-c", code, str(path)],
+                            timeout=3, capture_output=True, check=False)
+    assert result.returncode == 0
 
 
 @pytest.fixture
