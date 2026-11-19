@@ -1,0 +1,58 @@
+{
+  "dataset": "SWE-bench/SWE-bench_Verified",
+  "config": "default",
+  "split": "test",
+  "features": [
+    {"name": "instance_id", "type": {"_type": "Value", "dtype": "string"}},
+    {"name": "repo", "type": {"_type": "Value", "dtype": "string"}},
+    {"name": "base_commit", "type": {"_type": "Value", "dtype": "string"}},
+    {"name": "problem_statement", "type": {"_type": "Value", "dtype": "string"}},
+    {"name": "patch", "type": {"_type": "Value", "dtype": "string"}}
+  ],
+  "rows": [
+    {
+      "row_idx": 0,
+      "row": {
+        "instance_id": "django__django-11099",
+        "repo": "django/django",
+        "base_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "problem_statement": "Fix the query compiler so model fields are validated before SQL is generated.",
+        "patch": "diff --git a/django/db/models.py b/django/db/models.py\nindex 1111111..2222222 100644\n--- a/django/db/models.py\n+++ b/django/db/models.py\n@@ -10,3 +10,4 @@ class Model:\n     def save(self):\n-        return None\n+        return self._save_table()\ndiff --git a/django/db/query.py b/django/db/query.py\nindex 3333333..4444444 100644\n--- a/django/db/query.py\n+++ b/django/db/query.py\n@@ -1,2 +1,2 @@\n-def compile():\n+def compile_query():\n     return None\ndiff --git a/django/db/models.py b/django/db/models.py\nindex 1111111..2222222 100644\n--- a/django/db/models.py\n+++ b/django/db/models.py\n@@ -20,2 +20,2 @@\n-old = 1\n+old = 2\n"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 1,
+      "row": {
+        "instance_id": "sympy__sympy-12345",
+        "repo": "sympy/sympy",
+        "base_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "problem_statement": "Simplify the expression printer for nested powers.",
+        "patch": "diff --git a/sympy/printing/str.py b/sympy/printing/str.py\nindex 5555555..6666666 100644\n--- a/sympy/printing/str.py\n+++ b/sympy/printing/str.py\n@@ -1,2 +1,2 @@\n-print_power = old\n+print_power = new\n"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 2,
+      "row": {
+        "instance_id": "django__django-99999",
+        "repo": "django/django",
+        "base_commit": "cccccccccccccccccccccccccccccccccccccccc",
+        "problem_statement": "",
+        "patch": "diff --git a/django/db/models.py b/django/db/models.py\n"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 3,
+      "row": {
+        "instance_id": "pytest__pytest-88888",
+        "repo": "pytest-dev/pytest",
+        "base_commit": "dddddddddddddddddddddddddddddddddddddddd",
+        "problem_statement": "Investigate the fixture teardown ordering.",
+        "patch": "This row has no unified diff at all.\n"
+      },
+      "truncated_cells": []
+    }
+  ]
+}

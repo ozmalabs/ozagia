@@ -1,0 +1,25 @@
+{
+  "dataset": "SWE-bench/SWE-bench_Lite",
+  "config": "default",
+  "split": "test",
+  "features": [
+    {"name": "instance_id", "type": {"_type": "Value", "dtype": "string"}},
+    {"name": "repo", "type": {"_type": "Value", "dtype": "string"}},
+    {"name": "base_commit", "type": {"_type": "Value", "dtype": "string"}},
+    {"name": "problem_statement", "type": {"_type": "Value", "dtype": "string"}},
+    {"name": "patch", "type": {"_type": "Value", "dtype": "string"}}
+  ],
+  "rows": [
+    {
+      "row_idx": 0,
+      "row": {
+        "instance_id": "flask__flask-4045",
+        "repo": "pallets/flask",
+        "base_commit": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "problem_statement": "Reject invalid route endpoint names earlier.",
+        "patch": "diff --git a/src/flask/app.py b/src/flask/app.py\nindex 7777777..8888888 100644\n--- a/src/flask/app.py\n+++ b/src/flask/app.py\n@@ -1,2 +1,2 @@\n-old = 1\n+new = 2\n"
+      },
+      "truncated_cells": []
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "id": "SWE-bench/SWE-bench_Verified",
+  "sha": "0123456789abcdef0123456789abcdef01234567",
+  "lastModified": "2025-01-01T00:00:00.000Z",
+  "tags": ["task_categories:software-engineering", "format:parquet"],
+  "cardData": {
+    "dataset_info": {"config_name": "default"}
+  }
+}

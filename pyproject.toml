@@ -86,11 +86,12 @@ ozagia-files = "ozagia.files_cli:main"
 ozagia-mcp = "ozagia.integrations.mcp.server:main"
 ozagia-research = "ozagia.research.service:main"
 ozagia-edit = "ozagia.edit.code_edit:main"
-ozagia-profile = "ozagia.profile_cli:main"
 ozagia-symbols = "ozagia.core.symbol_graph:main"
 ozagia-eval = "ozagia.eval.agent:main"
 ozagia-eval-retrieval = "ozagia.eval.retrieval:main"
+ozagia-eval-benchmarks = "ozagia.eval.hf_benchmarks:main"
 ozagia-bench = "ozagia.eval.bench:main"
+ozagia-profile = "ozagia.profile_cli:main"
 
 [project.urls]
 Repository = "https://github.com/ozmalabs/ozagia"
