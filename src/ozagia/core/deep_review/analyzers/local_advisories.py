@@ -150,11 +150,34 @@ def _validate_semver_events(ecosystem: str, value: Any, index: int
         if not isinstance(events, list) or not events or len(events) > 200:
             raise ValueError(
                 f"advisories[{index}].affected_ranges[{range_index}] is invalid")
+        # Limits constrain the entire OSV range, independently of timeline
+        # events. Multiple limits form a union, hence the greatest finite limit.
+        limits: list[str] = []
+        infinite_limit = False
+        timeline = []
+        for event in events:
+            if isinstance(event, Mapping) and set(event) == {"limit"}:
+                limit = event["limit"]
+                if limit == "*":
+                    infinite_limit = True
+                    continue
+                if not isinstance(limit, str):
+                    raise ValueError("OSV limit must be strict SemVer or '*'")
+                if ecosystem == "go":
+                    if not limit.startswith("v"):
+                        raise ValueError("Go OSV limit must have a v prefix")
+                    limit = limit[1:]
+                if not _SEMVER_VERSION.fullmatch(limit):
+                    raise ValueError("OSV limit must be strict SemVer or '*'")
+                limits.append(limit)
+            else:
+                timeline.append(event)
+        block_ranges: list[tuple[str, str, bool]] = []
         start: str | None = None
         last_kind: str | None = None
         previous_fixed: str | None = None
         closing_kind: str | None = None
-        for event in events:
+        for event in timeline:
             if not isinstance(event, Mapping) or len(event) != 1:
                 raise ValueError("OSV range events must contain one introduced/fixed/last_affected key")
             kind, version = next(iter(event.items()))
@@ -194,16 +217,27 @@ def _validate_semver_events(ecosystem: str, value: Any, index: int
                 comparison = _semver_compare(version, start)
                 if comparison < 0 or (comparison == 0 and kind == "fixed"):
                     raise ValueError("OSV range ending must follow introduced")
-                ranges.append((start, version, kind == "last_affected"))
+                block_ranges.append((start, version, kind == "last_affected"))
                 previous_fixed = version
                 start = None
             last_kind = kind
         if start is not None:
-            ranges.append((start, "", False))
-        elif last_kind in {"fixed", "last_affected"}:
-            continue
-        else:
+            block_ranges.append((start, "", False))
+        elif last_kind not in {"fixed", "last_affected"}:
             raise ValueError("OSV range must begin with introduced")
+        cap = None
+        if limits and not infinite_limit:
+            cap = limits[0]
+            for candidate in limits[1:]:
+                if _semver_compare(candidate, cap) > 0:
+                    cap = candidate
+        for start, end, inclusive in block_ranges:
+            if cap is not None:
+                if _semver_compare(start, cap) >= 0:
+                    continue
+                if not end or _semver_compare(end, cap) >= 0:
+                    end, inclusive = cap, False
+            ranges.append((start, end, inclusive))
     return ranges
 
 

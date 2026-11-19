@@ -199,7 +199,8 @@ Range events are supported only for Node and Rust strict SemVer, and Go
 fixed is exclusive, `last_affected` is inclusive, and an open introduced event
 has no upper bound. A `last_affected` ceiling is a last known affected version,
 not evidence that later versions are fixed. A single event sequence cannot mix
-`fixed` and `last_affected`; limit events and malformed sequences are rejected. Exact Python versions remain validated as PEP 440 and
+`fixed` and `last_affected`; finite `limit` events impose an exclusive upper
+bound, while `*` leaves that range unbounded. Malformed sequences are rejected. Exact Python versions remain validated as PEP 440 and
 compared as written, with the Go `v` prefix normalized. Ruby Bundler
 `Gemfile.lock` pins support exact-version matching only, using conservative
 numeric versions with an optional prerelease suffix. Only specs under a `GEM`

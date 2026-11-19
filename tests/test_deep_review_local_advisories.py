@@ -571,12 +571,38 @@ def test_osv_last_affected_go_and_multiple_intervals():
     assert {row["version"] for row in result["findings"]} == {"1.0.0", "2.0.0"}
 
 
-def test_osv_range_rejects_non_semver_type_and_limit():
+def test_osv_range_rejects_non_semver_type_and_invalid_limit():
     advisory = {"id": "OSV-TYPE-1", "ecosystem": "node", "package": "demo",
                 "affected_ranges": [{"type": "GIT", "events": [{"introduced": "0"}]}]}
     with pytest.raises(ValueError, match="SEMVER"):
         match_local_advisories({"lockfiles": []}, _advisories(advisory))
     advisory["affected_ranges"][0] = {"events": [
-        {"introduced": "0"}, {"limit": "2.0.0"}]}
+        {"introduced": "0"}, {"limit": "not-a-version"}]}
     with pytest.raises(ValueError):
         match_local_advisories({"lockfiles": []}, _advisories(advisory))
+
+
+def test_osv_limits_are_exclusive_and_apply_to_the_whole_range():
+    inventory = {"lockfiles": [{"file": "package-lock.json", "ecosystem": "node",
+                                "packages": [{"name": "demo", "version": v} for v in
+                                             ("1.0.0", "1.5.0", "2.0.0", "3.0.0")]}]}
+    advisory = {"id": "OSV-LIMIT-1", "ecosystem": "node", "package": "demo",
+                "affected_ranges": [{"events": [{"introduced": "0"},
+                    {"limit": "1.5.0"}, {"limit": "2.0.0"}]}]}
+    result = match_local_advisories(inventory, _advisories(advisory))
+    assert {row["version"] for row in result["findings"]} == {"1.0.0", "1.5.0"}
+    advisory["affected_ranges"][0]["events"].append({"limit": "*"})
+    result = match_local_advisories(inventory, _advisories(advisory))
+    assert {row["version"] for row in result["findings"]} == {"1.0.0", "1.5.0", "2.0.0", "3.0.0"}
+
+
+def test_osv_limit_clips_inclusive_last_affected_and_is_per_range():
+    inventory = {"lockfiles": [{"file": "go.sum", "ecosystem": "go",
+                                "packages": [{"name": "example.com/m", "version": v} for v in
+                                             ("v1.0.0", "v2.0.0", "v3.0.0")]}]}
+    advisory = {"id": "OSV-LIMIT-2", "ecosystem": "go", "package": "example.com/m",
+                "affected_ranges": [{"events": [{"introduced": "0"},
+                    {"last_affected": "v2.0.0"}, {"limit": "v2.0.0"}]},
+                    {"events": [{"introduced": "v3.0.0"}]}]}
+    result = match_local_advisories(inventory, _advisories(advisory))
+    assert {row["version"] for row in result["findings"]} == {"1.0.0", "3.0.0"}
