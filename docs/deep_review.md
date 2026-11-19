@@ -62,7 +62,12 @@ change is committed and the base/head revisions are available.
   rule identity produce one finding and appear in every matching subject report.
   An absent baseline finding is `resolved` only if all its current subjects
   are complete; otherwise it appears in `unverified_absent`. `new` means an
-  ID was absent from the supplied baseline, whose coverage may be unknown.
+  ID was absent from the supplied baseline. `coverage_supported_new` and
+  `unverified_new` partition those IDs by baseline coverage: the baseline
+  findings must match its manifest hash, its profile and range must match,
+  normalization must be complete, and attributed subjects must have complete
+  comparable checks. Older or standalone baselines have unknown coverage.
+  Coverage does not verify a claim or prove its first occurrence.
   Legacy duplicate IDs and moved paths follow the same coverage rule;
   `move_mapping` remains `unknown`. Comparison counts do not establish that
   a finding was true or fixed.

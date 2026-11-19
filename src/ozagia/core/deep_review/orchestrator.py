@@ -297,7 +297,7 @@ def _plan_hash(*, root: Path, out: Path, budget_available: bool,
                range_spec: str | None, budget_s: float, index: bool,
                fail_on: str, max_findings: int | None, focus_subjects=(), security_tools,
                security_network: bool, local_advisories, license_policy,
-               baseline, baseline_findings, profile_reports, bench_commands,
+               baseline, baseline_findings, baseline_coverage=None, profile_reports, bench_commands,
                bench_timeout_s: float, tool_versions, sections, findings,
                security_provenance, deadline: float
                ) -> tuple[str, dict[str, Any]]:
@@ -369,6 +369,8 @@ def _plan_hash(*, root: Path, out: Path, budget_available: bool,
         "local_advisories": advisory_input,
         "license_policy": policy_input,
         "baseline_findings": baseline_input,
+        "baseline_coverage": _canonical_input_digest(baseline_coverage, max_bytes=32 * 1024 * 1024)
+        if baseline_coverage is not None else {"state": "unavailable", "sha256": None},
         "profile_reports": {"state": profile_input_state,
                              "supplied": profile_reports_requested,
                              "sha256": profile_hashes},
@@ -671,7 +673,8 @@ def _run_status(subjects):
     return "unknown"
 
 
-def _baseline_comparison(previous, findings, *, sections=None):
+def _baseline_comparison(previous, findings, *, sections=None, baseline_manifest=None,
+                         profile=None, range_spec=None):
     """Compare current findings to a baseline using exact finding IDs.
 
     No similarity, basename, or directory heuristic is used. A moved file gets
@@ -683,6 +686,42 @@ def _baseline_comparison(previous, findings, *, sections=None):
     current_by_id = {str(item["id"]): item for item in findings
                      if isinstance(item, Mapping) and isinstance(item.get("id"), str)}
     new_ids = sorted(set(current_by_id) - set(old_by_id))
+    # `new` remains the historical raw ID delta. A separate partition records
+    # whether the baseline's comparable coverage supports the absence claim.
+    baseline_subjects = (baseline_manifest.get("subjects")
+                         if isinstance(baseline_manifest, Mapping) else None)
+    truncation = (baseline_manifest.get("truncation")
+                  if isinstance(baseline_manifest, Mapping) else None)
+    compatible = (isinstance(baseline_subjects, Mapping)
+                  and isinstance(truncation, Mapping)
+                  and truncation.get("normalization_findings_omitted") == 0
+                  and baseline_manifest.get("profile") == profile
+                  and baseline_manifest.get("range") == range_spec)
+
+    def baseline_covered(identifier):
+        item = current_by_id[identifier]
+        subjects = item.get("subjects") or [item.get("subject")]
+        if not compatible or not isinstance(sections, Mapping) or not subjects:
+            return False
+        for subject in subjects:
+            if not isinstance(subject, str):
+                return False
+            old = baseline_subjects.get(subject)
+            current = sections.get(subject)
+            if not isinstance(old, Mapping) or not isinstance(current, Mapping):
+                return False
+            old_checks, current_checks = old.get("checks"), current.get("checks")
+            if (old.get("status") != "complete" or current.get("status") != "complete"
+                    or any(old.get(key) for key in ("omitted", "skipped", "unknown"))
+                    or not isinstance(old_checks, list) or not isinstance(current_checks, list)
+                    or not current_checks
+                    or not all(isinstance(check, str) for check in old_checks + current_checks)
+                    or not set(current_checks).issubset(old_checks)):
+                return False
+        return True
+
+    covered_new = [identifier for identifier in new_ids if baseline_covered(identifier)]
+    unverified_new = [identifier for identifier in new_ids if not baseline_covered(identifier)]
     absent_ids = sorted(set(old_by_id) - set(current_by_id))
     # An absent ID is only classified as resolved when all of its attributed
     # subjects were completely reviewed. A profile exclusion, budget limit or
@@ -726,6 +765,9 @@ def _baseline_comparison(previous, findings, *, sections=None):
         "move_policy": MOVE_POLICY,
         "move_mapping": "unknown",
         "new": new_ids,
+        "coverage_supported_new": covered_new,
+        "unverified_new": unverified_new,
+        "new_coverage_policy": "Raw new IDs are partitioned by comparable, complete baseline coverage; coverage does not verify truth or first occurrence.",
         "resolved": resolved_ids,
         "unverified_absent": unverified_ids,
         "coverage_policy": "Absent baseline findings are resolved only when all attributed current subjects are complete; otherwise absence is unverified.",
@@ -1274,13 +1316,14 @@ def build_deep_review(root, out, *, profile="full", budget_s=60, index=False,
     deadline = started + budget_s
     budget_exhausted = False
     previous = None
+    baseline_manifest = None
     if baseline:
         baseline_path = Path(baseline)
         try:
             # Pass report directories through intact so the baseline loader
             # can validate manifest.json as well as findings.json. Resolving
             # the directory here bypassed that compatibility check.
-            previous = baseline_loader.load_baseline(baseline_path)
+            previous, baseline_manifest = baseline_loader.load_baseline_artifacts(baseline_path)
         except (OSError, UnicodeError, ValueError) as exc:
             raise DeepReviewError(f"invalid baseline findings: {exc}") from exc
     revision = _revision(root) if time.monotonic() < deadline else None
@@ -1616,7 +1659,9 @@ def build_deep_review(root, out, *, profile="full", budget_s=60, index=False,
     _write(out / "README.md", render_readme(sections, all_findings))
     comparison = None
     if baseline:
-        comparison = _baseline_comparison(previous, all_findings, sections=sections)
+        comparison = _baseline_comparison(previous, all_findings, sections=sections,
+                                          baseline_manifest=baseline_manifest,
+                                          profile=profile, range_spec=range_spec)
     run_status = _run_status(sections)
     timings["compose_s"] = time.monotonic() - phase_started
     elapsed = time.monotonic() - started
@@ -1705,6 +1750,7 @@ def build_deep_review(root, out, *, profile="full", budget_s=60, index=False,
         security_tools=security_tools, security_network=security_network,
         local_advisories=local_advisories, license_policy=license_policy,
         baseline=baseline, baseline_findings=previous,
+        baseline_coverage=baseline_manifest,
         profile_reports=profile_reports, bench_commands=bench_commands,
         bench_timeout_s=bench_timeout_s, tool_versions=tool_versions,
         sections=sections, findings=all_findings,

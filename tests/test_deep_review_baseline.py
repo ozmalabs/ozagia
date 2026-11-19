@@ -129,3 +129,23 @@ def test_rejects_symlinked_manifest(tmp_path):
 
     with pytest.raises(BaselineValidationError, match="regular file"):
         load_baseline(report)
+
+
+def test_manifest_coverage_requires_matching_findings_hash(tmp_path):
+    import hashlib
+    from ozagia.core.deep_review.baseline import load_baseline_artifacts
+
+    report = tmp_path / "report"
+    report.mkdir()
+    payload = json.dumps([_finding()]).encode()
+    (report / "findings.json").write_bytes(payload)
+    manifest = {"schema": "ozagia.deep_review.manifest.v1", "findings": 1,
+                "subjects": {"security": {"status": "complete"}},
+                "output_hashes": {"findings.json": "sha256:" + hashlib.sha256(payload).hexdigest()}}
+    (report / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    assert load_baseline_artifacts(report)[1] == manifest
+    (report / "findings.json").write_bytes(payload + b" ")
+    findings, coverage = load_baseline_artifacts(report)
+    assert findings == [_finding()]
+    assert coverage is None
+    assert load_baseline_artifacts(report / "findings.json")[1] is None

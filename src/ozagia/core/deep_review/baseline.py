@@ -6,6 +6,7 @@ manifest, whose schema is checked when present.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -44,7 +45,7 @@ def validate_findings(value: Any) -> list[dict[str, Any]]:
     return findings
 
 
-def _read_json(path: Path, *, limit: int = MAX_BASELINE_BYTES) -> Any:
+def _read_json(path: Path, *, limit: int = MAX_BASELINE_BYTES, with_digest: bool = False) -> Any:
     def no_duplicate_keys(pairs):
         result = {}
         for key, value in pairs:
@@ -81,14 +82,17 @@ def _read_json(path: Path, *, limit: int = MAX_BASELINE_BYTES) -> Any:
         raise BaselineValidationError(
             f"{path.name} exceeds {limit // (1024 * 1024)} MiB")
     try:
-        return json.loads(payload, object_pairs_hook=no_duplicate_keys)
+        value = json.loads(payload, object_pairs_hook=no_duplicate_keys)
+        if with_digest:
+            return value, "sha256:" + hashlib.sha256(payload).hexdigest()
+        return value
     except BaselineValidationError:
         raise
     except (UnicodeError, ValueError, RecursionError) as exc:
         raise BaselineValidationError(f"{path.name} is not valid JSON") from exc
 
 
-def load_baseline(path: str | Path) -> list[dict[str, Any]]:
+def load_baseline_artifacts(path: str | Path) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
     """Load findings from a report directory or a standalone findings file.
 
     A directory may omit its manifest for compatibility with older report
@@ -96,6 +100,7 @@ def load_baseline(path: str | Path) -> list[dict[str, Any]]:
     Standalone findings files are accepted as the historical public format.
     """
     source = Path(path)
+    manifest = None
     try:
         source_stat = source.lstat()
     except OSError as exc:
@@ -113,13 +118,26 @@ def load_baseline(path: str | Path) -> list[dict[str, Any]]:
                         or manifest.get("schema") != _MANIFEST_SCHEMA):
                     raise BaselineValidationError(
                         "manifest.json has an unsupported deep-review schema")
-            findings = _read_json(findings_path)
+            findings, findings_digest = _read_json(findings_path, with_digest=True)
         except OSError as exc:
             raise BaselineValidationError(
                 "report directory must contain readable findings.json") from exc
     else:
-        findings = _read_json(source)
-    return validate_findings(findings)
+        findings, findings_digest = _read_json(source, with_digest=True)
+    validated = validate_findings(findings)
+    # Coverage is evidence only when it is bound to the exact findings bytes.
+    if not (isinstance(manifest, dict)
+            and isinstance(manifest.get("output_hashes"), dict)
+            and manifest["output_hashes"].get("findings.json") == findings_digest
+            and manifest.get("findings") == len(validated)
+            and isinstance(manifest.get("subjects"), dict)):
+        manifest = None
+    return validated, manifest
 
 
-__all__ = ["BaselineValidationError", "load_baseline", "validate_findings"]
+def load_baseline(path: str | Path) -> list[dict[str, Any]]:
+    """Load the historical findings-list format, discarding coverage metadata."""
+    return load_baseline_artifacts(path)[0]
+
+
+__all__ = ["BaselineValidationError", "load_baseline", "load_baseline_artifacts", "validate_findings"]

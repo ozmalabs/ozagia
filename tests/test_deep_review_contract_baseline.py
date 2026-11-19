@@ -150,3 +150,27 @@ def test_baseline_absence_requires_complete_current_subject():
         old, [], sections={"security": {"status": "complete"}})
     assert comparison["resolved"] == [old[0]["id"]]
     assert comparison["unverified_absent"] == []
+
+
+def test_new_ids_are_partitioned_by_comparable_baseline_coverage():
+    finding = {"id": "dr-1234567890abcdef", "subject": "security"}
+    complete = {"status": "complete", "checks": ["scan"], "omitted": [],
+                "skipped": [], "unknown": []}
+    baseline = {"subjects": {"security": complete}, "profile": "full", "range": None,
+                "truncation": {"normalization_findings_omitted": 0}}
+    def compare(manifest, current=None):
+        return orchestrator._baseline_comparison(
+            [], [finding], sections={"security": current or complete},
+            baseline_manifest=manifest, profile="full")
+
+    result = compare(baseline)
+    assert result["new"] == result["coverage_supported_new"] == [finding["id"]]
+    assert result["unverified_new"] == []
+    for manifest in (None, {**baseline, "profile": "security"},
+                     {**baseline, "truncation": {"normalization_findings_omitted": 1}},
+                     {**baseline, "subjects": {"security": {**complete, "status": "partial"}}}):
+        result = compare(manifest)
+        assert result["coverage_supported_new"] == []
+        assert result["unverified_new"] == [finding["id"]]
+    result = compare(baseline, {**complete, "checks": ["scan", "other"]})
+    assert result["unverified_new"] == [finding["id"]]
