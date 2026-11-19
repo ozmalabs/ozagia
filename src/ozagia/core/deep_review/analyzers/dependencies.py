@@ -329,7 +329,14 @@ def _pnpm_packages(text: str) -> list[dict[str, Any]]:
             break
         match = _PNPM_PACKAGE.match(line)
         if match:
-            rows.append({"name": match.group(1), "version": match.group(2)})
+            version = match.group(2)
+            # pnpm appends peer-resolution context to a package key; it is
+            # not part of the published package version. Only strip simple,
+            # well-formed suffixes from a recognizable version token.
+            peer_context = re.fullmatch(r"([^()]+)(?:\([^()]+\))+", version)
+            if peer_context and _VERSION_TOKEN.fullmatch(peer_context.group(1)):
+                version = peer_context.group(1)
+            rows.append({"name": match.group(1), "version": version})
     return rows
 
 

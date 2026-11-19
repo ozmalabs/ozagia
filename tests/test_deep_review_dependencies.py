@@ -389,3 +389,23 @@ def test_yarn_npm_aliases_match_the_target_not_the_alias(tmp_path):
     matches = {finding["dependency"] for finding in result["findings"]
                if finding["type"] == "local_advisory_exact_version_match"}
     assert matches == {"lodash", "@scope/lib", "normal"}
+
+
+def test_pnpm_peer_context_matches_actual_package_version(tmp_path):
+    (tmp_path / "pnpm-lock.yaml").write_text(
+        "lockfileVersion: '9.0'\npackages:\n"
+        "  'widget@1.2.3(peer@2.0.0)':\n    resolution: {integrity: x}\n"
+        "  '@scope/lib@3.4.5(peer@2.0.0)(other@1.0.0)':\n"
+        "    resolution: {integrity: y}\n", encoding="utf-8")
+    advisory = {"schema": "ozagia.local_advisories.v1", "advisories": [
+        {"id": "NPM-1", "ecosystem": "node", "package": "widget",
+         "affected_versions": ["1.2.3"]},
+        {"id": "NPM-2", "ecosystem": "node", "package": "@scope/lib",
+         "affected_versions": ["3.4.5"]},
+    ]}
+
+    result = analyze(tmp_path, local_advisories=advisory)
+
+    assert {finding["dependency"] for finding in result["findings"]
+            if finding["type"] == "local_advisory_exact_version_match"} == {
+                "widget", "@scope/lib"}
