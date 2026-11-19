@@ -302,7 +302,14 @@ def _yarn_packages(text: str) -> list[dict[str, Any]]:
         for selector in selectors:
             name = _yarn_name(selector)
             if name:
-                rows.append({"name": name, "version": match.group(1)})
+                row = {"name": name, "version": match.group(1)}
+                # Explicit non-registry Yarn selectors describe a different
+                # source even when their package name/version matches npm.
+                if re.search(r"@(?:git\+|git:|github:|gitlab:|bitbucket:|ssh:)", selector, re.I):
+                    row["provenance"] = "git"
+                elif re.search(r"@(?:file:|link:|workspace:)", selector, re.I):
+                    row["provenance"] = "workspace-or-path"
+                rows.append(row)
         selectors = []
     return rows
 
@@ -582,7 +589,7 @@ def _lock_inventory_raw(rel: str, text: str) -> dict[str, Any] | None:
                       "packages": sorted(rows, key=lambda item: (item["name"],
                                                                     str(item["version"])))[:MAX_ITEMS]}
             if len(rows) > MAX_ITEMS:
-                result["omissions"] = [f"{name}: package inventory truncated at {MAX_ITEMS} entries"]
+                result["omissions"] = [f"{rel}: package inventory truncated at {MAX_ITEMS} entries"]
             return result
         if name == "Cargo.lock":
             doc = tomllib.loads(text)

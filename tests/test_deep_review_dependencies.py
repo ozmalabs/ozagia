@@ -358,3 +358,19 @@ def test_python_direct_sources_do_not_match_registry_advisories(tmp_path):
     assert matches == ["registry-demo"]
     assert any("3 Python pins were excluded" in item["reason"] for item in result["not_checked"])
     assert "secret.example" not in json.dumps(result)
+
+
+def test_yarn_explicit_git_and_local_selectors_do_not_match_registry_advisories(tmp_path):
+    (tmp_path / "yarn.lock").write_text(
+        '"safe@^1.0.0":\n  version "1.2.3"\n'
+        '"fork@git+https://secret.example/fork":\n  version "1.2.3"\n'
+        '"local@file:../local":\n  version "1.2.3"\n', encoding="utf-8")
+    advisory = {"schema": "ozagia.local_advisories.v1", "advisories": [
+        {"id": f"NPM-{i}", "ecosystem": "node", "package": name,
+         "affected_versions": ["1.2.3"]}
+        for i, name in enumerate(("safe", "fork", "local"))]}
+    result = analyze(tmp_path, local_advisories=advisory)
+    matches = [finding["dependency"] for finding in result["findings"]
+               if finding["type"] == "local_advisory_exact_version_match"]
+    assert matches == ["safe"]
+    assert "secret.example" not in json.dumps(result)

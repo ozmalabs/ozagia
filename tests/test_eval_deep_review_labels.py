@@ -474,3 +474,25 @@ def test_line_numbered_lockfile_omission_disables_recall():
     assert score["excluded_expected"] == 1
     assert score["recall"] is None
     assert score["coverage_reasons"]["dependencies"] == "labeled source path was omitted"
+
+
+def test_nested_npm_inventory_omission_excludes_labeled_path():
+    from ozagia.core.deep_review.analyzers.dependencies import _lock_inventory
+    import json
+
+    path = "frontend/package-lock.json"
+    data = {"packages": {f"node_modules/pkg{i}": {"version": "1.0.0"}
+                         for i in range(501)}}
+    inventory = _lock_inventory(path, json.dumps(data))
+    assert inventory is not None
+    assert inventory["omissions"][0].startswith(path + ": ")
+    expected = [{"path": path, "type": "rule", "subject": "dependencies",
+                 "required_checks": ["inventory"]}]
+    section = {"status": "partial", "checks": ["inventory"],
+               "omitted": [{"reason": reason} for reason in inventory["omissions"]],
+               "skipped": [], "unknown": []}
+    score = score_report_findings([], expected, complete_subjects={"dependencies"},
+                                  report_manifest={"subjects": {"dependencies": section}})
+    assert score["excluded_expected"] == 1
+    assert score["recall"] is None
+    assert score["coverage_reasons"]["dependencies"] == "labeled source path was omitted"

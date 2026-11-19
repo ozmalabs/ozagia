@@ -394,7 +394,7 @@ def match_local_advisories(
                         and row.get("provenance") != "crates-io"):
                     cargo_provenance_skipped += 1
                     continue
-                if (ecosystem == "node" and lock.get("format") == "npm"
+                if (ecosystem == "node" and lock.get("format") in {"npm", "yarn"}
                         and row.get("provenance") is not None
                         and row.get("provenance") != "npm-registry"):
                     npm_provenance_skipped += 1

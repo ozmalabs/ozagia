@@ -194,6 +194,8 @@ is explicitly marked as truncated. npm lock entries use explicit package names
 for aliases and classify known Git, local and non-npm-registry sources without
 recording source URLs. Explicitly non-npm sources are excluded from npm
 advisory matches; entries without source metadata remain provenance-unknown.
+Yarn selectors explicitly identifying Git or local sources are also excluded;
+other Yarn source provenance remains unknown.
 
 An explicit local advisory file can be supplied with
 `--local-advisories PATH` for the `full` or `dependencies` profile. The bounded
