@@ -62,11 +62,13 @@ def test_change_profile_explicit_range_uses_full_profile(tmp_path, monkeypatch):
 
     code = main(["deep-review", "--root", str(root), "--out",
                  str(tmp_path / "report"), "--profile", "review-change",
-                 "--range", "HEAD~1..HEAD"])
+                 "--range", "HEAD~1..HEAD", "--focus", "security",
+                 "--focus", "performance"])
 
     assert code == 0
     assert seen["profile"] == "full"
     assert seen["range_spec"] == "HEAD~1..HEAD"
+    assert seen["focus_subjects"] == ["security", "performance"]
     # The preset is compact only when the caller omitted --max-findings.
     assert seen["max_findings"] == 20
     assert seen["fail_on"] == "never"

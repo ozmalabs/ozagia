@@ -1225,6 +1225,7 @@ def _cmd_deep_review(args: argparse.Namespace) -> int:
                                    range_spec=range_spec,
                                    baseline=args.baseline, fail_on=args.fail_on,
                                    max_findings=max_findings,
+                                   focus_subjects=args.focus,
                                    profile_reports=args.profile_report,
                                    bench_commands=bench_commands,
                                    bench_timeout_s=args.bench_timeout_s,
@@ -1754,6 +1755,12 @@ def build_parser() -> argparse.ArgumentParser:
     dr.add_argument("--fail-on", default="never", choices=("blocking", "major", "never"))
     dr.add_argument("--budget-s", type=float, default=60.0)
     dr.add_argument("--max-findings", type=int, default=None)
+    dr.add_argument("--focus", action="append", default=None,
+                    choices=("security", "performance", "failure-modes",
+                             "data-structures", "scalability", "architecture",
+                             "tests-and-coverage", "dependencies", "operations",
+                             "documents-and-api", "correctness"),
+                    help="prioritize this subject within its severity; repeatable")
     dr.add_argument("--model-pass", action="store_true",
                     help="run optional independent model reviewers; requires --live and OZAGIA_EVAL_LIVE=1")
     dr.add_argument("--live", action="store_true",

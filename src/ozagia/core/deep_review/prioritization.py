@@ -14,10 +14,12 @@ MAX_DEPTH = 3
 MAX_RELATED = 20
 
 _SEVERITY = {"blocking": 100, "major": 70, "minor": 40, "note": 10}
+_CONFIDENCE = {"high": 3, "medium": 2, "low": 1, "unknown": 0}
 
 
 def prioritize_findings(findings, graph, *, freshness="unknown", max_nodes=MAX_NODES,
-                        max_edges=MAX_EDGES, max_depth=MAX_DEPTH):
+                        max_edges=MAX_EDGES, max_depth=MAX_DEPTH,
+                        churn_hotspots=None, focus_subjects=()):
     """Return copied findings with deterministic priority and blast radius.
 
     ``graph`` is a snapshot mapping with ``nodes`` and ``edges`` lists. Callers
@@ -38,6 +40,7 @@ def prioritize_findings(findings, graph, *, freshness="unknown", max_nodes=MAX_N
     truncated = bool(valid and (len(node_rows) > max_nodes or len(edge_rows) > max_edges))
     nodes = {}
     incoming = {}
+    degree = {}
     if valid and not truncated:
         for row in node_rows:
             if not isinstance(row, Mapping):
@@ -51,15 +54,30 @@ def prioritize_findings(findings, graph, *, freshness="unknown", max_nodes=MAX_N
                             "name": attrs.get("name"),
                             "qualname": attrs.get("qualname")}
         for edge in edge_rows:
-            if not isinstance(edge, Mapping) or edge.get("type") != "calls":
+            if not isinstance(edge, Mapping):
                 continue
             try:
                 source, target = int(edge.get("src")), int(edge.get("tgt"))
             except (TypeError, ValueError):
                 continue
             if source in nodes and target in nodes:
-                incoming.setdefault(target, set()).add(source)
+                degree.setdefault(source, set()).add((target, str(edge.get("type"))))
+                degree.setdefault(target, set()).add((source, str(edge.get("type"))))
+                if edge.get("type") == "calls":
+                    incoming.setdefault(target, set()).add(source)
 
+    # Only explicitly recorded hotspot counts are evidence; absence from a
+    # truncated hotspot list does not mean a file has zero churn.
+    churn = {}
+    if isinstance(churn_hotspots, list):
+        for row in churn_hotspots[:1000]:
+            if not isinstance(row, Mapping):
+                continue
+            path, count = row.get("file"), row.get("commits")
+            if (isinstance(path, str) and isinstance(count, int)
+                    and not isinstance(count, bool) and 0 <= count <= 1_000_000):
+                churn[path] = max(churn.get(path, 0), count)
+    focus = set(focus_subjects)
     results = []
     for original in findings:
         item = dict(original)
@@ -97,9 +115,23 @@ def prioritize_findings(findings, graph, *, freshness="unknown", max_nodes=MAX_N
         callers = reached - seeds
         related = sorted({str(nodes[i]["file"]) for i in callers if nodes[i]["file"]})
         base = _SEVERITY.get(str(item.get("severity", "note")), 10)
-        # Keep this a coarse triage score; graph reachability never changes severity.
-        score = base + min(len(callers), 20)
-        item["priority"] = {"score": score, "basis": "severity plus bounded fresh graph callers",
+        graph_degree = sum(len(degree.get(seed, ())) for seed in seeds) if seeds else None
+        path_counts = [churn[loc.get("path")] for loc in locations
+                       if isinstance(loc, Mapping) and isinstance(loc.get("path"), str)
+                       and loc["path"] in churn]
+        churn_count = max(path_counts) if path_counts else None
+        focused = bool(focus.intersection(item.get("subjects") or [item.get("subject")]))
+        confidence_points = _CONFIDENCE.get(str(item.get("confidence", "unknown")), 0)
+        # These are bounded triage signals, not evidence of severity or truth.
+        score = (base + confidence_points + min(len(callers), 10)
+                 + min(graph_degree or 0, 5) + min(churn_count or 0, 5)
+                 + (5 if focused else 0))
+        item["priority"] = {"score": score,
+                            "basis": "severity, confidence, bounded fresh graph callers/degree, recorded churn and requested focus",
+                            "signals": {"confidence": item.get("confidence", "unknown"),
+                                        "graph_degree": graph_degree,
+                                        "churn_commits": churn_count,
+                                        "focus_match": focused if focus else None},
                             "blast_radius": {"direct_symbols": len(seeds),
                                              "reachable_callers": len(callers),
                                              "caller_files": related[:MAX_RELATED],

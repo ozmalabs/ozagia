@@ -161,7 +161,13 @@ evidence and a priority block. Evidence file hashes are bounded to 1 MiB per
 file; oversized files record `hash_omitted`. Symlinked or unreadable files are
 not hashed. Caller reachability affects priority only when the graph is fresh
 and a finding's location matches an exact symbol; otherwise the prioritization
-block records why graph evidence was omitted.
+block records why graph evidence was omitted. Priority also considers confidence,
+bounded symbol degree in a fresh graph, and recorded per-file churn hotspots.
+A file absent from the bounded hotspot list has unknown churn, not zero churn.
+Use repeatable `--focus SUBJECT` to prioritize specific subjects within the same
+severity. These signals affect ordering only, never severity or truth assessment;
+missing graph, churn, or focus signals are recorded as unknown in the finding's
+priority block.
 
 Source excerpts are bounded: up to five lines of context on each side of the
 reported line, a 40-line and 8 KiB cap, a 250-file cap per report and a 1 MiB

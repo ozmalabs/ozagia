@@ -279,7 +279,7 @@ def _canonical_input_digest(value: Any, *, max_bytes: int) -> dict[str, Any]:
 def _plan_hash(*, root: Path, out: Path, budget_available: bool,
                revision: str | None, graph_hash: str | None, profile: str,
                range_spec: str | None, budget_s: float, index: bool,
-               fail_on: str, max_findings: int | None, security_tools,
+               fail_on: str, max_findings: int | None, focus_subjects=(), security_tools,
                security_network: bool, local_advisories, license_policy,
                baseline, baseline_findings, profile_reports, bench_commands,
                bench_timeout_s: float, tool_versions, sections, findings,
@@ -366,6 +366,7 @@ def _plan_hash(*, root: Path, out: Path, budget_available: bool,
         "index": bool(index),
         "fail_on": fail_on,
         "max_findings": max_findings,
+        "focus_subjects": sorted(focus_subjects),
         "security_tools": sorted(set(security_tools or [])),
         "security_network": bool(security_network),
         "local_advisories_supplied": local_advisories is not None,
@@ -1186,8 +1187,16 @@ def build_deep_review(root, out, *, profile="full", budget_s=60, index=False,
                       range_spec=None, profile_reports=None, bench_commands=None,
                       bench_timeout_s=30, security_tools=None,
                       security_network=False, local_advisories=None,
-                      license_policy=None):
+                      license_policy=None, focus_subjects=None):
     root, out = Path(root).resolve(), Path(out).resolve()
+    if focus_subjects is None:
+        focus_subjects = ()
+    if (not isinstance(focus_subjects, (list, tuple))
+            or len(focus_subjects) > len(SUBJECTS)
+            or any(not isinstance(subject, str) or subject not in SUBJECTS
+                   for subject in focus_subjects)):
+        raise DeepReviewError("focus_subjects must contain only known review subjects")
+    focus_subjects = tuple(sorted(set(focus_subjects)))
     if profile != "full" and profile not in {"security", "performance", "failure-modes", "data-structures", "scalability", "architecture", "tests", "dependencies", "operations", "docs"}:
         raise DeepReviewError(f"unsupported profile: {profile}")
     if local_advisories is not None and profile not in {"full", "dependencies"}:
@@ -1441,8 +1450,12 @@ def build_deep_review(root, out, *, profile="full", budget_s=60, index=False,
         remaining = max(0.0, deadline - time.monotonic())
         graph_snapshot, priority_graph = _verified_priority_graph(
             root, timeout_s=remaining)
+    churn_section = packet.get("sections", {}).get("churn") or {}
+    churn_data = churn_section.get("data") if isinstance(churn_section, Mapping) else None
+    hotspots = churn_data.get("hotspots") if isinstance(churn_data, Mapping) else None
     findings = prioritize_findings(
-        findings, graph_snapshot, freshness=priority_graph["freshness"])
+        findings, graph_snapshot, freshness=priority_graph["freshness"],
+        churn_hotspots=hotspots, focus_subjects=focus_subjects)
     findings.sort(key=lambda f: (f["subject"], -f["priority"]["score"], f["id"]))
     if max_findings is not None and max_findings < 0:
         raise DeepReviewError("max_findings must be >= 0")
@@ -1657,7 +1670,7 @@ def build_deep_review(root, out, *, profile="full", budget_s=60, index=False,
         root=root, out=out, budget_available=time.monotonic() < deadline,
         revision=revision, graph_hash=graph_hash, profile=profile,
         range_spec=range_spec, budget_s=budget_s, index=index,
-        fail_on=fail_on, max_findings=max_findings,
+        fail_on=fail_on, max_findings=max_findings, focus_subjects=focus_subjects,
         security_tools=security_tools, security_network=security_network,
         local_advisories=local_advisories, license_policy=license_policy,
         baseline=baseline, baseline_findings=previous,

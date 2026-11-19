@@ -27,7 +27,7 @@ def finding(severity="minor"):
 
 def test_only_fresh_graph_affects_blast_radius_and_score_is_stable():
     result = prioritize_findings([finding()], graph(), freshness="fresh")[0]
-    assert result["priority"]["score"] == 43
+    assert result["priority"]["score"] == 44
     assert result["priority"]["blast_radius"]["reachable_callers"] == 3
     assert result["priority"]["blast_radius"]["caller_files"] == ["a.py", "b.py", "c.py"]
     assert result["priority"]["omission"] is None
@@ -54,6 +54,51 @@ def test_oversize_graph_and_excessive_bounds_are_not_used():
     assert "exceeds node or edge bound" in result[0]["priority"]["omission"]
     with pytest.raises(ValueError):
         prioritize_findings([], graph(), freshness="fresh", max_depth=4)
+
+
+def test_priority_uses_bounded_focus_churn_confidence_and_fresh_degree():
+    candidate = {**finding(), "subject": "performance", "confidence": "high"}
+    result = prioritize_findings(
+        [candidate], graph(), freshness="fresh", focus_subjects=("performance",),
+        churn_hotspots=[{"file": "app.py", "commits": 42}],
+    )[0]["priority"]
+    assert result["score"] == 57  # severity + confidence + callers + degree + churn + focus
+    assert result["signals"] == {"confidence": "high", "graph_degree": 1,
+                                  "churn_commits": 42, "focus_match": True}
+    stale = prioritize_findings([candidate], graph(), freshness="stale")[0]["priority"]
+    assert stale["signals"]["graph_degree"] is None
+    assert stale["signals"]["churn_commits"] is None
+    assert stale["signals"]["focus_match"] is None
+    assert stale["score"] == 43
+
+
+def test_focus_and_churn_do_not_change_severity_or_infer_absent_hotspots():
+    candidate = {**finding(), "subject": "performance", "confidence": "low"}
+    result = prioritize_findings(
+        [candidate], graph(), freshness="fresh", focus_subjects=("security",),
+        churn_hotspots=[{"file": "other.py", "commits": 100}],
+    )[0]
+    assert result["severity"] == "minor"
+    assert result["priority"]["signals"]["churn_commits"] is None
+    assert result["priority"]["signals"]["focus_match"] is False
+
+
+def test_focus_is_recorded_and_changes_plan_hash(tmp_path, monkeypatch):
+    packet = {"findings": [{"section": "security", "type": "candidate",
+                            "severity": "major", "keys": ["file:app.py"]}],
+              "sections": {"security": {"checked": ["offline scan"]},
+                           "churn": {"data": {"hotspots": [
+                               {"file": "app.py", "commits": 4}]}}}, "graph": {}}
+    monkeypatch.setattr(orchestrator.collect, "collect", lambda *args, **kwargs: packet)
+    without = orchestrator.build_deep_review(tmp_path, tmp_path / "one", profile="security")
+    with_focus = orchestrator.build_deep_review(tmp_path, tmp_path / "two", profile="security",
+                                                focus_subjects=["security"])
+    assert with_focus["findings"][0]["priority"]["signals"]["focus_match"] is True
+    assert with_focus["findings"][0]["priority"]["signals"]["churn_commits"] == 4
+    assert with_focus["findings"][0]["priority"]["score"] == without["findings"][0]["priority"]["score"] + 5
+    assert with_focus["manifest"]["plan_hash"] != without["manifest"]["plan_hash"]
+    with pytest.raises(orchestrator.DeepReviewError, match="focus_subjects"):
+        orchestrator.build_deep_review(tmp_path, tmp_path / "bad", focus_subjects=["invalid"])
 
 
 def test_orchestrator_graph_read_requires_freshness_and_stable_file(tmp_path, monkeypatch):
@@ -176,7 +221,7 @@ def test_report_exposes_priority_and_symbol_omission(tmp_path, monkeypatch):
     out = tmp_path / "review"
     orchestrator.build_deep_review(tmp_path, out, profile="security")
     saved = json.loads((out / "findings.json").read_text())
-    assert saved[0]["priority"]["score"] == 70
+    assert saved[0]["priority"]["score"] == 72
     assert "exact path and symbol" in saved[0]["priority"]["omission"]
     index = (out / "findings-index.md").read_text()
     assert "Priority graph: fresh" in index
