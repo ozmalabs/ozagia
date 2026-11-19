@@ -15,6 +15,13 @@ import pytest
 
 def _init_repo(root: Path) -> None:
     root.mkdir(parents=True, exist_ok=True)
+    # These report contract tests exercise review composition, not host
+    # admission policy. Keep low-disk CI/container mounts from changing the
+    # report path under test.
+    policy_dir = root / "ozagia"
+    policy_dir.mkdir(exist_ok=True)
+    (policy_dir / "resources.toml").write_text(
+        "enabled = false\n", encoding="utf-8")
     subprocess.run(["git", "init", "-q", str(root)], check=True,
                    capture_output=True, text=True)
     subprocess.run(["git", "-C", str(root), "config", "user.email",

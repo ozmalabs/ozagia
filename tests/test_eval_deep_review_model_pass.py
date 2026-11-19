@@ -1,3 +1,6 @@
+import shutil
+from pathlib import Path
+
 import pytest
 
 from ozagia.eval import deep_review_comparison
@@ -5,6 +8,22 @@ from ozagia.eval.deep_review_comparison import (
     evaluate_model_pass,
     score_model_candidates,
 )
+
+
+@pytest.fixture(autouse=True)
+def _set_temp_checkout_resource_policy(monkeypatch):
+    """Persist a test policy into evaluator checkouts before they are committed."""
+    copytree = shutil.copytree
+
+    def copytree_with_policy(source, destination, *args, **kwargs):
+        result = copytree(source, destination, *args, **kwargs)
+        policy_dir = Path(destination) / "ozagia"
+        policy_dir.mkdir(parents=True, exist_ok=True)
+        (policy_dir / "resources.toml").write_text(
+            "enabled = false\n", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(shutil, "copytree", copytree_with_policy)
 
 
 def test_model_pass_comparison_scores_candidates_noise_duplicates_and_usage():

@@ -16,6 +16,14 @@ def _reasons(values):
             for value in values or []]
 
 
+def _disable_resource_admission(root):
+    """Keep these report tests independent of the host's free-disk reserve."""
+    policy_dir = root / "ozagia"
+    policy_dir.mkdir(parents=True, exist_ok=True)
+    (policy_dir / "resources.toml").write_text(
+        "enabled = false\n", encoding="utf-8")
+
+
 def test_in_process_analyzer_timeout_is_hard_bounded_and_reaped():
     import ozagia.core.deep_review.collect as collector
 
@@ -209,6 +217,7 @@ def test_static_collector_timeout_is_partial_but_report_still_composes(
 def test_analyzer_cli_refused_preflight_still_writes_report(tmp_path):
     from ozagia.cli import main
 
+    _disable_resource_admission(tmp_path)
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True,
                    capture_output=True, text=True)
     (tmp_path / "app.py").write_text("def f():\n    return 1\n",
@@ -262,6 +271,7 @@ def test_default_security_review_does_not_run_project_adapters_or_scanners(
     project_python.chmod(0o755)
     (root / ".venv" / "pyvenv.cfg").write_text("home = /usr\n",
                                                   encoding="utf-8")
+    _disable_resource_admission(root)
     subprocess.run(["git", "init", "-q", str(root)], check=True,
                    capture_output=True, text=True)
     subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
