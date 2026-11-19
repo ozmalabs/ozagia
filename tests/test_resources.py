@@ -118,6 +118,52 @@ def test_check_admission_offers_delay(tmp_path: Path, monkeypatch) -> None:
     assert any("retry" in item for item in report["suggestions"])
 
 
+def test_check_admission_ignores_a_low_disk_percentage_when_gib_fit(
+        tmp_path: Path, monkeypatch) -> None:
+    # 500 GiB free on a 10 TiB filesystem is 5%, but the requested 4 GiB job
+    # fits comfortably. A percentage threshold must not refuse it.
+    monkeypatch.setattr(R, "host_snapshot", lambda: _host(available=900.0))
+    monkeypatch.setattr(R, "disk_usage", lambda path: _disk(free=500.0,
+                                                            total=10000.0))
+    report = R.check_admission(tmp_path, kind="job", memory_mb=100,
+                               disk_mb=4096, policy=_policy())
+    assert report["ok"] is True
+    assert report["shortfall"]["disk_mb"] == 0
+
+
+def test_check_admission_disk_floor_is_absolute_and_has_a_shortfall(
+        tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(R, "host_snapshot", lambda: _host(available=900.0))
+    monkeypatch.setattr(R, "disk_usage", lambda path: _disk(free=0.5,
+                                                            total=100.0))
+    report = R.check_admission(tmp_path, kind="job", memory_mb=100,
+                               disk_mb=10, policy=_policy())
+    assert report["ok"] is False
+    assert report["reason"] == "disk.host_min"
+    assert report["shortfall"]["disk_mb"] == 1536
+    check = next(item for item in report["checks"]
+                 if item["id"] == "disk.host_min")
+    assert check["min_free_gb"] == 2.0
+
+
+def test_check_admission_disk_request_uses_the_requested_size(
+        tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(R, "host_snapshot", lambda: _host(available=900.0))
+    monkeypatch.setattr(R, "disk_usage", lambda path: _disk(free=10.0,
+                                                            total=100.0))
+    policy = _policy()
+    policy["reserve_disk_gb"] = 2.0
+    policy["admission"]["min_free_disk_gb"] = 1.0
+    small = R.check_admission(tmp_path, kind="job", memory_mb=100,
+                              disk_mb=100, policy=policy)
+    assert small["ok"] is True
+    large = R.check_admission(tmp_path, kind="job", memory_mb=100,
+                              disk_mb=9000, policy=policy)
+    assert large["ok"] is False
+    assert large["reason"] == "disk.request"
+    assert large["shortfall"]["disk_mb"] > 0
+
+
 def test_process_group_usage_current_process() -> None:
     if not Path("/proc/self/stat").exists():
         pytest.skip("procfs is unavailable")

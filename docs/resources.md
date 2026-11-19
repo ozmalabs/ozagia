@@ -98,7 +98,7 @@ enabled = true
 sample_s = 2
 watchdog = "auto"          # auto, cgroup, rlimit, watch, off
 reserve_memory_pct = 10
-reserve_disk_pct = 5
+reserve_disk_pct = 0         # optional; 0 = use the absolute reserve
 reserve_disk_gb = 1
 history = true
 
@@ -111,7 +111,6 @@ job_disk_mb = 4096
 
 [resources.admission]
 min_free_memory_pct = 15
-min_free_disk_pct = 10
 min_free_disk_gb = 2
 wait_max_s = 300
 
@@ -121,9 +120,13 @@ min_free_gb = 5
 avoid_tmpfs = true
 ```
 
-The checks subtract the OS reserve from available memory and free disk. A host
-already below the minimum is refused even for a small request. A request that
-does not fit returns the shortfall, the expected p90 and suggestions.
+The checks subtract the OS reserve from available memory and free disk. Disk
+admission is based on the request (or its historical p90), an absolute reserve
+and an absolute free-space floor; a low free-space percentage alone is not a
+refusal. A host already below an absolute minimum is refused even for a small
+request. A request that does not fit returns the shortfall, the expected p90
+and suggestions. `min_free_disk_pct` was removed: use `min_free_disk_gb` for
+the host floor and the requested/expected `disk_mb` for the work.
 `enabled = false` turns admission checks into a reported no-op and disables job
 enforcement. `watchdog = "off"` keeps admission but turns enforcement off.
 `auto` (the default) and `cgroup` prefer a delegated cgroup v2 hierarchy and
@@ -207,9 +210,10 @@ The remaining layers always apply:
   `kind: "disk"`. Only when no attribution is readable does the watchdog use
   the free-space drop since its first sample (`kind: "disk"`); that fallback
   is host pressure, and another process writing to the same filesystem counts
-  toward it. The reserve is `reserve_disk_gb`, raised to `reserve_disk_pct`
-  of the filesystem total. The watchdog remains active with a cgroup because
-  wall time and the process-group I/O fallback have no cgroup equivalent.
+  toward it. The reserve is `reserve_disk_gb`; `reserve_disk_pct` is an
+  optional proportional addition and is 0 by default. The watchdog remains
+  active with a cgroup because wall time and the process-group I/O fallback
+  have no cgroup equivalent.
 - **Verified groups only.** The watchdog's verifier checks that the record is
   this daemon's, still running, not marked `group_gone`, has an unreaped
   leader (so the pgid cannot be reused), and that `/proc` start times still

@@ -55,7 +55,10 @@ DEFAULT_POLICY: dict[str, Any] = {
     "sample_s": 2.0,
     "watchdog": "auto",
     "reserve_memory_pct": 10.0,
-    "reserve_disk_pct": 5.0,
+    # Optional proportional disk reserve. It is off by default: a percentage of
+    # a large filesystem can dwarf the work being admitted. The absolute
+    # reserve and the requested/expected disk are the defaults.
+    "reserve_disk_pct": 0.0,
     "reserve_disk_gb": 1.0,
     "history": True,
     "limits": {
@@ -65,7 +68,8 @@ DEFAULT_POLICY: dict[str, Any] = {
     },
     "admission": {
         "min_free_memory_pct": 15.0,
-        "min_free_disk_pct": 10.0,
+        # Disk admission is absolute and work-aware. A free-space percentage
+        # is reported for context but is not a refusal threshold.
         "min_free_disk_gb": 2.0,
         "wait_max_s": 300,
     },
@@ -1213,8 +1217,9 @@ def load_policy(root: str | Path) -> dict[str, Any]:
         policy["reserve_disk_gb"] = _clean_number(
             policy.get("reserve_disk_gb"), name="reserve_disk_gb")
         admission = policy.setdefault("admission", {})
-        for key in ("min_free_memory_pct", "min_free_disk_pct"):
-            admission[key] = _clean_number(admission.get(key), name=key, high=100)
+        admission["min_free_memory_pct"] = _clean_number(
+            admission.get("min_free_memory_pct"), name="min_free_memory_pct",
+            high=100)
         admission["min_free_disk_gb"] = _clean_number(
             admission.get("min_free_disk_gb"), name="min_free_disk_gb")
         admission["wait_max_s"] = int(_clean_number(
@@ -1363,24 +1368,27 @@ def check_admission(root: str | Path, *, kind: str = "job",
         })
     else:
         free_pct = disk.get("free_pct")
-        min_pct = float(admission.get("min_free_disk_pct", 10))
         min_gb = float(admission.get("min_free_disk_gb", 2))
-        if (free_pct is not None and free_pct < min_pct) or free_gb < min_gb:
+        total_gb = disk.get("total_gb") or 0.0
+        if free_gb < min_gb:
+            shortfall_disk = max(shortfall_disk, (min_gb - free_gb) * 1024)
             checks.append({
                 "id": "disk.host_min", "level": "error",
                 "message": (f"filesystem {disk.get('mount') or disk.get('path')} "
                             f"has {free_gb:.2f} GiB free "
-                            f"({free_pct if free_pct is not None else '?'}%), "
-                            f"below the reserve"),
+                            f"({free_pct if free_pct is not None else '?'}% of "
+                            f"{total_gb:.2f} GiB); minimum {min_gb:.2f} GiB"),
                 "free_gb": free_gb, "free_pct": free_pct,
+                "min_free_gb": min_gb,
             })
-        total_gb = disk.get("total_gb") or 0.0
         reserve_gb = max(float(loaded.get("reserve_disk_gb", 1)),
-                         float(total_gb) * float(loaded.get("reserve_disk_pct", 5)) / 100)
+                         float(total_gb)
+                         * float(loaded.get("reserve_disk_pct", 0)) / 100)
         usable_disk = max(0.0, float(free_gb) - reserve_gb)
         requested_disk_gb = requested_disk / 1024
         if requested_disk_gb > usable_disk:
-            shortfall_disk = (requested_disk_gb - usable_disk) * 1024
+            shortfall_disk = max(shortfall_disk,
+                                 (requested_disk_gb - usable_disk) * 1024)
             checks.append({
                 "id": "disk.request", "level": "error",
                 "message": (f"requested {requested_disk:.0f} MiB, usable "

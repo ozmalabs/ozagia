@@ -830,8 +830,9 @@ _SETTINGS: tuple[Setting, ...] = (
         check=_number_between(0.0, 80.0),
     ),
     Setting(
-        "resources.reserve_disk_pct", "number", 5.0, "both",
-        "Disk space kept free for the OS and the user, in percent.",
+        "resources.reserve_disk_pct", "number", 0.0, "both",
+        "Optional proportional disk reserve in percent; 0 disables it. "
+        "Prefer reserve_disk_gb and the requested/expected disk size.",
         section="resources", name="reserve_disk_pct",
         validation="a number between 0 and 80",
         check=_number_between(0.0, 80.0),
@@ -850,14 +851,6 @@ _SETTINGS: tuple[Setting, ...] = (
         validation="a number between 0 and 100",
         check=_number_between(0.0, 100.0),
         aliases=(("resources", "min_free_memory_pct"),),
-    ),
-    Setting(
-        "resources.min_free_disk_pct", "number", 10.0, "both",
-        "Minimum free disk required before new work starts, in percent.",
-        section="resources.admission", name="min_free_disk_pct",
-        validation="a number between 0 and 100",
-        check=_number_between(0.0, 100.0),
-        aliases=(("resources", "min_free_disk_pct"),),
     ),
     Setting(
         "resources.min_free_disk_gb", "number", 2.0, "both",

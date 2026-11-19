@@ -16,7 +16,7 @@ REQUIRED_KEYS = {
     "index.source_dirs", "index.test_dirs", "index.docs", "index.skip_dirs",
     "resources.enabled", "resources.reserve_memory_pct",
     "resources.reserve_disk_pct", "resources.reserve_disk_gb",
-    "resources.min_free_memory_pct", "resources.min_free_disk_pct",
+    "resources.min_free_memory_pct",
     "resources.min_free_disk_gb", "resources.job_memory_mb",
     "resources.job_disk_mb", "resources.job_pids",
     "worktrees.root", "worktrees.min_free_gb", "worktrees.avoid_tmpfs",

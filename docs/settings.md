@@ -334,10 +334,9 @@ setting, for example `reads.repeat_by_harness.opencode = "stub"`.
 | `resources.watchdog` | string | `"auto"` | both | no |
 | `resources.history` | boolean | `true` | both | no |
 | `resources.reserve_memory_pct` | number | `10.0` | both | no |
-| `resources.reserve_disk_pct` | number | `5.0` | both | no |
+| `resources.reserve_disk_pct` | number | `0.0` | both | no |
 | `resources.reserve_disk_gb` | number | `1.0` | both | no |
 | `resources.min_free_memory_pct` | number | `15.0` | both | no |
-| `resources.min_free_disk_pct` | number | `10.0` | both | no |
 | `resources.min_free_disk_gb` | number | `2.0` | both | no |
 | `resources.wait_max_s` | integer | `300` | both | no |
 | `resources.job_memory_mb` | integer | `2048` | both | no |
@@ -603,7 +602,7 @@ skip_dirs = ["vendor"]
 [resources]
 enabled = true
 reserve_memory_pct = 10
-reserve_disk_pct = 5
+reserve_disk_pct = 0
 reserve_disk_gb = 1
 
 [resources.limits]
@@ -613,7 +612,6 @@ job_pids = 256
 
 [resources.admission]
 min_free_memory_pct = 15
-min_free_disk_pct = 10
 min_free_disk_gb = 2
 wait_max_s = 300
 
