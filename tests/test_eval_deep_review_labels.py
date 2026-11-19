@@ -455,3 +455,18 @@ def test_wildcard_match_between_complete_subjects_preserves_aggregate_only():
         assert score["subjects"][subject]["true_positive"] is None
         assert score["subjects"][subject]["false_positive"] is None
         assert score["subjects"][subject]["report_noise_ratio"] is None
+
+
+def test_line_numbered_lockfile_omission_disables_recall():
+    expected = [{"path": "Gemfile.lock", "type": "rule", "subject": "dependencies",
+                 "required_checks": ["inventory"]}]
+    report = {"subjects": {"dependencies": {
+        "status": "partial", "checks": ["inventory"],
+        "omitted": ["Gemfile.lock:12: unsupported gem spec row"],
+        "skipped": [], "unknown": [],
+    }}}
+    score = score_report_findings([], expected, complete_subjects={"dependencies"},
+                                  report_manifest=report)
+    assert score["excluded_expected"] == 1
+    assert score["recall"] is None
+    assert score["coverage_reasons"]["dependencies"] == "labeled source path was omitted"

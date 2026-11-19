@@ -15,6 +15,7 @@ whose denominator is absent.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -559,7 +560,8 @@ def score_report_findings(findings: Iterable[Mapping[str, Any]],
                 # Operations and dependency analyzers report path-specific
                 # omissions as "<path>: <reason>" rather than a path field.
                 # Match the complete prefix, not a substring of another path.
-                if isinstance(reason, str) and reason.startswith(path + ": "):
+                if isinstance(reason, str) and (reason.startswith(path + ": ")
+                        or re.match(r"^" + re.escape(path) + r":\d+:", reason)):
                     return True
         return False
 
