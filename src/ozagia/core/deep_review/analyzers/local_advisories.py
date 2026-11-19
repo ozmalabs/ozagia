@@ -14,7 +14,7 @@ import os
 import re
 import stat
 from collections.abc import Mapping
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from ozagia.core.security import redact_text
@@ -511,6 +511,11 @@ def match_local_advisories(
             matched.add((advisory["ecosystem"], advisory["package_key"]))
             for lockfile in sorted(files):
                 is_range_match = in_range and not exact
+                # go.sum is a checksum history, not the selected build list.
+                # It can include old or transitive go.mod-only versions.
+                go_selection_unknown = (advisory["ecosystem"] == "go"
+                                        and PurePosixPath(lockfile).name == "go.sum")
+                unconfirmed = provenance_unknown or go_selection_unknown
                 findings.append({
                     "section": "dependencies",
                     "type": ("local_advisory_semver_range_match"
@@ -519,8 +524,8 @@ def match_local_advisories(
                     # A Gradle lock records GAV but not the repository that
                     # supplied it. Keep the advisory as a visible candidate,
                     # but prevent an ambiguous-origin match from blocking CI.
-                    "severity": "note" if provenance_unknown else advisory["severity"],
-                    "confidence": "low" if provenance_unknown else "medium",
+                    "severity": "note" if unconfirmed else advisory["severity"],
+                    "confidence": "low" if unconfirmed else "medium",
                     "evidence_kind": "declared",
                     "keys": [f"advisory:{advisory['id']}",
                              f"dependency:{advisory['ecosystem']}:{advisory['package_key']}:{version}",
@@ -535,16 +540,25 @@ def match_local_advisories(
                                    if advisory["summary"] else "")
                                 + (" Repository origin is unknown, so this match "
                                    "requires coordinate provenance review."
-                                   if provenance_unknown else "")),
+                                   if provenance_unknown else "")
+                                + (" A go.sum checksum does not establish that this "
+                                   "module version is selected or used."
+                                   if go_selection_unknown else "")),
                     "recommendation": ("Verify the advisory's provenance and "
                                        "applicability, then update or mitigate "
                                        "the pinned dependency if confirmed."
-                                       if not provenance_unknown else
-                                       "Verify which repository supplied this Maven coordinate and "
-                                       "confirm the advisory applies before treating it as affected."),
+                                       if not unconfirmed else
+                                       ("Verify the selected Go module build list and any replacements "
+                                        "before treating this checksum entry as affected."
+                                        if go_selection_unknown else
+                                        "Verify which repository supplied this Maven coordinate and "
+                                        "confirm the advisory applies before treating it as affected.")),
                     **({"advisory_severity": advisory["severity"],
                         "repository_provenance": "unknown"}
                        if provenance_unknown else {}),
+                    **({"advisory_severity": advisory["severity"],
+                        "module_selection": "unknown"}
+                       if go_selection_unknown else {}),
                     "advisory_id": advisory["id"],
                     "advisory_source_hash": "sha256:" + digest,
                     "dependency": advisory["package"],

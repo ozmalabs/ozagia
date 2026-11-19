@@ -606,3 +606,19 @@ def test_osv_limit_clips_inclusive_last_affected_and_is_per_range():
                     {"events": [{"introduced": "v3.0.0"}]}]}
     result = match_local_advisories(inventory, _advisories(advisory))
     assert {row["version"] for row in result["findings"]} == {"1.0.0", "3.0.0"}
+
+
+def test_go_checksum_advisory_is_unconfirmed_even_for_high_severity():
+    inventory = {"lockfiles": [{"file": "go.sum", "ecosystem": "go",
+                                "format": "go.sum", "packages": [
+                                    {"name": "example.com/mod", "version": "v1.2.3"}]}]}
+    report = match_local_advisories(
+        inventory, _advisories(_advisory(ecosystem="go", package="example.com/mod",
+                                          versions=["v1.2.3"], severity="major")))
+    finding = report["findings"][0]
+    assert finding["severity"] == "note"
+    assert finding["confidence"] == "low"
+    assert finding["advisory_severity"] == "major"
+    assert finding["module_selection"] == "unknown"
+    assert "does not establish" in finding["summary"]
+    assert "build list" in finding["recommendation"]

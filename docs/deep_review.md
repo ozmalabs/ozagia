@@ -688,3 +688,6 @@ the temporary checkout. Timings and memory are single-host samples; tracemalloc
 excludes native allocations and process RSS is not isolated to one report.
 Synthetic scores are regression evidence, not production accuracy, and added
 graph findings are measured candidates/noise, not proven quality improvements.
+
+Go `go.sum` advisory matches are low-confidence candidates: checksum entries do
+not establish the selected build list or account for module replacements.
