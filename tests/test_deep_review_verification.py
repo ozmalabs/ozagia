@@ -2,6 +2,10 @@ from copy import deepcopy
 import hashlib
 import os
 import socket
+import subprocess
+import sys
+
+import pytest
 
 from ozagia.core.deep_review.verification import (
     PYTHON_ASSERTION_SCHEMA, verify_model_candidates,
@@ -75,6 +79,15 @@ def _assertion(path, symbol, source):
             "kind": "python.mutable_default", "path": path,
             "symbol": symbol,
             "source_sha256": hashlib.sha256(source).hexdigest()}
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFOs unavailable")
+def test_python_assertion_source_rejects_fifo_without_blocking(tmp_path):
+    os.mkfifo(tmp_path / "pipe.py")
+    script = ("from ozagia.core.deep_review.verification import python_source_sha256; "
+              "import sys; assert python_source_sha256(sys.argv[1], 'pipe.py') is None")
+    subprocess.run([sys.executable, "-c", script, str(tmp_path)],
+                   check=True, timeout=3, capture_output=True)
 
 
 def test_python_mutable_default_assertion_checks_hash_and_exact_symbol(tmp_path):

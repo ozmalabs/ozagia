@@ -235,7 +235,7 @@ def _open_pinned_source(project_root: str | Path, rel: str) -> tuple[int, list[i
                               dir_fd=current_fd)
             opened.append(next_fd)
             current_fd = next_fd
-        source_fd = os.open(parts[-1], os.O_RDONLY | nofollow,
+        source_fd = os.open(parts[-1], os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0),
                             dir_fd=current_fd)
         info = os.fstat(source_fd)
         if not stat.S_ISREG(info.st_mode):

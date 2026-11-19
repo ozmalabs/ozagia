@@ -7,6 +7,8 @@ run a profiler, start the target or infer a cause. A hotspot is tagged
 from __future__ import annotations
 
 import json
+import os
+import stat
 import time
 from pathlib import Path
 from typing import Any, Mapping
@@ -58,7 +60,10 @@ def _load_report(root: Path, path: Path) -> dict[str, Any]:
         # A supplied report is untrusted input. Bound the read itself instead
         # of relying on stat(), which can be stale or report zero for special
         # files such as /proc entries.
-        with path.open("rb") as stream:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+        with os.fdopen(fd, "rb") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise ValueError("profile report is not a regular file")
             raw = stream.read(MAX_REPORT_BYTES + 1)
         if len(raw) > MAX_REPORT_BYTES:
             raise ValueError(
