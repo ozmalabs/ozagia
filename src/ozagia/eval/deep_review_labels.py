@@ -535,7 +535,7 @@ def score_report_findings(findings: Iterable[Mapping[str, Any]],
                 if any(marker in reason for marker in
                    ("budget exhausted", "timed out", "time limit",
                     "resource admission refused", "file limit reached",
-                    "file-count limit reached",
+                    "file-count limit reached", "finding limit reached",
                     "read limit reached", "remaining files not checked",
                     "remaining documentation not checked",
                     "review budget", "no review budget remained",
@@ -611,6 +611,9 @@ def score_report_findings(findings: Iterable[Mapping[str, Any]],
                 for item in values:
                     if isinstance(item, Mapping) and item.get("check") in required:
                         return "a required check was skipped or unknown"
+                    if (isinstance(item, Mapping) and not item.get("check")
+                            and not item.get("path") and not item.get("file")):
+                        return "unscoped skipped or unknown coverage"
                     if not isinstance(item, Mapping):
                         return "a required check was skipped or unknown"
             return None

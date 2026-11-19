@@ -259,6 +259,33 @@ def test_unscoped_omission_excludes_check_specific_label(omission):
     assert score["coverage_reasons"]["security"] == "required coverage was interrupted"
 
 
+def test_global_config_finding_limit_excludes_unreported_label():
+    expected = [{"path": "deploy.yaml", "type": "rule", "subject": "operations",
+                 "required_checks": ["config_scan"]}]
+    report = {"subjects": {"operations": {
+        "status": "partial", "checks": ["config_scan"],
+        "omitted": [{"reason": "static configuration finding limit reached (500)"}],
+        "skipped": [], "unknown": []}}}
+    score = score_report_findings([], expected, complete_subjects={"operations"},
+                                  report_manifest=report)
+    assert score["excluded_expected"] == 1
+    assert score["recall"] is None
+    assert score["coverage_reasons"]["operations"] == "required coverage was interrupted"
+
+
+@pytest.mark.parametrize("field", ["skipped", "unknown"])
+def test_unscoped_structured_coverage_excludes_label(field):
+    expected = [{"path": "a.py", "type": "rule", "subject": "security",
+                 "required_checks": ["scan"]}]
+    row = {"status": "partial", "checks": ["scan"], "omitted": [],
+           "skipped": [], "unknown": []}
+    row[field] = [{"reason": "parser could not inspect inputs"}]
+    score = score_report_findings([], expected, complete_subjects={"security"},
+                                  report_manifest={"subjects": {"security": row}})
+    assert score["excluded_expected"] == 1
+    assert score["recall"] is None
+
+
 @pytest.mark.parametrize("field", ["skipped", "unknown"])
 def test_unscoped_interruption_in_other_coverage_fields_excludes_label(field):
     expected = [{"path": "a.py", "type": "rule", "subject": "security",
