@@ -29,12 +29,22 @@ class DeepReviewError(ValueError):
 _EVIDENCE_HASH_LIMIT = 1024 * 1024
 _PLAN_INPUT_FILE_LIMIT = 5_000
 _PLAN_INPUT_BYTE_LIMIT = 20 * 1024 * 1024
+_OUTPUT_HASH_CHUNK_SIZE = 1024 * 1024
 _SHA256_VALUE = re.compile(r"(?:sha256:)?[0-9a-f]{64}\Z")
 
 
 def _is_sha256_value(value: Any) -> bool:
     """Accept only canonical SHA-256 text in plan input descriptors."""
     return isinstance(value, str) and _SHA256_VALUE.fullmatch(value) is not None
+
+
+def _hash_output_artifact(path: Path) -> str:
+    """Hash a generated artifact with constant memory use."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(_OUTPUT_HASH_CHUNK_SIZE):
+            digest.update(chunk)
+    return "sha256:" + digest.hexdigest()
 _PRIORITY_GRAPH_BYTE_LIMIT = 32 * 1024 * 1024
 _EXCERPT_CONTEXT_LINES = 5
 _EXCERPT_LINE_LIMIT = 40
@@ -83,21 +93,25 @@ def _is_deep_review_output(root: Path, directory: Path, *, deadline: float) -> b
     if not isinstance(hashes, Mapping) or any(
             not _is_sha256_value(hashes.get(name)) for name in required):
         return False
-    total_bytes = 0
+    total_bytes = len(raw)
     for name in required:
         if time.monotonic() >= deadline:
             return False
         artifact_rel = (directory / name).relative_to(root).as_posix()
+        remaining = 32 * 1024 * 1024 - total_bytes
+        if remaining <= 0:
+            return False
+        artifact_limit = min(16 * 1024 * 1024, remaining)
         fd, omission = _open_excerpt_source(
-            root, artifact_rel, max_bytes=16 * 1024 * 1024)
+            root, artifact_rel, max_bytes=artifact_limit)
         if omission:
             return False
         try:
             with os.fdopen(fd, "rb") as handle:
-                data = handle.read(16 * 1024 * 1024 + 1)
+                data = handle.read(artifact_limit + 1)
         except OSError:
             return False
-        if len(data) > 16 * 1024 * 1024:
+        if len(data) > artifact_limit:
             return False
         total_bytes += len(data)
         if total_bytes > 32 * 1024 * 1024:
@@ -1611,8 +1625,7 @@ def build_deep_review(root, out, *, profile="full", budget_s=60, index=False,
         generated.append(("sbom.json", out / "sbom.json"))
     generated.extend(("evidence/" + path.name, path) for path in excerpt_files)
     for name, artifact in sorted(set(generated)):
-        output_hashes[name] = "sha256:" + hashlib.sha256(
-            artifact.read_bytes()).hexdigest()
+        output_hashes[name] = _hash_output_artifact(artifact)
     truncation = {
         "max_findings": {"limit": max_findings, "total": len(all_findings),
                          "returned": len(returned_findings),

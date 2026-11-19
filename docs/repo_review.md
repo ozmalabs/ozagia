@@ -266,6 +266,11 @@ trust_project_python = true` in the user-level config; they are read from
 runs no binary the repository controls. `data.trust_project_python` says
 which applied.
 
+Callers can set `probe_interpreters=False` to disable discovery and execution
+of all interpreter candidates. Dependency manifest and import checks remain
+static; `test_environments` is explicitly marked not checked, and the section
+records `data.interpreter_probing: disabled`. Deep review uses this mode.
+
 The probe set (path, probe kind, version) is recorded per check in the
 section's `populations`. `--compare` does not compare `test_env_gap` with a
 review that probed another set (it is listed in `not_compared`), and holds

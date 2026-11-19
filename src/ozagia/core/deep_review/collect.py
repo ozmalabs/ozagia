@@ -304,6 +304,7 @@ def collect(root, *, profile="full", budget_s=60, index=False,
             packet = repo_review.review_repo(
                 root, sections=sections, budget_s=budget_s,
                 index=index, cache_mode="off", trust_project_python=False,
+                probe_interpreters=False,
                 allow_project_adapters=False)
         except repo_review.PreflightError as exc:
             refusal = f"repository preflight refused: {exc}"

@@ -663,6 +663,36 @@ def _import_repo(repo: Path) -> None:
     _graph(repo)
 
 
+def test_interpreter_probing_can_be_disabled_without_skipping_static_imports(
+        repo: Path, monkeypatch) -> None:
+    from ozagia.core import environments as EN
+
+    _import_repo(repo)
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("interpreter discovery or probing must not run")
+
+    monkeypatch.setattr(EN, "discover", forbidden)
+    monkeypatch.setattr(EN, "probe_one", forbidden)
+    packet = RR.review_repo(repo, sections=["dependencies"], cache_mode="off",
+                            probe_interpreters=False)
+
+    assert "zz_undeclared" in {
+        finding["message"].split()[0]
+        for finding in _of(packet, "undeclared_import")
+    }
+    section = packet["sections"]["dependencies"]
+    assert section["data"]["interpreter_probing"] == "disabled"
+    reasons = {item["check"]: item["reason"] for item in packet["not_checked"]}
+    assert reasons["test_environments"] == (
+        "interpreter probing was disabled for this review")
+
+
+def test_probe_interpreters_option_must_be_boolean(repo: Path) -> None:
+    with pytest.raises(RR.RepoReviewError, match="probe_interpreters"):
+        RR.review_repo(repo, sections=["architecture"], probe_interpreters="no")
+
+
 def test_dependency_import_findings(repo: Path, monkeypatch) -> None:
     _import_repo(repo)
     _stub_interpreters(monkeypatch, {"zz_plot"}, set())

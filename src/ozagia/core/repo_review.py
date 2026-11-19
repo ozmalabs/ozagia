@@ -693,7 +693,8 @@ class _Context:
                  index: dict[str, Any] | None, *, layers: Sequence[str],
                  deadline: float, clock: Callable[[], float],
                  churn_days: int, cap: int, cache_mode: str = "rw",
-                 trust_project_python: bool | None = None) -> None:
+                 trust_project_python: bool | None = None,
+                 probe_interpreters: bool = True) -> None:
         self.root = root
         self.head = head
         self.files = files
@@ -708,6 +709,7 @@ class _Context:
         self.cap = cap
         self.cache_mode = cache_mode
         self.trust_project_python = trust_project_python
+        self.probe_interpreters = probe_interpreters
         self._text: dict[str, str | None] = {}
         self._cached_bytes = 0
         self.real_root = root.resolve()
@@ -2132,26 +2134,28 @@ def _python_imports(sec: _Section) -> None:
         return
     if sec.expired():
         return
-    trusted = (EN.trust_project_python(ctx.root)
+    trusted = (False if not ctx.probe_interpreters else
+               EN.trust_project_python(ctx.root)
                if ctx.trust_project_python is None
                else ctx.trust_project_python)
     # Lock-file tools are never run here, trusted or not: pdm may create
     # `.venv` and `.pdm-python` in the repository, and the review writes
     # nothing there. `.pdm-python` is still read as text.
-    candidates = EN.discover(ctx.root, trust=trusted, lock_tools=False,
-                             cache_mode=ctx.cache_mode)
-    cache = EN.ProbeCache.for_root(ctx.root, ctx.cache_mode)
     probed: list[dict[str, Any]] = []
-    for cand in candidates:
-        if sec.expired():
-            break
-        timeout = max(0.1, min(EN.PROBE_TIMEOUT_S, ctx.deadline - ctx.clock()))
-        probed.append(EN.probe_one(cand, trusted=trusted, cache=cache,
-                                   timeout=timeout))
-    try:
-        cache.save()
-    except OSError:
-        pass
+    if ctx.probe_interpreters:
+        candidates = EN.discover(ctx.root, trust=trusted, lock_tools=False,
+                                 cache_mode=ctx.cache_mode)
+        cache = EN.ProbeCache.for_root(ctx.root, ctx.cache_mode)
+        for cand in candidates:
+            if sec.expired():
+                break
+            timeout = max(0.1, min(EN.PROBE_TIMEOUT_S, ctx.deadline - ctx.clock()))
+            probed.append(EN.probe_one(cand, trusted=trusted, cache=cache,
+                                       timeout=timeout))
+        try:
+            cache.save()
+        except OSError:
+            pass
     if sec.truncated:
         return
     EN.merge_system_site(probed)
@@ -2162,6 +2166,8 @@ def _python_imports(sec: _Section) -> None:
          "probe": EN.probe_kind(item), "project": bool(item.get("project"))}
         for item in probed][:MAX_DATA_ITEMS]
     sec.data["trust_project_python"] = trusted
+    if not ctx.probe_interpreters:
+        sec.data["interpreter_probing"] = "disabled"
     for check in _IMPORT_CHECKS:
         sec.population(check, EN.population(probed))
     probes = [item["probe"] for item in ok]
@@ -2260,7 +2266,10 @@ def _import_checks(sec: _Section, model: Any, py: Sequence[str],
         sec.ran("undeclared_imports")
         sec.ran("optional_only_imports")
     if not ok:
-        sec.skip("test_environments", "no Python interpreter could be probed")
+        reason = ("interpreter probing was disabled for this review"
+                  if not ctx.probe_interpreters else
+                  "no Python interpreter could be probed")
+        sec.skip("test_environments", reason)
         return
     for rel in ctx.tests:
         if not rel.endswith(".py") or _fixture(rel):
@@ -2585,6 +2594,7 @@ def review_repo(root: str | Path, *,
                 disk_mb: float = DEFAULT_DISK_MB,
                 cache_mode: str = "rw",
                 trust_project_python: bool | None = None,
+                probe_interpreters: bool = True,
                 allow_project_adapters: bool = True,
                 indexer: Callable[[Path, Path], Mapping[str, Any]] | None = None,
                 clock: Callable[[], float] = time.monotonic) -> dict[str, Any]:
@@ -2614,6 +2624,8 @@ def review_repo(root: str | Path, *,
         raise RepoReviewError("cache_mode must be rw, read, or off")
     if trust_project_python is not None and not isinstance(trust_project_python, bool):
         raise RepoReviewError("trust_project_python must be true, false, or None")
+    if not isinstance(probe_interpreters, bool):
+        raise RepoReviewError("probe_interpreters must be a boolean")
     wanted = _sections_arg(sections)
     previous: Mapping[str, Any] | None = None
     if compare is not None:
@@ -2667,7 +2679,8 @@ def review_repo(root: str | Path, *,
                    layers=layers, deadline=started + float(budget_s),
                    clock=clock, churn_days=int(churn_days),
                    cap=int(max_findings_per_section), cache_mode=cache_mode,
-                   trust_project_python=trust_project_python)
+                   trust_project_python=trust_project_python,
+                   probe_interpreters=probe_interpreters)
 
     section_out: dict[str, Any] = {}
     findings: list[dict[str, Any]] = []

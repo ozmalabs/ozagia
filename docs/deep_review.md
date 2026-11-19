@@ -3,9 +3,11 @@
 `ozagia deep-review --root REPO --out REPORT_DIR` composes a subject-based
 Markdown and JSON review report. The default run is deterministic and offline:
 it does not run tests, import the target, execute project code, or use the
-network. `--index` may refresh the graph under the target's `.ozagia` state
-directory, and profile artifact ingestion may build a missing tag cache there;
-the report directory, including `evidence/`, is the only other write.
+network. Interpreter discovery and probes are disabled; dependency imports
+are checked statically, and test-environment coverage is marked not checked.
+`--index` may refresh the graph under the target's `.ozagia` state
+directory; the report directory, including `evidence/`, is the only other
+write.
 
 ## Command
 
@@ -42,11 +44,9 @@ change is committed and the base/head revisions are available.
   that no collector ran.
 - `--out` defaults to `<root>/.ozagia/reviews/deep-<UTC stamp>/`. An output path
   inside the repository must be under `.ozagia/`; an explicit path outside the
-  repository is allowed. Apart from the `--index` refresh and a missing profile
-  tag cache, report writes stay in that directory, including `evidence/`.
-- `--index` asks the repository-review collectors to refresh the graph before
-  collection; profiles handled only by the static analyzers (performance,
-  failure-modes, data-structures and scalability) do not use it. Without a
+  repository is allowed. Apart from the `--index` refresh, report writes stay
+  in that directory, including `evidence/`.
+- `--index` asks the review to refresh the graph before collection. Without a
   refresh, graph-dependent checks use the existing snapshot and report its
   freshness.
 - `--range BASE..HEAD` adds deterministic change-set review when budget

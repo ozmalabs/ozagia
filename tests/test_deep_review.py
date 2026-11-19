@@ -233,12 +233,33 @@ def test_invalid_max_findings_fails_before_collection(tmp_path, monkeypatch):
 def test_dependency_analyzer_is_collected_with_inventory(tmp_path, monkeypatch):
     from ozagia.core.deep_review.collect import collect
     (tmp_path / "requirements.txt").write_text("requests>=2\n", encoding="utf-8")
+    review_options = {}
+
+    def review_repo(*_args, **kwargs):
+        review_options.update(kwargs)
+        return {"findings": [], "sections": {},
+                "graph": {"freshness": "fresh"}}
+
     monkeypatch.setattr("ozagia.core.deep_review.collect.repo_review.review_repo",
-                        lambda *a, **k: {"findings": [], "sections": {},
-                                         "graph": {"freshness": "fresh"}})
+                        review_repo)
     packet = collect(tmp_path, profile="dependencies", budget_s=2)
     assert packet["findings"][0]["type"] == "missing_lock_file"
     assert packet["sections"]["dependencies"]["inventory"]["manifests"][0]["file"] == "requirements.txt"
+    assert review_options["probe_interpreters"] is False
+
+
+def test_dependency_collection_never_probes_target_interpreters(tmp_path, monkeypatch):
+    from ozagia.core.deep_review.collect import collect
+    from ozagia.core import environments
+
+    (tmp_path / "app.py").write_text("import requests\n", encoding="utf-8")
+
+    def unexpected_probe(*_args, **_kwargs):
+        raise AssertionError("target interpreter probing must remain disabled")
+
+    monkeypatch.setattr(environments, "discover", unexpected_probe)
+    monkeypatch.setattr(environments, "probe_one", unexpected_probe)
+    collect(tmp_path, profile="full", budget_s=3)
 
 
 def test_dependency_analyzer_reports_unparseable_manifest_coverage(tmp_path):
@@ -506,6 +527,55 @@ def test_workspace_plan_digest_marks_unreadable_walks_partial(tmp_path, monkeypa
     assert digest["walk_errors"] == 1
 
 
+def test_prior_report_recognition_is_bounded_and_checks_artifact_hashes(
+        tmp_path, monkeypatch):
+    import time
+    import ozagia.core.deep_review.orchestrator as orchestrator
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "app.py").write_text("value = 1\n", encoding="utf-8")
+    packet = {"findings": [], "sections": {},
+              "graph": {"freshness": "missing", "reason": "test fixture"}}
+    monkeypatch.setattr(orchestrator.collect, "collect", lambda *a, **k: packet)
+    report = root / "report-old"
+    build_deep_review(root, report, profile="security")
+
+    manifest_path = report / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    # The report remains genuine if irrelevant JSON metadata makes its manifest
+    # larger than the old 64 KiB recognition cap.
+    manifest["padding"] = "x" * (70 * 1024)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    assert orchestrator._is_deep_review_output(
+        root, report, deadline=time.monotonic() + 5)
+
+    # A schema-shaped manifest without matching artifact hashes must not cause
+    # a user directory to disappear from the workspace fingerprint.
+    forged = root / "report-forged"
+    forged.mkdir()
+    fake_hashes = {name: "sha256:" + "0" * 64 for name in (
+        "00-method-and-scope.md", "findings.json", "findings-index.md",
+        "README.md")}
+    (forged / "manifest.json").write_text(json.dumps({
+        "schema": "ozagia.deep_review.manifest.v1",
+        "plan_hash_schema": "ozagia.deep_review.plan.v1",
+        "plan_hash": "sha256:" + "1" * 64,
+        "output_hashes": fake_hashes,
+    }), encoding="utf-8")
+    for name in fake_hashes:
+        (forged / name).write_text("user data\n", encoding="utf-8")
+    assert not orchestrator._is_deep_review_output(
+        root, forged, deadline=time.monotonic() + 5)
+
+    # Even a once-valid report stops being excluded when a core artifact is
+    # changed after the manifest was written.
+    with (report / "findings.json").open("a", encoding="utf-8") as handle:
+        handle.write("\n")
+    assert not orchestrator._is_deep_review_output(
+        root, report, deadline=time.monotonic() + 5)
+
+
 
 def test_duplicate_findings_merge_evidence_and_manifest_hashes(tmp_path, monkeypatch):
     import hashlib
@@ -528,6 +598,18 @@ def test_duplicate_findings_merge_evidence_and_manifest_hashes(tmp_path, monkeyp
         (out / "findings.json").read_bytes()).hexdigest()
     assert "## Scorecard" in (out / "README.md").read_text()
     assert manifest["status"] == "partial"
+
+
+def test_output_artifact_hashing_streams_large_files(tmp_path):
+    import hashlib
+    import ozagia.core.deep_review.orchestrator as orchestrator
+
+    artifact = tmp_path / "large-report.json"
+    contents = b"x" * (2 * 1024 * 1024 + 17)
+    artifact.write_bytes(contents)
+
+    assert orchestrator._hash_output_artifact(artifact) == (
+        "sha256:" + hashlib.sha256(contents).hexdigest())
 
 
 def test_identity_keys_are_not_fabricated_as_file_locations(tmp_path, monkeypatch):
