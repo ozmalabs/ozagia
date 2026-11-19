@@ -724,7 +724,8 @@ def test_legacy_cross_subject_baseline_reports_secondary_id_as_resolved(
     result = build_deep_review(tmp_path, tmp_path / "current", baseline=baseline)
     comparison = result["manifest"]["comparison"]
     assert comparison["unchanged"] == [canonical_id]
-    assert comparison["resolved"] == [legacy_duplicate_id]
+    assert comparison["resolved"] == []
+    assert comparison["unverified_absent"] == [legacy_duplicate_id]
 
 
 def test_evidence_hash_is_bounded_and_skips_symlink(tmp_path, monkeypatch):

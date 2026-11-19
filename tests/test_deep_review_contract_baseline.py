@@ -79,20 +79,21 @@ def test_baseline_new_resolved_unchanged_and_subject_severity_deltas(
         "canonical_subject_exact_finding_id_v1"
     assert second["manifest"]["move_mapping"] == "unknown"
     assert comparison["new"] == [current_ids["new_risk"]]
-    assert comparison["resolved"] == [baseline_ids["removed"]]
+    assert comparison["resolved"] == []
+    assert comparison["unverified_absent"] == [baseline_ids["removed"]]
     assert comparison["unchanged"] == [current_ids["shared"]]
     assert comparison["by_subject"] == {
-        "architecture": {"new": 0, "resolved": 1, "unchanged": 0},
-        "performance": {"new": 1, "resolved": 0, "unchanged": 0},
-        "security": {"new": 0, "resolved": 0, "unchanged": 1},
+        "architecture": {"new": 0, "resolved": 0, "unverified_absent": 1, "unchanged": 0},
+        "performance": {"new": 1, "resolved": 0, "unverified_absent": 0, "unchanged": 0},
+        "security": {"new": 0, "resolved": 0, "unverified_absent": 0, "unchanged": 1},
     }
     assert comparison["by_severity"] == {
-        "blocking": {"new": 1, "resolved": 0, "unchanged": 0},
-        "major": {"new": 0, "resolved": 0, "unchanged": 1},
-        "minor": {"new": 0, "resolved": 1, "unchanged": 0},
+        "blocking": {"new": 1, "resolved": 0, "unverified_absent": 0, "unchanged": 0},
+        "major": {"new": 0, "resolved": 0, "unverified_absent": 0, "unchanged": 1},
+        "minor": {"new": 0, "resolved": 0, "unverified_absent": 1, "unchanged": 0},
     }
     assert comparison["totals"] == {
-        "new": 1, "resolved": 1, "unchanged": 1}
+        "new": 1, "resolved": 0, "unverified_absent": 1, "unchanged": 1}
 
 
 def test_moved_file_follows_resolved_plus_new_policy(tmp_path, monkeypatch):
@@ -112,14 +113,15 @@ def test_moved_file_follows_resolved_plus_new_policy(tmp_path, monkeypatch):
 
     assert old_id != new_id
     assert comparison["new"] == [new_id]
-    assert comparison["resolved"] == [old_id]
+    assert comparison["resolved"] == []
+    assert comparison["unverified_absent"] == [old_id]
     assert comparison["unchanged"] == []
     assert "moved" not in comparison
     assert comparison["move_mapping"] == "unknown"
     assert comparison["by_subject"] == {
-        "architecture": {"new": 1, "resolved": 1, "unchanged": 0}}
+        "architecture": {"new": 1, "resolved": 0, "unverified_absent": 1, "unchanged": 0}}
     assert comparison["totals"] == {
-        "new": 1, "resolved": 1, "unchanged": 0}
+        "new": 1, "resolved": 0, "unverified_absent": 1, "unchanged": 0}
 
 
 def test_fail_on_ignores_note_only_model_candidates(tmp_path, monkeypatch):
@@ -135,3 +137,16 @@ def test_fail_on_ignores_note_only_model_candidates(tmp_path, monkeypatch):
     assert result["findings"][0]["severity"] == "note"
     assert result["failed"] is False
     assert result["manifest"]["truth_assessed"] is False
+
+
+def test_baseline_absence_requires_complete_current_subject():
+    old = [{"id": "dr-1234567890abcdef", "subject": "security"}]
+    for status in ("partial", "unknown"):
+        comparison = orchestrator._baseline_comparison(
+            old, [], sections={"security": {"status": status}})
+        assert comparison["resolved"] == []
+        assert comparison["unverified_absent"] == [old[0]["id"]]
+    comparison = orchestrator._baseline_comparison(
+        old, [], sections={"security": {"status": "complete"}})
+    assert comparison["resolved"] == [old[0]["id"]]
+    assert comparison["unverified_absent"] == []

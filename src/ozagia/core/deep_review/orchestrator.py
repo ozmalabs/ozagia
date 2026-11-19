@@ -434,7 +434,8 @@ def _finding_locations(raw: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 IDENTITY_POLICY = "canonical_subject_exact_finding_id_v1"
 MOVE_POLICY = ("Moved or renamed paths that lack a stable rule/symbol identity "
-               "are reported as resolved plus new; no move mapping is inferred.")
+               "are reported as new plus resolved or unverified absent according to coverage; "
+               "no move mapping is inferred.")
 
 
 def _priority_graph_worker(root: Path):
@@ -655,7 +656,7 @@ def _run_status(subjects):
     return "unknown"
 
 
-def _baseline_comparison(previous, findings):
+def _baseline_comparison(previous, findings, *, sections=None):
     """Compare current findings to a baseline using exact finding IDs.
 
     No similarity, basename, or directory heuristic is used. A moved file gets
@@ -667,12 +668,27 @@ def _baseline_comparison(previous, findings):
     current_by_id = {str(item["id"]): item for item in findings
                      if isinstance(item, Mapping) and isinstance(item.get("id"), str)}
     new_ids = sorted(set(current_by_id) - set(old_by_id))
-    resolved_ids = sorted(set(old_by_id) - set(current_by_id))
+    absent_ids = sorted(set(old_by_id) - set(current_by_id))
+    # An absent ID is only classified as resolved when all of its attributed
+    # subjects were completely reviewed. A profile exclusion, budget limit or
+    # unavailable collector cannot establish that the old finding disappeared.
+    def covered(identifier):
+        item = old_by_id[identifier]
+        subjects = item.get("subjects") or [item.get("subject")]
+        return (isinstance(sections, Mapping) and bool(subjects)
+                and all(isinstance(subject, str)
+                        and isinstance(sections.get(subject), Mapping)
+                        and sections[subject].get("status") == "complete"
+                        for subject in subjects))
+
+    resolved_ids = [identifier for identifier in absent_ids if covered(identifier)]
+    unverified_ids = [identifier for identifier in absent_ids if not covered(identifier)]
     unchanged_ids = sorted(set(old_by_id) & set(current_by_id))
 
     by_subject, by_severity = {}, {}
     groups = (("new", new_ids, current_by_id),
               ("resolved", resolved_ids, old_by_id),
+              ("unverified_absent", unverified_ids, old_by_id),
               ("unchanged", unchanged_ids, current_by_id))
     for status, identifiers, source in groups:
         for identifier in identifiers:
@@ -681,7 +697,7 @@ def _baseline_comparison(previous, findings):
             severity = str(item.get("severity") or "unknown")
             for bucket, key in ((by_subject, subject), (by_severity, severity)):
                 row = bucket.setdefault(key, {
-                    "new": 0, "resolved": 0, "unchanged": 0})
+                    "new": 0, "resolved": 0, "unverified_absent": 0, "unchanged": 0})
                 row[status] += 1
 
     def sorted_buckets(bucket):
@@ -691,15 +707,18 @@ def _baseline_comparison(previous, findings):
         "identity_policy": IDENTITY_POLICY,
         "baseline_compatibility": (
             "Older baselines with one finding per subject can retain the canonical "
-            "subject ID; redundant secondary-subject IDs are reported as resolved."),
+            "subject ID; redundant secondary-subject IDs are absent and their classification depends on current coverage."),
         "move_policy": MOVE_POLICY,
         "move_mapping": "unknown",
         "new": new_ids,
         "resolved": resolved_ids,
+        "unverified_absent": unverified_ids,
+        "coverage_policy": "Absent baseline findings are resolved only when all attributed current subjects are complete; otherwise absence is unverified.",
         "unchanged": unchanged_ids,
         "by_subject": sorted_buckets(by_subject),
         "by_severity": sorted_buckets(by_severity),
         "totals": {"new": len(new_ids), "resolved": len(resolved_ids),
+                   "unverified_absent": len(unverified_ids),
                    "unchanged": len(unchanged_ids)},
     }
 
@@ -1582,7 +1601,7 @@ def build_deep_review(root, out, *, profile="full", budget_s=60, index=False,
     _write(out / "README.md", render_readme(sections, all_findings))
     comparison = None
     if baseline:
-        comparison = _baseline_comparison(previous, all_findings)
+        comparison = _baseline_comparison(previous, all_findings, sections=sections)
     run_status = _run_status(sections)
     timings["compose_s"] = time.monotonic() - phase_started
     elapsed = time.monotonic() - started

@@ -60,12 +60,12 @@ change is committed and the base/head revisions are available.
   up to 32 MiB) and compares exact finding IDs. `identity_policy` is
   `canonical_subject_exact_finding_id_v1`; cross-subject matches with a stable
   rule identity produce one finding and appear in every matching subject report.
-  A legacy baseline can retain the canonical subject ID; redundant IDs from
-  secondary subject copies are reported as resolved. `move_policy` records that moved or renamed paths without
-  a stable rule/symbol identity appear as both resolved and new, and
-  `move_mapping` is `unknown`. No move matching is inferred. The comparison
-  includes `new`, `resolved`, `unchanged`, `totals`, and per-subject and
-  per-severity deltas. It does not establish that a finding was true or fixed.
+  An absent baseline finding is `resolved` only if all its current subjects
+  are complete; otherwise it appears in `unverified_absent`. `new` means an
+  ID was absent from the supplied baseline, whose coverage may be unknown.
+  Legacy duplicate IDs and moved paths follow the same coverage rule;
+  `move_mapping` remains `unknown`. Comparison counts do not establish that
+  a finding was true or fixed.
 - `--fail-on` defaults to `never`. `blocking` fails on blocking findings;
   `major` fails on major or blocking findings. `--max-findings N` is a global
   top-N view after severity, priority and blast-radius ranking, not a per-subject
