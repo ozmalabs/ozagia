@@ -190,7 +190,10 @@ Lockfile inventories report when their package cap may omit entries, so advisory
 
 npm lockfile v1 inventory traverses nested installed dependencies as well as
 top-level entries. Inventory limits still apply, and an oversized package list
-is explicitly marked as truncated.
+is explicitly marked as truncated. npm lock entries use explicit package names
+for aliases and classify known Git, local and non-npm-registry sources without
+recording source URLs. Explicitly non-npm sources are excluded from npm
+advisory matches; entries without source metadata remain provenance-unknown.
 
 An explicit local advisory file can be supplied with
 `--local-advisories PATH` for the `full` or `dependencies` profile. The bounded

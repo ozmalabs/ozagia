@@ -364,6 +364,7 @@ def match_local_advisories(
     pins: dict[tuple[str, str, str], set[str]] = {}
     composer_provenance_skipped = 0
     cargo_provenance_skipped = 0
+    npm_provenance_skipped = 0
     maven_provenance_unknown = 0
     maven_unknown_pins: set[tuple[str, str, str]] = set()
     if isinstance(lockfiles, list):
@@ -387,6 +388,11 @@ def match_local_advisories(
                 if (ecosystem == "rust" and row.get("provenance") is not None
                         and row.get("provenance") != "crates-io"):
                     cargo_provenance_skipped += 1
+                    continue
+                if (ecosystem == "node" and lock.get("format") == "npm"
+                        and row.get("provenance") is not None
+                        and row.get("provenance") != "npm-registry"):
+                    npm_provenance_skipped += 1
                     continue
                 if ecosystem == "composer" and row.get("provenance") == "path":
                     composer_provenance_skipped += 1
@@ -567,6 +573,9 @@ def match_local_advisories(
             + (f" {composer_provenance_skipped} Composer pins were excluded because "
                "their repository provenance is custom, missing, or path-based."
                if composer_provenance_skipped else "")
+            + (f" {npm_provenance_skipped} npm pins were excluded because their "
+               "source is not known to be the npm registry."
+               if npm_provenance_skipped else "")
             + (f" {cargo_provenance_skipped} Cargo pins were excluded because their "
                "source is not known to be crates.io."
                if cargo_provenance_skipped else "")

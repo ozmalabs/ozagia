@@ -505,6 +505,29 @@ def _gradle_lock_packages(text: str) -> tuple[list[dict[str, Any]], list[str], i
     return rows, omissions, entries
 
 
+def _npm_lock_row(name: str, value: Mapping[str, Any]) -> dict[str, Any]:
+    # npm v2/v3 aliases retain the original package name in the entry.
+    actual_name = value.get("name")
+    row = {"name": actual_name if isinstance(actual_name, str) and actual_name else name,
+           "version": value.get("version")}
+    resolved = value.get("resolved")
+    if value.get("link") is True or (isinstance(resolved, str) and
+                                     resolved.startswith(("file:", "link:", "workspace:"))):
+        row["provenance"] = "workspace-or-path"
+    elif isinstance(resolved, str) and resolved.startswith(
+            ("git+", "git:", "github:", "gitlab:", "bitbucket:", "ssh:")):
+        row["provenance"] = "git"
+    elif isinstance(resolved, str) and resolved.startswith(("http://", "https://")):
+        from urllib.parse import urlsplit
+        try:
+            host = (urlsplit(resolved).hostname or "").lower()
+        except ValueError:
+            host = ""
+        row["provenance"] = ("npm-registry" if host == "registry.npmjs.org"
+                             else "other-or-unknown-registry")
+    return row
+
+
 def _lock_inventory_raw(rel: str, text: str) -> dict[str, Any] | None:
     name = PurePosixPath(rel).name
     try:
@@ -516,8 +539,7 @@ def _lock_inventory_raw(rel: str, text: str) -> dict[str, Any] | None:
             if isinstance(packages, dict) and packages:
                 for path, value in packages.items():
                     if path and isinstance(value, dict):
-                        row = {"name": path.rsplit("node_modules/", 1)[-1],
-                               "version": value.get("version")}
+                        row = _npm_lock_row(path.rsplit("node_modules/", 1)[-1], value)
                         license_text = _license_value(value.get("license"))
                         if license_text:
                             row["license"] = license_text
@@ -532,7 +554,7 @@ def _lock_inventory_raw(rel: str, text: str) -> dict[str, Any] | None:
                     for key, value in section.items():
                         if not isinstance(value, dict):
                             continue
-                        rows.append({"name": key, "version": value.get("version")})
+                        rows.append(_npm_lock_row(key, value))
                         nested = value.get("dependencies")
                         if isinstance(nested, dict):
                             pending.append(nested)

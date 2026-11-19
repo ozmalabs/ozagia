@@ -307,3 +307,29 @@ def test_cargo_local_advisories_require_crates_io_provenance(tmp_path):
     assert {item["name"]: item["provenance"] for item in packages} == {
         "registry-demo": "crates-io", "fork-demo": "git",
         "workspace-demo": "workspace-or-path", "private-demo": "other-or-unknown-registry"}
+
+
+def test_npm_advisories_respect_alias_names_and_source_provenance(tmp_path):
+    (tmp_path / "package-lock.json").write_text(json.dumps({
+        "lockfileVersion": 3,
+        "packages": {
+            "node_modules/alias": {"name": "actual", "version": "1.2.3",
+                                   "resolved": "https://registry.npmjs.org/actual/-/actual-1.2.3.tgz"},
+            "node_modules/fork": {"version": "1.2.3", "resolved": "git+https://example.com/fork"},
+            "node_modules/local": {"version": "1.2.3", "resolved": "file:../local"},
+            "node_modules/private": {"version": "1.2.3", "resolved": "https://private.example/pkg.tgz"},
+            "node_modules/workspace": {"version": "1.2.3", "link": True},
+        },
+    }), encoding="utf-8")
+    advisories = {"schema": "ozagia.local_advisories.v1", "advisories": [
+        {"id": f"NPM-{i}", "ecosystem": "node", "package": name,
+         "affected_versions": ["1.2.3"]}
+        for i, name in enumerate(("actual", "alias", "fork", "local", "private", "workspace"))
+    ]}
+
+    result = analyze(tmp_path, local_advisories=advisories)
+    matches = [item["dependency"] for item in result["findings"]
+               if item["type"] == "local_advisory_exact_version_match"]
+    assert matches == ["actual"]
+    assert any("4 npm pins were excluded" in item["reason"] for item in result["not_checked"])
+    assert "private.example" not in json.dumps(result)
