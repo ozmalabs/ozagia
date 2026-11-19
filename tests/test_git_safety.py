@@ -104,3 +104,16 @@ def test_included_filter_is_refused_without_execution(tmp_path):
     _git(root, "config", "include.path", str(included))
     with pytest.raises(git_safety.UnsafeGitConfig, match="filter"):
         git_safety.run_git(root, ["status", "--porcelain"])
+
+
+def test_copied_index_preserves_timestamp_for_racy_clean_detection(tmp_path):
+    source = tmp_path / "index"
+    destination = tmp_path / "isolated" / "index"
+    source.write_bytes(b"index contents")
+    timestamp_ns = 1_600_000_000_123_456_789
+    os.utime(source, ns=(timestamp_ns, timestamp_ns))
+
+    git_safety._copy_regular(source, destination, limit=1024, preserve_mtime=True)
+
+    assert destination.read_bytes() == source.read_bytes()
+    assert destination.stat().st_mtime_ns == source.stat().st_mtime_ns

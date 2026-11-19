@@ -80,7 +80,8 @@ def _git_path(root: str | Path, name: str, env: Mapping[str, str],
     return path
 
 
-def _copy_regular(source: Path, destination: Path, *, limit: int) -> int:
+def _copy_regular(source: Path, destination: Path, *, limit: int,
+                  preserve_mtime: bool = False) -> int:
     descriptor = None
     try:
         flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
@@ -110,6 +111,10 @@ def _copy_regular(source: Path, destination: Path, *, limit: int) -> int:
         raise UnsafeGitConfig("Git metadata changed while being copied")
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_bytes(raw)
+    if preserve_mtime:
+        # Git uses the index mtime to identify racily clean entries. A fresh
+        # timestamp on a copy can hide same-second, same-size worktree edits.
+        os.utime(destination, ns=(before.st_atime_ns, before.st_mtime_ns))
     return len(raw)
 
 
@@ -318,7 +323,8 @@ def run_isolated_worktree_git(root: str | Path, args: Sequence[str], *,
         if packed.exists():
             _copy_regular(packed, safe_dir / "packed-refs", limit=MAX_METADATA_BYTES)
         if index.exists():
-            _copy_regular(index, safe_dir / "index", limit=MAX_INDEX_BYTES)
+            _copy_regular(index, safe_dir / "index", limit=MAX_INDEX_BYTES,
+                          preserve_mtime=True)
             shared = sorted(index.parent.glob("sharedindex.*"), key=str)
             if len(shared) > 1000:
                 raise UnsafeGitConfig("too many split-index shared files")
