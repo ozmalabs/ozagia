@@ -216,6 +216,22 @@ def test_one_missing_required_check_disables_multi_label_subject_metrics():
     assert score["unlabeled"] == 1
 
 
+@pytest.mark.parametrize("omission", ["collector failed", {"reason": "collector failed"}])
+def test_unscoped_omission_excludes_check_specific_label(omission):
+    expected = [{"path": "a.py", "type": "rule", "subject": "security",
+                 "required_checks": ["scan"]}]
+    report = {"subjects": {"security": {"status": "partial", "checks": ["scan"],
+                                          "omitted": [omission], "skipped": [],
+                                          "unknown": []}}}
+
+    score = score_report_findings([], expected, complete_subjects={"security"},
+                                  report_manifest=report)
+
+    assert score["excluded_expected"] == 1
+    assert score["recall"] is None
+    assert score["coverage_reasons"]["security"] == "required coverage was interrupted"
+
+
 def test_labeled_path_omission_disables_recall_even_when_check_ran():
     expected = [{"path": "src/target.py", "type": "rule", "subject": "performance",
                  "required_checks": ["python_ast_static_checks"]}]

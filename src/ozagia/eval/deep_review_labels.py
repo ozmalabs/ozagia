@@ -529,7 +529,8 @@ def score_report_findings(findings: Iterable[Mapping[str, Any]],
                     "resource admission refused", "file limit reached",
                     "read limit reached", "remaining files not checked",
                     "remaining documentation not checked",
-                    "review budget", "no review budget remained")):
+                    "review budget", "no review budget remained",
+                    "collector failed", "collector crashed", "analysis failed")):
                 return True
         return False
 
