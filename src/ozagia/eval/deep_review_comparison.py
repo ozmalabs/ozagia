@@ -37,7 +37,7 @@ from ozagia.eval.deep_review_labels import (
     expected_findings,
     label_metadata,
     load_labels,
-    score_findings,
+    score_report_findings,
 )
 
 DEFAULT_FIXTURE = Path(__file__).resolve().parents[3] / "tests" / "fixtures" / "deep_review_service"
@@ -318,12 +318,20 @@ def evaluate_range(fixture: str | Path = DEFAULT_FIXTURE, *, budget_s: float = 6
             item for item in ranged.get("findings") or []
             if str(item.get("id")) in new_ids
         ]
-        full_score = score_findings(full_change, expected,
-                                    complete_subjects=complete)
+        full_expected = []
+        for label in expected:
+            row = dict(label)
+            row["required_checks"] = label.get("baseline_required_checks")
+            row["requires_graph"] = label.get("baseline_requires_graph", False)
+            full_expected.append(row)
+        full_score = score_report_findings(
+            full_change, full_expected, complete_subjects=complete,
+            report_manifest=full.get("manifest") or {})
         range_review = ranged.get("manifest", {}).get("range_review") or {}
         range_available, environment = _range_review_state(ranged)
-        range_score = (score_findings(range_change, expected,
-                                      complete_subjects=complete)
+        range_score = (score_report_findings(
+            range_change, expected, complete_subjects=complete,
+            report_manifest=ranged.get("manifest") or {})
                        if range_available else None)
         counts = _comparison_counts(ranged) if range_available else None
         range_graph = range_review.get("graph") or {}
@@ -348,6 +356,9 @@ def evaluate_range(fixture: str | Path = DEFAULT_FIXTURE, *, budget_s: float = 6
                 "scope": "range-added findings only",
                 "expected": len(expected),
                 "full": {
+                    "expected": full_score["expected"],
+                    "excluded_expected": full_score["excluded_expected"],
+                    "unavailable_subjects": full_score["unavailable_subjects"],
                     "predicted": full_score["predicted"],
                     "true_positive": full_score["true_positive"],
                     "false_positive": full_score["false_positive"],
@@ -359,6 +370,11 @@ def evaluate_range(fixture: str | Path = DEFAULT_FIXTURE, *, budget_s: float = 6
                     "report_noise_ratio": full_score["report_noise_ratio"],
                 },
                 "range": {
+                    "expected": range_score["expected"] if range_score else None,
+                    "excluded_expected": (range_score["excluded_expected"]
+                                          if range_score else len(expected)),
+                    "unavailable_subjects": (
+                        range_score["unavailable_subjects"] if range_score else None),
                     "predicted": range_score["predicted"] if range_score else None,
                     "true_positive": range_score["true_positive"] if range_score else None,
                     "false_positive": range_score["false_positive"] if range_score else None,
@@ -671,15 +687,21 @@ def evaluate_model_pass(fixture: str | Path = DEFAULT_FIXTURE, *,
 
         findings = [item for item in report.get("findings") or []
                     if isinstance(item, dict)]
-        baseline_score = score_findings(findings, expected,
-                                        complete_subjects=complete)
+        baseline_score = score_report_findings(
+            findings, expected, complete_subjects=complete,
+            report_manifest=report.get("manifest") or {})
+        unavailable_subjects = set(baseline_score["unavailable_subjects"])
+        candidate_expected = [row for row in expected
+                              if (row.get("subject") not in unavailable_subjects
+                                  and not (row.get("subject") is None
+                                           and unavailable_subjects))]
         before_pass = json.dumps(findings, sort_keys=True)
         first_pass = _run_fake_model_pass(findings)
         second_pass = _run_fake_model_pass(findings)
         validation = first_pass.get("validation")
         validation = validation if isinstance(validation, Mapping) else {}
         candidate_metrics = score_model_candidates(
-            first_pass.get("findings") or [], findings, expected,
+            first_pass.get("findings") or [], findings, candidate_expected,
             accepted=validation.get("accepted"),
             deduplicated=int(validation.get("deduplicated") or 0),
         )
@@ -688,13 +710,20 @@ def evaluate_model_pass(fixture: str | Path = DEFAULT_FIXTURE, *,
         repeat_stable = (_deterministic_signature(first_pass) ==
                          _deterministic_signature(second_pass))
         total_seconds = time.perf_counter() - started
+        unavailable_subjects = baseline_score["unavailable_subjects"]
+        model_run_complete = (report.get("manifest", {}).get("complete")
+                              and not unavailable_subjects)
         return {
             "schema_version": 1,
             "scope": "deterministic report versus an injected fake model pass",
             "fixture": source.name,
             "labels": metadata,
-            "status": report.get("manifest", {}).get("status"),
-            "environment": {"status": "admitted", "preflight": "passed"},
+            "status": "complete" if model_run_complete else "partial",
+            "environment": {
+                "status": "admitted",
+                "preflight": "passed",
+                "unavailable_label_subjects": unavailable_subjects,
+            },
             "report": _report_view(report, out, measure),
             "baseline": {
                 "model_pass": False,
@@ -839,23 +868,32 @@ def evaluate_graph(fixture: str | Path = DEFAULT_FIXTURE, *, budget_s: float = 6
                 ],
             }
 
-        less_score = score_findings(less.get("findings") or [], expected,
-                                    complete_subjects=complete)
-        aware_score = score_findings(aware.get("findings") or [], expected,
-                                     complete_subjects=complete)
+        less_score = score_report_findings(
+            less.get("findings") or [], expected, complete_subjects=complete,
+            report_manifest=less.get("manifest") or {})
+        aware_score = score_report_findings(
+            aware.get("findings") or [], expected, complete_subjects=complete,
+            report_manifest=aware.get("manifest") or {})
         diff = _finding_diff(less.get("findings") or [], aware.get("findings") or [])
+        unavailable_subjects = sorted(set(less_score["unavailable_subjects"])
+                                      | set(aware_score["unavailable_subjects"]))
+        graph_run_complete = (less.get("manifest", {}).get("complete")
+                              and aware.get("manifest", {}).get("complete")
+                              and not unavailable_subjects)
         total_seconds = time.perf_counter() - started
         return {
             "schema_version": 1,
             "scope": "absent graph versus a fresh graph on identical synthetic checkouts",
             "fixture": source.name,
             "labels": metadata,
-            "status": "complete" if (less.get("manifest", {}).get("complete") and
-                                     aware.get("manifest", {}).get("complete"))
-                      else "partial",
+            "status": "complete" if graph_run_complete else "partial",
             "commits": {"graph_less": less_rev, "graph_aware": graph_rev,
                         "same": less_rev == graph_rev},
-            "environment": {"status": "admitted", "preflight": "passed"},
+            "environment": {
+                "status": "admitted",
+                "preflight": "passed",
+                "unavailable_label_subjects": unavailable_subjects,
+            },
             "reports": {
                 "graph_less": _report_view(less, less_out, less_measure),
                 "graph_aware": _report_view(aware, graph_out, aware_measure),

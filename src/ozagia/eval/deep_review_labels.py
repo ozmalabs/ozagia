@@ -76,6 +76,29 @@ def _optional_string_list(value: Any, field: str) -> list[str]:
     return _string_list(value, field)
 
 
+def _coverage_fields(item: Mapping[str, Any], field: str) -> dict[str, Any]:
+    checks = item.get("required_checks")
+    if checks is not None:
+        checks = _string_list(checks, f"{field}.required_checks")
+        if not checks:
+            raise ValueError(f"{field}.required_checks must not be empty")
+    requires_graph = item.get("requires_graph", False)
+    if not isinstance(requires_graph, bool):
+        raise ValueError(f"{field}.requires_graph must be a boolean")
+    baseline_checks = item.get("baseline_required_checks")
+    if baseline_checks is not None:
+        baseline_checks = _string_list(
+            baseline_checks, f"{field}.baseline_required_checks")
+        if not baseline_checks:
+            raise ValueError(f"{field}.baseline_required_checks must not be empty")
+    baseline_graph = item.get("baseline_requires_graph", False)
+    if not isinstance(baseline_graph, bool):
+        raise ValueError(f"{field}.baseline_requires_graph must be a boolean")
+    return {"required_checks": checks, "requires_graph": requires_graph,
+            "baseline_required_checks": baseline_checks,
+            "baseline_requires_graph": baseline_graph}
+
+
 def _expectation_rows(value: Any, field: str) -> list[dict[str, Any]]:
     if value is None:
         return []
@@ -91,13 +114,14 @@ def _expectation_rows(value: Any, field: str) -> list[dict[str, Any]]:
         assert ftype is not None
         subject = _text(item.get("subject"), f"{field}[{index}].subject",
                         required=False)
+        coverage = _coverage_fields(item, f"{field}[{index}]")
         key = (path, ftype, subject)
         if key in seen:
             raise ValueError(f"duplicate reviewed label: {path} {ftype} {subject}")
         seen.add(key)
         label_id = _text(item.get("id"), f"{field}[{index}].id", required=False)
         rows.append({"id": label_id or f"{field}-{index}", "path": path,
-                     "type": ftype, "subject": subject})
+                     "type": ftype, "subject": subject, **coverage})
     return rows
 
 
@@ -172,8 +196,10 @@ def load_labels(path: str | Path) -> dict[str, Any]:
                                 f"labels.cases[{index}].expected")
         negatives = _optional_string_list(
             case.get("negatives"), f"labels.cases[{index}].negatives")
+        coverage = _coverage_fields(case, f"labels.cases[{index}]")
         cases.append({"id": case_id, "file": path, "subject": subject,
-                      "expected": expected, "negatives": negatives})
+                      "expected": expected, "negatives": negatives,
+                      **coverage})
 
     report_findings = _expectation_rows(raw.get("report_findings"),
                                         "labels.report_findings")
@@ -228,27 +254,31 @@ def expected_findings(manifest: Mapping[str, Any], *, include_cases: bool = True
     rows: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str | None]] = set()
 
-    def add(path: str, ftype: str, subject: str | None, source: str) -> None:
+    def add(path: str, ftype: str, subject: str | None, source: str,
+            coverage: Mapping[str, Any] | None = None) -> None:
         key = (path, ftype, subject)
         if key in seen:
             raise ValueError(f"duplicate reviewed label across sections: {path} {ftype} {subject}")
         seen.add(key)
         rows.append({"path": path, "type": ftype, "subject": subject,
-                     "source": source})
+                     "source": source,
+                     **(dict(coverage) if coverage else {
+                         "required_checks": None, "requires_graph": False})})
 
     if include_cases:
         for case in manifest.get("cases") or []:
             for ftype in case.get("expected") or []:
-                add(case["file"], ftype, case.get("subject"), f"case:{case['id']}")
+                add(case["file"], ftype, case.get("subject"), f"case:{case['id']}",
+                    case)
     if include_report:
         for item in manifest.get("report_findings") or []:
             add(item["path"], item["type"], item.get("subject"),
-                f"report:{item['id']}")
+                f"report:{item['id']}", item)
     if include_range:
         range_data = manifest.get("range") or {}
         for item in range_data.get("expected") or []:
             add(item["path"], item["type"], item.get("subject"),
-                f"range:{item['id']}")
+                f"range:{item['id']}", item)
     return rows
 
 
@@ -400,3 +430,122 @@ def score_findings(findings: Iterable[Mapping[str, Any]],
         "subjects": subject_rows,
         "metric_definitions": dict(METRIC_DEFINITIONS),
     }
+
+
+def score_report_findings(findings: Iterable[Mapping[str, Any]],
+                          expected: Iterable[Mapping[str, Any]], *,
+                          complete_subjects: Iterable[str],
+                          report_manifest: Mapping[str, Any],
+                          all_subjects: Iterable[str] | None = None
+                          ) -> dict[str, Any]:
+    """Score only label subjects whose report section has usable coverage.
+
+    Corpus labels can be exhaustive while one review run skips that subject.
+    Such a run must not turn uncollected labels into false negatives or count
+    its predictions as verified precision evidence.
+    """
+    expected_rows = [dict(item) for item in expected]
+    complete = {str(subject) for subject in complete_subjects}
+    relevant_subjects = complete | {
+        str(item.get("subject") or "unknown") for item in expected_rows
+    }
+    sections = report_manifest.get("subjects")
+    sections = sections if isinstance(sections, Mapping) else {}
+    unavailable: dict[str, str] = {}
+
+    def graph_is_fresh() -> bool:
+        graph = report_manifest.get("prioritization_graph")
+        if isinstance(graph, Mapping) and graph.get("freshness") == "fresh":
+            return True
+        range_review = report_manifest.get("range_review")
+        graph = range_review.get("graph") if isinstance(range_review, Mapping) else None
+        return isinstance(graph, Mapping) and graph.get("freshness") == "fresh"
+
+    def omission_rows(row: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+        value = row.get("omitted") or []
+        return [item for item in value if isinstance(item, Mapping)] if isinstance(value, list) else []
+
+    def has_interruption_omission(row: Mapping[str, Any]) -> bool:
+        value = row.get("omitted") or []
+        values = value if isinstance(value, list) else [value]
+        for item in values:
+            reason = (item.get("reason", "") if isinstance(item, Mapping) else item)
+            reason = str(reason).lower()
+            if any(marker in reason for marker in
+                   ("budget exhausted", "timed out", "time limit",
+                    "resource admission refused")):
+                return True
+        return False
+
+    def unavailable_reason(subject: str, label: Mapping[str, Any] | None) -> str | None:
+        row = sections.get(subject)
+        if not isinstance(row, Mapping):
+            return "subject report is missing"
+        checks = row.get("checks")
+        if row.get("status") == "unknown" or not isinstance(checks, list) or not checks:
+            return "subject has no executed checks"
+        required = (label or {}).get("required_checks")
+        if required is not None:
+            if not isinstance(required, list) or not required:
+                return "label has invalid check coverage metadata"
+            missing = sorted(set(required) - set(checks))
+            if missing:
+                return "required checks did not run: " + ", ".join(missing)
+            if (label or {}).get("requires_graph") and not graph_is_fresh():
+                return "label requires a fresh graph"
+            if has_interruption_omission(row):
+                return "required coverage was interrupted"
+            for item in omission_rows(row):
+                if item.get("check") in required:
+                    return "a required check was omitted"
+            for field in ("skipped", "unknown"):
+                values = row.get(field) or []
+                if not isinstance(values, list):
+                    return f"{field} coverage is malformed"
+                for item in values:
+                    if isinstance(item, Mapping) and item.get("check") in required:
+                        return "a required check was skipped or unknown"
+                    if not isinstance(item, Mapping):
+                        return "a required check was skipped or unknown"
+            return None
+
+        # Legacy labels without check-level requirements fail closed when the
+        # report has any omission or no fresh graph. This avoids treating an
+        # ambiguous graph-dependent negative result as a false negative.
+        if bool(row.get("skipped")) or bool(row.get("unknown")):
+            return "subject contains skipped or unknown checks"
+        if row.get("omitted"):
+            return "subject contains omissions without label-specific coverage metadata"
+        if not graph_is_fresh():
+            return "label has no check metadata and graph freshness is unavailable"
+        return None
+
+    labels_by_subject: dict[str, list[Mapping[str, Any]]] = {}
+    for label in expected_rows:
+        labels_by_subject.setdefault(str(label.get("subject") or "unknown"), []).append(label)
+    for subject in relevant_subjects:
+        labels = labels_by_subject.get(subject, [])
+        if labels:
+            reasons = [unavailable_reason(subject, label) for label in labels]
+            reasons = [reason for reason in reasons if reason]
+            if reasons:
+                unavailable[subject] = reasons[0]
+        else:
+            reason = unavailable_reason(subject, None)
+            if reason:
+                unavailable[subject] = reason
+
+    # A label without a subject may match any report section. If any labelled
+    # section is unavailable, its negative result cannot be attributed safely.
+    exclude_unscoped = any(item.get("subject") is None for item in expected_rows) and bool(unavailable)
+    scored_expected = [item for item in expected_rows
+                       if (str(item.get("subject") or "unknown") not in unavailable
+                           and not (exclude_unscoped and item.get("subject") is None))]
+    score = score_findings(
+        findings, scored_expected,
+        complete_subjects=complete - set(unavailable),
+        all_subjects=all_subjects)
+    score["unavailable_subjects"] = sorted(unavailable)
+    score["coverage_reasons"] = dict(sorted(unavailable.items()))
+    score["excluded_expected"] = len(expected_rows) - len(scored_expected)
+    return score

@@ -82,7 +82,8 @@ def test_range_comparison_empty_findings_are_not_scored_as_success(monkeypatch):
     result = evaluate_range()
     assert result["change_set"]["range"]["predicted"] == 0
     assert result["change_set"]["range"]["true_positive"] == 0
-    assert result["change_set"]["range"]["recall"] == 0.0
+    assert result["change_set"]["range"]["expected"] == 0
+    assert result["change_set"]["range"]["recall"] is None
     assert result["change_set"]["range"]["precision"] is None
     assert result["change_set"]["range"]["report_noise_ratio"] is None
     assert result["comparison"] == {"new": 0, "resolved": 0, "unchanged": 0}

@@ -564,6 +564,13 @@ subject is a false positive; elsewhere it is `unlabeled` noise. Findings with
 no location cannot match and are counted separately. Metrics are `None` when
 their denominator is absent.
 
+Labels can specify `required_checks` and `requires_graph`; range labels can
+also specify `baseline_required_checks` and `baseline_requires_graph`. A run
+excludes a label when its required check did not run, was omitted, or needs a
+fresh graph that was unavailable. Without coverage metadata, ambiguous
+omissions fail closed. Results report excluded labels and unavailable subjects
+instead of counting missing analysis as a false negative.
+
 The evaluator does not enable the model pass, refresh an index, run tests,
 import the fixture, or call the network. Host resource admission is part of
 full report generation; if it refuses, the JSON records `preflight_refused` and

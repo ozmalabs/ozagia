@@ -9,15 +9,15 @@
     "tests-and-coverage"
   ],
   "cases": [
-    {"id": "catalog_search", "file": "src/catalog/search.py", "subject": "performance", "expected": ["repeated_nested_iteration"]},
-    {"id": "catalog_cache", "file": "src/catalog/cache.py", "subject": "data-structures", "expected": ["mutable_default_argument"]},
-    {"id": "checkout_gateway", "file": "src/checkout/gateway.py", "subject": "failure-modes", "expected": ["silently_suppressed_exception"]},
-    {"id": "batch_export", "file": "src/batch/export.py", "subject": "scalability", "expected": ["materialized_range"]}
+    {"id": "catalog_search", "file": "src/catalog/search.py", "subject": "performance", "required_checks": ["python_ast_static_checks"], "expected": ["repeated_nested_iteration"]},
+    {"id": "catalog_cache", "file": "src/catalog/cache.py", "subject": "data-structures", "required_checks": ["python_ast_static_checks"], "expected": ["mutable_default_argument"]},
+    {"id": "checkout_gateway", "file": "src/checkout/gateway.py", "subject": "failure-modes", "required_checks": ["python_ast_static_checks"], "expected": ["silently_suppressed_exception"]},
+    {"id": "batch_export", "file": "src/batch/export.py", "subject": "scalability", "required_checks": ["python_ast_static_checks"], "expected": ["materialized_range"]}
   ],
   "report_findings": [
-    {"id": "catalog_search_untested", "file": "src/catalog/search.py", "subject": "tests-and-coverage", "type": "untested_module"},
-    {"id": "catalog_cache_untested", "file": "src/catalog/cache.py", "subject": "tests-and-coverage", "type": "untested_module"},
-    {"id": "checkout_gateway_untested", "file": "src/checkout/gateway.py", "subject": "tests-and-coverage", "type": "untested_module"},
-    {"id": "batch_export_untested", "file": "src/batch/export.py", "subject": "tests-and-coverage", "type": "untested_module"}
+    {"id": "catalog_search_untested", "file": "src/catalog/search.py", "subject": "tests-and-coverage", "type": "untested_module", "required_checks": ["untested_modules"]},
+    {"id": "catalog_cache_untested", "file": "src/catalog/cache.py", "subject": "tests-and-coverage", "type": "untested_module", "required_checks": ["untested_modules"]},
+    {"id": "checkout_gateway_untested", "file": "src/checkout/gateway.py", "subject": "tests-and-coverage", "type": "untested_module", "required_checks": ["untested_modules"]},
+    {"id": "batch_export_untested", "file": "src/batch/export.py", "subject": "tests-and-coverage", "type": "untested_module", "required_checks": ["untested_modules"]}
   ]
 }

@@ -115,12 +115,13 @@ def test_model_pass_comparison_handles_empty_deterministic_findings(monkeypatch)
     monkeypatch.setattr(deep_review_comparison, "build_deep_review", build)
     result = evaluate_model_pass()
     assert result["baseline"]["deterministic_findings"] == 0
-    assert result["baseline"]["deterministic_score"]["recall"] == 0.0
+    assert result["baseline"]["deterministic_score"]["recall"] is None
+    assert result["baseline"]["deterministic_score"]["excluded_expected"] == 8
     assert result["baseline"]["deterministic_score"]["precision"] is None
     with_model = result["with_model_pass"]
     assert with_model["deterministic_findings"] == 0
     assert with_model["candidate_metrics"]["unique_candidates"] >= 1
-    assert with_model["candidate_metrics"]["candidate_recall"] == 0.0
+    assert with_model["candidate_metrics"]["candidate_recall"] is None
     assert with_model["candidate_metrics"]["candidate_precision"] == 0.0
     assert result["deterministic_repeat"] is True
 

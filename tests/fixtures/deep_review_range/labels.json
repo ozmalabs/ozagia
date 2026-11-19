@@ -13,8 +13,8 @@
       }
     ],
     "expected": [
-      {"id": "changed_gateway_shell", "file": "src/checkout/gateway.py", "subject": "security", "type": "security_sensitive"},
-      {"id": "changed_gateway_untested", "file": "src/checkout/gateway.py", "subject": "tests-and-coverage", "type": "missing_test"}
+      {"id": "changed_gateway_shell", "file": "src/checkout/gateway.py", "subject": "security", "type": "security_sensitive", "required_checks": ["git_range_review"], "baseline_required_checks": ["dangerous_constructs"]},
+      {"id": "changed_gateway_untested", "file": "src/checkout/gateway.py", "subject": "tests-and-coverage", "type": "missing_test", "required_checks": ["git_range_review"], "baseline_required_checks": ["untested_modules"]}
     ]
   }
 }

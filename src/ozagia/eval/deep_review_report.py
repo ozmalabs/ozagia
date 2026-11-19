@@ -27,7 +27,7 @@ from ozagia.eval.deep_review_labels import (
     expected_findings,
     label_metadata,
     load_labels,
-    score_findings,
+    score_report_findings,
 )
 
 DEFAULT_FIXTURE = Path(__file__).resolve().parents[3] / "tests" / "fixtures" / "deep_review_service"
@@ -136,9 +136,11 @@ def _counts(result: dict[str, Any]) -> dict[str, Any]:
 
 
 def _score(findings: list[dict[str, Any]], expected: list[dict[str, Any]],
-           complete: list[str], all_subjects: list[str] | None = None) -> dict[str, Any]:
-    return score_findings(findings, expected, complete_subjects=complete,
-                          all_subjects=all_subjects)
+           complete: list[str], report_manifest: dict[str, Any],
+           all_subjects: list[str] | None = None) -> dict[str, Any]:
+    return score_report_findings(
+        findings, expected, complete_subjects=complete,
+        report_manifest=report_manifest, all_subjects=all_subjects)
 
 
 def evaluate(fixture: str | Path = DEFAULT_FIXTURE, *, budget_s: float = 60,
@@ -188,9 +190,16 @@ def evaluate(fixture: str | Path = DEFAULT_FIXTURE, *, budget_s: float = 60,
             }
 
         first_score = _score(first.get("findings") or [], expected, complete,
+                             first.get("manifest") or {},
                              sorted((first["manifest"].get("subjects") or {})))
         second_score = _score(second.get("findings") or [], expected, complete,
+                              second.get("manifest") or {},
                               sorted((second["manifest"].get("subjects") or {})))
+        unavailable_subjects = sorted(set(first_score["unavailable_subjects"])
+                                      | set(second_score["unavailable_subjects"]))
+        complete_run = (first["manifest"].get("complete")
+                        and second["manifest"].get("complete")
+                        and not unavailable_subjects)
         first_ids = {item["id"] for item in first.get("findings") or []
                      if isinstance(item, dict) and item.get("id")}
         second_ids = {item["id"] for item in second.get("findings") or []
@@ -207,8 +216,7 @@ def evaluate(fixture: str | Path = DEFAULT_FIXTURE, *, budget_s: float = 60,
             "scope": "full offline report pipeline on a temporary synthetic checkout",
             "fixture": source.name,
             "labels": metadata,
-            "status": "complete" if first["manifest"].get("complete") and
-                      second["manifest"].get("complete") else "partial",
+            "status": "complete" if complete_run else "partial",
             "reports": 2,
             "first_report": {
                 "status": first["manifest"].get("status"),
@@ -267,7 +275,11 @@ def evaluate(fixture: str | Path = DEFAULT_FIXTURE, *, budget_s: float = 60,
                                 second_size["bytes"] is not None else None),
             },
             "counts": {"first": first_counts, "second": second_counts},
-            "environment": {"status": "admitted", "preflight": "passed"},
+            "environment": {
+                "status": "admitted" if complete_run else "partial",
+                "preflight": "passed",
+                "unavailable_label_subjects": unavailable_subjects,
+            },
             "limitations": [
                 "The second report compares the same frozen fixture against the first report.",
                 "Stable finding IDs do not validate finding truth or severity.",

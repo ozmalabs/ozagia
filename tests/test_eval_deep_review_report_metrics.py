@@ -90,14 +90,17 @@ def test_report_evaluator_scores_empty_findings_without_inventing_metrics(monkey
     monkeypatch.setattr(deep_review_report, "build_deep_review", build)
     result = evaluate()
     metrics = result["metrics"]["first"]
-    assert metrics["expected"] == 8
+    assert result["status"] == "partial"
+    assert metrics["expected"] == 0
+    assert metrics["excluded_expected"] == 8
+    assert len(metrics["unavailable_subjects"]) == 5
     assert metrics["predicted"] == 0
     assert metrics["true_positive"] == 0
-    assert metrics["false_negative"] == 8
+    assert metrics["false_negative"] == 0
     assert metrics["precision"] is None
     assert metrics["false_positive_rate"] is None
     assert metrics["report_noise_ratio"] is None
-    assert metrics["recall"] == 0.0
+    assert metrics["recall"] is None
     assert result["first_report"]["report_bytes"] is None
 
 

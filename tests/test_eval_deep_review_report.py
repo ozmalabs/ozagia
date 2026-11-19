@@ -20,7 +20,8 @@ def test_report_evaluator_compares_two_runs_in_private_temporary_checkout(monkey
 
     monkeypatch.setattr(deep_review_report, "build_deep_review", build)
     result = deep_review_report.evaluate()
-    assert result["status"] == "complete"
+    assert result["status"] == "partial"
+    assert result["environment"]["unavailable_label_subjects"]
     assert roots[0] == roots[1]
     assert outputs[0] != outputs[1]
     assert result["comparison"] == {"new": 0, "resolved": 0,
