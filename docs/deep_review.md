@@ -186,6 +186,10 @@ manifests and lockfiles that were read. Components carry an
 were not assessed. It is inventory data, not a validated compliance SBOM or a
 vulnerability result.
 
+npm lockfile v1 inventory traverses nested installed dependencies as well as
+top-level entries. Inventory limits still apply, and an oversized package list
+is explicitly marked as truncated.
+
 An explicit local advisory file can be supplied with
 `--local-advisories PATH` for the `full` or `dependencies` profile. The bounded
 JSON format is `ozagia.local_advisories.v1`, with an `advisories` list whose

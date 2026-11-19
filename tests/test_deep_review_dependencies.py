@@ -114,6 +114,26 @@ def test_duplicate_and_conflicting_versions_are_reported_across_inputs(tmp_path)
                      "duplicate_dependency_declaration"}
 
 
+def test_npm_v1_inventory_includes_nested_transitive_dependencies(tmp_path):
+    (tmp_path / "package-lock.json").write_text(json.dumps({
+        "lockfileVersion": 1,
+        "dependencies": {
+            "parent": {"version": "1.0.0", "dependencies": {
+                "@scope/child": {"version": "2.0.0", "dependencies": {
+                    "leaf": {"version": "3.0.0"}}}}},
+        },
+    }), encoding="utf-8")
+
+    lock = analyze(tmp_path)["inventory"]["lockfiles"][0]
+
+    assert lock["entries"] == 3
+    assert lock["packages"] == [
+        {"name": "@scope/child", "version": "2.0.0"},
+        {"name": "leaf", "version": "3.0.0"},
+        {"name": "parent", "version": "1.0.0"},
+    ]
+
+
 def test_lockfile_yarn_and_pnpm_versions_are_parsed(tmp_path):
     (tmp_path / "yarn.lock").write_text(
         '"left-pad@^1.0.0":\n  version "1.0.0"\n  resolved "x"\n',

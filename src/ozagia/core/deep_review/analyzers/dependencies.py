@@ -523,12 +523,26 @@ def _lock_inventory(rel: str, text: str) -> dict[str, Any] | None:
                             row["license"] = license_text
                         rows.append(row)
             elif isinstance(deps, dict):
-                rows = [{"name": key, "version": value.get("version")}
-                        for key, value in deps.items() if isinstance(value, dict)]
-            return {"file": rel, "ecosystem": "node", "format": "npm",
-                    "entries": len(rows),
-                    "packages": sorted(rows, key=lambda item: (item["name"],
-                                                                  str(item["version"])))[:MAX_ITEMS]}
+                # npm lockfile v1 nests installed transitive dependencies under
+                # each package. Traverse iteratively so deep dependency trees
+                # do not consume Python's call stack.
+                pending = [deps]
+                while pending:
+                    section = pending.pop()
+                    for key, value in section.items():
+                        if not isinstance(value, dict):
+                            continue
+                        rows.append({"name": key, "version": value.get("version")})
+                        nested = value.get("dependencies")
+                        if isinstance(nested, dict):
+                            pending.append(nested)
+            result = {"file": rel, "ecosystem": "node", "format": "npm",
+                      "entries": len(rows),
+                      "packages": sorted(rows, key=lambda item: (item["name"],
+                                                                    str(item["version"])))[:MAX_ITEMS]}
+            if len(rows) > MAX_ITEMS:
+                result["omissions"] = [f"{name}: package inventory truncated at {MAX_ITEMS} entries"]
+            return result
         if name == "Cargo.lock":
             doc = tomllib.loads(text)
             packages = doc.get("package", [])
