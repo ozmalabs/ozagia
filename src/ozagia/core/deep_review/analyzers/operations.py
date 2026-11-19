@@ -1170,7 +1170,7 @@ def analyze(root: str | Path, *, budget_s: float = 10.0) -> dict:
                 continue
             try:
                 content, size = _read_text(
-                    path, min(MAX_FILE_BYTES, MAX_TOTAL_BYTES - total))
+                    path, min(MAX_FILE_BYTES, MAX_TOTAL_BYTES - total), root=root)
             except ValueError:
                 omissions.append(f"{rel}: exceeds read size limit")
                 continue

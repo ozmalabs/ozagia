@@ -135,7 +135,7 @@ def analyze(root: str | Path, *, budget_s: float = 10.0) -> dict:
             rel = path.relative_to(root).as_posix()
             try:
                 source, size = _read_text(
-                    path, min(MAX_FILE_BYTES, MAX_TOTAL_BYTES - total))
+                    path, min(MAX_FILE_BYTES, MAX_TOTAL_BYTES - total), root=root)
             except ValueError:
                 unknown.append({"path": rel, "reason": "file or total byte limit reached"})
                 continue

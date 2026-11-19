@@ -11,7 +11,6 @@ import json
 import math
 import os
 import re
-import stat
 import time
 import tomllib
 from pathlib import Path, PurePosixPath
@@ -19,6 +18,7 @@ from typing import Any, Mapping
 from urllib.parse import quote
 
 from ozagia.core import manifests
+from ._bounded_read import read_text as _read_text
 
 MAX_FILES = 3000
 MAX_FILE_BYTES = 1_000_000
@@ -88,21 +88,11 @@ def _walk(root: Path, deadline: float):
             yield path
 
 
-def _read(path: Path, remaining: int) -> str | None:
-    limit = min(MAX_FILE_BYTES, remaining)
-    if limit < 0 or not hasattr(os, "O_NOFOLLOW"):
-        return None
+def _read(path: Path, remaining: int, *, root: Path | None = None) -> str | None:
     try:
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-        fd = os.open(path, flags)
-        with os.fdopen(fd, "rb") as stream:
-            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
-                return None
-            content = stream.read(limit + 1)
-        if len(content) > limit:
-            return None
-        return content.decode("utf-8")
-    except (OSError, UnicodeError):
+        content, _ = _read_text(path, min(MAX_FILE_BYTES, remaining), root=root)
+        return content
+    except (OSError, UnicodeError, ValueError):
         return None
 
 
@@ -1063,7 +1053,7 @@ def analyze(root: str | Path, *, budget_s: float = 10.0,
                 "uv.lock", "poetry.lock", "Pipfile.lock", "pdm.lock",
                 "go.sum", "Gemfile.lock", "composer.lock", "yarn.lock",
                 "composer.json", "pnpm-lock.yaml", "gradle.lockfile"}:
-            text = _read(path, remaining)
+            text = _read(path, remaining, root=root)
             if text is None:
                 omissions.append(f"{rel}: unreadable or exceeds per-file/total size limit")
                 continue

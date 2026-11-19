@@ -35,3 +35,42 @@ def test_analyzers_disclose_files_over_read_cap(tmp_path, monkeypatch):
     operation_report = operations.analyze(tmp_path)
     assert any("Dockerfile: exceeds read size limit" in item["reason"]
                for item in operation_report["not_checked"])
+
+
+def test_bounded_read_rejects_symlinked_ancestor(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.py").write_text("secret", encoding="utf-8")
+    (root / "sub").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(OSError):
+        read_text(root / "sub" / "secret.py", 100, root=root)
+
+
+def test_bounded_read_refuses_ancestor_swapped_before_open(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    root.mkdir()
+    sub = root / "sub"
+    sub.mkdir()
+    (sub / "file.py").write_text("inside", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "file.py").write_text("outside", encoding="utf-8")
+    original_open = os.open
+    swapped = False
+
+    def racing_open(path, flags, *args, **kwargs):
+        nonlocal swapped
+        if path == "sub" and kwargs.get("dir_fd") is not None and not swapped:
+            swapped = True
+            sub.rename(root / "old")
+            sub.symlink_to(outside, target_is_directory=True)
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", racing_open)
+    # The capability test uses the original os.open identity.
+    monkeypatch.setattr(os, "supports_dir_fd", {racing_open})
+    with pytest.raises(OSError):
+        read_text(sub / "file.py", 100, root=root)
+    assert swapped

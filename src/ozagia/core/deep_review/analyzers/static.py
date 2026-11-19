@@ -158,7 +158,7 @@ def analyze(root, *, budget_s=60):
             rel = file_path.relative_to(root).as_posix()
             try:
                 text, size = _read_text(
-                    file_path, min(MAX_SOURCE_BYTES, MAX_TOTAL_BYTES - total_bytes))
+                    file_path, min(MAX_SOURCE_BYTES, MAX_TOTAL_BYTES - total_bytes), root=root)
             except ValueError:
                 skipped.append({"path": rel, "reason": "source or total read limit reached"})
                 continue
