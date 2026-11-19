@@ -1,4 +1,4 @@
-from ozagia.core.deep_review.reports import render_readme, render_subject
+from ozagia.core.deep_review.reports import render_method, render_readme, render_subject
 
 
 def test_subject_report_shows_coverage_evidence_and_integrity():
@@ -141,3 +141,23 @@ def test_readme_links_index_and_ranks_top_risks_by_severity_then_priority():
     assert "[Findings index](./findings-index.md)" in readme
     assert readme.index("major-high") < readme.index("major-low") < readme.index("minor-high")
     assert "01-security.md#finding-major-high" in readme
+
+
+def test_method_reports_opt_in_execution_without_claiming_run_was_offline():
+    method = render_method(
+        root="/project", profile="full", revision="abc", tool_versions={},
+        budget_s=60, security_tools=["scanner"], security_network=True,
+        bench_timeout_s=5)
+    assert "This run is offline" not in method
+    assert "does not run tests" not in method
+    assert "Security tools requested: scanner" in method
+    assert "Security scanner network access: enabled" in method
+    assert "Caller-supplied benchmarks: requested" in method
+
+
+def test_method_reports_default_execution_gates():
+    method = render_method(root="/project", profile="full", revision="abc",
+                           tool_versions={}, budget_s=60)
+    assert "Security tools requested: none" in method
+    assert "Security scanner network access: disabled" in method
+    assert "Caller-supplied benchmarks: not requested" in method

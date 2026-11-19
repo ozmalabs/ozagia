@@ -449,7 +449,7 @@ def render_method(*, root, profile, revision, tool_versions, budget_s,
                   graph=None, graph_hash=None, graph_hash_reason=None,
                   priority_graph=None, profile_reports=(), omissions=(),
                   normalization_omitted=0, range_spec=None, index=False,
-                  bench_timeout_s=None):
+                  bench_timeout_s=None, security_tools=(), security_network=False):
     """Render the deterministic method/scope document.
 
     Elapsed durations stay in ``manifest.json``; this file records configured
@@ -462,8 +462,11 @@ def render_method(*, root, profile, revision, tool_versions, budget_s,
         f"Root: `{_cell(root)}`", "",
         f"Profile: `{_cell(profile)}`", "",
         f"Revision: `{_cell(revision or 'unknown')}`", "",
-        "This run is offline and deterministic. It does not run tests or import "
-        "the target. Static Python AST checks cover selected performance, "
+        "The default review uses offline static analysis without importing the "
+        "target. Optional scanners, benchmarks and model review may execute "
+        "commands or use network access when explicitly requested; see the "
+        "manifest and model-review artifact for execution results. Static Python "
+        "AST checks cover selected performance, "
         "failure-mode, data-structure, and scalability patterns. Other patterns "
         "and languages remain unassessed.", "",
         "## Tool versions", "",
@@ -474,6 +477,11 @@ def render_method(*, root, profile, revision, tool_versions, budget_s,
         "", "## Budgets and timings", "",
         f"- Total budget: {budget_s:g} s",
         f"- Index refresh: {'requested' if index else 'not requested'}",
+        "- Security tools requested: " + (
+            ", ".join(_cell(name) for name in sorted(set(security_tools or ())))
+            if security_tools else "none"),
+        f"- Security scanner network access: {'enabled' if security_network else 'disabled'}",
+        f"- Caller-supplied benchmarks: {'requested' if bench_timeout_s is not None else 'not requested'}",
         f"- Range review: `{_cell(range_spec)}`" if range_spec is not None
         else "- Range review: not requested",
     ]

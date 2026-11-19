@@ -1567,7 +1567,8 @@ def build_deep_review(root, out, *, profile="full", budget_s=60, index=False,
         omissions=_method_omissions(sections),
         normalization_omitted=normalization_omitted,
         range_spec=range_spec, index=index,
-        bench_timeout_s=bench_timeout_s if bench_commands is not None else None)
+        bench_timeout_s=bench_timeout_s if bench_commands is not None else None,
+        security_tools=security_tools, security_network=security_network)
     _write(out / "00-method-and-scope.md", method)
     _write(out / "findings.json", canonical_json(all_findings))
     index_lines = [f"Priority graph: {_cell(priority_graph['freshness'])} "
