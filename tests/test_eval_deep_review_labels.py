@@ -278,6 +278,20 @@ def test_unscoped_collector_limit_excludes_unreported_label(reason):
     assert score["coverage_reasons"]["dependencies"] == "required coverage was interrupted"
 
 
+def test_missing_configuration_scan_excludes_check_specific_label():
+    expected = [{"path": "deploy.yaml", "type": "rule", "subject": "operations",
+                 "required_checks": ["config_scan"]}]
+    report = {"subjects": {"operations": {
+        "status": "partial", "checks": ["config_scan"],
+        "omitted": [{"reason": "static IaC/config checks were not run; configuration coverage is unknown"}],
+        "skipped": [], "unknown": []}}}
+    score = score_report_findings([], expected, complete_subjects={"operations"},
+                                  report_manifest=report)
+    assert score["excluded_expected"] == 1
+    assert score["recall"] is None
+    assert score["coverage_reasons"]["operations"] == "required coverage was interrupted"
+
+
 def test_global_config_finding_limit_excludes_unreported_label():
     expected = [{"path": "deploy.yaml", "type": "rule", "subject": "operations",
                  "required_checks": ["config_scan"]}]
