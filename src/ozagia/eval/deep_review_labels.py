@@ -531,7 +531,13 @@ def score_report_findings(findings: Iterable[Mapping[str, Any]],
                     "read limit reached", "remaining files not checked",
                     "remaining documentation not checked",
                     "review budget", "no review budget remained",
-                    "collector failed", "collector crashed", "analysis failed")):
+                    "collector failed", "collector crashed", "analysis failed",
+                    "static python analysis unavailable:",
+                    "dependency analyzer unavailable:",
+                    "operations analyzer unavailable:",
+                    "documentation/api analyzer unavailable:",
+                    "data-structure analyzer unavailable:",
+                    "profile report analyzer unavailable:")):
                 return True
         return False
 

@@ -216,7 +216,15 @@ def test_one_missing_required_check_disables_multi_label_subject_metrics():
     assert score["unlabeled"] == 1
 
 
-@pytest.mark.parametrize("omission", ["collector failed", {"reason": "collector failed"}])
+@pytest.mark.parametrize("omission", [
+    "collector failed", {"reason": "collector failed"},
+    {"reason": "static Python analysis unavailable: RuntimeError: failure"},
+    {"reason": "dependency analyzer unavailable: RuntimeError: failure"},
+    {"reason": "operations analyzer unavailable: RuntimeError: failure"},
+    {"reason": "documentation/API analyzer unavailable: RuntimeError: failure"},
+    {"reason": "data-structure analyzer unavailable: RuntimeError: failure"},
+    {"reason": "profile report analyzer unavailable: RuntimeError: failure"},
+])
 def test_unscoped_omission_excludes_check_specific_label(omission):
     expected = [{"path": "a.py", "type": "rule", "subject": "security",
                  "required_checks": ["scan"]}]
