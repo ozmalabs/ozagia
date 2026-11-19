@@ -169,7 +169,7 @@ def _git(root: str | Path, args: Sequence[str], *,
     env.setdefault("LC_ALL", "C")
     try:
         return subprocess.run(
-            ["git", "-C", str(root), *args],
+            ["git", "-c", "core.fsmonitor=false", "-C", str(root), *args],
             capture_output=True, timeout=timeout, env=env,
             stdin=subprocess.DEVNULL, check=False,
         )

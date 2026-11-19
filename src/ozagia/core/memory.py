@@ -1121,7 +1121,8 @@ def build_index(root: str | Path = ROOT, out: str | Path = DEFAULT_DUMP,
     # snapshot can always be checked for staleness, and a git failure is
     # recorded instead of being swallowed.
     try:
-        rev = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+        rev = subprocess.run(["git", "-c", "core.fsmonitor=false",
+                             "-C", str(root), "rev-parse", "HEAD"],
                              capture_output=True, text=True, timeout=30,
                              check=False)
         if rev.returncode == 0 and rev.stdout.strip():
@@ -1136,7 +1137,8 @@ def build_index(root: str | Path = ROOT, out: str | Path = DEFAULT_DUMP,
     if include_git:
         try:
             proc = subprocess.run(
-                ["git", "-C", str(root), "log", f"-n{int(git_limit)}",
+                ["git", "-c", "core.fsmonitor=false", "-C", str(root),
+                 "log", f"-n{int(git_limit)}",
                  "--date=short", "--pretty=format:__COMMIT__%H%x09%ad%x09%s",
                  "--name-only"],
                 capture_output=True, text=True, timeout=60, check=False,
@@ -1336,7 +1338,8 @@ def _tree_digest(root: Path, *, dump: str | Path | None = None,
     excludes = _digest_excludes(root, dump)
     try:
         diff = subprocess.run(
-            ["git", "-C", str(root), "diff", "HEAD", "--no-color",
+            ["git", "-c", "core.fsmonitor=false", "-C", str(root),
+             "diff", "HEAD", "--no-color",
              "--no-ext-diff", "--no-textconv"],
             capture_output=True, timeout=60, check=False,
             stdin=subprocess.DEVNULL,
@@ -1390,9 +1393,11 @@ def _build_untracked_paths(root: Path, *, dump: str | Path | None,
     those directories using the build's pruned walk, then ask Git which files
     remain ignored (including nested negation rules).
     """
-    args = ["git", "-C", str(root), "ls-files", "-z", "--others",
+    args = ["git", "-c", "core.fsmonitor=false", "-C", str(root),
+            "ls-files", "-z", "--others",
             "--directory", "--exclude-standard", "--", *_digest_pathspecs()]
-    ignored_args = ["git", "-C", str(root), "ls-files", "-z", "--others",
+    ignored_args = ["git", "-c", "core.fsmonitor=false", "-C", str(root),
+                    "ls-files", "-z", "--others",
                     "--ignored", "--directory", "--exclude-standard", "--",
                     *_digest_pathspecs()]
     try:
@@ -1442,7 +1447,8 @@ def _build_untracked_paths(root: Path, *, dump: str | Path | None,
         ignored_expanded: set[str] = set()
         if expanded_ignored:
             check = subprocess.run(
-                ["git", "-C", str(root), "check-ignore", "--no-index",
+                ["git", "-c", "core.fsmonitor=false", "-C", str(root),
+                 "check-ignore", "--no-index",
                  "-z", "--stdin"],
                 input=b"\0".join(p.encode("utf-8", errors="surrogateescape")
                                   for p in sorted(expanded_ignored)) + b"\0",
@@ -2757,7 +2763,8 @@ class DevMemory:
         exclude = tuple(CHANGED_EXCLUDE) + ((srel + "/",) if srel else ())
         try:
             proc = subprocess.run(
-                ["git", "-C", root, "status", "--porcelain", "-uall"],
+                ["git", "-c", "core.fsmonitor=false", "-C", root,
+                 "status", "--porcelain", "-uall"],
                 capture_output=True, text=True, timeout=30, check=False)
         except (OSError, subprocess.SubprocessError) as e:
             return {"ok": False, "error": str(e),
@@ -2824,7 +2831,8 @@ class DevMemory:
         head: str | None = None
         try:
             proc = subprocess.run(
-                ["git", "-C", root, "rev-parse", "HEAD"],
+                ["git", "-c", "core.fsmonitor=false", "-C", root,
+                 "rev-parse", "HEAD"],
                 capture_output=True, text=True, timeout=10, check=False)
             if proc.returncode == 0 and proc.stdout.strip():
                 head = proc.stdout.strip()

@@ -60,7 +60,8 @@ def _git(root: Path, *args: str, stdin: bytes | None = None,
     # its optional index lock and writing that refresh back to the checkout.
     env = {**os.environ, "GIT_OPTIONAL_LOCKS": "0", "GIT_PAGER": "cat"}
     try:
-        proc = subprocess.run(["git", "-C", str(root), *args], input=stdin,
+        proc = subprocess.run(["git", "-c", "core.fsmonitor=false",
+                               "-C", str(root), *args], input=stdin,
                               capture_output=True, timeout=timeout, check=False,
                               env=env,
                               **({} if stdin is not None

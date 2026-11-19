@@ -7,6 +7,7 @@ exit status or a profile artifact.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -81,6 +82,34 @@ def test_deep_review_cli_exit_zero_writes_real_report(tmp_path, capsys):
                  "00-method-and-scope.md"):
         assert (out / name).is_file()
     assert manifest["output_hashes"]["findings.json"].startswith("sha256:")
+
+
+def test_deep_review_does_not_execute_repository_fsmonitor(tmp_path):
+    if os.name != "posix":
+        pytest.skip("fsmonitor marker fixture requires POSIX")
+    from ozagia.cli import main
+
+    root = tmp_path / "repo"
+    _init_repo(root)
+    (root / "app.py").write_text("value = 1\n", encoding="utf-8")
+    _commit(root)
+    from ozagia.core.memory import build_index
+    build_index(root, root / ".ozagia" / "graph.json")
+    marker = tmp_path / "fsmonitor-ran"
+    hook = tmp_path / "fsmonitor"
+    hook.write_text(
+        f"#!/bin/sh\nprintf ran > {marker}\nprintf token\\n\n",
+        encoding="utf-8")
+    hook.chmod(0o755)
+    subprocess.run(["git", "-C", str(root), "config", "core.fsmonitor",
+                    str(hook)], check=True, capture_output=True, text=True)
+    out = root / ".ozagia" / "reviews" / "fsmonitor"
+
+    code = main(["deep-review", "--root", str(root), "--out", str(out),
+                 "--profile", "security", "--budget-s", "10"])
+
+    assert code == 0
+    assert not marker.exists()
 
 
 def test_deep_review_cli_exit_one_when_fail_on_matches(tmp_path):

@@ -525,7 +525,8 @@ def _revision(root: Path):
     """Return the checked-out revision when git metadata is available."""
     try:
         result = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "--verify", "HEAD"],
+            ["git", "-c", "core.fsmonitor=false", "-C", str(root),
+             "rev-parse", "--verify", "HEAD"],
             capture_output=True, text=True, timeout=2, check=False,
         )
     except (OSError, subprocess.SubprocessError):
