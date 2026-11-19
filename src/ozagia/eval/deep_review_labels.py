@@ -334,7 +334,13 @@ def score_findings(findings: Iterable[Mapping[str, Any]],
     matched_expected: set[int] = set()
     matched_actual: set[tuple[str, str, str]] = set()
 
-    for index, label in enumerate(expected_rows):
+    # Reserve exact-subject predictions before matching subjectless labels.
+    # Otherwise label order can consume the sole prediction available to a
+    # more specific label even when a complete one-to-one matching exists.
+    order = sorted(range(len(expected_rows)),
+                   key=lambda index: expected_rows[index].get("subject") is None)
+    for index in order:
+        label = expected_rows[index]
         wanted_subject = label.get("subject")
         candidates = sorted(
             key for key in actual_rows

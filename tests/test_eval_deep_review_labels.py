@@ -299,3 +299,18 @@ def test_subjectless_label_counts_for_prediction_subject_precision():
     assert score["precision"] == 1.0
     assert score["subjects"]["complete"]["precision"] == 1.0
     assert score["subjects"]["unknown"]["recall"] == 1.0
+
+
+def test_subject_specific_labels_are_matched_before_subjectless_labels():
+    findings = [_finding("a", "a.py", "rule", "a"),
+                _finding("b", "a.py", "rule", "b")]
+    wildcard = {"path": "a.py", "type": "rule", "subject": None}
+    specific = {"path": "a.py", "type": "rule", "subject": "a"}
+
+    for labels in ([wildcard, specific], [specific, wildcard]):
+        score = score_findings(findings, labels, complete_subjects={"a", "b"})
+        assert score["true_positive"] == 2
+        assert score["false_positive"] == 0
+        assert score["false_negative"] == 0
+        assert score["precision"] == 1.0
+        assert score["recall"] == 1.0
