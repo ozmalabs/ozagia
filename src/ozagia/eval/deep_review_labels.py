@@ -587,11 +587,18 @@ def score_report_findings(findings: Iterable[Mapping[str, Any]],
     scored_expected = [item for item in expected_rows
                        if (str(item.get("subject") or "unknown") not in unavailable
                            and not (exclude_unscoped and item.get("subject") is None))]
+    # An excluded subjectless label could match a finding in any subject. We
+    # cannot classify unmatched predictions as false positives until its
+    # coverage is known, even if their subject was otherwise fully labelled.
+    scored_complete = set() if exclude_unscoped else complete - set(unavailable)
     score = score_findings(
         findings, scored_expected,
-        complete_subjects=complete - set(unavailable),
+        complete_subjects=scored_complete,
         all_subjects=all_subjects)
     score["unavailable_subjects"] = sorted(unavailable)
     score["coverage_reasons"] = dict(sorted(unavailable.items()))
     score["excluded_expected"] = len(expected_rows) - len(scored_expected)
+    if exclude_unscoped:
+        score["precision_coverage_reason"] = (
+            "subjectless labels were excluded; their prediction subjects are unknown")
     return score

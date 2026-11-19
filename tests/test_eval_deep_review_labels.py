@@ -173,6 +173,22 @@ def test_graph_dependent_label_is_not_scored_without_fresh_graph():
     assert score["coverage_reasons"]["architecture"] == "label requires a fresh graph"
 
 
+def test_excluded_subjectless_label_does_not_create_false_positives():
+    expected = [{"path": "a.py", "type": "rule", "subject": None}]
+    report = {"prioritization_graph": {"freshness": "fresh"},
+              "subjects": {"security": {"status": "complete", "checks": ["scan"],
+                                         "omitted": [], "skipped": [], "unknown": []}}}
+    score = score_report_findings(
+        [_finding("1", "a.py", "rule", "security")], expected,
+        complete_subjects={"security"}, report_manifest=report)
+
+    assert score["excluded_expected"] == 1
+    assert score["false_positive"] is None
+    assert score["precision"] is None
+    assert score["unlabeled"] == 1
+    assert "subjectless" in score["precision_coverage_reason"]
+
+
 def test_one_missing_required_check_disables_multi_label_subject_metrics():
     expected = [
         {"path": "a.py", "type": "rule_a", "subject": "subject-a",
