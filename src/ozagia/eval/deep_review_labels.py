@@ -489,6 +489,7 @@ def score_report_findings(findings: Iterable[Mapping[str, Any]],
     its predictions as verified precision evidence.
     """
     expected_rows = [dict(item) for item in expected]
+    finding_rows = list(findings)
     complete = {str(subject) for subject in complete_subjects}
     relevant_subjects = complete | {
         str(item["subject"]) for item in expected_rows if item.get("subject") is not None
@@ -501,6 +502,11 @@ def score_report_findings(findings: Iterable[Mapping[str, Any]],
         # rather than inventing an "unknown" section that can never be checked.
         relevant_subjects.update(str(subject) for subject in sections)
         relevant_subjects.update(str(subject) for subject in (all_subjects or []))
+        # Predictions can contain subjects absent from a malformed or partial
+        # manifest. They are still candidates for an unscoped label, so their
+        # missing coverage cannot be ignored when scoring that label.
+        relevant_subjects.update(str(item.get("subject") or "unknown")
+                                 for item in finding_rows if isinstance(item, Mapping))
     unavailable: dict[str, str] = {}
     truncation = report_manifest.get("truncation")
     truncation = truncation if isinstance(truncation, Mapping) else {}
@@ -656,7 +662,7 @@ def score_report_findings(findings: Iterable[Mapping[str, Any]],
     # coverage is known, even if their subject was otherwise fully labelled.
     scored_complete = set() if exclude_unscoped else complete - set(unavailable)
     score = score_findings(
-        findings, scored_expected,
+        finding_rows, scored_expected,
         complete_subjects=scored_complete,
         all_subjects=all_subjects)
     score["unavailable_subjects"] = sorted(unavailable)

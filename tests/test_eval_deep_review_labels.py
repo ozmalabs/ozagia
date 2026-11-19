@@ -204,6 +204,22 @@ def test_subjectless_label_is_scored_when_all_sections_are_covered():
     assert score["recall"] == 1.0
     assert score["precision"] == 1.0
 
+
+def test_subjectless_label_is_excluded_for_prediction_without_report_section():
+    expected = [{"path": "a.py", "type": "rule", "subject": None}]
+    report = {"prioritization_graph": {"freshness": "fresh"},
+              "subjects": {"security": {"status": "complete", "checks": ["scan"],
+                                        "omitted": [], "skipped": [], "unknown": []}}}
+    findings = (_finding("1", "a.py", "rule", "operations") for _ in range(1))
+
+    score = score_report_findings(findings, expected, complete_subjects={"security"},
+                                  report_manifest=report)
+
+    assert score["excluded_expected"] == 1
+    assert score["recall"] is None
+    assert score["precision"] is None
+    assert score["coverage_reasons"]["operations"] == "subject report is missing"
+
 def test_one_missing_required_check_disables_multi_label_subject_metrics():
     expected = [
         {"path": "a.py", "type": "rule_a", "subject": "subject-a",
