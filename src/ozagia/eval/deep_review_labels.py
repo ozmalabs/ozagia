@@ -483,7 +483,23 @@ def score_report_findings(findings: Iterable[Mapping[str, Any]],
             reason = str(reason).lower()
             if any(marker in reason for marker in
                    ("budget exhausted", "timed out", "time limit",
-                    "resource admission refused")):
+                    "resource admission refused", "file limit reached",
+                    "read limit reached", "remaining files not checked",
+                    "remaining documentation not checked",
+                    "review budget", "no review budget remained")):
+                return True
+        return False
+
+    def label_path_omitted(label: Mapping[str, Any], row: Mapping[str, Any]) -> bool:
+        path = label.get("path")
+        if not isinstance(path, str) or not path:
+            return False
+        for field in ("omitted", "skipped", "unknown"):
+            value = row.get(field) or []
+            values = value if isinstance(value, list) else [value]
+            if any(isinstance(item, Mapping)
+                   and (item.get("path") == path or item.get("file") == path)
+                   for item in values):
                 return True
         return False
 
@@ -503,6 +519,8 @@ def score_report_findings(findings: Iterable[Mapping[str, Any]],
             missing = sorted(set(required) - set(checks))
             if missing:
                 return "required checks did not run: " + ", ".join(missing)
+            if label_path_omitted(label or {}, row):
+                return "labeled source path was omitted"
             if (label or {}).get("requires_graph") and not graph_is_fresh():
                 return "label requires a fresh graph"
             if has_interruption_omission(row):

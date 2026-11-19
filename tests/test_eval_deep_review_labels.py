@@ -199,6 +199,24 @@ def test_one_missing_required_check_disables_multi_label_subject_metrics():
     assert score["unlabeled"] == 1
 
 
+def test_labeled_path_omission_disables_recall_even_when_check_ran():
+    expected = [{"path": "src/target.py", "type": "rule", "subject": "performance",
+                 "required_checks": ["python_ast_static_checks"]}]
+    report = {"subjects": {"performance": {
+        "status": "partial", "checks": ["python_ast_static_checks"],
+        "omitted": [{"path": "src/target.py", "reason": "source exceeds read limit"}],
+        "skipped": [], "unknown": [],
+    }}}
+
+    score = score_report_findings(
+        [], expected, complete_subjects={"performance"}, report_manifest=report)
+
+    assert score["expected"] == 0
+    assert score["excluded_expected"] == 1
+    assert score["recall"] is None
+    assert score["coverage_reasons"]["performance"] == "labeled source path was omitted"
+
+
 @pytest.mark.parametrize("truncation", [
     {"normalization_findings_omitted": 1},
     {"max_findings": {"truncated": True}},
