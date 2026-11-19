@@ -278,3 +278,32 @@ def test_cargo_inventory_reports_possible_package_truncation(tmp_path):
     assert len(lock["packages"]) == 500
     assert any("package inventory may be truncated" in reason
                for reason in lock["omissions"])
+
+
+def test_cargo_local_advisories_require_crates_io_provenance(tmp_path):
+    (tmp_path / "Cargo.lock").write_text(
+        'version = 3\n'
+        '[[package]]\nname = "registry-demo"\nversion = "1.2.3"\n'
+        'source = "registry+https://github.com/rust-lang/crates.io-index"\n'
+        '[[package]]\nname = "fork-demo"\nversion = "1.2.3"\n'
+        'source = "git+https://example.com/fork#abc"\n'
+        '[[package]]\nname = "workspace-demo"\nversion = "1.2.3"\n'
+        '[[package]]\nname = "private-demo"\nversion = "1.2.3"\n'
+        'source = "registry+https://example.com/private"\n', encoding="utf-8")
+    advisories = {"schema": "ozagia.local_advisories.v1", "advisories": [
+        {"id": f"CARGO-{i}", "ecosystem": "rust", "package": name,
+         "affected_versions": ["1.2.3"]}
+        for i, name in enumerate(("registry-demo", "fork-demo", "workspace-demo", "private-demo"))
+    ]}
+
+    result = analyze(tmp_path, local_advisories=advisories)
+
+    matches = [item for item in result["findings"]
+               if item["type"] == "local_advisory_exact_version_match"]
+    assert [item["dependency"] for item in matches] == ["registry-demo"]
+    assert any("3 Cargo pins were excluded" in item["reason"]
+               for item in result["not_checked"])
+    packages = result["inventory"]["lockfiles"][0]["packages"]
+    assert {item["name"]: item["provenance"] for item in packages} == {
+        "registry-demo": "crates-io", "fork-demo": "git",
+        "workspace-demo": "workspace-or-path", "private-demo": "other-or-unknown-registry"}

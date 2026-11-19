@@ -200,7 +200,10 @@ rows contain `id`, `ecosystem`, `package`, and either
 `{"events":[{"introduced":"1.2.0"},{"fixed":"1.4.0"}]}` sequences
 (optional `severity` and `summary`). It is never fetched or refreshed.
 Matching uses parsed lockfile pins only; manifest ranges are never evaluated.
-Range events are supported only for Node and Rust strict SemVer, and Go
+Cargo lock entries retain a coarse source classification; advisory matching
+excludes Git, workspace/path and non-crates.io registry entries because the
+same name and version can identify different packages. Range events are
+supported only for Node and Rust strict SemVer, and Go
 `v`-prefixed strict SemVer (including pseudo-versions). Introduced is inclusive,
 fixed is exclusive, `last_affected` is inclusive, and an open introduced event
 has no upper bound. A `last_affected` ceiling is a last known affected version,

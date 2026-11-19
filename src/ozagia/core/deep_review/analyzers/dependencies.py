@@ -550,8 +550,19 @@ def _lock_inventory_raw(rel: str, text: str) -> dict[str, Any] | None:
             if isinstance(packages, list):
                 for package in packages:
                     if isinstance(package, dict) and isinstance(package.get("name"), str):
+                        source = package.get("source")
+                        if isinstance(source, str) and source in {"registry+https://github.com/rust-lang/crates.io-index",
+                                      "sparse+https://index.crates.io/"}:
+                            provenance = "crates-io"
+                        elif isinstance(source, str) and source.startswith("git+"):
+                            provenance = "git"
+                        elif source is None:
+                            provenance = "workspace-or-path"
+                        else:
+                            provenance = "other-or-unknown-registry"
                         row = {"name": package["name"],
-                               "version": package.get("version")}
+                               "version": package.get("version"),
+                               "provenance": provenance}
                         license_text = _license_value(package.get("license"))
                         if license_text:
                             row["license"] = license_text

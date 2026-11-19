@@ -363,6 +363,7 @@ def match_local_advisories(
     lockfiles = inventory.get("lockfiles")
     pins: dict[tuple[str, str, str], set[str]] = {}
     composer_provenance_skipped = 0
+    cargo_provenance_skipped = 0
     maven_provenance_unknown = 0
     maven_unknown_pins: set[tuple[str, str, str]] = set()
     if isinstance(lockfiles, list):
@@ -381,6 +382,12 @@ def match_local_advisories(
                 if not isinstance(row, Mapping):
                     continue
                 name, version = row.get("name"), row.get("version")
+                # Cargo package names and versions are not globally unique
+                # across registries, Git forks, and local workspace sources.
+                if (ecosystem == "rust" and row.get("provenance") is not None
+                        and row.get("provenance") != "crates-io"):
+                    cargo_provenance_skipped += 1
+                    continue
                 if ecosystem == "composer" and row.get("provenance") == "path":
                     composer_provenance_skipped += 1
                     continue
@@ -560,6 +567,9 @@ def match_local_advisories(
             + (f" {composer_provenance_skipped} Composer pins were excluded because "
                "their repository provenance is custom, missing, or path-based."
                if composer_provenance_skipped else "")
+            + (f" {cargo_provenance_skipped} Cargo pins were excluded because their "
+               "source is not known to be crates.io."
+               if cargo_provenance_skipped else "")
             + (f" {maven_provenance_unknown} Gradle lockfile pins use exact Maven "
                "coordinates, but repository origin is not recorded in the lockfile."
                if maven_provenance_unknown else "")),
