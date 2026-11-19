@@ -55,9 +55,14 @@ _SHA_RE = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
 
 def _git(root: Path, *args: str, stdin: bytes | None = None,
          timeout: float = GIT_TIMEOUT_S) -> bytes | None:
+    # `git status` may opportunistically refresh the target index. Reviews and
+    # fingerprints only observe repository state, so prevent Git from taking
+    # its optional index lock and writing that refresh back to the checkout.
+    env = {**os.environ, "GIT_OPTIONAL_LOCKS": "0", "GIT_PAGER": "cat"}
     try:
         proc = subprocess.run(["git", "-C", str(root), *args], input=stdin,
                               capture_output=True, timeout=timeout, check=False,
+                              env=env,
                               **({} if stdin is not None
                                  else {"stdin": subprocess.DEVNULL}))
     except (OSError, subprocess.SubprocessError):
