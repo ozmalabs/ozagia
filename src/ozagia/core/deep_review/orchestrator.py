@@ -13,6 +13,7 @@ import stat
 from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
 from typing import Any
+from ozagia.core.git_safety import safe_git_env
 from . import bench as bench_runner, collect
 from . import baseline as baseline_loader
 from .contract import (SUBJECTS, canonical_json, cross_subject_identity,
@@ -529,11 +530,13 @@ def _revision(root: Path):
             ["git", "-c", "core.fsmonitor=false", "-C", str(root),
              "rev-parse", "--verify", "HEAD"],
             capture_output=True, text=True, timeout=2, check=False,
+            env=safe_git_env(), stdin=subprocess.DEVNULL,
         )
     except (OSError, subprocess.SubprocessError):
         return None
     value = result.stdout.strip()
-    return value if result.returncode == 0 and len(value) == 40 else None
+    return value if result.returncode == 0 and re.fullmatch(
+        r"(?:[0-9a-f]{40}|[0-9a-f]{64})", value) else None
 
 
 def _tool_versions():
