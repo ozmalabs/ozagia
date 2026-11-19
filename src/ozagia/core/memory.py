@@ -71,6 +71,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 from ozagia.config import load_project_config, repo_root, state_path, state_rel
+from ozagia.core import git_safety as GS
 from ozagia.core.keys import format_key, parse_key
 
 ROOT = repo_root()
@@ -1337,14 +1338,9 @@ def _tree_digest(root: Path, *, dump: str | Path | None = None,
             return None, f"adapter path escapes repository root: {rel!r}"
     excludes = _digest_excludes(root, dump)
     try:
-        diff = subprocess.run(
-            ["git", "-c", "core.fsmonitor=false", "-C", str(root),
-             "diff", "HEAD", "--no-color",
-             "--no-ext-diff", "--no-textconv"],
-            capture_output=True, timeout=60, check=False,
-            stdin=subprocess.DEVNULL,
-            env={**os.environ, "GIT_OPTIONAL_LOCKS": "0",
-                 "GIT_PAGER": "cat"})
+        diff = GS.run_git(
+            root, ["diff", "HEAD", "--no-color", "--no-ext-diff",
+                   "--no-textconv"], timeout=60)
         paths = _build_untracked_paths(root, dump=dump,
                                        include_docs=include_docs)
         if paths is None:
@@ -1355,7 +1351,7 @@ def _tree_digest(root: Path, *, dump: str | Path | None = None,
             from ozagia.adapters import registry
             watch_globs = registry(root).watch_globs
         paths = list(paths) + watched_files(root, watch_globs)
-    except (OSError, subprocess.SubprocessError) as e:
+    except (OSError, subprocess.SubprocessError, GS.UnsafeGitConfig) as e:
         return None, str(e)
     if diff.returncode != 0:
         err = (diff.stderr or b"git failed").decode(
@@ -2762,19 +2758,19 @@ class DevMemory:
         srel = state_rel(root)
         exclude = tuple(CHANGED_EXCLUDE) + ((srel + "/",) if srel else ())
         try:
-            proc = subprocess.run(
-                ["git", "-c", "core.fsmonitor=false", "-C", root,
-                 "status", "--porcelain", "-uall"],
-                capture_output=True, text=True, timeout=30, check=False)
-        except (OSError, subprocess.SubprocessError) as e:
+            proc = GS.run_git(root, ["status", "--porcelain", "-uall"],
+                              timeout=30)
+        except (OSError, subprocess.SubprocessError, GS.UnsafeGitConfig) as e:
             return {"ok": False, "error": str(e),
                     "snapshot": self.staleness()}
         if proc.returncode != 0:
             return {"ok": False,
-                    "error": (proc.stderr or "git status failed").strip(),
+                    "error": (proc.stderr or b"git status failed").decode(
+                        "utf-8", errors="replace").strip(),
                     "snapshot": self.staleness()}
         files = []
-        for line in (proc.stdout or "").splitlines():
+        for line in (proc.stdout or b"").decode(
+                "utf-8", errors="replace").splitlines():
             if len(line) < 4:
                 continue
             status = line[:2].strip() or "?"

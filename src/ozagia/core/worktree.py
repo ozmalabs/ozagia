@@ -6,7 +6,6 @@ deletes a worktree. Mutating actions are a later, preview-first layer.
 """
 from __future__ import annotations
 
-import os
 import re
 import subprocess
 from datetime import datetime, timezone
@@ -16,6 +15,7 @@ from typing import Any, Mapping, Sequence
 import tomllib
 
 from ozagia.core.resources import disk_usage
+from ozagia.core import git_safety as GS
 
 SCHEMA = 1
 GIT_TIMEOUT = 20
@@ -31,17 +31,19 @@ def _now() -> str:
 
 
 def _git(path: str | Path, args: Sequence[str], *, timeout: int = GIT_TIMEOUT) -> subprocess.CompletedProcess[str]:
-    env = dict(os.environ)
-    env["GIT_OPTIONAL_LOCKS"] = "0"
-    env.setdefault("LC_ALL", "C")
+    command = GS.git_subcommand(args)
     try:
-        return subprocess.run(
-            ["git", "-C", str(path), *args],
-            capture_output=True, text=True, errors="replace", timeout=timeout,
-            env=env, stdin=subprocess.DEVNULL, check=False,
-        )
+        result = GS.run_git(path, args, timeout=timeout)
+        if isinstance(result.stdout, bytes):
+            result = subprocess.CompletedProcess(
+                result.args, result.returncode,
+                result.stdout.decode("utf-8", errors="replace"),
+                result.stderr.decode("utf-8", errors="replace"))
     except (OSError, subprocess.SubprocessError) as exc:
         raise WorktreeError(f"git {' '.join(args)} could not run: {exc}") from exc
+    except GS.UnsafeGitConfig as exc:
+        raise WorktreeError(f"refusing git {command}: {exc}") from exc
+    return result
 
 
 def _git_text(path: str | Path, args: Sequence[str], *, timeout: int = GIT_TIMEOUT) -> str | None:

@@ -89,6 +89,7 @@ import time
 from pathlib import Path
 from typing import Any, Iterable
 
+from ozagia.core import git_safety as GS
 from ozagia.core import adapter_state as AS
 from ozagia.core import memory as M
 from ozagia.core.delta import GraphDelta
@@ -993,16 +994,16 @@ def _git_status(root: Path) -> list[tuple[str, str]]:
     """(XY status code, path) for each path `git status` reports; a rename
     gives both paths."""
     try:
-        proc = subprocess.run(
-            ["git", "-C", str(root), "status", "--porcelain", "-uall"],
-            capture_output=True, text=True, timeout=30, check=False)
-    except (OSError, subprocess.SubprocessError):
+        proc = GS.run_git(root, ["status", "--porcelain", "-uall"],
+                          timeout=30)
+    except (OSError, subprocess.SubprocessError, GS.UnsafeGitConfig):
         return []
     if proc.returncode != 0:
         return []
     out: list[tuple[str, str]] = []
     seen: set[str] = set()
-    for line in (proc.stdout or "").splitlines():
+    for line in (proc.stdout or b"").decode(
+            "utf-8", errors="replace").splitlines():
         if len(line) < 4:
             continue
         for path in line[3:].strip().split(" -> "):

@@ -33,6 +33,7 @@ from ozagia.core import ocelot_code
 from ozagia.core import resources
 from ozagia.core import testing as test_plans
 from ozagia.core import worktree as W
+from ozagia.core import git_safety as GS
 
 SCHEMA = 1
 PACKET_SCHEMA = "ozagia.code_review.packet.v1"
@@ -163,19 +164,19 @@ class PreflightError(CodeReviewError):
 
 def _git(root: str | Path, args: Sequence[str], *,
          timeout: int = GIT_TIMEOUT) -> subprocess.CompletedProcess[bytes]:
-    env = dict(os.environ)
-    env["GIT_OPTIONAL_LOCKS"] = "0"
-    env["GIT_PAGER"] = "cat"
-    env.setdefault("LC_ALL", "C")
+    # Git inherits caller environment configuration, which can redirect the
+    # repository/index or inject global config. Review must operate on the
+    # supplied worktree with host-safe, empty global/system config.
+    command = GS.git_subcommand(args)
     try:
-        return subprocess.run(
-            ["git", "-c", "core.fsmonitor=false", "-C", str(root), *args],
-            capture_output=True, timeout=timeout, env=env,
-            stdin=subprocess.DEVNULL, check=False,
-        )
+        result = GS.run_git(root, args, timeout=timeout)
     except (OSError, subprocess.SubprocessError) as exc:
         raise CodeReviewError(
             f"git {' '.join(args)} could not run: {exc}") from exc
+    except GS.UnsafeGitConfig as exc:
+        raise CodeReviewError(
+            f"refusing git {command}: {exc}") from exc
+    return result
 
 
 def _decode(data: bytes) -> str:

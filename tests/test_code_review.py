@@ -559,6 +559,40 @@ def test_range_and_root_errors(review_repo):
             head=review_repo["base"])
 
 
+def test_review_refuses_configured_process_filter_without_executing_it(tmp_path):
+    repo = _init_repo(tmp_path / "filter-review")
+    base = _commit(repo, "initial")
+    (repo / ".gitattributes").write_text("*.txt filter=marker\n", encoding="utf-8")
+    (repo / "sample.txt").write_text("original\n", encoding="utf-8")
+    _commit(repo, "add filter attribute")
+
+    marker = tmp_path / "filter-ran"
+    process = tmp_path / "clean-filter.sh"
+    process.write_text(
+        "#!/bin/sh\n"
+        f"printf invoked > '{marker}'\n"
+        "exit 0\n", encoding="utf-8")
+    process.chmod(0o755)
+    _git(repo, "config", "filter.marker.process", str(process))
+    (repo / "sample.txt").write_text("changed after filter setup\n",
+                                     encoding="utf-8")
+
+    report = R.review_range(repo, f"{base}..HEAD")
+    assert report["range"]["spec"] == f"{base}..HEAD"
+    assert not marker.exists()
+
+
+def test_review_refuses_local_git_config_includes_before_status(tmp_path):
+    repo = _init_repo(tmp_path / "filter-include")
+    external = tmp_path / "included.gitconfig"
+    external.write_text('[filter "marker"]\n process = /tmp/should-not-run\n',
+                        encoding="utf-8")
+    _git(repo, "config", "include.path", str(external))
+
+    result = R._git(repo, ["status", "--porcelain=v2"])
+    assert result.returncode == 0
+
+
 def test_wrong_branch_refuses(review_repo):
     (review_repo["repo"] / "ozagia" / "worktrees.toml").write_text(
         "[worktrees.review]\n"
