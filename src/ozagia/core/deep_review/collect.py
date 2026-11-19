@@ -895,9 +895,10 @@ def collect(root, *, profile="full", budget_s=60, index=False,
             if operations_result["checked"]:
                 current["checked"].append("operational_file_inventory")
             inventory_checks = operations_result["inventory"].get("checks", [])
-            if ("static_iac_config_candidates" in inventory_checks
-                    and "static_iac_config_candidates" not in current["checked"]):
-                current["checked"].append("static_iac_config_candidates")
+            for check in ("runbook_links_and_topics", "observability_declarations",
+                          "static_iac_config_candidates"):
+                if check in inventory_checks and check not in current["checked"]:
+                    current["checked"].append(check)
             current["not_checked"] = (list(current.get("not_checked", []))
                                        + operations_result["not_checked"])
             current["inventory"] = operations_result["inventory"]

@@ -139,6 +139,7 @@ def test_operations_coverage_merges_into_ops_and_routes_findings(
 
     assert section["checked"] == ["ops.tracked_sources",
                                   "operational_file_inventory",
+                                  "observability_declarations",
                                   "static_iac_config_candidates"]
     assert section["not_checked"] == [
         {"reason": "deployment graph unavailable"},

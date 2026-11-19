@@ -734,6 +734,7 @@ def test_operations_inventory_is_collected_and_merged(tmp_path, monkeypatch):
     packet = collect(tmp_path, profile="operations", budget_s=5)
     section = packet["sections"]["operations"]
     assert section["checked"] == ["ops.tracked_sources", "operational_file_inventory",
+                                  "observability_declarations",
                                   "static_iac_config_candidates"]
     assert section["not_checked"] == [
         {"reason": "deployment graph unavailable"},
@@ -758,3 +759,16 @@ def test_kubernetes_host_port_uses_precise_pointer_and_literal_integer(tmp_path)
     }
     assert all(item["truth_assessed"] is False for item in findings)
     assert all("depends on" in item["summary"] for item in findings)
+
+
+def test_runbook_coverage_is_propagated_to_collected_packet(tmp_path, monkeypatch):
+    from ozagia.core.deep_review.collect import collect
+
+    (tmp_path / "runbook.md").write_text("Restart the service.\n", encoding="utf-8")
+    monkeypatch.setattr("ozagia.core.deep_review.collect.repo_review.review_repo",
+                        lambda *a, **k: {"findings": [], "sections": {},
+                                         "graph": {"freshness": "unknown"}})
+    packet = collect(tmp_path, profile="operations", budget_s=5)
+    checks = packet["sections"]["ops"]["checked"]
+    assert "runbook_links_and_topics" in checks
+    assert "observability_declarations" in checks
