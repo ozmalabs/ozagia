@@ -58,15 +58,13 @@ _METRIC_SPECS = {
     },
     "data-structures": {
         "data_inventory": {"files_seen": "Files seen",
-                           "bytes_read": "Bytes read",
-                           "duration_s": "Analysis seconds"},
+                           "bytes_read": "Bytes read"},
         "data_inventory_counts": {"models": "Models",
                                   "schema_declarations": "Schema declarations",
                                   "documents": "Structured documents"},
     },
     "dependencies": {
-        "inventory": {"files_seen": "Files seen", "bytes_read": "Bytes read",
-                      "duration_s": "Analysis seconds"},
+        "inventory": {"files_seen": "Files seen", "bytes_read": "Bytes read"},
         "inventory_counts": {"manifests": "Manifests",
                              "lockfiles": "Lockfiles",
                              "version_conflicts": "Version conflicts",

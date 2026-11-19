@@ -99,7 +99,7 @@ def test_subject_metrics_are_allowlisted_bounded_and_path_free():
     assert "## Metrics" in report
     assert "| Files seen | 12 |" in report
     assert "| Bytes read | 4096 |" in report
-    assert "| Analysis seconds | 0.5 |" in report
+    assert "Analysis seconds" not in report
     assert "| Models | 1 |" in report
     assert "| Structured documents | 1 |" in report
     assert "secret" not in report
