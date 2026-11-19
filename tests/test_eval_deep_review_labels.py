@@ -224,6 +224,10 @@ def test_one_missing_required_check_disables_multi_label_subject_metrics():
     {"reason": "documentation/API analyzer unavailable: RuntimeError: failure"},
     {"reason": "data-structure analyzer unavailable: RuntimeError: failure"},
     {"reason": "profile report analyzer unavailable: RuntimeError: failure"},
+    {"reason": "security scan unavailable: RuntimeError: failure"},
+    {"reason": "trust-boundary scan unavailable: RuntimeError: failure"},
+    {"reason": "repository review unavailable: RuntimeError: failure"},
+    {"reason": "repository preflight unavailable: RuntimeError: failure"},
 ])
 def test_unscoped_omission_excludes_check_specific_label(omission):
     expected = [{"path": "a.py", "type": "rule", "subject": "security",
