@@ -207,7 +207,9 @@ def _safe_subprocess_call(function, args, kwargs, timeout):
                 _signal_safe_worker(process, getattr(signal, "SIGKILL", signal.SIGTERM),
                                     force=True)
                 process.wait(timeout=1.0)
-            raise TimeoutError(f"collector timed out after {timeout:g} seconds") from exc
+            # Do not include the micro-variant per-worker timeout (which is
+            # derived from remaining shared budget) in rendered coverage.
+            raise TimeoutError("collector timed out at its assigned time limit") from exc
         reader.join(1.0)
         if reader.is_alive():
             raise RuntimeError("isolated analyzer output reader did not finish")
@@ -379,11 +381,11 @@ def _bounded_call(function, *args, timeout, start_method=None, **kwargs):
 
 
 def _parallel_analyzers(tasks, *, started: float, budget_s: float):
-    """Run independent analyzers concurrently in spawn-isolated processes.
+    """Run independent analyzers concurrently in isolated Python subprocesses.
 
-    Threads only supervise process creation and completion. Each analyzer is
-    executed in a fresh spawned process, so no process is forked from a worker
-    thread. Results are returned in task order regardless of completion order.
+    Threads supervise process creation and completion. Each production
+    analyzer is executed in a fresh ``python -I -B`` subprocess; results are
+    returned in task order regardless of completion order.
     """
     if not tasks:
         return {}
@@ -409,7 +411,7 @@ def _parallel_analyzers(tasks, *, started: float, budget_s: float):
                 function, *args, timeout=min(remaining, _ANALYZER_TIMEOUT_S),
                 start_method=method, **options)
             return {key: (True, value)}
-        except BaseException as exc:
+        except Exception as exc:
             return {key: (False, exc)}
 
     def invoke(task):
@@ -432,7 +434,7 @@ def _parallel_analyzers(tasks, *, started: float, budget_s: float):
         for key, future in futures:
             try:
                 results[key] = (True, future.result())
-            except BaseException as exc:  # collector failure is coverage data
+            except Exception as exc:  # collector failure is coverage data
                 results[key] = (False, exc)
     return results
 

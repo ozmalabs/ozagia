@@ -152,7 +152,29 @@ def test_deep_review_cli_index_refreshes_analyzer_profile_graph(tmp_path):
     assert manifest["profile"] == "performance"
     assert manifest["index"] is True
     assert manifest["graph"]["indexed"]["ok"] is True
+    assert manifest["graph"]["freshness"] == "fresh"
     assert "python_ast_static_checks" in manifest["subjects"]["performance"]["checks"]
+
+    # A dirty working tree makes the committed graph stale. Deep review may
+    # still run static checks, but graph prioritization must not use that old
+    # snapshot.
+    (root / "app.py").write_text(
+        "def nested(items):\n"
+        "    for x in items:\n"
+        "        for y in items:\n"
+        "            print(x, y)\n", encoding="utf-8")
+    stale_out = root / ".ozagia" / "reviews" / "stale-graph"
+    code = main(["deep-review", "--root", str(root), "--out", str(stale_out),
+                 "--profile", "performance", "--budget-s", "30", "--json"])
+
+    assert code == 0
+    stale_manifest = json.loads(
+        (stale_out / "manifest.json").read_text(encoding="utf-8"))
+    assert stale_manifest["graph"]["freshness"] == "stale"
+    assert stale_manifest["prioritization_graph"]["freshness"] == "stale"
+    assert all(finding["priority"]["blast_radius"]["direct_symbols"] == 0
+               for finding in json.loads(
+                   (stale_out / "findings.json").read_text(encoding="utf-8")))
 
 
 def test_deep_review_cli_profile_report_and_json(tmp_path, capsys):

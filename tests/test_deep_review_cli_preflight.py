@@ -171,6 +171,38 @@ def test_parallel_analyzer_budget_timeout_and_failure_are_isolated(
     assert elapsed < 3.5
 
 
+def test_parallel_analyzers_share_budget_across_queued_lanes(tmp_path, monkeypatch):
+    import ozagia.core.deep_review.collect as collector
+
+    barrier = threading.Barrier(6)
+    assigned = {}
+
+    def bounded_call(function, *args, timeout, start_method=None, **kwargs):
+        name = args[1]
+        assigned[name] = timeout
+        if name != "worker-6":
+            barrier.wait(timeout=2)
+        if timeout < args[2]:
+            raise TimeoutError("shared review deadline reached")
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(collector, "_bounded_call", bounded_call)
+    tasks = [(f"worker-{index}", _parallel_probe,
+              (tmp_path, f"worker-{index}", 0.3), {})
+             for index in range(7)]
+    # Simulate half of the overall budget already consumed by preflight and
+    # the serial repository/security collection phases.
+    started = time.monotonic() - 0.5
+    results = collector._parallel_analyzers(
+        tasks, started=started, budget_s=1.0)
+
+    assert all(results[f"worker-{index}"][0] for index in range(6))
+    assert results["worker-6"][0] is False
+    assert isinstance(results["worker-6"][1], TimeoutError)
+    assert all(assigned[f"worker-{index}"] > 0.35 for index in range(6))
+    assert 0 < assigned["worker-6"] < 0.3
+
+
 def test_parallel_failure_merges_explicit_coverage_omission(tmp_path, monkeypatch):
     import ozagia.core.deep_review.collect as collector
 
@@ -251,7 +283,8 @@ def test_safe_worker_timeout_bounds_a_child_that_never_reads_stdin(
     monkeypatch.setattr(collector.sys, "executable", str(fake_python))
     started = time.monotonic()
 
-    with pytest.raises(TimeoutError, match="timed out"):
+    with pytest.raises(TimeoutError,
+                       match="collector timed out at its assigned time limit"):
         collector._safe_subprocess_call(
             data.analyze, ("x" * 2_000_000,), {}, timeout=0.1)
 
