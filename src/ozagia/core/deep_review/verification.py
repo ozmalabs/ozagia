@@ -112,16 +112,94 @@ def _has_mutable_default(function: ast.FunctionDef | ast.AsyncFunctionDef) -> bo
                for default in args.kw_defaults)
 
 
+class _ScopeBindings(ast.NodeVisitor):
+    """Conservatively count bindings in one lexical scope, including branches."""
+
+    def __init__(self) -> None:
+        self.counts: dict[str, int] = {}
+        self.wildcard_import = False
+
+    def _add(self, name: str) -> None:
+        self.counts[name] = self.counts.get(name, 0) + 1
+
+    def visit_Name(self, node: ast.Name) -> None:
+        if isinstance(node.ctx, (ast.Store, ast.Del)):
+            self._add(node.id)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._add(node.name)
+        for expression in (*node.decorator_list, *node.args.defaults,
+                           *(item for item in node.args.kw_defaults if item is not None)):
+            self.visit(expression)
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self._add(node.name)
+        for expression in (*node.decorator_list, *node.bases,
+                           *(keyword.value for keyword in node.keywords)):
+            self.visit(expression)
+
+    def visit_Import(self, node: ast.Import) -> None:
+        for alias in node.names:
+            self._add(alias.asname or alias.name.split('.')[0])
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        for alias in node.names:
+            if alias.name == '*':
+                self.wildcard_import = True
+            else:
+                self._add(alias.asname or alias.name)
+
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
+        if node.name:
+            self._add(node.name)
+        self.generic_visit(node)
+
+    def visit_MatchAs(self, node: ast.MatchAs) -> None:
+        if node.name:
+            self._add(node.name)
+        self.generic_visit(node)
+
+    def visit_MatchStar(self, node: ast.MatchStar) -> None:
+        if node.name:
+            self._add(node.name)
+
+    def visit_MatchMapping(self, node: ast.MatchMapping) -> None:
+        if node.rest:
+            self._add(node.rest)
+        self.generic_visit(node)
+
+
+def _scope_bindings(body: list[ast.stmt]) -> _ScopeBindings:
+    bindings = _ScopeBindings()
+    for node in body:
+        bindings.visit(node)
+    return bindings
+
+
 def _top_level_functions(tree: ast.Module) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
-    """Index module functions and direct class methods; don't infer nested scopes."""
+    """Index only unambiguous module functions and direct class methods."""
     found: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
+    definitions = _scope_bindings(tree.body)
+    if definitions.wildcard_import:
+        return found
     for node in tree.body:
+        if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                and definitions.counts[node.name] != 1):
+            continue
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             found[node.name] = node
         elif isinstance(node, ast.ClassDef):
+            class_bindings = _scope_bindings(node.body)
+            methods: dict[str, list[ast.FunctionDef | ast.AsyncFunctionDef]] = {}
             for child in node.body:
                 if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    found[f"{node.name}.{child.name}"] = child
+                    methods.setdefault(child.name, []).append(child)
+            for name, matches in methods.items():
+                if (len(matches) == 1 and not class_bindings.wildcard_import
+                        and class_bindings.counts[name] == 1):
+                    found[f"{node.name}.{name}"] = matches[0]
     return found
 
 

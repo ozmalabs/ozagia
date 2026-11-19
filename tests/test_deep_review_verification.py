@@ -104,6 +104,36 @@ def test_python_mutable_default_checker_does_not_trust_shadowable_constructor_na
     assert result["state"] == "unverified"
 
 
+def test_python_mutable_default_rejects_ambiguous_repeated_definitions(tmp_path):
+    cases = [
+        (b"class C:\n    def f(self, x=[]): pass\nclass C:\n    pass\n", "C.f"),
+        (b"class C:\n    def f(self, x=[]): pass\n    def f(self, x=[]): pass\n", "C.f"),
+        (b"def f(x=[]): pass\ndef f(x=[]): pass\n", "f"),
+        (b"class C:\n    def f(self, x=[]): pass\ndef C(): pass\n", "C.f"),
+    ]
+    for source, symbol in cases:
+        (tmp_path / "mod.py").write_bytes(source)
+        result = verify_python_mutable_default(
+            tmp_path, _assertion("mod.py", symbol, source))
+        assert result["state"] == "unverified"
+
+
+def test_python_mutable_default_rejects_rebound_names_in_each_scope(tmp_path):
+    cases = [
+        (b"def f(x=[]): pass\nf = None\n", "f"),
+        (b"def f(x=[]): pass\nimport os as f\n", "f"),
+        (b"def f(x=[]): pass\nif True:\n    f = None\n", "f"),
+        (b"def f(x=[]): pass\nfrom other import *\n", "f"),
+        (b"class C:\n    def f(self, x=[]): pass\nC = None\n", "C.f"),
+        (b"class C:\n    def f(self, x=[]): pass\n    f = None\n", "C.f"),
+        (b"class C:\n    def f(self, x=[]): pass\n    import os as f\n", "C.f"),
+    ]
+    for source, symbol in cases:
+        (tmp_path / "mod.py").write_bytes(source)
+        assert verify_python_mutable_default(
+            tmp_path, _assertion("mod.py", symbol, source))["state"] == "unverified"
+
+
 def test_python_source_hash_rejects_nul_path(tmp_path):
     from ozagia.core.deep_review.verification import python_source_sha256
 
