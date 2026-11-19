@@ -534,7 +534,7 @@ def score_report_findings(findings: Iterable[Mapping[str, Any]],
                 reason = str(reason).lower()
                 if any(marker in reason for marker in
                    ("budget exhausted", "timed out", "time limit",
-                    "resource admission refused", "file limit reached",
+                    "resource admission refused", "limit reached", "file limit reached",
                     "file-count limit reached", "finding limit reached",
                     "read limit reached", "remaining files not checked",
                     "remaining documentation not checked",

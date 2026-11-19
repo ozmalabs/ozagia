@@ -259,6 +259,25 @@ def test_unscoped_omission_excludes_check_specific_label(omission):
     assert score["coverage_reasons"]["security"] == "required coverage was interrupted"
 
 
+@pytest.mark.parametrize("reason", [
+    "runbook link limit reached (500)",
+    "license declaration limit reached",
+    "dependency version conflict limit reached (500)",
+    "duplicate declaration limit reached (500)",
+])
+def test_unscoped_collector_limit_excludes_unreported_label(reason):
+    expected = [{"path": "a.py", "type": "rule", "subject": "dependencies",
+                 "required_checks": ["inventory"]}]
+    report = {"subjects": {"dependencies": {
+        "status": "partial", "checks": ["inventory"],
+        "omitted": [{"reason": reason}], "skipped": [], "unknown": []}}}
+    score = score_report_findings([], expected, complete_subjects={"dependencies"},
+                                  report_manifest=report)
+    assert score["excluded_expected"] == 1
+    assert score["recall"] is None
+    assert score["coverage_reasons"]["dependencies"] == "required coverage was interrupted"
+
+
 def test_global_config_finding_limit_excludes_unreported_label():
     expected = [{"path": "deploy.yaml", "type": "rule", "subject": "operations",
                  "required_checks": ["config_scan"]}]
