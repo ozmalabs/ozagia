@@ -1496,7 +1496,8 @@ def build_deep_review(root, out, *, profile="full", budget_s=60, index=False,
                                          ([] if checked else ["No dedicated collector for this subject."])),
                               checks=source_section.get("checked", []) if checked else [],
                               skipped=reasons(skipped), unknown=reasons(unknown),
-                              scope=scope, metrics=source_section)
+                              scope=scope, metrics=source_section,
+                              related_findings=all_findings)
         _write(out / name, text)
         sections[subject] = {"status": status,
                              "checks": source_section.get("checked", []) if checked else [],

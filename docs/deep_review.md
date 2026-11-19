@@ -308,8 +308,9 @@ evidence or subject contents. See [status](status.md).
   languages and patterns remain unassessed.
   The failure-modes report includes a derived FMEA table for supported static
   candidates. It records the matched symptom/rule and mitigation, links to the
-  finding evidence, and labels runtime trigger conditions unknown. It does not
-  assign likelihood or criticality.
+  finding evidence and any explicitly related test/record finding, and labels
+  runtime trigger and critical-path status unknown. It does not assign
+  likelihood or criticality. Tests are never associated by filename alone.
 - **Architecture:** the existing repository-review architecture checks
   (hubs, cycles, coupling and related graph signals). Results depend on graph
   coverage and freshness.

@@ -33,21 +33,26 @@ def test_failure_mode_report_renders_bounded_fmea_with_unknowns_and_evidence_lin
         "evidence": [{"source": "static", "method": "AST scan"}],
         "locations": [{"path": "src/worker.py", "symbol": "run"}],
     }
+    test_finding = {"id": "dr-test-record", "subject": "tests-and-coverage",
+                    "type": "failing_test", "related_ids": []}
+    finding["related_ids"] = ["dr-test-record"]
     report = render_subject(
         "failure-modes", [finding], status="partial", omissions=[],
-        checks=["Python static patterns"])
+        checks=["Python static patterns"], related_findings=[finding, test_finding])
 
     assert "## Failure-mode analysis" in report
-    assert "Static review candidates only; no runtime criticality or likelihood is assigned." in report
+    assert "critical-path status, runtime likelihood and criticality are unknown" in report
+    assert "Unknown (no critical-path classification is available)." in report
     assert "An exception handler may continue an unconditional loop." in report
     assert "static source inspection does not establish runtime trigger conditions" in report
     assert "Static AST rule matched: unconditional loop with an exception-handler continue." in report
     assert "Bound retries and use a deadline." in report
     assert "See evidence details for dr-retry." in report
+    assert "[dr-test-record](./07-tests-and-coverage.md#finding-dr-test-record)" in report
     # Rendering is a view; it does not add FMEA fields to canonical source data.
     assert set(finding) == {
         "id", "subject", "type", "severity", "confidence", "evidence_kind",
-        "recommendation", "evidence", "locations"}
+        "recommendation", "evidence", "locations", "related_ids"}
 
 
 def test_failure_mode_fmea_marks_unsupported_fields_unknown_and_bounds_text():
@@ -60,7 +65,21 @@ def test_failure_mode_fmea_marks_unsupported_fields_unknown_and_bounds_text():
     assert "no supported detection mapping" in report
     assert "no mitigation recorded" in report
     assert "source finding has no evidence items" in report
+    assert "no critical-path classification is available" in report
+    assert "no explicit test/record finding is linked" in report
     assert len(report) < 10_000
+
+
+def test_failure_mode_fmea_does_not_guess_test_links_from_matching_locations():
+    failure = {"id": "dr-failure", "type": "unbounded_exception_retry",
+               "locations": [{"path": "src/worker.py"}], "evidence": []}
+    test = {"id": "dr-test", "subject": "tests-and-coverage",
+            "type": "failing_test", "locations": [{"path": "src/worker.py"}]}
+    report = render_subject("failure-modes", [failure], status="partial",
+                            omissions=[], related_findings=[test])
+
+    assert "no explicit test/record finding is linked" in report
+    assert "./07-tests-and-coverage.md#finding-dr-test" not in report
 
 
 def test_subject_metrics_are_allowlisted_bounded_and_path_free():

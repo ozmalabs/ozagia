@@ -217,14 +217,18 @@ def _fmea_cell(value, *, limit=320):
     return _cell(text)
 
 
-def _render_failure_fmea(findings):
+def _render_failure_fmea(findings, related_findings=()):
     """Render an evidence-linked FMEA view without changing source findings."""
     if not findings:
         return []
+    related_by_id = {
+        str(item.get("id")): item for item in related_findings
+        if isinstance(item, Mapping) and item.get("id")
+    }
     rows = ["## Failure-mode analysis", "",
-            "Static review candidates only; no runtime criticality or likelihood is assigned.",
-            "", "| Finding | Symptom | Trigger | Detection | Mitigation | Evidence |",
-            "| --- | --- | --- | --- | --- | --- |"]
+            "Static review candidates only; critical-path status, runtime likelihood and criticality are unknown unless independently evidenced.",
+            "", "| Finding | Critical-path status | Symptom | Trigger | Detection | Mitigation | Evidence and linked tests/records |",
+            "| --- | --- | --- | --- | --- | --- | --- |"]
     for finding in findings:
         kind = str(finding.get("type", ""))
         rule = _FMEA_RULES.get(kind)
@@ -236,13 +240,34 @@ def _render_failure_fmea(findings):
         evidence_items = finding.get("evidence")
         has_evidence = (isinstance(evidence_items, list)
                         and any(isinstance(item, Mapping) for item in evidence_items))
-        evidence = (f"See evidence details for {_fmea_cell(finding.get('id', 'finding'))}."
-                    if has_evidence
-                    else "Unknown (source finding has no evidence items).")
+        finding_id = str(finding.get("id", "finding"))
+        linked_tests = []
+        for related_id in finding.get("related_ids", []):
+            related = related_by_id.get(str(related_id))
+            if not related:
+                continue
+            subjects = related.get("subjects", [related.get("subject")])
+            if "tests-and-coverage" in subjects:
+                linked_tests.append(str(related.get("id")))
+        linked_tests = sorted(set(linked_tests))
+        evidence_parts = []
+        if has_evidence:
+            evidence_parts.append(
+                f"See evidence details for {_fmea_cell(finding_id)}.")
+        else:
+            evidence_parts.append("Unknown (source finding has no evidence items).")
+        if linked_tests:
+            links = [f"[{_fmea_cell(identifier)}](./07-tests-and-coverage.md#finding-{_slug(identifier)})"
+                     for identifier in linked_tests]
+            evidence_parts.append("Linked test/record findings: " + ", ".join(links) + ".")
+        else:
+            evidence_parts.append("Unknown (no explicit test/record finding is linked).")
+        evidence = " ".join(evidence_parts)
         rows.append("| " + " | ".join((
-            _fmea_cell(finding.get("id", "finding")),
+            _fmea_cell(finding_id),
+            "Unknown (no critical-path classification is available).",
             _fmea_cell(symptom), _fmea_cell(trigger), _fmea_cell(detection),
-            _fmea_cell(mitigation), _fmea_cell(evidence))) + " |")
+            _fmea_cell(mitigation), evidence)) + " |")
     return rows
 
 
@@ -302,7 +327,7 @@ def _subject_metrics(subject, findings, source_section, *, status,
 
 
 def render_subject(subject, findings, *, status, omissions, checks=(), skipped=(), unknown=(), scope=None,
-                   metrics=None):
+                   metrics=None, related_findings=()):
     rows = [f"# {subject.replace('-', ' ').title()}", "",
             "## Scope", "", _cell(scope or f"Review subject: {subject}."), "",
             f"Status: **{status}**", "",
@@ -316,7 +341,7 @@ def render_subject(subject, findings, *, status, omissions, checks=(), skipped=(
                     ("id", "severity", "type")) + " | " + _cell(views) + " | " +
                      _cell(loc) + " |")
     if subject == "failure-modes":
-        rows.extend([""] + _render_failure_fmea(findings))
+        rows.extend([""] + _render_failure_fmea(findings, related_findings))
     metric_rows = _subject_metrics(
         subject, findings, metrics, status=status, checks=checks,
         skipped=skipped, unknown=unknown, omissions=omissions)
