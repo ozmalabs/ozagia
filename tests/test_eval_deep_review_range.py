@@ -74,7 +74,8 @@ def test_range_comparison_is_deterministic_across_repeated_runs():
 def test_range_comparison_empty_findings_are_not_scored_as_success(monkeypatch):
     def build(_root, _out, **_kwargs):
         return {"manifest": {"complete": True, "status": "complete",
-                             "subjects": {}, "comparison": {}},
+                             "subjects": {}, "comparison": {},
+                             "range_review": {"status": "available"}},
                 "findings": []}
 
     monkeypatch.setattr(deep_review_comparison, "build_deep_review", build)
@@ -85,6 +86,34 @@ def test_range_comparison_empty_findings_are_not_scored_as_success(monkeypatch):
     assert result["change_set"]["range"]["precision"] is None
     assert result["change_set"]["range"]["report_noise_ratio"] is None
     assert result["comparison"] == {"new": 0, "resolved": 0, "unchanged": 0}
+
+
+def test_range_comparison_marks_resource_refusal_partial(monkeypatch):
+    def build(_root, _out, **kwargs):
+        if kwargs.get("range_spec"):
+            return {"manifest": {
+                "complete": False, "status": "partial", "subjects": {},
+                "comparison": {}, "range_review": {
+                    "status": "unavailable",
+                    "error": "range review unavailable: PreflightError: resource admission refused (disk.host_min)",
+                }}, "findings": []}
+        return {"manifest": {"complete": True, "status": "complete",
+                             "subjects": {}, "comparison": {}},
+                "findings": []}
+
+    monkeypatch.setattr(deep_review_comparison, "build_deep_review", build)
+    result = evaluate_range()
+
+    assert result["status"] == "partial"
+    assert result["environment"] == {
+        "status": "partial", "preflight": "passed",
+        "range_review": "unavailable",
+        "reason": "range review unavailable: PreflightError: resource admission refused (disk.host_min)",
+    }
+    assert result["change_set"]["range"]["recall"] is None
+    assert result["change_set"]["range_signals_on_changed_files"] is None
+    assert result["comparison"] is None
+    assert result["finding_ids"] is None
 
 
 def test_range_comparison_rejects_missing_or_malformed_range_labels(tmp_path):

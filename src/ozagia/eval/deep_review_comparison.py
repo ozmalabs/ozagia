@@ -189,6 +189,20 @@ def _report_view(result: Mapping[str, Any], out: Path,
     }
 
 
+def _range_review_state(result: Mapping[str, Any]) -> tuple[bool, dict[str, Any]]:
+    """Return whether range evidence was collected and its environment state."""
+    manifest = result.get("manifest") or {}
+    review = manifest.get("range_review")
+    if isinstance(review, Mapping) and review.get("status") == "available":
+        return True, {"status": "admitted", "preflight": "passed",
+                      "range_review": "available"}
+    reason = (review.get("error") if isinstance(review, Mapping) else None)
+    if not reason:
+        reason = "range review did not report an available result"
+    return False, {"status": "partial", "preflight": "passed",
+                   "range_review": "unavailable", "reason": str(reason)}
+
+
 def _finding_diff(first: Iterable[Mapping[str, Any]],
                   second: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     first_ids = {str(item["id"]) for item in first
@@ -306,10 +320,12 @@ def evaluate_range(fixture: str | Path = DEFAULT_FIXTURE, *, budget_s: float = 6
         ]
         full_score = score_findings(full_change, expected,
                                     complete_subjects=complete)
-        range_score = score_findings(range_change, expected,
-                                     complete_subjects=complete)
-        counts = _comparison_counts(ranged)
         range_review = ranged.get("manifest", {}).get("range_review") or {}
+        range_available, environment = _range_review_state(ranged)
+        range_score = (score_findings(range_change, expected,
+                                      complete_subjects=complete)
+                       if range_available else None)
+        counts = _comparison_counts(ranged) if range_available else None
         range_graph = range_review.get("graph") or {}
         total_seconds = time.perf_counter() - started
         return {
@@ -317,12 +333,13 @@ def evaluate_range(fixture: str | Path = DEFAULT_FIXTURE, *, budget_s: float = 6
             "scope": "whole-repo versus range report on a temporary synthetic checkout",
             "fixture": source.name,
             "labels": label_metadata(manifest, labels_path),
-            "status": "complete" if (full.get("manifest", {}).get("complete") and
+            "status": "complete" if (range_available and
+                                     full.get("manifest", {}).get("complete") and
                                      ranged.get("manifest", {}).get("complete"))
                       else "partial",
             "commits": {"base": base, "head": head},
             "changed_files": sorted(changed_paths),
-            "environment": {"status": "admitted", "preflight": "passed"},
+            "environment": environment,
             "reports": {
                 "full": _report_view(full, full_out, full_measure),
                 "range": _report_view(ranged, range_out, range_measure),
@@ -342,27 +359,30 @@ def evaluate_range(fixture: str | Path = DEFAULT_FIXTURE, *, budget_s: float = 6
                     "report_noise_ratio": full_score["report_noise_ratio"],
                 },
                 "range": {
-                    "predicted": range_score["predicted"],
-                    "true_positive": range_score["true_positive"],
-                    "false_positive": range_score["false_positive"],
-                    "false_negative": range_score["false_negative"],
-                    "unlabeled": range_score["unlabeled"],
-                    "recall": range_score["recall"],
-                    "precision": range_score["precision"],
-                    "false_positive_rate": range_score["false_positive_rate"],
-                    "report_noise_ratio": range_score["report_noise_ratio"],
+                    "predicted": range_score["predicted"] if range_score else None,
+                    "true_positive": range_score["true_positive"] if range_score else None,
+                    "false_positive": range_score["false_positive"] if range_score else None,
+                    "false_negative": range_score["false_negative"] if range_score else None,
+                    "unlabeled": range_score["unlabeled"] if range_score else None,
+                    "recall": range_score["recall"] if range_score else None,
+                    "precision": range_score["precision"] if range_score else None,
+                    "false_positive_rate": (range_score["false_positive_rate"]
+                                             if range_score else None),
+                    "report_noise_ratio": (range_score["report_noise_ratio"]
+                                           if range_score else None),
                 },
                 "full_signals_on_changed_files": _signals(
                     full.get("findings") or [], changed_paths),
-                "range_signals_on_changed_files": _signals(
-                    ranged.get("findings") or [], changed_paths),
+                "range_signals_on_changed_files": (_signals(
+                    ranged.get("findings") or [], changed_paths)
+                    if range_available else None),
             },
             "comparison": counts,
             "finding_ids": {
                 "added_by_range": len(range_ids - full_ids),
                 "only_in_full": len(full_ids - range_ids),
                 "shared": len(full_ids & range_ids),
-            },
+            } if range_available else None,
             "range_graph": {
                 "freshness": range_graph.get("freshness"),
                 "available": range_graph.get("available"),
