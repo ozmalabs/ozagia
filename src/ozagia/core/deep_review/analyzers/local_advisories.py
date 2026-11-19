@@ -1,7 +1,7 @@
 """Bounded local advisory matching against caller-supplied advisory data.
 
 The data source is never downloaded. A match requires a parsed lockfile pin
-and either an exact tuple or a supported OSV introduced/fixed range. A no-match
+and either an exact tuple or a supported OSV introduced/fixed or last_affected range. A no-match
 result does not mean dependencies are free of vulnerabilities; the supplied
 data may be incomplete or out of date.
 """
@@ -136,27 +136,30 @@ def _semver_compare(left: str, right: str) -> int:
 
 
 def _validate_semver_events(ecosystem: str, value: Any, index: int
-                            ) -> list[tuple[str, str]]:
+                            ) -> list[tuple[str, str, bool]]:
     if ecosystem not in {"node", "rust", "go"}:
         raise ValueError(
             f"advisories[{index}].affected_ranges is unsupported for this ecosystem")
     if not isinstance(value, list) or not value or len(value) > 200:
         raise ValueError(f"advisories[{index}].affected_ranges is invalid")
-    ranges: list[tuple[str, str]] = []
+    ranges: list[tuple[str, str, bool]] = []
     for range_index, block in enumerate(value):
         events = block.get("events") if isinstance(block, Mapping) else None
+        if isinstance(block, Mapping) and block.get("type", "SEMVER") != "SEMVER":
+            raise ValueError("OSV range type must be SEMVER")
         if not isinstance(events, list) or not events or len(events) > 200:
             raise ValueError(
                 f"advisories[{index}].affected_ranges[{range_index}] is invalid")
         start: str | None = None
         last_kind: str | None = None
         previous_fixed: str | None = None
+        closing_kind: str | None = None
         for event in events:
             if not isinstance(event, Mapping) or len(event) != 1:
-                raise ValueError("OSV range events must contain one introduced/fixed key")
+                raise ValueError("OSV range events must contain one introduced/fixed/last_affected key")
             kind, version = next(iter(event.items()))
-            if kind not in {"introduced", "fixed"} or not isinstance(version, str):
-                raise ValueError("OSV range supports only introduced/fixed SemVer events")
+            if kind not in {"introduced", "fixed", "last_affected"} or not isinstance(version, str):
+                raise ValueError("OSV range supports only introduced/fixed/last_affected SemVer events")
             if ecosystem == "go" and version != "0":
                 if not version.startswith("v"):
                     raise ValueError("Go OSV range versions must have a v prefix")
@@ -182,28 +185,33 @@ def _validate_semver_events(ecosystem: str, value: Any, index: int
                         "OSV introduced event must follow the previous fixed event")
             else:
                 if start is None or last_kind != "introduced":
-                    raise ValueError("OSV fixed event must follow introduced")
+                    raise ValueError("OSV range ending must follow introduced")
+                if closing_kind is not None and closing_kind != kind:
+                    raise ValueError("OSV range cannot mix fixed and last_affected")
+                closing_kind = kind
                 if not _SEMVER_VERSION.fullmatch(version):
-                    raise ValueError("OSV fixed event must be strict SemVer")
-                if _semver_compare(version, start) <= 0:
-                    raise ValueError("OSV fixed event must follow introduced")
-                ranges.append((start, version))
+                    raise ValueError("OSV range ending must be strict SemVer")
+                comparison = _semver_compare(version, start)
+                if comparison < 0 or (comparison == 0 and kind == "fixed"):
+                    raise ValueError("OSV range ending must follow introduced")
+                ranges.append((start, version, kind == "last_affected"))
                 previous_fixed = version
                 start = None
             last_kind = kind
         if start is not None:
-            ranges.append((start, ""))
-        elif last_kind == "fixed":
+            ranges.append((start, "", False))
+        elif last_kind in {"fixed", "last_affected"}:
             continue
         else:
             raise ValueError("OSV range must begin with introduced")
     return ranges
 
 
-def _in_semver_ranges(version: str, ranges: list[tuple[str, str]]) -> bool:
-    for start, end in ranges:
+def _in_semver_ranges(version: str, ranges: list[tuple[str, str, bool]]) -> bool:
+    for start, end, inclusive in ranges:
         if (_semver_compare(version, start) >= 0
-                and (not end or _semver_compare(version, end) < 0)):
+                and (not end or _semver_compare(version, end) < 0
+                     or (inclusive and _semver_compare(version, end) == 0))):
             return True
     return False
 
@@ -314,7 +322,7 @@ def match_local_advisories(
     """Match explicit advisory records to exact versions from lockfiles.
 
     Advisory rows use either ``affected_versions`` or OSV-style
-    ``affected_ranges`` introduced/fixed SemVer events (Node, Rust and Go
+    ``affected_ranges`` introduced/fixed/last_affected SemVer events (Node, Rust and Go
     only). Ruby, Composer and Maven support exact versions only. Only parsed lockfile
     pins match.
     """
@@ -390,7 +398,7 @@ def match_local_advisories(
         if ecosystem == "maven" and not _MAVEN_PACKAGE.fullmatch(package):
             raise ValueError(f"advisories[{index}].package is invalid")
         versions: set[str] = set()
-        ranges: list[tuple[str, str]] = []
+        ranges: list[tuple[str, str, bool]] = []
         if ("affected_versions" in row) == ("affected_ranges" in row):
             raise ValueError(
                 f"advisories[{index}] must have exactly one affected_versions or affected_ranges")

@@ -532,3 +532,51 @@ def test_deep_review_cli_passes_only_explicit_advisory_path(tmp_path, monkeypatc
     assert cli.main(["deep-review", "--root", str(tmp_path), "--out",
                      str(out) + "-default"]) == 0
     assert "local_advisories" not in calls[0]
+
+
+def test_osv_last_affected_is_inclusive_and_honors_semver_prerelease_order():
+    inventory = {"lockfiles": [{"file": "package-lock.json", "ecosystem": "node",
+                                "packages": [{"name": "demo", "version": v} for v in (
+                                    "1.0.0", "1.1.0-rc.1", "1.1.0", "1.1.1")]}]}
+    advisory = {"id": "OSV-LAST-1", "ecosystem": "node", "package": "demo",
+                "affected_ranges": [{"events": [{"introduced": "1.0.0"},
+                                                   {"last_affected": "1.1.0"}]}]}
+    result = match_local_advisories(inventory, _advisories(advisory))
+    assert {row["version"] for row in result["findings"]} == {
+        "1.0.0", "1.1.0-rc.1", "1.1.0"}
+
+
+def test_osv_last_affected_may_equal_introduction_but_cannot_mix_fixed():
+    inventory = {"lockfiles": [{"file": "Cargo.lock", "ecosystem": "rust",
+                                "packages": [{"name": "demo", "version": "1.0.0"}]}]}
+    advisory = {"id": "OSV-LAST-2", "ecosystem": "rust", "package": "demo",
+                "affected_ranges": [{"events": [{"introduced": "1.0.0"},
+                                                   {"last_affected": "1.0.0"}]}]}
+    assert len(match_local_advisories(inventory, _advisories(advisory))["findings"]) == 1
+    advisory["affected_ranges"][0]["events"].extend(
+        [{"introduced": "2.0.0"}, {"fixed": "3.0.0"}])
+    with pytest.raises(ValueError, match="cannot mix"):
+        match_local_advisories(inventory, _advisories(advisory))
+
+
+def test_osv_last_affected_go_and_multiple_intervals():
+    inventory = {"lockfiles": [{"file": "go.sum", "ecosystem": "go",
+                                "packages": [{"name": "example.com/m", "version": v}
+                                             for v in ("v1.0.0", "v1.0.1", "v2.0.0")]}]}
+    advisory = {"id": "OSV-LAST-GO", "ecosystem": "go", "package": "example.com/m",
+                "affected_ranges": [{"type": "SEMVER", "events": [
+                    {"introduced": "0"}, {"last_affected": "v1.0.0"},
+                    {"introduced": "v2.0.0"}]}]}
+    result = match_local_advisories(inventory, _advisories(advisory))
+    assert {row["version"] for row in result["findings"]} == {"1.0.0", "2.0.0"}
+
+
+def test_osv_range_rejects_non_semver_type_and_limit():
+    advisory = {"id": "OSV-TYPE-1", "ecosystem": "node", "package": "demo",
+                "affected_ranges": [{"type": "GIT", "events": [{"introduced": "0"}]}]}
+    with pytest.raises(ValueError, match="SEMVER"):
+        match_local_advisories({"lockfiles": []}, _advisories(advisory))
+    advisory["affected_ranges"][0] = {"events": [
+        {"introduced": "0"}, {"limit": "2.0.0"}]}
+    with pytest.raises(ValueError):
+        match_local_advisories({"lockfiles": []}, _advisories(advisory))

@@ -196,9 +196,10 @@ rows contain `id`, `ecosystem`, `package`, and either
 Matching uses parsed lockfile pins only; manifest ranges are never evaluated.
 Range events are supported only for Node and Rust strict SemVer, and Go
 `v`-prefixed strict SemVer (including pseudo-versions). Introduced is inclusive,
-fixed is exclusive, and an open introduced event has no upper bound. Only
-introduced/fixed events are accepted; unsupported event kinds and malformed
-sequences are rejected. Exact Python versions remain validated as PEP 440 and
+fixed is exclusive, `last_affected` is inclusive, and an open introduced event
+has no upper bound. A `last_affected` ceiling is a last known affected version,
+not evidence that later versions are fixed. A single event sequence cannot mix
+`fixed` and `last_affected`; limit events and malformed sequences are rejected. Exact Python versions remain validated as PEP 440 and
 compared as written, with the Go `v` prefix normalized. Ruby Bundler
 `Gemfile.lock` pins support exact-version matching only, using conservative
 numeric versions with an optional prerelease suffix. Only specs under a `GEM`
@@ -327,7 +328,7 @@ evidence or subject contents. See [status](status.md).
   exact version-conflict candidates. Declared licences and a deterministic
   CycloneDX-shaped SBOM are recorded, but CVE state remains `unknown`. An
   explicit `--local-advisories` file can match exact locked versions or
-  supported OSV-style introduced/fixed SemVer ranges against local advisory
+  supported OSV-style introduced/fixed/last_affected SemVer ranges against local advisory
   records; range matching supports Node/Rust and `v`-prefixed Go, while Python
   and Ruby are exact-version only. Composer `composer.lock` matches exact
   supported versions only; branch aliases and ranges are skipped. Ruby
@@ -376,7 +377,7 @@ tools are recorded as coverage, not crashes. Dependency licence, version and
 SBOM facts are local inventory: CVE state stays unknown, no advisory database is
 queried, and no licence-compliance decision is made. Optional
 `--local-advisories` matching uses exact locked versions and supported
-introduced/fixed SemVer ranges from a local file; it does not fetch data or
+introduced/fixed/last_affected SemVer ranges from a local file; it does not fetch data or
 prove a dependency clean. Range matching is limited to Node/Rust and
 `v`-prefixed Go strict SemVer pins; Python, Ruby and Composer are exact-version only.
 Ruby exact matches include only Bundler `GEM` source pins; Git/path pins are
