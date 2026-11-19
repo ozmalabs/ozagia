@@ -348,7 +348,7 @@ evidence or subject contents. See [status](status.md).
   `hostNetwork`/`hostPath`, and Compose all-interface port binds. Explicit
   telemetry disable settings are reported with rule IDs. Selected plain JSON
   Kubernetes manifests and selected Kubernetes/Compose YAML receive bounded
-  structural checks for literal security settings, including host PID/IPC
+  structural checks for literal security settings, including host ports, host PID/IPC
   namespaces and explicitly configured root UIDs. Pod defaults can be
   overridden by individual containers. YAML checks use PyYAML from
   the optional `iac-yaml` extra. Terraform ingress checks use `python-hcl2`
@@ -641,7 +641,10 @@ part of the fixture.
   a completely labelled subject are counted in this metric. If a subjectless
   label can match only some predictions across complete and incomplete subjects,
   ambiguous subjects are excluded from precision and listed in
-  `ambiguous_precision_subjects`.
+  `ambiguous_precision_subjects`. Where subjectless labels leave attribution
+  ambiguous between fully labeled subjects, aggregate precision remains
+  measurable but affected per-subject prediction metrics are unknown and
+  listed in `ambiguous_subject_attribution`.
 - **Recall**: matched reviewed labels divided by reviewed labels.
 - **False-positive rate**: false positives divided by all actual negatives.
   This remains unknown for report-label comparisons because the labels do not

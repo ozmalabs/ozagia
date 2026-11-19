@@ -327,6 +327,17 @@ def _kubernetes_object_findings(rel: str, document: object, *,
             for index, container in enumerate(containers):
                 if not isinstance(container, dict):
                     continue
+                ports = container.get("ports")
+                if isinstance(ports, list):
+                    for port_index, port in enumerate(ports):
+                        if not isinstance(port, dict):
+                            continue
+                        host_port = port.get("hostPort")
+                        if type(host_port) is int and 1 <= host_port <= 65535:
+                            add("iac.kubernetes.host_port",
+                                pod_path + (container_field, index, "ports", port_index, "hostPort"),
+                                f"{rel} declares a hostPort in a {kind} container; actual exposure depends on node networking and policy.",
+                                "Review node port collisions and intended exposure; omit hostPort unless required.")
                 security_context = container.get("securityContext")
                 if (isinstance(security_context, dict)
                         and type(security_context.get("runAsUser")) is int
@@ -1257,6 +1268,7 @@ def analyze(root: str | Path, *, budget_s: float = 10.0) -> dict:
             "iac.terraform.public_admin_ingress",
             "iac.container.privileged_mode",
             "iac.kubernetes.host_network",
+            "iac.kubernetes.host_port",
             "iac.kubernetes.host_path_volume",
             "iac.compose.bind_all_interfaces",
             "ops.observability.*_explicitly_disabled",

@@ -742,3 +742,19 @@ def test_operations_inventory_is_collected_and_merged(tmp_path, monkeypatch):
     ]
     assert section["inventory"]["configuration_files"] == ["Dockerfile"]
     assert packet["findings"][0]["type"] == "container_healthcheck_absent"
+
+
+def test_kubernetes_host_port_uses_precise_pointer_and_literal_integer(tmp_path):
+    (tmp_path / "pod.json").write_text(
+        '{"apiVersion":"v1","kind":"Pod","spec":{"containers":[{"name":"app",'
+        '"ports":[{"hostPort":8080},{"hostPort":true},{"hostPort":"9090"},'
+        '{"hostPort":0},{"hostPort":65536}]}],"initContainers":['
+        '{"name":"init","ports":[{"hostPort":80}]}]}}', encoding="utf-8")
+    findings = [item for item in analyze(tmp_path)["findings"]
+                if item.get("rule_id") == "iac.kubernetes.host_port"]
+    assert {item["json_pointer"] for item in findings} == {
+        "/spec/containers/0/ports/0/hostPort",
+        "/spec/initContainers/0/ports/0/hostPort",
+    }
+    assert all(item["truth_assessed"] is False for item in findings)
+    assert all("depends on" in item["summary"] for item in findings)
