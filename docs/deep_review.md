@@ -638,7 +638,10 @@ part of the fixture.
 
 - **Precision**: true positives divided by predictions whose subject has
   complete reviewed labels. Neither matched nor unmatched predictions outside
-  a completely labelled subject are counted in this metric.
+  a completely labelled subject are counted in this metric. If a subjectless
+  label can match only some predictions across complete and incomplete subjects,
+  ambiguous subjects are excluded from precision and listed in
+  `ambiguous_precision_subjects`.
 - **Recall**: matched reviewed labels divided by reviewed labels.
 - **False-positive rate**: false positives divided by all actual negatives.
   This remains unknown for report-label comparisons because the labels do not

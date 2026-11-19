@@ -333,6 +333,8 @@ def score_findings(findings: Iterable[Mapping[str, Any]],
     actual_rows, locationless = _finding_rows(findings)
     matched_expected: set[int] = set()
     matched_actual: set[tuple[str, str, str]] = set()
+    ambiguous_complete: set[str] = set()
+    checked_wildcards: set[tuple[str, str]] = set()
 
     # Reserve exact-subject predictions before matching subjectless labels.
     # Otherwise label order can consume the sole prediction available to a
@@ -342,6 +344,20 @@ def score_findings(findings: Iterable[Mapping[str, Any]],
     for index in order:
         label = expected_rows[index]
         wanted_subject = label.get("subject")
+        group = (label["path"], label["type"])
+        if wanted_subject is None and group not in checked_wildcards:
+            checked_wildcards.add(group)
+            available = [key for key in actual_rows
+                         if key[:2] == group and key not in matched_actual]
+            wildcards = sum(1 for row in expected_rows
+                            if row.get("subject") is None
+                            and (row["path"], row["type"]) == group)
+            # If some but not all of these interchangeable predictions can
+            # match, subject attribution is not established by the labels.
+            if (0 < wildcards < len(available)
+                    and any(key[2] not in complete for key in available)):
+                ambiguous_complete.update(key[2] for key in available
+                                          if key[2] in complete)
         candidates = sorted(
             key for key in actual_rows
             if key[0] == label["path"] and key[1] == label["type"]
@@ -352,6 +368,9 @@ def score_findings(findings: Iterable[Mapping[str, Any]],
                 matched_actual.add(key)
                 matched_expected.add(index)
                 break
+
+    declared_complete = set(complete)
+    complete -= ambiguous_complete
 
     def subject_row(subject: str) -> dict[str, Any]:
         subject_expected = [
@@ -376,7 +395,9 @@ def score_findings(findings: Iterable[Mapping[str, Any]],
         notes: list[str] = []
         if not subject_expected:
             notes.append("no reviewed labels for this subject")
-        if not is_complete:
+        if subject in ambiguous_complete:
+            notes.append("subjectless labels match predictions across coverage boundaries")
+        elif not is_complete:
             notes.append("subject is not marked as completely labelled")
         if not predicted:
             notes.append("no predictions in this subject")
@@ -443,6 +464,8 @@ def score_findings(findings: Iterable[Mapping[str, Any]],
         "report_noise_ratio": _ratio(unmatched_total, predicted_total)
         if predicted_total else None,
         "complete_subjects": sorted(complete),
+        "declared_complete_subjects": sorted(declared_complete),
+        "ambiguous_precision_subjects": sorted(ambiguous_complete),
         "subjects": subject_rows,
         "metric_definitions": dict(METRIC_DEFINITIONS),
     }

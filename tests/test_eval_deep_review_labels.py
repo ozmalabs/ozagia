@@ -330,3 +330,25 @@ def test_subject_specific_labels_are_matched_before_subjectless_labels():
         assert score["false_negative"] == 0
         assert score["precision"] == 1.0
         assert score["recall"] == 1.0
+
+
+def test_wildcard_match_across_coverage_boundaries_does_not_invent_precision():
+    expected = [{"path": "a.py", "type": "rule", "subject": None}]
+    for complete_subject in ("a", "z"):
+        findings = [_finding("1", "a.py", "rule", "a"),
+                    _finding("2", "a.py", "rule", "z")]
+        score = score_findings(findings, expected, complete_subjects={complete_subject})
+        assert score["recall"] == 1.0
+        assert score["precision"] is None
+        assert score["false_positive"] is None
+        assert score["ambiguous_precision_subjects"] == [complete_subject]
+        assert score["subjects"][complete_subject]["precision"] is None
+
+
+def test_wildcard_matching_all_candidates_keeps_complete_precision():
+    findings = [_finding("1", "a.py", "rule", "a"),
+                _finding("2", "a.py", "rule", "z")]
+    expected = [{"path": "a.py", "type": "rule", "subject": None}] * 2
+    score = score_findings(findings, expected, complete_subjects={"a"})
+    assert score["precision"] == 1.0
+    assert score["ambiguous_precision_subjects"] == []
