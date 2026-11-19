@@ -151,6 +151,19 @@ def test_default_file_discovery_on_flat_fixture(tmp_path: Path) -> None:
     assert result["results"][0]["path"] == "a.py"
 
 
+def test_empty_map_dirs_do_not_expand_search_discovery(tmp_path: Path) -> None:
+    _fixture(tmp_path)
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "outside.py").write_text(
+        "def alpha_outside(): pass\n", encoding="utf-8")
+    (tmp_path / ".ozagia.toml").write_text('[index]\nmap_dirs = []\n')
+
+    result = code_search(tmp_path, "alpha", cache_path=_cache(tmp_path))
+    assert result["ok"] is True
+    assert result["results"] == []
+    assert result["index"]["files"] == 0
+
+
 def test_graph_prior_breaks_ties_but_not_a_lexical_lead(tmp_path: Path) -> None:
     files = _fusion_fixture(tmp_path)
     result = code_search(tmp_path, "needle", cache_path=_cache(tmp_path),
@@ -441,7 +454,6 @@ def test_full_scan_prunes_side_rows_for_removed_files(tmp_path: Path,
     root = tmp_path / "repo"
     _identity_fixture(root)
     cache = root / "var" / "tags.json"
-    monkeypatch.setattr(repo_map_module, "SOURCE_DIRS", (".",))
     search_module.code_search(root, "alpha", cache_path=cache)
     assert "helpers.py" in search_module._load_side(_side(cache))
 

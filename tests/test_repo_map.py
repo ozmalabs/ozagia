@@ -53,6 +53,66 @@ def test_python_tags() -> None:
     assert "alpha" in refs
 
 
+def test_repo_map_uses_each_roots_config_and_default_cache(
+        tmp_path: Path, monkeypatch) -> None:
+    from ozagia.config import clear_config_cache, state_path
+
+    monkeypatch.delenv("OZAGIA_CONFIG", raising=False)
+    monkeypatch.delenv("OZAGIA_STATE_DIR", raising=False)
+    clear_config_cache()
+
+    roots = [tmp_path / "one", tmp_path / "two"]
+    for root, chosen, skipped in ((roots[0], "src", "vendor"),
+                                  (roots[1], "app", "generated")):
+        (root / chosen).mkdir(parents=True)
+        (root / skipped).mkdir()
+        (root / chosen / "kept.py").write_text("def kept(): pass\n")
+        (root / skipped / "hidden.py").write_text("def hidden(): pass\n")
+        (root / ".ozagia.toml").write_text(
+            f'[index]\nmap_dirs = ["{chosen}"]\nskip_dirs = ["{skipped}"]\n')
+
+    first = repo_map(roots[0], task="kept", budget_tokens=500)
+    second = repo_map(roots[1], task="kept", budget_tokens=500)
+    assert {f["path"] for f in first["files"]} == {"src/kept.py"}
+    assert {f["path"] for f in second["files"]} == {"app/kept.py"}
+    assert state_path(roots[0], "tags.json").exists()
+    assert state_path(roots[1], "tags.json").exists()
+    assert set(json.loads(state_path(roots[0], "tags.json").read_text())["files"]) == {"src/kept.py"}
+    assert set(json.loads(state_path(roots[1], "tags.json").read_text())["files"]) == {"app/kept.py"}
+
+
+def test_repo_map_cli_defaults_follow_target_root_from_another_checkout(
+        tmp_path: Path) -> None:
+    caller = tmp_path / "caller"
+    target = tmp_path / "target"
+    (caller / "src").mkdir(parents=True)
+    (target / "src" / "vendor").mkdir(parents=True)
+    (target / "misc").mkdir()
+    (target / "src" / "kept.py").write_text("def kept_target(): pass\n")
+    (target / "src" / "vendor" / "hidden.py").write_text(
+        "def hidden_target(): pass\n")
+    (target / "misc" / "outside.py").write_text(
+        "def outside_target(): pass\n")
+    (target / ".ozagia.toml").write_text(
+        '[index]\nmap_dirs = ["src"]\nskip_dirs = ["vendor"]\n')
+
+    env = dict(os.environ)
+    env.pop("OZAGIA_ROOT", None)
+    env.pop("OZAGIA_CONFIG", None)
+    env.pop("OZAGIA_STATE_DIR", None)
+    subprocess.run([sys.executable, "-m", "ozagia.core.memory", "build",
+                    "--root", str(target)], cwd=caller, env=env,
+                   check=True, capture_output=True, text=True)
+    result = subprocess.run(
+        [sys.executable, "-m", "ozagia.core.memory", "repo-map", "--root",
+         str(target)], cwd=caller, env=env, check=True, capture_output=True,
+        text=True)
+    payload = json.loads(result.stdout)
+    assert {entry["path"] for entry in payload["files"]} == {"src/kept.py"}
+    assert (target / ".ozagia" / "tags.json").exists()
+    assert not (caller / ".ozagia").exists()
+
+
 def test_rust_and_lua_tags() -> None:
     rust = extract_tags("x.rs", "fn add(a: i32, b: i32) -> i32 { a + b }\n"
                                 "fn main() { let x = add(1, 2); }\n")
@@ -86,7 +146,7 @@ def test_kotlin_and_swift_files_are_listed_and_tagged(tmp_path: Path,
         "    let id: Int\n"
         "}\n",
         encoding="utf-8")
-    monkeypatch.setattr(repo_map_module, "SOURCE_DIRS", (".",))
+    (root / ".ozagia.toml").write_text('[index]\nmap_dirs = ["."]\n')
     files = repo_map_module._source_files(root)
     assert {"Main.kt", "App.swift"} <= set(files)
 
@@ -230,7 +290,7 @@ def test_subset_call_does_not_shrink_cache(tmp_path: Path, monkeypatch) -> None:
                                    encoding="utf-8")
     cache_path = tmp_path / "var" / "tags.json"
     # Point the full scan at the fixture root instead of the repo's dirs.
-    monkeypatch.setattr(repo_map_module, "SOURCE_DIRS", (".",))
+    (tmp_path / ".ozagia.toml").write_text('[index]\nmap_dirs = ["."]\n')
     full, _ = update_tag_cache(tmp_path, cache_path=cache_path)
     assert set(full["files"]) == {"a.py", "b.py", "c.py"}
     subset, stats = update_tag_cache(tmp_path, cache_path=cache_path,
@@ -393,8 +453,10 @@ def test_output_matches_base_implementation(tmp_path: Path) -> None:
     for i, kwargs in enumerate(cases):
         expected = base.repo_map(tmp_path, cache_path=tmp_path / f"base_{i}.json",
                                  files=files, **kwargs)
+        # The base module predates the content-search fusion; compare the
+        # graph/name path only. A separate test covers the new lexical signal.
         actual = repo_map(tmp_path, cache_path=tmp_path / f"new_{i}.json",
-                          files=files, **kwargs)
+                          files=files, content_search=False, **kwargs)
         assert _without_timing(actual) == _without_timing(expected), kwargs
     for i, (target, depth) in enumerate([("base.py", 1), ("base.py", 3),
                                          ("a.py", 2), ("missing.py", 2)]):
@@ -404,6 +466,125 @@ def test_output_matches_base_implementation(tmp_path: Path) -> None:
         actual = impact(tmp_path, file=target, depth=depth,
                         cache_path=tmp_path / f"inew_{i}.json", files=files)
         assert _without_timing(actual) == _without_timing(expected), target
+
+
+def test_repo_map_bounds_a_long_task_header(tmp_path: Path) -> None:
+    (tmp_path / "mod.py").write_text("def work():\n    return 1\n",
+                                     encoding="utf-8")
+    long_task = "retry the flaky operation " * 100
+    report = repo_map(tmp_path, task=long_task, budget_tokens=500,
+                      content_search=False)
+    header = report["markdown"].splitlines()[0]
+    assert len(header) <= 230
+    assert header.startswith("# Repo map: retry the flaky operation")
+    assert header.endswith("...")
+
+
+def test_repo_map_uses_content_when_paths_and_symbols_miss(
+        tmp_path: Path) -> None:
+    (tmp_path / "z_cryptic.py").write_text(
+        "def puzzle():\n"
+        "    return 'scarlet ibis'\n",
+        encoding="utf-8")
+    for index in range(8):
+        (tmp_path / f"u{index}_unrelated.py").write_text(
+            f"def other_{index}():\n"
+            "    return 1\n",
+            encoding="utf-8")
+    clear_memos()
+    graph_only = repo_map(tmp_path, task="scarlet ibis", budget_tokens=200,
+                          content_search=False)
+    content = repo_map(tmp_path, task="scarlet ibis", budget_tokens=200,
+                       content_search=True)
+    assert graph_only["files"][0]["path"] != "z_cryptic.py"
+    assert content["files"][0]["path"] == "z_cryptic.py"
+
+
+def test_exact_symbol_match_outranks_generic_mentions(tmp_path: Path) -> None:
+    (tmp_path / "series.py").write_text(
+        "class TimeSeries:\n"
+        "    pass\n",
+        encoding="utf-8")
+    (tmp_path / "notes.py").write_text(
+        "# time series time series time series\n"
+        "def helper():\n"
+        "    return 'time series column'\n",
+        encoding="utf-8")
+    clear_memos()
+    report = repo_map(tmp_path, task="TimeSeries required column",
+                      budget_tokens=800, content_search=True)
+    assert report["files"][0]["path"] == "series.py"
+    assert report["files"][0]["evidence_symbols"] == ["TimeSeries"]
+
+
+def test_repo_map_demotes_test_and_doc_files(tmp_path: Path) -> None:
+    (tmp_path / "widget.py").write_text(
+        "class Widget:\n"
+        "    pass\n",
+        encoding="utf-8")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_widget.py").write_text(
+        "def test_widget():\n"
+        "    assert 'Widget widget widget'\n",
+        encoding="utf-8")
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "widget.md").write_text(
+        "Widget widget widget\n", encoding="utf-8")
+    clear_memos()
+    report = repo_map(tmp_path, task="Widget", budget_tokens=800,
+                      content_search=True)
+    paths = [entry["path"] for entry in report["files"]]
+    assert paths[0] == "widget.py"
+    assert paths.index("widget.py") < paths.index("tests/test_widget.py")
+
+
+def test_repo_map_uses_snippets_for_lexical_tail(tmp_path: Path) -> None:
+    for index in range(14):
+        (tmp_path / f"mod{index:02d}.py").write_text(
+            f"def work_{index}():\n"
+            f"    return 'scarlet ibis marker {index}'\n",
+            encoding="utf-8")
+    clear_memos()
+    report = repo_map(tmp_path, task="scarlet ibis marker",
+                      budget_tokens=900, content_search=True)
+    tiers = {entry["path"]: entry["tier"] for entry in report["files"]}
+    assert "snippet" in tiers.values()
+    snippet_path = next(path for path, tier in tiers.items()
+                        if tier == "snippet")
+    assert snippet_path in report["markdown"]
+    assert "scarlet ibis" in report["markdown"]
+    assert report["estimated_tokens"] <= 900
+
+
+def test_repo_map_confidence_gate_drops_redundant_low_confidence_files(
+        tmp_path: Path) -> None:
+    for index in range(30):
+        (tmp_path / f"w{index:02d}.py").write_text(
+            "class Widget:\n"
+            "    pass\n",
+            encoding="utf-8")
+    clear_memos()
+    full = repo_map(tmp_path, task="Widget", budget_tokens=1500,
+                    content_search=True, min_confidence=0)
+    gated = repo_map(tmp_path, task="Widget", budget_tokens=1500,
+                     content_search=True, min_confidence=0.35)
+    assert len(gated["files"]) < len(full["files"])
+    assert gated["suppressed_files"] > 0
+    assert all("confidence" in entry for entry in gated["files"])
+    confidences = [entry["confidence"] for entry in gated["files"]]
+    assert confidences == sorted(confidences, reverse=True)
+
+
+def test_repo_map_caps_the_low_confidence_tail(tmp_path: Path) -> None:
+    for index in range(60):
+        (tmp_path / f"mod{index:02d}.py").write_text(
+            "def work():\n"
+            "    return 1\n",
+            encoding="utf-8")
+    clear_memos()
+    report = repo_map(tmp_path, task="work", budget_tokens=8000,
+                      content_search=True)
+    assert len(report["files"]) <= 32
 
 
 def test_graph_memo_reuses_until_content_changes(tmp_path: Path,
@@ -535,13 +716,15 @@ def test_source_files_matches_base_walk(tmp_path: Path, monkeypatch) -> None:
     root = tmp_path / "repo"
     _write_walk_fixture(root)
     for dirs in (("pkg", "lib"), (".",)):
-        monkeypatch.setattr(repo_map_module, "SOURCE_DIRS", dirs)
+        (root / ".ozagia.toml").write_text(
+            "[index]\nmap_dirs = " + json.dumps(list(dirs)) + "\n")
         monkeypatch.setattr(base, "SOURCE_DIRS", dirs)
         expected = base._source_files(root)
         actual = repo_map_module._source_files(root)
         assert actual == expected, dirs
 
-    monkeypatch.setattr(repo_map_module, "SOURCE_DIRS", ("pkg", "lib"))
+    (root / ".ozagia.toml").write_text(
+        '[index]\nmap_dirs = ["pkg", "lib"]\n')
     files = repo_map_module._source_files(root)
     assert "pkg/a.py" in files
     assert "pkg/sub/deep/b.rs" in files

@@ -42,12 +42,13 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import re
 import sys
 import time
 from collections import Counter
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 from ozagia.config import repo_root, state_path
 
 ROOT = repo_root()
@@ -71,7 +72,7 @@ AREAS = ("dev_tooling", "rust_engine", "seeds_boot", "domains", "substrate",
 CONTENT = "content"
 LISTING = "listing"
 # repo_map tiers that show code (signatures or full bodies) rather than paths.
-REPO_MAP_CONTENT_TIERS = ("full", "outline")
+REPO_MAP_CONTENT_TIERS = ("full", "outline", "snippet")
 CODE_SEARCH_LIMIT = 50
 # Words of length >= 4 that carry no retrieval signal for the grep arm.
 GREP_STOPWORDS = frozenset({
@@ -334,6 +335,7 @@ def code_search_listing(result: dict[str, Any],
     lines: list[str] = []
     selected: list[str] = []
     tiers: dict[str, str] = {}
+    symbols: dict[str, list[str]] = {}
     for item in result.get("results") or []:
         if not isinstance(item, dict):
             continue
@@ -353,9 +355,15 @@ def code_search_listing(result: dict[str, Any],
         lines = trial
         selected.append(rel)
         tiers[rel] = tier
+        symbols[rel] = [
+            str(sym.get("name"))
+            for sym in item.get("symbols") or []
+            if isinstance(sym, dict) and sym.get("name")
+        ]
     text = "\n".join(lines)
     return {"files": selected, "text": text,
-            "estimated_tokens": len(text) // 4, "tiers": tiers}
+            "estimated_tokens": len(text) // 4, "tiers": tiers,
+            "symbols": symbols}
 
 
 def context_files(result: dict[str, Any]) -> list[str]:
@@ -481,11 +489,73 @@ def _parse_arms(values: Iterable[str] | str) -> tuple[str, ...]:
     return tuple(arm for arm in ARMS if arm in wanted)
 
 
+def _evidence_text(text: str) -> str:
+    """Rendered text without the repo-map header (which repeats the task)."""
+    return "\n".join(
+        line for line in str(text or "").splitlines()
+        if not line.startswith("# Repo map") and not line.startswith("# files:"))
+
+
+def _evidence_fields(task_text: str, rendered_text: str,
+                     estimated_tokens: int,
+                     symbols: Mapping[str, Iterable[str]] | None = None
+                     ) -> dict[str, Any]:
+    """Unique task terms, IDF-weighted, plus matched symbols per 1000 tokens.
+
+    A term's weight falls as more delivered lines repeat it, so redundant
+    context adds tokens without adding evidence. Each unique matched
+    definition is one additional evidence unit.
+    """
+    terms = grep_terms(task_text)
+    body = _evidence_text(rendered_text)
+    low = body.lower()
+    lines = [line.lower() for line in body.splitlines() if line.strip()]
+    line_count = max(1, len(lines))
+    matched = [term for term in terms if term in low]
+    weights = []
+    for term in matched:
+        df = sum(1 for line in lines if term in line)
+        weights.append(math.log((line_count + 1) / (df + 1)) + 1.0)
+    symbol_names = sorted({
+        str(name)
+        for names in (symbols or {}).values()
+        for name in names
+        if str(name)
+    })
+    weighted = sum(weights) + len(symbol_names)
+    tokens = max(1, int(estimated_tokens))
+    return {
+        "task_term_count": len(terms),
+        "evidence_terms": len(matched),
+        "evidence_symbols": len(symbol_names),
+        "evidence_weight": round(weighted, 4),
+        "evidence_coverage": (round(len(matched) / len(terms), 6)
+                              if terms else 0.0),
+        "evidence_density": round(weighted / tokens * 1000, 4),
+    }
+
+
+def _context_text(result: dict[str, Any] | None) -> str:
+    """Text actually delivered by a dev_context result."""
+    parts: list[str] = []
+    for item in (result or {}).get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        snap = item.get("snippet") or {}
+        parts.append(str(snap.get("path") or ""))
+        parts.append(str(item.get("why") or ""))
+        parts.append(str(snap.get("text") or ""))
+    return "\n".join(parts)
+
+
 def _run_record(*, task_id: str, budget: int, arm: str,
                 selected: Iterable[str], expected: Iterable[str],
                 estimated_tokens: int, elapsed_seconds: float,
                 cache: dict[str, Any] | None = None,
                 tiers: dict[str, str] | None = None,
+                task_text: str = "",
+                rendered_text: str = "",
+                symbols: Mapping[str, Iterable[str]] | None = None,
                 extra: dict[str, Any] | None = None) -> dict[str, Any]:
     files = _unique(selected)
     tier_map = {rel: (tiers or {}).get(rel, LISTING) for rel in files}
@@ -507,6 +577,8 @@ def _run_record(*, task_id: str, budget: int, arm: str,
         "recall_content": (round(len(content_hits) / expected_n, 6)
                            if expected_n else 0.0),
         "content_files": [rel for rel in files if tier_map[rel] == CONTENT],
+        **_evidence_fields(task_text, rendered_text, estimated_tokens,
+                           symbols),
     }
     if extra:
         record.update(extra)
@@ -547,6 +619,11 @@ def aggregate(runs: Iterable[dict[str, Any]], budgets: Iterable[int],
                 "mean_recall_at_budget": mean("recall"),
                 "mean_recall_content_at_budget": mean("recall_content"),
                 "mean_precision": mean("precision"),
+                "mean_evidence_coverage": mean("evidence_coverage"),
+                "mean_evidence_density": mean("evidence_density"),
+                "mean_evidence_terms": mean("evidence_terms"),
+                "mean_evidence_symbols": mean("evidence_symbols"),
+                "mean_evidence_weight": mean("evidence_weight"),
                 "mean_selected_files": round(
                     sum(r["selected_count"] for r in group) / n, 4),
                 "mean_content_files": round(
@@ -686,6 +763,7 @@ def evaluate(
             map_selected: list[str] = []
             map_tokens = 0
             map_elapsed = 0.0
+            map_symbols: dict[str, list[str]] = {}
             if needs_map:
                 t0 = time.perf_counter()
                 map_result = repo_map_fn(
@@ -694,6 +772,11 @@ def evaluate(
                 map_elapsed = time.perf_counter() - t0
                 map_selected = [f["path"] for f in map_result.get("files") or []]
                 map_tokens = int(map_result.get("estimated_tokens") or 0)
+                map_symbols = {
+                    str(entry["path"]): list(entry.get("evidence_symbols") or [])
+                    for entry in map_result.get("files") or []
+                    if entry.get("path")
+                }
 
             for arm in arm_list:
                 if arm == "baseline":
@@ -705,7 +788,8 @@ def evaluate(
                         selected=listing["files"], expected=expected,
                         estimated_tokens=listing["estimated_tokens"],
                         elapsed_seconds=elapsed,
-                        tiers=listing["tiers"]))
+                        tiers=listing["tiers"],
+                        task_text=text, rendered_text=listing["text"]))
                 elif arm == "grep":
                     t0 = time.perf_counter()
                     listing = _listing(grep_orders[task_id], budget)
@@ -716,6 +800,7 @@ def evaluate(
                         estimated_tokens=listing["estimated_tokens"],
                         elapsed_seconds=elapsed,
                         tiers=listing["tiers"],
+                        task_text=text, rendered_text=listing["text"],
                         extra={"terms": len(grep_terms(text))}))
                 elif arm == "code_search":
                     t0 = time.perf_counter()
@@ -727,6 +812,8 @@ def evaluate(
                         estimated_tokens=rendered["estimated_tokens"],
                         elapsed_seconds=elapsed,
                         tiers=rendered["tiers"],
+                        task_text=text, rendered_text=rendered["text"],
+                        symbols=rendered.get("symbols"),
                         extra={"results": len(
                             (code_result or {}).get("results") or [])}))
                 elif arm == "dev_context":
@@ -736,6 +823,8 @@ def evaluate(
                         estimated_tokens=context_tokens,
                         elapsed_seconds=context_elapsed,
                         tiers=context_tiers(context_result or {}),
+                        task_text=text,
+                        rendered_text=_context_text(context_result),
                         extra={"items": len(
                             (context_result or {}).get("items") or [])}))
                 elif arm == "dev_repo_map":
@@ -746,6 +835,10 @@ def evaluate(
                         elapsed_seconds=map_elapsed,
                         tiers=repo_map_tiers(map_result),
                         cache=_cache_record(map_result),
+                        task_text=text,
+                        rendered_text=str(
+                            (map_result or {}).get("markdown") or ""),
+                        symbols=map_symbols,
                         extra={"map_files": len(map_selected)}))
                 else:
                     component_tokens = {
@@ -764,6 +857,11 @@ def evaluate(
                         tiers=merge_tiers(context_tiers(context_result or {}),
                                           repo_map_tiers(map_result)),
                         cache=_cache_record(map_result),
+                        task_text=text,
+                        rendered_text=(_context_text(context_result) + "\n"
+                                       + str((map_result or {}).get("markdown")
+                                             or "")),
+                        symbols=map_symbols,
                         extra={
                             "component_estimated_tokens": component_tokens,
                             "components_within_budget": components_within,
@@ -834,15 +932,20 @@ def render_markdown(report: dict[str, Any]) -> str:
     lines.extend(["", "## Aggregate metrics", ""])
     lines.append("| Budget | Arm | Tasks | Mean recall@budget | "
                  "Mean recall (content tier) | Mean precision | "
+                 "Mean evidence coverage | Mean evidence symbols | "
+                 "Mean evidence/1k tokens | "
                  "Mean files | Mean content files | Mean tokens | Mean s | "
                  "Cache parsed | Cache reused |")
-    lines.append("|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+    lines.append("|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
     for row in report["aggregates"]:
         lines.append(
             f"| {row['budget_tokens']} | {row['arm']} | {row['tasks']} | "
             f"{row['mean_recall_at_budget']:.3f} | "
             f"{row.get('mean_recall_content_at_budget', 0.0):.3f} | "
             f"{row['mean_precision']:.3f} | "
+            f"{row.get('mean_evidence_coverage', 0.0):.3f} | "
+            f"{row.get('mean_evidence_symbols', 0.0):.1f} | "
+            f"{row.get('mean_evidence_density', 0.0):.2f} | "
             f"{row['mean_selected_files']:.1f} | "
             f"{row.get('mean_content_files', 0.0):.1f} | "
             f"{row['mean_estimated_tokens']:.0f} | "

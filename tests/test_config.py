@@ -22,6 +22,7 @@ from ozagia.config import (
     state_path,
     state_rel,
 )
+from ozagia import config as config_module
 from ozagia.core import memory as memory_module
 from ozagia.core import repo_map as repo_map_module
 from ozagia.core.memory import DevMemory, build_index
@@ -1165,13 +1166,15 @@ def test_dot_source_dir_builds_clean_paths(tmp_path: Path, monkeypatch) -> None:
 def test_default_state_dir_is_never_indexed(tmp_path: Path, monkeypatch) -> None:
     root = tmp_path / "repo"
     _dot_fixture(root)
-    # Remove the generic name from the skip set: the state dir is still left out.
+    # Remove the generic name from config so state-dir exclusion itself is
+    # exercised, rather than the generic directory-name skip.
+    monkeypatch.setattr(
+        config_module, "GENERIC_SKIP_DIRS",
+        frozenset(config_module.GENERIC_SKIP_DIRS - {".ozagia"}))
+    config_module.clear_config_cache()
     monkeypatch.setattr(memory_module, "SKIP_PARTS",
                         set(memory_module.SKIP_PARTS) - {".ozagia"})
-    monkeypatch.setattr(repo_map_module, "SKIP_PARTS",
-                        set(repo_map_module.SKIP_PARTS) - {".ozagia"})
     monkeypatch.setattr(memory_module, "SOURCE_DIRS", (".",))
-    monkeypatch.setattr(repo_map_module, "SOURCE_DIRS", (".",))
     out = state_path(root, "graph.json")
     build_index(root, out, include_docs="none", include_git=False)
     mem = DevMemory(out, state_path(root, "journal.jsonl"), root=root)
@@ -1188,7 +1191,6 @@ def test_repo_map_respects_custom_state_dir(tmp_path: Path, monkeypatch) -> None
     root = tmp_path / "repo"
     _dot_fixture(root)
     monkeypatch.setenv("OZAGIA_STATE_DIR", "work/state")
-    monkeypatch.setattr(repo_map_module, "SOURCE_DIRS", (".",))
     files = repo_map_module._source_files(root)
     assert "work/state/inside_custom_state.py" not in files
     assert "a.py" in files

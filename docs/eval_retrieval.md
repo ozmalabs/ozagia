@@ -59,7 +59,7 @@ as the historical record (its sections follow this one).
 | `grep` | Every source file ranked by distinct task terms found in its text (case-insensitive substring), then total occurrences, then path. Terms are words of length 4 or more, minus `GREP_STOPWORDS`. Each file is read once per run. | listing |
 | `code_search` | `code_search(root, task, limit=50)` results, rendered as `path:line: snippet` in result order | content if a snippet is shown, else listing |
 | `dev_context` | Files from `DevMemory.context` items | content if the item carries snippet text |
-| `dev_repo_map` | Files from `repo_map`, same budget | content for `full` and `outline` tiers, listing otherwise |
+| `dev_repo_map` | Files from `repo_map`, same budget | content for `full`, `outline` and `snippet` tiers, listing otherwise |
 | `both` | Union of dev_context and dev_repo_map | content if either side is content |
 
 `baseline` and the `dev_context`/`dev_repo_map`/`both` arms behave as in v1.
@@ -242,6 +242,17 @@ For each run:
 
 - **recall** = `|expected ∩ selected| / |expected|`
 - **precision** = `|expected ∩ selected| / |selected|`
+- **evidence_terms** = unique task terms present in the rendered text, excluding
+  the repo-map header (which repeats the task)
+- **evidence_symbols** = unique matched definitions exposed by the arm
+- **evidence_coverage** = `evidence_terms / task_term_count`
+- **evidence_weight** = sum of line-IDF term weights plus one per matched
+  symbol. A term's weight is `log((lines + 1) / (lines_containing_term + 1)) + 1`,
+  so repeating the same term across the delivered context adds tokens without
+  adding evidence.
+- **evidence_density** = `evidence_weight / estimated_tokens * 1000`; because
+  terms are counted once and weighted by repetition, redundant context lowers
+  the density
 - **selected_count** = unique files in the arm's file set
 - **estimated_tokens** = the arm's own ~4-chars/token estimate
 - **elapsed_seconds** = retrieval wall time for that arm/component
@@ -251,7 +262,11 @@ For each run:
 The aggregate table reports the mean of each metric per `(budget, arm)`,
 plus totals for cache parsed/reused, the number of runs within budget, and the
 number of tasks with recall 1.0. `mean_recall_at_budget` is the mean file
-recall at that budget.
+recall at that budget. Evidence density is not a gold-file metric: a dense map
+can still miss the expected file, so read it beside recall and precision. It is
+also unit-scaled: one matched definition counts as one unit, while term weights
+depend on repetition, so compare density within a table rather than across
+different metric versions.
 
 Because the benchmark is small, treat differences as a regression signal, not
 as statistical evidence.

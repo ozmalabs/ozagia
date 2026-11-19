@@ -289,6 +289,59 @@ def test_code_search_arm_renders_snippets_within_budget_and_marks_content(
     assert tiny["files"] == []
 
 
+def test_repo_map_snippet_tier_counts_as_content() -> None:
+    from ozagia.eval.retrieval import repo_map_tiers
+    tiers = repo_map_tiers({"files": [
+        {"path": "a.py", "tier": "snippet"},
+        {"path": "b.py", "tier": "listing"},
+    ]})
+    assert tiers["a.py"] == CONTENT
+    assert tiers["b.py"] == LISTING
+
+
+def test_evidence_fields_count_weighted_terms_and_symbols() -> None:
+    import math
+    from ozagia.eval.retrieval import _evidence_fields
+    fields = _evidence_fields(
+        "alpha beta gamma",
+        "a.py\nalpha beta\nalpha beta\n",
+        100)
+    weight = 2 * (math.log(4 / 3) + 1.0)
+    assert fields["task_term_count"] == 3
+    assert fields["evidence_terms"] == 2
+    assert fields["evidence_symbols"] == 0
+    assert fields["evidence_coverage"] == 0.666667
+    assert fields["evidence_weight"] == round(weight, 4)
+    assert fields["evidence_density"] == round(weight / 100 * 1000, 4)
+
+    with_symbols = _evidence_fields(
+        "alpha beta gamma",
+        "a.py\nalpha beta\nalpha beta\n",
+        100,
+        symbols={"a.py": ["alpha", "beta"]})
+    assert with_symbols["evidence_symbols"] == 2
+    assert with_symbols["evidence_weight"] == round(weight + 2, 4)
+
+
+def test_evidence_density_falls_when_context_repeats_terms() -> None:
+    from ozagia.eval.retrieval import _evidence_fields
+    sparse = _evidence_fields("retry flaky operation",
+                              "a.py\nretry\na.py\nb.py\n", 100)
+    repeated = _evidence_fields("retry flaky operation",
+                                "retry\nretry\nretry\nretry\n", 100)
+    assert repeated["evidence_density"] < sparse["evidence_density"]
+
+
+def test_evidence_fields_ignore_the_repo_map_header() -> None:
+    from ozagia.eval.retrieval import _evidence_fields
+    fields = _evidence_fields(
+        "retry flaky operation",
+        "# Repo map: retry flaky operation\n# files: 1\nmod.py\n",
+        10)
+    assert fields["evidence_terms"] == 0
+    assert fields["evidence_density"] == 0.0
+
+
 def test_recall_content_differs_from_recall_for_a_listing_tier_hit() -> None:
     run = _run_record(
         task_id="t", budget=500, arm="dev_repo_map",

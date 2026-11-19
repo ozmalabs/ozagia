@@ -23,12 +23,14 @@ import hashlib
 import json
 import math
 import os
+import re
 import tempfile
 import time
 from collections import OrderedDict, defaultdict, deque
 from pathlib import Path
 from typing import Any, Iterable
-from ozagia.config import load_project_config, repo_root, state_path, state_rel
+from ozagia.config import (GENERIC_SKIP_DIRS, load_project_config, repo_root,
+                           state_path, state_rel)
 
 ROOT = repo_root()
 CACHE_VERSION = 3
@@ -46,7 +48,6 @@ DEFAULT_INDEX_WORKERS = 4
 # change again without a visible size or mtime change at the same second
 # (racy-git rule). Such entries are re-hashed instead of trusted by mtime.
 RACY_NS = 2_000_000_000
-DEFAULT_CACHE = state_path(ROOT, "tags.json")
 from ozagia.index.tag_languages import (  # noqa: E402
     LANGUAGES as _TAG_LANGUAGES,
     extract_tags as _registry_extract_tags,
@@ -56,11 +57,10 @@ from ozagia.index.tag_languages import (  # noqa: E402
 LANGUAGES = {suffix: entry["module"]
              for suffix, entry in _TAG_LANGUAGES.items()
              if entry.get("module")}
-# Scanned directories and skipped directory names, from the project
-# configuration of ROOT (`map_dirs`, `skip_dirs`).
-_CONFIG = load_project_config(ROOT)
-SOURCE_DIRS = _CONFIG.map_dirs
-SKIP_PARTS = set(_CONFIG.skip_dirs)
+# Compatibility aliases for callers that imported these historical constants.
+# Scans always load configuration for the root passed to _source_files.
+SOURCE_DIRS = (".",)
+SKIP_PARTS = set(GENERIC_SKIP_DIRS)
 MAX_FILE_BYTES = 2 * 1024 * 1024
 
 
@@ -72,12 +72,12 @@ def _rel(root: Path, path: Path) -> str:
     return path.resolve().relative_to(root.resolve()).as_posix()
 
 
-def _skipped(rel: str) -> bool:
-    return any(part in SKIP_PARTS for part in rel.split("/"))
+def _skipped(rel: str, skip_parts: set[str]) -> bool:
+    return any(part in skip_parts for part in rel.split("/"))
 
 
 def _source_files(root: Path) -> list[str]:
-    """Repo-relative source files under SOURCE_DIRS, in the repo-map order.
+    """Repo-relative source files under this root's configured map_dirs.
 
     Same result as the earlier ``sorted(base.rglob("*"))`` walk, without a
     ``resolve()`` per file:
@@ -92,10 +92,13 @@ def _source_files(root: Path) -> list[str]:
     * a symlinked file is resolved, and kept only when its target is under
       root. Its rel is the target's rel, as before.
     """
+    config = load_project_config(root)
+    source_dirs = config.map_dirs
+    skip_parts = set(config.skip_dirs)
     root_real = Path(root).resolve()
     srel = state_rel(root_real)
     out: list[str] = []
-    for d in SOURCE_DIRS:
+    for d in source_dirs:
         base = Path(root) / d if d not in ("", ".") else Path(root)
         if not base.exists():
             continue
@@ -117,7 +120,7 @@ def _source_files(root: Path) -> list[str]:
                 child_parts = parts + (entry.name,)
                 try:
                     if entry.is_dir(follow_symlinks=False):
-                        if entry.name not in SKIP_PARTS:
+                        if entry.name not in skip_parts:
                             stack.append((entry.path, child_parts))
                         continue
                     if not entry.is_file():
@@ -139,7 +142,7 @@ def _source_files(root: Path) -> list[str]:
                 continue
             else:
                 rel = "/".join(prefix + child_parts)
-            if _skipped(rel):
+            if _skipped(rel, skip_parts):
                 continue
             if srel and (rel == srel or rel.startswith(srel + "/")):
                 continue
@@ -263,7 +266,7 @@ def _entry_is_fresh(old: Any, st: os.stat_result, fingerprint: str) -> bool:
 
 
 def update_tag_cache(root: str | Path = ROOT, *,
-                     cache_path: str | Path = DEFAULT_CACHE,
+                     cache_path: str | Path | None = None,
                      files: Iterable[str] | None = None,
                      force: bool = False) -> tuple[dict[str, Any], dict[str, Any]]:
     """Content-hash incremental tag cache. Returns (cache, stats).
@@ -274,6 +277,7 @@ def update_tag_cache(root: str | Path = ROOT, *,
     restricted to the requested or scanned paths, with its own ``root_hash``.
     """
     root = Path(root).resolve()
+    cache_path = state_path(root, "tags.json") if cache_path is None else cache_path
     cache_path = Path(cache_path)
     existed = cache_path.exists()
     cache = _load_cache(cache_path)
@@ -499,11 +503,63 @@ def build_reference_graph(cache: dict[str, Any]) -> dict[str, Any]:
 
 
 def _task_terms(task: str) -> list[str]:
-    import re
     raw = re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", (task or "").lower())
     stop = {"the", "and", "for", "with", "from", "into", "this", "that",
             "add", "fix", "use", "make", "new", "code", "file", "test"}
     return [t for t in raw if t not in stop]
+
+
+# Issue templates, URLs and code samples carry many repeated words ("python",
+# "version", "example") that are not task evidence. De-duplicating and dropping
+# them stops a long boilerplate paragraph from outweighing the one identifier
+# the issue is actually about.
+_CONTENT_STOP = {
+    "the", "and", "for", "with", "from", "into", "this", "that", "add",
+    "fix", "use", "make", "new", "code", "file", "test", "when", "you",
+    "not", "need", "are", "does", "can", "has", "have", "was", "were",
+    "will", "would", "should", "could", "them", "they", "their", "there",
+    "here", "also", "but", "however", "please", "sure", "comments",
+    "submit", "issue", "hidden", "remove", "contributing", "guidelines",
+    "github", "www", "org", "https", "http", "actual", "behavior",
+    "behaviour", "description", "steps", "reproduce", "output", "version",
+    "following", "example", "expected", "value", "values", "import",
+    "from", "class", "def", "return", "self", "none", "true", "false",
+    "object", "string", "print", "assert", "lambda", "const", "function",
+    "module", "python",
+}
+
+
+def _content_task_terms(task: str) -> list[str]:
+    """Task terms for content-aware ranking, without template noise.
+
+    HTML comments, URLs and duplicate words are removed. Code-block
+    identifiers are kept: they often name the failing API.
+    """
+    text = re.sub(r"<!--.*?-->", " ", task or "", flags=re.S)
+    text = re.sub(r"https?://\S+", " ", text)
+    raw = re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", text.lower())
+    seen: set[str] = set()
+    terms: list[str] = []
+    for term in raw:
+        if term in _CONTENT_STOP or term in seen:
+            continue
+        seen.add(term)
+        terms.append(term)
+    return terms
+
+
+_AUXILIARY_SEGMENTS = ("/tests/", "/test/", "/testing/", "/docs/",
+                       "/doc/", "/examples/", "/example/", "/vendor/",
+                       "/extern/", "/third_party/", "/thirdparty/")
+
+
+def _is_auxiliary_path(path: str) -> bool:
+    """Whether a path is test/documentation/vendored support code."""
+    low = "/" + str(path).lower().lstrip("/")
+    name = low.rsplit("/", 1)[-1]
+    if name.startswith("test_") or name.endswith("_test.py"):
+        return True
+    return any(segment in low for segment in _AUXILIARY_SEGMENTS)
 
 
 def _file_names(graph: dict[str, Any]) -> tuple[dict[str, set[str]],
@@ -564,17 +620,24 @@ def _name_index(graph: dict[str, Any]) -> _NameIndex:
 
 def _task_relevance(graph: dict[str, Any], task: str,
                     focus_files: Iterable[str],
-                    index: _NameIndex | None = None) -> tuple[dict[str, float],
-                                                              set[str]]:
+                    index: _NameIndex | None = None,
+                    *, content_aware: bool = False) -> tuple[dict[str, float],
+                                                             set[str]]:
     """Term-weighted relevance + a candidate subgraph.
 
     The candidate restriction is what stops a globally central file (e.g. a
     py.rs with hundreds of references) from dominating every task. Terms are
     weighted by inverse file frequency; the candidates are the top matching
     files plus their one-hop reference neighbours.
+
+    With ``content_aware`` the score distinguishes evidence quality: an exact
+    definition name or path segment is worth much more than a substring hit,
+    and test/documentation/vendored files are demoted. This stops a long issue
+    template that repeats generic words from outranking the one file that
+    defines the identifier named in the title.
     """
     idx = index if index is not None else _name_index(graph)
-    terms = _task_terms(task)
+    terms = _content_task_terms(task) if content_aware else _task_terms(task)
     nodes = idx.nodes
     if not nodes:
         return {}, set()
@@ -593,16 +656,37 @@ def _task_relevance(graph: dict[str, Any], task: str,
             lowpath = f.lower()
             defs_blob = idx.defs_blob.get(f, "")
             refs_blob = idx.refs_blob.get(f, "")
-            score = 0.0
-            for t in terms:
-                if t in lowpath:
-                    score += 3.0 * weight[t]
-                if t in defs_blob:
-                    score += 4.0 * weight[t]
-                if t in refs_blob:
-                    score += 1.5 * weight[t]
+            if content_aware:
+                defs = idx.file_defs.get(f, set())
+                segments = set(re.split(r"[/_.\-]", lowpath))
+                score = 0.0
+                for t in terms:
+                    signal = 0.0
+                    if t in segments:
+                        signal = 6.0
+                    elif t in lowpath:
+                        signal = 2.0
+                    if t in defs:
+                        signal = 10.0
+                    elif t in defs_blob:
+                        signal = max(signal, 4.0)
+                    if t in refs_blob:
+                        signal = max(signal, 1.0)
+                    if signal:
+                        score += signal * weight[t]
+            else:
+                score = 0.0
+                for t in terms:
+                    if t in lowpath:
+                        score += 3.0 * weight[t]
+                    if t in defs_blob:
+                        score += 4.0 * weight[t]
+                    if t in refs_blob:
+                        score += 1.5 * weight[t]
             if score > 0:
-                if f.startswith("tests/"):
+                if content_aware and _is_auxiliary_path(f):
+                    score *= 0.5
+                elif f.startswith("tests/"):
                     score *= 0.35
                 scores[f] = score
     for f in focus_files:
@@ -625,6 +709,26 @@ def _task_relevance(graph: dict[str, Any], task: str,
 
 PPR_TOLERANCE = 1e-10
 PPR_MAX_ITERATIONS = 100
+
+# Confidence-weighted rank-fusion horizons. A candidate's contribution decays
+# exponentially with its rank in each signal; the horizons say how many
+# positions that signal is trusted over. Lexical search is noisy past its
+# first handful of hits, so its horizon is shorter than the graph's.
+GRAPH_RANK_HORIZON = 20.0
+LEXICAL_RANK_HORIZON = 8.0
+GRAPH_FUSION_WEIGHT = 0.60
+LEXICAL_FUSION_WEIGHT = 0.40
+# Stop rendering candidates below this fraction of the top fused score, and
+# never render more than this many. This keeps the map a confident reading
+# list instead of an 80-90 path dump.
+CONTENT_TAIL_RATIO = 0.18
+CONTENT_MAX_FILES = 32
+# Below this share of the top fused score, a file is kept only when it adds
+# task evidence not already covered by the files above it. High-confidence
+# files are always kept; low-confidence duplicates are redundant context.
+# Small budgets have fewer slots, so they use the stricter threshold.
+CONTENT_MIN_CONFIDENCE = 0.30
+CONTENT_MIN_CONFIDENCE_TIGHT = 0.35
 
 
 def personalized_pagerank(graph: dict[str, Any], *,
@@ -830,15 +934,68 @@ def _scip_edges(root: Path, scip_path: str | Path | None) -> list[dict[str, Any]
         return []
 
 
+def _content_rank(root: Path, task: str,
+                  cache_path: str | Path | None
+                  ) -> tuple[dict[str, float],
+                             dict[str, tuple[int, str]]]:
+    """Bounded lexical candidates and their best matching line.
+
+    The repo-map graph knows paths and symbol names, but not what a file says.
+    Reusing the existing BM25 search adds content evidence without a second
+    lexical implementation. A missing/failed search is a silent fallback: the
+    map still works from the graph alone.
+    """
+    try:
+        from ozagia.core.search import code_search
+        result = code_search(
+            root, task, limit=80, cache_path=cache_path,
+            include_snippet=True)
+    except Exception:  # a map remains useful when search is unavailable
+        return {}, {}
+    if not isinstance(result, dict) or not result.get("ok"):
+        return {}, {}
+    scores: dict[str, float] = {}
+    snippets: dict[str, tuple[int, str]] = {}
+    for item in result.get("results") or []:
+        if not isinstance(item, dict):
+            continue
+        path = item.get("path")
+        score = item.get("score")
+        if not isinstance(path, str) or not isinstance(score, (int, float)):
+            continue
+        scores[path] = float(score)
+        line = item.get("line")
+        snippet = item.get("snippet")
+        if isinstance(line, int) and isinstance(snippet, str) and snippet:
+            snippets[path] = (line, snippet)
+    return scores, snippets
+
+
 def repo_map(root: str | Path = ROOT, *, task: str = "",
              budget_tokens: int = 1500,
-             cache_path: str | Path = DEFAULT_CACHE,
+             cache_path: str | Path | None = None,
              focus_files: Iterable[str] = (),
              full_tier: int = 3, outline_tier: int = 12,
              force_refresh: bool = False,
              files: Iterable[str] | None = None,
-             scip_path: str | Path | None = None) -> dict[str, Any]:
-    """Ranked, token-budgeted repo map (Aider-style, graph-native)."""
+             scip_path: str | Path | None = None,
+             content_search: bool = True,
+             min_confidence: float | None = None
+             ) -> dict[str, Any]:
+    """Ranked, token-budgeted repo map (Aider-style, graph-native).
+
+    With a non-empty task and ``content_search=True``, bounded BM25 results
+    from :mod:`ozagia.core.search` are fused with the graph/name relevance.
+    This lets a file whose content matches the issue terms enter the candidate
+    set even when its path and symbol names do not.
+
+    ``min_confidence`` is the share of the top fused score below which a file
+    must add new task evidence to be kept. High-confidence files are always
+    kept; low-confidence duplicates are dropped. Set it to 0 to keep every
+    candidate above the tail floor. ``None`` uses 0.35 for budgets below 700
+    tokens and 0.30 above, because small budgets have fewer slots to spend on
+    uncertain candidates.
+    """
     root = Path(root).resolve()
     cache, stats = update_tag_cache(root, cache_path=cache_path,
                                     files=files,
@@ -849,31 +1006,117 @@ def repo_map(root: str | Path = ROOT, *, task: str = "",
     prep = (_prepared_with_edges(cache, scip_edges) if scip_edges
             else _prepared(cache))
     graph = prep.graph
+    content_aware = bool(content_search and task.strip())
     relevance, candidates = _task_relevance(graph, task, focus_files,
-                                            index=prep.index)
+                                            index=prep.index,
+                                            content_aware=content_aware)
+    lexical, lexical_snippets = (
+        _content_rank(root, task, cache_path) if content_aware else ({}, {}))
+    lexical = {path: score for path, score in lexical.items()
+               if path in known_files}
+    lexical_snippets = {path: snippet
+                        for path, snippet in lexical_snippets.items()
+                        if path in lexical}
+    if lexical:
+        # Content hits must be candidates before PageRank runs; otherwise the
+        # candidate restriction would hide the very files search found.
+        candidates.update(lexical)
     ranked = personalized_pagerank(graph, task=task,
                                    focus_files=focus_files,
                                    prepared_relevance=(relevance, candidates))
     if task.strip() and ranked:
-        # PageRank supplies centrality; the term-weighted relevance supplies
-        # task fit. The map is for a task, so relevance leads (0.7/0.3).
+        # PageRank supplies centrality; task relevance and BM25 content
+        # evidence supply fit. Relevance leads more strongly when content
+        # evidence is available because PageRank is query-independent.
         max_rel = max(relevance.values()) or 1.0
         max_rank = max(ranked.values()) or 1.0
-        ranked = dict(sorted(
-            ranked.items(),
-            key=lambda kv: (-(0.7 * relevance.get(kv[0], 0.0) / max_rel
-                              + 0.3 * kv[1] / max_rank),
-                            kv[0])))
+        rel_weight = 0.80 if content_aware else 0.70
+        if lexical:
+            # Confidence-weighted rank fusion. Reciprocal-rank fusion's
+            # 1/(k+rank) decays too slowly when the lexical list is much
+            # longer than the graph list: an 80th lexical hit could outrank a
+            # top-10 graph hit. An exponential horizon makes each list's tail
+            # vanish, so a file must be near the top of at least one signal.
+            graph_order = sorted(
+                ranked,
+                key=lambda path: (-(rel_weight * relevance.get(path, 0.0)
+                                    / max_rel
+                                    + (1.0 - rel_weight) * ranked[path]
+                                    / max_rank), path))
+            graph_rank = {path: index + 1
+                          for index, path in enumerate(graph_order)}
+            lexical_order = sorted(lexical,
+                                   key=lambda path: (-lexical[path], path))
+            lexical_rank = {path: index + 1
+                            for index, path in enumerate(lexical_order)}
+            fused = {}
+            for path in set(graph_order) | set(lexical_order):
+                score = 0.0
+                if path in graph_rank:
+                    score += GRAPH_FUSION_WEIGHT * math.exp(
+                        -(graph_rank[path] - 1) / GRAPH_RANK_HORIZON)
+                if path in lexical_rank:
+                    score += LEXICAL_FUSION_WEIGHT * math.exp(
+                        -(lexical_rank[path] - 1) / LEXICAL_RANK_HORIZON)
+                fused[path] = score
+            ranked = dict(sorted(fused.items(),
+                                 key=lambda kv: (-kv[1], kv[0])))
+            # The map is a reading aid, not an exhaustive path dump. Keep the
+            # confident head and drop the flat tail; the old 80-90 file tail
+            # added little recall and made precision collapse.
+            floor = (max(ranked.values()) or 1.0) * CONTENT_TAIL_RATIO
+            ranked = {path: score for path, score in ranked.items()
+                      if score >= floor}
+            if len(ranked) > CONTENT_MAX_FILES:
+                ranked = dict(list(ranked.items())[:CONTENT_MAX_FILES])
+        else:
+            def _score(item: tuple[str, float]) -> float:
+                rel, rank = item[0], item[1]
+                return (rel_weight * relevance.get(rel, 0.0) / max_rel
+                        + (1.0 - rel_weight) * rank / max_rank)
+            ranked = dict(sorted(
+                ranked.items(),
+                key=lambda kv: (-_score(kv), kv[0])))
     budget = max(200, int(budget_tokens))
+    if min_confidence is None:
+        min_confidence = (CONTENT_MIN_CONFIDENCE_TIGHT if budget < 700
+                          else CONTENT_MIN_CONFIDENCE)
+    min_confidence = max(0.0, min(1.0, float(min_confidence)))
+    if content_aware:
+        # Lexical candidates tend to arrive as many medium-confidence files.
+        # Keep one full body and more compact outlines, then spend the rest on
+        # cheap listings so the confident head is shown with content.
+        full_tier = min(full_tier, 1)
+        outline_tier = min(max(outline_tier, 16), 20)
     full_tier = max(1, min(int(full_tier), max(1, budget // 300)))
     outline_tier = max(full_tier, min(int(outline_tier),
                                       max(2, budget // 80)))
     symbols_by_file = prep.symbols_by_file
+    # A snippet costs more than a listing but far less than an outline. Spend
+    # a bounded slice of the budget on the best lexical evidence so files just
+    # outside the outline tier still arrive with a matching line. At 500
+    # tokens there is no spare room: a snippet would displace a candidate and
+    # cost more recall than the extra content returns.
+    snippet_limit = (min(8, max(2, budget // 150))
+                     if content_aware and budget >= 700 else 0)
+    snippets_used = 0
     line_cache: dict[str, list[str]] = {}
     lines: list[str] = []
     used_files: list[dict[str, Any]] = []
+    top_score = max((score for _, score in ranked.items()), default=1.0) or 1.0
+    task_evidence = _content_task_terms(task) if content_aware else []
+    seen_evidence: set[str] = set()
+    suppressed = 0
+    gate_low_confidence = bool(
+        content_aware and lexical and min_confidence > 0)
     if task:
-        lines.append(f"# Repo map: {task}")
+        # The task drives ranking, but the map header must not spend the file
+        # budget on a long issue description. One bounded line is enough to
+        # identify the map; the caller still has the full prompt.
+        headline = " ".join(str(task).split())[:200]
+        if len(" ".join(str(task).split())) > 200:
+            headline += "..."
+        lines.append(f"# Repo map: {headline}")
     else:
         lines.append("# Repo map")
     lines.append(f"# files: {len(ranked)}  cache: {stats['cached_files']} "
@@ -881,12 +1124,14 @@ def repo_map(root: str | Path = ROOT, *, task: str = "",
     lines.append("")
     for i, (rel, score) in enumerate(ranked.items()):
         syms = symbols_by_file.get(rel, [])
+        rendered_symbols: list[str] = []
         if i < full_tier:
             tier = "full"
             body = [f"{rel}  score={score:.4f}"]
             shown = 0
+            symbol_limit = 8 if content_aware else 16
             for s in syms:
-                if shown >= 16:
+                if shown >= symbol_limit:
                     break
                 if (s["name"].lower() in _GENERIC_SYMBOLS
                         and len(syms) > 8):
@@ -896,6 +1141,7 @@ def repo_map(root: str | Path = ROOT, *, task: str = "",
                 if src:
                     line += f"  | {src[:120]}"
                 body.append(line)
+                rendered_symbols.append(str(s["name"]))
                 shown += 1
         elif i < outline_tier:
             tier = "outline"
@@ -904,12 +1150,37 @@ def repo_map(root: str | Path = ROOT, *, task: str = "",
                       and s["name"].lower() not in _GENERIC_SYMBOLS]
             if not public:
                 public = syms
+            name_limit = 6 if content_aware else 12
+            shown_symbols = public[:name_limit]
+            rendered_symbols = [str(s["name"]) for s in shown_symbols]
             names = ", ".join(f"{s['name']}@L{s['line']}"
-                              for s in public[:12])
+                              for s in shown_symbols)
             body = [f"{rel}  score={score:.4f}  {names}"]
+        elif (snippets_used < snippet_limit
+              and rel in lexical_snippets):
+            tier = "snippet"
+            line_no, text = lexical_snippets[rel]
+            if len(text) > 140:
+                text = text[:137].rstrip() + "..."
+            body = [f"{rel}  score={score:.4f}  L{line_no}",
+                    f"  {text}"]
+            snippets_used += 1
         else:
             tier = "listing"
             body = [f"{rel}  ({len(syms)} symbols)"]
+        body_low = "\n".join(body).lower()
+        body_terms = {term for term in task_evidence if term in body_low}
+        confidence = score / top_score
+        if (gate_low_confidence and used_files
+                and confidence < min_confidence
+                and not (body_terms - seen_evidence)):
+            # Below the confidence line, redundant context is not worth its
+            # tokens. High-confidence files are always kept.
+            if tier == "snippet":
+                snippets_used -= 1
+            suppressed += 1
+            continue
+        seen_evidence.update(body_terms)
         if not used_files:
             # Always return at least one file: trim a too-large first body
             # rather than returning an empty map.
@@ -919,18 +1190,40 @@ def repo_map(root: str | Path = ROOT, *, task: str = "",
                     break
             lines.extend(body)
             lines.append("")
-            used_files.append({"path": rel, "score": round(score, 6),
-                               "tier": tier, "symbols": len(syms)})
+            entry = {"path": rel, "score": round(score, 6),
+                     "tier": tier, "symbols": len(syms)}
+            if content_aware:
+                entry["confidence"] = round(confidence, 6)
+                entry["evidence_symbols"] = sorted({
+                    name for name in rendered_symbols
+                    if any(term in name.lower() for term in task_evidence)
+                })[:12]
+            used_files.append(entry)
             continue
         candidate = "\n".join(lines + body + [""])
         if len(candidate) // 4 > budget:
-            break
+            if tier == "snippet":
+                # A snippet must not crowd out the rest of the tail; degrade
+                # it to a listing and keep going.
+                snippets_used -= 1
+                tier = "listing"
+                body = [f"{rel}  ({len(syms)} symbols)"]
+                candidate = "\n".join(lines + body + [""])
+            if len(candidate) // 4 > budget:
+                break
         lines.extend(body)
         lines.append("")
-        used_files.append({"path": rel, "score": round(score, 6),
-                           "tier": tier, "symbols": len(syms)})
+        entry = {"path": rel, "score": round(score, 6),
+                 "tier": tier, "symbols": len(syms)}
+        if content_aware:
+            entry["confidence"] = round(confidence, 6)
+            entry["evidence_symbols"] = sorted({
+                name for name in rendered_symbols
+                if any(term in name.lower() for term in task_evidence)
+            })[:12]
+        used_files.append(entry)
     markdown = "\n".join(lines).strip() + "\n"
-    return {
+    result = {
         "ok": True,
         "task": task,
         "budget_tokens": budget,
@@ -943,10 +1236,14 @@ def repo_map(root: str | Path = ROOT, *, task: str = "",
                   "scip_edges": len(scip_edges),
                   "definitions": sum(len(v) for v in graph["defines"].values())},
     }
+    if content_aware:
+        result["suppressed_files"] = suppressed
+        result["evidence_terms"] = len(seen_evidence)
+    return result
 
 
 def impact(root: str | Path = ROOT, *, file: str, depth: int = 2,
-           cache_path: str | Path = DEFAULT_CACHE,
+           cache_path: str | Path | None = None,
            files: Iterable[str] | None = None,
            scip_path: str | Path | None = None) -> dict[str, Any]:
     """Transitive dependents of a file over the reference graph."""

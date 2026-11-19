@@ -5,6 +5,25 @@ from tree-sitter tags, a file reference graph and personalized PageRank. The
 map names repository-relative paths and symbol line numbers; it is a reading
 aid, never an edit and never a substitute for the source.
 
+When a task is present, the map also uses bounded lexical content candidates
+from `ozagia.core.search.code_search`. Candidates are scored with exact
+definition-name and path-segment matches above substring matches, and
+test/documentation/vendored files are demoted. Graph order and BM25 order are
+then fused with confidence-weighted rank fusion: each signal's contribution
+decays exponentially with rank, so a file must be near the top of at least one
+signal instead of entering through a long tail. Candidates below 18% of the top
+fused score are dropped, with a hard cap of 32 files. Below the confidence line
+(35% of the top score at small budgets, 30% above) a file is kept only when it
+adds task evidence not already covered by the files above it; high-confidence
+files are always kept. The task header is capped at 200 characters, and the map
+spends one full body, compact outlines, matching-line snippets for lexical hits,
+and cheap listings within the same token budget.
+`repo_map(..., content_search=False)` keeps the graph/name-only behavior;
+`min_confidence=0` disables the evidence gate. Each content-aware file entry
+carries `confidence` and the matched `evidence_symbols` it exposed; the result
+reports `suppressed_files` and `evidence_terms`. The content path opens no
+network and calls no model.
+
 The same map is available in three places:
 
 - the MCP tool `dev_repo_map` and

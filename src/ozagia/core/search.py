@@ -36,14 +36,12 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from ozagia.core.repo_map import (
-    LANGUAGES,
     MAX_FILE_BYTES,
-    SKIP_PARTS,
     _index_workers,
     graph_prior,
     update_tag_cache,
 )
-from ozagia.config import state_path, state_rel
+from ozagia.config import state_path
 
 # BM25 defaults; both are keyword arguments on code_search().
 BM25_K1 = 1.5
@@ -482,33 +480,6 @@ def _get_index(root: Path, cache_path: Path,
     return index
 
 
-def _discover_source_files(root: Path) -> list[str]:
-    """Best-effort flat-fixture fallback for an empty repo-map scan.
-
-    ``update_tag_cache`` defaults to repo-map SOURCE_DIRS. A temporary fixture
-    with ``a.py`` at its root has none of those dirs, so when the default scan
-    yields no files we walk the root with the same extension and skip rules.
-    The real repository is never affected: its default cache is non-empty.
-    """
-    out: list[str] = []
-    srel = state_rel(root)
-    for path in sorted(root.rglob("*")):
-        if not path.is_file() or path.suffix.lower() not in LANGUAGES:
-            continue
-        rel = path.relative_to(root).as_posix()
-        if any(part in SKIP_PARTS for part in rel.split("/")):
-            continue
-        if srel and (rel == srel or rel.startswith(srel + "/")):
-            continue
-        try:
-            if path.stat().st_size > MAX_FILE_BYTES:
-                continue
-        except OSError:
-            continue
-        out.append(rel)
-    return out
-
-
 def code_search(root: str | Path, query: str, *, limit: int = 20,
                 cache_path: str | Path | None = None,
                 files: Iterable[str] | None = None,
@@ -576,13 +547,6 @@ def code_search(root: str | Path, query: str, *, limit: int = 20,
     cache, _stats = update_tag_cache(root, cache_path=Path(cache_path),
                                      files=files)
     prune = files is None
-    if files is None and not cache.get("files"):
-        discovered = _discover_source_files(root)
-        if discovered:
-            cache, _stats = update_tag_cache(root,
-                                             cache_path=Path(cache_path),
-                                             files=discovered)
-            prune = False
     index = _get_index(root, Path(cache_path), cache, prune)
     if limit == 0 or index["n_files"] == 0:
         return {"ok": True, "query": raw_query, "results": [], "n": 0,

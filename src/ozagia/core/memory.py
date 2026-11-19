@@ -3746,9 +3746,9 @@ def _cmd_repo_map_eval(args: argparse.Namespace, mem: DevMemory) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    p.add_argument("--dump", default=str(DEFAULT_DUMP),
+    p.add_argument("--dump", default=None,
                    help="dev-memory snapshot path")
-    p.add_argument("--journal", default=str(DEFAULT_JOURNAL),
+    p.add_argument("--journal", default=None,
                    help="decision/verification journal path")
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--pretty", action="store_true",
@@ -4016,6 +4016,8 @@ def main(argv: list[str] | None = None) -> int:
 
     args = p.parse_args(argv)
     try:
+        args.dump = args.dump or str(state_path(Path(args.root), "graph.json"))
+        args.journal = args.journal or str(state_path(Path(args.root), "journal.jsonl"))
         if not getattr(args, "needs_mem", True):
             return args.func(args)
         mem = DevMemory(Path(args.dump), Path(args.journal),
