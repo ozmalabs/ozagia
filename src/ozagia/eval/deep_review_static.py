@@ -27,9 +27,19 @@ def evaluate(corpus: str | Path = DEFAULT_CORPUS) -> dict[str, Any]:
     root = Path(corpus).resolve()
     labels_text, _ = read_text(root / "labels.json", MAX_LABEL_BYTES, root=root)
     manifest = json.loads(labels_text)
+    if not isinstance(manifest, dict):
+        raise ValueError("corpus manifest must be an object")
     cases = manifest.get("cases")
     if not isinstance(cases, list) or len(cases) > MAX_CASES:
         raise ValueError("corpus cases must be a bounded list")
+    for index, case in enumerate(cases):
+        if (not isinstance(case, dict)
+                or not isinstance(case.get("id"), str) or not case["id"]
+                or not isinstance(case.get("file"), str) or not case["file"]
+                or not isinstance(case.get("expected"), list)
+                or any(not isinstance(kind, str) or not kind
+                       for kind in case["expected"])):
+            raise ValueError(f"corpus case {index} has invalid id, file, or expected labels")
     expected: set[tuple[str, str]] = set()
     actual: set[tuple[str, str]] = set()
     rules = sorted({kind for case in cases for kind in case["expected"]})

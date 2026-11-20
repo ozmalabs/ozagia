@@ -102,3 +102,21 @@ def test_static_eval_ignores_sibling_sources(tmp_path):
 
     assert result["predicted"] == 0
     assert result["case_predictions"] == {"case": []}
+
+
+@pytest.mark.parametrize("case", [
+    {"id": "case", "file": "case.py", "expected": "mutable_default_argument"},
+    {"id": "case", "file": "case.py", "expected": [None]},
+    {"id": "case", "file": "case.py", "expected": []},
+])
+def test_static_eval_rejects_malformed_case_labels(tmp_path, case):
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "labels.json").write_text(json.dumps({"cases": [case]}), encoding="utf-8")
+    (corpus / "case.py").write_text("pass\n", encoding="utf-8")
+    if case["expected"] == []:
+        # An empty expected list is a valid negative case.
+        assert evaluate(corpus)["negative_cases"] == 1
+    else:
+        with pytest.raises(ValueError, match="invalid id, file, or expected labels"):
+            evaluate(corpus)
