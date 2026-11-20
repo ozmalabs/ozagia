@@ -60,8 +60,9 @@ change is committed and the base/head revisions are available.
   up to 32 MiB) and compares exact finding IDs. `identity_policy` is
   `canonical_subject_exact_finding_id_v1`; cross-subject matches with a stable
   rule identity produce one finding and appear in every matching subject report.
-  An absent baseline finding is `resolved` only if all its current subjects
-  are complete; otherwise it appears in `unverified_absent`. `new` means an
+  An absent baseline finding is `resolved` only when a comparable, hash-bound
+  baseline records checks that are all complete in its current subjects;
+  otherwise it appears in `unverified_absent`. `new` means an
   ID was absent from the supplied baseline. `coverage_supported_new` and
   `unverified_new` partition those IDs by baseline coverage: the baseline
   findings must match its manifest hash, its profile and range must match,

@@ -729,11 +729,26 @@ def _baseline_comparison(previous, findings, *, sections=None, baseline_manifest
     def covered(identifier):
         item = old_by_id[identifier]
         subjects = item.get("subjects") or [item.get("subject")]
-        return (isinstance(sections, Mapping) and bool(subjects)
-                and all(isinstance(subject, str)
-                        and isinstance(sections.get(subject), Mapping)
-                        and sections[subject].get("status") == "complete"
-                        for subject in subjects))
+        if not compatible or not isinstance(sections, Mapping) or not subjects:
+            return False
+        for subject in subjects:
+            if not isinstance(subject, str):
+                return False
+            old = baseline_subjects.get(subject)
+            current = sections.get(subject)
+            if not isinstance(old, Mapping) or not isinstance(current, Mapping):
+                return False
+            old_checks, current_checks = old.get("checks"), current.get("checks")
+            if (old.get("status") != "complete"
+                    or current.get("status") != "complete"
+                    or any(old.get(key) for key in ("omitted", "skipped", "unknown"))
+                    or any(current.get(key) for key in ("omitted", "skipped", "unknown"))
+                    or not isinstance(old_checks, list) or not isinstance(current_checks, list)
+                    or not old_checks or not current_checks
+                    or not all(isinstance(check, str) for check in old_checks + current_checks)
+                    or not set(old_checks).issubset(current_checks)):
+                return False
+        return True
 
     resolved_ids = [identifier for identifier in absent_ids if covered(identifier)]
     unverified_ids = [identifier for identifier in absent_ids if not covered(identifier)]
@@ -770,7 +785,7 @@ def _baseline_comparison(previous, findings, *, sections=None, baseline_manifest
         "new_coverage_policy": "Raw new IDs are partitioned by comparable, complete baseline coverage; coverage does not verify truth or first occurrence.",
         "resolved": resolved_ids,
         "unverified_absent": unverified_ids,
-        "coverage_policy": "Absent baseline findings are resolved only when all attributed current subjects are complete; otherwise absence is unverified.",
+        "coverage_policy": "Absent baseline findings are resolved only when comparable baseline coverage identifies checks all completed by current subjects; otherwise absence is unverified.",
         "unchanged": unchanged_ids,
         "by_subject": sorted_buckets(by_subject),
         "by_severity": sorted_buckets(by_severity),

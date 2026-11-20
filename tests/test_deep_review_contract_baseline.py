@@ -139,15 +139,34 @@ def test_fail_on_ignores_note_only_model_candidates(tmp_path, monkeypatch):
     assert result["manifest"]["truth_assessed"] is False
 
 
-def test_baseline_absence_requires_complete_current_subject():
+def test_baseline_absence_requires_comparable_current_coverage():
     old = [{"id": "dr-1234567890abcdef", "subject": "security"}]
-    for status in ("partial", "unknown"):
-        comparison = orchestrator._baseline_comparison(
-            old, [], sections={"security": {"status": status}})
+    complete = {"status": "complete", "checks": ["scan"], "omitted": [],
+                "skipped": [], "unknown": []}
+    baseline = {"subjects": {"security": complete}, "profile": "full", "range": None,
+                "truncation": {"normalization_findings_omitted": 0}}
+    def compare(current, manifest=baseline):
+        return orchestrator._baseline_comparison(
+            old, [], sections={"security": current}, baseline_manifest=manifest,
+            profile="full")
+
+    for current in ({**complete, "status": "partial"},
+                    {**complete, "status": "unknown"},
+                    {**complete, "checks": ["unrelated"]},
+                    {**complete, "omitted": ["scan unavailable"]}):
+        comparison = compare(current)
         assert comparison["resolved"] == []
         assert comparison["unverified_absent"] == [old[0]["id"]]
-    comparison = orchestrator._baseline_comparison(
-        old, [], sections={"security": {"status": "complete"}})
+    for manifest in (None, {**baseline, "profile": "security"},
+                     {**baseline, "range": "main..HEAD"},
+                     {**baseline, "subjects": {"security": {
+                         **complete, "status": "partial"}}},
+                     {**baseline, "subjects": {"security": {
+                         **complete, "checks": ["other scan"]}}},
+                     {**baseline, "subjects": {"security": {
+                         **complete, "checks": []}}}):
+        assert compare(complete, manifest)["unverified_absent"] == [old[0]["id"]]
+    comparison = compare(complete)
     assert comparison["resolved"] == [old[0]["id"]]
     assert comparison["unverified_absent"] == []
 
