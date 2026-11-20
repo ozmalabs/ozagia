@@ -26,17 +26,35 @@ def _name(node):
 
 
 def _functools_imports(tree):
-    """Return locally imported functools module and decorator aliases."""
+    """Return module-scope functools imports used to resolve decorators.
+
+    Imports inside functions and classes do not bind names in the module
+    namespace, so they must not make an unrelated module-level decorator look
+    like a functools decorator.
+    """
     modules, names = set(), {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
+
+    class ModuleImports(ast.NodeVisitor):
+        def visit_FunctionDef(self, node):
+            return
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_ClassDef(self, node):
+            return
+
+        def visit_Import(self, node):
             for alias in node.names:
                 if alias.name == "functools":
                     modules.add(alias.asname or "functools")
-        elif isinstance(node, ast.ImportFrom) and node.module == "functools":
-            names.update({alias.asname or alias.name: alias.name
-                          for alias in node.names
-                          if alias.name in {"cache", "lru_cache"}})
+
+        def visit_ImportFrom(self, node):
+            if node.module == "functools":
+                names.update({alias.asname or alias.name: alias.name
+                              for alias in node.names
+                              if alias.name in {"cache", "lru_cache"}})
+
+    ModuleImports().visit(tree)
     return modules, names
 
 

@@ -267,6 +267,13 @@ def custom_cache(value):
 @cache
 def unimported_cache(value):
     return value
+
+def helper():
+    from functools import cache
+
+@cache
+def name_from_local_import(value):
+    return value
 '''
     (tmp_path / "cache.py").write_text(source, encoding="utf-8")
     from ozagia.core.deep_review.analyzers.static import analyze
