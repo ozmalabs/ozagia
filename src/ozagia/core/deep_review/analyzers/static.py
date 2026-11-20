@@ -85,7 +85,7 @@ def _unbounded_cache(decorator, modules, names):
     return isinstance(maxsize, ast.Constant) and maxsize.value is None
 
 
-def _mutable_default(default):
+def _mutable_default(default, shadowed_builtins=frozenset()):
     """Recognize common mutable default literals and builtin constructors.
 
     Calls such as ``dict()`` and ``set()`` create one shared object at function
@@ -96,7 +96,44 @@ def _mutable_default(default):
         return True
     return (isinstance(default, ast.Call)
             and isinstance(default.func, ast.Name)
+            and default.func.id not in shadowed_builtins
             and default.func.id in {"list", "dict", "set", "bytearray"})
+
+
+def _shadowed_builtin_names(tree):
+    """Names bound in source that could shadow builtin constructors.
+
+    This deliberately treats a binding in any scope as a shadow: that can miss
+    a real builtin use, but avoids asserting that a same-spelled user factory
+    returns a mutable object.
+    """
+    candidates = {"list", "dict", "set", "bytearray"}
+    shadowed = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            if node.id in candidates:
+                shadowed.add(node.id)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if node.name in candidates:
+                shadowed.add(node.name)
+            if isinstance(node, ast.ClassDef):
+                continue
+            for arg in (*node.args.posonlyargs, *node.args.args,
+                        *node.args.kwonlyargs):
+                if arg.arg in candidates:
+                    shadowed.add(arg.arg)
+            if node.args.vararg and node.args.vararg.arg in candidates:
+                shadowed.add(node.args.vararg.arg)
+            if node.args.kwarg and node.args.kwarg.arg in candidates:
+                shadowed.add(node.args.kwarg.arg)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                bound = alias.asname or (alias.name.split(".")[0]
+                                         if isinstance(node, ast.Import)
+                                         else alias.name)
+                if bound in candidates or alias.name == "*":
+                    shadowed.update(candidates)
+    return shadowed
 
 
 def _finding(subject, kind, path, node, summary, recommendation, symbol=None,
@@ -124,6 +161,7 @@ def _analyze(path: str, text: str) -> list[dict] | None:
         if node_count > MAX_AST_NODES:
             return None
     functools_modules, functools_names = _functools_imports(tree)
+    shadowed_builtins = _shadowed_builtin_names(tree)
     parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
 
     def symbol_at(node):
@@ -169,7 +207,7 @@ def _analyze(path: str, text: str) -> list[dict] | None:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             defaults = list(node.args.defaults) + [d for d in node.args.kw_defaults if d is not None]
             for default in defaults:
-                if _mutable_default(default):
+                if _mutable_default(default, shadowed_builtins):
                     add("data-structures", "mutable_default_argument", node,
                         "A mutable object is used as a function default and is shared between calls.",
                         "Use `None` as the default and create a fresh object inside the function.")

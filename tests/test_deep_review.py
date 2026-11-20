@@ -317,6 +317,27 @@ def arbitrary_constructor(value=SomeFactory()):
         "list_default", "dict_default", "set_default", "bytearray_default"]
 
 
+def test_static_analyzer_does_not_assume_shadowed_constructors_are_mutable(tmp_path):
+    from ozagia.core.deep_review.analyzers.static import analyze
+
+    (tmp_path / "defaults.py").write_text('''\
+def list(value):
+    return value
+
+def factory():
+    return ()
+
+def immutable_default(value=list()):
+    return value
+
+def unknown_default(value=factory()):
+    return value
+''', encoding="utf-8")
+    findings, _, _ = analyze(tmp_path)
+    assert not [item for item in findings
+                if item["type"] == "mutable_default_argument"]
+
+
 def test_invalid_max_findings_fails_before_collection(tmp_path, monkeypatch):
     import pytest
     import ozagia.core.deep_review.orchestrator as orchestrator
