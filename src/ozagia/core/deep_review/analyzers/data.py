@@ -20,8 +20,53 @@ MAX_FILES = 2000
 MAX_FILE_BYTES = 512_000
 MAX_TOTAL_BYTES = 12_000_000
 MAX_ITEMS = 400
+MAX_YAML_NODES = 50_000
+MAX_YAML_DEPTH = 64
 SKIP_DIRS = {".git", ".ozagia", ".venv", "venv", "node_modules", "__pycache__", ".tox", "target", "dist"}
 _STRUCTURED = {".json", ".toml", ".yaml", ".yml"}
+
+
+def _yaml_value(source: str):
+    """Load one bounded, unambiguous YAML document without object tags."""
+    import yaml
+
+    class BoundedSafeLoader(yaml.SafeLoader):
+        def __init__(self, stream):
+            super().__init__(stream)
+            self._oz_nodes = 0
+            self._oz_depth = 0
+
+        def compose_node(self, parent, index):
+            self._oz_nodes += 1
+            self._oz_depth += 1
+            if self._oz_nodes > MAX_YAML_NODES or self._oz_depth > MAX_YAML_DEPTH:
+                self._oz_depth -= 1
+                raise yaml.YAMLError("YAML structure exceeded analysis bounds")
+            try:
+                return super().compose_node(parent, index)
+            finally:
+                self._oz_depth -= 1
+
+        def construct_mapping(self, node, deep=False):
+            self.flatten_mapping(node)
+            mapping = {}
+            for key_node, value_node in node.value:
+                key = self.construct_object(key_node, deep=deep)
+                try:
+                    duplicate = key in mapping
+                except TypeError as exc:
+                    raise yaml.YAMLError("unhashable YAML mapping key") from exc
+                if duplicate:
+                    raise yaml.YAMLError(f"duplicate YAML mapping key {key!r}")
+                mapping[key] = self.construct_object(value_node, deep=deep)
+            return mapping
+
+    loader = BoundedSafeLoader(source)
+    try:
+        value = loader.get_single_data()
+    finally:
+        loader.dispose()
+    return value
 
 
 def _decorator_name(node: ast.expr) -> str:
@@ -179,7 +224,7 @@ def analyze(root: str | Path, *, budget_s: float = 10.0) -> dict:
                     unknown.append({"path": rel, "reason": "YAML key inventory is unsupported without optional PyYAML"})
                     continue
                 try:
-                    value = yaml.safe_load(source)
+                    value = _yaml_value(source)
                     keys = _keys(value)
                 except (yaml.YAMLError, ValueError, RecursionError):
                     unknown.append({"path": rel, "reason": "structured document is invalid"})

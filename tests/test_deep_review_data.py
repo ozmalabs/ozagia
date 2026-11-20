@@ -77,6 +77,19 @@ def test_yaml_inventory_is_safe_for_recursive_aliases(tmp_path):
     assert "values.yaml" in result["checked"]
 
 
+def test_yaml_duplicate_keys_are_not_reported_as_an_unambiguous_inventory(tmp_path):
+    pytest.importorskip("yaml")
+    (tmp_path / "duplicate.yaml").write_text(
+        "setting: first\nsetting: second\n", encoding="utf-8")
+
+    result = analyze(tmp_path)
+
+    assert result["checked"] == []
+    assert result["not_checked"] == [{
+        "path": "duplicate.yaml", "reason": "structured document is invalid",
+    }]
+
+
 def test_pathologically_nested_yaml_does_not_escape_as_recursion_error(tmp_path):
     pytest.importorskip("yaml")
     (tmp_path / "deep.yaml").write_text(
