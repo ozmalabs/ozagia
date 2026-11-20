@@ -332,8 +332,13 @@ def render_subject(subject, findings, *, status, omissions, checks=(), skipped=(
             "## Findings", "", "| ID | Severity | Type | Subject views | Location |",
             "| --- | --- | --- | --- | --- |"]
     for f in findings:
-        locations = f.get("locations") or [{}]
-        loc = ", ".join(_display_location(item) for item in locations)
+        locations = f.get("locations") or []
+        # Repository-wide checks can legitimately have no file location, but
+        # the contract requires an explicit scope reason in that case. Keep
+        # that explanation visible in the Markdown report instead of emitting
+        # an empty location cell.
+        loc = (", ".join(_display_location(item) for item in locations)
+              if locations else f"Scope: {f.get('scope') or 'No location or scope recorded.'}")
         views = ", ".join(f.get("subjects", [f.get("subject", subject)]))
         rows.append("| " + " | ".join(_cell(f.get(key, "")) for key in
                     ("id", "severity", "type")) + " | " + _cell(views) + " | " +

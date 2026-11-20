@@ -21,6 +21,18 @@ def test_subject_report_shows_coverage_evidence_and_integrity():
     assert '<a id="finding-dr-a1"></a>' in report
 
 
+def test_location_free_finding_shows_its_scope_reason():
+    report = render_subject(
+        "correctness",
+        [{"id": "dr-scope", "severity": "note", "type": "repo-wide-check",
+          "scope": "The repository config defines one global policy.",
+          "locations": []}],
+        status="partial", omissions=[])
+
+    assert "Scope: The repository config defines one global policy." in report
+    assert "| dr-scope | note | repo-wide-check | correctness | Scope:" in report
+
+
 def test_failure_mode_report_renders_bounded_fmea_with_unknowns_and_evidence_link():
     finding = {
         "id": "dr-retry",
