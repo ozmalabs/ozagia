@@ -763,6 +763,22 @@ def test_github_actions_check_is_not_claimed_without_workflows(tmp_path):
     assert not result["inventory"]["github_workflows"]
 
 
+@pytest.mark.parametrize("trigger", [
+    "on: pull_request_target\n",
+    "on: [push, pull_request_target]\n",
+    "on: {pull_request_target: {types: [opened]}}\n",
+])
+def test_github_workflow_detects_inline_pull_request_target_forms(tmp_path, trigger):
+    workflow = tmp_path / ".github/workflows/ci.yml"
+    workflow.parent.mkdir(parents=True, exist_ok=True)
+    workflow.write_text(trigger, encoding="utf-8")
+
+    result = analyze(tmp_path)
+
+    assert "ops.github_actions.pull_request_target" in {
+        item["rule_id"] for item in result["findings"]}
+
+
 def test_github_workflow_permissions_and_commit_pins_suppress_candidates(tmp_path):
     workflow = tmp_path / ".github/workflows/ci.yaml"
     workflow.parent.mkdir(parents=True)

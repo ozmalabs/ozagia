@@ -55,6 +55,9 @@ HCL_PARSE_TIMEOUT_S = 5.0
 _GITHUB_ACTION_REF = re.compile(
     r"^\s*(?:-\s*)?uses\s*:\s*['\"]?([^\s'\"#]+)", re.I)
 _GITHUB_COMMIT = re.compile(r"[0-9a-fA-F]{40}\Z")
+_GITHUB_PR_TARGET_INLINE = re.compile(
+    r"^\s*on\s*:\s*(?:(?:['\"]?pull_request_target['\"]?)\s*(?:#.*)?$|"
+    r"[\[{].*\bpull_request_target\b)", re.I)
 _RUNBOOK = re.compile(r"(?:runbook|operations|on[-_ ]call|disaster[-_ ]recovery|rollback)", re.I)
 _LINK = re.compile(r"!?\[[^\]]*\]\(\s*([^)\s]+)(?:\s+['\"][^'\"]*['\"])?\s*\)")
 _RST_LINK = re.compile(r"`[^`<]*<([^>]+)>`__?")
@@ -165,7 +168,8 @@ def _github_workflow_findings(rel: str, text: str, *, limit: int
             "locations": [{"path": rel}], "truth_assessed": False,
         })
     for number, line in content_lines:
-        trigger = re.match(r"^\s*pull_request_target\s*:", line)
+        trigger = (re.match(r"^\s*['\"]?pull_request_target['\"]?\s*:", line)
+                   or _GITHUB_PR_TARGET_INLINE.match(line))
         if trigger:
             add({
                 "section": "operations", "type": "workflow_privileged_pull_request_trigger",
