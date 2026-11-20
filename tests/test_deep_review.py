@@ -230,6 +230,58 @@ def materialize(n):
     assert [item["type"] for item in got] == ["repeated_nested_iteration"]
 
 
+def test_static_analyzer_flags_only_explicitly_unbounded_function_caches(tmp_path):
+    source = '''\
+from functools import cache as memo, lru_cache
+import functools
+import custom
+
+@memo
+def cached(value):
+    return value
+
+@lru_cache(maxsize=None)
+def also_cached(value):
+    return value
+
+@functools.lru_cache(None)
+def positional_none(value):
+    return value
+
+@functools.cache
+def qualified_cache(value):
+    return value
+
+@lru_cache(maxsize=32)
+def bounded(value):
+    return value
+
+@functools.lru_cache()
+def default_bounded(value):
+    return value
+
+@custom.cache
+def custom_cache(value):
+    return value
+
+@cache
+def unimported_cache(value):
+    return value
+'''
+    (tmp_path / "cache.py").write_text(source, encoding="utf-8")
+    from ozagia.core.deep_review.analyzers.static import analyze
+
+    findings, checked, skipped = analyze(tmp_path)
+    cache_findings = [item for item in findings
+                      if item["type"] == "unbounded_function_cache"]
+    assert checked == ["cache.py"]
+    assert skipped == []
+    assert [item["locations"][0]["symbol"] for item in cache_findings] == [
+        "cached", "also_cached", "positional_none", "qualified_cache"]
+    assert all(item["section"] == "scalability" for item in cache_findings)
+    assert all(item["confidence"] == "low" for item in cache_findings)
+
+
 def test_invalid_max_findings_fails_before_collection(tmp_path, monkeypatch):
     import pytest
     import ozagia.core.deep_review.orchestrator as orchestrator

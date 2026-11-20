@@ -366,6 +366,12 @@ opt-in `--run-bench` argv interface. The data inventory also covers YAML keys
 when optional PyYAML is installed; parser failures and unsupported cases remain
 explicit coverage omissions.**
 
+The static scalability checks include a low-confidence candidate for unbounded
+Python function caches when `functools.cache` or `functools.lru_cache` is
+imported locally and the latter uses `maxsize=None` (positional or keyword).
+Import rebinding and wrapper behavior are not resolved, so the finding remains
+a candidate for review.
+
 - Static analyzers with graph-aware evidence and explicit confidence.
 - Independent static, dependency, operations, docs, data and supplied-profile
   analyzers use at most six isolated `python -I -B` workers, a shared deadline

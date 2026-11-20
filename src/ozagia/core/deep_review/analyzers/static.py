@@ -25,6 +25,48 @@ def _name(node):
     return node.id if isinstance(node, ast.Name) else None
 
 
+def _functools_imports(tree):
+    """Return locally imported functools module and decorator aliases."""
+    modules, names = set(), {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "functools":
+                    modules.add(alias.asname or "functools")
+        elif isinstance(node, ast.ImportFrom) and node.module == "functools":
+            names.update({alias.asname or alias.name: alias.name
+                          for alias in node.names
+                          if alias.name in {"cache", "lru_cache"}})
+    return modules, names
+
+
+def _unbounded_cache(decorator, modules, names):
+    """Recognize imported functools.cache and explicitly unbounded lru_cache."""
+    called = isinstance(decorator, ast.Call)
+    target = decorator.func if called else decorator
+    if isinstance(target, ast.Name):
+        name = names.get(target.id)
+        imported = name is not None
+    elif (isinstance(target, ast.Attribute)
+          and isinstance(target.value, ast.Name)):
+        name = target.attr
+        imported = (target.value.id in modules
+                    and name in {"cache", "lru_cache"})
+    else:
+        return False
+    if not imported:
+        return False
+    if name == "cache":
+        return True
+    if not called:
+        # @lru_cache uses functools' bounded default maxsize=128.
+        return False
+    maxsize = (decorator.args[0] if decorator.args else None)
+    maxsize = next((keyword.value for keyword in decorator.keywords
+                    if keyword.arg == "maxsize"), maxsize)
+    return isinstance(maxsize, ast.Constant) and maxsize.value is None
+
+
 def _finding(subject, kind, path, node, summary, recommendation, symbol=None,
              confidence="low"):
     return {"section": subject, "type": kind, "severity": "minor",
@@ -49,6 +91,7 @@ def _analyze(path: str, text: str) -> list[dict] | None:
         node_count += 1
         if node_count > MAX_AST_NODES:
             return None
+    functools_modules, functools_names = _functools_imports(tree)
     parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
 
     def symbol_at(node):
@@ -113,6 +156,13 @@ def _analyze(path: str, text: str) -> list[dict] | None:
             add("scalability", "eager_sequence_conversion", node,
                 f"`{node.func.id}` eagerly consumes an iteration, potentially retaining all items in memory.",
                 "Stream the values or process them in bounded batches when the full result is unnecessary.",
+                confidence="low")
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and any(
+                _unbounded_cache(decorator, functools_modules, functools_names)
+                for decorator in node.decorator_list):
+            add("scalability", "unbounded_function_cache", node,
+                "A function uses an unbounded cache, so distinct calls can retain results for the process lifetime.",
+                "Use a bounded `lru_cache(maxsize=...)` or an explicit eviction policy when inputs can grow.",
                 confidence="low")
     # Keep this candidate family isolated from the broad pattern loop above;
     # the file-level traversal still owns parsing limits and coverage reporting.

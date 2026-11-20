@@ -335,11 +335,14 @@ evidence or subject contents. See [status](status.md).
 - **Performance, failure modes, data structures and scalability:** selected
   Python AST patterns (for example repeated nested iteration, silently
   suppressed exceptions, unconditional retry loops, mutable default arguments,
-  materialized ranges and eager sequence conversion), plus a bounded inventory
+  materialized ranges, eager sequence conversion and explicitly unbounded
+  `functools` caches), plus a bounded inventory
   of Python data models and JSON/TOML keys, with YAML keys when optional
   PyYAML is installed, for the data subject. Recursive YAML aliases are
   cycle-bounded; documents beyond parser limits are reported as unknown. Other
-  languages and patterns remain unassessed.
+  languages and patterns remain unassessed. Cache candidates require a visible
+  `functools` import and remain low confidence because static analysis cannot
+  rule out later rebinding.
   The failure-modes report includes a derived FMEA table for supported static
   candidates. It records the matched symptom/rule and mitigation, links to the
   finding evidence and any explicitly related test/record finding, and labels
