@@ -90,7 +90,10 @@ def test_reports_are_deterministic_and_mark_unimplemented_subjects(tmp_path, mon
     import ozagia.core.deep_review.orchestrator as orchestrator
     packet = {"findings": [{"section": "architecture", "type": "import_cycle",
                             "severity": "major", "keys": ["file:a.py"],
-                            "summary": "cycle"}],
+                            "summary": "cycle"},
+                           {"section": "security", "type": "secret_candidate",
+                            "severity": "blocking", "keys": ["file:b.py"],
+                            "summary": "secret candidate"}],
               "sections": {"architecture": {}}, "graph": {"fresh": True}}
     monkeypatch.setattr(orchestrator.collect, "collect", lambda *a, **k: packet)
     out = tmp_path / "report"
@@ -100,7 +103,13 @@ def test_reports_are_deterministic_and_mark_unimplemented_subjects(tmp_path, mon
     second = {p.name: p.read_bytes() for p in out.iterdir()}
     assert {name: data for name, data in first.items() if name != "manifest.json"} == {
         name: data for name, data in second.items() if name != "manifest.json"}
-    assert json.loads((out / "findings.json").read_text())[0]["type"] == "import_cycle"
+    assert {item["type"] for item in json.loads(
+        (out / "findings.json").read_text())} == {"import_cycle", "secret_candidate"}
+    index = (out / "findings-index.md").read_text()
+    assert index.index("## Blocking") < index.index("## Major")
+    assert index.index("### Security") < index.index("### Architecture")
+    assert "01-security.md#finding-" in index
+    assert "06-architecture.md#finding-" in index
     manifest = json.loads((out / "manifest.json").read_text())
     assert manifest["subjects"]["performance"]["status"] == "unknown"
     assert manifest["revision"] is None or len(manifest["revision"]) == 40

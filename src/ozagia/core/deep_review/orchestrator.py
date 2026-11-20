@@ -1678,16 +1678,32 @@ def build_deep_review(root, out, *, profile="full", budget_s=60, index=False,
     _write(out / "findings.json", canonical_json(all_findings))
     index_lines = [f"Priority graph: {_cell(priority_graph['freshness'])} "
                    f"({_cell(priority_graph.get('reason', 'no reason recorded'))}).", ""]
-    for finding in all_findings:
-        priority = finding["priority"]
-        detail = (priority["omission"] or
-                  f"{priority['blast_radius']['reachable_callers']} reachable callers")
-        index_lines.append(
-            f"- priority {priority['score']} · {_cell(finding['severity'])} "
-            f"`{_cell(finding['id'])}` {_cell(finding['subject'])}: "
-            f"{_cell(finding['type'])} — {_cell(detail)}")
+    subject_reports = {subject: row["report"] for subject, row in sections.items()}
+    for severity in ("blocking", "major", "minor", "note"):
+        severity_findings = [finding for finding in ranked_findings
+                             if finding.get("severity") == severity]
+        if not severity_findings:
+            continue
+        index_lines.extend([f"## {severity.title()}", ""])
+        for subject in SUBJECTS:
+            subject_findings = [finding for finding in severity_findings
+                                if finding.get("subject") == subject]
+            if not subject_findings:
+                continue
+            index_lines.extend([f"### {subject.replace('-', ' ').title()}", ""])
+            for finding in subject_findings:
+                priority = finding["priority"]
+                detail = (priority["omission"] or
+                          f"{priority['blast_radius']['reachable_callers']} reachable callers")
+                report = subject_reports[subject]
+                anchor = str(finding["id"]).lower()
+                index_lines.append(
+                    f"- [`{_cell(finding['id'])}`]({report}#finding-{anchor}) "
+                    f"priority {priority['score']}: {_cell(finding['type'])} — "
+                    f"{_cell(detail)}")
+            index_lines.append("")
     _write(out / "findings-index.md", "# Findings index\n\n" +
-           "\n".join(index_lines) + "\n")
+           "\n".join(index_lines).rstrip() + "\n")
     _write(out / "README.md", render_readme(sections, all_findings))
     comparison = None
     if baseline:
