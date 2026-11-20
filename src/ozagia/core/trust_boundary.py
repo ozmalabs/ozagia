@@ -125,10 +125,14 @@ def _target_origins(target: ast.AST, value: ast.AST,
                 value_index += star_count
             elif value_index < len(value.elts):
                 part = value.elts[value_index]
-                source = _source_line(part)
-                inherited = [taint[name] for name in _names(part) if name in taint]
-                origin = source if source is not None else min(inherited, default=None)
-                result.extend((name, origin) for name in _assigned_names(item))
+                if (isinstance(item, (ast.Tuple, ast.List)) and
+                        isinstance(part, (ast.Tuple, ast.List))):
+                    result.extend(_target_origins(item, part, taint))
+                else:
+                    source = _source_line(part)
+                    inherited = [taint[name] for name in _names(part) if name in taint]
+                    origin = source if source is not None else min(inherited, default=None)
+                    result.extend((name, origin) for name in _assigned_names(item))
                 value_index += 1
             else:
                 result.extend((name, None) for name in _assigned_names(item))

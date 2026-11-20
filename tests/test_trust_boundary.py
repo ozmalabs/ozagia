@@ -43,6 +43,16 @@ def handler(request):
     assert [(item["source_line"], item["line"]) for item in findings] == [(3, 5)]
 
 
+def test_nested_destructuring_keeps_sibling_values_separate() -> None:
+    findings = analyze_source('''
+def handler(request):
+    first, (value, safe) = "constant", (request.args.get("x"), "also constant")
+    db.execute(value)
+    db.execute(safe)
+''')
+    assert [(item["source_line"], item["line"]) for item in findings] == [(3, 4)]
+
+
 def test_swap_assignment_uses_pre_assignment_taint() -> None:
     findings = analyze_source('''
 def handler(request):
