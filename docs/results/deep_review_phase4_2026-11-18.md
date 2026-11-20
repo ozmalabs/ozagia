@@ -35,7 +35,7 @@ compared by stable finding ID.
 | Findings / expected labels (per report) | 8 / 8 |
 | True positive / false positive / false negative (per report) | 8 / 0 / 0 |
 | Precision / recall | 1.0 / 1.0 |
-| False-positive rate / report-noise ratio | 0.0 / 0.0 |
+| False-positive rate / report-noise ratio | unavailable / 0.0 |
 | Reports / report files / report bytes | 2 / 16 / 88,802 |
 | Total duration | 1.47 s |
 | tracemalloc peak | 11,054,753 B |
@@ -57,7 +57,7 @@ two-commit range.
 | Whole-repo findings / range findings | 10 / 12 |
 | New / resolved / unchanged stable IDs | 2 / 0 / 10 |
 | Range change-set precision / recall | 1.0 / 1.0 |
-| Range change-set false-positive rate / noise | 0.0 / 0.0 |
+| Range change-set false-positive rate / noise | unavailable / 0.0 |
 | Whole-repo change-set recall on range-only labels | 0.0 |
 | Range graph freshness | missing |
 | Commit determinism | deterministic base and head commits |

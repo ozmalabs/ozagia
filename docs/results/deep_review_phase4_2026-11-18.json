@@ -17,7 +17,7 @@
     "false_negative": 0,
     "precision": 1.0,
     "recall": 1.0,
-    "false_positive_rate": 0.0,
+    "false_positive_rate": null,
     "report_noise_ratio": 0.0,
     "reports": 2,
     "report_files": 16,
@@ -37,7 +37,7 @@
     "range_change_set": {
       "precision": 1.0,
       "recall": 1.0,
-      "false_positive_rate": 0.0,
+      "false_positive_rate": null,
       "report_noise_ratio": 0.0
     },
     "whole_repo_change_set_recall_on_range_only_labels": 0.0,
