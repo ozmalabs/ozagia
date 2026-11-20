@@ -576,6 +576,8 @@ def _tool_versions():
 def _deduplicate(findings):
     """Merge repeated collector results while retaining every evidence pointer."""
     merged = {}
+    severity_rank = {"blocking": 0, "major": 1, "minor": 2, "note": 3}
+    confidence_rank = {"high": 0, "medium": 1, "low": 2, "unknown": 3}
     for item in findings:
         key = item["id"]
         if key not in merged:
@@ -594,6 +596,18 @@ def _deduplicate(findings):
         rank = {"declared": 0, "inferred": 1, "observed": 2, "verified": 3}
         if rank.get(item.get("evidence_kind"), 0) > rank.get(current.get("evidence_kind"), 0):
             current["evidence_kind"] = item["evidence_kind"]
+        # Keep severity and confidence from the same collector observation.
+        # Fieldwise maxima could invent a high-confidence blocker that no
+        # collector asserted. Severity is the primary ordering; confidence
+        # breaks ties. The evidence pointers are merged above, but evidence
+        # strength does not independently promote the selected assessment.
+        current_pair = (severity_rank.get(current.get("severity"), 4),
+                        confidence_rank.get(current.get("confidence"), 4))
+        item_pair = (severity_rank.get(item.get("severity"), 4),
+                     confidence_rank.get(item.get("confidence"), 4))
+        if item_pair < current_pair:
+            current["severity"] = item["severity"]
+            current["confidence"] = item["confidence"]
         if item.get("impact") and not current.get("impact"):
             current["impact"] = item["impact"]
         if item.get("recommendation") and not current.get("recommendation"):

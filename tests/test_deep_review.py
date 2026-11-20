@@ -669,6 +669,26 @@ def test_identity_keys_are_not_fabricated_as_file_locations(tmp_path, monkeypatc
     assert duplicate["locations"] == [{"path": "requirements.txt"}]
 
 
+def test_duplicate_findings_keep_one_severity_confidence_assessment():
+    from ozagia.core.deep_review.orchestrator import _deduplicate
+
+    base = {"id": "dr-same", "severity": "note", "confidence": "low",
+            "evidence_kind": "inferred", "locations": [], "evidence": [],
+            "tags": [], "related_ids": []}
+    stronger = {**base, "severity": "blocking", "confidence": "high"}
+    for rows in ([base, stronger], [stronger, base]):
+        finding = _deduplicate(rows)[0]
+        assert finding["severity"] == "blocking"
+        assert finding["confidence"] == "high"
+
+    # Do not synthesize a high-confidence blocker from two different claims.
+    low_blocker = {**base, "severity": "blocking", "confidence": "low"}
+    high_note = {**base, "severity": "note", "confidence": "high"}
+    for rows in ([low_blocker, high_note], [high_note, low_blocker]):
+        finding = _deduplicate(rows)[0]
+        assert (finding["severity"], finding["confidence"]) == ("blocking", "low")
+
+
 def test_cross_subject_duplicates_have_one_canonical_finding_and_subject_views(
         tmp_path, monkeypatch):
     import ozagia.core.deep_review.orchestrator as orchestrator
