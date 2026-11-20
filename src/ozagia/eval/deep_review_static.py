@@ -26,6 +26,14 @@ def evaluate(corpus: str | Path = DEFAULT_CORPUS) -> dict[str, Any]:
     case_ids = set()
     case_predictions: dict[str, set[str]] = {}
     corpus_hash = hashlib.sha256()
+    # Include label identity in the fingerprint. Hashing only source bytes and
+    # expected rule names made two corpora with different case IDs collide,
+    # even though the case-level predictions in the result would differ.
+    corpus_hash.update(json.dumps(
+        sorted(({"id": case["id"], "file": Path(case["file"]).as_posix(),
+                 "expected": sorted(case["expected"])}
+                for case in manifest["cases"]), key=lambda row: row["id"]),
+        sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n")
     for case in manifest["cases"]:
         case_id = case["id"]
         if case_id in case_ids:
@@ -39,7 +47,6 @@ def evaluate(corpus: str | Path = DEFAULT_CORPUS) -> dict[str, Any]:
             raise ValueError(f"corpus source missing: {rel}")
         source = path.read_bytes()
         corpus_hash.update(rel.as_posix().encode("utf-8") + b"\0" + source + b"\0")
-        corpus_hash.update(json.dumps(sorted(case["expected"]), separators=(",", ":")).encode("utf-8") + b"\n")
         for kind in case["expected"]:
             expected.add((case_id, kind))
         findings, checked, skipped = analyze_static(path.parent)

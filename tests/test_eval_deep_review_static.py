@@ -26,3 +26,18 @@ def test_static_eval_cli_and_direct_result_match(tmp_path):
 
     assert main(["--corpus", str(DEFAULT_CORPUS), "--out", str(output)]) == 0
     assert json.loads(output.read_text(encoding="utf-8")) == evaluate()
+
+
+def test_static_eval_fingerprint_includes_case_identity(tmp_path):
+    import shutil
+
+    corpus = tmp_path / "corpus"
+    shutil.copytree(DEFAULT_CORPUS, corpus)
+    labels_path = corpus / "labels.json"
+    labels = json.loads(labels_path.read_text(encoding="utf-8"))
+    original = evaluate(corpus)["corpus_sha256"]
+
+    labels["cases"][0]["id"] = "renamed-case"
+    labels_path.write_text(json.dumps(labels), encoding="utf-8")
+
+    assert evaluate(corpus)["corpus_sha256"] != original
