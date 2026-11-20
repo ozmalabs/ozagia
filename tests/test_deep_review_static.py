@@ -71,3 +71,33 @@ def test_module_level_finding_has_no_guessed_symbol(tmp_path):
     (tmp_path / "app.py").write_text("items = list(range(10))\n", encoding="utf-8")
     findings, _, _ = analyze(tmp_path)
     assert findings[0]["locations"] == [{"path": "app.py"}]
+
+
+def test_shadowed_exception_name_is_not_treated_as_builtin_broad_handler(tmp_path):
+    (tmp_path / "app.py").write_text(
+        "class Exception(ValueError):\n"
+        "    pass\n"
+        "try:\n"
+        "    work()\n"
+        "except Exception:\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+
+    findings, _, _ = analyze(tmp_path)
+
+    assert not any(finding["type"] == "silently_suppressed_exception"
+                   for finding in findings)
+
+
+def test_builtin_broad_exception_handler_is_still_reported(tmp_path):
+    (tmp_path / "app.py").write_text(
+        "try:\n    work()\nexcept Exception:\n    pass\n",
+        encoding="utf-8",
+    )
+
+    findings, _, _ = analyze(tmp_path)
+
+    assert [finding["type"] for finding in findings] == [
+        "silently_suppressed_exception",
+    ]

@@ -120,13 +120,13 @@ def _mutable_default(default, shadowed_builtins=frozenset()):
 
 
 def _shadowed_builtin_names(tree):
-    """Names bound in source that could shadow builtin constructors.
+    """Names bound in source that could shadow builtins recognized by rules.
 
     This deliberately treats a binding in any scope as a shadow: that can miss
     a real builtin use, but avoids asserting that a same-spelled user factory
     returns a mutable object.
     """
-    candidates = {"list", "dict", "set", "bytearray"}
+    candidates = {"list", "dict", "set", "bytearray", "Exception", "BaseException"}
     shadowed = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
@@ -220,7 +220,9 @@ def _analyze(path: str, text: str) -> list[dict] | None:
                             confidence="low")
                         break
         if isinstance(node, ast.ExceptHandler) and node.type is not None:
-            broad = isinstance(node.type, ast.Name) and node.type.id in {"Exception", "BaseException"}
+            broad = (isinstance(node.type, ast.Name)
+                     and node.type.id in {"Exception", "BaseException"}
+                     and node.type.id not in shadowed_builtins)
             # Restrict this candidate to an empty handler: a return or continue
             # elsewhere in a handler does not imply the exception was unreported.
             silently_exits = len(node.body) == 1 and isinstance(node.body[0], ast.Pass)
