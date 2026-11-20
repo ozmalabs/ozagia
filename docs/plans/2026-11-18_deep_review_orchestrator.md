@@ -362,7 +362,9 @@ and change-set semantics (breaking public API, missing migration, test impact).
 
 **Status: implemented for the static analyzers, fixtures, cross-subject dedupe,
 blast-radius ranking, bounded parallel analyzer collection, and the explicit
-opt-in `--run-bench` argv interface.**
+opt-in `--run-bench` argv interface. The data inventory also covers YAML keys
+when optional PyYAML is installed; parser failures and unsupported cases remain
+explicit coverage omissions.**
 
 - Static analyzers with graph-aware evidence and explicit confidence.
 - Independent static, dependency, operations, docs, data and supplied-profile

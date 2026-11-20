@@ -336,7 +336,9 @@ evidence or subject contents. See [status](status.md).
   Python AST patterns (for example repeated nested iteration, silently
   suppressed exceptions, unconditional retry loops, mutable default arguments,
   materialized ranges and eager sequence conversion), plus a bounded inventory
-  of Python data models and JSON/TOML keys for the data subject. Other
+  of Python data models and JSON/TOML keys, with YAML keys when optional
+  PyYAML is installed, for the data subject. Recursive YAML aliases are
+  cycle-bounded; documents beyond parser limits are reported as unknown. Other
   languages and patterns remain unassessed.
   The failure-modes report includes a derived FMEA table for supported static
   candidates. It records the matched symptom/rule and mitigation, links to the

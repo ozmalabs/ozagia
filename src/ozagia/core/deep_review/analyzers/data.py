@@ -81,23 +81,35 @@ def _python_models(path: str, source: str):
     return models, schemas
 
 
-def _keys(value, prefix="", cap=MAX_ITEMS):
+def _keys(value, prefix="", cap=MAX_ITEMS, ancestors=frozenset()):
     found = []
-    if isinstance(value, dict):
-        for key in sorted(value, key=lambda item: str(item)):
-            path = f"{prefix}/{key}"
-            found.append(path)
-            if len(found) < cap:
-                found.extend(_keys(value[key], path, cap - len(found)))
-            if len(found) >= cap:
-                break
-    elif isinstance(value, list) and value:
-        found.extend(_keys(value[0], f"{prefix}/*", cap))
+    # Use an explicit stack so both pathological nesting and YAML aliases are
+    # bounded by the item cap rather than Python's recursion limit.
+    stack = [(value, prefix, ancestors)]
+    while stack and len(found) < cap:
+        current, current_prefix, seen = stack.pop()
+        if isinstance(current, dict):
+            identity = id(current)
+            if identity in seen:
+                continue
+            next_seen = seen | {identity}
+            children = []
+            for key in sorted(current, key=lambda item: str(item)):
+                path = f"{current_prefix}/{key}"
+                found.append(path)
+                children.append((current[key], path, next_seen))
+                if len(found) >= cap:
+                    break
+            stack.extend(reversed(children))
+        elif isinstance(current, list) and current:
+            identity = id(current)
+            if identity not in seen:
+                stack.append((current[0], f"{current_prefix}/*", seen | {identity}))
     return found[:cap]
 
 
 def analyze(root: str | Path, *, budget_s: float = 10.0) -> dict:
-    """Inventory Python records/schema declarations and JSON/TOML keys.
+    """Inventory Python records/schema declarations and structured document keys.
 
     The result contains bounded ``inventory``, ``findings`` (currently
     descriptive checks only), and ``not_checked`` reasons for unsupported or
@@ -161,8 +173,19 @@ def analyze(root: str | Path, *, budget_s: float = 10.0) -> dict:
                 documents.append({"file": rel, "format": suffix[1:], "top_level_type": type(value).__name__,
                                   "keys": keys, "keys_truncated": len(keys) >= MAX_ITEMS})
             else:
-                unknown.append({"path": rel, "reason": "YAML key inventory is unsupported without an optional parser"})
-                continue
+                try:
+                    import yaml
+                except ImportError:
+                    unknown.append({"path": rel, "reason": "YAML key inventory is unsupported without optional PyYAML"})
+                    continue
+                try:
+                    value = yaml.safe_load(source)
+                    keys = _keys(value)
+                except (yaml.YAMLError, ValueError, RecursionError):
+                    unknown.append({"path": rel, "reason": "structured document is invalid"})
+                    continue
+                documents.append({"file": rel, "format": suffix[1:], "top_level_type": type(value).__name__,
+                                  "keys": keys, "keys_truncated": len(keys) >= MAX_ITEMS})
             checked.append(rel)
         if stop_reason:
             break
