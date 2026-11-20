@@ -765,6 +765,7 @@ def test_github_actions_check_is_not_claimed_without_workflows(tmp_path):
 
 @pytest.mark.parametrize("trigger", [
     "on: pull_request_target\n",
+    "\"on\": pull_request_target\n",
     "on: [push, pull_request_target]\n",
     "on: {pull_request_target: {types: [opened]}}\n",
 ])
@@ -802,6 +803,15 @@ def test_github_workflow_permissions_and_commit_pins_suppress_candidates(tmp_pat
         encoding="utf-8")
 
     assert analyze(tmp_path)["findings"] == []
+
+
+def test_github_workflow_recognizes_quoted_permissions_key(tmp_path):
+    workflow = tmp_path / ".github/workflows/ci.yml"
+    workflow.parent.mkdir(parents=True)
+    workflow.write_text('"permissions": { contents: read }\n', encoding="utf-8")
+
+    assert "ops.github_actions.permissions_not_declared" not in {
+        item["rule_id"] for item in analyze(tmp_path)["findings"]}
 
 
 def test_operations_inventory_is_collected_and_merged(tmp_path, monkeypatch):

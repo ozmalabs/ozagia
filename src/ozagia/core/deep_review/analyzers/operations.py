@@ -56,7 +56,7 @@ _GITHUB_ACTION_REF = re.compile(
     r"^\s*(?:-\s*)?uses\s*:\s*['\"]?([^\s'\"#]+)", re.I)
 _GITHUB_COMMIT = re.compile(r"[0-9a-fA-F]{40}\Z")
 _GITHUB_PR_TARGET_INLINE = re.compile(
-    r"^\s*on\s*:\s*(?:(?:['\"]?pull_request_target['\"]?)\s*(?:#.*)?$|"
+    r"^\s*['\"]?on['\"]?\s*:\s*(?:(?:['\"]?pull_request_target['\"]?)\s*(?:#.*)?$|"
     r"[\[{].*\bpull_request_target\b)", re.I)
 _RUNBOOK = re.compile(r"(?:runbook|operations|on[-_ ]call|disaster[-_ ]recovery|rollback)", re.I)
 _LINK = re.compile(r"!?\[[^\]]*\]\(\s*([^)\s]+)(?:\s+['\"][^'\"]*['\"])?\s*\)")
@@ -152,7 +152,7 @@ def _github_workflow_findings(rel: str, text: str, *, limit: int
     lines = text.splitlines()
     content_lines = [(number, line) for number, line in enumerate(lines, 1)
                      if not line.lstrip().startswith("#")]
-    has_permissions = any(re.match(r"^\s*permissions\s*:", line, re.I)
+    has_permissions = any(re.match(r"^\s*['\"]?permissions['\"]?\s*:", line, re.I)
                           for _, line in content_lines)
     if not has_permissions:
         add({
@@ -172,7 +172,7 @@ def _github_workflow_findings(rel: str, text: str, *, limit: int
         indent = len(line) - len(line.lstrip())
         if workflow_trigger_indent is not None and indent <= workflow_trigger_indent:
             workflow_trigger_indent = None
-        if re.match(r"^\s*on\s*:\s*(?:#.*)?$", line, re.I):
+        if re.match(r"^\s*['\"]?on['\"]?\s*:\s*(?:#.*)?$", line, re.I):
             workflow_trigger_indent = indent
         trigger = (re.match(r"^\s*['\"]?pull_request_target['\"]?\s*:", line)
                    or _GITHUB_PR_TARGET_INLINE.match(line)
