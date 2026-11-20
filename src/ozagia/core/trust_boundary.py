@@ -92,6 +92,53 @@ def _names(node: ast.AST) -> set[str]:
     return {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
 
 
+def _assigned_names(node: ast.AST) -> set[str]:
+    """Names bound by a simple or destructuring assignment target."""
+    if isinstance(node, ast.Name):
+        return {node.id}
+    if isinstance(node, (ast.Tuple, ast.List)):
+        return set().union(*(_assigned_names(item) for item in node.elts))
+    if isinstance(node, ast.Starred):
+        return _assigned_names(node.value)
+    return set()
+
+
+def _target_origins(target: ast.AST, value: ast.AST,
+                    taint: dict[str, int]) -> list[tuple[str, int | None]]:
+    """Pair destructured targets with their corresponding value origins."""
+    if isinstance(target, (ast.Tuple, ast.List)) and isinstance(value, (ast.Tuple, ast.List)):
+        result: list[tuple[str, int | None]] = []
+        value_index = 0
+        for index, item in enumerate(target.elts):
+            if isinstance(item, ast.Starred):
+                # A starred target can receive several values; conservatively
+                # join the origins of the remaining value elements.
+                trailing_targets = len(target.elts) - index - 1
+                star_count = max(0, len(value.elts) - value_index - trailing_targets)
+                rest = value.elts[value_index:value_index + star_count]
+                source_lines = [_source_line(part) for part in rest]
+                inherited = [taint[name] for part in rest for name in _names(part)
+                             if name in taint]
+                origin = min([line for line in source_lines if line is not None] + inherited,
+                             default=None)
+                result.extend((name, origin) for name in _assigned_names(item))
+                value_index += star_count
+            elif value_index < len(value.elts):
+                part = value.elts[value_index]
+                source = _source_line(part)
+                inherited = [taint[name] for name in _names(part) if name in taint]
+                origin = source if source is not None else min(inherited, default=None)
+                result.extend((name, origin) for name in _assigned_names(item))
+                value_index += 1
+            else:
+                result.extend((name, None) for name in _assigned_names(item))
+        return result
+    source = _source_line(value)
+    inherited = [taint[name] for name in _names(value) if name in taint]
+    origin = source if source is not None else min(inherited, default=None)
+    return [(name, origin) for name in _assigned_names(target)]
+
+
 def _source_line(node: ast.AST) -> int | None:
     for child in ast.walk(node):
         if isinstance(child, ast.Call):
@@ -124,19 +171,17 @@ class _Flow(ast.NodeVisitor):
     visit_AsyncFunctionDef = visit_FunctionDef
 
     def visit_Assign(self, node: ast.Assign) -> None:
-        source = _source_line(node.value)
-        origins = [self.taint[n] for n in _names(node.value) if n in self.taint]
-        origin = source if source is not None else min(origins, default=None)
+        original_taint = self.taint.copy()
         for target in node.targets:
-            if isinstance(target, ast.Name):
+            for name, origin in _target_origins(target, node.value, original_taint):
                 if _http_client_constructor(node.value):
-                    self.http_clients.add(target.id)
+                    self.http_clients.add(name)
                 else:
-                    self.http_clients.discard(target.id)
+                    self.http_clients.discard(name)
                 if origin is None:
-                    self.taint.pop(target.id, None)
+                    self.taint.pop(name, None)
                 else:
-                    self.taint[target.id] = origin
+                    self.taint[name] = origin
         self.generic_visit(node.value)
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:

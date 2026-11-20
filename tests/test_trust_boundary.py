@@ -17,6 +17,44 @@ def handler(request):
     assert findings[0]["confidence"] == "low"
 
 
+def test_tracks_source_through_destructuring_assignment() -> None:
+    findings = analyze_source('''
+def handler(request):
+    value, ignored = request.args.get("name"), "constant"
+    db.execute(value)
+''')
+    assert len(findings) == 1
+    assert findings[0]["source_line"] == 3
+    assert findings[0]["line"] == 4
+    assert analyze_source('''
+def handler(request):
+    value, safe = request.args.get("name"), "constant"
+    db.execute(safe)
+''') == []
+
+
+def test_starred_destructuring_maps_trailing_value_origin() -> None:
+    findings = analyze_source('''
+def handler(request):
+    first, *middle, last = "clean", "also clean", request.args.get("x")
+    db.execute(first)
+    db.execute(last)
+''')
+    assert [(item["source_line"], item["line"]) for item in findings] == [(3, 5)]
+
+
+def test_swap_assignment_uses_pre_assignment_taint() -> None:
+    findings = analyze_source('''
+def handler(request):
+    tainted = request.args.get("x")
+    clean = "constant"
+    tainted, clean = clean, tainted
+    db.execute(tainted)
+    db.execute(clean)
+''')
+    assert [(item["source_line"], item["line"]) for item in findings] == [(3, 7)]
+
+
 def test_ignores_untainted_sink_and_does_not_cross_function_boundary() -> None:
     findings = analyze_source('''
 def read(request):
