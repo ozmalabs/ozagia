@@ -85,6 +85,20 @@ def _unbounded_cache(decorator, modules, names):
     return isinstance(maxsize, ast.Constant) and maxsize.value is None
 
 
+def _mutable_default(default):
+    """Recognize common mutable default literals and builtin constructors.
+
+    Calls such as ``dict()`` and ``set()`` create one shared object at function
+    definition time just like ``{}`` and ``set()`` literals. Keep this list
+    narrow: arbitrary constructor calls may return immutable values.
+    """
+    if isinstance(default, (ast.List, ast.Dict, ast.Set)):
+        return True
+    return (isinstance(default, ast.Call)
+            and isinstance(default.func, ast.Name)
+            and default.func.id in {"list", "dict", "set", "bytearray"})
+
+
 def _finding(subject, kind, path, node, summary, recommendation, symbol=None,
              confidence="low"):
     return {"section": subject, "type": kind, "severity": "minor",
@@ -155,7 +169,7 @@ def _analyze(path: str, text: str) -> list[dict] | None:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             defaults = list(node.args.defaults) + [d for d in node.args.kw_defaults if d is not None]
             for default in defaults:
-                if isinstance(default, (ast.List, ast.Dict, ast.Set)):
+                if _mutable_default(default):
                     add("data-structures", "mutable_default_argument", node,
                         "A mutable object is used as a function default and is shared between calls.",
                         "Use `None` as the default and create a fresh object inside the function.")

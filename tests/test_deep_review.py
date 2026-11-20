@@ -289,6 +289,34 @@ def name_from_local_import(value):
     assert all(item["confidence"] == "low" for item in cache_findings)
 
 
+def test_static_analyzer_flags_common_mutable_constructor_defaults(tmp_path):
+    from ozagia.core.deep_review.analyzers.static import analyze
+
+    (tmp_path / "defaults.py").write_text('''\
+def list_default(value=list()):
+    return value
+
+def dict_default(value=dict()):
+    return value
+
+def set_default(value=set()):
+    return value
+
+def bytearray_default(value=bytearray()):
+    return value
+
+def arbitrary_constructor(value=SomeFactory()):
+    return value
+''', encoding="utf-8")
+    findings, checked, skipped = analyze(tmp_path)
+    mutable = [item for item in findings
+               if item["type"] == "mutable_default_argument"]
+    assert checked == ["defaults.py"]
+    assert skipped == []
+    assert [item["locations"][0]["symbol"] for item in mutable] == [
+        "list_default", "dict_default", "set_default", "bytearray_default"]
+
+
 def test_invalid_max_findings_fails_before_collection(tmp_path, monkeypatch):
     import pytest
     import ozagia.core.deep_review.orchestrator as orchestrator
