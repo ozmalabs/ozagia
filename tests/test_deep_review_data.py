@@ -136,6 +136,27 @@ def test_pathologically_nested_yaml_does_not_escape_as_recursion_error(tmp_path)
     assert not result["findings"]
 
 
+def test_yaml_merge_alias_expansion_is_bounded(tmp_path):
+    pytest.importorskip("yaml")
+    source = "base0: &base0 {key0: value}\n"
+    # Each layer duplicates the previous anchor twice. The source stays tiny,
+    # while PyYAML's default merge flattening would expand exponentially.
+    for level in range(1, 30):
+        source += (
+            f"base{level}: &base{level}\n"
+            f"  <<: [*base{level - 1}, *base{level - 1}]\n"
+            f"  key{level}: value\n"
+        )
+    (tmp_path / "merge-bomb.yaml").write_text(source, encoding="utf-8")
+
+    result = analyze(tmp_path)
+
+    assert result["checked"] == []
+    assert result["not_checked"] == [{
+        "path": "merge-bomb.yaml", "reason": "structured document is invalid",
+    }]
+
+
 def test_budget_must_be_finite_nonnegative(tmp_path):
     for value in (-1, float("inf"), "bad"):
         with pytest.raises(ValueError, match="finite and non-negative"):

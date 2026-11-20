@@ -35,6 +35,7 @@ def _yaml_value(source: str):
             super().__init__(stream)
             self._oz_nodes = 0
             self._oz_depth = 0
+            self._oz_merged_entries = 0
 
         def compose_node(self, parent, index):
             self._oz_nodes += 1
@@ -75,6 +76,54 @@ def _yaml_value(source: str):
                 if explicit:
                     explicit_keys.add(key)
             return mapping
+
+        def flatten_mapping(self, node):
+            # SafeLoader's implementation recursively expands YAML merge
+            # aliases into lists. A tiny document can repeat the same anchor
+            # twice at each level and grow those lists exponentially, bypassing
+            # the composed-node limit above. Charge every inherited entry as
+            # it is copied and stop before allocating an unbounded list.
+            merge = []
+            index = 0
+
+            def add_entries(target, entries):
+                self._oz_merged_entries += len(entries)
+                if self._oz_merged_entries > MAX_YAML_NODES:
+                    raise yaml.YAMLError("YAML merge expansion exceeded analysis bounds")
+                target.extend(entries)
+
+            while index < len(node.value):
+                key_node, value_node = node.value[index]
+                if key_node.tag == "tag:yaml.org,2002:merge":
+                    del node.value[index]
+                    if isinstance(value_node, yaml.MappingNode):
+                        self.flatten_mapping(value_node)
+                        add_entries(merge, value_node.value)
+                    elif isinstance(value_node, yaml.SequenceNode):
+                        submerge = []
+                        for subnode in value_node.value:
+                            if not isinstance(subnode, yaml.MappingNode):
+                                raise yaml.constructor.ConstructorError(
+                                    "while constructing a mapping", node.start_mark,
+                                    "expected a mapping for merging, but found %s" % subnode.id,
+                                    subnode.start_mark)
+                            self.flatten_mapping(subnode)
+                            submerge.append(subnode.value)
+                        submerge.reverse()
+                        for entries in submerge:
+                            add_entries(merge, entries)
+                    else:
+                        raise yaml.constructor.ConstructorError(
+                            "while constructing a mapping", node.start_mark,
+                            "expected a mapping or list of mappings for merging, but found %s" % value_node.id,
+                            value_node.start_mark)
+                elif key_node.tag == "tag:yaml.org,2002:value":
+                    key_node.tag = "tag:yaml.org,2002:str"
+                    index += 1
+                else:
+                    index += 1
+            if merge:
+                node.value = merge + node.value
 
     loader = BoundedSafeLoader(source)
     try:
