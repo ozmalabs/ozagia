@@ -4,12 +4,18 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import tempfile
 from pathlib import Path
 from typing import Any
 
 from ozagia.core.deep_review.analyzers import analyze_static
+from ozagia.core.deep_review.analyzers._bounded_read import read_text
 
 DEFAULT_CORPUS = Path(__file__).resolve().parents[3] / "tests" / "fixtures" / "deep_review_static"
+MAX_LABEL_BYTES = 1_000_000
+MAX_CASES = 1_000
+MAX_CORPUS_BYTES = 20_000_000
+MAX_SOURCE_BYTES = 1_000_000
 
 
 def _ratio(numerator: int, denominator: int) -> float:
@@ -19,10 +25,14 @@ def _ratio(numerator: int, denominator: int) -> float:
 def evaluate(corpus: str | Path = DEFAULT_CORPUS) -> dict[str, Any]:
     """Score predicted (case, rule) pairs against the corpus labels."""
     root = Path(corpus).resolve()
-    manifest = json.loads((root / "labels.json").read_text(encoding="utf-8"))
+    labels_text, _ = read_text(root / "labels.json", MAX_LABEL_BYTES, root=root)
+    manifest = json.loads(labels_text)
+    cases = manifest.get("cases")
+    if not isinstance(cases, list) or len(cases) > MAX_CASES:
+        raise ValueError("corpus cases must be a bounded list")
     expected: set[tuple[str, str]] = set()
     actual: set[tuple[str, str]] = set()
-    rules = sorted({kind for case in manifest["cases"] for kind in case["expected"]})
+    rules = sorted({kind for case in cases for kind in case["expected"]})
     case_ids = set()
     case_predictions: dict[str, set[str]] = {}
     corpus_hash = hashlib.sha256()
@@ -32,9 +42,10 @@ def evaluate(corpus: str | Path = DEFAULT_CORPUS) -> dict[str, Any]:
     corpus_hash.update(json.dumps(
         sorted(({"id": case["id"], "file": Path(case["file"]).as_posix(),
                  "expected": sorted(case["expected"])}
-                for case in manifest["cases"]), key=lambda row: row["id"]),
+        for case in cases), key=lambda row: row["id"]),
         sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n")
-    for case in manifest["cases"]:
+    total_bytes = 0
+    for case in cases:
         case_id = case["id"]
         if case_id in case_ids:
             raise ValueError(f"duplicate corpus case id: {case_id}")
@@ -43,14 +54,24 @@ def evaluate(corpus: str | Path = DEFAULT_CORPUS) -> dict[str, Any]:
         if rel.is_absolute() or ".." in rel.parts:
             raise ValueError(f"corpus path escapes root: {rel}")
         path = root / rel
-        if not path.is_file():
-            raise ValueError(f"corpus source missing: {rel}")
-        source = path.read_bytes()
+        try:
+            source_text, source_size = read_text(path, MAX_SOURCE_BYTES, root=root)
+        except (OSError, UnicodeError, ValueError) as exc:
+            raise ValueError(f"corpus source unavailable or unsafe: {rel}") from exc
+        total_bytes += source_size
+        if total_bytes > MAX_CORPUS_BYTES:
+            raise ValueError("corpus source total exceeds read limit")
+        source = source_text.encode("utf-8")
         corpus_hash.update(rel.as_posix().encode("utf-8") + b"\0" + source + b"\0")
         for kind in case["expected"]:
             expected.add((case_id, kind))
-        findings, checked, skipped = analyze_static(path.parent)
-        relpath = path.name
+        # Analyze precisely the captured bytes: the corpus may change after the
+        # secure read, so never let the analyzer reopen the original path.
+        with tempfile.TemporaryDirectory(prefix="ozagia-static-eval-") as scratch:
+            staged = Path(scratch) / "case.py"
+            staged.write_bytes(source)
+            findings, checked, skipped = analyze_static(staged.parent)
+        relpath = "case.py"
         if relpath not in checked or skipped:
             # Analyze the one source directly when parent has unrelated inputs;
             # a fixture failure must not silently count as a true negative.
