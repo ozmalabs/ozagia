@@ -1169,13 +1169,23 @@ def _test_record(root: Path) -> dict[str, Any] | None:
     failing test can be reported as resolved)."""
     from ozagia.core import working_set as WS
     path = WS._record_path(root)
+    # Read the record once through a bounded, non-following descriptor. A
+    # second path lookup can select a different record or block on a FIFO.
+    from ozagia.config import state_dir
+    from ozagia.core.deep_review.analyzers._bounded_read import read_text as bounded_read
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        raw, _ = bounded_read(path, 4 * 1024 * 1024, root=state_dir(root))
+        data = json.loads(raw)
+    except (OSError, ValueError, UnicodeError, RecursionError):
         return None
     if not isinstance(data, dict) or not isinstance(data.get("tests"), dict):
         return None
-    return WS.load_test_record(root)
+    tests = {key: WS._record_test(value) for key, value in data["tests"].items()
+             if isinstance(key, str) and key.startswith("test:") and isinstance(value, dict)}
+    raw_runs = data.get("runs") if isinstance(data.get("runs"), list) else []
+    runs = [row for row in (WS._record_run(value) for value in raw_runs) if row]
+    return {"tests": tests, "last": WS._record_last(data.get("last")),
+            "runs": runs[-WS.MAX_RECORD_RUNS:]}
 
 
 def _tests(sec: _Section) -> None:

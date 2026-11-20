@@ -1100,3 +1100,19 @@ def test_source_read_rejects_ancestor_swap(tmp_path, monkeypatch):
     content, reason = RR.read_text(root, "source/file.py")
     assert content is None
     assert reason is not None
+
+
+def test_test_record_rejects_fifo_without_blocking(tmp_path):
+    import os
+    import subprocess
+    import sys
+
+    record = tmp_path / ".ozagia" / "working_set" / "tests.json"
+    record.parent.mkdir(parents=True)
+    os.mkfifo(record)
+    process = subprocess.run(
+        [sys.executable, "-c",
+         "from pathlib import Path; from ozagia.core.repo_review import _test_record; "
+         "import sys; assert _test_record(Path(sys.argv[1])) is None", str(tmp_path)],
+        capture_output=True, timeout=5, check=False)
+    assert process.returncode == 0, process.stderr
