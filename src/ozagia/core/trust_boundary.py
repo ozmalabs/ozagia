@@ -19,7 +19,7 @@ _SKIP_DIRS = {".git", ".ozagia", ".venv", "venv", "node_modules", "vendor",
               "dist", "build", "target", "__pycache__"}
 
 _SOURCES = {
-    "input", "get_json", "get_data", "get", "form", "args", "values",
+    "input", "get_json", "get_data", "form", "args", "values",
     "query_params", "argv", "environ", "getenv",
 }
 _SINKS = {
@@ -27,10 +27,37 @@ _SINKS = {
     "run": ("command", "cwe:78"), "Popen": ("command", "cwe:78"),
     "execute": ("sql", "cwe:89"), "executemany": ("sql", "cwe:89"),
     "raw": ("sql", "cwe:89"), "urlopen": ("ssrf", "cwe:918"),
-    "get": ("ssrf", "cwe:918"), "post": ("ssrf", "cwe:918"),
     "open": ("path", "cwe:22"), "send_file": ("path", "cwe:22"),
     "eval": ("code", "cwe:95"), "exec": ("code", "cwe:95"),
 }
+
+
+def _dotted_name(node: ast.AST) -> str:
+    """Return a simple dotted name, without trying to resolve aliases."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        prefix = _dotted_name(node.value)
+        return f"{prefix}.{node.attr}" if prefix else node.attr
+    return ""
+
+
+def _request_value_get(node: ast.Call) -> bool:
+    """Recognize common request containers without treating all `.get`s as input."""
+    if not isinstance(node.func, ast.Attribute) or node.func.attr != "get":
+        return False
+    receiver = _dotted_name(node.func.value).lower().split(".")
+    return any(part in {"request", "args", "form", "params", "query_params",
+                        "headers", "cookies"} for part in receiver)
+
+
+def _http_get_post(node: ast.Call) -> bool:
+    """Recognize conventional HTTP client calls, not arbitrary object methods."""
+    if not isinstance(node.func, ast.Attribute) or node.func.attr not in {"get", "post"}:
+        return False
+    receiver = _dotted_name(node.func.value).lower().split(".")
+    return any(part in {"requests", "httpx", "session", "client"}
+               for part in receiver)
 
 
 @dataclass(frozen=True)
@@ -60,7 +87,7 @@ def _source_line(node: ast.AST) -> int | None:
         if isinstance(child, ast.Call):
             fn = child.func
             name = fn.attr if isinstance(fn, ast.Attribute) else fn.id if isinstance(fn, ast.Name) else ""
-            if name in _SOURCES:
+            if name in _SOURCES or _request_value_get(child):
                 return child.lineno
         if isinstance(child, ast.Attribute) and child.attr in _SOURCES:
             return child.lineno
@@ -103,6 +130,8 @@ class _Flow(ast.NodeVisitor):
         fn = node.func
         name = fn.attr if isinstance(fn, ast.Attribute) else fn.id if isinstance(fn, ast.Name) else ""
         sink = _SINKS.get(name)
+        if sink is None and _http_get_post(node):
+            sink = ("ssrf", "cwe:918")
         if sink:
             source_lines = [self.taint[n] for n in _names(node) if n in self.taint]
             direct = [_source_line(a) for a in node.args]

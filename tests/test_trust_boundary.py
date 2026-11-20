@@ -42,3 +42,21 @@ def test_file_scan_is_root_relative_and_bounded(tmp_path: Path) -> None:
     assert got[0]["file"] == "app.py"
     source.write_text("x" * 600_000)
     assert analyze_file(source, root=tmp_path) == []
+
+
+def test_get_methods_need_request_or_http_context() -> None:
+    benign = analyze_source('''
+def f(mapping, cache, value):
+    result = mapping.get("fixed")
+    cached = cache.get(value)
+    execute(cached)
+''')
+    assert benign == []
+
+    request_flow = analyze_source('''
+def f(request):
+    value = request.args.get("url")
+    requests.get(value)
+''')
+    assert [(item["category"], item["source_line"], item["line"])
+            for item in request_flow] == [("ssrf", 3, 4)]
