@@ -48,17 +48,28 @@ def _yaml_value(source: str):
                 self._oz_depth -= 1
 
         def construct_mapping(self, node, deep=False):
+            # YAML merge keys intentionally allow an explicit entry to
+            # override an inherited one. Keep rejecting repeated explicit
+            # keys, while preserving that standard merge behavior.
+            explicit_key_nodes = {
+                id(key_node) for key_node, _ in node.value
+                if key_node.tag != "tag:yaml.org,2002:merge"
+            }
             self.flatten_mapping(node)
             mapping = {}
+            explicit_keys = set()
             for key_node, value_node in node.value:
                 key = self.construct_object(key_node, deep=deep)
                 try:
                     duplicate = key in mapping
                 except TypeError as exc:
                     raise yaml.YAMLError("unhashable YAML mapping key") from exc
-                if duplicate:
+                explicit = id(key_node) in explicit_key_nodes
+                if duplicate and explicit and key in explicit_keys:
                     raise yaml.YAMLError(f"duplicate YAML mapping key {key!r}")
                 mapping[key] = self.construct_object(value_node, deep=deep)
+                if explicit:
+                    explicit_keys.add(key)
             return mapping
 
     loader = BoundedSafeLoader(source)

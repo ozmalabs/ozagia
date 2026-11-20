@@ -90,6 +90,20 @@ def test_yaml_duplicate_keys_are_not_reported_as_an_unambiguous_inventory(tmp_pa
     }]
 
 
+def test_yaml_merge_key_explicit_override_is_inventoried(tmp_path):
+    pytest.importorskip("yaml")
+    (tmp_path / "merged.yaml").write_text(
+        "defaults: &defaults\n  setting: inherited\n"
+        "service:\n  <<: *defaults\n  setting: explicit\n",
+        encoding="utf-8")
+
+    result = analyze(tmp_path)
+
+    assert result["checked"] == ["merged.yaml"]
+    assert result["not_checked"] == []
+    assert "/service/setting" in result["inventory"]["documents"][0]["keys"]
+
+
 def test_pathologically_nested_yaml_does_not_escape_as_recursion_error(tmp_path):
     pytest.importorskip("yaml")
     (tmp_path / "deep.yaml").write_text(
