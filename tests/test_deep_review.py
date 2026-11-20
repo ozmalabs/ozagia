@@ -732,6 +732,29 @@ def test_cross_subject_duplicates_have_one_canonical_finding_and_subject_views(
         "canonical_subject_exact_finding_id_v1"
 
 
+def test_cross_subject_merge_preserves_one_observed_assessment_pair(
+        tmp_path, monkeypatch):
+    import ozagia.core.deep_review.orchestrator as orchestrator
+    shared = {"type": "unsafe_call", "rule_key": "shell-input",
+              "keys": ["file:src/app.py"], "summary": "Input reaches shell."}
+    packet = {"findings": [
+        {**shared, "section": "security", "severity": "note",
+         "confidence": "high"},
+        {**shared, "section": "architecture", "severity": "blocking",
+         "confidence": "low"},
+    ], "sections": {}, "graph": {"freshness": "fresh"}}
+    monkeypatch.setattr(orchestrator.collect, "collect", lambda *a, **k: packet)
+
+    build_deep_review(tmp_path, tmp_path / "report")
+    findings = json.loads((tmp_path / "report" / "findings.json").read_text())
+    finding = next(item for item in findings if item["type"] == "unsafe_call")
+
+    assert (finding["severity"], finding["confidence"]) == ("blocking", "low")
+    assert {(row["severity"], row["confidence"])
+            for row in finding["subject_observations"]} == {
+                ("note", "high"), ("blocking", "low")}
+
+
 def test_cross_subject_stable_key_does_not_merge_different_finding_types(
         tmp_path, monkeypatch):
     import ozagia.core.deep_review.orchestrator as orchestrator

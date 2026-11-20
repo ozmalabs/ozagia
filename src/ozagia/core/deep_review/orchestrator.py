@@ -655,12 +655,15 @@ def _canonicalize_cross_subject(findings, raw_by_id):
                             seen.add(encoded)
                 if values:
                     canonical[field] = sorted(values, key=canonical_json)
-            canonical["severity"] = min(
-                (row["severity"] for row in group),
-                key=lambda value: severity_rank.get(value, 4))
-            canonical["confidence"] = min(
-                (row["confidence"] for row in group),
-                key=lambda value: confidence_rank.get(value, 4))
+            # Preserve a severity/confidence assessment as an observed pair.
+            # Independent maxima can combine a blocker from one subject with
+            # high confidence from another subject that only reported a note.
+            assessment = min(
+                group,
+                key=lambda row: (severity_rank.get(row.get("severity"), 4),
+                                 confidence_rank.get(row.get("confidence"), 4)))
+            canonical["severity"] = assessment["severity"]
+            canonical["confidence"] = assessment["confidence"]
             evidence_rank = {"declared": 0, "inferred": 1, "observed": 2,
                              "verified": 3}
             canonical["evidence_kind"] = max(
