@@ -338,6 +338,36 @@ def unknown_default(value=factory()):
                 if item["type"] == "mutable_default_argument"]
 
 
+def test_static_analyzer_accounts_for_pattern_and_exception_bindings(tmp_path):
+    from ozagia.core.deep_review.analyzers.static import analyze
+
+    (tmp_path / "defaults.py").write_text('''\
+try:
+    raise RuntimeError()
+except Exception as list:
+    def exception_binding(value=list()):
+        return value
+
+match ():
+    case list:
+        def pattern_binding(value=list()):
+            return value
+
+match []:
+    case [*list]:
+        def star_binding(value=list()):
+            return value
+
+match {}:
+    case {"key": _, **list}:
+        def mapping_rest_binding(value=list()):
+            return value
+''', encoding="utf-8")
+    findings, _, _ = analyze(tmp_path)
+    assert not [item for item in findings
+                if item["type"] == "mutable_default_argument"]
+
+
 def test_invalid_max_findings_fails_before_collection(tmp_path, monkeypatch):
     import pytest
     import ozagia.core.deep_review.orchestrator as orchestrator

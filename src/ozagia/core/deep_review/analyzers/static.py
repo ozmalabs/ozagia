@@ -133,6 +133,16 @@ def _shadowed_builtin_names(tree):
                                          else alias.name)
                 if bound in candidates or alias.name == "*":
                     shadowed.update(candidates)
+        elif isinstance(node, ast.ExceptHandler):
+            # Unlike assignment targets, the exception alias is stored as a
+            # string in the AST, so the Name(Store) check above misses it.
+            if node.name in candidates:
+                shadowed.add(node.name)
+        elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name in candidates:
+            # Structural pattern capture names are represented as strings.
+            shadowed.add(node.name)
+        elif isinstance(node, ast.MatchMapping) and node.rest in candidates:
+            shadowed.add(node.rest)
     return shadowed
 
 
