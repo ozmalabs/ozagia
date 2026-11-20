@@ -95,6 +95,12 @@ SCAN_NAMES = frozenset({
     "requirements.txt", ".npmrc", ".pypirc", ".env", "credentials",
     "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "config",
 })
+# `exec`/`eval` are language builtins; a C/C++ member or declaration named
+# `exec` is not one, even when it is not a `->`/`::` member call.
+_C_FAMILY_SUFFIXES = frozenset({
+    ".c", ".h", ".cc", ".cpp", ".cxx", ".hpp", ".hxx",
+})
+_LANGUAGE_BUILTIN_RULES = frozenset({"eval", "exec"})
 
 CI_PREFIXES = (".github/workflows/", ".gitlab-ci", ".circleci/")
 
@@ -471,13 +477,15 @@ def _r(name: str, pattern: str, kind: str, category: str, cwe: str,
 # Rules match one line at a time. More contextual checks (JWT options, cookie
 # flags, SSRF allowlists, routes) run separately below.
 _RULES: tuple[Rule, ...] = (
-    _r("eval", r"(?<![\w.])eval\s*\(", "code-execution", "owasp:a03",
+    # `obj.exec()` is excluded as a member call, and `->`/`::` exclude the
+    # same-looking C++ method calls (for example Qt's QMenu::exec).
+    _r("eval", r"(?<![\w.:>])eval\s*\(", "code-execution", "owasp:a03",
        "cwe:95", "high", "medium",
        "eval() can execute attacker-controlled input",
        "replace eval with a parser or an explicit dispatch table",
        "eval of a constant or trusted local expression is still flagged",
        sink="eval"),
-    _r("exec", r"(?<![\w.])exec\s*\(", "code-execution", "owasp:a03",
+    _r("exec", r"(?<![\w.:>])exec\s*\(", "code-execution", "owasp:a03",
        "cwe:95", "high", "medium",
        "exec() can execute attacker-controlled input",
        "remove exec; load configuration as data",
@@ -495,13 +503,15 @@ _RULES: tuple[Rule, ...] = (
        "use subprocess with an argv list and shell=False",
        "a constant command with no untrusted input is still shell-based",
        sink="shell"),
-    _r("sql-fstring", r"(?i)\b(?:execute|executemany|raw)\s*\(\s*f[\"']",
+    # Python's `cursor.execute(...)` is matched, but C++ `->execute` and
+    # `::execute` are not; otherwise ordinary C++ method calls read as SQL.
+    _r("sql-fstring", r"(?i)(?<![\w:>])\b(?:execute|executemany|raw)\s*\(\s*f[\"']",
        "sql-injection", "owasp:a03", "cwe:89", "high", "medium",
        "SQL built with an f-string",
        "use driver parameters or a query builder with bound values",
        "the interpolated value may be a fixed identifier, not request data",
        sink="sql"),
-    _r("sql-concat", r"(?i)\b(?:execute|executemany|raw)\s*\([^)]*"
+    _r("sql-concat", r"(?i)(?<![\w:>])\b(?:execute|executemany|raw)\s*\([^)]*"
        r"(?:\+|\bformat\s*\(|%\s*\()", "sql-injection", "owasp:a03",
        "cwe:89", "high", "medium",
        "SQL built with string concatenation or formatting",
@@ -1292,7 +1302,11 @@ def _scan_source(rel: str, text: str, index: GraphIndex,
     for number, line in enumerate(lines, start=1):
         if number in non_code_lines:
             continue
+        suffix = Path(rel).suffix.lower()
         for rule in _RULES:
+            if (rule.name in _LANGUAGE_BUILTIN_RULES
+                    and suffix in _C_FAMILY_SUFFIXES):
+                continue
             if not rule.pattern.search(line):
                 continue
             window = _window(lines, number - 1)

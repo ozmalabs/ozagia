@@ -544,6 +544,41 @@ subprocess.run(["bash", "-c", script])
     assert any(item["source"]["rule"] == "eval" for item in findings)
 
 
+def test_code_execution_rules_ignore_cpp_member_calls() -> None:
+    source = '''\
+menu->exec(view->viewport()->mapToGlobal(pos));
+QMenu::exec(actions, view, nullptr, view);
+parent_->m_eventLoop->exec();
+d->m_js->execute(builtInScript + script, event);
+'''
+    findings = S._scan_source(
+        "part/example.cpp", source, S.GraphIndex(info={}), [])
+    assert not [item for item in findings
+                if item["source"]["rule"] in {"exec", "eval", "sql-concat"}]
+
+    declaration = "void exec(const QPoint point = QPoint());\n"
+    findings = S._scan_source(
+        "part/example.h", declaration, S.GraphIndex(info={}), [])
+    assert not [item for item in findings if item["source"]["rule"] == "exec"]
+
+    # `->` and `::` member calls are also not Python's builtin in languages
+    # outside the C-family, where these rules still run.
+    for rel, text in (("src/example.php", "$menu->exec($pos);\n"),
+                      ("src/example.rs", "Type::exec();\n")):
+        findings = S._scan_source(rel, text, S.GraphIndex(info={}), [])
+        assert not [item for item in findings
+                    if item["source"]["rule"] == "exec"], rel
+
+    python_source = '''\
+exec(user_input)
+cursor.execute("select * from users where id=" + value)
+'''
+    findings = S._scan_source(
+        "src/example.py", python_source, S.GraphIndex(info={}), [])
+    rules = {item["source"]["rule"] for item in findings}
+    assert {"exec", "sql-concat"} <= rules
+
+
 def test_secret_scan_ignores_docstrings_but_keeps_live_assignments() -> None:
     source = '''\
 """Examples: secret://keyring/SERVICE/ACCOUNT"""
