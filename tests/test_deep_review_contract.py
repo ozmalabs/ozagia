@@ -4,7 +4,7 @@ import re
 import pytest
 
 from ozagia.core.deep_review import orchestrator, range_review
-from ozagia.core.deep_review.contract import canonical_json
+from ozagia.core.deep_review.contract import canonical_json, finding_id
 
 
 def _stub_build(monkeypatch, packet, *, graph=(None, {
@@ -17,6 +17,14 @@ def _stub_build(monkeypatch, packet, *, graph=(None, {
 def _packet(findings, sections=None, graph=None):
     return {"findings": findings, "sections": sections or {},
             "graph": graph or {"freshness": "unknown"}}
+
+
+def test_location_free_findings_use_description_to_avoid_id_collision():
+    first = {"type": "repository_warning", "summary": "No license declared."}
+    second = {"type": "repository_warning", "summary": "No ownership file."}
+
+    assert finding_id("correctness", first) != finding_id("correctness", second)
+    assert finding_id("correctness", first) == finding_id("correctness", first)
 
 
 def test_evidence_excerpt_is_bounded_linked_and_hashed(tmp_path, monkeypatch):

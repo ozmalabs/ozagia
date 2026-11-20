@@ -33,6 +33,14 @@ def finding_id(subject: str, finding: Mapping[str, Any]) -> str:
         scope = finding.get("scope") or finding.get("rule_key") or finding.get("rule")
         if scope:
             keys = [str(scope)]
+    # Some repository-wide collectors have neither a path nor a named scope.
+    # Including only subject + type would make every such finding collide and
+    # be silently merged by the report normalizer. Use the caller's stable
+    # descriptive text as the last-resort discriminator.
+    if not keys:
+        description = finding.get("summary") or finding.get("message")
+        if description:
+            keys = [f"description:{description}"]
     # Keys are location/rule identities. Normalize their representation and
     # order, so equivalent findings from collectors with different iteration
     # order retain the same ID.
