@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 LABEL_SCHEMA_VERSION = 2
+SUPPORTED_LABEL_SCHEMA_VERSIONS = frozenset({1, LABEL_SCHEMA_VERSION})
 
 METRIC_DEFINITIONS = {
     "precision": (
@@ -180,6 +181,11 @@ def load_labels(path: str | Path) -> dict[str, Any]:
     schema = raw.get("schema_version", 1)
     if isinstance(schema, bool) or not isinstance(schema, int):
         raise ValueError("labels.schema_version must be an integer")
+    if schema not in SUPPORTED_LABEL_SCHEMA_VERSIONS:
+        supported = ", ".join(str(version) for version in
+                               sorted(SUPPORTED_LABEL_SCHEMA_VERSIONS))
+        raise ValueError(
+            f"unsupported labels.schema_version {schema}; supported versions: {supported}")
     cases_value = raw.get("cases")
     if not isinstance(cases_value, list):
         raise ValueError("labels.cases must be a list")

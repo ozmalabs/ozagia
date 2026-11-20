@@ -41,6 +41,14 @@ def test_fixture_labels_are_valid_and_extract_reviewed_findings():
     assert "tests-and-coverage" in metadata["complete_subjects"]
 
 
+@pytest.mark.parametrize("schema", [0, 3, -1])
+def test_label_loader_rejects_unsupported_schema_versions(tmp_path, schema):
+    path = _write(tmp_path, {"schema_version": schema, "cases": []})
+
+    with pytest.raises(ValueError, match="unsupported labels.schema_version"):
+        load_labels(path)
+
+
 def test_complete_subject_scores_precision_recall_fpr_and_noise():
     expected = [
         {"path": "a.py", "type": "rule_a", "subject": "subject-a"},
