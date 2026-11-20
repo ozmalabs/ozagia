@@ -385,7 +385,8 @@ opt-in exact-version or supported OSV-style range matching against explicit
 local advisory data, including exact-version-only RubyGems-source Bundler and
 Composer matching (overall CVE
 state remains unknown); runbook links/topics, observability declarations,
-bounded Kubernetes/Compose YAML structural checks when optional PyYAML is
+lexical GitHub Actions workflow candidates for undeclared permissions,
+`pull_request_target`, and non-commit-pinned actions; bounded Kubernetes/Compose YAML structural checks when optional PyYAML is
 installed, bounded literal Terraform ingress checks in an isolated subprocess
 when optional `python-hcl2` is installed, and lexical IaC/config candidates; docs/API
 coverage and stale-reference candidates; fresh-graph range blast radius and

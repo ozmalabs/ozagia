@@ -3,7 +3,8 @@
 This deliberately makes very few claims: it inventories common deployment
 files, inspects selected Kubernetes JSON/YAML and Compose YAML structures when
 the optional YAML parser is present, applies narrow lexical rules to other
-supported configuration, flags a Dockerfile without a
+supported configuration, checks GitHub Actions workflow declarations without
+resolving effective permissions or expression-expanded steps, flags a Dockerfile without a
 HEALTHCHECK instruction, checks local runbook links and topics, and records
 logging, metrics, tracing, and observability declarations. Runtime monitoring
 is never inferred from absence: it stays explicitly unknown.
@@ -51,6 +52,9 @@ MAX_HCL_FILES = 64
 MAX_HCL_BYTES = 4_000_000
 MAX_HCL_RESULT_BYTES = 512_000
 HCL_PARSE_TIMEOUT_S = 5.0
+_GITHUB_ACTION_REF = re.compile(
+    r"^\s*(?:-\s*)?uses\s*:\s*['\"]?([^\s'\"#]+)", re.I)
+_GITHUB_COMMIT = re.compile(r"[0-9a-fA-F]{40}\Z")
 _RUNBOOK = re.compile(r"(?:runbook|operations|on[-_ ]call|disaster[-_ ]recovery|rollback)", re.I)
 _LINK = re.compile(r"!?\[[^\]]*\]\(\s*([^)\s]+)(?:\s+['\"][^'\"]*['\"])?\s*\)")
 _RST_LINK = re.compile(r"`[^`<]*<([^>]+)>`__?")
@@ -127,6 +131,74 @@ def _runbook_links(root: Path, rel: str, text: str) -> list[dict[str, object]]:
             if len(rows) >= MAX_RUNBOOK_LINKS:
                 return rows
     return rows
+
+
+def _github_workflow_findings(rel: str, text: str, *, limit: int
+                              ) -> list[dict[str, object]]:
+    """Return conservative GitHub Actions workflow configuration candidates.
+
+    These are lexical declarations, not effective-permission or workflow
+    semantics checks. In particular, a missing permissions key depends on the
+    repository/org default, and an action ref's meaning depends on GitHub.
+    """
+    findings = []
+
+    def add(finding):
+        if len(findings) < limit:
+            findings.append(finding)
+    lines = text.splitlines()
+    content_lines = [(number, line) for number, line in enumerate(lines, 1)
+                     if not line.lstrip().startswith("#")]
+    has_permissions = any(re.match(r"^\s*permissions\s*:", line, re.I)
+                          for _, line in content_lines)
+    if not has_permissions:
+        add({
+            "section": "operations", "type": "workflow_permissions_not_declared",
+            "rule_id": "ops.github_actions.permissions_not_declared",
+            "rule": "ops.github_actions.permissions_not_declared",
+            "severity": "note", "confidence": "low", "evidence_kind": "observed",
+            "keys": [f"file:{rel}"], "file": rel,
+            "summary": (f"{rel} does not declare workflow permissions; the effective "
+                        "token permissions depend on repository and organization defaults."),
+            "recommendation": ("Declare the minimum required GITHUB_TOKEN permissions "
+                               "at workflow or job scope, then confirm the effective policy."),
+            "locations": [{"path": rel}], "truth_assessed": False,
+        })
+    for number, line in content_lines:
+        trigger = re.match(r"^\s*pull_request_target\s*:", line)
+        if trigger:
+            add({
+                "section": "operations", "type": "workflow_privileged_pull_request_trigger",
+                "rule_id": "ops.github_actions.pull_request_target",
+                "rule": "ops.github_actions.pull_request_target",
+                "severity": "note", "confidence": "low", "evidence_kind": "observed",
+                "keys": [f"file:{rel}", "trigger:pull_request_target"],
+                "file": rel, "line": number,
+                "summary": (f"{rel} declares pull_request_target, which runs in the base-repository "
+                            "context; event token and secret access depend on workflow policy."),
+                "recommendation": ("Review checkout refs, secrets, write permissions, and every "
+                                   "step that processes pull-request-controlled data."),
+                "locations": [{"path": rel, "line": number}], "truth_assessed": False,
+            })
+        action = _GITHUB_ACTION_REF.match(line)
+        if action:
+            reference = action.group(1)
+            if ("@" in reference and not reference.startswith(("./", "../", "docker://"))
+                    and not _GITHUB_COMMIT.fullmatch(reference.rsplit("@", 1)[1])):
+                add({
+                    "section": "operations", "type": "workflow_action_not_commit_pinned",
+                    "rule_id": "ops.github_actions.action_not_commit_pinned",
+                    "rule": "ops.github_actions.action_not_commit_pinned",
+                    "severity": "note", "confidence": "medium", "evidence_kind": "observed",
+                    "keys": [f"file:{rel}", f"line:{number}",
+                             "action:mutable-reference"],
+                    "file": rel, "line": number,
+                    "summary": (f"{rel} references an action by a mutable or non-commit ref."),
+                    "recommendation": ("Pin third-party actions to a reviewed full commit SHA "
+                                       "and add a version comment for maintainability."),
+                    "locations": [{"path": rel, "line": number}], "truth_assessed": False,
+                })
+    return findings
 
 
 def _runbook_topics(text: str) -> list[str]:
@@ -1140,6 +1212,8 @@ def analyze(root: str | Path, *, budget_s: float = 10.0) -> dict:
     root = Path(root).resolve()
     deadline = time.monotonic() + budget
     configs: dict[str, str] = {}
+    workflow_files: list[str] = []
+    workflow_findings = 0
     runbooks: dict[str, str] = {}
     findings, omissions = [], []
     count = total = 0
@@ -1158,12 +1232,16 @@ def analyze(root: str | Path, *, budget_s: float = 10.0) -> dict:
                 omissions.append(f"file-count limit reached ({MAX_FILES})")
                 break
             rel = path.relative_to(root).as_posix()
+            is_github_workflow = (
+                rel.startswith(".github/workflows/")
+                and path.suffix.lower() in {".yaml", ".yml"})
             systemd_suffixes = (".service", ".timer", ".container", ".volume",
                                 ".pod", ".network")
             is_config = (name in _CONFIG_NAMES or name in _K8S_FILENAMES
                          or name.lower() in _K8S_JSON_FILENAMES
                          or name.endswith(systemd_suffixes)
-                         or name.lower().endswith((".tf", ".tfvars")))
+                         or name.lower().endswith((".tf", ".tfvars"))
+                         or is_github_workflow)
             is_yaml_candidate = name.endswith((".yaml", ".yml"))
             is_runbook = bool(_RUNBOOK.search(name)) and path.suffix.lower() in {".md", ".rst", ".txt"}
             if not (is_config or is_yaml_candidate or is_runbook):
@@ -1183,6 +1261,16 @@ def analyze(root: str | Path, *, budget_s: float = 10.0) -> dict:
                 continue
             if is_config:
                 configs[rel] = content
+            if is_github_workflow:
+                workflow_files.append(rel)
+                remaining = max(0, MAX_CONFIG_FINDINGS - workflow_findings)
+                candidates = _github_workflow_findings(
+                    rel, content, limit=remaining)
+                findings.extend(candidates)
+                workflow_findings += len(candidates)
+                if workflow_findings >= MAX_CONFIG_FINDINGS:
+                    omissions.append(
+                        f"GitHub Actions finding limit reached ({MAX_CONFIG_FINDINGS})")
             if is_runbook:
                 runbooks[rel] = content
             if name in {"Dockerfile", "Containerfile"}:
@@ -1262,19 +1350,26 @@ def analyze(root: str | Path, *, budget_s: float = 10.0) -> dict:
     findings.extend(static_findings)
     omissions.extend(static_omissions)
     observability = _observability(configs, runbooks)
+    static_checks = [
+        "iac.terraform.public_ingress_cidr",
+        "iac.terraform.public_admin_ingress",
+        "iac.container.privileged_mode",
+        "iac.kubernetes.host_network",
+        "iac.kubernetes.host_port",
+        "iac.kubernetes.host_path_volume",
+        "iac.compose.bind_all_interfaces",
+        "ops.observability.*_explicitly_disabled",
+    ]
+    if workflow_files:
+        static_checks.extend((
+            "ops.github_actions.permissions_not_declared",
+            "ops.github_actions.pull_request_target",
+            "ops.github_actions.action_not_commit_pinned",
+        ))
     static_validation = {
         "state": "checked" if configs else "unknown",
         "files_checked": len(configs),
-        "checks": [
-            "iac.terraform.public_ingress_cidr",
-            "iac.terraform.public_admin_ingress",
-            "iac.container.privileged_mode",
-            "iac.kubernetes.host_network",
-            "iac.kubernetes.host_port",
-            "iac.kubernetes.host_path_volume",
-            "iac.compose.bind_all_interfaces",
-            "ops.observability.*_explicitly_disabled",
-        ] if configs else [],
+        "checks": static_checks if configs else [],
         "findings": sum(1 for item in static_findings
                         if not item["rule_id"].startswith("ops.observability.")),
         "kubernetes_json_files_checked": json_checked,
@@ -1284,7 +1379,7 @@ def analyze(root: str | Path, *, budget_s: float = 10.0) -> dict:
         "terraform_files_parsed": terraform_parsed,
         "terraform_files_unknown": terraform_unknown,
         "omitted": [
-            "Structured inspection covers selected plain JSON Kubernetes objects, optional Kubernetes/Compose YAML, and literal Terraform ingress blocks; systemd checks remain lexical.",
+            "Structured inspection covers selected plain JSON Kubernetes objects, optional Kubernetes/Compose YAML, and literal Terraform ingress blocks; GitHub Actions checks are lexical, and systemd checks remain lexical.",
             "No Kubernetes schema/API validation, Terraform module evaluation or provider validation is run; templating, interpolation and effective merged configuration are not resolved.",
         ],
     }
@@ -1295,8 +1390,11 @@ def analyze(root: str | Path, *, budget_s: float = 10.0) -> dict:
         checks.append("observability_declarations")
     if configs:
         checks.append("static_iac_config_candidates")
+    if workflow_files:
+        checks.append("github_actions_workflow_candidates")
     return {"findings": findings,
             "inventory": {"configuration_files": sorted(configs),
+                          "github_workflows": sorted(workflow_files),
                           "runbooks": sorted(runbooks),
                           "runbook_checks": runbook_checks,
                           "observability": observability,

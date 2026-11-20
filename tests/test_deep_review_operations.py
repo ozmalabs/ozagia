@@ -723,6 +723,57 @@ def test_runbook_without_recognized_topics_is_a_note(tmp_path):
     assert result["findings"][0]["section"] == "operations"
 
 
+def test_github_workflows_report_unpinned_actions_and_privileged_triggers(tmp_path):
+    workflow = tmp_path / ".github/workflows/ci.yml"
+    workflow.parent.mkdir(parents=True)
+    workflow.write_text(
+        "name: CI\n"
+        "on:\n"
+        "  pull_request_target:\n"
+        "jobs:\n"
+        "  build:\n"
+        "    steps:\n"
+        "      - uses: actions/checkout@v4 # mutable tag\n"
+        "      - uses: example/action@0123456789abcdef0123456789abcdef01234567\n",
+        encoding="utf-8")
+
+    result = analyze(tmp_path)
+
+    findings = {item["rule_id"]: item for item in result["findings"]}
+    assert set(findings) == {
+        "ops.github_actions.permissions_not_declared",
+        "ops.github_actions.pull_request_target",
+        "ops.github_actions.action_not_commit_pinned",
+    }
+    assert findings["ops.github_actions.pull_request_target"]["line"] == 3
+    assert findings["ops.github_actions.action_not_commit_pinned"]["line"] == 7
+    assert result["inventory"]["configuration_files"] == [
+        ".github/workflows/ci.yml"]
+    assert "github_actions_workflow_candidates" in result["inventory"]["checks"]
+    assert all(item["truth_assessed"] is False for item in findings.values())
+    assert all("v4" not in str(item) for item in findings.values())
+
+
+def test_github_actions_check_is_not_claimed_without_workflows(tmp_path):
+    (tmp_path / "Dockerfile").write_text("FROM alpine\n", encoding="utf-8")
+
+    result = analyze(tmp_path)
+
+    assert "github_actions_workflow_candidates" not in result["inventory"]["checks"]
+    assert not result["inventory"]["github_workflows"]
+
+
+def test_github_workflow_permissions_and_commit_pins_suppress_candidates(tmp_path):
+    workflow = tmp_path / ".github/workflows/ci.yaml"
+    workflow.parent.mkdir(parents=True)
+    workflow.write_text(
+        "permissions:\n  contents: read\njobs:\n  test:\n    steps:\n"
+        "      - uses: example/action@0123456789abcdef0123456789abcdef01234567\n",
+        encoding="utf-8")
+
+    assert analyze(tmp_path)["findings"] == []
+
+
 def test_operations_inventory_is_collected_and_merged(tmp_path, monkeypatch):
     from ozagia.core.deep_review.collect import collect
     (tmp_path / "Dockerfile").write_text("FROM alpine\n", encoding="utf-8")
