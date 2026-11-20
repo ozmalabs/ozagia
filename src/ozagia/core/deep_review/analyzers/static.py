@@ -25,6 +25,25 @@ def _name(node):
     return node.id if isinstance(node, ast.Name) else None
 
 
+def _walk_executed_scope(node):
+    """Walk code executed in this scope, excluding deferred function bodies.
+
+    A function or lambda defined inside a loop does not run merely because the
+    loop reaches its definition. Counting loops in that body as nested work
+    would report quadratic behavior that is not present at the definition
+    site. Class bodies are retained because they execute when the class is
+    defined.
+    """
+    pending = [node]
+    while pending:
+        current = pending.pop()
+        yield current
+        if current is not node and isinstance(
+                current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+        pending.extend(reversed(list(ast.iter_child_nodes(current))))
+
+
 def _functools_imports(tree):
     """Return module-scope functools imports used to resolve decorators.
 
@@ -191,7 +210,7 @@ def _analyze(path: str, text: str) -> list[dict] | None:
         if isinstance(node, (ast.For, ast.AsyncFor)):
             outer_iter = _name(node.iter)
             if outer_iter:
-                for child in ast.walk(node):
+                for child in _walk_executed_scope(node):
                     if child is node:
                         continue
                     if isinstance(child, (ast.For, ast.AsyncFor)) and _name(child.iter) == outer_iter:
