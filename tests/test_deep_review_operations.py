@@ -779,6 +779,20 @@ def test_github_workflow_detects_inline_pull_request_target_forms(tmp_path, trig
         item["rule_id"] for item in result["findings"]}
 
 
+def test_github_workflow_detects_block_sequence_pull_request_target(tmp_path):
+    workflow = tmp_path / ".github/workflows/ci.yml"
+    workflow.parent.mkdir(parents=True, exist_ok=True)
+    workflow.write_text(
+        "on:\n  - push\n  - pull_request_target\njobs:\n  test:\n    runs-on: ubuntu-latest\n",
+        encoding="utf-8")
+
+    result = analyze(tmp_path)
+
+    finding = next(item for item in result["findings"]
+                   if item["rule_id"] == "ops.github_actions.pull_request_target")
+    assert finding["line"] == 3
+
+
 def test_github_workflow_permissions_and_commit_pins_suppress_candidates(tmp_path):
     workflow = tmp_path / ".github/workflows/ci.yaml"
     workflow.parent.mkdir(parents=True)

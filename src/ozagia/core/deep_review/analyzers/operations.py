@@ -167,9 +167,18 @@ def _github_workflow_findings(rel: str, text: str, *, limit: int
                                "at workflow or job scope, then confirm the effective policy."),
             "locations": [{"path": rel}], "truth_assessed": False,
         })
+    workflow_trigger_indent = None
     for number, line in content_lines:
+        indent = len(line) - len(line.lstrip())
+        if workflow_trigger_indent is not None and indent <= workflow_trigger_indent:
+            workflow_trigger_indent = None
+        if re.match(r"^\s*on\s*:\s*(?:#.*)?$", line, re.I):
+            workflow_trigger_indent = indent
         trigger = (re.match(r"^\s*['\"]?pull_request_target['\"]?\s*:", line)
-                   or _GITHUB_PR_TARGET_INLINE.match(line))
+                   or _GITHUB_PR_TARGET_INLINE.match(line)
+                   or (workflow_trigger_indent is not None
+                       and re.match(r"^\s*-\s*['\"]?pull_request_target['\"]?\s*(?:#.*)?$",
+                                    line, re.I)))
         if trigger:
             add({
                 "section": "operations", "type": "workflow_privileged_pull_request_trigger",
