@@ -346,7 +346,10 @@ def evaluate_range(fixture: str | Path = DEFAULT_FIXTURE, *, budget_s: float = 6
             "labels": label_metadata(manifest, labels_path),
             "status": "complete" if (range_available and
                                      full.get("manifest", {}).get("complete") and
-                                     ranged.get("manifest", {}).get("complete"))
+                                     ranged.get("manifest", {}).get("complete") and
+                                     not full_score["unavailable_subjects"] and
+                                     range_score is not None and
+                                     not range_score["unavailable_subjects"])
                       else "partial",
             "commits": {"base": base, "head": head},
             "changed_files": sorted(changed_paths),

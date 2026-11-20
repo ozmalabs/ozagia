@@ -172,6 +172,44 @@ def test_range_comparison_marks_resource_refusal_partial(monkeypatch):
     assert result["finding_ids"] is None
 
 
+def test_range_comparison_marks_unavailable_label_coverage_partial(
+        tmp_path, monkeypatch):
+    labels = tmp_path / "range-labels.json"
+    labels.write_text(json.dumps({
+        "schema_version": 2,
+        "cases": [],
+        "report_findings": [],
+        "complete_subjects": [],
+        "range": {
+            "changes": [{"file": "app.py", "append": "value = 2\n"}],
+            "expected": [{"file": "app.py", "type": "changed_rule",
+                          "subject": "security",
+                          "required_checks": ["security scan"]}],
+        },
+    }), encoding="utf-8")
+
+    def build(_root, _out, **kwargs):
+        manifest = {
+            "complete": True, "status": "complete",
+            "subjects": {"security": {
+                "status": "complete", "checks": [],
+                "omitted": [], "skipped": [], "unknown": [],
+            }},
+            "comparison": {},
+        }
+        if kwargs.get("range_spec"):
+            manifest["range_review"] = {"status": "available"}
+        return {"manifest": manifest, "findings": []}
+
+    monkeypatch.setattr(deep_review_comparison, "build_deep_review", build)
+
+    result = evaluate_range(DEFAULT_FIXTURE, labels=labels)
+
+    assert result["status"] == "partial"
+    assert result["change_set"]["range"]["expected"] == 0
+    assert result["change_set"]["range"]["excluded_expected"] == 1
+
+
 def test_range_comparison_rejects_missing_or_malformed_range_labels(tmp_path):
     with pytest.raises(ValueError, match="missing"):
         evaluate_range(DEFAULT_FIXTURE, labels=tmp_path / "absent.json")
