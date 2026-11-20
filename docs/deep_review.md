@@ -329,7 +329,9 @@ evidence or subject contents. See [status](status.md).
   scanners run only when named with `--security-tool`; a scanner that requires
   network access is refused unless `--security-network` is also set. Tool
   provenance is recorded. Scanner findings are candidates, not proof of
-  exploitability.
+  exploitability. The Python flow check recognizes direct `requests`/`httpx`
+  calls and locally assigned known client constructors; import aliases, copied
+  client variables and dynamic receiver types are not resolved.
 - **Performance, failure modes, data structures and scalability:** selected
   Python AST patterns (for example repeated nested iteration, silently
   suppressed exceptions, unconditional retry loops, mutable default arguments,

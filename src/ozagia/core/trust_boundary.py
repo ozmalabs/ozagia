@@ -51,13 +51,23 @@ def _request_value_get(node: ast.Call) -> bool:
                         "headers", "cookies"} for part in receiver)
 
 
-def _http_get_post(node: ast.Call) -> bool:
+def _http_get_post(node: ast.Call, http_clients: set[str]) -> bool:
     """Recognize conventional HTTP client calls, not arbitrary object methods."""
     if not isinstance(node.func, ast.Attribute) or node.func.attr not in {"get", "post"}:
         return False
     receiver = _dotted_name(node.func.value).lower().split(".")
-    return any(part in {"requests", "httpx", "session", "client"}
-               for part in receiver)
+    # Generic `session` and `client` names are ambiguous. Accept them only
+    # when an earlier assignment in this function binds the name to a known
+    # requests/httpx constructor.
+    return any(part in {"requests", "httpx"} for part in receiver) or (
+        isinstance(node.func.value, ast.Name)
+        and node.func.value.id in http_clients
+    )
+
+
+def _http_client_constructor(node: ast.AST) -> bool:
+    name = _dotted_name(node.func) if isinstance(node, ast.Call) else ""
+    return name in {"requests.Session", "httpx.Client", "httpx.AsyncClient"}
 
 
 @dataclass(frozen=True)
@@ -98,14 +108,18 @@ class _Flow(ast.NodeVisitor):
     def __init__(self, file: str) -> None:
         self.file = file
         self.taint: dict[str, int] = {}
+        self.http_clients: set[str] = set()
         self.candidates: list[Candidate] = []
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         saved = self.taint
+        saved_clients = self.http_clients
         self.taint = {}
+        self.http_clients = set()
         for stmt in node.body:
             self.visit(stmt)
         self.taint = saved
+        self.http_clients = saved_clients
 
     visit_AsyncFunctionDef = visit_FunctionDef
 
@@ -115,6 +129,10 @@ class _Flow(ast.NodeVisitor):
         origin = source if source is not None else min(origins, default=None)
         for target in node.targets:
             if isinstance(target, ast.Name):
+                if _http_client_constructor(node.value):
+                    self.http_clients.add(target.id)
+                else:
+                    self.http_clients.discard(target.id)
                 if origin is None:
                     self.taint.pop(target.id, None)
                 else:
@@ -130,7 +148,7 @@ class _Flow(ast.NodeVisitor):
         fn = node.func
         name = fn.attr if isinstance(fn, ast.Attribute) else fn.id if isinstance(fn, ast.Name) else ""
         sink = _SINKS.get(name)
-        if sink is None and _http_get_post(node):
+        if sink is None and _http_get_post(node, self.http_clients):
             sink = ("ssrf", "cwe:918")
         if sink:
             source_lines = [self.taint[n] for n in _names(node) if n in self.taint]

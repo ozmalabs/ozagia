@@ -60,3 +60,24 @@ def f(request):
 ''')
     assert [(item["category"], item["source_line"], item["line"])
             for item in request_flow] == [("ssrf", 3, 4)]
+
+    known_clients = analyze_source('''
+def f(request):
+    value = request.args.get("url")
+    session = requests.Session()
+    session.get(value)
+    client = httpx.Client()
+    client.post(value)
+''')
+    assert [(item["category"], item["source_line"], item["line"])
+            for item in known_clients] == [("ssrf", 3, 5), ("ssrf", 3, 7)]
+
+    ambiguous_clients = analyze_source('''
+def f(request):
+    value = request.args.get("id")
+    db.client.get(value)
+    session.get(value)
+    session = database.session()
+    session.get(value)
+''')
+    assert ambiguous_clients == []
