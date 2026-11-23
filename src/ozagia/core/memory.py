@@ -64,10 +64,12 @@ import hashlib
 import json
 import math
 import os
+import posixpath
 import re
 import subprocess
 import sys
 import time
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
@@ -478,6 +480,48 @@ def _rust_mod_alternate(rel: str) -> str | None:
     return None
 
 
+_INCLUDE_RE = re.compile(
+    r'include(?:_str|_bytes)?!\s*\(\s*"([^"\\\n]{1,300})"\s*\)')
+
+
+def _rust_manifest_for(root: Path, rel: str) -> str | None:
+    """The nearest Cargo.toml above a Rust file, relative to the root."""
+    parent = PurePosixPath(rel).parent
+    while True:
+        manifest = (parent / "Cargo.toml").as_posix()
+        if (root / manifest).is_file():
+            return manifest
+        if parent.as_posix() == ".":
+            return None
+        parent = parent.parent
+
+
+def _rust_lib_target(root: Path, manifest: str) -> str | None:
+    """The package library root declared by a Cargo.toml, if it exists."""
+    try:
+        data = tomllib.loads((root / manifest).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return None
+    lib = data.get("lib")
+    path = "src/lib.rs"
+    if isinstance(lib, dict) and lib.get("path"):
+        path = str(lib["path"])
+    base = PurePosixPath(manifest).parent.as_posix()
+    rel = path if base == "." else (PurePosixPath(base) / path).as_posix()
+    return rel if (root / rel).is_file() else None
+
+
+def _rust_under_test_target(rel: str, manifest: str) -> bool:
+    prefix = PurePosixPath(manifest).parent.parts
+    if prefix in ((), (".",)):
+        prefix = ()
+    parts = PurePosixPath(rel).parts
+    if parts[:len(prefix)] != tuple(prefix):
+        return False
+    rest = parts[len(prefix):]
+    return bool(rest) and rest[0] in _RUST_TEST_ROOT_DIRS
+
+
 def _rust_parse(path: Path, src: str | None = None) -> dict[str, Any] | None:
     """The Phase 1 Rust source model, mapped to the graph's legacy keys."""
     from ozagia.index.rust_symbols import parse_rust
@@ -872,6 +916,47 @@ class FileIndexer:
                     b.edge(parent, "contains_symbol", sid)
         return test_ids
 
+    def _rust_test_links(self, fid: int, rel: str, text: str | None,
+                         test_ids: list[int]) -> None:
+        """Link integration/bench/example tests to the crate they test and
+        record ``include_str!``/``include_bytes!``/``include!`` paths."""
+        if not test_ids:
+            return
+        b = self.b
+        root = self.root
+        manifest = _rust_manifest_for(root, rel)
+        package_dir = ""
+        if manifest is not None:
+            package_dir = PurePosixPath(manifest).parent.as_posix()
+            if _rust_under_test_target(rel, manifest):
+                lib = _rust_lib_target(root, manifest)
+                if lib is not None:
+                    lib_nid = self.file_node(lib)
+                    for tid in test_ids:
+                        b.edge(tid, "tests_module", lib_nid)
+        seen: set[str] = set()
+        src = text or ""
+        for match in _INCLUDE_RE.finditer(src):
+            target = match.group(1)
+            bases = [PurePosixPath(rel).parent.as_posix()]
+            if package_dir and package_dir != ".":
+                bases.append(package_dir)
+            found = None
+            for base in bases:
+                joined = posixpath.normpath(
+                    posixpath.join("" if base == "." else base, target))
+                if joined == ".." or joined.startswith("../"):
+                    continue
+                if (root / joined).is_file():
+                    found = joined
+                    break
+            if found is None or found in seen:
+                continue
+            seen.add(found)
+            nid = self.file_node(found)
+            for tid in test_ids:
+                b.edge(tid, "mentions_file", nid)
+
     def _rust_modules(self, fid: int, rel: str, entry: dict[str, Any],
                       modules: Iterable[dict[str, Any]]) -> None:
         """Resolve external `mod x;` declarations, including `#[path]`."""
@@ -946,8 +1031,9 @@ class FileIndexer:
             parsed = _rust_parse(p, text)
             if parsed is None:
                 return
-            self._rust_symbols(fid, rel, parsed)
+            test_ids = self._rust_symbols(fid, rel, parsed)
             self._rust_modules(fid, rel, entry, parsed["mods"])
+            self._rust_test_links(fid, rel, text, test_ids)
             self.sources.append(self._types[0](rel, fid,
                                                parsed.get("source") or ""))
             entry["ctx"] = 1
@@ -962,6 +1048,7 @@ class FileIndexer:
                 return
             test_ids = self._rust_symbols(fid, rel, parsed)
             self._rust_modules(fid, rel, entry, parsed["mods"])
+            self._rust_test_links(fid, rel, text, test_ids)
             self.tests.append(self._types[1](
                 rel, fid, parsed.get("source") or "", test_ids))
             entry["ctx"] = 1

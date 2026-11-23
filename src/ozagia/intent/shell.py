@@ -19,6 +19,19 @@ Classes (`result["class"]`):
                   pytest. Fields: `python` (the interpreter token, or None
                   for a pytest script), `script` (the pytest script token),
                   `selectors`, `extra_args`.
+    cargo_test    `cargo test` (the executable may be a path, with an
+                  optional `+toolchain`) with mapped package/target/feature/
+                  filter options. Fields: `tool`, `args` (all cargo arguments
+                  after the executable), `packages`, `excludes`,
+                  `test_targets`, `bin_targets`, `bench_targets`,
+                  `example_targets`, `lib`, `bins`, `tests`, `benches`,
+                  `examples`, `all_targets`, `doc`, `workspace`,
+                  `all_features`, `no_default_features`, `features`,
+                  `release`, `profile`, `target_triple`, `manifest_path`,
+                  `target_dir`, `color`, `jobs`, `no_run`, `no_fail_fast`,
+                  `keep_going`, `quiet`, `verbose`, `offline`, `frozen`,
+                  `locked`, `toolchain`, `filter`, `extra_args` (after `--`),
+                  `subcommand`, `selection_safe`.
     read          cat F | head [-n N] F | tail [-n N|+N] F | tail -c [+]N F |
                   sed -n 'A[,B]p' F | nl [-ba|-bt] F. Fields: `file`,
                   `range` (`("all",)`, `("head", n)`, `("tail", n)`,
@@ -146,6 +159,40 @@ _PYTEST_REFUSED = frozenset({
     "--funcargs", "--fixtures-per-test",
 })
 _PYTEST_CLUSTER = set("vqxsl")
+
+# cargo test options that take a separate value (long options also accept
+# `--name=value`).
+_CARGO_VALUE_OPTS = {
+    "-p": "packages", "--package": "packages",
+    "--exclude": "excludes",
+    "--test": "test_targets", "--bin": "bin_targets",
+    "--bench": "bench_targets", "--example": "example_targets",
+    "--features": "features", "-F": "features",
+    "--target": "target_triple", "--profile": "profile",
+    "--jobs": "jobs", "-j": "jobs",
+    "--manifest-path": "manifest_path",
+    "--target-dir": "target_dir",
+    "--color": "color",
+}
+# Options that are refused: they change the output format, the configuration
+# or the build plan in ways this mapping does not model.
+_CARGO_REFUSED = frozenset({
+    "-Z", "--config", "--timings", "--message-format", "--unit-graph",
+    "--build-plan", "--artifact-dir",
+})
+# cargo test flags that do not add a selector and are safe to pass through.
+_CARGO_FLAGS = frozenset({
+    "--workspace", "--all", "--lib", "--bins", "--examples", "--benches",
+    "--tests", "--all-targets", "--doc", "--no-run", "--no-fail-fast",
+    "--keep-going", "--all-features", "--no-default-features", "--release",
+    "--frozen", "--locked", "--offline", "-q", "--quiet", "-v", "--verbose",
+    "--ignore-rust-version", "--future-incompat-report", "--no-deps",
+})
+# Harness arguments after `--` that only change reporting.
+_CARGO_SAFE_HARNESS = frozenset({
+    "--nocapture", "--show-output", "--test-threads", "--color",
+    "--shuffle", "--shuffle-seed",
+})
 
 
 def _result(cls: str, reason: str = "", **fields: Any) -> dict[str, Any]:
@@ -627,6 +674,130 @@ def _pytest(tokens: list[str], *, python: str | None,
     return _result("pytest", python=python, script=script,
                    selectors=selectors, extra_args=extra,
                    path_options=path_opts)
+
+
+def _cargo_test(tokens: list[str], *, tool: str) -> dict[str, Any]:
+    """Map `cargo test` when every option's meaning is known."""
+    rest = list(tokens)
+    toolchain: str | None = None
+    if rest and rest[0].startswith("+") and len(rest[0]) > 1:
+        toolchain = rest.pop(0)[1:]
+    if not rest:
+        return _result("other", "cargo without a subcommand")
+    if rest[0] != "test":
+        return _result("other", f"cargo {rest[0]} is not mapped")
+    fields: dict[str, Any] = {
+        "tool": tool, "args": list(tokens), "subcommand": "test",
+        "packages": [], "excludes": [], "test_targets": [],
+        "bin_targets": [], "bench_targets": [], "example_targets": [],
+        "features": [], "extra_args": [], "toolchain": toolchain,
+        "lib": False, "bins": False, "tests": False, "benches": False,
+        "examples": False, "all_targets": False, "doc": False,
+        "workspace": False, "all_features": False,
+        "no_default_features": False, "release": False, "no_run": False,
+        "no_fail_fast": False, "keep_going": False, "offline": False,
+        "frozen": False, "locked": False, "quiet": False, "verbose": False,
+        "profile": None, "target_triple": None, "manifest_path": None,
+        "target_dir": None, "color": None, "jobs": None,
+        "filter": None, "selection_safe": True,
+    }
+    list_opts = {"packages", "excludes", "test_targets", "bin_targets",
+                 "bench_targets", "example_targets", "features"}
+    scalar = {"target_triple", "profile", "jobs", "manifest_path",
+              "target_dir", "color"}
+    flag_opts = {
+        "--lib": "lib", "--bins": "bins", "--tests": "tests",
+        "--benches": "benches", "--examples": "examples",
+        "--all-targets": "all_targets", "--doc": "doc",
+        "--workspace": "workspace", "--all": "workspace",
+        "--all-features": "all_features",
+        "--no-default-features": "no_default_features",
+        "--release": "release", "--no-run": "no_run",
+        "--no-fail-fast": "no_fail_fast", "--keep-going": "keep_going",
+        "--offline": "offline", "--frozen": "frozen", "--locked": "locked",
+        "--ignore-rust-version": None, "--future-incompat-report": None,
+        "--no-deps": None, "-q": "quiet", "--quiet": "quiet",
+        "-v": "verbose", "--verbose": "verbose",
+    }
+    i = 1
+    while i < len(rest):
+        tok = rest[i]
+        name, eq, value = tok.partition("=")
+        if tok == "--":
+            fields["extra_args"] = rest[i + 1:]
+            break
+        if tok in _CARGO_REFUSED or name in _CARGO_REFUSED:
+            return _result("other", f"cargo test option {name} is not mapped")
+        if tok in _CARGO_VALUE_OPTS or (eq and name in _CARGO_VALUE_OPTS):
+            kind = _CARGO_VALUE_OPTS.get(tok) or _CARGO_VALUE_OPTS[name]
+            if not eq:
+                if i + 1 >= len(rest):
+                    return _result("other",
+                                   f"cargo test option {tok} needs a value")
+                value = rest[i + 1]
+                i += 2
+            else:
+                i += 1
+            if value.startswith("-"):
+                return _result("other",
+                               f"cargo test option {name} has no value")
+            if kind in list_opts:
+                fields[kind].append(value)
+            elif kind == "color":
+                if value not in ("auto", "always", "never"):
+                    return _result("other",
+                                   f"cargo test color {value!r} is not mapped")
+                fields["color"] = value
+            elif kind in scalar:
+                fields[kind] = value
+            continue
+        if tok[:2] in ("-p", "-F", "-j") and len(tok) > 2 and tok[1] in "pFj":
+            kind = {"p": "packages", "F": "features", "j": "jobs"}[tok[1]]
+            if kind == "jobs":
+                fields["jobs"] = tok[2:]
+            else:
+                fields[kind].append(tok[2:])
+            i += 1
+            continue
+        if tok in _CARGO_FLAGS:
+            key = flag_opts.get(tok)
+            if key:
+                fields[key] = True
+            i += 1
+            continue
+        if (not tok.startswith("--") and len(tok) > 2
+                and set(tok[1:]) <= set("vq")):
+            fields["verbose"] = fields["verbose"] or "v" in tok
+            fields["quiet"] = fields["quiet"] or "q" in tok
+            i += 1
+            continue
+        if tok.startswith("-"):
+            return _result("other", f"cargo test option {tok} is not mapped")
+        if fields["filter"] is not None:
+            return _result("other", "cargo test takes one test filter")
+        fields["filter"] = tok
+        fields["selection_safe"] = False
+        i += 1
+    extra = list(fields["extra_args"])
+    j = 0
+    while j < len(extra):
+        tok = extra[j]
+        name = tok.split("=", 1)[0]
+        if name in ("--format", "--list"):
+            return _result("other", f"cargo test harness option {name} "
+                                    "is not mapped")
+        if name in ("--test-threads", "--color", "--shuffle-seed") \
+                and "=" not in tok:
+            j += 2
+            continue
+        if tok in _CARGO_SAFE_HARNESS or name in _CARGO_SAFE_HARNESS:
+            j += 1
+            continue
+        # Unknown harness arguments still mean the command runs as typed;
+        # they only disable selection and the cache for it.
+        fields["selection_safe"] = False
+        j += 1
+    return _result("cargo_test", **fields)
 
 
 def _positive(text: str) -> int | None:
@@ -1344,6 +1515,8 @@ def _simple(tokens: list[str]) -> dict[str, Any]:
         return _jq(tokens[1:])
     if base == "git":
         return _git(tokens)
+    if base == "cargo":
+        return _cargo_test(tokens[1:], tool=cmd)
     if base in ("pytest", "py.test"):
         return _pytest(tokens[1:], python=None, script=cmd)
     if _PYTHON_RE.match(base):
@@ -1467,9 +1640,9 @@ def classify(command: str, *, _filters: bool = True,
              _nested: bool = False, _compound: bool = True) -> dict[str, Any]:
     """The class of a shell command line (see the module docstring).
 
-    A pytest command followed only by `2>&1` and/or `| tail -N` / `| head -N`
-    is still `pytest`, with `output_filter` = ("tail"|"head", N) or
-    ("all", 0) applied to its output.
+    A pytest or `cargo test` command followed only by `2>&1` and/or
+    `| tail -N` / `| head -N` is still its class, with `output_filter` =
+    ("tail"|"head", N) or ("all", 0) applied to its output.
 
     A command that is not simple but is a sequence the intent layer can
     carry out step by step is `compound` (see `plan_compound`).
@@ -1486,7 +1659,7 @@ def classify(command: str, *, _filters: bool = True,
     if filt is not None and inner.strip():
         got = classify(inner, _filters=False, _nested=_nested,
                        _compound=False)
-        if got["class"] == "pytest":
+        if got["class"] in ("pytest", "cargo_test"):
             return {**got, "output_filter": filt}
     segments = _segments(command)
     if segments is None:

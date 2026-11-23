@@ -535,11 +535,12 @@ array of tables and is reported, not migrated, until it has a registry shape.
 `testing.captured` and `testing.cache`, so migrated legacy files keep working
 in place. `testing.fallback` is one of `all`, `refuse` or
 `affected_with_warning`. `testing.mode` is the default for bounded tasks;
-`testing.captured` is the interactive captured-pytest default and stays `all`
-unless a repository opts into a subset. An explicit `[tests] select` in
-`.ozagia.toml` still wins over `testing.captured`; see `docs/testing.md` for
-the precedence and the executor mapping. `testing.timeout_s` is recorded for a
-caller that executes the plan; the planner never runs tests.
+`testing.captured` is the interactive captured pytest/cargo-test default and
+stays `all` unless a repository opts into a subset. An explicit `[tests]
+select` in `.ozagia.toml` still wins over `testing.captured`; see
+`docs/testing.md` for the precedence and the executor mapping.
+`testing.timeout_s` is recorded for a caller that executes the plan; the
+planner never runs tests.
 
 ### hints
 
@@ -915,9 +916,10 @@ moved yet:
   mapping) is separate from the registry's `worktrees` group (resource
   placement policy), which is stored under `[resources.worktrees]`.
 - `ozagia.core.testing` reads the `testing` group and its open-ended tables.
-  The interactive captured-pytest selector in `ozagia.intent.affected` reads
+  The interactive captured pytest/cargo-test selectors in
+  `ozagia.intent.affected` and `ozagia.intent.affected_cargo` read
   `[tests] select`/`[tests] cache` from `.ozagia.toml` first; when `select` is
-  not set it uses `testing.captured`. `ozagia.config` maps the same keys (and
+  not set they use `testing.captured`. `ozagia.config` maps the same keys (and
   `testing.cache`) into `ProjectConfig`, keeping the legacy value when both
   files define one. `OZAGIA_TESTS_ALL=1` still runs the command as typed.
 - `ozagia.core.models` reads `[models]` directly, including the same

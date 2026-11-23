@@ -1,6 +1,6 @@
 # Rust parity with Python — plan (2026-11-23)
 
-Status: Phases 0, 0.5, 1, 2, 3 and 4 implemented (2026-11-23); Phases 5–7 proposed. This plan closes
+Status: Phases 0, 0.5, 1, 2, 3, 4 and 5 implemented (2026-11-23); Phases 6–7 proposed. This plan closes
 the gap between `.rs` and `.py` support across the graph, tags,
 symbol-question layer, edits, LSP, tests and documentation, and adds the
 initial setup for a Python→Rust migration assistant built on the same graph.
@@ -34,13 +34,13 @@ do in a Python repository today, at the same honesty level:
 |---|---|---|
 | Tag extraction | stdlib AST: defs, refs, scoped imports, qualnames, end lines | bundled `index/queries/rust-tags.scm`: defs/refs with impl scopes (`Foo.bar`), trait signatures, const/static/enum variants, qualified calls, and `use` import records; Phase 1 |
 | Graph symbols | `_python_parse`: qualnames, end lines, docstrings, decorators, args, returns, bases, imports, tests | `rust_symbols.parse_rust`: tree-sitter fields (qualname, spans, doc, attributes, args, returns, visibility, test marker) with regex fallback; Phase 0 `mod` resolution retained; `#[path]` recorded as unsupported |
-| Test indexing | `index_test` parses pytest tests, links `tests_module`, `mentions_file` | Phase 1 adds `#[test]`/`#[tokio::test]`/`#[rstest]` and `tests/*.rs` Test nodes; import/`tests_module` resolution remains Phase 2/5 |
+| Test indexing | `index_test` parses pytest tests, links `tests_module`, `mentions_file` | Phase 1 adds `#[test]`/`#[tokio::test]`/`#[rstest]` Test nodes; Phase 5 adds a Cargo-target/libtest-name model and integration-test `tests_module`/`mentions_file` links |
 | Repo map | file edges from resolved imports + names | file edges from resolved Rust `use`/glob module targets plus name edges; `mod` edges resolve |
 | Symbol graph | local / import / name resolution; pyright precise mode | Phase 2 Rust resolver covers `crate`/`self`/`super`/workspace crates, aliases, globs and bounded re-exports; external crates and ambiguous bindings stay unresolved; Python resolution unchanged |
 | Edits | symbol ops (`replace_symbol`, `replace_body`, `insert_import`, `delete_symbol`, `rename_symbol`, …) with AST parse gate | Phase 3 symbol ops (`edit/rust_edit.py`) with tree-sitter parse gate, group import merge, conservative same-file rename, LSP preview application; CST subtree ops remain |
 | LSP | pyright live | rust-analyzer 1.97.1 installed; workspace-root selection, install hints, live definition/references/symbols/diagnostics/call-hierarchy/rename tests pass; first query still waits for indexing |
 | Lint | ruff | rustfmt (already parity for formatting; no Rust linter like clippy) |
-| Tests | `pytest` capture, affected subset, result cache | `cargo test` is not a captured command; no crate or test-target nodes |
+| Tests | `pytest` capture, affected subset, result cache | `cargo test` capture, human-output parsing, per-target affected subset and cache; failures never cached |
 | Dependencies/review | Python manifests + trust-boundary dataflow | Cargo.lock inventory, crates.io, purls, strict SemVer advisories; no Rust dataflow |
 
 Cross-language migration has no support at all today: there is no Python→Rust
@@ -280,33 +280,47 @@ availability of a parser.
   2026-11-23 with rust-analyzer 1.97.1; new unit tests cover workspace-root and
   install-hint selection. Full suite: 6251 passed / 22 skipped; ruff clean.
 
-### Phase 5 — `cargo test` parity (5–8 days)
+### Phase 5 — `cargo test` parity (5–8 days) — implemented 2026-11-23
 
-- **Command capture**: `intent/shell.py` recognizes `cargo test` (workspace,
-  `-p/--package`, `--test`, `--lib`, `--bins`, `--examples`, `--benches`,
-  `--all-targets`, feature flags, filters, `--` args, test-thread/env options)
-  and takes over only forms whose semantics are fully understood; ambiguous
-  forms run as typed.
-- **Runner**: `intent/run.py` gets `run_cargo_test` with the same bounded
-  timeout, output tail and `[ozagia] cargo test ...` head-line contract. Parse
-  the stable human output (`running N tests`, `test ... ok/ignored/FAILED`,
-  `test result:`), not nightly JSON. Failures are never cached.
-- **Rust test graph**: test functions from `#[test]`/`#[cfg(test)]`, plus
-  integration tests under `tests/`, benches and examples; map each test target
-  to its crate and file; add `has_test`, `tested_by_file`, `tests_module` and
-  `mentions_file` links using the Phase 1/2 symbol and import model.
-- **Affected selection**: reuse `[tests] select` and `cache`. Key a green run
-  on the cargo/rustc versions, toolchain, workspace manifests, `Cargo.lock`,
-  feature flags and environment; map changed files to crates/targets and run
-  `cargo test -p <crate> --test <target> <filter>` only when narrow. Run
-  everything as typed when a build script, proc-macro crate, workspace
-  manifest, non-Rust file or unlinked crate changed, or planning is ambiguous.
-  `OZAGIA_TESTS_ALL=1` keeps its meaning.
+- **Command capture**: `intent/shell.py` recognizes a simple `cargo test`
+  (workspace, `-p/--package`, `--exclude`, `--test`/`--bin`/`--bench`/
+  `--example`, `--lib`/`--bins`/`--tests`/`--benches`/`--examples`/
+  `--all-targets`/`--doc`, feature/profile/toolchain flags, one filter and
+  `--` harness args) and leaves ambiguous or output-format-changing forms to
+  the shell.
+- **Runner**: `intent/cargo.py` and `intent/run.py` (`run_cargo_test`) run the
+  typed executable with the pytest timeout/process-group contract, parse the
+  stable human output (`Running ...`, `Doc-tests ...`, `running N tests`,
+  `test ... ok/ignored/FAILED`, `test result:` and panic blocks), and report
+  a `[ozagia] cargo test ...` head, build errors as `file:` keys and failed
+  tests as `test:` keys with frames.
+- **Rust test graph**: `core/rust_tests.py` maps every `#[test]` in a Cargo
+  target's module tree to its graph Test key and libtest name
+  (`module::path::function`), including integration tests, benches, examples,
+  custom target paths and doctest targets. Integration tests gain
+  `tests_module` links to the crate library, and `include_str!`/
+  `include_bytes!`/`include!` paths become `mentions_file` links.
+- **Affected selection**: `intent/affected_cargo.py` reuses `[tests] select`
+  and `cache`. A suite is keyed on cargo/rustc versions, toolchain, manifests,
+  `Cargo.lock`, feature/profile options and environment. A changed library or
+  binary runs the package's default targets and those of workspace packages
+  that depend on it; a changed integration test or helper runs only its
+  targets; manifests, lock file, toolchain, build script, proc-macro crate,
+  non-Rust file, unknown Rust file, or bench/example change runs as typed with
+  the reason. A narrowed run names targets
+  (`cargo test -p <crate> --test <target>`); `--all-targets` and typed target
+  selection stay as typed. `OZAGIA_TESTS_ALL=1` keeps its meaning.
+- **Cache**: per target. A target is skipped only when its key matches and
+  every test passed or was ignored; a failure removes the key. Counters match
+  the pytest contract (`affected_runs`, `tests_skipped_unaffected`,
+  `cached_passes`, `full_runs_forced`, plus `cargo_targets_run`).
 - **Security**: tests execute project code, so nothing runs unless the caller
-  typed `cargo test`; no implicit `cargo check`/`build`/`clippy`.
-- Exit: a fixture with two crates and three test targets runs only the linked
-  targets after a one-file change; every run-all reason is printed; cache and
-  counters match the pytest contract.
+  typed `cargo test`; no implicit `cargo check`/`build`/`clippy`. The planner
+  reads `Cargo.toml` and sources only.
+- Verification: `tests/test_cargo_test.py` (30 tests) covers classification,
+  the model, parsing, build failures, scopes and end-to-end affected/cache
+  runs in a two-crate workspace; the full suite is 6281 passed / 22 skipped
+  and ruff is clean.
 
 ### Phase 6 — Python→Rust migration assistant, initial setup (3–5 days)
 
@@ -505,7 +519,7 @@ python -m ozagia.eval.bench --root <rust-repo> --cold --check
 | 2 — modules/imports/symbol graph (done 2026-11-23) | 3–5 |
 | 3 — symbol edits (done 2026-11-23) | 3–4 |
 | 4 — LSP (done 2026-11-23) | 1–2 |
-| 5 — cargo test | 5–8 |
+| 5 — cargo test (done 2026-11-23) | 5–8 |
 | 6 — migration assistant (initial setup) | 3–5 |
 | 7 — optional SCIP/review/docs | 2–4 |
 

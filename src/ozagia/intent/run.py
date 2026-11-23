@@ -25,6 +25,21 @@ affected or uncached tests; the line after the head then says what ran and
 what did not (`[ozagia] ran N affected tests of M; not run: ...; run all:
 <cmd>`, or `[ozagia] ran all tests: <reason>`), followed by `cached pass`
 lines, and slow and flaky tests come last.
+
+`cargo test` is captured as `cargo_test` (`ozagia.intent.cargo`): cargo's
+human output tail, then
+
+    [ozagia] cargo test <status>: exit <code>, <s> s, <p> passed, <f> failed, <i> ignored
+    [ozagia] build error <file>:<line>: <message>
+    [ozagia] failed test:<rel>::<qualname>: <message>
+    [ozagia]   frame <file>:<line>
+
+The affected selector and cache (`ozagia.intent.affected_cargo`) work at
+Cargo-target granularity: a changed crate library runs the crate's default
+tests, a changed integration test runs only that test target, and a green
+target whose inputs did not change is skipped. A typed test filter, target
+selection, `--no-run` or an unmodelled option runs as typed.
+
 A read-like command becomes a read of the same range; a search-like command
 becomes a grep; `ruff check` runs ruff itself and appends the node keys
 of its findings (`run_ruff`); a `jq` command in the subset of `ozagia.core.jq` prints
@@ -318,6 +333,239 @@ def run_pytest(memory: Any, cls: dict[str, Any], inp: dict[str, Any],
     return out_res
 
 
+def _cargo_status_word(status: str) -> str:
+    return {"build_failed": "build failed", "timed_out": "timed out"}.get(
+        status, status)
+
+
+def _cargo_order(model: Any, cls: dict[str, Any],
+                 argv: list[str]) -> list[str] | None:
+    """Expected target order for cargo's output blocks, as a tie-breaker."""
+    if model is None:
+        return None
+    packages: list[str] = []
+    i = 0
+    while i < len(argv):
+        tok = argv[i]
+        if tok in ("-p", "--package") and i + 1 < len(argv):
+            packages.append(argv[i + 1])
+            i += 2
+            continue
+        if tok.startswith("--package="):
+            packages.append(tok.split("=", 1)[1])
+        elif tok.startswith("-p") and len(tok) > 2:
+            packages.append(tok[2:])
+        i += 1
+    if not packages:
+        packages = [str(p) for p in cls.get("packages") or []]
+    known = set(model.package_targets)
+    packages = [p for p in packages if p in known]
+    if packages:
+        return model.default_targets(packages)
+    return model.default_targets()
+
+
+def run_cargo_test(memory: Any, cls: dict[str, Any], inp: dict[str, Any],
+                   wd: Path) -> dict[str, Any]:
+    from ozagia.intent import affected_cargo as AC
+    from ozagia.intent import cargo as C
+    from ozagia.core import rust_tests
+    root = root_of(memory)
+    cargo = C.resolve_cargo(cls, wd)
+    timeout = inp.get("timeout")
+    try:
+        timeout_s = float(timeout) / 1000 if timeout else DEFAULT_TIMEOUT_S
+    except (TypeError, ValueError):
+        timeout_s = DEFAULT_TIMEOUT_S
+    remaining = inp.get("_deadline_s_remaining")
+    if isinstance(remaining, (int, float)) and not isinstance(remaining, bool):
+        timeout_s = max(MIN_TIMEOUT_S, min(timeout_s, float(remaining)))
+    env = inp.get("_test_env")
+    if isinstance(cls.get("env"), dict) and cls["env"]:
+        base_env = env if isinstance(env, dict) else dict(os.environ)
+        env = {**base_env, **cls["env"]}
+    run_env = env if isinstance(env, dict) else None
+    preflight_stop(inp)
+    t_plan = time.monotonic()
+    plan = AC.plan(memory, cls, inp, root=root, wd=wd, cargo=cargo)
+    if isinstance(remaining, (int, float)) and not isinstance(remaining, bool):
+        timeout_s = max(MIN_TIMEOUT_S, min(
+            timeout_s, float(remaining) - (time.monotonic() - t_plan)))
+    if plan is not None and plan.nothing_to_run:
+        sel_head, sel_tail, meta = AC.finish(plan, None)
+        lines = [tag("cargo test not run: every selected target has a cached "
+                     "pass (exit 0)"), *sel_head, *sel_tail]
+        return {"intent": "shell_cargo_test", "output": "\n".join(lines),
+                "keys": [], "exit_code": 0, "meta": meta}
+    model = plan.model if plan is not None else None
+    if model is None:
+        try:
+            model = rust_tests.discover(root)
+        except Exception:  # noqa: BLE001 - counts still parse, keys do not
+            model = C.EmptyModel(root)
+    if plan is not None and plan.runs is not None:
+        runs = plan.runs
+    else:
+        runs = [list(cls["args"])]
+    if not runs:
+        sel_head, sel_tail, meta = AC.finish(plan, None) if plan else ([], [], {})
+        lines = [tag("cargo test not run: no Cargo test target was selected"),
+                 *sel_head, *sel_tail]
+        return {"intent": "shell_cargo_test", "output": "\n".join(lines),
+                "keys": [], "exit_code": 0, "meta": meta}
+    tail_lines = int(C.OUTPUT_TAIL_LINES if cls.get("tail_lines") is None
+                     else cls["tail_lines"])
+    deadline = time.monotonic() + timeout_s
+    executed: list[dict[str, Any]] = []
+    stopped_early = False
+    for argv in runs:
+        preflight_stop(inp)
+        left = deadline - time.monotonic()
+        if left <= 0:
+            executed.append({
+                "argv": argv, "raw": {"ok": False, "timed_out": True,
+                                      "exit_code": 124, "seconds": 0.0,
+                                      "output": "", "output_tail": "",
+                                      "command": [cargo, *argv],
+                                      "error": "the deadline was reached"},
+                "parsed": {"blocks": [], "tests": [],
+                           "counts": {"passed": 0, "failed": 0, "ignored": 0,
+                                      "measured": 0, "filtered": 0},
+                           "errors": [], "notes": []}})
+            break
+        raw = C.run(cargo, C.dedupe_argv(argv), wd,
+                    timeout_s=max(MIN_TIMEOUT_S, left),
+                    env=run_env, tail_lines=tail_lines)
+        parsed = C.parse(raw["output"], model,
+                         order=_cargo_order(model, cls, argv))
+        executed.append({"argv": argv, "raw": raw, "parsed": parsed})
+        if not raw["ok"] and plan is not None and plan.early_stop:
+            stopped_early = True
+            break
+    counts = {"passed": 0, "failed": 0, "ignored": 0, "measured": 0,
+              "filtered": 0}
+    tests: list[dict[str, Any]] = []
+    blocks: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    tails: list[str] = []
+    statuses: list[str] = []
+    seconds = 0.0
+    exit_code = 0
+    timed_out = False
+    error_text = ""
+    for item in executed:
+        raw, parsed = item["raw"], item["parsed"]
+        seconds += float(raw.get("seconds") or 0)
+        if raw.get("exit_code"):
+            exit_code = int(raw["exit_code"])
+        timed_out = timed_out or bool(raw.get("timed_out"))
+        for key, value in (parsed.get("counts") or {}).items():
+            counts[key] = counts.get(key, 0) + int(value or 0)
+        tests.extend(parsed.get("tests") or [])
+        blocks.extend(parsed.get("blocks") or [])
+        errors.extend(parsed.get("errors") or [])
+        if raw.get("output_tail"):
+            tails.append(str(raw["output_tail"]))
+        if raw.get("error"):
+            error_text = str(raw["error"])
+        statuses.append(C.status_for(raw, parsed))
+    if timed_out:
+        status = "timed_out"
+        error_text = error_text or (f"timed out after {timeout_s:g} s; "
+                                    "process group killed")
+    elif statuses and all(s == "passed" for s in statuses):
+        status = "passed"
+    elif statuses and all(s == "build_failed" for s in statuses):
+        status = "build_failed"
+    else:
+        status = "failed"
+    if stopped_early and status == "failed":
+        error_text = error_text or "a target failed; later targets were not run"
+    combined = "\n".join(part for part in tails if part)
+    if len(combined.splitlines()) > tail_lines > 0:
+        combined = "\n".join(combined.splitlines()[-tail_lines:])
+    res: dict[str, Any] = {
+        "ok": status == "passed",
+        "status": status,
+        "exit_code": exit_code,
+        "timed_out": timed_out,
+        "seconds": round(seconds, 3),
+        "counts": counts,
+        "tests": tests,
+        "blocks": blocks,
+        "errors": errors,
+        "output_tail": combined,
+        "command": [cargo, *(executed[-1]["argv"] if executed else [])],
+        "error": error_text,
+        "runs": [{"argv": item["argv"], "status": C.status_for(
+            item["raw"], item["parsed"]),
+            "exit_code": item["raw"].get("exit_code"),
+            "seconds": item["raw"].get("seconds")} for item in executed],
+    }
+    sel_head: list[str] = []
+    sel_tail: list[str] = []
+    meta: dict[str, Any] = {}
+    if plan is not None:
+        sel_head, sel_tail, meta = AC.finish(plan, res)
+    out = res.get("output_tail") or ""
+    filt = cls.get("output_filter")
+    if filt and filt[0] in ("tail", "head") and filt[1] >= 0:
+        rows = out.splitlines()
+        rows = rows[-filt[1]:] if filt[0] == "tail" and filt[1] else (
+            rows[:filt[1]] if filt[0] == "head" else [])
+        out = "\n".join(rows)
+    lines = [out] if out else []
+    head = (f"cargo test {_cargo_status_word(status)}"
+            f"{AC.scope(plan, res)}: exit {res['exit_code']}, "
+            f"{res['seconds']} s, {counts['passed']} passed, "
+            f"{counts['failed']} failed, {counts['ignored']} ignored")
+    if errors:
+        head += f", {len(errors)} build errors"
+    if not (counts["passed"] or counts["failed"] or counts["ignored"]) \
+            and not errors:
+        head += ", no tests"
+    lines.append(tag(head))
+    lines.extend(sel_head)
+    if res.get("error"):
+        lines.append(tag(f"error: {res['error']}"))
+    keys: list[str] = []
+    for err in errors[:20]:
+        file = str(err.get("file") or "")
+        line = err.get("line")
+        message = one_line(str(err.get("message") or "compile error"))
+        if file and line:
+            lines.append(tag(f"build error {file}:{line}: {message}"))
+        else:
+            lines.append(tag(f"build error: {message}"))
+        if err.get("key"):
+            keys.append(str(err["key"]))
+    for test in tests:
+        if test.get("outcome") != "failed":
+            continue
+        key = str(test.get("key") or "")
+        name = key or str(test.get("name") or "test")
+        message = one_line(str(test.get("message") or "test failed"))
+        lines.append(tag(f"failed {name}: {message}"))
+        if key:
+            keys.append(key)
+        for frame in test.get("frames") or []:
+            file, line = frame.get("file"), frame.get("line")
+            if file and line:
+                lines.append(tag(f"  frame {file}:{line}"))
+    lines.extend(sel_tail)
+    notes = []
+    for item in executed:
+        notes.extend(item["parsed"].get("notes") or [])
+    for note in notes[:5]:
+        lines.append(tag(f"note: {note}"))
+    out_res: dict[str, Any] = {
+        "intent": "shell_cargo_test", "output": "\n".join(lines),
+        "keys": list(dict.fromkeys(keys)), "exit_code": res["exit_code"]}
+    if meta:
+        out_res["meta"] = meta
+    return out_res
+
+
 def run_jq(memory: Any, cls: dict[str, Any], path: Path) -> dict[str, Any]:
     """A `jq` command in `ozagia.core.jq`'s subset: jq's exact stdout.
     Anything the subset does not reproduce (a jq error, an exponent,
@@ -569,8 +817,8 @@ def handle_shell(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
     kind = cls["class"]
     if kind == "git_refs":
         raise IntentError(refusal(command), intent="shell_refused")
-    if kind not in ("pytest", "read", "grep", "ls", "find", "files", "jq",
-                    "compound", "ruff"):
+    if kind not in ("pytest", "cargo_test", "read", "grep", "ls", "find",
+                    "files", "jq", "compound", "ruff"):
         raise Unhandled(cls.get("compound_reason") or cls.get("reason")
                         or kind)
     root = root_of(memory)
@@ -594,6 +842,8 @@ def handle_shell(memory: Any, inp: dict[str, Any]) -> dict[str, Any]:
         wd = _workdir(root, p if p.is_absolute() else wd / p)
     if kind == "pytest":
         return run_pytest(memory, cls, inp, wd)
+    if kind == "cargo_test":
+        return run_cargo_test(memory, cls, inp, wd)
     if kind == "ruff":
         return run_ruff(memory, cls, inp, wd)
     if kind == "read":

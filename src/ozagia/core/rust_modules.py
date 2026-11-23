@@ -297,10 +297,10 @@ def _target_specs(manifest: str, text: str, root: Path) -> list[CrateTarget]:
         bin_dir = root / manifest_dir / "src" / "bin"
         if bin_dir.is_dir():
             for path in sorted(bin_dir.glob("*.rs")):
-                add("bin", (Path(manifest_dir) / "src" / "bin" / path.name).as_posix(),
+                add("bin", (Path("src") / "bin" / path.name).as_posix(),
                     path.stem)
             for path in sorted(bin_dir.glob("*/main.rs")):
-                add("bin", (Path(manifest_dir) / "src" / "bin" / path.parent.name /
+                add("bin", (Path("src") / "bin" / path.parent.name /
                             "main.rs").as_posix(), path.parent.name)
 
     for kind, field_name, default_dir in (
@@ -316,10 +316,10 @@ def _target_specs(manifest: str, text: str, root: Path) -> list[CrateTarget]:
             base = root / manifest_dir / default_dir
             if base.is_dir():
                 for path in sorted(base.glob("*.rs")):
-                    add(kind, (Path(manifest_dir) / default_dir / path.name).as_posix(),
+                    add(kind, (Path(default_dir) / path.name).as_posix(),
                         path.stem)
                 for path in sorted(base.glob("*/main.rs")):
-                    add(kind, (Path(manifest_dir) / default_dir / path.parent.name /
+                    add(kind, (Path(default_dir) / path.parent.name /
                                "main.rs").as_posix(), path.parent.name)
     return targets
 

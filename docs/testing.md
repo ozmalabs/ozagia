@@ -6,7 +6,8 @@ them, never calls a model and never reaches the network. A plan is evidence
 for a caller or a person, not a test result.
 
 The existing captured-pytest selector in `ozagia.intent.affected` remains the
-executor for interactive shell commands. This module adds the policy surface,
+executor for interactive shell commands; a captured `cargo test` uses
+`ozagia.intent.affected_cargo`. This module adds the policy surface,
 the graph-aware planner and the integration points for bounded tasks and code
 review.
 
@@ -106,6 +107,45 @@ runs the command as typed, before any of the above.
 the selector. A malformed `.ozagia.toml` or an invalid `testing.captured`
 falls back to `all`; a captured command is never silently made partial by a
 broken config.
+
+## Captured cargo test
+
+A typed `cargo test` uses the same settings and precedence through
+`ozagia.intent.affected_cargo`. Selection and the cache are at Cargo-target
+granularity:
+
+- a changed library or binary file selects every default test target of that
+  package (library unit tests, binary unit tests, integration tests and
+  doctests), plus the tests of workspace packages that depend on it,
+  transitively;
+- a changed integration test, benchmark/example target or helper module
+  selects only the targets whose module tree contains it;
+- a changed `Cargo.toml`, `Cargo.lock`, toolchain file, `.cargo/config`,
+  `build.rs`, proc-macro crate, non-Rust file, a Rust file outside every
+  target, or a changed bench/example target runs the command as typed;
+- a target is cached only when its key matches and every test in it passed or
+  was ignored; a failure removes the key, so it runs again;
+- `OZAGIA_TESTS_ALL=1` always runs the command as typed.
+
+A narrowed run names its targets explicitly (`cargo test -p a --test
+integration --lib --doc`), so only linked targets execute. The command's
+package selection (`-p`), features, profile, toolchain and environment are
+part of the suite key. A typed test filter, `--lib`/`--test` selection,
+`--no-run`, `--all-targets`, a `--manifest-path` to another manifest, or a
+working directory other than the project root runs as typed. Captured runs
+drop `-q`/`--quiet` so Cargo's target headers and libtest lines can be
+parsed; the visible output remains the bounded tail.
+
+Cargo's stable human output is parsed, not nightly JSON. The head line and
+target-level counters mirror pytest:
+
+```
+[ozagia] cargo test passed (affected subset: 6 of 8 tests run, 2 not run): exit 0, 0.2 s, 5 passed, 0 failed, 1 ignored
+[ozagia] ran 6 affected tests of 8; not run: 2 tests in 2 targets (-p b --lib, -p b --test other); run all: OZAGIA_TESTS_ALL=1 cargo test
+```
+
+Slow targets (> 5 s) are reported; per-test timing and flaky detection need
+Cargo's unstable JSON format and are not attempted.
 
 ## Failure classes
 

@@ -502,6 +502,7 @@ back. The classes are:
 | class | commands | what happens |
 |---|---|---|
 | pytest | `pytest`, `py.test`, `python[3] -m pytest`, `<path>/python -m pytest` | `ozagia.check.run_tests` with the named interpreter (a pytest script's `#!` line), the selectors made root-relative, the other flags, `timeout`/1000 s (default 120). Refused flags (cache, `--pdb`, `--junitxml`, ...) and ambiguous options fall back. |
+| cargo_test | `cargo test` (also a path, `+toolchain`) with `-p/--package`, `--exclude`, `--workspace/--all`, `--test/--bin/--bench/--example`, `--lib`, `--bins`, `--tests`, `--benches`, `--examples`, `--all-targets`, `--doc`, feature/profile flags, `--release`, `--locked/--offline/--frozen`, `--no-fail-fast`, `--keep-going`, `--no-run`, `--color`, `--jobs`, one filter and `--` harness args | `ozagia.intent.cargo` runs the typed executable with the pytest timeout/process-group contract and parses Cargo's stable human output; `[ozagia] cargo test ...` head, `build error`/`failed` lines. `--message-format`, `-Z`, `--config`, `--timings` and unknown forms fall back. A typed filter, target selection or `--no-run` still captures but never narrows. |
 | read | `cat F`, `head [-n N] F`, `tail [-n N\|+N] F`, `sed -n 'A[,B]p' F`, `nl [-ba\|-bt] F`, `tail -c [+]N F` | read of that range (no 2000-line cap). `nl` lines are numbered as nl prints them (`%6d` and a tab; with `-bt`, the default, an empty line is 7 spaces and takes no number); a file with a byte order mark, a carriage return or an nl section delimiter line (`\:`, `\:\:`, `\:\:\:`) falls back. `tail -c` shows the bytes verbatim after `Read file <abs>, bytes a-b of n`, then `[ozagia] lines in: <keys>`; bytes that start inside a UTF-8 character fall back. |
 | grep | `grep [-rRnHiFE] [-A\|-B\|-C N\|-N] [--include G] PAT [PATH...]`, `rg [-nNHiF] [-A\|-B\|-C N] [-g G]... [-t T] [-T T] PAT [PATH...]`, `git grep [-niFE] PAT [PATH]` | grep; `-i` is case-insensitive. A basic regex is converted to the Rust/Python dialect (`\|` `\(` `\{` become operators, `+ ? \| { } ( )` literals); one with back-references, `\<`, `\>` or POSIX classes falls back. Several paths are searched in the order given (matches by path and line within each); overlapping paths, grep `--include` with a file operand (grep filters it, rg does not) and `rg --hidden` fall back. `-A/-B/-C` add context lines (`  Line n- text`) and a `  --` line between groups of one file; `-A`/`-B` override `-C` whatever the order, as in both tools. rg searches as rg does (hidden and ignored files skipped; `-g`, negated `-g !G`, `-t` and `-T` passed to rg). grep and git grep are searched with rg too (hidden files included, `.gitignore` respected: this differs from grep for ignored files, and from git grep for untracked ones). |
 | files | `rg --files [PATH...] [-g G]... [-t T] [-T T] [--hidden] [--no-ignore[-vcs]] [-u\|-uu\|-uuu] [--sort path]` | runs rg itself (paths inside the root), sorted by path; rg's own order is that of its parallel walk, so this is one of the orders it can print. Intent `shell_files`. |
@@ -652,8 +653,29 @@ listed at the end (`[ozagia] slow test ...`, `[ozagia] flaky test ...`).
 `select = "all"` is the default because changing what a command runs is
 surprising. `meta.tests` has the counters `affected_runs`,
 `tests_skipped_unaffected`, `cached_passes`, `full_runs_forced`, which the
-daemon's `stats` sums. `cargo test` is not covered (not a captured command,
-and the Rust graph has no crate or test-target nodes).
+daemon's `stats` sums.
+
+A captured `cargo test` (`ozagia.intent.cargo` and
+`ozagia.intent.affected_cargo`) uses the same settings and head-line
+contract at Cargo-target granularity:
+
+```
+[ozagia] cargo test passed (affected subset: 6 of 8 tests run, 2 not run): exit 0, 0.3 s, 5 passed, 0 failed, 1 ignored
+[ozagia] ran 6 affected tests of 8; not run: 2 tests in 2 targets (-p b --lib, -p b --test other); run all: OZAGIA_TESTS_ALL=1 cargo test
+```
+
+The Rust test model (`ozagia.core.rust_tests`) maps every `#[test]` in a
+Cargo target's module tree to the name libtest prints. A change in a crate's
+library or binary runs that package's default targets; a change in an
+integration test or its helper modules runs only those test targets; a change
+in `Cargo.toml`, `Cargo.lock`, a toolchain file, `.cargo/config`, a build
+script, a proc-macro crate, a non-Rust file or a Rust file outside every
+target runs everything as typed. The cache is per target, and a target with
+a failure is never served from it. Cargo runs without `-q`/`--quiet` when
+captured so target headers and per-test lines can be parsed; the output is
+still the bounded tail. A typed test filter, `--lib`/`--test` selection,
+`--no-run`, `--manifest-path` to another manifest or a workdir other than
+the project root runs as typed.
 
 A captured pytest runs with the timeout `input.timeout` (ms), else 120 s
 (OpenCode's built-in shell default, so capture never lets a command run
@@ -782,10 +804,11 @@ file's git state.
 
 One process per repository. `socketserver.ThreadingUnixStreamServer`, a
 thread per connection, one lock around `tool` and `after` (`DevMemory` is
-not thread-safe), except a captured pytest: it reads no graph state and
-runs without the lock, so edits and reads sent while tests run are answered
-at once. A compound command with a pytest step also runs without it, and
-takes the lock (`_lock`) only around the steps that read the graph. Requests are JSON lines, answered in order; a line over
+not thread-safe), except a captured pytest or cargo test: it reads no graph
+state and runs without the lock, so edits and reads sent while tests run are
+answered at once. A compound command with a pytest step also runs without it,
+and takes the lock (`_lock`) only around the steps that read the graph.
+Requests are JSON lines, answered in order; a line over
 `MAX_MESSAGE_BYTES` gets an error and the connection is closed. A request
 with a `deadline_ms` that has passed when its turn comes is answered
 `expired` and not executed (`ozagia.daemon.protocol`). The socket
@@ -946,10 +969,11 @@ normal captured or built-in behavior.
   - a `read` deny on one file and a `bash` `cat *` deny refused the handled
     read and the captured `cat`;
   - a captured compound `grep ... && echo found` ran.
-- A captured pytest keeps the last 40 lines of its output (all of it when
-  a compound step pipes it through a filter). A bare `pytest -v` with more
-  output shows less than bash would; the `[ozagia]` lines carry every
-  failure.
+- A captured pytest or cargo test keeps the last 40 lines of its output (all
+  of it when a compound step pipes it through a filter). A bare `pytest -v`
+  with more output shows less than bash would; the `[ozagia]` lines carry
+  every failure. A captured cargo test drops `-q`/`--quiet` so target headers
+  remain parseable.
 - A permission can be asked twice. This happens when the file or directory
   changes between the preflight and the real call (for example, an edit's
   `oldString` no longer matches) and the real call becomes passthrough. The

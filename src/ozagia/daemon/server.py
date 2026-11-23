@@ -6,23 +6,24 @@ until `shutdown`, SIGTERM or SIGINT, or, with `parent_pid`, until that
 process is gone (checked every `PARENT_POLL_S` seconds). Connections are
 served by threads; one global lock serialises `tool` and `after`, because
 `DevMemory` is not thread-safe. `ping`, `hello` and `stats` do not take that
-lock, and neither does a captured pytest or `ruff check` (`shell` that
-classifies as `pytest` or `ruff`): it reads no graph state while it runs, so
-a long run does not hold up the edits and reads sent meanwhile. Lint after
-an edit (`ozagia.intent.lint`) releases the lock while its linters run
-(`_unlock`), and its budget ends a margin before `deadline_ms`
-(`_reply_deadline`).
+lock, and neither does a captured pytest, cargo test or `ruff check` (`shell`
+that classifies as `pytest`, `cargo_test` or `ruff`): it reads no graph state
+while it runs, so a long run does not hold up the edits and reads sent
+meanwhile. Lint after an edit (`ozagia.intent.lint`) releases the lock while
+its linters run (`_unlock`), and its budget ends a margin before
+`deadline_ms` (`_reply_deadline`).
 
 A `tool` or `after` request whose `deadline_ms` (Unix epoch, ms) has passed
 when its turn comes (after the lock is taken, before the handler runs) is
 answered `expired` and not executed (see `ozagia.daemon.protocol`).
 
-Captured pytest, captured `ruff check` and lint run with `test_env`
-(default: this process's environment without `OZAGIA_*`, `PYTHONPATH` and
-`COLUMNS`, the variables the harness adds for ozagia itself), passed to the
-intent layer as `_test_env` (for `tool` and `after`). Reserved `_` fields a
-client puts in `input` are dropped, except `_reason`: the bounded one-line
-label the created-file ledger records for a handled write or an `after`
+Captured pytest, captured cargo test, captured `ruff check` and lint run with
+`test_env` (default: this process's environment without `OZAGIA_*`,
+`PYTHONPATH` and `COLUMNS`, the variables the harness adds for ozagia itself),
+passed to the intent layer as `_test_env` (for `tool` and `after`). Reserved
+`_` fields a client puts in `input` are dropped, except `_reason`: the bounded
+one-line label the created-file ledger records for a handled write or an
+`after`
 that created files.
 
 Every request is journaled, one JSON object per line, to
@@ -223,9 +224,10 @@ META_COUNTERS = ("path_suggestions", "ownership_warnings", "files_recorded",
 JOURNAL_KEYS = 20
 # Distinct shell passthrough reasons kept, and shown in `stats`.
 SHELL_REASONS = 200
-# `meta.tests` counters of a captured pytest (`ozagia.intent.affected`).
+# `meta.tests` counters of a captured pytest or cargo test
+# (`ozagia.intent.affected` / `ozagia.intent.affected_cargo`).
 TEST_COUNTERS = ("affected_runs", "tests_skipped_unaffected", "cached_passes",
-                 "full_runs_forced")
+                 "full_runs_forced", "cargo_targets_run")
 SHELL_REASONS_SHOWN = 30
 # `meta` counters of the `replace` tool (`ozagia.intent.replace`): previews,
 # applies, and files the applies wrote.
@@ -342,12 +344,13 @@ def _reply_deadline(msg: dict[str, Any]) -> float | None:
 
 
 def _lock_free(op: Any, tool: Any, inp: Any) -> bool:
-    """A captured pytest reads no graph state, so it skips the lock; so does
-    a captured `ruff check`, which takes the lock itself (`_lock`) only for
-    its node keys. So does a compound command with a pytest step: it takes
-    the lock itself for the steps that read the graph. So does `after` of a
-    web fetch (`webfetch`): its hint is a local check of the URL and output
-    (`ozagia.research.fallback.after_lines`) and reads no graph state."""
+    """A captured pytest or cargo test reads no graph state, so it skips the
+    lock; so does a captured `ruff check`, which takes the lock itself
+    (`_lock`) only for its node keys. So does a compound command with a
+    pytest step: it takes the lock itself for the steps that read the graph.
+    So does `after` of a web fetch (`webfetch`): its hint is a local check of
+    the URL and output (`ozagia.research.fallback.after_lines`) and reads no
+    graph state."""
     if op == "after" and tool == "webfetch":
         return True
     if op != "tool" or tool != "shell" or not isinstance(inp, dict):
@@ -356,7 +359,7 @@ def _lock_free(op: Any, tool: Any, inp: Any) -> bool:
     cls = classify(str(inp.get("command") or ""))
     if cls["class"] == "compound":
         return any(s["kind"] == "pytest" for s in compound_steps(cls))
-    return cls["class"] in ("pytest", "ruff")
+    return cls["class"] in ("pytest", "cargo_test", "ruff")
 
 
 def _research_fetch_counters(root: Path) -> dict[str, int]:

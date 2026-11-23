@@ -108,9 +108,9 @@ the wrong shape are dropped on load; a failed write resets the file.
 
 Known limits: tests that pass alone but fail with others (order or shared
 state) can pass in a subset run; files git ignores (generated data, the
-virtualenv beyond its distribution list) are not seen as changes. `cargo
-test` is not covered: it is not a captured command, and the Rust graph has
-no crate or test-target nodes to map changed files to.
+virtualenv beyond its distribution list) are not seen as changes. A captured
+`cargo test` uses the same `[tests]` settings through
+:mod:`ozagia.intent.affected_cargo` (target-level selection and cache).
 """
 from __future__ import annotations
 
@@ -730,7 +730,7 @@ class _Project:
 
 def _empty() -> dict[str, Any]:
     return {"version": VERSION, "suites": {}, "files": {}, "nodes": {},
-            "flaky": {}, "slow": {}, "failing": {}}
+            "flaky": {}, "slow": {}, "failing": {}, "cargo": {}}
 
 
 def _state_file(root: Path) -> Path:
@@ -787,8 +787,24 @@ def _valid_failing(r: Any) -> bool:
             and _str_map(r.get("files"), _num))
 
 
+def _valid_cargo_suite(r: Any) -> bool:
+    return (isinstance(r, dict) and _t_ok(r)
+            and isinstance(r.get("head"), str)
+            and _str_map(r.get("dirty"), lambda x: x is None or isinstance(x, str))
+            and _str_map(r.get("targets"), lambda x: isinstance(x, int)
+                         and not isinstance(x, bool))
+            and _str_map(r.get("passed"), lambda x: isinstance(x, int)
+                         and not isinstance(x, bool))
+            and _str_map(r.get("ignored"), lambda x: isinstance(x, int)
+                         and not isinstance(x, bool))
+            and _str_map(r.get("keys"), lambda x: isinstance(x, str))
+            and all(r.get(k) is None or isinstance(r.get(k), str)
+                    for k in ("cargo", "env", "manifests", "features")))
+
+
 _VALID = {"suites": _valid_suite, "files": _valid_file, "nodes": _valid_node,
-          "flaky": _valid_flaky, "slow": _valid_slow, "failing": _valid_failing}
+          "flaky": _valid_flaky, "slow": _valid_slow, "failing": _valid_failing,
+          "cargo": _valid_cargo_suite}
 
 
 def load_state(root: Path) -> dict[str, Any]:
@@ -853,6 +869,7 @@ def _locked(root: Path) -> Iterator[dict[str, Any]]:
             _prune(data["flaky"], MAX_FLAKY)
             _prune(data["slow"], MAX_SLOW)
             _prune(data["failing"], MAX_SUITES)
+            _prune(data["cargo"], MAX_SUITES)
             _write_state(path, data)
         except Exception:
             try:
