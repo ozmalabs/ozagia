@@ -108,13 +108,14 @@ class CargoBlock:
     tests: list[dict[str, Any]] = field(default_factory=list)
     seconds: float = 0.0
     status: str = ""
+    harness: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return {"header": self.header, "kind": self.kind,
                 "package": self.package, "name": self.name, "root": self.root,
                 "target": self.target_id, "counts": dict(self.counts),
                 "seconds": self.seconds, "status": self.status,
-                "tests": len(self.tests)}
+                "harness": self.harness, "tests": len(self.tests)}
 
 
 def _normal_name(text: str) -> str:
@@ -209,13 +210,14 @@ def _line_blocks(lines: Iterable[str], model: Any,
     notes: list[str] = []
     used: set[str] = set()
     block: CargoBlock | None = None
+    custom = False
     failure_names: dict[tuple[str, str], list[dict[str, Any]]] = {}
     current_failure: dict[str, Any] | None = None
     pending_error: str | None = None
     seen_tests = False
 
     def finish_block() -> None:
-        nonlocal block, current_failure
+        nonlocal block, current_failure, custom
         if block is not None:
             if block.status == "":
                 if block.counts["failed"]:
@@ -225,6 +227,7 @@ def _line_blocks(lines: Iterable[str], model: Any,
             blocks.append(block)
         block = None
         current_failure = None
+        custom = False
 
     def error(message: str, *, file: str = "", line: int = 0,
               column: int = 0) -> None:
@@ -259,11 +262,12 @@ def _line_blocks(lines: Iterable[str], model: Any,
                                  package=package, used=used, order=order)
             used.add(tid)
             target = model.targets.get(tid)
+            custom = bool(target is not None and not target.harness)
             block = CargoBlock(
                 header=line.strip(), kind=kind, package=package,
                 name=target.name if target is not None else _exe_name(exe),
                 root=target.root if target is not None else path,
-                target_id=tid)
+                target_id=tid, harness=not custom)
             if target is not None:
                 block.package = target.package
             continue
@@ -276,6 +280,10 @@ def _line_blocks(lines: Iterable[str], model: Any,
             block = CargoBlock(header=line.strip(), kind="doc",
                                package=package, name=package, target_id=tid,
                                root=model.package_lib.get(package, ""))
+            continue
+        # A custom harness's output is arbitrary, not libtest: keep no
+        # counts or tests from it (the planner runs such commands as typed).
+        if custom:
             continue
         m = _RUNNING_N.match(line)
         if m and block is not None:

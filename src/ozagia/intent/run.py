@@ -521,6 +521,9 @@ def run_cargo_test(memory: Any, cls: dict[str, Any], inp: dict[str, Any],
             f"{counts['failed']} failed, {counts['ignored']} ignored")
     if errors:
         head += f", {len(errors)} build errors"
+    custom = sum(1 for block in blocks if block.get("harness") is False)
+    if custom:
+        head += f", {custom} custom harness{'es' if custom != 1 else ''}"
     if not (counts["passed"] or counts["failed"] or counts["ignored"]) \
             and not errors:
         head += ", no tests"

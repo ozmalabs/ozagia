@@ -474,6 +474,12 @@ def plan(memory: Any, cls: dict[str, Any], inp: dict[str, Any], *,
         _as_typed(p, reason, keep_keys=keep)
         return p
 
+    # A custom test harness may print anything: its output is not libtest,
+    # so keep the cache/selection from narrowing or counting it.
+    if any(model.custom_harness(tid) for tid in candidates):
+        p.can_be_green = False
+        return typed("a target uses a custom test harness")
+
     try:
         p.manifests = _manifest_hash(
             root, A._git_files(root, state_rel(root)), model) or ""
@@ -652,7 +658,8 @@ def _record(p: CargoPlan, res: dict[str, Any] | None, *,
         return lines
     now = time.time()
     model = p.model
-    blocks = [b for b in res.get("blocks") or [] if b.get("target")]
+    blocks = [b for b in res.get("blocks") or []
+              if b.get("target") and b.get("harness", True)]
     by_target: dict[str, dict[str, int]] = {}
     for block in blocks:
         tid = str(block.get("target") or "")

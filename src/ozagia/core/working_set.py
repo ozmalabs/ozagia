@@ -10,8 +10,8 @@ and the compaction hooks hand it back as one bounded block of text:
   `after` refreshes of built-in edits, writes and patches (the files the
   call changed, `meta.edited_files`) and of shell commands that changed
   files (`meta.changed_paths`: changed files written in the last minute);
-- the tests that failed in its last pytest runs (captured runs and the
-  `[ozagia] failed test:...` lines of `after`), with the command that
+- the tests that failed in its last pytest or cargo test runs (captured runs
+  and the `[ozagia] failed test:...` lines of `after`), with the command that
   reruns them; a later run that selects a test and does not fail it
   clears it (`apply_test_run`);
 - the files and line ranges it read most recently (from the ledger's
@@ -91,7 +91,7 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Mapping
 
 MAX_FILES = 20
 MAX_KEYS = 30
@@ -210,25 +210,26 @@ def key_file(key: str) -> str | None:
 # --------------------------------------------------------------------------- #
 @dataclass
 class TestRun:
-    """One pytest run: its command, the arguments that rerun it, the
-    root-relative selectors it ran (empty: everything), and the tests it
-    failed (`{key: {"outcome", "params", "message"}}`). `complete`: the run
-    reported a summary, so a selected test it did not fail passed, unless
-    `filtered` (`-k`, `-m`, `--deselect`, `--lf`: not every test under the
-    selectors ran) or `stops` (`-x`, `--maxfail`: after a failure the rest
-    did not run). `source`: `captured` when the daemon ran this pytest
-    itself (a `shell_pytest` answer: the only runs that count as evidence
-    for goal criteria), `compound` (a captured compound command with a
-    pytest step), else `reported` (output a harness handed over). `tree`:
-    the working tree's fingerprint at the start of a captured run
-    (`ozagia.core.fingerprint`), and then `ts` is the start time.
-    `failure_class` (captured runs only; never compound ones, whose other
-    commands may print a head): the class the daemon's `[ozagia] failure
-    class` line names (`ozagia.core.failures`), or `passed` for a head with
-    status passed and no such line; None when unknown. `failure_module`:
-    the module that line names. `failure_items`: the failing tests whose own
-    class differs from the run's (`[ozagia] failure item` lines), as
-    `{"key", "class", "module"?}`."""
+    """One test run (pytest or cargo test): its command, the arguments that
+    rerun it, the root-relative selectors it ran (empty: everything), and
+    the tests it failed (`{key: {"outcome", "params", "message"}}`).
+    `complete`: the run reported a summary, so a selected test it did not
+    fail passed, unless `filtered` (`-k`, `-m`, `--deselect`, `--lf`, a
+    narrowed cargo command: not every test under the selectors ran) or
+    `stops` (`-x`, `--maxfail`, a stopped cargo target: after a failure the
+    rest did not run). `source`: `captured` when the daemon ran this test
+    command itself (a `shell_pytest` or `shell_cargo_test` answer: the only
+    runs that count as evidence for goal criteria), `compound` (a captured
+    compound command with a pytest step), else `reported` (output a harness
+    handed over). `tree`: the working tree's fingerprint at the start of a
+    captured run (`ozagia.core.fingerprint`), and then `ts` is the start
+    time. `failure_class` (captured pytest runs only; never compound ones,
+    whose other commands may print a head): the class the daemon's
+    `[ozagia] failure class` line names (`ozagia.core.failures`), or
+    `passed` for a head with status passed and no such line; None when
+    unknown. `failure_module`: the module that line names. `failure_items`:
+    the failing tests whose own class differs from the run's
+    (`[ozagia] failure item` lines), as `{"key", "class", "module"?}`."""
     __test__ = False
     command: str
     prefix: list[str]
@@ -528,6 +529,151 @@ def pytest_run(command: str, heads: Iterable[list[str]], text: str, *,
                    failure_module=failure_module, failure_items=failure_items)
 
 
+# A captured cargo test's own head (`ozagia.intent.run.run_cargo_test`), with
+# or without the affected/cached target scope.
+_CARGO_HEAD_RE = re.compile(
+    r"^\[ozagia\] cargo test "
+    r"(passed|failed|build failed|timed out)(?: \(([^)]*)\))?: "
+    r"exit (-?\d+|None), [\d.]+ s, (\d+) passed, (\d+) failed, "
+    r"(\d+) ignored")
+# `[ozagia]   frame path:line` after a failed cargo test.
+_CARGO_FRAME_RE = re.compile(r"^\[ozagia\]\s+frame (.+?):(\d+)\s*$")
+# Cargo options that select packages, targets or tests (a subset run).
+_CARGO_SELECTION_VALUE = frozenset({
+    "-p", "--package", "--exclude", "--test", "--bin", "--bench",
+    "--example", "--skip"})
+_CARGO_SELECTION_FLAGS = frozenset({
+    "--lib", "--bins", "--tests", "--benches", "--examples", "--doc",
+    "--ignored", "--include-ignored"})
+# Cargo/libtest options whose value is the next argument (so it is not a
+# test-name filter).
+_CARGO_VALUE_OPTS = frozenset({
+    *_CARGO_SELECTION_VALUE, "--features", "--target", "--target-dir",
+    "--manifest-path", "--jobs", "-j", "--message-format", "--color",
+    "--config", "-Z", "--profile", "--test-threads", "--logfile",
+    "--shuffle-seed", "--format", "--crate-type"})
+_CARGO_STOP = "a target failed; later targets were not run"
+_CARGO_RAN_RE = re.compile(r"^\[ozagia\] ran \d+ (?:affected )?tests? of \d+")
+_CARGO_CACHED_RE = re.compile(r"^\[ozagia\] cached pass\b")
+
+
+def _cargo_head(heads: Iterable[list[str]]
+                ) -> tuple[list[str], list[str]] | None:
+    """`(prefix, args)` of the first cargo test command in `heads`."""
+    for head in heads:
+        if not head or os.path.basename(head[0]) not in ("cargo", "cargo.exe"):
+            continue
+        i = 1
+        toolchain = ""
+        if i < len(head) and head[i].startswith("+") and len(head[i]) > 1:
+            toolchain = head[i]
+            i += 1
+        if i < len(head) and head[i] == "test":
+            prefix = [head[0], *([toolchain] if toolchain else []), "test"]
+            return prefix, head[i + 1:]
+    return None
+
+
+def _cargo_filtered(args: list[str]) -> bool:
+    """Whether the typed arguments select fewer tests than a whole run."""
+    filtered = False
+    after = False
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            after = True
+            i += 1
+            continue
+        name = a.split("=", 1)[0]
+        if name in ("--skip", "--ignored", "--include-ignored"):
+            filtered = True
+        if not after and name in _CARGO_SELECTION_VALUE:
+            filtered = True
+            if "=" not in a:
+                i += 2
+                continue
+        elif name in _CARGO_VALUE_OPTS:
+            if "=" not in a:
+                i += 2
+                continue
+        elif not after and name in _CARGO_SELECTION_FLAGS:
+            filtered = True
+        elif not after and a.startswith("-p") and len(a) > 2:
+            filtered = True
+        elif not a.startswith("-"):
+            filtered = True
+        i += 1
+    return filtered
+
+
+def cargo_run(command: str, heads: Iterable[list[str]], text: str, *,
+              source: str = "reported") -> TestRun | None:
+    """The cargo test run a shell command made, from its command line and
+    its text, or None when it ran no parsable cargo test.
+
+    The daemon's own captured lines are authoritative: the head line
+    (`[ozagia] cargo test passed|failed|...`), `failed test:` lines,
+    `frame` lines, the affected/cached subset lines and the early-stop
+    error. Cargo's own libtest output is not mapped a second time, so a
+    custom harness's arbitrary output cannot invent failures. `complete`
+    only when the head reports a test summary and the named failures cover
+    its count (a doctest failure has no graph key, so it keeps the run
+    incomplete). A narrowed command (packages, targets, a test filter) or
+    an affected/cached run is `filtered`, so it clears no unrelated
+    failure."""
+    got = _cargo_head([list(h) for h in heads if h])
+    lines = (text or "").splitlines()
+    at = max((i for i, x in enumerate(lines)
+              if _CARGO_HEAD_RE.match(x.strip())), default=None)
+    if got is None or at is None:
+        return None
+    prefix, args = got
+    if "--no-run" in args:
+        return None                       # compiled, ran no test
+    head = _CARGO_HEAD_RE.match(lines[at].strip())
+    if head is None:
+        return None                       # `cargo test not run: ...`
+    status, scope, _exit, _passed, failed, _ignored = head.groups()
+    failures: dict[str, dict[str, Any]] = {}
+    current: dict[str, Any] | None = None
+    for line in lines[at + 1:]:
+        s = line.strip()
+        m = _FAIL_RE.match(s)
+        if m:
+            outcome = "error" if m.group(1) == "error" else "failed"
+            rec = failures.setdefault(m.group(2), {
+                "outcome": outcome, "params": [],
+                "message": (m.group(4) or "")[:200]})
+            if m.group(3) and m.group(3) not in rec["params"]:
+                rec["params"].append(m.group(3))
+            current = rec
+            continue
+        m = _CARGO_FRAME_RE.match(s)
+        if m and current is not None:
+            frames = current.setdefault("frames", [])
+            if len(frames) < 8:
+                frames.append({"file": m.group(1), "line": int(m.group(2))})
+    count = int(failed)
+    named = _failure_count(failures)
+    complete = False
+    if status in ("passed", "failed"):
+        complete = (count > 0 or status == "passed") and named >= count
+        if status == "passed" and (count > 0 or named):
+            complete = False
+    if "custom harness" in lines[at]:
+        complete = False                  # its results are not libtest
+    filtered = bool(scope) or _cargo_filtered(args)
+    for line in lines[at + 1:]:
+        s = line.strip()
+        if _CARGO_RAN_RE.match(s) or _CARGO_CACHED_RE.match(s):
+            filtered = True
+    stops = any(_CARGO_STOP in line for line in lines[at + 1:])
+    return TestRun(command=command, prefix=prefix, selectors=[],
+                   failures=failures, complete=complete, filtered=filtered,
+                   stops=stops, source=source)
+
+
 def _failure_class(text: str) -> tuple[str | None, str | None,
                                          list[dict[str, Any]] | None]:
     """The failure class, module and items of the daemon's (last) captured
@@ -592,11 +738,15 @@ def apply_test_run(tests: "OrderedDict[str, dict[str, Any]]", run: TestRun,
     failures are added (or refreshed; `since` keeps the time of the first
     run that failed the test, `ts` is the last); a test it selected and did
     not fail is removed when the run completed, was not `filtered`, and did
-    not stop early (`stops` with failures). Returns whether `tests`
-    changed."""
+    not stop early (`stops` with failures). Only tests from the same runner
+    (pytest or cargo) are cleared or refreshed: a cargo run cannot clear a
+    pytest failure, or the reverse. Returns whether `tests` changed."""
     before = {k: dict(v) for k, v in tests.items()}
+    kind = _runner_kind(run.prefix)
     if run.complete and not run.filtered and not (run.stops and run.failures):
         for key in list(tests):
+            if _runner_kind(tests[key].get("prefix")) != kind:
+                continue
             if key not in run.failures and _selected(key, run.selectors):
                 del tests[key]
     for key, rec in run.failures.items():
@@ -609,30 +759,74 @@ def apply_test_run(tests: "OrderedDict[str, dict[str, Any]]", run: TestRun,
     return before != {k: dict(v) for k, v in tests.items()}
 
 
+def _cargo_prefix(prefix: Any) -> list[str] | None:
+    """A stored rerun prefix for cargo test: `cargo [+toolchain] test`."""
+    if not (isinstance(prefix, list) and len(prefix) in (2, 3)
+            and all(isinstance(x, str) for x in prefix)):
+        return None
+    if os.path.basename(prefix[0]) not in ("cargo", "cargo.exe"):
+        return None
+    rest = prefix[1:]
+    if rest == ["test"]:
+        return list(prefix)
+    if (len(rest) == 2 and rest[0].startswith("+") and len(rest[0]) > 1
+            and rest[1] == "test"):
+        return list(prefix)
+    return None
+
+
+def _runner_kind(prefix: Any) -> str:
+    """`"cargo"` for a cargo rerun prefix, else `"pytest"` (also the
+    back-compatible default for records written before cargo support)."""
+    return "cargo" if _cargo_prefix(safe_prefix(prefix)) is not None else "pytest"
+
+
+def _key_runner(key: str, rec: Mapping[str, Any] | None = None) -> str:
+    """The runner a failing-test key came from, from its prefix or file type."""
+    prefix = (rec or {}).get("prefix")
+    if prefix is not None:
+        return _runner_kind(prefix)
+    rel = key[len("test:"):].partition("::")[0] if key.startswith("test:") else ""
+    return "cargo" if rel.endswith(".rs") else "pytest"
+
+
 def safe_prefix(prefix: Any) -> list[str]:
     """A rerun prefix reduced to the interpreter and `-m pytest` (or the
-    `pytest` executable): nothing else of a command line is kept."""
+    `pytest` executable), or `cargo [+toolchain] test`: nothing else of a
+    command line is kept."""
     if isinstance(prefix, list) and all(isinstance(x, str) for x in prefix):
         if len(prefix) == 3 and prefix[1:] == ["-m", "pytest"]:
             return list(prefix)
         if len(prefix) == 1 and os.path.basename(prefix[0]) in ("pytest", "py.test"):
             return list(prefix)
+        cargo = _cargo_prefix(prefix)
+        if cargo is not None:
+            return cargo
     return ["python", "-m", "pytest"]
 
 
 def rerun_command(tests: list[tuple[str, dict[str, Any]]]) -> str | None:
-    """One pytest command line that reruns `tests` (from the root), with the
-    prefix of the newest one's run."""
+    """One command line that reruns `tests`, using the prefix kind of the
+    newest one's run: pytest reruns the failing node ids of pytest runs;
+    cargo reruns the whole suite (its libtest filter names are not kept).
+    Tests recorded by the other runner are left out rather than turned into
+    a bogus command."""
     if not tests:
         return None
     prefix = safe_prefix(tests[-1][1].get("prefix"))
+    if _cargo_prefix(prefix) is not None:
+        return shlex.join([*prefix, "-q"])
     ids: list[str] = []
     for key, rec in tests:
+        if _cargo_prefix(safe_prefix(rec.get("prefix"))) is not None:
+            continue                    # a cargo failure in a mixed record
         rel, name = _nodeid(key)
         params = rec.get("params") or []
         nid = f"{rel}::{name}" + (params[0] if len(params) == 1 else "")
         if nid not in ids:
             ids.append(nid)
+    if not ids:
+        return None
     return shlex.join([*prefix, "-q", *ids])
 
 
@@ -978,10 +1172,12 @@ def _record_run(run: Any) -> dict[str, Any] | None:
     if f_drop or e_drop:
         complete = False
     source = run.get("source") if run.get("source") in RUN_SOURCES else "reported"
+    runner = run.get("runner") if run.get("runner") in ("pytest", "cargo") else (
+        _runner_kind(run.get("prefix")))
     out: dict[str, Any] = {"ts": float(ts), "selectors": kept, "failed": failed,
                            "errors": errors, "complete": complete,
                            "filtered": filtered, "stops": run.get("stops") is True,
-                           "source": source}
+                           "source": source, "runner": runner}
     if source == "captured":
         from ozagia.core.failures import CLASSES
         if run.get("failure_class") in CLASSES:
@@ -1024,10 +1220,11 @@ def _record_items(value: Any) -> list[dict[str, Any]]:
 
 
 def run_record(run: TestRun) -> dict[str, Any]:
-    """The record's entry for a pytest run (see `_record_run`)."""
+    """The record's entry for a test run (see `_record_run`)."""
     failed = [k for k, v in run.failures.items() if v.get("outcome") != "error"]
     errors = [k for k, v in run.failures.items() if v.get("outcome") == "error"]
     return _record_run({"ts": run.ts, "selectors": list(run.selectors),
+                        "prefix": list(run.prefix),
                         "failed": failed, "errors": errors,
                         "complete": run.complete, "filtered": run.filtered,
                         "stops": run.stops, "source": run.source,
@@ -1052,8 +1249,12 @@ def recorded_outcome(record: dict[str, Any], key: str, *,
     the newest captured run that selected the test unfiltered did not
     finish (a collection or import error, a timeout, `--co`), the outcome
     is `unknown`."""
+    failing = (record.get("tests") or {}).get(key)
+    key_runner = _key_runner(key, failing if isinstance(failing, dict) else None)
     best: dict[str, Any] | None = None
     for run in reversed(record.get("runs") or []):
+        if (run.get("runner") or "pytest") != key_runner:
+            continue                    # a run of the other test runner
         if evidence and run.get("source") != "captured":
             continue
         if key in (run.get("errors") or []):
@@ -1083,7 +1284,7 @@ def recorded_outcome(record: dict[str, Any], key: str, *,
         if best is not None:
             return best
         return {"outcome": "unknown", "ts": None, "run": None,
-                "reason": "no complete pytest run that ozagia captured "
+                "reason": "no complete test run that ozagia captured "
                           "selected this test"}
     failing = (record.get("tests") or {}).get(key)
     if isinstance(failing, dict):
@@ -1095,7 +1296,7 @@ def recorded_outcome(record: dict[str, Any], key: str, *,
     if best is not None:
         return best
     return {"outcome": "unknown", "ts": None, "run": None,
-            "reason": "no recorded complete pytest run selected this test"}
+            "reason": "no recorded complete test run selected this test"}
 
 
 def _record_test(rec: dict[str, Any]) -> dict[str, Any]:
@@ -1509,8 +1710,9 @@ def session_brief(root: str | Path, max_chars: int = BRIEF_MAX_CHARS, *,
 __all__ = ["BRIEF_HEADER", "BRIEF_MAX_CHARS", "HEADER", "JOBS_LINE", "MAX_FILES",
            "MAX_JOBS", "MAX_KEYS", "MAX_READ_FILES", "MAX_READ_RANGES",
            "MAX_TESTS", "MCP_TOOLS_LINE", "TEXT_MAX_CHARS", "TestRecord",
-           "TestRun", "View", "WorkingSet", "apply_test_run", "devsession_line",
-           "job_lines", "key_file", "load_test_record", "merge_views",
-           "failing_lines", "parse_failures", "pytest_head", "rerun_command",
-           "run_record", "session_brief", "tool_brief_lines", "pytest_run",
-           "recorded_outcome", "text_meta", "working_set_text"]
+           "TestRun", "View", "WorkingSet", "apply_test_run", "cargo_run",
+           "devsession_line", "job_lines", "key_file", "load_test_record",
+           "merge_views", "failing_lines", "parse_failures", "pytest_head",
+           "rerun_command", "run_record", "session_brief", "tool_brief_lines",
+           "pytest_run", "recorded_outcome", "text_meta",
+           "working_set_text"]

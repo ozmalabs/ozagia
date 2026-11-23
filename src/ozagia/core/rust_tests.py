@@ -142,14 +142,18 @@ class CargoTests:
 
     def default_targets(self, packages: Iterable[str] | None = None,
                         *, docs: bool = True) -> list[str]:
-        """The targets a plain ``cargo test`` runs, in Cargo's order."""
+        """The targets a plain ``cargo test`` runs, in Cargo's order.
+
+        A target with Cargo's ``test = False`` is not run by ``cargo test``,
+        so it is not selected (nor its unit tests counted). Doctests stay a
+        pseudo target for a package with a library."""
         selected = set(packages) if packages is not None else set(
             self.package_targets)
         out: list[str] = []
         for target in self.targets.values():
             if target.package not in selected:
                 continue
-            if target.kind not in DEFAULT_KINDS:
+            if target.kind not in DEFAULT_KINDS or not target.test:
                 continue
             out.append(target.id)
         out.sort(key=self._target_order)
@@ -158,6 +162,13 @@ class CargoTests:
                 if package in self.package_lib:
                     out.append(self.doc_target_id(package))
         return out
+
+    def custom_harness(self, target_id: str) -> bool:
+        """Whether `target_id` uses a harness other than libtest."""
+        if self.is_doc(target_id):
+            return False
+        target = self.targets.get(target_id)
+        return target is not None and not target.harness
 
     def _target_order(self, target_id: str) -> tuple:
         target = self.targets.get(target_id)

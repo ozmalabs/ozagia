@@ -205,7 +205,73 @@ def test_rust_tests_model_uses_custom_target_paths(tmp_path):
     target = next(t for t in model.targets.values() if t.kind == "test"
                   and t.name == "custom")
     assert target.root == "a/checks/custom.rs"
+    assert target.test is True and target.harness is True
     assert [t.cargo for t in model.tests_of(target.id)] == ["custom_ok"]
+
+
+def test_rust_tests_model_excludes_test_false_targets(tmp_path):
+    root = tmp_path / "repo"
+    _write(root / "Cargo.toml",
+           '[package]\nname = "demo"\nversion = "0.1.0"\nedition = "2021"\n'
+           '[lib]\npath = "src/lib.rs"\ntest = false\n'
+           '[[bin]]\nname = "tool"\npath = "src/main.rs"\ntest = false\n'
+           '[[test]]\nname = "skip"\npath = "tests/skip.rs"\ntest = false\n')
+    _write(root / "src/lib.rs", "#[test]\nfn lib_unit() {}\n")
+    _write(root / "src/main.rs", "fn main() {}\n\n#[test]\nfn bin_unit() {}\n")
+    _write(root / "tests/skip.rs", "#[test]\nfn skipped() {}\n")
+    model = rust_tests.discover(root)
+    lib = next(t for t in model.targets.values() if t.kind == "lib")
+    skip = next(t for t in model.targets.values() if t.name == "skip")
+    assert lib.test is False and lib.harness is True
+    assert skip.test is False
+    # Their unit tests are still mapped, but a plain `cargo test` does not
+    # select or count them. The lib's doctests still run.
+    assert [t.cargo for t in model.tests_of(lib.id)] == ["lib_unit"]
+    assert model.default_targets(["demo"]) == [model.doc_target_id("demo")]
+    assert model.tests_of(skip.id)
+
+
+def test_rust_tests_model_custom_harness_runs_as_typed(tmp_path):
+    root = tmp_path / "repo"
+    for rel, text in WORKSPACE.items():
+        _write(root / rel, text)
+    _write(root / "a/Cargo.toml",
+           '[package]\nname = "a"\nversion = "0.1.0"\nedition = "2021"\n'
+           '[[test]]\nname = "custom"\npath = "checks/custom.rs"\n'
+           'harness = false\n')
+    _write(root / "a/checks/custom.rs", "#[test]\nfn custom_ok() {}\n")
+    _write(root / ".ozagia.toml", '[tests]\nselect = "affected"\n')
+    model = rust_tests.discover(root)
+    target = next(t for t in model.targets.values() if t.kind == "test"
+                  and t.name == "custom")
+    assert target.root == "a/checks/custom.rs" and target.harness is False
+    assert [t.cargo for t in model.tests_of(target.id)] == ["custom_ok"]
+    assert model.custom_harness(target.id)
+    assert not model.custom_harness(model.doc_target_id("a"))
+    plan = AC.plan(None, classify("cargo test"), {}, root=root, wd=root,
+                   cargo=CARGO or "cargo")
+    assert plan is not None and plan.full
+    assert plan.reason == "a target uses a custom test harness"
+
+
+def test_parse_custom_harness_output_is_not_libtest(tmp_path):
+    root = tmp_path / "repo"
+    _write(root / "Cargo.toml",
+           '[package]\nname = "demo"\nversion = "0.1.0"\nedition = "2021"\n'
+           '[[test]]\nname = "custom"\npath = "checks/custom.rs"\n'
+           'harness = false\n')
+    _write(root / "checks/custom.rs", "#[test]\nfn custom_ok() {}\n")
+    model = rust_tests.discover(root)
+    text = (
+        "     Running tests/custom.rs (target/debug/deps/custom-0123456789abcdef)\n"
+        "this harness prints anything\n"
+        "test result: ok. 99 passed; 0 failed; 0 ignored; 0 measured; "
+        "0 filtered out; finished in 0.01s\n")
+    parsed = C.parse(text, model, order=model.default_targets(["demo"]))
+    assert parsed["counts"] == {"passed": 0, "failed": 0, "ignored": 0,
+                                "measured": 0, "filtered": 0}
+    assert parsed["tests"] == []
+    assert parsed["blocks"][0]["harness"] is False
 
 
 def test_rust_tests_model_tracks_workspace_dependencies(tmp_path):

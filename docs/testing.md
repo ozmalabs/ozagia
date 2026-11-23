@@ -125,6 +125,12 @@ granularity:
   target, or a changed bench/example target runs the command as typed;
 - a target is cached only when its key matches and every test in it passed or
   was ignored; a failure removes the key, so it runs again;
+- a target with `test = false` is not selected, counted or cached (its unit
+  tests are not run by a plain `cargo test`; the package's doctests still
+  are);
+- a target with `harness = false` makes the command run as typed, with
+  `ran all tests: a target uses a custom test harness`: ozagia cannot parse a
+  custom harness's output as libtest, so it neither narrows nor caches it;
 - `OZAGIA_TESTS_ALL=1` always runs the command as typed.
 
 A narrowed run names its targets explicitly (`cargo test -p a --test
@@ -146,6 +152,15 @@ target-level counters mirror pytest:
 
 Slow targets (> 5 s) are reported; per-test timing and flaky detection need
 Cargo's unstable JSON format and are not attempted.
+
+A captured `cargo test` that fails feeds the session's working set and the
+root test record like pytest: its `[ozagia] failed test:<rel>::<qualname>`
+lines become failing entries, affected/cached subsets are filtered (they clear
+no unrelated failure), and an early stopped run is marked as such. A cargo run
+clears only cargo failures, and a pytest run only pytest failures, so a mixed
+repository cannot clear the other runner's failures. Doctest failures are not
+given an invented test key, so a run that names fewer failures than its summary
+counts stays incomplete.
 
 ## Failure classes
 

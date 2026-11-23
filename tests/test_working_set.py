@@ -68,6 +68,31 @@ FAIL_OUT = ("F.\n=== short test summary info ===\n"
             "FAILED tests/test_a.py::test_one - assert 2 == 1\n"
             "1 failed, 1 passed in 0.05s\n")
 PASS_OUT = "..\n2 passed in 0.04s\n"
+CARGO_FAIL = (
+    "     Running unittests src/lib.rs (target/debug/deps/a-0123456789abcdef)\n"
+    "test tests::adds ... FAILED\n\n"
+    "[ozagia] cargo test failed: exit 101, 0.1 s, 0 passed, 1 failed, "
+    "0 ignored\n"
+    "[ozagia] failed test:a/src/lib.rs::tests.adds: assertion failed\n"
+    "[ozagia]   frame a/src/lib.rs:8\n")
+CARGO_PASS = (
+    "[ozagia] cargo test passed: exit 0, 0.1 s, 3 passed, 0 failed, "
+    "1 ignored\n")
+CARGO_BUILD_FAIL = (
+    "[ozagia] cargo test build failed: exit 101, 0.2 s, 0 passed, 0 failed, "
+    "0 ignored, 1 build errors\n")
+CARGO_FILTERED = (
+    "[ozagia] cargo test passed (affected subset: 2 of 5 tests run, "
+    "3 not run): exit 0, 0.1 s, 2 passed, 0 failed, 0 ignored\n"
+    "[ozagia] ran 2 affected tests of 5; not run: 3 tests in 1 target "
+    "(-p b --lib); run all: OZAGIA_TESTS_ALL=1 cargo test\n"
+    "[ozagia] cached pass -p a --lib: 1 passed (inputs unchanged since "
+    "2026-01-01 00:00:00)\n")
+CARGO_STOPPED = (
+    "[ozagia] cargo test failed: exit 101, 0.1 s, 0 passed, 1 failed, "
+    "0 ignored\n"
+    "[ozagia] failed test:a/src/lib.rs::tests.adds: assertion failed\n"
+    "[ozagia] error: a target failed; later targets were not run\n")
 PYTEST = ".venv/bin/python -m pytest -q tests/test_a.py"
 
 
@@ -175,6 +200,132 @@ def test_selectors_and_prefix_follow_the_workdir(tmp_path):
     run = _run("cd pkg && pytest t.py", "1 passed in 0.1s", tmp_path,
                heads=[["cd", "pkg"], ["pytest", "t.py"]])
     assert run.selectors == ["pkg/t.py"]
+
+
+# --------------------------------------------------------------------------- #
+# cargo runs
+# --------------------------------------------------------------------------- #
+def _cargo(text, command="cargo test"):
+    heads = [command.split()]
+    return W.cargo_run(command, heads, text)
+
+
+def test_cargo_run_parses_failures_and_is_complete(tmp_path):
+    run = _cargo(CARGO_FAIL)
+    assert run is not None
+    assert run.command == "cargo test" and run.prefix == ["cargo", "test"]
+    assert run.complete and not run.filtered and not run.stops
+    assert list(run.failures) == ["test:a/src/lib.rs::tests.adds"]
+    rec = run.failures["test:a/src/lib.rs::tests.adds"]
+    assert rec["outcome"] == "failed"
+    assert rec["message"] == "assertion failed"
+    assert rec["frames"] == [{"file": "a/src/lib.rs", "line": 8}]
+    assert run.selectors == []
+
+
+def test_cargo_run_counts_only_named_failures_and_passes():
+    passed = _cargo(CARGO_PASS)
+    assert passed is not None and passed.complete and not passed.failures
+    build = _cargo(CARGO_BUILD_FAIL)
+    assert build is not None and not build.complete and not build.failures
+    # A failed head with no named failure (e.g. a doctest) is incomplete.
+    unknown = _cargo(
+        "[ozagia] cargo test failed: exit 101, 0.1 s, 0 passed, 1 failed, "
+        "0 ignored\n")
+    assert unknown is not None and not unknown.complete
+    assert W.cargo_run("pytest -q", [["pytest", "-q"]], CARGO_PASS) is None
+    assert W.cargo_run("cargo test", [["cargo", "test"]],
+                       "[ozagia] cargo test not run: every selected target "
+                       "has a cached pass (exit 0)\n") is None
+    assert W.cargo_run("cargo test --no-run",
+                       [["cargo", "test", "--no-run"]], CARGO_PASS) is None
+
+
+def test_cargo_run_marks_subsets_and_early_stops():
+    filtered = _cargo(CARGO_FILTERED)
+    assert filtered is not None
+    assert filtered.filtered and filtered.complete
+    assert not filtered.stops
+    # The head line's scope alone marks a subset even without the ran line.
+    scope_only = _cargo(
+        "[ozagia] cargo test passed (cached subset: 1 of 2 tests run, "
+        "1 cached): exit 0, 0.1 s, 1 passed, 0 failed, 0 ignored\n")
+    assert scope_only is not None and scope_only.filtered
+    # A typed package/target/test selection is also a subset.
+    typed = _cargo(CARGO_PASS, "cargo test -p a --test integration")
+    assert typed is not None and typed.filtered
+    filtered = _cargo(CARGO_PASS, "cargo test some_filter")
+    assert filtered is not None and filtered.filtered
+    full = _cargo(CARGO_PASS,
+                  "cargo test --features x --target-dir target --release")
+    assert full is not None and not full.filtered
+    workspace = _cargo(CARGO_PASS, "cargo test --workspace --all-targets")
+    assert workspace is not None and not workspace.filtered
+    stopped = _cargo(CARGO_STOPPED)
+    assert stopped is not None and stopped.stops and stopped.complete
+    assert list(stopped.failures) == ["test:a/src/lib.rs::tests.adds"]
+
+
+def test_test_record_keeps_cargo_failures_and_rerun(tmp_path):
+    rec = W.TestRecord(tmp_path)
+    run = _cargo(CARGO_FAIL)
+    run.source = "captured"
+    rec.apply(run)
+    again = W.TestRecord(tmp_path)
+    tests, last = again.view()
+    assert [k for k, _ in tests] == ["test:a/src/lib.rs::tests.adds"]
+    assert last["failed"] == 1
+    assert W.rerun_command(tests) == "cargo test -q"
+    outcome = W.recorded_outcome({"tests": dict(tests), "runs": again.runs},
+                                 "test:a/src/lib.rs::tests.adds")
+    assert outcome["outcome"] == "failed"
+    # A mixed record reruns only the newest run's kind, never a bogus mix.
+    py = W.TestRun(
+        command="python -m pytest", prefix=["python", "-m", "pytest"],
+        selectors=[], failures={
+            "test:tests/test_a.py::test_one": {
+                "outcome": "failed", "params": [], "message": "x"}},
+        complete=True, ts=run.ts + 1)
+    again.apply(py)
+    mixed, _ = again.view()
+    py_cmd = W.rerun_command(mixed)
+    assert py_cmd is not None and py_cmd.startswith("python -m pytest -q")
+    assert "tests/test_a.py::test_one" in py_cmd
+    assert "a/src/lib.rs" not in py_cmd
+    again.apply(W.TestRun(
+        command=run.command, prefix=run.prefix, selectors=[],
+        failures=run.failures, complete=True, ts=py.ts + 1))
+    mixed, _ = again.view()
+    assert W.rerun_command(mixed) == "cargo test -q"
+
+
+def test_runners_do_not_clear_each_others_failures():
+    tests: OrderedDict[str, dict] = OrderedDict()
+    cargo = _cargo(CARGO_FAIL)
+    W.apply_test_run(tests, cargo)
+    cargo_key = "test:a/src/lib.rs::tests.adds"
+    py_pass = W.TestRun(command="python -m pytest",
+                        prefix=["python", "-m", "pytest"], selectors=[],
+                        failures={}, complete=True)
+    W.apply_test_run(tests, py_pass)
+    assert list(tests) == [cargo_key]
+    py_fail = W.TestRun(
+        command="python -m pytest", prefix=["python", "-m", "pytest"],
+        selectors=[], failures={
+            "test:tests/test_a.py::test_one": {
+                "outcome": "failed", "params": [], "message": "x"}},
+        complete=True)
+    W.apply_test_run(tests, py_fail)
+    cargo_pass = W.TestRun(command="cargo test", prefix=["cargo", "test"],
+                           selectors=[], failures={}, complete=True)
+    W.apply_test_run(tests, cargo_pass)
+    assert list(tests) == ["test:tests/test_a.py::test_one"]
+    # A run of one runner decides nothing about the other runner's key.
+    rec = {"tests": {}, "runs": [W.run_record(cargo_pass)]}
+    assert W.recorded_outcome(
+        rec, cargo_key)["outcome"] == "passed"
+    assert W.recorded_outcome(
+        rec, "test:tests/test_a.py::test_one")["outcome"] == "unknown"
 
 
 # --------------------------------------------------------------------------- #
@@ -652,6 +803,35 @@ def test_daemon_observe_never_breaks_a_request(daemon, monkeypatch):
     resp = daemon({"op": "after", "harness": "claude", "session": "s", "tool": "shell",
                    "input": {"command": "pytest"}, "output": PASS_OUT})
     assert resp["ok"]
+
+
+def test_daemon_observe_records_captured_cargo_failures(tmp_path):
+    from ozagia.daemon.server import DaemonState
+    root = tmp_path / "repo"
+    root.mkdir()
+    st = DaemonState(root, None, tmp_path / "j.jsonl")
+    assert st._pytest_start("tool", "shell",
+                            {"command": "cargo test"}) is not None
+    assert st._pytest_start("tool", "shell",
+                            {"command": "cargo build"}) is None
+    state = st.session_state({"harness": "codex", "session": "cargo1"})
+    st._observe(
+        "tool", "shell", {"command": "cargo test", "workdir": str(root)}, {},
+        {"handled": True, "output": CARGO_FAIL,
+         "meta": {"intent": "shell_cargo_test"}}, state)
+    key = "test:a/src/lib.rs::tests.adds"
+    assert [k for k, _ in state.work.view().tests] == [key]
+    tests, last = st.test_record.view()
+    assert [k for k, _ in tests] == [key] and last["failed"] == 1
+    run = st.test_record.runs[-1]
+    assert run["source"] == "captured" and run["complete"]
+    assert run["failed"] == [key]
+    # An `after` that reports a cargo run feeds the root record too.
+    st._observe(
+        "after", "shell", {"command": "cargo test", "workdir": str(root)},
+        {"output": CARGO_PASS}, {"meta": {"intent": "after_refresh"}},
+        st.session_state({"harness": "codex", "session": "cargo2"}))
+    assert st.test_record.runs[-1]["source"] == "reported"
 
 
 # --------------------------------------------------------------------------- #

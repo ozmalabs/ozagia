@@ -40,6 +40,9 @@ class CrateTarget:
     kind: str
     root: str
     manifest: str
+    # Cargo's `test` and `harness` target keys (defaults true).
+    test: bool = True
+    harness: bool = True
 
 
 @dataclass(frozen=True)
@@ -266,7 +269,12 @@ def _target_specs(manifest: str, text: str, root: Path) -> list[CrateTarget]:
         manifest_dir = ""
     targets: list[CrateTarget] = []
 
-    def add(kind: str, path: str, name: str) -> None:
+    def flag(value: Mapping[str, Any], key: str) -> bool:
+        got = value.get(key)
+        return got if isinstance(got, bool) else True
+
+    def add(kind: str, path: str, name: str, *, test: bool = True,
+            harness: bool = True) -> None:
         rel = _rel_join(manifest_dir, path)
         if not rel or rel.startswith("../") or not _inside(root, rel):
             return
@@ -274,14 +282,16 @@ def _target_specs(manifest: str, text: str, root: Path) -> list[CrateTarget]:
             return
         target = CrateTarget(
             id=f"{manifest}:{kind}:{rel}", package=package_name,
-            name=name, kind=kind, root=rel, manifest=manifest)
+            name=name, kind=kind, root=rel, manifest=manifest,
+            test=test, harness=harness)
         if all(item.id != target.id for item in targets):
             targets.append(target)
 
     lib = _table(data.get("lib"))
     lib_path = str(lib.get("path") or "src/lib.rs")
     lib_name = str(lib.get("name") or package_name.replace("-", "_"))
-    add("lib", lib_path, lib_name)
+    add("lib", lib_path, lib_name, test=flag(lib, "test"),
+        harness=flag(lib, "harness"))
 
     bins = data.get("bin")
     if isinstance(bins, list) and bins:
@@ -291,7 +301,8 @@ def _target_specs(manifest: str, text: str, root: Path) -> list[CrateTarget]:
             name = str(value.get("name") or
                        (Path(path).stem if path else package_name))
             if path:
-                add("bin", path, name)
+                add("bin", path, name, test=flag(value, "test"),
+                    harness=flag(value, "harness"))
     else:
         add("bin", "src/main.rs", package_name)
         bin_dir = root / manifest_dir / "src" / "bin"
@@ -304,14 +315,17 @@ def _target_specs(manifest: str, text: str, root: Path) -> list[CrateTarget]:
                             "main.rs").as_posix(), path.parent.name)
 
     for kind, field_name, default_dir in (
-            ("test", "test", "tests"), ("bench", "bench", "benches")):
+            ("test", "test", "tests"), ("bench", "bench", "benches"),
+            ("example", "example", "examples")):
         configured = data.get(field_name)
         if isinstance(configured, list) and configured:
             for item in configured:
                 value = _table(item)
                 path = str(value.get("path") or "")
                 if path:
-                    add(kind, path, str(value.get("name") or Path(path).stem))
+                    add(kind, path, str(value.get("name") or Path(path).stem),
+                        test=flag(value, "test"),
+                        harness=flag(value, "harness"))
         else:
             base = root / manifest_dir / default_dir
             if base.is_dir():

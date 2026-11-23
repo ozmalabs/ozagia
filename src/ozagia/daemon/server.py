@@ -1162,25 +1162,26 @@ class DaemonState:
 
     def _pytest_start(self, op: str, tool: str, inp: Any
                       ) -> tuple[float, dict[str, Any] | None] | None:
-        """For a `tool` shell call the daemon may run as a captured pytest:
-        the start time and the working tree's fingerprint now
+        """For a `tool` shell call the daemon may run as a captured pytest or
+        cargo test: the start time and the working tree's fingerprint now
         (`ozagia.core.fingerprint`), stored with the run so goal criteria
         can tell whether a file changed since it started. None otherwise.
         Never raises."""
         if op != "tool" or tool != "shell" or not isinstance(inp, dict):
             return None
         command = inp.get("command")
-        if not isinstance(command, str) or "pytest" not in command:
+        if not isinstance(command, str) or (
+                "pytest" not in command and "cargo" not in command):
             return None
         try:
             from ozagia.intent.shell import classify
-            if classify(command).get("class") != "pytest":
+            if classify(command).get("class") not in ("pytest", "cargo_test"):
                 return None
             from ozagia.core.fingerprint import tree_fingerprint
             at = time.time()
             return at, tree_fingerprint(self.root)
         except Exception as e:  # noqa: BLE001 - bookkeeping only
-            print(f"pytest fingerprint failed: {type(e).__name__}: {e}",
+            print(f"test fingerprint failed: {type(e).__name__}: {e}",
                   file=sys.stderr, flush=True)
             return None
 
@@ -1242,7 +1243,7 @@ class DaemonState:
                     work.note_edit(named, keys)
                 result = (named, keys)
             command = inp.get("command")
-            if tool != "shell" or not isinstance(command, str) or "pytest" not in command:
+            if tool != "shell" or not isinstance(command, str):
                 return result
             if op == "tool":
                 if not body.get("handled"):
@@ -1252,15 +1253,26 @@ class DaemonState:
                 out = msg.get("output")
                 text = (out if isinstance(out, str) else "") + "\n" + str(
                     body.get("append") or "")
+            cargo = it == "shell_cargo_test" or (
+                op == "after" and "cargo" in command
+                and "[ozagia] cargo test " in text)
+            if not cargo and "pytest" not in command:
+                return result
             from ozagia.intent.shell import command_heads
-            source = "reported"
-            if op == "tool":
-                source = "captured" if it == "shell_pytest" else "compound"
-            env = inp.get("_test_env") if isinstance(inp.get("_test_env"), dict) \
-                else dict(os.environ)
-            run = W.pytest_run(command, command_heads(command), text,
-                               workdir=inp.get("workdir"), root=self.root,
-                               source=source, env=env)
+            heads = command_heads(command)
+            run = None
+            if cargo:
+                source = "captured" if op == "tool" else "reported"
+                run = W.cargo_run(command, heads, text, source=source)
+            if run is None and "pytest" in command:
+                source = "reported"
+                if op == "tool":
+                    source = "captured" if it == "shell_pytest" else "compound"
+                env = inp.get("_test_env") if isinstance(
+                    inp.get("_test_env"), dict) else dict(os.environ)
+                run = W.pytest_run(command, heads, text,
+                                   workdir=inp.get("workdir"), root=self.root,
+                                   source=source, env=env)
             if run is None:
                 return result
             if run.source == "captured" and started is not None:
