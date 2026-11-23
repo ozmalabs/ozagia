@@ -15,6 +15,11 @@ The command is discovery and planning only:
 - the core stays standard-library only, and a missing tool is a report, not an
   error.
 
+Language support is a separate path: `ozagia languages detect|ensure` (see
+[languages.md](languages.md)) may install known pip and rustup components for a
+detected language. `ozagia-toolchain` itself remains discovery-only and never
+installs.
+
 ## Why standard library plus optional extras
 
 Detection uses the standard library rather than a third-party detector:

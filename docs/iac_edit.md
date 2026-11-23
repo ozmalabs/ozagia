@@ -34,7 +34,9 @@ not a complete HCL grammar implementation.
 
 ## YAML
 
-Install the round-trip editor extra with `pip install 'ozagia[edit-yaml]'`.
+Install the round-trip editor extra with
+`uv pip install --python .venv/bin/python 'ozagia[edit-yaml]'` (or
+`python -m pip install 'ozagia[edit-yaml]'`).
 Operations use mapping-key/list-index paths:
 
 ```python

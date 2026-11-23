@@ -71,7 +71,7 @@ entry["module"]                         # "tree_sitter_typescript"
 
 tags = extract_tags("src/App.tsx", source)
 # [{"name": "AppProps", "kind": "def", "detail": "definition.interface",
-#   "line": 12}, ...]
+#   "line": 12, "end_line": 24, "qualname": "AppProps"}, ...]
 
 available_languages()
 # ["c", "cpp", "go", "java", "javascript", "kotlin", "lua", "python",
@@ -87,12 +87,25 @@ backend_status("c")
 # }
 ```
 
-`extract_tags` returns `[{name, kind: "def"|"ref", detail, line}]`, where
-`detail` is the query capture (`definition.function`, `reference.call`, …) and
-`line` is 1-based. Python's output is deliberately identical to
-`ocelot_repo_map.extract_tags` for `.py` files: class/function definitions,
-loaded names (`reference.name`) and loaded attributes
-(`reference.attribute`).
+`extract_tags` returns definitions, references and Python imports:
+
+```python
+{"name": "AppProps", "kind": "def", "detail": "definition.interface",
+ "line": 12, "end_line": 24, "qualname": "AppProps"}
+{"name": "useThing", "kind": "ref", "detail": "reference.call",
+ "line": 21, "scope": "App"}
+{"name": "helper", "kind": "import", "detail": "import.from",
+ "line": 3, "module": "pkg.helpers", "level": 0,
+ "imported": "helper", "scope": ""}
+```
+
+`detail` is the query capture (`definition.function`, `reference.call`, …),
+`line` is 1-based, and `end_line`/`qualname`/`scope` are the enclosing-def
+information attached after extraction. Python's definitions and references are
+deliberately identical to `ocelot_repo_map.extract_tags` for `.py` files:
+class/function definitions, loaded names (`reference.name`) and loaded
+attributes (`reference.attribute`); its import bindings are the extra
+`kind: "import"` records.
 
 `language_for()` is suffix-only and case-insensitive; the file need not exist.
 `backend_status()` accepts a language label (`"rust"`) or a suffix (`".rs"`),
@@ -128,7 +141,9 @@ Kotlin wheel does not, so ozagia bundles one. The granularity differs:
 - **Python** (`tree_sitter_python`) — query exists, but the AST path is used.
   Grammar query covers classes, functions, module-level constants and calls.
 - **Rust** — structs/enums/unions/type aliases, methods, functions, traits,
-  modules, macros; call/macro/impl references.
+  modules, macros; call/macro/impl references. `use` declarations are **not**
+  tagged; the graph's separate `_rust_parse` records `mod` edges and Phase 1 of
+  the Rust plan adds import records.
 - **Lua** — functions, methods, assignment/table function definitions; call
   references.
 - **TypeScript / TSX** — interfaces, abstract classes, function/method

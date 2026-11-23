@@ -36,6 +36,20 @@ treesitter = [
     "tree-sitter-swift>=0.7",
 ]
 lsp = ["pyright>=1.1.400"]
+# One support package per language. `treesitter` above is the union; these exist
+# so a checkout can install only the language it is working on. System
+# components (rust-analyzer, clangd, language servers) are reported and, where
+# safe, installed by `ozagia languages ensure`.
+lang-python = ["tree-sitter-python>=0.25", "pyright>=1.1.400", "ruff>=0.6"]
+lang-rust = ["tree-sitter-rust>=0.24"]
+lang-lua = ["tree-sitter-lua>=0.5"]
+lang-typescript = ["tree-sitter-typescript>=0.23"]
+lang-go = ["tree-sitter-go>=0.25"]
+lang-java = ["tree-sitter-java>=0.23"]
+lang-c = ["tree-sitter-c>=0.24"]
+lang-cpp = ["tree-sitter-cpp>=0.23"]
+lang-kotlin = ["tree-sitter-kotlin>=1.1"]
+lang-swift = ["tree-sitter-swift>=0.7"]
 openapi-yaml = ["PyYAML>=6"]
 iac-yaml = ["PyYAML>=6"]
 iac-hcl = ["python-hcl2>=7.3,<9"]
@@ -78,6 +92,8 @@ ozagia-security = "ozagia.security_cli:main"
 ozagia-secrets = "ozagia.secrets_cli:main"
 ozagia-library-hints = "ozagia.library_hints_cli:main"
 ozagia-toolchain = "ozagia.toolchain_cli:main"
+ozagia-languages = "ozagia.languages_cli:main"
+ozagia-supply-chain = "ozagia.supply_chain_cli:main"
 ozagia-review = "ozagia.code_review_cli:main"
 ozagia-ocelot = "ozagia.integrations.ocelot.__main__:main"
 ozagia-worktree = "ozagia.worktree_cli:main"

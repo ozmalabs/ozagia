@@ -1021,6 +1021,29 @@ _TOOLS.append({
     }),
 })
 
+_TOOLS.append({
+    "name": "dev_supply_chain",
+    "description": (
+        "Run the offline supply-chain attack checks over dependency inputs: "
+        "untrusted registries, credentials, TLS settings, mutable/direct "
+        "sources, wildcard versions, mixed lockfile integrity, install/build "
+        "scripts, typosquat and dependency-confusion candidates. Read-only: "
+        "no network, install, target import or code execution. A clean result "
+        "is not a verdict."),
+    "inputSchema": _schema({
+        "action": {"type": "string", "default": "check",
+                   "enum": ["check", "rules", "explain"]},
+        "policy": {"type": "string",
+                   "description": "Optional policy JSON path inside the workspace."},
+        "rule": {"type": "string",
+                 "description": "Rule id for action=explain."},
+        "budget_s": {"type": "number", "default": 10,
+                     "description": "Time budget in seconds (maximum 60)."},
+        "max_findings": {"type": "integer", "default": 50,
+                         "description": "Finding cap (maximum 100)."},
+    }),
+})
+
 # Application profiles (`ozagia.core.profile`): read one existing cProfile,
 # speedscope, Chrome, collapsed-stack or OTLP JSON artifact and join its active
 # frames to the graph. The artifact is data; it is never executed.
@@ -1429,6 +1452,7 @@ class DevMemoryServer:
             "dev_files_explain": self._files_explain,
             "dev_review_repo": self._review_repo,
             "dev_deep_review": self._deep_review,
+            "dev_supply_chain": self._supply_chain,
             "dev_profile": self._profile,
             "dev_environment": self._environment,
             "dev_tools": self._dev_tools,
@@ -1867,6 +1891,48 @@ class DevMemoryServer:
                 "top_findings": top_findings,
                 "findings_total": findings_total,
                 "findings_truncated": findings_truncated}
+
+    def _supply_chain(self, a: dict[str, Any]) -> Any:
+        """Offline supply-chain checks over the workspace; never writes."""
+        from ozagia.core import supply_chain as SC
+        root = Path(self.mem.raw_repo_root if self.mem else self.workspace).resolve()
+        action = str(a.get("action") or "check")
+        if action == "rules":
+            return {"ok": True,
+                    "rules": [rule.__dict__ for rule in
+                              (SC.RULES[key] for key in sorted(SC.RULES))]}
+        if action == "explain":
+            rule = SC.RULES.get(str(a.get("rule") or ""))
+            if rule is None:
+                return {"ok": False, "error": "unknown supply-chain rule"}
+            return {"ok": True, "rule": rule.__dict__,
+                    "not_assessed": list(SC.NOT_ASSESSED)}
+        if action != "check":
+            return {"ok": False, "error": "action must be check, rules or explain"}
+        policy = a.get("policy")
+        if policy is not None:
+            if not isinstance(policy, str) or not policy.strip():
+                return {"ok": False, "error": "policy must be a path string"}
+            candidate = Path(policy)
+            if not candidate.is_absolute():
+                candidate = root / candidate
+            try:
+                candidate = candidate.resolve()
+                candidate.relative_to(root)
+            except (OSError, ValueError):
+                return {"ok": False,
+                        "error": "policy must stay inside the workspace"}
+            policy = str(candidate)
+        try:
+            budget = float(a.get("budget_s", 10))
+            if not math.isfinite(budget) or budget < 0:
+                return {"ok": False, "error": "budget_s must be finite and >= 0"}
+            limit = min(max(int(a.get("max_findings", 50)), 0), 100)
+            result = SC.check(root, policy=policy, budget_s=min(budget, 60.0),
+                              max_findings=limit)
+        except (OSError, ValueError, TypeError) as exc:
+            return {"ok": False, "error": str(exc)}
+        return {"ok": True, **result}
 
     def _profile(self, a: dict[str, Any]) -> Any:
         """Read one profiler/telemetry artifact and return a bounded summary."""

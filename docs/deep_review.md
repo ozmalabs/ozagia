@@ -363,7 +363,13 @@ evidence or subject contents. See [status](status.md).
   and Ruby are exact-version only. Composer `composer.lock` matches exact
   supported versions only; branch aliases and ranges are skipped. Ruby
   advisory matching is limited to Bundler `GEM` source pins; `GIT` and `PATH`
-  pins are recorded but skipped. There is no fetch or registry
+  pins are recorded but skipped. The same inventory runs the offline
+  supply-chain rules from `core/supply_chain.py` (untrusted registries,
+  credentials, TLS, mutable/direct sources, wildcard versions, mixed
+  integrity, install scripts/build backends, typosquat and dependency-confusion
+  candidates); `--supply-chain-policy PATH` supplies an explicit allowlist
+  policy. Those findings are candidates, sources are hashed, and online
+  registry/attestation facts remain unknown. There is no fetch or registry
   lookup, advisory database, licence-compliance decision or validated compliance
   SBOM.
 - **Operations:** inventory of common deployment configuration and runbook

@@ -199,7 +199,7 @@ prove fidelity to the source paper.
 
 The graph, source index, paper ingestion, PDF backends and Lean export use the
 Python standard library or optional local executables. PyMuPDF
-(`pip install pymupdf`), `sentence-transformers`, Poppler `pdftotext`, GROBID and
+(`uv pip install pymupdf`), `sentence-transformers`, Poppler `pdftotext`, GROBID and
 Pandoc are optional and are reported as unavailable when absent. Install
 `ozagia[research]` to enable optional SymPy/Lark parse proposals. Native projection, graph-context resolution and native
 execution additionally require a separately installed compatible `substrate_rs`
@@ -207,7 +207,7 @@ runtime. Its absence is reported when those operations are invoked; it is not
 required to use coding mode or maintain a research ledger. A converter is not
 bundled: optional LaTeXML XML is read only when a selected artifact is supplied.
 For a local Ocelot source checkout, the backend can be installed into the same
-environment with `python -m pip install /path/to/ocelot/runners/dsl` (which builds
+environment with `uv pip install --python .venv/bin/python /path/to/ocelot/runners/dsl` (which builds
 the Rust extension); Ozagia then imports the installed runtime, not the target
 project. Backend provenance is reported separately and is not independently
 verified against an Ocelot source tree.

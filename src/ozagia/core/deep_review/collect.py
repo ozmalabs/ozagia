@@ -583,7 +583,8 @@ def _analyzer_preflight(root, *, index, budget_s, started):
 
 def collect(root, *, profile="full", budget_s=60, index=False,
             profile_reports=None, security_tools=None, security_network=False,
-            local_advisories=None, license_policy=None):
+            local_advisories=None, license_policy=None,
+            supply_chain_policy=None):
     started = time.monotonic()
     sections = None if profile == "full" else {
         "security": ("security",), "architecture": ("architecture",),
@@ -791,6 +792,8 @@ def collect(root, *, profile="full", budget_s=60, index=False,
             options["local_advisories"] = local_advisories
         if license_policy is not None:
             options["license_policy"] = license_policy
+        if supply_chain_policy is not None:
+            options["supply_chain_policy"] = supply_chain_policy
         tasks.append(("dependencies", dependencies.analyze, (root,), options))
     if profile == "full" or profile == "operations":
         tasks.append(("operations", operations.analyze, (root,), {}))
@@ -874,6 +877,7 @@ def collect(root, *, profile="full", budget_s=60, index=False,
             current["cve_state"] = dependency_result.get("cve_state")
             current["local_advisories"] = dependency_result.get("local_advisories")
             current["license_policy"] = inventory.get("license_policy")
+            current["supply_chain"] = inventory.get("supply_chain")
             current["version_conflicts"] = inventory.get("version_conflicts", [])
         elif name == "operations":
             operations_result = value

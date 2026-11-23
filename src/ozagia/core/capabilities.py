@@ -358,6 +358,8 @@ _DOCS = {
     "environment": "doc:docs/environments.md",
     "resources": "doc:docs/resources.md",
     "toolchain": "doc:docs/toolchain.md",
+    "languages": "doc:docs/languages.md",
+    "supply_chain": "doc:docs/supply_chain.md",
     "status": "doc:docs/status.md",
     "federation": "doc:docs/federation.md",
     "research": "doc:docs/research.md",
@@ -408,6 +410,8 @@ _TESTS = {
     "files": "test:tests/test_files.py",
     "resources": "test:tests/test_cgroup.py",
     "toolchain": "test:tests/test_toolchain.py",
+    "languages": "test:tests/test_languages.py",
+    "supply_chain": "test:tests/test_supply_chain.py",
     "status": "test:tests/test_status.py",
     "settings": "test:tests/test_settings.py",
     "federation": "test:tests/test_federation.py",
@@ -1395,6 +1399,56 @@ _BUILTIN_DEFINITIONS: tuple[dict[str, Any], ...] = (
         authorization=_READ,
         tests=_tests("toolchain"),
         docs=_docs("toolchain"),
+    ),
+    _def(
+        id="cap:security.supply_chain",
+        domain="toolchain",
+        purpose=("Inventory dependency inputs and report offline supply-chain "
+                 "attack candidates: untrusted registries, credentials, "
+                 "mutable sources, install-time code, missing integrity and "
+                 "typosquat/confusion signals."),
+        owner="ozagia.core.supply_chain",
+        side_effect="read",
+        exposure=["cli", "mcp"],
+        impl=["impl:ozagia.core.supply_chain.analyze",
+              "impl:ozagia.core.supply_chain.check",
+              "impl:ozagia.supply_chain_cli.run"],
+        surfaces=["cli:ozagia.supply-chain",
+                  "mcp:tool:dev_supply_chain"],
+        prerequisites=["dependency manifests, lockfiles or registry "
+                       "configuration under the checkout",
+                       "an optional explicit supply-chain policy JSON"],
+        limits=["deterministic and offline; no fetch, install, target import "
+                "or code execution",
+                "findings are candidates; absence of a finding is not a clean "
+                "verdict",
+                "registry hosts and direct URLs are hashed in findings",
+                "online metadata, signatures, attestations and tarball "
+                "contents remain unknown"],
+        authorization=_READ,
+        tests=_tests("supply_chain"),
+        docs=_docs("supply_chain"),
+    ),
+    _def(
+        id="cap:languages.support",
+        domain="toolchain",
+        purpose=("Detect the languages in a checkout, report their component "
+                 "readiness, and install declared pip or rustup components."),
+        owner="ozagia.languages.model",
+        side_effect="network",
+        exposure=["cli"],
+        impl=["impl:ozagia.languages.model.ensure_for_root",
+              "impl:ozagia.languages.model.ensure",
+              "impl:ozagia.languages_cli.run"],
+        surfaces=["cli:ozagia.languages"],
+        prerequisites=["the language support registry", "a checkout to scan"],
+        limits=["pip specs and rustup components only; no sudo, npm or OS "
+                "package manager",
+                "bounded 600 s per install; failures are reported, not raised",
+                "optional/manual components are reported but not installed"],
+        authorization="explicit CLI; automatic check is opt-out; no sudo",
+        tests=_tests("languages"),
+        docs=_docs("languages"),
     ),
     # status ---------------------------------------------------------------
     _def(

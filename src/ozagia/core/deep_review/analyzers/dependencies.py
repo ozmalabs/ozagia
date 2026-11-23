@@ -1009,7 +1009,9 @@ def build_sbom(source: Mapping[str, Any], *, root_name: str = "repository") -> d
 
 def analyze(root: str | Path, *, budget_s: float = 10.0,
             local_advisories: str | Path | Mapping[str, Any] | None = None,
-            license_policy: str | Path | Mapping[str, Any] | None = None
+            license_policy: str | Path | Mapping[str, Any] | None = None,
+            supply_chain: bool = True,
+            supply_chain_policy: str | Path | Mapping[str, Any] | None = None
             ) -> dict[str, Any]:
     """Return an inventory and conservative findings within explicit limits.
 
@@ -1020,6 +1022,10 @@ def analyze(root: str | Path, *, budget_s: float = 10.0,
     explicit JSON path/object; it is never fetched and only parsed lockfile
     versions can match supported exact records or local SemVer ranges.
     Non-matches keep CVE coverage unknown.
+
+    ``supply_chain`` adds the offline supply-chain rules from
+    :mod:`ozagia.core.supply_chain`; ``supply_chain_policy`` is an optional
+    explicit policy path/object. No network, install or target import runs.
     """
     root = Path(root).resolve()
     try:
@@ -1276,6 +1282,24 @@ def analyze(root: str | Path, *, budget_s: float = 10.0,
     # Even an exact hit is only a match against the caller's local dataset;
     # absence of hits cannot establish a clean dependency set.
     inventory["cve_state"] = CVE_STATE
+    if supply_chain:
+        from ozagia.core import supply_chain as SC
+        remaining = max(0.5, budget - (time.monotonic() - started))
+        try:
+            sc_result = SC.analyze(
+                root, inventory=inventory, policy=supply_chain_policy,
+                budget_s=min(5.0, remaining), max_findings=100)
+            findings.extend(sc_result["findings"])
+            inventory["supply_chain"] = sc_result["summary"]
+            omissions.extend(item.get("reason", "")
+                             for item in sc_result["not_checked"])
+        except Exception as exc:  # one analyzer must not hide the inventory
+            inventory["supply_chain"] = {
+                "state": "error", "truth_assessed": False,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+            omissions.append(f"supply-chain analysis unavailable: "
+                             f"{type(exc).__name__}: {exc}")
     sbom = build_sbom(inventory, root_name=root.name)
     return {"findings": findings, "inventory": inventory, "sbom": sbom,
             "cve_state": CVE_STATE,

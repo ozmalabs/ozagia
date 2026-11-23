@@ -637,6 +637,7 @@ def test_plan_hash_rejects_untrusted_digest_shapes_and_marks_unprocessed_inputs(
         budget_s=10, index=False, fail_on="high", max_findings=None,
         security_tools=[], security_network=False,
         local_advisories="advisories.json", license_policy="policy.json",
+        supply_chain_policy="supply_chain.json",
         baseline=None, baseline_findings=[], profile_reports=["report.json"],
         bench_commands=None, bench_timeout_s=0, tool_versions={},
         sections={"performance": {"profile_report_hashes": [

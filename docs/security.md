@@ -248,6 +248,20 @@ scanner, its results are recorded but the inventory is still
 Unknown versions, lockfile gaps and unavailable scanners are explicit. The
 scan does not resolve a package registry or guess a CVE.
 
+For supply-chain attack candidates, use the dedicated offline analyzer:
+
+```bash
+ozagia supply-chain check --fail-on high
+ozagia supply-chain check --policy supply-chain.json --json
+```
+
+It covers untrusted registries, registry credentials, TLS/trusted-host
+settings, mutable or direct sources, wildcard versions, mixed lockfile
+integrity, install-time scripts/build backends, typosquat and
+dependency-confusion candidates. The deep-review `dependencies` subject runs
+the same checks and accepts `--supply-chain-policy`. See
+[`supply_chain.md`](supply_chain.md).
+
 ## Finding shape
 
 ```json

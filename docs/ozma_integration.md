@@ -37,7 +37,8 @@ before enabling it by default.
 
 An adapter may call `ozagia.core.openapi.index_openapi_document` with a graph
 builder, file node, repository-relative path and JSON or YAML text. YAML
-requires `pip install 'ozagia[openapi-yaml]'`; aliases and unsupported tags
+requires `uv pip install --python .venv/bin/python 'ozagia[openapi-yaml]'`
+(or `python -m pip install 'ozagia[openapi-yaml]'`); aliases and unsupported tags
 are rejected, and source size and structure are bounded. It adds API
 operation and schema nodes with JSON Pointer locations, and edges for direct
 schema references inside operations. It reports unresolved, external and

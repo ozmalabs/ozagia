@@ -62,7 +62,7 @@ candidate wins.
 | Language | Candidate order | Notes |
 |---|---|---|
 | `python` | `pyright-langserver --stdio`, then `pylsp` | pyright is the intended server; pylsp is the fallback |
-| `rust` | `rust-analyzer` | rustup shim must have the component installed |
+| `rust` | `rust-analyzer` | install the rustup component: `rustup component add rust-analyzer` |
 | `c` / `cpp` | `clangd` | uses `compile_commands.json`/`compile_flags.txt` when present |
 | `typescript` | `typescript-language-server --stdio` | absent in this environment |
 | `javascript` | `typescript-language-server --stdio` | same server, JS language id |
@@ -259,16 +259,15 @@ Live smoke tests are gated by `OZAGIA_LIVE_LSP=1` and skip when a server is
 absent, cold or unable to answer; they are not part of the default gate. The
 fake server proves our protocol handling, not server-specific compatibility.
 
-Verification in this tree on 2026-11-14:
+Verification in this tree on 2026-11-23:
 
 ```text
-.venv/bin/python -m pytest tests/test_lsp_migrated.py -q
-14 passed, 2 skipped in 1.04s
-
-OZAGIA_LIVE_LSP=1 .venv/bin/python -m pytest tests/test_lsp_migrated.py -q -rs
-15 passed, 1 skipped in 2.35s
-# live pyright definition passed; rust-analyzer skipped:
-# "Unknown binary 'rust-analyzer' in official toolchain"
+OZAGIA_LIVE_LSP=1 PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_lsp.py -rs
+18 passed, 1 skipped in 1.83s
+# live pyright definition passed; rust-analyzer 1.97.1 started and reported
+# available, but the immediate first definition was empty while it indexed.
+# The gated smoke skips rather than inventing an answer (Phase 4 adds a
+# bounded warm-up/retry).
 ```
 
 ## Integration notes (MCP / CLI, owner: central integrator)
@@ -317,9 +316,11 @@ OZAGIA_LIVE_LSP=1 .venv/bin/python -m pytest tests/test_lsp_migrated.py -q -rs
   needs a Cargo project and a working rustup component, clangd wants
   `compile_commands.json`/`compile_flags.txt`. The client times out honestly
   rather than inventing answers.
-- This environment has pyright and clangd; rust-analyzer is a rustup shim
-  without the component, and no TypeScript, Kotlin or Swift server is installed
-  by the default venv. Availability means "binary found".
+- The dev toolchain has pyright, clangd and rust-analyzer 1.97.1 (the rustup
+  component is installed). Rust-analyzer still indexes a Cargo workspace
+  lazily, so an immediate first query can be empty; no TypeScript, Kotlin or
+  Swift server is installed by the default venv. Availability means "binary
+  found".
 - Call hierarchy depends on server support and on a hierarchy item at the
   exact position. An empty `items` list is reported, not guessed.
 - Cold indexing is not a readiness barrier. References retry an empty answer,

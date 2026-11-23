@@ -297,6 +297,7 @@ def _plan_hash(*, root: Path, out: Path, budget_available: bool,
                range_spec: str | None, budget_s: float, index: bool,
                fail_on: str, max_findings: int | None, focus_subjects=(), security_tools,
                security_network: bool, local_advisories, license_policy,
+               supply_chain_policy,
                baseline, baseline_findings, baseline_coverage=None, profile_reports, bench_commands,
                bench_timeout_s: float, tool_versions, sections, findings,
                security_provenance, deadline: float
@@ -337,6 +338,14 @@ def _plan_hash(*, root: Path, out: Path, budget_available: bool,
         "sha256": (policy.get("policy_hash")
                    if _is_sha256_value(policy.get("policy_hash")) else None),
     }
+    supply = inventory.get("supply_chain") or {}
+    supply_chain_input = {
+        "state": supply.get(
+            "state", "not_supplied" if supply_chain_policy is None
+            else "supplied_unprocessed"),
+        "sha256": (supply.get("policy_hash")
+                   if _is_sha256_value(supply.get("policy_hash")) else None),
+    }
     baseline_input = ({"state": "not_supplied", "sha256": None}
                       if baseline is None else
                       _canonical_input_digest(baseline_findings,
@@ -368,6 +377,7 @@ def _plan_hash(*, root: Path, out: Path, budget_available: bool,
         "project_config": project_config,
         "local_advisories": advisory_input,
         "license_policy": policy_input,
+        "supply_chain": supply_chain_input,
         "baseline_findings": baseline_input,
         "baseline_coverage": _canonical_input_digest(baseline_coverage, max_bytes=32 * 1024 * 1024)
         if baseline_coverage is not None else {"state": "unavailable", "sha256": None},
@@ -1299,7 +1309,8 @@ def build_deep_review(root, out, *, profile="full", budget_s=60, index=False,
                       range_spec=None, profile_reports=None, bench_commands=None,
                       bench_timeout_s=30, security_tools=None,
                       security_network=False, local_advisories=None,
-                      license_policy=None, focus_subjects=None):
+                      license_policy=None, supply_chain_policy=None,
+                      focus_subjects=None):
     root, out = Path(root).resolve(), Path(out).resolve()
     if focus_subjects is None:
         focus_subjects = ()
@@ -1317,6 +1328,9 @@ def build_deep_review(root, out, *, profile="full", budget_s=60, index=False,
     if license_policy is not None and profile not in {"full", "dependencies"}:
         raise DeepReviewError(
             "license_policy requires the full or dependencies profile")
+    if supply_chain_policy is not None and profile not in {"full", "dependencies"}:
+        raise DeepReviewError(
+            "supply_chain_policy requires the full or dependencies profile")
     if not isinstance(budget_s, (int, float)) or isinstance(budget_s, bool) or not 0 <= budget_s < float("inf"):
         raise DeepReviewError("budget_s must be >= 0")
     if fail_on not in {"blocking", "major", "never"}:
@@ -1373,6 +1387,8 @@ def build_deep_review(root, out, *, profile="full", budget_s=60, index=False,
         collect_options["local_advisories"] = local_advisories
     if license_policy is not None:
         collect_options["license_policy"] = license_policy
+    if supply_chain_policy is not None:
+        collect_options["supply_chain_policy"] = supply_chain_policy
     packet = collect.collect(root, **collect_options)
     timings["collect_s"] = time.monotonic() - phase_started
     bench_artifact = None
@@ -1797,6 +1813,7 @@ def build_deep_review(root, out, *, profile="full", budget_s=60, index=False,
         fail_on=fail_on, max_findings=max_findings, focus_subjects=focus_subjects,
         security_tools=security_tools, security_network=security_network,
         local_advisories=local_advisories, license_policy=license_policy,
+        supply_chain_policy=supply_chain_policy,
         baseline=baseline, baseline_findings=previous,
         baseline_coverage=baseline_manifest,
         profile_reports=profile_reports, bench_commands=bench_commands,

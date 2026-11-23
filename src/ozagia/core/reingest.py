@@ -143,6 +143,8 @@ class _State:
                     cs.update(M._import_candidates(rel, ref[1], ref[2]))
                 except ValueError:
                     continue
+            elif ref[0] == "rs_mod":
+                cs.update(str(c) for c in ref[1:])
             else:
                 cs.add(str(ref[1]))
         self._entry_cands[rel] = cs
@@ -539,6 +541,9 @@ def _rederive(txn: _Txn, rel: str) -> None:
                     root, M._import_candidates(rel, ref[1], ref[2]))
             except ValueError:
                 target = None
+        elif kind == "rs_mod":
+            target = next((str(c) for c in ref[1:]
+                           if (root / str(c)).is_file()), None)
         else:
             target = ref[1] if (root / ref[1]).is_file() else None
         if not target:
@@ -815,6 +820,10 @@ def _referenced(txn: _Txn, rel: str) -> bool:
                 except ValueError:
                     continue
                 if rel in cands and M._resolve_candidates(root, cands) == rel:
+                    return True
+            elif ref[0] == "rs_mod":
+                if (rel in {str(c) for c in ref[1:]}
+                        and (root / rel).is_file()):
                     return True
             elif ref[1] == rel and (root / rel).is_file():
                 return True

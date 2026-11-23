@@ -66,9 +66,10 @@ import math
 import os
 import re
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 from ozagia.config import load_project_config, repo_root, state_path, state_rel
 from ozagia.core import git_safety as GS
@@ -438,7 +439,56 @@ _RUST_SYM_RE = re.compile(
     r"(fn|struct|enum|trait|impl|mod|type|const|static)\s+"
     r"([A-Za-z_][A-Za-z0-9_]*)"
 )
-_RUST_MOD_RE = re.compile(r"^\s*(?:pub\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;")
+_RUST_MOD_RE = re.compile(
+    r"^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;")
+_RUST_PATH_ATTR_RE = re.compile(r'^\s*#\[\s*path\s*=')
+# Crate roots: their child modules live beside the root file. Test, example
+# and bench directories hold crate roots too, although a helper module in one
+# of them can look the same; that ambiguity is documented in docs/rust.md.
+_RUST_CRATE_ROOT_FILES = frozenset({"lib.rs", "main.rs", "build.rs"})
+_RUST_TEST_ROOT_DIRS = frozenset({"tests", "examples", "benches"})
+
+
+def _rust_module_base(rel: str) -> str:
+    """The directory a `mod x;` declared in `rel` resolves against.
+
+    Crate roots (`lib.rs`, `main.rs`, `build.rs`, `src/bin/*.rs` and test,
+    example and bench roots) resolve children beside themselves; `foo/mod.rs`
+    resolves inside its own directory; any other `foo.rs` resolves under `foo/`.
+    """
+    p = PurePosixPath(rel)
+    parent = p.parent.as_posix()
+    if parent == ".":
+        parent = ""
+    if p.name in _RUST_CRATE_ROOT_FILES or p.name == "mod.rs":
+        return parent
+    parts = p.parts
+    for i, part in enumerate(parts[:-1]):
+        # `tests/…` and `crates/x/tests/…` are crate roots; `src/tests/…` is an
+        # ordinary module tree.
+        if part in _RUST_TEST_ROOT_DIRS and (i == 0 or parts[i - 1] != "src"):
+            return parent
+    if len(parts) >= 3 and parts[-3] == "src" and parts[-2] == "bin":
+        return parent
+    return p.with_suffix("").as_posix()
+
+
+def _rust_mod_candidates(rel: str, mod: str) -> list[str]:
+    """The `foo.rs` / `foo/mod.rs` targets of `mod foo;`, in order."""
+    base = _rust_module_base(rel)
+    stem = f"{base}/{mod}" if base else mod
+    return [f"{stem}.rs", f"{stem}/mod.rs"]
+
+
+def _rust_mod_alternate(rel: str) -> str | None:
+    """The other layout of a `mod` target (`foo.rs` vs `foo/mod.rs`)."""
+    if rel == "mod.rs":
+        return None
+    if rel.endswith("/mod.rs"):
+        return rel[: -len("/mod.rs")] + ".rs"
+    if rel.endswith(".rs"):
+        return rel[: -len(".rs")] + "/mod.rs"
+    return None
 
 
 def _rust_parse(path: Path, src: str | None = None) -> dict[str, Any] | None:
@@ -447,8 +497,15 @@ def _rust_parse(path: Path, src: str | None = None) -> dict[str, Any] | None:
     if src is None:
         return None
     symbols: list[dict[str, Any]] = []
-    mods: list[str] = []
+    mods: list[dict[str, Any]] = []
+    # A `#[path = "..."]` attribute on the line(s) before `mod x;` overrides
+    # normal module lookup. It is recorded, not resolved (see docs/rust.md).
+    path_attr_line: int | None = None
     for i, line in enumerate(src.splitlines(), start=1):
+        stripped = line.strip()
+        if _RUST_PATH_ATTR_RE.match(line):
+            path_attr_line = i
+            continue
         m = _RUST_SYM_RE.match(line)
         if m:
             kind, name = m.group(1), m.group(2)
@@ -465,9 +522,19 @@ def _rust_parse(path: Path, src: str | None = None) -> dict[str, Any] | None:
                 "decorators": [],
                 "args": [],
             })
+            if kind != "mod":
+                path_attr_line = None
         mm = _RUST_MOD_RE.match(line)
         if mm:
-            mods.append(mm.group(1))
+            mods.append({
+                "name": mm.group(1),
+                "line": i,
+                "path_attribute": path_attr_line,
+            })
+            path_attr_line = None
+            continue
+        if (stripped and not stripped.startswith(("//", "/*", "*", "#[", "#!"))):
+            path_attr_line = None
     return {"symbols": symbols, "mods": mods, "source": src}
 
 
@@ -727,7 +794,7 @@ class FileIndexer:
         {"role": "source"|"test"|"doc", "ctx": 0|1,
          "size": <bytes>, "mtime_ns": <ns>,
          "refs": [["imports", <module>, <level>],    # Python import
-                  ["rs_mod", <rel>],                  # Rust `mod x;`
+                  ["rs_mod", <a.rs>, <a/mod.rs>],     # Rust `mod x;`
                   ["mentions", <rel>],                # path in a test file
                   ["documents", <rel>], ...]}         # path in a doc
 
@@ -848,11 +915,25 @@ class FileIndexer:
                 }, key=("symbol", rel, kq))
                 b.edge(fid, "defines", sid)
                 b.edge(sid, "defined_in", fid)
+            unsupported_mods: list[dict[str, Any]] = []
             for mod in parsed["mods"]:
-                target = (Path(rel).parent / f"{mod}.rs").as_posix()
-                self._ref(entry, ["rs_mod", target])
-                if (self.root / target).is_file():
+                if mod.get("path_attribute"):
+                    unsupported_mods.append({
+                        "name": mod["name"],
+                        "line": mod["line"],
+                        "reason": "#[path] module paths are not resolved",
+                    })
+                    continue
+                candidates = _rust_mod_candidates(rel, mod["name"])
+                # Record both layouts so reingest notices a module file that
+                # appears or disappears; the edge uses the first existing one.
+                self._ref(entry, ["rs_mod", *candidates])
+                target = next((c for c in candidates
+                               if (self.root / c).is_file()), None)
+                if target:
                     b.edge(fid, "imports", self.file_node(target))
+            if unsupported_mods:
+                b.attrs(fid)["rust_unsupported_mods"] = unsupported_mods
             self.sources.append(self._types[0](rel, fid,
                                                parsed.get("source") or ""))
             entry["ctx"] = 1
@@ -3551,6 +3632,19 @@ def _print(obj: Any, *, pretty: bool) -> None:
 
 
 def _cmd_build(args: argparse.Namespace) -> int:
+    if not args.no_language_install:
+        try:
+            from ozagia.languages import AUTO_INSTALL_ENV, ensure_for_root
+            auto = os.environ.get(AUTO_INSTALL_ENV, "1").strip().lower()
+            if auto not in ("0", "false", "no"):
+                ensure_for_root(
+                    Path(args.root),
+                    install=True,
+                    report=lambda line: print(line, file=sys.stderr, flush=True),
+                )
+        except Exception as exc:  # an install probe must not break the build
+            print(f"[ozagia] languages: check failed: "
+                  f"{type(exc).__name__}: {exc}", file=sys.stderr)
     report = build_index(args.root, args.out or args.dump,
                          include_docs=args.docs,
                          include_git=not args.no_git,
@@ -3768,6 +3862,9 @@ def main(argv: list[str] | None = None) -> int:
                    default="features")
     b.add_argument("--no-git", action="store_true")
     b.add_argument("--no-scripts", action="store_true")
+    b.add_argument(
+        "--no-language-install", action="store_true",
+        help="report missing language components without installing them")
     b.add_argument("--git-limit", type=int, default=200)
     b.set_defaults(func=_cmd_build, needs_mem=False)
 

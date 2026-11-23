@@ -241,6 +241,25 @@ def _root(value: str | None) -> Path:
     return repo_root()
 
 
+def _ensure_language_support(root: Path) -> None:
+    """Report and install support for the languages present under `root`.
+
+    Best effort: a failed probe or install never blocks the command. Disable
+    with ``OZAGIA_LANGUAGE_AUTOINSTALL=0``.
+    """
+    from ozagia.languages import AUTO_INSTALL_ENV, ensure_for_root
+    if os.environ.get(AUTO_INSTALL_ENV, "1").strip().lower() in (
+            "0", "false", "no"):
+        return
+    try:
+        ensure_for_root(
+            root, install=True,
+            report=lambda line: print(line, file=sys.stderr, flush=True))
+    except Exception as exc:  # an install probe must not break indexing
+        print(f"[ozagia] languages: check failed: "
+              f"{type(exc).__name__}: {exc}", file=sys.stderr)
+
+
 
 def _config_summary(config: dict[str, Any]) -> str:
     """One text line naming both config files, precedence and unmapped count.
@@ -299,6 +318,7 @@ def _cmd_index(args: argparse.Namespace) -> int:
     from ozagia.harness.session import SessionError, prepare_snapshot, tool_env
     from ozagia.config import config_path, state_path
     root = _root(args.root)
+    _ensure_language_support(root)
     dump = Path(args.dump).resolve() if args.dump else state_path(root, "graph.json")
     env = tool_env(root, tool_python=sys.executable, config=config_path(root))
     try:
@@ -333,6 +353,7 @@ def _cmd_agent(args: argparse.Namespace) -> int:
         except OSError as exc:
             print(f"error: cannot read --prompt-file: {exc}", file=sys.stderr)
             return 2
+    _ensure_language_support(_root(args.workdir))
     # The snapshot build/refresh and the daemon start take seconds on a large
     # repository; report them before the TUI takes the terminal.
     progress = Spinner()
@@ -1000,6 +1021,7 @@ def _replace_memory(root: Path):
     from ozagia.core.memory import DevMemory, build_index
     dump = state_path(root, "graph.json")
     if not dump.exists():
+        _ensure_language_support(root)
         print(f"building {dump} ...", file=sys.stderr)
         build_index(root, dump, include_docs="features", include_git=True,
                     include_scripts=True)
@@ -1220,6 +1242,8 @@ def _cmd_deep_review(args: argparse.Namespace) -> int:
             security_options["local_advisories"] = args.local_advisories
         if args.license_policy is not None:
             security_options["license_policy"] = args.license_policy
+        if args.supply_chain_policy is not None:
+            security_options["supply_chain_policy"] = args.supply_chain_policy
         result = build_deep_review(root, resolved_out, profile=profile,
                                    budget_s=args.budget_s, index=args.index,
                                    range_spec=range_spec,
@@ -1738,6 +1762,9 @@ def build_parser() -> argparse.ArgumentParser:
     dr.add_argument("--license-policy", default=None, metavar="PATH",
                     help="evaluate declared lockfile licenses against a local "
                          "allow/deny policy; ambiguous values remain unknown")
+    dr.add_argument("--supply-chain-policy", default=None, metavar="PATH",
+                    help="apply an explicit local supply-chain policy JSON to "
+                         "the offline dependency checks; no network")
     dr.add_argument("--range", dest="range_spec", default=None,
                     metavar="BASE..HEAD", help="include deterministic review of a commit range")
     dr.add_argument("--profile-report", action="append", default=None,
@@ -1804,6 +1831,10 @@ def build_parser() -> argparse.ArgumentParser:
     _capabilities_parser(sub)
     from ozagia.task_preflight_cli import add_parser as _task_preflight_parser
     _task_preflight_parser(sub)
+    from ozagia.languages_cli import add_parser as _languages_parser
+    _languages_parser(sub)
+    from ozagia.supply_chain_cli import add_parser as _supply_chain_parser
+    _supply_chain_parser(sub)
     return p
 
 
@@ -1828,7 +1859,8 @@ def _repo_map_budget(value: str) -> int:
 
 _COMMANDS = frozenset({"index", "agent", "install", "who", "replace",
                        "review-repo", "goal", "capabilities", "profile-run",
-                       "task-preflight", *DELEGATES})
+                       "task-preflight", "languages", "supply-chain",
+                       *DELEGATES})
 # Agent options that may lead a bare `ozagia ...` (the TUI).
 _AGENT_FLAGS = frozenset({"--research", "--mcp", "--model", "-m", "--workdir",
                           "--root", "--clone", "--prompt", "--prompt-file",
@@ -1922,6 +1954,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "task-preflight":
         from ozagia.task_preflight_cli import run as _task_preflight_run
         return _task_preflight_run(args)
+    if args.command == "languages":
+        from ozagia.languages_cli import run as _languages_run
+        return _languages_run(args)
+    if args.command == "supply-chain":
+        from ozagia.supply_chain_cli import run as _supply_chain_run
+        return _supply_chain_run(args)
     parser.error(f"unknown command {args.command}")  # pragma: no cover
     return 2
 

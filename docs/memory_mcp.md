@@ -331,7 +331,8 @@ subset). See [`REPO_MAP_EVAL.md`](REPO_MAP_EVAL.md) and
 The repo map is the Aider/RepoGraph-style layer built on tree-sitter tags:
 
 - Python tags come from the stdlib AST (fast); Rust/Lua tags come from each
-  grammar's own `queries/tags.scm`.
+  grammar's own `queries/tags.scm`. Rust `mod x;` edges resolve both `x.rs`
+  and `x/mod.rs`, including crate-root layouts (see [`rust.md`](rust.md)).
 - Files are nodes; a reference edge points from a referencing file to the file
   defining the symbol. Generic/high-fan-out identifiers are capped so the graph
   stays usable.
@@ -363,8 +364,9 @@ The full landscape comparison, including what we adopted and what remains
 are LSP-native 0-based lines/UTF-16 characters.
 
 - Python: `.venv/bin/pyright-langserver --stdio` (live definition smoke passed).
-- Rust: `rust-analyzer` (the binary is present but the rustup component is
-  missing in this environment; status reports honestly).
+- Rust: `rust-analyzer` (install the component with
+  `rustup component add rust-analyzer`; the dev toolchain has 1.97.1. The
+  first query can be empty while it indexes; status reports honestly).
 - C/C++: `clangd`; TypeScript: `typescript-language-server` if installed.
 - `dev_rename_preview` is review-only. Applying a rename still goes through the
   semantic edit transaction.
@@ -661,7 +663,7 @@ is refused honestly.
 Reproduce the environment with:
 
 ```bash
-.venv/bin/pip install -r requirements-dev.txt
+uv pip install --python .venv/bin/python -r requirements-dev.txt
 ```
 
 (`tree-sitter`, `tree-sitter-python`, `tree-sitter-rust`, `tree-sitter-lua`).
@@ -758,10 +760,11 @@ layer is honest: semantic targets in, lossless CST out, diff as a view.
   lexical/qualia tables. This is why the snapshot is ~137k nodes. If that
   becomes slow, add a `--seed-item-types` filter; do not hand-edit the dump.
 - **Edit adapters are v0.** Python has symbol + generic AST-node ops; Markdown
-  has section ops; JSON has path ops. Rust/Lua have the `ts_ingest` `CstNode`
-  parser but no edit adapter yet. YAML/TOML/other formats are refused rather
-  than silently patched. Rename is lexical and reported as such; scope-aware
-  rename is a later graph pass.
+  has section ops; JSON has path ops; HCL and YAML have their own adapters;
+  Rust/Lua use the `CstNode` subtree adapter (`edit/cst.py`) but have no
+  symbol-addressed ops yet. Formats without an adapter (TOML, arbitrary text)
+  are refused rather than silently patched. Rename is lexical and reported as
+  such; scope-aware rename is a later graph pass.
 - **Symbol graph is syntactic.** Callers and callees come from name, import and
   local-scope resolution only. `obj.method()` resolves by name, under the name
   rules. Dynamic dispatch, `getattr` and star re-exports are not followed. Tags are not extracted from a

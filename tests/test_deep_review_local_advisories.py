@@ -9,6 +9,13 @@ from ozagia.core.deep_review.analyzers.local_advisories import (
     SCHEMA,
     match_local_advisories,
 )
+from ozagia.core.supply_chain import RULES as SUPPLY_CHAIN_RULES
+
+
+def _non_supply_chain(findings):
+    """Advisory tests assert their own findings; supply-chain findings are separate."""
+    return [finding for finding in findings
+            if finding["type"] not in SUPPLY_CHAIN_RULES]
 
 
 def _advisories(*rows):
@@ -273,9 +280,10 @@ def test_bundler_lockfile_matches_only_exact_local_ruby_advisories(tmp_path):
 
     assert report["inventory"]["lockfiles"][0]["packages"] == [
         {"name": "rack", "version": "3.0.8", "source": "rubygems"}]
-    assert len(report["findings"]) == 1
-    assert report["findings"][0]["type"] == "local_advisory_exact_version_match"
-    assert report["findings"][0]["dependency"] == "rack"
+    advisory_findings = _non_supply_chain(report["findings"])
+    assert len(advisory_findings) == 1
+    assert advisory_findings[0]["type"] == "local_advisory_exact_version_match"
+    assert advisory_findings[0]["dependency"] == "rack"
     assert report["inventory"]["cve_state"] == "unknown"
 
 
@@ -294,8 +302,9 @@ def test_ruby_local_advisories_skip_git_and_path_sources(tmp_path):
     pins = report["inventory"]["lockfiles"][0]["packages"]
     assert {(pin["source"], pin["version"]) for pin in pins} == {
         ("rubygems", "3.0.8"), ("git", "3.0.8"), ("path", "3.0.8")}
-    assert len(report["findings"]) == 1
-    assert report["findings"][0]["file"] == "Gemfile.lock"
+    advisory_findings = _non_supply_chain(report["findings"])
+    assert len(advisory_findings) == 1
+    assert advisory_findings[0]["file"] == "Gemfile.lock"
 
 
 def test_composer_lock_matches_only_exact_local_advisories(tmp_path):
@@ -422,7 +431,7 @@ def test_composer_custom_git_repository_suppresses_ambiguous_advisory_matches(
 
     report = analyze(tmp_path, local_advisories=_advisories(advisory))
 
-    assert report["findings"] == []
+    assert _non_supply_chain(report["findings"]) == []
     lock = report["inventory"]["lockfiles"][0]
     assert lock["custom_repositories"] is True
     assert lock["packages"][0]["provenance"] == "git"
@@ -447,7 +456,7 @@ def test_composer_path_package_is_excluded_from_advisory_matching(tmp_path):
 
     report = analyze(tmp_path, local_advisories=_advisories(advisory))
 
-    assert report["findings"] == []
+    assert _non_supply_chain(report["findings"]) == []
     assert report["inventory"]["lockfiles"][0]["packages"][0]["provenance"] == "path"
     component = next(item for item in report["sbom"]["components"]
                      if item["name"] == "vendor/package")
