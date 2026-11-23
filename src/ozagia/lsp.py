@@ -43,7 +43,7 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 from urllib.parse import unquote, urlparse
 from ozagia.config import repo_root
 
@@ -70,14 +70,18 @@ class ServerSpec:
 
     name: str
     args: tuple[str, ...] = ()
+    #: Suggested install command; reported, never run by this module.
+    install: tuple[str, ...] = ()
 
 
 LANGUAGE_SERVERS: dict[str, tuple[ServerSpec, ...]] = {
     "python": (
-        ServerSpec("pyright-langserver", ("--stdio",)),
+        ServerSpec("pyright-langserver", ("--stdio",),
+                   ("uv", "pip", "install", "pyright")),
         ServerSpec("pylsp"),
     ),
-    "rust": (ServerSpec("rust-analyzer"),),
+    "rust": (ServerSpec("rust-analyzer", (),
+                        ("rustup", "component", "add", "rust-analyzer")),),
     "c": (ServerSpec("clangd"),),
     "cpp": (ServerSpec("clangd"),),
     "typescript": (ServerSpec("typescript-language-server", ("--stdio",)),),
@@ -174,6 +178,52 @@ def detect_language(path: str | Path) -> str | None:
     return SUFFIX_LANGUAGES.get(Path(path).suffix.lower())
 
 
+def workspace_root(root: str | Path, path: str | Path | None = None,
+                   language: str | None = None) -> Path:
+    """The server workspace root for a file.
+
+    Rust uses the nearest Cargo workspace manifest (or the nearest member
+    manifest when no `[workspace]` exists); a Cargo project can live below the
+    repository root. Other languages keep the repository root.
+    """
+    import tomllib
+
+    root = Path(root).resolve()
+    lang = normalize_language(language) if language else (
+        detect_language(path) if path else None)
+    if lang != "rust":
+        return root
+    start = root
+    if path is not None:
+        candidate = Path(path)
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        start = candidate.parent if candidate.suffix else candidate
+        try:
+            start = start.resolve()
+            start.relative_to(root)
+        except (OSError, ValueError):
+            start = root
+    manifests: list[Path] = []
+    current = start
+    while True:
+        manifest = current / "Cargo.toml"
+        if manifest.is_file():
+            manifests.append(current)
+        if current == root:
+            break
+        current = current.parent
+    for directory in reversed(manifests):
+        try:
+            data = tomllib.loads(
+                (directory / "Cargo.toml").read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError, ValueError):
+            continue
+        if isinstance(data.get("workspace"), Mapping):
+            return directory
+    return manifests[0] if manifests else root
+
+
 def _format_command(argv: Sequence[str]) -> str:
     return " ".join(shlex.quote(str(part)) for part in argv)
 
@@ -223,6 +273,8 @@ def server_candidates(language: str, root: str | Path = ROOT
             "available": found is not None,
             "path": found,
             "command": _format_command(argv),
+            "install": list(spec.install),
+            "install_command": _format_command(spec.install) if spec.install else None,
         })
     return out
 
@@ -1738,4 +1790,5 @@ __all__ = [
     "get_client",
     "normalize_language",
     "server_candidates",
+    "workspace_root",
 ]

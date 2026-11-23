@@ -62,7 +62,7 @@ candidate wins.
 | Language | Candidate order | Notes |
 |---|---|---|
 | `python` | `pyright-langserver --stdio`, then `pylsp` | pyright is the intended server; pylsp is the fallback |
-| `rust` | `rust-analyzer` | install the rustup component: `rustup component add rust-analyzer` |
+| `rust` | `rust-analyzer` | install the rustup component: `rustup component add rust-analyzer`; candidates report this as `install_command` |
 | `c` / `cpp` | `clangd` | uses `compile_commands.json`/`compile_flags.txt` when present |
 | `typescript` | `typescript-language-server --stdio` | absent in this environment |
 | `javascript` | `typescript-language-server --stdio` | same server, JS language id |
@@ -263,12 +263,21 @@ Verification in this tree on 2026-11-23:
 
 ```text
 OZAGIA_LIVE_LSP=1 PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_lsp.py -rs
-18 passed, 1 skipped in 1.83s
-# live pyright definition passed; rust-analyzer 1.97.1 started and reported
-# available, but the immediate first definition was empty while it indexed.
-# The gated smoke skips rather than inventing an answer (Phase 4 adds a
-# bounded warm-up/retry).
+22 passed in 10.72s
+# live pyright definition passed. The Rust live suite waits for rust-analyzer
+# to finish indexing, then checks definition, references, document symbols,
+# diagnostics, incoming calls and rename preview against a small Cargo project.
 ```
+
+Rust workspace roots are selected from the nearest `Cargo.toml`, preferring a
+`[workspace]` manifest above a member crate. A file under `crates/x/src` uses
+the workspace root; a standalone crate uses its own directory. Other languages
+keep the repository root.
+
+The gated Rust test is deliberately patient: rust-analyzer answers the first
+query after background indexing, so the test polls with a 25 s bound and skips
+only if the server never becomes ready. The client itself still reports an
+empty first answer honestly and does not invent one.
 
 ## Integration notes (MCP / CLI, owner: central integrator)
 
@@ -318,9 +327,10 @@ OZAGIA_LIVE_LSP=1 PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_lsp.py
   rather than inventing answers.
 - The dev toolchain has pyright, clangd and rust-analyzer 1.97.1 (the rustup
   component is installed). Rust-analyzer still indexes a Cargo workspace
-  lazily, so an immediate first query can be empty; no TypeScript, Kotlin or
-  Swift server is installed by the default venv. Availability means "binary
-  found".
+  lazily, so an immediate first query can be empty; the live suite waits, but
+  the client does not auto-warm on every call. No TypeScript, Kotlin or Swift
+  server is installed by the default venv. Availability means "binary found",
+  and missing rust-analyzer candidates report the exact rustup command.
 - Call hierarchy depends on server support and on a hierarchy item at the
   exact position. An empty `items` list is reported, not guessed.
 - Cold indexing is not a readiness barrier. References retry an empty answer,

@@ -3167,9 +3167,12 @@ class DevMemory:
         ready = [c for c in candidates if c["available"]]
         if not ready:
             tried = ", ".join(c["name"] for c in candidates) or "none registered"
+            install = next((c.get("install_command") for c in candidates
+                            if c.get("install_command")), None)
             result["precision"] = {
                 "lsp": f"unavailable: no {lang} language server found "
-                       f"(tried: {tried})"}
+                       f"(tried: {tried})"
+                       + (f"; install with: {install}" if install else "")}
             return
         server = ready[0]["name"]
         lines = self._read(rel).split("\n")
@@ -3233,12 +3236,13 @@ class DevMemory:
     # -- LSP bridge (compiler-accurate; lazy server) ---------------------- #
     def _lsp_client(self, file: str, language: str | None = None,
                     command: str | None = None):
-        from ozagia.lsp import detect_language, get_client
+        from ozagia.lsp import detect_language, get_client, workspace_root
         lang = language or detect_language(file)
         if not lang:
             return None, {"ok": False,
                           "error": f"no LSP language for {file!r}"}
-        return get_client(self.raw_repo_root, lang, command), None
+        root = workspace_root(self.raw_repo_root, file, lang)
+        return get_client(root, lang, command), None
 
     def lsp_status(self) -> dict[str, Any]:
         from ozagia.lsp import available_servers

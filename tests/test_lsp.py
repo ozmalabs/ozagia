@@ -13,6 +13,7 @@ import json
 import os
 import shutil
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -24,6 +25,7 @@ from ozagia.lsp import (
     available_servers,
     detect_language,
     server_candidates,
+    workspace_root,
 )
 
 
@@ -702,6 +704,45 @@ def _cargo_project(root: Path) -> None:
 
 
 @pytest.mark.skipif(not LIVE, reason=LIVE_REASON)
+def _wait_nonempty(fetch, *, timeout: float = 25.0) -> dict:
+    deadline = time.monotonic() + timeout
+    last: dict = {}
+    while time.monotonic() < deadline:
+        last = fetch()
+        if last.get("ok") and any(last.get(key) for key in (
+                "locations", "count", "calls", "files", "symbols")):
+            return last
+        time.sleep(0.25)
+    return last
+
+
+def test_workspace_root_prefers_cargo_workspace(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    crate = workspace / "crates" / "one"
+    (crate / "src").mkdir(parents=True)
+    (workspace / "Cargo.toml").write_text(
+        "[workspace]\nmembers = [\"crates/one\"]\n", encoding="utf-8")
+    (crate / "Cargo.toml").write_text(
+        "[package]\nname = \"one\"\nversion = \"0.1.0\"\n", encoding="utf-8")
+    (crate / "src" / "lib.rs").write_text("pub fn one() {}\n")
+
+    assert workspace_root(workspace, "crates/one/src/lib.rs", "rust") == workspace
+    assert workspace_root(workspace, "crates/one/src/lib.rs") == workspace
+    # A standalone crate selects its own manifest directory.
+    assert workspace_root(crate, "src/lib.rs", "rust") == crate
+    # Non-Rust languages keep the repository root.
+    (tmp_path / "a.py").write_text("x = 1\n")
+    assert workspace_root(tmp_path, "a.py", "python") == tmp_path
+
+
+def test_rust_server_candidate_reports_install_hint() -> None:
+    candidate = server_candidates("rust", ROOT)[0]
+    assert candidate["name"] == "rust-analyzer"
+    assert candidate["install"] == [
+        "rustup", "component", "add", "rust-analyzer"]
+    assert candidate["install_command"] == "rustup component add rust-analyzer"
+
+
 def test_live_rust_analyzer_definition(tmp_path: Path) -> None:
     if shutil.which("rust-analyzer") is None:
         pytest.skip("rust-analyzer is not on PATH")
@@ -710,7 +751,8 @@ def test_live_rust_analyzer_definition(tmp_path: Path) -> None:
     _cargo_project(root)
     client = LSPClient(root, "rust", timeout=30.0, initialize_timeout=60.0)
     try:
-        response = client.definition("src/main.rs", 3, 12)
+        response = _wait_nonempty(
+            lambda: client.definition("src/main.rs", 3, 12))
     finally:
         status = client.server_status()
         client.close()
@@ -721,6 +763,44 @@ def test_live_rust_analyzer_definition(tmp_path: Path) -> None:
         pytest.skip(f"rust-analyzer gave no definition yet; status={status}")
     assert any(loc["path"].endswith("src/main.rs")
                for loc in response["locations"])
+
+
+@pytest.mark.skipif(not LIVE, reason=LIVE_REASON)
+def test_live_rust_analyzer_navigation_suite(tmp_path: Path) -> None:
+    if shutil.which("rust-analyzer") is None:
+        pytest.skip("rust-analyzer is not on PATH")
+    root = tmp_path / "rust_nav"
+    root.mkdir()
+    _cargo_project(root)
+    client = LSPClient(root, "rust", timeout=30.0, initialize_timeout=60.0)
+    try:
+        definition = _wait_nonempty(
+            lambda: client.definition("src/main.rs", 3, 12))
+        if not definition.get("locations"):
+            pytest.skip("rust-analyzer did not finish indexing")
+        references = _wait_nonempty(
+            lambda: client.references("src/main.rs", 0, 3))
+        assert references["ok"], references
+        assert references["count"] >= 1
+
+        symbols = _wait_nonempty(
+            lambda: client.document_symbols("src/main.rs"))
+        assert symbols["ok"] and symbols["count"] >= 1
+
+        diagnostics = client.diagnostics("src/main.rs")
+        assert diagnostics["ok"], diagnostics
+
+        calls = _wait_nonempty(
+            lambda: client.incoming_calls("src/main.rs", 0, 3))
+        assert calls["ok"], calls
+        assert calls["count"] >= 1
+
+        rename = _wait_nonempty(
+            lambda: client.rename_preview("src/main.rs", 0, 3, "beta"))
+        assert rename["ok"], rename
+        assert rename["files"]
+    finally:
+        client.close()
 
 
 @pytest.mark.skipif(not LIVE, reason=LIVE_REASON)

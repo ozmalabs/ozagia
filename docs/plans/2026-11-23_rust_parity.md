@@ -1,6 +1,6 @@
 # Rust parity with Python — plan (2026-11-23)
 
-Status: Phases 0, 0.5, 1, 2 and 3 implemented (2026-11-23); Phases 4–7 proposed. This plan closes
+Status: Phases 0, 0.5, 1, 2, 3 and 4 implemented (2026-11-23); Phases 5–7 proposed. This plan closes
 the gap between `.rs` and `.py` support across the graph, tags,
 symbol-question layer, edits, LSP, tests and documentation, and adds the
 initial setup for a Python→Rust migration assistant built on the same graph.
@@ -38,7 +38,7 @@ do in a Python repository today, at the same honesty level:
 | Repo map | file edges from resolved imports + names | file edges from resolved Rust `use`/glob module targets plus name edges; `mod` edges resolve |
 | Symbol graph | local / import / name resolution; pyright precise mode | Phase 2 Rust resolver covers `crate`/`self`/`super`/workspace crates, aliases, globs and bounded re-exports; external crates and ambiguous bindings stay unresolved; Python resolution unchanged |
 | Edits | symbol ops (`replace_symbol`, `replace_body`, `insert_import`, `delete_symbol`, `rename_symbol`, …) with AST parse gate | Phase 3 symbol ops (`edit/rust_edit.py`) with tree-sitter parse gate, group import merge, conservative same-file rename, LSP preview application; CST subtree ops remain |
-| LSP | pyright live | registry entry exists; Phase 0 installed rust-analyzer 1.97.1, but the first query can be empty while it indexes a workspace |
+| LSP | pyright live | rust-analyzer 1.97.1 installed; workspace-root selection, install hints, live definition/references/symbols/diagnostics/call-hierarchy/rename tests pass; first query still waits for indexing |
 | Lint | ruff | rustfmt (already parity for formatting; no Rust linter like clippy) |
 | Tests | `pytest` capture, affected subset, result cache | `cargo test` is not a captured command; no crate or test-target nodes |
 | Dependencies/review | Python manifests + trust-boundary dataflow | Cargo.lock inventory, crates.io, purls, strict SemVer advisories; no Rust dataflow |
@@ -258,21 +258,27 @@ availability of a parser.
   stale-base/parse-gate/backup and dispatch routing. Focused suites pass; the
   full suite is 6248 passed / 22 skipped and ruff is clean.
 
-### Phase 4 — LSP parity (1–2 days)
+### Phase 4 — LSP parity (1–2 days) — implemented 2026-11-23
 
-- Toolchain/status: `ozagia-toolchain` and `lsp.server_status()` explain the
-  rustup component state and the exact install command; `available` continues
-  to mean "binary found", not "protocol works".
-- Live tests: a minimal Cargo fixture exercises definition, references,
-  document symbols, diagnostics, call hierarchy and rename preview under
-  `OZAGIA_LIVE_LSP=1`; skip when the component or a Cargo project is absent.
-- Root selection: use the workspace root (`Cargo.toml`) rather than the file's
-  directory; keep one shared client per root/language.
-- Precise mode integration: `symbol_graph` uses LSP confirmation for Rust the
-  same way it does for Python; expose `precision` facts and fall back silently
-  to syntactic rows when unavailable.
-- Exit: live Rust LSP suite passes when the component is installed; all
-  unavailable paths are honest and tested.
+- `ServerSpec` candidates now carry an install command; the Rust candidate
+  reports `rustup component add rust-analyzer`, and `server_status()` keeps
+  `available` meaning "binary found", not "protocol works".
+- Added `lsp.workspace_root(root, path, language)`: Rust selects the nearest
+  `Cargo.toml`, preferring a `[workspace]` manifest above a member crate;
+  standalone crates use their own directory. `DevMemory._lsp_client` uses it,
+  so one client is shared per workspace root/language. Other languages keep
+  the repository root.
+- The gated live suite now covers definition, references, document symbols,
+  diagnostics, incoming call hierarchy and rename preview against a minimal
+  Cargo project. It polls with a 25 s bound while rust-analyzer indexes and
+  skips only when the server never becomes ready.
+- Precise mode (`dev_symbol_callers` / `dev_symbol_graph_impact` with
+  `precise=true`) already shares the refined LSP path; it now uses the
+  workspace-rooted client and reports the install hint when the server is
+  absent.
+- Verification: `OZAGIA_LIVE_LSP=1 pytest tests/test_lsp.py` → 22 passed on
+  2026-11-23 with rust-analyzer 1.97.1; new unit tests cover workspace-root and
+  install-hint selection. Full suite: 6251 passed / 22 skipped; ruff clean.
 
 ### Phase 5 — `cargo test` parity (5–8 days)
 
@@ -498,7 +504,7 @@ python -m ozagia.eval.bench --root <rust-repo> --cold --check
 | 1 — parser + tags + graph fields (done 2026-11-23) | 2–3 |
 | 2 — modules/imports/symbol graph (done 2026-11-23) | 3–5 |
 | 3 — symbol edits (done 2026-11-23) | 3–4 |
-| 4 — LSP | 1–2 |
+| 4 — LSP (done 2026-11-23) | 1–2 |
 | 5 — cargo test | 5–8 |
 | 6 — migration assistant (initial setup) | 3–5 |
 | 7 — optional SCIP/review/docs | 2–4 |

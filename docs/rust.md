@@ -1,6 +1,6 @@
 # Rust support
 
-Status: Phases 0, 0.5, 1, 2 and 3 of
+Status: Phases 0, 0.5, 1, 2, 3 and 4 of
 [`docs/plans/2026-11-23_rust_parity.md`](plans/2026-11-23_rust_parity.md),
 2026-11-23. This page describes what works today, not the target state. The
 `ozagia languages` command and automatic component checks are documented in
@@ -21,7 +21,7 @@ updated as each phase lands.
 | Symbol questions | `dev_symbol_*` / `dev_callers` / `dev_callees` resolve Rust `crate`/`self`/`super`/workspace imports, aliases, globs and bounded re-exports; external crates are unresolved, never guessed by name; there is no type inference | `ozagia core.symbol_graph` CLI or the MCP tools |
 | Structural edits | symbol ops through `edit/rust_edit.py`: `replace_symbol`, `replace_body`, `delete_symbol`, `insert_before_symbol`, `insert_after_symbol`, `insert_import`, `replace_span`, `rename_symbol`; CST subtree ops remain available; preview by default, tree-sitter parse gate | `ozagia edit` script with a `file` ending in `.rs` |
 | Lint | `rustfmt --check --edition <Cargo edition>` when `rustfmt` is on `PATH`; config `[lint] rust = "auto" "rustfmt" "off"` | `ozagia-settings`; edit-time lint |
-| LSP | rust-analyzer through `ozagia.lsp`: definition, references, document symbols, hover, diagnostics, call hierarchy, rename preview | `ozagia languages ensure --root .` or `ozagia[lang-rust]`; `OZAGIA_LIVE_LSP=1` for the gated smoke |
+| LSP | rust-analyzer through `ozagia.lsp`: definition, references, document symbols, hover, diagnostics, call hierarchy, rename preview; workspace-root selection and install hints | `ozagia languages ensure --root .` or `ozagia[lang-rust]`; `OZAGIA_LIVE_LSP=1` for the gated suite |
 | Dependencies and review | Cargo.lock inventory, crates.io detection, `pkg:cargo/…` purls, strict SemVer advisory matching, `cargo-audit` in the allowlisted scanners | `ozagia-review`, deep review dependencies subject |
 | SCIP | the importer is language-agnostic; a Rust index can be produced with `rust-analyzer scip .` and `scip print --json` (recipe is provisional until Phase 7) | `index/scip.py` |
 | `cargo test` selection | not captured; there are no Rust test-target nodes yet | Phase 5 |
@@ -125,8 +125,17 @@ automatically. Set `OZAGIA_LANGUAGE_AUTOINSTALL=0` to disable that, or pass
 Rust-analyzer indexes a Cargo workspace lazily: the first definition or
 reference query can return an empty answer, then a `content modified` protocol
 error, before the project is ready. The client reports the empty answer
-honestly; the gated live smoke can still skip on a cold server. Phase 4 adds
-the bounded warm-up/retry and the full live suite.
+honestly. `workspace_root()` selects the nearest `Cargo.toml`, preferring a
+`[workspace]` manifest above a member crate; a standalone crate uses its own
+directory. Missing server candidates carry the exact
+`rustup component add rust-analyzer` command.
+
+The gated live suite (2026-11-23) passes definition, references, document
+symbols, diagnostics, incoming call hierarchy and rename preview against a
+small Cargo project. It polls with a 25 s bound while rust-analyzer indexes and
+skips only if the server never becomes ready. `precise=true` on
+`dev_symbol_callers` / `dev_symbol_graph_impact` uses the same workspace-rooted
+client and reports LSP confirmation or an honest unavailable/error status.
 
 ## Edits
 
@@ -187,4 +196,5 @@ PYTHONPATH=src .venv/bin/python -m pytest -q \
 
 # LSP is gated and needs the rustup component
 OZAGIA_LIVE_LSP=1 PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_lsp.py
+# 22 passed with rust-analyzer 1.97.1 on 2026-11-23
 ```

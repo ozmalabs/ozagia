@@ -368,10 +368,12 @@ are LSP-native 0-based lines/UTF-16 characters.
 - Python: `.venv/bin/pyright-langserver --stdio` (live definition smoke passed).
 - Rust: `rust-analyzer` (install the component with
   `rustup component add rust-analyzer`; the dev toolchain has 1.97.1. The
-  first query can be empty while it indexes; status reports honestly).
+  workspace root is selected from `Cargo.toml`, preferring a `[workspace]`
+  manifest above a member crate. The first query can be empty while it
+  indexes; status reports honestly).
 - C/C++: `clangd`; TypeScript: `typescript-language-server` if installed.
-- `dev_rename_preview` is review-only. Applying a rename still goes through the
-  semantic edit transaction.
+- `dev_rename_preview` is review-only. Applying a same-file Rust preview goes
+  through `edit/rust_edit.py`; cross-file previews stay review-only.
 - When a server is absent or a query fails, the result is `ok:false` with a
   reason; file-level `dev_impact` / `dev_repo_map` remain the fallback.
 - Diagnostics are push-based; `published:false` means nothing arrived, not
