@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ozagia"
-version = "0.1.4.dev0"
+version = "0.1.4"
 description = "Ozma advanced graph integration agent: a live code graph for LLM coding agents, as a library, tool integrations and a harness."
 readme = "README.md"
 license = "MIT"

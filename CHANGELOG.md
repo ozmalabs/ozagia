@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.4 (2026-11-24)
 
 - Rust graph imports now include resolved `use` records as `File -> File`
   edges (crate/self/super, child/root modules and workspace libraries), so
