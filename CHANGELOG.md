@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- Rust parity (Phases 1–7): tree-sitter structural tags, symbols, modules and
+  imports; symbol-addressed Rust edits with a parse gate; rust-analyzer LSP
+  parity with workspace-root routing and install hints; captured `cargo test`
+  with stable human-output parsing, target-level affected selection and cache;
+  a validated Python→Rust migration overlay with inventories, matcher, hints,
+  status/tasks/scaffold and `dev_migration`; and the optional SCIP fixture,
+  benchmark and Rust tier declaration. The tier remains syntactic by default;
+  rust-analyzer/SCIP are optional precise layers, and a Rust dataflow analyzer
+  is a separate plan.
+- `cargo test` capture supports package/target/feature/filter mapping, reports
+  linked targets after a change, skips cached targets, never caches failures,
+  handles `test = false`/`harness = false`, and records captured failures in
+  the daemon working set and root test record without clearing the other test
+  runner's failures.
+- `ozagia migration status|tasks|scaffold` and `dev_migration` read bounded
+  Python and Rust inventories, keep explicit pairs authoritative, report
+  inference candidates without accepting them, and keep scaffold preview-only
+  unless the CLI `--write` transaction is used.
+
 - Repo map retrieval now scores exact definition names and path segments above
   substring hits, demotes tests/docs/vendored files, and fuses the graph/name
   ranking with bounded BM25 content candidates using confidence-weighted rank
