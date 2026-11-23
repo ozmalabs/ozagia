@@ -187,6 +187,8 @@ def query(memory: Any, kind: Any, target: Any, *, depth: Any = 1,
                 "text": safe_text[:6000],
                 "freshness": state, "coverage": coverage, "resources": resources,
                 "truncated": len(safe_text) > 6000,
+                **({"matches": result["matches"][:10]}
+                   if isinstance(result.get("matches"), list) else {}),
                 **({"error": "outline omitted because it has no safe in-checkout citation"}
                    if not resources and result.get("ok") else {}),
                 **({"error": str(result["error"])[:500]}

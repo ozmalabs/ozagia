@@ -121,6 +121,7 @@ class Workspace:
         base = list(context.module)
         if parts and parts[0] == "crate":
             parts = parts[1:]
+            base = []
         elif parts and parts[0] == "self":
             parts = parts[1:]
         elif parts and parts[0] == "super":
@@ -443,6 +444,35 @@ def _populate(workspace: Workspace, target: CrateTarget) -> None:
                 workspace.pub_bindings[(rel, scope, name)] = tag
 
 
+def targets_for_manifest(root: str | Path, manifest: str) -> list[CrateTarget]:
+    """Cargo targets declared by one manifest, without parsing source files."""
+    root = Path(root).resolve()
+    rel = PurePosixPath(str(manifest)).as_posix()
+    if rel.startswith("../") or not _inside(root, rel):
+        return []
+    try:
+        text = (root / rel).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    return _target_specs(rel, text, root)
+
+
+def package_targets(root: str | Path, *, max_manifests: int = MAX_MANIFESTS
+                    ) -> dict[str, list[CrateTarget]]:
+    """Package name to its Cargo targets, read from manifests only.
+
+    This is the cheap lookup used for package-name resolution in `outline`;
+    unlike :func:`discover` it does not parse module trees.
+    """
+    root = Path(root).resolve()
+    paths, _scanned, _truncated, _omissions = _manifest_paths(root)
+    out: dict[str, list[CrateTarget]] = {}
+    for rel in paths[:max_manifests]:
+        for target in targets_for_manifest(root, rel):
+            out.setdefault(target.package, []).append(target)
+    return out
+
+
 def discover(root: str | Path, *, max_manifests: int = MAX_MANIFESTS
              ) -> Workspace:
     """Read Cargo targets and build the module/import map for `root`."""
@@ -458,11 +488,7 @@ def discover(root: str | Path, *, max_manifests: int = MAX_MANIFESTS
         workspace.not_checked.append("Cargo manifest limit reached")
     targets: list[CrateTarget] = []
     for rel in paths:
-        try:
-            text = (root / rel).read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        targets.extend(_target_specs(rel, text, root))
+        targets.extend(targets_for_manifest(root, rel))
     for target in targets:
         workspace.targets[target.id] = target
         if target.kind == "lib":
@@ -482,4 +508,6 @@ __all__ = [
     "ModuleEntry",
     "Workspace",
     "discover",
+    "package_targets",
+    "targets_for_manifest",
 ]

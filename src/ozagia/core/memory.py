@@ -522,6 +522,67 @@ def _rust_under_test_target(rel: str, manifest: str) -> bool:
     return bool(rest) and rest[0] in _RUST_TEST_ROOT_DIRS
 
 
+def _rust_parent(rel: str) -> str:
+    """The root-relative directory of `rel` ("" at the root)."""
+    parent = PurePosixPath(rel).parent.as_posix()
+    return "" if parent == "." else parent
+
+
+def _rust_module_parts(rel: str, base: str) -> tuple[str, ...]:
+    """The module path of `rel` relative to a crate target's base directory."""
+    path = PurePosixPath(rel)
+    if base:
+        try:
+            path = path.relative_to(base)
+        except ValueError:
+            return ()
+    parts = list(path.parts)
+    if not parts:
+        return ()
+    name = parts[-1]
+    if name in _RUST_CRATE_ROOT_FILES:
+        return ()
+    if name == "mod.rs":
+        return tuple(parts[:-1])
+    parts[-1] = PurePosixPath(name).stem
+    return tuple(parts)
+
+
+def _rust_fallback_context(rel: str) -> tuple[str, tuple[str, ...]]:
+    """A best-effort crate base and module path without a Cargo manifest."""
+    path = PurePosixPath(rel)
+    parts = path.parts
+    if path.name in _RUST_CRATE_ROOT_FILES:
+        return _rust_parent(rel), ()
+    for i, part in enumerate(parts[:-1]):
+        if part in _RUST_TEST_ROOT_DIRS and (i == 0 or parts[i - 1] != "src"):
+            base = "/".join(parts[:i + 1])
+            return base, _rust_module_parts(rel, base)
+    if len(parts) >= 3 and parts[-3] == "src" and parts[-2] == "bin":
+        base = "/".join(parts[:-1])
+        return base, ()
+    if "src" in parts[:-1]:
+        before = list(parts[:-1])
+        index = len(before) - 1 - before[::-1].index("src")
+        base = "/".join(parts[:index + 1])
+        return base, _rust_module_parts(rel, base)
+    base = _rust_parent(rel)
+    return base, _rust_module_parts(rel, base)
+
+
+def _rust_inline_prefixes(modules: Iterable[dict[str, Any]]) -> frozenset[str]:
+    """The qualname prefixes of inline modules declared in one file."""
+    out: set[str] = set()
+    for module in modules:
+        if not module.get("inline"):
+            continue
+        parent = tuple(str(part) for part in module.get("parent") or ())
+        name = str(module.get("name") or "")
+        if name:
+            out.add(".".join((*parent, name)))
+    return frozenset(out)
+
+
 def _rust_parse(path: Path, src: str | None = None) -> dict[str, Any] | None:
     """The Phase 1 Rust source model, mapped to the graph's legacy keys."""
     from ozagia.index.rust_symbols import parse_rust
@@ -824,6 +885,12 @@ class FileIndexer:
         self.files: dict[str, int] = {}
         self.table: dict[str, dict[str, Any]] = {}
         self._ref_seen: dict[int, set[tuple]] = {}
+        # Rust target/package lookups are lazy and shared by every file of a
+        # build (or one reingest call).
+        self._rust_targets: dict[str, list[Any]] = {}
+        self._rust_context: dict[str, tuple[str, tuple[str, ...], str | None]] = {}
+        self._rust_packages: dict[
+            str, list[tuple[str, tuple[str, ...], str]]] | None = None
         # Parsed file texts, handed to adapter indexers.
         self.sources: list[Any] = []
         self.tests: list[Any] = []
@@ -957,6 +1024,203 @@ class FileIndexer:
             for tid in test_ids:
                 b.edge(tid, "mentions_file", nid)
 
+    def _rust_targets_for(self, manifest: str) -> list[Any]:
+        targets = self._rust_targets.get(manifest)
+        if targets is None:
+            from ozagia.core import rust_modules
+            try:
+                targets = rust_modules.targets_for_manifest(self.root, manifest)
+            except Exception:  # noqa: BLE001 - a manifest is optional context
+                targets = []
+            self._rust_targets[manifest] = targets
+        return targets
+
+    def _rust_file_context(self, rel: str
+                           ) -> tuple[str, tuple[str, ...], str | None]:
+        """The crate base, module path and crate-root file of `rel`."""
+        cached = self._rust_context.get(rel)
+        if cached is not None:
+            return cached
+        manifest = _rust_manifest_for(self.root, rel)
+        choices: list[tuple[int, int, int, Any]] = []
+        if manifest is not None:
+            for target in self._rust_targets_for(manifest):
+                base = _rust_parent(target.root)
+                if target.root == rel:
+                    choices.append((0, -len(base),
+                                    0 if target.kind == "lib" else 1, target))
+                elif base and rel.startswith(base + "/"):
+                    choices.append((1, -len(base),
+                                    0 if target.kind == "lib" else 1, target))
+        if choices:
+            target = min(choices, key=lambda item: item[:3])[3]
+            base = _rust_parent(target.root)
+            parts = (() if rel == target.root
+                     else _rust_module_parts(rel, base))
+            context = (base, parts, target.root)
+        else:
+            base, parts = _rust_fallback_context(rel)
+            root_file = None
+            for name in ("lib.rs", "main.rs"):
+                candidate = f"{base}/{name}" if base else name
+                if (self.root / candidate).is_file():
+                    root_file = candidate
+                    break
+            if rel in (f"{base}/lib.rs", f"{base}/main.rs"):
+                root_file = rel
+            context = (base, parts, root_file)
+        self._rust_context[rel] = context
+        return context
+
+    def _rust_package_contexts(self, name: str
+                               ) -> list[tuple[str, tuple[str, ...], str]]:
+        """Crate base, module prefix and root file for a workspace crate."""
+        if self._rust_packages is None:
+            from ozagia.core import rust_modules
+            packages: dict[
+                str, list[tuple[str, tuple[str, ...], str]]] = {}
+            try:
+                found = rust_modules.package_targets(self.root)
+            except Exception:  # noqa: BLE001 - no Cargo workspace is fine
+                found = {}
+            for package, targets in found.items():
+                # Only libraries can be imported by name from another crate.
+                ordered = sorted((t for t in targets if t.kind == "lib"),
+                                 key=lambda t: (len(t.root), t.root))
+                for target in ordered:
+                    entry = (_rust_parent(target.root), (), target.root)
+                    for label in (package, target.name):
+                        key = label.replace("-", "_")
+                        rows = packages.setdefault(key, [])
+                        if entry not in rows:
+                            rows.append(entry)
+            self._rust_packages = packages
+        return self._rust_packages.get(name.replace("-", "_"), [])
+
+    def _rust_use_candidates(self, rel: str, tag: dict[str, Any],
+                             inline: frozenset[str] = frozenset()) -> list[str]:
+        """Files a Rust `use` can resolve to, in Rust's resolution order."""
+        module = str(tag.get("module") or "")
+        imported = str(tag.get("imported") or "")
+        parts = [part for part in module.split("::") if part]
+        base, current, root_file = self._rust_file_context(rel)
+        scope = str(tag.get("scope") or "")
+        if scope and inline:
+            # `scope` is a module path for a module-level `use` and a symbol
+            # qualname for a function-local one. Only a known inline-module
+            # prefix changes the module context; a function name does not.
+            prefixes = [prefix for prefix in inline
+                        if scope == prefix or scope.startswith(prefix + ".")]
+            if prefixes:
+                current = current + tuple(max(prefixes, key=len).split("."))
+        modules: list[tuple[str, tuple[str, ...]]] = []
+        roots: list[str] = []
+
+        def add_module(at: str, path: tuple[str, ...]) -> None:
+            item = (at, tuple(path))
+            if item not in modules:
+                modules.append(item)
+
+        def add_use_module(at: str, path: tuple[str, ...]) -> None:
+            # `use a::b::c` names the child module `a::b::c` when it exists;
+            # otherwise `c` is an item in `a::b`. Try the module file first.
+            if imported and imported != "*" and imported[:1].islower():
+                add_module(at, path + (imported,))
+            add_module(at, path)
+
+        def add_root(path: str | None) -> None:
+            if path and path not in roots:
+                roots.append(path)
+
+        first = parts[0] if parts else ""
+        if first == "crate":
+            rest = tuple(parts[1:])
+            if rest:
+                add_use_module(base, rest)
+            else:
+                if imported and imported != "*" and imported[:1].islower():
+                    add_module(base, (imported,))
+                add_root(root_file)
+        elif first == "self":
+            rest = tuple(parts[1:])
+            if rest:
+                add_use_module(base, current + rest)
+            else:
+                if imported and imported != "*" and imported[:1].islower():
+                    add_module(base, current + (imported,))
+                add_root(root_file if not current else rel)
+        elif first == "super":
+            rest = list(parts)
+            parent = list(current)
+            while rest and rest[0] == "super":
+                if not parent:
+                    return []
+                parent.pop()
+                rest.pop(0)
+            if rest:
+                add_use_module(base, tuple(parent) + tuple(rest))
+            else:
+                if imported and imported != "*" and imported[:1].islower():
+                    add_module(base, tuple(parent) + (imported,))
+                if parent:
+                    add_module(base, tuple(parent))
+                else:
+                    add_root(root_file)
+        elif first:
+            if first[:1].isupper():
+                return []
+            add_use_module(base, current + tuple(parts))
+            add_use_module(base, tuple(parts))
+            for crate_base, prefix, crate_root in self._rust_package_contexts(first):
+                rest = tuple(parts[1:])
+                if rest:
+                    add_use_module(crate_base, prefix + rest)
+                else:
+                    if imported and imported != "*" and imported[:1].islower():
+                        add_module(crate_base, prefix + (imported,))
+                    add_root(crate_root)
+        elif imported and imported != "*" and imported[:1].islower():
+            add_module(base, current + (imported,))
+            add_module(base, (imported,))
+
+        files: list[str] = []
+
+        def add_file(path: str) -> None:
+            candidate = posixpath.normpath(path)
+            if (candidate in ("", ".", "..") or candidate.startswith("../")
+                    or candidate.startswith("/") or candidate == rel):
+                return
+            if candidate not in files:
+                files.append(candidate)
+
+        for at, path in modules:
+            if not path:
+                continue
+            stem = "/".join(part for part in (at, *path) if part)
+            add_file(stem + ".rs")
+            add_file(stem + "/mod.rs")
+        for path in roots:
+            add_file(path)
+        return files
+
+    def _rust_imports(self, fid: int, rel: str, entry: dict[str, Any],
+                      imports: Iterable[dict[str, Any]],
+                      modules: Iterable[dict[str, Any]] = ()) -> None:
+        """Resolve `use` records to file-level `imports` edges and refs."""
+        inline = _rust_inline_prefixes(modules)
+        seen: set[str] = set()
+        for tag in imports:
+            candidates = self._rust_use_candidates(rel, tag, inline)
+            if not candidates:
+                continue
+            self._ref(entry, ["rs_use", *candidates])
+            for target in candidates:
+                if target in seen or not (self.root / target).is_file():
+                    continue
+                seen.add(target)
+                self.b.edge(fid, "imports", self.file_node(target))
+                break
+
     def _rust_modules(self, fid: int, rel: str, entry: dict[str, Any],
                       modules: Iterable[dict[str, Any]]) -> None:
         """Resolve external `mod x;` declarations, including `#[path]`."""
@@ -1033,6 +1297,8 @@ class FileIndexer:
                 return
             test_ids = self._rust_symbols(fid, rel, parsed)
             self._rust_modules(fid, rel, entry, parsed["mods"])
+            self._rust_imports(fid, rel, entry, parsed["imports"],
+                               parsed["mods"])
             self._rust_test_links(fid, rel, text, test_ids)
             self.sources.append(self._types[0](rel, fid,
                                                parsed.get("source") or ""))
@@ -1048,6 +1314,8 @@ class FileIndexer:
                 return
             test_ids = self._rust_symbols(fid, rel, parsed)
             self._rust_modules(fid, rel, entry, parsed["mods"])
+            self._rust_imports(fid, rel, entry, parsed["imports"],
+                               parsed["mods"])
             self._rust_test_links(fid, rel, text, test_ids)
             self.tests.append(self._types[1](
                 rel, fid, parsed.get("source") or "", test_ids))
@@ -1782,6 +2050,9 @@ class DevMemory:
         # read again.
         self._text_cache: dict[tuple[str, int, int], str] = {}
         self._staleness_memo: tuple[float, dict[str, Any]] | None = None
+        # Cargo package/target lookup for outline targets (lazy; cleared when
+        # a reingest may have changed a manifest).
+        self._cargo_package_cache: dict[str, list[Any]] | None = None
         # Token document frequency over labels, used only to weight a search
         # hit by how distinctive its matched words are. This is a mechanical
         # retrieval heuristic, not an agent decision.
@@ -1886,12 +2157,14 @@ class DevMemory:
         deleted), update the graph and, with `write`, rewrite the snapshot.
         Returns a `GraphDelta`. See `ozagia.core.reingest`."""
         from ozagia.core.reingest import reingest
+        self._cargo_package_cache = None
         return reingest(self, paths, write=write)
 
     def refresh(self, *, write: bool = True):
         """Reingest every file changed since the snapshot (see
         `pending_changes`). Returns a `GraphDelta`."""
         from ozagia.core.reingest import pending_changes, reingest
+        self._cargo_package_cache = None
         return reingest(self, pending_changes(self), write=write)
 
     def pending_changes(self, *, limit: int | None = None) -> list[str]:
@@ -2302,7 +2575,101 @@ class DevMemory:
         for nid in self._nodes_of("Doc"):
             if (self.node(nid) or {}).get("attrs", {}).get("path") == t:
                 return {"ok": True, "target": t, **self.outline(nid)}
-        return {"ok": False, "error": f"no file/symbol/seed/doc matching {t!r}"}
+        package = self._cargo_package_outline(t)
+        if package is not None:
+            return package
+        matches = self._outline_misses(t)
+        error = f"no file/symbol/seed/doc/package matching {t!r}"
+        if matches:
+            labels = [str(item.get("name") or item.get("path") or "")
+                      for item in matches[:6]]
+            error += "; did you mean: " + ", ".join(labels)
+        return {"ok": False, "error": error, "matches": matches}
+
+    def _cargo_packages(self) -> dict[str, list[Any]]:
+        if self._cargo_package_cache is None:
+            has_rust = any(
+                str((self.node(nid) or {}).get("attrs", {}).get("path") or "")
+                .endswith(".rs")
+                for nid in self._nodes_of("File"))
+            if not has_rust:
+                self._cargo_package_cache = {}
+                return self._cargo_package_cache
+            from ozagia.core import rust_modules
+            try:
+                found = rust_modules.package_targets(self.raw_repo_root)
+            except Exception:  # noqa: BLE001 - Cargo is optional context
+                found = {}
+            self._cargo_package_cache = found
+        return self._cargo_package_cache
+
+    def _cargo_package_outline(self, target: str) -> dict[str, Any] | None:
+        """Outline a Cargo package or target name, or None when none matches."""
+        raw = (target or "").strip()
+        if not raw:
+            return None
+        normalized = raw.replace("-", "_")
+        chosen: tuple[str, Any, tuple[int, int, str]] | None = None
+        for package, targets in sorted(self._cargo_packages().items()):
+            package_match = (package == raw
+                             or package.replace("-", "_") == normalized)
+            for item in targets:
+                name_match = (item.name == raw
+                              or item.name.replace("-", "_") == normalized)
+                if not package_match and not name_match:
+                    continue
+                rank = (0 if item.kind == "lib" else
+                        1 if item.kind == "bin" else 2)
+                key = (0 if package_match else 1, rank, item.root)
+                if chosen is None or key < chosen[2]:
+                    chosen = (package, item, key)
+        if chosen is None:
+            return None
+        package, item, _key = chosen
+        fnode = self._file_node(item.root)
+        if fnode is None:
+            return {
+                "ok": False,
+                "target": raw,
+                "package": package,
+                "error": (f"Cargo package {package!r} resolves to {item.root}, "
+                          "which is not in the graph"),
+                "matches": [{"kind": "package", "name": package,
+                             "path": item.root}],
+            }
+        return {"ok": True, "target": raw, "package": package,
+                "target_kind": item.kind, "target_name": item.name,
+                **self.outline(fnode)}
+
+    def _outline_misses(self, target: str) -> list[dict[str, Any]]:
+        """Bounded package/file candidates for a failed outline lookup."""
+        needle = (target or "").strip().lower()
+        if not needle:
+            return []
+        matches: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+
+        def add(kind: str, label: str, path: str = "") -> None:
+            key = (kind, label)
+            if not label or key in seen or len(matches) >= 10:
+                return
+            seen.add(key)
+            item = {"kind": kind, "name": label}
+            if path:
+                item["path"] = path
+            matches.append(item)
+
+        for package in sorted(self._cargo_packages()):
+            if needle in package.lower():
+                add("package", package)
+        for nid in self._nodes_of("File"):
+            path = str((self.node(nid) or {}).get("attrs", {}).get("path") or "")
+            if path and (needle in path.lower()
+                         or Path(path).stem.lower() == needle):
+                add("file", path, path)
+            if len(matches) >= 10:
+                break
+        return matches
 
     def _seed_snippet(self, attrs: dict[str, Any], *,
                       max_lines: int = 60) -> dict[str, Any]:

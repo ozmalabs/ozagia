@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Rust graph imports now include resolved `use` records as `File -> File`
+  edges (crate/self/super, child/root modules and workspace libraries), so
+  `imports:`/`imported by:` counts and repo-map edges reflect `use` as well as
+  `mod`; external crates stay unresolved, and reingest follows targets that
+  appear, move between `foo.rs`/`foo/mod.rs`, or are deleted. The Rust
+  resolver also starts `crate::` paths at the crate root when the importing
+  file is a nested module, instead of prefixing the current module.
+- `outline`/`ozagia_structure` resolves a Cargo package or target name to its
+  library (or first binary) root. A failed lookup now returns matching package
+  and file candidates in `matches` and in the error text.
+
 ## 0.1.3 (2026-11-23)
 
 - Rust parity (Phases 1–7): tree-sitter structural tags, symbols, modules and

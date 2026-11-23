@@ -90,3 +90,85 @@ def test_reingest_switches_module_layout(tmp_path: Path) -> None:
     mem.reingest(["src/target/mod.rs", "src/target.rs"])
 
     assert _imports(mem, "src/lib.rs") == {"file:src/target.rs"}
+
+
+def test_use_edges_resolve_local_and_workspace_files(tmp_path: Path) -> None:
+    _write(tmp_path / "Cargo.toml",
+           '[package]\nname = "demo"\nversion = "0.1.0"\nedition = "2021"\n'
+           '[workspace]\nmembers = ["crates/lib2"]\n')
+    _write(tmp_path / "src" / "lib.rs",
+           "mod model;\nmod nested;\n"
+           "use crate::model::Item;\nuse crate::nested::tick;\n"
+           "use serde::Serialize;\npub fn top() {}\n")
+    _write(tmp_path / "src" / "model.rs", "pub struct Item;\n")
+    _write(tmp_path / "src" / "nested.rs",
+           "mod inner { use super::model::Item; }\n"
+           "pub fn tick() {\n"
+           "    use super::model::Item;\n"
+           "    use crate::model::Item as I;\n"
+           "}\n")
+    _write(tmp_path / "src" / "nested" / "model.rs", "pub struct Item;\n")
+    _write(tmp_path / "crates" / "lib2" / "Cargo.toml",
+           '[package]\nname = "lib2"\nversion = "0.1.0"\nedition = "2021"\n')
+    _write(tmp_path / "crates" / "lib2" / "src" / "lib.rs",
+           "use demo::model::Item;\nuse external_crate::Thing;\n"
+           "pub fn use_it() {}\n")
+
+    mem = _build(tmp_path)
+
+    assert _imports(mem, "src/lib.rs") == {
+        "file:src/model.rs", "file:src/nested.rs"}
+    # An inline module's `super` is its real parent; a function-local `super`
+    # keeps the file's module context rather than treating the function name
+    # as a module.
+    assert _imports(mem, "src/nested.rs") == {
+        "file:src/model.rs", "file:src/nested/model.rs"}
+    # A workspace crate name resolves to its library file; the external crate
+    # stays unresolved and does not fall back to a same-named local symbol.
+    assert _imports(mem, "crates/lib2/src/lib.rs") == {"file:src/model.rs"}
+    assert len(mem.file("src/lib.rs")["imports"]) >= 2
+
+
+def test_reingest_use_edges_follow_a_target_appearing_and_going(
+        tmp_path: Path) -> None:
+    _write(tmp_path / "Cargo.toml",
+           '[package]\nname = "demo"\nversion = "0.1.0"\nedition = "2021"\n')
+    _write(tmp_path / "src" / "lib.rs",
+           "mod target;\nuse crate::target::thing;\npub fn run() {}\n")
+
+    mem = _build(tmp_path)
+    assert _imports(mem, "src/lib.rs") == set()
+
+    _write(tmp_path / "src" / "target.rs", "pub fn thing() {}\n")
+    mem.reingest(["src/target.rs"])
+    assert _imports(mem, "src/lib.rs") == {"file:src/target.rs"}
+
+    (tmp_path / "src" / "target.rs").unlink()
+    mem.reingest(["src/target.rs"])
+    assert _imports(mem, "src/lib.rs") == set()
+
+
+def test_outline_resolves_a_cargo_package_name_and_lists_misses(
+        tmp_path: Path) -> None:
+    _write(tmp_path / "Cargo.toml", '[workspace]\nmembers = ["widget"]\n')
+    _write(tmp_path / "widget" / "Cargo.toml",
+           '[package]\nname = "my-widget"\nversion = "0.1.0"\n'
+           'edition = "2021"\n[lib]\npath = "source/lib.rs"\n')
+    _write(tmp_path / "widget" / "source" / "lib.rs",
+           "pub fn build() -> bool { true }\n")
+
+    mem = _build(tmp_path)
+
+    for name in ("my-widget", "my_widget"):
+        out = mem.outline_target(name)
+        assert out["ok"] is True
+        assert out["package"] == "my-widget"
+        assert out["path"] == "widget/source/lib.rs"
+        assert "def build" in out["text"]
+
+    miss = mem.outline_target("widget")
+    assert miss["ok"] is False
+    assert "did you mean" in miss["error"]
+    assert any(item.get("kind") == "package"
+               and item.get("name") == "my-widget"
+               for item in miss["matches"])

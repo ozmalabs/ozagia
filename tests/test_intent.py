@@ -953,6 +953,22 @@ def test_structural_outline_withholds_text_without_safe_citation(mem, monkeypatc
     assert "no safe in-checkout citation" in result["error"]
 
 
+def test_structural_outline_miss_keeps_bounded_match_candidates(
+        mem, monkeypatch):
+    from ozagia.intent import structural
+
+    matches = [{"kind": "package", "name": "my-widget"},
+               {"kind": "file", "name": "widget/src/lib.rs",
+                "path": "widget/src/lib.rs"}]
+    monkeypatch.setattr(mem, "outline_target", lambda _target: {
+        "ok": False, "error": "no file/symbol/seed/doc/package matching 'widget'",
+        "matches": matches})
+    result = structural.query(mem, "outline", "widget")
+    assert result["ok"] is False
+    assert result["matches"] == matches
+    assert "no file/symbol" in result["error"]
+
+
 def test_shell_ls_refuses_truncated_or_unreadable_directory(mem, repo, monkeypatch):
     from ozagia.intent import run
     import os

@@ -20,7 +20,7 @@ updated as each phase lands.
 | Tags and repo map | bundled `index/queries/rust-tags.scm` superset: structs/enums/unions/type aliases, functions, impl-scoped methods (`Foo.bar`), traits, trait signatures, modules, macros, constants, statics, enum variants, calls, qualified calls and impl references; `use` bindings are import records | install the `treesitter` extra (`tree-sitter-rust`); `tag_languages.backend_status("rust")` |
 | Graph symbols | tree-sitter structural parser: qualified names, spans, doc comments, attributes, arguments, return type, visibility and test markers; regex fallback without the grammar | `build_index` / `ozagia-memory build` |
 | Test nodes | inline `#[test]`/`#[tokio::test]`/`#[rstest]` functions, plus `tests/*.rs`, `benches/*.rs` and example/test targets, produce Test nodes; `ozagia.core.rust_tests` maps each to its Cargo target and libtest name; integration tests gain `tests_module`/`tested_by_file` links to the crate library | graph Test nodes, `tests_for` |
-| Module edges | `mod x;` resolves to `x.rs` or `x/mod.rs`, with crate-root rules (see below); `#[path = "..."]` is recorded as unsupported, not guessed | graph `File -imports-> File` edges |
+| Module edges | `mod x;` resolves to `x.rs` or `x/mod.rs`, with crate-root rules (see below); resolved `use` records add `File -imports-> File` edges to local and workspace-library files, while external crates stay unresolved; `#[path = "..."]` is recorded as unsupported, not guessed | graph `File -imports-> File` edges, `imports:`/`imported by:` counts |
 | Symbol questions | `dev_symbol_*` / `dev_callers` / `dev_callees` resolve Rust `crate`/`self`/`super`/workspace imports, aliases, globs and bounded re-exports; external crates are unresolved, never guessed by name; there is no type inference | `ozagia core.symbol_graph` CLI or the MCP tools |
 | Structural edits | symbol ops through `edit/rust_edit.py`: `replace_symbol`, `replace_body`, `delete_symbol`, `insert_before_symbol`, `insert_after_symbol`, `insert_import`, `replace_span`, `rename_symbol`; CST subtree ops remain available; preview by default, tree-sitter parse gate | `ozagia edit` script with a `file` ending in `.rs` |
 | Lint | `rustfmt --check --edition <Cargo edition>` when `rustfmt` is on `PATH`; config `[lint] rust = "auto" "rustfmt" "off"` | `ozagia-settings`; edit-time lint |
@@ -45,6 +45,15 @@ updated as each phase lands.
 A module declaration that appears in both layouts (`foo.rs` and `foo/mod.rs`)
 uses `foo.rs`, matching rustc's preference order; the graph records both
 candidates so reingest notices a file moving between layouts.
+
+The same `File -> File` import edges are produced for `use` records that name a
+local module, using `crate::`, `self::`, `super::`, a child/root module path or
+a workspace library crate. External crates (`serde`, `std`, …) produce no edge.
+The graph records the candidate files for each `use`, so reingest follows a
+target that appears, moves between `foo.rs`/`foo/mod.rs`, or is deleted. The
+`imports:` count in a read header is the number of resolved project-file
+edges; a file whose `use` statements are all external reports 0, as Python
+reports for `import json`.
 
 Known gaps, deliberately reported rather than guessed:
 
@@ -101,10 +110,15 @@ The resolved imports produce:
 - symbol-graph edges with `resolution: "import"` and confidence 1.0 for exact
   targets; unresolved/external bindings suppress the bare-name fallback for
   that reference;
-- file-level `File -> File` repo-map edges (including glob module targets), so
-  Rust imports contribute to PageRank;
+- graph and repo-map `File -> File` edges (including glob module targets) for
+  both `mod` and resolved `use` records, so Rust imports contribute to
+  PageRank and `imports:`/`imported by:` counts;
 - per-graph counters (`rust_module_targets`, `resolved_import`,
   `unresolved`) in `build_symbol_graph`.
+
+`outline` also accepts a Cargo package or target name, resolving it to the
+library (or first binary) root from the manifests. A failed lookup lists
+matching package and file candidates instead of only saying "no match".
 
 ## LSP
 
@@ -269,7 +283,9 @@ fixture round-trip are recorded in
   conditional `cfg` inclusion, feature-specific modules and macros/proc-macros
   are not fully resolved; generics are stripped from impl scope names.
 - Re-exports are followed up to three hops. Glob imports resolve to a module
-  file and only link a symbol when the imported qualname is unique.
+  file and only link a symbol when the imported qualname is unique. File-level
+  `use` edges are coarser: a re-exported name can point at the facade module
+  (`mod.rs`) rather than the file that defines the item.
 - Repo-map edges are name-based. Generic names are capped, and two unrelated
   `new` functions can be linked by name; the LSP layer is the precise one.
 - `cargo test` selection is syntactic and target-level: package/target

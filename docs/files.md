@@ -77,7 +77,11 @@ manifests are kept (oldest pruned) and each is capped at 5000 files with a
 - A handled `write`, and an `edit` that creates the file, records it after
   the tool succeeds: session, harness, tool and the reason from the reserved
   `_reason` input field (else `unknown`). An edit of an existing file is not
-  recorded as a creation. Key edits are not creations.
+  recorded as a creation: it belongs to the edit journal
+  (`.ozagia/journal.jsonl`), not the created-file ledger. Key edits are not
+  creations. Consequently a session with many edits and few new files has few
+  ledger rows by design; `unknown` means the caller supplied no `_reason`, and
+  cleanup treats it as an unknown origin.
 - `after` for a built-in `edit`, `write`, `patch` or `shell` records the
   newly created files among `meta.changed_paths`/`edited_files`, plus the
   file an edit or write names. When those lists are absent or incomplete, a

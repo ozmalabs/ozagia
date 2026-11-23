@@ -933,9 +933,10 @@ git) or a tool error from preflight asks nothing, since it changes nothing.
 When OpenCode exposes `ctx.permission.assert`, the plugin registers the
 read-only `ozagia_structure` tool. It supports `resolve`, `callers`,
 `callees`, `tests`, and `outline` requests against the existing graph
-services. `outline` takes a repository file/symbol key or `repo`; a module
-file outline contains signatures and related tests, while `repo` returns a
-ranked repo map. The daemon withholds results for stale or unverifiable
+services. `outline` takes a repository file/symbol key, a Cargo package/target
+name, or `repo`; a module file outline contains signatures and related tests,
+while `repo` returns a ranked repo map. A miss lists matching package and file
+candidates. The daemon withholds results for stale or unverifiable
 snapshots and reports tag or snapshot coverage, syntactic confidence, and
 truncation. Every cited path is passed to OpenCode's `read` permission check
 before the tool returns. If the host has no permission assertion API, the

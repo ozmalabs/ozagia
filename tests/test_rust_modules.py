@@ -48,6 +48,7 @@ def _workspace(root: Path) -> None:
     _write(root / "src" / "nested.rs",
            "mod inner;\n"
            "use super::model::build;\n"
+           "use crate::model::build as crate_build;\n"
            "use self::inner::Thing;\n"
            "pub fn nested_build() { build(); inner::go(); }\n")
     _write(root / "src" / "nested" / "inner.rs",
@@ -73,6 +74,21 @@ def _imports(rel: str, root: Path) -> dict[str, dict]:
     for item in parsed["imports"]:
         out.setdefault(str(item["name"]), item)
     return out
+
+
+def test_manifest_target_helpers_read_targets_without_source_trees(
+        tmp_path: Path) -> None:
+    _workspace(tmp_path)
+
+    targets = rust_modules.targets_for_manifest(tmp_path, "Cargo.toml")
+    assert {target.kind for target in targets} >= {"lib", "test", "bench"}
+    assert all(target.package == "demo" for target in targets)
+    assert rust_modules.targets_for_manifest(
+        tmp_path, "../outside/Cargo.toml") == []
+
+    packages = rust_modules.package_targets(tmp_path)
+    assert set(packages) == {"demo", "lib2"}
+    assert packages["lib2"][0].root == "crates/lib2/src/lib.rs"
 
 
 def test_workspace_targets_modules_and_contexts(tmp_path: Path) -> None:
@@ -135,6 +151,10 @@ def test_use_resolution_crate_self_super_inline_and_external(
     nested = _imports("src/nested.rs", tmp_path)
     super_import = workspace.resolve("src/nested.rs", nested["build"])
     assert super_import["file"] == "src/model.rs"
+    # `crate::` starts at the crate root even from a nested module.
+    crate_import = workspace.resolve("src/nested.rs", nested["crate_build"])
+    assert crate_import["file"] == "src/model.rs"
+    assert crate_import["qualname"] == "build"
     self_import = workspace.resolve("src/nested.rs", nested["Thing"])
     assert self_import["file"] == "src/nested/inner.rs"
     assert self_import["qualname"] == "Thing"

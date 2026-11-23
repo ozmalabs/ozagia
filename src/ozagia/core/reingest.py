@@ -143,7 +143,7 @@ class _State:
                     cs.update(M._import_candidates(rel, ref[1], ref[2]))
                 except ValueError:
                     continue
-            elif ref[0] == "rs_mod":
+            elif ref[0] in ("rs_mod", "rs_use"):
                 cs.update(str(c) for c in ref[1:])
             else:
                 cs.add(str(ref[1]))
@@ -432,7 +432,9 @@ def _apply_fragment(txn: _Txn, rel: str,
     # (a test file without tests), so their targets are settled again.
     for e in (table.get(rel), frag[1] if frag else None):
         for ref in (e or {}).get("refs") or ():
-            if ref[0] != "imports":
+            if ref[0] in ("rs_mod", "rs_use"):
+                txn.touched.update(str(c) for c in ref[1:])
+            elif ref[0] != "imports":
                 txn.touched.add(str(ref[1]))
     old_owned = set(st.owned.get(rel, ()))
     if (frag is None) == (rel in table):
@@ -541,7 +543,7 @@ def _rederive(txn: _Txn, rel: str) -> None:
                     root, M._import_candidates(rel, ref[1], ref[2]))
             except ValueError:
                 target = None
-        elif kind == "rs_mod":
+        elif kind in ("rs_mod", "rs_use"):
             target = next((str(c) for c in ref[1:]
                            if (root / str(c)).is_file()), None)
         else:
@@ -549,7 +551,7 @@ def _rederive(txn: _Txn, rel: str) -> None:
         if not target:
             continue
         g = txn.ensure_file(target)
-        if kind in ("imports", "rs_mod"):
+        if kind in ("imports", "rs_mod", "rs_use"):
             new.add((fid, "imports", g))
         if kind == "imports" and role == "test":
             new.update((t, "tests_module", g) for t in tests)
@@ -821,7 +823,7 @@ def _referenced(txn: _Txn, rel: str) -> bool:
                     continue
                 if rel in cands and M._resolve_candidates(root, cands) == rel:
                     return True
-            elif ref[0] == "rs_mod":
+            elif ref[0] in ("rs_mod", "rs_use"):
                 if (rel in {str(c) for c in ref[1:]}
                         and (root / rel).is_file()):
                     return True
