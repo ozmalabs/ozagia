@@ -1,6 +1,6 @@
 # Rust support
 
-Status: Phase 0 baseline and Phase 0.5 language support packages of
+Status: Phases 0, 0.5 and 1 of
 [`docs/plans/2026-11-23_rust_parity.md`](plans/2026-11-23_rust_parity.md),
 2026-11-23. This page describes what works today, not the target state. The
 `ozagia languages` command and automatic component checks are documented in
@@ -14,10 +14,11 @@ updated as each phase lands.
 
 | Capability | Today | How to enable / verify |
 |---|---|---|
-| Tags and repo map | tree-sitter definitions and references from `tree_sitter_rust/queries/tags.scm`: structs, enums, unions, type aliases, functions, methods, traits, modules, macros, calls, macro calls, impl references. `use` imports are **not** tagged yet. | install the `treesitter` extra (`tree-sitter-rust`); `tag_languages.backend_status("rust")` |
-| Graph symbols | line-based `_rust_parse` regex: `fn`, `struct`, `enum`, `trait`, `impl`, `mod`, `type`, `const`, `static`; one line per symbol; no docs, args, returns or nesting | `build_index` / `ozagia-memory build` |
+| Tags and repo map | bundled `index/queries/rust-tags.scm` superset: structs/enums/unions/type aliases, functions, impl-scoped methods (`Foo.bar`), traits, trait signatures, modules, macros, constants, statics, enum variants, calls, qualified calls and impl references; `use` bindings are import records | install the `treesitter` extra (`tree-sitter-rust`); `tag_languages.backend_status("rust")` |
+| Graph symbols | tree-sitter structural parser: qualified names, spans, doc comments, attributes, arguments, return type, visibility and test markers; regex fallback without the grammar | `build_index` / `ozagia-memory build` |
+| Test nodes | inline `#[test]`/`#[tokio::test]`/`#[rstest]` functions, plus `tests/*.rs` and `benches/*.rs` files, produce Test nodes; `cargo test` capture and selection remain Phase 5 | graph Test nodes, `tests_for` |
 | Module edges | `mod x;` resolves to `x.rs` or `x/mod.rs`, with crate-root rules (see below); `#[path = "..."]` is recorded as unsupported, not guessed | graph `File -imports-> File` edges |
-| Symbol questions | `dev_symbol_*` / `dev_callers` / `dev_callees` work over the tags, but resolution is name-based for Rust: `use` imports are not resolved, and there is no type inference | `ozagia core.symbol_graph` CLI or the MCP tools |
+| Symbol questions | `dev_symbol_*` / `dev_callers` / `dev_callees` work over the tags, but resolution is still name-based for Rust: `use` bindings are recorded, not resolved, and there is no type inference | `ozagia core.symbol_graph` CLI or the MCP tools |
 | Structural edits | CST subtree ops on `.rs` through `edit/cst.py`: `replace_node`, `insert_before_node`, `insert_after_node`, `delete_node`, `wrap_node`, `replace_span`; preview by default | `ozagia edit` script with a `file` ending in `.rs` and a CST path |
 | Lint | `rustfmt --check --edition <Cargo edition>` when `rustfmt` is on `PATH`; config `[lint] rust = "auto" "rustfmt" "off"` | `ozagia-settings`; edit-time lint |
 | LSP | rust-analyzer through `ozagia.lsp`: definition, references, document symbols, hover, diagnostics, call hierarchy, rename preview | `ozagia languages ensure --root .` or `ozagia[lang-rust]`; `OZAGIA_LIVE_LSP=1` for the gated smoke |
@@ -46,12 +47,30 @@ Known gaps, deliberately reported rather than guessed:
 
 - `#[path = "..."]` on a module declaration is recorded in the file's
   `rust_unsupported_mods` attribute and produces no edge.
-- Inline `mod x { ... }` blocks are not tracked as scopes; `mod y;` inside one
-  is attributed to the file, not the inline module.
+- Inline `mod x { ... }` blocks scope symbols as `x.fn`, but an external
+  `mod y;` declared inside one is still resolved against the file rather than
+  the inline module path.
 - Custom Cargo target paths (`[lib] path`, `[[bin]] path`) are not read yet, so
   a non-conventional crate root is treated as an ordinary module file.
 - A helper module named `tests/*.rs` (rather than `tests/*/mod.rs`) is treated
   as a test crate root; its own children resolve beside it.
+
+## Structural symbols and tags (Phase 1)
+
+`src/ozagia/index/rust_symbols.py` parses each `.rs` file with tree-sitter-rust
+when it is installed and falls back to the line parser otherwise. Symbols carry
+the Python-parity field set: `name`, `qualname`, `kind`, `start_line`,
+`end_line`, `doc`, `decorators` (attributes), `args`, `returns`, `visibility`
+and `is_test`. Methods inside an `impl`/trait are qualified by the implementing
+type (`Foo.bar`, `Trait.qux`); inline modules nest as `module.name`; duplicate
+qualnames in one file get the same `#2`/`#3` suffix as Python. Outlines and the
+repo map use the qualified names.
+
+`use` declarations are expanded (single paths, groups, `self`, aliases, globs,
+`pub use`, `crate`/`super`/`self` prefixes) into `kind: "import"` tag records.
+They are not resolved to files or symbols until Phase 2. Test attributes are
+recorded, inline/source tests become Test nodes, and `tests/*.rs` files are
+indexed with the test role.
 
 ## LSP
 
@@ -95,13 +114,13 @@ Preview is the default; applying backs up the file under
 
 ## Honest limits
 
-- The graph's Rust parser is a line regex, not the tree-sitter tag extractor:
-  spans are one line, doc comments and signatures are empty, methods do not
-  carry their `impl` type, and `use` bindings are invisible.
+- Symbols and tags are syntactic, not scope/type resolved. `use` bindings are
+  recorded but not resolved until Phase 2; macros and proc macros are not
+  expanded, and generics are stripped from the impl scope name.
 - Repo-map edges are name-based. Generic names are capped, and two unrelated
   `new` functions can be linked by name; the LSP layer is the precise one.
-- `cargo test` is not a captured command and there are no crate/test-target
-  nodes, so no affected-test selection or test-result cache exists for Rust.
+- `cargo test` is not a captured command. Test nodes exist, but affected-test
+  selection, crate/target mapping and the result cache remain Phase 5.
 - No build, `cargo check` or `cargo metadata` is run: reading the project must
   not execute build scripts or proc macros. Cargo tests, when supported, will
   run only because the caller typed the command.
@@ -113,8 +132,9 @@ Preview is the default; applying backs up the file under
 ```bash
 # focused
 PYTHONPATH=src .venv/bin/python -m pytest -q \
-  tests/test_rust_mods.py tests/test_repo_map.py tests/test_memory.py \
-  tests/test_graph_reingest.py
+  tests/test_rust_symbols.py tests/test_rust_mods.py \
+  tests/test_tag_languages.py tests/test_repo_map.py \
+  tests/test_memory.py tests/test_graph_reingest.py
 
 # LSP is gated and needs the rustup component
 OZAGIA_LIVE_LSP=1 PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_lsp.py

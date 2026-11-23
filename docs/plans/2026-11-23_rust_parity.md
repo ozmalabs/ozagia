@@ -1,6 +1,6 @@
 # Rust parity with Python — plan (2026-11-23)
 
-Status: Phases 0 and 0.5 implemented (2026-11-23); Phases 1–7 proposed. This plan closes
+Status: Phases 0, 0.5 and 1 implemented (2026-11-23); Phases 2–7 proposed. This plan closes
 the gap between `.rs` and `.py` support across the graph, tags,
 symbol-question layer, edits, LSP, tests and documentation, and adds the
 initial setup for a Python→Rust migration assistant built on the same graph.
@@ -32,10 +32,10 @@ do in a Python repository today, at the same honesty level:
 
 | Layer | Python | Rust today |
 |---|---|---|
-| Tag extraction | stdlib AST: defs, refs, scoped imports, qualnames, end lines | tree-sitter `tree_sitter_rust/queries/tags.scm`: defs and refs; **no `use` tags**, no const/static, no trait signature methods, impl methods get a bare qualname (`bar`, not `Foo.bar`) |
-| Graph symbols | `_python_parse`: qualnames, end lines, docstrings, decorators, args, returns, bases, imports, tests | `_rust_parse`: one line per symbol via regex; no docs, args, returns or nesting; `impl` stored as a pseudo-symbol holding the head text. Phase 0 fixed `mod` resolution to `x.rs`/`x/mod.rs` with crate-root rules; `#[path]` is recorded as unsupported |
-| Test indexing | `index_test` parses pytest tests, links `tests_module`, `mentions_file` | no Rust branch; `index_test` returns after `_python_parse` fails |
-| Repo map | file edges from resolved imports + names | name-only file edges; `mod` edges limited; `use` invisible to PageRank |
+| Tag extraction | stdlib AST: defs, refs, scoped imports, qualnames, end lines | bundled `index/queries/rust-tags.scm`: defs/refs with impl scopes (`Foo.bar`), trait signatures, const/static/enum variants, qualified calls, and `use` import records; Phase 1 |
+| Graph symbols | `_python_parse`: qualnames, end lines, docstrings, decorators, args, returns, bases, imports, tests | `rust_symbols.parse_rust`: tree-sitter fields (qualname, spans, doc, attributes, args, returns, visibility, test marker) with regex fallback; Phase 0 `mod` resolution retained; `#[path]` recorded as unsupported |
+| Test indexing | `index_test` parses pytest tests, links `tests_module`, `mentions_file` | Phase 1 adds `#[test]`/`#[tokio::test]`/`#[rstest]` and `tests/*.rs` Test nodes; import/`tests_module` resolution remains Phase 2/5 |
+| Repo map | file edges from resolved imports + names | name-only file edges; `mod` edges resolve; `use` records exist in tags but do not yet contribute resolved PageRank edges |
 | Symbol graph | local / import / name resolution; pyright precise mode | tag ingest works, but import resolution is Python-only (`from X import name`, `_PY_ROOTS`), so Rust relies on bare-name guesses |
 | Edits | symbol ops (`replace_symbol`, `replace_body`, `insert_import`, `delete_symbol`, `rename_symbol`, …) with AST parse gate | CST subtree ops only (`edit/cst.py`); no symbol addressing, no `use` insertion, no symbol rename |
 | LSP | pyright live | registry entry exists; Phase 0 installed rust-analyzer 1.97.1, but the first query can be empty while it indexes a workspace |
@@ -160,44 +160,39 @@ availability of a parser.
   install reporting, no-install, network blocking, manual/system handling and
   uv-first/pip-fallback command construction (10 passed).
 
-### Phase 1 — Structural parser and tags (2–3 days)
+### Phase 1 — Structural parser and tags (2–3 days) — implemented 2026-11-23
 
-- `src/ozagia/index/rust_symbols.py`:
-  - `parse_rust(path, source)` returning `symbols`, `imports`, `tests`,
-    `modules`, `crate_roots`, `source`.
-  - Symbols: `fn` (function/method), `struct`, `enum`, `union`, `trait`,
-    type alias, `impl`, `mod`, `const`, `static`, macro; qualname includes the
-    impl/trait type (`Foo.bar`, `Trait.method`), matching Python's
-    `Class.method`; `start_line`/`end_line`, doc comments (`///`, `//!`),
-    attributes as `decorators`, args, return type.
-  - `#[test]`, `#[tokio::test]`, `#[rstest]` and test functions inside
-    `#[cfg(test)]` are recorded; `tests/*.rs` and `benches/*.rs` are classified
-    as test targets, not ordinary source.
-  - `use` extraction: single, grouped, aliased, glob and `self`/`super`/`crate`
-    paths, plus the enclosing scope; `pub use` keeps a re-export flag.
-  - Optional tree-sitter path; regex fallback returns the current shallow
-    shape and a reason. Never import a grammar at module import time.
-- `src/ozagia/index/queries/rust-tags.scm` (bundled superset of the upstream
-  query):
-  - upstream definitions and call/macro/impl references;
-  - `const_item`/`static_item`, trait signature methods, enum variants;
-  - an `@scope.impl` capture so nested method definitions inherit
-    `Type.method` qualnames without emitting a duplicate `impl` definition;
-  - qualified calls (`Foo::bar()`, `crate::a::b()`) as references;
-  - no `use` reference captures: imports are emitted as `kind: "import"`
-    records by the Rust extractor, not mixed into name references.
-- Wire `.rs` to the bundled query in `tag_languages.LANGUAGES` (same mechanism
-  Kotlin already uses with `query_package: "ozagia"`), bump
-  `repo_map.CACHE_VERSION` to 4, and let `extractor_fingerprint` re-extract
-  existing caches.
-- `core/memory.py`: `.rs` source and test indexing delegate to
-  `rust_symbols`; Symbol nodes gain the Python-parity fields; impl methods get
-  `contains_symbol` edges; `index_test` handles `.rs` Test nodes and
-  `tests_module` links; `use`/`mod` edges resolve through Phase 2 when present,
-  otherwise stay as `refs` entries.
-- Exit: the fixture crate's symbols match the Python field set; outlines show
-  `Foo.bar`; test functions appear as Test nodes; regex fallback is tested;
-  Python output is unchanged.
+- Added `src/ozagia/index/rust_symbols.py`:
+  - `parse_rust(path, source)` returns `symbols`, `imports`, `tests`,
+    `modules`, `source`, `backend`, `has_errors`, `error` and `crate_root`.
+  - Symbols: functions/methods, structs, enums, unions, traits, type aliases,
+    impl blocks, modules, consts, statics and macros; qualnames include the
+    impl/trait type (`Foo.bar`, `Trait.method`); spans, outer doc comments,
+    attributes as `decorators`, parameter names, return type and visibility.
+  - `#[test]`, `#[tokio::test]`, `#[rstest]`, `#[quickcheck]`, `#[proptest]`
+    and `#[test_case]` are recorded; inline tests and `tests/*.rs` become Test
+    nodes. `#[cfg(test)]` marks an inline test-module context.
+  - `use` extraction covers single paths, groups, aliases, globs, `self`,
+    `crate`/`super` prefixes and `pub use`, retaining the enclosing scope.
+  - Tree-sitter is optional and imported lazily; the regex fallback returns
+    shallow symbols, modules, imports and test markers with a visible backend.
+- Added `src/ozagia/index/queries/rust-tags.scm`, a bundled superset of the
+  upstream query: existing definitions/references plus const/static, enum
+  variants, trait signature methods, qualified calls and an `@scope.impl`
+  capture. Methods now nest as `Type.method` without a duplicate `impl` def.
+- Wired `.rs` to the bundled query (`query_package: "ozagia"`), bumped
+  `TAGS_SCHEMA_VERSION` to 4 and `repo_map.CACHE_VERSION` to 4; extractor
+  fingerprints invalidate existing Rust tag caches.
+- `core/memory.py` delegates `.rs` source and test indexing to `rust_symbols`:
+  Symbol nodes carry the Python-parity fields, impl methods get
+  `contains_symbol` edges, inline/source tests and `tests/*.rs` get Test nodes,
+  and external `mod` edges keep the Phase 0 resolution. `use` records live in
+  the tag cache for Phase 2 resolution.
+- Verification: `tests/test_rust_symbols.py` (5 tests) covers CST fields,
+  qualnames, docs/attributes, args/returns, use forms, modules, regex fallback
+  and graph integration; `tests/test_tag_languages.py`, `test_rust_mods.py`,
+  `test_repo_map.py`, `test_memory.py` and `test_graph_reingest.py` pass, and
+  the full suite is 6230 passed / 22 skipped. Python tag output is unchanged.
 
 ### Phase 2 — Rust imports, modules and symbol-graph parity (3–5 days)
 
@@ -412,6 +407,9 @@ New and extended suites:
 - `tests/test_cargo_test.py` — command mapping, output parsing, selection,
   cache keys, run-all reasons (use a fake `cargo` executable for determinism).
 - `tests/test_repo_map.py` — Rust import edges and tag-cache migration.
+- `tests/test_rust_symbols.py` — tree-sitter symbol fields/qualnames, docs and
+  attributes, args/returns, use forms, module entries, regex fallback and
+  graph Test/containment integration.
 - `tests/test_rust_mods.py` — crate-root and `mod.rs` resolution, `#[path]`
   recording, and a reingest switch between `foo.rs` and `foo/mod.rs`.
 - `tests/test_languages.py` — support-package registry coverage, language
@@ -486,7 +484,7 @@ python -m ozagia.eval.bench --root <rust-repo> --cold --check
 |---|---|
 | 0 — baseline/docs (done 2026-11-23) | 0.5–1 |
 | 0.5 — language support packages (done 2026-11-23) | 1–2 |
-| 1 — parser + tags + graph fields | 2–3 |
+| 1 — parser + tags + graph fields (done 2026-11-23) | 2–3 |
 | 2 — modules/imports/symbol graph | 3–5 |
 | 3 — symbol edits | 3–4 |
 | 4 — LSP | 1–2 |

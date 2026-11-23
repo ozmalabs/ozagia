@@ -236,6 +236,11 @@ def test_extension_registry_mapping() -> None:
             # tree-sitter-kotlin ships no tags.scm; ozagia bundles one.
             assert entry["tags_query"] == "index/queries/kotlin-tags.scm"
             assert entry["query_package"] == "ozagia"
+        elif suffix == ".rs":
+            # Rust uses the bundled superset for impl scopes, trait
+            # signatures, constants and qualified calls.
+            assert entry["tags_query"] == "index/queries/rust-tags.scm"
+            assert entry["query_package"] == "ozagia"
         else:
             assert entry["tags_query"] == "queries/tags.scm"
             assert "query_package" not in entry
@@ -768,6 +773,35 @@ def test_java_method_inside_class_nests_under_class() -> None:
     assert refs["gamma"] == "Alpha.beta"
 
 
+def test_rust_impl_scope_trait_signatures_consts_and_uses() -> None:
+    source = (
+        "use crate::inner::{self, helper as h};\n"
+        "struct Foo;\n"
+        "impl Foo {\n"
+        "    fn bar(&self) { Foo::baz(); }\n"
+        "}\n"
+        "trait Baz { fn qux(&self); }\n"
+        "const C: i32 = 1;\n"
+        "enum E { A }\n"
+    )
+    tags = extract_tags("x.rs", source)
+    defs = {(item["name"], item.get("qualname")) for item in tags
+            if item["kind"] == "def"}
+    assert ("bar", "Foo.bar") in defs
+    assert ("qux", "Baz.qux") in defs
+    assert ("C", "C") in defs
+    assert ("A", "E.A") in defs
+    refs = {item["name"]: item["scope"] for item in tags
+            if item["kind"] == "ref"}
+    assert refs["baz"] == "Foo.bar"
+    imports = {item["name"]: item for item in tags
+               if item["kind"] == "import"}
+    assert imports["inner"]["module"] == "crate::inner"
+    assert imports["h"]["module"] == "crate::inner"
+    assert imports["h"]["imported"] == "helper"
+    assert imports["h"]["alias"] == "h"
+
+
 def test_tree_sitter_tags_are_in_source_order_and_deterministic() -> None:
     source = ("fn a() { b(); }\n"
               "fn c() { d(); }\n")
@@ -783,4 +817,4 @@ def test_python_bom_source_yields_the_same_tags() -> None:
     plain = extract_tags("x.py", source)
     assert plain
     assert extract_tags("x.py", "\ufeff" + source) == plain
-    assert tag_languages.TAGS_SCHEMA_VERSION == 3
+    assert tag_languages.TAGS_SCHEMA_VERSION == 4

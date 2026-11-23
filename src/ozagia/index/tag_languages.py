@@ -29,6 +29,7 @@ import ast
 import hashlib
 import importlib
 import json
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -47,8 +48,10 @@ __all__ = [
 # Bump whenever extraction output changes for any suffix. Tag caches key on
 # extractor_fingerprint(), which includes this number, so a bump invalidates
 # every cached entry. v3: Python sources with a leading UTF-8 BOM now produce
-# tags (v2 returned none, and the empty result was cached).
-TAGS_SCHEMA_VERSION = 3
+# tags (v2 returned none, and the empty result was cached). v4: Rust gains
+# impl-scoped qualnames, trait signatures, const/static/enum variants,
+# qualified calls and bundled `use` import records.
+TAGS_SCHEMA_VERSION = 4
 
 # Every grammar package inspected for this registry keeps its upstream tag
 # query at <package>/queries/tags.scm, except tree-sitter-kotlin, whose wheel
@@ -56,6 +59,7 @@ TAGS_SCHEMA_VERSION = 3
 # resolved through ``query_package``.
 _TAGS_QUERY = "queries/tags.scm"
 _BUNDLED_KOTLIN_QUERY = "index/queries/kotlin-tags.scm"
+_BUNDLED_RUST_QUERY = "index/queries/rust-tags.scm"
 
 
 def _entry(language: str, module: str, factory: str, *,
@@ -86,7 +90,8 @@ def _entry(language: str, module: str, factory: str, *,
 LANGUAGES: dict[str, dict[str, Any]] = {
     ".py": _entry("python", "tree_sitter_python", "language",
                   backend="python-ast"),
-    ".rs": _entry("rust", "tree_sitter_rust", "language"),
+    ".rs": _entry("rust", "tree_sitter_rust", "language",
+                  tags_query=_BUNDLED_RUST_QUERY, query_package="ozagia"),
     ".lua": _entry("lua", "tree_sitter_lua", "language"),
     ".ts": _entry("typescript", "tree_sitter_typescript",
                   "language_typescript"),
@@ -282,7 +287,12 @@ def _python_tags(source: str) -> list[dict[str, Any]]:
 
 
 class _Span(NamedTuple):
-    """One tree-sitter capture, with byte offsets for nesting."""
+    """One tree-sitter capture, with byte offsets for nesting.
+
+    ``kind`` is ``"def"``, ``"ref"`` or ``"scope"``. A scope (for example a
+    Rust ``impl`` block) contributes a qualname prefix but is not emitted as a
+    tag itself.
+    """
     name: str
     kind: str
     detail: str
@@ -307,11 +317,12 @@ def _nest_tree_sitter_tags(spans: list[_Span]) -> list[dict[str, Any]]:
     order in which tree-sitter groups query patterns.
     """
     events: list[tuple[int, int, int, int]] = []
-    seen_defs: set[tuple[int, int, int, str]] = set()
+    seen_defs: set[tuple[str, int, int, int, str]] = set()
     emit = [True] * len(spans)
     for i, span in enumerate(spans):
-        if span.kind == "def":
-            key = (span.def_start, span.def_end, span.name_start, span.name)
+        if span.kind in ("def", "scope"):
+            key = (span.kind, span.def_start, span.def_end,
+                   span.name_start, span.name)
             if key in seen_defs:
                 emit[i] = False
                 continue
@@ -336,7 +347,7 @@ def _nest_tree_sitter_tags(spans: list[_Span]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for i in sorted(range(len(spans)), key=lambda k: (spans[k].name_start, k)):
         span = spans[i]
-        if not emit[i]:
+        if not emit[i] or span.kind == "scope":
             continue
         if span.kind == "def":
             out.append({"name": span.name, "kind": "def",
@@ -377,6 +388,28 @@ def extract_tags_status(path: str | Path,
         # tree-sitter 0.26: matches() yields
         # (pattern_index, {capture_name: [Node, ...]}).
         for _pattern_index, captures in cursor.matches(tree.root_node):
+            scope_capture = next(
+                (key for key in captures if key.startswith("scope.")), None)
+            if scope_capture:
+                names = captures.get(f"{scope_capture}_name") or []
+                outers = captures.get(scope_capture) or []
+                for node in names:
+                    name = node.text.decode("utf-8", errors="replace")
+                    name = re.split(r"[<{]", name, maxsplit=1)[0].strip().lstrip("&").strip()
+                    if not name:
+                        continue
+                    outer = outers[0] if outers else node
+                    spans.append(_Span(
+                        name=name,
+                        kind="scope",
+                        detail=scope_capture,
+                        line=int(node.start_point[0]) + 1,
+                        name_start=int(node.start_byte),
+                        def_start=int(outer.start_byte),
+                        def_end=int(outer.end_byte),
+                        end_line=int(outer.end_point[0]) + 1,
+                    ))
+                continue
             kind_capture = next(
                 (key for key in captures
                  if key.startswith(("definition.", "reference."))),
@@ -402,9 +435,28 @@ def extract_tags_status(path: str | Path,
                     def_end=int(outer.end_byte),
                     end_line=int(outer.end_point[0]) + 1,
                 ))
-        return _nest_tree_sitter_tags(spans), None
+        tags = _nest_tree_sitter_tags(spans)
+        if entry["language"] == "rust":
+            try:
+                from ozagia.index.rust_symbols import parse_rust
+                tags.extend(parse_rust(path, source).get("imports") or [])
+                tags.sort(key=lambda item: (
+                    int(item.get("line") or 0),
+                    0 if item.get("kind") == "def" else 1))
+            except Exception:
+                # Imports are additive; a fallback failure must not discard
+                # the definitions and references already extracted.
+                pass
+        return tags, None
     except Exception as exc:
-        return [], f"{type(exc).__name__}: {exc}"
+        fallback: list[dict[str, Any]] = []
+        if entry["language"] == "rust":
+            try:
+                from ozagia.index.rust_symbols import parse_rust
+                fallback = list(parse_rust(path, source).get("imports") or [])
+            except Exception:
+                fallback = []
+        return fallback, f"{type(exc).__name__}: {exc}"
 
 
 def extract_tags(path: str | Path, source: str) -> list[dict[str, Any]]:
@@ -413,7 +465,9 @@ def extract_tags(path: str | Path, source: str) -> list[dict[str, Any]]:
     Defs are ``{name, kind: "def", detail, line, end_line, qualname}``. Refs
     are ``{name, kind: "ref", detail, line, scope}``. Python import bindings
     are ``{name, kind: "import", detail: "import.module"|"import.from", line,
-    module, level, imported, scope}``. ``detail`` is the query capture (for
+    module, level, imported, scope}``; Rust `use` bindings use
+    ``detail: "import.use"`` with ``module, imported, alias, glob, pub, scope``.
+    ``detail`` is the query capture (for
     example ``definition.function`` or ``reference.call``) and ``line`` is
     1-based. ``qualname`` and ``scope`` are dotted enclosing-def chains, "" at
     module level. Output is in source order.

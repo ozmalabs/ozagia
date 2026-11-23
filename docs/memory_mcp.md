@@ -330,9 +330,11 @@ subset). See [`REPO_MAP_EVAL.md`](REPO_MAP_EVAL.md) and
 
 The repo map is the Aider/RepoGraph-style layer built on tree-sitter tags:
 
-- Python tags come from the stdlib AST (fast); Rust/Lua tags come from each
-  grammar's own `queries/tags.scm`. Rust `mod x;` edges resolve both `x.rs`
-  and `x/mod.rs`, including crate-root layouts (see [`rust.md`](rust.md)).
+- Python tags come from the stdlib AST (fast); Rust uses a bundled tree-sitter
+  query that adds impl scopes (`Foo.bar`), trait signatures, constants and
+  qualified calls, and Lua uses its grammar's own `queries/tags.scm`. Rust
+  `mod x;` edges resolve both `x.rs` and `x/mod.rs`, including crate-root
+  layouts (see [`rust.md`](rust.md)).
 - Files are nodes; a reference edge points from a referencing file to the file
   defining the symbol. Generic/high-fan-out identifiers are capped so the graph
   stays usable.

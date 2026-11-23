@@ -30,7 +30,7 @@ LANGUAGES[".rs"] == {
 | Suffixes | `language` | Grammar module | Language factory | Backend | Query defs | Query refs |
 |---|---|---|---|---|---|---|
 | `.py` | `python` | `tree_sitter_python` | `language` | `python-ast` | yes (AST) | yes (AST) |
-| `.rs` | `rust` | `tree_sitter_rust` | `language` | tree-sitter | yes | yes |
+| `.rs` | `rust` | `tree_sitter_rust` | `language` | tree-sitter | yes | yes (bundled query) |
 | `.lua` | `lua` | `tree_sitter_lua` | `language` | tree-sitter | yes | yes |
 | `.ts` | `typescript` | `tree_sitter_typescript` | `language_typescript` | tree-sitter | yes | yes |
 | `.tsx` | `tsx` | `tree_sitter_typescript` | `language_tsx` | tree-sitter | yes | yes |
@@ -42,11 +42,12 @@ LANGUAGES[".rs"] == {
 | `.kt`, `.kts` | `kotlin` | `tree_sitter_kotlin` | `language` | tree-sitter | yes | yes |
 | `.swift` | `swift` | `tree_sitter_swift` | `language` | tree-sitter | yes | **no** |
 
-`tags_query` is package-relative. `backend_status()` resolves it to the
-installed absolute path and reports whether the shipped query actually contains
-`@definition.*` / `@reference.*` captures. `.js`/`.jsx` use the TSX factory
-because that grammar is the JavaScript + JSX superset; plain JavaScript parses
-there too.
+`tags_query` is package-relative unless `query_package` names a package (Kotlin
+and Rust use bundled queries under `src/ozagia/index/queries/`). `backend_status()`
+resolves it to the installed absolute path and reports whether the query
+actually contains `@definition.*` / `@reference.*` captures. `.js`/`.jsx` use
+the TSX factory because that grammar is the JavaScript + JSX superset; plain
+JavaScript parses there too.
 
 Kotlin is the one entry with `query_package: "ozagia"`: the
 `tree-sitter-kotlin` PyPI wheel (1.1.0) ships no `queries/tags.scm`, so the
@@ -140,10 +141,15 @@ Kotlin wheel does not, so ozagia bundles one. The granularity differs:
 
 - **Python** (`tree_sitter_python`) — query exists, but the AST path is used.
   Grammar query covers classes, functions, module-level constants and calls.
-- **Rust** — structs/enums/unions/type aliases, methods, functions, traits,
-  modules, macros; call/macro/impl references. `use` declarations are **not**
-  tagged; the graph's separate `_rust_parse` records `mod` edges and Phase 1 of
-  the Rust plan adds import records.
+- **Rust** — ozagia bundles `index/queries/rust-tags.scm` as a superset of the
+  upstream query: structs/enums/unions/type aliases, methods, functions,
+  traits, trait method signatures, modules, macros, constants, statics and enum
+  variants; call/macro/impl references plus qualified calls such as
+  `Foo::bar()`. An `impl` scope capture makes methods `Foo.bar` instead of a
+  bare `bar`. `use` declarations are emitted by the Rust source model as
+  `kind: "import"` records with `detail: "import.use"` (module, imported name,
+  alias, glob and scope); they are not CST name references. Resolution of those
+  imports is Phase 2 of the Rust plan.
 - **Lua** — functions, methods, assignment/table function definitions; call
   references.
 - **TypeScript / TSX** — interfaces, abstract classes, function/method
@@ -217,10 +223,11 @@ Then:
    provided the relevant files live under its `SOURCE_DIRS`. Extend
    `SOURCE_DIRS` separately if TypeScript/Go/Java/C/C++/Kotlin/Swift trees live
    elsewhere.
-4. No `CACHE_VERSION` bump is required for existing Python/Rust/Lua entries:
-   their tag output is unchanged. New suffixes were simply never indexed
-   before; the cache's prune/add logic handles them. Bump the version only if
-   you also change existing-language extraction semantics.
+4. Rust extraction semantics changed in Phase 1 of the Rust plan (impl
+   scopes, trait signatures, constants, qualified calls and `use` import
+   records), so `TAGS_SCHEMA_VERSION` and `repo_map.CACHE_VERSION` are both 4.
+   Extractor fingerprints invalidate the old Rust rows automatically; bump the
+   version again only when existing-language extraction semantics change.
 5. `backend_status()` is suitable for a one-line brief/diagnostic (for example
    "tags: python(AST), rust, lua, typescript/tsx/js, go, java, c/cpp
    (definition-only), kotlin, swift (definition-only)") and to explain empty

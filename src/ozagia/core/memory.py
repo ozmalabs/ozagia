@@ -433,20 +433,14 @@ def _python_parse(path: Path, src: str | None = None) -> PyParse | None:
     return out
 
 
-_RUST_SYM_RE = re.compile(
-    r"^\s*(?:pub(?:\([^)]*\))?\s+)?"
-    r"(?:async\s+|unsafe\s+|const\s+|extern\s+\"[^\"]+\"\s+)*"
-    r"(fn|struct|enum|trait|impl|mod|type|const|static)\s+"
-    r"([A-Za-z_][A-Za-z0-9_]*)"
-)
-_RUST_MOD_RE = re.compile(
-    r"^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;")
-_RUST_PATH_ATTR_RE = re.compile(r'^\s*#\[\s*path\s*=')
 # Crate roots: their child modules live beside the root file. Test, example
 # and bench directories hold crate roots too, although a helper module in one
 # of them can look the same; that ambiguity is documented in docs/rust.md.
 _RUST_CRATE_ROOT_FILES = frozenset({"lib.rs", "main.rs", "build.rs"})
 _RUST_TEST_ROOT_DIRS = frozenset({"tests", "examples", "benches"})
+# Rust integration tests and benchmarks are separate crate targets; examples
+# are ordinary build targets and stay source files.
+_RUST_TEST_DIRS = ("tests", "benches")
 
 
 def _rust_module_base(rel: str) -> str:
@@ -492,50 +486,22 @@ def _rust_mod_alternate(rel: str) -> str | None:
 
 
 def _rust_parse(path: Path, src: str | None = None) -> dict[str, Any] | None:
-    if src is None:
-        src = _read_text(path)
-    if src is None:
+    """The Phase 1 Rust source model, mapped to the graph's legacy keys."""
+    from ozagia.index.rust_symbols import parse_rust
+
+    parsed = parse_rust(path, src)
+    if src is None and parsed.get("error") == "file could not be read":
         return None
-    symbols: list[dict[str, Any]] = []
-    mods: list[dict[str, Any]] = []
-    # A `#[path = "..."]` attribute on the line(s) before `mod x;` overrides
-    # normal module lookup. It is recorded, not resolved (see docs/rust.md).
-    path_attr_line: int | None = None
-    for i, line in enumerate(src.splitlines(), start=1):
-        stripped = line.strip()
-        if _RUST_PATH_ATTR_RE.match(line):
-            path_attr_line = i
-            continue
-        m = _RUST_SYM_RE.match(line)
-        if m:
-            kind, name = m.group(1), m.group(2)
-            if kind == "impl":
-                # Keep the impl head as the name so `impl Foo` is searchable.
-                name = line.strip()[len("impl"):].strip()[:120]
-            symbols.append({
-                "name": name.split()[0] if name else kind,
-                "qualname": name or kind,
-                "kind": kind,
-                "start_line": i,
-                "end_line": i,
-                "doc": "",
-                "decorators": [],
-                "args": [],
-            })
-            if kind != "mod":
-                path_attr_line = None
-        mm = _RUST_MOD_RE.match(line)
-        if mm:
-            mods.append({
-                "name": mm.group(1),
-                "line": i,
-                "path_attribute": path_attr_line,
-            })
-            path_attr_line = None
-            continue
-        if (stripped and not stripped.startswith(("//", "/*", "*", "#[", "#!"))):
-            path_attr_line = None
-    return {"symbols": symbols, "mods": mods, "source": src}
+    return {
+        "symbols": parsed["symbols"],
+        "mods": parsed["modules"],
+        "imports": parsed.get("imports") or [],
+        "tests": parsed.get("tests") or [],
+        "source": parsed["source"],
+        "backend": parsed.get("backend"),
+        "error": parsed.get("error"),
+        "crate_root": parsed.get("crate_root", False),
+    }
 
 
 def _import_candidates(rel_file: str, module: str, level: int) -> list[str]:
@@ -675,7 +641,14 @@ def _file_attrs(root: Path, rel: str, *, indexed: bool = True) -> dict[str, Any]
 
 
 def _is_test_path(rel: str) -> bool:
-    if not Path(rel).name.startswith("test_") or not rel.endswith(".py"):
+    if rel.endswith(".py"):
+        if not Path(rel).name.startswith("test_"):
+            return False
+    elif rel.endswith(".rs"):
+        # Rust integration tests, benchmarks and their helper modules are
+        # crate roots under a test directory; they are not ordinary source.
+        return any(rel.startswith(d + "/") for d in _RUST_TEST_DIRS)
+    else:
         return False
     return any(d in ("", ".") or rel.startswith(d + "/") for d in TEST_DIRS)
 
@@ -854,6 +827,84 @@ class FileIndexer:
         if module or level:
             self._ref(entry, ["imports", module, level])
 
+    def _rust_symbols(self, fid: int, rel: str,
+                      parsed: dict[str, Any]) -> list[int]:
+        """Add Rust Symbol/Test nodes and their containment edges."""
+        b = self.b
+        seen: dict[str, int] = {}
+        test_ids: list[int] = []
+        for sym in parsed.get("symbols") or []:
+            q = str(sym["qualname"])
+            seen[q] = seen.get(q, 0) + 1
+            kq = q if seen[q] == 1 else f"{q}#{seen[q]}"
+            if sym.get("is_test"):
+                tid = b.node("Test", {
+                    "name": sym["name"],
+                    "qualname": q,
+                    "file": rel,
+                    "start_line": sym["start_line"],
+                    "end_line": sym["end_line"],
+                    "doc": sym.get("doc") or "",
+                    "kind": "test",
+                }, key=("test", rel, kq))
+                b.edge(fid, "has_test", tid)
+                b.edge(tid, "tested_by_file", fid)
+                # Inline unit tests belong to the file that contains them.
+                b.edge(tid, "tests_module", fid)
+                test_ids.append(tid)
+                continue
+            sid = b.node("Symbol", {
+                "name": sym["name"],
+                "qualname": q,
+                "kind": sym["kind"],
+                "file": rel,
+                "start_line": sym["start_line"],
+                "end_line": sym["end_line"],
+                "doc": sym.get("doc") or "",
+                "decorators": list(sym.get("decorators") or []),
+                "args": list(sym.get("args") or []),
+                "returns": sym.get("returns") or "",
+                "visibility": sym.get("visibility") or "",
+            }, key=("symbol", rel, kq))
+            b.edge(fid, "defines", sid)
+            b.edge(sid, "defined_in", fid)
+            if "." in q:
+                parent_q = q.rsplit(".", 1)[0]
+                parent = b.find(("symbol", rel, parent_q))
+                if parent is None:
+                    # A method can live under an impl block without a local
+                    # struct/trait symbol (for example `impl External`).
+                    parent = b.find(("symbol", rel, "impl " + parent_q))
+                if parent is not None:
+                    b.edge(parent, "contains_symbol", sid)
+        return test_ids
+
+    def _rust_modules(self, fid: int, rel: str, entry: dict[str, Any],
+                      modules: Iterable[dict[str, Any]]) -> None:
+        """Resolve external `mod x;` declarations; record unsupported ones."""
+        b = self.b
+        unsupported: list[dict[str, Any]] = []
+        for mod in modules:
+            if mod.get("inline"):
+                continue
+            if mod.get("path_attribute"):
+                unsupported.append({
+                    "name": mod["name"],
+                    "line": mod["line"],
+                    "reason": "#[path] module paths are not resolved",
+                })
+                continue
+            candidates = _rust_mod_candidates(rel, mod["name"])
+            # Record both layouts so reingest notices a module file that
+            # appears or disappears; the edge uses the first existing one.
+            self._ref(entry, ["rs_mod", *candidates])
+            target = next((c for c in candidates
+                           if (self.root / c).is_file()), None)
+            if target:
+                b.edge(fid, "imports", self.file_node(target))
+        if unsupported:
+            b.attrs(fid)["rust_unsupported_mods"] = unsupported
+
     def index_source(self, p: Path, rel: str) -> None:
         b = self.b
         fid, text, entry = self._begin(rel, "source", p)
@@ -895,45 +946,8 @@ class FileIndexer:
             parsed = _rust_parse(p, text)
             if parsed is None:
                 return
-            # Rust items are keyed by qualname; the 2nd, 3rd ... item with
-            # the same qualname in one file (in file order) gets `#2`, `#3`.
-            seen: dict[str, int] = {}
-            for sym in parsed["symbols"]:
-                q = sym["qualname"]
-                seen[q] = seen.get(q, 0) + 1
-                kq = q if seen[q] == 1 else f"{q}#{seen[q]}"
-                sid = b.node("Symbol", {
-                    "name": sym["name"],
-                    "qualname": sym["qualname"],
-                    "kind": sym["kind"],
-                    "file": rel,
-                    "start_line": sym["start_line"],
-                    "end_line": sym["end_line"],
-                    "doc": "",
-                    "decorators": [],
-                    "args": [],
-                }, key=("symbol", rel, kq))
-                b.edge(fid, "defines", sid)
-                b.edge(sid, "defined_in", fid)
-            unsupported_mods: list[dict[str, Any]] = []
-            for mod in parsed["mods"]:
-                if mod.get("path_attribute"):
-                    unsupported_mods.append({
-                        "name": mod["name"],
-                        "line": mod["line"],
-                        "reason": "#[path] module paths are not resolved",
-                    })
-                    continue
-                candidates = _rust_mod_candidates(rel, mod["name"])
-                # Record both layouts so reingest notices a module file that
-                # appears or disappears; the edge uses the first existing one.
-                self._ref(entry, ["rs_mod", *candidates])
-                target = next((c for c in candidates
-                               if (self.root / c).is_file()), None)
-                if target:
-                    b.edge(fid, "imports", self.file_node(target))
-            if unsupported_mods:
-                b.attrs(fid)["rust_unsupported_mods"] = unsupported_mods
+            self._rust_symbols(fid, rel, parsed)
+            self._rust_modules(fid, rel, entry, parsed["mods"])
             self.sources.append(self._types[0](rel, fid,
                                                parsed.get("source") or ""))
             entry["ctx"] = 1
@@ -942,6 +956,16 @@ class FileIndexer:
         b = self.b
         root = self.root
         fid, text, entry = self._begin(rel, "test", p)
+        if p.suffix == ".rs":
+            parsed = _rust_parse(p, text)
+            if parsed is None:
+                return
+            test_ids = self._rust_symbols(fid, rel, parsed)
+            self._rust_modules(fid, rel, entry, parsed["mods"])
+            self.tests.append(self._types[1](
+                rel, fid, parsed.get("source") or "", test_ids))
+            entry["ctx"] = 1
+            return
         parsed = _python_parse(p, text)
         if parsed is None:
             return
@@ -1125,9 +1149,15 @@ def build_index(root: str | Path = ROOT, out: str | Path = DEFAULT_DUMP,
     # -- tests ------------------------------------------------------------- #
     test_paths: list[Path] = []
     seen_tests: set[str] = set()
-    for rel_dir in TEST_DIRS:
-        for p in _iter_paths(root, rel_dir, (".py",),
-                             path_filter=lambda r: Path(r).name.startswith("test_")):
+    def _test_candidate(rel: str) -> bool:
+        if rel.endswith(".py"):
+            return Path(rel).name.startswith("test_")
+        return rel.endswith(".rs")
+
+    test_dirs = tuple(dict.fromkeys((*TEST_DIRS, *_RUST_TEST_DIRS)))
+    for rel_dir in test_dirs:
+        for p in _iter_paths(root, rel_dir, (".py", ".rs"),
+                             path_filter=_test_candidate):
             rel = _rel(root, p)
             if rel not in seen_tests:
                 seen_tests.add(rel)

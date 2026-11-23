@@ -33,7 +33,7 @@ from ozagia.config import (GENERIC_SKIP_DIRS, load_project_config, repo_root,
                            state_path, state_rel)
 
 ROOT = repo_root()
-CACHE_VERSION = 3
+CACHE_VERSION = 4
 # Process-local memos. The document memo keeps parsed tag caches keyed by
 # path and validated by (mtime_ns, size); the graph memo keeps reference
 # graphs and derived indexes keyed by the cache view's content.
