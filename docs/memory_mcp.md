@@ -688,7 +688,8 @@ stable address. See [`CST_EDIT.md`](CST_EDIT.md).
 | `.py` | AST paths + lossless Python CST; hub-IR-authored replacements via `*_ir` / `engine:"ir"` | v0 |
 | `.md` / `.markdown` | section graph + line leaves | v0 |
 | `.json` | document paths + span-preserving leaves | v0 |
-| `.rs` / `.lua` | `ts_ingest` `CstNode` graph | v0 CST ops; tree-sitter backend or a supplied synthetic graph |
+| `.rs` | `edit/rust_edit.py` symbol ops plus `CstNode` graph | symbol/body/import/rename ops with parse gate; CST ops for node paths |
+| `.lua` | `ts_ingest` `CstNode` graph | v0 CST ops; tree-sitter backend or a supplied synthetic graph |
 | `.yaml` / `.toml` / others | — | refused rather than falling back to a text patch |
 
 Adding a format means adding a parser + renderer for that format's block graph
@@ -763,8 +764,9 @@ layer is honest: semantic targets in, lossless CST out, diff as a view.
   becomes slow, add a `--seed-item-types` filter; do not hand-edit the dump.
 - **Edit adapters are v0.** Python has symbol + generic AST-node ops; Markdown
   has section ops; JSON has path ops; HCL and YAML have their own adapters;
-  Rust/Lua use the `CstNode` subtree adapter (`edit/cst.py`) but have no
-  symbol-addressed ops yet. Formats without an adapter (TOML, arbitrary text)
+  Rust has a symbol-addressed adapter (`edit/rust_edit.py`) and the `CstNode`
+  subtree adapter; Lua has the CST adapter only. Formats without an adapter
+  (TOML, arbitrary text)
   are refused rather than silently patched. Rename is lexical and reported as
   such; scope-aware rename is a later graph pass.
 - **Symbol graph is syntactic.** Callers and callees come from name, import and

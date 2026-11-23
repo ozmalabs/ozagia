@@ -11,6 +11,7 @@ One edit-script contract, multiple format adapters:
     .yaml / .yml         -> ozagia.edit.yaml_edit (optional round-trip parser)
     .rs / .lua         -> ozagia.edit.cst (CstNode subtree/leaf ops;
                            tree-sitter backend or a supplied synthetic graph)
+    .rs                 -> ozagia.edit.rust_edit (symbol/body/import/rename ops)
 
 The adapters share the transaction contract: preview by default, optional
 `base_sha256` staleness check, parse/structural validation, atomic write,
@@ -30,6 +31,8 @@ from typing import Any
 from ozagia.edit.code_edit import CodeEditError
 from ozagia.edit.code_edit import apply_edit_script as apply_python_edit
 from ozagia.edit.cst import apply_cst_edit_script
+from ozagia.edit.rust_edit import SYMBOL_OPS as _RUST_SYMBOL_OPS
+from ozagia.edit.rust_edit import apply_rust_edit_script
 from ozagia.edit.json_edit import apply_json_edit_script
 from ozagia.edit.markdown import apply_markdown_edit_script
 from ozagia.adapters import registry
@@ -102,13 +105,21 @@ def apply_edit_script(root: str | Path, script: dict[str, Any], *,
     if kind == "yaml":
         from ozagia.edit.yaml_edit import apply_yaml_edit_script
         return apply_yaml_edit_script(root, script, write=write)
-    if kind in ("rust", "lua"):
+    if kind == "rust":
+        names = {str(op.get("op") or "")
+                 for op in script.get("ops") or [] if isinstance(op, dict)}
+        # `replace_span` alone keeps the existing CST adapter; symbol ops use
+        # the symbol-addressed Rust adapter.
+        if names & (_RUST_SYMBOL_OPS - {"replace_span"}):
+            return apply_rust_edit_script(root, script, write=write)
+        return apply_cst_edit_script(root, script, write=write)
+    if kind == "lua":
         return apply_cst_edit_script(root, script, write=write)
     if kind == "source-refused":
         raise CodeEditError(
             f"no graph edit adapter for {Path(file).suffix!r} yet; supported "
             f"in v0: .py (symbol/AST ops, plus adapter engines), .md/.markdown (section ops), "
             f".json (path ops), .tf/.tofu/.hcl (HCL block/attribute ops), "
-            f".yaml/.yml (round-trip path ops), and .rs/.lua (CST ops). "
-            f"Refusing rather than falling back to a text patch.")
+            f".yaml/.yml (round-trip path ops), .rs (symbol or CST ops) and "
+            f".lua (CST ops). Refusing rather than falling back to a text patch.")
     raise CodeEditError(f"unsupported file type: {file}")

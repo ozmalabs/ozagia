@@ -1,8 +1,9 @@
 # CST edit — graph-addressed Rust/Lua edits
 
-**Status:** Workstream A v0 (2026-11-14). The adapter exists and is tested; it
-is not yet wired into the shared dispatcher. This note is the contract the
-central integration in `docs/features/GRAPH_EDIT_AND_SESSION_PLAN.md` binds to.
+**Status:** Workstream A v0 (2026-11-14), wired through `edit/dispatch.py`.
+Rust also has a symbol-addressed adapter (`edit/rust_edit.py`); this CST
+adapter remains the lossless subtree/leaf path for `.rs` and `.lua`. See
+[`rust.md`](rust.md) for the Rust symbol ops.
 
 **Not agent runtime.** This is dev tooling. It consumes the substrate's
 `CstNode` graph (parsed by `ts_ingest` when tree-sitter is available), applies

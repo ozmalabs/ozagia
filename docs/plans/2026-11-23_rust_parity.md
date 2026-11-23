@@ -1,6 +1,6 @@
 # Rust parity with Python — plan (2026-11-23)
 
-Status: Phases 0, 0.5, 1 and 2 implemented (2026-11-23); Phases 3–7 proposed. This plan closes
+Status: Phases 0, 0.5, 1, 2 and 3 implemented (2026-11-23); Phases 4–7 proposed. This plan closes
 the gap between `.rs` and `.py` support across the graph, tags,
 symbol-question layer, edits, LSP, tests and documentation, and adds the
 initial setup for a Python→Rust migration assistant built on the same graph.
@@ -37,7 +37,7 @@ do in a Python repository today, at the same honesty level:
 | Test indexing | `index_test` parses pytest tests, links `tests_module`, `mentions_file` | Phase 1 adds `#[test]`/`#[tokio::test]`/`#[rstest]` and `tests/*.rs` Test nodes; import/`tests_module` resolution remains Phase 2/5 |
 | Repo map | file edges from resolved imports + names | file edges from resolved Rust `use`/glob module targets plus name edges; `mod` edges resolve |
 | Symbol graph | local / import / name resolution; pyright precise mode | Phase 2 Rust resolver covers `crate`/`self`/`super`/workspace crates, aliases, globs and bounded re-exports; external crates and ambiguous bindings stay unresolved; Python resolution unchanged |
-| Edits | symbol ops (`replace_symbol`, `replace_body`, `insert_import`, `delete_symbol`, `rename_symbol`, …) with AST parse gate | CST subtree ops only (`edit/cst.py`); no symbol addressing, no `use` insertion, no symbol rename |
+| Edits | symbol ops (`replace_symbol`, `replace_body`, `insert_import`, `delete_symbol`, `rename_symbol`, …) with AST parse gate | Phase 3 symbol ops (`edit/rust_edit.py`) with tree-sitter parse gate, group import merge, conservative same-file rename, LSP preview application; CST subtree ops remain |
 | LSP | pyright live | registry entry exists; Phase 0 installed rust-analyzer 1.97.1, but the first query can be empty while it indexes a workspace |
 | Lint | ruff | rustfmt (already parity for formatting; no Rust linter like clippy) |
 | Tests | `pytest` capture, affected subset, result cache | `cargo test` is not a captured command; no crate or test-target nodes |
@@ -229,29 +229,34 @@ availability of a parser.
 - Precise-mode rust-analyzer warm-up and complete live coverage remain Phase 4;
   the existing precise path still uses the LSP client.
 
-### Phase 3 — Symbol-addressed Rust edits (3–4 days)
+### Phase 3 — Symbol-addressed Rust edits (3–4 days) — implemented 2026-11-23
 
-- New `src/ozagia/edit/rust_edit.py` with the Python op vocabulary where it
-  maps:
+- Added `src/ozagia/edit/rust_edit.py` with:
   - `replace_symbol`, `replace_body`, `delete_symbol`,
     `insert_before_symbol`, `insert_after_symbol`;
-  - `insert_import` (inserts a `use`, merging into an existing group when
-    unambiguous, sorted by rustfmt conventions);
-  - `replace_span` (already available through CST; expose the same op here);
-  - `rename_symbol` for the **same file only**, scope-aware through
-    tree-sitter scopes; refuse fields, macros, ambiguous bindings and
-    trait/impl method renames that could affect other types.
-- Reuse `edit/txn.py` unchanged: preview by default, `base_sha256` check,
-  atomic write, backup, journal. Add a parse gate: the edited source must parse
-  with `tree_sitter_rust` without `ERROR`/missing nodes; refuse rather than
-  write.
-- `edit/dispatch.py`: `.rs` dispatches symbol ops to `rust_edit` and CST ops to
-  `cst`; unknown ops are refused. `code_edit.py` stays Python-only.
-- Rename application from `lsp.rename_preview`: translate a same-file preview
-  into `replace_span` edits through the transaction (the Python path does the
-  same today); cross-file application remains preview-only.
-- Exit: every Python symbol op has a Rust counterpart or an explicit refusal;
-  docs/tests show preview, stale-base, parse-gate and lossless behaviour.
+  - `insert_import`, including merging a simple name into an existing
+    `use prefix::{...};` group and duplicate suppression;
+  - `replace_span` (line/column or absolute character span);
+  - same-file `rename_symbol` for free functions, structs/enums/unions,
+    traits, type aliases, consts/statics and modules. It refuses methods,
+    impl blocks, macros, field names, import bindings and names also bound as
+    local variables/parameters. It never crosses files.
+- Reuses `edit/txn.py`: preview by default, `base_sha256`, atomic write,
+  backup under `.ozagia/edits/backups/`, preserved BOM/newlines. Every preview
+  and apply must reparse as Rust with tree-sitter (no `ERROR`/missing nodes);
+  an edit that would not parse is refused.
+- `edit/dispatch.py` routes `.rs` symbol ops to `rust_edit` and CST node ops
+  to `cst`; mixed/unknown ops are refused. `.lua` remains CST-only.
+- `apply_lsp_rename_preview(root, preview, write=...)` applies a **same-file**
+  rust-analyzer rename preview through the transaction, with UTF-16 position
+  conversion and overlap checks. Cross-file previews and resource operations
+  are review-only.
+- Docs: `docs/rust.md`, `docs/cst_edit.md`, `docs/memory_mcp.md` and the plan.
+- Verification: `tests/test_rust_edit.py` (12 tests) covers symbol/body spans,
+  docs/attributes, replace/delete/insert, struct/span edits, import placement
+  and group merge, rename and its refusals, LSP preview,
+  stale-base/parse-gate/backup and dispatch routing. Focused suites pass; the
+  full suite is 6248 passed / 22 skipped and ruff is clean.
 
 ### Phase 4 — LSP parity (1–2 days)
 
@@ -447,11 +452,9 @@ Commands:
 
 ```bash
 .venv/bin/python -m pytest -q \
-  tests/test_rust_modules.py tests/test_rust_symbols.py tests/test_rust_mods.py \
-  tests/test_symbol_graph.py tests/test_tag_languages.py tests/test_repo_map.py \
-  tests/test_lsp.py tests/test_migration_config.py tests/test_migration_inventory.py \
-  tests/test_migration_match.py tests/test_migration_report.py \
-  tests/test_migration_cli.py
+  tests/test_rust_edit.py tests/test_rust_modules.py tests/test_rust_symbols.py \
+  tests/test_rust_mods.py tests/test_symbol_graph.py tests/test_tag_languages.py \
+  tests/test_repo_map.py tests/test_lsp.py tests/test_cst_edit.py
 .venv/bin/python -m pytest -q          # full gate
 .venv/bin/ruff check src tests
 OZAGIA_LIVE_LSP=1 .venv/bin/python -m pytest -q tests/test_lsp.py
@@ -494,7 +497,7 @@ python -m ozagia.eval.bench --root <rust-repo> --cold --check
 | 0.5 — language support packages (done 2026-11-23) | 1–2 |
 | 1 — parser + tags + graph fields (done 2026-11-23) | 2–3 |
 | 2 — modules/imports/symbol graph (done 2026-11-23) | 3–5 |
-| 3 — symbol edits | 3–4 |
+| 3 — symbol edits (done 2026-11-23) | 3–4 |
 | 4 — LSP | 1–2 |
 | 5 — cargo test | 5–8 |
 | 6 — migration assistant (initial setup) | 3–5 |

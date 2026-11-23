@@ -1,6 +1,6 @@
 # Rust support
 
-Status: Phases 0, 0.5, 1 and 2 of
+Status: Phases 0, 0.5, 1, 2 and 3 of
 [`docs/plans/2026-11-23_rust_parity.md`](plans/2026-11-23_rust_parity.md),
 2026-11-23. This page describes what works today, not the target state. The
 `ozagia languages` command and automatic component checks are documented in
@@ -19,7 +19,7 @@ updated as each phase lands.
 | Test nodes | inline `#[test]`/`#[tokio::test]`/`#[rstest]` functions, plus `tests/*.rs` and `benches/*.rs` files, produce Test nodes; `cargo test` capture and selection remain Phase 5 | graph Test nodes, `tests_for` |
 | Module edges | `mod x;` resolves to `x.rs` or `x/mod.rs`, with crate-root rules (see below); `#[path = "..."]` is recorded as unsupported, not guessed | graph `File -imports-> File` edges |
 | Symbol questions | `dev_symbol_*` / `dev_callers` / `dev_callees` resolve Rust `crate`/`self`/`super`/workspace imports, aliases, globs and bounded re-exports; external crates are unresolved, never guessed by name; there is no type inference | `ozagia core.symbol_graph` CLI or the MCP tools |
-| Structural edits | CST subtree ops on `.rs` through `edit/cst.py`: `replace_node`, `insert_before_node`, `insert_after_node`, `delete_node`, `wrap_node`, `replace_span`; preview by default | `ozagia edit` script with a `file` ending in `.rs` and a CST path |
+| Structural edits | symbol ops through `edit/rust_edit.py`: `replace_symbol`, `replace_body`, `delete_symbol`, `insert_before_symbol`, `insert_after_symbol`, `insert_import`, `replace_span`, `rename_symbol`; CST subtree ops remain available; preview by default, tree-sitter parse gate | `ozagia edit` script with a `file` ending in `.rs` |
 | Lint | `rustfmt --check --edition <Cargo edition>` when `rustfmt` is on `PATH`; config `[lint] rust = "auto" "rustfmt" "off"` | `ozagia-settings`; edit-time lint |
 | LSP | rust-analyzer through `ozagia.lsp`: definition, references, document symbols, hover, diagnostics, call hierarchy, rename preview | `ozagia languages ensure --root .` or `ozagia[lang-rust]`; `OZAGIA_LIVE_LSP=1` for the gated smoke |
 | Dependencies and review | Cargo.lock inventory, crates.io detection, `pkg:cargo/…` purls, strict SemVer advisory matching, `cargo-audit` in the allowlisted scanners | `ozagia-review`, deep review dependencies subject |
@@ -130,18 +130,30 @@ the bounded warm-up/retry and the full live suite.
 
 ## Edits
 
-`.rs` currently has CST-node addressing, not symbol addressing:
+`.rs` has two adapters:
+
+- **symbol-addressed** (`edit/rust_edit.py`): `replace_symbol`, `replace_body`,
+  `delete_symbol`, `insert_before_symbol`, `insert_after_symbol`,
+  `insert_import` (including simple `use prefix::{a, b}` group merging),
+  `replace_span`, and a conservative same-file `rename_symbol`.
+- **CST-addressed** (`edit/cst.py`): `replace_node`, `insert_before_node`,
+  `insert_after_node`, `delete_node`, `wrap_node`, `replace_span`, using
+  `child[2].child[0]` paths or a supplied synthetic CST.
 
 ```json
 {"file": "src/lib.rs",
  "base_sha256": "<optional>",
- "ops": [{"op": "replace_node", "target": "child[1].child[3]", "text": "..."}]}
+ "ops": [{"op": "replace_body", "symbol": "Foo.bar", "text": "self.x + 1"}]}
 ```
 
-Preview is the default; applying backs up the file under
-`.ozagia/edits/backups/` and writes atomically. There is no symbol rename,
-`use` insertion or symbol-body replacement yet; Phase 3 adds those in
-`edit/rust_edit.py`. Raw diff/patch input is refused.
+Both use the shared transaction: preview by default, stale-base refusal,
+atomic write, backup under `.ozagia/edits/backups/`, and a tree-sitter parse
+gate for Rust (an edit that would not parse is refused). `rename_symbol` is
+deliberately limited to free functions/types/modules/constants/statics and
+refuses methods, impl blocks, macros, field names, import bindings and names
+that are also local bindings. `apply_lsp_rename_preview` applies a same-file
+rust-analyzer preview through the same transaction; cross-file previews stay
+review-only. Raw diff/patch input is refused.
 
 ## Honest limits
 
@@ -158,18 +170,20 @@ Preview is the default; applying backs up the file under
 - No build, `cargo check` or `cargo metadata` is run: reading the project must
   not execute build scripts or proc macros. Cargo tests, when supported, will
   run only because the caller typed the command.
-- `#[path]`, inline module scope, custom target paths and generated source are
-  reported as gaps; they are not followable guesses.
+- `#[path]`, inline module scope and configured Cargo target paths are
+  resolved; build-script-generated targets, conditional `cfg` modules and
+  proc-macro source remain unknown. Symbol rename does not cross files or
+  resolve types; a trait/impl method or field rename needs the LSP preview.
 
 ## Checks
 
 ```bash
 # focused
 PYTHONPATH=src .venv/bin/python -m pytest -q \
-  tests/test_rust_modules.py tests/test_rust_symbols.py \
-  tests/test_rust_mods.py tests/test_symbol_graph.py \
-  tests/test_tag_languages.py tests/test_repo_map.py \
-  tests/test_memory.py tests/test_graph_reingest.py
+  tests/test_rust_edit.py tests/test_rust_modules.py \
+  tests/test_rust_symbols.py tests/test_rust_mods.py \
+  tests/test_symbol_graph.py tests/test_tag_languages.py \
+  tests/test_repo_map.py tests/test_memory.py tests/test_graph_reingest.py
 
 # LSP is gated and needs the rustup component
 OZAGIA_LIVE_LSP=1 PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_lsp.py
