@@ -1,8 +1,10 @@
 # Rust support
 
-Status: Phases 0, 0.5, 1, 2, 3, 4, 5 and 6 of
-[`docs/plans/2026-11-23_rust_parity.md`](plans/2026-11-23_rust_parity.md),
-2026-11-23. This page describes what works today, not the target state. The
+Status: Phases 0, 0.5, 1, 2, 3, 4, 5 and 6, plus the optional Phase 7
+SCIP/bench/tier slice, 2026-11-23, of
+[`docs/plans/2026-11-23_rust_parity.md`](plans/2026-11-23_rust_parity.md).
+The normalized SCIP cache and a Rust dataflow analyzer remain out of scope.
+This page describes what works today, not the target state. The
 `ozagia languages` command and automatic component checks are documented in
 [`languages.md`](languages.md); the Python→Rust overlay is documented in
 [`migration.md`](migration.md).
@@ -24,7 +26,7 @@ updated as each phase lands.
 | Lint | `rustfmt --check --edition <Cargo edition>` when `rustfmt` is on `PATH`; config `[lint] rust = "auto" "rustfmt" "off"` | `ozagia-settings`; edit-time lint |
 | LSP | rust-analyzer through `ozagia.lsp`: definition, references, document symbols, hover, diagnostics, call hierarchy, rename preview; workspace-root selection and install hints | `ozagia languages ensure --root .` or `ozagia[lang-rust]`; `OZAGIA_LIVE_LSP=1` for the gated suite |
 | Dependencies and review | Cargo.lock inventory, crates.io detection, `pkg:cargo/…` purls, strict SemVer advisory matching, `cargo-audit` in the allowlisted scanners | `ozagia-review`, deep review dependencies subject |
-| SCIP | the importer is language-agnostic; a Rust index can be produced with `rust-analyzer scip .` and `scip print --json` (recipe is provisional until Phase 7) | `index/scip.py` |
+| SCIP | the importer is language-agnostic; a Rust index is produced with `rust-analyzer scip .` and exported with `scip print --json`; a real rust-analyzer fixture round-trips through `index/scip.py` (protobuf fallback requires `scip_pb2`) | `docs/scip.md`, `tests/test_scip.py` |
 | `cargo test` selection | captured `cargo test` with package/target/feature mapping, stable human-output parsing, per-target affected selection and cache; failures are never cached | `[tests] select = "affected"` / `cache = true`; `tests/test_cargo_test.py` |
 | Migration assistance | `[migration]` pairs validate; `ozagia migration status` inventories both trees, derives planned/in-progress/ported/diverged/dropped/extra statuses and parity flags, reports inference candidates without accepting them, records freshness, and emits a task checklist; `scaffold` is preview-only unless `--write` (transaction + backup) and refuses complex shapes | `docs/migration.md`; `tests/test_migration_*.py` |
 
@@ -239,6 +241,26 @@ root runs as typed. `OZAGIA_TESTS_ALL=1` always runs as typed.
 The overlay is syntactic: re-exports, runtime metaprogramming, C extensions and
 cross-language tests are not resolved, and no `migrates_to` graph edge is
 written yet. A clean flag set is not a promise of semantic equivalence.
+
+## Rust tier (Phase 7)
+
+The Rust tier is syntactic by default. Precision and execution are explicit
+opt-ins, and each layer has a stated limit:
+
+| Layer | Tier | Explicit limits |
+| --- | --- | --- |
+| Tags | structural, standard library | bundled tree-sitter query plus regex fallback; macro expansions, generated files and `cfg`-hidden items are not invented |
+| Symbols / graph | syntactic definitions and references | spans, docs, attributes, args, returns, visibility and Test nodes; no type inference, trait resolution or MIR |
+| Imports / modules | `mod` and `use` resolution | `crate`/`self`/`super`, workspace crates, aliases, globs and bounded re-exports; external crates and ambiguous bindings stay unresolved |
+| Edits | symbol and CST operations | preview by default, base-hash check, backup and tree-sitter parse gate; same-file rename only; cross-file rename is the LSP preview |
+| LSP | optional rust-analyzer | workspace-root routing, install hints and live definition/references/symbols/diagnostics/call hierarchy/rename preview; first query waits for indexing |
+| Tests | captured `cargo test` | target-level affected selection and cache, stable human output only; custom harnesses run as typed; failures never cached |
+| SCIP / precise graph | optional importer | JSON export is the primary path; protobuf requires `protobuf` + `scip_pb2`; the normalized-index cache is not implemented |
+| Review | Cargo.lock/advisory support | a Rust dataflow/trust-boundary analyzer is a separate plan, not part of this tier |
+
+The Phase 7 smoke benchmark (27-file `ozma` crate, rustc 1.87.0) and the SCIP
+fixture round-trip are recorded in
+[`docs/results/rust_parity_bench_2026-11-23.md`](results/rust_parity_bench_2026-11-23.md).
 
 ## Honest limits
 

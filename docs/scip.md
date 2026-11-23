@@ -35,6 +35,31 @@ scip print --json index.scip > index.scip.json
 form. The loader accepts the standard lowerCamelCase spelling and the more
 readable snake_case spelling used by several exporters:
 
+### Rust
+
+`rust-analyzer` has an unstable `scip` subcommand (it may be hidden from
+`--help` and its CLI is not a compatibility promise). From a Cargo workspace
+or package root:
+
+```bash
+cd crates/example
+rust-analyzer scip .
+scip print --json index.scip > index.scip.json
+```
+
+The first command writes `index.scip`; the second exports JSON and is part of
+the Sourcegraph SCIP CLI, not Ozagia. If the CLI is not installed, the
+protobuf path works only when `protobuf` and `scip_pb2` are importable; the
+importer refuses honestly otherwise. The checked-in fixture
+`tests/fixtures/scip/rust_index.scip.json` is a real rust-analyzer 1.97.1
+index of `tests/fixtures/py_rust_migration/rust` (three documents, 29
+definitions, 25 references, two cross-file edges). `tests/test_scip.py`
+round-trips it through the importer, summaries and graph records.
+
+The index is read-only and is never written under the repository by Ozagia.
+An optional normalized-index cache under `.ozagia/` is not implemented yet;
+the importer reads and normalizes the supplied index each time.
+
 ```json
 {
   "metadata": {

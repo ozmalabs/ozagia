@@ -1,7 +1,8 @@
 # Rust parity with Python — plan (2026-11-23)
 
-Status: Phases 0, 0.5, 1, 2, 3, 4, 5 and 6 implemented (2026-11-23); Phase 7
-proposed. This plan closes
+Status: Phases 0, 0.5, 1, 2, 3, 4, 5 and 6 implemented (2026-11-23);
+the optional Phase 7 SCIP/bench/tier slice is implemented, with the normalized
+SCIP cache and the separate Rust dataflow analyzer left out. This plan closes
 the gap between `.rs` and `.py` support across the graph, tags,
 symbol-question layer, edits, LSP, tests and documentation, and adds the
 initial setup for a Python→Rust migration assistant built on the same graph.
@@ -403,7 +404,24 @@ cross-language tests and a graph `migrates_to` edge are not implemented; the
 scaffold supports only simple scalar dataclasses/functions and appends to an
 existing file. See `docs/migration.md`.
 
-### Phase 7 — Optional precise graph and review (2–4 days, stretch)
+### Phase 7 — Optional precise graph and review (2–4 days, stretch) — implemented 2026-11-23
+
+- SCIP recipe: `docs/scip.md` now documents `rust-analyzer scip .` and
+  `scip print --json index.scip`, the protobuf fallback, and the
+  `tests/fixtures/scip/rust_index.scip.json` round-trip test. The optional
+  normalized-index cache under `.ozagia/` is not implemented.
+- Benchmark: `docs/results/rust_parity_bench_2026-11-23.md` and `.json` record
+  cold/warm indexing, repo-map/search/impact timings and symbol/import
+  resolution counts on the 27-file `ozma` crate (commit `33a39c8`).
+- Tier declaration: `docs/rust.md`, `docs/status.md` and
+  `cap:languages.rust_tier` declare tags, symbols, imports, edits, LSP, tests
+  and SCIP limits explicitly.
+- Deep review: Cargo.lock/advisory support is unchanged. A Rust
+  trust-boundary/dataflow analyzer remains a separate plan.
+- Verification: `tests/test_scip.py` (9 passed, including the rust-analyzer
+  fixture round-trip), full suite 6352 passed / 22 skipped, ruff clean.
+
+Original scope:
 
 - SCIP recipe: document `rust-analyzer scip .` and
   `scip print --json index.scip`, ingest through `index/scip.py`, and add a
@@ -532,7 +550,7 @@ python -m ozagia.eval.bench --root <rust-repo> --cold --check
 | 4 — LSP (done 2026-11-23) | 1–2 |
 | 5 — cargo test (done 2026-11-23) | 5–8 |
 | 6 — migration assistant (initial setup) (done 2026-11-23) | 3–5 |
-| 7 — optional SCIP/review/docs | 2–4 |
+| 7 — optional SCIP/review/docs (done 2026-11-23; cache and Rust dataflow separate) | 2–4 |
 
 Core parity (0–5) is roughly 15–23 developer-days, plus the 1–2 days already
 spent on the language support packages (Phase 0.5). With the initial migration

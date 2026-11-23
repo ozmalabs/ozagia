@@ -282,3 +282,54 @@ def test_protobuf_path_refuses_without_scip_pb2(tmp_path: Path) -> None:
     # A JSON export remains the supported path in this environment.
     with pytest.raises(ScipProtobufUnavailableError):
         load_scip(dummy, format_hint="protobuf")
+
+
+RUST_FIXTURE = (Path(__file__).resolve().parent / "fixtures" / "scip"
+                / "rust_index.scip.json")
+
+
+def test_rust_analyzer_scip_fixture_round_trip() -> None:
+    """A real rust-analyzer index of the migration fixture crate.
+
+    Generated with ``rust-analyzer scip .`` in
+    ``tests/fixtures/py_rust_migration/rust`` and exported through the SCIP
+    protobuf JSON shape; the absolute project root was replaced with
+    ``file:///repo``. It exercises Rust crate/module/type/method descriptors,
+    local symbols, definition and reference roles, and two cross-file edges.
+    """
+    index = load_scip(RUST_FIXTURE)
+    assert index["format"] == "scip-json"
+    assert [doc["path"] for doc in index["documents"]] == [
+        "src/lib.rs", "src/models.rs", "src/service.rs"]
+
+    payload = scip_import(RUST_FIXTURE)
+    assert payload["ok"] is True
+    assert payload["input_format"] == "scip-json"
+    assert payload["documents"] == 3
+    assert payload["totals"] == {
+        "files": 3,
+        "definitions": 29,
+        "references": 25,
+        "local_definitions": 8,
+        "local_references": 5,
+        "symbols": 31,
+        "defined_symbols": 21,
+        "edges": 2,
+    }
+    assert {row["path"] for row in payload["files"]} == {
+        "src/lib.rs", "src/models.rs", "src/service.rs"}
+    assert {(edge["src"], edge["tgt"]) for edge in payload["edges"]} == {
+        ("src/lib.rs", "src/models.rs"),
+        ("src/lib.rs", "src/service.rs"),
+    }
+    user = next(record for record in payload["definitions"]
+                if record["symbol"].endswith("models/User#"))
+    assert user["path"] == "src/models.rs"
+    assert user["name"] == "User"
+    method = next(record for record in payload["definitions"]
+                  if "display_name" in record["symbol"])
+    assert method["path"] == "src/models.rs"
+    # The graph payload can be fed back to the summary functions unchanged.
+    assert scip_file_summary(payload)["totals"] == payload["totals"]
+    assert scip_to_graph_records(payload)["totals"] == payload["totals"]
+    assert json.loads(scip_dumps(payload)) == payload

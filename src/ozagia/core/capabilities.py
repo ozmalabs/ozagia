@@ -359,6 +359,7 @@ _DOCS = {
     "resources": "doc:docs/resources.md",
     "toolchain": "doc:docs/toolchain.md",
     "languages": "doc:docs/languages.md",
+    "rust": "doc:docs/rust.md",
     "migration": "doc:docs/migration.md",
     "supply_chain": "doc:docs/supply_chain.md",
     "status": "doc:docs/status.md",
@@ -1452,6 +1453,41 @@ _BUILTIN_DEFINITIONS: tuple[dict[str, Any], ...] = (
         authorization="explicit CLI; automatic check is opt-out; no sudo",
         tests=_tests("languages"),
         docs=_docs("languages"),
+    ),
+    _def(
+        id="cap:languages.rust_tier",
+        domain="toolchain",
+        purpose=("Declare the syntactic Rust tier and its explicit limits for "
+                 "tags, symbols, imports, edits, LSP, tests and optional SCIP."),
+        owner="ozagia.core.memory",
+        side_effect="read",
+        exposure=["internal"],
+        impl=["impl:ozagia.core.memory.build_index",
+              "impl:ozagia.core.rust_modules.discover",
+              "impl:ozagia.core.rust_tests.discover",
+              "impl:ozagia.index.scip.load_scip",
+              "impl:ozagia.edit.rust_edit",
+              "impl:ozagia.lsp",
+              "impl:ozagia.intent.run.run_cargo_test"],
+        surfaces=[],
+        prerequisites=["Rust source trees in the checkout",
+                       "optional tree-sitter-rust grammar",
+                       "optional rust-analyzer for the precise layer"],
+        limits=["tags are structural; macros, generated files and cfg-hidden "
+                "items are not expanded",
+                "symbols and imports are syntactic; no type inference, trait "
+                "resolution or MIR",
+                "external crates and ambiguous bindings stay unresolved",
+                "edits are preview-first and same-file rename only; "
+                "cross-file rename is an LSP preview",
+                "rust-analyzer is optional; first queries wait for indexing",
+                "cargo tests use target-level affected selection and cache, "
+                "stable human output only; failures are never cached"],
+        authorization=("read-only by default; edits are explicit transactions; "
+                       "LSP and tests run only when invoked"),
+        tests=_tests("memory", "repo_map", "scip", "lsp", "edit",
+                     "test_policy"),
+        docs=_docs("rust", "scip", "lsp", "edit", "test"),
     ),
     _def(
         id="cap:migration.overlay",

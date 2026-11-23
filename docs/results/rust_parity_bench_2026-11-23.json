@@ -1,0 +1,341 @@
+{
+  "cold": {
+    "code_search": {
+      "config file": {
+        "first_call_ok": true,
+        "first_s": 0.025,
+        "results": 13,
+        "second_s": 0.025
+      },
+      "main": {
+        "first_call_ok": true,
+        "first_s": 0.025,
+        "results": 7,
+        "second_s": 0.025
+      },
+      "parse arguments": {
+        "first_call_ok": true,
+        "first_s": 0.027,
+        "results": 8,
+        "second_s": 0.027
+      }
+    },
+    "code_search_build": {
+      "parallel": 1,
+      "reused": 0,
+      "rows": 27,
+      "side_cache": "absent",
+      "side_written": 77361,
+      "tokenized": 27
+    },
+    "impact": {
+      "src/compress/stubs.rs": {
+        "first_call_ok": true,
+        "first_s": 0.002,
+        "impacted": 2,
+        "ok": true,
+        "second_s": 0.002
+      },
+      "src/inference/hardware.rs": {
+        "first_call_ok": true,
+        "first_s": 0.002,
+        "impacted": 13,
+        "ok": true,
+        "second_s": 0.003
+      }
+    },
+    "new_process_search": {
+      "build": {
+        "parallel": 1,
+        "reused": 27,
+        "rows": 27,
+        "side_cache": "loaded",
+        "tokenized": 0
+      },
+      "n": 7,
+      "seconds": 0.101,
+      "side_bytes_after": 77361,
+      "side_bytes_before": 77361
+    },
+    "repo_map": {
+      "configuration loading": {
+        "estimated_tokens": 476,
+        "files": 16,
+        "first_call_ok": true,
+        "first_s": 0.019,
+        "second_s": 0.019
+      },
+      "error handling and logging": {
+        "estimated_tokens": 556,
+        "files": 19,
+        "first_call_ok": true,
+        "first_s": 0.014,
+        "second_s": 0.014
+      },
+      "main entry point": {
+        "estimated_tokens": 448,
+        "files": 13,
+        "first_call_ok": true,
+        "first_s": 0.126,
+        "second_s": 0.031
+      }
+    },
+    "targets": {
+      "code_search": {
+        "median_second_s": 0.025,
+        "met": true,
+        "target_s": 0.5
+      },
+      "code_search_cold_first": {
+        "met": true,
+        "seconds": 0.025,
+        "target_s": 40.0
+      },
+      "code_search_new_process": {
+        "met": true,
+        "seconds": 0.101,
+        "target_s": 10.0
+      },
+      "cold_index": {
+        "met": true,
+        "seconds": 0.305,
+        "target_s": 30.0
+      },
+      "impact": {
+        "median_second_s": 0.003,
+        "met": true,
+        "target_s": 0.3
+      },
+      "repo_map": {
+        "median_second_s": 0.019,
+        "met": true,
+        "target_s": 1.0
+      }
+    },
+    "update": {
+      "cached_files": 27,
+      "failed": 0,
+      "files": 27,
+      "parallel": 1,
+      "parsed": 27,
+      "reused": 0,
+      "seconds": 0.305
+    }
+  },
+  "commands": {
+    "cold": "PYTHONPATH=src .venv/bin/python -m ozagia.eval.bench --root ~/ozma-ai/rust --cold --cache /tmp/opencode/ozagiabench/ozma_rust_tags.json",
+    "resolution": "PYTHONPATH=src .venv/bin/python -c '<rust_modules.discover + rust_tests.discover + update_tag_cache + build_symbol_graph>'",
+    "warm": "PYTHONPATH=src .venv/bin/python -m ozagia.eval.bench --root ~/ozma-ai/rust --cache /tmp/opencode/ozagiabench/ozma_rust_tags.json"
+  },
+  "date": "2026-11-23",
+  "environment": {
+    "cargo": "1.87.0 (Homebrew)",
+    "cpus": 24,
+    "platform": "Linux 6.8.0-147-generic x86_64",
+    "python": "3.13.5",
+    "rust_analyzer": "1.97.1 (8bab26f 2026-07-14)",
+    "rustc": "1.87.0 (Homebrew)",
+    "tag_parser": "tree-sitter-rust"
+  },
+  "notes": [
+    "The target is a 27-file crate, not a large workspace; timings are a smoke benchmark, not a performance guarantee.",
+    "Cold means the tag cache was removed first; warm reuses it in a new process.",
+    "The cold bench's code-search child process still had a warm side cache after the first search, matching the bench contract.",
+    "Unresolved symbol references include external std/crate paths, macros, local bindings and syntactic ambiguities; the count is not a defect count.",
+    "SCIP JSON was produced from a real rust-analyzer index with protoc-generated bindings; the Sourcegraph scip CLI was not installed."
+  ],
+  "resolution": {
+    "root": "~/ozma-ai/rust",
+    "rust_modules": {
+      "ambiguous": {},
+      "crates": [],
+      "files_scanned": 1,
+      "files_with_contexts": 27,
+      "modules": 35,
+      "not_checked": [],
+      "targets": 1
+    },
+    "rust_tests": {
+      "omissions": [],
+      "packages": [
+        "ozma"
+      ],
+      "proc_macro": [],
+      "targets": 1,
+      "tests": 41
+    },
+    "symbol_graph": {
+      "defs": 393,
+      "duplicate_defs": 0,
+      "edges": 408,
+      "files": 27,
+      "refs": 1878,
+      "resolved_import": 31,
+      "resolved_local": 208,
+      "resolved_name": 133,
+      "rust_module_targets": 1,
+      "unresolved": 1506
+    },
+    "tag_cache": {
+      "cached_files": 27,
+      "errors": [],
+      "failed": 0,
+      "files": 27,
+      "parallel": 1,
+      "parsed": 0,
+      "reused": 27,
+      "root_hash": "60c3091e6d7216c73cf58c85feaac256e054036feb2733fb93837e8e7903b246"
+    },
+    "timings_s": {
+      "modules": 0.05,
+      "symbol_graph": 0.054,
+      "tag_cache": 0.015,
+      "tests": 0.047
+    }
+  },
+  "schema": "ozagia.rust_parity_bench.v1",
+  "scip_fixture": {
+    "defined_symbols": 21,
+    "definitions": 29,
+    "documents": 3,
+    "edges": 2,
+    "index_bytes": 7424,
+    "indexer": "rust-analyzer 1.97.1",
+    "json_bytes": 19835,
+    "local_definitions": 8,
+    "local_references": 5,
+    "references": 25,
+    "source": "tests/fixtures/scip/rust_index.scip.json",
+    "source_crate": "tests/fixtures/py_rust_migration/rust",
+    "symbols": 31
+  },
+  "target": {
+    "commit": "33a39c8",
+    "name": "ozma rust crate",
+    "path": "~/ozma-ai/rust",
+    "rust_files": 27,
+    "size": "1.9M"
+  },
+  "warm": {
+    "code_search": {
+      "config file": {
+        "first_call_ok": true,
+        "first_s": 0.026,
+        "results": 13,
+        "second_s": 0.025
+      },
+      "main": {
+        "first_call_ok": true,
+        "first_s": 0.026,
+        "results": 7,
+        "second_s": 0.026
+      },
+      "parse arguments": {
+        "first_call_ok": true,
+        "first_s": 0.027,
+        "results": 8,
+        "second_s": 0.028
+      }
+    },
+    "code_search_build": {
+      "parallel": 1,
+      "reused": 27,
+      "rows": 27,
+      "side_cache": "loaded",
+      "tokenized": 0
+    },
+    "impact": {
+      "src/compress/stubs.rs": {
+        "first_call_ok": true,
+        "first_s": 0.002,
+        "impacted": 2,
+        "ok": true,
+        "second_s": 0.002
+      },
+      "src/inference/hardware.rs": {
+        "first_call_ok": true,
+        "first_s": 0.002,
+        "impacted": 13,
+        "ok": true,
+        "second_s": 0.002
+      }
+    },
+    "new_process_search": {
+      "build": {
+        "parallel": 1,
+        "reused": 27,
+        "rows": 27,
+        "side_cache": "loaded",
+        "tokenized": 0
+      },
+      "n": 7,
+      "seconds": 0.099,
+      "side_bytes_after": 77361,
+      "side_bytes_before": 77361
+    },
+    "repo_map": {
+      "configuration loading": {
+        "estimated_tokens": 476,
+        "files": 16,
+        "first_call_ok": true,
+        "first_s": 0.019,
+        "second_s": 0.019
+      },
+      "error handling and logging": {
+        "estimated_tokens": 556,
+        "files": 19,
+        "first_call_ok": true,
+        "first_s": 0.014,
+        "second_s": 0.014
+      },
+      "main entry point": {
+        "estimated_tokens": 448,
+        "files": 13,
+        "first_call_ok": true,
+        "first_s": 0.091,
+        "second_s": 0.032
+      }
+    },
+    "targets": {
+      "code_search": {
+        "median_second_s": 0.026,
+        "met": true,
+        "target_s": 0.5
+      },
+      "code_search_cold_first": {
+        "met": null,
+        "seconds": null,
+        "target_s": 40.0
+      },
+      "code_search_new_process": {
+        "met": true,
+        "seconds": 0.099,
+        "target_s": 10.0
+      },
+      "cold_index": {
+        "met": null,
+        "seconds": null,
+        "target_s": 30.0
+      },
+      "impact": {
+        "median_second_s": 0.002,
+        "met": true,
+        "target_s": 0.3
+      },
+      "repo_map": {
+        "median_second_s": 0.019,
+        "met": true,
+        "target_s": 1.0
+      }
+    },
+    "update": {
+      "cached_files": 27,
+      "failed": 0,
+      "files": 27,
+      "parallel": 1,
+      "parsed": 0,
+      "reused": 27,
+      "seconds": 0.016
+    }
+  }
+}

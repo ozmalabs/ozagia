@@ -1,0 +1,1018 @@
+{
+ "documents": [
+  {
+   "language": "rust",
+   "occurrences": [
+    {
+     "enclosing_range": [
+      0,
+      0,
+      13,
+      0
+     ],
+     "range": [
+      0,
+      0,
+      13,
+      0
+     ],
+     "symbol": "rust-analyzer cargo fixturecrate 0.1.0 crate/",
+     "symbol_roles": 1
+    },
+    {
+     "range": [
+      2,
+      8,
+      14
+     ],
+     "symbol": "rust-analyzer cargo fixturecrate 0.1.0 models/"
+    },
+    {
+     "range": [
+      3,
+      8,
+      15
+     ],
+     "symbol": "rust-analyzer cargo fixturecrate 0.1.0 service/"
+    },
+    {
+     "enclosing_range": [
+      5,
+      0,
+      8,
+      1
+     ],
+     "range": [
+      6,
+      7,
+      20
+     ],
+     "symbol": "rust-analyzer cargo fixturecrate 0.1.0 legacy_helper().",
+     "symbol_roles": 1
+    },
+    {
+     "enclosing_range": [
+      10,
+      0,
+      12,
+      1
+     ],
+     "range": [
+      10,
+      3,
+      17
+     ],
+     "symbol": "rust-analyzer cargo fixturecrate 0.1.0 private_helper().",
+     "symbol_roles": 1
+    }
+   ],
+   "position_encoding": "UTF8CodeUnitOffsetFromLineStart",
+   "relative_path": "src/lib.rs",
+   "symbols": [
+    {
+     "documentation": [
+      "Fixture crate for the migration overlay."
+     ],
+     "kind": "Module",
+     "signature_documentation": {
+      "language": "rust",
+      "text": "extern crate fixturecrate"
+     },
+     "symbol": "rust-analyzer cargo fixturecrate 0.1.0 crate/"
+    },
+    {
+     "display_name": "legacy_helper",
+     "documentation": [
+      "An old helper with no Python counterpart."
+     ],
+     "kind": "Function",
+     "signature_documentation": {
+      "language": "rust",
+      "text": "pub fn legacy_helper() -> u32"
+     },
+     "symbol": "rust-analyzer cargo fixturecrate 0.1.0 legacy_helper()."
+    },
+    {
+     "display_name": "private_helper",
+     "kind": "Function",
+     "signature_documentation": {
+      "language": "rust",
+      "text": "fn private_helper() -> u32"
+     },
+     "symbol": "rust-analyzer cargo fixturecrate 0.1.0 private_helper()."
+    }
+   ]
+  },
+  {
+   "language": "rust",
+   "occurrences": [
+    {
+     "enclosing_range": [
+      0,
+      0,
+      16,
+      0
+     ],
+     "range": [
+      0,
+      0,
+      16,
+      0
+     ],
+     "symbol": "rust-analyzer cargo fixturecrate 0.1.0 service/",
+     "symbol_roles": 1
+    },
+    {
+     "enclosing_range": [
+      2,
+      0,
+      5,
+      1
+     ],
+     "range": [
+      3,
+      13,
+      23
+     ],
+     "symbol": "rust-analyzer cargo fixturecrate 0.1.0 service/fetch_user().",
+     "symbol_roles": 1
+    },
+    {
+     "enclosing_range": [
+      3,
+      24,
+      26
+     ],
+     "range": [
+      3,
+      24,
+      26
+     ],
+     "symbol": "local 0",
+     "symbol_roles": 1
+    },
+    {
+     "range": [
+      3,
+      36,
+      42
+     ],
+     "symbol": "rust-analyzer cargo core https://github.com/rust-lang/rust/library/core option/Option#"
+    },
+    {
+     "range": [
+      3,
+      43,
+      49
+     ],
+     "symbol": "rust-analyzer cargo alloc https://github.com/rust-lang/rust/library/alloc string/String#"
+    },
+    {
+     "range": [
+      4,
+      4,
+      8
+     ],
+     "symbol": "rust-analyzer cargo core https://github.com/rust-lang/rust/library/core option/Option#None#"
+    },
+    {
+     "enclosing_range": [
+      7,
+      0,
+      10,
+      1
+     ],
+     "range": [
+      8,
+      7,
+      15
+     ],
+     "symbol": "rust-analyzer cargo fixturecrate 0.1.0 service/checksum().",
+     "symbol_roles": 1
+    },
+    {
+     "enclosing_range": [
+      8,
+      16,
+      20
+     ],
+     "range": [
+      8,
+      16,
+      20
+     ],
+     "symbol": "local 1",
+     "symbol_roles": 1
+    },
+    {
+     "enclosing_range": [
+      8,
+      16,
+      20
+     ],
+     "range": [
+      9,
+      4,
+      8
+     ],
+     "symbol": "local 1"
+    },
+    {
+     "range": [
+      9,
+      9,
+      13
+     ],
+     "symbol": "rust-analyzer cargo core https://github.com/rust-lang/rust/library/core slice/impl#[`[T]`]iter()."
+    },
+    {
+     "range": [
+      9,
+      16,
+      19
+     ],
+     "symbol": "rust-analyzer cargo core https://github.com/rust-lang/rust/library/core iter/traits/iterator/Iterator#map()."
+    },
+    {
+     "enclosing_range": [
+      9,
+      21,
+      25
+     ],
+     "range": [
+      9,
+      21,
+      25
+     ],
+     "symbol": "local 2",
+     "symbol_roles": 1
+    },
+    {
+     "range": [
+      9,
+      32,
+      36
+     ],
+     "symbol": "rust-analyzer cargo core https://github.com/rust-lang/rust/library/core convert/num/impl#[u64][`From<u8>`]from()."
+    },
+    {
+     "range": [
+      9,
+      37,
+      38
+     ],
+     "symbol": "rust-analyzer cargo core https://github.com/rust-lang/rust/library/core ops/deref/impl#[`&T`][Deref]deref()."
+    },
+    {
+     "enclosing_range": [
+      9,
+      21,
+      25
+     ],
+     "range": [
+      9,
+      38,
+      42
+     ],
+     "symbol": "local 2"
+    },
+    {
+     "range": [
+      9,
+      45,
+      48
+     ],
+     "symbol": "rust-analyzer cargo core https://github.com/rust-lang/rust/library/core iter/traits/iterator/Iterator#sum()."
+    },
+    {
+     "enclosing_range": [
+      12,
+      0,
+      15,
+      1
+     ],
+     "range": [
+      13,
+      7,
+      20
+     ],
+     "symbol": "rust-analyzer cargo fixturecrate 0.1.0 service/service_extra().",
+     "symbol_roles": 1
+    }
+   ],
+   "position_encoding": "UTF8CodeUnitOffsetFromLineStart",
+   "relative_path": "src/service.rs",
+   "symbols": [
+    {
+     "display_name": "service",
+     "documentation": [
+      "Service functions."
+     ],
+     "kind": "Module",
+     "signature_documentation": {
+      "language": "rust",
+      "text": "pub mod service"
+     },
+     "symbol": "rust-analyzer cargo fixturecrate 0.1.0 service/"
+    },
+    {
+     "display_name": "fetch_user",
+     "documentation": [
+      "Fetch a user's display name."
+     ],
+     "kind": "Function",
+     "signature_documentation": {
+      "language": "rust",
+      "text": "pub async fn fetch_user(id: u64) -> Option<String>"
+     },
+     "symbol": "rust-analyzer cargo fixturecrate 0.1.0 service/fetch_user()."
+    },
+    {
+     "display_name": "id",
+     "enclosing_symbol": "rust-analyzer cargo fixturecrate 0.1.0 service/fetch_user().",
+     "kind": "Parameter",
+     "signature_documentation": {
+      "language": "rust",
+      "text": "id: u64"
+     },
+     "symbol": "local 0"
+    },
+    {
+     "display_name": "checksum",
+     "documentation": [
+      "Compute a checksum."
+     ],
+     "kind": "Function",
+     "signature_documentation": {
+      "language": "rust",
+      "text": "pub fn checksum(data: &[u8]) -> u64"
+     },
+     "symbol": "rust-analyzer cargo fixturecrate 0.1.0 service/checksum()."
+    },
+    {
+     "display_name": "data",
+     "enclosing_symbol": "rust-analyzer cargo fixturecrate 0.1.0 service/checksum().",
+     "kind": "Parameter",
+     "signature_documentation": {
+      "language": "rust",
+      "text": "data: &[u8]"
+     },
+     "symbol": "local 1"
+    },
+    {
+     "display_name": "byte",
+     "enclosing_symbol": "rust-analyzer cargo fixturecrate 0.1.0 service/checksum().",
+     "kind": "Parameter",
+     "signature_documentation": {
+      "language": "rust",
+      "text": "byte: &u8"
+     },
+     "symbol": "local 2"
+    },
+    {
+     "display_name": "service_extra",
+     "documentation": [
+      "A Rust-only helper."
+     ],
+     "kind": "Function",
+     "signature_documentation": {
+      "language": "rust",
+      "text": "pub fn service_extra() -> bool"
+     },
+     "symbol": "rust-analyzer cargo fixturecrate 0.1.0 service/service_extra()."
+    }
+   ]
+  },
+  {
+   "language": "rust",
+   "occurrences": [
+    {
+     "enclosing_range": [
+      0,
+      0,
+      39,
+      0
+     ],
+     "range": [
+      0,
+      0,
+      39,
+      0
+     ],
+     "symbol": "rust-analyzer cargo fixturecrate 0.1.0 models/",
+     "symbol_roles": 1
+    },
+    {
+     "enclosing_range": [
+      2,
+      0,
+      8,
+      1
+     ],
+     "range": [
+      3,
+      11,
+      15
+     ],
+     "symbol": "rust-analyzer cargo fixturecrate 0.1.0 models/User#",
+     "symbol_roles": 1
+    },
+    {
+     "enclosing_range": [
+      4,
+      4,
+      5,
+      15
+     ],
+     "range": [
+      5,
+      8,
+      10
+     ],
+     "symbol": "rust-analyzer cargo fixturecrate 0.1.0 models/User#id.",
+     "symbol_roles": 1
+    },
+    {
+     "enclosing_range": [
+      6,
+      4,
+      7,
+      20
+     ],
+     "range": [
+      7,
+      8,
+      12
+     ],
+     "symbol": "rust-analyzer cargo fixturecrate 0.1.0 models/User#name.",
+     "symbol_roles": 1
+    },
+    {
+     "range": [
+      7,
+      14,
+      20
+     ],
+     "symbol": "rust-analyzer cargo alloc https://github.com/rust-lang/rust/library/alloc string/String#"
+    },
+    {
+     "enclosing_range": [
+      2,
+      0,
+      8,
+      1
+     ],
+     "range": [
+      10,
+      5,
+      9
+     ],
+     "symbol": "rust-analyzer cargo fixturecrate 0.1.0 models/User#"
+    },
+    {
+     "enclosing_range": [
+      11,
+      4,
+      14,
+      5
+     ],
+     "range": [
+      12,
+      11,
+      23
+     ],
+     "symbol": "rust-analyzer cargo fixturecrate 0.1.0 models/impl#[User]display_name().",
+     "symbol_roles": 1
+    },
+    {
+     "enclosing_range": [
+      12,
+      24,
+      29
+     ],
+     "range": [
+      12,
+      25,
+      29
+     ],
+     "symbol": "local 0",
+     "symbol_roles": 1
+    },
+    {
+     "range": [
+      12,
+      34,
+      40
+     ],
+     "symbol": "rust-analyzer cargo alloc https://github.com/rust-lang/rust/library/alloc string/String#"
+    },
+    {
+     "enclosing_range": [
+      12,
+      24,
+      29
+     ],
+     "range": [
+      13,
+      8,
+      12
+     ],
+     "symbol": "local 0"
+    },
+    {
+     "enclosing_range": [
+      6,
+      4,
+      7,
+      20
+     ],
+     "range": [
+      13,
+      13,
+      17
+     ],
+     "symbol": "rust-analyzer cargo fixturecrate 0.1.0 models/User#name."
+    },
+    {
+     "range": [
+      13,
+      18,
+      23
+     ],
+     "symbol": "rust-analyzer cargo alloc https://github.com/rust-lang/rust/library/alloc string/impl#[String][Clone]clone()."
+    },
+    {
+     "enclosing_range": [
+      17,
+      0,
+      21,
+      1
+     ],
+     "range": [
+      18,
+      11,
+      17
+     ],
+     "symbol": "rust-analyzer cargo fixturecrate 0.1.0 models/Widget#",
+     "symbol_roles": 1
+    },
+    {
+     "enclosing_range": [
+      19,
+      4,
+      17
+     ],
+     "range": [
+      19,
+      8,
+      12
+     ],
+     "symbol": "rust-analyzer cargo fixturecrate 0.1.0 models/Widget#size.",
+     "symbol_roles": 1
+    },
+    {
+     "enclosing_range": [
+      20,
+      4,
+      21
+     ],
+     "range": [
+      20,
+      8,
+      13
+     ],
+     "symbol": "rust-analyzer cargo fixturecrate 0.1.0 models/Widget#label.",
+     "symbol_roles": 1
+    },
+    {
+     "range": [
+      20,
+      15,
+      21
+     ],
+     "symbol": "rust-analyzer cargo alloc https://github.com/rust-lang/rust/library/alloc string/String#"
+    },
+    {
+     "enclosing_range": [
+      23,
+      0,
+      27,
+      1
+     ],
+     "range": [
+      24,
+      9,
+      15
+     ],
+     "symbol": "rust-analyzer cargo fixturecrate 0.1.0 models/Colour#",
+     "symbol_roles": 1
+    },
+    {
+     "enclosing_range": [
+      25,
+      4,
+      7
+     ],
+     "range": [
+      25,
+      4,
+      7
+     ],
+     "symbol": "rust-analyzer cargo fixturecrate 0.1.0 models/Colour#Red#",
+     "symbol_roles": 1
+    },
+    {
+     "enclosing_range": [
+      26,
+      4,
+      8
+     ],
+     "range": [
+      26,
+      4,
+      8
+     ],
+     "symbol": "rust-analyzer cargo fixturecrate 0.1.0 models/Colour#Blue#",
+     "symbol_roles": 1
+    },
+    {
+     "enclosing_range": [
+      29,
+      0,
+      33,
+      1
+     ],
+     "range": [
+      30,
+      10,
+      16
+     ],
+     "symbol": "rust-analyzer cargo fixturecrate 0.1.0 models/Runner#",
+     "symbol_roles": 1
+    },
+    {
+     "enclosing_range": [
+      31,
+      4,
+      32,
+      40
+     ],
+     "range": [
+      32,
+      7,
+      10
+     ],
+     "symbol": "rust-analyzer cargo fixturecrate 0.1.0 models/Runner#run().",
+     "symbol_roles": 1
+    },
+    {
+     "enclosing_range": [
+      32,
+      11,
+      16
+     ],
+     "range": [
+      32,
+      12,
+      16
+     ],
+     "symbol": "local 1",
+     "symbol_roles": 1
+    },
+    {
+     "enclosing_range": [
+      32,
+      18,
+      23
+     ],
+     "range": [
+      32,
+      18,
+      23
+     ],
+     "symbol": "local 2",
+     "symbol_roles": 1
+    },
+    {
+     "range": [
+      32,
+      33,
+      39
+     ],
+     "symbol": "rust-analyzer cargo alloc https://github.com/rust-lang/rust/library/alloc string/String#"
+    },
+    {
+     "enclosing_range": [
+      35,
+      0,
+      38,
+      1
+     ],
+     "range": [
+      36,
+      7,
+      18
+     ],
+     "symbol": "rust-analyzer cargo fixturecrate 0.1.0 models/flush_cache().",
+     "symbol_roles": 1
+    },
+    {
+     "enclosing_range": [
+      36,
+      19,
+      24
+     ],
+     "range": [
+      36,
+      19,
+      24
+     ],
+     "symbol": "local 3",
+     "symbol_roles": 1
+    },
+    {
+     "enclosing_range": [
+      36,
+      32,
+      39
+     ],
+     "range": [
+      36,
+      32,
+      39
+     ],
+     "symbol": "local 4",
+     "symbol_roles": 1
+    },
+    {
+     "enclosing_range": [
+      36,
+      19,
+      24
+     ],
+     "range": [
+      37,
+      4,
+      9
+     ],
+     "symbol": "local 3"
+    },
+    {
+     "enclosing_range": [
+      36,
+      32,
+      39
+     ],
+     "range": [
+      37,
+      13,
+      20
+     ],
+     "symbol": "local 4"
+    },
+    {
+     "range": [
+      37,
+      20,
+      21
+     ],
+     "symbol": "rust-analyzer cargo core https://github.com/rust-lang/rust/library/core cmp/impls/impl#[u32][`PartialOrd<Self>`]gt()."
+    },
+    {
+     "range": [
+      37,
+      21,
+      22
+     ],
+     "symbol": "rust-analyzer cargo core https://github.com/rust-lang/rust/library/core cmp/impls/impl#[u32][`PartialOrd<Self>`]gt()."
+    },
+    {
+     "range": [
+      37,
+      22,
+      23
+     ],
+     "symbol": "rust-analyzer cargo core https://github.com/rust-lang/rust/library/core cmp/impls/impl#[u32][`PartialOrd<Self>`]gt()."
+    }
+   ],
+   "position_encoding": "UTF8CodeUnitOffsetFromLineStart",
+   "relative_path": "src/models.rs",
+   "symbols": [
+    {
+     "display_name": "models",
+     "documentation": [
+      "Data models."
+     ],
+     "kind": "Module",
+     "signature_documentation": {
+      "language": "rust",
+      "text": "pub mod models"
+     },
+     "symbol": "rust-analyzer cargo fixturecrate 0.1.0 models/"
+    },
+    {
+     "display_name": "User",
+     "documentation": [
+      "A user record."
+     ],
+     "kind": "Struct",
+     "signature_documentation": {
+      "language": "rust",
+      "text": "pub struct User"
+     },
+     "symbol": "rust-analyzer cargo fixturecrate 0.1.0 models/User#"
+    },
+    {
+     "display_name": "id",
+     "documentation": [
+      "Stable identifier."
+     ],
+     "kind": "Field",
+     "signature_documentation": {
+      "language": "rust",
+      "text": "pub id: i64"
+     },
+     "symbol": "rust-analyzer cargo fixturecrate 0.1.0 models/User#id."
+    },
+    {
+     "display_name": "name",
+     "documentation": [
+      "Display name."
+     ],
+     "kind": "Field",
+     "signature_documentation": {
+      "language": "rust",
+      "text": "pub name: String"
+     },
+     "symbol": "rust-analyzer cargo fixturecrate 0.1.0 models/User#name."
+    },
+    {
+     "display_name": "display_name",
+     "documentation": [
+      "Render the display name."
+     ],
+     "kind": "Method",
+     "signature_documentation": {
+      "language": "rust",
+      "text": "pub fn display_name(&self) -> String"
+     },
+     "symbol": "rust-analyzer cargo fixturecrate 0.1.0 models/impl#[User]display_name()."
+    },
+    {
+     "display_name": "self",
+     "enclosing_symbol": "rust-analyzer cargo fixturecrate 0.1.0 models/impl#[User]display_name().",
+     "kind": "SelfParameter",
+     "signature_documentation": {
+      "language": "rust",
+      "text": "self: &User"
+     },
+     "symbol": "local 0"
+    },
+    {
+     "display_name": "Widget",
+     "documentation": [
+      "A widget with a size."
+     ],
+     "kind": "Struct",
+     "signature_documentation": {
+      "language": "rust",
+      "text": "pub struct Widget"
+     },
+     "symbol": "rust-analyzer cargo fixturecrate 0.1.0 models/Widget#"
+    },
+    {
+     "display_name": "size",
+     "kind": "Field",
+     "signature_documentation": {
+      "language": "rust",
+      "text": "pub size: i64"
+     },
+     "symbol": "rust-analyzer cargo fixturecrate 0.1.0 models/Widget#size."
+    },
+    {
+     "display_name": "label",
+     "kind": "Field",
+     "signature_documentation": {
+      "language": "rust",
+      "text": "pub label: String"
+     },
+     "symbol": "rust-analyzer cargo fixturecrate 0.1.0 models/Widget#label."
+    },
+    {
+     "display_name": "Colour",
+     "documentation": [
+      "A colour."
+     ],
+     "kind": "Enum",
+     "signature_documentation": {
+      "language": "rust",
+      "text": "pub enum Colour"
+     },
+     "symbol": "rust-analyzer cargo fixturecrate 0.1.0 models/Colour#"
+    },
+    {
+     "display_name": "Red",
+     "kind": "EnumMember",
+     "signature_documentation": {
+      "language": "rust",
+      "text": "Red"
+     },
+     "symbol": "rust-analyzer cargo fixturecrate 0.1.0 models/Colour#Red#"
+    },
+    {
+     "display_name": "Blue",
+     "kind": "EnumMember",
+     "signature_documentation": {
+      "language": "rust",
+      "text": "Blue"
+     },
+     "symbol": "rust-analyzer cargo fixturecrate 0.1.0 models/Colour#Blue#"
+    },
+    {
+     "display_name": "Runner",
+     "documentation": [
+      "A runner trait."
+     ],
+     "kind": "Trait",
+     "signature_documentation": {
+      "language": "rust",
+      "text": "pub trait Runner"
+     },
+     "symbol": "rust-analyzer cargo fixturecrate 0.1.0 models/Runner#"
+    },
+    {
+     "display_name": "run",
+     "documentation": [
+      "Run one value."
+     ],
+     "kind": "TraitMethod",
+     "signature_documentation": {
+      "language": "rust",
+      "text": "pub fn run(&self, value: i64) -> String"
+     },
+     "symbol": "rust-analyzer cargo fixturecrate 0.1.0 models/Runner#run()."
+    },
+    {
+     "display_name": "self",
+     "enclosing_symbol": "rust-analyzer cargo fixturecrate 0.1.0 models/Runner#run().",
+     "kind": "SelfParameter",
+     "signature_documentation": {
+      "language": "rust",
+      "text": "self: &Self"
+     },
+     "symbol": "local 1"
+    },
+    {
+     "display_name": "value",
+     "enclosing_symbol": "rust-analyzer cargo fixturecrate 0.1.0 models/Runner#run().",
+     "kind": "Parameter",
+     "signature_documentation": {
+      "language": "rust",
+      "text": "value: i64"
+     },
+     "symbol": "local 2"
+    },
+    {
+     "display_name": "flush_cache",
+     "documentation": [
+      "Flush a cache."
+     ],
+     "kind": "Function",
+     "signature_documentation": {
+      "language": "rust",
+      "text": "pub fn flush_cache(force: bool, retries: u32) -> bool"
+     },
+     "symbol": "rust-analyzer cargo fixturecrate 0.1.0 models/flush_cache()."
+    },
+    {
+     "display_name": "force",
+     "enclosing_symbol": "rust-analyzer cargo fixturecrate 0.1.0 models/flush_cache().",
+     "kind": "Parameter",
+     "signature_documentation": {
+      "language": "rust",
+      "text": "force: bool"
+     },
+     "symbol": "local 3"
+    },
+    {
+     "display_name": "retries",
+     "enclosing_symbol": "rust-analyzer cargo fixturecrate 0.1.0 models/flush_cache().",
+     "kind": "Parameter",
+     "signature_documentation": {
+      "language": "rust",
+      "text": "retries: u32"
+     },
+     "symbol": "local 4"
+    }
+   ]
+  }
+ ],
+ "metadata": {
+  "project_root": "file:///repo",
+  "text_document_encoding": "UTF8",
+  "tool_info": {
+   "name": "rust-analyzer",
+   "version": "1.97.1 (8bab26f 2026-07-14)"
+  }
+ }
+}

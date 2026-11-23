@@ -130,6 +130,25 @@ Absence is a fact; ignorance is not absence. The snapshot keeps them apart:
   manifest says. Only the newest manifest is read; findings are not copied and
   at most 32 subject statuses are shown.
 
+## Rust tier declaration
+
+The Rust tier is declared in [`rust.md`](rust.md) and in the capability
+catalogue (`cap:languages.rust_tier`). It is syntactic by default:
+
+| Layer | Declared limit |
+| --- | --- |
+| tags | tree-sitter structural query plus regex fallback; no macro/generated/cfg expansion |
+| symbols | definitions, references, spans, docs and Test nodes; no type inference or trait resolution |
+| imports | `mod`/`use` resolution for local and workspace crates; external and ambiguous bindings unresolved |
+| edits | preview-first transaction, parse gate, same-file rename; cross-file rename is an LSP preview |
+| lsp | optional rust-analyzer; indexing latency and install status are reported |
+| tests | captured `cargo test`, target-level affected/cache; stable human output only; failures never cached |
+
+SCIP is an optional importer, not a snapshot mutation. The tier benchmark and
+SCIP fixture result are recorded under
+[`docs/results/`](results/rust_parity_bench_2026-11-23.md). Rust
+trust-boundary/dataflow analysis is a separate plan.
+
 ## Read-only guarantees
 
 The composition never:

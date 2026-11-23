@@ -493,7 +493,7 @@ for precise navigation. The CLI is `code-search QUERY`.
 definitions/references/roles/ranges, and returns repo-map-compatible edges plus
 per-file counts. A real `.scip` protobuf is accepted only when `protobuf` +
 `scip_pb2` are importable; otherwise the tool refuses honestly. See
-[`SCIP_IMPORT.md`](SCIP_IMPORT.md).
+[`scip.md`](scip.md).
 
 ## Architecture summary
 
