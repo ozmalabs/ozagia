@@ -1,6 +1,6 @@
 # Rust parity with Python — plan (2026-11-23)
 
-Status: Phases 0, 0.5 and 1 implemented (2026-11-23); Phases 2–7 proposed. This plan closes
+Status: Phases 0, 0.5, 1 and 2 implemented (2026-11-23); Phases 3–7 proposed. This plan closes
 the gap between `.rs` and `.py` support across the graph, tags,
 symbol-question layer, edits, LSP, tests and documentation, and adds the
 initial setup for a Python→Rust migration assistant built on the same graph.
@@ -35,8 +35,8 @@ do in a Python repository today, at the same honesty level:
 | Tag extraction | stdlib AST: defs, refs, scoped imports, qualnames, end lines | bundled `index/queries/rust-tags.scm`: defs/refs with impl scopes (`Foo.bar`), trait signatures, const/static/enum variants, qualified calls, and `use` import records; Phase 1 |
 | Graph symbols | `_python_parse`: qualnames, end lines, docstrings, decorators, args, returns, bases, imports, tests | `rust_symbols.parse_rust`: tree-sitter fields (qualname, spans, doc, attributes, args, returns, visibility, test marker) with regex fallback; Phase 0 `mod` resolution retained; `#[path]` recorded as unsupported |
 | Test indexing | `index_test` parses pytest tests, links `tests_module`, `mentions_file` | Phase 1 adds `#[test]`/`#[tokio::test]`/`#[rstest]` and `tests/*.rs` Test nodes; import/`tests_module` resolution remains Phase 2/5 |
-| Repo map | file edges from resolved imports + names | name-only file edges; `mod` edges resolve; `use` records exist in tags but do not yet contribute resolved PageRank edges |
-| Symbol graph | local / import / name resolution; pyright precise mode | tag ingest works, but import resolution is Python-only (`from X import name`, `_PY_ROOTS`), so Rust relies on bare-name guesses |
+| Repo map | file edges from resolved imports + names | file edges from resolved Rust `use`/glob module targets plus name edges; `mod` edges resolve |
+| Symbol graph | local / import / name resolution; pyright precise mode | Phase 2 Rust resolver covers `crate`/`self`/`super`/workspace crates, aliases, globs and bounded re-exports; external crates and ambiguous bindings stay unresolved; Python resolution unchanged |
 | Edits | symbol ops (`replace_symbol`, `replace_body`, `insert_import`, `delete_symbol`, `rename_symbol`, …) with AST parse gate | CST subtree ops only (`edit/cst.py`); no symbol addressing, no `use` insertion, no symbol rename |
 | LSP | pyright live | registry entry exists; Phase 0 installed rust-analyzer 1.97.1, but the first query can be empty while it indexes a workspace |
 | Lint | ruff | rustfmt (already parity for formatting; no Rust linter like clippy) |
@@ -181,8 +181,9 @@ availability of a parser.
   variants, trait signature methods, qualified calls and an `@scope.impl`
   capture. Methods now nest as `Type.method` without a duplicate `impl` def.
 - Wired `.rs` to the bundled query (`query_package: "ozagia"`), bumped
-  `TAGS_SCHEMA_VERSION` to 4 and `repo_map.CACHE_VERSION` to 4; extractor
-  fingerprints invalidate existing Rust tag caches.
+  `TAGS_SCHEMA_VERSION` and `repo_map.CACHE_VERSION` (now 5 after Phase 2's
+  qualified-path field); extractor fingerprints invalidate existing Rust tag
+  caches.
 - `core/memory.py` delegates `.rs` source and test indexing to `rust_symbols`:
   Symbol nodes carry the Python-parity fields, impl methods get
   `contains_symbol` edges, inline/source tests and `tests/*.rs` get Test nodes,
@@ -194,32 +195,39 @@ availability of a parser.
   `test_repo_map.py`, `test_memory.py` and `test_graph_reingest.py` pass, and
   the full suite is 6230 passed / 22 skipped. Python tag output is unchanged.
 
-### Phase 2 — Rust imports, modules and symbol-graph parity (3–5 days)
+### Phase 2 — Rust imports, modules and symbol-graph parity (3–5 days) — implemented 2026-11-23
 
-- **Cargo/workspace model** (new `src/ozagia/core/rust_modules.py` or inside
-  `rust_symbols`): read workspace members, package names, `[lib] path`,
-  `[[bin]]` targets, `src/lib.rs`, `src/main.rs`, `src/bin/*.rs`; build the
-  crate/module tree. No `cargo metadata`, no build.
-- **`use` resolution**: `crate::`, `self::`, `super::`, `::crate_name::`,
-  aliases, groups, globs, re-exports (bounded depth). Globs resolve to a module
-  file, not every symbol; ambiguous/cyclic re-exports stay unresolved with a
-  count. External crates (`serde`, `tokio`, …) are unresolved, never guessed
-  by name.
-- **Tag records**: `{kind: "import", detail: "import.use", module, imported,
-  alias, glob, scope, line}` written by the Rust extractor; the repo map uses
-  them for `imports` edges.
-- **`core/symbol_graph.py` refactor**: replace the Python-only `py_files` /
-  `_resolve_ref` branch with per-language resolvers sharing the existing
-  `local` / `import` / `name` confidence ladder. Rust resolver: same-file
-  scope (impl type prefix for `self.method`), explicit imports and globs,
-  unique global name as the fallback. Keep `_PY_ROOTS` behaviour for Python.
-  Report per-language `stats` (`resolved_local`, `resolved_import`,
-  `resolved_name`, `unresolved`).
-- **Precise mode**: the existing `precise=true` path works once rust-analyzer
-  answers; add Rust fixtures and coverage notes. Cold-index retry stays shared.
-- Exit: cross-file caller/callee queries in the fixture crate resolve through
-  `crate::`/`super::`/aliases; an external-crate use yields zero false edges;
-  the Python suite is unchanged.
+- Added `src/ozagia/core/rust_modules.py`: reads `Cargo.toml` with stdlib
+  `tomllib` (no `cargo metadata`, no build) and builds library, binary,
+  test/bench targets and their module trees. It handles `src/lib.rs`,
+  `src/main.rs`, `src/bin/*.rs`, configured `[lib]`/`[[bin]]`/`[[test]]`/
+  `[[bench]]` paths, workspace member manifests, inline modules, `foo.rs` /
+  `foo/mod.rs`, nested module directories and `#[path]`.
+- `use` resolution covers `crate::`, `self::`, `super::`, leading `::`,
+  workspace crate names, aliases, groups, globs and `pub use` re-exports for
+  up to three hops. Relative child-module paths (`inner::go`) resolve; a
+  type/method path such as `Foo::bar` is left to local scope resolution.
+  External crates are reported external and never guessed by name; ambiguous
+  modules/missing files are unresolved and reported.
+- Tag records carry `{kind: "import", detail: "import.use", module, imported,
+  alias, glob, pub, scope, line, path}`; Rust qualified calls also retain their
+  full `path` (`crate::a::b`, `Foo::bar`). `TAGS_SCHEMA_VERSION` and
+  `repo_map.CACHE_VERSION` moved to 5.
+- `core/symbol_graph.py` resolves Rust references before the shared Python
+  local/name fallback. Exact import targets become `resolution: "import"`
+  edges at confidence 1.0; a file with an external/unresolved binding or glob
+  suppresses bare-name guessing for that reference. Stats add
+  `rust_module_targets`, `resolved_import` and `unresolved`.
+- `repo_map.build_reference_graph` adds resolved Rust import/glob file edges,
+  so `use` contributes to PageRank. The Python resolver and `_PY_ROOTS`
+  behavior are unchanged.
+- Verification: `tests/test_rust_modules.py` (5 tests) covers workspace targets,
+  module trees, inline modules, `crate`/`self`/`super`, aliases, globs,
+  cross-crate imports, re-exports, external false-edge suppression, symbol
+  graph and repo-map edges. The full suite is 6236 passed / 22 skipped; the
+  focused Rust/import/graph suites pass, and ruff is clean.
+- Precise-mode rust-analyzer warm-up and complete live coverage remain Phase 4;
+  the existing precise path still uses the LSP client.
 
 ### Phase 3 — Symbol-addressed Rust edits (3–4 days)
 
@@ -395,21 +403,21 @@ next, and flag everything that needs a human or a different design.
 New and extended suites:
 
 - `tests/test_rust_symbols.py` — parser fields, qualnames, impl/trait methods,
-  docs/attributes, consts/statics/macros, tests, use forms, regex fallback.
-- `tests/test_rust_tags.py` — bundled query captures, nesting, cache version.
-- `tests/test_rust_modules.py` — workspace discovery, module tree, `mod.rs`,
-  nested modules, `#[path]` refusal.
-- `tests/test_symbol_graph.py` — cross-file Rust callers/callees, aliases,
-  globs, external crates, per-language stats (extend the Python cases).
+  docs/attributes, consts/statics/macros, tests, use forms, regex fallback and
+  graph Test/containment integration.
+- `tests/test_tag_languages.py` — bundled Rust query captures, impl scopes,
+  trait signatures, constants, qualified calls and cache version.
+- `tests/test_rust_modules.py` — workspace targets, module trees, inline
+  modules, `crate`/`self`/`super`, aliases, globs, cross-crate imports,
+  re-exports, external false-edge suppression and repo-map edges.
+- `tests/test_symbol_graph.py` — Python resolution unchanged; Rust cross-file
+  cases live in `test_rust_modules.py`.
 - `tests/test_rust_edit.py` — every op, preview/apply, stale hash, parse gate,
   lossless output, rename refusals.
 - `tests/test_lsp.py` — fake-server cases unchanged; gated live Rust cases.
 - `tests/test_cargo_test.py` — command mapping, output parsing, selection,
   cache keys, run-all reasons (use a fake `cargo` executable for determinism).
 - `tests/test_repo_map.py` — Rust import edges and tag-cache migration.
-- `tests/test_rust_symbols.py` — tree-sitter symbol fields/qualnames, docs and
-  attributes, args/returns, use forms, module entries, regex fallback and
-  graph Test/containment integration.
 - `tests/test_rust_mods.py` — crate-root and `mod.rs` resolution, `#[path]`
   recording, and a reingest switch between `foo.rs` and `foo/mod.rs`.
 - `tests/test_languages.py` — support-package registry coverage, language
@@ -439,11 +447,11 @@ Commands:
 
 ```bash
 .venv/bin/python -m pytest -q \
-  tests/test_rust_symbols.py tests/test_rust_tags.py tests/test_rust_modules.py \
-  tests/test_symbol_graph.py tests/test_rust_edit.py tests/test_cargo_test.py \
-  tests/test_repo_map.py tests/test_lsp.py tests/test_migration_config.py \
-  tests/test_migration_inventory.py tests/test_migration_match.py \
-  tests/test_migration_report.py tests/test_migration_cli.py
+  tests/test_rust_modules.py tests/test_rust_symbols.py tests/test_rust_mods.py \
+  tests/test_symbol_graph.py tests/test_tag_languages.py tests/test_repo_map.py \
+  tests/test_lsp.py tests/test_migration_config.py tests/test_migration_inventory.py \
+  tests/test_migration_match.py tests/test_migration_report.py \
+  tests/test_migration_cli.py
 .venv/bin/python -m pytest -q          # full gate
 .venv/bin/ruff check src tests
 OZAGIA_LIVE_LSP=1 .venv/bin/python -m pytest -q tests/test_lsp.py
@@ -485,7 +493,7 @@ python -m ozagia.eval.bench --root <rust-repo> --cold --check
 | 0 — baseline/docs (done 2026-11-23) | 0.5–1 |
 | 0.5 — language support packages (done 2026-11-23) | 1–2 |
 | 1 — parser + tags + graph fields (done 2026-11-23) | 2–3 |
-| 2 — modules/imports/symbol graph | 3–5 |
+| 2 — modules/imports/symbol graph (done 2026-11-23) | 3–5 |
 | 3 — symbol edits | 3–4 |
 | 4 — LSP | 1–2 |
 | 5 — cargo test | 5–8 |

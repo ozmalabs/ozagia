@@ -467,13 +467,6 @@ def _rust_module_base(rel: str) -> str:
     return p.with_suffix("").as_posix()
 
 
-def _rust_mod_candidates(rel: str, mod: str) -> list[str]:
-    """The `foo.rs` / `foo/mod.rs` targets of `mod foo;`, in order."""
-    base = _rust_module_base(rel)
-    stem = f"{base}/{mod}" if base else mod
-    return [f"{stem}.rs", f"{stem}/mod.rs"]
-
-
 def _rust_mod_alternate(rel: str) -> str | None:
     """The other layout of a `mod` target (`foo.rs` vs `foo/mod.rs`)."""
     if rel == "mod.rs":
@@ -881,20 +874,29 @@ class FileIndexer:
 
     def _rust_modules(self, fid: int, rel: str, entry: dict[str, Any],
                       modules: Iterable[dict[str, Any]]) -> None:
-        """Resolve external `mod x;` declarations; record unsupported ones."""
+        """Resolve external `mod x;` declarations, including `#[path]`."""
         b = self.b
-        unsupported: list[dict[str, Any]] = []
         for mod in modules:
             if mod.get("inline"):
                 continue
-            if mod.get("path_attribute"):
-                unsupported.append({
-                    "name": mod["name"],
-                    "line": mod["line"],
-                    "reason": "#[path] module paths are not resolved",
-                })
+            parent = tuple(str(part) for part in mod.get("parent") or ())
+            base = _rust_module_base(rel)
+            if parent:
+                base = PurePosixPath(base, *parent).as_posix()
+            path_attribute = mod.get("path_attribute")
+            if path_attribute:
+                target = PurePosixPath(base, path_attribute).as_posix()
+                try:
+                    absolute = (self.root / target).resolve()
+                    absolute.relative_to(self.root.resolve())
+                except (OSError, ValueError):
+                    continue
+                self._ref(entry, ["rs_mod", target])
+                if absolute.is_file():
+                    b.edge(fid, "imports", self.file_node(target))
                 continue
-            candidates = _rust_mod_candidates(rel, mod["name"])
+            stem = f"{base}/{mod['name']}" if base else mod["name"]
+            candidates = [f"{stem}.rs", f"{stem}/mod.rs"]
             # Record both layouts so reingest notices a module file that
             # appears or disappears; the edge uses the first existing one.
             self._ref(entry, ["rs_mod", *candidates])
@@ -902,8 +904,6 @@ class FileIndexer:
                            if (self.root / c).is_file()), None)
             if target:
                 b.edge(fid, "imports", self.file_node(target))
-        if unsupported:
-            b.attrs(fid)["rust_unsupported_mods"] = unsupported
 
     def index_source(self, p: Path, rel: str) -> None:
         b = self.b

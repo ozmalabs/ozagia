@@ -76,7 +76,7 @@
 
 (call_expression
     function: (scoped_identifier
-        name: (identifier) @name)) @reference.call
+        name: (identifier) @name) @path) @reference.call
 
 (macro_invocation
     macro: (identifier) @name) @reference.call

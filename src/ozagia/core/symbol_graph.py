@@ -143,14 +143,113 @@ def _resolve_ref(rel: str, name: str, scope: str,
     return None, [], 0.0
 
 
+def _scope_visible(binding_scope: str, ref_scope: str) -> bool:
+    if not binding_scope:
+        return True
+    return ref_scope == binding_scope or ref_scope.startswith(binding_scope + ".")
+
+
+def _exact_symbol_ids(file_defs: dict[str, dict[str, list[str]]],
+                      nodes: dict[str, dict[str, Any]], file: str,
+                      qualname: str) -> list[str]:
+    if not qualname:
+        return []
+    name = qualname.rsplit(".", 1)[-1]
+    return [sid for sid in file_defs.get(file, {}).get(name, [])
+            if nodes[sid]["qualname"] == qualname]
+
+
+def _resolve_rust_ref(rel: str, tag: dict[str, Any], rust: Any,
+                      rust_imports: dict[str, list[dict[str, Any]]],
+                      file_defs: dict[str, dict[str, list[str]]],
+                      nodes: dict[str, dict[str, Any]]
+                      ) -> tuple[str, list[str], float] | None:
+    """Resolve a Rust reference through `use` bindings and qualified paths.
+
+    Returns None when the existing local/name resolver should run, and an
+    explicit unresolved result when a binding exists but its target is external
+    or unknown: guessing a same-named local symbol would be a false edge.
+    """
+    name = str(tag.get("name") or "")
+    scope = str(tag.get("scope") or "")
+    bindings = [binding for binding in rust_imports.get(rel, ())
+                if binding.get("name") == name
+                and _scope_visible(str(binding.get("scope") or ""), scope)]
+    targets: set[str] = set()
+    for binding in bindings:
+        result = rust.resolve(rel, binding)
+        if result.get("status") == "resolved":
+            if not result.get("is_module"):
+                targets.update(_exact_symbol_ids(
+                    file_defs, nodes, str(result.get("file") or ""),
+                    str(result.get("qualname") or "")))
+        elif result.get("status") in ("external", "unresolved", "ambiguous"):
+            # A bound name with no in-repo target is not a name-resolution
+            # candidate.
+            pass
+    if bindings:
+        if targets:
+            ordered = sorted(targets)
+            return "import", ordered, 1.0 / len(ordered)
+        return "unresolved", [], 0.0
+
+    globs = [binding for binding in rust_imports.get(rel, ())
+             if binding.get("glob")
+             and _scope_visible(str(binding.get("scope") or ""), scope)]
+    if globs:
+        external_glob = False
+        for binding in globs:
+            result = rust.resolve(rel, binding)
+            if result.get("status") != "resolved":
+                external_glob = True
+                continue
+            prefix = str(result.get("qualname") or "")
+            qualname = f"{prefix}.{name}" if prefix else name
+            ids = _exact_symbol_ids(file_defs, nodes,
+                                    str(result.get("file") or ""), qualname)
+            if len(ids) == 1:
+                return "import", ids, 1.0
+        # An external/unresolved glob makes bare-name guessing unsafe. An
+        # internal glob that has no matching symbol may still leave a local
+        # method/function to the existing fallback.
+        if external_glob:
+            return "unresolved", [], 0.0
+
+    path = str(tag.get("path") or "")
+    parts = [part for part in path.split("::") if part]
+    if len(parts) >= 2:
+        result = rust.resolve_path(rel, path, scope)
+        if result.get("status") == "resolved":
+            ids = _exact_symbol_ids(file_defs, nodes,
+                                    str(result.get("file") or ""),
+                                    str(result.get("qualname") or ""))
+            if ids:
+                return "import", ids, 1.0
+        absolute = parts[0] in ("crate", "self", "super") or parts[0] in getattr(
+            rust, "crates", {})
+        if result.get("status") == "external" or (
+                absolute and result.get("status") in ("unresolved", "ambiguous")):
+            return "unresolved", [], 0.0
+    return None
+
+
 def _build(cache: dict[str, Any]) -> dict[str, Any]:
     files = cache.get("files") or {}
     py_files = {rel for rel in files if rel.endswith(".py")}
+    rust = None
+    root = cache.get("root")
+    if root and any(str(rel).endswith(".rs") for rel in files):
+        try:
+            from ozagia.core import rust_modules
+            rust = rust_modules.discover(root)
+        except Exception:
+            rust = None
     nodes: dict[str, dict[str, Any]] = {}
     defs_by_name: dict[str, list[str]] = defaultdict(list)
     file_defs: dict[str, dict[str, list[str]]] = defaultdict(
         lambda: defaultdict(list))
     imports: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    rust_imports: dict[str, list[dict[str, Any]]] = defaultdict(list)
     refs: list[tuple[str, dict[str, Any]]] = []
     duplicate_defs = 0
     for rel in sorted(files):
@@ -180,6 +279,8 @@ def _build(cache: dict[str, Any]) -> dict[str, Any]:
                 refs.append((rel, tag))
             elif kind == "import":
                 imports[rel].append(tag)
+                if tag.get("detail") == "import.use":
+                    rust_imports[rel].append(tag)
     for name in defs_by_name:
         defs_by_name[name].sort()
 
@@ -192,6 +293,7 @@ def _build(cache: dict[str, Any]) -> dict[str, Any]:
         "resolved_name": 0,
         "unresolved": 0,
         "duplicate_defs": duplicate_defs,
+        "rust_module_targets": len(getattr(rust, "targets", {})),
     }
     edges: dict[tuple[str, str], dict[str, Any]] = {}
     for rel, tag in refs:
@@ -202,10 +304,17 @@ def _build(cache: dict[str, Any]) -> dict[str, Any]:
             nodes[caller] = {"file": rel, "qualname": "<module>",
                              "name": "<module>", "line": 1, "end_line": 1,
                              "kind_detail": "module"}
-        resolution, targets, confidence = _resolve_ref(
-            rel, name, scope, file_defs, imports, py_files, defs_by_name,
-            nodes)
+        resolution = targets = confidence = None
+        if rust is not None and rel.endswith(".rs"):
+            rust_result = _resolve_rust_ref(
+                rel, tag, rust, rust_imports, file_defs, nodes)
+            if rust_result is not None:
+                resolution, targets, confidence = rust_result
         if resolution is None:
+            resolution, targets, confidence = _resolve_ref(
+                rel, name, scope, file_defs, imports, py_files, defs_by_name,
+                nodes)
+        if resolution is None or resolution == "unresolved" or not targets:
             stats["unresolved"] += 1
             continue
         stats[f"resolved_{resolution}"] += 1

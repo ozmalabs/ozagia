@@ -817,4 +817,4 @@ def test_python_bom_source_yields_the_same_tags() -> None:
     plain = extract_tags("x.py", source)
     assert plain
     assert extract_tags("x.py", "\ufeff" + source) == plain
-    assert tag_languages.TAGS_SCHEMA_VERSION == 4
+    assert tag_languages.TAGS_SCHEMA_VERSION == 5

@@ -50,8 +50,9 @@ __all__ = [
 # every cached entry. v3: Python sources with a leading UTF-8 BOM now produce
 # tags (v2 returned none, and the empty result was cached). v4: Rust gains
 # impl-scoped qualnames, trait signatures, const/static/enum variants,
-# qualified calls and bundled `use` import records.
-TAGS_SCHEMA_VERSION = 4
+# qualified calls and bundled `use` import records. v5: qualified Rust calls
+# retain their full scoped path for import resolution.
+TAGS_SCHEMA_VERSION = 5
 
 # Every grammar package inspected for this registry keeps its upstream tag
 # query at <package>/queries/tags.scm, except tree-sitter-kotlin, whose wheel
@@ -286,6 +287,13 @@ def _python_tags(source: str) -> list[dict[str, Any]]:
     return out
 
 
+def _node_text(node: Any) -> str:
+    try:
+        return node.text.decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+
+
 class _Span(NamedTuple):
     """One tree-sitter capture, with byte offsets for nesting.
 
@@ -301,6 +309,7 @@ class _Span(NamedTuple):
     def_start: int
     def_end: int
     end_line: int
+    path: str = ""
 
 
 def _nest_tree_sitter_tags(spans: list[_Span]) -> list[dict[str, Any]]:
@@ -355,9 +364,12 @@ def _nest_tree_sitter_tags(spans: list[_Span]) -> list[dict[str, Any]]:
                         "end_line": span.end_line,
                         "qualname": qualname[i]})
         else:
-            out.append({"name": span.name, "kind": "ref",
-                        "detail": span.detail, "line": span.line,
-                        "scope": scope_of[i]})
+            item = {"name": span.name, "kind": "ref",
+                    "detail": span.detail, "line": span.line,
+                    "scope": scope_of[i]}
+            if span.path:
+                item["path"] = span.path
+            out.append(item)
     return out
 
 
@@ -425,6 +437,8 @@ def extract_tags_status(path: str | Path,
                 # Refs and defs without a definition node fall back to the
                 # name node's own range; nesting then uses the name only.
                 outer = def_nodes[0] if (kind == "def" and def_nodes) else node
+                path_nodes = captures.get("path") or []
+                path = "".join(_node_text(item) for item in path_nodes)
                 spans.append(_Span(
                     name=name,
                     kind=kind,
@@ -434,6 +448,7 @@ def extract_tags_status(path: str | Path,
                     def_start=int(outer.start_byte),
                     def_end=int(outer.end_byte),
                     end_line=int(outer.end_point[0]) + 1,
+                    path=path,
                 ))
         tags = _nest_tree_sitter_tags(spans)
         if entry["language"] == "rust":

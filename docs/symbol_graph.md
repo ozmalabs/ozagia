@@ -20,25 +20,27 @@ rejected the BOM and the empty result was cached. Line numbers do not move.
 | kind | keys |
 |---|---|
 | `def` | `name`, `kind`, `detail`, `line`, `end_line`, `qualname` |
-| `ref` | `name`, `kind`, `detail`, `line`, `scope` |
-| `import` (Python only) | `name`, `kind`, `detail`, `line`, `module`, `level`, `imported`, `scope` |
+| `ref` | `name`, `kind`, `detail`, `line`, `scope` (Rust qualified calls also carry `path`) |
+| `import` (Python/Rust) | Python: `name`, `kind`, `detail`, `line`, `module`, `level`, `imported`, `scope`. Rust: `name`, `kind`, `detail: "import.use"`, `line`, `module`, `imported`, `alias`, `glob`, `pub`, `scope`, `path` |
 
 - `qualname`: dotted chain of enclosing definitions plus the name. A nested
   function inside `f` is `f.inner`. A method is `Class.method`.
 - `scope`: `qualname` of the innermost enclosing definition of a reference,
   `""` at module level.
 - `end_line`: last line of the definition.
-- `import` tags exist only for Python. `import a.b` binds `a` (`imported` is
-  `a.b`). `import a.b as c` binds `c`. `from .m import x as y` binds `y` with
-  `level` 1 and `module` `m`. Star imports bind no name and are not tagged.
+- Python imports: `import a.b` binds `a` (`imported` is `a.b`).
+  `import a.b as c` binds `c`. `from .m import x as y` binds `y` with `level`
+  1 and `module` `m`. Star imports bind no name and are not tagged. Rust
+  `use` bindings use `detail: "import.use"` and include the bound name, module
+  prefix, imported leaf, alias, glob and visibility.
 - Python decorators, default values, annotations, bases and keywords belong to
   the enclosing scope. Only the def body is a new scope.
 - Tree-sitter languages nest by byte range: a def is inside another def when
   the other definition node's range contains it. Nesting is computed per file
-  in O(n log n). Nesting depends on what the grammar's `tags.scm` captures. For
-  Rust, `impl` blocks are not captured, so a method inside `impl` has no class
-  in its qualname. A function inside `mod` nests under the module. Java
-  classes and methods nest.
+  in O(n log n). Nesting depends on what the grammar's `tags.scm` captures. The
+  bundled Rust query emits an `impl` scope capture, so a method inside
+  `impl Foo` is `Foo.method`; trait signatures nest under the trait. A function
+  inside `mod` nests under the module. Java classes and methods nest.
 
 ## Graph (`src/ozagia/core/symbol_graph.py`)
 
@@ -46,10 +48,11 @@ rejected the BOM and the empty result was cached. Line numbers do not move.
   `"<rel path>::<module>"`.
 - `build_symbol_graph(cache)` takes a tag-cache view and returns
   `{root_hash, nodes, edges, stats}`. The result is memoised in process by the
-  repo-map graph key (`_graph_key`: `root_hash` plus a digest of each file's
-  extractor fingerprint), for the last 4 graphs. A view with the same
+  repo-map graph key (`_graph_key`: root path, `root_hash` and a digest of each
+  file's extractor fingerprint), for the last 4 graphs. A view with the same
   `root_hash` but a changed fingerprint on any entry is rebuilt. A view without
-  a `root_hash` is never memoised.
+  a `root_hash` is never memoised. The root path also enables Rust import
+  resolution.
 - Each edge is `{src, tgt, resolution, confidence, count}`. `count` is the
   number of references that produced the edge. Self edges are dropped.
 
@@ -60,12 +63,13 @@ Each reference is resolved at the first level that applies.
 | level | rule | confidence |
 |---|---|---|
 | `local` | A definition with the same name exists in the same file. For `self.x()` inside `A.m`, the candidate `A.x` is preferred when `A` is a class. | `1 / number of candidates` (1.0 when unique or class-preferred) |
-| `import` | The file has `from X import name` and `X` resolves to an indexed file. Edges go to that file's definition named `imported`. Relative imports resolve from the importing file's package. Module imports (`import a.b`) are skipped for bare names. | `1 / number of targets` |
+| `import` | Python: the file has `from X import name` and `X` resolves to an indexed file; edges go to that file's definition named `imported`. Relative imports resolve from the importing file's package. Rust: `use`/qualified paths resolve through the Cargo workspace model (`crate`, `self`, `super`, workspace crates, aliases, globs and bounded re-exports). Module imports (`import a.b`) are skipped for bare names. | `1 / number of targets` |
 | `name` | A global definition with this name exists, there are at most 5, the name is at least 3 characters, and it is not in `ocelot_repo_map._GENERIC_IDENTS` (for example `run`, `get`, `data`). | `1 / number of candidates` |
 
-If a name is bound by a `from` import whose module is outside the index, the
+If a name is bound by an import whose target is outside the index, the
 reference is unresolved. The name-level fallback is skipped, so an external
-`array()` does not link to a repo function called `array`.
+`array()` does not link to a repo function called `array`. The same rule
+applies to Rust external crates, unresolved imports and globs.
 
 A reference that matches no level is unresolved and counted in
 `stats.unresolved`.
@@ -121,8 +125,10 @@ exit code is 0 on success and 1 otherwise.
   star imports, `importlib` dynamic imports, and `sys.path` tricks.
 - Duplicate qualnames in one file (for example a def inside `if`/`else`) keep
   the first definition. `stats.duplicate_defs` counts the rest.
-- Python import tags are not used for Rust, Lua, Go, Java or C/C++ resolution.
-  Those languages resolve through `local` and `name` only.
+- Rust is the only non-Python language with import resolution
+  (`core/rust_modules.py`). Lua, Go, Java and C/C++ still resolve through
+  `local` and `name` only. Rust paths through module aliases, conditional
+  `cfg` modules, features and macros remain unresolved.
 - LSP is the precise layer. W3-B wires optional LSP refinement; this module
   does not call a language server.
 

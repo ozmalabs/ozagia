@@ -53,20 +53,29 @@ def test_test_root_and_bin_root_module_layouts(tmp_path: Path) -> None:
     assert _imports(mem, "tests/it.rs") == {"file:tests/common.rs"}
 
 
-def test_path_attribute_is_recorded_not_resolved(tmp_path: Path) -> None:
+def test_path_attribute_resolves_relative_module_file(tmp_path: Path) -> None:
     _write(tmp_path / "src" / "lib.rs",
            '#[path = "weird.rs"]\nmod weird;\npub fn run() {}\n')
     _write(tmp_path / "src" / "weird.rs", "pub fn weird() {}\n")
 
     mem = _build(tmp_path)
 
-    assert _imports(mem, "src/lib.rs") == set()
+    assert _imports(mem, "src/lib.rs") == {"file:src/weird.rs"}
     fid = mem.node_by_key("file:src/lib.rs")
     assert fid is not None
-    assert mem.nodes[fid]["attrs"]["rust_unsupported_mods"] == [
-        {"name": "weird", "line": 2,
-         "reason": "#[path] module paths are not resolved"},
-    ]
+    assert "rust_unsupported_mods" not in mem.nodes[fid]["attrs"]
+
+
+def test_inline_module_external_file_uses_inline_directory(
+        tmp_path: Path) -> None:
+    _write(tmp_path / "src" / "lib.rs",
+           "mod outer { mod inner; }\npub fn run() {}\n")
+    _write(tmp_path / "src" / "outer" / "inner.rs",
+           "pub fn inner() {}\n")
+
+    mem = _build(tmp_path)
+
+    assert _imports(mem, "src/lib.rs") == {"file:src/outer/inner.rs"}
 
 
 def test_reingest_switches_module_layout(tmp_path: Path) -> None:

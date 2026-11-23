@@ -1,6 +1,6 @@
 # Rust support
 
-Status: Phases 0, 0.5 and 1 of
+Status: Phases 0, 0.5, 1 and 2 of
 [`docs/plans/2026-11-23_rust_parity.md`](plans/2026-11-23_rust_parity.md),
 2026-11-23. This page describes what works today, not the target state. The
 `ozagia languages` command and automatic component checks are documented in
@@ -18,7 +18,7 @@ updated as each phase lands.
 | Graph symbols | tree-sitter structural parser: qualified names, spans, doc comments, attributes, arguments, return type, visibility and test markers; regex fallback without the grammar | `build_index` / `ozagia-memory build` |
 | Test nodes | inline `#[test]`/`#[tokio::test]`/`#[rstest]` functions, plus `tests/*.rs` and `benches/*.rs` files, produce Test nodes; `cargo test` capture and selection remain Phase 5 | graph Test nodes, `tests_for` |
 | Module edges | `mod x;` resolves to `x.rs` or `x/mod.rs`, with crate-root rules (see below); `#[path = "..."]` is recorded as unsupported, not guessed | graph `File -imports-> File` edges |
-| Symbol questions | `dev_symbol_*` / `dev_callers` / `dev_callees` work over the tags, but resolution is still name-based for Rust: `use` bindings are recorded, not resolved, and there is no type inference | `ozagia core.symbol_graph` CLI or the MCP tools |
+| Symbol questions | `dev_symbol_*` / `dev_callers` / `dev_callees` resolve Rust `crate`/`self`/`super`/workspace imports, aliases, globs and bounded re-exports; external crates are unresolved, never guessed by name; there is no type inference | `ozagia core.symbol_graph` CLI or the MCP tools |
 | Structural edits | CST subtree ops on `.rs` through `edit/cst.py`: `replace_node`, `insert_before_node`, `insert_after_node`, `delete_node`, `wrap_node`, `replace_span`; preview by default | `ozagia edit` script with a `file` ending in `.rs` and a CST path |
 | Lint | `rustfmt --check --edition <Cargo edition>` when `rustfmt` is on `PATH`; config `[lint] rust = "auto" "rustfmt" "off"` | `ozagia-settings`; edit-time lint |
 | LSP | rust-analyzer through `ozagia.lsp`: definition, references, document symbols, hover, diagnostics, call hierarchy, rename preview | `ozagia languages ensure --root .` or `ozagia[lang-rust]`; `OZAGIA_LIVE_LSP=1` for the gated smoke |
@@ -45,13 +45,14 @@ candidates so reingest notices a file moving between layouts.
 
 Known gaps, deliberately reported rather than guessed:
 
-- `#[path = "..."]` on a module declaration is recorded in the file's
-  `rust_unsupported_mods` attribute and produces no edge.
-- Inline `mod x { ... }` blocks scope symbols as `x.fn`, but an external
-  `mod y;` declared inside one is still resolved against the file rather than
-  the inline module path.
-- Custom Cargo target paths (`[lib] path`, `[[bin]] path`) are not read yet, so
-  a non-conventional crate root is treated as an ordinary module file.
+- `#[path = "..."]` resolves the simple relative form; an attribute that
+  depends on a generated or non-standard module layout is reported as
+  unresolved rather than guessed.
+- Inline `mod x { ... }` blocks scope symbols as `x.fn` and external
+  `mod y;` declarations inside them use the inline module directory.
+- Custom Cargo target paths are read from `[lib]`/`[[bin]]`/`[[test]]`/
+  `[[bench]]`; targets produced by build scripts, conditional `cfg`, or macros
+  are not discovered.
 - A helper module named `tests/*.rs` (rather than `tests/*/mod.rs`) is treated
   as a test crate root; its own children resolve beside it.
 
@@ -68,9 +69,39 @@ repo map use the qualified names.
 
 `use` declarations are expanded (single paths, groups, `self`, aliases, globs,
 `pub use`, `crate`/`super`/`self` prefixes) into `kind: "import"` tag records.
-They are not resolved to files or symbols until Phase 2. Test attributes are
-recorded, inline/source tests become Test nodes, and `tests/*.rs` files are
-indexed with the test role.
+Test attributes are recorded, inline/source tests become Test nodes, and
+`tests/*.rs`, `benches/*.rs` files are indexed with the test role.
+
+## Import and module resolution (Phase 2)
+
+`src/ozagia/core/rust_modules.py` reads `Cargo.toml` files (stdlib `tomllib`,
+never `cargo metadata`) and builds crate targets and a module tree:
+
+- library targets (`[lib]` name/path or `src/lib.rs`), binaries (`src/main.rs`,
+  `src/bin/*.rs`, `[[bin]]`) and test/bench targets (`[[test]]`/`[[bench]]`,
+  `tests/*.rs`, `benches/*.rs`, `*/main.rs`);
+- external `mod foo;` files (`foo.rs` or `foo/mod.rs`), nested module
+  directories, inline modules as a file plus qualname prefix, and `#[path]`
+  declarations;
+- workspace member crates discovered from their own `Cargo.toml` files.
+
+`use` records resolve through `crate::`, `self::`, `super::`, leading `::`,
+workspace crate names, aliases and groups. A glob resolves to its module file;
+a matching symbol can be linked when exactly one definition has the imported
+qualname. `pub use` re-exports are followed for up to three hops. External
+crates (`serde`, `std`, …) are reported as external and never fall back to a
+same-named local symbol. Ambiguous module paths and missing files are reported
+as unresolved.
+
+The resolved imports produce:
+
+- symbol-graph edges with `resolution: "import"` and confidence 1.0 for exact
+  targets; unresolved/external bindings suppress the bare-name fallback for
+  that reference;
+- file-level `File -> File` repo-map edges (including glob module targets), so
+  Rust imports contribute to PageRank;
+- per-graph counters (`rust_module_targets`, `resolved_import`,
+  `unresolved`) in `build_symbol_graph`.
 
 ## LSP
 
@@ -114,9 +145,12 @@ Preview is the default; applying backs up the file under
 
 ## Honest limits
 
-- Symbols and tags are syntactic, not scope/type resolved. `use` bindings are
-  recorded but not resolved until Phase 2; macros and proc macros are not
-  expanded, and generics are stripped from the impl scope name.
+- Imports and module paths are resolved syntactically, not with type
+  inference. Paths through a module alias (`use crate::a as m; m::f()`),
+  conditional `cfg` inclusion, feature-specific modules and macros/proc-macros
+  are not fully resolved; generics are stripped from impl scope names.
+- Re-exports are followed up to three hops. Glob imports resolve to a module
+  file and only link a symbol when the imported qualname is unique.
 - Repo-map edges are name-based. Generic names are capped, and two unrelated
   `new` functions can be linked by name; the LSP layer is the precise one.
 - `cargo test` is not a captured command. Test nodes exist, but affected-test
@@ -132,7 +166,8 @@ Preview is the default; applying backs up the file under
 ```bash
 # focused
 PYTHONPATH=src .venv/bin/python -m pytest -q \
-  tests/test_rust_symbols.py tests/test_rust_mods.py \
+  tests/test_rust_modules.py tests/test_rust_symbols.py \
+  tests/test_rust_mods.py tests/test_symbol_graph.py \
   tests/test_tag_languages.py tests/test_repo_map.py \
   tests/test_memory.py tests/test_graph_reingest.py
 

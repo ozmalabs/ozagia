@@ -160,15 +160,15 @@ def _impl_name(node: Any) -> str:
     return text or "impl"
 
 
-def _module_entries(attrs: list[str], name: str, line: int,
-                    inline: bool) -> dict[str, Any]:
+def _module_entries(attrs: list[str], name: str, line: int, inline: bool,
+                    scope: tuple[str, ...] = ()) -> dict[str, Any]:
     path_attribute = None
     for attr in attrs:
         match = _PATH_ATTR.search(attr)
         if match:
             path_attribute = match.group(1)
     return {"name": name, "line": line, "inline": inline,
-            "path_attribute": path_attribute}
+            "path_attribute": path_attribute, "parent": list(scope)}
 
 
 # --------------------------------------------------------------------------- #
@@ -353,11 +353,13 @@ def _walk_items(node: Any, scope: tuple[str, ...], owner: str,
             if body is not None:
                 is_test = in_test_module or any("cfg(test)" in item
                                                 for item in attrs)
-                modules.append(_module_entries(attrs, name, _line(child), True))
+                modules.append(_module_entries(attrs, name, _line(child), True,
+                                               scope))
                 _walk_items(body, (*scope, name), "mod", is_test,
                             symbols, imports, modules)
             else:
-                modules.append(_module_entries(attrs, name, _line(child), False))
+                modules.append(_module_entries(attrs, name, _line(child), False,
+                                               scope))
             continue
         if kind in ("function_item", "function_signature_item"):
             symbol = _function_symbol(child, scope, owner, doc, attrs)

@@ -148,8 +148,9 @@ Kotlin wheel does not, so ozagia bundles one. The granularity differs:
   `Foo::bar()`. An `impl` scope capture makes methods `Foo.bar` instead of a
   bare `bar`. `use` declarations are emitted by the Rust source model as
   `kind: "import"` records with `detail: "import.use"` (module, imported name,
-  alias, glob and scope); they are not CST name references. Resolution of those
-  imports is Phase 2 of the Rust plan.
+  alias, glob and scope); they are not CST name references. Phase 2 resolves
+  those records through the Cargo workspace/module model; external crates stay
+  unresolved.
 - **Lua** — functions, methods, assignment/table function definitions; call
   references.
 - **TypeScript / TSX** — interfaces, abstract classes, function/method
@@ -223,11 +224,12 @@ Then:
    provided the relevant files live under its `SOURCE_DIRS`. Extend
    `SOURCE_DIRS` separately if TypeScript/Go/Java/C/C++/Kotlin/Swift trees live
    elsewhere.
-4. Rust extraction semantics changed in Phase 1 of the Rust plan (impl
-   scopes, trait signatures, constants, qualified calls and `use` import
-   records), so `TAGS_SCHEMA_VERSION` and `repo_map.CACHE_VERSION` are both 4.
-   Extractor fingerprints invalidate the old Rust rows automatically; bump the
-   version again only when existing-language extraction semantics change.
+4. Rust extraction semantics changed in Phases 1–2 of the Rust plan (impl
+   scopes, trait signatures, constants, qualified calls, `use` import records
+   and qualified-call paths), so `TAGS_SCHEMA_VERSION` and
+   `repo_map.CACHE_VERSION` are both 5. Extractor fingerprints invalidate the
+   old Rust rows automatically; bump the version again only when
+   existing-language extraction semantics change.
 5. `backend_status()` is suitable for a one-line brief/diagnostic (for example
    "tags: python(AST), rust, lua, typescript/tsx/js, go, java, c/cpp
    (definition-only), kotlin, swift (definition-only)") and to explain empty

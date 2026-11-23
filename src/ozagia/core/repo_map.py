@@ -33,7 +33,7 @@ from ozagia.config import (GENERIC_SKIP_DIRS, load_project_config, repo_root,
                            state_path, state_rel)
 
 ROOT = repo_root()
-CACHE_VERSION = 4
+CACHE_VERSION = 5
 # Process-local memos. The document memo keeps parsed tag caches keyed by
 # path and validated by (mtime_ns, size); the graph memo keeps reference
 # graphs and derived indexes keyed by the cache view's content.
@@ -372,14 +372,14 @@ def update_tag_cache(root: str | Path = ROOT, *,
     view_hash = _root_hash(entries, view_rels)
     stored_hash = _root_hash(entries, entries)
     document = {"version": CACHE_VERSION, "files": entries,
-                "root_hash": stored_hash,
+                "root": str(root), "root_hash": stored_hash,
                 "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
     if stats["parsed"] or dirty or force or not existed:
         _save_cache(cache_path, document)
     stats["root_hash"] = view_hash
     stats["cached_files"] = len(entries)
     result = {"version": CACHE_VERSION, "files": view,
-              "root_hash": view_hash}
+              "root": str(root), "root_hash": view_hash}
     return result, stats
 
 
@@ -458,7 +458,17 @@ def build_reference_graph(cache: dict[str, Any]) -> dict[str, Any]:
     defines: dict[str, set[str]] = defaultdict(set)
     references: dict[str, set[str]] = defaultdict(set)
     definitions: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
-    for rel, entry in (cache.get("files") or {}).items():
+    import_edges: dict[tuple[str, str], float] = defaultdict(float)
+    rust = None
+    root = cache.get("root")
+    files = cache.get("files") or {}
+    if root and any(str(rel).endswith(".rs") for rel in files):
+        try:
+            from ozagia.core import rust_modules
+            rust = rust_modules.discover(root)
+        except Exception:
+            rust = None
+    for rel, entry in files.items():
         for tag in entry.get("tags") or []:
             name = str(tag.get("name") or "")
             if not name:
@@ -468,7 +478,13 @@ def build_reference_graph(cache: dict[str, Any]) -> dict[str, Any]:
                 definitions[(rel, name)].append(tag)
             elif tag.get("kind") == "ref":
                 references[name].add(rel)
+            elif (rust is not None and tag.get("kind") == "import"
+                  and tag.get("detail") == "import.use"):
+                target = rust.import_file(rel, tag)
+                if target and target != rel:
+                    import_edges[(rel, target)] += 1.0
     edges: dict[tuple[str, str], float] = defaultdict(float)
+    edges.update(import_edges)
     MAX_DEFINERS = 12
     MAX_REFERENCERS = 120
     MAX_EDGES = 250_000
@@ -831,7 +847,7 @@ def _graph_key(cache: dict[str, Any]) -> str:
     fp_text = "|".join(f"{rel}:{(files[rel] or {}).get('fp', '')}"
                        for rel in sorted(files))
     fp_digest = hashlib.sha256(fp_text.encode("utf-8")).hexdigest()
-    return f"{cache.get('root_hash', '')}|{fp_digest}"
+    return f"{cache.get('root', '')}|{cache.get('root_hash', '')}|{fp_digest}"
 
 
 def _prepared(cache: dict[str, Any]) -> _Prepared:
