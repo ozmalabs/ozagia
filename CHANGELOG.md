@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 0.1.3 (2026-11-23)
 
 - Rust parity (Phases 1–7): tree-sitter structural tags, symbols, modules and
