@@ -118,6 +118,16 @@ optional:
                                   # importing a file of a higher layer is a
                                   # layering violation (docs/repo_review.md)
 
+    [migration]
+    python = "python"             # Python source tree (repository-relative,
+    rust = "crates"               # must exist); Rust source tree
+    infer = false                 # report name/path candidates, never accept
+    [[migration.pairs]]           # explicit pair (highest precedence)
+    python = "pkg.models.User"
+    rust = "core::model::User"
+    status = "in_progress"        # optional: planned | in_progress | ported |
+                                  # diverged | dropped | extra
+
     [environments.dev]
     paths = ["envs/dev"]
     namespaces = ["dev"]
@@ -169,6 +179,8 @@ project config maps these groups and keys into the fields above:
     [lint]           enabled, timeout_s, python, rust
     [iac]            roots, skip_globs
     [review] layers
+    [migration]      python, rust, infer (`[[migration.pairs]]` stays in
+                     `.ozagia.toml`)
     [environments.NAME] all environment fields
     [services.NAME]     all service fields
     [relays.NAME]       specs, allowed_kinds, max_timeout_s, command_allowlist,
@@ -362,6 +374,47 @@ class RuntimeTunnelConfig:
 
 
 @dataclass(frozen=True)
+class MigrationPair:
+    """One explicit Python-to-Rust pair from ``[[migration.pairs]]``.
+
+    ``status`` is a manual override; None lets the matcher derive the status
+    from the two inventories and their parity flags.
+    """
+
+    python: str
+    rust: str
+    status: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"python": self.python, "rust": self.rust,
+                "status": self.status}
+
+
+@dataclass(frozen=True)
+class MigrationConfig:
+    """The effective ``[migration]`` overlay (see ``docs/migration.md``)."""
+
+    python: str | None = None
+    rust: str | None = None
+    infer: bool = False
+    pairs: tuple[MigrationPair, ...] = ()
+
+    @property
+    def configured(self) -> bool:
+        """True when both trees are named (the minimum for a report)."""
+        return self.python is not None and self.rust is not None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "configured": self.configured,
+            "python": self.python,
+            "rust": self.rust,
+            "infer": self.infer,
+            "pairs": [pair.to_dict() for pair in self.pairs],
+        }
+
+
+@dataclass(frozen=True)
 class ProjectConfig:
     """The resolved project configuration (see the module docstring)."""
     root: Path
@@ -407,6 +460,8 @@ class ProjectConfig:
     runtime_tunnels: tuple[RuntimeTunnelConfig, ...] = ()
     # `[review] layers`: path prefixes, lowest layer first.
     review_layers: tuple[str, ...] = ()
+    # `[migration]`: Python-to-Rust overlay (docs/migration.md).
+    migration: MigrationConfig = MigrationConfig()
     #: The configuration files that supplied values, highest priority first.
     sources: tuple[Path, ...] = ()
     #: Reload identity for both configuration locations:
@@ -481,6 +536,7 @@ _KEYS = {
     "lint": {"enabled", "timeout_s", "python", "rust"},
     "iac": {"roots", "skip_globs", "remote_states"},
     "review": {"layers"},
+    "migration": {"python", "rust", "infer", "pairs"},
 }
 #: `[security]` keys `ozagia.core.security` reads from either config file.
 SECURITY_SECTION = "security"
@@ -491,6 +547,13 @@ SECURITY_KEYS = (
 _SECURITY_KEY_SET = frozenset(SECURITY_KEYS)
 REPEAT_POLICIES = ("stub", "note", "off")
 TEST_SELECT_POLICIES = ("all", "affected")
+#: Migration status vocabulary (docs/migration.md).
+MIGRATION_STATUSES = (
+    "planned", "in_progress", "ported", "diverged", "dropped", "extra",
+)
+MAX_MIGRATION_PAIRS = 1000
+MIGRATION_NAME = re.compile(
+    r"[A-Za-z_][A-Za-z0-9_]*(?:(?:\.|::)[A-Za-z_][A-Za-z0-9_]*)*\Z")
 
 #: Versioned-config keys mapped into ProjectConfig -> legacy TOML location.
 #: `testing.captured` and `tests.select` are aliases, as in the registry.
@@ -527,6 +590,9 @@ _PROJECT_CONFIG_KEYS: dict[str, tuple[str, str]] = {
     "iac.roots": ("iac", "roots"),
     "iac.skip_globs": ("iac", "skip_globs"),
     "review.layers": ("review", "layers"),
+    "migration.python": ("migration", "python"),
+    "migration.rust": ("migration", "rust"),
+    "migration.infer": ("migration", "infer"),
 }
 #: Tables whose named entries are project models rather than flat settings.
 #: They are validated by `_parse` (the legacy parser) and merged by name, so
@@ -559,6 +625,8 @@ _OWNED_KEYS = {
     "testing.max_tests": "read by ozagia.core.testing",
     "testing.timeout_s": "read by ozagia.core.testing",
     "iac.remote_states": "an array of tables has no registry equivalent yet",
+    "migration.pairs": "an array of tables has no registry equivalent yet; "
+                       "keep [[migration.pairs]] in .ozagia.toml",
 }
 
 #: Registry values that mean "derive the project default" when empty.
@@ -1045,9 +1113,106 @@ def _runtime_env(value: Any, *, section: str) -> tuple[tuple[str, str], ...]:
     return tuple(sorted(pairs))
 
 
+def _migration_config(table: Any, *, root: Path, where: str,
+                      partial: bool = False) -> MigrationConfig:
+    """Validate ``[migration]`` (see ``docs/migration.md``).
+
+    The source and target trees must be repository-relative directories that
+    exist after resolving symlinks. ``partial`` is used when one configuration
+    file is validated on its own: the other file may supply the missing tree.
+    """
+    if table is None:
+        return MigrationConfig()
+    if not isinstance(table, dict):
+        raise ConfigError(f"{where}: [migration] must be a table")
+    location = f"{where} [migration]"
+    unknown = sorted(set(table) - _KEYS["migration"])
+    if unknown:
+        raise ConfigError(f"{location}: unknown key(s): " + ", ".join(unknown))
+
+    def tree(key: str) -> str | None:
+        if key not in table:
+            return None
+        value = table[key]
+        if not isinstance(value, str) or not value.strip():
+            raise ConfigError(f"{location}: {key} must name a directory")
+        rel = _rel_dir(value.strip(), key, location)
+        target = (root / rel).resolve()
+        try:
+            target.relative_to(root.resolve())
+        except ValueError as exc:
+            raise ConfigError(
+                f"{location}: {key} directory {rel!r} is outside the "
+                "repository root") from exc
+        if not target.is_dir():
+            raise ConfigError(
+                f"{location}: {key} directory {rel!r} does not exist")
+        return rel
+
+    python = tree("python")
+    rust = tree("rust")
+    infer = table.get("infer", False)
+    if not isinstance(infer, bool):
+        raise ConfigError(f"{location}: infer must be true or false")
+
+    raw_pairs = table.get("pairs", [])
+    if not isinstance(raw_pairs, list):
+        raise ConfigError(f"{location}: pairs must be an array of tables")
+    if len(raw_pairs) > MAX_MIGRATION_PAIRS:
+        raise ConfigError(
+            f"{location}: pairs exceeds the {MAX_MIGRATION_PAIRS}-item limit")
+    pairs: list[MigrationPair] = []
+    seen_pairs: set[tuple[str, str]] = set()
+    seen_python: set[str] = set()
+    seen_rust: set[str] = set()
+
+    def symbol(value: Any, key: str, index: int) -> str:
+        if not isinstance(value, str) or not MIGRATION_NAME.fullmatch(value):
+            raise ConfigError(
+                f"{location} [[migration.pairs]] entry {index}: {key} must be "
+                "a dotted or `::` symbol path")
+        return value
+
+    for index, mapping in enumerate(raw_pairs):
+        entry = f"{location} [[migration.pairs]] entry {index}"
+        if not isinstance(mapping, dict):
+            raise ConfigError(f"{entry}: must be a table")
+        unknown = sorted(set(mapping) - {"python", "rust", "status"})
+        if unknown:
+            raise ConfigError(f"{entry}: unknown key(s): " + ", ".join(unknown))
+        if "python" not in mapping or "rust" not in mapping:
+            raise ConfigError(f"{entry}: python and rust are required")
+        pair_python = symbol(mapping["python"], "python", index)
+        pair_rust = symbol(mapping["rust"], "rust", index)
+        status = mapping.get("status")
+        if status is not None and status not in MIGRATION_STATUSES:
+            raise ConfigError(
+                f"{entry}: unknown status {status!r}; expected one of "
+                + ", ".join(MIGRATION_STATUSES))
+        if (pair_python, pair_rust) in seen_pairs:
+            raise ConfigError(f"{entry}: duplicate pair")
+        if pair_python in seen_python:
+            raise ConfigError(
+                f"{entry}: duplicate python symbol {pair_python!r}")
+        if pair_rust in seen_rust:
+            raise ConfigError(f"{entry}: duplicate rust symbol {pair_rust!r}")
+        seen_pairs.add((pair_python, pair_rust))
+        seen_python.add(pair_python)
+        seen_rust.add(pair_rust)
+        pairs.append(MigrationPair(pair_python, pair_rust, status))
+
+    if not partial and (python is None or rust is None):
+        raise ConfigError(
+            f"{location}: python and rust trees are required when the "
+            "section is present")
+    return MigrationConfig(python=python, rust=rust, infer=infer,
+                           pairs=tuple(pairs))
+
+
 def _parse(root: Path, source: Path | None, data: dict[str, Any], *,
            extra_environment_names: Iterable[str] = (),
-           extra_relay_names: Iterable[str] = ()) -> ProjectConfig:
+           extra_relay_names: Iterable[str] = (),
+           partial_migration: bool = False) -> ProjectConfig:
     """Validate and resolve the legacy-shaped project configuration.
 
     `extra_*_names` name entries supplied by the other configuration file, so
@@ -1085,6 +1250,9 @@ def _parse(root: Path, source: Path | None, data: dict[str, Any], *,
     review_layers = tuple(_dedup([
         _rel_dir(v, "layers", f"{where} [review]")
         for v in (_str_list(review, "layers", f"{where} [review]") or [])]))
+    migration = _migration_config(
+        data.get("migration"), root=root, where=where,
+        partial=partial_migration)
     runtime = data.get("runtime", {})
     relay_configs = _relay_configs(data.get("relays"), where=where)
     relay_names = {relay.name for relay in relay_configs}
@@ -1383,6 +1551,7 @@ def _parse(root: Path, source: Path | None, data: dict[str, Any], *,
         runtime_services=tuple(runtime_services),
         runtime_tunnels=tuple(runtime_tunnels),
         review_layers=review_layers,
+        migration=migration,
     )
 
 
@@ -1742,11 +1911,11 @@ def load_project_config(root: str | Path | None = None) -> ProjectConfig:
     if sources.legacy is not None:
         _parse(root_p, sources.legacy, legacy_data,
                extra_environment_names=extra_environments,
-               extra_relay_names=extra_relays)
+               extra_relay_names=extra_relays, partial_migration=True)
     if repo_path is not None and new_data:
         _parse(root_p, repo_path, new_data,
                extra_environment_names=extra_environments,
-               extra_relay_names=extra_relays)
+               extra_relay_names=extra_relays, partial_migration=True)
     unmapped = tuple(sorted(set(legacy_unmapped) | set(new_unmapped)))
 
     if repo_path is None:

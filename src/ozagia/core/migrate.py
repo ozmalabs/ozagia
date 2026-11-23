@@ -92,6 +92,14 @@ LEGACY_SECTIONS: dict[str, dict[str, LegacyKey]] = {
             reason="an array of tables has no registry equivalent yet"),
     },
     "review": {"layers": LegacyKey(target="review.layers")},
+    "migration": {
+        "python": LegacyKey(target="migration.python"),
+        "rust": LegacyKey(target="migration.rust"),
+        "infer": LegacyKey(target="migration.infer"),
+        "pairs": LegacyKey(
+            reason="an array of tables has no registry equivalent yet; keep "
+                   "[[migration.pairs]] in .ozagia.toml"),
+    },
     "security": {
         "enabled": LegacyKey(target="security.enabled"),
         "tools": LegacyKey(target="security.tools"),

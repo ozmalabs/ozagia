@@ -1,6 +1,7 @@
 # Rust parity with Python — plan (2026-11-23)
 
-Status: Phases 0, 0.5, 1, 2, 3, 4 and 5 implemented (2026-11-23); Phases 6–7 proposed. This plan closes
+Status: Phases 0, 0.5, 1, 2, 3, 4, 5 and 6 implemented (2026-11-23); Phase 7
+proposed. This plan closes
 the gap between `.rs` and `.py` support across the graph, tags,
 symbol-question layer, edits, LSP, tests and documentation, and adds the
 initial setup for a Python→Rust migration assistant built on the same graph.
@@ -43,10 +44,11 @@ do in a Python repository today, at the same honesty level:
 | Tests | `pytest` capture, affected subset, result cache | `cargo test` capture, human-output parsing, per-target affected subset and cache; failures never cached |
 | Dependencies/review | Python manifests + trust-boundary dataflow | Cargo.lock inventory, crates.io, purls, strict SemVer advisories; no Rust dataflow |
 
-Cross-language migration has no support at all today: there is no Python→Rust
-pairing, status, parity report or hint surface, and the graph has no
-`migrates_to` relationship. This plan adds the read-only foundation for it
-(Phase 6) without turning ozagia into a transpiler.
+Cross-language migration had no support before Phase 6: there was no
+Python→Rust pairing, status, parity report or hint surface, and the graph has
+no `migrates_to` relationship. Phase 6 adds the read-only overlay described
+below without turning ozagia into a transpiler; the graph edge remains a
+follow-up.
 
 Language support packages are new as of Phase 0.5: each language has a
 `lang-*` extra and a module that declares its parser, language server and
@@ -322,7 +324,7 @@ availability of a parser.
   runs in a two-crate workspace; the full suite is 6281 passed / 22 skipped
   and ruff is clean.
 
-### Phase 6 — Python→Rust migration assistant, initial setup (3–5 days)
+### Phase 6 — Python→Rust migration assistant, initial setup (3–5 days) — implemented 2026-11-23
 
 The goal is a graph-aware migration cockpit, not a source-to-source compiler:
 know what has a counterpart, what is missing, what diverged, and what to do
@@ -391,6 +393,15 @@ next, and flag everything that needs a human or a different design.
   correctly; hints mark manual/unsupported constructs; no write happens
   without an explicit scaffold `--write`; docs and CLI output are honest about
   stale snapshots and inference confidence.
+
+Implemented in `src/ozagia/migration/` (`inventory`, `match`, `hints`,
+`report`, `tasks`, `scaffold`), `src/ozagia/migration_cli.py`, the
+`ProjectConfig.migration` section and registry keys, and `dev_migration`.
+Known limits at completion: inference is a name/module heuristic; re-exports,
+generated/`#[path]` modules and runtime metaprogramming are not resolved;
+cross-language tests and a graph `migrates_to` edge are not implemented; the
+scaffold supports only simple scalar dataclasses/functions and appends to an
+existing file. See `docs/migration.md`.
 
 ### Phase 7 — Optional precise graph and review (2–4 days, stretch)
 
@@ -520,7 +531,7 @@ python -m ozagia.eval.bench --root <rust-repo> --cold --check
 | 3 — symbol edits (done 2026-11-23) | 3–4 |
 | 4 — LSP (done 2026-11-23) | 1–2 |
 | 5 — cargo test (done 2026-11-23) | 5–8 |
-| 6 — migration assistant (initial setup) | 3–5 |
+| 6 — migration assistant (initial setup) (done 2026-11-23) | 3–5 |
 | 7 — optional SCIP/review/docs | 2–4 |
 
 Core parity (0–5) is roughly 15–23 developer-days, plus the 1–2 days already

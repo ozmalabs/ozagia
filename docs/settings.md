@@ -542,6 +542,22 @@ select` in `.ozagia.toml` still wins over `testing.captured`; see
 `testing.timeout_s` is recorded for a caller that executes the plan; the
 planner never runs tests.
 
+### migration
+
+| Key | Type | Default | Scope | Restart |
+| --- | --- | --- | --- | --- |
+| `migration.python` | string | `""` | repo | yes |
+| `migration.rust` | string | `""` | repo | yes |
+| `migration.infer` | boolean | `false` | repo | no |
+
+`migration.python` and `migration.rust` name repository-relative source
+directories; both must exist when `[migration]` is used. `migration.infer`
+reports name/path candidates only, never accepts them. Explicit
+`[[migration.pairs]]` entries stay in `.ozagia.toml` because an array of
+tables has no registry shape. The effective configuration is shown by
+`ozagia doctor` (`config.migration`) and by `ozagia config get migration.*`;
+see [migration.md](migration.md).
+
 ### hints
 
 | Key | Type | Default | Scope | Restart |

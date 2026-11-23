@@ -336,6 +336,16 @@ def _check_trash(value: Any) -> str:
     return _relative_path(value)
 
 
+def _check_migration_path(value: Any) -> str:
+    """A repository-relative migration tree, or empty for unset."""
+    if isinstance(value, str) and value.strip() == "":
+        return ""
+    path = _relative_path(value, allow_root=True)
+    if any(char in path for char in "*?[]"):
+        raise ValueError("must be a directory, not a glob pattern")
+    return path
+
+
 def _check_bool(value: Any) -> bool:
     if not isinstance(value, bool):
         raise ValueError("must be true or false")
@@ -1069,6 +1079,27 @@ _SETTINGS: tuple[Setting, ...] = (
         section="review", name="layers",
         validation="repository-relative directories (may be empty)",
         check=_check_test_dirs, restart_required=True,
+    ),
+    Setting(
+        "migration.python", "string", "", "repo",
+        "Python source tree for the migration overlay; empty disables it.",
+        section="migration", name="python",
+        validation="a repository-relative directory or empty",
+        check=_check_migration_path, restart_required=True,
+    ),
+    Setting(
+        "migration.rust", "string", "", "repo",
+        "Rust source tree for the migration overlay; empty disables it.",
+        section="migration", name="rust",
+        validation="a repository-relative directory or empty",
+        check=_check_migration_path, restart_required=True,
+    ),
+    Setting(
+        "migration.infer", "boolean", False, "repo",
+        "Report name/path migration candidates; never accepts them.",
+        section="migration", name="infer",
+        validation="true or false",
+        check=_check_bool,
     ),
     Setting(
         "testing.mode", "string", "affected", "both",

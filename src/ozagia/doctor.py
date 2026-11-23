@@ -116,6 +116,7 @@ def diagnose(root: str | Path) -> dict[str, Any]:
             config.update({
                 "valid": True,
                 "adapters_configured": list(cfg.adapters),
+                "migration": cfg.migration.to_dict(),
                 "unmapped": unmapped[:CONFIG_UNMAPPED_LIMIT],
                 "unmapped_count": len(unmapped),
                 "unmapped_truncated": len(unmapped) > CONFIG_UNMAPPED_LIMIT,

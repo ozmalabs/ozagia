@@ -359,6 +359,7 @@ _DOCS = {
     "resources": "doc:docs/resources.md",
     "toolchain": "doc:docs/toolchain.md",
     "languages": "doc:docs/languages.md",
+    "migration": "doc:docs/migration.md",
     "supply_chain": "doc:docs/supply_chain.md",
     "status": "doc:docs/status.md",
     "federation": "doc:docs/federation.md",
@@ -411,6 +412,8 @@ _TESTS = {
     "resources": "test:tests/test_cgroup.py",
     "toolchain": "test:tests/test_toolchain.py",
     "languages": "test:tests/test_languages.py",
+    "migration": "test:tests/test_migration_cli.py",
+    "mcp_migration": "test:tests/test_mcp_migration.py",
     "supply_chain": "test:tests/test_supply_chain.py",
     "status": "test:tests/test_status.py",
     "settings": "test:tests/test_settings.py",
@@ -1449,6 +1452,38 @@ _BUILTIN_DEFINITIONS: tuple[dict[str, Any], ...] = (
         authorization="explicit CLI; automatic check is opt-out; no sudo",
         tests=_tests("languages"),
         docs=_docs("languages"),
+    ),
+    _def(
+        id="cap:migration.overlay",
+        domain="toolchain",
+        purpose=("Inventory configured Python and Rust trees, pair symbols, "
+                 "derive migration status and parity flags, report inference "
+                 "candidates without accepting them, and emit a task checklist "
+                 "or a bounded scaffold preview."),
+        owner="ozagia.migration.report",
+        side_effect="write",
+        exposure=["cli", "mcp"],
+        impl=["impl:ozagia.migration.inventory.inventory_python",
+              "impl:ozagia.migration.inventory.inventory_rust",
+              "impl:ozagia.migration.match.match",
+              "impl:ozagia.migration.report.build_report",
+              "impl:ozagia.migration.tasks.build_tasks",
+              "impl:ozagia.migration.scaffold.scaffold",
+              "impl:ozagia.migration_cli.run"],
+        surfaces=["cli:ozagia.migration", "mcp:tool:dev_migration"],
+        prerequisites=["a validated [migration] section naming two existing "
+                       "trees inside the repository",
+                       "explicit pairs, or inference for candidates only"],
+        limits=["status and tasks never modify a source tree or execute the "
+                "project",
+                "inference is a name/module heuristic and never accepted",
+                "reports are bounded and written only under the state directory",
+                "scaffold supports simple scalar dataclasses/functions only",
+                "the MCP tool is preview-only; only the CLI --write path edits"],
+        authorization=("read-only by default; scaffold --write is an explicit "
+                       "CLI edit through the transaction; MCP never writes"),
+        tests=_tests("migration", "mcp_migration"),
+        docs=_docs("migration"),
     ),
     # status ---------------------------------------------------------------
     _def(

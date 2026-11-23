@@ -1,0 +1,27 @@
+[migration]
+python = "python"
+rust = "rust"
+infer = true
+
+[[migration.pairs]]
+python = "fixturepy.models.User"
+rust = "fixturecrate::models::User"
+status = "ported"
+
+[[migration.pairs]]
+python = "fixturepy.models.Widget"
+rust = "fixturecrate::models::Widget"
+
+[[migration.pairs]]
+python = "fixturepy.service.fetch_user"
+rust = "fixturecrate::service::fetch_user"
+
+[[migration.pairs]]
+python = "fixturepy.service.checksum"
+rust = "fixturecrate::service::checksum"
+status = "in_progress"
+
+[[migration.pairs]]
+python = "fixturepy.models.legacy_only"
+rust = "fixturecrate::legacy_only"
+status = "dropped"

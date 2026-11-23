@@ -1,10 +1,11 @@
 # Rust support
 
-Status: Phases 0, 0.5, 1, 2, 3, 4 and 5 of
+Status: Phases 0, 0.5, 1, 2, 3, 4, 5 and 6 of
 [`docs/plans/2026-11-23_rust_parity.md`](plans/2026-11-23_rust_parity.md),
 2026-11-23. This page describes what works today, not the target state. The
 `ozagia languages` command and automatic component checks are documented in
-[`languages.md`](languages.md).
+[`languages.md`](languages.md); the Python→Rust overlay is documented in
+[`migration.md`](migration.md).
 
 Rust is a first-class indexed language at the syntactic layer and a
 second-class one at the semantic layer. The plan closes the rest; this page is
@@ -25,7 +26,7 @@ updated as each phase lands.
 | Dependencies and review | Cargo.lock inventory, crates.io detection, `pkg:cargo/…` purls, strict SemVer advisory matching, `cargo-audit` in the allowlisted scanners | `ozagia-review`, deep review dependencies subject |
 | SCIP | the importer is language-agnostic; a Rust index can be produced with `rust-analyzer scip .` and `scip print --json` (recipe is provisional until Phase 7) | `index/scip.py` |
 | `cargo test` selection | captured `cargo test` with package/target/feature mapping, stable human-output parsing, per-target affected selection and cache; failures are never cached | `[tests] select = "affected"` / `cache = true`; `tests/test_cargo_test.py` |
-| Migration assistance | not implemented | Phase 6 |
+| Migration assistance | `[migration]` pairs validate; `ozagia migration status` inventories both trees, derives planned/in-progress/ported/diverged/dropped/extra statuses and parity flags, reports inference candidates without accepting them, records freshness, and emits a task checklist; `scaffold` is preview-only unless `--write` (transaction + backup) and refuses complex shapes | `docs/migration.md`; `tests/test_migration_*.py` |
 
 ## Module resolution (Phase 0)
 
@@ -51,8 +52,8 @@ Known gaps, deliberately reported rather than guessed:
 - Inline `mod x { ... }` blocks scope symbols as `x.fn` and external
   `mod y;` declarations inside them use the inline module directory.
 - Custom Cargo target paths are read from `[lib]`/`[[bin]]`/`[[test]]`/
-  `[[bench]]`; targets produced by build scripts, conditional `cfg`, or macros
-  are not discovered.
+  `[[bench]]`/`[[example]]`; targets produced by build scripts, conditional
+  `cfg`, or macros are not discovered.
 - A helper module named `tests/*.rs` (rather than `tests/*/mod.rs`) is treated
   as a test crate root; its own children resolve beside it.
 
@@ -215,6 +216,29 @@ A narrowed run names its targets (`cargo test -p a --test integration`), so
 only linked targets execute. A typed filter, target-selection flags,
 `--no-run`, another `--manifest-path`, or a workdir other than the project
 root runs as typed. `OZAGIA_TESTS_ALL=1` always runs as typed.
+
+## Migration assistance (Phase 6)
+
+`docs/migration.md` is the full reference. In short:
+
+- `[migration] python = "python"`, `rust = "crates"`, `infer`, and explicit
+  `[[migration.pairs]]` validate on load; the trees must exist inside the
+  repository.
+- `ozagia migration status [--json|--markdown]` inventories public Python
+  definitions and `pub` Rust items, derives the six statuses and parity flags,
+  lists inference candidates without accepting them, and records freshness.
+- `ozagia migration tasks` emits a bounded checklist; it creates no goal and
+  runs nothing.
+- `ozagia migration scaffold SYMBOL --target FILE` previews a simple
+  dataclass/function skeleton; `--write` is the only write and goes through
+  `edit/txn.py` with a backup. Complex classes, unions, decorators and unknown
+  types are refused with reasons.
+- `dev_migration` exposes the bounded status/tasks/preview views to MCP but
+  never writes.
+
+The overlay is syntactic: re-exports, runtime metaprogramming, C extensions and
+cross-language tests are not resolved, and no `migrates_to` graph edge is
+written yet. A clean flag set is not a promise of semantic equivalence.
 
 ## Honest limits
 

@@ -1131,6 +1131,30 @@ _TOOLS.append({
     }),
 })
 _TOOLS.append({
+    "name": "dev_migration",
+    "description": (
+        "Read-only Python-to-Rust migration overlay. view=status inventories "
+        "the configured [migration] trees and reports per-status totals, top "
+        "gaps/divergences, inference candidates (never accepted), freshness "
+        "and explicit omissions; view=tasks emits a checklist for planned, "
+        "in-progress or diverged symbols without creating a goal or running "
+        "anything; view=scaffold renders a bounded skeleton preview for a "
+        "simple dataclass/function. The MCP tool never writes: use "
+        "`ozagia migration scaffold --write` for an explicit transaction."),
+    "inputSchema": _schema({
+        "view": {"type": "string", "enum": ["status", "tasks", "scaffold"],
+                 "default": "status",
+                 "description": "status, tasks or a scaffold preview."},
+        "symbol": {"type": "string",
+                   "description": "public Python symbol key for view=scaffold."},
+        "target": {"type": "string",
+                   "description": "existing .rs file inside the Rust tree for "
+                                  "view=scaffold."},
+        "limit": {"type": "integer", "default": 25,
+                  "description": "bounded list size (default 25, max 100)."},
+    }),
+})
+_TOOLS.append({
     "name": "dev_capabilities",
     "description": (
         "Read-only catalogue of Ozagia's declared capabilities and a coverage "
@@ -1458,6 +1482,7 @@ class DevMemoryServer:
             "dev_tools": self._dev_tools,
             "dev_capabilities": self._dev_capabilities,
             "dev_maps": self._dev_maps,
+            "dev_migration": self._dev_migration,
             "goal_list": self._goal_list,
             "goal_show": self._goal_show,
             "goal_check": self._goal_check,
@@ -2096,6 +2121,113 @@ class DevMemoryServer:
                 configured_support={map_type: "supported"})
         except (ModelAPIError, ValueError) as exc:
             return error_payload(exc)
+
+    def _dev_migration(self, a: dict[str, Any]) -> Any:
+        """Bounded Python→Rust migration status, tasks or scaffold preview.
+
+        Read-only: the MCP surface never writes a source file. Scaffold
+        previews go through the same renderer as the CLI, but a write request
+        is refused because the explicit transaction belongs to the CLI (or a
+        normal edit tool).
+        """
+        from ozagia.migration.report import build_report
+        from ozagia.migration.scaffold import ScaffoldError, scaffold
+        from ozagia.migration.tasks import tasks_from_report
+        root = self._files_root()
+        view = str(a.get("view") or "status")
+        if view not in ("status", "tasks", "scaffold"):
+            return {"ok": False, "error": "view must be status, tasks or "
+                                          "scaffold"}
+        if a.get("write") is True:
+            return {"ok": False,
+                    "error": "dev_migration is preview-only; use "
+                             "`ozagia migration scaffold --write` for an "
+                             "explicit transaction"}
+        limit = a.get("limit")
+        limit = 25 if limit is None else limit
+        if isinstance(limit, bool) or not isinstance(limit, int):
+            return {"ok": False, "error": "limit must be an integer"}
+        if limit < 1 or limit > 100:
+            return {"ok": False, "error": "limit must be between 1 and 100"}
+        if view == "scaffold":
+            symbol = str(a.get("symbol") or "").strip()
+            target = str(a.get("target") or "").strip()
+            if not symbol or not target:
+                return {"ok": False,
+                        "error": "view=scaffold needs symbol and target"}
+            try:
+                result = scaffold(root, symbol, target, write=False)
+            except (ScaffoldError, OSError, ValueError) as exc:
+                return {"ok": False, "view": "scaffold", "error": str(exc),
+                        "written": False}
+            return {
+                "ok": True,
+                "view": "scaffold",
+                "configured": True,
+                "symbol": result["symbol"],
+                "target": result["target"],
+                "candidate": result["candidate"][:8000],
+                "hints": result["hints"][:20],
+                "notes": result["notes"][:10],
+                "parse_gate": result["parse_gate"],
+                "base_sha256": result["base_sha256"],
+                "new_sha256": result["new_sha256"],
+                "diff_view": result["diff_view"][:4000],
+                "written": False,
+                "executed": False,
+                "note": "the MCP tool is preview-only; use the CLI with "
+                        "--write for an explicit transaction",
+            }
+        try:
+            report = build_report(root, write=False)
+        except (OSError, ValueError) as exc:
+            return {"ok": False, "view": view, "error": str(exc),
+                    "written": False}
+        if view == "tasks":
+            payload = tasks_from_report(report, limit=min(limit, 100))
+            return {"ok": True, "view": "tasks", **payload}
+        if not report.get("configured"):
+            return {
+                "ok": True,
+                "view": "status",
+                "configured": False,
+                "reason": report.get("reason"),
+                "status_counts": report.get("status_counts"),
+                "counts": report.get("counts"),
+                "executed": False,
+                "written": False,
+            }
+        config = dict(report["config"])
+        config["pairs"] = list(config.get("pairs") or [])[:20]
+        return {
+            "ok": True,
+            "view": "status",
+            "configured": True,
+            "schema": report["schema"],
+            "config": config,
+            "counts": report["counts"],
+            "status_counts": report["status_counts"],
+            "gaps": report["gaps"][:limit],
+            "gaps_count": report["gaps_count"],
+            "divergences": report["divergences"][:limit],
+            "divergences_count": report["divergences_count"],
+            "candidates": report["candidates"][:limit],
+            "candidates_count": report["candidates_count"],
+            "candidates_truncated": report["candidates_truncated"],
+            "omissions": report["omissions"][:limit],
+            "omissions_count": report["omissions_count"],
+            "omissions_truncated": report["omissions_truncated"],
+            "freshness": report["freshness"],
+            "limits": report["limits"],
+            "notes": report["notes"],
+            "truncated": (report["rows_truncated"]
+                          or report["gaps_count"] > limit
+                          or report["divergences_count"] > limit
+                          or report["candidates_count"] > limit),
+            "executed": False,
+            "written": False,
+            "source_modified": False,
+        }
 
     def _dev_capabilities(self, a: dict[str, Any]) -> Any:
         """The declared-capability catalogue and its read-only audit.

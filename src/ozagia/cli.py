@@ -1835,6 +1835,8 @@ def build_parser() -> argparse.ArgumentParser:
     _languages_parser(sub)
     from ozagia.supply_chain_cli import add_parser as _supply_chain_parser
     _supply_chain_parser(sub)
+    from ozagia.migration_cli import add_parser as _migration_parser
+    _migration_parser(sub)
     return p
 
 
@@ -1860,6 +1862,7 @@ def _repo_map_budget(value: str) -> int:
 _COMMANDS = frozenset({"index", "agent", "install", "who", "replace",
                        "review-repo", "goal", "capabilities", "profile-run",
                        "task-preflight", "languages", "supply-chain",
+                       "migration",
                        *DELEGATES})
 # Agent options that may lead a bare `ozagia ...` (the TUI).
 _AGENT_FLAGS = frozenset({"--research", "--mcp", "--model", "-m", "--workdir",
@@ -1960,6 +1963,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "supply-chain":
         from ozagia.supply_chain_cli import run as _supply_chain_run
         return _supply_chain_run(args)
+    if args.command == "migration":
+        from ozagia.migration_cli import run as _migration_run
+        return _migration_run(args)
     parser.error(f"unknown command {args.command}")  # pragma: no cover
     return 2
 

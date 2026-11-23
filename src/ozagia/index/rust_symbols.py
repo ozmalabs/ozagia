@@ -119,6 +119,7 @@ def _function_symbol(node: Any, scope: tuple[str, ...], owner: str,
     name_node = _field(node, "name")
     name = _text(name_node) or "anonymous"
     qualname = ".".join((*scope, name))
+    header = _text(node).split("{", 1)[0]
     return {
         "name": name,
         "qualname": qualname,
@@ -131,6 +132,7 @@ def _function_symbol(node: Any, scope: tuple[str, ...], owner: str,
         "returns": _text(_field(node, "return_type")).strip()
                    if _field(node, "return_type") is not None else "",
         "visibility": _visibility(node),
+        "async": bool(re.search(r"\basync\s+fn\b", header)),
         "is_test": any(_TEST_ATTR.search(item) for item in attrs),
     }
 
@@ -148,6 +150,7 @@ def _simple_symbol(node: Any, name: str, kind: str, scope: tuple[str, ...],
         "args": [],
         "returns": "",
         "visibility": _visibility(node),
+        "async": False,
         "is_test": False,
     }
 
@@ -331,6 +334,7 @@ def _walk_items(node: Any, scope: tuple[str, ...], owner: str,
                 "args": [],
                 "returns": "",
                 "visibility": "",
+                "async": False,
                 "is_test": False,
             })
             body = _field(child, "body")
@@ -440,6 +444,7 @@ def _regex_parse(source: str) -> dict[str, Any]:
                 "args": [],
                 "returns": "",
                 "visibility": "pub" if stripped.startswith("pub") else "",
+                "async": bool(re.search(r"\basync\s+fn\b", stripped)),
                 "is_test": is_test and kind == "fn",
             })
             attrs = []
