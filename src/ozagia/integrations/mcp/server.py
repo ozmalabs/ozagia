@@ -2958,6 +2958,9 @@ def serve(server: DevMemoryServer) -> int:
         pool.shutdown(wait=True)
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
+        engine = getattr(server, "engine", None)
+        if engine is not None:
+            engine.close()
         sys.stdout = saved_stdout
     return 0
 

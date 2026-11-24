@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -18,11 +19,13 @@ from ozagia.core.graph_engine import (
     DEFAULT_BUDGET,
     ENGINE_TOOL_NAME,
     MAX_BUDGET,
+    MAX_FETCH_WAIT_MS,
     MAX_SESSIONS,
-    MAX_SPEC,
+    MAX_SPEC_PREPARE,
     OPS,
     PROTOCOL,
     SPEC_BUDGET,
+    SPEC_TTL_S,
     GraphEngine,
     _short_keys,
     description_tokens,
@@ -109,8 +112,45 @@ def memory(repo: Path) -> DevMemory:
 
 
 @pytest.fixture()
-def engine(memory: DevMemory) -> GraphEngine:
-    return GraphEngine(memory)
+def engine(memory: DevMemory):
+    instance = GraphEngine(memory)
+    yield instance
+    instance.close()
+
+
+class ManualWorker:
+    def __init__(self) -> None:
+        self.jobs: list[Any] = []
+        self.closed = False
+
+    def submit(self, job: Any) -> bool:
+        if self.closed:
+            return False
+        self.jobs.append(job)
+        return True
+
+    def close(self, timeout: float = 1.0) -> None:
+        self.closed = True
+        self.jobs.clear()
+
+
+def _manual_engine(memory: DevMemory, *, clock: Any = None
+                   ) -> tuple[GraphEngine, ManualWorker]:
+    worker = ManualWorker()
+    instance = GraphEngine(memory, spec_worker=worker, clock=clock)
+    return instance, worker
+
+
+@pytest.fixture()
+def manual(memory: DevMemory):
+    instance, worker = _manual_engine(memory)
+    yield instance, worker
+    instance.close()
+
+
+def _run_next(engine: GraphEngine, worker: ManualWorker) -> None:
+    assert worker.jobs, "no speculation job was submitted"
+    engine._run_spec_job(worker.jobs.pop(0))
 
 
 def _hello(engine: GraphEngine, **args: Any) -> dict[str, Any]:
@@ -160,11 +200,16 @@ def test_hello_is_minimal_and_detail_is_opt_in(engine: GraphEngine) -> None:
     assert "sl" not in first and "snap" not in first
     detail = _hello(engine, caps=True, budget=MAX_BUDGET)
     assert set(detail["ops"]) == set(OPS)
-    assert set(detail["ft"]) == {"compact", "known", "spec", "fetch"}
+    assert {"compact", "known", "spec", "fetch"} <= set(detail["ft"])
+    assert "async-spec" in detail["ft"]
     assert detail["bd"] == {"d": DEFAULT_BUDGET, "m": MAX_BUDGET,
                             "c": MAX_BUDGET}
-    assert detail["st"] == {"prepared": 0, "fetched": 0,
-                            "wasted": 0, "evicted": 0}
+    assert detail["st"]["prepared"] == 0
+    assert detail["st"]["fetched"] == 0
+    assert detail["st"]["hit_rate"] == 0.0
+    assert set(detail["st"]) >= {"prepared", "fetched", "wasted", "evicted",
+                                 "cancelled", "worker_ms", "hits", "misses",
+                                 "hit_rate"}
     # Both handles stay isolated and usable.
     one = engine.handle({"op": "find", "session": first["sid"], "q": "add"})
     two = engine.handle({"op": "find", "session": second["sid"], "q": "add"})
@@ -222,8 +267,10 @@ def test_stats_are_opt_in(engine: GraphEngine) -> None:
     assert "st" not in plain
     with_stats = engine.handle({"op": "find", "session": sid, "q": "add",
                                 "stats": True})
-    assert with_stats["st"] == {"prepared": 0, "fetched": 0,
-                                "wasted": 0, "evicted": 0}
+    assert with_stats["st"]["prepared"] == 0
+    assert with_stats["st"]["fetched"] == 0
+    assert with_stats["st"]["hit_rate"] == 0.0
+    assert "worker_ms" in with_stats["st"]
 
 
 def test_page_trimming_returns_next(engine: GraphEngine) -> None:
@@ -352,48 +399,226 @@ def test_unknown_snapshot_withholds_structure(
 # --------------------------------------------------------------------------- #
 # speculation
 # --------------------------------------------------------------------------- #
-def test_speculation_prepares_fetches_and_accounts(engine: GraphEngine) -> None:
+def _spec_result(engine: GraphEngine, sid: str,
+                 **extra: Any) -> dict[str, Any]:
+    result = engine.handle({"op": "find", "session": sid, "q": "add",
+                            "spec": True, "budget": 1200, **extra})
+    assert "e" not in result, result
+    return result
+
+
+def test_background_response_returns_before_preparation(manual) -> None:
+    engine, worker = manual
     sid = _hello(engine)["sid"]
-    first = engine.handle({"op": "find", "session": sid, "q": "add",
-                           "spec": True, "budget": 1200})
-    assert "e" not in first
+    first = _spec_result(engine, sid)
     handles = first["q"]["h"]
-    assert len(handles) <= 2
-    assert first["q"]["r"] == len(handles)
-    assert "st" not in first
-    if not handles:
-        pytest.skip("fixture produced no speculation candidates")
+    assert 0 < len(handles) <= MAX_SPEC_PREPARE
+    assert first["q"]["r"] == 0
+    assert first["q"]["p"] >= 0
+    assert len(worker.jobs) == 1
+    job = worker.jobs[0]
+    assert 0 < len(job.requests) <= MAX_SPEC_PREPARE
+    assert len(job.requests) <= len(job.suggestions) <= 6
     session = engine.sessions[sid]
-    handle = handles[0]
-    entry = session.spec[handle]
+    assert all(session.spec[handle]["status"] == "pending"
+               for handle in handles)
+    assert session.ledger["prepared"] == 0
+    assert "st" not in first
+
+
+def test_fetch_after_completion_hits_without_recompute(
+        manual, monkeypatch: pytest.MonkeyPatch) -> None:
+    engine, worker = manual
+    sid = _hello(engine)["sid"]
+    first = _spec_result(engine, sid)
+    handles = first["q"]["h"]
+    _run_next(engine, worker)
+    session = engine.sessions[sid]
+    assert session.ledger["prepared"] == len(handles)
+    entry = session.spec[handles[0]]
+    assert entry["status"] == "ready"
     assert estimate_tokens(_short_keys(entry["result"])) <= SPEC_BUDGET
+
+    def no_graph_work(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("fetch must not recompute")
+
+    monkeypatch.setattr(engine, "_execute", no_graph_work)
     fetched = engine.handle({"op": "fetch", "session": sid,
-                             "fetch": [handle], "budget": 400,
+                             "fetch": [handles[0]], "budget": 400,
                              "stats": True})
     assert "e" not in fetched
-    assert fetched["h"] == handle
+    assert fetched["h"] == handles[0]
     assert fetched["t"] <= 400
     assert fetched["st"]["fetched"] == 1
-    # Fetching does not repeat graph work; the prepared payload is returned.
+    assert fetched["st"]["hits"] == 1
+    assert fetched["st"]["hit_rate"] == 1.0
     assert fetched.get("r") is not None or fetched.get("qo")
-    again = engine.handle({"op": "fetch", "session": sid, "h": handle})
+    again = engine.handle({"op": "fetch", "session": sid, "h": handles[0]})
     assert "e" in again and "unknown or expired" in again["e"]
 
 
-def test_speculation_bound_evicts_and_records_waste(
-        engine: GraphEngine) -> None:
+def test_fetch_pending_bounded_wait_returns_pending(manual) -> None:
+    engine, worker = manual
     sid = _hello(engine)["sid"]
-    prepared = 0
-    for _ in range(6):
-        result = engine.handle({"op": "find", "session": sid, "q": "add",
-                                "spec": True, "budget": 1200})
-        prepared += len(result["q"]["h"])
-        assert len(engine.sessions[sid].spec) <= MAX_SPEC
+    first = _spec_result(engine, sid)
+    handles = first["q"]["h"]
+    started = time.monotonic()
+    pending = engine.handle({"op": "fetch", "session": sid,
+                             "fetch": handles, "wait_ms": 5,
+                             "stats": True})
+    elapsed = time.monotonic() - started
+    assert "e" not in pending
+    assert elapsed < MAX_FETCH_WAIT_MS / 1000 + 0.5
+    items = pending.get("it") or [pending]
+    assert all(item["fs"] == "pending" for item in items)
+    assert pending["st"]["misses"] == len(handles)
+    assert pending["st"]["hit_rate"] == 0.0
+    one = engine.handle({"op": "fetch", "session": sid,
+                         "fetch": [handles[0]], "wait_ms": 1,
+                         "stats": True})
+    assert one["fs"] == "pending" and "st" in one
+    # A later fetch can still use the entry once the worker has run.
+    _run_next(engine, worker)
+    ready = engine.handle({"op": "fetch", "session": sid,
+                           "fetch": handles, "stats": True})
+    assert "e" not in ready
+    assert ready["st"]["hits"] == len(handles)
+    assert ready["st"]["hit_rate"] == 0.4
+
+
+@pytest.mark.parametrize("change", ["generation", "scope", "snapshot"])
+def test_changed_generation_scope_or_snapshot_discards(
+        manual, change: str) -> None:
+    engine, worker = manual
+    sid = _hello(engine)["sid"]
+    first = _spec_result(engine, sid)
+    handles = first["q"]["h"]
     session = engine.sessions[sid]
-    assert session.ledger["prepared"] == prepared
-    assert session.ledger["evicted"] >= max(0, prepared - MAX_SPEC)
-    assert session.ledger["wasted"] >= max(0, prepared - MAX_SPEC)
-    assert engine.stats()["totals"]["prepared"] == prepared
+    if change == "generation":
+        session.spec_generation += 1
+    elif change == "scope":
+        session.scope = "different-scope"
+    else:
+        session.snap = "different-snapshot"
+    _run_next(engine, worker)
+    assert session.ledger["prepared"] == 0
+    assert all(session.spec[handle]["status"] != "ready"
+               for handle in handles)
+    fetched = engine.handle({"op": "fetch", "session": sid,
+                             "fetch": handles, "stats": True})
+    if "e" in fetched:
+        assert "unknown or expired" in fetched["e"]
+    else:
+        items = fetched.get("it") or [fetched]
+        assert all(item.get("fs") == "cancelled" for item in items)
+    assert session.ledger["prepared"] == 0
+
+
+def test_worker_budget_candidate_cap_and_expiry(memory: DevMemory) -> None:
+    now = [0.0]
+
+    def clock() -> float:
+        return now[0]
+
+    engine, worker = _manual_engine(memory, clock=clock)
+    try:
+        sid = _hello(engine)["sid"]
+        first = _spec_result(engine, sid)
+        handles = first["q"]["h"]
+        assert len(handles) <= MAX_SPEC_PREPARE
+        job = worker.jobs.pop(0)
+        now[0] = job.deadline + 0.001
+        engine._run_spec_job(job)
+        session = engine.sessions[sid]
+        assert session.ledger["prepared"] == 0
+        assert session.ledger["cancelled"] == len(handles)
+
+        engine.worker_budget_s = 100.0
+        second = _spec_result(engine, sid)
+        handles = second["q"]["h"]
+        job = worker.jobs.pop(0)
+        now[0] = SPEC_TTL_S + 1
+        engine._run_spec_job(job)
+        fetched = engine.handle({"op": "fetch", "session": sid,
+                                 "fetch": handles, "stats": True})
+        items = fetched.get("it") or [fetched]
+        assert all(item.get("fs") == "cancelled" for item in items)
+        assert session.ledger["prepared"] == 0
+    finally:
+        engine.close()
+
+
+def test_close_and_eviction_clear_speculation(manual) -> None:
+    engine, worker = manual
+    sid = _hello(engine)["sid"]
+    first = _spec_result(engine, sid)
+    assert first["q"]["h"]
+    session = engine.sessions[sid]
+    closed = engine.handle({"op": "bye", "session": sid})
+    assert closed["bye"] == 1
+    assert sid not in engine.sessions
+    assert session.closed is True
+    assert not session.spec
+    _run_next(engine, worker)
+    assert session.ledger["prepared"] == 0
+    engine.close()
+    assert worker.closed is True
+
+
+def test_ledger_records_hit_and_waste(manual) -> None:
+    engine, worker = manual
+    sid = _hello(engine)["sid"]
+    first = _spec_result(engine, sid)
+    handles = first["q"]["h"]
+    _run_next(engine, worker)
+    session = engine.sessions[sid]
+    fetched = engine.handle({"op": "fetch", "session": sid,
+                             "fetch": [handles[0]], "stats": True})
+    assert fetched["st"]["hits"] == 1
+    engine.handle({"op": "bye", "session": sid})
+    ledger = engine._ledger(session)
+    assert ledger["prepared"] == len(handles)
+    assert ledger["fetched"] == 1
+    assert ledger["wasted"] == len(handles) - 1
+    assert ledger["hit_rate"] == 1.0
+
+
+def test_speculation_can_be_disabled(memory: DevMemory,
+                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OZAGIA_ENGINE_SPEC", "0")
+    engine = GraphEngine(memory)
+    try:
+        sid = _hello(engine)["sid"]
+        result = _spec_result(engine, sid)
+        assert result["q"] == {"h": [], "r": 0, "p": 0}
+        assert engine.stats()["spec_enabled"] is False
+        assert engine.spec_worker is None
+    finally:
+        engine.close()
+
+
+def test_default_worker_prepares_and_stops(engine: GraphEngine) -> None:
+    sid = _hello(engine)["sid"]
+    first = _spec_result(engine, sid)
+    handles = first["q"]["h"]
+    session = engine.sessions[sid]
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        if all(session.spec.get(handle, {}).get("status") == "ready"
+               for handle in handles):
+            break
+        time.sleep(0.01)
+    assert all(session.spec[handle]["status"] == "ready"
+               for handle in handles)
+    fetched = engine.handle({"op": "fetch", "session": sid,
+                             "fetch": handles, "stats": True})
+    assert "e" not in fetched
+    assert fetched["st"]["hits"] == len(handles)
+    assert fetched["st"]["worker_ms"] > 0
+    worker = engine.spec_worker
+    engine.close()
+    assert worker is not None and not worker.alive
+    assert engine.stats()["worker_alive"] is False
 
 
 # --------------------------------------------------------------------------- #
@@ -438,7 +663,7 @@ def test_engine_surface_does_not_change_full_or_graph(memory: DevMemory) -> None
 def test_engine_has_no_write_or_execution_op(repo: Path,
                                              memory: DevMemory,
                                              monkeypatch: pytest.MonkeyPatch) -> None:
-    engine = GraphEngine(memory)
+    engine, worker = _manual_engine(memory)
     sid = _hello(engine)["sid"]
 
     def forbidden(*_args: Any, **_kwargs: Any) -> Any:
@@ -463,6 +688,11 @@ def test_engine_has_no_write_or_execution_op(repo: Path,
     ):
         result = engine.handle({"op": op, "session": sid, **extra})
         assert "e" not in result, (op, result)
+    speculative = engine.handle({"op": "find", "session": sid, "q": "add",
+                                 "spec": True})
+    _run_next(engine, worker)
+    engine.handle({"op": "fetch", "session": sid,
+                   "fetch": speculative["q"]["h"]})
     after = {
         path.relative_to(repo).as_posix(): path.read_bytes()
         for path in repo.rglob("*") if path.is_file()
@@ -473,3 +703,4 @@ def test_engine_has_no_write_or_execution_op(repo: Path,
         rejected = engine.handle({"op": op, "session": sid})
         assert "e" in rejected
         assert "unknown op" in rejected["e"]
+    engine.close()

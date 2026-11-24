@@ -28,7 +28,7 @@ The 0.1.x line delivered the core platform and then Rust parity:
 | Research | Sources, references, claims, evidence, synthesis, theory, PDF/TEI, citation graph, manuscript bundles |
 | Infrastructure | Source-only Terraform/Kubernetes/Helm/CloudFormation/Pulumi/GitOps graph, offline IaC checks, operations graph, runtime services/relays/tunnels behind explicit gates |
 | Federation | Sibling/explicit-member snapshots, qualified identities, read-only cross-repo search and declared links |
-| Model interface | Contracts, read-only self-graph/capabilities, task preflight and evidence store, task profile/critical path, model-facing maps (M3), a bounded structured edit/interaction path (M4), an offline prefetch planner/ledger, a stateful compact graph-engine prototype with synchronous bounded speculation, and partial M5 linked/research/action joins with optional Ocelot research projection; M6 has an offline harness and one live run invalid for the map arm |
+| Model interface | Contracts, read-only self-graph/capabilities, task preflight and evidence store, task profile/critical path, model-facing maps (M3), a bounded structured edit/interaction path (M4), an offline prefetch planner/ledger, a stateful compact graph-engine prototype with bounded in-process background speculation, and partial M5 linked/research/action joins with optional Ocelot research projection; M6 has an offline harness and one live run invalid for the map arm |
 
 The capability catalogue currently declares **104 capabilities across 14
 domains and 166 surfaces** (`ozagia capabilities list --json`). That number is
@@ -482,18 +482,21 @@ examples and a larger-repository budget study, remain follow-on work.
 A first **stateful graph-engine prototype** also landed (2026-11-25):
 `OZAGIA_SURFACE=engine` exposes one `graph` tool with `hello` sessions, compact
 tabular rows, hard estimated-token budgets, `known` outline/context deltas and
-bounded synchronous speculation (`spec`/`fetch`). It reuses the existing graph
-surface, context and repository-shape services and withholds structural data
-when the snapshot is stale or unknown. The protocol is in
-`docs/plans/2026-11-25_graph_engine_protocol.md`, the guide in
-`docs/graph_engine.md`, and the v2 prototype measurement (374 estimated tokens
-and 4 round-trips versus 637/4 for the graph surface and 1,707/5 for the `dev_*`
-sequence on a tiny fixture; a multi-turn run is 578/5 versus 684/5 stateless) in
-`docs/results/graph_engine_prototype_2026-11-25.md`. That measurement is wire
-size, not a model-task gain. Speculation currently prepares at most two payloads
-before returning; it does not overlap model work. Next: a daemon/process worker
-for true overlap, hit-rate/waste evaluation on larger repositories, and an
-optional Ozma transport.
+bounded in-process background speculation (`spec`/`fetch`). One daemon worker
+prepares at most two candidates after the response, checked against the
+session's snapshot, scope and generation, with a 300 ms worker deadline,
+bounded `fetch` waits, `bye`/engine-close cleanup and `OZAGIA_ENGINE_SPEC=0`
+disable. It reuses the existing graph surface, context and repository-shape
+services and withholds structural data when the snapshot is stale or unknown.
+The protocol is in `docs/plans/2026-11-25_graph_engine_protocol.md`, the guide
+in `docs/graph_engine.md`, and the v2 prototype measurement (374 estimated
+tokens and 4 round-trips versus 637/4 for the graph surface and 1,707/5 for the
+`dev_*` sequence on a tiny fixture; a multi-turn run is 578/5 versus 684/5
+stateless; background speculation was ready before fetch with hit_rate 1.0 and
+zero waste) in `docs/results/graph_engine_prototype_2026-11-25.md`. That
+measurement is wire size and readiness, not a model-task gain. Next: a
+daemon/process worker for true parallelism beyond the GIL, larger-repository
+hit-rate/waste evaluation, and an optional Ozma transport.
 
 **Exit criteria**
 

@@ -16,10 +16,11 @@ Wire version: ``ozagia.graph_engine/2``.  See
 ``docs/plans/2026-11-25_graph_engine_protocol.md`` and
 ``docs/graph_engine.md``.
 
-The speculation in this slice is synchronous: after a response with
-``spec=true`` the engine suggests at most six next requests and precomputes at
-most two bounded payloads *before* returning.  There is no worker and no
-overlap with model work yet.
+Speculation is asynchronous in this slice: after a response with ``spec=true``
+the engine queues at most six suggestions, a single in-process daemon worker
+prepares at most two bounded payloads, and the handler returns without waiting
+for it.  The worker is generation/snapshot/scope checked, deadline-bounded and
+cancellable.  It still shares the interpreter's GIL and is not a daemon process.
 """
 from __future__ import annotations
 
@@ -27,6 +28,9 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 import hashlib
 import json
+import os
+import queue
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -41,18 +45,22 @@ MAX_SPEC = 8
 MAX_SPEC_PREPARE = 2
 MAX_SPEC_SUGGEST = 6
 SPEC_BUDGET = 400
+SPEC_TTL_S = 30.0
+SPEC_WORKER_BUDGET_MS = 300
+MAX_FETCH_WAIT_MS = 250
+SPEC_QUEUE_SIZE = 8
 MAX_ROWS = 200
 
 OPS = ("hello", "find", "outline", "expand", "impact", "tests", "context",
-       "shape", "fetch")
-FEATURES = ("compact", "known", "spec", "fetch")
+       "shape", "fetch", "bye")
+FEATURES = ("compact", "known", "spec", "fetch", "async-spec")
 CAP_BITS = {"find": 1, "outline": 2, "expand": 4, "impact": 8, "tests": 16,
-            "context": 32, "shape": 64, "fetch": 128}
+            "context": 32, "shape": 64, "fetch": 128, "bye": 256}
 CAP_MASK = sum(CAP_BITS.values())
 _SHORT_KEYS = {
     "rows": "r", "cols": "c", "unchanged": "u", "truncated": "x",
     "omitted": "o", "next": "n", "spec": "q", "edges": "ed",
-    "counts": "ct", "items": "it", "qop": "qo",
+    "counts": "ct", "items": "it", "qop": "qo", "fetch_state": "fs",
 }
 
 # Short column names keep the tabular payload small.  ``_COL_NAMES`` is only
@@ -102,6 +110,7 @@ ENGINE_TOOLS: list[dict[str, Any]] = [{
         "depth": {"type": "integer"},
         "limit": {"type": "integer"},
         "offset": {"type": "integer"},
+        "wait_ms": {"type": "integer"},
         "task": {"type": "string"},
         "mode": {"type": "string", "enum": ["auto", "outline", "full"]},
         "budget": {"type": "integer"},
@@ -169,6 +178,22 @@ def _clamp(value: Any, low: int, high: int, default: int) -> int:
     return max(low, min(high, number))
 
 
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"0", "false", "off", "no"}
+
+
+def _worker_budget_s() -> float:
+    raw = os.environ.get("OZAGIA_ENGINE_SPEC_MS")
+    try:
+        milliseconds = int(raw) if raw is not None else SPEC_WORKER_BUDGET_MS
+    except ValueError:
+        milliseconds = SPEC_WORKER_BUDGET_MS
+    return max(0.05, min(2.0, milliseconds / 1000.0))
+
+
 def _span(start: Any, end: Any = None) -> list[int] | None:
     if start in (None, ""):
         return None
@@ -233,16 +258,124 @@ class EngineSession:
     tokens: int = 0
     spec: OrderedDict[str, dict[str, Any]] = field(default_factory=OrderedDict)
     spec_seq: int = 0
-    ledger: dict[str, int] = field(default_factory=lambda: {
-        "prepared": 0, "fetched": 0, "wasted": 0, "evicted": 0})
+    spec_generation: int = 0
+    scope: str = ""
+    closed: bool = False
+    ledger: dict[str, Any] = field(default_factory=lambda: {
+        "prepared": 0, "fetched": 0, "wasted": 0, "evicted": 0,
+        "cancelled": 0, "worker_ms": 0.0, "hits": 0, "misses": 0})
     touched: float = field(default_factory=time.monotonic)
+
+
+@dataclass
+class SpecJob:
+    """One background speculation job, bound to a session generation."""
+    session_id: str
+    generation: int
+    scope: str
+    snap: str
+    fresh: str
+    budget: int
+    deadline: float
+    requests: list[tuple[str, dict[str, Any]]]
+    suggestions: list[dict[str, Any]] = field(default_factory=list)
+
+
+class BackgroundSpecWorker:
+    """One daemon thread that prepares at most one job at a time.
+
+    It blocks on a bounded queue (no busy spin), checks a deadline and a
+    stop event between candidates, and can be closed.  The GIL still limits
+    true parallelism with the handler; this overlaps I/O/CPU work only at the
+    interpreter's scheduling granularity.
+    """
+
+    def __init__(self, engine: "GraphEngine", *,
+                 queue_size: int = SPEC_QUEUE_SIZE) -> None:
+        self.engine = engine
+        self._queue: queue.Queue[SpecJob | None] = queue.Queue(
+            maxsize=max(1, int(queue_size)))
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def _ensure_thread(self) -> None:
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(
+            target=self._run, name="ozagia-engine-spec", daemon=True)
+        self._thread.start()
+
+    def submit(self, job: SpecJob) -> bool:
+        if self._stop.is_set():
+            return False
+        try:
+            self._ensure_thread()
+            self._queue.put_nowait(job)
+            return True
+        except (queue.Full, RuntimeError):
+            return False
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                job = self._queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if job is None:
+                return
+            try:
+                self.engine._run_spec_job(job)
+            except Exception:  # noqa: BLE001 - a worker failure cancels its job
+                self.engine._cancel_job(job, "worker_error")
+            finally:
+                self._queue.task_done()
+
+    def close(self, timeout: float = 1.0) -> None:
+        self._stop.set()
+        if self._thread is None:
+            return
+        try:
+            self._queue.put_nowait(None)
+        except queue.Full:
+            pass
+        thread = self._thread
+        thread.join(timeout)
+        if not thread.is_alive():
+            self._thread = None
+
+    @property
+    def alive(self) -> bool:
+        return bool(self._thread and self._thread.is_alive())
+
+
+class InlineSpecWorker:
+    """Synchronous worker for measurements and deterministic tests."""
+
+    def __init__(self) -> None:
+        self.engine: GraphEngine | None = None
+        self.closed = False
+
+    def bind(self, engine: "GraphEngine") -> None:
+        self.engine = engine
+
+    def submit(self, job: SpecJob) -> bool:
+        if self.closed or self.engine is None:
+            return False
+        self.engine._run_spec_job(job)
+        return True
+
+    def close(self, timeout: float = 1.0) -> None:
+        self.closed = True
 
 
 class GraphEngine:
     """One bounded set of sessions over one ``DevMemory`` snapshot."""
 
     def __init__(self, memory: Any, *, workspace: str | Path | None = None,
-                 max_sessions: int = MAX_SESSIONS) -> None:
+                 max_sessions: int = MAX_SESSIONS,
+                 spec_worker: Any | None = None,
+                 spec_enabled: bool | None = None,
+                 clock: Callable[[], float] | None = None) -> None:
         if memory is None:
             raise ValueError("the graph engine needs a dev-memory snapshot")
         self.mem = memory
@@ -253,9 +386,23 @@ class GraphEngine:
         self._surface_obj: Any = None
         self._shape_cache: tuple[str, dict[str, Any]] | None = None
         self._snap_cache: tuple[tuple[Any, ...], str] | None = None
+        self._clock = clock or time.monotonic
+        self._lock = threading.RLock()
+        self.spec_enabled = (_env_flag("OZAGIA_ENGINE_SPEC", True)
+                             if spec_enabled is None else bool(spec_enabled))
+        self.worker_budget_s = _worker_budget_s()
+        if not self.spec_enabled:
+            self.spec_worker: Any | None = None
+        elif spec_worker is not None:
+            self.spec_worker = spec_worker
+        else:
+            self.spec_worker = BackgroundSpecWorker(self)
+        if self.spec_worker is not None and hasattr(self.spec_worker, "bind"):
+            self.spec_worker.bind(self)
         self.totals = {"sessions": 0, "evicted_sessions": 0,
                        "prepared": 0, "fetched": 0, "wasted": 0,
-                       "evicted": 0}
+                       "evicted": 0, "cancelled": 0, "worker_ms": 0.0,
+                       "hits": 0, "misses": 0}
 
     # -- public ------------------------------------------------------------- #
     def handle(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -270,6 +417,11 @@ class GraphEngine:
         session = self._session(args.get("session"))
         if session is None:
             return self._error("unknown or expired session; call hello")
+        if op == "bye":
+            self._close_session(session)
+            result = {"bye": 1, "t": 0}
+            result["t"] = estimate_tokens(result)
+            return result
         fresh, snap = self._guard(session)
         if fresh != "fresh":
             return self._withheld(snap, fresh)
@@ -288,13 +440,27 @@ class GraphEngine:
 
     def stats(self) -> dict[str, Any]:
         """Bounded operational counters; no graph content."""
+        worker = self.spec_worker
         return {
             "sessions": len(self.sessions),
             "max_sessions": self.max_sessions,
+            "spec_enabled": bool(self.spec_enabled),
             "spec_per_session": MAX_SPEC,
             "prepared_per_response": MAX_SPEC_PREPARE,
+            "worker_alive": bool(getattr(worker, "alive", False)),
             "totals": dict(self.totals),
         }
+
+    def close(self) -> None:
+        """Close every session and stop the background worker."""
+        with self._lock:
+            for session in list(self.sessions.values()):
+                self._close_session_locked(session)
+            self.sessions.clear()
+        worker = self.spec_worker
+        if worker is not None:
+            worker.close()
+        self.spec_worker = None
 
     # -- sessions ----------------------------------------------------------- #
     def _hello(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -305,8 +471,11 @@ class GraphEngine:
         else:
             session = self._new_session()
         fresh, snap = self._freshness()
-        session.snap = snap
-        session.fresh = fresh
+        with self._lock:
+            session.snap = snap
+            session.fresh = fresh
+            session.scope = self._scope_key(snap)
+            session.closed = False
         session.budget = _clamp(args.get("budget", session.budget),
                                 MIN_BUDGET, MAX_BUDGET, DEFAULT_BUDGET)
         session.compact = bool(args.get("compact", True))
@@ -338,33 +507,39 @@ class GraphEngine:
         result["t"] = estimate_tokens(result)
         return result
 
+    def _scope_key(self, snap: str) -> str:
+        return f"{self.root}:{snap}"
+
     def _new_session(self) -> EngineSession:
-        if len(self.sessions) >= self.max_sessions:
-            _, old = self.sessions.popitem(last=False)
-            self._expire(old)
-            self.totals["evicted_sessions"] += 1
-        self._seq += 1
-        session = EngineSession(id=f"s{self._seq}", snap="")
-        self.sessions[session.id] = session
-        self.totals["sessions"] += 1
-        return session
+        with self._lock:
+            if len(self.sessions) >= self.max_sessions:
+                _, old = self.sessions.popitem(last=False)
+                self._expire_locked(old)
+                self.totals["evicted_sessions"] += 1
+            self._seq += 1
+            session = EngineSession(id=f"s{self._seq}", snap="")
+            self.sessions[session.id] = session
+            self.totals["sessions"] += 1
+            return session
 
     def _session(self, handle: Any) -> EngineSession | None:
         if not isinstance(handle, str):
             return None
-        session = self.sessions.get(handle)
-        if session is not None:
-            session.touched = time.monotonic()
-            self.sessions.move_to_end(handle)
-        return session
+        with self._lock:
+            session = self.sessions.get(handle)
+            if session is not None:
+                session.touched = time.monotonic()
+                self.sessions.move_to_end(handle)
+            return session
 
     def _expire(self, session: EngineSession) -> None:
-        for entry in session.spec.values():
-            if not entry.get("fetched"):
-                session.ledger["wasted"] += 1
-                self.totals["wasted"] += 1
-            session.ledger["evicted"] += 1
-            self.totals["evicted"] += 1
+        with self._lock:
+            self._expire_locked(session)
+
+    def _expire_locked(self, session: EngineSession) -> None:
+        self._cancel_entries_locked(session, reason="evicted")
+        session.closed = True
+        session.spec_generation += 1
         session.spec.clear()
 
     # -- freshness and snapshot identity ------------------------------------ #
@@ -411,26 +586,52 @@ class GraphEngine:
 
     def _guard(self, session: EngineSession) -> tuple[str, str]:
         fresh, snap = self._freshness()
-        if fresh != "fresh":
-            if session.spec:
-                self._drop_specs(session, wasted=True)
-            session.fresh = fresh
+        with self._lock:
+            if fresh != "fresh":
+                self._drop_specs_locked(session, reason="stale")
+                session.fresh = fresh
+                session.snap = snap
+                session.scope = self._scope_key(snap)
+                return fresh, snap
+            if session.snap and session.snap != snap:
+                self._drop_specs_locked(session, reason="snapshot_changed")
+                session.scope = self._scope_key(snap)
             session.snap = snap
-            return fresh, snap
-        if session.snap and session.snap != snap:
-            self._drop_specs(session, wasted=True)
-        session.snap = snap
-        session.fresh = fresh
+            session.fresh = fresh
         return fresh, snap
 
-    def _drop_specs(self, session: EngineSession, *, wasted: bool) -> None:
-        for entry in session.spec.values():
-            if wasted and not entry.get("fetched"):
-                session.ledger["wasted"] += 1
-                self.totals["wasted"] += 1
-            session.ledger["evicted"] += 1
-            self.totals["evicted"] += 1
+    def _drop_specs(self, session: EngineSession, *, wasted: bool = True) -> None:
+        with self._lock:
+            self._drop_specs_locked(session,
+                                    reason="wasted" if wasted else "evicted")
+
+    def _drop_specs_locked(self, session: EngineSession,
+                           *, reason: str) -> None:
+        self._cancel_entries_locked(session, reason=reason)
+        session.spec_generation += 1
         session.spec.clear()
+
+    def _cancel_entries_locked(self, session: EngineSession,
+                               *, reason: str) -> None:
+        for handle, entry in list(session.spec.items()):
+            status = entry.get("status", "pending")
+            if status in ("pending", "ready"):
+                self._cancel_entry_locked(session, handle, reason=reason)
+                session.ledger["evicted"] += 1
+                self.totals["evicted"] += 1
+
+    def _close_session(self, session: EngineSession) -> None:
+        with self._lock:
+            self._close_session_locked(session)
+            self.sessions.pop(session.id, None)
+
+    def _close_session_locked(self, session: EngineSession) -> None:
+        self._cancel_entries_locked(session, reason="closed")
+        session.closed = True
+        session.spec_generation += 1
+        session.spec.clear()
+        session.known.clear()
+        session.cols.clear()
 
     # -- dispatch ----------------------------------------------------------- #
     def _execute(self, op: str, args: dict[str, Any], session: EngineSession,
@@ -680,31 +881,56 @@ class GraphEngine:
     def _speculate(self, session: EngineSession, op: str,
                    args: dict[str, Any], keys: list[str], snap: str,
                    budget: int) -> dict[str, Any]:
-        candidates = self._candidates(op, args, keys)
-        ready: list[str] = []
-        pending = 0
-        for request in candidates[:MAX_SPEC_SUGGEST]:
-            if len(ready) >= MAX_SPEC_PREPARE:
-                pending += 1
-                continue
-            if self._same_request(op, args, request):
-                continue
-            handle = f"q{session.spec_seq + 1}"
-            session.spec_seq += 1
-            payload = self._execute(request["op"], dict(request), session,
-                                    snap, min(SPEC_BUDGET, budget),
-                                    allow_spec=False, compact=False,
-                                    cache_cols=False)
-            if "e" in payload or "withheld" in payload:
-                pending += 1
-                continue
-            self._evict_specs(session)
-            session.spec[handle] = {"request": request, "result": payload,
-                                    "snap": snap, "fetched": False}
-            session.ledger["prepared"] += 1
-            self.totals["prepared"] += 1
-            ready.append(handle)
-        return {"spec": {"h": ready, "r": len(ready), "p": pending}}
+        if not self.spec_enabled or self.spec_worker is None:
+            return {"spec": {"h": [], "r": 0, "p": 0}}
+        eligible = [request for request in self._candidates(op, args, keys)
+                    if not self._same_request(op, args, request)]
+        planned = eligible[:MAX_SPEC_PREPARE]
+        remaining = max(0, len(eligible) - len(planned))
+        if not planned:
+            return {"spec": {"h": [], "r": 0, "p": remaining}}
+        now = self._clock()
+        handles: list[str] = []
+        requests: list[tuple[str, dict[str, Any]]] = []
+        with self._lock:
+            self._cancel_pending_locked(session, reason="superseded")
+            session.spec_generation += 1
+            generation = session.spec_generation
+            while len(session.spec) + len(planned) > MAX_SPEC:
+                self._evict_one_locked(session)
+            for request in planned:
+                handle = f"q{session.spec_seq + 1}"
+                session.spec_seq += 1
+                session.spec[handle] = {
+                    "request": request,
+                    "result": None,
+                    "snap": snap,
+                    "generation": generation,
+                    "scope": session.scope,
+                    "status": "pending",
+                    "created": now,
+                    "expires": now + SPEC_TTL_S,
+                    "fetched": False,
+                    "event": threading.Event(),
+                }
+                handles.append(handle)
+                requests.append((handle, request))
+        job = SpecJob(session_id=session.id, generation=generation,
+                      scope=session.scope, snap=snap, fresh=session.fresh,
+                      budget=min(SPEC_BUDGET, budget),
+                      deadline=now + self.worker_budget_s,
+                      requests=requests,
+                      suggestions=eligible[:MAX_SPEC_SUGGEST])
+        if not self.spec_worker.submit(job):
+            with self._lock:
+                self._cancel_handles_locked(session, handles,
+                                            reason="queue_full")
+            return {"spec": {"h": [], "r": 0, "p": remaining}}
+        with self._lock:
+            ready = sum(1 for handle in handles
+                        if (session.spec.get(handle) or {}).get("status")
+                        == "ready")
+        return {"spec": {"h": handles, "r": ready, "p": remaining}}
 
     def _candidates(self, op: str, args: dict[str, Any],
                     keys: list[str]) -> list[dict[str, Any]]:
@@ -747,19 +973,167 @@ class GraphEngine:
                     and request.get("edges") == args.get("edges"))
         return False
 
-    def _evict_specs(self, session: EngineSession) -> None:
-        while len(session.spec) >= MAX_SPEC:
-            _, entry = session.spec.popitem(last=False)
-            if not entry.get("fetched"):
-                session.ledger["wasted"] += 1
-                self.totals["wasted"] += 1
+    def _job_valid_locked(self, session: EngineSession | None,
+                          job: SpecJob) -> bool:
+        return bool(session is not None and not session.closed
+                    and session.spec_generation == job.generation
+                    and session.snap == job.snap
+                    and session.fresh == job.fresh
+                    and session.scope == job.scope)
+
+    def _job_valid(self, job: SpecJob) -> bool:
+        with self._lock:
+            return self._job_valid_locked(
+                self.sessions.get(job.session_id), job)
+
+    def _cancel_pending_locked(self, session: EngineSession,
+                               *, reason: str) -> None:
+        for handle, entry in list(session.spec.items()):
+            if entry.get("status") != "pending":
+                continue
+            self._cancel_entry_locked(session, handle, reason=reason)
+            session.spec.pop(handle, None)
             session.ledger["evicted"] += 1
             self.totals["evicted"] += 1
 
+    def _cancel_entry_locked(self, session: EngineSession, handle: str,
+                             *, reason: str) -> None:
+        entry = session.spec.get(handle)
+        if entry is None:
+            return
+        status = entry.get("status")
+        if status not in ("pending", "ready"):
+            return
+        if status == "ready" and not entry.get("fetched"):
+            session.ledger["wasted"] += 1
+            self.totals["wasted"] += 1
+        elif status == "pending":
+            session.ledger["cancelled"] += 1
+            self.totals["cancelled"] += 1
+        entry["status"] = "cancelled"
+        entry["reason"] = reason
+        event = entry.get("event")
+        if event is not None:
+            event.set()
+
+    def _cancel_handles_locked(self, session: EngineSession,
+                               handles: Iterable[str], *, reason: str) -> None:
+        for handle in handles:
+            self._cancel_entry_locked(session, handle, reason=reason)
+
+    def _cancel_job(self, job: SpecJob, reason: str,
+                    handles: Iterable[str] | None = None) -> None:
+        with self._lock:
+            session = self.sessions.get(job.session_id)
+            if session is None:
+                return
+            targets = list(handles) if handles is not None else [
+                handle for handle, _request in job.requests]
+            self._cancel_handles_locked(session, targets, reason=reason)
+
+    def _evict_one_locked(self, session: EngineSession) -> None:
+        if not session.spec:
+            return
+        _, entry = session.spec.popitem(last=False)
+        status = entry.get("status")
+        if status == "ready" and not entry.get("fetched"):
+            session.ledger["wasted"] += 1
+            self.totals["wasted"] += 1
+        elif status == "pending":
+            session.ledger["cancelled"] += 1
+            self.totals["cancelled"] += 1
+        event = entry.get("event")
+        if event is not None:
+            event.set()
+        session.ledger["evicted"] += 1
+        self.totals["evicted"] += 1
+
+    def _run_spec_job(self, job: SpecJob) -> None:
+        """Prepare at most the job's requests, stopping on any invalidation."""
+        if not self._job_valid(job):
+            self._cancel_job(job, "stale")
+            return
+        for index, (handle, request) in enumerate(job.requests):
+            remaining = [item[0] for item in job.requests[index:]]
+            now = self._clock()
+            if now >= job.deadline:
+                self._cancel_job(job, "budget", handles=remaining)
+                return
+            with self._lock:
+                session = self.sessions.get(job.session_id)
+                if not self._job_valid_locked(session, job):
+                    targets = remaining
+                    session = self.sessions.get(job.session_id)
+                    if session is not None:
+                        self._cancel_handles_locked(session, targets,
+                                                    reason="stale")
+                    return
+                entry = session.spec.get(handle) if session else None
+                if entry is None or entry.get("status") != "pending":
+                    continue
+                if now > entry.get("expires", now):
+                    self._cancel_entry_locked(session, handle,
+                                              reason="expired")
+                    continue
+            started = self._clock()
+            try:
+                payload = self._execute(
+                    request["op"], dict(request), session, job.snap,
+                    job.budget, allow_spec=False, compact=False,
+                    cache_cols=False)
+            except Exception as exc:  # noqa: BLE001 - reported as cancelled
+                payload = {"e": f"{type(exc).__name__}: {exc}"}
+            elapsed_ms = max(0.0, (self._clock() - started) * 1000.0)
+            self.totals["worker_ms"] += elapsed_ms
+            with self._lock:
+                session = self.sessions.get(job.session_id)
+                if not self._job_valid_locked(session, job):
+                    if session is not None:
+                        self._cancel_handles_locked(
+                            session,
+                            [item[0] for item in job.requests[index:]],
+                            reason="stale")
+                    return
+                session.ledger["worker_ms"] += elapsed_ms
+                entry = session.spec.get(handle)
+                if entry is None or entry.get("status") != "pending":
+                    continue
+                if self._clock() > entry.get("expires", self._clock()):
+                    self._cancel_entry_locked(session, handle,
+                                              reason="expired")
+                    continue
+                if "e" in payload:
+                    entry["status"] = "cancelled"
+                    entry["reason"] = "error"
+                    entry["error"] = payload["e"]
+                    session.ledger["cancelled"] += 1
+                    self.totals["cancelled"] += 1
+                else:
+                    entry["result"] = payload
+                    entry["status"] = "ready"
+                    session.ledger["prepared"] += 1
+                    self.totals["prepared"] += 1
+                event = entry.get("event")
+                if event is not None:
+                    event.set()
+            time.sleep(0)  # yield between candidates; do not spin
+
     @staticmethod
-    def _ledger(session: EngineSession) -> dict[str, int]:
-        return {key: int(session.ledger.get(key, 0))
-                for key in ("prepared", "fetched", "wasted", "evicted")}
+    def _ledger(session: EngineSession) -> dict[str, Any]:
+        hits = int(session.ledger.get("hits", 0))
+        misses = int(session.ledger.get("misses", 0))
+        attempts = hits + misses
+        return {
+            "prepared": int(session.ledger.get("prepared", 0)),
+            "fetched": int(session.ledger.get("fetched", 0)),
+            "wasted": int(session.ledger.get("wasted", 0)),
+            "evicted": int(session.ledger.get("evicted", 0)),
+            "cancelled": int(session.ledger.get("cancelled", 0)),
+            "worker_ms": round(float(session.ledger.get("worker_ms", 0.0)), 1),
+            "hits": hits,
+            "misses": misses,
+            "hit_rate": round(hits / attempts, 3) if attempts else 0.0,
+        }
 
     # -- fetch -------------------------------------------------------------- #
     def _fetch(self, args: dict[str, Any], session: EngineSession,
@@ -772,27 +1146,69 @@ class GraphEngine:
             return self._error("fetch needs one or more handles", snap=snap)
         if len(handles) > 4:
             return self._error("at most four handles per fetch", snap=snap)
+        wait_ms = _clamp(args.get("wait_ms", 0), 0, MAX_FETCH_WAIT_MS, 0)
+        wait_deadline = time.monotonic() + wait_ms / 1000.0
         items: list[dict[str, Any]] = []
         for handle in handles:
-            entry = session.spec.get(handle)
-            if entry is None:
-                return self._error(f"unknown or expired spec handle {handle!r}",
-                                   snap=snap)
-            if entry.get("snap") != snap:
-                self._drop_specs(session, wasted=True)
-                return self._withheld(snap, "stale")
-            payload = dict(entry["result"])
-            prepared_op = str((entry.get("request") or {}).get("op") or "")
-            for key in ("next", "spec", "st"):
-                payload.pop(key, None)
-            payload["h"] = handle
-            payload["qop"] = prepared_op
-            items.append(payload)
-            del session.spec[handle]
-            if not entry.get("fetched"):
-                entry["fetched"] = True
-                session.ledger["fetched"] += 1
-                self.totals["fetched"] += 1
+            while True:
+                event = None
+                timeout = 0.0
+                with self._lock:
+                    entry = session.spec.get(handle)
+                    if entry is None:
+                        return self._error(
+                            f"unknown or expired spec handle {handle!r}",
+                            snap=snap)
+                    if entry.get("snap") != snap:
+                        self._drop_specs_locked(session,
+                                                reason="snapshot_changed")
+                        return self._withheld(snap, "stale")
+                    prepared_op = str(
+                        (entry.get("request") or {}).get("op") or "")
+                    now = self._clock()
+                    if now > entry.get("expires", now):
+                        self._cancel_entry_locked(session, handle,
+                                                  reason="expired")
+                    status = entry.get("status")
+                    if status == "ready":
+                        payload = dict(entry["result"])
+                        for key in ("next", "spec", "st"):
+                            payload.pop(key, None)
+                        payload["h"] = handle
+                        payload["qop"] = prepared_op
+                        del session.spec[handle]
+                        entry["fetched"] = True
+                        session.ledger["fetched"] += 1
+                        self.totals["fetched"] += 1
+                        session.ledger["hits"] += 1
+                        self.totals["hits"] += 1
+                        items.append(payload)
+                        break
+                    if status in ("cancelled", "expired"):
+                        item: dict[str, Any] = {
+                            "h": handle, "qop": prepared_op,
+                            "fetch_state": "cancelled",
+                        }
+                        reason = entry.get("reason")
+                        if reason:
+                            item["reason"] = reason
+                        session.spec.pop(handle, None)
+                        session.ledger["evicted"] += 1
+                        self.totals["evicted"] += 1
+                        session.ledger["misses"] += 1
+                        self.totals["misses"] += 1
+                        items.append(item)
+                        break
+                    event = entry.get("event")
+                    timeout = wait_deadline - time.monotonic()
+                    if wait_ms <= 0 or timeout <= 0:
+                        items.append({"h": handle, "qop": prepared_op,
+                                      "fetch_state": "pending"})
+                        session.ledger["misses"] += 1
+                        self.totals["misses"] += 1
+                        break
+                if event is not None:
+                    event.wait(timeout)
         if len(items) == 1:
             result = dict(items[0])
         else:
@@ -807,7 +1223,7 @@ class GraphEngine:
         if not verbose:
             if len(items) == 1:
                 result = self._maybe_omit_cols(
-                    result, prepared_op, session,
+                    result, str(items[0].get("qop") or ""), session,
                     force=args.get("cols") is True)
             else:
                 for item in result.get("items") or []:
@@ -1075,8 +1491,10 @@ class GraphEngine:
 
 
 __all__ = [
-    "CAP_BITS", "CAP_MASK", "DEFAULT_BUDGET", "ENGINE_TOOL_NAME",
-    "ENGINE_TOOLS", "FEATURES", "GraphEngine", "MAX_BUDGET", "MAX_SESSIONS",
+    "BackgroundSpecWorker", "CAP_BITS", "CAP_MASK", "DEFAULT_BUDGET",
+    "ENGINE_TOOL_NAME", "ENGINE_TOOLS", "FEATURES", "GraphEngine",
+    "InlineSpecWorker", "MAX_BUDGET", "MAX_FETCH_WAIT_MS", "MAX_SESSIONS",
     "MAX_SPEC", "MIN_BUDGET", "OPS", "PROTOCOL", "PROTOCOL_VERSION",
-    "SPEC_BUDGET", "description_tokens", "estimate_tokens",
+    "SPEC_BUDGET", "SPEC_TTL_S", "SPEC_WORKER_BUDGET_MS", "SpecJob",
+    "description_tokens", "estimate_tokens",
 ]

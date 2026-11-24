@@ -25,6 +25,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -32,9 +33,15 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
 
-from ozagia.core.graph_engine import OUTLINE_COLS  # noqa: E402
+from ozagia.core.graph_engine import (  # noqa: E402
+    OUTLINE_COLS,
+    GraphEngine,
+    InlineSpecWorker,
+)
 from ozagia.core.memory import DevMemory, build_index  # noqa: E402
 from ozagia.integrations.mcp.server import DevMemoryServer  # noqa: E402
+
+THINK_S = 0.15
 
 CORE = '''\
 """Core helpers."""
@@ -178,17 +185,28 @@ def _measure_engine(server: DevMemoryServer) -> dict[str, Any]:
 
     hello = call({"op": "hello"})
     sid = hello["sid"]
+    started = time.perf_counter()
     find = call({"op": "find", "session": sid, "q": "add", "spec": True,
                  "budget": 700})
+    find_ms = (time.perf_counter() - started) * 1000
     handles = list((find.get("q") or {}).get("h") or [])
+    time.sleep(THINK_S)
+    session = server.engine.sessions.get(sid)
+    ready = sum(1 for handle in handles
+                if (session.spec.get(handle) or {}).get("status") == "ready")
     if handles:
-        call({"op": "fetch", "session": sid, "fetch": handles, "budget": 700})
+        call({"op": "fetch", "session": sid, "fetch": handles, "budget": 700,
+              "wait_ms": 50})
     call({"op": "tests", "session": sid, "key": KEY, "budget": 700})
     result = {"surface": "engine (1 tool)", "round_trips": len(rows),
-              "estimated_tokens": total, "calls": rows}
+              "estimated_tokens": total, "calls": rows,
+              "find_handler_ms": round(find_ms, 1)}
     result["spec"] = {"handles": handles,
-                      "ready": (find.get("q") or {}).get("r"),
-                      "pending": (find.get("q") or {}).get("p")}
+                      "ready_at_response": (find.get("q") or {}).get("r"),
+                      "ready_before_fetch": ready,
+                      "pending": (find.get("q") or {}).get("p"),
+                      "ledger": (server.engine._ledger(session)
+                                 if session else {})}
     return result
 
 
@@ -213,14 +231,20 @@ def _measure_engine_turns(server: DevMemoryServer) -> dict[str, Any]:
     hello = call({"op": "hello"})
     first.append({k: v for k, v in hello.items() if k != "payload"})
     sid = hello["payload"]["sid"]
+    started = time.perf_counter()
     find = call({"op": "find", "session": sid, "q": "add", "spec": True,
                  "budget": 700})
+    find_ms = (time.perf_counter() - started) * 1000
     first.append({k: v for k, v in find.items() if k != "payload"})
     handles = list((find["payload"].get("q") or {}).get("h") or [])
+    time.sleep(THINK_S)
+    session = server.engine.sessions.get(sid)
+    ready = sum(1 for handle in handles
+                if (session.spec.get(handle) or {}).get("status") == "ready")
     fetch = None
     if handles:
         fetch = call({"op": "fetch", "session": sid, "fetch": handles,
-                      "budget": 700})
+                      "budget": 700, "wait_ms": 50})
         first.append({k: v for k, v in fetch.items() if k != "payload"})
     discovered = _fetch_outline(fetch["payload"]) if fetch else None
 
@@ -240,10 +264,112 @@ def _measure_engine_turns(server: DevMemoryServer) -> dict[str, Any]:
     if second:
         turns.append(_turn("known outline", second))
     turns.append(_turn("follow-up impact/tests", third))
-    return {"surface": "engine (session)", "turns": turns,
-            "round_trips": sum(turn["round_trips"] for turn in turns),
-            "estimated_tokens": total,
-            "discovered_outline": bool(discovered)}
+    result = {"surface": "engine (session)", "turns": turns,
+              "round_trips": sum(turn["round_trips"] for turn in turns),
+              "estimated_tokens": total,
+              "discovered_outline": bool(discovered),
+              "find_handler_ms": round(find_ms, 1),
+              "ready_at_response": (find["payload"].get("q") or {}).get("r"),
+              "ready_before_fetch": ready}
+    if session is not None:
+        result["ledger"] = server.engine._ledger(session)
+    return result
+
+
+def _measure_engine_sync(memory: DevMemory) -> dict[str, Any]:
+    engine = GraphEngine(memory, spec_worker=InlineSpecWorker())
+    rows: list[dict[str, Any]] = []
+    total = 0
+
+    def call(arguments: dict[str, Any]) -> dict[str, Any]:
+        nonlocal total
+        payload = engine.handle(arguments)
+        tokens = _tokens(payload)
+        total += tokens
+        rows.append({"call": "graph", "op": arguments.get("op"),
+                     "tokens": tokens})
+        return payload
+
+    try:
+        hello = call({"op": "hello"})
+        sid = hello["sid"]
+        started = time.perf_counter()
+        find = call({"op": "find", "session": sid, "q": "add", "spec": True,
+                     "budget": 700})
+        find_ms = (time.perf_counter() - started) * 1000
+        handles = list((find.get("q") or {}).get("h") or [])
+        if handles:
+            call({"op": "fetch", "session": sid, "fetch": handles,
+                  "budget": 700})
+        call({"op": "tests", "session": sid, "key": KEY, "budget": 700})
+        session = engine.sessions.get(sid)
+        return {"surface": "engine sync v2 (inline)", "round_trips": len(rows),
+                "estimated_tokens": total, "calls": rows,
+                "find_handler_ms": round(find_ms, 1),
+                "spec": {"handles": handles,
+                         "ready": (find.get("q") or {}).get("r"),
+                         "pending": (find.get("q") or {}).get("p"),
+                         "ledger": engine._ledger(session) if session else {}}}
+    finally:
+        engine.close()
+
+
+def _measure_engine_sync_turns(memory: DevMemory) -> dict[str, Any]:
+    engine = GraphEngine(memory, spec_worker=InlineSpecWorker())
+    turns: list[dict[str, Any]] = []
+    total = 0
+
+    def call(arguments: dict[str, Any]) -> dict[str, Any]:
+        nonlocal total
+        payload = engine.handle(arguments)
+        tokens = _tokens(payload)
+        total += tokens
+        return {"call": "graph", "op": arguments.get("op"), "tokens": tokens,
+                "payload": payload}
+
+    try:
+        first = []
+        hello = call({"op": "hello"})
+        first.append({k: v for k, v in hello.items() if k != "payload"})
+        sid = hello["payload"]["sid"]
+        started = time.perf_counter()
+        find = call({"op": "find", "session": sid, "q": "add", "spec": True,
+                     "budget": 700})
+        find_ms = (time.perf_counter() - started) * 1000
+        first.append({k: v for k, v in find.items() if k != "payload"})
+        handles = list((find["payload"].get("q") or {}).get("h") or [])
+        fetch = None
+        if handles:
+            fetch = call({"op": "fetch", "session": sid, "fetch": handles,
+                          "budget": 700})
+            first.append({k: v for k, v in fetch.items() if k != "payload"})
+        discovered = _fetch_outline(fetch["payload"]) if fetch else None
+        second = []
+        if discovered:
+            known_key, digest = discovered
+            same = call({"op": "outline", "session": sid, "key": known_key,
+                         "known": [{"key": known_key, "hash": digest}]})
+            second.append({k: v for k, v in same.items() if k != "payload"})
+        third = []
+        impact = call({"op": "impact", "session": sid, "keys": [KEY],
+                       "depth": 2, "budget": 700})
+        third.append({k: v for k, v in impact.items() if k != "payload"})
+        turns.append(_turn("discover", first))
+        if second:
+            turns.append(_turn("known outline", second))
+        turns.append(_turn("follow-up impact/tests", third))
+        session = engine.sessions.get(sid)
+        result = {"surface": "engine sync v2 (inline)", "turns": turns,
+                  "round_trips": sum(turn["round_trips"] for turn in turns),
+                  "estimated_tokens": total,
+                  "discovered_outline": bool(discovered),
+                  "find_handler_ms": round(find_ms, 1),
+                  "ready_before_fetch": (find["payload"].get("q") or {}).get("r")}
+        if session is not None:
+            result["ledger"] = engine._ledger(session)
+        return result
+    finally:
+        engine.close()
 
 
 def _measure_graph_turns(server: DevMemoryServer) -> dict[str, Any]:
@@ -295,12 +421,15 @@ def main() -> int:
             ("impact", {"keys": [KEY], "depth": 2}),
         ]
         engine_result = _measure_engine(engine)
+        sync_result = _measure_engine_sync(memory)
         results = [
             _measure("full (dev_*)", full_calls, full),
             _measure("graph (8 verbs)", graph_calls, graph),
+            sync_result,
             engine_result,
         ]
         multi_turn = {
+            "engine_sync": _measure_engine_sync_turns(memory),
             "engine": _measure_engine_turns(engine),
             "graph": _measure_graph_turns(graph),
         }
@@ -308,7 +437,8 @@ def main() -> int:
             "task": TASK,
             "fixture": {"source_files": 4, "test_files": 2},
             "note": ("Prototype wire measurement, not a model-task gain. "
-                     "Tokens are len(JSON)/4 estimates."),
+                     "Tokens are len(JSON)/4 estimates. The background run "
+                     "sleeps 150 ms after find to simulate model thinking."),
             "engine_spec": engine_result.get("spec"),
             "results": results,
             "multi_turn": multi_turn,

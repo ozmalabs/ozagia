@@ -23,18 +23,20 @@ logic:
 - **No model calls, network, target imports or target execution.** The engine
   does not run tests, edit files, refresh the snapshot, start a daemon or
   import a target module.
-- **No true background overlap.** Speculation is synchronous: suggested work is
-  planned and at most two bounded payloads are prepared *before* the response
-  is returned. There is no worker and no overlap with a model turn.
+- **No process isolation.** Speculation runs in one in-process daemon thread.
+  It can overlap model thinking time at the interpreter's scheduling granularity
+  but is GIL-bounded and has no separate CPU/memory budget. There is no new
+  daemon process yet.
 - **No speculative writes.** A prepared payload is a read-only graph answer.
 - **No edit/create/check/refresh/shell ops.** Those remain on the graph
   surface; the engine deliberately cannot reach them.
 - **No multi-repository federation.** A session belongs to one loaded snapshot.
 - **No persistent session store.** Sessions live in the server process and are
   bounded; restarting the server discards them.
-- **No hit-rate measurement yet.** The prototype measurement in
-  `docs/results/graph_engine_prototype_2026-11-25.md` counts tokens and
-  round-trips, not model-task gains or speculation hit rate.
+- **No production hit-rate evidence.** The prototype measurement in
+  `docs/results/graph_engine_prototype_2026-11-25.md` counts tokens,
+  round-trips, readiness and hit/waste on one tiny fixture; it is not a
+  model-task gain or a larger-repository hit-rate study.
 
 ## Versioning and transport
 
@@ -62,7 +64,7 @@ Default handshake:
 
 ```json
 {"p": "ozagia.graph_engine/2", "v": "2.0", "sid": "s1",
- "s": "3f2a1c9d8e7b6a50", "f": "fresh", "b": [1200, 8000], "c": 255,
+ "s": "3f2a1c9d8e7b6a50", "f": "fresh", "b": [1200, 8000], "c": 511,
  "t": 33}
 ```
 
@@ -72,8 +74,8 @@ Default handshake:
 - `f`: `fresh`, `stale` or `unknown`.
 - `b`: default and maximum estimated-token budget.
 - `c`: capability bit mask. Bits: `find=1`, `outline=2`, `expand=4`,
-  `impact=8`, `tests=16`, `context=32`, `shape=64`, `fetch=128`; `255` means
-  all eight are present.
+  `impact=8`, `tests=16`, `context=32`, `shape=64`, `fetch=128`, `bye=256`;
+  `511` means all are present.
 - `t`: estimated response tokens.
 
 Full handshake only when requested:
@@ -121,6 +123,7 @@ Top-level keys:
 | `it` | multiple fetched payloads |
 | `h` | fetched speculative handle |
 | `qo` | op that produced a fetched payload |
+| `fs` | fetch state: `pending` or `cancelled` |
 | `st` | full speculation ledger, only with `stats:true` |
 | `t` | estimated response tokens |
 
@@ -146,10 +149,12 @@ Errors use short keys too:
 | `tests` | `key` or `keys`, `limit?` | covering tests and why each was linked |
 | `context` | `task`, `limit?`, `offset?`, `mode?`, `known?` | cited task context items |
 | `shape` | `limit?` | bounded repository identity/counts/languages/modules/commands |
-| `fetch` | `fetch` (1–4 handles) or `h` | prepared speculative payloads |
+| `fetch` | `fetch` (1–4 handles) or `h`, `wait_ms?` | prepared payloads, a compact pending result, or cancelled |
+| `bye` | `session` | close the session and clear its caches |
 
 `tests` discovers test keys; it never runs pytest. `shape` is a compact
-projection of the deterministic `repo_shape` report.
+projection of the deterministic `repo_shape` report. `wait_ms` is clamped to
+`0..250`; a pending fetch never blocks indefinitely.
 
 ## Compact rows
 
@@ -187,9 +192,10 @@ integer ids.
 ## Sessions
 
 One server process holds at most **16** live sessions (LRU). Evicting a
-session counts its unfetched prepared payloads as wasted and its cache entries
-as evicted. A request naming an evicted or unknown handle returns
-`{"e": "unknown or expired session; call hello"}`.
+session cancels its pending work, counts unfetched prepared payloads as wasted,
+and clears its cache. A request naming an evicted or unknown handle returns
+`{"e": "unknown or expired session; call hello"}`. `bye` closes one session
+immediately; engine shutdown closes all sessions and joins the daemon worker.
 
 A session stores:
 
@@ -200,6 +206,7 @@ A session stores:
 - the fixed columns already sent for each op;
 - the last response token estimate and cumulative estimated tokens;
 - the compact flag and current default budget;
+- a snapshot/root scope, a speculation generation and a closed flag;
 - an ordered speculation cache (at most 8 entries) and a ledger.
 
 ## `known` deltas
@@ -245,45 +252,77 @@ When a response has `spec: true`:
 
 1. The engine derives up to six candidate requests from the returned keys:
    outline, callers and callees (`expand`), and covering tests (`tests`).
-2. It skips a candidate that repeats the current request.
-3. It prepares **at most two** candidates synchronously, each with a bounded
-   budget, before returning. They are stored in the session cache and returned
-   as compact handles:
+2. It skips a candidate that repeats the current request and selects at most
+   two to prepare.
+3. It creates pending handles for those two, queues one `SpecJob`, and returns
+   immediately:
 
    ```json
-   {"q": {"h": ["q1", "q2"], "r": 2, "p": 4}, "t": 130}
+   {"q": {"h": ["q1", "q2"], "r": 0, "p": 4}, "t": 130}
    ```
 
-   `q.h` handles, `q.r` ready count, `q.p` pending suggestions.
+   `q.h` planned handles, `q.r` how many are already ready at response time,
+   `q.p` further unaddressed suggestions. The handler does **not** wait for
+   preparation.
 
-4. The full ledger is **not** sent by default. `stats: true` adds:
+4. A single in-process daemon thread blocks on a bounded queue, prepares at
+   most two results per job, and yields between candidates. It captures the
+   session id, snapshot token, scope, generation, budget, deadline and entry
+   expiry. Before and after each candidate it checks that the session still
+   exists, is not closed, and has the same snapshot, scope and generation. A
+   changed/evicted/closed session, an expired entry or an exhausted worker
+   budget cancels the remaining handles.
+5. The full ledger is **not** sent by default. `stats: true` adds it:
 
    ```json
-   {"st": {"prepared": 2, "fetched": 0, "wasted": 0, "evicted": 0}}
+   {"st": {"prepared": 2, "fetched": 2, "wasted": 0, "evicted": 0,
+           "cancelled": 0, "worker_ms": 1.0, "hits": 2, "misses": 0,
+           "hit_rate": 1.0}}
    ```
 
-`fetch` (one handle, or up to four) returns the prepared payload without
-repeating graph work. The entry is removed after the first fetch. A handle that
-is unknown, evicted or prepared under a different snapshot is refused. If the
-snapshot becomes stale or unknown, all prepared entries are invalidated.
+### Fetch
+
+`fetch` (one handle, or up to four) returns:
+
+- a ready prepared payload without repeating graph work; the entry is removed
+  after the first fetch;
+- `{"h": ..., "qo": ..., "fs": "pending"}` for a still-pending handle, after an
+  optional bounded `wait_ms` (`0..250`); the entry remains fetchable;
+- `{"h": ..., "qo": ..., "fs": "cancelled", "reason": ...}` for a handle
+  cancelled by budget, expiry, invalidation, eviction or close.
+
+A handle that is unknown or prepared under a different snapshot is refused.
+If the snapshot becomes stale or unknown, all prepared entries are invalidated.
 `stats: true` on `fetch` returns the ledger.
 
 Ledger counters:
 
 | Counter | Meaning |
 | --- | --- |
-| `prepared` | payloads successfully prepared |
+| `prepared` | payloads successfully prepared after the response |
 | `fetched` | prepared payloads actually fetched |
 | `wasted` | prepared but never fetched when evicted/invalidated |
-| `evicted` | cache entries removed (fetched or wasted) |
+| `evicted` | cache entries removed |
+| `cancelled` | pending requests cancelled before being prepared |
+| `worker_ms` | accumulated worker preparation time |
+| `hits` / `misses` | fetch ready vs pending/cancelled outcomes |
+| `hit_rate` | `hits / (hits + misses)`, 0 when no attempts |
 
 The cache is bounded at 8 entries per session. The engine also keeps
 process-lifetime aggregate counters in `GraphEngine.stats()`.
 
-**This slice does not overlap work with a model.** Preparation happens before
-the response is returned; it can make the response slower but cannot make it
-faster. The next step is a daemon/process worker that prepares after returning
-and a hit-rate evaluation.
+### Worker limits
+
+- One daemon thread per engine process, bounded queue (8 jobs).
+- One job at a time; at most two candidates per job.
+- Total worker deadline default 300 ms (`OZAGIA_ENGINE_SPEC_MS`, clamped
+  50..2000 ms), checked between candidates. A single in-flight graph call can
+  overrun the deadline because it is not preempted.
+- Entry expiry default 30 s.
+- `OZAGIA_ENGINE_SPEC=0` disables speculation entirely (no worker, no handles).
+- The thread is daemonized; `bye` closes one session, and engine shutdown joins
+  the worker. The GIL still serialises CPU work with the handler; this overlaps
+  model-side waiting and some I/O, not two CPU-bound Python tasks.
 
 ## Freshness and unknowns
 
@@ -325,7 +364,12 @@ same freshness check.
 | known hashes remembered per session | 1,000 |
 | speculation cache per session | 8 |
 | suggested candidates per response | 6 |
-| prepared synchronously per response | 2 |
+| prepared per background job | 2 |
+| background worker threads per engine | 1 (daemon) |
+| worker queue | 8 jobs |
+| worker total budget | 300 ms default (`OZAGIA_ENGINE_SPEC_MS`) |
+| speculation entry expiry | 30 s |
+| fetch wait | 0–250 ms |
 | handles per `fetch` | 4 |
 | default response budget | 1,200 estimated tokens |
 | maximum response budget | 8,000 |
@@ -345,16 +389,22 @@ From `scripts/measure_graph_engine.py` on the tiny fixture:
 | `outline` with matching `known` | 10 |
 
 Single-turn task total: 374 tokens / 4 round-trips, versus 637 / 4 for the
-stateless graph surface and 1,707 / 5 for the `dev_*` sequence. Multi-turn
-(discover, known outline, follow-up impact): 578 / 5 versus 684 / 5 for the
-stateless graph sequence. See
+stateless graph surface and 1,707 / 5 for the `dev_*` sequence. The background
+measurement sleeps 150 ms after `find` to simulate model thinking: two handles
+were pending at response time and both ready before `fetch`, with
+`prepared=2`, `fetched=2`, `worker_ms≈1`, `hit_rate=1.0`.
+The synchronous inline-worker sequence has the same 374 tokens but pays
+preparation inside the `find` handler; the background handler does not wait.
+Multi-turn (discover, known outline, follow-up impact): 578 / 5 versus 684 / 5
+for the stateless graph sequence, with the same two prepared/fetched and
+`hit_rate=1.0`. See
 `docs/results/graph_engine_prototype_2026-11-25.md`.
 
 ## Open work
 
-- Daemon/process worker for true background speculation.
-- Hit-rate and waste evaluation on larger repositories; tune the two-handle
-  and 400-token defaults against measured fetches.
+- Process/daemon worker or executor with real parallelism beyond the GIL.
+- Hit-rate and waste evaluation on larger repositories; tune the two-handle,
+  300 ms and 400-token defaults against measured fetches and think times.
 - Optional Ozma transport (the protocol values are JSON-ready and
   transport-neutral).
 - A persistent, versioned session/cache layer if the process-local bound

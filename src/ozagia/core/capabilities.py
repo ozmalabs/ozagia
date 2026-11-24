@@ -955,7 +955,7 @@ _BUILTIN_DEFINITIONS: tuple[dict[str, Any], ...] = (
         domain="graph",
         purpose=("Answer bounded, token-estimated graph questions through one "
                  "stateful engine tool with compact rows, known deltas and "
-                 "synchronous speculative handles."),
+                 "bounded in-process background speculative handles."),
         owner="ozagia.core.graph_engine",
         side_effect="read",
         exposure=["mcp"],
@@ -963,7 +963,10 @@ _BUILTIN_DEFINITIONS: tuple[dict[str, Any], ...] = (
         surfaces=["mcp:tool:graph"],
         prerequisites=["a graph snapshot whose freshness can be verified"],
         limits=["default 1200 and maximum 8000 estimated tokens per response",
-                "16 bounded sessions; at most two prepared spec handles per call",
+                "16 bounded sessions; one GIL-bound daemon worker prepares at "
+                "most two spec handles per response (300 ms default)",
+                "fetch waits at most 250 ms; worker can be disabled with "
+                "OZAGIA_ENGINE_SPEC=0",
                 "no edit, create, check, refresh, shell or target execution",
                 "a stale or unknown snapshot yields no structural rows"],
         authorization=_READ,
