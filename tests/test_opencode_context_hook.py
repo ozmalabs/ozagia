@@ -255,7 +255,8 @@ def test_compaction_hook_sends_session_event(tmp_path):
     try:
         proc = _run_compaction(tmp_path, daemon.path)
         assert proc.returncode == 0, proc.stderr
-        assert json.loads(proc.stdout)["names"] == ["compaction", "context"]
+        assert json.loads(proc.stdout)["names"] == [
+            "compaction", "context", "prompt"]
         events = [r for r in daemon.requests if r["op"] == "session_event"]
         assert len(events) == 1
         assert {k: events[0][k] for k in ("harness", "session", "event")} == {
@@ -269,11 +270,12 @@ def test_compaction_hook_is_fail_safe(tmp_path):
     # No daemon listening: the hook returns without throwing.
     proc = _run_compaction(tmp_path, tmp_path / "missing.sock")
     assert proc.returncode == 0, proc.stderr
-    assert json.loads(proc.stdout)["names"] == ["compaction", "context"]
+    assert json.loads(proc.stdout)["names"] == [
+        "compaction", "context", "prompt"]
     # A harness without the hook: setup still succeeds.
     proc = _run_compaction(tmp_path, tmp_path / "missing.sock", NO_COMPACTION_HOOK="1")
     assert proc.returncode == 0, proc.stderr
-    assert json.loads(proc.stdout)["names"] == ["context"]
+    assert json.loads(proc.stdout)["names"] == ["context", "prompt"]
 
 
 @needs_node

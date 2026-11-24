@@ -89,9 +89,14 @@ const permission = cfg.permission === undefined ? undefined : {
 };
 const synthetic = [];
 const hooks = {};
-const session = (cfg.synthetic || cfg.context || cfg.contexts) ? {
+const wantsSession = cfg.synthetic || cfg.context || cfg.contexts
+  || cfg.prompts || cfg.promptHookFailure;
+const session = wantsSession ? {
   synthetic: async (x) => { synthetic.push(x); },
-  hook: async (name, fn) => { hooks[name] = fn; },
+  hook: async (name, fn) => {
+    if (name === "prompt" && cfg.promptHookFailure) throw new Error("no prompt hook");
+    hooks[name] = fn;
+  },
 } : undefined;
 await plugin.setup({ tool: { transform: (fn) => fn(reg), hook: () => {},
                        list: () => reg.list() },
@@ -120,13 +125,18 @@ for (const event of contextInputs) {
     contextEvents.push(event);
   }
 }
+const promptEvents = [];
+for (const event of cfg.prompts || []) {
+  if (hooks.prompt) await hooks.prompt(event);
+  promptEvents.push(event);
+}
 process.stdout.write(JSON.stringify({
   id: mod.default.id, has_setup: typeof mod.default.setup === "function",
   results, calls, asserts, synthetic, toolNames: Object.keys(tools),
   replaced: Object.keys(tools).filter((k) => tools[k].execute !== original[k]),
   schema_swapped: Object.fromEntries(Object.keys(tools).map((k) => [k, tools[k].output === schema])),
   descriptions: Object.fromEntries(Object.keys(tools).map((k) => [k, tools[k].description])),
-  contextEvents,
+  contextEvents, promptEvents, hooksRegistered: Object.keys(hooks),
 }) + "\n");
 process.exit(0);
 """
@@ -364,6 +374,178 @@ def test_native_secret_request_tool_refuses_without_session(tmp_path, daemon):
     assert payload["status"] == "refused"
     assert payload["code"] == "session_unavailable"
     assert not any(req.get("op") == "secrets" for req in d.requests)
+
+
+@needs_node
+def test_prompt_hook_rewrites_a_pasted_secret_and_remaps_mentions(tmp_path, daemon):
+    tokens = ["ghp_" + "A" * 36, "xoxb-" + "B" * 24]
+    refs = ["secret://session/prompt-a", "secret://session/prompt-b"]
+    text = (f"before @alpha key1 {tokens[0]} between @beta key2 "
+            f"{tokens[1]} after @omega")
+    before_start = text.index("@alpha")
+    between_start = text.index("@beta")
+    after_start = text.index("@omega")
+    first_start = text.index(tokens[0])
+    first_end = first_start + len(tokens[0])
+    overlap_start = first_start - 3
+    overlap_end = first_end + 3
+    deltas = [len(ref) - len(token) for ref, token in zip(refs, tokens)]
+
+    def script(req):
+        if req["op"] == "hello":
+            return {"ok": True}
+        if req["op"] == "secrets" and req.get("action") == "capture_text":
+            assert req["harness"] == "opencode"
+            assert req["session"] == "ses_prompt"
+            original = req["text"]
+            pieces, secrets, cursor = [], [], 0
+            for token, ref in zip(tokens, refs):
+                start = original.index(token)
+                end = start + len(token)
+                pieces.append(original[cursor:start])
+                pieces.append(ref)
+                cursor = end
+                secrets.append({
+                    "fingerprint": "sha256:prompt", "label": "token",
+                    "kind": "token", "start": start, "end": end,
+                    "ref": ref, "captured": True,
+                })
+            pieces.append(original[cursor:])
+            return {"ok": True, "text": "".join(pieces), "secrets": secrets,
+                    "count": len(secrets), "detected": len(secrets),
+                    "captured": len(secrets), "withheld": 0,
+                    "truncated": False, "not_assessed": []}
+        return {"ok": False, "error": "unexpected"}
+
+    event = {
+        "sessionID": "ses_prompt", "messageID": "msg_prompt",
+        "prompt": {
+            "text": text,
+            "files": [
+                {"start": before_start, "end": before_start + 6,
+                 "text": "@alpha"},
+                {"start": overlap_start, "end": overlap_end,
+                 "text": text[overlap_start:overlap_end]},
+                {"start": between_start, "end": between_start + 5,
+                 "text": "@beta"},
+                {"start": after_start, "end": after_start + 6,
+                 "text": "@omega"},
+            ],
+            "agents": [{"start": after_start, "end": after_start + 6,
+                        "text": "@omega"}],
+            "skills": [{"start": between_start, "end": between_start + 5,
+                        "text": "@beta"}],
+        },
+        "metadata": {"trace": "prompt-1"}, "delivery": {"mode": "interactive"},
+    }
+    d = daemon(script)
+    out = _run(tmp_path, {"prompts": [event]}, d.path)
+    ev = out["promptEvents"][0]
+    expected_text = (f"before @alpha key1 {refs[0]} between @beta key2 "
+                     f"{refs[1]} after @omega")
+    assert ev["prompt"]["text"] == expected_text
+    assert ev["sessionID"] == "ses_prompt"
+    assert ev["messageID"] == "msg_prompt"
+    assert ev["metadata"] == {"trace": "prompt-1"}
+    assert ev["delivery"] == {"mode": "interactive"}
+    files = ev["prompt"]["files"]
+    assert [m["text"] for m in files] == ["@alpha", "@beta", "@omega"]
+    assert (files[0]["start"], files[0]["end"]) == (before_start, before_start + 6)
+    assert (files[1]["start"], files[1]["end"]) == (
+        between_start + deltas[0], between_start + 5 + deltas[0])
+    after_shift = deltas[0] + deltas[1]
+    assert (files[2]["start"], files[2]["end"]) == (
+        after_start + after_shift, after_start + 6 + after_shift)
+    assert ev["prompt"]["agents"] == [{
+        "start": after_start + after_shift, "end": after_start + 6 + after_shift,
+        "text": "@omega"}]
+    assert ev["prompt"]["skills"] == [{
+        "start": between_start + deltas[0], "end": between_start + 5 + deltas[0],
+        "text": "@beta"}]
+    # The daemon gets the prompt text once; every other op is the setup hello.
+    captures = [r for r in d.requests if r["op"] == "secrets"]
+    assert len(captures) == 1
+    assert captures[0]["action"] == "capture_text"
+    assert captures[0]["text"] == text
+    assert "value" not in captures[0] and "label" not in captures[0]
+    assert "ref" not in captures[0]
+    assert sorted(d.ops()) == ["hello", "secrets"]
+    # The raw values never appear in the model-facing event or plugin output.
+    assert all(token not in json.dumps(out) for token in tokens)
+
+
+@needs_node
+def test_prompt_hook_leaves_the_prompt_when_no_secret_is_captured(tmp_path, daemon):
+    def script(req):
+        if req["op"] == "hello":
+            return {"ok": True}
+        if req["op"] == "secrets":
+            return {"ok": True, "text": req["text"], "secrets": [], "count": 0,
+                    "detected": 0, "captured": 0, "withheld": 0,
+                    "truncated": False, "not_assessed": []}
+        return {"ok": False, "error": "unexpected"}
+
+    event = {
+        "sessionID": "ses_plain", "messageID": "msg_plain",
+        "prompt": {"text": "please read @file",
+                   "files": [{"start": 12, "end": 17, "text": "@file"}]},
+        "metadata": {"trace": "plain"}, "delivery": {"mode": "interactive"},
+    }
+    d = daemon(script)
+    out = _run(tmp_path, {"prompts": [event]}, d.path)
+    assert out["promptEvents"] == [event]
+
+
+@needs_node
+def test_prompt_hook_fails_open_on_a_daemon_error(tmp_path, daemon):
+    def script(req):
+        if req["op"] == "hello":
+            return {"ok": True}
+        if req["op"] == "secrets":
+            return {"ok": False, "error": "capture failed"}
+        return {"ok": False, "error": "unexpected"}
+
+    token = "ghp_" + "C" * 36
+    event = {"sessionID": "ses_error",
+             "prompt": {"text": f"token {token}",
+                        "files": [{"start": 0, "end": 5, "text": "token"}]}}
+    d = daemon(script)
+    out = _run(tmp_path, {"prompts": [event]}, d.path)
+    assert out["promptEvents"] == [event]
+    assert len([r for r in d.requests if r["op"] == "secrets"]) == 1
+
+
+@needs_node
+def test_prompt_hook_fails_open_when_the_daemon_is_absent(tmp_path, sockdir):
+    event = {"sessionID": "ses_absent",
+             "prompt": {"text": "unchanged",
+                        "files": [{"start": 0, "end": 3, "text": "unc"}]}}
+    out = _run(tmp_path, {"prompts": [event]}, sockdir / "missing.sock")
+    assert out["promptEvents"] == [event]
+
+
+@needs_node
+def test_prompt_hook_without_a_session_or_text_does_not_call_the_daemon(tmp_path, daemon):
+    d = daemon(lambda req: {"ok": True})
+    events = [
+        {"sessionID": None, "prompt": {"text": "no session"}},
+        {"sessionID": "ses_text", "prompt": {"text": 42}},
+        {"sessionID": "ses_text"},
+    ]
+    out = _run(tmp_path, {"prompts": events}, d.path)
+    assert out["promptEvents"] == events
+    assert not any(req["op"] == "secrets" for req in d.requests)
+
+
+@needs_node
+def test_prompt_hook_registration_failure_does_not_break_setup(tmp_path, daemon):
+    event = {"sessionID": "ses_no_hook", "prompt": {"text": "unchanged"}}
+    d = daemon(lambda req: {"ok": True})
+    out = _run(tmp_path, {"promptHookFailure": True, "prompts": [event]}, d.path)
+    assert "prompt" not in out["hooksRegistered"]
+    assert out["promptEvents"] == [event]
+    assert out["replaced"]  # the rest of the plugin still installed
+    assert not any(req["op"] == "secrets" for req in d.requests)
 
 
 def test_native_structure_tool_denial_withholds_graph_result(tmp_path, daemon):

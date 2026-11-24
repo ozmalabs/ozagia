@@ -222,6 +222,32 @@ end` clears that session's captures, and expired entries are pruned on access.
 daemon socket can call these actions; protect the socket and state directory
 like the rest of `.ozagia/`.
 
+### OpenCode prompt admission
+
+The OpenCode plugin registers `ctx.session.hook("prompt", ...)` at setup when
+the host exposes it (registration failure is ignored). The hook runs once per
+user prompt, before model dispatch:
+
+1. it requires a string `event.prompt.text` and `event.sessionID`;
+2. it sends `{op: "secrets", action: "capture_text", text, harness,
+   session}` over the ordinary bounded local socket with a 2 s timeout;
+3. when the reply is `ok`, has a string `text`, and contains captured
+   `secrets` entries (`start`, `end`, `ref`), it replaces `prompt.text` with
+   the rewritten text;
+4. it remaps every mention in `prompt.files`, `prompt.agents` and
+   `prompt.skills`, sorted by start: mentions after a replacement shift by the
+   length delta, and a mention overlapping a replaced span is removed so no
+   invalid offset remains. All other prompt fields, `metadata`, `delivery` and
+   the session/message ids are preserved.
+
+An empty capture (`count`/`secrets` empty) leaves the prompt exactly as it was.
+No daemon, a timeout, an error response, a malformed mention list or any other
+failure is fail-open: the prompt passes through unchanged and the hook does not
+throw. The prompt text is never logged, and the only secret-shaped content the
+hook can add is a reference returned by the daemon. This path is verified
+against the plugin host fixture and the daemon protocol, not a live OpenCode
+session; the native dialog/composer pill and HTTP fallback remain future work.
+
 ### Redaction
 
 `SecretBroker.redactor` (a `Redactor`) keeps at most 64 resolved values and
@@ -293,13 +319,14 @@ rewritten = detect_text(
   reference. The store's `repr` and `describe()` expose counts and limits, not
   tokens or values.
 
-The daemon/plugin wiring is the current slice: the daemon owns the store, the
-`secrets` op captures text and values over its local socket, jobs resolve
-session references only for their own harness/session, and a session end
-clears its captures and request records. The CLI's `capture`/`capture-text`
-commands read from stdin and call the daemon; they never take a value in argv.
-No in-memory store is persisted by a CLI process, and a capture made by one
-session cannot be resolved by another.
+The daemon/plugin wiring includes prompt admission: the daemon owns the store,
+the `secrets` op captures text and values over its local socket, the OpenCode
+`prompt` hook rewrites a pasted value to a session reference before dispatch,
+jobs resolve session references only for their own harness/session, and a
+session end clears its captures and request records. The CLI's
+`capture`/`capture-text` commands read from stdin and call the daemon; they
+never take a value in argv. No in-memory store is persisted by a CLI process,
+and a capture made by one session cannot be resolved by another.
 
 ### Model-initiated secret requests
 
@@ -519,14 +546,18 @@ input is empty. A value is never accepted in argv; there is no reveal command.
   user's privileges. The model-facing plugin tool cannot send a value, and the
   MCP `dev_secrets` tool stays read-only.
 - The model-initiated request slice has a metadata-only handle and a CLI
-  prompt. It does **not** yet include the OpenCode native secret dialog,
-  composer pill, prompt-paste rewrite, keychain/`pass`/`op` persistence UI,
-  or live-host verification. A user who pastes a value into chat still relies
-  on the host hook and the best-effort detector described above.
-- No live GUI or host plugin is implemented here: the hook path is the daemon
-  `secrets capture_text` op, exercised by tests and the CLI. There is no
-  external keychain integration beyond the optional `keyring` provider, and no
-  guarantee about a GUI keychain's lock state.
+  prompt. The OpenCode plugin also registers a prompt-admission hook that
+  rewrites a pasted value to a session reference and remaps mentions; it is
+  verified against the plugin host fixture and the daemon protocol, not a live
+  OpenCode session. It does **not** yet include the native secret dialog,
+  composer pill, the HTTP provider-request fallback, keychain/`pass`/`op`
+  persistence UI, or live-host verification of prompt-storage order. A user
+  who pastes a value into chat still relies on the host hook and the
+  best-effort detector described above.
+- No live GUI is implemented here: the prompt hook and the CLI share the
+  daemon `secrets capture_text` op, exercised by tests and the host fixture.
+  There is no external keychain integration beyond the optional `keyring`
+  provider, and no guarantee about a GUI keychain's lock state.
 
 ## Tests
 
@@ -541,5 +572,8 @@ PYTHONPATH=src python -m pytest -q tests/test_secrets.py \
 The tests use temporary directories and injected fakes for keyring, `pass`,
 `op` and the runtime process factory. Job tests print a fake value from a real
 child and assert that the raw log file, reads and responses do not contain it.
-No test uses a real secret store, the network, `pass`, `op` or the keyring
-package.
+The OpenCode plugin tests drive the prompt hook against a fake daemon: a pasted
+canary disappears from the returned model-facing event, mentions before/after
+shift and an overlapping mention is removed, and the only capture request is
+`capture_text` with text/harness/session. No test uses a real secret store, the
+network, `pass`, `op` or the keyring package.

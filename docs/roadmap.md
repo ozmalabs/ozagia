@@ -44,7 +44,7 @@ an inventory, not a maturity claim.
 | Deep review is high quality | Synthetic fixture score only: 4/4 true positives, 8/8 labeled pairs; no false positives in the declared scope. The realistic corpus now has 12 verified repository pins, 50 assigned ranges and 62 deterministic reports, but no human label or score. | Weak for production: no completed human labels, no realistic score, no go/no-go decision |
 | Rust edits/LSP/tests work | Live rust-analyzer tests and `cargo test` capture; parity bench | Good on the test crate; dataflow and macro/cfg expansion remain absent |
 | Live host integrations work | OpenCode has live smoke runs. Codex, Kiro and Claude Code are implemented and untested live. OpenCode Desktop is untested. | Weak: integration status is the largest untested surface |
-| Secrets never reach the model | Reference broker, providers, redactor, in-memory session store and metadata-only model-initiated request slice landed (`core/secrets.py`, daemon `secrets`, `ozagia-secrets`, OpenCode tool); runtime/job/daemon boundaries resolve refs only. The native prompt/UI capture flow and end-to-end live canary coverage are not implemented. | Partial: boundary and request code is tested; the full session guarantee is not established |
+| Secrets never reach the model | Reference broker, providers, redactor, in-memory session store, metadata-only model-initiated request slice and OpenCode prompt-admission rewrite landed (`core/secrets.py`, daemon `secrets`, `ozagia-secrets`, OpenCode tool/hook); runtime/job/daemon boundaries resolve refs only. The prompt hook is verified against the plugin host fixture, not a live session; the native prompt/UI capture flow and end-to-end live canary coverage are not implemented. | Partial: boundary, request and host-fixture prompt code is tested; the full session guarantee is not established |
 
 Two problems distorted the picture at the start of this audit. Both were
 corrected on 2026-11-24:
@@ -84,7 +84,7 @@ breadth third, live operations last**. New surface area is not a release theme.
 | `2026-11-23_rust_parity.md` | Phases 0–6 done; Phase 7 implemented with limits | Matches | Normalized SCIP cache, Rust dataflow, `migrates_to` graph edges, test mapping, macro/cfg expansion | 0.6 |
 | `2026-11-18_deep_review_orchestrator.md` | Phases 0–1 done; 2 largely; 3–4 partial | Matches | Realistic corpus and human labels, broader SCA/IaC/config depth, model-pass quality evaluation, go/no-go | 0.2 |
 | `2026-11-17_self_graph_service_unification_model_api.md` | Implementation plan; M0–M4 done, M5–M6 partial | M0–M4 implemented; M5 partial (linked/research/action joins, Ocelot research projection, secret boundaries); M6 has an offline harness and one live run invalid for the map arm | M5 Ocelot/live-service integration; a valid M6 matched-arm result and opt-in rollout | 0.4 |
-| `2026-11-17_session_secrets_ui.md` | Request slice implemented | Core broker, providers, redactor, session store and model-initiated request/fulfil/decline (daemon, CLI, OpenCode tool) implemented; host UI is not | Native prompt/pill, host rewrite, persistence UI, revoke/expiry UI, live-host canary review | 0.3 |
+| `2026-11-17_session_secrets_ui.md` | Request and prompt-admission slices implemented | Core broker, providers, redactor, session store, model-initiated request/fulfil/decline (daemon, CLI, OpenCode tool) and the OpenCode `prompt` hook (capture/rewrite plus mention remapping, verified against the host fixture) are implemented; the native UI is not, and the hook has no live-session run | Native prompt/pill, HTTP fallback, persistence UI, revoke/expiry UI, live-host canary and prompt-storage review | 0.3 |
 | `2026-11-17_session-profile-instrumentation.md` | Implemented in part | Core store, CLI, daemon events, OpenCode subscriber and TUI slot exist; Codex/Kiro/Claude hook capture exists offline | Live host verification, status/console rows for host lifecycle counters | 0.3 |
 | `2026-11-18_bounded_graph_prefetch.md` | Offline primitives implemented; MCP integration not adopted for 0.3 | Offline planner, safety checks and ledger implemented (`core/prefetch.py`); the 2026-11-25 decision keeps them unwired because the measured benefit is small and the lifecycle risk is high | Revisit only with larger-repository measurements and the acceptance tests | 0.3 decision |
 | `2026-11-17_opencode_intent_graph_retrieval.md` | Stages A–C done; D partial; E initial offline check | Matches | Broader shell/task intent linking, richer paired and end-to-end evaluation | 0.4 |
@@ -351,16 +351,41 @@ named secret without its value entering chat:
   not learn the harness session id, and accepting one from model arguments
   would let a model claim another session.
 
-Native dialog/composer pill, prompt-paste rewrite, keychain/`pass`/`op`/`.env`
-persistence UI, revoke UI beyond `forget`, and live-host verification remain
-open.
+**Progress (2026-11-25, prompt-admission slice).** A value pasted into an
+OpenCode prompt is rewritten before the model sees it. This is verified against
+the plugin host fixture and the daemon protocol, **not** a live OpenCode
+session:
+
+- setup registers `ctx.session.hook("prompt", ...)` when the host exposes it;
+  a registration failure is ignored and never breaks plugin setup;
+- the hook requires a string prompt text and session id, then sends
+  `{op: "secrets", action: "capture_text", text, harness, session}` over the
+  existing bounded local socket with a 2 s timeout;
+- an `ok` reply with captured `secrets` replaces `prompt.text` with the
+  daemon's rewritten text; an empty capture leaves the prompt untouched;
+- mentions in `prompt.files`, `prompt.agents` and `prompt.skills` are remapped
+  from the reply's `start`/`end`/`ref` spans: after a replacement they shift by
+  its length delta, and an overlapping mention is removed. Other prompt fields,
+  `metadata`, `delivery` and the ids are preserved;
+- daemon absence, timeout, an error response, a malformed reply or a bad
+  mention list is fail-open: the prompt passes through unchanged, the hook
+  does not throw and nothing is logged. Only daemon-returned refs can appear
+  in the rewritten prompt;
+- the tests use a fake daemon, assert that the only capture request is
+  `capture_text` with text/harness/session, that mentions shift/are removed,
+  and that a raw secret canary is absent from the returned model-facing event.
+
+Native dialog/composer pill, the HTTP provider-request fallback,
+keychain/`pass`/`op`/`.env` persistence UI, revoke UI beyond `forget`, and
+live-host verification remain open.
 
 Still open in 0.3: the native session-secret prompt/UI and revoke/expiry flow;
 live Codex, Kiro and Claude Code sessions to verify the installed hooks (the
 store and event paths are tested offline); model-provider connection probes
 (only secret-provider readiness is local and authoritative); and the prefetch
-keep/drop decision. Live integration and model/network probes remain out of
-scope for the read-only command.
+keep/drop decision. Live OpenCode prompt-storage order and RPC-body logging
+also remain unverified. Live integration and model/network probes remain out
+of scope for the read-only command.
 
 **Exit criteria**
 
