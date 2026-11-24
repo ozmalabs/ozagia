@@ -1,14 +1,14 @@
-# Graph engine protocol (first slice)
+# Graph engine protocol (v2 first slice)
 
 Status: implemented 2026-11-25 in `src/ozagia/core/graph_engine.py`, with the
 MCP surface in `src/ozagia/integrations/mcp/server.py` and tests in
 `tests/test_graph_engine.py`.
 
-This is the first slice of one compact, stateful, token-efficient graph
-interface for LLMs. It replaces a family of independent `dev_*` calls with one
-MCP tool (`graph`), one versioned session protocol, explicit token budgets,
-`known` deltas and bounded speculation. It reuses the existing services rather
-than re-implementing graph logic:
+This is the compact, stateful, token-efficient graph interface for LLMs. It
+replaces a family of independent `dev_*` calls with one MCP tool (`graph`), one
+versioned session protocol, hard token budgets, `known` deltas and bounded
+speculation. It reuses the existing services rather than re-implementing graph
+logic:
 
 | Engine op | Existing implementation |
 | --- | --- |
@@ -38,91 +38,110 @@ than re-implementing graph logic:
 
 ## Versioning and transport
 
-- Protocol string: `ozagia.graph_engine/1`
-- Protocol version: `1.0`
+- Protocol string: `ozagia.graph_engine/2`
+- Protocol version: `2.0`
 - MCP tool: `graph`
 - MCP surfaces: `OZAGIA_SURFACE=engine` or `--surface engine`
 - The tool's input schema has `additionalProperties: false`.
 - JSON-RPC framing, errors and `tools/list` are the existing MCP server's.
   A bad tool argument is a JSON-RPC `-32602`; a bad engine request is a normal
-  JSON result with `ok: false` and `err`.
+  JSON result with an `e` message.
 
-A version bump is required for a wire-incompatible change: op removal, a
-column meaning change, a new required input, or a change to the meaning of a
-handle, hash or freshness label.
+v2 is a wire-incompatible simplification of v1: success responses no longer
+carry `ok`/`op`/`fresh`/`budget`, top-level metadata uses short keys, columns are
+sent once per session, and the per-response speculation ledger moved behind
+`stats: true`.
 
 ## Handshake
 
+Default handshake:
+
 ```json
-{"op": "hello", "budget": 1200, "compact": true}
+{"op": "hello"}
 ```
 
 ```json
-{
-  "ok": true,
-  "op": "hello",
-  "proto": "ozagia.graph_engine/1",
-  "ver": "1.0",
-  "sid": "s1",
-  "caps": ["find", "outline", "expand", "impact", "tests", "context",
-           "shape", "fetch"],
-  "feats": ["compact", "known", "spec", "fetch"],
-  "snap": {"id": "3f2a…", "fresh": "fresh", "head": "…", "gen": "…",
-           "nodes": 1234, "edges": 5678},
-  "budget": {"def": 1200, "max": 8000, "cur": 1200},
-  "compact": true,
-  "sl": {"prepared": 0, "fetched": 0, "wasted": 0, "evicted": 0}
-}
+{"p": "ozagia.graph_engine/2", "v": "2.0", "sid": "s1",
+ "s": "3f2a1c9d8e7b6a50", "f": "fresh", "b": [1200, 8000], "c": 255,
+ "t": 33}
 ```
+
+- `p`/`v`: protocol and version.
+- `sid`: session handle.
+- `s`: snapshot token.
+- `f`: `fresh`, `stale` or `unknown`.
+- `b`: default and maximum estimated-token budget.
+- `c`: capability bit mask. Bits: `find=1`, `outline=2`, `expand=4`,
+  `impact=8`, `tests=16`, `context=32`, `shape=64`, `fetch=128`; `255` means
+  all eight are present.
+- `t`: estimated response tokens.
+
+Full handshake only when requested:
+
+```json
+{"op": "hello", "caps": true}
+```
+
+`caps: true` (alias `detail: true`) adds `ops` (full op names), `ft`
+(features), `bd` (budget default/max/current), `sn`, `compact` and the full
+speculation ledger `st`. The default response omits all of those.
 
 Calling `hello` again without `session` creates a new isolated session. With a
 live `session` it refreshes freshness and the budget rather than creating a
-second handle. `hello` may report `fresh`, `stale` or `unknown`; it contains no
-structural rows, so it is safe to answer even when the snapshot is not usable.
+second handle. `hello` contains no structural rows, so it is safe to answer
+even when the snapshot is not usable.
 
-## Common response envelope
+## Success envelope
 
-```json
-{
-  "ok": true,
-  "op": "find",
-  "snap": "3f2a…",
-  "fresh": "fresh",
-  "budget": 1200,
-  "cols": ["k", "n", "f", "sp", "sig", "sum", "sc"],
-  "rows": [["sym:pkg/core.py::add", "add", "pkg/core.py", [4, 4],
-            "def add(a, b):", "Add two numbers.", 0.03]],
-  "tok": 81,
-  "truncated": false,
-  "omitted": 0,
-  "next": {"op": "find", "q": "add", "session": "s1", "offset": 20}
-}
-```
-
-`ok`, `op`, `fresh`, `tok` and `budget` are stable fields. `snap`, `cols`,
-`rows`, `truncated`, `omitted`, `next`, `unchanged`, `spec`, `ready`, `pending`
-and `sl` appear when they apply. `tok` is the reported estimate for the whole
-response (`len(json.dumps(response))` / 4); it is an estimate, not a
-tokenizer measurement.
-
-Once a response is stale or unverifiable:
+Success responses omit redundant request/session metadata. There is no `ok`,
+`op`, `fresh`, `snap` or `budget` on a successful op; a successful response is
+the payload plus `t` (and `c`/`x`/`o`/`n`/`u`/`q` when they apply). `fresh` and
+`snap` appear only in the handshake and in withheld/error responses.
 
 ```json
-{"ok": false, "op": "find", "snap": "…", "fresh": "stale",
- "withheld": true, "err": "snapshot is not verifiably fresh; structural data is withheld",
- "tok": 29}
+{"c": ["k", "n", "f", "sp", "sig", "sum", "sc"],
+ "r": [["sym:pkg/core.py::add", "add", "pkg/core.py", [4, 4],
+        "def add(a, b):", "Add two numbers.", 0.03]],
+ "t": 130}
 ```
 
-No `cols`, `rows`, `unchanged` or speculative payload is returned.
+Top-level keys:
+
+| Key | Meaning |
+| --- | --- |
+| `r` | rows (arrays in `c` order) |
+| `c` | columns; only the first response for an op in a session, or `cols:true` |
+| `u` | unchanged key handles from a `known` request |
+| `x` | `true` when the payload was cut |
+| `o` | number of rows/items omitted |
+| `n` | a complete continuation request (includes `op`, `session`, `offset`) |
+| `q` | compact speculation handles/counts |
+| `ed` | expand edge triples |
+| `ct` | impact group counts |
+| `it` | multiple fetched payloads |
+| `h` | fetched speculative handle |
+| `qo` | op that produced a fetched payload |
+| `st` | full speculation ledger, only with `stats:true` |
+| `t` | estimated response tokens |
+
+Errors use short keys too:
+
+```json
+{"e": "snapshot is not verifiably fresh; structural data is withheld",
+ "f": "stale", "s": "3f2a…", "t": 28}
+```
+
+`e` marks an error/withheld result. A stale or unknown result never contains
+`r`, `c`, `u` or a prepared payload.
 
 ## Operations
 
-| Op | Inputs | Result rows |
+| Op | Inputs | Result |
 | --- | --- | --- |
-| `hello` | `session?`, `budget?`, `compact?` | handshake, no graph rows |
+| `hello` | `session?`, `budget?`, `compact?`, `caps?`, `detail?` | handshake |
 | `find` | `q`, `kinds?`, `limit?`, `offset?` | ranked keys, names, files, spans, signatures, summaries, scores |
 | `outline` | `key`, `limit?`, `known?` | a root row and (for a file) its defined symbols |
-| `expand` | `keys`, `edges?`, `depth?`, `limit?`, `offset?` | nodes plus edge triples |
+| `expand` | `keys`, `edges?`, `depth?`, `limit?`, `offset?` | nodes plus `ed` edge triples |
 | `impact` | `keys`, `depth?`, `limit?` | symbols/files/tests with depth and one `why` path |
 | `tests` | `key` or `keys`, `limit?` | covering tests and why each was linked |
 | `context` | `task`, `limit?`, `offset?`, `mode?`, `known?` | cited task context items |
@@ -132,9 +151,11 @@ No `cols`, `rows`, `unchanged` or speculative payload is returned.
 `tests` discovers test keys; it never runs pytest. `shape` is a compact
 projection of the deterministic `repo_shape` report.
 
-## Compact encoding
+## Compact rows
 
-Rows are arrays in the order of `cols`. Short keys mean:
+Rows are arrays in the order of the op's fixed columns. Columns are stable per
+op; after the first response that includes `c` in a session, the same columns
+are assumed unless `cols:true` asks for them again.
 
 | Short | Long | Notes |
 | --- | --- | --- |
@@ -146,7 +167,7 @@ Rows are arrays in the order of `cols`. Short keys mean:
 | `sig` | signature | definition header or equivalent |
 | `sum` | summary | first docstring/description/title line |
 | `sc` | score | fused retrieval score |
-| `e` | edges | neighbour counts by type |
+| `e` | edges | neighbour counts by type (outline column) |
 | `r` | role | `root` or `child` |
 | `g` | group | impact group (`s`, `f`, `t`) |
 | `d` | depth | impact depth |
@@ -155,8 +176,8 @@ Rows are arrays in the order of `cols`. Short keys mean:
 | `sec` | section | `repo`, `count`, `lang`, `module`, `cmd`, `conv` |
 | `v` | value | shape value |
 
-`verbose: true` expands each row into a named object using the long names. It is
-for debugging, not for normal model context, and it is still budgeted.
+`verbose: true` expands rows into named objects for debugging. It is not part
+of the compact path and is still budgeted.
 
 Node handles are the existing stable keys: `file:<path>`,
 `sym:<path>::<qualname>`, `test:<path>::<qualname>`, `doc:<path>`,
@@ -168,14 +189,15 @@ integer ids.
 One server process holds at most **16** live sessions (LRU). Evicting a
 session counts its unfetched prepared payloads as wasted and its cache entries
 as evicted. A request naming an evicted or unknown handle returns
-`ok: false, err: "unknown or expired session; call hello"`.
+`{"e": "unknown or expired session; call hello"}`.
 
 A session stores:
 
 - the last observed snapshot token and freshness label;
 - up to 1,000 `key -> hash` entries remembered from responses;
-- the last cursor/page position (today the self-contained `next` object is
+- the last cursor/page position (today the self-contained `n` object is
   authoritative; the cursor is session bookkeeping);
+- the fixed columns already sent for each op;
 - the last response token estimate and cumulative estimated tokens;
 - the compact flag and current default budget;
 - an ordered speculation cache (at most 8 entries) and a ledger.
@@ -190,16 +212,17 @@ Callers send outlines/context they already have:
 ```
 
 The engine hashes each item it would serialize. If the key and hash match, the
-item is represented only by its key in `unchanged`:
+item is represented only by its key in `u`:
 
 ```json
-{"ok": true, "op": "outline", "unchanged": ["sym:pkg/core.py::add"], ...}
+{"u": ["sym:pkg/core.py::add"], "t": 10}
 ```
 
 Changed, missing or unknown hashes are reserialized with a fresh `h`. A
 16-hex SHA-256 prefix is used to keep the wire small; a collision would cause
 the client to keep an old payload, so this is a prototype trade-off, not a
-cryptographic identity guarantee.
+cryptographic identity guarantee. A known-only response is dramatically smaller
+than reserializing the outline (10 vs 41 estimated tokens on the fixture).
 
 ## Token budgets
 
@@ -209,33 +232,41 @@ cryptographic identity guarantee.
 - Per-session default from `hello`; a per-call `budget` overrides it.
 - The engine trims the *payload*, never silently overflows. Long text cells are
   shortened first; then lists are cut from the end.
-- A cut list sets `truncated: true`, an `omitted` count and, when a continuation
-  is meaningful, a self-contained `next` request with an `offset`.
-- Optional metadata (`total`, `budget`, `next`) is dropped before rows, and
-  `fresh` is never dropped. If even the metadata cannot fit, the response
-  becomes `{ok, op, fresh, truncated}`.
-- `tok` is computed after the final trim and is the value callers should trust
-  for accounting. Prepared speculative payloads have their own bound
-  (`SPEC_BUDGET = 400` estimated tokens, or the request budget if smaller).
+- A cut list sets `x: true`, an `o` count and, when a continuation is
+  meaningful, a complete `n` request with an `offset`.
+- Optional metadata (`n`, `total`) is dropped before rows; `t` is computed after
+  the final trim and is the value callers should trust for accounting.
+- Prepared speculative payloads have their own bound (`SPEC_BUDGET = 400`
+  estimated tokens, or the request budget if smaller).
 
 ## Speculation lifecycle
 
 When a response has `spec: true`:
 
 1. The engine derives up to six candidate requests from the returned keys:
-   callers and callees (`expand`), covering tests (`tests`) and an outline
-   (`outline`).
+   outline, callers and callees (`expand`), and covering tests (`tests`).
 2. It skips a candidate that repeats the current request.
 3. It prepares **at most two** candidates synchronously, each with a bounded
    budget, before returning. They are stored in the session cache and returned
-   as handles.
-4. The response reports `spec: ["q1","q2"]`, `ready: 2`, `pending: N` and the
-   session ledger `sl`.
+   as compact handles:
+
+   ```json
+   {"q": {"h": ["q1", "q2"], "r": 2, "p": 4}, "t": 130}
+   ```
+
+   `q.h` handles, `q.r` ready count, `q.p` pending suggestions.
+
+4. The full ledger is **not** sent by default. `stats: true` adds:
+
+   ```json
+   {"st": {"prepared": 2, "fetched": 0, "wasted": 0, "evicted": 0}}
+   ```
 
 `fetch` (one handle, or up to four) returns the prepared payload without
 repeating graph work. The entry is removed after the first fetch. A handle that
 is unknown, evicted or prepared under a different snapshot is refused. If the
 snapshot becomes stale or unknown, all prepared entries are invalidated.
+`stats: true` on `fetch` returns the ledger.
 
 Ledger counters:
 
@@ -261,9 +292,11 @@ allow_project_adapters=False)`. Project adapters are **not** loaded: freshness
 must not execute project code. If the working tree, HEAD or root differs from
 the snapshot, freshness is `stale`; if the check cannot be completed (no git,
 no recorded digest/root/head, unknown adapter inputs, digest error), it is
-`unknown`. Neither state answers with structural rows. A session snapshot token
-change invalidates prepared speculation and updates the token on the next fresh
-answer.
+`unknown`. Neither state answers with structural rows. A successful response
+therefore implies the snapshot was fresh at the time of the call; the label is
+not repeated. Stale/unknown responses return `e`, `f`, `s` and no payload. A
+session snapshot token change invalidates prepared speculation and updates the
+token on the next fresh answer.
 
 `shape` reuses the deterministic `repo_shape` report; it is still gated by the
 same freshness check.
@@ -299,6 +332,23 @@ same freshness check.
 | minimum accepted budget | 64 |
 | prepared payload budget | 400 (or the request budget, if smaller) |
 | rows requested by an op | 200 |
+
+## Measured wire size
+
+From `scripts/measure_graph_engine.py` on the tiny fixture:
+
+| Call | Estimated tokens |
+| --- | ---: |
+| `hello` (default) | 33 |
+| `find` + spec | 130 |
+| `fetch` two prepared handles | 169 |
+| `outline` with matching `known` | 10 |
+
+Single-turn task total: 374 tokens / 4 round-trips, versus 637 / 4 for the
+stateless graph surface and 1,707 / 5 for the `dev_*` sequence. Multi-turn
+(discover, known outline, follow-up impact): 578 / 5 versus 684 / 5 for the
+stateless graph sequence. See
+`docs/results/graph_engine_prototype_2026-11-25.md`.
 
 ## Open work
 

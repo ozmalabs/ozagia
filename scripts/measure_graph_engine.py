@@ -8,6 +8,10 @@ three surfaces and reports estimated tokens and round-trips:
 * the graph surface (`find`, `node`, `expand`, `impact`);
 * the engine surface (`graph` with a session, spec and fetch).
 
+A second, multi-turn run exercises the stateful path: a known outline, a
+reused session and a follow-up impact, against the same stateless graph
+sequence.
+
 This is an instrumented comparison of wire size and call count.  It is not a
 model-task evaluation and does not claim that fewer tokens produce a better
 agent outcome.
@@ -28,6 +32,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
 
+from ozagia.core.graph_engine import OUTLINE_COLS  # noqa: E402
 from ozagia.core.memory import DevMemory, build_index  # noqa: E402
 from ozagia.integrations.mcp.server import DevMemoryServer  # noqa: E402
 
@@ -79,6 +84,7 @@ pytest -q
 """
 TASK = ("Trace how add is used: find the symbol, inspect its outline and "
         "callers, and list the tests that cover it.")
+KEY = "sym:pkg/core.py::add"
 
 
 def _write(root: Path, rel: str, text: str) -> None:
@@ -122,48 +128,148 @@ def _call(server: DevMemoryServer, tool: str, **arguments: Any) -> dict[str, Any
     return json.loads(text)
 
 
+def _tokens(payload: Any) -> int:
+    return (len(json.dumps(payload)) + 3) // 4
+
+
 def _measure(label: str, calls: list[tuple[str, dict[str, Any]]],
              server: DevMemoryServer) -> dict[str, Any]:
     rows = []
-    total_chars = 0
+    total = 0
     for name, args in calls:
         payload = _call(server, name, **args)
-        chars = len(json.dumps(payload))
-        total_chars += chars
-        rows.append({"call": name, "arguments": args,
-                     "tokens": (chars + 3) // 4})
+        tokens = _tokens(payload)
+        total += tokens
+        rows.append({"call": name, "arguments": args, "tokens": tokens})
     return {"surface": label, "round_trips": len(calls),
-            "estimated_tokens": (total_chars + 3) // 4, "calls": rows}
+            "estimated_tokens": total, "calls": rows}
+
+
+def _fetch_outline(payload: dict[str, Any]) -> tuple[str, str] | None:
+    items = payload.get("it") or [payload]
+    for item in items:
+        if item.get("qo") != "outline":
+            continue
+        cols = item.get("c") or OUTLINE_COLS
+        for row in item.get("r") or []:
+            try:
+                key = row[cols.index("k")]
+                digest = row[cols.index("h")]
+            except (ValueError, IndexError):
+                continue
+            if key and digest:
+                return str(key), str(digest)
+    return None
 
 
 def _measure_engine(server: DevMemoryServer) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
-    total_chars = 0
+    total = 0
     handles: list[str] = []
 
     def call(arguments: dict[str, Any]) -> dict[str, Any]:
-        nonlocal total_chars
+        nonlocal total
         payload = _call(server, "graph", **arguments)
-        chars = len(json.dumps(payload))
-        total_chars += chars
+        tokens = _tokens(payload)
+        total += tokens
         rows.append({"call": "graph", "op": arguments.get("op"),
-                     "tokens": (chars + 3) // 4})
+                     "tokens": tokens})
         return payload
 
     hello = call({"op": "hello"})
     sid = hello["sid"]
     find = call({"op": "find", "session": sid, "q": "add", "spec": True,
                  "budget": 700})
-    handles = list(find.get("spec") or [])
+    handles = list((find.get("q") or {}).get("h") or [])
     if handles:
         call({"op": "fetch", "session": sid, "fetch": handles, "budget": 700})
-    call({"op": "tests", "session": sid, "key": "sym:pkg/core.py::add",
-          "budget": 700})
+    call({"op": "tests", "session": sid, "key": KEY, "budget": 700})
     result = {"surface": "engine (1 tool)", "round_trips": len(rows),
-              "estimated_tokens": (total_chars + 3) // 4, "calls": rows}
-    result["spec"] = {"handles": handles, "ready": find.get("ready"),
-                      "pending": find.get("pending")}
+              "estimated_tokens": total, "calls": rows}
+    result["spec"] = {"handles": handles,
+                      "ready": (find.get("q") or {}).get("r"),
+                      "pending": (find.get("q") or {}).get("p")}
     return result
+
+
+def _turn(label: str, calls: list[dict[str, Any]]) -> dict[str, Any]:
+    return {"turn": label, "tokens": sum(call["tokens"] for call in calls),
+            "round_trips": len(calls), "calls": calls}
+
+
+def _measure_engine_turns(server: DevMemoryServer) -> dict[str, Any]:
+    turns: list[dict[str, Any]] = []
+    total = 0
+
+    def call(arguments: dict[str, Any]) -> dict[str, Any]:
+        nonlocal total
+        payload = _call(server, "graph", **arguments)
+        tokens = _tokens(payload)
+        total += tokens
+        return {"call": "graph", "op": arguments.get("op"), "tokens": tokens,
+                "payload": payload}
+
+    first = []
+    hello = call({"op": "hello"})
+    first.append({k: v for k, v in hello.items() if k != "payload"})
+    sid = hello["payload"]["sid"]
+    find = call({"op": "find", "session": sid, "q": "add", "spec": True,
+                 "budget": 700})
+    first.append({k: v for k, v in find.items() if k != "payload"})
+    handles = list((find["payload"].get("q") or {}).get("h") or [])
+    fetch = None
+    if handles:
+        fetch = call({"op": "fetch", "session": sid, "fetch": handles,
+                      "budget": 700})
+        first.append({k: v for k, v in fetch.items() if k != "payload"})
+    discovered = _fetch_outline(fetch["payload"]) if fetch else None
+
+    second = []
+    if discovered:
+        known_key, digest = discovered
+        same = call({"op": "outline", "session": sid, "key": known_key,
+                     "known": [{"key": known_key, "hash": digest}]})
+        second.append({k: v for k, v in same.items() if k != "payload"})
+
+    third = []
+    impact = call({"op": "impact", "session": sid, "keys": [KEY],
+                   "depth": 2, "budget": 700})
+    third.append({k: v for k, v in impact.items() if k != "payload"})
+
+    turns.append(_turn("discover", first))
+    if second:
+        turns.append(_turn("known outline", second))
+    turns.append(_turn("follow-up impact/tests", third))
+    return {"surface": "engine (session)", "turns": turns,
+            "round_trips": sum(turn["round_trips"] for turn in turns),
+            "estimated_tokens": total,
+            "discovered_outline": bool(discovered)}
+
+
+def _measure_graph_turns(server: DevMemoryServer) -> dict[str, Any]:
+    first_calls = [
+        ("find", {"query": "add", "limit": 10}),
+        ("node", {"key": KEY, "view": "outline"}),
+        ("expand", {"keys": [KEY], "edges": ["callers"], "depth": 1}),
+    ]
+    second_calls = [("node", {"key": KEY, "view": "outline"})]
+    third_calls = [("impact", {"keys": [KEY], "depth": 2})]
+    turns = []
+    total = 0
+    for label, calls in (("discover", first_calls),
+                         ("repeat outline", second_calls),
+                         ("follow-up impact/tests", third_calls)):
+        rows = []
+        for name, args in calls:
+            payload = _call(server, name, **args)
+            rows.append({"call": name, "arguments": args,
+                         "tokens": _tokens(payload)})
+        turn = _turn(label, rows)
+        total += turn["tokens"]
+        turns.append(turn)
+    return {"surface": "graph (stateless)", "turns": turns,
+            "round_trips": sum(turn["round_trips"] for turn in turns),
+            "estimated_tokens": total}
 
 
 def main() -> int:
@@ -184,10 +290,9 @@ def main() -> int:
         ]
         graph_calls = [
             ("find", {"query": "add", "limit": 10}),
-            ("node", {"key": "sym:pkg/core.py::add", "view": "outline"}),
-            ("expand", {"keys": ["sym:pkg/core.py::add"],
-                        "edges": ["callers"], "depth": 1}),
-            ("impact", {"keys": ["sym:pkg/core.py::add"], "depth": 2}),
+            ("node", {"key": KEY, "view": "outline"}),
+            ("expand", {"keys": [KEY], "edges": ["callers"], "depth": 1}),
+            ("impact", {"keys": [KEY], "depth": 2}),
         ]
         engine_result = _measure_engine(engine)
         results = [
@@ -195,6 +300,10 @@ def main() -> int:
             _measure("graph (8 verbs)", graph_calls, graph),
             engine_result,
         ]
+        multi_turn = {
+            "engine": _measure_engine_turns(engine),
+            "graph": _measure_graph_turns(graph),
+        }
         out = {
             "task": TASK,
             "fixture": {"source_files": 4, "test_files": 2},
@@ -202,6 +311,7 @@ def main() -> int:
                      "Tokens are len(JSON)/4 estimates."),
             "engine_spec": engine_result.get("spec"),
             "results": results,
+            "multi_turn": multi_turn,
         }
         print(json.dumps(out, indent=2))
         return 0

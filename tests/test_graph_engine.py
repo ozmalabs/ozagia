@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 
 from ozagia.core.graph_engine import (
+    CAP_MASK,
     DEFAULT_BUDGET,
     ENGINE_TOOL_NAME,
     MAX_BUDGET,
@@ -23,7 +24,9 @@ from ozagia.core.graph_engine import (
     PROTOCOL,
     SPEC_BUDGET,
     GraphEngine,
+    _short_keys,
     description_tokens,
+    estimate_tokens,
 )
 from ozagia.core.memory import DevMemory, build_index
 from ozagia.integrations.mcp.server import DevMemoryServer
@@ -112,7 +115,7 @@ def engine(memory: DevMemory) -> GraphEngine:
 
 def _hello(engine: GraphEngine, **args: Any) -> dict[str, Any]:
     result = engine.handle({"op": "hello", **args})
-    assert result["ok"] is True, result
+    assert "e" not in result, result
     return result
 
 
@@ -129,31 +132,43 @@ def _call(server: DevMemoryServer, name: str, **args: Any) -> Any:
     return json.loads(reply["result"]["content"][0]["text"])
 
 
-def _cell(result: dict[str, Any], row: list[Any], column: str) -> Any:
-    return row[result["cols"].index(column)]
+def _columns(result: dict[str, Any], engine: GraphEngine,
+             sid: str, op: str) -> list[str]:
+    return list(result.get("c") or engine.sessions[sid].cols[op])
+
+
+def _cell(result: dict[str, Any], rows: list[Any], row: list[Any],
+          column: str, engine: GraphEngine, sid: str, op: str) -> Any:
+    cols = _columns(result, engine, sid, op)
+    return row[cols.index(column)]
 
 
 # --------------------------------------------------------------------------- #
 # handshake and sessions
 # --------------------------------------------------------------------------- #
-def test_hello_handshake_and_session_isolation(engine: GraphEngine) -> None:
+def test_hello_is_minimal_and_detail_is_opt_in(engine: GraphEngine) -> None:
     first = _hello(engine, budget=999_999)
     second = _hello(engine)
-    assert first["proto"] == PROTOCOL
+    assert first["p"] == PROTOCOL
+    assert first["v"] == "2.0"
     assert first["sid"] != second["sid"]
-    assert first["snap"]["fresh"] == "fresh"
-    assert first["snap"]["id"]
-    assert "find" in first["caps"] and "fetch" in first["caps"]
-    assert first["budget"]["def"] == DEFAULT_BUDGET
-    assert first["budget"]["max"] == MAX_BUDGET
-    assert first["budget"]["cur"] == MAX_BUDGET
-    assert second["budget"]["cur"] == DEFAULT_BUDGET
-    assert first["sl"] == {"prepared": 0, "fetched": 0,
-                           "wasted": 0, "evicted": 0}
+    assert first["f"] == "fresh" and first["s"]
+    assert first["b"] == [DEFAULT_BUDGET, MAX_BUDGET]
+    assert first["c"] == CAP_MASK
+    assert first["t"] < 50 and second["t"] < 50
+    assert "ops" not in first and "st" not in first
+    assert "sl" not in first and "snap" not in first
+    detail = _hello(engine, caps=True, budget=MAX_BUDGET)
+    assert set(detail["ops"]) == set(OPS)
+    assert set(detail["ft"]) == {"compact", "known", "spec", "fetch"}
+    assert detail["bd"] == {"d": DEFAULT_BUDGET, "m": MAX_BUDGET,
+                            "c": MAX_BUDGET}
+    assert detail["st"] == {"prepared": 0, "fetched": 0,
+                            "wasted": 0, "evicted": 0}
     # Both handles stay isolated and usable.
     one = engine.handle({"op": "find", "session": first["sid"], "q": "add"})
     two = engine.handle({"op": "find", "session": second["sid"], "q": "add"})
-    assert one["ok"] and two["ok"]
+    assert "e" not in one and "e" not in two
     assert first["sid"] != second["sid"]
 
 
@@ -161,29 +176,35 @@ def test_sessions_are_bounded_and_evicted(engine: GraphEngine) -> None:
     handles = [_hello(engine)["sid"] for _ in range(MAX_SESSIONS + 3)]
     assert len(engine.sessions) == MAX_SESSIONS
     expired = engine.handle({"op": "find", "session": handles[0], "q": "add"})
-    assert expired["ok"] is False
-    assert "unknown or expired session" in expired["err"]
+    assert "e" in expired
+    assert "unknown or expired session" in expired["e"]
     assert engine.stats()["totals"]["evicted_sessions"] == 3
     # The newest handle still works.
-    assert engine.handle({"op": "find", "session": handles[-1],
-                          "q": "add"})["ok"] is True
+    assert "e" not in engine.handle({"op": "find", "session": handles[-1],
+                                     "q": "add"})
 
 
 # --------------------------------------------------------------------------- #
-# compact rows and hard budgets
+# compact rows, column reuse and hard budgets
 # --------------------------------------------------------------------------- #
-def test_compact_rows_and_hard_budget(engine: GraphEngine) -> None:
+def test_compact_rows_columns_and_hard_budget(engine: GraphEngine) -> None:
     sid = _hello(engine)["sid"]
     result = engine.handle({"op": "find", "session": sid, "q": "add",
                             "budget": 80})
-    assert result["ok"] is True
-    assert result["tok"] <= 80
-    assert result["cols"] == ["k", "n", "f", "sp", "sig", "sum", "sc"]
-    assert all(isinstance(row, list) for row in result["rows"])
+    assert "e" not in result
+    assert result["t"] <= 80
+    assert result["c"] == ["k", "n", "f", "sp", "sig", "sum", "sc"]
+    assert all(isinstance(row, list) for row in result.get("r", []))
+    # Fixed columns are sent once per session unless requested again.
+    second = engine.handle({"op": "find", "session": sid, "q": "add"})
+    assert "c" not in second
+    again = engine.handle({"op": "find", "session": sid, "q": "add",
+                           "cols": True})
+    assert again["c"] == ["k", "n", "f", "sp", "sig", "sum", "sc"]
     verbose = engine.handle({"op": "find", "session": sid, "q": "add",
                              "verbose": True, "budget": 1200})
-    assert verbose["rows"] and isinstance(verbose["rows"][0], dict)
-    assert "key" in verbose["rows"][0]
+    assert verbose["r"] and isinstance(verbose["r"][0], dict)
+    assert "key" in verbose["r"][0]
     for budget in (64, 80, 120):
         for request in (
             {"op": "find", "q": "add", "limit": 20},
@@ -192,23 +213,33 @@ def test_compact_rows_and_hard_budget(engine: GraphEngine) -> None:
         ):
             reply = engine.handle({"session": sid, "budget": budget,
                                    **request})
-            assert reply["tok"] <= budget, (budget, request, reply)
+            assert reply["t"] <= budget, (budget, request, reply)
+
+
+def test_stats_are_opt_in(engine: GraphEngine) -> None:
+    sid = _hello(engine)["sid"]
+    plain = engine.handle({"op": "find", "session": sid, "q": "add"})
+    assert "st" not in plain
+    with_stats = engine.handle({"op": "find", "session": sid, "q": "add",
+                                "stats": True})
+    assert with_stats["st"] == {"prepared": 0, "fetched": 0,
+                                "wasted": 0, "evicted": 0}
 
 
 def test_page_trimming_returns_next(engine: GraphEngine) -> None:
     sid = _hello(engine)["sid"]
     first = engine.handle({"op": "find", "session": sid, "q": "pkg",
                            "limit": 20, "budget": 100})
-    assert first["ok"]
-    assert first["tok"] <= 100
-    assert first["truncated"] is True
-    assert first["omitted"] > 0
-    assert first["next"]["op"] == "find"
-    assert first["next"]["offset"] == len(first["rows"])
-    second = engine.handle({**first["next"], "session": sid, "budget": 100})
-    assert second["ok"] and second["tok"] <= 100
-    assert second["rows"]
-    assert second["rows"][0] != first["rows"][0]
+    assert "e" not in first
+    assert first["t"] <= 100
+    assert first["x"] is True
+    assert first["o"] > 0
+    assert first["n"]["op"] == "find"
+    assert first["n"]["offset"] == len(first["r"])
+    second = engine.handle({**first["n"], "session": sid, "budget": 100})
+    assert "e" not in second and second["t"] <= 100
+    assert second["r"]
+    assert second["r"][0] != first["r"][0]
 
 
 # --------------------------------------------------------------------------- #
@@ -219,18 +250,20 @@ def test_known_outline_is_a_handle_and_change_reserializes(
     sid = _hello(engine)["sid"]
     key = "sym:pkg/core.py::add"
     first = engine.handle({"op": "outline", "session": sid, "key": key})
-    assert first["rows"]
-    digest = _cell(first, first["rows"][0], "h")
+    assert first["r"]
+    digest = _cell(first, first["r"], first["r"][0], "h", engine, sid,
+                   "outline")
     same = engine.handle({
         "op": "outline", "session": sid, "key": key,
         "known": [{"key": key, "hash": digest}]})
-    assert same.get("rows", []) == []
-    assert same["unchanged"] == [key]
+    assert same.get("r", []) == []
+    assert same["u"] == [key]
+    assert same["t"] < first["t"]
     changed = engine.handle({
         "op": "outline", "session": sid, "key": key,
         "known": [{"key": key, "hash": "not-the-hash"}]})
-    assert changed["rows"]
-    assert key not in changed.get("unchanged", [])
+    assert changed["r"]
+    assert key not in changed.get("u", [])
 
 
 def test_known_context_is_a_handle(engine: GraphEngine) -> None:
@@ -238,15 +271,16 @@ def test_known_context_is_a_handle(engine: GraphEngine) -> None:
     first = engine.handle({"op": "context", "session": sid,
                            "task": "add two numbers", "limit": 8,
                            "budget": 2000})
-    assert first["rows"], first
-    key = _cell(first, first["rows"][0], "k")
-    digest = _cell(first, first["rows"][0], "h")
+    assert first["r"], first
+    key = _cell(first, first["r"], first["r"][0], "k", engine, sid, "context")
+    digest = _cell(first, first["r"], first["r"][0], "h", engine, sid,
+                   "context")
     same = engine.handle({
         "op": "context", "session": sid, "task": "add two numbers",
         "limit": 8, "budget": 2000, "known": [{"key": key, "hash": digest}]})
-    assert key in same.get("unchanged", [])
-    assert all(row[same["cols"].index("k")] != key
-               for row in same.get("rows", []))
+    assert key in same.get("u", [])
+    assert all(row[same["c"].index("k")] != key
+               for row in same.get("r", []) if "c" in same)
 
 
 # --------------------------------------------------------------------------- #
@@ -255,37 +289,39 @@ def test_known_context_is_a_handle(engine: GraphEngine) -> None:
 def test_read_operations_against_fixture(engine: GraphEngine) -> None:
     sid = _hello(engine)["sid"]
     found = engine.handle({"op": "find", "session": sid, "q": "add"})
-    assert found["rows"]
-    key = _cell(found, found["rows"][0], "k")
+    assert found["r"]
+    key = _cell(found, found["r"], found["r"][0], "k", engine, sid, "find")
     assert key == "sym:pkg/core.py::add"
-    span = _cell(found, found["rows"][0], "sp")
+    span = _cell(found, found["r"], found["r"][0], "sp", engine, sid, "find")
     assert span and span[0] > 0
 
     outline = engine.handle({"op": "outline", "session": sid, "key": key})
-    assert _cell(outline, outline["rows"][0], "k") == key
-    assert _cell(outline, outline["rows"][0], "f") == "pkg/core.py"
+    assert _cell(outline, outline["r"], outline["r"][0], "k", engine, sid,
+                 "outline") == key
+    assert _cell(outline, outline["r"], outline["r"][0], "f", engine, sid,
+                 "outline") == "pkg/core.py"
 
     expanded = engine.handle({"op": "expand", "session": sid, "keys": [key],
                               "edges": ["callers"], "depth": 1})
-    assert expanded["ok"] and expanded["rows"]
-    assert any("double" in str(row) for row in expanded["rows"])
+    assert "e" not in expanded and expanded["r"]
+    assert any("double" in str(row) for row in expanded["r"])
 
     impact = engine.handle({"op": "impact", "session": sid, "keys": [key],
                             "depth": 2})
-    assert impact["ok"] and impact["counts"]
-    assert impact["rows"]
+    assert "e" not in impact and impact["ct"]
+    assert impact["r"]
 
     tests = engine.handle({"op": "tests", "session": sid, "key": key})
-    assert tests["ok"] and tests["rows"]
-    assert any("test_add" in str(row) for row in tests["rows"])
+    assert "e" not in tests and tests["r"]
+    assert any("test_add" in str(row) for row in tests["r"])
 
     context = engine.handle({"op": "context", "session": sid,
                              "task": "add two numbers", "budget": 2000})
-    assert context["ok"] and context["rows"]
+    assert "e" not in context and context["r"]
 
     shape = engine.handle({"op": "shape", "session": sid})
-    assert shape["ok"] and shape["rows"]
-    assert any("repo" == row[0] for row in shape["rows"])
+    assert "e" not in shape and shape["r"]
+    assert any("repo" == row[0] for row in shape["r"])
 
 
 def test_stale_snapshot_withholds_structure(repo: Path,
@@ -295,10 +331,10 @@ def test_stale_snapshot_withholds_structure(repo: Path,
     (repo / "pkg" / "core.py").write_text(CORE + "\n# changed\n",
                                           encoding="utf-8")
     result = engine.handle({"op": "find", "session": sid, "q": "add"})
-    assert result["ok"] is False
-    assert result["fresh"] == "stale"
-    assert result["withheld"] is True
-    assert "rows" not in result and "cols" not in result
+    assert "e" in result
+    assert result["f"] == "stale"
+    assert result["s"]
+    assert "r" not in result and "c" not in result
 
 
 def test_unknown_snapshot_withholds_structure(
@@ -308,10 +344,9 @@ def test_unknown_snapshot_withholds_structure(
                         lambda: ("unknown", "unknown-snapshot"))
     result = engine.handle({"op": "outline", "session": sid,
                             "key": "sym:pkg/core.py::add"})
-    assert result["ok"] is False
-    assert result["fresh"] == "unknown"
-    assert result["withheld"] is True
-    assert "rows" not in result
+    assert "e" in result
+    assert result["f"] == "unknown"
+    assert "r" not in result
 
 
 # --------------------------------------------------------------------------- #
@@ -321,27 +356,28 @@ def test_speculation_prepares_fetches_and_accounts(engine: GraphEngine) -> None:
     sid = _hello(engine)["sid"]
     first = engine.handle({"op": "find", "session": sid, "q": "add",
                            "spec": True, "budget": 1200})
-    assert first["ok"]
-    assert len(first["spec"]) <= 2
-    assert first["ready"] == len(first["spec"])
-    assert first["sl"]["prepared"] == first["ready"]
-    assert first["pending"] >= 0
-    if not first["spec"]:
+    assert "e" not in first
+    handles = first["q"]["h"]
+    assert len(handles) <= 2
+    assert first["q"]["r"] == len(handles)
+    assert "st" not in first
+    if not handles:
         pytest.skip("fixture produced no speculation candidates")
     session = engine.sessions[sid]
-    handle = first["spec"][0]
+    handle = handles[0]
     entry = session.spec[handle]
-    assert entry["result"]["tok"] <= SPEC_BUDGET
+    assert estimate_tokens(_short_keys(entry["result"])) <= SPEC_BUDGET
     fetched = engine.handle({"op": "fetch", "session": sid,
-                             "fetch": [handle], "budget": 400})
-    assert fetched["ok"] is True
+                             "fetch": [handle], "budget": 400,
+                             "stats": True})
+    assert "e" not in fetched
     assert fetched["h"] == handle
-    assert fetched["tok"] <= 400
-    assert fetched["sl"]["fetched"] == 1
+    assert fetched["t"] <= 400
+    assert fetched["st"]["fetched"] == 1
     # Fetching does not repeat graph work; the prepared payload is returned.
-    assert fetched.get("rows") is not None or fetched.get("qop")
+    assert fetched.get("r") is not None or fetched.get("qo")
     again = engine.handle({"op": "fetch", "session": sid, "h": handle})
-    assert again["ok"] is False and "unknown or expired" in again["err"]
+    assert "e" in again and "unknown or expired" in again["e"]
 
 
 def test_speculation_bound_evicts_and_records_waste(
@@ -351,7 +387,7 @@ def test_speculation_bound_evicts_and_records_waste(
     for _ in range(6):
         result = engine.handle({"op": "find", "session": sid, "q": "add",
                                 "spec": True, "budget": 1200})
-        prepared += len(result["spec"])
+        prepared += len(result["q"]["h"])
         assert len(engine.sessions[sid].spec) <= MAX_SPEC
     session = engine.sessions[sid]
     assert session.ledger["prepared"] == prepared
@@ -373,7 +409,7 @@ def test_mcp_engine_surface_exposes_only_graph(memory: DevMemory) -> None:
     assert set(schema["properties"]["op"]["enum"]) == set(OPS)
     assert description_tokens() < 200
     hello = _call(server, "graph", op="hello")
-    assert hello["ok"] and hello["sid"] and hello["snap"]["fresh"] == "fresh"
+    assert hello["sid"] and hello["f"] == "fresh" and hello["t"] < 50
     rejected = _rpc(server, "tools/call",
                     {"name": "dev_context", "arguments": {"task": "x"}})
     assert rejected["error"]["code"] == -32602
@@ -426,7 +462,7 @@ def test_engine_has_no_write_or_execution_op(repo: Path,
         ("shape", {}),
     ):
         result = engine.handle({"op": op, "session": sid, **extra})
-        assert result["ok"], (op, result)
+        assert "e" not in result, (op, result)
     after = {
         path.relative_to(repo).as_posix(): path.read_bytes()
         for path in repo.rglob("*") if path.is_file()
@@ -435,5 +471,5 @@ def test_engine_has_no_write_or_execution_op(repo: Path,
     assert before == after
     for op in ("edit", "create", "check", "refresh"):
         rejected = engine.handle({"op": op, "session": sid})
-        assert rejected["ok"] is False
-        assert "unknown op" in rejected["err"]
+        assert "e" in rejected
+        assert "unknown op" in rejected["e"]

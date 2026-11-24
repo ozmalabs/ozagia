@@ -12,7 +12,7 @@ It deliberately has no edit, create, check, refresh or shell operation.  A
 result is withheld whenever the snapshot is stale or its freshness cannot be
 verified.
 
-Wire version: ``ozagia.graph_engine/1``.  See
+Wire version: ``ozagia.graph_engine/2``.  See
 ``docs/plans/2026-11-25_graph_engine_protocol.md`` and
 ``docs/graph_engine.md``.
 
@@ -31,8 +31,8 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
-PROTOCOL = "ozagia.graph_engine/1"
-PROTOCOL_VERSION = "1.0"
+PROTOCOL = "ozagia.graph_engine/2"
+PROTOCOL_VERSION = "2.0"
 DEFAULT_BUDGET = 1200
 MAX_BUDGET = 8000
 MIN_BUDGET = 64
@@ -46,6 +46,14 @@ MAX_ROWS = 200
 OPS = ("hello", "find", "outline", "expand", "impact", "tests", "context",
        "shape", "fetch")
 FEATURES = ("compact", "known", "spec", "fetch")
+CAP_BITS = {"find": 1, "outline": 2, "expand": 4, "impact": 8, "tests": 16,
+            "context": 32, "shape": 64, "fetch": 128}
+CAP_MASK = sum(CAP_BITS.values())
+_SHORT_KEYS = {
+    "rows": "r", "cols": "c", "unchanged": "u", "truncated": "x",
+    "omitted": "o", "next": "n", "spec": "q", "edges": "ed",
+    "counts": "ct", "items": "it", "qop": "qo",
+}
 
 # Short column names keep the tabular payload small.  ``_COL_NAMES`` is only
 # used by the verbose debugging view.
@@ -99,6 +107,10 @@ ENGINE_TOOLS: list[dict[str, Any]] = [{
         "budget": {"type": "integer"},
         "compact": {"type": "boolean"},
         "verbose": {"type": "boolean"},
+        "caps": {"type": "boolean"},
+        "detail": {"type": "boolean"},
+        "stats": {"type": "boolean"},
+        "cols": {"type": "boolean"},
         "known": {"type": "array", "items": {
             "type": "object",
             "properties": {"key": {"type": "string"},
@@ -140,7 +152,9 @@ def _json_size(value: Any) -> int:
 
 
 def _clean(value: dict[str, Any]) -> dict[str, Any]:
-    return {k: v for k, v in value.items() if v not in (None, "", [], {})}
+    return {k: v for k, v in value.items()
+            if v is not None and v is not False
+            and v != "" and v != [] and v != {}}
 
 
 def _kind(key: str) -> str:
@@ -193,6 +207,16 @@ def _compact(items: list[dict[str, Any]], cols: list[str]) -> list[list[Any]]:
     return [_row(cols, item) for item in items]
 
 
+def _short_keys(value: Any) -> Any:
+    """Rename response metadata to its short wire spelling, recursively."""
+    if isinstance(value, dict):
+        return {_SHORT_KEYS.get(str(key), str(key)): _short_keys(item)
+                for key, item in value.items()}
+    if isinstance(value, list):
+        return [_short_keys(item) for item in value]
+    return value
+
+
 # --------------------------------------------------------------------------- #
 # Session
 # --------------------------------------------------------------------------- #
@@ -204,6 +228,7 @@ class EngineSession:
     budget: int = DEFAULT_BUDGET
     compact: bool = True
     cursor: dict[str, Any] = field(default_factory=dict)
+    cols: dict[str, list[str]] = field(default_factory=dict)
     known: OrderedDict[str, str] = field(default_factory=OrderedDict)
     tokens: int = 0
     spec: OrderedDict[str, dict[str, Any]] = field(default_factory=OrderedDict)
@@ -236,30 +261,29 @@ class GraphEngine:
     def handle(self, args: dict[str, Any]) -> dict[str, Any]:
         """Answer one engine request. Never raises for a bad request."""
         if not isinstance(args, dict):
-            return self._error("", "arguments must be an object")
+            return self._error("arguments must be an object")
         op = str(args.get("op") or "").strip()
         if op not in OPS:
-            return self._error(op, f"unknown op {op!r}; known: {list(OPS)}")
+            return self._error(f"unknown op {op!r}; known: {list(OPS)}")
         if op == "hello":
             return self._hello(args)
         session = self._session(args.get("session"))
         if session is None:
-            return self._error(op, "unknown or expired session; call hello")
+            return self._error("unknown or expired session; call hello")
         fresh, snap = self._guard(session)
         if fresh != "fresh":
-            return self._withheld(op, snap, fresh)
+            return self._withheld(snap, fresh)
         budget = _clamp(args.get("budget", session.budget), MIN_BUDGET,
                         MAX_BUDGET, session.budget)
         session.budget = budget
         session.compact = bool(args.get("compact", session.compact))
         if op == "fetch":
-            result = self._enforce_budget(
-                self._fetch(args, session, snap, budget), budget)
+            result = self._fetch(args, session, snap, budget)
         else:
             result = self._execute(op, args, session, snap, budget,
                                    allow_spec=True)
-        result["tok"] = estimate_tokens(result)
-        session.tokens += int(result["tok"])
+        result["t"] = estimate_tokens(result)
+        session.tokens += int(result["t"])
         return result
 
     def stats(self) -> dict[str, Any]:
@@ -287,27 +311,31 @@ class GraphEngine:
                                 MIN_BUDGET, MAX_BUDGET, DEFAULT_BUDGET)
         session.compact = bool(args.get("compact", True))
         result: dict[str, Any] = {
-            "ok": True,
-            "op": "hello",
-            "proto": PROTOCOL,
-            "ver": PROTOCOL_VERSION,
+            "p": PROTOCOL,
+            "v": PROTOCOL_VERSION,
             "sid": session.id,
-            "caps": list(OPS[1:]),
-            "feats": list(FEATURES),
-            "snap": {
-                "id": snap,
-                "fresh": fresh,
-                "head": (self._last_freshness or {}).get("snapshot_head"),
-                "gen": (self._last_freshness or {}).get("generated_at"),
-                "nodes": len(self.mem.nodes),
-                "edges": len(self.mem.edges),
-            },
-            "budget": {"def": DEFAULT_BUDGET, "max": MAX_BUDGET,
-                       "cur": session.budget},
-            "compact": session.compact,
-            "sl": self._ledger(session),
+            "s": snap,
+            "f": fresh,
+            "b": [DEFAULT_BUDGET, MAX_BUDGET],
+            "c": CAP_MASK,
         }
-        result["tok"] = estimate_tokens(result)
+        if args.get("caps") is True or args.get("detail") is True:
+            state = self._last_freshness or {}
+            result["ops"] = list(OPS)
+            result["ft"] = list(FEATURES)
+            result["bd"] = {"d": DEFAULT_BUDGET, "m": MAX_BUDGET,
+                            "c": session.budget}
+            result["sn"] = {
+                "h": state.get("snapshot_head"),
+                "g": state.get("generated_at"),
+                "n": len(self.mem.nodes),
+                "e": len(self.mem.edges),
+            }
+            result["compact"] = session.compact
+            result["st"] = self._ledger(session)
+        if args.get("stats") is True:
+            result.setdefault("st", self._ledger(session))
+        result["t"] = estimate_tokens(result)
         return result
 
     def _new_session(self) -> EngineSession:
@@ -406,23 +434,25 @@ class GraphEngine:
 
     # -- dispatch ----------------------------------------------------------- #
     def _execute(self, op: str, args: dict[str, Any], session: EngineSession,
-                 snap: str, budget: int, *, allow_spec: bool) -> dict[str, Any]:
+                 snap: str, budget: int, *, allow_spec: bool,
+                 compact: bool = True,
+                 cache_cols: bool = True) -> dict[str, Any]:
         try:
             payload = self._op(op, args, session)
         except (EngineError, ValueError) as exc:
-            return self._error(op, str(exc), snap=snap)
+            return self._error(str(exc), snap=snap)
         except Exception as exc:  # noqa: BLE001 - reported, never raised
-            return self._error(op, f"{type(exc).__name__}: {exc}", snap=snap)
+            return self._error(f"{type(exc).__name__}: {exc}", snap=snap)
         keys = list(payload.pop("__keys", []) or [])
         next_args = payload.pop("__next", None)
         offset = max(0, int(args.get("offset", 0) or 0))
         total_rows = len(payload.get("rows") or [])
-        result: dict[str, Any] = {"ok": True, "op": op, "snap": snap,
-                                  "fresh": "fresh", "budget": budget}
-        result.update(payload)
+        result: dict[str, Any] = dict(payload)
         if allow_spec and args.get("spec") is True:
             result.update(self._speculate(session, op, args, keys, snap,
                                           budget))
+        if args.get("stats") is True:
+            result["st"] = self._ledger(session)
         verbose = bool(args.get("verbose")) or not session.compact
         if verbose:
             result = self._verbose(result)
@@ -435,7 +465,11 @@ class GraphEngine:
             next_args["offset"] = offset + len(rows)
             result["next"] = next_args
             session.cursor = {"op": op, "offset": next_args["offset"]}
-        return self._enforce_budget(result, budget)
+        result = self._enforce_budget(result, budget)
+        if cache_cols and not verbose:
+            result = self._maybe_omit_cols(result, op, session,
+                                           force=args.get("cols") is True)
+        return _short_keys(result) if compact else result
 
     def _enforce_budget(self, result: dict[str, Any],
                         budget: int) -> dict[str, Any]:
@@ -464,13 +498,7 @@ class GraphEngine:
             if "cols" in result:
                 result.pop("cols")
                 continue
-            if "snap" in result:
-                result.pop("snap")
-                continue
-            result = {"ok": bool(result.get("ok", True)),
-                      "op": result.get("op", ""),
-                      "fresh": result.get("fresh", "unknown"),
-                      "truncated": True}
+            result = {"truncated": True}
             break
         return result
 
@@ -545,6 +573,22 @@ class GraphEngine:
             ]
         return result
 
+    def _maybe_omit_cols(self, result: dict[str, Any], op: str,
+                         session: EngineSession, *, force: bool) -> dict[str, Any]:
+        """Send fixed per-op columns once per session unless asked again."""
+        cols = result.get("cols")
+        if not isinstance(cols, list) or not cols:
+            return result
+        current = [str(col) for col in cols]
+        if force:
+            session.cols[op] = current
+            return result
+        if session.cols.get(op) == current:
+            result.pop("cols")
+        else:
+            session.cols[op] = current
+        return result
+
     # -- fitting ------------------------------------------------------------ #
     def _fit(self, result: dict[str, Any], budget: int) -> dict[str, Any]:
         """Trim the payload until the rendered JSON fits the estimated budget.
@@ -579,11 +623,7 @@ class GraphEngine:
             result["truncated"] = True
         # A budget this small should still produce an honest, tiny answer.
         if _json_size(result) > target:
-            minimal = {k: result.get(k) for k in
-                       ("ok", "op", "fresh", "truncated")}
-            minimal = {k: v for k, v in minimal.items()
-                       if v is not None and v is not False}
-            result = minimal
+            result = {"truncated": True}
         return result
 
     def _longest_text_cell(
@@ -653,19 +693,18 @@ class GraphEngine:
             session.spec_seq += 1
             payload = self._execute(request["op"], dict(request), session,
                                     snap, min(SPEC_BUDGET, budget),
-                                    allow_spec=False)
-            if not payload.get("ok") or payload.get("withheld"):
+                                    allow_spec=False, compact=False,
+                                    cache_cols=False)
+            if "e" in payload or "withheld" in payload:
                 pending += 1
                 continue
-            payload["tok"] = estimate_tokens(payload)
             self._evict_specs(session)
             session.spec[handle] = {"request": request, "result": payload,
                                     "snap": snap, "fetched": False}
             session.ledger["prepared"] += 1
             self.totals["prepared"] += 1
             ready.append(handle)
-        return {"spec": ready, "ready": len(ready), "pending": pending,
-                "sl": self._ledger(session)}
+        return {"spec": {"h": ready, "r": len(ready), "p": pending}}
 
     def _candidates(self, op: str, args: dict[str, Any],
                     keys: list[str]) -> list[dict[str, Any]]:
@@ -730,25 +769,21 @@ class GraphEngine:
         if not handles and args.get("h"):
             handles = [str(args["h"])]
         if not handles:
-            return self._error("fetch", "fetch needs one or more handles",
-                               snap=snap)
+            return self._error("fetch needs one or more handles", snap=snap)
         if len(handles) > 4:
-            return self._error("fetch", "at most four handles per fetch",
-                               snap=snap)
+            return self._error("at most four handles per fetch", snap=snap)
         items: list[dict[str, Any]] = []
         for handle in handles:
             entry = session.spec.get(handle)
             if entry is None:
-                return self._error("fetch", f"unknown or expired spec handle "
-                                   f"{handle!r}", snap=snap)
+                return self._error(f"unknown or expired spec handle {handle!r}",
+                                   snap=snap)
             if entry.get("snap") != snap:
                 self._drop_specs(session, wasted=True)
-                return self._withheld("fetch", snap, "stale")
+                return self._withheld(snap, "stale")
             payload = dict(entry["result"])
-            prepared_op = payload.pop("op", None)
-            for key in ("ok", "snap", "fresh", "tok", "budget", "omitted",
-                        "truncated", "next", "spec", "ready", "pending",
-                        "sl"):
+            prepared_op = str((entry.get("request") or {}).get("op") or "")
+            for key in ("next", "spec", "st"):
                 payload.pop(key, None)
             payload["h"] = handle
             payload["qop"] = prepared_op
@@ -758,17 +793,29 @@ class GraphEngine:
                 entry["fetched"] = True
                 session.ledger["fetched"] += 1
                 self.totals["fetched"] += 1
-        result: dict[str, Any] = {"ok": True, "op": "fetch", "snap": snap,
-                                  "fresh": "fresh", "budget": budget,
-                                  "sl": self._ledger(session)}
         if len(items) == 1:
-            result.update(items[0])
+            result = dict(items[0])
         else:
-            result["items"] = items
-        if args.get("verbose") is True:
+            result = {"items": items}
+        if args.get("stats") is True:
+            result["st"] = self._ledger(session)
+        verbose = bool(args.get("verbose")) or not session.compact
+        if verbose:
             result = self._verbose(result)
         result = self._fit(result, budget)
-        return result
+        result = self._enforce_budget(result, budget)
+        if not verbose:
+            if len(items) == 1:
+                result = self._maybe_omit_cols(
+                    result, prepared_op, session,
+                    force=args.get("cols") is True)
+            else:
+                for item in result.get("items") or []:
+                    if isinstance(item, dict):
+                        self._maybe_omit_cols(
+                            item, str(item.get("qop") or ""), session,
+                            force=args.get("cols") is True)
+        return _short_keys(result)
 
     # -- services ----------------------------------------------------------- #
     def _surface(self) -> Any:
@@ -799,8 +846,7 @@ class GraphEngine:
         } for hit in page]
         rows = _compact(items, FIND_COLS)
         return _clean({"cols": FIND_COLS, "rows": rows,
-                       "total": len(hits), "__keys": [i["k"] for i in items
-                                                     if i.get("k")],
+                       "__keys": [i["k"] for i in items if i.get("k")],
                        "__next": self._next_args(args, session)})
 
     def _outline(self, args: dict[str, Any],
@@ -1010,29 +1056,27 @@ class GraphEngine:
         return base
 
     @staticmethod
-    def _error(op: str, message: str, *, snap: str | None = None
-               ) -> dict[str, Any]:
-        result = {"ok": False, "op": op, "err": message}
+    def _error(message: str, *, snap: str | None = None) -> dict[str, Any]:
+        result: dict[str, Any] = {"e": message}
         if snap:
-            result["snap"] = snap
-        result["tok"] = estimate_tokens(result)
+            result["s"] = snap
+        result["t"] = estimate_tokens(result)
         return result
 
     @staticmethod
-    def _withheld(op: str, snap: str, fresh: str) -> dict[str, Any]:
+    def _withheld(snap: str, fresh: str) -> dict[str, Any]:
         result = {
-            "ok": False, "op": op, "snap": snap, "fresh": fresh,
-            "withheld": True,
-            "err": ("snapshot is not verifiably fresh; structural data is "
-                    "withheld"),
+            "e": "snapshot is not verifiably fresh; structural data is withheld",
+            "f": fresh,
+            "s": snap,
         }
-        result["tok"] = estimate_tokens(result)
+        result["t"] = estimate_tokens(result)
         return result
 
 
 __all__ = [
-    "DEFAULT_BUDGET", "ENGINE_TOOL_NAME", "ENGINE_TOOLS", "FEATURES",
-    "GraphEngine", "MAX_BUDGET", "MAX_SESSIONS", "MAX_SPEC", "MIN_BUDGET",
-    "OPS", "PROTOCOL", "PROTOCOL_VERSION", "SPEC_BUDGET",
-    "description_tokens", "estimate_tokens",
+    "CAP_BITS", "CAP_MASK", "DEFAULT_BUDGET", "ENGINE_TOOL_NAME",
+    "ENGINE_TOOLS", "FEATURES", "GraphEngine", "MAX_BUDGET", "MAX_SESSIONS",
+    "MAX_SPEC", "MIN_BUDGET", "OPS", "PROTOCOL", "PROTOCOL_VERSION",
+    "SPEC_BUDGET", "description_tokens", "estimate_tokens",
 ]

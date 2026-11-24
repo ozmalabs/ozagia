@@ -5,7 +5,10 @@
 - A first stateful graph-engine surface (`OZAGIA_SURFACE=engine`) exposes one
   `graph` MCP tool with `hello` sessions, compact tabular rows, hard estimated
   token budgets, `known` outline/context deltas and bounded synchronous
-  speculation (`spec`/`fetch`). It reuses the existing graph, context and
+  speculation (`spec`/`fetch`). The v2 wire keeps the default handshake to
+  protocol/session/snapshot/budget/capability-mask fields, sends columns once
+  per session, omits redundant success metadata, and moves the speculation
+  ledger behind `stats: true`. It reuses the existing graph, context and
   repository-shape services, withholds structural data on stale/unknown
   snapshots, and has no edit, test-run, refresh, shell, network or model path.
   The prototype wire measurement is in

@@ -486,9 +486,9 @@ bounded synchronous speculation (`spec`/`fetch`). It reuses the existing graph
 surface, context and repository-shape services and withholds structural data
 when the snapshot is stale or unknown. The protocol is in
 `docs/plans/2026-11-25_graph_engine_protocol.md`, the guide in
-`docs/graph_engine.md`, and the prototype measurement (584 estimated tokens and
-4 round-trips versus 636/4 for the graph surface and 1,705/5 for the `dev_*`
-sequence on a tiny fixture) in
+`docs/graph_engine.md`, and the v2 prototype measurement (374 estimated tokens
+and 4 round-trips versus 637/4 for the graph surface and 1,707/5 for the `dev_*`
+sequence on a tiny fixture; a multi-turn run is 578/5 versus 684/5 stateless) in
 `docs/results/graph_engine_prototype_2026-11-25.md`. That measurement is wire
 size, not a model-task gain. Speculation currently prepares at most two payloads
 before returning; it does not overlap model work. Next: a daemon/process worker
