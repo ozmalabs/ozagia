@@ -1020,8 +1020,8 @@ def analyze(root: str | Path, *, budget_s: float = 10.0,
     shape consumed by deep review (section/type/severity/keys/summary).
     Licence facts remain inventory only. Optional ``local_advisories`` is an
     explicit JSON path/object; it is never fetched and only parsed lockfile
-    versions can match supported exact records or local SemVer ranges.
-    Non-matches keep CVE coverage unknown.
+    versions can match supported exact records or local SemVer/PEP 440
+    ranges. Non-matches keep CVE coverage unknown.
 
     ``supply_chain`` adds the offline supply-chain rules from
     :mod:`ozagia.core.supply_chain`; ``supply_chain_policy`` is an optional

@@ -221,6 +221,13 @@ executable deletions stay breaking. Reports and packets were rebuilt again
 non-breaking). This is a noise/quality work note, not a quality result: there
 are still 0 labels, no precision/recall and no measured gate.
 
+On 2026-11-25 local-advisory SCA breadth gained Python PEP 440 range matching:
+`introduced`/`fixed`/`last_affected` events now use PEP 440 ordering (epoch,
+release, pre/post/dev/local) with the existing alternation and limit
+validation. This is local, explicit-data-only functionality; no advisory feed
+or provenance source was added. Ruby, Composer and Maven still support exact
+pins only.
+
 **Scope**
 
 - Build the frozen realistic corpus and labeling protocol from the go/no-go
@@ -229,7 +236,9 @@ are still 0 labels, no precision/recall and no measured gate.
   adjudicator, and published label digests.
 - Complete the deterministic subjects that remain partial:
   - SCA breadth: decide build-vs-integrate for Python/Ruby/Composer/Maven
-    range matching; do not add a network advisory feed by default;
+    range matching; Python PEP 440 ranges are implemented, while
+    Ruby/Composer/Maven exact-pin limits remain; do not add a network advisory
+    feed by default;
   - semantic IaC validation only where it can be source-only and honest;
   - broader configuration families, runbook/observability links and docs/API
     coverage already started.

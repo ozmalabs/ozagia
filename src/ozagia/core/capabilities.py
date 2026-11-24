@@ -2136,7 +2136,7 @@ _BUILTIN_DEFINITIONS: tuple[dict[str, Any], ...] = (
                 "model time, request, token and cost budgets apply; token/cost caps depend on provider-reported usage and cannot preempt an in-flight request",
                 "optional --ocelot clusters model candidates only, with exact fallback; no install, network or model call",
                 "profile reports and --run-bench commands are explicit inputs; measured evidence is not a verdict",
-                "optional --local-advisories matches supported exact pins and selected SemVer ranges from a local file; no fetch or clean verdict",
+                "optional --local-advisories matches supported exact pins and selected SemVer, Go or PEP 440 ranges from a local file; no fetch or clean verdict",
                 "evidence excerpts are bounded; sbom.json is inventory-shaped with CVE state unknown",
                 "writes reports to the report directory; --index may refresh the graph under .ozagia"],
         authorization=("none: caller runs the command; scanners and model calls need explicit flags/gates; writes stay under report/state"),

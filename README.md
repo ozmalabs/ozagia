@@ -58,10 +58,11 @@ glibc) and macOS (arm64, x64). `ozagia self check --tui` verifies the install;
   profile evidence. External scanners run only when named with `--security-tool`;
   `--security-network` is a separate opt-in, and per-tool provenance is
   recorded. Dependencies include local licence/version inventory, optional
-  exact-version matching or OSV-style introduced/fixed SemVer ranges against an
-  explicit local advisory file (range matching supports Node/Rust and
-  `v`-prefixed Go; Python, Ruby and Composer are exact-version only; Ruby
-  matches only Bundler `GEM` source pins, not Git/path pins), and `sbom.json` with CVE state
+  exact-version matching or OSV-style introduced/fixed ranges against an
+  explicit local advisory file (range matching supports Node/Rust strict
+  SemVer, `v`-prefixed Go and Python PEP 440; Ruby, Composer and Maven are
+  exact-version only; Ruby matches only Bundler `GEM` source pins, not
+  Git/path pins), and `sbom.json` with CVE state
   unknown. `ozagia-status` has a read-only `reviews`
   section. An optional `--model-pass` (requires `--live` and
   `OZAGIA_EVAL_LIVE=1`) writes advisory, unverified, role-mapped candidates to

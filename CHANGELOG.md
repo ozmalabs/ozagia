@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Deep-review local advisories now match Python lockfile pins against OSV-style
+  `introduced`/`fixed`/`last_affected` ranges using PEP 440 ordering (epoch,
+  release, pre/post/dev and local segments), with the existing event
+  alternation, limit and size bounds. Python range blocks accept OSV
+  `ECOSYSTEM` or `SEMVER` types; malformed or unorderable versions are refused
+  or skipped, never coerced. Ruby, Composer and Maven remain exact-version
+  only, and no network advisory feed was added.
 - The test suite is hermetic and sharded. Job and admission tests inject small
   test-only resource limits instead of inheriting the host's disk and memory
   budgets, and `OZAGIA_TEST_SHARD=i/n` filters whole test files into four

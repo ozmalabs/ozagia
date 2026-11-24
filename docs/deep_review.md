@@ -216,14 +216,24 @@ excluded from registry advisory matching; absent source metadata remains unknown
 Cargo lock entries retain a coarse source classification; advisory matching
 excludes Git, workspace/path and non-crates.io registry entries because the
 same name and version can identify different packages. Range events are
-supported only for Node and Rust strict SemVer, and Go
-`v`-prefixed strict SemVer (including pseudo-versions). Introduced is inclusive,
+supported for Node and Rust strict SemVer, Go `v`-prefixed strict SemVer
+(including pseudo-versions), and Python PEP 440. Python range blocks accept
+`type` `ECOSYSTEM` or `SEMVER`, or an omitted `type`. Python versions are
+ordered by epoch, release (trailing zero segments are insignificant),
+pre-release (`a`/`b`/`rc` sort before the public release), post-release (after
+it), dev-release (before the matching pre/public/post release) and local
+segment (after the public version), with alphabetic local segments before
+numeric ones. A literal `introduced` value of `0` means the beginning of
+history and includes dev and pre-release versions. Introduced is inclusive,
 fixed is exclusive, `last_affected` is inclusive, and an open introduced event
 has no upper bound. A `last_affected` ceiling is a last known affected version,
 not evidence that later versions are fixed. A single event sequence cannot mix
 `fixed` and `last_affected`; finite `limit` events impose an exclusive upper
-bound, while `*` leaves that range unbounded. Malformed sequences are rejected. Exact Python versions remain validated as PEP 440 and
-compared as written, with the Go `v` prefix normalized. Ruby Bundler
+bound, while `*` leaves that range unbounded. Malformed sequences and versions
+outside the supported grammar are rejected rather than coerced; a lockfile
+version the comparator cannot parse is omitted and stays unknown. Exact Python
+versions remain validated as PEP 440 and compared as written, with the Go `v`
+prefix normalized. Ruby Bundler
 `Gemfile.lock` pins support exact-version matching only, using conservative
 numeric versions with an optional prerelease suffix. Only specs under a `GEM`
 source block are eligible for Ruby advisory matches; `GIT` and `PATH` specs are
@@ -358,9 +368,10 @@ evidence or subject contents. See [status](status.md).
   exact version-conflict candidates. Declared licences and a deterministic
   CycloneDX-shaped SBOM are recorded, but CVE state remains `unknown`. An
   explicit `--local-advisories` file can match exact locked versions or
-  supported OSV-style introduced/fixed/last_affected SemVer ranges against local advisory
-  records; range matching supports Node/Rust and `v`-prefixed Go, while Python
-  and Ruby are exact-version only. Composer `composer.lock` matches exact
+  supported OSV-style introduced/fixed/last_affected ranges against local
+  advisory records; range matching supports Node/Rust strict SemVer,
+  `v`-prefixed Go and Python PEP 440, while Ruby, Composer and Maven are
+  exact-version only. Composer `composer.lock` matches exact
   supported versions only; branch aliases and ranges are skipped. Ruby
   advisory matching is limited to Bundler `GEM` source pins; `GIT` and `PATH`
   pins are recorded but skipped. The same inventory runs the offline
@@ -418,9 +429,12 @@ tools are recorded as coverage, not crashes. Dependency licence, version and
 SBOM facts are local inventory: CVE state stays unknown, no advisory database is
 queried, and no licence-compliance decision is made. Optional
 `--local-advisories` matching uses exact locked versions and supported
-introduced/fixed/last_affected SemVer ranges from a local file; it does not fetch data or
-prove a dependency clean. Range matching is limited to Node/Rust and
-`v`-prefixed Go strict SemVer pins; Python, Ruby and Composer are exact-version only.
+introduced/fixed/last_affected ranges from a local file; it does not fetch data or
+prove a dependency clean. Range matching supports Node/Rust strict SemVer,
+`v`-prefixed Go and Python PEP 440 pins; Ruby, Composer and Maven remain
+exact-version only. PEP 440 range events that are malformed or outside the
+supported version grammar are refused; a Python lock pin that cannot be
+ordered faithfully is skipped and remains unknown rather than matching.
 Ruby exact matches include only Bundler `GEM` source pins; Git/path pins are
 inventory-only. Composer branch/dev versions are not matchable. Runbook and
 observability checks read repository declarations; runtime

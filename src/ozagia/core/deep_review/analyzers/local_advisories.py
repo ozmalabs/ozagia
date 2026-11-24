@@ -1,9 +1,10 @@
 """Bounded local advisory matching against caller-supplied advisory data.
 
 The data source is never downloaded. A match requires a parsed lockfile pin
-and either an exact tuple or a supported OSV introduced/fixed or last_affected range. A no-match
-result does not mean dependencies are free of vulnerabilities; the supplied
-data may be incomplete or out of date.
+and either an exact tuple or a supported OSV introduced/fixed or
+last_affected range: strict SemVer for Node/Rust, ``v``-prefixed SemVer for
+Go, and PEP 440 for Python. A no-match result does not mean dependencies are
+free of vulnerabilities; the supplied data may be incomplete or out of date.
 """
 from __future__ import annotations
 
@@ -33,11 +34,22 @@ SEVERITIES = frozenset({"blocking", "major", "minor", "note"})
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 _PACKAGE = re.compile(r"[!-~]{1,240}\Z")
 _PEP440_VERSION = re.compile(
-    r"(?i)v?\d+(?:!\d+)?(?:\.\d+)*"
-    r"(?:[-_.]?(?:a|b|c|rc|alpha|beta|pre|preview)[-_.]?\d*)?"
-    r"(?:(?:[-_.]?post|[-_.]?rev|[-_.]?r|-(?=\d))[-_.]?\d*)?"
-    r"(?:[-_.]?dev[-_.]?\d*)?"
-    r"(?:\+[a-z0-9]+(?:[-_.][a-z0-9]+)*)?\Z")
+    r"(?i)v?(?:(?P<epoch>\d+)!)?(?P<release>\d+(?:\.\d+)*)"
+    r"(?P<pre>[-_.]?(?:a|b|c|rc|alpha|beta|pre|preview)[-_.]?\d*)?"
+    r"(?P<post>(?:[-_.]?post|[-_.]?rev|[-_.]?r|-(?=\d))[-_.]?\d*)?"
+    r"(?P<dev>[-_.]?dev[-_.]?\d*)?"
+    r"(?:\+(?P<local>[a-z0-9]+(?:[-_.][a-z0-9]+)*))?\Z")
+_PEP440_PRE_PART = re.compile(
+    r"(?i)[-_.]?(?P<label>a|b|c|rc|alpha|beta|pre|preview)"
+    r"[-_.]?(?P<number>\d*)\Z")
+_PEP440_POST_PART = re.compile(
+    r"(?i)(?:[-_.]?post|[-_.]?rev|[-_.]?r|-(?=\d))[-_.]?(?P<number>\d*)\Z")
+_PEP440_DEV_PART = re.compile(
+    r"(?i)[-_.]?dev[-_.]?(?P<number>\d*)\Z")
+_PEP440_PRE_RANK = {
+    "a": 0, "alpha": 0, "b": 1, "beta": 1,
+    "c": 2, "rc": 2, "pre": 2, "preview": 2,
+}
 _SEMVER_VERSION = re.compile(
     r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)"
     r"(?:-(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)"
@@ -135,18 +147,130 @@ def _semver_compare(left: str, right: str) -> int:
     return (len(ap) > len(bp)) - (len(ap) < len(bp))
 
 
-def _validate_semver_events(ecosystem: str, value: Any, index: int
-                            ) -> list[tuple[str, str, bool]]:
-    if ecosystem not in {"node", "rust", "go"}:
+def _pep440_parts(value: str) -> tuple[Any, ...]:
+    """Parse PEP 440 into a comparison key, or raise on an ambiguous form.
+
+    The key follows PEP 440 ordering: epoch, release, pre/dev, post, then
+    local. Trailing release zeros are insignificant, a dev-only release sorts
+    before pre-releases, and a local version sorts after the same public
+    version. Every form accepted by ``_PEP440_VERSION`` is parsed; a form that
+    cannot be parsed is rejected instead of being coerced.
+    """
+    match = _PEP440_VERSION.fullmatch(value)
+    if match is None:
+        raise ValueError("range versions must be PEP 440")
+    epoch_text = match.group("epoch")
+    epoch = int(epoch_text) if epoch_text else 0
+    release = [int(part) for part in match.group("release").split(".")]
+    while len(release) > 1 and release[-1] == 0:
+        release.pop()
+    pre: tuple[int, int] | None = None
+    pre_text = match.group("pre")
+    if pre_text:
+        parsed = _PEP440_PRE_PART.fullmatch(pre_text)
+        if parsed is None:
+            raise ValueError("ambiguous PEP 440 pre-release")
+        label = parsed.group("label").lower()
+        if label not in _PEP440_PRE_RANK:
+            raise ValueError("unsupported PEP 440 pre-release label")
+        pre = (_PEP440_PRE_RANK[label], int(parsed.group("number") or 0))
+    post: int | None = None
+    post_text = match.group("post")
+    if post_text:
+        parsed = _PEP440_POST_PART.fullmatch(post_text)
+        if parsed is None:
+            raise ValueError("ambiguous PEP 440 post-release")
+        post = int(parsed.group("number") or 0)
+    dev: int | None = None
+    dev_text = match.group("dev")
+    if dev_text:
+        parsed = _PEP440_DEV_PART.fullmatch(dev_text)
+        if parsed is None:
+            raise ValueError("ambiguous PEP 440 dev-release")
+        dev = int(parsed.group("number") or 0)
+    local: tuple[tuple[int, Any], ...] | None = None
+    local_text = match.group("local")
+    if local_text:
+        # PEP 440: an alphanumeric local segment sorts before a numeric one.
+        local = tuple(
+            (1, int(part)) if part.isdigit() else (0, part.lower())
+            for part in re.split(r"[-_.]", local_text))
+    if pre is not None:
+        pre_key: tuple[int, ...] = (1, pre[0], pre[1])
+    elif post is None and dev is not None:
+        pre_key = (0,)
+    else:
+        pre_key = (2,)
+    return (epoch, tuple(release), pre_key,
+            post if post is not None else -1,
+            dev if dev is not None else math.inf,
+            (0,) if local is None else (1, local))
+
+
+def _pep440_compare(left: str, right: str) -> int:
+    a, b = _pep440_parts(left), _pep440_parts(right)
+    return (a > b) - (a < b)
+
+
+# A literal "0" introduced event means "from the beginning". These sentinels
+# sort at or below every supported version without being a version guess.
+_RANGE_MINIMUM = {
+    "python": "0!0.dev0",
+    "node": "0.0.0-0",
+    "rust": "0.0.0-0",
+    "go": "0.0.0-0",
+}
+_RANGE_NAME = {"python": "PEP 440", "node": "strict SemVer",
+               "rust": "strict SemVer", "go": "strict SemVer"}
+
+
+def _compare_versions(ecosystem: str, left: str, right: str) -> int:
+    if ecosystem == "python":
+        return _pep440_compare(left, right)
+    return _semver_compare(left, right)
+
+
+def _range_event_version(ecosystem: str, version: str, label: str) -> str:
+    """Validate and normalize an OSV range boundary for its ecosystem."""
+    if ecosystem == "go":
+        if not version.startswith("v"):
+            raise ValueError("Go OSV range versions must have a v prefix")
+        version = version[1:]
+    elif ecosystem == "python":
+        try:
+            _pep440_parts(version)
+        except ValueError as exc:
+            raise ValueError(
+                f"OSV {label} must be a PEP 440 version") from exc
+        return version
+    elif version.startswith("v"):
+        raise ValueError(f"OSV {label} must be strict SemVer")
+    try:
+        _semver_parts(version)
+    except ValueError as exc:
+        raise ValueError(f"OSV {label} must be strict SemVer") from exc
+    return version
+
+
+def _validate_range_events(ecosystem: str, value: Any, index: int
+                           ) -> list[tuple[str, str, bool]]:
+    if ecosystem not in _RANGE_MINIMUM:
         raise ValueError(
             f"advisories[{index}].affected_ranges is unsupported for this ecosystem")
     if not isinstance(value, list) or not value or len(value) > 200:
         raise ValueError(f"advisories[{index}].affected_ranges is invalid")
+    syntax = _RANGE_NAME[ecosystem]
     ranges: list[tuple[str, str, bool]] = []
     for range_index, block in enumerate(value):
         events = block.get("events") if isinstance(block, Mapping) else None
-        if isinstance(block, Mapping) and block.get("type", "SEMVER") != "SEMVER":
-            raise ValueError("OSV range type must be SEMVER")
+        if isinstance(block, Mapping):
+            block_type = block.get("type", "SEMVER")
+            if ecosystem == "python":
+                if block_type not in {"SEMVER", "ECOSYSTEM"}:
+                    raise ValueError(
+                        "OSV range type must be SEMVER or ECOSYSTEM for Python")
+            elif block_type != "SEMVER":
+                raise ValueError("OSV range type must be SEMVER")
         if not isinstance(events, list) or not events or len(events) > 200:
             raise ValueError(
                 f"advisories[{index}].affected_ranges[{range_index}] is invalid")
@@ -162,14 +286,8 @@ def _validate_semver_events(ecosystem: str, value: Any, index: int
                     infinite_limit = True
                     continue
                 if not isinstance(limit, str):
-                    raise ValueError("OSV limit must be strict SemVer or '*'")
-                if ecosystem == "go":
-                    if not limit.startswith("v"):
-                        raise ValueError("Go OSV limit must have a v prefix")
-                    limit = limit[1:]
-                if not _SEMVER_VERSION.fullmatch(limit):
-                    raise ValueError("OSV limit must be strict SemVer or '*'")
-                limits.append(limit)
+                    raise ValueError(f"OSV limit must be {syntax} or '*'")
+                limits.append(_range_event_version(ecosystem, limit, "limit"))
             else:
                 timeline.append(event)
         block_ranges: list[tuple[str, str, bool]] = []
@@ -182,28 +300,21 @@ def _validate_semver_events(ecosystem: str, value: Any, index: int
                 raise ValueError("OSV range events must contain one introduced/fixed/last_affected key")
             kind, version = next(iter(event.items()))
             if kind not in {"introduced", "fixed", "last_affected"} or not isinstance(version, str):
-                raise ValueError("OSV range supports only introduced/fixed/last_affected SemVer events")
-            if ecosystem == "go" and version != "0":
-                if not version.startswith("v"):
-                    raise ValueError("Go OSV range versions must have a v prefix")
-                version = version[1:]
-            elif ecosystem != "go" and version.startswith("v"):
-                raise ValueError("OSV range versions must be strict SemVer")
+                raise ValueError(
+                    f"OSV range supports only introduced/fixed/last_affected {syntax} events")
             if kind == "introduced":
                 if start is not None or last_kind == "introduced":
                     raise ValueError("OSV range events must alternate introduced/fixed")
                 if version == "0":
-                    start = "0.0.0-0"
-                elif _SEMVER_VERSION.fullmatch(version):
-                    start = version
+                    start = _RANGE_MINIMUM[ecosystem]
                 else:
-                    raise ValueError("OSV introduced event must be strict SemVer or '0'")
+                    start = _range_event_version(ecosystem, version, "introduced")
                 # OSV encodes ranges as an ordered event stream. Accepting a
                 # later interval that starts before the previous fix would
                 # silently reinterpret malformed source data as the union of
                 # intervals. Equal boundaries are ambiguous as well.
                 if (previous_fixed is not None
-                        and _semver_compare(start, previous_fixed) <= 0):
+                        and _compare_versions(ecosystem, start, previous_fixed) <= 0):
                     raise ValueError(
                         "OSV introduced event must follow the previous fixed event")
             else:
@@ -212,13 +323,12 @@ def _validate_semver_events(ecosystem: str, value: Any, index: int
                 if closing_kind is not None and closing_kind != kind:
                     raise ValueError("OSV range cannot mix fixed and last_affected")
                 closing_kind = kind
-                if not _SEMVER_VERSION.fullmatch(version):
-                    raise ValueError("OSV range ending must be strict SemVer")
-                comparison = _semver_compare(version, start)
+                end = _range_event_version(ecosystem, version, "ending")
+                comparison = _compare_versions(ecosystem, end, start)
                 if comparison < 0 or (comparison == 0 and kind == "fixed"):
                     raise ValueError("OSV range ending must follow introduced")
-                block_ranges.append((start, version, kind == "last_affected"))
-                previous_fixed = version
+                block_ranges.append((start, end, kind == "last_affected"))
+                previous_fixed = end
                 start = None
             last_kind = kind
         if start is not None:
@@ -229,23 +339,25 @@ def _validate_semver_events(ecosystem: str, value: Any, index: int
         if limits and not infinite_limit:
             cap = limits[0]
             for candidate in limits[1:]:
-                if _semver_compare(candidate, cap) > 0:
+                if _compare_versions(ecosystem, candidate, cap) > 0:
                     cap = candidate
         for start, end, inclusive in block_ranges:
             if cap is not None:
-                if _semver_compare(start, cap) >= 0:
+                if _compare_versions(ecosystem, start, cap) >= 0:
                     continue
-                if not end or _semver_compare(end, cap) >= 0:
+                if not end or _compare_versions(ecosystem, end, cap) >= 0:
                     end, inclusive = cap, False
             ranges.append((start, end, inclusive))
     return ranges
 
 
-def _in_semver_ranges(version: str, ranges: list[tuple[str, str, bool]]) -> bool:
+def _in_ranges(ecosystem: str, version: str,
+               ranges: list[tuple[str, str, bool]]) -> bool:
     for start, end, inclusive in ranges:
-        if (_semver_compare(version, start) >= 0
-                and (not end or _semver_compare(version, end) < 0
-                     or (inclusive and _semver_compare(version, end) == 0))):
+        if (_compare_versions(ecosystem, version, start) >= 0
+                and (not end or _compare_versions(ecosystem, version, end) < 0
+                     or (inclusive
+                         and _compare_versions(ecosystem, version, end) == 0))):
             return True
     return False
 
@@ -356,9 +468,10 @@ def match_local_advisories(
     """Match explicit advisory records to exact versions from lockfiles.
 
     Advisory rows use either ``affected_versions`` or OSV-style
-    ``affected_ranges`` introduced/fixed/last_affected SemVer events (Node, Rust and Go
-    only). Ruby, Composer and Maven support exact versions only. Only parsed lockfile
-    pins match.
+    ``affected_ranges`` introduced/fixed/last_affected events: strict SemVer
+    ordering for Node and Rust, ``v``-prefixed strict SemVer for Go, and PEP
+    440 ordering for Python. Ruby, Composer and Maven support exact versions
+    only. Only parsed lockfile pins match.
     """
     lockfiles = inventory.get("lockfiles")
     pins: dict[tuple[str, str, str], set[str]] = {}
@@ -467,7 +580,7 @@ def match_local_advisories(
                         f"advisories[{index}].affected_versions must contain exact versions")
                 versions.add(_version_key(ecosystem, version))
         else:
-            ranges = _validate_semver_events(
+            ranges = _validate_range_events(
                 ecosystem, row["affected_ranges"], index)
         severity = row.get("severity", "minor")
         if not isinstance(severity, str) or severity not in SEVERITIES:
@@ -498,8 +611,16 @@ def match_local_advisories(
             (advisory["ecosystem"], advisory["package_key"]), [])
         for version, files in sorted(package_pins):
             exact = version in advisory["versions"]
-            in_range = bool(advisory["ranges"]) and _in_semver_ranges(
-                version, advisory["ranges"])
+            in_range = False
+            if advisory["ranges"]:
+                try:
+                    in_range = _in_ranges(
+                        advisory["ecosystem"], version, advisory["ranges"])
+                except ValueError:
+                    # A pin the comparator cannot order faithfully is unknown,
+                    # not a match; inventory validation already skips the
+                    # malformed version strings it can see.
+                    in_range = False
             if not exact and not in_range:
                 continue
             if not files:
@@ -518,7 +639,9 @@ def match_local_advisories(
                 unconfirmed = provenance_unknown or go_selection_unknown
                 findings.append({
                     "section": "dependencies",
-                    "type": ("local_advisory_semver_range_match"
+                    "type": ("local_advisory_pep440_range_match"
+                             if is_range_match and advisory["ecosystem"] == "python"
+                             else "local_advisory_semver_range_match"
                              if is_range_match
                              else "local_advisory_exact_version_match"),
                     # A Gradle lock records GAV but not the repository that

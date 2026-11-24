@@ -10,9 +10,10 @@ and version inventory with deterministic SBOM and CVE state unknown, runbook and
 observability declarations, bounded lexical IaC/config candidates,
 documentation/API coverage (including literal local module imports), and
 fresh-graph range blast radius. Local OSV-style introduced/fixed/last_affected range matching
-is implemented for Node and Rust strict SemVer pins and Go `v`-prefixed strict
-SemVer pins; range events support introduced/fixed/last_affected and strict SemVer limits. Python, Ruby,
-Composer and Maven remain exact-version only; Gradle `gradle.lockfile` inventory
+is implemented for Node and Rust strict SemVer pins, Go `v`-prefixed strict
+SemVer pins and Python PEP 440 pins; range events support
+introduced/fixed/last_affected with strict SemVer limits for Node/Rust/Go and
+PEP 440 limits for Python. Ruby, Composer and Maven remain exact-version only; Gradle `gradle.lockfile` inventory
 and conservative Maven coordinate matching are supported, with repository
 origin unknown. Ruby Bundler `Gemfile.lock` inventory and
 exact local-advisory matching for registry (`GEM`) pins are supported; Git and
