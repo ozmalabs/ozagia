@@ -41,6 +41,13 @@ accepts both.
   `session_event` `compact`. install.py registers it in the V3 hook file
   only (2.37's V3 loader skips a trigger it does not know; the CLI 2.x
   profile validator rejects one). `PreCompact` does nothing.
+- `SessionEnd` (V3 only): `session_event` `end`, which clears the session's
+  read ledger. The CLI 2.x engines have no session-end trigger.
+- Every mapped event also sends at most one metadata-only `profile_event`
+  through `ozagia.integrations.session_profile`: session start/end/compact,
+  tool started/terminal counts and host-supplied durations/model name. No
+  prompt, path, command, tool input/output or secret value is persisted.
+  Recording is fail-open and never starts a daemon.
 
 The hook stops itself after `HOOK_ALARM_S`, a few seconds before the
 handler timeout install.py writes. It never blocks the agent because
@@ -53,12 +60,22 @@ import os
 from pathlib import Path
 from typing import Any, TextIO
 
-from ozagia.integrations import hookcore
+from ozagia.integrations import hookcore, session_profile
 from ozagia.integrations.hookcore import session_brief
 
 # The handler timeout install.py writes (`timeout` in seconds in a hook
 # file; `timeout_ms` in a CLI 2.x agent profile).
 HOOK_TIMEOUT_S = 20
+# One profile event per hook invocation. PreCompact is not mapped: it may be
+# cancelled, and the CLI 2.x engines never send it. Kiro's V3 SessionEnd is
+# recorded when the host sends it.
+PROFILE_EVENTS = {
+    "SessionStart": ("session", "start"),
+    "SessionEnd": ("session", "end"),
+    "PostCompact": ("session", "compact"),
+    "PreToolUse": ("tool", "started"),
+    "PostToolUse": ("tool", "completed"),
+}
 # The hook stops itself (prints nothing) after this many seconds.
 HOOK_ALARM_S = 15
 # One daemon request: with AUTOSTART_BUDGET_S (3 s) it stays under HOOK_ALARM_S.
@@ -83,6 +100,7 @@ KEY_PREFIXES = hookcore.KEY_PREFIXES + hookcore.STRUCTURED_KEY_PREFIXES
 EVENTS = {
     "SessionStart": "SessionStart", "sessionStart": "SessionStart",
     "agentSpawn": "SessionStart", "AgentSpawn": "SessionStart",
+    "SessionEnd": "SessionEnd", "sessionEnd": "SessionEnd",
     "PreToolUse": "PreToolUse", "preToolUse": "PreToolUse",
     "PostToolUse": "PostToolUse", "postToolUse": "PostToolUse",
     "PreCompact": "PreCompact", "PostCompact": "PostCompact",
@@ -368,6 +386,23 @@ def _pre_missing(tool_input: dict[str, Any], root: Path,
         + "\n".join(lines))
 
 
+def _profile_event(root: Path, payload: dict[str, Any], event: str | None,
+                   tool_name: str) -> None:
+    """Record this hook invocation once, if it maps to a profile event."""
+    spec = PROFILE_EVENTS.get(event or "")
+    if spec is None:
+        return
+    kind, outcome = spec
+    phase = None
+    status = None
+    if kind == "session":
+        phase = "compact" if payload.get("source") == "compact" else outcome
+    else:
+        status = outcome
+    session_profile.record(root, HARNESS, payload, kind=kind, event=event or "",
+                           phase=phase, status=status, tool=tool_name)
+
+
 def handle(payload: dict[str, Any], root: Path) -> str | hookcore.HookBlock | None:
     """The hook's answer for one event: text for stdout, a `HookBlock`, or
     None to print nothing."""
@@ -378,6 +413,10 @@ def handle(payload: dict[str, Any], root: Path) -> str | hookcore.HookBlock | No
         tool_input = {}
     session = str(payload.get("session_id") or "")
     cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else None
+    # SessionStart records after its daemon start below, so the first session
+    # of a cold root is not dropped.
+    if event != "SessionStart":
+        _profile_event(root, payload, event, tool_name)
 
     if event == "SessionStart":
         in_repo = hookcore.in_work_tree(root)
@@ -388,7 +427,12 @@ def handle(payload: dict[str, Any], root: Path) -> str | hookcore.HookBlock | No
             hookcore.rearm_alarm(BRIEF_ALARM_S)
         except Exception as exc:  # the brief does not need the daemon
             hookcore.log_failure(root, LOG_NAME, payload, exc)
+        _profile_event(root, payload, event, tool_name)
         return session_brief(root) if in_repo else None
+
+    if event == "SessionEnd":
+        hookcore.session_event(root, HARNESS, session, "end")
+        return None
 
     if event == "PreToolUse":
         if tool_name in SHELL_TOOLS:

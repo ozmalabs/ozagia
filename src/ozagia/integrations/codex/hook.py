@@ -66,6 +66,12 @@ work tree, `$OZAGIA_ROOT` or a root with a graph snapshot
 `HOOK_ALARM_S`, a few seconds before Codex's handler timeout. It never blocks
 the agent because ozagia failed: any error prints nothing and exits 0, and
 is logged as one JSON line to `<state dir>/codex_hook.log`.
+
+Each mapped event also sends at most one metadata-only `profile_event`
+through `ozagia.integrations.session_profile`: session start/end/compact,
+tool started/terminal counts and any host-supplied model, duration or numeric
+token counts. Prompts, paths, command text, tool input/output and secret
+values are never persisted. It never starts a daemon for a profile event.
 """
 from __future__ import annotations
 
@@ -76,11 +82,20 @@ from typing import Any, TextIO
 
 from ozagia.daemon import protocol
 from ozagia.core import working_set as W
-from ozagia.integrations import hookcore
+from ozagia.integrations import hookcore, session_profile
 from ozagia.intent.patch import check_patch, patch_text
 
 # Codex's handler timeout, which install.py writes to hooks.json.
 HOOK_TIMEOUT_S = 20
+# One profile event per hook invocation. A SessionStart with source "compact"
+# is recorded as the compact phase, not as another start.
+PROFILE_EVENTS = {
+    "SessionStart": ("session", "start"),
+    "PreCompact": ("session", "compact"),
+    "SessionEnd": ("session", "end"),
+    "PreToolUse": ("tool", "started"),
+    "PostToolUse": ("tool", "completed"),
+}
 # The hook stops itself (prints nothing) after this many seconds, before
 # Codex kills it.
 HOOK_ALARM_S = 15
@@ -273,6 +288,23 @@ def job_ps_answer(root: Path, command: str, session: str = "") -> str | None:
             f"`{command.strip()[:200]}` (same output):\n{out}")
 
 
+def _profile_event(root: Path, payload: dict[str, Any], event: Any,
+                   tool_name: str) -> None:
+    """Record this hook invocation once, if it maps to a profile event."""
+    spec = PROFILE_EVENTS.get(event)
+    if spec is None:
+        return
+    kind, outcome = spec
+    phase = None
+    status = None
+    if kind == "session":
+        phase = "compact" if payload.get("source") == "compact" else outcome
+    else:
+        status = outcome
+    session_profile.record(root, HARNESS, payload, kind=kind, event=str(event),
+                           phase=phase, status=status, tool=tool_name)
+
+
 def handle(payload: dict[str, Any], root: Path) -> dict[str, Any] | None:
     """The hook's JSON answer for one event, or None to print nothing."""
     event = payload.get("hook_event_name")
@@ -283,6 +315,10 @@ def handle(payload: dict[str, Any], root: Path) -> dict[str, Any] | None:
     session = payload.get("session_id") or ""
     cwd = payload.get("cwd")
     sub = session_sub(payload)
+    # SessionStart records after its daemon start below, so the first session
+    # of a cold root is not dropped.
+    if event != "SessionStart":
+        _profile_event(root, payload, event, str(tool_name))
 
     if event == "PreCompact":
         hookcore.session_event(root, HARNESS, session, "compact")
@@ -301,6 +337,7 @@ def handle(payload: dict[str, Any], root: Path) -> dict[str, Any] | None:
             hookcore.rearm_alarm(BRIEF_ALARM_S)
         except Exception as exc:  # the brief does not need the daemon
             hookcore.log_failure(root, LOG_NAME, payload, exc)
+        _profile_event(root, payload, event, str(tool_name))
         if not in_repo:
             return None
         # After a compaction, the session's working set (it survives the

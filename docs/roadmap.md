@@ -85,7 +85,7 @@ breadth third, live operations last**. New surface area is not a release theme.
 | `2026-11-18_deep_review_orchestrator.md` | Phases 0–1 done; 2 largely; 3–4 partial | Matches | Realistic corpus and human labels, broader SCA/IaC/config depth, model-pass quality evaluation, go/no-go | 0.2 |
 | `2026-11-17_self_graph_service_unification_model_api.md` | Implementation plan; M0–M4 done, M5–M6 partial | M0–M4 implemented; M5 partial (linked/research/action joins, Ocelot research projection, secret boundaries); M6 has an offline harness and one live run invalid for the map arm | M5 Ocelot/live-service integration; a valid M6 matched-arm result and opt-in rollout | 0.4 |
 | `2026-11-17_session_secrets_ui.md` | Design only | Core broker, providers, redactor and session store implemented (`core/secrets.py`); the native prompt/UI capture flow is not | Native prompt, host rewrite, persistence UI, revoke/expiry, end-to-end canary review | 0.3 |
-| `2026-11-17_session-profile-instrumentation.md` | Implemented in part | Core store, CLI, daemon events, OpenCode subscriber and TUI slot exist; Codex/Kiro/Claude capture does not | Complete lifecycle across hosts, status/console surfaces, coverage tests | 0.3 |
+| `2026-11-17_session-profile-instrumentation.md` | Implemented in part | Core store, CLI, daemon events, OpenCode subscriber and TUI slot exist; Codex/Kiro/Claude hook capture exists offline | Live host verification, status/console rows for host lifecycle counters | 0.3 |
 | `2026-11-18_bounded_graph_prefetch.md` | Offline primitives implemented; MCP integration design only | Offline planner, safety checks and ledger implemented (`core/prefetch.py`); no MCP lifecycle integration | Publication/freshness/cancellation integration **only if measured** | 0.3 (decision only) |
 | `2026-11-17_opencode_intent_graph_retrieval.md` | Stages A–C done; D partial; E initial offline check | Matches | Broader shell/task intent linking, richer paired and end-to-end evaluation | 0.4 |
 | `2026-11-17_federated_graphs.md` | Base delivery | Discovery, explicit members, qualified identities, status/search/node inspection, cross-repo checks landed | Version-aware relationships, persistent identity, incremental cache, org manifests/access control | 0.4 |
@@ -307,10 +307,27 @@ landed without changing the envelope or the absent-versus-unknown rule:
 - `ownership`: bounded dirty files with uncommitted journaled edits by a
   session, live/committed state and age, from the existing owner/journals.
 
+**Progress (2026-11-25, host profile slice).** Codex, Kiro and Claude Code
+command hooks now write bounded metadata-only `profile_event`s through the
+existing daemon op and store:
+
+- session start/end/compact and the host model name when the payload has one;
+- tool started/terminal outcome counts and a duration only when the host
+  supplies a numeric one;
+- no prompt, source, path, command, tool input/output or secret value. Host
+  payloads without a tool id use an opaque digest only for replay dedupe;
+- fail-open: a missing daemon or malformed event drops the profile event and
+  never blocks the tool call. Kiro's session-end hook is V3-only.
+
+Token counts and turn timestamps are recorded only if a host supplies them;
+none of these command-hook payloads currently does, so those fields stay
+`null`. `ozagia-status` still reads the profiles with an unchanged summary
+shape.
+
 Still open in 0.3: the native session-secret prompt/UI and revoke/expiry flow;
-complete tool-lifecycle capture for Codex, Kiro and Claude Code (status reports
-only profiles that exist); model-provider connection probes (only
-secret-provider readiness is local and authoritative); and the prefetch
+live Codex, Kiro and Claude Code sessions to verify the installed hooks (the
+store and event paths are tested offline); model-provider connection probes
+(only secret-provider readiness is local and authoritative); and the prefetch
 keep/drop decision. Live integration and model/network probes remain out of
 scope for the read-only command.
 

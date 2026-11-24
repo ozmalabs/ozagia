@@ -52,6 +52,12 @@ subagent into its parent's ledger).
 The hook never blocks the agent because ozagia failed: any error prints
 nothing and exits 0, and is logged as one JSON line to
 `<state dir>/claude_hook.log`.
+
+Each mapped event also sends at most one metadata-only `profile_event`
+through `ozagia.integrations.session_profile`: session start/end/compact,
+tool started/terminal counts and any host-supplied model, duration or numeric
+token counts. Prompts, paths, command text, tool input/output and secret
+values are never persisted. A missing daemon just drops the event.
 """
 from __future__ import annotations
 
@@ -59,7 +65,7 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from ozagia.daemon import protocol
-from ozagia.integrations import hookcore
+from ozagia.integrations import hookcore, session_profile
 from ozagia.integrations.hookcore import (  # noqa: F401 - part of this module's API
     DAEMON_TIMEOUT_S,
     KEY_PREFIXES,
@@ -76,6 +82,15 @@ from ozagia.integrations.hookcore import (  # noqa: F401 - part of this module's
 HOOK_TIMEOUT_S = 20
 LOG_NAME = "claude_hook.log"
 HARNESS = "claude"
+# One profile event per hook invocation. A SessionStart with source "compact"
+# is recorded as the compact phase instead of another start.
+PROFILE_EVENTS = {
+    "SessionStart": ("session", "start"),
+    "SessionEnd": ("session", "end"),
+    "PreToolUse": ("tool", "started"),
+    "PostToolUse": ("tool", "completed"),
+    "PostToolUseFailure": ("tool", "error"),
+}
 # SessionStart after a compaction: the working set, at most this long.
 WORKING_SET_MAX_CHARS = 7000
 
@@ -187,6 +202,23 @@ def webfetch_text(tool_response: Any) -> str:
     return "\n".join(lines)
 
 
+def _profile_event(root: Path, payload: dict[str, Any], event: Any,
+                   tool_name: str) -> None:
+    """Record this hook invocation once, if it maps to a profile event."""
+    spec = PROFILE_EVENTS.get(event)
+    if spec is None:
+        return
+    kind, outcome = spec
+    phase = None
+    status = None
+    if kind == "session":
+        phase = "compact" if payload.get("source") == "compact" else outcome
+    else:
+        status = outcome
+    session_profile.record(root, HARNESS, payload, kind=kind, event=str(event),
+                           phase=phase, status=status, tool=tool_name)
+
+
 def handle(payload: dict[str, Any], root: Path) -> dict[str, Any] | None:
     """The hook's JSON answer for one event, or None to print nothing."""
     event = payload.get("hook_event_name")
@@ -198,6 +230,7 @@ def handle(payload: dict[str, Any], root: Path) -> dict[str, Any] | None:
     cwd = payload.get("cwd")
     # Subagent calls carry `agent_id` (and the parent's session id).
     sub = payload.get("agent_id") if isinstance(payload.get("agent_id"), str) else ""
+    _profile_event(root, payload, event, str(tool_name))
 
     if event == "SessionStart":
         # The working set first (it survives the ledger reset anyway).

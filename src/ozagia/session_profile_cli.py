@@ -101,8 +101,9 @@ def report(root: Path, *, now: datetime | None = None,
         "observed_at": observed.isoformat(),
         "sessions": [],
         "coverage": {
-            "model": "observed from OpenCode server message events when the Ozagia plugin is active; otherwise unknown",
-            "tokens": "observed from OpenCode assistant-message metadata when supplied; otherwise unknown",
+            "model": "observed from OpenCode server message events or a host hook payload when supplied; otherwise unknown",
+            "tokens": "observed from host message/hook metadata when supplied; otherwise unknown",
+            "lifecycle": "session start/end/compact and tool lifecycle counts are observed only from host events the host actually sends; hooks that are not installed remain unknown",
             "daemon": "persisted counters are preferred; bounded journal rows are a fallback. Successful explicit passthrough, handled, expired, failed (ok=false), and unknown outcomes are separate; errors include daemon failures. Legacy rows without ok accept explicit handled=false as passthrough. Missing or timed-out profile writes are unknown; daemon logs/RPC errors mark dropped writes.",
             "critical_path": "unavailable: model and tool durations do not establish task dependencies",
         },
@@ -427,24 +428,100 @@ def _write_profile_event(path: Path, directory: Path, envelope: dict, new_profil
                 pass
 
 
-def _store_profile_event(root: Path, value: dict) -> dict:
-    """Merge one metadata-only OpenCode message/tool completion event.
+_PROFILE_SOURCES = ("opencode_server_events", "host_hooks")
 
-    The server plugin sends final assistant messages and terminal tool-part
-    states only. A short hashed-ID window deduplicates reconnect/replay events;
-    aggregate counters are retained for the whole session in state.
+
+def _ensure_host_profile_shape(profile: dict, session: str, harness: str) -> None:
+    """Add the host-hook counters to a profile without discarding old ones."""
+    profile.setdefault("session_id", session)
+    profile.setdefault("harness", harness)
+    profile.setdefault("models", [])
+    profile.setdefault("model_calls", 0)
+    tokens = profile.setdefault("tokens", {})
+    if not isinstance(tokens, dict):
+        tokens = profile["tokens"] = {}
+    for key in ("input", "output", "reasoning", "cache_read", "cache_write"):
+        tokens.setdefault(key, None)
+    timing = profile.setdefault("timing_ms", {})
+    if not isinstance(timing, dict):
+        timing = profile["timing_ms"] = {}
+    for key in ("first_token", "streamed", "completed", "model_turn"):
+        timing.setdefault(key, None)
+    coverage = profile.setdefault("coverage", {})
+    for key in (
+        "assistant_turns", "turns_with_tokens", "turns_without_tokens",
+        "turns_with_complete_timing", "turns_without_complete_timing",
+        "host_tool_calls", "host_tool_calls_with_timing",
+        "host_tool_calls_without_timing",
+    ):
+        coverage.setdefault(key, 0)
+    for key in (
+        "session_starts", "session_ends", "session_compactions",
+        "tool_lifecycle_started", "tool_lifecycle_terminal",
+    ):
+        coverage.setdefault(key, 0)
+    lifecycle = profile.setdefault("lifecycle", {})
+    lifecycle.setdefault("starts", 0)
+    lifecycle.setdefault("ends", 0)
+    lifecycle.setdefault("compactions", 0)
+    lifecycle.setdefault("last", None)
+    profile.setdefault("tools", {})
+    profile.setdefault("recent_event_ids", [])
+    profile.setdefault("truncated", False)
+
+
+def _new_profile(session: str, harness: str, source: str) -> dict:
+    if source == "host_hooks":
+        profile = {
+            "session_id": session, "harness": harness, "source": source,
+            "model_calls": 0, "models": [], "tokens": {}, "timing_ms": {},
+            "coverage": {}, "tools": {}, "recent_event_ids": [],
+            "truncated": False,
+        }
+        _ensure_host_profile_shape(profile, session, harness)
+        return profile
+    return {
+        "session_id": session, "harness": harness,
+        "source": "opencode_server_events", "model_calls": 0, "models": [],
+        "tokens": {k: None for k in ("input", "output", "reasoning", "cache_read", "cache_write")},
+        "timing_ms": {k: None for k in ("first_token", "streamed", "completed", "model_turn")},
+        "coverage": {
+            "assistant_turns": 0, "turns_with_tokens": 0,
+            "turns_without_tokens": 0, "turns_with_complete_timing": 0,
+            "turns_without_complete_timing": 0, "host_tool_calls": 0,
+            "host_tool_calls_with_timing": 0,
+            "host_tool_calls_without_timing": 0,
+        },
+        "tools": {}, "seen_message_ids": [], "seen_tool_ids": [],
+        "truncated": False,
+    }
+
+
+def _store_profile_event(root: Path, value: dict) -> dict:
+    """Merge one metadata-only host event into the bounded profile store.
+
+    OpenCode sends final assistant messages and terminal tool-part states; the
+    command hooks (Claude Code, Codex, Kiro) send session start/end/compact and
+    tool lifecycle outcomes. A short hashed-ID window deduplicates
+    reconnect/replay events; aggregate counters are retained for the whole
+    session in state. Content never enters a field.
     """
     session = value.get("session_id", value.get("session"))
     harness = value.get("harness", "opencode")
     kind = value.get("kind")
     event_id = value.get("event_id")
     metadata = value.get("metadata")
+    source = value.get("source")
     if not isinstance(session, str) or not re.fullmatch(r"[A-Za-z0-9._:-]{1,256}", session):
         raise ValueError("invalid session id")
     if not isinstance(harness, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", harness):
         raise ValueError("invalid harness")
-    if kind not in ("message", "tool") or not isinstance(event_id, str) or not event_id or len(event_id) > 256:
+    if kind not in ("message", "tool", "session") or not isinstance(event_id, str) or not event_id or len(event_id) > 256:
         raise ValueError("invalid event kind or id")
+    if source is not None and source not in _PROFILE_SOURCES:
+        raise ValueError("invalid profile source")
+    if source is None:
+        source = "host_hooks" if kind == "session" else "opencode_server_events"
     if not isinstance(metadata, dict) or len(json.dumps(metadata)) > 2048:
         raise ValueError("event metadata must be an object under 2 KiB")
     import hashlib
@@ -464,23 +541,15 @@ def _store_profile_event(root: Path, value: dict) -> dict:
     if not isinstance(envelope, dict):
         envelope = {}
     profile = envelope.get("host_profile")
-    if not isinstance(profile, dict) or profile.get("source") != "opencode_server_events":
-        profile = {
-            "session_id": session, "harness": harness,
-            "source": "opencode_server_events", "model_calls": 0, "models": [],
-            "tokens": {k: None for k in ("input", "output", "reasoning", "cache_read", "cache_write")},
-            "timing_ms": {k: None for k in ("first_token", "streamed", "completed", "model_turn")},
-            "coverage": {
-                "assistant_turns": 0, "turns_with_tokens": 0,
-                "turns_without_tokens": 0, "turns_with_complete_timing": 0,
-                "turns_without_complete_timing": 0, "host_tool_calls": 0,
-                "host_tool_calls_with_timing": 0,
-                "host_tool_calls_without_timing": 0,
-            },
-            "tools": {}, "seen_message_ids": [], "seen_tool_ids": [],
-            "truncated": False,
-        }
-    seen_key = "seen_message_ids" if kind == "message" else "seen_tool_ids"
+    if not isinstance(profile, dict) or profile.get("source") not in _PROFILE_SOURCES:
+        profile = _new_profile(session, harness, source)
+    elif profile.get("source") == "host_hooks" or kind == "session":
+        _ensure_host_profile_shape(profile, session, harness)
+    host_source = profile.get("source") == "host_hooks"
+    if host_source or kind == "session":
+        seen_key = "recent_event_ids"
+    else:
+        seen_key = "seen_message_ids" if kind == "message" else "seen_tool_ids"
     seen = profile.get(seen_key)
     if not isinstance(seen, list):
         seen = []
@@ -506,15 +575,16 @@ def _store_profile_event(root: Path, value: dict) -> dict:
         target[key] = (target[key] or 0) + amount if target.get(key) is not None else amount
         return True
 
+    model = metadata.get("model")
+    if isinstance(model, str) and re.fullmatch(r"[A-Za-z0-9_.:/+-]{1,160}", model):
+        profile["models"] = list(dict.fromkeys([*(profile.get("models") or []), model]))[:20]
+    tokens = metadata.get("tokens") if isinstance(metadata.get("tokens"), dict) else {}
+    has_tokens = False
+    for key_name in ("input", "output", "reasoning", "cache_read", "cache_write"):
+        has_tokens |= add_known(profile["tokens"], key_name, tokens.get(key_name))
+
     if kind == "message":
-        model = metadata.get("model")
-        if isinstance(model, str) and re.fullmatch(r"[A-Za-z0-9_.:/+-]{1,160}", model):
-            profile["models"] = list(dict.fromkeys([*(profile.get("models") or []), model]))[:20]
         profile["model_calls"] = int(profile.get("model_calls") or 0) + 1
-        tokens = metadata.get("tokens") if isinstance(metadata.get("tokens"), dict) else {}
-        has_tokens = False
-        for key_name in ("input", "output", "reasoning", "cache_read", "cache_write"):
-            has_tokens |= add_known(profile["tokens"], key_name, tokens.get(key_name))
         coverage["assistant_turns"] += 1
         coverage["turns_with_tokens" if has_tokens else "turns_without_tokens"] += 1
         timing = metadata.get("timing_ms") if isinstance(metadata.get("timing_ms"), dict) else {}
@@ -522,16 +592,42 @@ def _store_profile_event(root: Path, value: dict) -> dict:
             add_known(profile["timing_ms"], key_name, timing.get(key_name))
         complete_timing = _bounded_count(timing.get("model_turn")) is not None
         coverage["turns_with_complete_timing" if complete_timing else "turns_without_complete_timing"] += 1
+    elif kind == "session":
+        phase = metadata.get("phase")
+        if phase not in ("start", "end", "compact"):
+            return {"ok": False, "error": "invalid session phase"}
+        lifecycle = profile.setdefault("lifecycle", {})
+        if phase == "start":
+            lifecycle["starts"] = int(lifecycle.get("starts") or 0) + 1
+            coverage["session_starts"] = int(coverage.get("session_starts") or 0) + 1
+        elif phase == "end":
+            lifecycle["ends"] = int(lifecycle.get("ends") or 0) + 1
+            coverage["session_ends"] = int(coverage.get("session_ends") or 0) + 1
+        else:
+            lifecycle["compactions"] = int(lifecycle.get("compactions") or 0) + 1
+            coverage["session_compactions"] = int(coverage.get("session_compactions") or 0) + 1
+        lifecycle["last"] = phase
+        timing = metadata.get("timing_ms") if isinstance(metadata.get("timing_ms"), dict) else {}
+        for key_name in ("first_token", "streamed", "completed", "model_turn"):
+            add_known(profile["timing_ms"], key_name, timing.get(key_name))
     else:
         tool = metadata.get("tool")
         status = metadata.get("status")
         if not isinstance(tool, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", tool):
             return {"ok": False, "error": "invalid tool name"}
-        if status not in ("completed", "error"):
-            return {"ok": False, "error": "tool event must be terminal"}
+        if status not in ("started", "completed", "error"):
+            return {"ok": False, "error": "invalid tool status"}
         duration = _bounded_count(metadata.get("duration_ms"))
-        coverage["host_tool_calls"] += 1
-        coverage["host_tool_calls_with_timing" if duration is not None else "host_tool_calls_without_timing"] += 1
+        if status == "started":
+            if host_source:
+                coverage["tool_lifecycle_started"] = int(
+                    coverage.get("tool_lifecycle_started") or 0) + 1
+        else:
+            if host_source:
+                coverage["tool_lifecycle_terminal"] = int(
+                    coverage.get("tool_lifecycle_terminal") or 0) + 1
+            coverage["host_tool_calls"] += 1
+            coverage["host_tool_calls_with_timing" if duration is not None else "host_tool_calls_without_timing"] += 1
         statuses = profile["tools"].setdefault(tool, {})
         stats = statuses.setdefault(status, {
             "count": 0, "timed_count": 0, "untimed_count": 0,

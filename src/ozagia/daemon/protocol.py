@@ -24,14 +24,21 @@ Requests (`op`):
           "meta": {...}}
 
     {"id": 3, "op": "profile_event", "harness": "opencode",
-     "session": "ses_...", "kind": "message"|"tool", "event_id": "...",
+     "session": "ses_...", "kind": "message"|"tool"|"session",
+     "event_id": "...", "source": "opencode_server_events"|"host_hooks",
      "metadata": {"model"?, "tokens"?, "timing_ms"?, "tool"?, "status"?,
-                  "duration_ms"?}}
+                  "duration_ms"?, "phase"?, "source"?}}
       -> {"id": 3, "ok": true, "stored": true}
       Persists an allowlisted aggregate in `.ozagia/session_profiles/`.
-      The OpenCode server plugin sends only final assistant-message and tool
-      outcome metadata; prompts, source, paths, and tool inputs/outputs are
-      never included.
+      The OpenCode server plugin sends final assistant-message and tool
+      outcome metadata; the Codex, Kiro and Claude Code command hooks send
+      session start/end/compact and tool lifecycle outcomes. Prompts, source,
+      paths, and tool inputs/outputs are never included. A tool event is
+      `started` (PreToolUse), `completed` (PostToolUse) or `error`; a session
+      event carries `start`, `end` or `compact` and the host's reason when it
+      supplies one (startup, resume, clear, compact). Token counts are only
+      recorded when the host payload has numeric ones; none of the command
+      hooks currently does, so they stay unknown rather than estimated.
       `meta` always has `intent` (a short name of what was done), `keys`
       (the node keys involved) and `ms` (handler time); `ozagia.intent`
       documents the intents and output formats. A handled answer also

@@ -190,10 +190,14 @@ stops after 30 minutes without requests (`OZAGIA_DAEMON_IDLE_TIMEOUT`).
 | `PreToolUse` | read: `read_file`, `readFile`, `read_files`, `fs_read`, `read` | When every requested path is a node key (`sym:`, `test:`, `doc:`, `text:`, `json:`, `yaml:`, `toml:`; also after `<cwd>/`), the daemon answers each (`tool` op, `read`, at most 8). If it handled any, the built-in is blocked with the answers. Real paths, mixed batches and image reads run as usual. | exit 2, the node text on stderr |
 | `PostToolUse` | see the mapping below | `after` with the neutral tool and input and the tool's result; the daemon re-ingests changed files and counts the call. | stdout, when the `append` is not empty (but see "Limits") |
 | `PostCompact` (CLI 3.1.0+) | | `hook.compaction_context`: asks a running daemon (3 s, no autostart) for the session's working set (`working_set` op: edited files and keys, failing tests and their rerun command, running jobs, the DevSession step, recent reads; see docs/codex.md, "Working set"), then sends `session_event` `compact`. Install registers it in the V3 hook file only (see below). | stdout, at most 3,000 characters (Kiro's cap), added after the summary |
+| `SessionEnd` (V3) | | Sends `session_event` `end`, which clears the session's read ledger. The CLI 2.x engines have no session-end trigger, so profiles do not get it. | nothing |
 | `PreCompact` | | Nothing, and not registered: its stdout would be summarised away, and a non-zero exit would cancel the compaction. | nothing |
 
 Every request has `harness: "kiro"` and `session` = `session_id`; the
-daemon counts requests by harness (`stats.by_harness`).
+daemon counts requests by harness (`stats.by_harness`). Each mapped event also
+sends one metadata-only `profile_event` (session start/end/compact, tool
+started/terminal counts and any host-supplied model, duration or numeric token
+counts); prompts, paths, command text and tool bodies are never stored.
 
 ### Tool mapping
 
