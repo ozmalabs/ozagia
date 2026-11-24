@@ -23,8 +23,8 @@ The task is:
 
 Each surface runs the calls a client would naturally choose for that task; no
 surface is given an artificial token budget below its default. The engine uses
-the v2 compact wire (`ozagia.graph_engine/2`) and its in-process background
-speculation worker.
+the v2 compact wire (`ozagia.graph_engine/2`) and its background speculation
+worker (fork process where available, thread fallback).
 
 ## Single turn
 
@@ -33,7 +33,7 @@ speculation worker.
 | full MCP (`dev_context`, `dev_repo_map`, `dev_symbol_callers`, `dev_outline`, `dev_tests`) | 5 | 1,707 |
 | graph surface (`find`, `node`, `expand`, `impact`) | 4 | 637 |
 | engine sync v2 (inline worker) | 4 | **374** |
-| engine background (daemon worker) | 4 | **374** |
+| engine background (process worker) | 4 | **374** |
 
 The wire size is unchanged by moving preparation to the background; the
 difference is *when* preparation happens. The background `find` response
@@ -108,8 +108,9 @@ opt-in with `stats: true` and is not repeated on every response.
 ## Speculation readiness and accounting
 
 The worker enqueues one job per `spec: true` response, selects at most two
-candidates, and prepares them in a single in-process daemon thread. The handler
-returns without waiting. In the background measurement:
+candidates, and prepares them in a single worker: a forked child process when
+available, with an in-process daemon-thread fallback. The handler returns
+without waiting. In the background measurement:
 
 - `ready_at_response`: 0 of 2 handles;
 - `ready_before_fetch`: 2 of 2 after the simulated think time;
@@ -130,9 +131,10 @@ entries and are covered by tests.
 - It does **not** show model latency or task improvement. The simulated sleep
   is not a model turn, and the fixture is tiny.
 - The background `find` handler was not faster in wall-clock on this fixture;
-  the GIL and thread startup can cost as much as the tiny graph work it
+  worker startup and scheduling can cost as much as the tiny graph work it
   prepares. The intended benefit is overlapping *model-side* waiting on larger
-  work, not winning a microbenchmark.
+  work, not winning a microbenchmark. The process path has more isolation but
+  also fork startup; the thread fallback is GIL-bound.
 - It does **not** measure hit rate across real repositories or think durations.
 - The token estimate is `len(JSON) / 4`; a real tokenizer will differ.
 
@@ -144,10 +146,13 @@ entries and are covered by tests.
   when the work happens, not the wire size.
 - `impact` remains the largest engine response (236 tokens); it needs a stricter
   budget/pagination or transport streaming.
-- The worker is one daemon thread in the same process, GIL-bound, with no
-  process isolation. One in-flight graph call can overrun the 300 ms worker
-  deadline because it is not preempted.
+- The worker is one fork child or one fallback daemon thread. The child has no
+  separate CPU/memory budget and inherits a fork-time graph snapshot; one
+  in-flight graph call can overrun the 300 ms worker deadline because it is not
+  preempted. The larger-corpus run records this explicitly.
 - No hit-rate evidence on larger repositories or real think times yet.
 
-Next: a daemon/process worker for true parallelism beyond the GIL, then a
-larger-repository hit-rate/waste evaluation before changing defaults.
+A fork-isolated process worker and a larger local-corpus measurement are in
+[`docs/results/graph_engine_speculation_2026-11-25.md`](graph_engine_speculation_2026-11-25.md).
+Next: a supervised long-lived worker with preemption for a long graph call, then
+broader hit-rate/waste evaluation before changing defaults.

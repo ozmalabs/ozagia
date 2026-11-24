@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import subprocess
 from pathlib import Path
 
 from ozagia import cli
@@ -152,6 +153,8 @@ def test_shape_identity_layout_modules_docs_entries_and_commands(tmp_path: Path)
     assert identity["counts"]["test_files"] == 3
     assert identity["counts"]["symbols"] >= 4
     assert shape["environment"]["snapshot"]["state"] == "missing"
+    assert shape["environment"]["untracked"]["state"] == "not_git"
+    assert shape["environment"]["untracked"]["count"] is None
     assert "snapshot" not in identity
     assert "head" not in identity
 
@@ -307,6 +310,79 @@ def test_check_ignores_environment_only_changes(tmp_path: Path, capsys) -> None:
     assert cli.main(["overview", "--root", str(root), "--check", str(out),
                      "--budget-s", "5"]) == 0
     assert "not drift" in capsys.readouterr().err
+
+
+def _git_init_tracked(root: Path) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True,
+                   capture_output=True)
+    subprocess.run(["git", "add", "-A"], cwd=root, check=True,
+                   capture_output=True)
+
+
+def test_git_checkout_ignores_untracked_files(
+        tmp_path: Path, capsys) -> None:
+    root = _fixture(tmp_path / "demo")
+    _git_init_tracked(root)
+    out = root / "REPO_SHAPE.md"
+    assert cli.main(["overview", "--root", str(root), "--out", str(out),
+                     "--budget-s", "5"]) == 0
+    capsys.readouterr()
+    before = RS.build_shape(root, budget_s=5, exclude=[out])
+
+    _write(root / "docs" / "website_claims.md", "# Website claims\n\nDraft.\n")
+    _write(root / "src" / "demo" / "untracked.py",
+           '"""Untracked module."""\n\ndef hidden() -> None:\n    pass\n')
+    after = RS.build_shape(root, budget_s=5, exclude=[out])
+
+    assert after["content_hash"] == before["content_hash"]
+    assert after["identity"]["counts"] == before["identity"]["counts"]
+    assert after["layout"] == before["layout"]
+    assert after["modules"] == before["modules"]
+    assert after["environment"]["untracked"]["state"] == "read"
+    assert after["environment"]["untracked"]["count"] == 2
+    assert set(after["environment"]["untracked"]["sample"]) == {
+        "docs/website_claims.md", "src/demo/untracked.py"}
+    assert "website_claims" not in RS.render_json(
+        RS.stable_projection(after))
+    markdown = RS.render_markdown(after)
+    assert "docs/website_claims.md" not in markdown.split(
+        "## Generation environment")[0]
+    assert "docs/website_claims.md" in markdown.split(
+        "## Generation environment")[1]
+
+    assert cli.main(["overview", "--root", str(root), "--check", str(out),
+                     "--budget-s", "5"]) == 0
+    assert "not drift" in capsys.readouterr().err
+
+    # An unstaged working-tree edit is environment only.
+    tracked = root / "README.md"
+    _write(tracked, tracked.read_text(encoding="utf-8") + "\nTracked change.\n")
+    modified = RS.build_shape(root, budget_s=5, exclude=[out])
+    assert modified["content_hash"] == before["content_hash"]
+    assert modified["environment"]["tracked_dirty"]["state"] == "read"
+    assert modified["environment"]["tracked_dirty"]["count"] == 1
+    assert modified["environment"]["tracked_dirty"]["sample"] == ["README.md"]
+    assert cli.main(["overview", "--root", str(root), "--check", str(out),
+                     "--budget-s", "5"]) == 0
+    assert "not drift" in capsys.readouterr().err
+
+    # Staging the change makes it part of the index-backed stable shape.
+    subprocess.run(["git", "add", "README.md"], cwd=root, check=True,
+                   capture_output=True)
+    staged = RS.build_shape(root, budget_s=5, exclude=[out])
+    assert staged["content_hash"] != before["content_hash"]
+    assert cli.main(["overview", "--root", str(root), "--check", str(out),
+                     "--budget-s", "5"]) == 1
+    assert "stable shape drift" in capsys.readouterr().err
+
+    # The index build matches a clean checkout of the same index.
+    clean = tmp_path / "clean" / "demo"
+    clean.mkdir(parents=True)
+    subprocess.run(
+        ["git", "checkout-index", "-a", f"--prefix={clean}/"],
+        cwd=root, check=True, capture_output=True)
+    clean_shape = RS.build_shape(clean, budget_s=5)
+    assert clean_shape["content_hash"] == staged["content_hash"]
 
 
 def test_check_fails_on_real_module_doc_and_command_drift(

@@ -963,10 +963,12 @@ _BUILTIN_DEFINITIONS: tuple[dict[str, Any], ...] = (
         surfaces=["mcp:tool:graph"],
         prerequisites=["a graph snapshot whose freshness can be verified"],
         limits=["default 1200 and maximum 8000 estimated tokens per response",
-                "16 bounded sessions; one GIL-bound daemon worker prepares at "
-                "most two spec handles per response (300 ms default)",
+                "16 bounded sessions; a fork child (or thread fallback) "
+                "prepares at most two spec handles per response (300 ms "
+                "default, one long call not preempted)",
                 "fetch waits at most 250 ms; worker can be disabled with "
-                "OZAGIA_ENGINE_SPEC=0",
+                "OZAGIA_ENGINE_SPEC=0 or forced to threads with "
+                "OZAGIA_ENGINE_SPEC_PROCESS=0",
                 "no edit, create, check, refresh, shell or target execution",
                 "a stale or unknown snapshot yields no structural rows"],
         authorization=_READ,

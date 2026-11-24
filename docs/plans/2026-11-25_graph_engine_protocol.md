@@ -23,10 +23,12 @@ logic:
 - **No model calls, network, target imports or target execution.** The engine
   does not run tests, edit files, refresh the snapshot, start a daemon or
   import a target module.
-- **No process isolation.** Speculation runs in one in-process daemon thread.
-  It can overlap model thinking time at the interpreter's scheduling granularity
-  but is GIL-bounded and has no separate CPU/memory budget. There is no new
-  daemon process yet.
+- **Process isolation is fork-only, not a daemon service.** When fork is
+  available, one child process per engine computes speculation payloads and
+  the parent applies validated messages. The child inherits the graph snapshot
+  at fork, has no parent-session access and no separate CPU/memory budget; a
+  thread fallback covers unavailable/failed fork. One long graph call is still
+  not preempted.
 - **No speculative writes.** A prepared payload is a read-only graph answer.
 - **No edit/create/check/refresh/shell ops.** Those remain on the graph
   surface; the engine deliberately cannot reach them.
@@ -265,13 +267,24 @@ When a response has `spec: true`:
    `q.p` further unaddressed suggestions. The handler does **not** wait for
    preparation.
 
-4. A single in-process daemon thread blocks on a bounded queue, prepares at
-   most two results per job, and yields between candidates. It captures the
-   session id, snapshot token, scope, generation, budget, deadline and entry
-   expiry. Before and after each candidate it checks that the session still
-   exists, is not closed, and has the same snapshot, scope and generation. A
+4. The computation and application are separate. A worker prepares a
+   `PreparedSpec` containing `(handle, payload)` results. The parent then
+   validates the job again and applies the results to the session. The worker
+   captures the job id, session id, snapshot token, freshness, scope,
+   generation, budget, deadline and entry expiry.
+5. The preferred worker is a **forked child process** per engine. The child
+   inherits the graph snapshot, builds its own speculation-disabled engine and
+   computes payloads; it never touches parent sessions. A small parent listener
+   thread only receives IPC messages and applies validated results. A bounded
+   pipe/queue, 300 ms worker budget and `time.sleep(0)` yields keep it from
+   spinning.
+6. If fork is unavailable or the child fails, the engine uses the thread worker
+   fallback; outstanding child jobs are cancelled cleanly. Before and after
+   each candidate the parent checks that the session still exists, is not
+   closed, and has the same snapshot, freshness, scope and generation. A
    changed/evicted/closed session, an expired entry or an exhausted worker
    budget cancels the remaining handles.
+7. The full ledger is **not** sent by default. `stats: true` adds it:
 5. The full ledger is **not** sent by default. `stats: true` adds it:
 
    ```json
@@ -311,18 +324,27 @@ Ledger counters:
 The cache is bounded at 8 entries per session. The engine also keeps
 process-lifetime aggregate counters in `GraphEngine.stats()`.
 
-### Worker limits
+### Worker limits and lifecycle
 
-- One daemon thread per engine process, bounded queue (8 jobs).
-- One job at a time; at most two candidates per job.
+- One worker per engine: a forked child when available, otherwise one daemon
+  thread. Bounded job queue (8) and one job at a time.
+- At most two candidates per job; up to six suggestions are queued in the job.
+- `OZAGIA_ENGINE_SPEC_PROCESS=auto` (default) uses fork when available;
+  `0` forces the thread worker; `1` requests process mode but still falls back
+  if fork is unavailable or the child dies.
 - Total worker deadline default 300 ms (`OZAGIA_ENGINE_SPEC_MS`, clamped
   50..2000 ms), checked between candidates. A single in-flight graph call can
-  overrun the deadline because it is not preempted.
+  overrun the deadline because it is not preempted. On the `ozagia` checkout the
+  measured second candidate took about 1.2 s, so a 150 ms think window missed.
 - Entry expiry default 30 s.
 - `OZAGIA_ENGINE_SPEC=0` disables speculation entirely (no worker, no handles).
-- The thread is daemonized; `bye` closes one session, and engine shutdown joins
-  the worker. The GIL still serialises CPU work with the handler; this overlaps
-  model-side waiting and some I/O, not two CPU-bound Python tasks.
+- `bye` cancels one session; engine shutdown sets the stop event, sends a
+  sentinel, joins/terminates the child, joins the IPC listener and clears the
+  queue. No processes or listener threads should remain.
+- The parent listener only does IPC and application, not graph computation. The
+  fork path is closer to true parallelism than the GIL-bound thread fallback,
+  but the child has no separate memory/CPU limit and the graph snapshot is a
+  fork-time copy.
 
 ## Freshness and unknowns
 
@@ -365,7 +387,8 @@ same freshness check.
 | speculation cache per session | 8 |
 | suggested candidates per response | 6 |
 | prepared per background job | 2 |
-| background worker threads per engine | 1 (daemon) |
+| background workers per engine | 1 fork child or 1 fallback daemon thread |
+| parent IPC listener | 1 daemon thread |
 | worker queue | 8 jobs |
 | worker total budget | 300 ms default (`OZAGIA_ENGINE_SPEC_MS`) |
 | speculation entry expiry | 30 s |
@@ -400,13 +423,41 @@ for the stateless graph sequence, with the same two prepared/fetched and
 `hit_rate=1.0`. See
 `docs/results/graph_engine_prototype_2026-11-25.md`.
 
+Larger-repository measurement
+(`scripts/measure_graph_engine_corpus.py`, 150 ms simulated think, 1,200-token
+budget):
+
+| Repo | Engine tokens / RT | Graph tokens / RT | Ready before fetch | Hit rate | Worker ms |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| fd | 1,432 / 5 | 3,952 / 5 | 2 / 2 | 1.0 | 49.5 |
+| flask | 2,979 / 5 | 10,311 / 5 | 2 / 2 | 1.0 | 24.3 |
+| httpx | 3,214 / 5 | 12,185 / 5 | 2 / 2 | 1.0 | 24.6 |
+| ozagia | 2,672 / 5 | 12,055 / 5 | 0 / 2 | 0.0 (2 misses) | 1,171.0 |
+
+The `ozagia` run missed the 150 ms fetch window because one candidate took
+about 1.2 s; both entries were ready after the follow-up (`ready_after=2`). With
+a 1,500 ms simulated think, the same run hit (`3,131 / 5`, `hit_rate=1.0`,
+`worker_ms=1,116.4`). This is the non-preemptible-call limit, not a wire
+failure. A thread-fallback `fd` run produced the same 1,432 tokens and hit
+rate. Details: `docs/results/graph_engine_speculation_2026-11-25.md`.
+
+## Live model session
+
+A local OpenAI-compatible endpoint check on `127.0.0.1:8000` returned
+`ConnectionRefusedError`; no model session was started and no hosted fallback
+was used. A live session remains blocked behind `--live`,
+`OZAGIA_EVAL_LIVE=1` and explicit human approval.
+
 ## Open work
 
-- Process/daemon worker or executor with real parallelism beyond the GIL.
-- Hit-rate and waste evaluation on larger repositories; tune the two-handle,
+- A persistent process/daemon worker with a supervisor and real resource
+  isolation; the current child is fork-only and not itself supervised.
+- Larger and more varied hit-rate/waste evaluation; tune the two-handle,
   300 ms and 400-token defaults against measured fetches and think times.
+- Preemption or cancellation for one long graph call; it currently can overrun
+  the worker deadline.
 - Optional Ozma transport (the protocol values are JSON-ready and
-  transport-neutral).
+  transport-neutral; explicitly out of this slice).
 - A persistent, versioned session/cache layer if the process-local bound
   proves too short for long agent sessions.
 - Stronger item identity than a 16-hex hash prefix if cross-process caching is

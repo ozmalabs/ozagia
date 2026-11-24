@@ -28,6 +28,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 import hashlib
 import json
+import multiprocessing
 import os
 import queue
 import threading
@@ -270,6 +271,7 @@ class EngineSession:
 @dataclass
 class SpecJob:
     """One background speculation job, bound to a session generation."""
+    job_id: str
     session_id: str
     generation: int
     scope: str
@@ -279,6 +281,14 @@ class SpecJob:
     deadline: float
     requests: list[tuple[str, dict[str, Any]]]
     suggestions: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class PreparedSpec:
+    """Worker output; the parent applies it only after revalidation."""
+    results: list[tuple[str, dict[str, Any]]]
+    reason: str | None = None
+    worker_ms: float = 0.0
 
 
 class BackgroundSpecWorker:
@@ -347,6 +357,10 @@ class BackgroundSpecWorker:
     def alive(self) -> bool:
         return bool(self._thread and self._thread.is_alive())
 
+    @property
+    def mode(self) -> str:
+        return "closed" if self._stop.is_set() else "thread"
+
 
 class InlineSpecWorker:
     """Synchronous worker for measurements and deterministic tests."""
@@ -354,6 +368,10 @@ class InlineSpecWorker:
     def __init__(self) -> None:
         self.engine: GraphEngine | None = None
         self.closed = False
+
+    @property
+    def mode(self) -> str:
+        return "closed" if self.closed else "inline"
 
     def bind(self, engine: "GraphEngine") -> None:
         self.engine = engine
@@ -366,6 +384,214 @@ class InlineSpecWorker:
 
     def close(self, timeout: float = 1.0) -> None:
         self.closed = True
+
+
+def _fork_available() -> bool:
+    try:
+        return ("fork" in multiprocessing.get_all_start_methods()
+                and hasattr(os, "fork"))
+    except Exception:  # noqa: BLE001 - no fork is an honest fallback
+        return False
+
+
+def _process_spec_main(conn: Any, memory: Any, root: str,
+                       worker_budget_s: float) -> None:
+    """Child loop: compute payloads only; never apply parent session state."""
+    try:
+        engine = GraphEngine(memory, workspace=root, spec_enabled=False)
+        engine.worker_budget_s = worker_budget_s
+    except Exception as exc:  # noqa: BLE001 - report a failed child honestly
+        try:
+            conn.send({"fatal": f"{type(exc).__name__}: {exc}"})
+        except (OSError, EOFError):
+            pass
+        conn.close()
+        return
+    while True:
+        try:
+            job = conn.recv()
+        except (EOFError, OSError):
+            break
+        if job is None:
+            break
+        try:
+            prepared = engine._prepare_spec_requests(job)
+            conn.send({"job_id": job.job_id, "prepared": prepared})
+        except Exception as exc:  # noqa: BLE001 - parent cancels the job
+            try:
+                conn.send({
+                    "job_id": job.job_id,
+                    "prepared": PreparedSpec([], "worker_error", 0.0),
+                    "error": f"{type(exc).__name__}: {exc}",
+                })
+            except (OSError, EOFError):
+                break
+    try:
+        conn.close()
+    except OSError:
+        pass
+
+
+class ProcessSpecWorker:
+    """One forked child computes payloads; a parent listener applies them.
+
+    The child inherits the graph snapshot through ``fork`` and builds its own
+    ``GraphEngine`` with speculation disabled.  It sends ``PreparedSpec``
+    messages; the parent validates the session generation/snapshot/scope/expiry
+    before applying anything.  If the child dies or cannot be started, new
+    jobs go to the thread fallback and outstanding jobs are cancelled.
+    """
+
+    def __init__(self, engine: "GraphEngine", *,
+                 queue_size: int = SPEC_QUEUE_SIZE) -> None:
+        self.engine = engine
+        self.queue_size = max(1, int(queue_size))
+        self._ctx = multiprocessing.get_context("fork")
+        self._lock = threading.RLock()
+        self._stop = threading.Event()
+        self._parent_conn: Any = None
+        self._process: Any = None
+        self._listener: threading.Thread | None = None
+        self._jobs: dict[str, SpecJob] = {}
+        self._fallback: BackgroundSpecWorker | None = None
+        self._dead = False
+
+    @property
+    def mode(self) -> str:
+        with self._lock:
+            if self._stop.is_set():
+                return "closed"
+            if self._process is not None and self._process.is_alive() and not self._dead:
+                return "process"
+            if self._fallback is not None:
+                return "thread"
+            if self._process is None and not self._dead:
+                return "process"
+            return "dead"
+
+    @property
+    def alive(self) -> bool:
+        with self._lock:
+            process = self._process
+            listener = self._listener
+            fallback = self._fallback
+        return bool((process is not None and process.is_alive())
+                    or (listener is not None and listener.is_alive())
+                    or (fallback is not None and fallback.alive))
+
+    def _ensure_process_locked(self) -> None:
+        if self._process is not None:
+            return
+        parent, child = self._ctx.Pipe(duplex=True)
+        process = self._ctx.Process(
+            target=_process_spec_main,
+            args=(child, self.engine.mem, str(self.engine.root),
+                  self.engine.worker_budget_s),
+            name="ozagia-engine-spec-proc", daemon=True)
+        try:
+            process.start()
+        except Exception:
+            parent.close()
+            child.close()
+            raise
+        child.close()
+        self._parent_conn = parent
+        self._process = process
+        self._listener = threading.Thread(
+            target=self._listen, name="ozagia-engine-spec-ipc", daemon=True)
+        self._listener.start()
+
+    def _ensure_fallback_locked(self) -> None:
+        if self._fallback is None:
+            self._fallback = BackgroundSpecWorker(self.engine)
+
+    def submit(self, job: SpecJob) -> bool:
+        if self._stop.is_set():
+            return False
+        with self._lock:
+            if self._process is not None and not self._process.is_alive():
+                self._dead = True
+            if not self._dead:
+                try:
+                    self._ensure_process_locked()
+                except Exception:  # noqa: BLE001 - fork is not usable here
+                    self._dead = True
+            if not self._dead and self._process is not None:
+                if self._process.is_alive():
+                    self._jobs[job.job_id] = job
+                    try:
+                        self._parent_conn.send(job)
+                        return True
+                    except (OSError, EOFError, BrokenPipeError):
+                        self._jobs.pop(job.job_id, None)
+                        self._dead = True
+            self._ensure_fallback_locked()
+            fallback = self._fallback
+        return fallback.submit(job) if fallback is not None else False
+
+    def _listen(self) -> None:
+        while not self._stop.is_set():
+            try:
+                message = self._parent_conn.recv()
+            except (EOFError, OSError):
+                break
+            if message is None:
+                break
+            if "fatal" in message:
+                break
+            job_id = str(message.get("job_id") or "")
+            with self._lock:
+                job = self._jobs.pop(job_id, None)
+            if job is None:
+                continue
+            prepared = message.get("prepared")
+            if message.get("error") or prepared is None:
+                self.engine._cancel_job(job, "worker_error")
+            else:
+                self.engine._apply_spec_results(job, prepared)
+        with self._lock:
+            self._dead = True
+            jobs = list(self._jobs.values())
+            self._jobs.clear()
+        for job in jobs:
+            self.engine._cancel_job(job, "worker_died")
+
+    def close(self, timeout: float = 2.0) -> None:
+        self._stop.set()
+        with self._lock:
+            conn = self._parent_conn
+            process = self._process
+            listener = self._listener
+            fallback = self._fallback
+        if conn is not None:
+            try:
+                conn.send(None)
+            except (OSError, EOFError, BrokenPipeError):
+                pass
+        if listener is not None:
+            listener.join(timeout)
+        if process is not None:
+            process.join(0.5)
+            if process.is_alive():
+                process.terminate()
+                process.join(1.0)
+            if process.is_alive():
+                process.kill()
+                process.join(0.5)
+        if listener is not None and listener.is_alive():
+            listener.join(1.0)
+        if conn is not None:
+            try:
+                conn.close()
+            except OSError:
+                pass
+        if fallback is not None:
+            fallback.close()
+        with self._lock:
+            self._dead = True
+            self._parent_conn = None
+            self._process = None
+            self._listener = None
 
 
 class GraphEngine:
@@ -396,7 +622,18 @@ class GraphEngine:
         elif spec_worker is not None:
             self.spec_worker = spec_worker
         else:
-            self.spec_worker = BackgroundSpecWorker(self)
+            preference = os.environ.get("OZAGIA_ENGINE_SPEC_PROCESS",
+                                        "auto").strip().lower()
+            use_process = (preference not in {"0", "thread", "false", "off",
+                                               "no"}
+                           and _fork_available())
+            if use_process:
+                try:
+                    self.spec_worker = ProcessSpecWorker(self)
+                except Exception:  # noqa: BLE001 - unsafe fork falls back
+                    self.spec_worker = BackgroundSpecWorker(self)
+            else:
+                self.spec_worker = BackgroundSpecWorker(self)
         if self.spec_worker is not None and hasattr(self.spec_worker, "bind"):
             self.spec_worker.bind(self)
         self.totals = {"sessions": 0, "evicted_sessions": 0,
@@ -448,6 +685,7 @@ class GraphEngine:
             "spec_per_session": MAX_SPEC,
             "prepared_per_response": MAX_SPEC_PREPARE,
             "worker_alive": bool(getattr(worker, "alive", False)),
+            "worker_mode": getattr(worker, "mode", "none") if worker else "none",
             "totals": dict(self.totals),
         }
 
@@ -915,7 +1153,8 @@ class GraphEngine:
                 }
                 handles.append(handle)
                 requests.append((handle, request))
-        job = SpecJob(session_id=session.id, generation=generation,
+        job = SpecJob(job_id=f"{session.id}:{generation}",
+                      session_id=session.id, generation=generation,
                       scope=session.scope, snap=snap, fresh=session.fresh,
                       budget=min(SPEC_BUDGET, budget),
                       deadline=now + self.worker_budget_s,
@@ -1048,56 +1287,59 @@ class GraphEngine:
         session.ledger["evicted"] += 1
         self.totals["evicted"] += 1
 
+    def _prepare_spec_requests(self, job: SpecJob) -> PreparedSpec:
+        """Compute payloads in a detached session; never apply parent state."""
+        detached = EngineSession(id=job.session_id, snap=job.snap,
+                                 fresh=job.fresh, scope=job.scope,
+                                 budget=job.budget)
+        results: list[tuple[str, dict[str, Any]]] = []
+        started = self._clock()
+        reason: str | None = None
+        for handle, request in job.requests:
+            if self._clock() >= job.deadline:
+                reason = "budget"
+                break
+            try:
+                payload = self._execute(
+                    request["op"], dict(request), detached, job.snap,
+                    job.budget, allow_spec=False, compact=False,
+                    cache_cols=False)
+            except Exception as exc:  # noqa: BLE001 - parent cancels it
+                payload = {"e": f"{type(exc).__name__}: {exc}"}
+            results.append((handle, payload))
+            time.sleep(0)  # yield between candidates; do not spin
+        if len(results) < len(job.requests) and reason is None:
+            reason = "budget"
+        worker_ms = max(0.0, (self._clock() - started) * 1000.0)
+        return PreparedSpec(results, reason, worker_ms)
+
     def _run_spec_job(self, job: SpecJob) -> None:
-        """Prepare at most the job's requests, stopping on any invalidation."""
+        """Thread/inline path: prepare, then apply in the parent."""
         if not self._job_valid(job):
             self._cancel_job(job, "stale")
             return
-        for index, (handle, request) in enumerate(job.requests):
-            remaining = [item[0] for item in job.requests[index:]]
-            now = self._clock()
-            if now >= job.deadline:
-                self._cancel_job(job, "budget", handles=remaining)
+        prepared = self._prepare_spec_requests(job)
+        self._apply_spec_results(job, prepared)
+
+    def _apply_spec_results(self, job: SpecJob,
+                            prepared: PreparedSpec) -> None:
+        """Validate the job again before mutating the parent session."""
+        self.totals["worker_ms"] += prepared.worker_ms
+        with self._lock:
+            session = self.sessions.get(job.session_id)
+            if not self._job_valid_locked(session, job):
+                if session is not None:
+                    self._cancel_handles_locked(
+                        session, [item[0] for item in job.requests],
+                        reason="stale")
                 return
-            with self._lock:
-                session = self.sessions.get(job.session_id)
-                if not self._job_valid_locked(session, job):
-                    targets = remaining
-                    session = self.sessions.get(job.session_id)
-                    if session is not None:
-                        self._cancel_handles_locked(session, targets,
-                                                    reason="stale")
-                    return
-                entry = session.spec.get(handle) if session else None
-                if entry is None or entry.get("status") != "pending":
-                    continue
-                if now > entry.get("expires", now):
-                    self._cancel_entry_locked(session, handle,
-                                              reason="expired")
-                    continue
-            started = self._clock()
-            try:
-                payload = self._execute(
-                    request["op"], dict(request), session, job.snap,
-                    job.budget, allow_spec=False, compact=False,
-                    cache_cols=False)
-            except Exception as exc:  # noqa: BLE001 - reported as cancelled
-                payload = {"e": f"{type(exc).__name__}: {exc}"}
-            elapsed_ms = max(0.0, (self._clock() - started) * 1000.0)
-            self.totals["worker_ms"] += elapsed_ms
-            with self._lock:
-                session = self.sessions.get(job.session_id)
-                if not self._job_valid_locked(session, job):
-                    if session is not None:
-                        self._cancel_handles_locked(
-                            session,
-                            [item[0] for item in job.requests[index:]],
-                            reason="stale")
-                    return
-                session.ledger["worker_ms"] += elapsed_ms
+            session.ledger["worker_ms"] += prepared.worker_ms
+            applied: set[str] = set()
+            for handle, payload in prepared.results:
                 entry = session.spec.get(handle)
                 if entry is None or entry.get("status") != "pending":
                     continue
+                applied.add(handle)
                 if self._clock() > entry.get("expires", self._clock()):
                     self._cancel_entry_locked(session, handle,
                                               reason="expired")
@@ -1116,7 +1358,10 @@ class GraphEngine:
                 event = entry.get("event")
                 if event is not None:
                     event.set()
-            time.sleep(0)  # yield between candidates; do not spin
+            reason = prepared.reason or "budget"
+            for handle, _request in job.requests:
+                if handle not in applied:
+                    self._cancel_entry_locked(session, handle, reason=reason)
 
     @staticmethod
     def _ledger(session: EngineSession) -> dict[str, Any]:
@@ -1495,6 +1740,7 @@ __all__ = [
     "ENGINE_TOOL_NAME", "ENGINE_TOOLS", "FEATURES", "GraphEngine",
     "InlineSpecWorker", "MAX_BUDGET", "MAX_FETCH_WAIT_MS", "MAX_SESSIONS",
     "MAX_SPEC", "MIN_BUDGET", "OPS", "PROTOCOL", "PROTOCOL_VERSION",
-    "SPEC_BUDGET", "SPEC_TTL_S", "SPEC_WORKER_BUDGET_MS", "SpecJob",
-    "description_tokens", "estimate_tokens",
+    "PreparedSpec", "ProcessSpecWorker", "SPEC_BUDGET", "SPEC_TTL_S",
+    "SPEC_WORKER_BUDGET_MS", "SpecJob", "description_tokens",
+    "estimate_tokens",
 ]

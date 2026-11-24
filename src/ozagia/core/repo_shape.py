@@ -32,6 +32,7 @@ import ast
 import hashlib
 import json
 import os
+import posixpath
 import re
 import tempfile
 import time
@@ -44,6 +45,7 @@ from ozagia.config import (
     load_project_config,
     state_path,
 )
+from ozagia.core.git_safety import UnsafeGitConfig, run_git
 
 SCHEMA = "ozagia.repo_shape.v1"
 GENERATOR = "ozagia overview"
@@ -57,6 +59,10 @@ MAX_README_BYTES = 128 * 1024
 MAX_DOC_BYTES = 48 * 1024
 MAX_DOC_FILES = 200
 MAX_GRAPH_BYTES = 96 * 1024 * 1024
+# Git index content is fetched from blobs, never from a working-tree copy.
+# The caps keep a huge repository from turning one overview into a full clone.
+MAX_INDEX_TOTAL_BYTES = 64 * 1024 * 1024
+MAX_INDEX_BLOB_BYTES = 4 * 1024 * 1024
 MAX_MARKDOWN_COMMANDS = 40
 MAX_COMMANDS_PER_KIND = 8
 MAX_DOC_LINKS = 300
@@ -231,6 +237,46 @@ def _read_text(root: Path, rel: str, limit: int) -> str | None:
         return None
 
 
+class _SourceView:
+    """Stable file contents: git index blobs or the filesystem fallback."""
+
+    def __init__(self, root: Path, files: Iterable[str], *,
+                 indexed: bool = False,
+                 data: dict[str, bytes] | None = None,
+                 sizes: dict[str, int | None] | None = None) -> None:
+        self.root = root
+        self.files = frozenset(files)
+        self.indexed = indexed
+        self.data = data or {}
+        self.sizes = sizes or {}
+
+    def has(self, rel: str) -> bool:
+        return rel in self.files
+
+    def read_text(self, rel: str, limit: int) -> str | None:
+        if rel not in self.files:
+            return None
+        if self.indexed:
+            blob = self.data.get(rel)
+            if blob is None:
+                return None
+            return blob.decode("utf-8", "replace")[:limit]
+        return _read_text(self.root, rel, limit)
+
+    def size(self, rel: str) -> int | None:
+        if rel not in self.files:
+            return None
+        if self.indexed:
+            if rel in self.sizes:
+                return self.sizes[rel]
+            blob = self.data.get(rel)
+            return len(blob) if blob is not None else None
+        try:
+            return (self.root / rel).stat().st_size
+        except OSError:
+            return None
+
+
 def _module_doc(tree: ast.AST) -> tuple[str, str]:
     try:
         doc = ast.get_docstring(tree, clean=True) or ""
@@ -337,6 +383,190 @@ class _Config:
         self.docs = tuple(cfg.docs) if cfg else ("README.md", "docs/**/*.md")
 
 
+def _decode_git_paths(output: bytes) -> list[str]:
+    return [part.replace("\\", "/")
+            for part in output.decode("utf-8", "surrogateescape").split("\0")
+            if part]
+
+
+def _tracked_path_allowed(rel: str, skip_dirs: Iterable[str]) -> bool:
+    """The walk's skip semantics, applied to an index path."""
+    parts = rel.split("/")
+    skip = set(skip_dirs)
+    for part in parts[:-1]:
+        if part in skip or part.startswith("."):
+            return False
+    name = parts[-1]
+    return not (name in {".DS_Store"} or name.endswith((".pyc", ".pyo")))
+
+
+def _needs_index_content(rel: str) -> bool:
+    if _code_file(rel) or _doc_file(rel):
+        return True
+    return rel in {"pyproject.toml", "LICENSE", "LICENSE.md", "COPYING"}
+
+
+def _parse_stage(output: bytes) -> list[tuple[str, str]]:
+    entries: list[tuple[str, str]] = []
+    for record in output.split(b"\0"):
+        if not record or b"\t" not in record:
+            continue
+        meta, raw_path = record.split(b"\t", 1)
+        fields = meta.decode("ascii", "replace").split()
+        if len(fields) != 3 or fields[2] != "0" or fields[0] == "160000":
+            continue
+        rel = raw_path.decode("utf-8", "surrogateescape").replace("\\", "/")
+        entries.append((rel, fields[1]))
+    return entries
+
+
+def _cat_file_sizes(root: Path, oids: Iterable[str]) -> dict[str, int]:
+    unique = sorted(set(oids))
+    if not unique:
+        return {}
+    try:
+        proc = run_git(root, ["cat-file", "--batch-check"],
+                       input_data=("\n".join(unique) + "\n").encode("ascii"),
+                       timeout=30)
+    except UnsafeGitConfig:
+        return {}
+    if proc.returncode != 0:
+        return {}
+    sizes: dict[str, int] = {}
+    for line in proc.stdout.decode("ascii", "replace").splitlines():
+        parts = line.split()
+        if len(parts) == 3 and parts[1] == "blob":
+            try:
+                sizes[parts[0]] = int(parts[2])
+            except ValueError:
+                continue
+    return sizes
+
+
+def _cat_file_blobs(root: Path, oids: Iterable[str]) -> dict[str, bytes]:
+    unique = sorted(set(oids))
+    if not unique:
+        return {}
+    try:
+        proc = run_git(root, ["cat-file", "--batch"],
+                       input_data=("\n".join(unique) + "\n").encode("ascii"),
+                       timeout=60)
+    except UnsafeGitConfig:
+        return {}
+    if proc.returncode != 0:
+        return {}
+    raw = proc.stdout
+    blobs: dict[str, bytes] = {}
+    position = 0
+    while position < len(raw):
+        newline = raw.find(b"\n", position)
+        if newline < 0:
+            break
+        header = raw[position:newline].decode("ascii", "replace").split()
+        position = newline + 1
+        if len(header) == 2 and header[1] == "missing":
+            continue
+        if len(header) != 3:
+            break
+        try:
+            size = int(header[2])
+        except ValueError:
+            break
+        end = position + size
+        if end > len(raw):
+            break
+        blobs[header[0]] = raw[position:end]
+        position = end + 1
+    return blobs
+
+
+def _git_snapshot(root: Path, cfg: _Config, excluded: set[str],
+                  deadline: float | None) -> dict[str, Any]:
+    """Index-backed stable view plus observed untracked/dirty state.
+
+    Stable sections read the Git index blobs (``git ls-files --stage`` plus
+    ``git cat-file``), never modified working-tree files. A directory without
+    ``.git`` (or a failed Git read) returns ``state != "read"`` so callers fall
+    back to the bounded filesystem walk.
+    """
+    empty = {"state": "not_git", "paths": None, "view": None,
+             "tracked_count": None, "untracked": [], "dirty": [],
+             "dirty_state": "not_git", "reason": "no .git in this directory",
+             "content": {}}
+    if not (root / ".git").exists():
+        return empty
+    try:
+        staged = run_git(root, ["ls-files", "-z", "--stage"], timeout=20)
+        untracked_proc = run_git(
+            root, ["ls-files", "-z", "--others", "--exclude-standard"],
+            timeout=20)
+        dirty_proc = run_git(root, ["diff", "--name-only", "-z", "--"],
+                             timeout=20)
+    except UnsafeGitConfig as exc:
+        return {**empty, "state": "unavailable", "dirty_state": "unavailable",
+                "reason": str(exc)[:300]}
+    if staged.returncode != 0:
+        return {**empty, "state": "unavailable", "dirty_state": "unavailable",
+                "reason": "git ls-files --stage failed"}
+    entries = [(rel, oid) for rel, oid in _parse_stage(staged.stdout)
+               if rel not in excluded
+               and _tracked_path_allowed(rel, cfg.skip_dirs)]
+    entries.sort()
+    truncated = len(entries) > MAX_WALK_FILES
+    entries = entries[:MAX_WALK_FILES]
+    paths = [rel for rel, _oid in entries]
+    untracked = sorted(rel for rel in set(
+        _decode_git_paths(untracked_proc.stdout)) if rel not in excluded) \
+        if untracked_proc.returncode == 0 else []
+    dirty = sorted(rel for rel in set(
+        _decode_git_paths(dirty_proc.stdout)) if rel not in excluded) \
+        if dirty_proc.returncode == 0 else []
+    dirty_state = "read" if dirty_proc.returncode == 0 else "unavailable"
+
+    needed = [(rel, oid) for rel, oid in entries if _needs_index_content(rel)]
+    sizes_by_oid = _cat_file_sizes(root, (oid for _rel, oid in needed))
+    selected: list[tuple[str, str, int]] = []
+    total = 0
+    skipped = 0
+    for rel, oid in needed:
+        size = sizes_by_oid.get(oid)
+        if size is None or size > MAX_INDEX_BLOB_BYTES:
+            skipped += 1
+            continue
+        if total + size > MAX_INDEX_TOTAL_BYTES:
+            skipped += 1
+            continue
+        selected.append((rel, oid, size))
+        total += size
+    if deadline is not None and time.monotonic() > deadline:
+        skipped += len(selected)
+        selected = []
+        total = 0
+    blobs = _cat_file_blobs(root, (oid for _rel, oid, _size in selected))
+    data = {rel: blobs[oid] for rel, oid, _size in selected if oid in blobs}
+    sizes = {rel: sizes_by_oid.get(oid) for rel, oid in entries
+             if oid in sizes_by_oid}
+    view = _SourceView(root, paths, indexed=True, data=data, sizes=sizes)
+    return {
+        "state": "read",
+        "paths": paths,
+        "view": view,
+        "tracked_count": len(entries),
+        "untracked": untracked,
+        "dirty": dirty,
+        "dirty_state": dirty_state,
+        "reason": None,
+        "truncated": truncated,
+        "content": {
+            "blobs": len(data),
+            "bytes": total,
+            "skipped": skipped,
+            "cap_bytes": MAX_INDEX_TOTAL_BYTES,
+            "blob_cap_bytes": MAX_INDEX_BLOB_BYTES,
+        },
+    }
+
+
 def _walk(root: Path, cfg: _Config, deadline: float | None,
           max_files: int) -> dict[str, Any]:
     files: list[str] = []
@@ -378,8 +608,8 @@ def _walk(root: Path, cfg: _Config, deadline: float | None,
 
 
 def _analyze_modules(root: Path, source_files: list[str], cfg: _Config,
-                     deadline: float | None, max_modules: int
-                     ) -> dict[str, Any]:
+                     deadline: float | None, max_modules: int,
+                     view: _SourceView) -> dict[str, Any]:
     modules: list[dict[str, Any]] = []
     cli_commands: list[dict[str, Any]] = []
     symbols_total = 0
@@ -394,7 +624,7 @@ def _analyze_modules(root: Path, source_files: list[str], cfg: _Config,
             budget_hit = True
             break
         analyzed += 1
-        text = _read_text(root, rel, MAX_FILE_BYTES)
+        text = view.read_text(rel, MAX_FILE_BYTES)
         if text is None:
             read_failures.append(rel)
             modules.append(_module_row(rel, "", "unread", None))
@@ -523,7 +753,8 @@ def _group_modules(modules: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _analyze_tests(root: Path, test_files: list[str],
-                   deadline: float | None) -> dict[str, Any]:
+                   deadline: float | None,
+                   view: _SourceView) -> dict[str, Any]:
     tests_total = 0
     imports: dict[str, list[str]] = {}
     analyzed = 0
@@ -536,7 +767,7 @@ def _analyze_tests(root: Path, test_files: list[str],
         analyzed += 1
         if not rel.endswith(".py"):
             continue
-        text = _read_text(root, rel, MAX_FILE_BYTES)
+        text = view.read_text(rel, MAX_FILE_BYTES)
         if text is None:
             continue
         try:
@@ -794,14 +1025,18 @@ def _first_prose(text: str, limit: int = 900) -> str:
 
 def _documentation(root: Path, walk: dict[str, Any], cfg: _Config,
                    deadline: float | None,
-                   excluded: set[str] | None = None) -> dict[str, Any]:
+                   excluded: set[str] | None = None,
+                   available: set[str] | None = None,
+                   view: _SourceView | None = None) -> dict[str, Any]:
     excluded = excluded or set()
+    available = available if available is not None else set(walk["files"])
+    view = view or _SourceView(root, walk["files"])
     readme_rel = ""
     for candidate in (*cfg.key_docs, "README.md", "README.rst"):
-        if (root / candidate).is_file():
+        if candidate in available and view.has(candidate):
             readme_rel = candidate
             break
-    readme_text = (_read_text(root, readme_rel, MAX_README_BYTES)
+    readme_text = (view.read_text(readme_rel, MAX_README_BYTES)
                    if readme_rel else None)
     readme = {
         "path": readme_rel or None,
@@ -834,12 +1069,11 @@ def _documentation(root: Path, walk: dict[str, Any], cfg: _Config,
         if deadline is not None and time.monotonic() > deadline:
             continue
         read_count += 1
-        text = _read_text(root, rel, MAX_DOC_BYTES)
+        text = view.read_text(rel, MAX_DOC_BYTES)
         if text is None:
             continue
         scanned.append({"path": rel, "title": _redact(_title(text)),
-                        "kind": kind, "bytes": (root / rel).stat().st_size
-                        if (root / rel).is_file() else None})
+                        "kind": kind, "bytes": view.size(rel)})
         for match in list(_LINK_RE.finditer(text))[:MAX_DOC_LINKS]:
             target = match.group(1).strip()
             if (not target or target.startswith(("#", "http://", "https://",
@@ -849,24 +1083,30 @@ def _documentation(root: Path, walk: dict[str, Any], cfg: _Config,
             if not target or "://" in target:
                 continue
             links_checked += 1
-            resolved = (root / rel).parent / target
-            if _exists(root, resolved, excluded):
+            resolved = _resolve_rel(rel, target)
+            if resolved and (resolved in excluded or view.has(resolved)):
                 links_existing += 1
             elif len(links_missing) < 8:
                 links_missing.append({"doc": rel, "target": target[:180]})
         for match in list(_PATH_TOKEN_RE.finditer(text))[:MAX_PATH_MENTIONS]:
             path_mentions += 1
             token = match.group(1)
-            if (_exists(root, root / token, excluded)
-                    or _exists(root, (root / rel).parent / token, excluded)):
+            from_root = _resolve_rel("", token)
+            from_doc = _resolve_rel(rel, token)
+            if ((from_root and (from_root in excluded or view.has(from_root)))
+                    or (from_doc and (from_doc in excluded or view.has(from_doc)))):
                 path_found += 1
 
     canonical = {
-        "roadmap": "docs/roadmap.md" if (root / "docs/roadmap.md").is_file()
+        "roadmap": "docs/roadmap.md" if "docs/roadmap.md" in available
         else None,
-        "plans": _dir_count(root, "docs/plans", ".md"),
-        "results": _dir_count(root, "docs/results", ".md"),
-        "research": _dir_count(root, "docs/research", ".md"),
+        "plans": sum(1 for rel in doc_rels
+                     if rel.startswith("docs/plans/") and rel.endswith(".md")),
+        "results": sum(1 for rel in doc_rels
+                       if rel.startswith("docs/results/") and rel.endswith(".md")),
+        "research": sum(1 for rel in doc_rels
+                        if rel.startswith("docs/research/")
+                        and rel.endswith(".md")),
     }
     scanned.sort(key=lambda item: item["path"])
     return {
@@ -891,23 +1131,21 @@ def _documentation(root: Path, walk: dict[str, Any], cfg: _Config,
     }
 
 
-def _inside(root: Path, path: Path) -> bool:
-    try:
-        path.resolve().relative_to(root.resolve())
-        return True
-    except (OSError, ValueError):
-        return False
-
-
-def _exists(root: Path, path: Path, excluded: set[str]) -> bool:
-    """A target counts as existing when it is real or the excluded output."""
-    try:
-        rel = path.resolve().relative_to(root.resolve()).as_posix()
-    except (OSError, ValueError):
-        return False
-    if rel in excluded:
-        return True
-    return _inside(root, path) and path.exists()
+def _resolve_rel(base_rel: str, target: str) -> str | None:
+    """Resolve a link/path token to a normalized repo-relative path."""
+    target = target.strip()
+    if not target:
+        return None
+    if target.startswith("/"):
+        joined = posixpath.normpath(target.lstrip("/"))
+    elif base_rel:
+        joined = posixpath.normpath(
+            posixpath.join(posixpath.dirname(base_rel), target))
+    else:
+        joined = posixpath.normpath(target)
+    if joined in {"", ".", ".."} or joined.startswith("../"):
+        return None
+    return joined
 
 
 def _doc_kind(rel: str) -> str:
@@ -925,24 +1163,6 @@ def _doc_kind(rel: str) -> str:
     if rel in {"AGENTS.md", "CONTRIBUTING.md", "CHANGELOG.md"}:
         return "root"
     return "other"
-
-
-def _dir_count(root: Path, rel: str, suffix: str) -> int | None:
-    path = root / rel
-    if not path.is_dir():
-        return None
-    count = 0
-    try:
-        for dirpath, dirnames, filenames in os.walk(path):
-            dirnames[:] = sorted(name for name in dirnames
-                                 if not name.startswith("."))
-            count += sum(1 for name in filenames
-                         if Path(name).suffix == suffix)
-            if count > 10_000:
-                break
-    except OSError:
-        return None
-    return count
 
 
 _SHELL_LANGUAGES = frozenset({"sh", "bash", "shell", "console", "zsh", "fish",
@@ -1033,16 +1253,20 @@ def _command_kind(command: str) -> str:
     return "other"
 
 
-def _commands(root: Path, cfg: _Config) -> dict[str, Any]:
+def _commands(root: Path, cfg: _Config,
+              available: set[str] | None = None,
+              view: _SourceView | None = None) -> dict[str, Any]:
     sources = list(dict.fromkeys((*cfg.command_docs, *COMMAND_DOCS)))
+    allowed = available if available is not None else None
+    view = view or _SourceView(root, allowed or ())
     seen: set[str] = set()
     by_kind: dict[str, list[dict[str, str]]] = {
         "build": [], "test": [], "lint": [], "run": [], "other": []}
     sources_read: list[str] = []
     for rel in sources:
-        if not (root / rel).is_file():
+        if allowed is not None and rel not in allowed:
             continue
-        text = _read_text(root, rel, MAX_README_BYTES)
+        text = view.read_text(rel, MAX_README_BYTES)
         if text is None:
             continue
         sources_read.append(rel)
@@ -1066,7 +1290,9 @@ def _commands(root: Path, cfg: _Config) -> dict[str, Any]:
     }
 
 
-def _conventions(root: Path, pyproject: dict[str, Any]) -> list[dict[str, str]]:
+def _conventions(root: Path, pyproject: dict[str, Any],
+                 available: set[str] | None = None,
+                 view: _SourceView | None = None) -> list[dict[str, str]]:
     notes: list[dict[str, str]] = []
     tool = pyproject.get("tool") if isinstance(pyproject, dict) else None
     if isinstance(tool, dict):
@@ -1080,10 +1306,12 @@ def _conventions(root: Path, pyproject: dict[str, Any]) -> list[dict[str, str]]:
             if paths:
                 text += f" (testpaths={', '.join(map(str, paths))})"
             notes.append({"source": "pyproject.toml", "text": text})
-    if (root / "AGENTS.md").is_file():
+    allowed = available if available is not None else None
+    view = view or _SourceView(root, allowed or ())
+    if "AGENTS.md" in view.files:
         notes.append({"source": "AGENTS.md",
                       "text": "agent instructions are in AGENTS.md"})
-    if (root / "CONTRIBUTING.md").is_file():
+    if "CONTRIBUTING.md" in view.files:
         notes.append({"source": "CONTRIBUTING.md",
                       "text": "contribution workflow is in CONTRIBUTING.md"})
     return notes[:MAX_CONVENTIONS]
@@ -1223,16 +1451,24 @@ def _file_level(source_files: list[str], test_files: list[str],
 # --------------------------------------------------------------------------- #
 
 
-def _pyproject(root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+def _pyproject(root: Path, available: set[str] | None = None,
+               view: _SourceView | None = None
+               ) -> tuple[dict[str, Any], dict[str, Any]]:
     path = root / "pyproject.toml"
+    view = view or _SourceView(root, available or ())
     meta: dict[str, Any] = {"path": "pyproject.toml", "present": path.is_file(),
                             "state": "missing", "error": None}
-    if not path.is_file():
+    if "pyproject.toml" not in view.files:
+        if path.is_file() and view.indexed:
+            meta["state"] = "untracked"
+            meta["error"] = "pyproject.toml is not tracked in the git checkout"
+        return {}, meta
+    text = view.read_text("pyproject.toml", MAX_README_BYTES)
+    if text is None:
         return {}, meta
     try:
-        with path.open("rb") as handle:
-            data = tomllib.load(handle)
-    except (OSError, tomllib.TOMLDecodeError) as exc:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
         meta["state"] = "invalid"
         meta["error"] = f"{type(exc).__name__}: {exc}"[:300]
         return {}, meta
@@ -1254,7 +1490,9 @@ def _snapshot_state(snapshot: dict[str, Any],
 
 def _identity(root: Path, pyproject: dict[str, Any], walk: dict[str, Any],
               modules: dict[str, Any], tests: dict[str, Any],
-              docs: dict[str, Any]) -> dict[str, Any]:
+              docs: dict[str, Any],
+              available: set[str] | None = None,
+              view: _SourceView | None = None) -> dict[str, Any]:
     project = pyproject.get("project") if isinstance(pyproject, dict) else None
     if not isinstance(project, dict):
         project = {}
@@ -1264,10 +1502,12 @@ def _identity(root: Path, pyproject: dict[str, Any], walk: dict[str, Any],
     license_value = project.get("license")
     if isinstance(license_value, dict):
         license_value = license_value.get("text") or license_value.get("file")
+    view = view or _SourceView(root, available or walk["files"])
     if not license_value:
         for candidate in ("LICENSE", "LICENSE.md", "COPYING"):
-            if (root / candidate).is_file():
-                first = (_read_text(root, candidate, 500) or "").strip().splitlines()
+            if candidate in view.files:
+                first = ((view.read_text(candidate, 500) or "")
+                         .strip().splitlines())
                 license_value = _one_line(first[0], 80) if first else candidate
                 break
     languages: dict[str, int] = {}
@@ -1323,7 +1563,6 @@ def build_shape(root: str | Path = ".", *,
     start = time.monotonic()
     deadline = start + budget_s if budget_s else None
     cfg = _Config(root_path)
-    walk = _walk(root_path, cfg, deadline, MAX_WALK_FILES)
     excluded: set[str] = set()
     for item in exclude or ():
         path = Path(item)
@@ -1333,9 +1572,22 @@ def build_shape(root: str | Path = ".", *,
             excluded.add(path.resolve().relative_to(root_path).as_posix())
         except (OSError, ValueError):
             continue
-    if excluded:
-        walk = {**walk,
-                "files": [rel for rel in walk["files"] if rel not in excluded]}
+    git_info = _git_snapshot(root_path, cfg, excluded, deadline)
+    if git_info["state"] == "read":
+        walk = {"files": list(git_info.get("paths") or []), "dirs": [],
+                "truncated": bool(git_info.get("truncated")),
+                "budget_exceeded": False}
+        view = git_info["view"]
+    else:
+        walk = _walk(root_path, cfg, deadline, MAX_WALK_FILES)
+        if excluded:
+            walk = {**walk,
+                    "files": [rel for rel in walk["files"]
+                              if rel not in excluded]}
+        view = _SourceView(root_path, walk["files"])
+    available = set(walk["files"])
+    untracked = list(git_info.get("untracked") or [])
+    tracked_dirty = list(git_info.get("dirty") or [])
 
     test_files = [rel for rel in walk["files"]
                   if _test_file(rel, cfg.test_dirs)]
@@ -1355,10 +1607,10 @@ def build_shape(root: str | Path = ".", *,
         "analysis": {},
     }
     analysis = _analyze_modules(root_path, source_files, cfg, deadline,
-                                max_modules)
+                                max_modules, view)
     grammar["analysis"] = analysis
 
-    tests_analysis = _analyze_tests(root_path, test_files, deadline)
+    tests_analysis = _analyze_tests(root_path, test_files, deadline, view)
     tests_analysis["link_source"] = "filename+import"
     test_summary = {
         "files": test_files[:50],
@@ -1380,9 +1632,10 @@ def build_shape(root: str | Path = ".", *,
     test_summary["truncated"] = (test_summary["truncated"]
                                  or len(test_files) > 50)
 
-    docs = _documentation(root_path, walk, cfg, deadline, excluded)
-    commands = _commands(root_path, cfg)
-    pyproject, pyproject_meta = _pyproject(root_path)
+    docs = _documentation(root_path, walk, cfg, deadline, excluded, available,
+                          view)
+    commands = _commands(root_path, cfg, available, view)
+    pyproject, pyproject_meta = _pyproject(root_path, available, view)
     architecture = _architecture(root_path, cfg, source_files, test_files,
                                  {item["language"]: item["files"]
                                   for item in _identity_languages(walk)},
@@ -1405,7 +1658,7 @@ def build_shape(root: str | Path = ".", *,
         "schema": SCHEMA,
         "root_name": _redact(root_path.name),
         "identity": _identity(root_path, pyproject, walk, grammar, test_summary,
-                              docs),
+                              docs, available, view),
         "source": {
             "readme": docs["readme"],
             "package": {
@@ -1451,7 +1704,7 @@ def build_shape(root: str | Path = ".", *,
         "architecture": architecture,
         "tests": test_summary,
         "commands": commands,
-        "conventions": _conventions(root_path, pyproject),
+        "conventions": _conventions(root_path, pyproject, available, view),
         "coverage": {
             "files_walked": len(walk["files"]),
             "unknowns": _stable_unknowns(docs, analysis),
@@ -1470,11 +1723,38 @@ def build_shape(root: str | Path = ".", *,
         },
         "environment": {
             "label": "Generation environment (not checked)",
-            "note": ("Informational only. Git HEAD, the local graph snapshot, "
-                     "the tag cache and generation time are excluded from "
-                     "content_hash and from `--check`."),
+            "note": ("Informational only. Git HEAD, working-tree modifications, "
+                     "untracked files, the local graph snapshot, the tag cache "
+                     "and generation time are excluded from content_hash and "
+                     "from `--check`."),
             "configuration_error": cfg.error,
             "git": head,
+            "git_files": {
+                "state": git_info.get("state"),
+                "tracked_count": (git_info.get("tracked_count")
+                                  if git_info.get("state") == "read" else None),
+                "reason": git_info.get("reason"),
+                "index_content": git_info.get("content") or {},
+            },
+            "untracked": {
+                "state": git_info.get("state"),
+                "count": (len(untracked)
+                          if git_info.get("state") == "read" else None),
+                "sample": untracked[:20],
+                "truncated": len(untracked) > 20,
+                "reason": git_info.get("reason"),
+                "note": ("untracked files are observation only; they are not "
+                         "part of the stable source shape or `--check`"),
+            },
+            "tracked_dirty": {
+                "state": git_info.get("dirty_state"),
+                "count": (len(tracked_dirty)
+                          if git_info.get("dirty_state") == "read" else None),
+                "sample": tracked_dirty[:20],
+                "truncated": len(tracked_dirty) > 20,
+                "note": ("working-tree modifications to tracked files are "
+                         "observation only; the stable shape reads the index"),
+            },
             "snapshot": snapshot,
             "tag_cache": {
                 "path": architecture.get("cache_path"),
@@ -1494,6 +1774,8 @@ def build_shape(root: str | Path = ".", *,
                 "tag_cache": ("read" if architecture["available"]
                               else "unavailable"),
                 "git": head.get("state"),
+                "git_files": git_info.get("state"),
+                "tracked_dirty": git_info.get("dirty_state"),
             },
             "test_links": {
                 "graph_edges_used": bool(graph_links),
@@ -1960,11 +2242,34 @@ def render_markdown(shape: dict[str, Any]) -> str:
     tag_cache = environment.get("tag_cache") or {}
     sources = environment.get("sources") or {}
     test_links = environment.get("test_links") or {}
+    untracked = environment.get("untracked") or {}
+    tracked_dirty = environment.get("tracked_dirty") or {}
+    git_files = environment.get("git_files") or {}
     lines.extend(["## Generation environment (observed; not checked)", "",
                   f"> {_cell(environment.get('note') or 'Informational only.')}"])
     lines.append("")
     lines.append(f"- Git: head `{_cell(git.get('commit'))}`; "
                  f"ref `{_cell(git.get('ref'))}`; state {_cell(git.get('state'))}.")
+    lines.append(f"- Git file view: {_cell(git_files.get('state'))}; "
+                 f"tracked files {_cell(git_files.get('tracked_count'))}.")
+    lines.append(f"- Tracked files dirty in the working tree: "
+                 f"{_cell(tracked_dirty.get('state'))}; "
+                 f"count {_cell(tracked_dirty.get('count'))}.")
+    if tracked_dirty.get("sample"):
+        lines.append("- Dirty tracked sample: " + ", ".join(
+            f"`{_cell(item, 120)}`" for item in tracked_dirty["sample"]))
+        lines.append(f"  Note: {_cell(tracked_dirty.get('note'))}.")
+    lines.append(f"- Untracked files: {_cell(untracked.get('state'))}; "
+                 f"count {_cell(untracked.get('count'))}.")
+    if untracked.get("sample"):
+        lines.append("- Untracked sample: " + ", ".join(
+            f"`{_cell(item, 120)}`" for item in untracked["sample"]))
+        if untracked.get("truncated"):
+            lines.append(f"  ({_cell(untracked.get('count'))} untracked files; "
+                         "only the first 20 are shown.)")
+        lines.append(f"  Note: {_cell(untracked.get('note'))}.")
+    elif untracked.get("state") != "read":
+        lines.append(f"- Untracked: {_cell(untracked.get('reason') or 'not a git checkout')}.")
     lines.append(f"- Snapshot: {_cell(snapshot.get('state'))}; "
                  f"head `{_cell(snapshot.get('head'))}`; "
                  f"generated at `{_cell(snapshot.get('generated_at'))}`; "

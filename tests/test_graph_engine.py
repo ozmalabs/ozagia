@@ -7,6 +7,7 @@ server's engine surface.
 from __future__ import annotations
 
 import json
+import multiprocessing
 import subprocess
 import time
 from pathlib import Path
@@ -71,6 +72,7 @@ def test_quadruple():
     assert quadruple(1) == 4
 '''
 README = "# Fixture\n\nA small graph engine fixture.\n"
+FORK_AVAILABLE = "fork" in multiprocessing.get_all_start_methods()
 
 
 def _write(root: Path, rel: str, text: str) -> None:
@@ -151,6 +153,20 @@ def manual(memory: DevMemory):
 def _run_next(engine: GraphEngine, worker: ManualWorker) -> None:
     assert worker.jobs, "no speculation job was submitted"
     engine._run_spec_job(worker.jobs.pop(0))
+
+
+def _wait_status(engine: GraphEngine, sid: str, handles: list[str],
+                 wanted: str, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    session = engine.sessions[sid]
+    while time.monotonic() < deadline:
+        if all(session.spec.get(handle, {}).get("status") == wanted
+               for handle in handles):
+            return
+        time.sleep(0.01)
+    raise AssertionError(
+        f"handles did not become {wanted}: "
+        f"{[(h, session.spec.get(h, {}).get('status')) for h in handles]}")
 
 
 def _hello(engine: GraphEngine, **args: Any) -> dict[str, Any]:
@@ -565,6 +581,22 @@ def test_close_and_eviction_clear_speculation(manual) -> None:
     assert worker.closed is True
 
 
+def test_refused_spec_request_cancels_cleanly(manual) -> None:
+    engine, worker = manual
+    sid = _hello(engine)["sid"]
+    first = _spec_result(engine, sid)
+    handles = first["q"]["h"]
+    job = worker.jobs[0]
+    job.requests = [(handles[0], {"op": "not_an_op"})]
+    engine._run_spec_job(job)
+    session = engine.sessions[sid]
+    assert session.ledger["prepared"] == 0
+    assert session.spec[handles[0]]["status"] == "cancelled"
+    fetched = engine.handle({"op": "fetch", "session": sid,
+                             "fetch": [handles[0]], "stats": True})
+    assert fetched["fs"] == "cancelled"
+
+
 def test_ledger_records_hit_and_waste(manual) -> None:
     engine, worker = manual
     sid = _hello(engine)["sid"]
@@ -597,28 +629,122 @@ def test_speculation_can_be_disabled(memory: DevMemory,
         engine.close()
 
 
-def test_default_worker_prepares_and_stops(engine: GraphEngine) -> None:
-    sid = _hello(engine)["sid"]
-    first = _spec_result(engine, sid)
-    handles = first["q"]["h"]
-    session = engine.sessions[sid]
-    deadline = time.monotonic() + 2.0
-    while time.monotonic() < deadline:
-        if all(session.spec.get(handle, {}).get("status") == "ready"
-               for handle in handles):
-            break
-        time.sleep(0.01)
-    assert all(session.spec[handle]["status"] == "ready"
-               for handle in handles)
-    fetched = engine.handle({"op": "fetch", "session": sid,
-                             "fetch": handles, "stats": True})
-    assert "e" not in fetched
-    assert fetched["st"]["hits"] == len(handles)
-    assert fetched["st"]["worker_ms"] > 0
-    worker = engine.spec_worker
-    engine.close()
+def test_thread_worker_prepares_and_stops(memory: DevMemory,
+                                          monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OZAGIA_ENGINE_SPEC", raising=False)
+    monkeypatch.setenv("OZAGIA_ENGINE_SPEC_PROCESS", "0")
+    engine = GraphEngine(memory)
+    try:
+        assert engine.stats()["worker_mode"] == "thread"
+        sid = _hello(engine)["sid"]
+        first = _spec_result(engine, sid)
+        handles = first["q"]["h"]
+        _wait_status(engine, sid, handles, "ready")
+        fetched = engine.handle({"op": "fetch", "session": sid,
+                                 "fetch": handles, "stats": True})
+        assert "e" not in fetched
+        assert fetched["st"]["hits"] == len(handles)
+        assert fetched["st"]["worker_ms"] > 0
+    finally:
+        worker = engine.spec_worker
+        engine.close()
     assert worker is not None and not worker.alive
     assert engine.stats()["worker_alive"] is False
+
+
+@pytest.mark.skipif(not FORK_AVAILABLE, reason="fork is not available")
+def test_process_worker_prepares_after_response_and_reaps(
+        memory: DevMemory, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OZAGIA_ENGINE_SPEC", raising=False)
+    monkeypatch.delenv("OZAGIA_ENGINE_SPEC_PROCESS", raising=False)
+    engine = GraphEngine(memory)
+    try:
+        assert engine.stats()["worker_mode"] == "process"
+        sid = _hello(engine)["sid"]
+        first = _spec_result(engine, sid)
+        handles = first["q"]["h"]
+        assert handles
+        _wait_status(engine, sid, handles, "ready")
+        fetched = engine.handle({"op": "fetch", "session": sid,
+                                 "fetch": handles, "stats": True})
+        assert "e" not in fetched
+        assert fetched["st"]["hits"] == len(handles)
+        assert fetched["st"]["worker_ms"] > 0
+        worker = engine.spec_worker
+        assert worker is not None and worker.mode == "process"
+    finally:
+        worker = engine.spec_worker
+        engine.close()
+    assert worker is not None and not worker.alive
+    assert getattr(worker, "_process", None) is None
+    assert engine.stats()["worker_alive"] is False
+
+
+@pytest.mark.skipif(not FORK_AVAILABLE, reason="fork is not available")
+def test_process_child_crash_falls_back_to_thread(
+        memory: DevMemory, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OZAGIA_ENGINE_SPEC", raising=False)
+    monkeypatch.delenv("OZAGIA_ENGINE_SPEC_PROCESS", raising=False)
+    engine = GraphEngine(memory)
+    try:
+        sid = _hello(engine)["sid"]
+        first = _spec_result(engine, sid)
+        worker = engine.spec_worker
+        assert worker is not None
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            process = getattr(worker, "_process", None)
+            if process is not None and process.is_alive():
+                break
+            time.sleep(0.01)
+        process = getattr(worker, "_process", None)
+        assert process is not None and process.is_alive()
+        process.kill()
+        process.join(1.0)
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline and worker.mode != "thread":
+            time.sleep(0.01)
+            if worker.mode == "dead":
+                break
+        second = _spec_result(engine, sid)
+        handles = second["q"]["h"]
+        assert handles
+        _wait_status(engine, sid, handles, "ready")
+        assert engine.stats()["worker_mode"] == "thread"
+        fetched = engine.handle({"op": "fetch", "session": sid,
+                                 "fetch": handles, "stats": True})
+        assert fetched["st"]["hits"] == len(handles)
+        assert first["q"]["h"]
+    finally:
+        engine.close()
+
+
+@pytest.mark.skipif(not FORK_AVAILABLE, reason="fork is not available")
+def test_process_worker_discards_changed_generation(
+        memory: DevMemory, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OZAGIA_ENGINE_SPEC", raising=False)
+    monkeypatch.delenv("OZAGIA_ENGINE_SPEC_PROCESS", raising=False)
+    engine = GraphEngine(memory)
+    try:
+        sid = _hello(engine)["sid"]
+        first = _spec_result(engine, sid)
+        handles = first["q"]["h"]
+        session = engine.sessions[sid]
+        session.spec_generation += 1
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if all(session.spec.get(handle, {}).get("status")
+                   in ("cancelled", "ready")
+                   for handle in handles):
+                break
+            time.sleep(0.01)
+        assert session.ledger["prepared"] == 0
+        fetched = engine.handle({"op": "fetch", "session": sid,
+                                 "fetch": handles, "stats": True})
+        items = fetched.get("it") or [fetched]
+        assert all(item.get("fs") == "cancelled" for item in items)
+    finally:
+        engine.close()
 
 
 # --------------------------------------------------------------------------- #

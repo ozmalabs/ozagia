@@ -4,19 +4,24 @@
 
 - A first stateful graph-engine surface (`OZAGIA_SURFACE=engine`) exposes one
   `graph` MCP tool with `hello` sessions, compact tabular rows, hard estimated
-  token budgets, `known` outline/context deltas and bounded in-process
-  background speculation (`spec`/`fetch`). A single daemon worker prepares at
-  most two candidates after the response, while the model thinks, with
-  snapshot/generation/scope checks, a worker deadline, cancellation and a
-  `bye` close path. The v2 wire keeps the default handshake to
+  token budgets, `known` outline/context deltas and bounded background
+  speculation (`spec`/`fetch`). Computation and parent application
+  are separate: a forked child per engine computes at most two candidates after
+  the response and a parent IPC listener applies validated results, with a
+  daemon-thread fallback when fork is unavailable or the child dies. It has
+  snapshot/freshness/scope/generation checks, a worker deadline, bounded
+  `fetch` waits, cancellation and a `bye` close path. The v2 wire keeps the
+  default handshake to
   protocol/session/snapshot/budget/capability-mask fields, sends columns once
   per session, omits redundant success metadata, and moves the speculation
   ledger behind `stats: true`. It reuses the existing graph, context and
   repository-shape services, withholds structural data on stale/unknown
   snapshots, and has no edit, test-run, refresh, shell, network or model path.
-  The prototype wire/readiness measurement is in
-  `docs/results/graph_engine_prototype_2026-11-25.md`; it is not a model-task
-  gain, and the worker is in-process, GIL-bounded and not a separate daemon.
+  The prototype wire/readiness measurements are in
+  `docs/results/graph_engine_prototype_2026-11-25.md` and
+  `docs/results/graph_engine_speculation_2026-11-25.md`; they are not
+  model-task gains. The worker is fork-isolated where available, with a thread
+  fallback, and is not a supervised daemon.
 - Deep-review local advisories now match Python lockfile pins against OSV-style
   `introduced`/`fixed`/`last_affected` ranges using PEP 440 ordering (epoch,
   release, pre/post/dev and local segments), with the existing event

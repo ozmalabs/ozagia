@@ -28,7 +28,7 @@ The 0.1.x line delivered the core platform and then Rust parity:
 | Research | Sources, references, claims, evidence, synthesis, theory, PDF/TEI, citation graph, manuscript bundles |
 | Infrastructure | Source-only Terraform/Kubernetes/Helm/CloudFormation/Pulumi/GitOps graph, offline IaC checks, operations graph, runtime services/relays/tunnels behind explicit gates |
 | Federation | Sibling/explicit-member snapshots, qualified identities, read-only cross-repo search and declared links |
-| Model interface | Contracts, read-only self-graph/capabilities, task preflight and evidence store, task profile/critical path, model-facing maps (M3), a bounded structured edit/interaction path (M4), an offline prefetch planner/ledger, a stateful compact graph-engine prototype with bounded in-process background speculation, and partial M5 linked/research/action joins with optional Ocelot research projection; M6 has an offline harness and one live run invalid for the map arm |
+| Model interface | Contracts, read-only self-graph/capabilities, task preflight and evidence store, task profile/critical path, model-facing maps (M3), a bounded structured edit/interaction path (M4), an offline prefetch planner/ledger, a stateful compact graph-engine prototype with bounded fork-isolated background speculation and a thread fallback, and partial M5 linked/research/action joins with optional Ocelot research projection; M6 has an offline harness and one live run invalid for the map arm |
 
 The capability catalogue currently declares **104 capabilities across 14
 domains and 166 surfaces** (`ozagia capabilities list --json`). That number is
@@ -470,9 +470,13 @@ The orientation reference also landed as an explicitly bounded first slice:
 `core/repo_shape.py` composes the existing README/package metadata, a bounded
 walk, Python AST module docstrings, `[project.scripts]`, the read-only tag-cache
 architecture report, graph test links and Markdown commands. The hash and
-`--check` cover only the stable checkout/source projection; git HEAD, snapshot
-state/counts/time and tag-cache availability are shown in a clearly labelled
-"observed; not checked" environment block. The CLI writes only on an explicit
+`--check` cover only the stable checkout/source projection; in a Git checkout
+that projection is read from the index blobs (`git ls-files --stage` plus
+`git cat-file`), so neither untracked notes nor uncommitted working-tree edits
+to tracked files can drift the committed reference. Git HEAD, snapshot
+state/counts/time, tag-cache availability, untracked count/sample and
+tracked-dirty count/sample are shown in a clearly labelled "observed; not
+checked" environment block; non-Git directories fall back to the bounded walk. The CLI writes only on an explicit
 `--out` (atomic), and MCP exposes `dev_overview` plus `ozagia://overview`
 resources. It deliberately does not claim a model-written summary, full
 documentation-to-code traceability beyond cheap links/path mentions, or
@@ -482,21 +486,31 @@ examples and a larger-repository budget study, remain follow-on work.
 A first **stateful graph-engine prototype** also landed (2026-11-25):
 `OZAGIA_SURFACE=engine` exposes one `graph` tool with `hello` sessions, compact
 tabular rows, hard estimated-token budgets, `known` outline/context deltas and
-bounded in-process background speculation (`spec`/`fetch`). One daemon worker
-prepares at most two candidates after the response, checked against the
-session's snapshot, scope and generation, with a 300 ms worker deadline,
-bounded `fetch` waits, `bye`/engine-close cleanup and `OZAGIA_ENGINE_SPEC=0`
-disable. It reuses the existing graph surface, context and repository-shape
-services and withholds structural data when the snapshot is stale or unknown.
-The protocol is in `docs/plans/2026-11-25_graph_engine_protocol.md`, the guide
-in `docs/graph_engine.md`, and the v2 prototype measurement (374 estimated
-tokens and 4 round-trips versus 637/4 for the graph surface and 1,707/5 for the
-`dev_*` sequence on a tiny fixture; a multi-turn run is 578/5 versus 684/5
-stateless; background speculation was ready before fetch with hit_rate 1.0 and
-zero waste) in `docs/results/graph_engine_prototype_2026-11-25.md`. That
-measurement is wire size and readiness, not a model-task gain. Next: a
-daemon/process worker for true parallelism beyond the GIL, larger-repository
-hit-rate/waste evaluation, and an optional Ozma transport.
+bounded background speculation (`spec`/`fetch`). Computation and parent
+application are separate: a forked child per engine computes `(handle,
+payload)` results and a parent IPC listener applies them after validating
+snapshot, freshness, scope, generation and expiry. A thread worker is the
+fallback when fork is unavailable or the child dies. `OZAGIA_ENGINE_SPEC=0`
+disables speculation; `OZAGIA_ENGINE_SPEC_PROCESS=0` forces the thread worker.
+`bye`/engine close stop and reap the child/listener, with a 300 ms worker
+deadline, 30 s entry expiry and bounded 250 ms fetch waits. One long graph call
+is still not preempted. The protocol is in
+`docs/plans/2026-11-25_graph_engine_protocol.md`, the guide in
+`docs/graph_engine.md`, and the prototype measurements in
+`docs/results/graph_engine_prototype_2026-11-25.md` and
+`docs/results/graph_engine_speculation_2026-11-25.md`. The tiny fixture remains
+374 tokens / 4 round-trips versus 637/4 for the graph surface and 1,707/5 for
+the `dev_*` sequence (multi-turn 578/5 versus 684/5). On the larger local
+corpus, engine wire/readiness results were fd 1,432/5 vs 3,952/5, flask
+2,979/5 vs 10,311/5, httpx 3,214/5 vs 12,185/5, and this repository 2,672/5 vs
+12,055/5 at a 150 ms think; the last run missed the fetch window because one
+candidate took about 1.2 s, and was ready later (1,500 ms think: 3,131/5,
+hit_rate 1.0). These are wire/overlap measurements, not model-task gains. The
+local OpenAI-compatible endpoint check (`127.0.0.1:8000`) was refused, so the
+live-model run remains blocked behind `--live`, `OZAGIA_EVAL_LIVE=1` and human
+approval. Next: a supervised, resource-bounded long-lived worker with
+preemption or cancellation for a long graph call, broader hit/waste evaluation,
+and an optional Ozma transport (out of this slice).
 
 **Exit criteria**
 

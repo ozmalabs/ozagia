@@ -491,7 +491,8 @@ def test_guided_cprofile_run_writes_artifact_and_report(tmp_path):
     policy["admission"]["min_free_disk_gb"] = 0
     profile, run = P.run_collection(
         root, tool="cprofile", command=[sys.executable, str(script)],
-        out_dir=out, allow_exec=True, timeout_s=30, policy=policy)
+        out_dir=out, allow_exec=True, timeout_s=30, policy=policy,
+        memory_mb=256, disk_mb=64)
     assert run["returncode"] == 0
     assert run["timed_out"] is False
     assert Path(run["artifact"]["path"]).is_file()

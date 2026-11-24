@@ -126,9 +126,16 @@ It returns compact handles and counts immediately:
 ```
 
 `q.h` are planned handles, `q.r` is how many are already ready at response
-time, and `q.p` is the number of further suggestions. A single in-process
-daemon worker prepares at most two payloads **after** the response, while the
-model is thinking. The handler never waits for it.
+time, and `q.p` is the number of further suggestions. A single worker prepares
+at most two payloads **after** the response, while the model is thinking. The
+handler never waits for it.
+
+When fork is available, the worker is a forked child process per engine: the
+child computes `(handle, payload)` results against its inherited graph snapshot
+and a small parent listener thread applies them after revalidating the session
+snapshot/scope/generation/expiry. If fork is unavailable or the child fails,
+the engine falls back to the in-process daemon thread. `bye` cancels that
+session's work; engine shutdown joins/terminates the child and listener.
 
 Fetch one or more:
 
@@ -153,10 +160,10 @@ and `fetch`):
 The worker captures the session's snapshot, scope, generation, budget and
 deadline. It discards results if the snapshot/scope/generation changes, the
 session is evicted or closed, or the entry expires. `OZAGIA_ENGINE_SPEC=0`
-disables speculation; `OZAGIA_ENGINE_SPEC_MS` bounds the worker time (default
-300 ms). `bye` cancels that session's pending work; engine shutdown closes
-sessions and joins the daemon thread. It still shares the interpreter GIL, so
-this overlaps waiting/model thinking rather than two CPU-bound Python tasks.
+disables speculation; `OZAGIA_ENGINE_SPEC_PROCESS=0` forces the thread worker;
+`OZAGIA_ENGINE_SPEC_MS` bounds the worker time (default 300 ms). One long graph
+call is still not preempted, so on larger repositories a candidate can overrun
+the think window; the larger-repository result records this.
 
 ## Freshness and safety
 
@@ -178,11 +185,14 @@ written to the checkout.
 ## Current limits
 
 - Process-local sessions; a restart loses them.
-- Speculation is one in-process daemon thread, GIL-bounded, with no process
-  isolation or CPU/memory budget; one in-flight graph call can overrun the
-  worker deadline because it is not preempted.
-- Hit-rate/waste is measured on one tiny fixture, not across real repositories.
+- Speculation is one fork child or one fallback daemon thread. Fork gives
+  isolation from parent sessions, but the child has no separate CPU/memory
+  budget and inherits a fork-time graph snapshot. One in-flight graph call can
+  overrun the worker deadline because it is not preempted.
+- Hit-rate/waste is measured on a few local corpus checkouts with simulated
+  think time, not real model latency or a broad repository sample.
 - A compact 16-hex content hash for `known`, not a cryptographic identity.
 - One snapshot per session; federation is not part of this surface.
-- Prototype wire measurement, not a model-task gain:
-  [`docs/results/graph_engine_prototype_2026-11-25.md`](results/graph_engine_prototype_2026-11-25.md).
+- Prototype wire/readiness measurements, not model-task gains:
+  [`docs/results/graph_engine_prototype_2026-11-25.md`](results/graph_engine_prototype_2026-11-25.md)
+  and [`docs/results/graph_engine_speculation_2026-11-25.md`](results/graph_engine_speculation_2026-11-25.md).
