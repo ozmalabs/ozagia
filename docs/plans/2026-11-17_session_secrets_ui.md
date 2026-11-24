@@ -1,12 +1,24 @@
 # Session secret entry UI
 
-Status: design proposal (2026-11-17; verified 2026-11-24). The reference broker,
-providers, redactor and in-memory session store are implemented in
-`src/ozagia/core/secrets.py` with `tests/test_secrets.py` and
-[`docs/secrets.md`](../secrets.md); runtime services, jobs and the daemon resolve
-refs only at their execution boundaries. The native secret prompt, host
-prompt rewrite, session-persistence UI, revoke/expiry surface and end-to-end
-canary review described here are not implemented.
+Status: design proposal (2026-11-17; verified 2026-11-24; request slice
+2026-11-25). The reference broker, providers, redactor and in-memory session
+store are implemented in `src/ozagia/core/secrets.py` with `tests/test_secrets.py`
+and [`docs/secrets.md`](../secrets.md); runtime services, jobs and the daemon
+resolve refs only at their execution boundaries. The host-agnostic
+model-initiated **request** slice is implemented: a bounded metadata-only
+pending store, daemon `secrets` actions (`request`, `request_list`,
+`request_status`, `request_fulfill`, `request_decline`), the
+`ozagia-secrets request/requests/fulfill/decline` CLI with a `getpass`/stdin
+value path, and the OpenCode `ozagia_secret_request` tool returning a handle
+and local instructions. The value never enters tool output; a fulfilled
+request returns only its reference and fingerprint. MCP is deliberately
+unchanged because an MCP server cannot establish harness session identity
+without trusting model-supplied arguments.
+
+Still not implemented: the native secret prompt and composer pill, host
+prompt-paste rewrite and HTTP fallback, keychain/`pass`/`op`/`.env`
+persistence UI, revoke UI beyond the existing `forget`, and live-host
+verification of prompt-storage order and RPC logging.
 
 ## Problem
 
@@ -61,6 +73,10 @@ The desired flow is:
 ## Flows
 
 ### A. Model-initiated request (primary)
+
+*Implemented in the host-agnostic slice (2026-11-25): the tool creates a
+metadata-only pending request and returns a handle plus the `ozagia-secrets
+fulfill` command. The native composer pill and dialog remain future work.*
 
 The model calls a tool:
 
@@ -276,6 +292,11 @@ and revocable.
     URL/domain; require consent; never pre-fetch the URL.
 
 ## Daemon/API contract (implementation sketch)
+
+*Implemented request slice (2026-11-25):* the daemon `secrets` actions are
+`request`, `request_list`, `request_status`, `request_fulfill` and
+`request_decline`; the CLI commands are `request`, `requests`, `fulfill` and
+`decline`. The sketch below keeps the original names for context.
 
 - `SessionSecretStore.capture(value, harness, session, label, ttl) -> CapturedSecret`
 - `SessionSecretStore.resolve(ref, harness, session) -> SecretValue`

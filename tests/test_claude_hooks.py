@@ -36,12 +36,14 @@ class StubDaemon:
         self.reply = reply
         self.requests: list[dict] = []
         self.profile_requests: list[dict] = []
+        self.order: list[str] = []
         stub = self
 
         class Handler(socketserver.StreamRequestHandler):
             def handle(self):
                 for line in self.rfile:
                     req = json.loads(line)
+                    stub.order.append(str(req.get("op")))
                     if req.get("op") == "profile_event":
                         stub.profile_requests.append(req)
                         body = {"ok": True, "stored": True}
@@ -149,6 +151,8 @@ def test_post_read_maps_to_read(repo, daemon):
     assert req["session"] == "abc123" and req["tool"] == "read"
     assert req["input"] == {"path": fp, "offset": 1, "limit": 50}
     assert req["output"] == "def f(x):\n    return x\n"
+    assert stub.order[0] == "after"
+    assert "profile_event" in stub.order[1:]
 
 
 def test_post_grep_maps_glob_to_include(repo, daemon):

@@ -9,21 +9,32 @@ Commands::
     capture [--root R] [--session S] [--label L] [--ttl S] [--json]
     capture-text [--root R] [--session S] [--json]
     doctor [--root R] [--json]
+    request --label L [--purpose P] [--session S] [--harness H] [--ttl-s S]
+    requests [--session S] [--harness H] [--json]
+    fulfill REQUEST_ID [--session S] [--harness H] [--stdin] [--ttl S]
+    decline REQUEST_ID [--session S] [--harness H] [--json]
 
 No command resolves a value into output. ``capture`` reads one value from
 standard input and ``capture-text`` reads text from standard input; neither
-takes a value on the command line. Both use the daemon's memory-only
-``SessionSecretStore``. If no daemon is available, ``capture-text`` fails
-closed: it prints the text with detected secrets redacted and exits ``2``.
-``check`` reports status only: ``0`` when every reference is available, ``1``
-when one is missing, denied, unavailable or failed, and ``2`` for an invalid
-reference or usage error. ``list`` and ``doctor`` are inspection commands and
-exit ``0`` after a completed report. The only files read are the two project
-configuration files and provider metadata; nothing is written.
+takes a value on the command line. ``request`` creates a metadata-only pending
+request; ``fulfill`` reads its value with ``getpass`` (or ``--stdin`` for tests
+and automation) and prints only the captured reference, fingerprint and
+expiry. ``requests`` and ``decline`` never print a value. Both use the
+daemon's memory-only ``SessionSecretStore``. If no daemon is available,
+``capture-text`` fails closed: it prints the text with detected secrets
+redacted and exits ``2``. ``check`` reports status only: ``0`` when every
+reference is available, ``1`` when one is missing, denied, unavailable or
+failed, and ``2`` for an invalid reference or usage error. ``request`` and
+``requests`` are inspection commands and exit ``0`` after a completed report.
+``fulfill`` exits ``1`` for a declined, expired, closed or cross-session
+request and ``2`` when the daemon is unavailable or the input is empty. The
+only files read are the two project configuration files and provider metadata;
+nothing is written.
 """
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import re
 import sys
@@ -37,6 +48,12 @@ _REF_TEXT = re.compile(r"secret://[A-Za-z0-9._~%/:@+-]+")
 
 class _DaemonError(RuntimeError):
     """The daemon refused the request or is unavailable."""
+
+    def __init__(self, message: str, *, code: str | None = None,
+                 refused: bool = False) -> None:
+        super().__init__(message)
+        self.code = code
+        self.refused = refused
 
 
 def _safe(text: Any) -> str:
@@ -64,13 +81,15 @@ def _secret_request(root: str, action: str, fields: dict[str, Any]
         reply = request(Path(root).resolve(), "secrets",
                         {"action": action, **fields})
     except JobUnavailable as exc:
-        raise _DaemonError(str(exc)) from None
+        raise _DaemonError(str(exc), code=getattr(exc, "code", None),
+                           refused=getattr(exc, "refused", False)) from None
     except (OSError, ValueError) as exc:
         raise _DaemonError(f"{type(exc).__name__}: {exc}") from None
     if not isinstance(reply, dict) or not reply.get("ok"):
         detail = (reply.get("error") if isinstance(reply, dict) else None) \
             or "the daemon refused the request"
-        raise _DaemonError(str(detail))
+        code = reply.get("code") if isinstance(reply, dict) else None
+        raise _DaemonError(str(detail), code=code, refused=True)
     return reply
 
 
@@ -143,6 +162,68 @@ def build_parser() -> argparse.ArgumentParser:
                         help="harness for --session (default: cli)")
     forget.add_argument("--json", action="store_true",
                         help="emit deterministic JSON")
+
+    request = sub.add_parser(
+        "request",
+        help="create a pending secret request; no value is read or printed")
+    request.add_argument("--root", default=".",
+                         help="repository root (default: current directory)")
+    request.add_argument("--session", default=None,
+                         help="the requesting session (default: cli)")
+    request.add_argument("--harness", default=None,
+                         help="harness for --session (default: cli)")
+    request.add_argument("--label", required=True,
+                         help="short name for the requested secret")
+    request.add_argument("--purpose", default=None,
+                         help="why the secret is needed (bounded)")
+    request.add_argument("--ttl-s", "--ttl", dest="ttl_s", type=float,
+                         default=None, metavar="S",
+                         help="pending lifetime in seconds (capped at 600)")
+    request.add_argument("--json", action="store_true",
+                         help="emit deterministic JSON")
+
+    requests = sub.add_parser(
+        "requests", help="list this session's secret requests and states")
+    requests.add_argument("--root", default=".",
+                          help="repository root (default: current directory)")
+    requests.add_argument("--session", default=None,
+                          help="the requesting session (default: cli)")
+    requests.add_argument("--harness", default=None,
+                          help="harness for --session (default: cli)")
+    requests.add_argument("--json", action="store_true",
+                          help="emit deterministic JSON")
+
+    fulfill = sub.add_parser(
+        "fulfill",
+        help="fulfil a pending request by reading one value from a prompt or stdin")
+    fulfill.add_argument("request_id", metavar="REQUEST_ID",
+                         help="the request handle to fulfil")
+    fulfill.add_argument("--root", default=".",
+                         help="repository root (default: current directory)")
+    fulfill.add_argument("--session", default=None,
+                         help="the request's session (default: cli)")
+    fulfill.add_argument("--harness", default=None,
+                         help="harness for --session (default: cli)")
+    fulfill.add_argument("--ttl-s", "--ttl", dest="ttl_s", type=float,
+                         default=None, metavar="S",
+                         help="capture lifetime in seconds (capped at 24 hours)")
+    fulfill.add_argument("--stdin", action="store_true",
+                         help="read the value from stdin instead of getpass")
+    fulfill.add_argument("--json", action="store_true",
+                         help="emit deterministic JSON")
+
+    decline = sub.add_parser(
+        "decline", help="decline a pending secret request")
+    decline.add_argument("request_id", metavar="REQUEST_ID",
+                         help="the request handle to decline")
+    decline.add_argument("--root", default=".",
+                         help="repository root (default: current directory)")
+    decline.add_argument("--session", default=None,
+                         help="the request's session (default: cli)")
+    decline.add_argument("--harness", default=None,
+                         help="harness for --session (default: cli)")
+    decline.add_argument("--json", action="store_true",
+                         help="emit deterministic JSON")
 
     capture = sub.add_parser(
         "capture", help="capture one value read from stdin; prints its reference")
@@ -313,6 +394,69 @@ def _capture_lines(row: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _request_lines(row: dict[str, Any], root: str, harness: str,
+                   session: str) -> str:
+    request_id = row.get("request_id")
+    lines = [f"request: {request_id}", f"state: {row.get('state')}"]
+    if row.get("label"):
+        lines.append(f"label: {row['label']}")
+    if row.get("purpose"):
+        lines.append(f"purpose: {row['purpose']}")
+    if row.get("expires") is not None:
+        lines.append(f"expires: {row['expires']}")
+    lines.append("next: ozagia-secrets fulfill " + str(request_id)
+                 + f" --harness {harness} --session {session}"
+                 + f" --root {root}")
+    lines.append("      (prompts with getpass; --stdin reads the value from "
+                 "stdin)")
+    return "\n".join(lines) + "\n"
+
+
+def _requests_lines(rows: list[dict[str, Any]]) -> str:
+    if not rows:
+        return "no secret requests\n"
+    lines = ["secret requests:"]
+    for row in rows:
+        label = f"  ({row['label']})" if row.get("label") else ""
+        lines.append(f"  {row.get('state'):<10} {row.get('request_id')}{label}")
+        if row.get("purpose"):
+            lines.append(f"    purpose: {row['purpose']}")
+        detail = []
+        if row.get("ref"):
+            detail.append(str(row["ref"]))
+        if row.get("fingerprint"):
+            detail.append(str(row["fingerprint"]))
+        if row.get("expires") is not None:
+            detail.append(f"expires {row['expires']}")
+        if detail:
+            lines.append("    " + "  ".join(detail))
+    return "\n".join(lines) + "\n"
+
+
+def _fulfilled_lines(row: dict[str, Any]) -> str:
+    lines = [f"ref: {row.get('ref')}"]
+    if row.get("fingerprint"):
+        lines.append(f"fingerprint: {row['fingerprint']}")
+    if row.get("expires") is not None:
+        lines.append(f"expires: {row['expires']}")
+    return "\n".join(lines) + "\n"
+
+
+def _request_error(command: str, exc: _DaemonError) -> int:
+    print(f"error: {command}: {_safe(exc)}", file=sys.stderr)
+    return 1 if exc.refused else 2
+
+
+def _prompt_value() -> str | None:
+    """Read one value with getpass; never echo it or put it in argv."""
+    try:
+        value = getpass.getpass("secret value: ")
+    except (EOFError, KeyboardInterrupt):
+        print("error: no value entered", file=sys.stderr)
+        return None
+    return value if value else None
+
+
 def _daemon_unavailable(command: str, exc: Exception) -> int:
     print(f"error: {command} needs the ozagia daemon: {_safe(exc)}",
           file=sys.stderr)
@@ -321,6 +465,71 @@ def _daemon_unavailable(command: str, exc: Exception) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+
+    if args.command == "request":
+        session_args = _session_args(args)
+        fields: dict[str, Any] = {
+            "label": args.label,
+            "target": "session",
+            **session_args,
+        }
+        if args.purpose is not None:
+            fields["purpose"] = args.purpose
+        if args.ttl_s is not None:
+            fields["ttl_s"] = args.ttl_s
+        try:
+            reply = _secret_request(args.root, "request", fields)
+        except _DaemonError as exc:
+            return _request_error("request", exc)
+        if args.json:
+            print(_json(reply), end="")
+        else:
+            print(_request_lines(reply, str(args.root), session_args["harness"],
+                                 session_args["session"]), end="")
+        return 0
+
+    if args.command == "requests":
+        fields = _session_args(args)
+        try:
+            reply = _secret_request(args.root, "request_list", fields)
+        except _DaemonError as exc:
+            return _request_error("requests", exc)
+        rows = list(reply.get("requests") or [])
+        print(_json(reply) if args.json else _requests_lines(rows), end="")
+        return 0
+
+    if args.command == "fulfill":
+        value = (_one_secret(_read_stdin_text()) if args.stdin
+                 else _prompt_value())
+        if not value:
+            print("error: fulfill needs one non-empty value from a prompt or "
+                  "stdin", file=sys.stderr)
+            return 2
+        fields = {
+            "request_id": args.request_id,
+            "value": value,
+            **_session_args(args),
+        }
+        if args.ttl_s is not None:
+            fields["ttl_s"] = args.ttl_s
+        try:
+            reply = _secret_request(args.root, "request_fulfill", fields)
+        except _DaemonError as exc:
+            return _request_error("fulfill", exc)
+        print(_json(reply) if args.json else _fulfilled_lines(reply), end="")
+        return 0
+
+    if args.command == "decline":
+        fields = {"request_id": args.request_id, **_session_args(args)}
+        try:
+            reply = _secret_request(args.root, "request_decline", fields)
+        except _DaemonError as exc:
+            return _request_error("decline", exc)
+        if args.json:
+            print(_json(reply), end="")
+        else:
+            print(f"declined: {reply.get('request_id')}")
+        return 0
 
     if args.command == "capture-text":
         text = _read_stdin_text()

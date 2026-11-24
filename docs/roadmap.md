@@ -44,7 +44,7 @@ an inventory, not a maturity claim.
 | Deep review is high quality | Synthetic fixture score only: 4/4 true positives, 8/8 labeled pairs; no false positives in the declared scope. The realistic corpus now has 12 verified repository pins, 50 assigned ranges and 62 deterministic reports, but no human label or score. | Weak for production: no completed human labels, no realistic score, no go/no-go decision |
 | Rust edits/LSP/tests work | Live rust-analyzer tests and `cargo test` capture; parity bench | Good on the test crate; dataflow and macro/cfg expansion remain absent |
 | Live host integrations work | OpenCode has live smoke runs. Codex, Kiro and Claude Code are implemented and untested live. OpenCode Desktop is untested. | Weak: integration status is the largest untested surface |
-| Secrets never reach the model | Reference broker, providers, redactor and in-memory session store landed (`core/secrets.py`); runtime/job/daemon boundaries resolve refs only. The native prompt/UI capture flow and end-to-end canary coverage are not implemented. | Partial: boundary code is tested; the full session guarantee is not established |
+| Secrets never reach the model | Reference broker, providers, redactor, in-memory session store and metadata-only model-initiated request slice landed (`core/secrets.py`, daemon `secrets`, `ozagia-secrets`, OpenCode tool); runtime/job/daemon boundaries resolve refs only. The native prompt/UI capture flow and end-to-end live canary coverage are not implemented. | Partial: boundary and request code is tested; the full session guarantee is not established |
 
 Two problems distorted the picture at the start of this audit. Both were
 corrected on 2026-11-24:
@@ -84,7 +84,7 @@ breadth third, live operations last**. New surface area is not a release theme.
 | `2026-11-23_rust_parity.md` | Phases 0–6 done; Phase 7 implemented with limits | Matches | Normalized SCIP cache, Rust dataflow, `migrates_to` graph edges, test mapping, macro/cfg expansion | 0.6 |
 | `2026-11-18_deep_review_orchestrator.md` | Phases 0–1 done; 2 largely; 3–4 partial | Matches | Realistic corpus and human labels, broader SCA/IaC/config depth, model-pass quality evaluation, go/no-go | 0.2 |
 | `2026-11-17_self_graph_service_unification_model_api.md` | Implementation plan; M0–M4 done, M5–M6 partial | M0–M4 implemented; M5 partial (linked/research/action joins, Ocelot research projection, secret boundaries); M6 has an offline harness and one live run invalid for the map arm | M5 Ocelot/live-service integration; a valid M6 matched-arm result and opt-in rollout | 0.4 |
-| `2026-11-17_session_secrets_ui.md` | Design only | Core broker, providers, redactor and session store implemented (`core/secrets.py`); the native prompt/UI capture flow is not | Native prompt, host rewrite, persistence UI, revoke/expiry, end-to-end canary review | 0.3 |
+| `2026-11-17_session_secrets_ui.md` | Request slice implemented | Core broker, providers, redactor, session store and model-initiated request/fulfil/decline (daemon, CLI, OpenCode tool) implemented; host UI is not | Native prompt/pill, host rewrite, persistence UI, revoke/expiry UI, live-host canary review | 0.3 |
 | `2026-11-17_session-profile-instrumentation.md` | Implemented in part | Core store, CLI, daemon events, OpenCode subscriber and TUI slot exist; Codex/Kiro/Claude hook capture exists offline | Live host verification, status/console rows for host lifecycle counters | 0.3 |
 | `2026-11-18_bounded_graph_prefetch.md` | Offline primitives implemented; MCP integration not adopted for 0.3 | Offline planner, safety checks and ledger implemented (`core/prefetch.py`); the 2026-11-25 decision keeps them unwired because the measured benefit is small and the lifecycle risk is high | Revisit only with larger-repository measurements and the acceptance tests | 0.3 decision |
 | `2026-11-17_opencode_intent_graph_retrieval.md` | Stages A–C done; D partial; E initial offline check | Matches | Broader shell/task intent linking, richer paired and end-to-end evaluation | 0.4 |
@@ -326,6 +326,34 @@ Token counts and turn timestamps are recorded only if a host supplies them;
 none of these command-hook payloads currently does, so those fields stay
 `null`. `ozagia-status` still reads the profiles with an unchanged summary
 shape.
+
+**Progress (2026-11-25, session-secret request slice).** A model can request a
+named secret without its value entering chat:
+
+- `SessionSecretStore` keeps bounded metadata-only request records (pending,
+  fulfilled, declined, expired) alongside session captures, bound to
+  `(harness, session)`; default 300 s pending TTL (600 s cap), 16 pending per
+  session, duplicate requests reused and fulfilled requests idempotent.
+- the daemon `secrets` op adds `request`, `request_list`, `request_status`,
+  `request_fulfill` and `request_decline`. Status/fulfil/decline require the
+  same harness and session; cross-session access is `request_mismatch`. Only
+  the trusted CLI sends a value (`request_fulfill`), and the response carries
+  only the session ref, fingerprint and expiry. Declined/expired records carry
+  no ref.
+- `ozagia-secrets request/requests/fulfill/decline` implements the handle,
+  list, `getpass` (or explicit `--stdin`) capture and decline flows; no value
+  is accepted in argv or printed.
+- the OpenCode `ozagia_secret_request` tool uses the session context of the
+  tool call, returns a pending handle and local `fulfill` instructions, and
+  returns typed `session_unavailable`/`refused`/`unavailable` results. It never
+  opens a native dialog in this slice.
+- MCP is unchanged: `dev_secrets` stays read-only because an MCP server does
+  not learn the harness session id, and accepting one from model arguments
+  would let a model claim another session.
+
+Native dialog/composer pill, prompt-paste rewrite, keychain/`pass`/`op`/`.env`
+persistence UI, revoke UI beyond `forget`, and live-host verification remain
+open.
 
 Still open in 0.3: the native session-secret prompt/UI and revoke/expiry flow;
 live Codex, Kiro and Claude Code sessions to verify the installed hooks (the

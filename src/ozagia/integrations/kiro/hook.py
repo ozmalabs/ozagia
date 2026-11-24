@@ -403,7 +403,7 @@ def _profile_event(root: Path, payload: dict[str, Any], event: str | None,
                            phase=phase, status=status, tool=tool_name)
 
 
-def handle(payload: dict[str, Any], root: Path) -> str | hookcore.HookBlock | None:
+def _primary(payload: dict[str, Any], root: Path) -> str | hookcore.HookBlock | None:
     """The hook's answer for one event: text for stdout, a `HookBlock`, or
     None to print nothing."""
     event = EVENTS.get(str(payload.get("hook_event_name") or ""))
@@ -413,10 +413,6 @@ def handle(payload: dict[str, Any], root: Path) -> str | hookcore.HookBlock | No
         tool_input = {}
     session = str(payload.get("session_id") or "")
     cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else None
-    # SessionStart records after its daemon start below, so the first session
-    # of a cold root is not dropped.
-    if event != "SessionStart":
-        _profile_event(root, payload, event, tool_name)
 
     if event == "SessionStart":
         in_repo = hookcore.in_work_tree(root)
@@ -427,7 +423,6 @@ def handle(payload: dict[str, Any], root: Path) -> str | hookcore.HookBlock | No
             hookcore.rearm_alarm(BRIEF_ALARM_S)
         except Exception as exc:  # the brief does not need the daemon
             hookcore.log_failure(root, LOG_NAME, payload, exc)
-        _profile_event(root, payload, event, tool_name)
         return session_brief(root) if in_repo else None
 
     if event == "SessionEnd":
@@ -468,6 +463,24 @@ def handle(payload: dict[str, Any], root: Path) -> str | hookcore.HookBlock | No
     if event in ("PreCompact", "PostCompact"):
         return compaction_context(event, payload, root)
     return None
+
+
+def handle(payload: dict[str, Any], root: Path) -> str | hookcore.HookBlock | None:
+    """Run the primary hook path, then record an optional profile event.
+
+    The primary daemon request(s) and the hook answer are built first, so an
+    optional profile write can never be the first request a stub sees or
+    displace the hook's actual behaviour. Session start still ensures the
+    daemon before either request.
+    """
+    answer = _primary(payload, root)
+    try:
+        event = EVENTS.get(str(payload.get("hook_event_name") or ""))
+        _profile_event(root, payload, event,
+                       str(payload.get("tool_name") or ""))
+    except Exception:  # optional metadata; never change the hook answer
+        pass
+    return answer
 
 
 def main(stdin: TextIO | None = None, stdout: TextIO | None = None,

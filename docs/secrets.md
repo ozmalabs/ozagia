@@ -296,10 +296,70 @@ rewritten = detect_text(
 The daemon/plugin wiring is the current slice: the daemon owns the store, the
 `secrets` op captures text and values over its local socket, jobs resolve
 session references only for their own harness/session, and a session end
-clears its captures. The CLI's `capture`/`capture-text` commands read from
-stdin and call the daemon; they never take a value in argv. No in-memory store
-is persisted by a CLI process, and a capture made by one session cannot be
-resolved by another.
+clears its captures and request records. The CLI's `capture`/`capture-text`
+commands read from stdin and call the daemon; they never take a value in argv.
+No in-memory store is persisted by a CLI process, and a capture made by one
+session cannot be resolved by another.
+
+### Model-initiated secret requests
+
+A model can ask for a named secret without receiving its value. This slice is
+host-agnostic: the OpenCode plugin exposes `ozagia_secret_request` when the
+host provides the native tool registry and permission API (the same path as
+`ozagia_structure`), and any tool or person can create the same request with
+the CLI. MCP is unchanged because an MCP server does not learn the harness
+session id; accepting one from model arguments would let a caller claim
+another session.
+
+```json
+{"action": "request", "harness": "opencode", "session": "ses_123",
+ "label": "OpenAI API key", "purpose": "the task calls the OpenAI API",
+ "target": "session", "ttl_s": 300}
+```
+
+The daemon records metadata only and returns an opaque `request_id`, `state`
+and `expires`. A request has no value, prompt text or source path. The model
+then tells the user to run the trusted local CLI:
+
+```bash
+ozagia-secrets fulfill req_<handle> --harness opencode --session ses_123 --root .
+```
+
+`fulfill` reads one value with `getpass` (or `--stdin` for tests and
+automation), sends it to the local daemon, captures it in the session store,
+and prints only the reference, fingerprint and expiry. The next status call
+for the same request returns `fulfilled` with `ref` and `fingerprint`; the
+model receives those and never the value.
+
+Protocol actions (all require matching `harness`/`session` for
+`request_status`, `request_fulfill` and `request_decline`):
+
+| Action | Input | Result |
+| --- | --- | --- |
+| `request` | `label`, optional `purpose`, `target: "session"`, `ttl_s` | pending record: `request_id`, `state`, `expires` |
+| `request_list` | none | that session's records, newest last |
+| `request_status` | `request_id` | state; `ref`/`fingerprint` only when fulfilled |
+| `request_fulfill` | `request_id`, `value` | fulfilled record: `ref`, `fingerprint`, expiry |
+| `request_decline` | `request_id` | declined record, no ref |
+
+Lifecycle rules:
+
+- pending requests expire after 300 s by default, capped at 600 s; at most 16
+  are pending per session and 64 records are kept (terminal ones evicted
+  first). A duplicate `request` with the same label, purpose and target
+  returns the existing record instead of creating another.
+- `fulfill` is idempotent: fulfilling an already fulfilled request returns the
+  same reference and ignores the new value. Fulfilling or declining a
+  declined/expired request is `request_closed`.
+- A cross-session `request_status`, `request_fulfill` or `request_decline` is
+  `request_mismatch` and returns no reference. A request id is otherwise
+  unguessable and never derived from the value.
+- Declined and expired records carry no reference. If a fulfilled capture is
+  forgotten, expires or the session ends, later status marks the request
+  expired and drops its reference; the fingerprint remains for rotation.
+- A plugin tool without session context returns a typed refusal
+  (`session_unavailable`); a daemon refusal is `refused` and an unreachable
+  daemon is `unavailable`. None includes a value.
 
 ### Pasted-text detection
 
@@ -345,6 +405,16 @@ PYTHONPATH=src python -m ozagia.secrets_cli check secret://session/... \
   --session ses_123
 PYTHONPATH=src python -m ozagia.secrets_cli forget secret://session/... \
   --session ses_123
+
+# Model-initiated requests: no value is read or printed by `request`.
+PYTHONPATH=src python -m ozagia.secrets_cli request --label "OpenAI API key" \
+  --purpose "the task calls the OpenAI API" --harness opencode --session ses_123
+PYTHONPATH=src python -m ozagia.secrets_cli requests --harness opencode \
+  --session ses_123
+PYTHONPATH=src python -m ozagia.secrets_cli fulfill req_<handle> \
+  --harness opencode --session ses_123
+PYTHONPATH=src python -m ozagia.secrets_cli decline req_<handle> \
+  --harness opencode --session ses_123
 ```
 
 `providers` prints names, whether they are enabled/available/ready, and their
@@ -364,6 +434,15 @@ daemon answers, `capture-text` **fails closed**: it prints the text with
 detected secrets replaced by `[REDACTED]`, writes the daemon error to stderr,
 and exits `2`; no value is captured. No command prints a resolved value and
 there is no `resolve`/`show` command.
+
+`request` creates a pending request and prints its id, state, expiry and the
+`fulfill` command; it never accepts or prints a value. `requests` lists the
+session's records (pending and terminal), and `decline` records a terminal
+decline. `fulfill` prompts with `getpass`, or reads one value from stdin with
+`--stdin` for tests and automation, and prints only the reference,
+fingerprint and expiry. It exits `0` on success, `1` for a declined, expired,
+closed or cross-session request, and `2` when the daemon is unavailable or the
+input is empty. A value is never accepted in argv; there is no reveal command.
 
 ## Rotation and revocation
 
@@ -433,6 +512,17 @@ there is no `resolve`/`show` command.
 - A clean `check` means the provider is reachable, not that the credential is
   valid, unexpired or authorized. Missing/denied statuses are the safe
   outcomes.
+- The daemon accepts `capture`, `request_fulfill` and `request_decline` from a
+  same-user local client; it cannot verify which process sent the value. The
+  trusted-CLI rule is a client convention, not a cryptographic boundary.
+  Any process that can talk to the daemon socket already shares the daemon
+  user's privileges. The model-facing plugin tool cannot send a value, and the
+  MCP `dev_secrets` tool stays read-only.
+- The model-initiated request slice has a metadata-only handle and a CLI
+  prompt. It does **not** yet include the OpenCode native secret dialog,
+  composer pill, prompt-paste rewrite, keychain/`pass`/`op` persistence UI,
+  or live-host verification. A user who pastes a value into chat still relies
+  on the host hook and the best-effort detector described above.
 - No live GUI or host plugin is implemented here: the hook path is the daemon
   `secrets capture_text` op, exercised by tests and the CLI. There is no
   external keychain integration beyond the optional `keyring` provider, and no
@@ -444,7 +534,7 @@ there is no `resolve`/`show` command.
 PYTHONPATH=src python -m pytest -q tests/test_secrets.py \
   tests/test_secrets_cli.py tests/test_security.py tests/test_config.py \
   tests/test_runtime.py tests/test_daemon.py tests/test_daemon_jobs.py \
-  tests/test_mcp_server.py
+  tests/test_mcp_server.py tests/test_opencode_plugin.py
 .venv/bin/ruff check src tests
 ```
 

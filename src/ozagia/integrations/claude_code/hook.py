@@ -219,7 +219,7 @@ def _profile_event(root: Path, payload: dict[str, Any], event: Any,
                            phase=phase, status=status, tool=tool_name)
 
 
-def handle(payload: dict[str, Any], root: Path) -> dict[str, Any] | None:
+def _primary(payload: dict[str, Any], root: Path) -> dict[str, Any] | None:
     """The hook's JSON answer for one event, or None to print nothing."""
     event = payload.get("hook_event_name")
     tool_name = payload.get("tool_name") or ""
@@ -230,7 +230,6 @@ def handle(payload: dict[str, Any], root: Path) -> dict[str, Any] | None:
     cwd = payload.get("cwd")
     # Subagent calls carry `agent_id` (and the parent's session id).
     sub = payload.get("agent_id") if isinstance(payload.get("agent_id"), str) else ""
-    _profile_event(root, payload, event, str(tool_name))
 
     if event == "SessionStart":
         # The working set first (it survives the ledger reset anyway).
@@ -332,6 +331,22 @@ def handle(payload: dict[str, Any], root: Path) -> dict[str, Any] | None:
         return {"hookSpecificOutput": {"hookEventName": "PostToolUse",
                                        "additionalContext": append}}
     return None
+
+
+def handle(payload: dict[str, Any], root: Path) -> dict[str, Any] | None:
+    """Run the primary hook path, then record an optional profile event.
+
+    The primary daemon request(s) and the hook answer are built first, so an
+    optional profile write can never be the first request a stub sees or
+    displace the hook's actual behaviour.
+    """
+    answer = _primary(payload, root)
+    try:
+        _profile_event(root, payload, payload.get("hook_event_name"),
+                       str(payload.get("tool_name") or ""))
+    except Exception:  # optional metadata; never change the hook answer
+        pass
+    return answer
 
 
 def main(stdin: TextIO | None = None, stdout: TextIO | None = None) -> int:

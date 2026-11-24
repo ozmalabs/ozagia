@@ -98,7 +98,7 @@ await plugin.setup({ tool: { transform: (fn) => fn(reg), hook: () => {},
                      ...(permission ? { permission } : {}),
                      ...(session ? { session } : {}) });
 const results = [];
-const c = { sessionID: "ses_test", agent: "build", messageID: "msg_1", id: "call_1",
+const c = { sessionID: cfg.sessionID === null ? undefined : (cfg.sessionID || "ses_test"), agent: "build", messageID: "msg_1", id: "call_1",
             progress: () => {}, signal: undefined };
 for (const call of cfg.calls || []) {
   try { results.push({ ok: true, result: await tools[call.tool].execute(call.input, c) }); }
@@ -313,6 +313,59 @@ def test_native_structure_tool_is_read_permission_gated(tmp_path, daemon):
 
 
 @needs_node
+@needs_node
+def test_native_secret_request_tool_returns_a_pending_handle(tmp_path, daemon):
+    def script(req):
+        if req["op"] == "hello":
+            return {"ok": True}
+        if req["op"] == "secrets":
+            if req.get("label") == "denied":
+                return {"ok": False, "code": "request_limit",
+                        "error": "too many pending secret requests"}
+            assert req["action"] == "request"
+            assert req["harness"] == "opencode"
+            assert req["session"] == "ses_test"
+            return {"ok": True, "request_id": "req_plugin-handle-1",
+                    "label": req.get("label"), "purpose": req.get("purpose"),
+                    "target": "session", "state": "pending",
+                    "created": 1.0, "expires": 301.0,
+                    "ref": None, "fingerprint": None}
+        return _standard(req)
+
+    d = daemon(script)
+    out = _run(tmp_path, {"nativeTools": True, "permission": "allow", "calls": [
+        {"tool": "ozagia_secret_request",
+         "input": {"label": "OpenAI API key", "purpose": "call the API"}},
+        {"tool": "ozagia_secret_request", "input": {"label": "denied"}},
+    ]}, d.path)
+    first = json.loads(out["results"][0]["result"]["content"])
+    assert first["status"] == "pending"
+    assert first["request_id"] == "req_plugin-handle-1"
+    assert "ozagia-secrets fulfill req_plugin-handle-1" in first["instructions"]
+    assert "ses_test" in first["instructions"]
+    assert first["ref"] is None
+    assert "value" not in first
+    second = json.loads(out["results"][1]["result"]["content"])
+    assert second["status"] == "refused"
+    assert second["code"] == "request_limit"
+    assert "plugin-secret-canary-1234" not in json.dumps(out)
+    assert any(req.get("op") == "secrets" and req.get("action") == "request"
+               for req in d.requests)
+
+
+@needs_node
+def test_native_secret_request_tool_refuses_without_session(tmp_path, daemon):
+    d = daemon(lambda req: {"ok": True})
+    out = _run(tmp_path, {"nativeTools": True, "permission": "allow",
+                          "sessionID": None,
+                          "calls": [{"tool": "ozagia_secret_request",
+                                     "input": {"label": "token"}}]}, d.path)
+    payload = json.loads(out["results"][0]["result"]["content"])
+    assert payload["status"] == "refused"
+    assert payload["code"] == "session_unavailable"
+    assert not any(req.get("op") == "secrets" for req in d.requests)
+
+
 def test_native_structure_tool_denial_withholds_graph_result(tmp_path, daemon):
     d = daemon(lambda req: ({"ok": True} if req["op"] == "hello" else
                             {"ok": True, "result": {"ok": True,
@@ -689,8 +742,9 @@ def test_self_test_passes_on_the_packaged_plugin(tmp_path):
     res = oc.self_test(oc.install(tmp_path))
     assert res["ok"] is True, res
     assert sorted(res["replaced"]) == sorted(oc.REPLACED_TOOLS)
-    assert res["native_tools"] == ["ozagia_structure"]
+    assert res["native_tools"] == ["ozagia_structure", "ozagia_secret_request"]
     assert res["structure_readonly"] is True
+    assert res["secret_request_readonly"] is True
 
 
 def test_cli_install_and_uninstall(tmp_path, capsys):

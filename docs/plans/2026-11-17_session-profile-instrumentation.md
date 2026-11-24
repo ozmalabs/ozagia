@@ -29,8 +29,11 @@ or secret value is sent; hooks without a host tool id use an opaque digest for
 replay dedupe (two identical Kiro calls in the same session share a digest and
 count once). A `started` count includes host attempts that a hook then
 refuses (for example a ref-moving git command), so started and terminal counts
-need not match. Missing daemons and malformed payloads are ignored, so a profile
-cannot block a tool call. None of these hook payloads currently carries token
+need not match. The profile event is sent after the hook's primary daemon
+request(s) and response are built, so optional metadata can never displace a
+path check, tool/after request or ledger request; session start still ensures
+the daemon exists first. Missing daemons and malformed payloads are ignored, so
+a profile cannot block a tool call. None of these hook payloads currently carries token
 counts or turn timestamps, so token and turn timing fields stay `null` rather
 than being estimated. Kiro's session-end hook is registered for the V3 engine
 only; the CLI 2.x engines have no session-end trigger. `ozagia-status`'s

@@ -40,7 +40,17 @@ REQUEST_TIMEOUT_S = 20.0
 
 
 class JobUnavailable(RuntimeError):
-    """No daemon could be reached, or it refused the request."""
+    """No daemon could be reached, or it refused the request.
+
+    ``refused`` is true when a daemon answered with ``ok: false`` (``code`` is
+    its stable reason); false when no daemon answered or the transport failed.
+    """
+
+    def __init__(self, message: str, *, code: str | None = None,
+                 refused: bool = False) -> None:
+        super().__init__(message)
+        self.code = code
+        self.refused = refused
 
 
 def request(root: str | Path, op: str, fields: dict[str, Any], *,
@@ -69,7 +79,10 @@ def request(root: str | Path, op: str, fields: dict[str, Any], *,
     except hookcore.HookError as e:
         text = str(e)
         if text.startswith("daemon error: "):
-            raise JobUnavailable(text[len("daemon error: "):]) from None
+            raise JobUnavailable(
+                text[len("daemon error: "):],
+                code=getattr(e, "code", None),
+                refused=True) from None
         raise JobUnavailable(
             f"no ozagia daemon could be reached for {root_p}: {text}; jobs live "
             f"in the daemon: start one with `ozagia daemon ensure --root {root_p}`"

@@ -44,12 +44,14 @@ class StubDaemon:
         self.reply = reply
         self.requests: list[dict] = []
         self.profile_requests: list[dict] = []
+        self.order: list[str] = []
         stub = self
 
         class Handler(socketserver.StreamRequestHandler):
             def handle(self):
                 for line in self.rfile:
                     req = json.loads(line)
+                    stub.order.append(str(req.get("op")))
                     if req.get("op") == "profile_event":
                         stub.profile_requests.append(req)
                         body = {"ok": True, "stored": True}
@@ -349,6 +351,8 @@ def test_post_maps_tool_and_prints_append(repo, daemon, name, tool, tool_input,
     assert req["session"] == "kiro-sess-1"
     assert req["tool"] == neutral and req["input"] == expect(repo)
     assert req["output"] == "result text"
+    assert stub.order[0] == "after"
+    assert "profile_event" in stub.order[1:]
 
 
 @pytest.mark.parametrize("response, text", [

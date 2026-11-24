@@ -1145,6 +1145,94 @@ def test_secrets_op_over_the_socket_never_returns_a_value(daemon):
         assert stats["secret_store"]["storage"] == "memory-only"
 
 
+def test_secrets_request_lifecycle_and_cross_session(tmp_path):
+    from ozagia.daemon.server import DaemonState
+    st = DaemonState(tmp_path, None, tmp_path / "j.jsonl")
+    value = "daemon-request-secret-1234"
+    made = st.dispatch({"op": "secrets", "action": "request",
+                        "label": "OpenAI API key",
+                        "purpose": "the task calls the API",
+                        "harness": "opencode", "session": "s1"})
+    assert made["ok"] and made["state"] == "pending"
+    assert made["request_id"].startswith("req_")
+    assert made["ref"] is None and made["fingerprint"] is None
+    assert value not in json.dumps(made)
+
+    listed = st.dispatch({"op": "secrets", "action": "request_list",
+                          "harness": "opencode", "session": "s1"})
+    assert listed["count"] == 1
+    assert listed["requests"][0]["state"] == "pending"
+
+    cross = st.dispatch({"op": "secrets", "action": "request_status",
+                         "request_id": made["request_id"],
+                         "harness": "opencode", "session": "s2"})
+    assert cross["ok"] is False and cross["code"] == "request_mismatch"
+    assert "secret://" not in json.dumps(cross)
+
+    fulfilled = st.dispatch({"op": "secrets", "action": "request_fulfill",
+                             "request_id": made["request_id"], "value": value,
+                             "harness": "opencode", "session": "s1",
+                             "ttl_s": 60})
+    assert fulfilled["ok"] and fulfilled["state"] == "fulfilled"
+    assert fulfilled["ref"].startswith("secret://session/")
+    assert fulfilled["fingerprint"].startswith("sha256:")
+    assert value not in json.dumps(fulfilled)
+
+    checked = st.dispatch({"op": "secrets", "action": "check",
+                           "refs": [fulfilled["ref"]],
+                           "harness": "opencode", "session": "s1"})
+    assert checked["checks"][0]["status"] == "available"
+    assert value not in json.dumps(checked)
+
+    again = st.dispatch({"op": "secrets", "action": "request_fulfill",
+                         "request_id": made["request_id"],
+                         "value": "another-value-5678",
+                         "harness": "opencode", "session": "s1"})
+    assert again["ok"] and again["ref"] == fulfilled["ref"]
+    entries = st.dispatch({"op": "secrets", "action": "list",
+                           "harness": "opencode", "session": "s1"})
+    assert entries["count"] == 1
+
+    declined = st.dispatch({"op": "secrets", "action": "request",
+                            "harness": "opencode", "session": "s1",
+                            "label": "second"})
+    ended = st.dispatch({"op": "secrets", "action": "request_decline",
+                         "request_id": declined["request_id"],
+                         "harness": "opencode", "session": "s1"})
+    assert ended["ok"] and ended["state"] == "declined"
+    assert ended["ref"] is None
+
+    closed = st.dispatch({"op": "session_event",
+                          "event": "end", "harness": "opencode",
+                          "session": "s1"})
+    assert closed["ok"] and closed["secret_requests_cleared"] == 2
+    assert st.dispatch({"op": "secrets", "action": "request_list",
+                        "harness": "opencode", "session": "s1"})["count"] == 0
+    assert value not in json.dumps(st.stats())
+
+
+def test_secrets_request_over_the_socket_has_no_value(daemon):
+    value = "socket-request-secret-1234"
+    with DaemonClient(daemon["sock"], timeout=10) as c:
+        made = c.request("secrets", action="request", label="socket token",
+                         purpose="socket test", harness="opencode",
+                         session="socket-request-s")
+        assert made["ok"] and made["state"] == "pending"
+        assert value not in json.dumps(made)
+        listed = c.request("secrets", action="request_list",
+                           harness="opencode", session="socket-request-s")
+        assert listed["count"] == 1 and value not in json.dumps(listed)
+        cross = c.request("secrets", action="request_fulfill",
+                          request_id=made["request_id"], value=value,
+                          harness="opencode", session="other-session")
+        assert cross["ok"] is False and cross["code"] == "request_mismatch"
+        fulfilled = c.request("secrets", action="request_fulfill",
+                              request_id=made["request_id"], value=value,
+                              harness="opencode", session="socket-request-s")
+        assert fulfilled["ok"] and fulfilled["ref"].startswith("secret://")
+        assert value not in json.dumps(fulfilled)
+
+
 def test_daemon_redacts_a_tool_response_that_echoes_a_captured_value(daemon):
     value = "tool-response-secret-1234"
     target = daemon["root"] / "leak.txt"

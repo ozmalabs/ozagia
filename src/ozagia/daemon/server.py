@@ -236,7 +236,8 @@ REPLACE_COUNTERS = ("replace_previews", "replace_applies", "replace_files")
 W_GOALS_CHARS = 2000
 # `secrets` op actions (bounded; none resolves or returns a value).
 SECRET_ACTIONS = ("capture_text", "capture", "list", "forget", "providers",
-                  "check")
+                  "check", "request", "request_list", "request_status",
+                  "request_fulfill", "request_decline")
 MAX_SECRET_CHECK_REFS = 64
 _SECRET_REF_TEXT = re.compile(r"secret://[A-Za-z0-9._~%/:@+-]+")
 
@@ -586,10 +587,13 @@ class DaemonState:
                                     session, event)
             self._files_session_event(msg, event)
             secrets_cleared = None
+            requests_cleared = None
             if event == "end":
+                harness = str(msg.get("harness") or "opencode")
                 try:
-                    secrets_cleared = self.secret_store.clear(
-                        str(msg.get("harness") or "opencode"), session)
+                    secrets_cleared = self.secret_store.clear(harness, session)
+                    requests_cleared = self.secret_store.clear_requests(
+                        harness, session)
                 except Exception:  # noqa: BLE001 - session end must not fail
                     self.secret_errors += 1
             body: dict[str, Any] = {"ok": True, "cleared": n,
@@ -597,6 +601,8 @@ class DaemonState:
                                              "keys": []}}
             if secrets_cleared is not None:
                 body["secrets_cleared"] = secrets_cleared
+            if requests_cleared is not None:
+                body["secret_requests_cleared"] = requests_cleared
             return body
         if op == "profile_event":
             try:
@@ -1052,6 +1058,50 @@ class DaemonState:
                     ref, harness=harness,
                     session=self._require_secret_session(session))
                 return {"ok": True, "forgotten": forgotten, "ref": ref}
+            if action == "request":
+                request = self.secret_store.request(
+                    harness=harness,
+                    session=self._require_secret_session(session),
+                    label=msg.get("label"), purpose=msg.get("purpose"),
+                    target=msg.get("target"), ttl_s=msg.get("ttl_s"))
+                return {"ok": True, **request.as_dict(),
+                        "storage": "memory-only"}
+            if action == "request_list":
+                items = self.secret_store.requests(
+                    harness, self._require_secret_session(session))
+                return {"ok": True,
+                        "requests": [item.as_dict() for item in items],
+                        "count": len(items), "storage": "memory-only"}
+            if action in ("request_status", "request_fulfill",
+                          "request_decline"):
+                request_id = msg.get("request_id")
+                if not isinstance(request_id, str) or not request_id:
+                    raise SecretError("request_id is required",
+                                      code="invalid_request_id")
+                current_session = self._require_secret_session(session)
+                if action == "request_status":
+                    request = self.secret_store.request_status(
+                        request_id, harness=harness, session=current_session)
+                elif action == "request_decline":
+                    request = self.secret_store.decline_request(
+                        request_id, harness=harness, session=current_session)
+                else:
+                    value = msg.get("value")
+                    if not isinstance(value, str):
+                        raise SecretError("value must be a string",
+                                          code="invalid_value")
+                    before = self.secret_store.request_status(
+                        request_id, harness=harness,
+                        session=current_session)
+                    request = self.secret_store.fulfill_request(
+                        request_id, value, harness=harness,
+                        session=current_session, ttl_s=msg.get("ttl_s"))
+                    if (before.state == "pending"
+                            and request.state == "fulfilled"):
+                        self.secret_broker.redactor.add(value)
+                        self._secret_stat("secret_captures")
+                return {"ok": True, **request.as_dict(),
+                        "storage": "memory-only"}
             refs = msg.get("refs")
             if (not isinstance(refs, list) or not refs
                     or len(refs) > MAX_SECRET_CHECK_REFS

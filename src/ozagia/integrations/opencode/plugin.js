@@ -218,7 +218,12 @@ class DaemonClient {
         try { res = JSON.parse(buffer.slice(0, nl)); }
         catch { finish(new Error("daemon sent a bad response")); return; }
         if (!res || res.id !== id) { finish(new Error("daemon response does not match")); return; }
-        if (!res.ok) { finish(new Error(`daemon error: ${res.error || "unknown"}`)); return; }
+        if (!res.ok) {
+          const err = new Error(`daemon error: ${res.error || "unknown"}`);
+          err.daemon = res;
+          finish(err);
+          return;
+        }
         finish(null, res);
       });
       s.on("error", (err) => finish(err));
@@ -1086,6 +1091,77 @@ export function createPlugin(options = {}) {
               client.structuralToolAvailable = true;
               client.tools.ozagia_structure = { codemode: false, read_only: true };
             } catch { /* unsupported registry API leaves the plugin usable */ }
+            // A model-initiated secret request: metadata only. The value is
+            // collected by the trusted local CLI (`ozagia-secrets fulfill`)
+            // and never passes through this tool or the chat.
+            try {
+              reg.add({
+                name: "secret_request",
+                description: "Request a named secret from the user without receiving its value. Creates a pending request bound to this session and returns a handle plus the local command the user should run. The value is read by `ozagia-secrets fulfill` (getpass or stdin) and only the secret reference returns here; never paste a secret into chat. Use the same label and purpose again to read the request's current state.",
+                options: { namespace: "ozagia", codemode: false },
+                input: {
+                  type: "object",
+                  properties: {
+                    label: { type: "string", minLength: 1, maxLength: 128 },
+                    purpose: { type: "string", maxLength: 280 },
+                    ttl_s: { type: "number", minimum: 1, maximum: 600 },
+                  },
+                  required: ["label"],
+                  additionalProperties: false,
+                },
+                execute: async (input, c) => {
+                  const session = c && typeof c.sessionID === "string" && c.sessionID
+                    ? c.sessionID : undefined;
+                  if (!session) {
+                    return { content: JSON.stringify({
+                      status: "refused", code: "session_unavailable",
+                      message: "ozagia has no session context; no request was created",
+                    }) };
+                  }
+                  let response;
+                  try {
+                    response = await client.request({
+                      op: "secrets", action: "request", harness: HARNESS, session,
+                      label: input.label,
+                      ...(input.purpose ? { purpose: input.purpose } : {}),
+                      ...(typeof input.ttl_s === "number" ? { ttl_s: input.ttl_s } : {}),
+                    }, timeoutMs);
+                  } catch (err) {
+                    const daemon = err && err.daemon;
+                    if (daemon) {
+                      return { content: JSON.stringify({
+                        status: "refused",
+                        code: daemon.code || "request_refused",
+                        message: "ozagia refused the secret request; no secret was created",
+                      }) };
+                    }
+                    return { content: JSON.stringify({
+                      status: "unavailable", code: "daemon_unavailable",
+                      message: "ozagia daemon did not answer; no secret was requested",
+                    }) };
+                  }
+                  if (!response || !response.ok) {
+                    return { content: JSON.stringify({
+                      status: "refused",
+                      code: (response && response.code) || "request_refused",
+                      message: "ozagia refused the secret request; no secret was created",
+                    }) };
+                  }
+                  const requestId = response.request_id;
+                  return { content: JSON.stringify({
+                    status: response.state || "pending",
+                    request_id: requestId,
+                    label: response.label || null,
+                    purpose: response.purpose || null,
+                    expires: response.expires ?? null,
+                    ref: response.ref || null,
+                    fingerprint: response.fingerprint || null,
+                    instructions: `Ask the user to run: ozagia-secrets fulfill ${requestId} --harness ${HARNESS} --session ${session} --root <this project>. The value is read by that local CLI and never returned to this tool.`,
+                  }) };
+                },
+              });
+              client.tools.ozagia_secret_request = { codemode: false, read_only: true };
+            } catch { /* the secret-request tool stays absent */ }
           }
         });
         // V2 exposes the effective registry after transforms. Verify that the

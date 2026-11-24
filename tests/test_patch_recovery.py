@@ -426,14 +426,22 @@ def test_caps(tmp_path):
 class StubDaemon:
     def __init__(self, sock: Path, reply):
         self.requests: list[dict] = []
+        self.profile_requests: list[dict] = []
+        self.order: list[str] = []
         stub = self
 
         class Handler(socketserver.StreamRequestHandler):
             def handle(self):
                 for line in self.rfile:
                     req = json.loads(line)
-                    stub.requests.append(req)
-                    resp = {"id": req.get("id"), **reply(req)}
+                    stub.order.append(str(req.get("op")))
+                    if req.get("op") == "profile_event":
+                        stub.profile_requests.append(req)
+                        body = {"ok": True, "stored": True}
+                    else:
+                        stub.requests.append(req)
+                        body = reply(req)
+                    resp = {"id": req.get("id"), **body}
                     self.wfile.write((json.dumps(resp) + "\n").encode())
                     self.wfile.flush()
 
@@ -542,6 +550,8 @@ def test_pre_apply_patch_uses_the_daemon_reply(cxrepo, sockdir):
         assert req["tool"] == "patch_check" and req["harness"] == "codex"
         assert req["input"]["patch"] == STALE and req["input"]["workdir"] == str(cxrepo)
         assert isinstance(req["deadline_ms"], int)
+        assert stub.order[0] == "tool"
+        assert "profile_event" in stub.order[1:]
         # A matching patch is not checked by the daemon; only the ownership
         # check (W11) asks it, and an empty answer prints nothing.
         proc = _pre(cxrepo, FRESH, sockdir / "d.sock")

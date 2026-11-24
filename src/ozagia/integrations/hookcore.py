@@ -210,7 +210,12 @@ def daemon_request(sock: Path, msg: dict[str, Any],
     if not isinstance(resp, dict) or resp.get("id") != msg.get("id"):
         raise HookError("daemon response does not match the request")
     if not resp.get("ok"):
-        raise HookError(f"daemon error: {resp.get('error')}")
+        err = HookError(f"daemon error: {resp.get('error')}")
+        # The stable error code stays available to callers that need to map a
+        # refusal to an exit status; nothing else from the response is kept.
+        code = resp.get("code")
+        err.code = code if isinstance(code, str) else None
+        raise err
     return resp
 
 
