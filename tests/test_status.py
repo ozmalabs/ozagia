@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -23,8 +25,9 @@ from ozagia.daemon.client import (
 
 KEYS = {
     "schema", "checked_at", "root", "ok", "errors", "degraded",
-    "workspace", "resources", "files", "runtime", "daemon", "doctor",
-    "integrations", "capabilities", "config", "reviews",
+    "workspace", "resources", "files", "runtime", "daemon", "jobs",
+    "admissions", "providers", "doctor", "integrations", "capabilities",
+    "snapshot", "sessions", "ownership", "config", "reviews",
 }
 
 
@@ -119,6 +122,8 @@ def _doctor_report(root: Path, snapshot_state: str) -> dict[str, Any]:
         "snapshot": {
             "path": str(root / ".ozagia" / "graph.json"),
             "state": snapshot_state,
+            "nodes": 12,
+            "edges": 34,
         },
         "parsers": {},
         "language_servers": {},
@@ -155,8 +160,33 @@ def _daemon_class(state: dict[str, str | None], calls: list[tuple[str, float]]):
                 raise DaemonTimeout("stats timed out")
             if state.get("stats") == "error":
                 raise DaemonError("stats failed")
-            return {"id": 2, "ok": True, "stats": {
-                "pid": 4321, "uptime_s": 12.5, "idle_timeout_s": 300}}
+            stats = {
+                "pid": 4321, "uptime_s": 12.5, "idle_timeout_s": 300}
+            if state.get("job_stats") is not None:
+                stats["jobs"] = state["job_stats"]
+            return {"id": 2, "ok": True, "stats": stats}
+
+        def job_list(self) -> dict[str, Any]:
+            failure = state.get("jobs")
+            if failure == "timeout":
+                raise DaemonTimeout("job table timed out")
+            if failure == "error":
+                raise DaemonError("job table failed")
+            rows = state.get("job_rows") or []
+            return {"id": 3, "ok": True, "jobs": rows,
+                    "running": sum(1 for job in rows
+                                   if job.get("status") in
+                                   ("running", "detached"))}
+
+        def secret_providers(self) -> dict[str, Any]:
+            failure = state.get("providers")
+            if failure == "timeout":
+                raise DaemonTimeout("providers timed out")
+            if failure == "error":
+                raise DaemonError("providers failed")
+            return {"id": 4, "ok": True,
+                    "providers": state.get("provider_rows") or [],
+                    "storage": "memory-only"}
 
         def close(self) -> None:
             return None
@@ -168,10 +198,22 @@ def _daemon_class(state: dict[str, str | None], calls: list[tuple[str, float]]):
 def components(tmp_path: Path, monkeypatch) -> SimpleNamespace:
     root = tmp_path / "repo"
     root.mkdir()
+    state_root = root / ".ozagia"
+    state_root.mkdir()
+    (state_root / "graph.json").write_text("{}", encoding="utf-8")
     cfg_path = root / ".ozagia.toml"
     cfg_path.write_text("# test project\n", encoding="utf-8")
-    state: dict[str, Any] = {"snapshot": "fresh", "ping": None,
-                             "stats": None}
+    state: dict[str, Any] = {
+        "snapshot": "fresh", "ping": None, "stats": None,
+        "jobs": None, "job_rows": [], "providers": None,
+        "provider_rows": [],
+        "job_stats": {
+            "jobs_refused": 0, "resource_refusals": 0,
+            "jobs_resource_killed": 0, "resource_events": 0,
+            "cgroup_oom_kills": 0, "stopped_on_load": 0,
+            "resource_peak_mb": 0.0, "resource_peak_disk_write_mb": 0.0,
+        },
+    }
     calls: list[tuple[str, float]] = []
     config = SimpleNamespace(
         source=cfg_path,
@@ -236,8 +278,21 @@ def test_status_all_present(components: SimpleNamespace) -> None:
     assert report["daemon"]["report"]["pid"] == 4321
     assert report["daemon"]["report"]["stats"]["uptime_s"] == 12.5
     assert report["daemon"]["report"]["timeout_s"] == 0.5
+    assert report["jobs"]["state"] == "ok"
+    assert report["jobs"]["report"]["counts"]["known"] == 0
+    assert report["admissions"]["state"] == "ok"
+    assert report["admissions"]["report"]["counts"]["jobs_refused"] == 0
+    assert report["providers"]["state"] == "ok"
+    assert report["providers"]["report"]["counts"]["known"] == 0
     assert report["doctor"]["state"] == "ok"
     assert report["doctor"]["report"]["snapshot"]["state"] == "fresh"
+    assert report["snapshot"]["state"] == "ok"
+    assert report["snapshot"]["report"]["nodes"] == 12
+    assert report["snapshot"]["report"]["edges"] == 34
+    assert report["snapshot"]["report"]["counts_read"] is True
+    assert report["snapshot"]["report"]["size_bytes"] == 2
+    assert report["sessions"]["state"] == "absent"
+    assert report["ownership"]["state"] == "absent"
     assert report["integrations"]["state"] == "unknown"
     assert report["capabilities"]["state"] == "unknown"
     assert report["reviews"]["state"] == "absent"
@@ -245,7 +300,7 @@ def test_status_all_present(components: SimpleNamespace) -> None:
     assert report["config"]["path"] == str(components.cfg_path)
     assert report["config"]["report"]["runtime_services"] == ["api"]
     assert components.calls == [
-        (str(status_module.protocol.socket_path(components.root)), 0.5)]
+        (str(status_module.protocol.socket_path(components.root)), 0.5)] * 3
 
 
 def test_status_carries_bounded_integration_and_capability_summaries(
@@ -486,12 +541,19 @@ def test_status_cli_json_and_text(
     payload = json.loads(capsys.readouterr().out)
     assert payload["schema"] == status_module.SCHEMA
     assert payload["daemon"]["state"] == "running"
+    assert payload["jobs"]["state"] == "ok"
+    assert payload["admissions"]["state"] == "ok"
+    assert payload["providers"]["state"] == "ok"
+    assert payload["snapshot"]["state"] == "ok"
+    assert payload["sessions"]["state"] == "absent"
+    assert payload["ownership"]["state"] == "absent"
     assert payload["runtime"]["report"]["items"][1]["state"] == "stale"
 
     assert status_cli.main(["--root", str(components.root)]) == 0
     text = capsys.readouterr().out
-    for label in ("workspace:", "resources:", "files:", "daemon:",
-                  "runtime:", "snapshot:", "config:"):
+    for label in ("workspace:", "resources:", "files:", "daemon:", "jobs:",
+                  "admissions:", "providers:", "runtime:", "snapshot:",
+                  "snapshot metrics:", "sessions:", "ownership:", "config:"):
         assert label in text
     assert "service api: configured, not running" in text
     assert "tunnel db: stale" in text
@@ -525,4 +587,297 @@ def test_status_real_repository_is_read_only(
     assert report["doctor"]["report"]["snapshot"]["state"] == "missing"
     assert any(item["code"] == "snapshot.missing"
                for item in report["degraded"])
+    assert report["snapshot"]["state"] == "absent"
+    assert report["sessions"]["state"] == "absent"
+    assert report["ownership"]["state"] == "absent"
+    assert report["jobs"]["state"] == "absent"
+    assert report["admissions"]["state"] == "absent"
+    assert report["providers"]["state"] == "absent"
+    assert not (root / ".ozagia").exists()
+
+
+def test_status_jobs_are_bounded_and_content_free(
+    components: SimpleNamespace,
+) -> None:
+    components.state["job_rows"] = [{
+        "id": f"j{index}", "status": "running", "pid": 1000 + index,
+        "command": "tool --password hunter2", "argv": ["--token", "hunter2"],
+        "cwd": "/private/checkout", "log": "/state/jobs/j1.log",
+        "env_keys": ["PASSWORD"], "started": "2026-11-25T10:00:00Z",
+        "ended": None, "exit_code": None, "signal": None,
+        "harness": "opencode", "session": "session-with-a-long-id",
+        "enforcement": "rlimit+watch", "peak_memory_mb": 12,
+        "peak_disk_write_mb": 3, "log_bytes": 99, "elapsed_s": 5,
+        "leader_exited": False, "group_alive": True,
+    } for index in range(status_module.JOB_LIMIT + 2)]
+
+    report = status_module.status(components.root)
+
+    jobs = report["jobs"]
+    assert jobs["state"] == "ok"
+    assert jobs["report"]["counts"]["known"] == status_module.JOB_LIMIT + 2
+    assert jobs["report"]["counts"]["shown"] == status_module.JOB_LIMIT
+    assert jobs["report"]["truncated"] is True
+    row = jobs["report"]["jobs"][0]
+    assert row["id"] == "j0"
+    assert row["state"] == "running"
+    assert row["pid"] == 1000
+    assert row["argv_count"] == 2
+    assert row["has_command"] is True
+    assert row["peak_memory_mb"] == 12
+    assert row["peak_disk_write_mb"] == 3
+    for key in ("command", "argv", "cwd", "log", "env_keys", "session"):
+        assert key not in row
+    serialized = json.dumps(report["jobs"])
+    assert "hunter2" not in serialized
+    assert "tool --password" not in serialized
+    assert "/private/checkout" not in serialized
+    assert "/state/jobs" not in serialized
+
+
+def test_status_jobs_absent_and_unknown_states(
+    components: SimpleNamespace,
+) -> None:
+    components.state["ping"] = "absent"
+    report = status_module.status(components.root)
+    assert report["jobs"]["state"] == "absent"
+    assert report["providers"]["state"] == "absent"
+    assert report["admissions"]["state"] == "absent"
+
+    components.state["ping"] = None
+    components.state["jobs"] = "timeout"
+    components.state["providers"] = "error"
+    report = status_module.status(components.root)
+    assert report["jobs"]["state"] == "unknown"
+    assert report["providers"]["state"] == "unknown"
+    assert any(item["code"] == "jobs.unknown"
+               for item in report["degraded"])
+    assert any(item["code"] == "providers.unknown"
+               for item in report["degraded"])
+
+
+def test_status_admissions_come_from_daemon_job_counters(
+    components: SimpleNamespace,
+) -> None:
+    components.state["job_stats"] = {
+        "jobs_refused": 2, "resource_refusals": 3,
+        "jobs_resource_killed": 1, "resource_events": 4,
+        "cgroup_oom_kills": 1, "stopped_on_load": 0,
+        "resource_peak_mb": 64.0, "resource_peak_disk_write_mb": 2.0,
+    }
+
+    report = status_module.status(components.root)
+
+    assert report["admissions"]["state"] == "ok"
+    counts = report["admissions"]["report"]["counts"]
+    assert counts["jobs_refused"] == 2
+    assert counts["resource_refusals"] == 3
+    assert counts["jobs_resource_killed"] == 1
+    assert counts["resource_events"] == 4
+
+    components.state["job_stats"] = None
+    report = status_module.status(components.root)
+    assert report["admissions"]["state"] == "unknown"
+
+
+def test_status_providers_use_the_daemon_reply_and_are_bounded(
+    components: SimpleNamespace,
+) -> None:
+    components.state["provider_rows"] = [{
+        "name": f"provider-{index}", "enabled": True, "available": True,
+        "ready": index == 0, "requires": ["optional package"],
+        "notes": "no value is returned",
+    } for index in range(status_module.PROVIDER_LIMIT + 2)]
+
+    report = status_module.status(components.root)
+
+    providers = report["providers"]
+    assert providers["state"] == "ok"
+    assert providers["report"]["kind"] == "secret_providers"
+    assert "not a connection" in providers["report"]["note"]
+    assert providers["report"]["counts"]["known"] == (
+        status_module.PROVIDER_LIMIT + 2)
+    assert providers["report"]["counts"]["ready"] == 1
+    assert providers["report"]["counts"]["shown"] == (
+        status_module.PROVIDER_LIMIT)
+    assert providers["report"]["truncated"] is True
+    assert len(providers["report"]["providers"]) == status_module.PROVIDER_LIMIT
+    assert "hunter2" not in json.dumps(providers)
+
+
+def _write_profile(
+    root: Path, name: str, envelope: dict[str, Any],
+) -> Path:
+    directory = root / ".ozagia" / "session_profiles"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / name
+    path.write_text(json.dumps(envelope), encoding="utf-8")
+    return path
+
+
+def test_status_sessions_are_metadata_only_and_empty_is_not_missing(
+    components: SimpleNamespace,
+) -> None:
+    directory = components.root / ".ozagia" / "session_profiles"
+    directory.mkdir()
+    report = status_module.status(components.root)
+    assert report["sessions"]["state"] == "ok"
+    assert report["sessions"]["report"]["profiles"] == 0
+    assert report["sessions"]["report"]["profiles_read"] == 0
+
+    now = datetime.now(timezone.utc).isoformat()
+    _write_profile(components.root, "one.json", {
+        "session_id": "session-super-secret-id",
+        "harness": "opencode",
+        "observed_at": now,
+        "host_profile": {
+            "source": "opencode_server_events",
+            "model_calls": 2,
+            "models": ["provider/model-a", "provider/model-b"],
+            "tokens": {"input": 20, "output": 7, "reasoning": 3},
+            "timing_ms": {"first_token": 100, "model_turn": 800},
+            "coverage": {"host_tool_calls": 4, "assistant_turns": 2},
+            "tools": {"read": {"completed": {"count": 4}}},
+            "capture_diagnostics": [{
+                "capture_id": "0d6b8d4e-2c7f-4b0b-8e3a-1b2c3d4e5f60",
+                "counters": {"events_received": 9, "step_events": 2,
+                             "tool_lifecycle_terminal": 4},
+            }],
+            "prompt": "must not be copied",
+        },
+        "daemon_profile": {
+            "tool_calls_observed": 4,
+            "tools_by_name": {"read": 4},
+        },
+    })
+
+    report = status_module.status(components.root)
+
+    sessions = report["sessions"]
+    assert sessions["state"] == "ok"
+    assert sessions["report"]["profiles"] == 1
+    assert sessions["report"]["profiles_read"] == 1
+    assert sessions["report"]["models"] == [
+        "provider/model-a", "provider/model-b"]
+    totals = sessions["report"]["totals"]
+    assert totals["model_calls"] == 2
+    assert totals["tokens"]["input"] == 20
+    assert totals["tokens"]["output"] == 7
+    assert totals["tool_calls"] == 4
+    assert totals["timing_ms"]["model_turn"] == 800
+    diagnostics = sessions["report"]["capture_diagnostics"]
+    assert diagnostics["captures"] == 1
+    assert diagnostics["counters"]["events_received"] == 9
+    assert diagnostics["counters"]["tool_lifecycle_terminal"] == 4
+    serialized = json.dumps(sessions)
+    assert "must not be copied" not in serialized
+    assert "session-super-secret-id" not in serialized
+    assert "tools_by_name" not in serialized
+
+
+def test_status_sessions_malformed_profile_is_unknown_with_partial_report(
+    components: SimpleNamespace,
+) -> None:
+    _write_profile(components.root, "good.json", {
+        "session_id": "good",
+        "harness": "opencode",
+        "observed_at": datetime.now(timezone.utc).isoformat(),
+        "host_profile": {"models": ["m"], "model_calls": 1},
+    })
+    (components.root / ".ozagia" / "session_profiles" / "bad.json").write_text(
+        "{not json", encoding="utf-8")
+
+    report = status_module.status(components.root)
+
+    sessions = report["sessions"]
+    assert sessions["state"] == "unknown"
+    assert sessions["report"]["malformed"] == 1
+    assert sessions["report"]["profiles_read"] == 1
+    assert any(item["code"] == "sessions.malformed"
+               for item in report["degraded"])
+
+
+def test_status_snapshot_without_counts_says_they_were_not_read(
+    components: SimpleNamespace, monkeypatch,
+) -> None:
+    doctor_report = _doctor_report(components.root, "fresh")
+    del doctor_report["snapshot"]["nodes"]
+    del doctor_report["snapshot"]["edges"]
+    monkeypatch.setattr(status_module, "diagnose",
+                        lambda value: doctor_report)
+
+    report = status_module.status(components.root)
+
+    assert report["snapshot"]["state"] == "ok"
+    assert report["snapshot"]["report"]["counts_read"] is False
+    assert report["snapshot"]["report"]["nodes"] is None
+    assert report["snapshot"]["report"]["size_bytes"] == 2
+    assert "not reported" in report["snapshot"]["report"]["counts_note"]
+
+
+def test_status_ownership_reports_dirty_uncommitted_journaled_edits(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root, "init", "-q")
+    _git(root, "symbolic-ref", "HEAD", "refs/heads/main")
+    target = root / "a.txt"
+    target.write_text("one\n", encoding="utf-8")
+    _git(root, "add", "a.txt")
+    _git(root, "commit", "-q", "-m", "initial")
+    head = _git(root, "rev-parse", "HEAD").stdout.strip()
+    target.write_text("two\n", encoding="utf-8")
+    state = root / ".ozagia"
+    state.mkdir()
+    journal = state / "journal.jsonl"
+    journal.write_text(json.dumps({
+        "ts": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+        "epoch": time.time(),
+        "kind": "edit",
+        "session": {"harness": "opencode", "id": "session-abcdef123456"},
+        "files": ["a.txt"],
+        "head": head,
+    }) + "\n", encoding="utf-8")
+
+    degraded: list[dict[str, str]] = []
+    section = status_module._ownership_status(root, degraded)
+
+    assert section["state"] == "ok"
+    assert degraded == []
+    assert section["report"]["counts"]["files"] == 1
+    assert section["report"]["counts"]["sessions"] == 1
+    row = section["report"]["rows"][0]
+    assert row["path"] == "a.txt"
+    assert row["label"] == "opencode session-"
+    assert row["live"] is False
+    assert row["committed"] is False
+    assert "session-abcdef123456" not in json.dumps(section)
+
+
+def test_status_ownership_unreadable_journal_is_unknown(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / ".ozagia").mkdir()
+    (root / ".ozagia" / "journal.jsonl").mkdir()
+
+    degraded: list[dict[str, str]] = []
+    section = status_module._ownership_status(root, degraded)
+
+    assert section["state"] == "unknown"
+    assert any(item["code"] == "ownership.unreadable" for item in degraded)
+
+
+def test_status_sessions_absent_does_not_create_state(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+
+    degraded: list[dict[str, str]] = []
+    section = status_module._sessions_status(root, degraded)
+
+    assert section["state"] == "absent"
     assert not (root / ".ozagia").exists()

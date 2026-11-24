@@ -368,8 +368,14 @@ def diagnose(root: str | Path) -> dict[str, Any]:
                 status["verification_errors"] = [*status.get("verification_errors", []), config_error]
                 if status["freshness"] == "fresh":
                     status["freshness"] = "unknown"
-            result["snapshot"] = {"path": str(dump), "state": status["freshness"],
-                                  "details": status}
+            nodes = getattr(memory, "nodes", None)
+            edges = getattr(memory, "edges", None)
+            result["snapshot"] = {
+                "path": str(dump), "state": status["freshness"],
+                "details": status,
+                "nodes": len(nodes) if isinstance(nodes, (dict, list)) else None,
+                "edges": len(edges) if isinstance(edges, list) else None,
+            }
         except (OSError, ValueError, KeyError, TypeError) as exc:
             result["snapshot"] = {"path": str(dump), "state": "invalid", "error": str(exc)}
 

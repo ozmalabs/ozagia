@@ -288,6 +288,32 @@ model, and can see what a session actually did without storing its content.
   a real latency win without freshness risk. Otherwise close the plan as
   "measured, not worth it" and keep the planner primitives.
 
+**Progress (2026-11-25, status slice).** The read-only `ozagia-status` expansion
+landed without changing the envelope or the absent-versus-unknown rule:
+
+- `jobs`: bounded rows from the running daemon's `job_list` (state, pid,
+  timing, exit/signal, peak memory/disk, log size); command/argv/paths/log text
+  are omitted, and status never starts or attaches to a job.
+- `admissions`: job/resource refusal and kill counters from the running
+  daemon's existing `stats`, not a new probe.
+- `providers`: secret-provider availability/readiness from the running daemon's
+  `secrets` status; configuration alone is never reported as a connection, and
+  no model/network connection state is invented.
+- `snapshot`: size, mtime/age, freshness and node/edge counts reused from
+  doctor's existing snapshot load; no build or rewrite.
+- `sessions`: metadata-only summary of `.ozagia/session_profiles/` (count,
+  newest age, models, token/tool/phase counters, capture diagnostics) with no
+  prompt, path, tool body, source content or full session id.
+- `ownership`: bounded dirty files with uncommitted journaled edits by a
+  session, live/committed state and age, from the existing owner/journals.
+
+Still open in 0.3: the native session-secret prompt/UI and revoke/expiry flow;
+complete tool-lifecycle capture for Codex, Kiro and Claude Code (status reports
+only profiles that exist); model-provider connection probes (only
+secret-provider readiness is local and authoritative); and the prefetch
+keep/drop decision. Live integration and model/network probes remain out of
+scope for the read-only command.
+
 **Exit criteria**
 
 - A secret canary never appears in model context, state files, logs, profiles,
