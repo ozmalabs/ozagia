@@ -58,6 +58,7 @@ FAMILIES = frozenset({
 FAMILY_BY_TYPE = {
     # code-review finding types
     "breaking_change": "claim_structure",
+    "non_breaking_change": "scope",
     "missing_test": "evidence",
     "unhandled_error": "other",
     "stale_reference": "provenance",

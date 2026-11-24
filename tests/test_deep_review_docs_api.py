@@ -17,6 +17,31 @@ def test_flags_only_missing_imports_from_local_public_api(tmp_path):
     assert findings[0]["line"] == 2
 
 
+def test_prose_import_is_checked_but_code_examples_are_not(tmp_path):
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "api.py").write_text(
+        "def present():\n    pass\n\n__all__ = ['present']\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text(
+        "from pkg.api import missing_prose\n"
+        "\n"
+        "```python\n"
+        "from pkg.api import missing_fenced\n"
+        "```\n"
+        "\n"
+        "For example, `from pkg.api import missing_inline` is not a live import.\n"
+        "\n"
+        "    from pkg.api import missing_indented\n",
+        encoding="utf-8")
+
+    result = analyze_with_coverage(tmp_path)
+
+    assert [item["line"] for item in result["findings"]] == [1]
+    assert result["coverage"]["removed_or_renamed_symbols"] == 1
+    assert result["coverage"]["local_imports_checked"] == 1
+    assert "fenced and indented code blocks" in " ".join(
+        result["coverage"]["limitations"])
+
+
 def test_unparseable_local_module_is_unknown_not_a_stale_api(tmp_path):
     (tmp_path / "pkg").mkdir()
     (tmp_path / "pkg" / "api.py").write_text("def broken(:\n", encoding="utf-8")

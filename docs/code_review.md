@@ -109,7 +109,8 @@ and a confidence note. Agreement between reviewers is never treated as proof.
 
 | Type | Deterministic source | Typical severity |
 | --- | --- | --- |
-| `breaking_change` | Deleted source file (imports/callers may still refer to it). | major |
+| `breaking_change` | Deleted source file (imports/callers may still refer to it), deleted config file, or deleted executable. | major / note |
+| `non_breaking_change` | Deleted documentation, image, generated asset, or other non-source/non-config file. | note |
 | `missing_test` | Changed source (not generated or binary) with no changed or covering test (graph edge or test filename at the reviewed commit). A deleted test file. | major |
 | `unhandled_error` | Conflict marker in an added line (`<<<<<<<`, `=======`, `>>>>>>>`). | blocking |
 | `stale_reference` | A changed or deleted symbol whose recorded `calls` callers are not in the diff; a stale graph snapshot. | major / minor |

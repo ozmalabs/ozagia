@@ -298,10 +298,67 @@ def test_deleted_binary_file_has_one_deletion_finding(tmp_path: Path) -> None:
 
     packet = R.review_range(repo, f"{base}..{head}")
 
-    deleted = _findings(packet, ftype="breaking_change", file="assets/logo.bin")
+    deleted = _findings(packet, ftype="non_breaking_change",
+                        file="assets/logo.bin")
+    breaking = _findings(packet, ftype="breaking_change",
+                         file="assets/logo.bin")
     binary = _findings(packet, ftype="unknown", file="assets/logo.bin")
     assert len(deleted) == 1
+    assert deleted[0]["severity"] == "note"
+    assert breaking == []
     assert binary == []
+
+
+def test_deleted_document_and_image_are_non_breaking(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "docs").mkdir()
+    (repo / "assets").mkdir()
+    (repo / "docs" / "guide.md").write_text("# guide\n", encoding="utf-8")
+    (repo / "assets" / "logo.png").write_bytes(b"\x89PNG\r\n")
+    base = _commit(repo, "base")
+    (repo / "docs" / "guide.md").unlink()
+    (repo / "assets" / "logo.png").unlink()
+    head = _commit(repo, "delete docs and image")
+
+    packet = R.review_range(repo, f"{base}..{head}")
+
+    for path in ("docs/guide.md", "assets/logo.png"):
+        deleted = _findings(packet, ftype="non_breaking_change", file=path)
+        assert len(deleted) == 1
+        assert deleted[0]["severity"] == "note"
+        assert _findings(packet, ftype="breaking_change", file=path) == []
+
+
+def test_deleted_source_config_and_executable_keep_breaking_classification(
+        tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "src").mkdir()
+    (repo / "config").mkdir()
+    (repo / "bin").mkdir()
+    (repo / "src" / "api.py").write_text("def public():\n    return 1\n",
+                                         encoding="utf-8")
+    (repo / "config" / "settings.toml").write_text(
+        "[service]\nenabled = true\n", encoding="utf-8")
+    script = repo / "bin" / "run"
+    script.write_text("#!/bin/sh\n", encoding="utf-8")
+    script.chmod(0o755)
+    base = _commit(repo, "base")
+    (repo / "src" / "api.py").unlink()
+    (repo / "config" / "settings.toml").unlink()
+    script.unlink()
+    head = _commit(repo, "delete source, config and executable")
+
+    packet = R.review_range(repo, f"{base}..{head}")
+
+    source = _findings(packet, ftype="breaking_change", file="src/api.py")
+    config = _findings(packet, ftype="breaking_change",
+                       file="config/settings.toml")
+    executable = _findings(packet, ftype="breaking_change", file="bin/run")
+    assert len(source) == 1 and source[0]["severity"] == "major"
+    assert len(config) == 1 and config[0]["severity"] == "note"
+    assert len(executable) == 1 and executable[0]["severity"] == "note"
+    for path in ("src/api.py", "config/settings.toml", "bin/run"):
+        assert _findings(packet, ftype="non_breaking_change", file=path) == []
 
 
 def test_missing_test_recognizes_javascript_and_cpp_test_names(

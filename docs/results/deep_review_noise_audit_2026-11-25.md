@@ -14,8 +14,10 @@ positives and duplicate-emission defects.
 - Findings audited: 3,407 report entries, 920 distinct `(repository, id)` findings
 - Holdouts: `pytest` and `gin`. Their findings are counted in aggregates only;
   no rule, threshold or convention change below was justified from them.
-- Result: 6 generic rule/collector fixes, 173 fewer report entries after
-  regeneration (3,407 -> 3,234), corpus reports and reviewer packets rebuilt.
+- Result: 6 generic rule/collector fixes in the first pass (3,407 -> 3,234
+  report entries), then 2 follow-up fixes on the same day (3,234 -> 3,218):
+  189 fewer report entries in total. Corpus reports and reviewer packets were
+  rebuilt after both passes; the follow-up is recorded below.
 - Manifest pins and digests are unchanged: `corpus.json` is untouched and its
   digest remains
   `5fae870cbb0d83b55c3904da97408a01f30af4cb116df072de9ec9120c1598c0`.
@@ -97,6 +99,12 @@ Severity after regeneration: 1,373 minor, 1,146 note, 715 major, 0 blocking.
 The reduction is concentrated in six verified false-positive/duplicate patterns
 listed below; no subject was disabled and no severity was lowered.
 
+A later follow-up on 2026-11-25 (see "Follow-up" below) removed 16
+`stale_documented_api` entries and reclassified non-source deletions, so the
+current corpus totals are 3,218 report entries and 854 distinct
+`(repository, id)` findings. The tables in this first-pass section record the
+state after the six original fixes, not the follow-up.
+
 ### Highest-volume types
 
 | Subject / type | Before (entries / distinct) | After | Note |
@@ -111,7 +119,8 @@ listed below; no subject was disabled and no severity was lowered.
 | dependencies / `undeclared_import` | 87 / 17 | 87 / 17 | Includes dynamically created test modules |
 | failure-modes / `silently_suppressed_exception` | 77 / 14 | 77 / 14 | Mostly test files |
 | security / `dangerous_construct` | 77 / 15 | 77 / 15 | File-level summary of line rules |
-| architecture / `breaking_change` | 69 / 69 | 69 / 69 | Mostly deleted docs/assets |
+| architecture / `breaking_change` | 69 / 69 | 18 / 18 | Deleted source/config/executable files; follow-up reclassified 51 docs/assets |
+| architecture / `non_breaking_change` | 0 / 0 | 51 / 51 | Follow-up: deleted docs, images and other non-source files |
 | scalability / `materialized_range` | 60 / 12 | 60 / 12 | Entirely pytest (holdout) |
 | security / `exec` | 56 / 11 | 56 / 11 | Construct is real; message overclaims intent |
 | security / `dependency-inventory` | 52 / 10 | 52 / 10 | Coverage statement, not a finding |
@@ -257,6 +266,94 @@ Verification:
   `ozagia.eval.deep_review_corpus validate` and `status` remain `valid` /
   `verified`.
 
+## Follow-up: code examples and non-source deletions (2026-11-25)
+
+Two further generic defects were fixed after the first regeneration. Neither
+was chosen from `pytest` or `gin`; both holdouts keep the same entry and
+distinct counts (pytest 769 / 166, gin 189 / 58).
+
+| Metric | Before follow-up | After follow-up |
+| --- | ---: | ---: |
+| Report entries | 3,234 | 3,218 |
+| Distinct `(repository, id)` | 857 | 854 |
+| documents-and-api entries / distinct | 47 / 9 | 31 / 6 |
+| `stale_documented_api` entries / distinct | 16 / 3 | 0 / 0 |
+| `breaking_change` entries / distinct | 69 / 69 | 18 / 18 |
+| `non_breaking_change` entries / distinct | 0 / 0 | 51 / 51 |
+| Severity major / minor / note | 715 / 1,373 / 1,146 | 715 / 1,357 / 1,146 |
+
+Only flask (485 -> 479 entries, 109 -> 108 distinct) and requests (191 -> 181
+entries, 54 -> 52 distinct) change in entry/distinct counts. The 16 fewer entries
+are all documentation examples; the deletion change reclassifies the same 69
+deletion entries without removing any and without changing their severities.
+
+### Documentation/API code examples
+
+`docs_api` checked every line of Markdown as if an import statement were live,
+so fenced examples (flask `README.md`) and indented examples (requests
+`HISTORY.md`) produced `stale_documented_api` findings. The analyzer now walks
+only prose lines: fenced blocks, indented code blocks and inline code spans are
+masked or skipped, while a bare prose import line is still checked. Line numbers
+are preserved for the prose findings that remain. Regression test:
+`test_prose_import_is_checked_but_code_examples_are_not` keeps a missing prose
+symbol reported and puts the same stale import in a fence, an inline span and an
+indented block.
+
+### Deletion classification
+
+Deleted docs, images and other non-source files were typed `breaking_change`
+(note severity), which is misleading. Deletions now classify by file kind and
+git mode:
+
+- source files: `breaking_change`, major (unchanged);
+- config files: `breaking_change`, note (unchanged);
+- deleted executables without a source suffix (git mode has an execute bit):
+  `breaking_change`, note;
+- generated files: `non_breaking_change`, note;
+- tests: `missing_test` (unchanged);
+- everything else (docs, images, data): `non_breaking_change`, note.
+
+`non_breaking_change` is a new code-review type mapped to the architecture
+subject in deep review. The diff-review task schema, Ocelot family mapping and
+`docs/code_review.md` were updated with it. Regression tests:
+`test_deleted_document_and_image_are_non_breaking`,
+`test_deleted_source_config_and_executable_keep_breaking_classification` and the
+updated `test_deleted_binary_file_has_one_deletion_finding`. After the change the
+18 breaking deletions are 12 source majors and 6 config/executable notes; the 51
+non-breaking deletions are all notes. No severity was lowered globally.
+
+Files changed in this follow-up:
+
+- `src/ozagia/core/deep_review/analyzers/docs_api.py`
+- `src/ozagia/core/code_review.py`
+- `src/ozagia/core/deep_review/range_review.py`
+- `src/ozagia/core/ocelot_code.py`
+- `src/ozagia/task_specs/coding/diff_review.toml`
+- `tests/test_deep_review_docs_api.py`
+- `tests/test_code_review.py`
+- `docs/code_review.md`, `docs/ocelot_code.md`
+
+### Follow-up regeneration
+
+All 62 reports were regenerated with the same command shape, pins, budget and
+`--fail-on never`; no `--index`, model, network tool, target test or target
+import was used. Packets and `packet-index.json` were rebuilt from the existing
+range metadata and repository pins. Verification:
+
+- 62/62 commands exited 0; all 62 manifests remain `status: partial`.
+- `packet-index.json`: 62 subjects, 12 whole-repo, 50 range, 62 manifests,
+  3,218 findings, 0 failures.
+- Every recorded findings/manifest SHA-256 and count matches the file on disk.
+- Repeat of `flask-01` produced byte-identical `findings.json` (SHA-256
+  `72e1435e0fe13b40ec7a457c20a7107de7ee10be7511c4b284c9ad12415f4669`).
+- `evaluation/deep_review_corpus/corpus.json` and its digest are unchanged;
+  validate/status remain `valid` / `verified`.
+- A self-scan with the new analyzer produced no new `stale_documented_api` or
+  `non_breaking_change` finding, so `ozagia/config.toml` was not changed.
+
+This is still a noise/quality work note. It does not add a human label, a
+precision/recall estimate or a measured go/no-go gate.
+
 ## Remaining noise and recommendations
 
 Ranked by expected value of a change, not by raw count:
@@ -279,10 +376,12 @@ Ranked by expected value of a change, not by raw count:
    `stale_doc_reference`.** Actionability is low. `dependency-inventory` is a
    coverage statement with a CWE tag; `stale_doc_reference` collapses all
    doc references to one line-less finding.
-5. **Non-source deletions typed as `breaking_change`.** Deleting docs or images
-   is not a breaking change. The message and note severity make it obvious, but
-   the type is misleading; a separate deletion type would require a contract
-   change.
+5. **Non-source deletions typed as `breaking_change`.** Resolved in the
+   follow-up: docs, images and other non-source files are now
+   `non_breaking_change` notes, while source, config and executable deletions
+   remain breaking. Residual: these deletion findings are still generated (a
+   caller that only wants source risk must ignore the type), and extensionless
+   files rely on the git execute bit rather than content.
 6. **Path-only credential/sensitive-file rules.** `.npmrc` files containing only
    `package-lock=false`, public PGP keys and test certificates are flagged as
    credentials. A content-aware suppression for configuration files and public
@@ -303,7 +402,10 @@ above. They were not inspected to choose any fix. In particular,
 `pytest`; it is recorded as a holdout-only pattern and no change was made to it.
 The fixes were justified from non-holdout repositories only: flask, express,
 requests, httpx, ripgrep, fmt and fd supplied the sampled evidence. `got` and
-`googletest` were inspected for other categories but did not drive a change.
+`googletest` were inspected for other categories but did not drive a change. The
+2026-11-25 follow-up also left both holdouts unchanged (958 entries, 224
+distinct), and its documentary and deletion evidence came from flask, requests,
+express and ripgrep.
 
 ## Limits
 

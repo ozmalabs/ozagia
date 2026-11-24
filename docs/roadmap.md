@@ -211,9 +211,15 @@ dependencies, explicit non-security hashes, cookie-jar receivers, trust-flow
 code duplicates and deleted-binary duplicates), and regenerated all reports and
 packets from the same pins (3,407 -> 3,234 report entries). The sample evidence,
 holdout exclusion and remaining noise are recorded in
-`docs/results/deep_review_noise_audit_2026-11-25.md`. This is a noise audit, not
-a quality result: there are still 0 labels, no precision/recall and no measured
-gate.
+`docs/results/deep_review_noise_audit_2026-11-25.md`. A follow-up on the same day
+fixed two more generic defects: documentation/API import checks now ignore
+fenced, indented and inline code examples while still checking prose, and
+non-source deletions (docs, images, generated assets) use the non-breaking
+`non_breaking_change` type instead of `breaking_change` while source, config and
+executable deletions stay breaking. Reports and packets were rebuilt again
+(3,234 -> 3,218 entries; 69 breaking-change entries became 18 breaking plus 51
+non-breaking). This is a noise/quality work note, not a quality result: there
+are still 0 labels, no precision/recall and no measured gate.
 
 **Scope**
 

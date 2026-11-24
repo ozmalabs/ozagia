@@ -65,7 +65,7 @@ enum = ["info", "warn", "error"]
 
 [output_schema.properties.findings.items.properties.issue_type]
 type = "string"
-enum = ["breaking_change", "missing_test", "unhandled_error", "stale_reference", "scope_creep", "duplicate_logic", "contract_mismatch", "security_sensitive", "performance_risk", "unknown"]
+enum = ["breaking_change", "non_breaking_change", "missing_test", "unhandled_error", "stale_reference", "scope_creep", "duplicate_logic", "contract_mismatch", "security_sensitive", "performance_risk", "unknown"]
 
 [output_schema.properties.findings.items.properties.evidence]
 type = "string"
