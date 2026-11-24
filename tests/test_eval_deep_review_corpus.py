@@ -24,24 +24,26 @@ def _raw_manifest():
     return json.loads(DEFAULT_MANIFEST.read_text(encoding="utf-8"))
 
 
-def test_realistic_manifest_is_valid_and_candidates_are_explicitly_unacquired():
+def test_realistic_manifest_is_valid_and_repositories_are_pinned():
     manifest = load_manifest(DEFAULT_MANIFEST)
     assert manifest["corpus_id"] == "ozagia-deep-review-realistic-v1"
     assert manifest["evidence_class"] == "realistic_corpus"
     assert len(manifest["repositories"]) >= 10
     assert len(manifest["change_ranges"]) >= 50
     assert sum(1 for item in manifest["repositories"] if item["holdout"]) == 2
-    assert all(item["acquisition_status"] == "candidate_unacquired"
+    assert all(item["acquisition_status"] == "verified"
                for item in manifest["repositories"])
-    assert all(item["pinned_commit"] is None for item in manifest["repositories"])
-    assert all(item["tree_sha256"] is None for item in manifest["repositories"])
-    assert all(item["base"] is None and item["head"] is None
-               for item in manifest["change_ranges"])
-    assert all(item["status"] == "slot_unassigned" for item in manifest["change_ranges"])
+    assert all(item["pinned_commit"] for item in manifest["repositories"])
+    assert all(item["tree_sha256"] for item in manifest["repositories"])
+    assert all(item["archive_sha256"] for item in manifest["repositories"])
+    assert all(item["verified_at"] for item in manifest["repositories"])
+    assert all(item["base"] and item["head"] for item in manifest["change_ranges"])
+    assert all(item["status"] == "assigned" for item in manifest["change_ranges"])
     summary = manifest_summary(manifest)
     assert summary["repositories"] == len(manifest["repositories"])
     assert summary["change_range_slots"] == len(manifest["change_ranges"])
-    assert summary["assigned_change_ranges"] == 0
+    assert summary["assigned_change_ranges"] == len(manifest["change_ranges"])
+    assert summary["labeled_change_ranges"] == 0
     assert summary["manifest_digest"] == manifest["digest"]
 
 
@@ -90,6 +92,7 @@ def test_manifest_rejects_duplicate_repository_and_slot_ids():
 
 def test_unacquired_repository_cannot_record_a_commit_or_digest():
     raw = _raw_manifest()
+    raw["repositories"][0]["acquisition_status"] = "candidate_unacquired"
     raw["repositories"][0]["pinned_commit"] = "a" * 40
     with pytest.raises(ValueError, match="unacquired but records"):
         validate_manifest(raw)
@@ -97,7 +100,7 @@ def test_unacquired_repository_cannot_record_a_commit_or_digest():
 
 def test_assigned_slot_requires_two_distinct_valid_commits():
     raw = _raw_manifest()
-    raw["change_ranges"][0]["status"] = "assigned"
+    raw["change_ranges"][0].update({"status": "assigned", "base": None, "head": None})
     with pytest.raises(ValueError, match="needs base and head"):
         validate_manifest(raw)
 
@@ -155,6 +158,15 @@ def test_tree_digest_is_repeatable_and_content_sensitive(tmp_path):
     assert tree_digest(tmp_path)["sha256"] != first["sha256"]
 
 
+def test_tree_digest_ignores_the_acquisition_marker(tmp_path):
+    (tmp_path / "a.py").write_text("print('a')\n", encoding="utf-8")
+    before = tree_digest(tmp_path)
+    (tmp_path / ".ozagia-deep-review-corpus.json").write_text(
+        '{"schema_version": 1}\n', encoding="utf-8")
+    after = tree_digest(tmp_path)
+    assert after == before
+
+
 def test_verify_checkout_reports_missing_verified_and_mismatch(tmp_path):
     missing = verify_checkout(tmp_path / "absent", expected_tree_sha256="a" * 64)
     assert missing["status"] == "missing"
@@ -177,17 +189,17 @@ def test_verify_checkout_reports_missing_verified_and_mismatch(tmp_path):
 
 
 def test_acquire_is_offline_by_default_and_refuses_unpinned_candidates(tmp_path):
-    manifest = load_manifest(DEFAULT_MANIFEST)
+    unacquired = copy.deepcopy(load_manifest(DEFAULT_MANIFEST))
+    repo = next(item for item in unacquired["repositories"] if item["id"] == "flask")
+    repo.update({"acquisition_status": "candidate_unacquired", "pinned_commit": None,
+                 "tree_sha256": None, "archive_sha256": None, "verified_at": None})
     with pytest.raises(CorpusError, match="no pinned commit") as excinfo:
-        acquire_repository(manifest, "flask", checkout_root=tmp_path)
+        acquire_repository(unacquired, "flask", checkout_root=tmp_path)
     assert excinfo.value.reason == "unassigned_commit"
 
-    pinned = copy.deepcopy(manifest)
-    repo = next(item for item in pinned["repositories"] if item["id"] == "flask")
-    repo["pinned_commit"] = "a" * 40
-    repo["tree_sha256"] = "b" * 64
+    manifest = load_manifest(DEFAULT_MANIFEST)
     with pytest.raises(CorpusError) as excinfo:
-        acquire_repository(pinned, "flask", checkout_root=tmp_path)
+        acquire_repository(manifest, "flask", checkout_root=tmp_path)
     assert excinfo.value.reason == "network_not_allowed"
     assert excinfo.value.to_dict()["status"] == "refused"
 
@@ -214,7 +226,7 @@ def test_verify_manifest_checkouts_is_offline_and_reports_incomplete(tmp_path):
     result = verify_manifest_checkouts(
         manifest, overrides={"flask": checkout})
     assert result["counts"]["missing"] == len(manifest["repositories"]) - 1
-    assert result["counts"]["unverified"] == 1
+    assert result["counts"]["mismatch"] == 1
     assert result["status"] == "incomplete"
 
 
@@ -233,5 +245,4 @@ def test_validate_cli_writes_a_summary(tmp_path):
     assert summary["status"] == "valid"
     assert summary["repositories"] >= 10
     assert summary["change_range_slots"] >= 50
-    assert summary["acquisition_status"] == {"candidate_unacquired": 12}
-
+    assert summary["acquisition_status"] == {"verified": 12}

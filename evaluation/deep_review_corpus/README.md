@@ -1,11 +1,17 @@
-# Realistic deep-review corpus (candidate scaffolding)
+# Realistic deep-review corpus (acquired, pinned, unlabeled)
 
-This directory holds the versioned candidate corpus for the realistic
-deep-review evaluation proposed in
+This directory holds the frozen realistic deep-review corpus for the evaluation
+proposed in
 [`docs/results/deep_review_go_no_go_proposal_2026-11-18.md`](../../docs/results/deep_review_go_no_go_proposal_2026-11-18.md).
-It is **scaffolding, not a measured result**. The repository list, licenses and
-sizes are candidate declarations; no pinned commit has been recorded yet and no
-human label has been entered.
+All 12 public repositories are acquired and verified at real release-tag
+commits, and all 50 change-range slots are assigned to real `base..head` pairs.
+**No human label has been entered and no quality gate is measured.** Acquisition
+and report generation are not a quality result.
+
+The checkouts, reports and blank reviewer packets live outside this repository
+(under a caller-selected checkout root such as
+`/home/matt/ozma/deep-review-corpus`). Only the manifest, templates, label
+placeholder and documentation are versioned here.
 
 The existing synthetic fixtures (`tests/fixtures/deep_review_*`) remain separate
 regression checks. Their scores must never be pooled into a realistic-corpus
@@ -16,7 +22,7 @@ runs as not applicable to quality gates.
 
 | Path | Purpose |
 | --- | --- |
-| `corpus.json` | Versioned manifest: 12 candidate public repositories, 50 change-range slots, inclusion reasons, language/size declarations. All candidates are `candidate_unacquired` with null commits and digests. |
+| `corpus.json` | Versioned manifest: 12 verified public repositories pinned to release-tag commits, 50 assigned real change ranges, inclusion reasons, measured language/size facts. No labels and no scores. |
 | `templates/reviewer-a.template.json` | Blank independent reviewer file. |
 | `templates/reviewer-b.template.json` | Second independent reviewer file. |
 | `templates/adjudicator.template.json` | Blank adjudication file with decisions. |
@@ -54,14 +60,65 @@ Top-level fields:
     distinct 40- or 64-character commits. Every repository must have at least
     one slot.
 
-Two candidates are marked holdout (`pytest-dev/pytest` and `gin-gonic/gin`).
+Two repositories are marked holdout (`pytest-dev/pytest` and `gin-gonic/gin`).
 Do not tune rules, thresholds or label conventions on holdout repositories; use
-the non-holdout candidates for development and report holdout results
+the non-holdout repositories for development and report holdout results
 separately. A passing aggregate must not hide a weak holdout subject.
 
-`corpus.json` intentionally records no commit and no digest. A human selects a
-public base/head pair, records it, and only then can acquisition run. Do not
-invent a commit to make the manifest look complete.
+## Acquisition state (2026-11-24)
+
+Every repository is `verified` against a release-tag commit. The manifest
+records the full commit, `tree_sha256` (the deterministic `ozagia-tree-v1` digest
+of the canonical Git checkout), `archive_sha256` (the downloaded GitHub
+archive), `verified_at`, measured languages and size class. License files were
+read at the pinned commit; SPDX names below are the verified expression.
+
+| id | repository | pin | license | canonical checkout | GitHub archive |
+| --- | --- | --- | --- | --- | --- |
+| flask | `pallets/flask` | `3.1.3` (`22d92470`) | BSD-3-Clause | Git checkout | tree matches |
+| requests | `psf/requests` | `v2.34.2` (`6e83187b`) | Apache-2.0 | Git checkout | extraction omits two test-cert symlinks |
+| httpx | `encode/httpx` | `0.28.1` (`26d48e06`) | BSD-3-Clause | Git checkout | tree matches |
+| pytest | `pytest-dev/pytest` | `9.2.0` (`ae1d0ff5`) | MIT | Git checkout | `export-subst` changes `.git_archival.txt` |
+| ripgrep | `BurntSushi/ripgrep` | `16.0.0` (`669cb4c7`) | MIT OR Unlicense | Git checkout | extraction omits the `HomebrewFormula` symlink |
+| fd | `sharkdp/fd` | `v10.5.2` (`b2a287b3`) | MIT OR Apache-2.0 | Git checkout | tree matches |
+| fzf | `junegunn/fzf` | `v0.75.0` (`c7bf2b8e`) | MIT | Git checkout | tree matches |
+| gin | `gin-gonic/gin` | `v1.12.0` (`73726dc6`) | MIT | Git checkout | tree matches |
+| express | `expressjs/express` | `v5.3.0` (`cf6722bf`) | MIT | Git checkout | tree matches |
+| got | `sindresorhus/got` | `v16.2.0` (`6b5aafc1`) | MIT | Git checkout | tree matches |
+| fmt | `fmtlib/fmt` | `12.2.1` (`208219da`) | MIT | Git checkout | tree matches |
+| googletest | `google/googletest` | `v1.18.0` (`063de7e9`) | BSD-3-Clause | Git checkout | tree matches |
+
+The three archive-tree differences are properties of the extraction path, not
+of the commit: GitHub archives carry `export-subst` substitutions, and the
+existing safe extractor intentionally skips symlinks. The canonical review
+checkout is therefore the Git checkout, which retains history for `--range`
+reviews. `archive_sha256` still records the exact downloaded archive so the
+acquisition is auditable.
+
+The 50 range slots are `assigned` to real release-tag diffs. Each range records
+both full commit hashes, its theme, focus and a factual rationale in
+`corpus.json`. Ranges are ancestor pairs; where consecutive release tags live on
+divergent release branches, the base is the merge-base of the two tags and the
+head is the later tag. No label is attached to any slot.
+
+```sh
+# Verify every pinned checkout offline.
+python -m ozagia.eval.deep_review_corpus status \
+  --checkout-root /home/matt/ozma/deep-review-corpus
+
+# Verify one repository.
+python -m ozagia.eval.deep_review_corpus verify \
+  --repo flask --checkout /home/matt/ozma/deep-review-corpus/repositories/flask
+```
+
+Reports and reviewer packets are external. The packet index records report and
+manifest paths/digests, finding counts, the exact diff digest and the blank
+reviewer files, but not source text. See
+[`docs/results/deep_review_corpus_acquisition_2026-11-24.md`](../../docs/results/deep_review_corpus_acquisition_2026-11-24.md).
+
+Do not change a commit pin or tree digest without re-running `verify` and
+recording the new `verified_at`. Do not invent a commit or a label to make the
+manifest look complete.
 
 ## Acquisition and verification
 
@@ -94,7 +151,8 @@ checkout is a `network_not_allowed` refusal rather than a fallback.
 The tree digest algorithm is `ozagia-tree-v1`: SHA-256 over sorted records of
 `kind\0relative-path\0content-or-link-target`, where kind is `f` or `l`, regular
 file content is hashed, symlinks are hashed by target and never followed, and
-top-level `.git`/`.ozagia` are excluded. A Git checkout also records
+top-level `.git`/`.ozagia` plus the acquisition marker
+`.ozagia-deep-review-corpus.json` are excluded. A Git checkout also records
 `git rev-parse HEAD`; an archive checkout has no Git metadata, so its commit pin
 is the manifest's declaration and its tree digest is the independent check.
 
@@ -247,16 +305,27 @@ default `--fail-on never` does not change. Synthetic evidence is always
 
 ## Current status and limitations
 
-- `corpus.json` is an unacquired candidate manifest. It has no pinned commits,
-  no tree digests and no human labels. Its candidate licenses are declared but
-  not verified offline.
+- `corpus.json` is an acquired and verified manifest: 12 real release-tag pins,
+  12 tree digests, 12 archive digests, 50 assigned ranges, 0 labels and 0 scored
+  gates. `status` is `acquired_pinned_ranges_assigned_no_labels`.
+- Deterministic whole-repo and per-range reports exist in the external output
+  root (62 reports: 12 whole-repo and 50 range). Every report is `partial`
+  because no graph snapshot, test execution, linter or type checker was used;
+  this is coverage, not a quality claim.
 - The run record and labels under `tests/fixtures/deep_review_corpus_dry_run/`
   are synthetic test data with fictional reviewer identities and
-  `provenance: synthetic_test_fixture`. They exercise the pipeline only.
+  `provenance: synthetic_test_fixture`. They exercise the pipeline only and are
+  never pooled into this corpus.
 - Source-file digests require a checkout. Without `--checkout-root`, digest
   status is `not_checked`, and the repeatability/coverage gate is incomplete.
 - False-positive rate remains undefined: the labels do not enumerate every
   actual negative. Recall is relative to reviewed labels, not all defects.
+- Three repositories (`requests`, `pytest`, `ripgrep`) have an archive
+  extraction tree that differs from the Git checkout tree because the safe
+  extractor skips symlinks and GitHub applies `export-subst`. The Git checkout
+  and its tree digest are canonical; the archive digest is provenance only.
+- Two holdout repositories (`pytest`, `gin`) must not be used to tune rules,
+  thresholds or label conventions.
 - Do not publish private repository contents or reviewer identities without
   authorization. The protocol publishes aggregate counts and digests, not
   private source excerpts.

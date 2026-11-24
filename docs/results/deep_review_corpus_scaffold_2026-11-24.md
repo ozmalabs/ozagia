@@ -1,5 +1,10 @@
 # Deep-review realistic corpus scaffolding and synthetic dry run (2026-11-24)
 
+> Historical note: acquisition and pinning landed later on 2026-11-24. See
+> [`deep_review_corpus_acquisition_2026-11-24.md`](deep_review_corpus_acquisition_2026-11-24.md)
+> for the current 12-repository/50-range state. This file remains the record of
+> the initial scaffolding and synthetic dry run.
+
 This is **scaffolding and a regression dry run, not realistic quality
 evidence**. No public repository was acquired for evaluation, no human label was
 entered, and no go/no-go gate was measured. The candidate corpus has 12

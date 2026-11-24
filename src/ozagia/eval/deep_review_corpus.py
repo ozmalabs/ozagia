@@ -41,8 +41,11 @@ EVALUATION_DIR = Path(__file__).resolve().parents[3] / "evaluation" / "deep_revi
 DEFAULT_MANIFEST = EVALUATION_DIR / "corpus.json"
 DEFAULT_LABELS_DIR = EVALUATION_DIR / "labels"
 TREE_DIGEST_ALGORITHM = "ozagia-tree-v1"
-TREE_DIGEST_EXCLUDES = (".git", ".ozagia")
 MARKER_NAME = ".ozagia-deep-review-corpus.json"
+# The acquisition marker records the digest itself, so it must never be part of
+# the tree identity.  Otherwise verifying a freshly acquired archive compares
+# the marker-inclusive tree against the tree recorded before the marker existed.
+TREE_DIGEST_EXCLUDES = (".git", ".ozagia", MARKER_NAME)
 CHECKOUT_SUBDIR = "repositories"
 MAX_MANIFEST_BYTES = 4 * 1024 * 1024
 MAX_TREE_BYTES = 4 * 1024 * 1024 * 1024

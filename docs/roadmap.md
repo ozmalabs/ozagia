@@ -41,7 +41,7 @@ an inventory, not a maturity claim.
 | Incremental indexing and graph queries are fast on a small crate | Rust parity bench, 27 files, all targets met | Good for that crate; not a scale benchmark |
 | Repo-map retrieval is useful | 23-task SWE-bench Verified stratified baseline: 0.935/0.967/0.967 file recall at 500/900/1500 tokens; 10-task Django holdout | Moderate: file localization only, one model-free instrument |
 | Graph assistance helps an agent | Small local-model pilots (12 + 12 sessions; 12/13 vs 12/13 assertions; descriptive wall-time medians) | Weak: small N, agent-scored, not human-verified, not generalizable |
-| Deep review is high quality | Synthetic fixtures only: 4/4 true positives, 8/8 labeled pairs; no false positives in the declared scope. A realistic-corpus manifest, label schema and scorer now exist, but no repository is acquired and no human label is entered. | Weak for production: no completed human labels, no realistic score, no go/no-go decision |
+| Deep review is high quality | Synthetic fixture score only: 4/4 true positives, 8/8 labeled pairs; no false positives in the declared scope. The realistic corpus now has 12 verified repository pins, 50 assigned ranges and 62 deterministic reports, but no human label or score. | Weak for production: no completed human labels, no realistic score, no go/no-go decision |
 | Rust edits/LSP/tests work | Live rust-analyzer tests and `cargo test` capture; parity bench | Good on the test crate; dataflow and macro/cfg expansion remain absent |
 | Live host integrations work | OpenCode has live smoke runs. Codex, Kiro and Claude Code are implemented and untested live. OpenCode Desktop is untested. | Weak: integration status is the largest untested surface |
 | Secrets never reach the model | Reference broker, providers, redactor and in-memory session store landed (`core/secrets.py`); runtime/job/daemon boundaries resolve refs only. The native prompt/UI capture flow and end-to-end canary coverage are not implemented. | Partial: boundary code is tested; the full session guarantee is not established |
@@ -195,8 +195,12 @@ by default.
 
 **Progress (2026-11-24):** candidate manifest (12 repositories, 50 slots),
 reviewer/adjudicator label schema, offline verification, explicit-network
-acquisition, deterministic scoring and a synthetic dry run landed. No candidate
-is acquired and no human label exists, so there is still no quality result.
+acquisition, deterministic scoring and a synthetic dry run landed. The corpus
+is now acquired and pinned: 12 repositories verified at release-tag commits
+with tree/archive digests and verified licenses, 50 real ancestor `base..head`
+ranges assigned, and 62 deterministic whole-repo/range reports collected with
+blank reviewer packets (external to this repository). No human label exists and
+no gate is measured; score status remains `not_measured`.
 
 **Scope**
 

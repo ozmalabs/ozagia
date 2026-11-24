@@ -1,15 +1,16 @@
 # 0.1.5 release verification (2026-11-24, re-run 2026-11-25)
 
-Status: verification of the uncommitted 0.1.5 stabilization tree, re-run after
-the security-hardening changes. Nothing was tagged, pushed or published, no
-live model or host-agent session ran, and no network request was made. The
-tag/publish decision remains with a human.
+Status: verification of the 0.1.5 stabilization tree, re-run after the
+security-hardening changes. The checked source was committed as `4d3ff1f`
+after these runs; no source changed between the checks and that commit except
+result-note edits. Nothing was tagged, pushed or published, no live model or
+host-agent session ran, and no network request was made. The tag/publish
+decision remains with a human.
 
 ## Environment
 
-- Commit `9a5162d` (`chore: start 0.1.5.dev0`) plus the uncommitted 0.1.5
-  stabilization, security-hardening and pre-existing unrelated edits in the
-  working tree.
+- The checked tree was `9a5162d` plus the 0.1.5 stabilization and
+  security-hardening edits; it is now commit `4d3ff1f`.
 - Developer `.venv`: CPython 3.13.12, editable `ozagia 0.1.5.dev0`, Linux
   x86_64, `uv 0.10.12`; `git`, `jq 1.8.2` and `ripgrep 15.2.0` on `PATH`.
 - PyYAML came from the declared `.venv`. `uv build --offline` used the local
