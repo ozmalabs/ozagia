@@ -198,8 +198,9 @@ parser with the offending file's path.
 
 `[security]` is consumed by `ozagia.core.security` from both files through
 :func:`load_config_section`; its supported keys are `enabled`, `tools`,
-`allow_network`, `fail_on`, `exclude`, `max_findings`, `block_secrets` and
-`secret_allowlist`. `[secrets]` is consumed the same way by
+`allow_network`, `fail_on`, `exclude`, `max_findings`, `block_secrets`,
+`secret_allowlist` and `finding_allowlist`. `[secrets]` is consumed the same way
+by
 `ozagia.core.secrets`; it holds provider policy and never a secret value (see
 `docs/secrets.md`). Values from the other registry groups (`hints`, `models`,
 `ui`, `resources`, `worktrees`, `markdown`, `files`, `tasks`) stay with the
@@ -543,6 +544,7 @@ SECURITY_SECTION = "security"
 SECURITY_KEYS = (
     "enabled", "tools", "allow_network", "fail_on", "exclude",
     "max_findings", "block_secrets", "secret_allowlist",
+    "finding_allowlist",
 )
 _SECURITY_KEY_SET = frozenset(SECURITY_KEYS)
 REPEAT_POLICIES = ("stub", "note", "off")

@@ -1,6 +1,16 @@
 # Bounded graph tag-cache prefetch proposal
 
-Status: design only; no prefetch code is enabled.
+Status: design only for MCP lifecycle integration; the offline planner and
+accounting primitives are implemented, verified 2026-11-24. Code and tests:
+`src/ozagia/core/prefetch.py`, `tests/test_prefetch.py` and
+[`docs/prefetch.md`](../prefetch.md). They select bounded read-only
+candidates, enforce authorization/trust/freshness/expiry, cancel and keep a
+prepare/use ledger; they do not read a file, graph or network, start a model or
+test, write a cache, or inject anything into a prompt. Not implemented: the
+MCP prefetch child process, private-cache publication, suspend/resume around
+requests, invalidation wiring and the on/off measurement described below. The
+plan's decision not to integrate until those acceptance tests pass still
+stands.
 
 ## Motivation and measured ceiling
 

@@ -1,5 +1,15 @@
 # Infrastructure and cloud context plan
 
+Status: implemented as an experimental, opt-in, source-only adapter, verified
+2026-11-24; matched agent/token savings are not established. Code is in
+`integrations/iac/`, `core/terraform_graph.py`,
+`core/kubernetes_graph.py`, `core/deployment_graph.py`,
+`core/infra_discovery.py`; usage and limits are in
+[`docs/iac_context.md`](../iac_context.md) with tests
+`tests/test_infra_context.py` and `tests/test_terraform_graph.py`. Static
+source is still not live deployment state, and impact traversal is not
+complete.
+
 ## Outcome and scope
 
 Help an agent answer “what defines this infrastructure, what depends on it,
@@ -10,7 +20,8 @@ Pulumi, CDK and other formats in measured increments. Static source describes
 intent, not deployed state. Never report it as live state or promise that an
 impact traversal is complete.
 
-This is a proposal, not a claim of existing support or measured savings.
+This was written as a proposal; it is not a claim of measured savings. Static
+source describes intent, not deployed state.
 Prioritize context quality and end-to-end agent results over counting intercepted
 commands. The Ocelot pilot showed why: more captured work and context can
 increase total tokens and elapsed time.

@@ -415,7 +415,7 @@ def test_report_fingerprint_is_identical_across_hash_seeds(
     for seed in ("1", "2"):
         out_json = tmp_path / f"out_{seed}.json"
         env = {**os.environ, "PYTHONHASHSEED": seed,
-               "PYTHONPATH": str(ROOT)}
+               "PYTHONPATH": str(ROOT / "src")}
         subprocess.run(
             [sys.executable, "-m", "ozagia.eval.retrieval",
              "--root", str(tmp_path), "--tasks", str(tasks_path),

@@ -31,7 +31,9 @@ reported but does not by itself fail the command.
 | `files` | `ozagia.core.files` | Ledger records, orphan count, new-file count, ledger path and presence |
 | `runtime` | `ozagia.core.runtime.runtime_status` | Services, tunnels and raw processes with their runtime states, relays and context lines |
 | `daemon` | `ozagia.daemon.client` | Ping, pid, uptime, idle timeout and daemon stats |
-| `doctor` | `ozagia.doctor.diagnose` | Config validity, graph snapshot freshness, parsers, language servers, optional tools |
+| `doctor` | `ozagia.doctor.diagnose` | Config validity, graph snapshot freshness, parsers, language servers, optional tools, host integrations and a bounded capability summary |
+| `integrations` | `ozagia.doctor.diagnose` | Bounded host version states and read-only integration configuration presence; no host agent is started |
+| `capabilities` | `ozagia.doctor.diagnose` | Catalogue version/hash/counts and the bounded result of the read-only capability audit; full findings are not copied |
 | `reviews` | `<root>/.ozagia/reviews/*/manifest.json` | Newest deep-review directory, run status, `complete`/`exhaustive`/`truth_assessed` flags, finding and subject counts, bounded subject statuses |
 | `config` | `ozagia.config` | Resolved config path, adapters, index directories, jobs flag, configured runtime names |
 
@@ -56,6 +58,22 @@ name what is missing keeps its partial report (daemon and reviews).
 `status`, `complete`, `exhaustive`, `truth_assessed`, `findings`,
 `subject_count`, a bounded `subjects` status map and `subjects_truncated`.
 Finding IDs, evidence and subject report contents are not copied.
+
+`integrations.report` is a bounded extraction of `doctor.report.integrations`:
+`note`, `hosts` (one row per host with `state`, `installed`, `version`, `path`,
+`tested_range`, `verification` and `error`), `config` (one `state`, `found` and
+`errors` list per integration) and `warnings`. The supported host states are
+`verified`, `installed_untested_version`, `not_installed` and `unknown`. A
+missing binary is `not_installed`; a binary whose `--version` timed out or
+could not be parsed is `unknown`. Configuration presence is reported separately
+and never means the host loads or trusts the integration. The host rows, tested
+versions and evidence are in [integrations.md](integrations.md).
+
+`capabilities.report` contains `state`, `catalogue` (version, hash, capability,
+domain and surface counts), `audit` (state, fixed count keys and finding counts
+by kind/severity), `warnings` and `error`. The audit's finding list, evidence
+and graph are not copied. Capability findings and drift are warnings; they do
+not make the status command fail.
 
 ## States
 
@@ -129,6 +147,16 @@ Absence is a fact; ignorance is not absence. The snapshot keeps them apart:
   `ok`: `status`, `complete`, `exhaustive` and `truth_assessed` copy what the
   manifest says. Only the newest manifest is read; findings are not copied and
   at most 32 subject statuses are shown.
+- **Integrations:** a host binary not found on `PATH` (or the project/ozagia
+  `.venv` for pyright) is `not_installed`; a found binary whose bounded
+  `--version` call times out, cannot run or prints no version is `unknown`. An
+  installed version not in the matrix's tested versions is
+  `installed_untested_version`. Config files are `present`, `absent` or
+  `unknown` (unreadable or malformed). None of these states is a live-session
+  result.
+- **Capabilities:** the section is `ok` when the bounded audit report was
+  produced. Catalogue drift and audit findings stay in `warnings`; they are not
+  presented as verified coverage and do not become a hard error.
 
 ## Rust tier declaration
 
@@ -159,7 +187,10 @@ The composition never:
   their `manifest.json`;
 - builds or updates a graph snapshot;
 - starts, stops, signals or autostarts a daemon, service, tunnel or job;
-- starts a language server, relay, cloud or cluster command.
+- starts a language server, relay, cloud or cluster command;
+- starts a host agent session or makes a model/tool call. Doctor may run an
+  installed host binary with `--version` under a two-second timeout; that is
+  the only host process the snapshot starts.
 
 It reads git metadata, `/proc`, the ledger, runtime state, project config and
 the newest deep-review manifest, and it pings an existing daemon socket when
@@ -169,9 +200,9 @@ appears after a run.
 ## Scope
 
 This is the first slice of plan item 6. It covers workspace, resources, files,
-runtime processes, the daemon, diagnostics and the newest deep-review manifest.
-Per-session and per-job usage, admission refusals, background jobs,
-connections/providers beyond the daemon, capability probes beyond `doctor`, and
-snapshot size metrics are not part of this shape yet; they can be added as
-extra sections without changing the envelope or the absence-versus-unknown
-rule.
+runtime processes, the daemon, diagnostics, host integrations, the capability
+catalogue summary and the newest deep-review manifest. Per-session and per-job
+usage, admission refusals, background jobs, connections/providers beyond the
+daemon, live integration sessions and snapshot size metrics are not part of
+this shape yet; they can be added as extra sections without changing the
+envelope or the absence-versus-unknown rule.

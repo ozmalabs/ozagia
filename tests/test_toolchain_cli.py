@@ -23,6 +23,11 @@ def _no_process(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(T.subprocess, "run", fail)
 
 
+def _no_python_modules(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ignore optional Python distributions installed on the host."""
+    monkeypatch.setattr(T.importlib.util, "find_spec", lambda name: None)
+
+
 def test_cli_env_json_and_text(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
                                capsys: pytest.CaptureFixture[str]) -> None:
     _which(monkeypatch, {
@@ -79,6 +84,7 @@ def test_cli_plan_text_is_the_default(tmp_path: Path,
                                       capsys: pytest.CaptureFixture[str]) -> None:
     _which(monkeypatch, {})
     _no_process(monkeypatch)
+    _no_python_modules(monkeypatch)
     assert C.main([
         "plan", "--root", str(tmp_path), "--path", "report.pdf",
         "--no-versions", "--no-sudo"]) == 0
@@ -109,6 +115,7 @@ def test_cli_require_ready_exit_code(tmp_path: Path,
                                      capsys: pytest.CaptureFixture[str]) -> None:
     _which(monkeypatch, {})
     _no_process(monkeypatch)
+    _no_python_modules(monkeypatch)
     assert C.main([
         "plan", "--root", str(tmp_path), "--capability", "pdf",
         "--require-ready", "--no-versions", "--no-sudo"]) == 1

@@ -2,6 +2,42 @@
 
 ## Unreleased
 
+- The test suite is hermetic and sharded. Job and admission tests inject small
+  test-only resource limits instead of inheriting the host's disk and memory
+  budgets, and `OZAGIA_TEST_SHARD=i/n` filters whole test files into four
+  roughly even shards. CI runs the four shards on Python 3.12 and 3.13; the
+  release workflow runs them on Python 3.13. The full suite remains available
+  unsharded.
+- Plan and feature statuses now match the code, and a new `docs/roadmap.md`
+  records each release's scope, evidence, gates and what is explicitly
+  untested.
+- Deep review gains realistic-corpus scaffolding: a candidate repository
+  manifest, reviewer/adjudicator label templates, a label schema and a
+  deterministic scorer, with a dry run over a synthetic fixture. No public
+  repository is acquired, no human label is entered and no realistic quality
+  result is claimed.
+- `ozagia config migrate` copies the `[environments.NAME]`, `[services.NAME]`,
+  `[relays.NAME]`, `[runtime.services.NAME]` and `[runtime.tunnels.NAME]`
+  project-model tables whole, validates every entry with the project parser,
+  writes atomically only after the preview token matches, and leaves
+  conflicting, unmapped and unknown entries in the legacy `.ozagia.toml`.
+- `docs/integrations.md` publishes the host integration matrix with the
+  verification level actually reached. `ozagia doctor --json` and
+  `ozagia-status --json` now report installed host versions, configuration
+  presence and capability-catalogue health, and warn when a host version is
+  outside the tested range.
+- The capability catalogue declares 102 capabilities across 156 surfaces; the
+  read-only `capabilities audit` reports zero findings.
+- Security scanning reduces reference false positives: `eval`/`exec` matches
+  inside strings and comments are masked, entropy checks ignore key-loader
+  calls, and statically safe YAML loaders are recognised. A new exact
+  `[security] finding_allowlist` applies `sha256:` fingerprints to static
+  findings separately from the secret gate; this repository records nine
+  reviewed entries.
+- **Not tested in this release:** a live Codex, Kiro, Claude Code or OpenCode
+  Desktop session, and the bundle build/installer smoke, which downloads the
+  pinned CPython runtime, OpenCode and Python extras.
+
 ## 0.1.4 (2026-11-24)
 
 - Rust graph imports now include resolved `use` records as `File -> File`

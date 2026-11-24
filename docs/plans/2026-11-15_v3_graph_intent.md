@@ -1,7 +1,8 @@
 # Dev tooling v3: capture the agent's tool calls and carry out their intent on the graph
 
-Status: plan, re-homed. The work moves to a separate public project; see
-`GRAPH_DEVTOOLS_PROJECT_PLAN.md` for the layout and waves. This document's
+Status: historical/re-homed plan (2026-11-15). The work moved to a separate
+public project, now Ozagia; see [`docs/roadmap.md`](../roadmap.md) for current
+work. This document's
 W0 probes and intent-mapping table remain the reference for that plan.
 
 ## Why

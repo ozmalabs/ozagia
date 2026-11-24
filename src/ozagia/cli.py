@@ -307,6 +307,32 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
             if not status["available"]:
                 print(f"Parser {language}: unavailable ({status['error']})")
         print(report["language_server_note"])
+        integrations = report.get("integrations") or {}
+        for key, item in (integrations.get("hosts") or {}).items():
+            version = item.get("version") or (
+                "unknown" if item.get("installed") else "")
+            suffix = f" {version}" if version else ""
+            location = item.get("path") or item.get("command")
+            print(f"Integration {key}: {item.get('state')}{suffix} "
+                  f"({location}); tested: {item.get('tested_range')}")
+        for key, item in (integrations.get("config") or {}).items():
+            if not isinstance(item, dict):
+                continue
+            paths = "; ".join(item.get("found") or []) or "none"
+            print(f"Integration config {key}: {item.get('state')} ({paths})")
+        capabilities = report.get("capabilities") or {}
+        if capabilities:
+            catalogue = capabilities.get("catalogue") or {}
+            counts = (capabilities.get("audit") or {}).get("counts") or {}
+            print(f"Capabilities: {capabilities.get('state')} "
+                  f"catalogue={catalogue.get('version')} "
+                  f"capabilities={counts.get('capabilities')} "
+                  f"surfaces={counts.get('declared_surfaces')} "
+                  f"findings={counts.get('findings')} "
+                  f"hash={catalogue.get('hash')}")
+        for warning in report.get("warnings") or []:
+            print(f"Warning: {warning.get('component')}: "
+                  f"{warning.get('message')}")
         for name, status in report.get("external_tools", {}).items():
             state = status["path"] if status["available"] else "unavailable"
             print(f"Relay tool {name}: {state}")

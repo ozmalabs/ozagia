@@ -1,6 +1,26 @@
 # Self-graph, service unification and model-side API
 
-Status: proposed implementation plan, 2026-11-17. This plan does not assert that the proposed graph, APIs or protocol compliance are already implemented. It builds on [the capability integration analysis](../ozagia_capability_integration_analysis.md), [the protocol review](../ozma_protocol_integration_review.md) and the [locally preserved Ozma protocol research](../research/ozma_protocol/README.md). The imported v5.16 draft is design material; Ozagia owns the next interface and may adopt, adapt or reject each mechanism.
+Status: implementation plan, verified against the code 2026-11-24. M0–M4 are
+implemented as the bounded, documented subsets in
+[contracts](../self_graph_contracts.md), [capabilities](../capabilities.md),
+[task preflight](../task_preflight.md), [evidence](../evidence.md),
+[task profile](../task_profile.md), [prefetch](../prefetch.md) and
+[model API](../model_api.md): `core/contracts.py`, `core/inventory.py`,
+`core/capabilities.py`, `core/self_graph.py`, `core/task_preflight.py`,
+`core/evidence.py`, `core/evidence_store.py`, `core/task_profile.py`,
+`core/critical_path.py`, `core/prefetch.py` and `model_api/`. M5 is partly
+implemented: linked-checkout, retained-research and read-only action joins are
+in `core/task_preflight.py`; the optional Ocelot research projection is
+`research/ocelot_projection.py`; service/tunnel actions are in
+`core/actions.py`; secrets resolve by reference at runtime, job and daemon
+boundaries in `core/secrets.py`. M5 does not yet put Ocelot or live service
+execution inside preflight itself (it reports Ocelot as an explicit unknown),
+and the catalogue is not claimed exhaustive. M6 has an offline harness and one
+completed 40-session local-Qwen run (`evaluation/m6_live/`,
+[result](../results/2026-11-18_m6_live_maps_local_qwen.md)), but that run never
+called `dev_maps` and is invalid for the map-arm question; a valid matched-arm
+result and any opt-in rollout remain. Prefetch is planner/accounting only and is
+not wired into the MCP lifecycle. The design below is unchanged.
 
 ## Objective and success criteria
 

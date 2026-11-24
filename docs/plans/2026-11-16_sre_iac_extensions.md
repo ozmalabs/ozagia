@@ -1,9 +1,18 @@
 # SRE and IaC extension plan
 
-Status: proposal for work after
-[the infrastructure context plan](2026-11-16_iac_cloud_context.md). No item
-below is implemented by this document. Live-cloud and cluster steps remain
-opt-in and separately gated.
+Status: offline workstreams implemented 2026-11-16; live paths remain gated,
+verified 2026-11-24. The implementation-progress section below lists the landed
+IaC accuracy, job wait, environment, imported live-snapshot, HCL/YAML edit,
+offline IaC check, ops-record, AWS-validation and relay work, with code in
+`core/terraform_graph.py`, `core/deployment_graph.py`,
+`core/infra_discovery.py`, `daemon/jobs.py`, `core/environments.py`,
+`core/live.py`, `edit/hcl.py`, `edit/yaml_edit.py`, `core/iac_check.py`,
+`core/ops.py` and `core/relay.py`. The "What already exists" section is the
+pre-work baseline, not current state. Still gated or unimplemented: live
+job-provider trials, the live environment identity/cluster route, live snapshot
+collection, real emulator execution, remote background service ownership, and a
+matched model/token evaluation. No live cloud, cluster, model or emulator call
+was made while implementing this record.
 
 Source: [the SRE/IaC recommendations](/tmp/ozagia_sre_iac_feature_recommendations.md),
 which analyzed 837 local Kiro/OpenCode sessions (413 keyword-matched, mostly

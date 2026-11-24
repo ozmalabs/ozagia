@@ -1,5 +1,13 @@
 # Self-graph execution plan — 2026-11-17
 
+Status: historical execution plan (2026-11-17), superseded, verified
+2026-11-24. WP0–WP6 landed and are documented in
+[the self-graph plan](2026-11-17_self_graph_service_unification_model_api.md)
+and its linked contract/preflight/evidence/profile/model-API docs. WP7 (M5) is
+partial and WP8 (M6) has an offline harness plus one live run that did not
+exercise the map arm. The baseline and dispatch briefs below are historical;
+they are not current status.
+
 Execution companion to [the self-graph plan](2026-11-17_self_graph_service_unification_model_api.md).
 That document is the design authority; this one maps its milestones to files, tests,
 surfaces, agent work packages and merge order. Nothing here claims a milestone is

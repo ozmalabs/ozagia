@@ -1,5 +1,17 @@
 # Session profile instrumentation plan — 2026-11-17
 
+Status: implemented in part, verified 2026-11-24. Daemon counters, the bounded
+`.ozagia/session_profiles/` store, `ozagia-session-profile`, daemon
+`profile_event` dispatch and the OpenCode subscriber/TUI sidebar exist in
+`src/ozagia/session_profile_cli.py`, `src/ozagia/daemon/server.py`,
+`src/ozagia/integrations/opencode/plugin.js`,
+`src/ozagia/integrations/opencode/tui_profile.js` and
+`tests/test_session_profile.py`. Not implemented: equivalent host capture for
+Codex, Kiro and Claude Code, a profile section in `ozagia-status` or the
+console, broad tool-lifecycle coverage across hosts, and a host-generated
+message/part event test that does not invoke a model. The verification limit
+below still applies.
+
 1. Reuse the daemon's existing metadata-only journal for per-session Ozagia outcomes/durations, and persist sanitized handled/passthrough/error counters as each daemon operation is recorded so reports survive daemon teardown.
 2. Subscribe on the OpenCode server plugin to `message.updated` and `message.part.updated`; persist a strict allowlist of model names, token counts, timing milestones, and tool outcome counts under `.ozagia/session_profiles/`, bounded to 200 sessions. Never persist prompt, source, tool input/output, or path content.
 3. Add a bounded, read-only JSON profile command and OpenCode Desktop Profile tab plus TUI right-sidebar slot. Show graph/daemon status, host transcript metadata, Ozagia-observed counters, refresh/stale/unknown states, and no inferred critical path.

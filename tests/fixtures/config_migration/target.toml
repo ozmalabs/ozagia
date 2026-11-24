@@ -1,0 +1,11 @@
+# Existing versioned configuration. The migration must keep this comment,
+# the inline comment, and every unrelated table.
+[index]
+test_dirs = ["spec"]  # keep the inline comment
+
+[ui]
+theme = "dark"  # keep theme
+
+[runtime.services.worker]
+command = ["python", "-m", "worker"]
+workdir = "services/worker"

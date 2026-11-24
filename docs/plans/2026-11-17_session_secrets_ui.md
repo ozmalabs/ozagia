@@ -1,6 +1,12 @@
 # Session secret entry UI
 
-Status: design proposal (2026-11-17). No implementation in this document.
+Status: design proposal (2026-11-17; verified 2026-11-24). The reference broker,
+providers, redactor and in-memory session store are implemented in
+`src/ozagia/core/secrets.py` with `tests/test_secrets.py` and
+[`docs/secrets.md`](../secrets.md); runtime services, jobs and the daemon resolve
+refs only at their execution boundaries. The native secret prompt, host
+prompt rewrite, session-persistence UI, revoke/expiry surface and end-to-end
+canary review described here are not implemented.
 
 ## Problem
 

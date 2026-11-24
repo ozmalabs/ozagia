@@ -1,5 +1,9 @@
 # Ozagia: product and functionality review
 
+Status: historical review (2026-11-15); retained as design input. Its
+recommendation is still reflected in [`docs/roadmap.md`](../roadmap.md), but
+the observations below are a point-in-time audit and not current status.
+
 Review date: 2026-11-15. This reviews the working tree, including uncommitted research-mode work. Competitor descriptions come from their own documentation and are not independent performance comparisons. This is a product and architecture review, not an exhaustive security audit.
 
 ## Recommendation

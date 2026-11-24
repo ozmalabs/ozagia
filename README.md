@@ -6,8 +6,9 @@ imports, call edges), keep it current while the agent edits, and put it in the
 agent's path. MIT licensed.
 
 Status: alpha. The library, the MCP server, the OpenCode capture plugin and
-the agent harnesses work; the Claude Code hooks are untested against a live
-Claude Code. Measurements are in `docs/results/`; plans in `docs/plans/`.
+the agent harnesses work; the Claude Code, Codex and Kiro hooks are implemented
+but untested against a live host. Measurements are in `docs/results/`; plans in `docs/plans/`; release sequencing
+and the current plan audit in [`docs/roadmap.md`](docs/roadmap.md).
 
 The [Ozma protocol research](docs/research/ozma_protocol/README.md) is
 preserved here as a design basis for Ozagia's future model interfaces. Its

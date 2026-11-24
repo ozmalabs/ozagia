@@ -63,6 +63,8 @@ REVIEW_MANIFEST_SCHEMA = "ozagia.deep_review.manifest.v1"
 REVIEW_MANIFEST_MAX_BYTES = 1_000_000
 REVIEW_SCAN_LIMIT = 256
 REVIEW_SUBJECT_LIMIT = 32
+INTEGRATION_LIMIT = 16
+CAPABILITY_WARNING_LIMIT = 20
 
 
 def _now() -> str:
@@ -288,6 +290,95 @@ def _daemon_status(
     return _section("running", report)
 
 
+def _integrations_summary(report: Mapping[str, Any]) -> dict[str, Any] | None:
+    section = report.get("integrations")
+    if not isinstance(section, Mapping):
+        return None
+    hosts = section.get("hosts")
+    hosts = hosts if isinstance(hosts, Mapping) else {}
+    summary_hosts: dict[str, Any] = {}
+    for key, row in list(hosts.items())[:INTEGRATION_LIMIT]:
+        if not isinstance(row, Mapping):
+            continue
+        summary_hosts[key] = {
+            "label": row.get("label"),
+            "state": row.get("state"),
+            "installed": row.get("installed"),
+            "version": row.get("version"),
+            "path": row.get("path"),
+            "tested_range": row.get("tested_range"),
+            "verification": row.get("verification"),
+            "error": row.get("error"),
+        }
+    config = section.get("config")
+    config = config if isinstance(config, Mapping) else {}
+    summary_config: dict[str, Any] = {}
+    from ozagia.integrations.versions import CONFIG_KEYS
+    for key in CONFIG_KEYS:
+        item = config.get(key)
+        if not isinstance(item, Mapping):
+            continue
+        summary_config[key] = {
+            "state": item.get("state"),
+            "found": list(item.get("found") or [])[:INTEGRATION_LIMIT],
+            "errors": list(item.get("errors") or [])[:INTEGRATION_LIMIT],
+        }
+    return {
+        "note": section.get("note"),
+        "hosts": summary_hosts,
+        "config": summary_config,
+        "warnings": list(section.get("warnings") or [])[:INTEGRATION_LIMIT],
+    }
+
+
+def _capabilities_summary(report: Mapping[str, Any]) -> dict[str, Any] | None:
+    section = report.get("capabilities")
+    if not isinstance(section, Mapping):
+        return None
+    catalogue = section.get("catalogue")
+    catalogue = catalogue if isinstance(catalogue, Mapping) else {}
+    audit = section.get("audit")
+    audit = audit if isinstance(audit, Mapping) else {}
+    counts = audit.get("counts")
+    counts = counts if isinstance(counts, Mapping) else {}
+    keys = (
+        "capabilities", "capabilities_without_surfaces", "declared_surfaces",
+        "present_surfaces", "observed_surfaces", "covered_surfaces",
+        "undeclared_surfaces", "duplicate_declarations", "findings",
+    )
+    return {
+        "state": section.get("state"),
+        "catalogue": {
+            "version": catalogue.get("version"),
+            "hash": catalogue.get("hash"),
+            "capabilities": catalogue.get("capabilities"),
+            "domains": dict(catalogue.get("domains") or {}),
+            "surfaces": catalogue.get("surfaces"),
+        },
+        "audit": {
+            "state": audit.get("state"),
+            "counts": {key: counts.get(key) for key in keys},
+            "findings_by_kind": dict(audit.get("findings_by_kind") or {}),
+            "findings_by_severity": dict(
+                audit.get("findings_by_severity") or {}),
+        },
+        "error": section.get("error"),
+        "warnings": list(section.get("warnings") or [])[
+            :CAPABILITY_WARNING_LIMIT],
+    }
+
+
+def _summary_section(
+    doctor: Mapping[str, Any], key: str,
+) -> dict[str, Any]:
+    summary = doctor.get(key)
+    if isinstance(summary, Mapping):
+        return _section("ok", summary)
+    state = "unavailable" if doctor.get("state") == "unavailable" else "unknown"
+    return _section(
+        state, None, error=f"diagnostics did not report the {key} summary")
+
+
 def _doctor_status(
     root: Path, degraded: list[dict[str, str]],
 ) -> dict[str, Any]:
@@ -298,11 +389,14 @@ def _doctor_status(
             "doctor", "doctor.unavailable",
             f"diagnostics could not run: {exc}"))
         return _section("unavailable", error=str(exc))
+    integrations = _integrations_summary(report)
+    capabilities = _capabilities_summary(report)
     snapshot = report.get("snapshot")
     snapshot = snapshot if isinstance(snapshot, Mapping) else {}
     snapshot_state = snapshot.get("state")
     if snapshot_state == "fresh":
-        return _section("ok", report)
+        return _section("ok", report, integrations=integrations,
+                        capabilities=capabilities)
     if snapshot_state not in SNAPSHOT_STATES:
         snapshot_state = "unknown"
     messages = {
@@ -313,7 +407,8 @@ def _doctor_status(
     }
     degraded.append(_issue(
         "doctor", f"snapshot.{snapshot_state}", messages[snapshot_state]))
-    return _section("degraded", report)
+    return _section("degraded", report, integrations=integrations,
+                    capabilities=capabilities)
 
 
 def _read_review_manifest(path: Path, limit: int) -> bytes:
@@ -576,6 +671,8 @@ def status(
     runtime = _runtime_status(root_path, project, degraded)
     daemon = _daemon_status(root_path, timeout=timeout, degraded=degraded)
     doctor = _doctor_status(root_path, degraded)
+    integrations = _summary_section(doctor, "integrations")
+    capabilities = _summary_section(doctor, "capabilities")
     reviews = _reviews_status(root_path, degraded)
 
     return {
@@ -591,6 +688,8 @@ def status(
         "runtime": runtime,
         "daemon": daemon,
         "doctor": doctor,
+        "integrations": integrations,
+        "capabilities": capabilities,
         "reviews": reviews,
         "config": config,
     }
@@ -730,6 +829,55 @@ def format_status(report: Mapping[str, Any]) -> str:
     else:
         lines.append(f"doctor: {doctor.get('state')} "
                      f"({_text(doctor.get('error'))})")
+
+    integrations = report.get("integrations") or {}
+    integrations_report = integrations.get("report")
+    if isinstance(integrations_report, Mapping):
+        hosts = integrations_report.get("hosts") or {}
+        rows = []
+        for key, item in list(hosts.items())[:INTEGRATION_LIMIT]:
+            if not isinstance(item, Mapping):
+                continue
+            version = item.get("version") or (
+                "unknown" if item.get("installed") else "")
+            suffix = f" {version}" if version else ""
+            rows.append(f"{key}={_text(item.get('state'))}{suffix}")
+        lines.append("integrations: " + (", ".join(rows) or "none reported"))
+        config = integrations_report.get("config") or {}
+        config_rows = [
+            f"{key}={_text(item.get('state'))}"
+            for key, item in config.items()
+            if isinstance(item, Mapping)
+        ]
+        lines.append("integration config: "
+                     + (", ".join(config_rows) or "none reported"))
+    else:
+        lines.append(f"integrations: {integrations.get('state')} "
+                     f"({_text(integrations.get('error'))})")
+
+    capabilities = report.get("capabilities") or {}
+    capabilities_report = capabilities.get("report")
+    if isinstance(capabilities_report, Mapping):
+        catalogue = capabilities_report.get("catalogue") or {}
+        audit = capabilities_report.get("audit") or {}
+        counts = audit.get("counts") or {}
+        lines.append(
+            f"capabilities: {_text(capabilities_report.get('state'))} "
+            f"catalogue={_text(catalogue.get('version'))} "
+            f"capabilities={_text(counts.get('capabilities'))} "
+            f"surfaces={_text(counts.get('declared_surfaces'))} "
+            f"findings={_text(counts.get('findings'))}")
+        warnings = capabilities_report.get("warnings") or []
+        for warning in warnings[:TEXT_FINDING_LIMIT]:
+            if isinstance(warning, Mapping):
+                lines.append(f"  capability warning: {warning.get('message')}")
+        if len(warnings) > TEXT_FINDING_LIMIT:
+            lines.append(
+                f"  ... {len(warnings) - TEXT_FINDING_LIMIT} more capability "
+                f"warning(s)")
+    else:
+        lines.append(f"capabilities: {capabilities.get('state')} "
+                     f"({_text(capabilities.get('error'))})")
 
     reviews = report.get("reviews") or {}
     reviews_report = reviews.get("report")

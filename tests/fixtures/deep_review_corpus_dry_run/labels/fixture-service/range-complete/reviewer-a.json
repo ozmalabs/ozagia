@@ -1,0 +1,186 @@
+{
+  "label_schema_version": 1,
+  "corpus_id": "synthetic:deep-review-corpus-dry-run-v1",
+  "repository_id": "fixture-service",
+  "subject_key": "range-complete",
+  "kind": "reviewer",
+  "provenance": "synthetic_test_fixture",
+  "reviewer": {
+    "id": "reviewer-a",
+    "role": "reviewer",
+    "independent_pass": false,
+    "started_at": "2026-11-24T00:00:00Z",
+    "completed_at": "2026-11-24T00:10:00Z"
+  },
+  "declared_scope": {
+    "status": "complete",
+    "description": "Both reviewers examined the four changed files and the directly affected helper.",
+    "subjects": [
+      "failure-modes",
+      "performance",
+      "scalability",
+      "security",
+      "tests-and-coverage"
+    ],
+    "paths": [
+      "src/error.py",
+      "src/loop.py",
+      "src/missed.py",
+      "src/noise.py",
+      "src/security.py"
+    ]
+  },
+  "labels": [
+    {
+      "id": "A-C-1",
+      "subject": "security",
+      "type": "tainted_input",
+      "severity": "blocking",
+      "scope": "exact",
+      "verdict": "true_positive",
+      "location": {
+        "path": "src/security.py",
+        "start_line": 2,
+        "end_line": 2,
+        "symbol": null
+      },
+      "evidence": [
+        {
+          "kind": "line",
+          "reference": "src/security.py:2",
+          "digest": "eae0f90d431168781548672a8746579612c66707378b859703f74a1efe00d84f",
+          "note": "Synthetic fixture evidence."
+        }
+      ],
+      "claim": "User input reaches eval.",
+      "actionable": {
+        "is_actionable": true,
+        "wording": "Parse without eval."
+      },
+      "severity_appropriate": true,
+      "source_file_digest": "eae0f90d431168781548672a8746579612c66707378b859703f74a1efe00d84f",
+      "notes": "Synthetic dry-run fixture; not a human label."
+    },
+    {
+      "id": "A-C-2",
+      "subject": "performance",
+      "type": "nested_iteration",
+      "severity": "minor",
+      "scope": "exact",
+      "verdict": "true_positive",
+      "location": {
+        "path": "src/loop.py",
+        "start_line": 2,
+        "end_line": 2,
+        "symbol": null
+      },
+      "evidence": [
+        {
+          "kind": "line",
+          "reference": "src/loop.py:2",
+          "digest": "dfe73b6cf681b6bd787c56ef9c185c598c5103725700fe2f71abaceed3bf0202",
+          "note": "Synthetic fixture evidence."
+        }
+      ],
+      "claim": "Nested comprehension materializes a matrix.",
+      "actionable": {
+        "is_actionable": true,
+        "wording": "Stream rows instead of materializing."
+      },
+      "severity_appropriate": true,
+      "source_file_digest": "dfe73b6cf681b6bd787c56ef9c185c598c5103725700fe2f71abaceed3bf0202",
+      "notes": "Synthetic dry-run fixture; not a human label."
+    },
+    {
+      "id": "A-C-3",
+      "subject": "failure-modes",
+      "type": "suppressed_exception",
+      "severity": "major",
+      "scope": "exact",
+      "verdict": "true_positive",
+      "location": {
+        "path": "src/error.py",
+        "start_line": 4,
+        "end_line": 4,
+        "symbol": null
+      },
+      "evidence": [
+        {
+          "kind": "line",
+          "reference": "src/error.py:4",
+          "digest": "2ddb5e9e22fe4f935ecb912beab5f3b7c9c4677756743af25d1f8dea404cfee2",
+          "note": "Synthetic fixture evidence."
+        }
+      ],
+      "claim": "The broad except silently drops failures.",
+      "actionable": {
+        "is_actionable": true,
+        "wording": "Log and re-raise the exception."
+      },
+      "severity_appropriate": true,
+      "source_file_digest": "2ddb5e9e22fe4f935ecb912beab5f3b7c9c4677756743af25d1f8dea404cfee2",
+      "notes": "Synthetic dry-run fixture; not a human label."
+    },
+    {
+      "id": "A-C-4",
+      "subject": "tests-and-coverage",
+      "type": "untested_module",
+      "severity": "minor",
+      "scope": "exact",
+      "verdict": "true_positive",
+      "location": {
+        "path": "src/missed.py",
+        "start_line": 1,
+        "end_line": 1,
+        "symbol": null
+      },
+      "evidence": [
+        {
+          "kind": "line",
+          "reference": "src/missed.py:1",
+          "digest": "8ac196dba4f434f33820d92ea867ab1f022e2dbf67d1be9301a0beb925500f0e",
+          "note": "Synthetic fixture evidence."
+        }
+      ],
+      "claim": "No test covers helper.",
+      "actionable": {
+        "is_actionable": true,
+        "wording": "Add a focused test."
+      },
+      "severity_appropriate": true,
+      "source_file_digest": "8ac196dba4f434f33820d92ea867ab1f022e2dbf67d1be9301a0beb925500f0e",
+      "notes": "Synthetic dry-run fixture; not a human label."
+    },
+    {
+      "id": "A-C-5",
+      "subject": "scalability",
+      "type": "unbounded_range",
+      "severity": "note",
+      "scope": "exact",
+      "verdict": "false_positive",
+      "location": {
+        "path": "src/noise.py",
+        "start_line": 2,
+        "end_line": 2,
+        "symbol": null
+      },
+      "evidence": [
+        {
+          "kind": "line",
+          "reference": "src/noise.py:2",
+          "digest": "01e46648a5f4c02e591685103372c8c826cd2ff9cd1d2baa96bdc15e3e1a2917",
+          "note": "Synthetic fixture evidence."
+        }
+      ],
+      "claim": "The range is bounded and small.",
+      "actionable": {
+        "is_actionable": false,
+        "wording": "No action; the prediction is a false alarm."
+      },
+      "severity_appropriate": true,
+      "source_file_digest": "01e46648a5f4c02e591685103372c8c826cd2ff9cd1d2baa96bdc15e3e1a2917",
+      "notes": "Synthetic dry-run fixture; not a human label."
+    }
+  ],
+  "label_file_sha256": "a21a5012468b5506dde44168072e06dba2e8e24ac768810752c24f3f2e7310b2"
+}

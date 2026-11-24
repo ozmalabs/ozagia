@@ -1,5 +1,16 @@
 # Federated repository graphs
 
+Status: base delivery implemented, verified 2026-11-24. Bounded discovery,
+explicit members, qualified identities, snapshot provenance, read-only status,
+search and node/edge inspection are in `core/federation.py`,
+`tests/test_federation.py`, `tests/test_federation_surface.py` and
+[`docs/federation.md`](../federation.md); declared cross-repository links and
+checks are in `core/cross_repo.py` and
+[`docs/cross-repo-checks.md`](../cross-repo-checks.md). The follow-on work in
+the last section—version-aware relationships from dependencies or SCIP,
+persistent identities across membership changes, incremental member caching,
+and organization manifests/access control—is not implemented.
+
 ## Objective
 
 Make cross-repository context easy on a machine with multiple checkouts, while retaining the existing single-repository experience. A federation is optional and read-only: discover nearby indexed sibling checkouts automatically, allow explicit membership, and query their existing snapshots as a virtual supergraph. Never silently index, execute project code, or write to another checkout.

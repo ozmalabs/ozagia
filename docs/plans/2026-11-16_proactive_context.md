@@ -1,5 +1,11 @@
 # Proactive agent context
 
+Status: implemented, verified 2026-11-24, in `core/proactive_context.py`, the
+daemon hint operation and the OpenCode plugin (`tests/test_proactive_context.py`,
+`tests/test_daemon_hints.py`, `tests/test_opencode_context_hook.py`). A
+controlled live comparison is still needed; the implementation notes at the end
+state the current limits.
+
 The Ocelot pilot showed that graph capture alone did not provide the task to
 retrieval before the first model call. The graph arm made more calls and emitted
 more tool output; a one-task run cannot establish causation. The goal is to

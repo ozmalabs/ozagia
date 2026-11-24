@@ -23,6 +23,10 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ["1/4", "2/4", "3/4", "4/4"]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -37,6 +41,8 @@ jobs:
       - name: Lint
         run: .venv/bin/ruff check src tests
       - name: Test
+        env:
+          OZAGIA_TEST_SHARD: ${{ matrix.shard }}
         run: .venv/bin/python -m pytest -q
 
   dist:

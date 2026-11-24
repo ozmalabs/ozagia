@@ -62,6 +62,21 @@ def live(tmp_path_factory):
     (root / "src").mkdir(parents=True)
     (root / "src" / "a.py").write_text(A_PY, encoding="utf-8")
     (root / ".ozagia.toml").write_text("[jobs]\nenabled = true\n", encoding="utf-8")
+    # Keep job admission independent of this host's free disk and memory. The
+    # budgets are far below what `sleep` needs; production keeps its defaults.
+    (root / "ozagia").mkdir()
+    (root / "ozagia" / "resources.toml").write_text(
+        "reserve_memory_pct = 0\n"
+        "reserve_disk_gb = 0\n"
+        "\n"
+        "[limits]\n"
+        "job_memory_mb = 256\n"
+        "job_disk_mb = 64\n"
+        "\n"
+        "[admission]\n"
+        "min_free_memory_pct = 0\n"
+        "min_free_disk_gb = 0\n",
+        encoding="utf-8")
     _git(root, "init", "-q")
     _git(root, "add", "-A")
     _git(root, "commit", "-qm", "initial commit")

@@ -24,7 +24,7 @@ from ozagia.daemon.client import (
 KEYS = {
     "schema", "checked_at", "root", "ok", "errors", "degraded",
     "workspace", "resources", "files", "runtime", "daemon", "doctor",
-    "config", "reviews",
+    "integrations", "capabilities", "config", "reviews",
 }
 
 
@@ -238,12 +238,68 @@ def test_status_all_present(components: SimpleNamespace) -> None:
     assert report["daemon"]["report"]["timeout_s"] == 0.5
     assert report["doctor"]["state"] == "ok"
     assert report["doctor"]["report"]["snapshot"]["state"] == "fresh"
+    assert report["integrations"]["state"] == "unknown"
+    assert report["capabilities"]["state"] == "unknown"
     assert report["reviews"]["state"] == "absent"
     assert report["config"]["state"] == "configured"
     assert report["config"]["path"] == str(components.cfg_path)
     assert report["config"]["report"]["runtime_services"] == ["api"]
     assert components.calls == [
         (str(status_module.protocol.socket_path(components.root)), 0.5)]
+
+
+def test_status_carries_bounded_integration_and_capability_summaries(
+    components: SimpleNamespace, monkeypatch,
+) -> None:
+    doctor_report = _doctor_report(components.root, "fresh")
+    doctor_report["integrations"] = {
+        "note": "presence only",
+        "hosts": {
+            "opencode": {
+                "label": "OpenCode TUI", "state": "verified",
+                "installed": True, "version": "2.4.1",
+                "path": "/bin/opencode", "tested_range": "2.3.0, 2.4.1",
+                "verification": "host-launch without model", "error": None,
+            },
+        },
+        "config": {"opencode": {"state": "present",
+                                "found": ["/repo/.opencode/plugins/ozagia.js"],
+                                "errors": []}},
+        "warnings": [],
+    }
+    doctor_report["capabilities"] = {
+        "state": "current",
+        "catalogue": {"version": "1.0", "hash": "abc", "capabilities": 102,
+                      "domains": {"graph": 31}, "surfaces": 156},
+        "audit": {
+            "state": "current",
+            "counts": {"capabilities": 102, "declared_surfaces": 156,
+                       "findings": 1},
+            "findings_by_kind": {"observed_surface_undeclared": 1},
+            "findings_by_severity": {"coverage": 1},
+            "findings": [{"subject": "must-not-be-copied"}],
+        },
+        "error": None,
+        "warnings": [{"component": "capabilities",
+                      "code": "capabilities.findings",
+                      "message": "1 finding"}],
+    }
+    monkeypatch.setattr(status_module, "diagnose",
+                        lambda value: doctor_report)
+
+    report = status_module.status(components.root)
+
+    assert report["integrations"]["state"] == "ok"
+    host = report["integrations"]["report"]["hosts"]["opencode"]
+    assert host["state"] == "verified"
+    assert host["version"] == "2.4.1"
+    assert report["integrations"]["report"]["config"]["opencode"]["state"] == (
+        "present")
+    assert report["capabilities"]["state"] == "ok"
+    audit = report["capabilities"]["report"]["audit"]
+    assert audit["counts"]["findings"] == 1
+    assert "findings" not in audit
+    assert "must-not-be-copied" not in json.dumps(report["capabilities"])
 
 
 def test_status_missing_daemon_is_absent_not_empty(

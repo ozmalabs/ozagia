@@ -1,0 +1,1031 @@
+{
+  "schema_version": 1,
+  "corpus_id": "ozagia-deep-review-realistic-v1",
+  "description": "Candidate frozen corpus for realistic deep-review precision, recall, noise and coverage evaluation. All repositories are unacquired candidates: commits, tree digests and range endpoints must be filled by a human from public history. This file is not a measured result.",
+  "created": "2026-11-24",
+  "status": "candidate_manifest_unacquired",
+  "evidence_class": "realistic_corpus",
+  "targets": {
+    "repositories": 10,
+    "change_ranges": 50,
+    "holdout_repositories": 2,
+    "complete_repositories_for_quality": 8
+  },
+  "review_policy": {
+    "reviewers": 2,
+    "adjudicator": true,
+    "independent_before_findings": true,
+    "reviewers_blind_to_ozagia_findings": true,
+    "require_sealed_label_files": true,
+    "require_source_file_digests": true,
+    "separate_from_synthetic_fixtures": true,
+    "notes": "Each subject is labelled independently by two humans before either sees Ozagia findings. A third human adjudicates disagreements. Synthetic fixtures remain separate regression checks and are never pooled into a realistic-corpus score."
+  },
+  "repositories": [
+    {
+      "id": "flask",
+      "repo": "pallets/flask",
+      "remote": "https://github.com/pallets/flask",
+      "license": "BSD-3-Clause",
+      "license_status": "declared_by_manifest_author_not_verified_offline",
+      "acquisition_status": "candidate_unacquired",
+      "pinned_commit": null,
+      "tree_sha256": null,
+      "archive_sha256": null,
+      "verified_at": null,
+      "languages": [
+        "Python"
+      ],
+      "language_mix_status": "declared_not_measured",
+      "size_class": "medium",
+      "size_status": "estimated_not_measured",
+      "reason": "Small WSGI framework with tests, configuration and request-handling security surfaces; useful for change-range review and test-coverage checks.",
+      "local_checkout": "repositories/flask",
+      "holdout": false
+    },
+    {
+      "id": "requests",
+      "repo": "psf/requests",
+      "remote": "https://github.com/psf/requests",
+      "license": "Apache-2.0",
+      "license_status": "declared_by_manifest_author_not_verified_offline",
+      "acquisition_status": "candidate_unacquired",
+      "pinned_commit": null,
+      "tree_sha256": null,
+      "archive_sha256": null,
+      "verified_at": null,
+      "languages": [
+        "Python"
+      ],
+      "language_mix_status": "declared_not_measured",
+      "size_class": "medium",
+      "size_status": "estimated_not_measured",
+      "reason": "Widely used HTTP client in maintenance mode; exercises redirect, TLS configuration, timeout and resilience review.",
+      "local_checkout": "repositories/requests",
+      "holdout": false
+    },
+    {
+      "id": "httpx",
+      "repo": "encode/httpx",
+      "remote": "https://github.com/encode/httpx",
+      "license": "BSD-3-Clause",
+      "license_status": "declared_by_manifest_author_not_verified_offline",
+      "acquisition_status": "candidate_unacquired",
+      "pinned_commit": null,
+      "tree_sha256": null,
+      "archive_sha256": null,
+      "verified_at": null,
+      "languages": [
+        "Python"
+      ],
+      "language_mix_status": "declared_not_measured",
+      "size_class": "medium",
+      "size_status": "estimated_not_measured",
+      "reason": "Active sync/async HTTP client; exercises concurrency, connection-pool and failure-mode findings.",
+      "local_checkout": "repositories/httpx",
+      "holdout": false
+    },
+    {
+      "id": "pytest",
+      "repo": "pytest-dev/pytest",
+      "remote": "https://github.com/pytest-dev/pytest",
+      "license": "MIT",
+      "license_status": "declared_by_manifest_author_not_verified_offline",
+      "acquisition_status": "candidate_unacquired",
+      "pinned_commit": null,
+      "tree_sha256": null,
+      "archive_sha256": null,
+      "verified_at": null,
+      "languages": [
+        "Python"
+      ],
+      "language_mix_status": "declared_not_measured",
+      "size_class": "large",
+      "size_status": "estimated_not_measured",
+      "reason": "Active test framework with deep architecture and plugin surfaces; held out from rule tuning to test generalisation.",
+      "local_checkout": "repositories/pytest",
+      "holdout": true
+    },
+    {
+      "id": "ripgrep",
+      "repo": "BurntSushi/ripgrep",
+      "remote": "https://github.com/BurntSushi/ripgrep",
+      "license": "MIT OR Unlicense",
+      "license_status": "declared_by_manifest_author_not_verified_offline",
+      "acquisition_status": "candidate_unacquired",
+      "pinned_commit": null,
+      "tree_sha256": null,
+      "archive_sha256": null,
+      "verified_at": null,
+      "languages": [
+        "Rust"
+      ],
+      "language_mix_status": "declared_not_measured",
+      "size_class": "medium",
+      "size_status": "estimated_not_measured",
+      "reason": "Performance-sensitive Rust CLI; exercises resource bounds, traversal and output-path review.",
+      "local_checkout": "repositories/ripgrep",
+      "holdout": false
+    },
+    {
+      "id": "fd",
+      "repo": "sharkdp/fd",
+      "remote": "https://github.com/sharkdp/fd",
+      "license": "MIT OR Apache-2.0",
+      "license_status": "declared_by_manifest_author_not_verified_offline",
+      "acquisition_status": "candidate_unacquired",
+      "pinned_commit": null,
+      "tree_sha256": null,
+      "archive_sha256": null,
+      "verified_at": null,
+      "languages": [
+        "Rust"
+      ],
+      "language_mix_status": "declared_not_measured",
+      "size_class": "small",
+      "size_status": "estimated_not_measured",
+      "reason": "Small Rust filesystem tool; exercises small-repository precision, error handling and filesystem failure modes.",
+      "local_checkout": "repositories/fd",
+      "holdout": false
+    },
+    {
+      "id": "fzf",
+      "repo": "junegunn/fzf",
+      "remote": "https://github.com/junegunn/fzf",
+      "license": "MIT",
+      "license_status": "declared_by_manifest_author_not_verified_offline",
+      "acquisition_status": "candidate_unacquired",
+      "pinned_commit": null,
+      "tree_sha256": null,
+      "archive_sha256": null,
+      "verified_at": null,
+      "languages": [
+        "Go"
+      ],
+      "language_mix_status": "declared_not_measured",
+      "size_class": "medium",
+      "size_status": "estimated_not_measured",
+      "reason": "Go terminal tool with concurrency and I/O paths; exercises Go collectors and interactive failure modes.",
+      "local_checkout": "repositories/fzf",
+      "holdout": false
+    },
+    {
+      "id": "gin",
+      "repo": "gin-gonic/gin",
+      "remote": "https://github.com/gin-gonic/gin",
+      "license": "MIT",
+      "license_status": "declared_by_manifest_author_not_verified_offline",
+      "acquisition_status": "candidate_unacquired",
+      "pinned_commit": null,
+      "tree_sha256": null,
+      "archive_sha256": null,
+      "verified_at": null,
+      "languages": [
+        "Go"
+      ],
+      "language_mix_status": "declared_not_measured",
+      "size_class": "medium",
+      "size_status": "estimated_not_measured",
+      "reason": "Go web framework with middleware and routing security surfaces; held out from rule tuning.",
+      "local_checkout": "repositories/gin",
+      "holdout": true
+    },
+    {
+      "id": "express",
+      "repo": "expressjs/express",
+      "remote": "https://github.com/expressjs/express",
+      "license": "MIT",
+      "license_status": "declared_by_manifest_author_not_verified_offline",
+      "acquisition_status": "candidate_unacquired",
+      "pinned_commit": null,
+      "tree_sha256": null,
+      "archive_sha256": null,
+      "verified_at": null,
+      "languages": [
+        "JavaScript"
+      ],
+      "language_mix_status": "declared_not_measured",
+      "size_class": "medium",
+      "size_status": "estimated_not_measured",
+      "reason": "Maintenance-mode JavaScript framework; exercises routing, middleware and documentation/API review.",
+      "local_checkout": "repositories/express",
+      "holdout": false
+    },
+    {
+      "id": "got",
+      "repo": "sindresorhus/got",
+      "remote": "https://github.com/sindresorhus/got",
+      "license": "MIT",
+      "license_status": "declared_by_manifest_author_not_verified_offline",
+      "acquisition_status": "candidate_unacquired",
+      "pinned_commit": null,
+      "tree_sha256": null,
+      "archive_sha256": null,
+      "verified_at": null,
+      "languages": [
+        "TypeScript"
+      ],
+      "language_mix_status": "declared_not_measured",
+      "size_class": "medium",
+      "size_status": "estimated_not_measured",
+      "reason": "TypeScript HTTP client; exercises typed public API, retries, timeouts and resilience review.",
+      "local_checkout": "repositories/got",
+      "holdout": false
+    },
+    {
+      "id": "fmt",
+      "repo": "fmtlib/fmt",
+      "remote": "https://github.com/fmtlib/fmt",
+      "license": "MIT",
+      "license_status": "declared_by_manifest_author_not_verified_offline",
+      "acquisition_status": "candidate_unacquired",
+      "pinned_commit": null,
+      "tree_sha256": null,
+      "archive_sha256": null,
+      "verified_at": null,
+      "languages": [
+        "C++"
+      ],
+      "language_mix_status": "declared_not_measured",
+      "size_class": "medium",
+      "size_status": "estimated_not_measured",
+      "reason": "C++ formatting library; exercises memory/lifetime, performance and header-only API review.",
+      "local_checkout": "repositories/fmt",
+      "holdout": false
+    },
+    {
+      "id": "googletest",
+      "repo": "google/googletest",
+      "remote": "https://github.com/google/googletest",
+      "license": "BSD-3-Clause",
+      "license_status": "declared_by_manifest_author_not_verified_offline",
+      "acquisition_status": "candidate_unacquired",
+      "pinned_commit": null,
+      "tree_sha256": null,
+      "archive_sha256": null,
+      "verified_at": null,
+      "languages": [
+        "C++"
+      ],
+      "language_mix_status": "declared_not_measured",
+      "size_class": "large",
+      "size_status": "estimated_not_measured",
+      "reason": "Large C++ test framework; exercises architecture, test infrastructure and cross-language collector coverage.",
+      "local_checkout": "repositories/googletest",
+      "holdout": false
+    }
+  ],
+  "change_ranges": [
+    {
+      "id": "flask-01",
+      "repository_id": "flask",
+      "status": "slot_unassigned",
+      "base": null,
+      "head": null,
+      "theme": "security",
+      "review_focus": [
+        "security",
+        "dependencies"
+      ],
+      "source_hint": "upstream security advisory or hardening commit; record base/head from the public fix",
+      "reason": "Candidate change-range slot; a human must select and pin a public base..head pair before labeling.",
+      "holdout": false
+    },
+    {
+      "id": "flask-02",
+      "repository_id": "flask",
+      "status": "slot_unassigned",
+      "base": null,
+      "head": null,
+      "theme": "correctness",
+      "review_focus": [
+        "change",
+        "tests-and-coverage",
+        "architecture"
+      ],
+      "source_hint": "upstream correctness fix with a regression test",
+      "reason": "Candidate change-range slot; a human must select and pin a public base..head pair before labeling.",
+      "holdout": false
+    },
+    {
+      "id": "flask-03",
+      "repository_id": "flask",
+      "status": "slot_unassigned",
+      "base": null,
+      "head": null,
+      "theme": "resilience",
+      "review_focus": [
+        "failure-modes",
+        "operations"
+      ],
+      "source_hint": "upstream timeout, retry or error-handling change",
+      "reason": "Candidate change-range slot; a human must select and pin a public base..head pair before labeling.",
+      "holdout": false
+    },
+    {
+      "id": "flask-04",
+      "repository_id": "flask",
+      "status": "slot_unassigned",
+      "base": null,
+      "head": null,
+      "theme": "performance",
+      "review_focus": [
+        "performance",
+        "scalability"
+      ],
+      "source_hint": "upstream performance or allocation change",
+      "reason": "Candidate change-range slot; a human must select and pin a public base..head pair before labeling.",
+      "holdout": false
+    },
+    {
+      "id": "requests-01",
+      "repository_id": "requests",
+      "status": "slot_unassigned",
+      "base": null,
+      "head": null,
+      "theme": "correctness",
+      "review_focus": [
+        "change",
+        "tests-and-coverage",
+        "architecture"
+      ],
+      "source_hint": "upstream correctness fix with a regression test",
+      "reason": "Candidate change-range slot; a human must select and pin a public base..head pair before labeling.",
+      "holdout": false
+    },
+    {
+      "id": "requests-02",
+      "repository_id": "requests",
+      "status": "slot_unassigned",
+      "base": null,
+      "head": null,
+      "theme": "resilience",
+      "review_focus": [
+        "failure-modes",
+        "operations"
+      ],
+      "source_hint": "upstream timeout, retry or error-handling change",
+      "reason": "Candidate change-range slot; a human must select and pin a public base..head pair before labeling.",
+      "holdout": false
+    },
+    {
+      "id": "requests-03",
+      "repository_id": "requests",
+      "status": "slot_unassigned",
+      "base": null,
+      "head": null,
+      "theme": "performance",
+      "review_focus": [
+        "performance",
+        "scalability"
+      ],
+      "source_hint": "upstream performance or allocation change",
+      "reason": "Candidate change-range slot; a human must select and pin a public base..head pair before labeling.",
+      "holdout": false
+    },
+    {
+      "id": "requests-04",
+      "repository_id": "requests",
+      "status": "slot_unassigned",
+      "base": null,
+      "head": null,
+      "theme": "architecture",
+      "review_focus": [
+        "architecture",
+        "data-structures"
+      ],
+      "source_hint": "refactor or public API change with before/after structure",
+      "reason": "Candidate change-range slot; a human must select and pin a public base..head pair before labeling.",
+      "holdout": false
+    },
+    {
+      "id": "httpx-01",
+      "repository_id": "httpx",
+      "status": "slot_unassigned",
+      "base": null,
+      "head": null,
+      "theme": "resilience",
+      "review_focus": [
+        "failure-modes",
+        "operations"
+      ],
+      "source_hint": "upstream timeout, retry or error-handling change",
+      "reason": "Candidate change-range slot; a human must select and pin a public base..head pair before labeling.",
+      "holdout": false
+    },
+    {
+      "id": "httpx-02",
+      "repository_id": "httpx",
+      "status": "slot_unassigned",
+      "base": null,
+      "head": null,
+      "theme": "performance",
+      "review_focus": [
+        "performance",
+        "scalability"
+      ],
+      "source_hint": "upstream performance or allocation change",
+      "reason": "Candidate change-range slot; a human must select and pin a public base..head pair before labeling.",
+      "holdout": false
+    },
+    {
+      "id": "httpx-03",
+      "repository_id": "httpx",
+      "status": "slot_unassigned",
+      "base": null,
+      "head": null,
+      "theme": "architecture",
+      "review_focus": [
+        "architecture",
+        "data-structures"
+      ],
+      "source_hint": "refactor or public API change with before/after structure",
+      "reason": "Candidate change-range slot; a human must select and pin a public base..head pair before labeling.",
+      "holdout": false
+    },
+    {
+      "id": "httpx-04",
+      "repository_id": "httpx",
+      "status": "slot_unassigned",
+      "base": null,
+      "head": null,
+      "theme": "tests",
+      "review_focus": [
+        "tests-and-coverage"
+      ],
+      "source_hint": "test-only or coverage change touching a reviewed module",
+      "reason": "Candidate change-range slot; a human must select and pin a public base..head pair before labeling.",
+      "holdout": false
+    },
+    {
+      "id": "pytest-01",
+      "repository_id": "pytest",
+      "status": "slot_unassigned",
+      "base": null,
+      "head": null,
+      "theme": "performance",
+      "review_focus": [
+        "performance",
+        "scalability"
+      ],
+      "source_hint": "upstream performance or allocation change",
+      "reason": "Candidate change-range slot; a human must select and pin a public base..head pair before labeling.",
+      "holdout": true
+    },
+    {
+      "id": "pytest-02",
+      "repository_id": "pytest",
+      "status": "slot_unassigned",
+      "base": null,
+      "head": null,
+      "theme": "architecture",
+      "review_focus": [
+        "architecture",
+        "data-structures"
+      ],
+      "source_hint": "refactor or public API change with before/after structure",
+      "reason": "Candidate change-range slot; a human must select and pin a public base..head pair before labeling.",
+      "holdout": true
+    },
+    {
+      "id": "pytest-03",
+      "repository_id": "pytest",
+      "status": "slot_unassigned",
+      "base": null,
+      "head": null,
+      "theme": "tests",
+      "review_focus": [
+        "tests-and-coverage"
+      ],
+      "source_hint": "test-only or coverage change touching a reviewed module",
+      "reason": "Candidate change-range slot; a human must select and pin a public base..head pair before labeling.",
+      "holdout": true
+    },
+    {
+      "id": "pytest-04",
+      "repository_id": "pytest",
+      "status": "slot_unassigned",
+      "base": null,
+      "head": null,
+      "theme": "dependencies",
+      "review_focus": [
+        "dependencies",
+        "security"
+      ],
+      "source_hint": "dependency bump or manifest/security update",
+      "reason": "Candidate change-range slot; a human must select and pin a public base..head pair before labeling.",
+      "holdout": true
+    },
+    {
+      "id": "ripgrep-01",
+      "repository_id": "ripgrep",
+      "status": "slot_unassigned",
+      "base": null,
+      "head": null,
+      "theme": "architecture",
+      "review_focus": [
+        "architecture",
+        "data-structures"
+      ],
+      "source_hint": "refactor or public API change with before/after structure",
+      "reason": "Candidate change-range slot; a human must select and pin a public base..head pair before labeling.",
+      "holdout": false
+    },
+    {
+      "id": "ripgrep-02",
+      "repository_id": "ripgrep",
+      "status": "slot_unassigned",
+      "base": null,
+      "head": null,
+      "theme": "tests",
+      "review_focus": [
+        "tests-and-coverage"
+      ],
+      "source_hint": "test-only or coverage change touching a reviewed module",
+      "reason": "Candidate change-range slot; a human must select and pin a public base..head pair before labeling.",
+      "holdout": false
+    },
+    {
+      "id": "ripgrep-03",
+      "repository_id": "ripgrep",
+      "status": "slot_unassigned",
+      "base": null,
+      "head": null,
+      "theme": "dependencies",
+      "review_focus": [
+        "dependencies",
+        "security"
+      ],
+      "source_hint": "dependency bump or manifest/security update",
+      "reason": "Candidate change-range slot; a human must select and pin a public base..head pair before labeling.",
+      "holdout": false
+    },
+    {
+      "id": "ripgrep-04",
+      "repository_id": "ripgrep",
+      "status": "slot_unassigned",
+      "base": null,
+      "head": null,
+      "theme": "operations",
+      "review_focus": [
+        "operations",
+        "failure-modes"
+      ],
+      "source_hint": "CI, release, configuration or observability change",
+      "reason": "Candidate change-range slot; a human must select and pin a public base..head pair before labeling.",
+      "holdout": false
+    },
+    {
+      "id": "fd-01",
+      "repository_id": "fd",
+      "status": "slot_unassigned",
+      "base": null,
+      "head": null,
+      "theme": "tests",
+      "review_focus": [
+        "tests-and-coverage"
+      ],
+      "source_hint": "test-only or coverage change touching a reviewed module",
+      "reason": "Candidate change-range slot; a human must select and pin a public base..head pair before labeling.",
+      "holdout": false
+    },
+    {
+      "id": "fd-02",
+      "repository_id": "fd",
+      "status": "slot_unassigned",
+      "base": null,
+      "head": null,
+      "theme": "dependencies",
+      "review_focus": [
+        "dependencies",
+        "security"
+      ],
+      "source_hint": "dependency bump or manifest/security update",
+      "reason": "Candidate change-range slot; a human must select and pin a public base..head pair before labeling.",
+      "holdout": false
+    },
+    {
+      "id": "fd-03",
+      "repository_id": "fd",
+      "status": "slot_unassigned",
+      "base": null,
+      "head": null,
+      "theme": "operations",
+      "review_focus": [
+        "operations",
+        "failure-modes"
+      ],
+      "source_hint": "CI, release, configuration or observability change",
+      "reason": "Candidate change-range slot; a human must select and pin a public base..head pair before labeling.",
+      "holdout": false
+    },
+    {
+      "id": "fd-04",
+      "repository_id": "fd",
+      "status": "slot_unassigned",
+      "base": null,
+      "head": null,
+      "theme": "docs",
+      "review_focus": [
+        "documentation-and-public-api",
+        "architecture"
+      ],
+      "source_hint": "documentation or public API description change",
+      "reason": "Candidate change-range slot; a human must select and pin a public base..head pair before labeling.",
+      "holdout": false
+    },
+    {
+      "id": "fzf-01",
+      "repository_id": "fzf",
+      "status": "slot_unassigned",
+      "base": null,
+      "head": null,
+      "theme": "dependencies",
+      "review_focus": [
+        "dependencies",
+        "security"
+      ],
+      "source_hint": "dependency bump or manifest/security update",
+      "reason": "Candidate change-range slot; a human must select and pin a public base..head pair before labeling.",
+      "holdout": false
+    },
+    {
+      "id": "fzf-02",
+      "repository_id": "fzf",
+      "status": "slot_unassigned",
+      "base": null,
+      "head": null,
+      "theme": "operations",
+      "review_focus": [
+        "operations",
+        "failure-modes"
+      ],
+      "source_hint": "CI, release, configuration or observability change",
+      "reason": "Candidate change-range slot; a human must select and pin a public base..head pair before labeling.",
+      "holdout": false
+    },
+    {
+      "id": "fzf-03",
+      "repository_id": "fzf",
+      "status": "slot_unassigned",
+      "base": null,
+      "head": null,
+      "theme": "docs",
+      "review_focus": [
+        "documentation-and-public-api",
+        "architecture"
+      ],
+      "source_hint": "documentation or public API description change",
+      "reason": "Candidate change-range slot; a human must select and pin a public base..head pair before labeling.",
+      "holdout": false
+    },
+    {
+      "id": "fzf-04",
+      "repository_id": "fzf",
+      "status": "slot_unassigned",
+      "base": null,
+      "head": null,
+      "theme": "security",
+      "review_focus": [
+        "security",
+        "dependencies"
+      ],
+      "source_hint": "upstream security advisory or hardening commit; record base/head from the public fix",
+      "reason": "Candidate change-range slot; a human must select and pin a public base..head pair before labeling.",
+      "holdout": false
+    },
+    {
+      "id": "gin-01",
+      "repository_id": "gin",
+      "status": "slot_unassigned",
+      "base": null,
+      "head": null,
+      "theme": "operations",
+      "review_focus": [
+        "operations",
+        "failure-modes"
+      ],
+      "source_hint": "CI, release, configuration or observability change",
+      "reason": "Candidate change-range slot; a human must select and pin a public base..head pair before labeling.",
+      "holdout": true
+    },
+    {
+      "id": "gin-02",
+      "repository_id": "gin",
+      "status": "slot_unassigned",
+      "base": null,
+      "head": null,
+      "theme": "docs",
+      "review_focus": [
+        "documentation-and-public-api",
+        "architecture"
+      ],
+      "source_hint": "documentation or public API description change",
+      "reason": "Candidate change-range slot; a human must select and pin a public base..head pair before labeling.",
+      "holdout": true
+    },
+    {
+      "id": "gin-03",
+      "repository_id": "gin",
+      "status": "slot_unassigned",
+      "base": null,
+      "head": null,
+      "theme": "security",
+      "review_focus": [
+        "security",
+        "dependencies"
+      ],
+      "source_hint": "upstream security advisory or hardening commit; record base/head from the public fix",
+      "reason": "Candidate change-range slot; a human must select and pin a public base..head pair before labeling.",
+      "holdout": true
+    },
+    {
+      "id": "gin-04",
+      "repository_id": "gin",
+      "status": "slot_unassigned",
+      "base": null,
+      "head": null,
+      "theme": "correctness",
+      "review_focus": [
+        "change",
+        "tests-and-coverage",
+        "architecture"
+      ],
+      "source_hint": "upstream correctness fix with a regression test",
+      "reason": "Candidate change-range slot; a human must select and pin a public base..head pair before labeling.",
+      "holdout": true
+    },
+    {
+      "id": "express-01",
+      "repository_id": "express",
+      "status": "slot_unassigned",
+      "base": null,
+      "head": null,
+      "theme": "docs",
+      "review_focus": [
+        "documentation-and-public-api",
+        "architecture"
+      ],
+      "source_hint": "documentation or public API description change",
+      "reason": "Candidate change-range slot; a human must select and pin a public base..head pair before labeling.",
+      "holdout": false
+    },
+    {
+      "id": "express-02",
+      "repository_id": "express",
+      "status": "slot_unassigned",
+      "base": null,
+      "head": null,
+      "theme": "security",
+      "review_focus": [
+        "security",
+        "dependencies"
+      ],
+      "source_hint": "upstream security advisory or hardening commit; record base/head from the public fix",
+      "reason": "Candidate change-range slot; a human must select and pin a public base..head pair before labeling.",
+      "holdout": false
+    },
+    {
+      "id": "express-03",
+      "repository_id": "express",
+      "status": "slot_unassigned",
+      "base": null,
+      "head": null,
+      "theme": "correctness",
+      "review_focus": [
+        "change",
+        "tests-and-coverage",
+        "architecture"
+      ],
+      "source_hint": "upstream correctness fix with a regression test",
+      "reason": "Candidate change-range slot; a human must select and pin a public base..head pair before labeling.",
+      "holdout": false
+    },
+    {
+      "id": "express-04",
+      "repository_id": "express",
+      "status": "slot_unassigned",
+      "base": null,
+      "head": null,
+      "theme": "resilience",
+      "review_focus": [
+        "failure-modes",
+        "operations"
+      ],
+      "source_hint": "upstream timeout, retry or error-handling change",
+      "reason": "Candidate change-range slot; a human must select and pin a public base..head pair before labeling.",
+      "holdout": false
+    },
+    {
+      "id": "got-01",
+      "repository_id": "got",
+      "status": "slot_unassigned",
+      "base": null,
+      "head": null,
+      "theme": "security",
+      "review_focus": [
+        "security",
+        "dependencies"
+      ],
+      "source_hint": "upstream security advisory or hardening commit; record base/head from the public fix",
+      "reason": "Candidate change-range slot; a human must select and pin a public base..head pair before labeling.",
+      "holdout": false
+    },
+    {
+      "id": "got-02",
+      "repository_id": "got",
+      "status": "slot_unassigned",
+      "base": null,
+      "head": null,
+      "theme": "correctness",
+      "review_focus": [
+        "change",
+        "tests-and-coverage",
+        "architecture"
+      ],
+      "source_hint": "upstream correctness fix with a regression test",
+      "reason": "Candidate change-range slot; a human must select and pin a public base..head pair before labeling.",
+      "holdout": false
+    },
+    {
+      "id": "got-03",
+      "repository_id": "got",
+      "status": "slot_unassigned",
+      "base": null,
+      "head": null,
+      "theme": "resilience",
+      "review_focus": [
+        "failure-modes",
+        "operations"
+      ],
+      "source_hint": "upstream timeout, retry or error-handling change",
+      "reason": "Candidate change-range slot; a human must select and pin a public base..head pair before labeling.",
+      "holdout": false
+    },
+    {
+      "id": "got-04",
+      "repository_id": "got",
+      "status": "slot_unassigned",
+      "base": null,
+      "head": null,
+      "theme": "performance",
+      "review_focus": [
+        "performance",
+        "scalability"
+      ],
+      "source_hint": "upstream performance or allocation change",
+      "reason": "Candidate change-range slot; a human must select and pin a public base..head pair before labeling.",
+      "holdout": false
+    },
+    {
+      "id": "fmt-01",
+      "repository_id": "fmt",
+      "status": "slot_unassigned",
+      "base": null,
+      "head": null,
+      "theme": "correctness",
+      "review_focus": [
+        "change",
+        "tests-and-coverage",
+        "architecture"
+      ],
+      "source_hint": "upstream correctness fix with a regression test",
+      "reason": "Candidate change-range slot; a human must select and pin a public base..head pair before labeling.",
+      "holdout": false
+    },
+    {
+      "id": "fmt-02",
+      "repository_id": "fmt",
+      "status": "slot_unassigned",
+      "base": null,
+      "head": null,
+      "theme": "resilience",
+      "review_focus": [
+        "failure-modes",
+        "operations"
+      ],
+      "source_hint": "upstream timeout, retry or error-handling change",
+      "reason": "Candidate change-range slot; a human must select and pin a public base..head pair before labeling.",
+      "holdout": false
+    },
+    {
+      "id": "fmt-03",
+      "repository_id": "fmt",
+      "status": "slot_unassigned",
+      "base": null,
+      "head": null,
+      "theme": "performance",
+      "review_focus": [
+        "performance",
+        "scalability"
+      ],
+      "source_hint": "upstream performance or allocation change",
+      "reason": "Candidate change-range slot; a human must select and pin a public base..head pair before labeling.",
+      "holdout": false
+    },
+    {
+      "id": "fmt-04",
+      "repository_id": "fmt",
+      "status": "slot_unassigned",
+      "base": null,
+      "head": null,
+      "theme": "architecture",
+      "review_focus": [
+        "architecture",
+        "data-structures"
+      ],
+      "source_hint": "refactor or public API change with before/after structure",
+      "reason": "Candidate change-range slot; a human must select and pin a public base..head pair before labeling.",
+      "holdout": false
+    },
+    {
+      "id": "googletest-01",
+      "repository_id": "googletest",
+      "status": "slot_unassigned",
+      "base": null,
+      "head": null,
+      "theme": "resilience",
+      "review_focus": [
+        "failure-modes",
+        "operations"
+      ],
+      "source_hint": "upstream timeout, retry or error-handling change",
+      "reason": "Candidate change-range slot; a human must select and pin a public base..head pair before labeling.",
+      "holdout": false
+    },
+    {
+      "id": "googletest-02",
+      "repository_id": "googletest",
+      "status": "slot_unassigned",
+      "base": null,
+      "head": null,
+      "theme": "performance",
+      "review_focus": [
+        "performance",
+        "scalability"
+      ],
+      "source_hint": "upstream performance or allocation change",
+      "reason": "Candidate change-range slot; a human must select and pin a public base..head pair before labeling.",
+      "holdout": false
+    },
+    {
+      "id": "googletest-03",
+      "repository_id": "googletest",
+      "status": "slot_unassigned",
+      "base": null,
+      "head": null,
+      "theme": "architecture",
+      "review_focus": [
+        "architecture",
+        "data-structures"
+      ],
+      "source_hint": "refactor or public API change with before/after structure",
+      "reason": "Candidate change-range slot; a human must select and pin a public base..head pair before labeling.",
+      "holdout": false
+    },
+    {
+      "id": "googletest-04",
+      "repository_id": "googletest",
+      "status": "slot_unassigned",
+      "base": null,
+      "head": null,
+      "theme": "tests",
+      "review_focus": [
+        "tests-and-coverage"
+      ],
+      "source_hint": "test-only or coverage change touching a reviewed module",
+      "reason": "Candidate change-range slot; a human must select and pin a public base..head pair before labeling.",
+      "holdout": false
+    },
+    {
+      "id": "flask-05",
+      "repository_id": "flask",
+      "status": "slot_unassigned",
+      "base": null,
+      "head": null,
+      "theme": "performance",
+      "review_focus": [
+        "performance",
+        "scalability"
+      ],
+      "source_hint": "upstream performance or allocation change",
+      "reason": "Additional candidate change-range slot; a human must select and pin a public base..head pair before labeling.",
+      "holdout": false
+    },
+    {
+      "id": "ripgrep-05",
+      "repository_id": "ripgrep",
+      "status": "slot_unassigned",
+      "base": null,
+      "head": null,
+      "theme": "security",
+      "review_focus": [
+        "security",
+        "dependencies"
+      ],
+      "source_hint": "upstream security advisory or hardening commit; record base/head from the public fix",
+      "reason": "Additional candidate change-range slot; a human must select and pin a public base..head pair before labeling.",
+      "holdout": false
+    }
+  ]
+}

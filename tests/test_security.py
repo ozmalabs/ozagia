@@ -204,6 +204,7 @@ def test_security_config_defaults_without_a_file(
         "max_findings": config["max_findings"],
         "block_secrets": config["block_secrets"],
         "secret_allowlist": config["secret_allowlist"],
+        "finding_allowlist": config["finding_allowlist"],
     } == {
         "enabled": True,
         "tools": [],
@@ -213,6 +214,7 @@ def test_security_config_defaults_without_a_file(
         "max_findings": S.DEFAULT_MAX_FINDINGS,
         "block_secrets": True,
         "secret_allowlist": [],
+        "finding_allowlist": [],
     }
     assert set(config["sources"].values()) == {"default"}
     assert config["files"]["legacy"] is None
@@ -234,6 +236,7 @@ exclude = ["vendor/**", "generated/**"]
 max_findings = 5000
 block_secrets = false
 secret_allowlist = ["path:tests/fixtures/**", "rule:generic_high_entropy"]
+finding_allowlist = ["sha256:0123456789abcdef"]
 """)
     config = S.load_config(tmp_path)
     assert config["enabled"] is False
@@ -246,6 +249,7 @@ secret_allowlist = ["path:tests/fixtures/**", "rule:generic_high_entropy"]
     assert config["block_secrets"] is False
     assert config["secret_allowlist"] == [
         "path:tests/fixtures/**", "rule:generic_high_entropy"]
+    assert config["finding_allowlist"] == ["sha256:0123456789abcdef"]
     assert config["sources"] == {key: "repo" for key in S.SECURITY_KEYS}
     assert config["files"] == {"legacy": None, "repo": str(path.resolve())}
     assert config["error"] is None and config["repo_error"] is None
@@ -265,6 +269,7 @@ exclude = ["vendor/**", 4]
 max_findings = 5000
 block_secrets = false
 secret_allowlist = ["rule:generic_high_entropy", 5]
+finding_allowlist = ["sha256:0123456789abcdef", 6]
 """)
     config = S.load_config(tmp_path)
     # The legacy loader stays forgiving: bad entries are dropped, not fatal.
@@ -276,6 +281,7 @@ secret_allowlist = ["rule:generic_high_entropy", 5]
     assert config["max_findings"] == S.MAX_FINDINGS
     assert config["block_secrets"] is False
     assert config["secret_allowlist"] == ["rule:generic_high_entropy"]
+    assert config["finding_allowlist"] == ["sha256:0123456789abcdef"]
     assert config["sources"] == {key: "legacy" for key in S.SECURITY_KEYS}
     assert config["files"] == {"legacy": str(path.resolve()),
                                "repo": str(
@@ -326,6 +332,7 @@ max_findings = 500
 exclude = ["vendor/**"]
 block_secrets = false
 secret_allowlist = ["path:tests/fixtures/**"]
+finding_allowlist = ["sha256:fedcba9876543210"]
 """)
     config = S.load_config(tmp_path)
     assert config["enabled"] is True
@@ -335,10 +342,12 @@ secret_allowlist = ["path:tests/fixtures/**"]
     assert config["exclude"] == ["vendor/**"]
     assert config["block_secrets"] is False
     assert config["secret_allowlist"] == ["path:tests/fixtures/**"]
+    assert config["finding_allowlist"] == ["sha256:fedcba9876543210"]
     assert config["sources"] == {
         "enabled": "legacy", "tools": "legacy", "fail_on": "legacy",
         "max_findings": "legacy", "exclude": "repo",
         "block_secrets": "repo", "secret_allowlist": "repo",
+        "finding_allowlist": "repo",
         "allow_network": "default",
     }
     assert config["files"] == {"legacy": str(legacy.resolve()),
@@ -399,6 +408,8 @@ enabled = false
     ("max_findings", "0", "between"),
     ("block_secrets", '"false"', "true or false"),
     ("secret_allowlist", '"rule:x"', "list"),
+    ("finding_allowlist", '"sha256:0123456789abcdef"', "list"),
+    ("finding_allowlist", '["sha256:abc"]', "exact"),
 ])
 def test_security_config_invalid_versioned_values_are_reported(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -579,6 +590,66 @@ cursor.execute("select * from users where id=" + value)
     assert {"exec", "sql-concat"} <= rules
 
 
+def test_code_execution_rules_ignore_python_strings_and_comments() -> None:
+    source = '''\
+DELEGATES = {"eval": "the agent eval (python -m ozagia.eval.agent)"}
+def run(user_input):
+    """eval(user_input)"""
+    note = "exec(user_input)"  # eval(user_input)
+    eval(user_input)
+    exec(user_input)
+    rendered = f"{eval(user_input)}"
+    literal = f"call eval(user_input) later"
+'''
+    findings = S._scan_source(
+        "src/example.py", source, S.GraphIndex(info={}), [])
+    assert [(item["source"]["rule"], item["line"]) for item in findings] == [
+        ("eval", 5), ("exec", 6), ("eval", 7)]
+
+    # An unparseable file must keep the rule rather than hiding the finding.
+    broken = "def run(:\n    eval(user_input)\n"
+    findings = S._scan_source(
+        "src/broken.py", broken, S.GraphIndex(info={}), [])
+    assert any(item["source"]["rule"] == "eval" for item in findings)
+
+
+def test_generic_secret_rule_ignores_key_loader_calls() -> None:
+    text = '''\
+api_key = _load_api_key(args.api_key_file)
+secret = read_api_key(env_name="X")
+API_KEY = "aB3-xY7-zQ2-wP9"
+'''
+    hits = S.secret_hits(text)
+    assert [(hit.rule, hit.line) for hit in hits] == [
+        ("generic_high_entropy", 3)]
+
+
+def test_unsafe_yaml_rule_recognizes_static_safe_loaders() -> None:
+    source = '''\
+import yaml
+class Loader(yaml.SafeLoader):
+    pass
+class Nested(Loader):
+    pass
+a = yaml.load(one, Loader=Loader)
+b = yaml.load(two, Loader=Nested)
+c = yaml.load(three, Loader=yaml.BaseLoader)
+d = yaml.load(four)
+e = yaml.load(five, Loader=yaml.FullLoader)
+f = yaml.load(six, Loader=UnknownLoader)
+g = yaml.safe_load(seven)
+h = yaml.load(eight)
+'''
+    findings = S._scan_source(
+        "src/example.py", source, S.GraphIndex(info={}), [])
+    assert [(item["source"]["rule"], item["line"]) for item in findings] == [
+        ("unsafe-yaml", 9),
+        ("unsafe-yaml", 10),
+        ("unsafe-yaml", 11),
+        ("unsafe-yaml", 13),
+    ]
+
+
 def test_secret_scan_ignores_docstrings_but_keeps_live_assignments() -> None:
     source = '''\
 """Examples: secret://keyring/SERVICE/ACCOUNT"""
@@ -630,6 +701,138 @@ def test_dedupe_and_cap(sec_repo: Path) -> None:
     assert capped["summary"]["omitted"] > 0
     assert S.report_json(S.scan(sec_repo, exclude=[], max_findings=100)) == (
         S.report_json(full))
+
+
+def test_finding_allowlist_exact_fingerprint_suppresses_only_that_line(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _isolate_config(monkeypatch)
+    repo = _init_repo(tmp_path / "repo")
+    _write(repo / "src" / "app.py", """\
+import subprocess
+
+def run(cmd):
+    subprocess.run(cmd, shell=True)
+""")
+    line = (repo / "src" / "app.py").read_text(encoding="utf-8").splitlines()[3]
+    fingerprint = S.finding_fingerprint("shell-true", "src/app.py", line)
+
+    before = S.scan(repo, max_findings=100)
+    assert _finding(before, "shell-true")["finding_fingerprint"] == fingerprint
+    assert S.exit_code(before) == 1
+
+    _security_repo_config(
+        repo, f'[security]\nfinding_allowlist = ["{fingerprint}"]\n')
+    after = S.scan(repo, max_findings=100)
+    assert after["allowed"] == [{
+        "rule": "shell-true", "path": "src/app.py", "line": 4,
+        "fingerprint": fingerprint, "allowlist": fingerprint}]
+    assert not [item for item in after["findings"]
+                if item["source"]["rule"] == "shell-true"]
+    assert after["summary"]["allowed"] == 1
+    assert after["summary"]["allowed_total"] == 1
+    assert S.exit_code(after) == 0
+    text = S.format_report(after)
+    assert "allowlisted: 1" in text
+    assert "[ALLOWED] shell-true src/app.py:4" in text
+    payload = json.loads(S.report_json(after))
+    assert payload["allowed"] == after["allowed"]
+
+    # Editing the matched line must invalidate the reviewed fingerprint.
+    _write(repo / "src" / "app.py", """\
+import subprocess
+
+def run(cmd):
+    subprocess.run(cmd, shell=True, check=True)
+""")
+    changed = S.scan(repo, max_findings=100)
+    assert changed["allowed"] == []
+    assert any(item["source"]["rule"] == "shell-true"
+               for item in changed["findings"])
+    assert S.exit_code(changed) == 1
+
+
+def test_finding_allowlist_does_not_suppress_an_unknown_fingerprint(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _isolate_config(monkeypatch)
+    repo = _init_repo(tmp_path / "repo")
+    _write(repo / "src" / "app.py", """\
+import subprocess
+
+def run(cmd):
+    subprocess.run(cmd, shell=True)
+""")
+    _security_repo_config(
+        repo, '[security]\nfinding_allowlist = ["sha256:0000000000000000"]\n')
+    report = S.scan(repo, max_findings=100)
+    assert report["allowed"] == []
+    assert report["summary"]["allowed"] == 0
+    assert any(item["source"]["rule"] == "shell-true"
+               for item in report["findings"])
+
+
+def test_finding_allowlist_report_withholds_secret_values(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _isolate_config(monkeypatch)
+    repo = _init_repo(tmp_path / "repo")
+    _write(repo / "src" / "leak.py", f'aws = "{AWS_KEY}"\n')
+    line = (repo / "src" / "leak.py").read_text(encoding="utf-8").splitlines()[0]
+    fingerprint = S.finding_fingerprint("aws_access_key", "src/leak.py", line)
+    _security_repo_config(
+        repo, f'[security]\nfinding_allowlist = ["{fingerprint}"]\n')
+
+    report = S.scan(repo, max_findings=100)
+    assert report["allowed"][0]["rule"] == "aws_access_key"
+    assert report["allowed"][0]["path"] == "src/leak.py"
+    assert report["allowed"][0]["fingerprint"] == fingerprint
+    text = S.report_json(report) + S.format_report(report)
+    assert AWS_KEY not in text
+
+
+def test_finding_allowlist_match_supports_broad_entries_but_not_prefixes() -> None:
+    fingerprint = S.finding_fingerprint("shell-true", "./src/app.py",
+                                        "    subprocess.run(cmd, shell=True)")
+    finding = {
+        "file": "src/app.py",
+        "line": 4,
+        "finding_fingerprint": fingerprint,
+        "source": {"rule": "shell-true"},
+    }
+    assert S.finding_allowlist_match(finding, [fingerprint]) == fingerprint
+    # A sha256 entry is exact; a prefix does not silently widen it.
+    assert S.finding_allowlist_match(
+        finding, [fingerprint[:len("sha256:") + 8]]) is None
+    # Broad compatibility entries are still accepted, but discouraged.
+    assert S.finding_allowlist_match(finding, ["path:src/**"]) == "path:src/**"
+    assert (S.finding_allowlist_match(finding, ["rule:shell-true"])
+            == "rule:shell-true")
+    assert S.finding_allowlist_match(
+        finding, ["sha256:0000000000000000"]) is None
+
+
+def test_finding_allowlist_precedence_and_versioned_validation(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _isolate_config(monkeypatch)
+    legacy_fingerprint = "sha256:" + "a" * 16
+    repo_fingerprint = "sha256:" + "b" * 16
+    _security_legacy_config(
+        tmp_path,
+        f'[security]\nfinding_allowlist = ["{legacy_fingerprint}"]\n')
+    _security_repo_config(
+        tmp_path,
+        f'[security]\nfinding_allowlist = ["{repo_fingerprint}"]\n')
+    config = S.load_config(tmp_path)
+    assert config["finding_allowlist"] == [legacy_fingerprint]
+    assert config["sources"]["finding_allowlist"] == "legacy"
+    assert config["error"] is None
+
+    _security_repo_config(
+        tmp_path, '[security]\nfinding_allowlist = ["sha256:nothex"]\n')
+    config = S.load_config(tmp_path)
+    assert config["finding_allowlist"] == [legacy_fingerprint]
+    assert config["repo_error"] is not None
+    assert "exact" in config["repo_error"]
+    with pytest.raises(ConfigError):
+        S.load_config_strict(tmp_path)
 
 
 # --------------------------------------------------------------------------- #

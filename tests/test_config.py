@@ -958,6 +958,7 @@ source_dirs = ["src"]
 
 [security]
 block_secrets = false
+finding_allowlist = ["sha256:0123456789abcdef"]
 not_a_setting = true
 
 [security.nested]
@@ -983,6 +984,7 @@ exclude = ["vendor/**"]
 max_findings = 500
 block_secrets = false
 secret_allowlist = ["rule:generic_high_entropy"]
+finding_allowlist = ["sha256:0123456789abcdef"]
 
 [security.extra]
 key = "value"

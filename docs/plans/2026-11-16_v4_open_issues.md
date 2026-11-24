@@ -4,6 +4,14 @@ Date: 16 Nov 2026. Branch `v4/open-issues` (worktree `../ozagia-v4`).
 Scope: the open issues left after the v3 pilot, except Claude Code (still
 logged out), plus capture of compound shell commands.
 
+Status: implemented with review fixes, verified 2026-11-24. Git-refusal wrapper
+peeling and compound shell capture are in `intent/shell.py`,
+`intent/compound.py` and `intent/run.py`, with `tests/test_intent_compound.py`,
+`tests/test_intent.py` and `tests/test_shell_capture.py`; the review fixes
+listed at the end are in the same slice. The branch/merge notes below are
+historical. The live checks in the verification section were not re-run for
+this audit.
+
 ## Evidence
 
 - v2 pilot, graph_intent arm: the daemon handled 43% of calls. Of the

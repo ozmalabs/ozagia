@@ -1,0 +1,52 @@
+{
+  "findings": [
+    {
+      "id": "DR-1",
+      "type": "tainted_input",
+      "subject": "security",
+      "severity": "blocking",
+      "locations": [
+        {
+          "path": "src/security.py",
+          "line": 2
+        }
+      ]
+    },
+    {
+      "id": "DR-2",
+      "type": "nested_iteration",
+      "subject": "performance",
+      "severity": "minor",
+      "locations": [
+        {
+          "path": "src/loop.py",
+          "line": 2
+        }
+      ]
+    },
+    {
+      "id": "DR-3",
+      "type": "suppressed_exception",
+      "subject": "failure-modes",
+      "severity": "major",
+      "locations": [
+        {
+          "path": "src/error.py",
+          "line": 4
+        }
+      ]
+    },
+    {
+      "id": "DR-4",
+      "type": "unbounded_range",
+      "subject": "scalability",
+      "severity": "note",
+      "locations": [
+        {
+          "path": "src/noise.py",
+          "line": 2
+        }
+      ]
+    }
+  ]
+}
