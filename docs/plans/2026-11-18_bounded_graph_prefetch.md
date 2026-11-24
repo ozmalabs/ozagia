@@ -1,7 +1,12 @@
 # Bounded graph tag-cache prefetch proposal
 
-Status: design only for MCP lifecycle integration; the offline planner and
-accounting primitives are implemented, verified 2026-11-24. Code and tests:
+Status: **not adopted for MCP integration in 0.3 (decision 2026-11-25)**.
+The offline planner and accounting primitives remain implemented, verified
+2026-11-24. The measured ceiling is small (about 1.26 s of cache work on one
+synthetic 868-file tree) while private-cache publication, freshness tokens,
+process cancellation and suspend/resume cross the MCP lifecycle, graph cache
+and invalidation paths. Revisit only after larger-repository measurements and
+the acceptance tests below. Code and tests:
 `src/ozagia/core/prefetch.py`, `tests/test_prefetch.py` and
 [`docs/prefetch.md`](../prefetch.md). They select bounded read-only
 candidates, enforce authorization/trust/freshness/expiry, cancel and keep a

@@ -86,7 +86,7 @@ breadth third, live operations last**. New surface area is not a release theme.
 | `2026-11-17_self_graph_service_unification_model_api.md` | Implementation plan; M0–M4 done, M5–M6 partial | M0–M4 implemented; M5 partial (linked/research/action joins, Ocelot research projection, secret boundaries); M6 has an offline harness and one live run invalid for the map arm | M5 Ocelot/live-service integration; a valid M6 matched-arm result and opt-in rollout | 0.4 |
 | `2026-11-17_session_secrets_ui.md` | Design only | Core broker, providers, redactor and session store implemented (`core/secrets.py`); the native prompt/UI capture flow is not | Native prompt, host rewrite, persistence UI, revoke/expiry, end-to-end canary review | 0.3 |
 | `2026-11-17_session-profile-instrumentation.md` | Implemented in part | Core store, CLI, daemon events, OpenCode subscriber and TUI slot exist; Codex/Kiro/Claude hook capture exists offline | Live host verification, status/console rows for host lifecycle counters | 0.3 |
-| `2026-11-18_bounded_graph_prefetch.md` | Offline primitives implemented; MCP integration design only | Offline planner, safety checks and ledger implemented (`core/prefetch.py`); no MCP lifecycle integration | Publication/freshness/cancellation integration **only if measured** | 0.3 (decision only) |
+| `2026-11-18_bounded_graph_prefetch.md` | Offline primitives implemented; MCP integration not adopted for 0.3 | Offline planner, safety checks and ledger implemented (`core/prefetch.py`); the 2026-11-25 decision keeps them unwired because the measured benefit is small and the lifecycle risk is high | Revisit only with larger-repository measurements and the acceptance tests | 0.3 decision |
 | `2026-11-17_opencode_intent_graph_retrieval.md` | Stages A–C done; D partial; E initial offline check | Matches | Broader shell/task intent linking, richer paired and end-to-end evaluation | 0.4 |
 | `2026-11-17_federated_graphs.md` | Base delivery | Discovery, explicit members, qualified identities, status/search/node inspection, cross-repo checks landed | Version-aware relationships, persistent identity, incremental cache, org manifests/access control | 0.4 |
 | `2026-11-16_sre_iac_extensions.md` | Offline workstreams implemented; live remains | Matches | Live cloud/cluster providers, semantic IaC validation, broader config families, real-host relay matrix, remote background services | 0.5 |
@@ -286,7 +286,10 @@ model, and can see what a session actually did without storing its content.
   which live session owns it.
 - Decide bounded prefetch: integrate only if the offline acceptance tests show
   a real latency win without freshness risk. Otherwise close the plan as
-  "measured, not worth it" and keep the planner primitives.
+  "measured, not worth it" and keep the planner primitives. **Decision
+  (2026-11-25):** not adopted for 0.3; the measured ceiling is about 1.26 s on
+  one synthetic tree and the lifecycle risk is high. Keep the primitives and
+  revisit after larger-repository measurements.
 
 **Progress (2026-11-25, status slice).** The read-only `ozagia-status` expansion
 landed without changing the envelope or the absent-versus-unknown rule:
