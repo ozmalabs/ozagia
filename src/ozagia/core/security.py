@@ -1312,6 +1312,15 @@ def _extra_findings(rule: Rule, path: str, line_no: int, line: str,
                     index: GraphIndex) -> tuple[str, list[str], list[str]] | None:
     """Return (message_suffix, not_assessed, owasp_extra) or a skip marker."""
     if rule.name == "weak-hash":
+        # ``usedforsecurity=False`` is the caller's explicit statement that the
+        # digest is not a security control (for example a protocol nonce or a
+        # cache key). The rule matches the algorithm name, not that intent.
+        # Only look past the matched line when the call clearly continues, so a
+        # later flagged digest in the same window is not suppressed by mistake.
+        if re.search(r"(?i)usedforsecurity\s*=\s*False", line) or (
+                line.rstrip().endswith(("(", ","))
+                and re.search(r"(?i)usedforsecurity\s*=\s*False", window)):
+            return None
         if re.search(r"(?i)password|passwd|pwd", line):
             return None
         if re.search(r"(?i)checksum|integrity|etag|content-md5", window):
@@ -1552,8 +1561,11 @@ def _scan_source(rel: str, text: str, index: GraphIndex,
                     cwe=["cwe:347"], owasp=["a07"],
                     not_assessed=["runtime reachability",
                                   "the library's default verification mode"]))
-        if re.search(r"(?i)\.set_cookie\s*\(", line) and not re.search(
-                r"(?i)delete_cookie", line):
+        cookie_receiver = re.search(r"(?i)([A-Za-z_][\w.]*)\.set_cookie\s*\(",
+                                    line)
+        if (cookie_receiver is not None
+                and "jar" not in cookie_receiver.group(1).casefold()
+                and not re.search(r"(?i)delete_cookie", line)):
             window = _window(lines, number - 1, after=8)
             missing = []
             if not re.search(r"(?i)secure\s*=\s*True", window):

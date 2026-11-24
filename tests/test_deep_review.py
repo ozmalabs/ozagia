@@ -530,6 +530,35 @@ def test_trust_boundary_adapter_deduplicates_existing_sink_rule(tmp_path, monkey
     assert packet["findings"][0]["type"] == "shell-true"
 
 
+def test_trust_boundary_adapter_deduplicates_eval_sink_rule_only_at_same_line(
+        tmp_path, monkeypatch):
+    from ozagia.core.deep_review.collect import collect
+    monkeypatch.setattr("ozagia.core.deep_review.collect.repo_review.review_repo",
+        lambda *a, **k: {"findings": [], "sections": {},
+                         "graph": {"freshness": "unknown"}})
+    monkeypatch.setattr("ozagia.core.deep_review.collect._bounded_security_scan",
+        lambda *a, **k: {"findings": [{"file": "src/app.py", "line": 9,
+            "source": {"rule": "eval"}, "severity": "high",
+            "confidence": "high", "message": "eval", "remediation": "avoid eval",
+            "evidence": {}}], "not_assessed": [], "inputs": {}, "summary": {}, "graph": {}})
+    monkeypatch.setattr("ozagia.core.deep_review.collect._bounded_trust_scan",
+        lambda *a, **k: {"findings": [
+            {"rule": "trust-flow-code", "category": "code", "file": "src/app.py",
+             "line": 9, "source_line": 7,
+             "message": "external input may reach code sink eval()"},
+            {"rule": "trust-flow-code", "category": "code", "file": "src/app.py",
+             "line": 20, "source_line": 18,
+             "message": "external input may reach code sink exec()"}],
+            "checked": 1, "not_checked": []})
+    packet = collect(tmp_path, profile="security", budget_s=5)
+    types = [item["type"] for item in packet["findings"]]
+    # The eval sink rule already reports line 9; the unbacked second flow is
+    # still a distinct candidate.
+    assert types == ["eval", "trust-flow-code"]
+    assert (packet["findings"][1]["file"], packet["findings"][1]["line"]) == (
+        "src/app.py", 20)
+
+
 def test_finding_message_populates_title_and_impact(tmp_path, monkeypatch):
     import ozagia.core.deep_review.orchestrator as orchestrator
     packet = {"findings": [{"section": "architecture", "type": "cycle",

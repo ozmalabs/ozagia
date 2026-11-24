@@ -36,4 +36,8 @@ finding_allowlist = [
   # the matched line, so the static rule cannot prove it and the line is
   # reviewed here instead.
   "sha256:67a1ca5f3374ea9f",
+
+  # evaluation/deep_review_corpus/corpus.json: the word `verify=False` appears
+  # in a prose rationale for an httpx release range, not in executable code.
+  "sha256:ac41f10a825c48e3",
 ]

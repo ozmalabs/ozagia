@@ -1125,7 +1125,25 @@ def _recompute_summary(packet: dict[str, Any]) -> None:
 
 def _fallback_tests(source: str, repo_tests: Iterable[str]) -> list[str]:
     p = PurePosixPath(source)
-    names = {f"test_{p.stem}.py", f"{p.stem}_test.py", f"{p.stem}_test.go"}
+    stem = p.stem
+    suffix = p.suffix.casefold()
+    names = {f"test_{stem}.py", f"{stem}_test.py", f"{stem}_test.go"}
+    if suffix in {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}:
+        names |= {
+            f"{stem}{suffix}", f"{stem}.test{suffix}", f"{stem}.spec{suffix}",
+            f"test_{stem}{suffix}", f"{stem}_test{suffix}",
+        }
+    elif suffix == ".rs":
+        names |= {
+            f"{stem}.rs", f"{stem}_test.rs", f"{stem}_tests.rs",
+            f"test_{stem}.rs",
+        }
+    elif suffix in {".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".hxx"}:
+        for ext in (".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".hxx"):
+            names |= {
+                f"{stem}{ext}", f"{stem}-test{ext}", f"{stem}_test{ext}",
+                f"test_{stem}{ext}",
+            }
     return sorted(path for path in repo_tests
                   if PurePosixPath(path).name in names)
 
@@ -1213,7 +1231,10 @@ def _derive_findings(files: Sequence[dict[str, Any]],
                 confidence="high",
                 confidence_note="the diff status is deterministic",
             ))
-        if item["binary"]:
+        # A deleted file is already reported by the deletion branch above. The
+        # binary-content check is moot once the blob is gone, and emitting both
+        # made one deletion look like two independent findings.
+        if item["binary"] and not item["deleted"]:
             findings.append(_finding(
                 "unknown", "note", path, None,
                 f"binary file {path} changed; its content was not reviewed",

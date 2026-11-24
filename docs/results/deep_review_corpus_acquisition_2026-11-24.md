@@ -195,6 +195,19 @@ Results:
 - Corpus status is not a release gate. `score_gate_status` stays
   `not_measured`.
 
+## Later regeneration (2026-11-25)
+
+The 62 reports and packets were regenerated on 2026-11-25 after an internal
+noise audit fixed six generic false-positive or duplicate-emission patterns.
+The pins, tree/archive digests and manifest digest did not change. The same
+command shape was used and every report remains `partial`. Totals after
+regeneration: 3,234 findings across the 62 reports (was 3,407), with the
+`flask-01` repeat still byte-identical. The counts and per-range tables above
+describe the original 2026-11-24 run; see
+[`deep_review_noise_audit_2026-11-25.md`](deep_review_noise_audit_2026-11-25.md)
+for the audited categories, sample evidence, fixes and the current packet-index
+counts.
+
 ## Exact human next steps
 
 1. Open `out/packet-index.json` and choose a non-holdout subject. Have reviewer

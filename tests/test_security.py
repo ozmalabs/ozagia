@@ -688,6 +688,51 @@ def test_dependency_inventory_without_scanner(sec_repo: Path) -> None:
     assert any("CVE" in note for note in report["not_assessed"])
 
 
+def test_weak_hash_respects_explicit_non_security_flag(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path / "repo")
+    _write(
+        repo / "src" / "hashes.py",
+        "import hashlib\n"
+        "\n"
+        "def cache_key(value):\n"
+        "    return hashlib.md5(value, usedforsecurity=False).hexdigest()\n"
+        "\n"
+        "def password_digest(value):\n"
+        "    return hashlib.md5(value).hexdigest()\n"
+        "\n"
+        "def split_call(value):\n"
+        "    return hashlib.sha1(\n"
+        "        value,\n"
+        "        usedforsecurity=False,\n"
+        "    ).hexdigest()\n",
+    )
+    report = S.scan(repo, exclude=[], max_findings=100)
+    weak = [item for item in report["findings"]
+            if (item.get("source") or {}).get("rule") == "weak-hash"]
+    # The explicit non-security call and its multi-line form are skipped; the
+    # ordinary call is still a finding.
+    assert [item["line"] for item in weak] == [7]
+
+
+def test_cookie_flags_ignore_cookie_jar_receivers(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path / "repo")
+    _write(
+        repo / "src" / "cookies.py",
+        "def store(jar, cookie):\n"
+        "    jar.set_cookie(cookie)\n"
+        "    self.jar.set_cookie(cookie)\n"
+        "\n"
+        "def respond(response, value):\n"
+        "    response.set_cookie('session', value)\n",
+    )
+    report = S.scan(repo, exclude=[], max_findings=100)
+    cookies = [item for item in report["findings"]
+               if (item.get("source") or {}).get("rule") == "cookie-flags"]
+    # A cookie jar is not an HTTP response; only the response call lacks flags.
+    assert [(item["file"], item["line"]) for item in cookies] == [
+        ("src/cookies.py", 6)]
+
+
 def test_dedupe_and_cap(sec_repo: Path) -> None:
     full = S.scan(sec_repo, exclude=[], max_findings=100)
     shell = [item for item in full["findings"]

@@ -152,7 +152,9 @@ code and tests; the integration matrix and doctor/status health landed;
 `ozagia config migrate` copies the four project-model tables; security
 hardening added exact static-finding allowlisting and removed reference false
 positives; release verification is recorded in
-`docs/results/release_check_0.1.5_2026-11-24.md`. Remaining: live Codex, Kiro,
+`docs/results/release_check_0.1.5_2026-11-24.md`. The tree is committed as
+`4d3ff1f` (no tag), and the committed-delta review has no blocking findings;
+see `docs/results/self_review_2026-11-24.md`. Remaining: live Codex, Kiro,
 Claude Code and OpenCode Desktop sessions; a network-gated bundle
 build/installer smoke; and a realistic deep-review quality result (0.2.0).
 
@@ -201,6 +203,17 @@ with tree/archive digests and verified licenses, 50 real ancestor `base..head`
 ranges assigned, and 62 deterministic whole-repo/range reports collected with
 blank reviewer packets (external to this repository). No human label exists and
 no gate is measured; score status remains `not_measured`.
+
+On 2026-11-25 an internal noise audit of those 62 reports sampled the
+highest-volume categories, fixed six generic false-positive or
+duplicate-emission patterns (test-name fallbacks, internal workspace path
+dependencies, explicit non-security hashes, cookie-jar receivers, trust-flow
+code duplicates and deleted-binary duplicates), and regenerated all reports and
+packets from the same pins (3,407 -> 3,234 report entries). The sample evidence,
+holdout exclusion and remaining noise are recorded in
+`docs/results/deep_review_noise_audit_2026-11-25.md`. This is a noise audit, not
+a quality result: there are still 0 labels, no precision/recall and no measured
+gate.
 
 **Scope**
 

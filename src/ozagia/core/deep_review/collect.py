@@ -729,6 +729,11 @@ def collect(root, *, profile="full", budget_s=60, index=False,
                         "command": {"shell-true", "os-system"},
                         "sql": {"sql-fstring", "sql-concat", "sql-template"},
                         "path": {"path-traversal-open", "path-traversal-send"},
+                        # The code-sink rule already reports eval/exec at the
+                        # same line. Keep the trust-flow candidate only when
+                        # the sink rule did not fire (for example a guarded or
+                        # non-literal call the sink regex does not match).
+                        "code": {"eval", "exec"},
                     }
                     added = 0
                     for item in flows.get("findings", []):

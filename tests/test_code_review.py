@@ -288,6 +288,44 @@ def _hint_repo(tmp_path: Path, text: str = HINT_RETRY) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 
+def test_deleted_binary_file_has_one_deletion_finding(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "assets").mkdir()
+    (repo / "assets" / "logo.bin").write_bytes(b"\x00\x01binary\n")
+    base = _commit(repo, "base")
+    (repo / "assets" / "logo.bin").unlink()
+    head = _commit(repo, "delete binary asset")
+
+    packet = R.review_range(repo, f"{base}..{head}")
+
+    deleted = _findings(packet, ftype="breaking_change", file="assets/logo.bin")
+    binary = _findings(packet, ftype="unknown", file="assets/logo.bin")
+    assert len(deleted) == 1
+    assert binary == []
+
+
+def test_missing_test_recognizes_javascript_and_cpp_test_names(
+        tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "lib").mkdir()
+    (repo / "lib" / "utils.js").write_text(
+        "module.exports = function value() { return 1; };\n", encoding="utf-8")
+    (repo / "test").mkdir()
+    (repo / "test" / "utils.js").write_text(
+        "const utils = require('../lib/utils');\n", encoding="utf-8")
+    base = _commit(repo, "base")
+    (repo / "lib" / "utils.js").write_text(
+        "module.exports = function value() { return 2; };\n", encoding="utf-8")
+    (repo / "lib" / "other.js").write_text(
+        "module.exports = function other() { return 3; };\n", encoding="utf-8")
+    head = _commit(repo, "change js sources")
+
+    packet = R.review_range(repo, f"{base}..{head}")
+
+    assert not _findings(packet, ftype="missing_test", file="lib/utils.js")
+    assert _findings(packet, ftype="missing_test", file="lib/other.js")
+
+
 def test_packet_without_graph_uses_file_level_checks(review_repo):
     packet = R.review_range(
         review_repo["repo"], review_repo["range"], max_file_bytes=1024)
