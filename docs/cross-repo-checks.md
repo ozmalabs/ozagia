@@ -5,9 +5,13 @@ report over the selected existing federation snapshots. It uses only
 explicit links in the anchor's `.ozagia/federation.json`; it does not match
 names or invent relationships. `roots` follows federation selection rules.
 Each result includes qualified endpoints, relation, source manifest and
-provenance. The report also includes each member's state and `member_errors`,
-even when there are no declared links. Invalid declarations become unknown
-checks. Any non-fresh member snapshot makes a comparison's `result` unknown;
+provenance. Endpoints use a member's declared stable id when the anchor
+manifest supplies one, otherwise the derived alias. Invalid, reserved or
+duplicate ids are reported in `member_errors`, and links that use an
+unresolved identity become unknown. The report also includes each member's
+state and `member_errors`, even when there are no declared links. Invalid
+declarations become unknown checks. Any non-fresh member snapshot makes a
+comparison's `result` unknown;
 `evaluated_result` retains the static comparison and `comparison_scope` says
 which attributes were compared. Current federation freshness is conservative
 and may be `unknown` when only Git HEAD was checked. `overall` is `no_checks`

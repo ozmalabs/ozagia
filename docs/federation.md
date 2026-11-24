@@ -27,13 +27,17 @@ loading problems. An absent or invalid graph is reported; the command does not
 repair it.
 
 The anchor's `.ozagia/federation.json` may also declare linked checkouts with
-an optional `members` array. Each item is a relative path resolved from the
-anchor checkout or an absolute directory path:
+an optional `members` array. Each item is either a relative or absolute
+directory string (the original form) or an object with `path` and an optional
+stable `id`:
 
 ```json
 {
   "version": 1,
-  "members": ["../service-b", "~/work/shared-library"],
+  "members": [
+    "../service-b",
+    {"path": "~/work/shared-library", "id": "shared"}
+  ],
   "reference_repos": [
     {"path": "../shared-library"},
     {"path": "../frozen-api", "pin": "0123456789abcdef0123456789abcdef01234567"}
@@ -41,6 +45,19 @@ anchor checkout or an absolute directory path:
   "links": []
 }
 ```
+
+A declared `id` is the member's federation identity and the prefix of every
+qualified key (`shared::sym:...`). It must be 1–64 characters, start with a
+lowercase letter or digit, and use only `[a-z0-9._-]`. `anchor` and `self` are
+reserved. Ids must be unique within a manifest and must not collide with the
+anchor or another member's identity. A bad id is reported under
+`links.member_errors`; the checkout stays listed with a derived identity and an
+`identity_error` instead of being dropped or silently assigned a duplicate.
+Because the manifest stores both path and id, moving a checkout is a two-field
+update and the id keeps the same qualified prefix. Entries without an `id`,
+automatic sibling discovery, reference repositories, and explicit CLI `--repo`
+or MCP `roots` selections keep the deterministic derived alias described under
+identity limits. Explicit roots ignore manifest ids.
 
 When roots are discovered automatically, indexed immediate siblings and these
 declared members are combined. Declared paths remain visible in status when a
@@ -281,15 +298,21 @@ checkout update is allowed.
 
 ## Identity and freshness limits
 
-Node keys are qualified by a checkout ID because local keys such as
-`file:src/main.py` and numeric graph IDs can repeat across snapshots. A
-checkout ID uses the repo name recorded in the snapshot (or the checkout
-directory name when absent); colliding IDs get a stable path-derived suffix. A
-change in federation membership can introduce or remove a collision and change
-these IDs. A qualified key identifies a node in the selected snapshot, not a permanent
-identity across renames or commits. The federation status response must be
-consulted when freshness matters. Search and inspection are limited to stored
-snapshot data; they do not guarantee that a checkout's current working tree is
-indexed. Cross-repository semantic navigation requires explicit identity and
-version evidence (for example compiler-produced SCIP package identities); it
-is not provided by federated lexical search.
+Node keys are qualified by a member identity because local keys such as
+`file:src/main.py` and numeric graph IDs can repeat across snapshots. Each
+status member reports `identity_source`: `"declared"` when the id came from
+the anchor manifest, `"derived"` otherwise. A declared id is stable across
+path moves and should be preferred for stored links. Without one, the derived
+alias uses the repo name recorded in the snapshot (or the checkout directory
+name when absent); colliding derived aliases get a stable path-derived suffix.
+A change in federation membership can introduce or remove a collision and
+change a derived alias. Declared ids do not change silently: an invalid,
+reserved, duplicate, anchor-colliding or member-colliding id is a member error,
+and the affected member falls back to its derived alias with `identity_error`.
+A qualified key identifies a node in the selected snapshot, not a permanent
+identity across commits or graph rebuilds. The federation status response must
+be consulted when freshness matters. Search and inspection are limited to
+stored snapshot data; they do not guarantee that a checkout's current working
+tree is indexed. Cross-repository semantic navigation requires explicit
+identity and version evidence (for example compiler-produced SCIP package
+identities); it is not provided by federated lexical search.

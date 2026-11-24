@@ -287,3 +287,191 @@ def test_explicit_links_are_validated_and_shown_on_incident_nodes(tmp_path: Path
     assert result["cross_repository_edges"][0]["source_manifest"] == str(manifest_path)
     assert result["cross_repository_link_errors"] == report["links"]["errors"]
     assert all(path.read_bytes() == content for path, content in before.items())
+
+
+def test_declared_member_id_survives_path_move_without_writes(tmp_path: Path) -> None:
+    root = tmp_path / "workspace" / "anchor"
+    old = tmp_path / "checkouts-v1" / "service"
+    new = tmp_path / "checkouts-v2" / "service"
+    root.mkdir(parents=True)
+    old.mkdir(parents=True)
+    _snapshot(root, "anchor")
+    _snapshot(old, "service")
+    manifest = root / ".ozagia" / "federation.json"
+
+    def declare(path: Path) -> None:
+        manifest.write_text(json.dumps({
+            "version": 1,
+            "members": [{"path": str(path), "id": "shared-service"}],
+            "links": [{"source": "anchor::file:src/app.py",
+                       "target": "shared-service::sym:src/app.py::widget",
+                       "relation": "uses",
+                       "provenance": "stable identity fixture"}],
+        }), encoding="utf-8")
+
+    declare(old)
+    before = {path: path.read_bytes() for path in
+              (manifest, root / ".ozagia" / "graph.json",
+               old / ".ozagia" / "graph.json")}
+    first = federation.status(root)
+    hits = federation.search(root, "widget")
+    inspected = federation.node(root, "shared-service::file:src/app.py")
+
+    member = next(m for m in first["members"] if m["root"] == str(old.resolve()))
+    assert member["id"] == "shared-service"
+    assert member["identity_source"] == "declared"
+    assert first["links"]["state"] == "ok"
+    assert first["links"]["links"][0]["target"] == (
+        "shared-service::sym:src/app.py::widget")
+    assert any(hit["source"]["id"] == "shared-service" for hit in hits["results"])
+    assert inspected["ok"] and inspected["key"] == "file:src/app.py"
+    assert all(path.read_bytes() == content for path, content in before.items())
+
+    new.parent.mkdir(parents=True)
+    old.rename(new)
+    declare(new)
+    moved = federation.status(root)
+    moved_member = next(m for m in moved["members"] if m["root"] == str(new.resolve()))
+    assert moved_member["id"] == "shared-service"
+    assert moved_member["identity_source"] == "declared"
+    assert moved["links"]["state"] == "ok"
+    assert federation.node(root, "shared-service::file:src/app.py")["ok"]
+
+
+def test_string_members_and_explicit_roots_keep_derived_identity(tmp_path: Path) -> None:
+    root, member = tmp_path / "root", tmp_path / "member"
+    root.mkdir()
+    member.mkdir()
+    _snapshot(root, "root")
+    _snapshot(member, "member")
+    (root / ".ozagia" / "federation.json").write_text(json.dumps({
+        "version": 1, "members": [str(member)], "links": [],
+    }), encoding="utf-8")
+
+    declared = next(m for m in federation.discover(root)["members"]
+                    if m["root"] == str(member.resolve()))
+    assert (declared["id"], declared["identity_source"]) == ("member", "derived")
+
+    # An id declared in the manifest is not applied to an explicit CLI root.
+    (root / ".ozagia" / "federation.json").write_text(json.dumps({
+        "version": 1,
+        "members": [{"path": str(member), "id": "stable-member"}],
+        "links": [],
+    }), encoding="utf-8")
+    explicit = next(m for m in federation.discover(root, roots=[member])["members"]
+                    if m["root"] == str(member.resolve()))
+    assert (explicit["id"], explicit["identity_source"]) == ("member", "derived")
+
+
+def test_invalid_reserved_duplicate_and_colliding_ids_are_member_errors(
+        tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    paths = [tmp_path / name for name in ("a", "b", "c", "d", "e", "f", "g")]
+    root.mkdir()
+    for path in paths:
+        path.mkdir()
+    _snapshot(root, "root")
+    for path in paths:
+        _snapshot(path, path.name)
+    manifest = {
+        "version": 1,
+        "members": [
+            {"path": str(paths[0]), "id": "Bad Id"},
+            {"path": str(paths[1]), "id": "self"},
+            {"path": str(paths[2]), "id": "shared"},
+            {"path": str(paths[3]), "id": "shared"},
+            {"path": str(paths[4]), "id": "root"},
+            {"path": str(paths[5])},
+            {"path": str(paths[6]), "id": "f"},
+            {"path": str(paths[6]), "id": "other"},
+        ],
+        "links": [],
+    }
+    (root / ".ozagia" / "federation.json").write_text(
+        json.dumps(manifest), encoding="utf-8")
+
+    report = federation.status(root)
+
+    assert report["links"]["member_errors"] == [
+        "members[0].id must be 1-64 characters, start with a lowercase letter or "
+        "digit, and use only [a-z0-9._-]",
+        "members[1].id is reserved: self",
+        "members[7] is duplicate or names the anchor",
+        "members[2].id duplicates another member id: shared",
+        "members[3].id duplicates another member id: shared",
+        "members[4].id collides with the anchor identity: root",
+        "members[6].id collides with another member identity: f",
+    ]
+    assert report["links"]["state"] == "partial"
+    assert [m["id"] for m in report["members"]] == [
+        "root", "a", "b", "c", "d", "e", "f", "g",
+    ]
+    assert [m["identity_source"] for m in report["members"]] == ["derived"] * 8
+    errored = {m["root"]: m["identity_error"] for m in report["members"]
+               if "identity_error" in m}
+    assert len(errored) == 6
+    assert errored[str(paths[4].resolve())].startswith("members[4].id collides")
+
+
+def test_declared_id_replaces_suffixed_derived_alias_for_same_label(tmp_path: Path) -> None:
+    root = tmp_path / "workspace" / "anchor"
+    sibling = root.parent / "service"
+    declared = tmp_path / "elsewhere" / "service"
+    root.mkdir(parents=True)
+    sibling.mkdir()
+    declared.mkdir(parents=True)
+    _snapshot(root, "anchor")
+    _snapshot(sibling, "service")
+    _snapshot(declared, "service")
+    (root / ".ozagia" / "federation.json").write_text(json.dumps({
+        "version": 1,
+        "members": [{"path": str(declared), "id": "shared-service"}],
+        "links": [],
+    }), encoding="utf-8")
+
+    report = federation.status(root)
+
+    ids = {member["root"]: (member["id"], member["identity_source"])
+           for member in report["members"]}
+    assert ids[str(declared.resolve())] == ("shared-service", "declared")
+    assert ids[str(sibling.resolve())][0].startswith("service@")
+    assert ids[str(sibling.resolve())][1] == "derived"
+    assert len({identifier for identifier, _ in ids.values()}) == 3
+
+
+def test_member_object_rejects_unknown_fields_and_keeps_other_entries(tmp_path: Path) -> None:
+    root = tmp_path / "workspace" / "root"
+    member = tmp_path / "elsewhere" / "member"
+    root.mkdir(parents=True)
+    member.mkdir(parents=True)
+    _snapshot(root, "root")
+    _snapshot(member, "member")
+    (root / ".ozagia" / "federation.json").write_text(json.dumps({
+        "version": 1,
+        "members": [{"path": str(member), "id": "member", "extra": True}],
+        "links": [],
+    }), encoding="utf-8")
+
+    report = federation.status(root)
+
+    assert [m["id"] for m in report["members"]] == ["root"]
+    assert report["links"]["member_errors"] == [
+        "members[0] must contain only path and optional id",
+    ]
+
+
+def test_unresolvable_member_path_is_a_member_error(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    _snapshot(root, "root")
+    (root / ".ozagia" / "federation.json").write_text(json.dumps({
+        "version": 1,
+        "members": [{"path": "bad\u0000path", "id": "bad-path"}],
+        "links": [],
+    }), encoding="utf-8")
+
+    report = federation.status(root)
+
+    assert [m["id"] for m in report["members"]] == ["root"]
+    assert report["links"]["member_errors"][0].startswith(
+        "members[0] cannot resolve path: ValueError:")

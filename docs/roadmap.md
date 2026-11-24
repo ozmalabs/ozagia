@@ -88,7 +88,7 @@ breadth third, live operations last**. New surface area is not a release theme.
 | `2026-11-17_session-profile-instrumentation.md` | Implemented in part | Core store, CLI, daemon events, OpenCode subscriber and TUI slot exist; Codex/Kiro/Claude hook capture exists offline | Live host verification, status/console rows for host lifecycle counters | 0.3 |
 | `2026-11-18_bounded_graph_prefetch.md` | Offline primitives implemented; MCP integration not adopted for 0.3 | Offline planner, safety checks and ledger implemented (`core/prefetch.py`); the 2026-11-25 decision keeps them unwired because the measured benefit is small and the lifecycle risk is high | Revisit only with larger-repository measurements and the acceptance tests | 0.3 decision |
 | `2026-11-17_opencode_intent_graph_retrieval.md` | Stages A–C done; D partial; E initial offline check | Matches | Broader shell/task intent linking, richer paired and end-to-end evaluation | 0.4 |
-| `2026-11-17_federated_graphs.md` | Base delivery plus the declared-dependency slice | Discovery, explicit members, qualified identities, status/search/node inspection, cross-repo checks and version-aware dependency links from declared manifests landed | Persistent identity, incremental member cache/freshness certification, SCIP identities, org manifests/access control | 0.4 |
+| `2026-11-17_federated_graphs.md` | Base delivery plus the declared-dependency and stable-identity slices | Discovery, explicit members, qualified identities, status/search/node inspection, cross-repo checks, version-aware dependency links from declared manifests, and stable declared member ids landed | Incremental member cache/freshness certification, SCIP identities, org manifests/access control | 0.4 |
 | `2026-11-16_sre_iac_extensions.md` | Offline workstreams implemented; live remains | Matches | Live cloud/cluster providers, semantic IaC validation, broader config families, real-host relay matrix, remote background services | 0.5 |
 | `2026-11-16_iac_cloud_context.md`, `2026-11-16_runtime_services_tunnels.md` | Implemented offline | Opt-in source-only IaC context and the offline runtime/service/tunnel layer are implemented; live remote operations are not | Live cloud/cluster state, remote service ownership, measured savings | 0.5 |
 | `2026-11-16_ui_and_agent_features.md` | Waves merged | Matches; "Not yet" list still open, except project-model config migration, which landed in 0.1.5 | Live Desktop smoke, live model/provider adapters, live security tool matrix/DAST | 0.1.5 / 0.3 |
@@ -384,7 +384,8 @@ real fixtures, provenance-preserving and still opt-in.
 - Federation follow-ons:
   - version-aware cross-repository relationships from declared dependencies or
     precise SCIP identities (no name-matching inference);
-  - persistent identities across membership changes;
+  - persistent identities across membership changes through declared member
+    ids;
   - incremental member caching and freshness certification;
   - organization manifests and access control boundaries.
 - Complete model API M5:
@@ -414,10 +415,15 @@ landed as declared dependency links: `ozagia federation check` and
 `federation_check` report a `dependency_links` section built from Python, Rust,
 Node and Go manifests in `core/dependency_links.py`, with fixture tests for
 satisfied, mismatched, unknown, ambiguous and unresolved cases. It is
-deliberately direct-manifest only. Persistent identities across membership
-changes, incremental member caching/freshness certification, precise SCIP
-package identities, and organization manifests/access control remain open, as
-does the matched-arm model-API evaluation.
+deliberately direct-manifest only. A following slice added declared stable
+member ids in `.ozagia/federation.json` (`{"path": ..., "id": ...}`), used as
+the qualified-key prefix by status, search, node, links, check and dependency
+links, with derived identities for unannotated and explicit roots. Invalid,
+reserved, duplicate and colliding ids are reported as member errors; a declared
+id is preserved when a checkout path moves. Incremental member
+caching/freshness certification, precise SCIP package identities, and
+organization manifests/access control remain open, as does the matched-arm
+model-API evaluation.
 
 **Exit criteria**
 

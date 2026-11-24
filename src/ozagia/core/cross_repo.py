@@ -75,11 +75,14 @@ def check(root: str | Path | None = None,
             "id": item["alias"], "name": item["label"],
             "root": str(item["root"]), "snapshot": str(item["snapshot_path"]),
             "state": state, "detail": detail,
+            "identity_source": item.get("identity_source", "derived"),
             "head": item["attrs"].get("head"),
             "generated_at": item["attrs"].get("generated_at"),
             "nodes": len((item["snapshot"] or {}).get("nodes", [])),
             "edges": len((item["snapshot"] or {}).get("edges", [])),
         }
+        if item.get("identity_error"):
+            public_member["identity_error"] = item["identity_error"]
         if reference:
             public_member.update({"reference": True, "pin": reference.get("pin"),
                                   "sync_state": sync_state, "sync": sync})

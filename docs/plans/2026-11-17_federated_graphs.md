@@ -1,19 +1,23 @@
 # Federated repository graphs
 
 Status: base delivery implemented, verified 2026-11-24; first version-aware
-dependency-link slice added 2026-11-25. Bounded discovery, explicit members,
-qualified identities, snapshot provenance, read-only status, search and
-node/edge inspection are in `core/federation.py`, `tests/test_federation.py`,
+dependency-link slice added 2026-11-25; stable declared member ids added
+2026-11-25. Bounded discovery, explicit members, qualified identities,
+snapshot provenance, read-only status, search and node/edge inspection are in
+`core/federation.py`, `tests/test_federation.py`,
 `tests/test_federation_surface.py` and
 [`docs/federation.md`](../federation.md); declared cross-repository links and
 checks are in `core/cross_repo.py` and
 [`docs/cross-repo-checks.md`](../cross-repo-checks.md). Declared package
 dependencies are matched across members by `core/dependency_links.py` and
 reported under `dependency_links`, with fixture tests in
-`tests/test_dependency_links.py`. The remaining follow-on work in the last
-section—precise SCIP identities, persistent identities across membership
-changes, incremental member caching, and organization manifests/access
-control—is not implemented.
+`tests/test_dependency_links.py`. Manifest members may carry a bounded `id`
+that becomes the qualified-key prefix for status, search, node, links, check
+and dependency links; unannotated members and explicit roots keep derived
+identities. Invalid, reserved, duplicate and colliding ids are member errors,
+and a declared id survives a checkout path move. The remaining follow-on work
+in the last section—precise SCIP identities, incremental member caching, and
+organization manifests/access control—is not implemented.
 
 ## Objective
 
@@ -33,9 +37,11 @@ Repository-local keys and integer IDs collide between snapshots. Qualify each no
 
 Version-aware cross-repository relationships are partly delivered: declared
 Python, Rust, Node and Go dependencies are matched by package name and compared
-against a provider's declared version. Precise SCIP identities, manifest/lock
-resolution beyond direct declarations, persistent identities across membership
-changes, incremental caching and organization-wide manifests/access control
-remain. The implementation supports manually declared provenance-bearing links
-and declared dependency links, but does not infer semantic relationships from
-federated search.
+against a provider's declared version. Declared stable member ids are also
+delivered: a manifest member may declare a bounded identity that keys qualified
+names and stored links, independent of its current checkout path. Precise SCIP
+identities, manifest/lock resolution beyond direct declarations, incremental
+member caching and organization-wide manifests/access control remain. The
+implementation supports manually declared provenance-bearing links and declared
+dependency links, but does not infer semantic relationships from federated
+search.

@@ -862,10 +862,13 @@ def analyze(members: Iterable[dict[str, Any]],
             "id": alias,
             "root": str(root),
             "state": member_state,
+            "identity_source": item.get("identity_source", "derived"),
             "manifests": collected["manifests"],
             "skipped": collected["skipped"],
             "notes": collected["notes"],
         })
+        if item.get("identity_error"):
+            member_reports[-1]["identity_error"] = item["identity_error"]
         notes.extend(f"{alias}: {note}" for note in collected["notes"])
         skipped.extend(collected["skipped"])
     links: list[dict[str, Any]] = []

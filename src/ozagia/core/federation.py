@@ -15,6 +15,10 @@ Optional declared cross-checkout links live in the consumer's
 ``.ozagia/federation.json`` as ``{"version": 1, "links": [{"source":
 "<checkout-id>::<node-key>", "target": "...", "relation": "...",
 "provenance": "..."}]}``; links are exposed only when both endpoints resolve.
+Declared members accept either a directory string or
+``{"path": "...", "id": "<stable-id>"}``. A declared id is the qualified-key
+prefix and survives a path move that keeps the declaration; entries without an
+id and explicit ``roots`` keep a deterministic derived alias.
 """
 from __future__ import annotations
 
@@ -36,6 +40,11 @@ _REFERENCE_SYNC_PENDING: dict[Path, list[dict[str, Any]]] = {}
 _REFERENCE_SYNC_THREADS: dict[Path, threading.Thread] = {}
 _REFERENCE_SYNC_LOCK = threading.Lock()
 _REFERENCE_SYNC_CURSOR: dict[Path, int] = {}
+
+# A declared member identity is the qualified-key prefix. It must stay short,
+# lowercase and easy to reference from stored links.
+_MEMBER_ID_PATTERN = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}\Z")
+_RESERVED_MEMBER_IDS = frozenset({"anchor", "self"})
 
 
 @contextmanager
@@ -268,7 +277,8 @@ def sync_references(root: str | Path | None = None,
             "root": str(selected), "references": results}
 
 
-def _candidate_roots(root: Path, roots: Iterable[str | Path] | None) -> list[Path]:
+def _candidate_roots(root: Path, roots: Iterable[str | Path] | None,
+                     declared: Iterable[Path] = ()) -> list[Path]:
     candidates = [root]
     if roots is None:
         try:
@@ -277,7 +287,6 @@ def _candidate_roots(root: Path, roots: Iterable[str | Path] | None) -> list[Pat
         except OSError:
             siblings = []
         candidates.extend(sorted(siblings, key=lambda p: p.name.casefold()))
-        declared, _errors = _manifest_members(root)
         references, _reference_errors = _reference_specs(root)
         candidates.extend(declared)
         candidates.extend(spec["root"] for spec in references)
@@ -293,8 +302,26 @@ def _candidate_roots(root: Path, roots: Iterable[str | Path] | None) -> list[Pat
     return result
 
 
-def _manifest_members(root: Path) -> tuple[list[Path], list[str]]:
-    """Read explicitly linked checkout paths from the anchor manifest."""
+def _member_id_error(value: Any) -> str | None:
+    """Return why a declared member id is unusable, or None when it is valid."""
+    if not isinstance(value, str) or not value:
+        return "must be a non-empty string"
+    if value in _RESERVED_MEMBER_IDS:
+        return f"is reserved: {value}"
+    if not _MEMBER_ID_PATTERN.fullmatch(value):
+        return ("must be 1-64 characters, start with a lowercase letter or digit, "
+                "and use only [a-z0-9._-]")
+    return None
+
+
+def _manifest_members(root: Path) -> tuple[list[dict[str, Any]], list[str]]:
+    """Read declared member checkouts and their optional stable identities.
+
+    Entries are either a directory string (the original form) or an object
+    ``{"path": "...", "id": "..."}``. Relative paths resolve from the anchor.
+    An invalid, reserved or duplicated id is reported as a member error; the
+    checkout stays visible with a derived identity rather than disappearing.
+    """
     path = state_path(root, "federation.json")
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
@@ -309,20 +336,69 @@ def _manifest_members(root: Path) -> tuple[list[Path], list[str]]:
         return [], []
     values = raw["members"]
     if not isinstance(values, list):
-        return [], ["members must be an array of directory strings"]
-    members: list[Path] = []
+        return [], ["members must be an array of directory strings or member objects"]
+    members: list[dict[str, Any]] = []
     errors: list[str] = []
+    seen: set[Path] = set()
+    by_index: dict[int, dict[str, Any]] = {}
+    ids: dict[str, list[int]] = {}
     for index, value in enumerate(values):
-        if not isinstance(value, str) or not value.strip():
+        member_id: Any = None
+        if isinstance(value, str):
+            name: Any = value
+        elif isinstance(value, dict):
+            if set(value) - {"path", "id"}:
+                errors.append(
+                    f"members[{index}] must contain only path and optional id")
+                continue
+            name = value.get("path")
+            member_id = value.get("id")
+            if not isinstance(name, str) or not name.strip():
+                errors.append(
+                    f"members[{index}].path must be a non-empty directory string")
+                continue
+        else:
             errors.append(f"members[{index}] must be a non-empty directory string")
             continue
-        candidate = Path(value).expanduser()
-        if not candidate.is_absolute():
-            candidate = root / candidate
-        resolved = candidate.resolve()
-        members.append(resolved)
+        if not isinstance(name, str) or not name.strip():
+            errors.append(f"members[{index}] must be a non-empty directory string")
+            continue
+        try:
+            candidate = Path(name).expanduser()
+            if not candidate.is_absolute():
+                candidate = root / candidate
+            resolved = candidate.resolve()
+        except (OSError, RuntimeError, ValueError) as exc:
+            errors.append(f"members[{index}] cannot resolve path: "
+                          f"{type(exc).__name__}: {exc}")
+            continue
+        if resolved == root or resolved in seen:
+            errors.append(f"members[{index}] is duplicate or names the anchor")
+            continue
+        seen.add(resolved)
+        record: dict[str, Any] = {"root": resolved, "id": None, "index": index,
+                                  "identity_error": None}
+        if member_id is not None:
+            message = _member_id_error(member_id)
+            if message:
+                errors.append(f"members[{index}].id {message}")
+                record["identity_error"] = f"members[{index}].id {message}"
+            else:
+                record["id"] = member_id
+                ids.setdefault(member_id, []).append(index)
+        members.append(record)
+        by_index[index] = record
         if resolved.exists() and not resolved.is_dir():
             errors.append(f"members[{index}] is not a directory: {resolved}")
+    for member_id, indexes in ids.items():
+        if len(indexes) < 2:
+            continue
+        for index in indexes:
+            message = f"members[{index}].id duplicates another member id: {member_id}"
+            errors.append(message)
+            record = by_index[index]
+            record["id"] = None
+            record["identity_error"] = message
     return members, errors
 
 
@@ -337,27 +413,39 @@ def _members(root: str | Path | None, roots: Iterable[str | Path] | None
     sync_by_root = {Path(item["root"]).resolve(): item for item in sync_results
                     if item.get("root")}
     entries: list[dict[str, Any]] = []
-    declared_roots, _ = _manifest_members(selected)
+    declared_records, _ = _manifest_members(selected)
+    declared_roots = [record["root"] for record in declared_records]
+    declared_set = set(declared_roots)
+    # Explicit roots always replace the manifest, so only the manifest mode
+    # carries a declared identity.
+    declared = ({record["root"]: record for record in declared_records}
+                if roots is None else {})
     reference_roots = set(references)
-    for path in _candidate_roots(selected, roots):
-        if (roots is None and not path.is_dir() and path not in declared_roots
+    for path in _candidate_roots(selected, roots, declared_roots):
+        if (roots is None and not path.is_dir() and path not in declared_set
                 and path not in reference_roots):
             continue
         snapshot, error = _read_snapshot(path, selected)
         # Automatic discovery includes only immediate siblings with a graph;
         # explicit roots are retained even when their snapshot is unavailable.
         if (roots is None and path != selected and error
-                and path not in declared_roots and path not in reference_roots):
+                and path not in declared_set and path not in reference_roots):
             continue
         attrs = _repo_attrs(snapshot)
         label = str(attrs.get("name") or path.name or "repo")
+        record = declared.get(path)
         entries.append({"root": path, "snapshot_path": _state_path(path, selected),
                         "snapshot": snapshot, "error": error,
                         "label": label, "attrs": attrs,
                         "reference": path in references,
                         "pin": references.get(path, {}).get("pin"),
-                        "sync": sync_by_root.get(path)})
-    # Alias collisions are resolved deterministically with an identity suffix.
+                        "sync": sync_by_root.get(path),
+                        "declared_index": record["index"] if record else None,
+                        "declared_id": record["id"] if record else None,
+                        "identity_error": record["identity_error"] if record else None})
+    # Derived aliases resolve label collisions deterministically with a
+    # path-derived suffix. They remain the fallback when no usable id is
+    # declared.
     counts: dict[str, int] = {}
     for item in entries:
         base = re.sub(r"[^A-Za-z0-9._-]+", "-", item["label"]).strip("-") or "repo"
@@ -367,9 +455,36 @@ def _members(root: str | Path | None, roots: Iterable[str | Path] | None
         base = item["base_alias"]
         if counts[base.casefold()] > 1:
             suffix = hashlib.sha256(str(item["root"]).encode()).hexdigest()[:8]
-            item["alias"] = f"{base}@{suffix}"
+            item["derived_alias"] = f"{base}@{suffix}"
         else:
-            item["alias"] = base
+            item["derived_alias"] = base
+    # A declared id must not shadow the anchor or another member's identity.
+    # Rejected declarations fall back to the derived alias and stay reported.
+    derived_owners = {item["derived_alias"].casefold(): item["root"]
+                      for item in entries}
+    anchor = entries[0]["derived_alias"] if entries else None
+    for item in entries:
+        wanted = item["declared_id"]
+        if not wanted:
+            item["alias"] = item["derived_alias"]
+            item["identity_source"] = "derived"
+            continue
+        index = item["declared_index"]
+        if anchor is not None and wanted.casefold() == anchor.casefold():
+            message = (f"members[{index}].id collides with the anchor identity: "
+                       f"{anchor}")
+        else:
+            owner = derived_owners.get(wanted.casefold())
+            if owner is not None and owner != item["root"]:
+                message = (f"members[{index}].id collides with another member "
+                           f"identity: {wanted}")
+            else:
+                item["alias"] = wanted
+                item["identity_source"] = "declared"
+                continue
+        item["alias"] = item["derived_alias"]
+        item["identity_source"] = "derived"
+        item["identity_error"] = message
     return entries
 
 
@@ -404,9 +519,12 @@ def _public_member(item: dict[str, Any]) -> dict[str, Any]:
     out = {"id": item["alias"], "name": item["label"],
             "root": str(item["root"]), "snapshot": str(item["snapshot_path"]),
             "state": state, "detail": detail,
+            "identity_source": item.get("identity_source", "derived"),
             "head": attrs.get("head"), "generated_at": attrs.get("generated_at"),
             "nodes": len((item["snapshot"] or {}).get("nodes", [])),
             "edges": len((item["snapshot"] or {}).get("edges", []))}
+    if item.get("identity_error"):
+        out["identity_error"] = item["identity_error"]
     if item.get("reference"):
         out["reference"] = True
         out["pin"] = item.get("pin")
@@ -460,6 +578,9 @@ def _declared_links(root: Path, members: list[dict[str, Any]]) -> dict[str, Any]
         valid.append({"source": source, "target": target, "type": relation,
                       "provenance": provenance, "source_manifest": str(path)})
     _declared, member_errors = _manifest_members(root)
+    identity_errors = [item["identity_error"] for item in members
+                       if item.get("identity_error")]
+    member_errors = list(dict.fromkeys([*member_errors, *identity_errors]))
     return {"path": str(path), "state": "ok" if not errors and not member_errors else "partial",
             "links": valid, "errors": errors, "member_errors": member_errors}
 

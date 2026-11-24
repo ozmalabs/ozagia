@@ -42,6 +42,31 @@ def _links(report: dict) -> dict[str, dict]:
     return links
 
 
+def test_declared_member_ids_are_used_in_dependency_links(tmp_path, monkeypatch):
+    consumer, provider = tmp_path / "consumer", tmp_path / "provider"
+    _member(consumer)
+    _member(provider)
+    _pyproject(consumer, "consumer", "1.0.0", ["shared-python>=1"])
+    _pyproject(provider, "shared-python", "1.4.0")
+    (consumer / ".ozagia" / "federation.json").write_text(json.dumps({
+        "version": 1,
+        "members": [{"path": str(provider), "id": "shared-python-src"}],
+        "links": [],
+    }), encoding="utf-8")
+    monkeypatch.setattr(federation, "_freshness", lambda _: ("fresh", None))
+
+    report = cross_repo.check(consumer)
+
+    link = _links(report)["shared-python"]
+    assert link["consumer"] == "consumer"
+    assert link["provider"] == "shared-python-src"
+    assert link["status"] == "satisfied"
+    member = next(m for m in report["dependency_links"]["members"]
+                  if m["root"] == str(provider.resolve()))
+    assert (member["id"], member["identity_source"]) == (
+        "shared-python-src", "declared")
+
+
 def test_supported_manifests_produce_satisfied_links(tmp_path, monkeypatch):
     python_consumer = tmp_path / "python-consumer"
     python_provider = tmp_path / "python-provider"
