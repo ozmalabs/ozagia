@@ -61,6 +61,10 @@
                                [--base REV] [--timeout-s S]
                                                   (read-only goal/task
                                                   preflight; docs/task_preflight.md)
+    ozagia overview|shape [--root R] [--json | --markdown] [--out PATH]
+                    [--budget-s S] [--max-modules N] [--check PATH]
+                                                  (one deterministic reference
+                                                  page; docs/repo_shape.md)
     ozagia --version
 
 `daemon`, `bg`, `mcp`, `eval` and `check` pass every argument after their name to
@@ -1857,6 +1861,8 @@ def build_parser() -> argparse.ArgumentParser:
     _capabilities_parser(sub)
     from ozagia.task_preflight_cli import add_parser as _task_preflight_parser
     _task_preflight_parser(sub)
+    from ozagia.overview_cli import add_parser as _overview_parser
+    _overview_parser(sub)
     from ozagia.languages_cli import add_parser as _languages_parser
     _languages_parser(sub)
     from ozagia.supply_chain_cli import add_parser as _supply_chain_parser
@@ -1887,8 +1893,8 @@ def _repo_map_budget(value: str) -> int:
 
 _COMMANDS = frozenset({"index", "agent", "install", "who", "replace",
                        "review-repo", "goal", "capabilities", "profile-run",
-                       "task-preflight", "languages", "supply-chain",
-                       "migration",
+                       "task-preflight", "overview", "shape", "languages",
+                       "supply-chain", "migration",
                        *DELEGATES})
 # Agent options that may lead a bare `ozagia ...` (the TUI).
 _AGENT_FLAGS = frozenset({"--research", "--mcp", "--model", "-m", "--workdir",
@@ -1983,6 +1989,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "task-preflight":
         from ozagia.task_preflight_cli import run as _task_preflight_run
         return _task_preflight_run(args)
+    if args.command in {"overview", "shape"}:
+        from ozagia.overview_cli import run as _overview_run
+        return _overview_run(args)
     if args.command == "languages":
         from ozagia.languages_cli import run as _languages_run
         return _languages_run(args)

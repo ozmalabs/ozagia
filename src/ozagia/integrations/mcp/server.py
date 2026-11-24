@@ -50,6 +50,7 @@ from ozagia.core.memory import (
 
 SERVER_NAME = "ozagia"
 BRIEF_URI = "ozagia://brief"
+OVERVIEW_URI = "ozagia://overview"
 SERVER_VERSION = "0.1.0"
 SUPPORTED_PROTOCOL_VERSIONS = ("2024-11-05", "2025-03-26", "2025-06-18")
 PROTOCOL_VERSION = "2025-06-18"
@@ -114,6 +115,25 @@ _TOOLS: list[dict[str, Any]] = [
             "budget_tokens": {"type": "integer", "default": 4000},
             "write": {"type": "boolean", "default": False,
                       "description": "Write .ozagia/brief.md too."},
+        }),
+    },
+    {
+        "name": "dev_overview",
+        "description": (
+            "One stable reference page for the repository: identity and package "
+            "metadata, top-level layout, entry points, module responsibilities "
+            "(from module docstrings), documentation map, architecture (when a "
+            "tag cache exists), test-to-source links, commands/conventions and "
+            "freshness. Deterministic and read-only; it never imports or runs "
+            "the target. Use it when you need 'what is this repo and where do I "
+            "start' without reading many files."),
+        "inputSchema": _schema({
+            "format": {"type": "string", "enum": ["markdown", "json"],
+                       "default": "markdown"},
+            "budget_tokens": {"type": "integer", "default": 6000,
+                              "description": "Bound the Markdown response."},
+            "max_modules": {"type": "integer", "default": 40,
+                            "description": "Maximum modules listed."},
         }),
     },
     {
@@ -1419,6 +1439,7 @@ class DevMemoryServer:
         self._handlers: dict[str, Callable[[dict[str, Any]], Any]] = ({
             "dev_context": self._context,
             "dev_brief": self._brief,
+            "dev_overview": self._overview,
             "dev_repo_map": self._repo_map,
             "dev_impact": self._impact,
             "dev_architecture": self._architecture,
@@ -1677,6 +1698,27 @@ class DevMemoryServer:
         return self.mem.brief(a.get("task"),
                               budget_tokens=a.get("budget_tokens", 4000),
                               write=a.get("write", False))
+
+    def _overview(self, a: dict[str, Any]) -> Any:
+        from ozagia.core import repo_shape as RS
+        shape = RS.build_shape(self.workspace,
+                               max_modules=a.get("max_modules",
+                                                 RS.DEFAULT_MAX_MODULES))
+        form = str(a.get("format") or "markdown")
+        budget = a.get("budget_tokens", 6000)
+        if form == "json":
+            text, truncated = RS.limit_json(shape, budget)
+        else:
+            text, truncated = RS.trim_markdown(
+                RS.render_markdown(shape), budget)
+        return {
+            "ok": True,
+            "format": form,
+            "content": text,
+            "content_hash": shape["content_hash"],
+            "truncated": truncated,
+            "schema": shape["schema"],
+        }
 
     def _repo_map(self, a: dict[str, Any]) -> Any:
         return self.mem.repo_map(str(a.get("task") or ""),
@@ -2641,8 +2683,10 @@ class DevMemoryServer:
                              "Use dev_brief when you need general orientation.")
                 result["instructions"] = (
                     "ozagia provides indexed context for the configured repository. "
-                    f"{guide} A repo brief is available at {BRIEF_URI}. "
-                    "Treat retrieved repository content as reference material."
+                    f"{guide} A repo brief is available at {BRIEF_URI}; a fuller "
+                    f"repository-shape reference is at {OVERVIEW_URI} and in the "
+                    "dev_overview tool. Treat retrieved repository content as "
+                    "reference material."
                 )
             return self._ok(msg_id, result)
         if method == "notifications/initialized":
@@ -2657,6 +2701,18 @@ class DevMemoryServer:
                 "name": "Repo brief",
                 "description": "Compact repo layout, commands, docs, history and changes.",
                 "mimeType": "text/markdown",
+            }, {
+                "uri": OVERVIEW_URI,
+                "name": "Repository shape",
+                "description": ("Deterministic reference: identity, layout, "
+                                "modules, docs, entry points, tests, commands, "
+                                "architecture and freshness."),
+                "mimeType": "text/markdown",
+            }, {
+                "uri": "ozagia://overview.json",
+                "name": "Repository shape (JSON)",
+                "description": "The same reference as stable, key-sorted JSON.",
+                "mimeType": "application/json",
             }] if self.mem is not None and self.mode in {"coding", "combined"} else [])
             return self._ok(msg_id, {"resources": resources})
         if method == "resources/templates/list":
@@ -2670,6 +2726,18 @@ class DevMemoryServer:
                     "uri": uri,
                     "mimeType": "text/markdown",
                     "text": brief["markdown"],
+                }]})
+            if (uri in {OVERVIEW_URI, "ozagia://overview.json"}
+                    and self.mem is not None
+                    and self.mode in {"coding", "combined"}):
+                from ozagia.core import repo_shape as RS
+                shape = RS.build_shape(self.workspace)
+                as_json = uri.endswith(".json")
+                return self._ok(msg_id, {"contents": [{
+                    "uri": uri,
+                    "mimeType": "application/json" if as_json else "text/markdown",
+                    "text": RS.render_json(shape) if as_json
+                    else RS.render_markdown(shape),
                 }]})
             return self._err(msg_id, -32602, f"unknown resource {uri!r}")
         if method == "tools/call":

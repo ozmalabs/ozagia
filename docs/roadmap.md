@@ -30,8 +30,8 @@ The 0.1.x line delivered the core platform and then Rust parity:
 | Federation | Sibling/explicit-member snapshots, qualified identities, read-only cross-repo search and declared links |
 | Model interface | Contracts, read-only self-graph/capabilities, task preflight and evidence store, task profile/critical path, model-facing maps (M3), a bounded structured edit/interaction path (M4), an offline prefetch planner/ledger, and partial M5 linked/research/action joins with optional Ocelot research projection; M6 has an offline harness and one live run invalid for the map arm |
 
-The capability catalogue currently declares **102 capabilities across 14
-domains and 156 surfaces** (`ozagia capabilities list --json`). That number is
+The capability catalogue currently declares **103 capabilities across 14
+domains and 165 surfaces** (`ozagia capabilities list --json`). That number is
 an inventory, not a maturity claim.
 
 ### What the evidence actually supports
@@ -443,6 +443,13 @@ real fixtures, provenance-preserving and still opt-in.
     unknowns.
 - Expand shell/task intent linking and richer paired usefulness evaluation from
   the OpenCode intent plan.
+- Orientation reference: one deterministic repository-shape page
+  (`ozagia overview`, alias `shape`; MCP `dev_overview`) that composes identity,
+  package metadata, bounded layout, module docstrings, entry points, a
+  documentation map, test links and commands without importing or running the
+  target. A separate observed environment block keeps git/snapshot/cache facts
+  out of the stable hash and `--check`. For this repository it is generated as
+  `REPO_SHAPE.md`.
 
 **Implementation status (2026-11-25):** the first version-aware federation slice
 landed as declared dependency links: `ozagia federation check` and
@@ -458,6 +465,19 @@ id is preserved when a checkout path moves. Incremental member
 caching/freshness certification, precise SCIP package identities, and
 organization manifests/access control remain open, as does the matched-arm
 model-API evaluation.
+
+The orientation reference also landed as an explicitly bounded first slice:
+`core/repo_shape.py` composes the existing README/package metadata, a bounded
+walk, Python AST module docstrings, `[project.scripts]`, the read-only tag-cache
+architecture report, graph test links and Markdown commands. The hash and
+`--check` cover only the stable checkout/source projection; git HEAD, snapshot
+state/counts/time and tag-cache availability are shown in a clearly labelled
+"observed; not checked" environment block. The CLI writes only on an explicit
+`--out` (atomic), and MCP exposes `dev_overview` plus `ozagia://overview`
+resources. It deliberately does not claim a model-written summary, full
+documentation-to-code traceability beyond cheap links/path mentions, or
+freshness beyond HEAD and the recorded snapshot head. Those, plus richer usage
+examples and a larger-repository budget study, remain follow-on work.
 
 **Exit criteria**
 

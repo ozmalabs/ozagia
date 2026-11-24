@@ -9,6 +9,9 @@ Status: alpha. The library, the MCP server, the OpenCode capture plugin and
 the agent harnesses work; the Claude Code, Codex and Kiro hooks are implemented
 but untested against a live host. Measurements are in `docs/results/`; plans in `docs/plans/`; release sequencing
 and the current plan audit in [`docs/roadmap.md`](docs/roadmap.md).
+A generated reference for this repository's own shape (layout, modules, docs,
+entry points and commands) is [`REPO_SHAPE.md`](REPO_SHAPE.md), produced by
+`ozagia overview` ([docs/repo_shape.md](docs/repo_shape.md)).
 
 The [Ozma protocol research](docs/research/ozma_protocol/README.md) is
 preserved here as a design basis for Ozagia's future model interfaces. Its
