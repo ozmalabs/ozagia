@@ -191,9 +191,10 @@ precedence over declarations; the two are never merged.
 
 It introspects, without side effects: `pyproject.toml` scripts and entry
 points (declared, not imported); `build_parser()` walked without running a
-command; both MCP surfaces — full `_TOOLS` + `DevMemoryServer._handlers` and
-graph `GRAPH_TOOLS` + `GraphSurface.handlers` — read from AST without
-instantiating a server, graph surface or snapshot; daemon `op` names parsed
+command; the MCP surfaces — full `_TOOLS` + `DevMemoryServer._handlers`, graph
+`GRAPH_TOOLS` + `GraphSurface.handlers`, and engine `ENGINE_TOOLS` +
+`GraphEngine.handle` — read from AST without instantiating a server, graph
+surface, engine or snapshot; daemon `op` names parsed
 from the docstring with the module's `PROTOCOL_VERSION`; and
 `settings.schema()`, a read-only registry.
 
@@ -201,9 +202,10 @@ Each surface records `id`, `kind` (`cli`/`mcp`/`daemon`/`entrypoint`/
 `settings`/`adapter`), `name`, `source`, `version`, `declared`, `observed` and
 `coverage`. CLI and settings entries use `details.observation="runtime"` and
 `coverage="observed"`. Full MCP entries use `mcp:tool:<name>`, graph entries
-use `mcp:graph:<name>`, both carry `details.surface` (`full`/`graph`) and
-`details.observation="static-ast"`, and both are `coverage="unknown"` because
-the runtime map depends on mode and surface selection. Daemon entries use the
+use `mcp:graph:<name>`, and the engine entry uses `mcp:tool:graph`; they carry
+`details.surface` (`full`/`graph`/`engine`) and
+`details.observation="static-ast"`, and are `coverage="unknown"` because the
+runtime map depends on mode and surface selection. Daemon entries use the
 protocol version (currently `"1"`). `gaps.declared_not_observed` and
 `gaps.observed_not_declared` report contradictory or missing surfaces;
 `gaps.unverified` records declared surfaces that could not be cross-checked

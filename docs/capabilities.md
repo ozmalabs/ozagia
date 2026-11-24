@@ -54,7 +54,7 @@ toolchain and status declarations are exact.
 `src/ozagia/core/self_graph.py` joins the catalogue to observations. It reads,
 without side effects:
 
-* the generated inventory: CLI parser walk, both MCP tool lists and handler maps
+* the generated inventory: CLI parser walk, all MCP tool lists and handler maps
   (read by AST, no server instantiated), the daemon protocol docstring,
   settings registry, entry points and read-only adapter declarations;
 * the static toolchain registry (`core.toolchain.registry()`, data only);

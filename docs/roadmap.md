@@ -28,10 +28,10 @@ The 0.1.x line delivered the core platform and then Rust parity:
 | Research | Sources, references, claims, evidence, synthesis, theory, PDF/TEI, citation graph, manuscript bundles |
 | Infrastructure | Source-only Terraform/Kubernetes/Helm/CloudFormation/Pulumi/GitOps graph, offline IaC checks, operations graph, runtime services/relays/tunnels behind explicit gates |
 | Federation | Sibling/explicit-member snapshots, qualified identities, read-only cross-repo search and declared links |
-| Model interface | Contracts, read-only self-graph/capabilities, task preflight and evidence store, task profile/critical path, model-facing maps (M3), a bounded structured edit/interaction path (M4), an offline prefetch planner/ledger, and partial M5 linked/research/action joins with optional Ocelot research projection; M6 has an offline harness and one live run invalid for the map arm |
+| Model interface | Contracts, read-only self-graph/capabilities, task preflight and evidence store, task profile/critical path, model-facing maps (M3), a bounded structured edit/interaction path (M4), an offline prefetch planner/ledger, a stateful compact graph-engine prototype with synchronous bounded speculation, and partial M5 linked/research/action joins with optional Ocelot research projection; M6 has an offline harness and one live run invalid for the map arm |
 
-The capability catalogue currently declares **103 capabilities across 14
-domains and 165 surfaces** (`ozagia capabilities list --json`). That number is
+The capability catalogue currently declares **104 capabilities across 14
+domains and 166 surfaces** (`ozagia capabilities list --json`). That number is
 an inventory, not a maturity claim.
 
 ### What the evidence actually supports
@@ -478,6 +478,22 @@ resources. It deliberately does not claim a model-written summary, full
 documentation-to-code traceability beyond cheap links/path mentions, or
 freshness beyond HEAD and the recorded snapshot head. Those, plus richer usage
 examples and a larger-repository budget study, remain follow-on work.
+
+A first **stateful graph-engine prototype** also landed (2026-11-25):
+`OZAGIA_SURFACE=engine` exposes one `graph` tool with `hello` sessions, compact
+tabular rows, hard estimated-token budgets, `known` outline/context deltas and
+bounded synchronous speculation (`spec`/`fetch`). It reuses the existing graph
+surface, context and repository-shape services and withholds structural data
+when the snapshot is stale or unknown. The protocol is in
+`docs/plans/2026-11-25_graph_engine_protocol.md`, the guide in
+`docs/graph_engine.md`, and the prototype measurement (584 estimated tokens and
+4 round-trips versus 636/4 for the graph surface and 1,705/5 for the `dev_*`
+sequence on a tiny fixture) in
+`docs/results/graph_engine_prototype_2026-11-25.md`. That measurement is wire
+size, not a model-task gain. Speculation currently prepares at most two payloads
+before returning; it does not overlap model work. Next: a daemon/process worker
+for true overlap, hit-rate/waste evaluation on larger repositories, and an
+optional Ozma transport.
 
 **Exit criteria**
 

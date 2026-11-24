@@ -1,7 +1,7 @@
 """Deterministic, read-only inventory of Ozagia's own declared surfaces.
 
 ``collect_inventory`` introspects the installed Ozagia package, never a target
-project.  It reads ``pyproject.toml``, walks the CLI parser, reads both MCP tool
+project.  It reads ``pyproject.toml``, walks the CLI parser, reads the MCP tool
 lists and handler maps by AST (without instantiating the server, a graph
 surface or loading a snapshot), parses the daemon protocol docstring, and asks
 the settings registry for its read-only schema.  It does **not** load target
@@ -46,6 +46,7 @@ SURFACE_KINDS = (
 
 _MCP_SERVER = Path("src/ozagia/integrations/mcp/server.py")
 _MCP_GRAPH = Path("src/ozagia/integrations/mcp/graph_surface.py")
+_MCP_ENGINE = Path("src/ozagia/core/graph_engine.py")
 _DAEMON_PROTOCOL = Path("src/ozagia/daemon/protocol.py")
 _CLI_SOURCE = Path("src/ozagia/cli.py")
 _SETTINGS_SOURCE = Path("src/ozagia/core/settings.py")
@@ -269,10 +270,9 @@ def _handler_keys_from_ast(path: Path) -> tuple[list[str], str | None]:
                     and isinstance(target.value, ast.Name)
                     and target.value.id == "self"
                     and target.attr == "_handlers"):
-                if (isinstance(value, ast.Call)
-                        and isinstance(value.func, ast.Attribute)
-                        and value.func.attr == "handlers"):
-                    # The graph surface is a separate, memory-backed map.
+                if isinstance(value, ast.Call):
+                    # The graph/engine surfaces are separate, memory-backed
+                    # maps; the full handler map is a literal.
                     continue
                 for name in _dict_literal_keys(value, class_node):
                     keys.add(name)
@@ -399,6 +399,19 @@ def _graph_default_parts() -> tuple[list[dict[str, Any]], list[str],
     root = _package_root()
     handler_keys, error = _graph_handler_keys_from_ast(root / _MCP_GRAPH)
     return _graph_tools_from_module(), handler_keys, error
+
+
+def _engine_tools_from_module() -> list[dict[str, Any]]:
+    from ozagia.core import graph_engine
+
+    return _tool_specs(graph_engine.ENGINE_TOOLS)
+
+
+def _engine_default_parts() -> tuple[list[dict[str, Any]], list[str],
+                                     str | None]:
+    from ozagia.core import graph_engine
+
+    return _engine_tools_from_module(), [graph_engine.ENGINE_TOOL_NAME], None
 
 
 # ---------------------------------------------------------------------------
@@ -792,6 +805,18 @@ def collect_inventory(root: str | Path | None = None, *,
     surfaces.extend(graph_surfaces)
     missing.extend(graph_missing)
     undeclared.extend(graph_undeclared)
+
+    engine_tools, engine_handlers, engine_error = _engine_default_parts()
+    engine_surfaces, engine_missing, engine_undeclared = _mcp_surfaces(
+        engine_tools, engine_handlers, tool_version, surface="engine",
+        id_prefix="mcp:tool:", source=_MCP_ENGINE)
+    if engine_error:
+        engine_missing.append(_gap(
+            "mcp:tool:graph", "mcp", "graph",
+            f"engine tool schema could not be read: {engine_error}"))
+    surfaces.extend(engine_surfaces)
+    missing.extend(engine_missing)
+    undeclared.extend(engine_undeclared)
 
     if adapter_registry_result is not None:
         adapter_surfaces, adapter_gaps = _adapter_surfaces(

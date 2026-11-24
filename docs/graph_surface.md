@@ -1,12 +1,16 @@
 # The `graph` MCP surface
 
-The MCP server has two tool surfaces:
+The MCP server has three tool surfaces:
 
 - `full` (default): the `dev_*` tools.
 - `graph`: eight verbs that name every node by its stable key
   (`ozagia.core.keys`) and never by an integer id.
+- `engine`: one stateful `graph` tool with compact rows, token budgets,
+  `known` deltas and bounded speculation. See
+  [`docs/graph_engine.md`](graph_engine.md).
 
-Adapter MCP tools are listed and callable on both surfaces.
+Adapter MCP tools are listed and callable on the full and graph surfaces. The
+engine surface lists only `graph`.
 
 ```
 OZAGIA_SURFACE=graph python -m ozagia.integrations.mcp.server

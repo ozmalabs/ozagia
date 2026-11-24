@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- A first stateful graph-engine surface (`OZAGIA_SURFACE=engine`) exposes one
+  `graph` MCP tool with `hello` sessions, compact tabular rows, hard estimated
+  token budgets, `known` outline/context deltas and bounded synchronous
+  speculation (`spec`/`fetch`). It reuses the existing graph, context and
+  repository-shape services, withholds structural data on stale/unknown
+  snapshots, and has no edit, test-run, refresh, shell, network or model path.
+  The prototype wire measurement is in
+  `docs/results/graph_engine_prototype_2026-11-25.md`; it is not a model-task
+  gain and there is no background worker yet.
 - Deep-review local advisories now match Python lockfile pins against OSV-style
   `introduced`/`fixed`/`last_affected` ranges using PEP 440 ordering (epoch,
   release, pre/post/dev and local segments), with the existing event

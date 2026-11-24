@@ -14,6 +14,7 @@ import pytest
 from ozagia import cli
 from ozagia.core import capabilities as K
 from ozagia.core import contracts as C
+from ozagia.core import graph_engine
 from ozagia.daemon import jobs, protocol
 from ozagia.integrations.mcp import graph_surface, server
 
@@ -81,10 +82,14 @@ def test_builtin_mcp_and_graph_tools_are_declared():
     declared = {surface for cap in K.catalogue() for surface in cap.surfaces}
     full = {f"mcp:tool:{tool['name']}" for tool in server._TOOLS}
     graph = {f"mcp:graph:{tool['name']}" for tool in graph_surface.GRAPH_TOOLS}
+    engine = {f"mcp:tool:{tool['name']}"
+              for tool in graph_engine.ENGINE_TOOLS}
     assert full <= declared
     assert graph <= declared
+    assert engine <= declared
     # Every declared MCP surface is a real built-in surface, not a guess.
-    assert {surface for surface in declared if surface.startswith("mcp:")} == full | graph
+    assert {surface for surface in declared
+            if surface.startswith("mcp:")} == full | graph | engine
     assert "mcp:tool:dev_capabilities" in declared
     for name in ("dev_context", "dev_tools", "dev_capabilities",
                  "goal_list", "job_start", "federation_status"):
