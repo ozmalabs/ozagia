@@ -1,15 +1,19 @@
 # Federated repository graphs
 
-Status: base delivery implemented, verified 2026-11-24. Bounded discovery,
-explicit members, qualified identities, snapshot provenance, read-only status,
-search and node/edge inspection are in `core/federation.py`,
-`tests/test_federation.py`, `tests/test_federation_surface.py` and
+Status: base delivery implemented, verified 2026-11-24; first version-aware
+dependency-link slice added 2026-11-25. Bounded discovery, explicit members,
+qualified identities, snapshot provenance, read-only status, search and
+node/edge inspection are in `core/federation.py`, `tests/test_federation.py`,
+`tests/test_federation_surface.py` and
 [`docs/federation.md`](../federation.md); declared cross-repository links and
 checks are in `core/cross_repo.py` and
-[`docs/cross-repo-checks.md`](../cross-repo-checks.md). The follow-on work in
-the last section—version-aware relationships from dependencies or SCIP,
-persistent identities across membership changes, incremental member caching,
-and organization manifests/access control—is not implemented.
+[`docs/cross-repo-checks.md`](../cross-repo-checks.md). Declared package
+dependencies are matched across members by `core/dependency_links.py` and
+reported under `dependency_links`, with fixture tests in
+`tests/test_dependency_links.py`. The remaining follow-on work in the last
+section—precise SCIP identities, persistent identities across membership
+changes, incremental member caching, and organization manifests/access
+control—is not implemented.
 
 ## Objective
 
@@ -27,4 +31,11 @@ Repository-local keys and integer IDs collide between snapshots. Qualify each no
 
 ## Follow-on work
 
-Version-aware cross-repository relationships based on declared dependencies or precise SCIP identities; persistent identities across membership changes; incremental caching; organization-wide manifests and access control. The initial implementation supports manually declared provenance-bearing links, but does not infer semantic relationships from federated search.
+Version-aware cross-repository relationships are partly delivered: declared
+Python, Rust, Node and Go dependencies are matched by package name and compared
+against a provider's declared version. Precise SCIP identities, manifest/lock
+resolution beyond direct declarations, persistent identities across membership
+changes, incremental caching and organization-wide manifests/access control
+remain. The implementation supports manually declared provenance-bearing links
+and declared dependency links, but does not infer semantic relationships from
+federated search.

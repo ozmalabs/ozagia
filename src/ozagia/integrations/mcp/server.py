@@ -638,7 +638,8 @@ _TOOLS.extend([
         "name": "federation_check",
         "description": (
             "Read-only static checks for declared cross-repository API and "
-            "code-to-infrastructure relationships. Designated references may "
+            "code-to-infrastructure relationships, plus declared package "
+            "dependency links between members. Designated references may "
             "be fetched and fast-forwarded over Git; set no_sync to opt out. "
             "Indexes are not refreshed; missing evidence remains unknown."),
         "inputSchema": _schema({

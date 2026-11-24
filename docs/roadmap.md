@@ -88,13 +88,13 @@ breadth third, live operations last**. New surface area is not a release theme.
 | `2026-11-17_session-profile-instrumentation.md` | Implemented in part | Core store, CLI, daemon events, OpenCode subscriber and TUI slot exist; Codex/Kiro/Claude hook capture exists offline | Live host verification, status/console rows for host lifecycle counters | 0.3 |
 | `2026-11-18_bounded_graph_prefetch.md` | Offline primitives implemented; MCP integration not adopted for 0.3 | Offline planner, safety checks and ledger implemented (`core/prefetch.py`); the 2026-11-25 decision keeps them unwired because the measured benefit is small and the lifecycle risk is high | Revisit only with larger-repository measurements and the acceptance tests | 0.3 decision |
 | `2026-11-17_opencode_intent_graph_retrieval.md` | Stages A–C done; D partial; E initial offline check | Matches | Broader shell/task intent linking, richer paired and end-to-end evaluation | 0.4 |
-| `2026-11-17_federated_graphs.md` | Base delivery | Discovery, explicit members, qualified identities, status/search/node inspection, cross-repo checks landed | Version-aware relationships, persistent identity, incremental cache, org manifests/access control | 0.4 |
+| `2026-11-17_federated_graphs.md` | Base delivery plus the declared-dependency slice | Discovery, explicit members, qualified identities, status/search/node inspection, cross-repo checks and version-aware dependency links from declared manifests landed | Persistent identity, incremental member cache/freshness certification, SCIP identities, org manifests/access control | 0.4 |
 | `2026-11-16_sre_iac_extensions.md` | Offline workstreams implemented; live remains | Matches | Live cloud/cluster providers, semantic IaC validation, broader config families, real-host relay matrix, remote background services | 0.5 |
 | `2026-11-16_iac_cloud_context.md`, `2026-11-16_runtime_services_tunnels.md` | Implemented offline | Opt-in source-only IaC context and the offline runtime/service/tunnel layer are implemented; live remote operations are not | Live cloud/cluster state, remote service ownership, measured savings | 0.5 |
 | `2026-11-16_ui_and_agent_features.md` | Waves merged | Matches; "Not yet" list still open, except project-model config migration, which landed in 0.1.5 | Live Desktop smoke, live model/provider adapters, live security tool matrix/DAST | 0.1.5 / 0.3 |
 | `2026-11-16_usage_features_plan.md` | Waves 1–4 implemented | Waves 1–4 implemented (Codex/Kiro, ledger, jobs, structured data, affected tests, lint, path resolution, ownership, replace, ops graph, research positions, fetch fallback) | Measure the claimed savings; live Codex/Kiro verification | 0.1.5 |
 | `2026-11-16_v4_open_issues.md` | Implemented with review fixes | Matches | None required for this roadmap | — |
-| `2026-11-17_cross_repo_checks.md`, `2026-11-17_env_failures_timing.md` | Implemented | Implemented | Version-aware relationships, scale/live timing validation | 0.4 / 0.1.5 |
+| `2026-11-17_cross_repo_checks.md`, `2026-11-17_env_failures_timing.md` | Implemented | Implemented | SCIP-precise identities, scale/live timing validation | 0.4 / 0.1.5 |
 | `2026-11-16_ozma_integration.md`, `2026-11-16_proactive_context.md`, `2026-11-16_repo_review_and_goals.md` | Third delivery / implementation notes | Implemented; HTTP surface, general watcher, live benchmark and live goal runs remain | As listed per document | 0.4 |
 | `2026-11-17_self_graph_ab_testing.md`, `2026-11-17_self_graph_execution.md` | Pilot partly executed; execution plan historical | Pilot partly executed; execution plan superseded | A frozen valid paired run before changing defaults | 0.4 |
 | Research plans (`reference_layer`, `deferred_research_work`, `paper_review`, etc.) | Landed stages A–D | Matches | Reproducible review package, labeled literature evaluation, OCR/PDF limits | 0.6 |
@@ -408,6 +408,16 @@ real fixtures, provenance-preserving and still opt-in.
     unknowns.
 - Expand shell/task intent linking and richer paired usefulness evaluation from
   the OpenCode intent plan.
+
+**Implementation status (2026-11-25):** the first version-aware federation slice
+landed as declared dependency links: `ozagia federation check` and
+`federation_check` report a `dependency_links` section built from Python, Rust,
+Node and Go manifests in `core/dependency_links.py`, with fixture tests for
+satisfied, mismatched, unknown, ambiguous and unresolved cases. It is
+deliberately direct-manifest only. Persistent identities across membership
+changes, incremental member caching/freshness certification, precise SCIP
+package identities, and organization manifests/access control remain open, as
+does the matched-arm model-API evaluation.
 
 **Exit criteria**
 

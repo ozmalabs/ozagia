@@ -143,9 +143,10 @@ adapters. Automatic updates may access the network and change the clean,
 explicitly designated Git checkouts as described above.
 
 `federation check` and `federation_check` run offline static checks for
-declared API relationships and code-to-infrastructure links. API identity
-checks use existing snapshots; the configuration check below also reads the
-linked current source files. The report preserves the source repository, relationship
+declared API relationships, code-to-infrastructure links, and declared
+package dependency links. API identity checks use existing snapshots; the
+configuration check below also reads the linked current source files. The
+report preserves the source repository, relationship
 provenance, and missing or ambiguous evidence. A declaration alone does not
 verify schema compatibility, runtime behavior, or deployed infrastructure;
 unknown or unverifiable results remain unknown. Selected roots and declared
@@ -175,6 +176,108 @@ stale snapshot keeps the overall result unknown. This check does not establish
 that the source is deployed, that optional environment access is covered, or
 that runtime behavior is correct. It does not execute code, load projects,
 refresh graphs or write to member repositories.
+
+## Declared dependency links
+
+`ozagia federation check` and `federation_check` also include a bounded
+`dependency_links` section. The same report is available from
+`ozagia.core.dependency_links.check(root, roots=None)`; `analyze(members,
+member_states)` accepts already-selected federation records. It reads each
+member's current declared manifests from the checkout root, matches package
+names explicitly, and compares a consumer's requirement with a provider's own
+declared package version. It does not infer links from symbol names, repository
+names, search results, or fuzzy matching.
+
+Supported root-level declarations are:
+
+| Ecosystem | Manifest | Provider identity |
+| --- | --- | --- |
+| Python | `pyproject.toml` (PEP 621 project, optional dependencies, dependency groups, Poetry), `setup.cfg` (`metadata`, `options.install_requires`, extras), root `requirements*.txt` | `[project].name`/`[tool.poetry].name`, or `[metadata].name` |
+| Rust | `Cargo.toml` (`dependencies`, `dev-dependencies`, `build-dependencies`, target and workspace dependencies) | `[package].name` and version, including `workspace.package` inheritance |
+| Node | `package.json` (`dependencies`, `devDependencies`, `optionalDependencies`, `peerDependencies`) | root `name` and `version` |
+| Go | `go.mod` `require` entries | `module` path; a main-module version is normally unavailable |
+
+Other formats are reported as skipped, not guessed: executable `setup.py`,
+`Pipfile`, Composer, Gemfile, Maven/Gradle, Dart and Elixir manifests. Lockfiles
+are listed as skipped because declared-requirement comparison does not resolve
+transitive versions. Workspace member packages outside the member root are not
+enumerated. Files are read with a 1 MiB-per-file cap, at most 16 manifests per
+member, 250 dependencies per manifest and 500 links in the report.
+
+Matching is per ecosystem. Python names use PEP 503 normalization; Node and
+Rust names are compared case-insensitively; Go module paths are exact. A member
+never links to itself. Only direct dependencies are examined; transitive
+dependencies are not followed.
+
+The version comparison is conservative and standard-library only:
+
+- Python supports `==`, `!=`, `===`, `~=`, `>=`, `>`, `<=`, `<`, comma-separated
+  clauses, and trailing `.*` wildcards. PEP 508 environment markers and direct
+  references are retained but not evaluated.
+- Node and Rust support exact versions, `^`, `~`, comparators, and `x`/`*`
+  wildcards. Rust's bare requirement is caret, as Cargo defines it; Node's bare
+  requirement is exact or a component wildcard. `||`, hyphen ranges,
+  `workspace:`, `file:`, `link:`, `git`, `npm:` aliases and URL forms are
+  unresolved.
+- Go `require` is treated as a minimum version, but a provider's version is
+  usually absent from `go.mod`, so most Go links are `unknown`.
+- Only numeric release components are compared. Pre-release, post-release,
+  development and local version suffixes, epochs, non-numeric versions, and
+  unparseable requirements produce `unknown`, never a guessed match.
+
+Each link reports `status` as one of:
+
+- `satisfied`: exactly one other member provides the package and the provided
+  version satisfies the declared requirement.
+- `mismatch`: exactly one other member provides it and the version does not
+  satisfy the requirement.
+- `unknown`: the provider version, requirement, marker or version syntax cannot
+  be compared, or the provider version is unavailable.
+- `ambiguous`: more than one member provides the same package name in the same
+  ecosystem, or one member declares incompatible provided versions. Provider
+  fields are left unset and candidate providers are listed; no candidate is
+  chosen.
+- `unresolved`: no other selected member provides the package.
+
+A link includes `consumer`, `provider`, `package`, `ecosystem`, `requirement`,
+`provided_version`, `source_manifest`, `source_line`, `provider_manifest`,
+`provider_line`, and `provenance` (`declared_dependency`). The section also
+contains `members` with each member's freshness and parsed/skipped manifests,
+`counts`, `ambiguities`, and a `state` of `ok`, `partial` (parse errors or
+truncation) or `absent` (no supported manifests).
+
+Dependency links are current-manifest evidence, not snapshot evidence. A stale
+or unknown graph snapshot remains visible in `member_states` and `members`, but
+does not by itself change a link's version verdict. The dependency report itself
+performs no writes, network access, package-manager invocation, target import,
+project execution or index refresh. `ozagia federation check` still follows the
+reference synchronization rules described above, so use `--no-sync` when no
+checkout update is allowed.
+
+```json
+"dependency_links": {
+  "state": "ok",
+  "links": [
+    {
+      "consumer": "service-a",
+      "provider": "shared-lib",
+      "package": "shared-lib",
+      "ecosystem": "python",
+      "requirement": ">=1.2,<2",
+      "provided_version": "1.5.0",
+      "source_manifest": "pyproject.toml",
+      "source_line": 7,
+      "provider_manifest": "pyproject.toml",
+      "provider_line": 3,
+      "provenance": "declared_dependency",
+      "status": "satisfied",
+      "reason": "requirement_satisfied"
+    }
+  ],
+  "counts": {"satisfied": 1, "mismatch": 0, "unknown": 0,
+             "ambiguous": 0, "unresolved": 0}
+}
+```
 
 ## Identity and freshness limits
 

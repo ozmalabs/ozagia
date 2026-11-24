@@ -51,3 +51,16 @@ claim. The check itself performs no target imports or indexing. Federation
 selection may fetch and fast-forward explicitly designated `reference_repos`;
 use CLI `--no-sync` to suppress that behavior. See
 [federation membership and reference synchronization](federation.md#discovery-and-membership).
+
+## Declared dependency links
+
+`cross_repo.check` also includes `dependency_links`, built by
+`ozagia.core.dependency_links` from each selected member's root manifests. It
+matches only explicit package declarations within one ecosystem and compares a
+consumer's declared requirement with a provider's declared version. Supported
+manifests, version semantics, status values and limits are documented under
+[declared dependency links](federation.md#declared-dependency-links). This is
+separate from the API/configuration checks: a dependency result does not make
+the API `overall` verdict pass or fail, and snapshot freshness is reported per
+member without changing a manifest-derived version verdict. No lockfile
+resolution, package manager, network call or member write occurs.
