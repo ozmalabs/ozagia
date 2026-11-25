@@ -384,12 +384,30 @@ session:
   `capture_text` with text/harness/session, that mentions shift/are removed,
   and that a raw secret canary is absent from the returned model-facing event.
 
-Native dialog/composer pill, the HTTP provider-request fallback,
-keychain/`pass`/`op`/`.env` persistence UI, revoke UI beyond `forget`, and
-live-host verification remain open.
+**Progress (2026-11-26, native dialog slice).** The OpenCode Desktop GUI
+add-in now exposes pending secret requests in a `ComposerPill` and provides
+`Provide secret…` / `Decline secret…` commands:
 
-Still open in 0.3: the native session-secret prompt/UI and revoke/expiry flow;
-live Codex, Kiro and Claude Code sessions to verify the installed hooks (the
+- the value is read only by the host's native
+  `ctx.dialogs.prompt({secret: true})`, stays a local variable, and goes
+  directly to the RPC call;
+- the add-in sends it to `ozagia-secrets fulfill --stdin` over a pipe, never
+  argv; display strings, error envelopes, RPC responses, logs and plugin
+  state carry only the reference, fingerprint and expiry;
+- the harness is fixed server-side to `opencode`; session/request ids, TTL
+  and value length are bounded before spawn;
+- 60 add-in tests, `tsc --noEmit` and the rebuilt GUI bundle pass.
+
+The actual Desktop dialog, host RPC-body logging and host storage ordering
+remain **unverified live**; this slice makes no claim that the host's own
+storage is erased.
+
+The HTTP provider-request fallback, keychain/`pass`/`op`/`.env` persistence UI,
+and revoke UI beyond `forget` remain open.
+
+Still open in 0.3: live host verification of the native dialog and
+revoke/expiry flow; live Codex, Kiro and Claude Code sessions to verify the
+installed hooks (the
 store and event paths are tested offline); model-provider connection probes
 (only secret-provider readiness is local and authoritative); and the prefetch
 keep/drop decision. Live OpenCode prompt-storage order and RPC-body logging
@@ -555,7 +573,12 @@ follows `n` pages, exposes typed budget/withheld/auth/transport errors and
 reports compact request/byte/token counters; 12 fixture tests
 (`tests/test_engine_client.py`, mostly over the real loopback server) cover it,
 including the deterministic 20-row repeat (1,390 → 158 estimated tokens and
-5,496 → 609 response bytes). The serving surfaces are now **auto-known**: the
+5,496 → 609 response bytes). The client also wraps the provider endpoint as
+`task_context(...)`: it posts to `/v1/ozma/context` without calling `hello` or
+touching session/`known` state, validates task/budget/max-items/staleness
+before sending, maps `invalid_context_request` to `EngineContextError`, and
+returns the versioned provider result; `examples/ozma_context_client.py` runs
+it offline against an indexed checkout. The serving surfaces are now **auto-known**: the
 MCP `engine` surface and `ozagia engine serve` apply the session's remembered
 `(op,key)` hashes when a request omits `known`, so a model gets `u` handles on
 a repeated `find`/`outline`/`context` without storing hashes; `known: []` is

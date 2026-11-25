@@ -18,14 +18,18 @@ from ozagia import engine_http
 from ozagia.core.graph_engine import GraphEngine, InlineSpecWorker
 from ozagia.core.memory import DevMemory, build_index
 from ozagia.engine_client import (
+    CONTEXT_OP,
+    MAX_TASK_CHARS,
     TOKEN_ENV,
     EngineAuthError,
     EngineBudgetError,
     EngineConfigError,
+    EngineContextError,
     EnginePagingError,
     EngineResultError,
     EngineSessionError,
     EngineTransportError,
+    EngineUnavailableError,
     EngineWithheldError,
     GraphEngineClient,
 )
@@ -353,6 +357,161 @@ def test_auth_failure_is_typed_and_the_token_is_never_logged(
         assert TOKEN not in repr(client)
         assert TOKEN not in json.dumps(client.stats())
     assert TOKEN not in caplog.text
+
+
+def test_task_context_is_session_independent_and_counted(server) -> None:
+    instance, engine = server
+    client = GraphEngineClient(instance.base_url, token=TOKEN)
+    assert client.session is None
+    assert engine.sessions == {}
+
+    result = client.task_context("add", budget_tokens=200, max_items=2)
+    assert result["version"] == 1
+    assert result["ok"] is True
+    assert result["freshness"] == "current"
+    assert result["task"] == "add"
+    assert result["budget"]["estimated_tokens_requested"] == 200
+    assert isinstance(result["items"], list) and result["items"]
+    assert len(result["items"]) <= 2
+    assert sum(len(item["snippet"]["text"]) for item in result["items"]) <= 200 * 4
+
+    # The provider must work on a fresh client: no hello, no session row, and
+    # no remembered hashes are created or consumed.
+    assert client.session is None
+    assert engine.sessions == {}
+    assert client.known_entries() == []
+
+    stats = client.stats()
+    assert stats["requests"] == 1
+    assert stats["responses"] == 1
+    assert stats["errors"] == 0
+    assert stats["result_errors"] == 0
+    assert stats["bytes_in"] > 0 and stats["bytes_out"] > 0
+    assert stats["ops"][CONTEXT_OP] == 1
+    assert stats["last_op"] == CONTEXT_OP
+
+    # The graph session still starts lazily and independently afterwards.
+    assert client.hello()["sid"] == client.session
+    assert client.session is not None
+
+
+def test_task_context_auth_failure_and_token_non_disclosure(server) -> None:
+    instance, engine = server
+    bad = GraphEngineClient(instance.base_url, token="wrong-" + TOKEN)
+    with pytest.raises(EngineAuthError) as error:
+        bad.task_context("add")
+    assert error.value.status == 401
+    assert error.value.code == "unauthorized"
+    assert "wrong-" + TOKEN not in str(error.value)
+    assert TOKEN not in repr(bad)
+    assert TOKEN not in json.dumps(bad.stats())
+    assert bad.session is None
+    assert engine.sessions == {}
+    assert bad.stats()["requests"] == 1
+    assert bad.stats()["errors"] == 1
+
+
+def test_task_context_rejects_invalid_input_before_any_request(server) -> None:
+    instance, _engine = server
+    client = GraphEngineClient(instance.base_url, token=TOKEN)
+
+    with pytest.raises(EngineConfigError, match="task"):
+        client.task_context("")
+    with pytest.raises(EngineConfigError, match="task"):
+        client.task_context("   ")
+    with pytest.raises(EngineConfigError, match="task"):
+        client.task_context(None)
+    with pytest.raises(EngineConfigError, match="at most"):
+        client.task_context("x" * (MAX_TASK_CHARS + 1))
+    for budget in (0, -1, True, 32_001, 1.5):
+        with pytest.raises(EngineConfigError, match="budget_tokens"):
+            client.task_context("add", budget_tokens=budget)
+    for max_items in (0, -1, True, 101, 1.5):
+        with pytest.raises(EngineConfigError, match="max_items"):
+            client.task_context("add", max_items=max_items)
+    for allow_stale in (1, 0, None, "yes"):
+        with pytest.raises(EngineConfigError, match="allow_stale"):
+            client.task_context("add", allow_stale=allow_stale)
+    # Unsupported fields are rejected by the signature, not sent as extras.
+    with pytest.raises(TypeError):
+        client.task_context("add", unexpected="field")
+
+    stats = client.stats()
+    assert stats["requests"] == 0
+    assert stats["responses"] == 0
+    assert stats["bytes_out"] == 0
+    assert stats["ops"] == {}
+    assert client.session is None
+
+
+def test_task_context_server_rejection_is_typed_and_raise_on_error(
+        server, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, _engine = server
+    client = GraphEngineClient(instance.base_url, token=TOKEN)
+
+    def reject(_memory: Any, _task: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise ValueError("task is not acceptable")
+
+    monkeypatch.setattr(engine_http, "task_context", reject)
+
+    with pytest.raises(EngineContextError) as error:
+        client.task_context("add")
+    failure = error.value
+    assert isinstance(failure, EngineResultError)
+    assert failure.code == "invalid_context_request"
+    assert failure.status == 400
+    assert "task is not acceptable" in str(failure)
+    assert client.stats()["requests"] == 1
+    assert client.stats()["errors"] == 1
+    assert client.stats()["result_errors"] == 1
+    assert client.session is None
+
+    raw = client.task_context("add", raise_on_error=False)
+    assert raw["e"] == "invalid_context_request"
+    assert raw["why"] == "task is not acceptable"
+    assert raw["status"] == 400
+    assert client.stats()["requests"] == 2
+    assert client.stats()["errors"] == 2
+    assert client.stats()["result_errors"] == 2
+
+
+def test_task_context_transport_failure_is_typed() -> None:
+    holder = socket.socket()
+    holder.bind(("127.0.0.1", 0))
+    port = holder.getsockname()[1]
+    try:
+        client = GraphEngineClient(
+            f"http://127.0.0.1:{port}", token=TOKEN, timeout=1.0)
+        with pytest.raises(EngineTransportError):
+            client.task_context("add")
+        assert client.requests == 1
+        assert client.errors == 1
+        assert client.session is None
+        assert TOKEN not in repr(client)
+    finally:
+        holder.close()
+
+
+def test_task_context_saturation_is_unavailable(server) -> None:
+    instance, _engine = server
+    client = GraphEngineClient(instance.base_url, token=TOKEN)
+    acquired = 0
+    while instance.try_acquire_slot():
+        acquired += 1
+    assert acquired > 0
+    try:
+        with pytest.raises(EngineUnavailableError) as error:
+            client.task_context("add")
+    finally:
+        for _ in range(acquired):
+            instance.release_slot()
+    assert error.value.status == 503
+    assert error.value.code == "saturated"
+    assert error.value.retry_after == "1"
+    assert client.session is None
+    assert client.stats()["requests"] == 1
+    assert client.stats()["errors"] == 1
+    assert client.stats()["responses"] == 0
 
 
 def test_expired_session_is_typed_and_hello_recovers(server, client) -> None:

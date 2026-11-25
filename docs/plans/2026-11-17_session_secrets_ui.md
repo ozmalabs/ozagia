@@ -1,7 +1,8 @@
 # Session secret entry UI
 
 Status: design proposal (2026-11-17; verified 2026-11-24; request slice
-2026-11-25; prompt-admission slice 2026-11-25). The reference broker,
+2026-11-25; prompt-admission slice 2026-11-25; native request UI slice
+2026-11-26, offline-tested). The reference broker,
 providers, redactor and in-memory session store are implemented in
 `src/ozagia/core/secrets.py` with `tests/test_secrets.py`
 and [`docs/secrets.md`](../secrets.md); runtime services, jobs and the daemon
@@ -24,10 +25,20 @@ with session references, and remaps `prompt.files`/`agents`/`skills` mentions
 the text. This is verified against the plugin host fixture and the daemon
 protocol, **not** a live OpenCode session.
 
-Still not implemented: the native secret prompt and composer pill, the HTTP
-provider-request fallback, keychain/`pass`/`op`/`.env` persistence UI, revoke
-UI beyond the existing `forget`, and live-host verification of prompt-storage
-order and RPC logging.
+The **native request UI** slice is implemented in the OpenCode add-in:
+`secretsRequests`, `secretsFulfill` and `secretsDecline` RPC methods, a
+`secrets` composer pill that polls pending metadata, `Provide secret…` and
+`Decline secret…` commands, the host's
+`ctx.dialogs.prompt({ secret: true })` dialog, and stdin-only value transport
+through the runner. It is offline-tested (runner transport/closure, spec
+bounds, RPC shape and source checks, metadata-only envelope); live OpenCode
+Desktop verification of the native dialog and host RPC-body logging remains
+open, and the add-in does not erase a host copy.
+
+Still not implemented: live-host verification of the native secret dialog and
+host logging/storage order, the HTTP provider-request fallback,
+keychain/`pass`/`op`/`.env` persistence UI, revoke UI beyond the existing
+`forget`, and live-host verification of prompt-storage order and RPC logging.
 
 ## Problem
 
@@ -83,9 +94,12 @@ The desired flow is:
 
 ### A. Model-initiated request (primary)
 
-*Implemented in the host-agnostic slice (2026-11-25): the tool creates a
-metadata-only pending request and returns a handle plus the `ozagia-secrets
-fulfill` command. The native composer pill and dialog remain future work.*
+*Implemented in the host-agnostic slice (2026-11-25) and the OpenCode native
+request UI slice (2026-11-26, offline-tested): the tool creates a
+metadata-only pending request and returns a handle, while the add-in's
+`secrets` composer pill and `Provide secret…` command collect the value in the
+host's native dialog and send it over stdin. Live Desktop verification remains
+open.*
 
 The model calls a tool:
 
@@ -358,7 +372,9 @@ and revocable.
 - A model tool call returns only ref/fingerprint; grep the full tool result,
   logs, daemon response and audit for the secret value.
 - The native secret prompt path is used; no custom password input in the
-  primary flow.
+  primary flow. Offline source/structure checks confirm
+  `ctx.dialogs.prompt({ secret: true })`, the pill and both commands; live
+  Desktop dialog verification remains.
 - Session refs expire, are cleared on session end, and are denied across
   sessions.
 - Job env refs resolve at spawn; raw job log file and `job_log` output contain
@@ -394,12 +410,15 @@ and revocable.
 
 1. **User-initiated + paste detection**: the in-memory session store, OpenCode
    prompt hook and daemon-side redaction are implemented; the prompt hook is
-   verified against the plugin host fixture, not a live session. The Secrets
-   panel and native secret prompt remain. No model tool was part of this step.
+   verified against the plugin host fixture, not a live session. The native
+   secret prompt and composer pill are implemented in the add-in and
+   offline-tested. The Secrets panel remains.
 2. **Model-initiated request**: `secret_request` tool, pending pill, waiting
-   status, result ref.
+   status and result ref are implemented. The GUI uses the host's native
+   secret dialog and the CLI/stdin path; live Desktop verification remains.
 3. **Persistence**: keyring, `.env`, `pass`, 1Password previews/applies; expiry
    and forget.
 4. **Connect/OAuth and MCP URL mode**; provider-specific validation.
-5. **Host verification**: test prompt-storage order and RPC logging; document
-   the exact guarantee.
+5. **Host verification**: test the native secret dialog, prompt-storage order,
+   host RPC-body logging and session storage; document the exact guarantee.
+   This slice does not claim the host's own storage is erased.

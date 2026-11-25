@@ -3,8 +3,9 @@
  *
  * This module deliberately imports only Node built-ins: the node:test suite
  * transpiles it directly, without loading any OpenCode package or starting a
- * process. There is no shell, stdin is closed, output is capped and every
- * free-form argument is bounded before it reaches argv.
+ * process. There is no shell, stdin is closed (except for an explicit secret
+ * value sent over a pipe), output is capped and every free-form argument is
+ * bounded before it reaches argv.
  */
 import { spawn } from "node:child_process"
 import { existsSync, realpathSync } from "node:fs"
@@ -37,6 +38,13 @@ export interface CommandSpec {
    * task input values, which may be credentials.
    */
   sensitive?: readonly string[]
+  /**
+   * UTF-8 text written to the child's stdin and then closed. Used for one
+   * secret value, which must never enter argv, the display string, an error
+   * or the returned envelope. The runner bounds and scrubs it independently
+   * of `sensitive`.
+   */
+  stdin?: string
 }
 
 /** A request that did not match the documented shape. */
@@ -75,6 +83,11 @@ const MAX_TOOLCHAIN_CAPABILITIES = 16
 const MAX_TOOLCHAIN_PATHS = 32
 const MAX_TOOLCHAIN_CAPABILITY = 32
 const MAX_TOOLCHAIN_PATH = 2000
+const MAX_SECRET_VALUE_BYTES = 8192
+/** Runner-side defence in depth; the fulfill spec is stricter. */
+export const MAX_STDIN_BYTES = 16 * 1024
+const MIN_SECRET_TTL_S = 1
+const MAX_SECRET_TTL_S = 86_400
 const DEFAULT_MAX_BUFFER = 8 * 1024 * 1024
 const STDERR_TAIL = 64 * 1024
 const ERROR_TAIL = 500
@@ -94,6 +107,8 @@ const TASK_INPUT_NAME_RE = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/
 const TOOLCHAIN_CAPABILITY_RE = /^[a-z][a-z0-9_-]{0,31}$/
 /** The same alphabet and length as `core.actions._TOKEN`. */
 const CONFIRMATION_RE = /^[A-Za-z0-9_-]{20,128}$/
+/** Opaque session and request handles: no spaces, slashes or control bytes. */
+const SECRET_HANDLE_RE = /^[A-Za-z0-9._:-]{1,128}$/
 const CONTROL_RE = /[\u0000-\u001f\u007f]/
 
 const RESEARCH_VIEWS = ["library", "fetch", "screening", "evidence", "consensus", "citation"] as const
@@ -259,6 +274,64 @@ export function stringList(value: unknown, field: string, maxItems: number): str
   if (raw.length > maxItems) throw new InputError(`${field} must contain at most ${maxItems} entries`)
   return raw.map((item, index) => text(item, `${field}[${index}]`, MAX_PATH))
 }
+
+/**
+ * Reject a field the caller supplied but the operation does not accept.
+ *
+ * The secret RPCs are deliberately closed: `harness` is fixed by the add-in,
+ * and a value is not an input field of the fulfill object (it travels as the
+ * separate argument and on stdin).
+ */
+export function rejectUnknownFields(
+  value: unknown,
+  allowed: readonly string[],
+  field = "input",
+): Record<string, unknown> {
+  if (!isRecord(value)) throw new InputError(`${field} must be an object`)
+  for (const key of Object.keys(value)) {
+    if (!allowed.includes(key)) throw new InputError(`${field} does not accept "${key}"`)
+  }
+  return value
+}
+
+/** An opaque OpenCode session id, bounded before it reaches argv. */
+export function secretSession(value: unknown): string {
+  const session = text(value, "session", MAX_ID)
+  if (!SECRET_HANDLE_RE.test(session)) {
+    throw new InputError(
+      "session must be 1-128 letters, digits, dots, underscores, colons or dashes",
+    )
+  }
+  return session
+}
+
+/** An opaque secret request id, bounded before it reaches argv. */
+export function secretRequestId(value: unknown): string {
+  const requestId = text(value, "requestId", MAX_ID)
+  if (!SECRET_HANDLE_RE.test(requestId)) {
+    throw new InputError(
+      "requestId must be 1-128 letters, digits, dots, underscores, colons or dashes",
+    )
+  }
+  return requestId
+}
+
+/**
+ * One secret value read by the native prompt. It is never trimmed: a secret
+ * can legitimately start or end with spaces. The byte cap matches the
+ * documented 1..8192 range and the runner's own stdin cap.
+ */
+export function secretValue(value: unknown): string {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new InputError("value must be a non-empty string")
+  }
+  const bytes = Buffer.byteLength(value, "utf8")
+  if (bytes > MAX_SECRET_VALUE_BYTES) {
+    throw new InputError(`value must be at most ${MAX_SECRET_VALUE_BYTES} bytes`)
+  }
+  return value
+}
+
 
 // ---------------------------------------------------------------------------
 // Pure argument builders
@@ -573,6 +646,95 @@ export function settingsValuesSpec(root: string): CommandSpec {
     display: "ozagia.settings_cli values --json",
   }
 }
+
+// ---------------------------------------------------------------------------
+// Session secret requests (the value is stdin-only)
+// ---------------------------------------------------------------------------
+
+export interface SecretsRequestsInput {
+  session?: unknown
+}
+
+/**
+ * List one session's secret request records.
+ *
+ * `harness` is fixed to `opencode` here and is not accepted from the GUI or
+ * the model. The method only reads metadata (ids, labels, purposes, states and
+ * expiry); no request value is recoverable from it.
+ */
+export function secretsRequestsSpec(root: string, input: SecretsRequestsInput): CommandSpec {
+  const fields = rejectUnknownFields(input, ["session"], "secretsRequests input")
+  const session = secretSession(fields.session)
+  return {
+    module: "ozagia.secrets_cli",
+    args: ["requests", "--root", root, "--session", session, "--harness", "opencode", "--json"],
+    display: "ozagia.secrets_cli requests --json",
+  }
+}
+
+export interface SecretsFulfillInput {
+  session?: unknown
+  requestId?: unknown
+  ttlS?: unknown
+}
+
+/**
+ * Build a `secrets_cli fulfill --stdin` invocation.
+ *
+ * The value is only ever the spec's `stdin` field. It is not in argv, not in
+ * `display`, and deliberately not in `sensitive` (that list describes argv
+ * values); the runner scrubs stdin separately from every envelope and error.
+ */
+export function secretsFulfillSpec(
+  root: string,
+  input: SecretsFulfillInput,
+  value: unknown,
+): CommandSpec {
+  const fields = rejectUnknownFields(input, ["session", "requestId", "ttlS"], "secretsFulfill input")
+  const session = secretSession(fields.session)
+  const requestId = secretRequestId(fields.requestId)
+  const ttlS = optionalInteger(fields.ttlS, "ttlS", MIN_SECRET_TTL_S, MAX_SECRET_TTL_S)
+  const secret = secretValue(value)
+
+  const args = [
+    "fulfill",
+    requestId,
+    "--root",
+    root,
+    "--session",
+    session,
+    "--harness",
+    "opencode",
+    "--stdin",
+    "--json",
+  ]
+  if (ttlS !== undefined) args.push("--ttl-s", String(ttlS))
+
+  return {
+    module: "ozagia.secrets_cli",
+    args,
+    display: "ozagia.secrets_cli fulfill --stdin --json",
+    stdin: secret,
+  }
+}
+
+export interface SecretsDeclineInput {
+  session?: unknown
+  requestId?: unknown
+}
+
+/** Decline a pending request. Metadata only; no value is involved. */
+export function secretsDeclineSpec(root: string, input: SecretsDeclineInput): CommandSpec {
+  const fields = rejectUnknownFields(input, ["session", "requestId"], "secretsDecline input")
+  const session = secretSession(fields.session)
+  const requestId = secretRequestId(fields.requestId)
+  return {
+    module: "ozagia.secrets_cli",
+    args: ["decline", requestId, "--root", root, "--session", session, "--harness", "opencode", "--json"],
+    display: "ozagia.secrets_cli decline --json",
+  }
+}
+
 
 export function tasksListSpec(root: string): CommandSpec {
   return {
@@ -1044,6 +1206,22 @@ export function redactSensitive(input: string, secrets?: readonly string[]): str
   return out
 }
 
+/**
+ * Scrub argv-only `sensitive` values and, separately, a stdin value. The stdin
+ * value is redacted at every length: it never reached argv, so there is no
+ * reason to preserve short tokens in an error tail.
+ */
+function scrubSecretText(
+  input: string,
+  sensitive: readonly string[] | undefined,
+  stdin: string | undefined,
+): string {
+  let out = redactSensitive(input, sensitive)
+  if (stdin) out = out.split(stdin).join("[redacted]")
+  return out
+}
+
+
 function failure(
   code: string,
   message: string,
@@ -1068,11 +1246,29 @@ export function runOzagia(
   const command = `${config.python} -m ${spec.display}`
   const maxBuffer = config.maxBuffer ?? DEFAULT_MAX_BUFFER
   const secrets = spec.sensitive
+  const stdin = spec.stdin
+  const scrub = (text: string) => scrubSecretText(text, secrets, stdin)
+
+  if (stdin !== undefined) {
+    if (typeof stdin !== "string") {
+      return Promise.resolve({
+        ...failure("invalid_stdin", "stdin must be a string"),
+        command: scrub(command),
+      })
+    }
+    const stdinBytes = Buffer.byteLength(stdin, "utf8")
+    if (stdinBytes > MAX_STDIN_BYTES) {
+      return Promise.resolve({
+        ...failure("stdin_too_large", `stdin must be at most ${MAX_STDIN_BYTES} bytes`),
+        command: scrub(command),
+      })
+    }
+  }
 
   if (!existsSync(config.root)) {
     return Promise.resolve({
       ...failure("root_missing", `root does not exist: ${config.root}`),
-      command: redactSensitive(command, secrets),
+      command: scrub(command),
     })
   }
 
@@ -1093,15 +1289,15 @@ export function runOzagia(
       signal?.removeEventListener("abort", onAbort)
       const sealed: Envelope = {
         ...envelope,
-        command: redactSensitive(envelope.command || command, secrets),
+        command: scrub(envelope.command || command),
       }
       if (envelope.error) {
         sealed.error = {
           ...envelope.error,
-          message: redactSensitive(envelope.error.message, secrets),
+          message: scrub(envelope.error.message),
         }
         if (envelope.error.detail) {
-          sealed.error.detail = redactSensitive(envelope.error.detail, secrets)
+          sealed.error.detail = scrub(envelope.error.detail)
         }
       }
       resolve(sealed)
@@ -1134,7 +1330,7 @@ export function runOzagia(
       child = spawn(config.python, ["-m", spec.module, ...spec.args], {
         cwd: config.root,
         shell: false,
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: [stdin !== undefined ? "pipe" : "ignore", "pipe", "pipe"],
         windowsHide: true,
         env: process.env,
       })
@@ -1144,6 +1340,21 @@ export function runOzagia(
     }
 
     if (aborted) stop("abort")
+
+    if (stdin !== undefined) {
+      // A child that exits before reading can emit EPIPE; it must not become
+      // an unhandled stream error, and no value may reach a message.
+      child.stdin?.on("error", () => {})
+      try {
+        child.stdin?.end(stdin, "utf8")
+      } catch {
+        try {
+          child.stdin?.destroy()
+        } catch {
+          // The stream may already be closed.
+        }
+      }
+    }
 
     child.stdout?.setEncoding("utf8")
     child.stderr?.setEncoding("utf8")

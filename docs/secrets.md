@@ -388,6 +388,49 @@ Lifecycle rules:
   (`session_unavailable`); a daemon refusal is `refused` and an unreachable
   daemon is `unavailable`. None includes a value.
 
+### Native OpenCode request UI
+
+The OpenCode GUI add-in closes the model-initiated loop without sending a value
+through chat or the model-facing tool. The `ozagia_secret_request` tool still
+creates a metadata-only pending request; the GUI now provides it:
+
+- a composer pill with id `secrets` polls the session's request list while the
+  session is routed. It shows the pending count (or the one label) and a menu
+  of rows with each request's label and purpose. The poll timer is cleared on a
+  route change and when the plugin goes away;
+- `ozagia: Provide secret…` selects a pending request (or asks for a request id
+  when the list is empty), opens the host's native
+  `ctx.dialogs.prompt({ secret: true, ... })`, and calls the `secretsFulfill`
+  RPC. After success it shows the reference, fingerprint and expiry and inserts
+  the reference into the routed composer with
+  `ctx.screen.current()?.composer.insert(ref)`;
+- `ozagia: Decline secret…` confirms with `ctx.dialogs.confirm` and calls the
+  `secretsDecline` RPC. Neither path receives a value.
+
+The value is a local variable passed straight from the native prompt to the RPC
+call. It is not held in a Solid signal, a store, a toast, a log or an error.
+The add-in fixes the harness to `opencode`; the GUI and model cannot choose it.
+The RPC methods are `secretsRequests { session }`,
+`secretsFulfill { session, requestId, ttlS?, value }` and
+`secretsDecline { session, requestId }`. Session and request ids are bounded
+opaque strings (1–128 characters from `[A-Za-z0-9._:-]`); `ttlS` is 1–86400;
+the value is 1–8192 bytes and rejects unknown fields.
+
+Transport is local and stdin-only. The runner spawns
+`python -m ozagia.secrets_cli fulfill <request_id> ... --stdin --json` with no
+shell, writes the UTF-8 value to child stdin, and always closes it. A
+runner-side 16 KiB cap rejects an oversized stdin before spawning. The value
+never enters argv, the display command, `sensitive`, the returned envelope or
+an error tail; the runner scrubs the exact stdin value from display and error
+text. The CLI prints only the reference, fingerprint, expiry and state, so the
+model and the RPC response receive no value.
+
+This slice is **offline-tested** (runner transport and closure, spec bounds and
+unknown-field rejection, RPC schema and source shape, and a fulfill envelope
+that contains only metadata). Live OpenCode Desktop checks of the native secret
+dialog and the host's RPC-body logging remain open. The add-in does not claim to
+erase a copy the host itself may have stored.
+
 ### Pasted-text detection
 
 `detect_text(text, max_secrets=16, ref_factory=...)` reuses the existing

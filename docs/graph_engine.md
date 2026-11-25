@@ -136,6 +136,9 @@ with GraphEngineClient("http://127.0.0.1:8765",
     # spec = graph.find("retry backoff", spec=True, inline=False)
     # graph.fetch((spec.get("q") or {}).get("h", [])[:2], wait_ms=50)
 
+    # The Ozma provider is session-independent and works on a fresh client.
+    context = graph.task_context("find the retry loop", budget_tokens=1500)
+
     print(graph.stats())                        # requests, bytes, engine tokens
 ```
 
@@ -163,6 +166,41 @@ Useful controls:
   returns the engine's `e` payload instead.
 - `hello(caps=True)` (or `detail=True`) is the only way to request the full
   handshake; `spec` defaults to off and `fetch` is only called explicitly.
+
+### Ozma task context
+
+`GraphEngineClient.task_context(task, *, budget_tokens=1500, max_items=8,
+allow_stale=False, raise_on_error=None)` posts directly to
+`POST /v1/ozma/context` and returns the provider's versioned result
+(`version: 1`, `ok`, `freshness`, `snapshot`, `budget`, `items`). It is
+**session-independent**: it never calls `hello`, never sends or creates a
+`session`, and never reads or writes remembered `known` hashes. A fresh client
+can assemble task context before, or without, starting a graph session.
+
+The method validates before sending: `task` is a non-empty string of at most
+4,096 characters (the client-side bound; the provider itself only requires
+non-empty), `budget_tokens` is an integer from 1 to 32,000 (default 1,500),
+`max_items` is an integer from 1 to 100 (default 8), and `allow_stale` is a
+bool. Invalid arguments raise `EngineConfigError` before any request.
+Unsupported keyword arguments are rejected by the signature rather than
+forwarded. A stale or unverifiable snapshot is a normal `ok: false` provider
+result (HTTP 200), not a client exception; `allow_stale=True` returns items
+with the stale freshness label.
+
+Errors follow the rest of the client: `400 invalid_context_request` raises
+`EngineContextError` (an `EngineResultError` carrying the code, message and
+`status`), `401` raises `EngineAuthError`, `503` raises
+`EngineUnavailableError`, and transport failures raise
+`EngineTransportError`. With `raise_on_error=False`, a `400` returns
+`{"e": "invalid_context_request", "why": ..., "status": 400}` instead of
+raising; auth and availability failures still raise. Nothing is retried.
+
+The call uses the same token, timeout, no-proxy/no-redirect opener and counters
+as the graph operations: `stats()["requests"]`, `bytes_in`, `bytes_out` and
+`ops["ozma_context"]` advance (a fresh client reports one request and no
+session). The token is absent from the result, `repr`, `stats` and exceptions.
+See `examples/ozma_context_client.py` for a runnable, offline example that
+starts a server for an indexed checkout and prints only metadata.
 
 ## Session
 

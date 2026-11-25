@@ -33,6 +33,10 @@ The token comes from ``OZAGIA_ENGINE_TOKEN``, an explicit ``token`` argument,
 an explicit ``token_file``, or ``<state>/engine/token`` (state is normally
 ``<root>/.ozagia``).  The token file is refused when it is a symlink or is
 readable by group/other, matching the server.
+
+``task_context`` is the one exception to the session flow: it posts to
+``/v1/ozma/context`` without calling ``hello`` or touching ``session``/``known``,
+so one client can serve both graph operations and Ozma provider context.
 """
 from __future__ import annotations
 
@@ -51,9 +55,20 @@ MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 TOKEN_ENV = "OZAGIA_ENGINE_TOKEN"
 BASE_URL_ENV = "OZAGIA_ENGINE_URL"
 GRAPH_PATH = "/v1/graph"
+CONTEXT_PATH = "/v1/ozma/context"
 HEALTH_PATH = "/healthz"
 KNOWN_OPS = ("find", "outline", "context")
 DEFAULT_USER_AGENT = "ozagia-engine-client/1"
+# Provider bounds (ozagia.integrations.ozma.context.task_context), plus a local
+# task-size bound that keeps the JSON body well under the server's 64 KiB cap.
+CONTEXT_DEFAULT_BUDGET_TOKENS = 1500
+CONTEXT_MIN_BUDGET_TOKENS = 1
+CONTEXT_MAX_BUDGET_TOKENS = 32_000
+CONTEXT_DEFAULT_MAX_ITEMS = 8
+CONTEXT_MIN_ITEMS = 1
+CONTEXT_MAX_ITEMS = 100
+MAX_TASK_CHARS = 4_096
+CONTEXT_OP = "ozma_context"
 
 
 class EngineClientError(RuntimeError):
@@ -116,6 +131,18 @@ class EngineBudgetError(EngineResultError):
     def suggested_budget(self) -> int | None:
         value = (self.next or {}).get("budget")
         return int(value) if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+class EngineContextError(EngineResultError):
+    """``/v1/ozma/context`` rejected the request (HTTP 400).
+
+    The payload keeps the transport's stable code (``invalid_context_request``)
+    and message, so callers can treat it like other engine ``e`` results.
+    """
+
+    def __init__(self, payload: dict[str, Any], *, status: int = 400) -> None:
+        self.status = int(status)
+        super().__init__(payload)
 
 
 class EngineWithheldError(EngineResultError):
@@ -228,6 +255,32 @@ def _base_url(value: str | None) -> str:
         raise EngineConfigError(
             "the engine base URL must be an origin without a path, query or fragment")
     return f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
+
+
+# --------------------------------------------------------------------------- #
+# context-request validation
+# --------------------------------------------------------------------------- #
+def _context_task(value: Any) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise EngineConfigError("task must be a non-empty string")
+    if len(value) > MAX_TASK_CHARS:
+        raise EngineConfigError(
+            f"task must be at most {MAX_TASK_CHARS} characters")
+    return value
+
+
+def _context_int(name: str, value: Any, minimum: int, maximum: int) -> int:
+    if (isinstance(value, bool) or not isinstance(value, int)
+            or not minimum <= value <= maximum):
+        raise EngineConfigError(
+            f"{name} must be an integer between {minimum} and {maximum}")
+    return value
+
+
+def _context_bool(name: str, value: Any) -> bool:
+    if not isinstance(value, bool):
+        raise EngineConfigError(f"{name} must be a boolean")
+    return value
 
 
 class GraphEngineClient:
@@ -508,6 +561,58 @@ class GraphEngineClient:
         """Liveness only; the transport does not require a token for this."""
         result = self._http("GET", HEALTH_PATH, None, auth=False)
         self._account("healthz", result)
+        return result
+
+    # -- Ozma task context (session-independent) --------------------------- #
+    def task_context(self, task: str, *, budget_tokens: int = CONTEXT_DEFAULT_BUDGET_TOKENS,
+                     max_items: int = CONTEXT_DEFAULT_MAX_ITEMS,
+                     allow_stale: bool = False,
+                     raise_on_error: bool | None = None) -> dict[str, Any]:
+        """Return the Ozma provider result from ``POST /v1/ozma/context``.
+
+        This is deliberately independent of the engine session: it never calls
+        ``hello``, never sends or creates a ``session``, and never reads or
+        writes remembered ``known`` hashes.  A fresh client can assemble task
+        context before (or without) starting a graph session.
+
+        ``task`` must be a non-empty string of at most :data:`MAX_TASK_CHARS`
+        characters.  ``budget_tokens`` and ``max_items`` must be integers in
+        the provider's inclusive bounds (1..32000 and 1..100), and
+        ``allow_stale`` must be a bool.  Invalid arguments raise
+        :class:`EngineConfigError` before any request; unsupported keyword
+        arguments are rejected by the signature rather than forwarded.
+
+        A ``400 invalid_context_request`` becomes :class:`EngineContextError`
+        (an :class:`EngineResultError`); ``401`` becomes
+        :class:`EngineAuthError`, ``503`` becomes
+        :class:`EngineUnavailableError`, and transport failures become
+        :class:`EngineTransportError`.  ``raise_on_error=False`` returns the
+        stable ``{"e": "invalid_context_request", "why": ...}`` payload for a
+        400 instead of raising; auth and availability failures still raise.
+        No request is retried.
+        """
+        payload = {
+            "task": _context_task(task),
+            "budget_tokens": _context_int(
+                "budget_tokens", budget_tokens,
+                CONTEXT_MIN_BUDGET_TOKENS, CONTEXT_MAX_BUDGET_TOKENS),
+            "max_items": _context_int(
+                "max_items", max_items, CONTEXT_MIN_ITEMS, CONTEXT_MAX_ITEMS),
+            "allow_stale": _context_bool("allow_stale", allow_stale),
+        }
+        try:
+            result = self._http("POST", CONTEXT_PATH, payload)
+        except EngineHTTPStatusError as exc:
+            if exc.status != 400 or exc.code != "invalid_context_request":
+                raise
+            failure = {"e": exc.code, "why": exc.message, "status": exc.status}
+            self.result_errors += 1
+            wanted = self.raise_on_error if raise_on_error is None else bool(raise_on_error)
+            if wanted:
+                raise EngineContextError(failure, status=exc.status) from None
+            return failure
+        self._account(CONTEXT_OP, result)
+        self._raise_result(result, raise_on_error)
         return result
 
     # -- low-level managed request ----------------------------------------- #
@@ -832,10 +937,13 @@ def _error_fields(raw: bytes) -> tuple[str, str]:
 
 
 __all__ = [
-    "BASE_URL_ENV", "DEFAULT_BASE_URL", "DEFAULT_BUDGET", "EngineAuthError",
-    "EngineBudgetError", "EngineClient", "EngineClientError",
-    "EngineConfigError", "EngineHTTPStatusError", "EnginePagingError",
-    "EngineResultError", "EngineSessionError", "EngineTransportError",
-    "EngineUnavailableError", "EngineWithheldError", "GraphEngineClient",
-    "GRAPH_PATH", "HEALTH_PATH", "KNOWN_OPS", "TOKEN_ENV",
+    "BASE_URL_ENV", "CONTEXT_DEFAULT_BUDGET_TOKENS", "CONTEXT_DEFAULT_MAX_ITEMS",
+    "CONTEXT_MAX_BUDGET_TOKENS", "CONTEXT_MAX_ITEMS", "CONTEXT_MIN_BUDGET_TOKENS",
+    "CONTEXT_MIN_ITEMS", "CONTEXT_OP", "CONTEXT_PATH", "DEFAULT_BASE_URL",
+    "DEFAULT_BUDGET", "EngineAuthError", "EngineBudgetError", "EngineClient",
+    "EngineClientError", "EngineConfigError", "EngineContextError",
+    "EngineHTTPStatusError", "EnginePagingError", "EngineResultError",
+    "EngineSessionError", "EngineTransportError", "EngineUnavailableError",
+    "EngineWithheldError", "GRAPH_PATH", "GraphEngineClient", "HEALTH_PATH",
+    "KNOWN_OPS", "MAX_TASK_CHARS", "TOKEN_ENV",
 ]

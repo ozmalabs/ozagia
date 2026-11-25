@@ -90,6 +90,53 @@ export const TASK_RUN_INPUT = {
 } as const
 
 /**
+ * Session secret request inputs.
+ *
+ * `harness` is deliberately absent: the handler fixes it to `opencode`. The
+ * value is a request body field for `secretsFulfill` (the runner moves it to
+ * stdin), but no response ever echoes it. `additionalProperties: false`
+ * rejects an extra `harness` or an unexpected field before the handler runs.
+ */
+const SECRET_HANDLE = {
+  type: "string",
+  minLength: 1,
+  maxLength: 128,
+  pattern: "^[A-Za-z0-9._:-]+$",
+} as const
+
+export const SECRET_SESSION_INPUT = {
+  type: "object",
+  properties: {
+    session: SECRET_HANDLE,
+  },
+  required: ["session"],
+  additionalProperties: false,
+} as const
+
+export const SECRET_FULFILL_INPUT = {
+  type: "object",
+  properties: {
+    session: SECRET_HANDLE,
+    requestId: SECRET_HANDLE,
+    ttlS: { type: "integer", minimum: 1, maximum: 86400 },
+    // The runner re-checks UTF-8 bytes (1..8192) before spawning.
+    value: { type: "string", minLength: 1, maxLength: 8192 },
+  },
+  required: ["session", "requestId", "value"],
+  additionalProperties: false,
+} as const
+
+export const SECRET_DECLINE_INPUT = {
+  type: "object",
+  properties: {
+    session: SECRET_HANDLE,
+    requestId: SECRET_HANDLE,
+  },
+  required: ["session", "requestId"],
+  additionalProperties: false,
+} as const
+
+/**
  * Toolchain discovery is read-only: `list`, `env` and `plan` only. `plan`
  * bounds the repeated `--capability`/`--path` flags and accepts the CLI's two
  * probe switches. There is no `--model-family` flag and no install method.

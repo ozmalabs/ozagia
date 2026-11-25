@@ -1,5 +1,6 @@
 import {
   Command,
+  ComposerPill,
   Panel,
   Plugin,
   SettingsPage,
@@ -8,9 +9,16 @@ import {
   type PanelProps,
   type PanelTab,
 } from "@opencode/plugin/gui"
-import { createSignal } from "solid-js"
+import { createEffect, createSignal, onCleanup } from "solid-js"
 import { Ozagia } from "./rpc"
-import type { Envelope, TestPlan, WorktreeReport } from "./types"
+import type {
+  Envelope,
+  SecretFulfilledReport,
+  SecretRequestRow,
+  SecretRequestsReport,
+  TestPlan,
+  WorktreeReport,
+} from "./types"
 import { failureText, invoke } from "./gui/client"
 import { definition } from "./gui/definition"
 import { OzagiaPanel } from "./gui/panel"
@@ -25,6 +33,202 @@ export default Plugin.define({
     ctx.add(Style, panelCss)
 
     const [lastTestPlan, setLastTestPlan] = createSignal<Envelope<TestPlan> | null>(null)
+
+    // Pending secret requests are metadata only: ids, labels, purposes and
+    // expiry. A value is never written to this (or any other) signal.
+    const [pendingSecrets, setPendingSecrets] = createSignal<
+      Record<string, SecretRequestRow[]>
+    >({})
+    const SECRET_POLL_MS = 4000
+
+    const secretRows = (sessionId: string) => pendingSecrets()[sessionId] ?? []
+    const isPendingSecret = (row: SecretRequestRow) =>
+      row.state === "pending" && typeof row.request_id === "string" && !!row.request_id
+    const pendingSecretsFor = (sessionId: string) => secretRows(sessionId).filter(isPendingSecret)
+    const describeSecret = (row: SecretRequestRow) =>
+      row.label || row.purpose || row.request_id
+
+    const formatSecretExpiry = (expires: number | null | undefined): string => {
+      if (typeof expires !== "number" || !Number.isFinite(expires)) return ""
+      try {
+        return new Date(expires * 1000).toLocaleString(ctx.locale.locale())
+      } catch {
+        return ""
+      }
+    }
+
+    const refreshSecretRequests = async (
+      sessionId: string,
+    ): Promise<Envelope<SecretRequestsReport>> => {
+      const envelope = await invoke<SecretRequestsReport>(ctx, () =>
+        ctx.client.rpc(Ozagia).secretsRequests({ session: sessionId }),
+      )
+      if (envelope.ok && envelope.data) {
+        setPendingSecrets((previous) => ({
+          ...previous,
+          [sessionId]: envelope.data?.requests ?? [],
+        }))
+      }
+      return envelope
+    }
+
+    // Poll only while a session is routed. The effect's cleanup clears the
+    // timer on a route change and when the plugin goes away.
+    createEffect(() => {
+      const session = ctx.sessions.current()
+      if (!session) {
+        setPendingSecrets({})
+        return
+      }
+      const sessionId = session.id
+      let stopped = false
+      let busy = false
+      const load = async () => {
+        if (stopped || busy) return
+        busy = true
+        try {
+          await refreshSecretRequests(sessionId)
+        } finally {
+          busy = false
+        }
+      }
+      void load()
+      const timer = setInterval(() => {
+        void load()
+      }, SECRET_POLL_MS)
+      onCleanup(() => {
+        stopped = true
+        clearInterval(timer)
+      })
+    })
+    onCleanup(() => setPendingSecrets({}))
+
+    const chooseSecretRequest = async (
+      sessionId: string,
+      preselected?: SecretRequestRow,
+    ): Promise<SecretRequestRow | undefined> => {
+      if (preselected) return preselected
+      let rows = pendingSecretsFor(sessionId)
+      if (!rows.length) {
+        const envelope = await refreshSecretRequests(sessionId)
+        if (envelope.ok && envelope.data) {
+          rows = (envelope.data.requests ?? []).filter(isPendingSecret)
+        }
+      }
+      if (rows.length === 1) return rows[0]
+      if (rows.length > 1) {
+        const picked = await ctx.dialogs.select<string>({
+          title: ctx.t("secrets.select.title"),
+          placeholder: ctx.t("secrets.select.placeholder"),
+          options: rows.map((row) => ({
+            title: describeSecret(row),
+            value: row.request_id,
+            description: row.purpose ?? undefined,
+            group: ctx.t("secrets.select.group"),
+          })),
+        })
+        if (!picked) return undefined
+        return rows.find((row) => row.request_id === picked)
+      }
+      const requestId = await ctx.dialogs.prompt({
+        title: ctx.t("secrets.requestId.title"),
+        description: ctx.t("secrets.requestId.description"),
+        placeholder: "req_…",
+      })
+      if (!requestId || !requestId.trim()) return undefined
+      return { request_id: requestId.trim(), state: "pending", label: null, purpose: null }
+    }
+
+    const provideSecret = async (
+      sessionId: string,
+      preselected?: SecretRequestRow,
+    ): Promise<void> => {
+      const request = await chooseSecretRequest(sessionId, preselected)
+      if (!request) return
+      const label = describeSecret(request)
+      const description = [
+        request.purpose,
+        request.target ? ctx.t("secrets.prompt.target", { target: request.target }) : "",
+        ctx.t("secrets.prompt.body"),
+      ]
+        .filter(Boolean)
+        .join("\n\n")
+      // The host's native secret prompt is the only place the value is read.
+      // It stays a local variable and goes straight to the RPC call below.
+      const value = await ctx.dialogs.prompt({
+        title: ctx.t("secrets.prompt.title", { label }),
+        description,
+        placeholder: ctx.t("secrets.prompt.placeholder"),
+        secret: true,
+        submit: ctx.t("secrets.prompt.submit"),
+      })
+      if (value === undefined) return
+      const envelope = await invoke<SecretFulfilledReport>(ctx, () =>
+        ctx.client.rpc(Ozagia).secretsFulfill({
+          session: sessionId,
+          requestId: request.request_id,
+          value,
+        }),
+      )
+      await refreshSecretRequests(sessionId)
+      if (!envelope.ok || !envelope.data) {
+        await ctx.dialogs.alert({
+          title: ctx.t("secrets.fail.title"),
+          description: failureText(envelope),
+        })
+        return
+      }
+      const report = envelope.data
+      const lines = [
+        report.ref ? ctx.t("secrets.done.ref", { ref: report.ref }) : "",
+        report.fingerprint
+          ? ctx.t("secrets.done.fingerprint", { fingerprint: report.fingerprint })
+          : "",
+        report.expires
+          ? ctx.t("secrets.done.expires", { expires: formatSecretExpiry(report.expires) })
+          : "",
+      ].filter(Boolean)
+      await ctx.dialogs.alert({
+        title: ctx.t("secrets.done.title"),
+        description: lines.join("\n"),
+      })
+      if (report.ref) ctx.screen.current()?.composer.insert(report.ref)
+    }
+
+    const declineSecret = async (
+      sessionId: string,
+      preselected?: SecretRequestRow,
+    ): Promise<void> => {
+      const request = await chooseSecretRequest(sessionId, preselected)
+      if (!request) return
+      const label = describeSecret(request)
+      const confirmed = await ctx.dialogs.confirm({
+        title: ctx.t("secrets.decline.title", { label }),
+        description: request.purpose || ctx.t("secrets.decline.description"),
+        confirm: ctx.t("secrets.decline.confirm"),
+        cancel: ctx.t("secrets.decline.cancel"),
+        danger: true,
+      })
+      if (!confirmed) return
+      const envelope = await invoke<SecretRequestsReport>(ctx, () =>
+        ctx.client.rpc(Ozagia).secretsDecline({
+          session: sessionId,
+          requestId: request.request_id,
+        }),
+      )
+      await refreshSecretRequests(sessionId)
+      if (!envelope.ok) {
+        await ctx.dialogs.alert({
+          title: ctx.t("secrets.fail.title"),
+          description: failureText(envelope),
+        })
+        return
+      }
+      await ctx.dialogs.alert({
+        title: ctx.t("secrets.declined.title"),
+        description: ctx.t("secrets.declined.body", { label }),
+      })
+    }
 
     const tab = (id: TabId, titleKey: string, pinned = false): PanelTab => ({
       id,
@@ -100,6 +304,35 @@ export default Plugin.define({
         ]
       },
       render: () => <OzagiaSettings />,
+    })
+
+    ctx.add(ComposerPill, {
+      id: "secrets",
+      order: 40,
+      show(input) {
+        const pending = pendingSecretsFor(input.session.id)
+        if (!pending.length) return undefined
+        const first = pending[0]
+        const label =
+          pending.length === 1
+            ? ctx.t("secrets.pill.one", { label: describeSecret(first) })
+            : ctx.t("secrets.pill.many", { count: pending.length })
+        return {
+          label,
+          icon: "lock",
+          tone: "warning",
+          title: ctx.t("secrets.pill.title"),
+          rows: pending.slice(0, 8).map((row) => ({
+            id: row.request_id,
+            label: describeSecret(row),
+            detail: row.purpose || undefined,
+            tone: "warning",
+            run: () => {
+              void provideSecret(input.session.id, row)
+            },
+          })),
+        }
+      },
     })
 
     const open = (id: TabId) => {
@@ -227,6 +460,45 @@ export default Plugin.define({
           persistent: !!plan.refused,
         })
         ctx.layout.open(`${ctx.id}:testing`, session, { background: true })
+      },
+    }))
+
+    ctx.add(Command, (): CommandItem => ({
+      id: "provide-secret",
+      get title() {
+        return ctx.t("command.provideSecret")
+      },
+      description: ctx.t("command.provideSecret.description"),
+      keywords: "secret token credential request secure prompt ozagia",
+      get group() {
+        return ctx.t("command.group")
+      },
+      section: "session",
+      featured: true,
+      enabled: !!ctx.sessions.current(),
+      run: async () => {
+        const session = ctx.sessions.current()
+        if (!session) return
+        await provideSecret(session.id)
+      },
+    }))
+
+    ctx.add(Command, (): CommandItem => ({
+      id: "decline-secret",
+      get title() {
+        return ctx.t("command.declineSecret")
+      },
+      description: ctx.t("command.declineSecret.description"),
+      keywords: "secret token credential request decline deny ozagia",
+      get group() {
+        return ctx.t("command.group")
+      },
+      section: "session",
+      enabled: !!ctx.sessions.current(),
+      run: async () => {
+        const session = ctx.sessions.current()
+        if (!session) return
+        await declineSecret(session.id)
       },
     }))
   },

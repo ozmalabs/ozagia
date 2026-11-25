@@ -14,6 +14,9 @@ import {
   resourcesCheckSpec,
   runOzagia,
   runTask,
+  secretsDeclineSpec,
+  secretsFulfillSpec,
+  secretsRequestsSpec,
   settingsSchemaSpec,
   settingsValuesSpec,
   statusSpec,
@@ -154,6 +157,30 @@ export default Plugin.define({
           return invalid(error)
         }
       },
+      secretsRequests: async (input, context) =>
+        run(
+          () => secretsRequestsSpec(config.root, input as Record<string, unknown>),
+          context.signal,
+        ),
+      secretsFulfill: async (input, context) => {
+        // Keep the value out of argv and out of the input object the spec
+        // validates: it is passed separately and becomes stdin only.
+        const { session, requestId, ttlS, value } = input as {
+          session?: unknown
+          requestId?: unknown
+          ttlS?: unknown
+          value?: unknown
+        }
+        return run(
+          () => secretsFulfillSpec(config.root, { session, requestId, ttlS }, value),
+          context.signal,
+        )
+      },
+      secretsDecline: async (input, context) =>
+        run(
+          () => secretsDeclineSpec(config.root, input as Record<string, unknown>),
+          context.signal,
+        ),
     })
 
     return async () => {

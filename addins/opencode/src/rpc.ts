@@ -2,6 +2,9 @@ import { Rpc } from "@opencode/plugin/rpc"
 import {
   ACTION_APPLY_INPUT,
   ACTION_PREVIEW_INPUT,
+  SECRET_DECLINE_INPUT,
+  SECRET_FULFILL_INPUT,
+  SECRET_SESSION_INPUT,
   TASK_RUN_INPUT,
   TOOLCHAIN_ENV_INPUT,
   TOOLCHAIN_PLAN_INPUT,
@@ -168,6 +171,9 @@ export const Ozagia = Rpc.define({
     actionPreview: { input: ACTION_PREVIEW_INPUT, output: ENVELOPE_OUTPUT },
     actionApply: { input: ACTION_APPLY_INPUT, output: ENVELOPE_OUTPUT },
     taskRun: { input: TASK_RUN_INPUT, output: ENVELOPE_OUTPUT },
+    secretsRequests: { input: SECRET_SESSION_INPUT, output: ENVELOPE_OUTPUT },
+    secretsFulfill: { input: SECRET_FULFILL_INPUT, output: ENVELOPE_OUTPUT },
+    secretsDecline: { input: SECRET_DECLINE_INPUT, output: ENVELOPE_OUTPUT },
   },
   events: {},
 })

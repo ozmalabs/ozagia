@@ -103,13 +103,17 @@ Every handler builds a fixed argument array and calls `runOzagia` in
 `src/runner.ts`. The runner uses `node:child_process.spawn` with:
 
 - no shell;
-- `stdio: ["ignore", "pipe", "pipe"]` (closed stdin);
+- `stdio: ["ignore", "pipe", "pipe"]` (closed stdin), except an explicit
+  secret value, which uses `["pipe", "pipe", "pipe"]`, is written as UTF-8 and
+  is always closed;
 - `cwd = root`;
 - a wall-clock timeout that sends `SIGKILL` (20 s for read-only CLIs;
   `taskTimeoutMs`, at most 15 minutes, for a task run);
-- an 8 MiB stdout cap and a 64 KiB stderr tail;
-- exact-value scrubbing for confirmation tokens and task input values of eight
-  or more characters before any command display or error tail is returned;
+- an 8 MiB stdout cap, a 64 KiB stderr tail and a 16 KiB stdin cap checked
+  before spawn;
+- exact-value scrubbing for confirmation tokens, task input values of eight or
+  more characters and the exact stdin secret value before any command display
+  or error tail is returned;
 - JSON parsing, with a structured error envelope for every failure.
 
 Exit status 0 and 1 are accepted. The read-only CLIs use 1 for a report that
@@ -153,6 +157,9 @@ schema and these methods:
 | `actionPreview()` | `{action, name?, live?, network?, maxBytes?, scope?, wait?, idleTimeout?}` | `python -m ozagia.actions_cli preview ACTION --root ROOT ... --json` | Preview only; returns the operation, argv, risks and a one-time token. |
 | `actionApply()` | `{action, confirm, ...the same bounded arguments}` | `python -m ozagia.actions_cli apply ACTION --confirm TOKEN --root ROOT ... --json` | Explicit apply; the token is argv-only and displayed as `<redacted>`. |
 | `taskRun()` | `{id, inputs?}` | `task_library_cli show ID --root ROOT --json` then `tasks_cli run PATH --executor local --allow-exec --root ROOT --input NAME=VALUE ... --json` | Resolves the path from the library; no approve flag. |
+| `secretsRequests()` | `{session}` | `python -m ozagia.secrets_cli requests --root ROOT --session S --harness opencode --json` | Metadata-only pending/terminal request records. `harness` is fixed; the caller cannot supply it. |
+| `secretsFulfill()` | `{session, requestId, ttlS?, value}` | `python -m ozagia.secrets_cli fulfill REQUEST_ID --root ROOT --session S --harness opencode --stdin --json [--ttl-s N]` | The value is written to child stdin, never argv. The CLI returns only ref/fingerprint/expiry/state. |
+| `secretsDecline()` | `{session, requestId}` | `python -m ozagia.secrets_cli decline REQUEST_ID --root ROOT --session S --harness opencode --json` | Records a terminal decline; no value is involved. |
 
 Input rules:
 
@@ -177,6 +184,12 @@ Input rules:
   values of at most 4096 characters with no NUL or control characters. The
   whole argument vector is capped at 64 KiB. The handler rejects an invalid
   request before spawning anything;
+- the secret methods accept a session and request id of 1–128 characters from
+  `[A-Za-z0-9._:-]`, and reject an unknown field (including `harness`, which is
+  fixed to `opencode`). `secretsFulfill` accepts `ttlS` as an integer 1–86400
+  and a value of 1–8192 UTF-8 bytes. The value is a separate handler argument,
+  is written to child stdin, and is never put in argv, `display`, an error
+  tail or the RPC response;
 - the task spec path is never accepted from the caller. It comes from
   `task_library_cli show`, must be absolute and named `<id>.toml`, and must sit
   under `<root>/ozagia/tasks` for a repo override or the package `task_specs`
@@ -599,10 +612,46 @@ missing tool is a report, not an error. The tab does not call
 `toolchain_cli explain`, install a package, start a package manager, set a gate
 or write `[tools]` configuration.
 
+### Secret requests
+
+The add-in closes the model-initiated secret-request loop locally. The server
+plugin's `ozagia_secret_request` tool still creates a metadata-only pending
+request; its result contains the request id, label, purpose, expiry, ref and
+fingerprint, never a value.
+
+- The GUI registers a composer pill with id `secrets`. While a session is
+  routed it polls `secretsRequests` every four seconds and shows the count or
+  the one pending label. Its menu lists each pending request with label and
+  purpose. The timer is cleared on a route change and when the plugin goes
+  away. The pill never shows a value, prefix or suffix.
+- `ozagia: Provide secret…` lists pending requests with `ctx.dialogs.select`
+  (or asks for a request id when the list is empty), opens the host's native
+  `ctx.dialogs.prompt({ secret: true, ... })`, and calls `secretsFulfill`.
+  `ozagia: Decline secret…` uses `ctx.dialogs.confirm` and `secretsDecline`.
+- After a successful fulfill the GUI shows the reference, fingerprint and
+  expiry in `ctx.dialogs.alert`, then inserts the reference into the routed
+  composer with `ctx.screen.current()?.composer.insert(ref)`.
+- The value is only a local variable passed directly to the RPC call. It is
+  not assigned to `createSignal`, a store, a toast, a log or a thrown error.
+
+The security boundary for this slice is local transport. The runner spawns
+`python -m ozagia.secrets_cli ... --stdin` with no shell, writes the value as
+UTF-8 to child stdin and closes it, caps the stdin payload at 16 KiB (the
+fulfill spec caps the value at 8192 bytes), and scrubs the exact stdin value
+from the display command and every error envelope. The value never enters
+argv, `display`, `sensitive`, an RPC response, an audit record or these docs.
+The model receives only the ref, fingerprint and state.
+
+This slice is **offline-tested**: runner stdin transport and closure, spec
+bounds/rejection, RPC schema shape and source checks, the fulfill envelope
+shape, and the absence of value echoes in failures. Live OpenCode Desktop
+verification of the native secret dialog and host RPC logging remains open;
+the host's own storage is not erased by this add-in.
+
 ## Mutation surface and guarantees
 
-The add-in is narrower than the full plan item. Apart from `actionApply` and
-`taskRun`, it does **not**:
+The add-in is narrower than the full plan item. Apart from `actionApply`,
+`taskRun` and the local `secretsFulfill` capture, it does **not**:
 
 - commit, merge, push, stage, edit, create or delete repository files;
 - start, stop, signal or autostart a daemon, service, tunnel or job without a
@@ -616,6 +665,14 @@ The add-in is narrower than the full plan item. Apart from `actionApply` and
 - run tests or apply a test plan outside a task's `test` step;
 - expose an arbitrary shell, direct edit/write/patch tool or caller-supplied
   spec path.
+
+`secretsFulfill` is the other local mutation: it captures one value in the
+daemon's memory-only `SessionSecretStore` after the user submits the host's
+native secret prompt. The value never enters argv, the display command, an RPC
+response, an audit record or a log; only the reference, fingerprint, expiry and
+state come back. The add-in does not reveal, rotate, export or write the value
+to keychain, `pass`, `op` or `.env`, and it does not erase a host copy the
+harness may already have stored.
 
 The state-dir writes are the ones the landed CLIs already own: a preview's
 pending token (bounded, `0600`, ten-minute TTL), an apply's audit record and the
@@ -654,12 +711,13 @@ npm run build
   matching, apply token validation and command/error redaction, task path
   resolution and no-fallback behaviour, toolchain capability/path bounds and
   repeated flags, the model brief, RPC schema shape, confirmation gating,
-  `changed` repetition, credential redaction/tail capping, and the subprocess
-  wrapper (JSON parse, exit 1, redacted exit errors, timeout, cancellation and
-  stdout cap). It is offline and does not load `@opencode/plugin`;
-  `tests/load-ts.cjs` transpiles `src/runner.ts` and the pure task-command,
-  toolchain-brief, mutation and schema modules with the installed TypeScript
-  package.
+  `changed` repetition, credential redaction/tail capping, secret request spec
+  bounds and unknown-field rejection, stdin-only value transport/closure, and
+  the subprocess wrapper (JSON parse, exit 1, redacted exit errors, timeout,
+  cancellation and stdout cap). It is offline and does not load
+  `@opencode/plugin`; `tests/load-ts.cjs` transpiles `src/runner.ts` and the pure
+  task-command, toolchain-brief, mutation and schema modules with the installed
+  TypeScript package.
 - `npm run build` uses `gui()` from `@opencode/plugin/gui/vite` and emits one
   CommonJS file at `dist/gui-experimental.cjs`. The bundle keeps `solid-js`,
   `solid-js/web`, `@opencode/plugin/gui` and `@opencode/plugin/rpc` external and
@@ -702,9 +760,9 @@ known gaps or host dependencies, not hidden behaviour:
    version before relying on the panel.
 2. **Browser tabs.** The GUI docs describe windows and the desktop main process;
    GitHub-style browser-tab support depends on the host version. This package
-   uses only window APIs (`Panel`, `SettingsPage`, `Command`, `Style`,
-   `ctx.layout`, `ctx.toast`, `ctx.client`, `ctx.ui`), so it should work wherever
-   those are provided.
+   uses only window APIs (`Panel`, `SettingsPage`, `Command`, `ComposerPill`,
+   `Style`, `ctx.layout`, `ctx.dialogs`, `ctx.screen`, `ctx.toast`,
+   `ctx.client`, `ctx.ui`), so it should work wherever those are provided.
 3. **Panel layout breadth.** The panel is a side panel with a pinned graph tab
    and command-opened status/testing/research/actions/tasks/tools tabs. The
    settings page is a separate Settings contribution. There is no slot-based
@@ -730,6 +788,11 @@ known gaps or host dependencies, not hidden behaviour:
    settings search index; the page-level entry is.
 8. **Node version.** Vite 7 warns on Node 20.5.1 and recommends 20.19+/22.12+.
    The build succeeds; use a supported Node when possible.
+9. **Secret dialog and host logging.** The `secrets` composer pill,
+   `ctx.dialogs.prompt({ secret: true })` flow and the fulfillment RPC are
+   offline-tested against the installed types, but the native dialog, host
+   RPC-body logging and host session storage need live OpenCode Desktop
+   verification. This add-in does not claim to erase a host copy.
 9. **Output schema.** The envelope uses a permissive JSON-object schema by
    design, so the host validates transport shape but not every CLI payload
    field. The GUI narrows defensively and renders section errors instead of

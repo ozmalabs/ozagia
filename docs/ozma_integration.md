@@ -67,6 +67,20 @@ perimeter. A Python caller that can import ozagia should use
 the op-scoped `known` deltas automatically; see [the client
 example](graph_engine.md#python-client-ozma-context-assembler).
 
+For the provider specifically, `GraphEngineClient.task_context(task,
+budget_tokens=1500, max_items=8, allow_stale=False)` posts to
+`/v1/ozma/context` and returns the same versioned result as the Python
+provider. It is session-independent: it does not call `hello`, does not send or
+create a `session`, and does not read or write remembered `known` hashes, so an
+assembler can use one client for graph operations and provider context (or use
+a fresh client with no graph session at all). The method validates
+`task`/`budget_tokens`/`max_items`/`allow_stale` before sending and maps
+`invalid_context_request` to `EngineContextError`; see [the client
+reference](graph_engine.md#ozma-task-context).
+`examples/ozma_context_client.py` is a runnable offline example: it starts a
+loopback server for an indexed checkout, calls `task_context`, and prints only
+metadata (never the token or snippets).
+
 This HTTP path is **optional local transport for the existing provider and
 engine**. It does not implement the full Ozma protocol, an Ozma server, a
 discovery/handshake contract, authentication beyond a local bearer token, or a

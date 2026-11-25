@@ -906,3 +906,36 @@ export interface ActionPreview {
   audit?: string | null
   audit_error?: string | null
 }
+
+/** One secret request record. Metadata only; it never carries a value. */
+export interface SecretRequestRow {
+  request_id: string
+  label?: string | null
+  purpose?: string | null
+  target?: string | null
+  state: string
+  created?: number | null
+  expires?: number | null
+  ref?: string | null
+  fingerprint?: string | null
+}
+
+export interface SecretRequestsReport {
+  requests?: SecretRequestRow[]
+  count?: number
+  storage?: string
+}
+
+/** The fulfilled record: a reference, fingerprint and expiry, never a value. */
+export interface SecretFulfilledReport {
+  request_id?: string
+  label?: string | null
+  purpose?: string | null
+  target?: string | null
+  state?: string
+  created?: number | null
+  expires?: number | null
+  ref?: string | null
+  fingerprint?: string | null
+  storage?: string
+}
