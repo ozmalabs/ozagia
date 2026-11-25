@@ -378,6 +378,7 @@ _DOCS = {
     "task_preflight": "doc:docs/task_preflight.md",
     "eval_agent": "doc:docs/eval_agent.md",
     "eval_retrieval": "doc:docs/eval_retrieval.md",
+    "temp": "doc:docs/temp.md",
     "install": "doc:docs/install.md",
 }
 
@@ -444,6 +445,8 @@ _TESTS = {
     "self": "test:tests/test_self_graph.py",
     "structural": "test:tests/test_structural_intent_routing.py",
     "model_api": "test:tests/test_model_api.py",
+    "temp_space": "test:tests/test_temp_space.py",
+    "temp_cli": "test:tests/test_temp_cli.py",
 }
 
 
@@ -1429,6 +1432,36 @@ _BUILTIN_DEFINITIONS: tuple[dict[str, Any], ...] = (
         authorization=_EXEC,
         tests=_tests("resources"),
         docs=_docs("resources"),
+    ),
+    _def(
+        id="cap:resources.temp_space",
+        domain="resources",
+        purpose=("Create, adopt, inspect, release and safely clean provenanced "
+                 "temporary directories with usage accounting and tmpfs "
+                 "capacity warnings."),
+        owner="ozagia.core.temp_space",
+        side_effect="write",
+        exposure=["cli"],
+        impl=["impl:ozagia.core.temp_space.create",
+              "impl:ozagia.core.temp_space.adopt",
+              "impl:ozagia.core.temp_space.touch",
+              "impl:ozagia.core.temp_space.status",
+              "impl:ozagia.core.temp_space.audit",
+              "impl:ozagia.core.temp_space.clean",
+              "impl:ozagia.core.temp_space.prune_registry",
+              "impl:ozagia.temp_cli.run"],
+        surfaces=["cli:ozagia.tmp"],
+        prerequisites=["a repository root and a writable state directory"],
+        limits=["cleanup is a plan unless --apply is given",
+                "only owned entries with a matching marker are deletable",
+                "audit is read-only and only reports conservative name "
+                "patterns",
+                "registry and markers store provenance, never file contents",
+                "usage walks are bounded; a stopped walk is reported partial",
+                "tmpfs detection reads /proc and returns unknown elsewhere"],
+        authorization=_STATE,
+        tests=_tests("temp_space", "temp_cli"),
+        docs=_docs("temp"),
     ),
     # toolchain ------------------------------------------------------------
     _def(
