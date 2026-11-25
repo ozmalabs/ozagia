@@ -40,7 +40,10 @@ ozagia agent                                                       # the TUI
 | `--timeout S` | kill the session after S seconds (exit 124) |
 | `--python P` | `python` in the agent's shell commands (and the daemon's) is P |
 | `--opencode EXE` | the opencode executable (default `opencode` on PATH) |
-| `--runs-dir D` | where run roots go (default `<tmp>/ozagia_agent`) |
+| `--runs-dir D` | where run roots go (default `<tmp>/ozagia_agent`); an explicit D is unmanaged (see below) |
+| `--no-managed-tmp` | do not register the default run root in the managed temp registry |
+| `--tmp-ttl D` | managed run-root lifetime (default 7 days; a bare number is days, or use `s`/`m`/`h`/`d`) |
+| `--clean-logs` | after a successful run with no kept clone, delete the run root and scratch workspace (default: keep the logs) |
 | `--repo-map` | send a bounded, task-ranked repository map in the first model request; off by default |
 | `--repo-map-tokens N` | repo-map budget for `--repo-map`, 200..8000 (default 1500); needs `--repo-map` |
 | `-- ARGS` | passed to opencode before the prompt |
@@ -52,7 +55,8 @@ daemon failure).
 ### What a session does
 
 1. A run root `<runs dir>/<stamp>-<pid>-<hex>/` holds the logs (`logs/`) and,
-   with `--clone`, the clone (`work/clone`).
+   with `--clone`, the clone (`work/clone`). The default run root is adopted in
+   the managed temp registry (see [Managed run roots](#managed-run-roots)).
 2. `--clone`: `git clone --shared --no-checkout`, checkout of REV detached,
    `origin` removed (as the eval's live drivers). Uncommitted changes in the
    source are not in the clone. The summary prints `rm -rf <run root>` to
@@ -86,6 +90,11 @@ daemon failure).
    remains authoritative. With `--repo-map`, `OZAGIA_REPO_MAP_TOKENS` carries
    the budget; without it the variable is absent from the OpenCode process's
    environment even when the caller's environment sets it.
+   A managed run also sets `TMPDIR`, `TMP` and `TEMP` to `<run root>/tmp`
+   (mode 0700) and `OZAGIA_SCRATCH_ROOT` to a disk-backed scratch workspace
+   under `<state dir>/tmp/workspaces/agent/<run>`. The graph daemon and the
+   shell tools it runs receive the same `TMPDIR`, so `$TMPDIR` never points at
+   the inherited, often RAM-backed `/tmp`.
    The TUI also gets `OZAGIA_LAUNCH_STATUS`, the status file its sidebar
    polls.
    - With a prompt: `opencode run --standalone --format json --auto --archived
@@ -174,6 +183,7 @@ ozagia agent: exit 0 after 41.2 s in /path/repo
   plugin loaded: yes; captured calls: 37; passthrough: 9; fallbacks: 0
   transcript: /tmp/ozagia_agent/.../logs/transcript.txt
   logs: /tmp/ozagia_agent/.../logs
+  managed tmp: tmp_1a2b3c4d5e6f  /tmp/ozagia_agent/...  (tmpfs)  TTL 604800s (expires 2026-12-03T12:00:00Z); ozagia tmp release tmp_1a2b3c4d5e6f --delete
 ```
 
 `plugin loaded` is the daemon's `hellos > 0`, `captured calls` its
@@ -181,6 +191,47 @@ ozagia agent: exit 0 after 41.2 s in /path/repo
 `fallbacks` its `stats.fallbacks` (the plugin's fallback reports, expired
 requests and failed requests; the `eval.agent.graph_stats_fields` fields). `run_agent` returns these and the
 paths as a dict.
+
+### Managed run roots
+
+By default `ozagia agent` registers its run root with the managed temporary
+space (`ozagia.core.temp_space`, `docs/temp.md`): the id, path, `agent` kind,
+`run_id`, optional model, TTL, ownership marker and usage are recorded. The
+registry lives in the source repository's state directory (respecting
+`OZAGIA_STATE_DIR`). Registration is best effort: if adopting the run root
+fails, the session still runs, the result has `tmp_registered: false`, and
+the summary says `managed tmp: not registered (...)`.
+
+```console
+$ ozagia agent --tmp-ttl 2d --prompt "fix the retry loop"
+$ ozagia agent --no-managed-tmp --prompt ...
+```
+
+`--tmp-ttl` applies to the run root and the scratch workspace; a bare number
+is days and `s`, `m`, `h`, `d` suffixes are accepted. The default is 7 days.
+`--no-managed-tmp` leaves the run root unregistered. Under the run root the
+harness reserves `tmp/` (mode 0700) for ephemeral files; `OZAGIA_SCRATCH_ROOT`
+names the separate disk-backed workspace under
+`<state dir>/tmp/workspaces/agent/<run>` so a model's scratch files outlive a
+reboot even when the logs do not. That workspace is a second managed entry
+with its own id and TTL. The result carries `tmp_id`, `tmp_path`,
+`tmp_registered`, `tmp_ttl_s`, `tmp_expires_at`, `tmp_bytes`, `tmp_files`,
+`tmpfs`, `scratch_root` and `tmp_cleaned`.
+
+`--clean-logs` deletes the owned run root and scratch workspace only when the
+run succeeded (`exit_code == 0` and not timed out) and no clone was kept. A
+failed or timed-out run is never deleted, and a kept clone keeps the run root
+(and the scratch) with the summary saying why. Deletion goes through
+`temp_space.release(..., delete=True)`, which needs the ownership marker and
+refuses a path it does not own; a missing path or a cleanup race does not fail
+the run. The default is off, so logs remain for tests and post-mortems.
+
+An explicit `--runs-dir D` is unmanaged, preserving earlier behavior: the run
+root is not adopted, no managed registry or scratch workspace is created under
+the source state directory, and scratch stays at `<run root>/scratch`. (The
+graph snapshot still lives in the workdir's own state directory, as before.)
+`--no-managed-tmp` gives the same unregistered run root with the default
+location.
 
 ### Repo-map delivery (opt-in)
 

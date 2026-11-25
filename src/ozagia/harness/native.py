@@ -40,9 +40,13 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from ozagia.core import temp_space as TS
+
 MODES = ("plain", "graph")
 MAX_STEPS = 100
 DEFAULT_TIMEOUT_S = 900
+# Default lifetime of the managed log directory (7 days).
+DEFAULT_TMP_TTL_S = 7 * 24 * 60 * 60
 # Attempts per model request; 429 and 5xx are retried.
 HTTP_ATTEMPTS = 3
 # Wait before the second attempt; doubled before each later one.
@@ -347,8 +351,17 @@ def run(workdir: str | Path, prompt: str, *, mode: str, base_url: str,
     started = time.monotonic()
     deadline = started + timeout_s
     workdir = Path(workdir).resolve()
-    log = Path(log_dir) if log_dir else Path(tempfile.mkdtemp(
-        prefix="ozagia-native-"))
+    tmp_id: str | None = None
+    tmp_path: str | None = None
+    if log_dir:
+        log = Path(log_dir)
+    else:
+        try:
+            entry = TS.create(workdir, kind="agent", reason="native agent run",
+                              ttl_s=DEFAULT_TMP_TTL_S)
+            log, tmp_id, tmp_path = Path(entry["path"]), entry["id"], entry["path"]
+        except Exception:  # noqa: BLE001 - managed tmp is best effort
+            log = Path(tempfile.mkdtemp(prefix="ozagia-native-"))
     log.mkdir(parents=True, exist_ok=True)
     transcript = log / "transcript.jsonl"
     transcript.write_text("", encoding="utf-8")
@@ -362,7 +375,8 @@ def run(workdir: str | Path, prompt: str, *, mode: str, base_url: str,
         "captured_calls": None, "passthrough_calls": None, "fallbacks": None,
         "stopped": None,
         "error": None, "final_text": "", "mode": mode, "model": model,
-        "wall_s": 0.0, "log_dir": str(log)}
+        "wall_s": 0.0, "log_dir": str(log),
+        "tmp_id": tmp_id, "tmp_path": tmp_path}
     warn = _plain_http_warning(base_url)
     if warn:
         print(warn, file=sys.stderr, flush=True)

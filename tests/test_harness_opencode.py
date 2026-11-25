@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pytest
 
+from ozagia.core import temp_space as TS
+from ozagia.daemon import autostart as daemon_autostart
 from ozagia.harness import launch_status
 from ozagia.harness import opencode as hop
 from ozagia.harness import session as hs
@@ -39,7 +41,8 @@ rec = {"argv": sys.argv, "cwd": os.getcwd(), "pid": os.getpid(),
        "started_at": time.time(),
        "env": {k: os.environ.get(k) for k in ("OZAGIA_DAEMON_SOCK", "PWD", "OPENCODE_CONFIG",
                                               "OZAGIA_LAUNCH_STATUS",
-                                              "OZAGIA_REPO_MAP_TOKENS")}}
+                                              "OZAGIA_REPO_MAP_TOKENS", "TMPDIR", "TMP",
+                                              "TEMP", "OZAGIA_SCRATCH_ROOT")}}
 # `opencode run` reads its message from stdin; the TUI path has none.
 if sys.argv[1:2] == ["run"]:
     rec["stdin"] = sys.stdin.read()
@@ -648,7 +651,11 @@ def test_graph_session_lifecycle(repo, stub, tmp_path):
         assert s.dump == repo / ".ozagia" / "graph.json"
         assert s.stats()["hellos"] == 0
         pid = s.pid
+        sock = s.sock
+        lock = daemon_autostart.lock_path(repo, sock)
+        assert lock.is_file()
     assert not s.sock.exists()
+    assert not lock.exists()  # the per-socket lock goes with the daemon
     assert _group_gone(pid)
     assert s.final_stats["by_op"].get("stats") == 1
     assert s.stats() == s.final_stats
@@ -742,3 +749,95 @@ def test_daemon_argv_passes_the_parent_pid():
     import ozagia.harness.session as hs
     argv = hs._daemon_argv("py", Path("/r"), Path("/d"), Path("/j"), Path("/s"))
     assert argv[-2:] == ["--parent-pid", str(os.getpid())]
+
+
+def _managed_run(repo, monkeypatch, tmp_path, **kw):
+    """A default run (no --runs-dir), with /tmp redirected under tmp_path."""
+    monkeypatch.setattr(hop.tempfile, "gettempdir",
+                        lambda: str(tmp_path / "temp-base"))
+    kw.setdefault("prompt", "fix the addition")
+    return run_agent(repo, quiet=True, **kw)
+
+
+def test_default_run_root_is_registered_with_managed_tmp(repo, stub, monkeypatch,
+                                                         tmp_path):
+    res = _managed_run(repo, monkeypatch, tmp_path)
+    rec = _record(stub)
+
+    assert res["tmp_registered"] is True
+    assert res["tmp_id"] and res["tmp_path"] == res["run_root"]
+    entry = TS.get(repo, res["tmp_id"])
+    assert entry["kind"] == "agent" and entry["owned"] is True
+    assert entry["path"] == res["run_root"]
+    assert entry["ttl_s"] == hop.DEFAULT_TMP_TTL_S
+    assert res["tmp_ttl_s"] == hop.DEFAULT_TMP_TTL_S
+    assert res["tmp_expires_at"] == entry["expires_at"]
+    marker = Path(res["run_root"]) / TS.MARKER_NAME
+    assert marker.is_file()
+
+    # TMPDIR/TMP/TEMP point at <run root>/tmp, not the inherited /tmp.
+    tmpdir = Path(rec["env"]["TMPDIR"])
+    assert tmpdir == Path(res["run_root"]) / "tmp"
+    assert rec["env"]["TMP"] == rec["env"]["TEMP"] == rec["env"]["TMPDIR"]
+    assert tmpdir.stat().st_mode & 0o777 == 0o700
+    probe = tmpdir / "shell-probe"
+    subprocess.run(["/bin/sh", "-c", 'printf ok > "$TMPDIR/shell-probe"'],
+                   env={**os.environ, "TMPDIR": rec["env"]["TMPDIR"]}, check=True)
+    assert probe.read_text() == "ok"
+
+    # The disk-backed scratch workspace is under the source state dir and is
+    # registered separately from the run root.
+    scratch = Path(rec["env"]["OZAGIA_SCRATCH_ROOT"])
+    assert scratch == TS.workspaces_root(repo) / "agent" / Path(res["run_root"]).name
+    assert scratch.is_dir()
+    entries = {entry["path"]: entry for entry in TS.list_entries(repo, kind="agent")}
+    assert str(scratch) in entries and entries[str(scratch)]["owned"] is True
+    assert res["scratch_root"] == str(scratch)
+
+    summary = hop._summary(res)
+    assert res["tmp_id"] in summary
+    assert str(res["tmp_path"]) in summary
+    assert "ozagia tmp release" in summary and "--delete" in summary
+
+
+def test_clean_logs_deletes_only_after_a_successful_run(repo, stub, monkeypatch,
+                                                        tmp_path):
+    res = _managed_run(repo, monkeypatch, tmp_path, clean_logs=True)
+    assert res["exit_code"] == 0 and res["timed_out"] is False
+    assert res["tmp_cleaned"] is True
+    assert not Path(res["run_root"]).exists()
+    assert not Path(res["scratch_root"]).exists()
+    assert TS.get(repo, res["tmp_id"])["state"] == "released"
+
+
+def test_clean_logs_keeps_a_failed_or_timed_out_run(repo, stub, monkeypatch,
+                                                    tmp_path):
+    monkeypatch.setenv("STUB_MODE", "sleep")
+    res = _managed_run(repo, monkeypatch, tmp_path, timeout_s=0.3, clean_logs=True)
+    assert res["timed_out"] is True
+    assert res["tmp_cleaned"] is False
+    assert Path(res["run_root"]).is_dir()
+    assert Path(res["scratch_root"]).is_dir()
+
+
+def test_clean_logs_keeps_a_clone(repo, stub, monkeypatch, tmp_path):
+    res = _managed_run(repo, monkeypatch, tmp_path, clone=True, clean_logs=True)
+    assert res["exit_code"] == 0 and res["clone"] is True
+    assert res["tmp_cleaned"] is False
+    assert Path(res["run_root"]).is_dir()
+    assert "clone kept" in hop._summary(res)
+
+
+def test_explicit_runs_dir_is_not_registered_and_leaves_the_source_untouched(
+        repo, stub, tmp_path):
+    res = _run(repo, tmp_path, clone=True)
+
+    assert res["tmp_registered"] is False
+    assert res["tmp_id"] is None and res["tmp_path"] is None
+    assert res["scratch_root"] == str(Path(res["run_root"]) / "scratch")
+    assert Path(res["scratch_root"]).is_dir()
+    # No managed entry and no source state dir created by the harness.
+    assert TS.list_entries(repo, kind="agent") == []
+    assert not (repo / ".ozagia").exists()
+    assert not (Path(res["run_root"]).parent / ".ozagia").exists()
+    assert _git(repo, "status", "--porcelain", "--untracked-files=all") == ""

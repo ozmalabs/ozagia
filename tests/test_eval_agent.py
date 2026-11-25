@@ -15,6 +15,8 @@ from pathlib import Path
 import pytest
 
 from ozagia.config import state_path
+from ozagia.core import temp_space as TS
+from ozagia.daemon import autostart as daemon_autostart
 from ozagia.eval import agent as ae
 from ozagia.eval.agent import (
     ARMS,
@@ -976,6 +978,93 @@ def test_graph_intent_daemon_that_never_gets_ready_is_killed(fixture, monkeypatc
     assert rec["success"] is False
     for pid in _pids(pidfile):
         assert _pid_gone(pid), pid
+
+
+def test_eval_run_root_is_registered_in_the_repo_state(fixture, tmp_path):
+    run_root = ae.new_run_root(tmp_path / "eval-runs", root=fixture["repo"],
+                               reason="test eval run")
+    entries = [e for e in TS.list_entries(fixture["repo"], kind="eval")
+               if e["path"] == str(run_root)]
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry["owned"] is True and entry["run_id"] == run_root.name
+    assert entry["ttl_s"] == ae.DEFAULT_RUN_TTL_S
+    assert (run_root / TS.MARKER_NAME).is_file()
+
+
+def test_daemon_socket_stays_short_when_tmpdir_and_base_are_long(monkeypatch,
+                                                                tmp_path):
+    long_base = tmp_path / ("x" * 80) / "run"
+    monkeypatch.setattr(ae.tempfile, "gettempdir", lambda: str(long_base))
+    sock = ae._daemon_sock_path(long_base)
+    assert len(os.fsencode(str(sock))) < ae.MAX_SOCKET_PATH
+    # Neither the requested base nor the redirected TMPDIR fits; a short
+    # runtime/temp directory must win.
+    assert Path(sock).parent != long_base
+    assert str(sock).startswith(("/tmp/", "/dev/shm/", "/run/user/"))
+
+
+def test_daemon_socket_prefers_the_run_root_when_it_fits(monkeypatch,
+                                                         tmp_path):
+    short_base = Path("/tmp") / f"ozsock-{os.getpid()}-{os.urandom(4).hex()}"
+    short_base.mkdir()
+    try:
+        # Even when TMPDIR is long, an explicitly short run root is used.
+        monkeypatch.setattr(ae.tempfile, "gettempdir",
+                            lambda: str(tmp_path / ("y" * 80)))
+        sock = ae._daemon_sock_path(short_base)
+        assert Path(sock).parent == short_base
+        assert len(os.fsencode(str(sock))) < ae.MAX_SOCKET_PATH
+    finally:
+        short_base.rmdir()
+
+
+def test_graph_daemon_stop_removes_the_socket_lock(fixture):
+    log_dir = fixture["run_root"] / "logs"
+    started = ae.start_daemon(fixture["repo"], _python(), log_dir)
+    daemon, sock = started["daemon"], started["sock"]
+    assert daemon is not None and started["daemon_ok"] is True
+    lock = daemon_autostart.lock_path(fixture["repo"], sock)
+    # The stub daemon does not take the real lock; create the leftover the
+    # real daemon would leave behind.
+    lock.write_text("stale\n", encoding="utf-8")
+    daemon.stop()
+    assert not Path(sock).exists()
+    assert not lock.exists()
+
+
+def test_graph_daemon_start_failure_removes_the_socket_lock(fixture, monkeypatch,
+                                                            stub_daemon_script,
+                                                            tmp_path):
+    pidfile = tmp_path / "pids.txt"
+    _use_stub_daemon(monkeypatch, stub_daemon_script, pidfile, mode="fail")
+    sock = tmp_path / "failed.sock"
+    monkeypatch.setattr(ae, "_daemon_sock_path", lambda *_args: sock)
+    lock = daemon_autostart.lock_path(fixture["repo"], sock)
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("stale\n", encoding="utf-8")
+    started = ae.start_daemon(fixture["repo"], _python(),
+                              fixture["run_root"] / "logs")
+    assert started["daemon_ok"] is False
+    assert not lock.exists()
+
+
+def test_release_lock_leaves_an_active_lock_alone(tmp_path):
+    import fcntl
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    sock = tmp_path / "active.sock"
+    lock = daemon_autostart.lock_path(root, sock)
+    lock.write_text("123\n", encoding="utf-8")
+    fd = os.open(lock, os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert daemon_autostart.release_lock(root, sock) is False
+        assert lock.exists()
+    finally:
+        os.close(fd)
+        lock.unlink(missing_ok=True)
 
 
 def test_graph_intent_with_claude_is_refused_before_any_worktree(fixture):

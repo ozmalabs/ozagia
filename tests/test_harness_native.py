@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 
 from ozagia.core import memory as M
+from ozagia.core import temp_space as TS
 from ozagia.core.memory import DevMemory, build_index
 from ozagia.harness import native
 from ozagia.harness import tools as T
@@ -667,3 +668,17 @@ def test_plain_edit_and_write_refuse_git(repo):
             call()
     assert (repo / ".git" / "HEAD").read_text() == head
     assert not (repo / "a").exists()
+
+
+def test_default_log_dir_is_registered_managed_tmp(repo):
+    with StubLLM([final()]) as stub:
+        s = native.run(repo, "addition gives the wrong sign",
+                       base_url=stub.url, model="stub-model", mode="plain")
+    assert s["tmp_id"] and s["tmp_path"] == s["log_dir"]
+    entry = TS.get(repo, s["tmp_id"])
+    assert entry["path"] == s["log_dir"] and entry["kind"] == "agent"
+    assert entry["owned"] is True
+    assert (Path(s["log_dir"]) / TS.MARKER_NAME).is_file()
+    written = json.loads((Path(s["log_dir"]) / "summary.json").read_text())
+    assert written["tmp_id"] == s["tmp_id"]
+    assert written["tmp_path"] == s["tmp_path"]

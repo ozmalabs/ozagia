@@ -86,6 +86,7 @@ from pathlib import Path
 from typing import Any, Iterator, Sequence
 
 from ozagia.config import config_path
+from ozagia.core import temp_space as TS
 from ozagia.daemon.protocol import ENV_SOCK
 from ozagia.eval import agent as ea
 from ozagia.harness import launch_status
@@ -103,6 +104,9 @@ REPO_MAP_ENV = "OZAGIA_REPO_MAP_TOKENS"
 REPO_MAP_DEFAULT_TOKENS = 1500
 REPO_MAP_MIN_TOKENS = 200
 REPO_MAP_MAX_TOKENS = 8000
+# Default lifetime of a managed run root (7 days).
+DEFAULT_TMP_TTL_S = 7 * 24 * 60 * 60
+SCRATCH_ENV = "OZAGIA_SCRATCH_ROOT"
 # Seconds the TUI gets to exit after SIGTERM before SIGKILL.
 TUI_KILL_GRACE_S = ea.KILL_GRACE_S
 
@@ -369,6 +373,106 @@ def _stop(proc: subprocess.Popen) -> None:
             proc.wait()
 
 
+def _register_run_root(source: Path, run_root: Path, *, model: str | None,
+                       ttl_s: int | None) -> tuple[dict[str, Any] | None, str | None]:
+    """Adopt the newly created run root; return (entry, warning)."""
+    try:
+        entry = TS.adopt(source, run_root, kind="agent",
+                         reason="opencode agent run", run_id=run_root.name,
+                         model=model, ttl_s=ttl_s, owned=True, mark=True)
+        return entry, None
+    except Exception as exc:  # noqa: BLE001 - registration fails open
+        return None, f"managed tmp registration failed: {exc}"
+
+
+def _register_scratch(source: Path, run_root: Path, *,
+                      ttl_s: int | None) -> tuple[Path | None, str | None, str | None]:
+    """Create the disk-backed scratch workspace; return (path, id, warning)."""
+    target = TS.workspaces_root(source) / "agent" / run_root.name
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        entry = TS.create(source, kind="agent",
+                          reason="agent scratch workspace",
+                          run_id=run_root.name, ttl_s=ttl_s, path=target)
+        return Path(entry["path"]), entry["id"], None
+    except Exception as exc:  # noqa: BLE001 - scratch is optional
+        return None, None, f"agent scratch workspace unavailable: {exc}"
+
+
+def _tmp_env(run_root: Path) -> dict[str, str]:
+    """A 0700 TMPDIR under the run root, exposed under the usual names."""
+    try:
+        path = run_root / "tmp"
+        path.mkdir(mode=0o700, exist_ok=True)
+        os.chmod(path, 0o700)
+    except OSError:
+        return {}
+    return {"TMPDIR": str(path), "TMP": str(path), "TEMP": str(path)}
+
+
+def _refresh_tmp_usage(source: Path, res: dict[str, Any]) -> None:
+    if not res.get("tmp_id"):
+        return
+    try:
+        entry = TS.get(source, res["tmp_id"])
+    except Exception:  # noqa: BLE001 - usage is informational
+        return
+    res.update(tmp_path=entry.get("path"), tmp_expires_at=entry.get("expires_at"),
+               tmp_bytes=entry.get("bytes"), tmp_files=entry.get("files"),
+               tmpfs=entry.get("tmpfs"))
+
+
+def _clean_run_tmp(source: Path, res: dict[str, Any], *,
+                   managed: bool, scratch_id: str | None) -> None:
+    """Delete an owned run root and scratch after a successful, uncloned run."""
+    if res.get("timed_out") or res.get("exit_code") != 0:
+        res["tmp_cleaned"] = False
+        res["tmp_clean_reason"] = "run did not succeed"
+        return
+    if res.get("clone"):
+        res["tmp_cleaned"] = False
+        res["tmp_clean_reason"] = "clone kept"
+        return
+    if not managed or not res.get("tmp_id"):
+        res["tmp_cleaned"] = False
+        res["tmp_clean_reason"] = ("explicit --runs-dir is unmanaged" if not managed
+                                   else "run root is not registered")
+        return
+    run_root = Path(res["run_root"])
+    try:
+        TS.release(source, res["tmp_id"], delete=True)
+    except Exception as exc:  # noqa: BLE001 - cleanup must not fail the run
+        res["tmp_cleaned"] = False
+        res["tmp_clean_error"] = f"managed tmp release failed: {exc}"
+        return
+    res["tmp_cleaned"] = not os.path.lexists(run_root)
+    if not res["tmp_cleaned"]:
+        res["tmp_clean_reason"] = "run root still exists after release"
+    if scratch_id:
+        try:
+            TS.release(source, scratch_id, delete=True)
+        except Exception as exc:  # noqa: BLE001 - scratch is best effort
+            res.setdefault("tmp_clean_warnings", []).append(str(exc))
+
+
+def _tmp_line(res: dict[str, Any]) -> str:
+    if not res.get("tmp_registered"):
+        if res.get("runs_dir_explicit"):
+            why = "explicit --runs-dir is unmanaged"
+        else:
+            why = res.get("tmp_warning") or "not registered"
+        return f"  managed tmp: not registered ({why}); {res.get('run_root')}"
+    filesystem = ("tmpfs" if res.get("tmpfs") else
+                  "disk" if res.get("tmpfs") is False else "filesystem unknown")
+    ttl = res.get("tmp_ttl_s")
+    expires = res.get("tmp_expires_at")
+    expiry = (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(expires))
+              if expires is not None else "none")
+    return (f"  managed tmp: {res.get('tmp_id')}  {res.get('tmp_path')}  ({filesystem})"
+            f"  TTL {ttl}s (expires {expiry}); "
+            f"ozagia tmp release {res.get('tmp_id')} --delete")
+
+
 def _summary(res: dict[str, Any]) -> str:
     def yn(v: Any) -> str:
         return "unknown" if v is None else ("yes" if v else "no")
@@ -411,6 +515,13 @@ def _summary(res: dict[str, Any]) -> str:
     if res.get("transcript_path"):
         lines.append(f"  transcript: {res['transcript_path']}")
     lines.append(f"  logs: {res['log_dir']}")
+    lines.append(_tmp_line(res))
+    if res.get("clean_logs"):
+        if res.get("tmp_cleaned") is True:
+            lines.append("  managed tmp cleaned: yes")
+        elif res.get("tmp_cleaned") is False:
+            why = res.get("tmp_clean_reason") or res.get("tmp_clean_error") or "kept"
+            lines.append(f"  managed tmp cleaned: no ({why})")
     if res.get("clone"):
         lines.append(f"  clone kept at {res['workdir']}; remove it with: "
                      f"rm -rf {res['run_root']}")
@@ -427,7 +538,10 @@ def run_agent(workdir: str | Path, *, prompt: str | None = None, model: str | No
               progress: Progress | None = None,
               background: bool | None = None,
               repo_map_tokens: int | None = None,
-              opencode_config: str | Path | None = None) -> dict[str, Any]:
+              opencode_config: str | Path | None = None,
+              managed_tmp: bool = True,
+              tmp_ttl_s: int | None = None,
+              clean_logs: bool = False) -> dict[str, Any]:
     """Run one OpenCode session on `workdir` with the graph daemon and plugin
     (see the module docstring). Returns {exit_code, seconds, timed_out,
     transcript_path, stdout_path, stderr_path, daemon_stats, plugin_loaded,
@@ -448,7 +562,18 @@ def run_agent(workdir: str | Path, *, prompt: str | None = None, model: str | No
     `providers`, `model`, `small_model`) are layered into the generated
     harness config; `model` (from `--model`) stays authoritative, and any
     other key, invalid JSON, or an unreadable file is an AgentError before
-    OpenCode starts. The user's global config is never read implicitly."""
+    OpenCode starts. The user's global config is never read implicitly.
+    `managed_tmp` (default true) adopts the run root in the managed temp
+    registry (`ozagia.core.temp_space`) and isolates the session's TMPDIR;
+    `tmp_ttl_s` defaults to 7 days. Each of the OpenCode process, the graph
+    daemon and its shell tools gets `<run root>/tmp`. A disk-backed scratch
+    workspace under `<state dir>/tmp/workspaces/agent/<run>` becomes
+    `OZAGIA_SCRATCH_ROOT`. Registration is best effort: a failure records a
+    warning and the session runs normally. With an explicit `runs_dir` the
+    root is not registered, the source state dir is not created for it, and
+    scratch stays under `<run root>/scratch`. `clean_logs` (default off)
+    removes an owned run root and scratch only after a successful run; a kept
+    clone, a failure or a timeout always keeps them."""
     if repo_map_tokens is not None:
         repo_map_tokens = validate_repo_map_tokens(repo_map_tokens)
     provider_config = (load_provider_config(opencode_config)
@@ -474,6 +599,10 @@ def run_agent(workdir: str | Path, *, prompt: str | None = None, model: str | No
     source = Path(workdir).resolve()
     if not source.is_dir():
         raise AgentError(f"not a directory: {source}")
+    explicit_runs = runs_dir is not None
+    managed = bool(managed_tmp and not explicit_runs)
+    if managed and tmp_ttl_s is None:
+        tmp_ttl_s = DEFAULT_TMP_TTL_S
     runs = Path(runs_dir) if runs_dir else Path(tempfile.gettempdir()) / RUNS_DIRNAME
     run_root = ea.new_run_root(runs)
     log_dir = run_root / "logs"
@@ -491,7 +620,38 @@ def run_agent(workdir: str | Path, *, prompt: str | None = None, model: str | No
                                str(status_path) if status_path is not None else None),
                            "sock": None, "prep": None, "build_s": None, "ready_s": None,
                            "launch_error": None, "repo_map_tokens": repo_map_tokens,
-                           "exclude": None, "plugin_path": None, "daemon_stop_error": None}
+                           "exclude": None, "plugin_path": None, "daemon_stop_error": None,
+                           "managed_tmp": managed, "runs_dir_explicit": explicit_runs,
+                           "clean_logs": clean_logs, "tmp_id": None, "tmp_path": None,
+                           "tmp_registered": False, "tmp_ttl_s": tmp_ttl_s if managed else None,
+                           "tmp_expires_at": None, "tmp_bytes": None, "tmp_files": None,
+                           "tmpfs": None, "scratch_root": None, "tmp_cleaned": None,
+                           "tmp_warning": None}
+    scratch_id: str | None = None
+    tmp_env: dict[str, str] = {}
+    if managed:
+        entry, warning = _register_run_root(source, run_root, model=model,
+                                            ttl_s=tmp_ttl_s)
+        if warning:
+            res["tmp_warning"] = warning
+        if entry is not None:
+            res.update(tmp_id=entry["id"], tmp_path=entry["path"],
+                       tmp_registered=True, tmp_expires_at=entry.get("expires_at"),
+                       tmpfs=entry.get("tmpfs"))
+        tmp_env = _tmp_env(run_root)
+        scratch, scratch_id, warning = _register_scratch(source, run_root,
+                                                         ttl_s=tmp_ttl_s)
+        if warning:
+            res.setdefault("tmp_warnings", []).append(warning)
+        if scratch is not None:
+            res["scratch_root"] = str(scratch)
+    else:
+        scratch = run_root / "scratch"
+        try:
+            scratch.mkdir(parents=True, exist_ok=True)
+            res["scratch_root"] = str(scratch)
+        except OSError:
+            pass
     with _sigterm_as_interrupt():
         if clone:
             rev = f"{base or 'HEAD'}^{{commit}}"
@@ -515,6 +675,8 @@ def run_agent(workdir: str | Path, *, prompt: str | None = None, model: str | No
                                build=build, log_dir=log_dir, config=config_path(source),
                                progress=progress, background=background,
                                status_path=status_path)
+        if tmp_env:
+            session.env.update(tmp_env)
         try:
             with session:
                 res.update(sock=str(session.sock) if session.sock is not None else None,
@@ -529,7 +691,9 @@ def run_agent(workdir: str | Path, *, prompt: str | None = None, model: str | No
                                         interactive=interactive, keep_plugin=keep_plugin,
                                         timeout_s=timeout_s, extra_args=extra_args,
                                         config=config, log_dir=log_dir,
-                                        repo_map_tokens=repo_map_tokens))
+                                        repo_map_tokens=repo_map_tokens,
+                                        tmp_env=tmp_env,
+                                        scratch_root=res.get("scratch_root")))
         finally:
             if not keep_plugin:
                 with no_interrupt():
@@ -542,6 +706,9 @@ def run_agent(workdir: str | Path, *, prompt: str | None = None, model: str | No
             if clone and not quiet and sys.exc_info()[0] is not None:
                 print(f"ozagia agent: clone kept at {work}; remove it with: rm -rf {run_root}",
                       file=sys.stderr)
+    _refresh_tmp_usage(source, res)
+    if clean_logs:
+        _clean_run_tmp(source, res, managed=managed, scratch_id=scratch_id)
     if not quiet:
         print(_summary(res))
     return res
@@ -550,7 +717,9 @@ def run_agent(workdir: str | Path, *, prompt: str | None = None, model: str | No
 def _with_plugin(exe: str, work: Path, session: GraphSession, *, prompt: str | None,
                  model: str | None, interactive: bool, keep_plugin: bool,
                  timeout_s: float | None, extra_args: Sequence[str], config: Path,
-                 log_dir: Path, repo_map_tokens: int | None = None) -> dict[str, Any]:
+                 log_dir: Path, repo_map_tokens: int | None = None,
+                 tmp_env: dict[str, str] | None = None,
+                 scratch_root: str | None = None) -> dict[str, Any]:
     """Install the plugin, run OpenCode, remove the plugin (in `finally`)."""
     path = plugin.plugin_path(work)
     existed = path.exists()
@@ -572,6 +741,10 @@ def _with_plugin(exe: str, work: Path, session: GraphSession, *, prompt: str | N
         env.update({ENV_SOCK: str(session.sock), "PWD": str(work),
                     "OPENCODE_CONFIG": str(config),
                     "OZAGIA_GIT_REFS_PASSTHROUGH": "1"})
+        if tmp_env:
+            env.update(tmp_env)
+        if scratch_root:
+            env[SCRATCH_ENV] = scratch_root
         if repo_map_tokens is None:
             # Off by default even when the caller's environment sets it.
             env.pop(REPO_MAP_ENV, None)

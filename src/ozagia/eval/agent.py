@@ -80,6 +80,8 @@ from pathlib import Path
 from typing import Any, Iterable
 from ozagia.config import STATE_DIRNAME, config_path, repo_root
 from ozagia.core import failures as F
+from ozagia.core import temp_space as TS
+from ozagia.daemon import autostart as daemon_autostart
 from ozagia.daemon.protocol import ENV_SOCK
 from ozagia.eval import timing
 from ozagia.integrations.opencode import install as opencode_plugin
@@ -88,6 +90,9 @@ from ozagia.intent.shell import GIT_REF_MOVING
 ROOT = repo_root()
 DEFAULT_TASKS = ROOT / "evaluation" / "agent_e2e" / "tasks.json"
 DEFAULT_RUN_ROOT = Path("/tmp/ozagia_eval")
+DEFAULT_RUN_TTL_S = 7 * 24 * 60 * 60
+# Unix socket paths are limited to about 100 bytes; use this as a margin.
+MAX_SOCKET_PATH = 100
 ARMS = ("baseline", "dev_memory", "graph_intent")
 GRAPH_ARM = "graph_intent"
 # Drivers the graph_intent arm runs with: the plugin is OpenCode's, and the
@@ -193,10 +198,25 @@ def _git(args: list[str], cwd: str | Path, *, check: bool = True) -> subprocess.
     return proc
 
 
-def new_run_root(base_dir: str | Path = DEFAULT_RUN_ROOT) -> Path:
+def new_run_root(base_dir: str | Path = DEFAULT_RUN_ROOT, *,
+                 root: str | Path | None = None,
+                 reason: str = "eval run root",
+                 ttl_s: int | None = DEFAULT_RUN_TTL_S) -> Path:
+    """A fresh eval run root, adopted as a managed entry when `root` is given.
+
+    `root` is the repository whose state directory holds the registry.  With
+    no `root` (a caller passing its own `run_root` later), the root is only
+    created: registration is best effort and never fails the run.
+    """
     stamp = time.strftime("%Y%m%d-%H%M%S")
     run_root = Path(base_dir) / f"{stamp}-{os.getpid()}-{uuid.uuid4().hex[:6]}"
     run_root.mkdir(parents=True, exist_ok=True)
+    if root is not None:
+        try:
+            TS.adopt(root, run_root, kind="eval", reason=reason,
+                     run_id=run_root.name, ttl_s=ttl_s, owned=True, mark=True)
+        except Exception:  # noqa: BLE001 - a run root must not fail the eval
+            pass
     return run_root
 
 
@@ -997,7 +1017,7 @@ def validate_task(repo: str | Path, task: dict[str, Any], base: str, *,
                   python: str | None = None, run_root: Path | None = None,
                   keep: bool = False) -> dict[str, Any]:
     python = python or sys.executable
-    run_root = run_root or new_run_root()
+    run_root = run_root or new_run_root(root=repo, reason="eval validation")
     log_dir = run_root / "logs"
     tid = task["id"]
     started = time.monotonic()
@@ -1064,7 +1084,7 @@ def validate_all(repo: str | Path, tasks: list[dict[str, Any]], base: str, *,
     if python is None:
         python, python_reason = resolve_check_python(repo, tasks, None)
     base_commit = resolve_base(repo, base)
-    run_root = run_root or new_run_root()
+    run_root = run_root or new_run_root(root=repo, reason="eval validation")
     results = [validate_task(repo, t, base_commit, tasks_dir=tasks_dir, python=python,
                              run_root=run_root, keep=keep) for t in tasks]
     state = interpreter_state(repo, tasks, python)
@@ -1808,9 +1828,28 @@ def daemon_command(tool_python: str, workdir: Path, log_dir: Path,
             "--parent-pid", str(os.getpid())]
 
 
-def _daemon_sock_path() -> Path:
-    """A short socket path: Unix socket paths are limited to about 100 bytes."""
-    return Path(tempfile.gettempdir()) / f"ozagia-eval-{uuid.uuid4().hex[:12]}.sock"
+def _daemon_sock_path(base: str | Path | None = None) -> Path:
+    """A socket path inside `base` when it fits the Unix-socket limit.
+
+    Falls back to the temp dir, then to short fixed directories. `TMPDIR`
+    itself can be long (or a test can redirect it under a long pytest path),
+    so the fallback must not assume it fits. The lock of either path is
+    removed with the socket.
+    """
+    name = f"ozagia-eval-{uuid.uuid4().hex[:12]}.sock"
+    candidates: list[Path] = []
+    if base is not None:
+        candidates.append(Path(base) / name)
+    candidates.append(Path(tempfile.gettempdir()) / name)
+    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    if runtime:
+        candidates.append(Path(runtime) / name)
+    candidates.extend((Path("/tmp") / name, Path("/dev/shm") / name))
+    for candidate in candidates:
+        if len(os.fsencode(str(candidate))) < MAX_SOCKET_PATH:
+            return candidate
+    # The daemon reports a clear "socket path too long" error for the first.
+    return candidates[0]
 
 
 def _daemon_request(sock: Path, msg: dict[str, Any],
@@ -1860,14 +1899,16 @@ class GraphDaemon:
     """A started daemon process (its own process group) and its socket."""
 
     def __init__(self, proc: subprocess.Popen, sock: Path,
-                 pump: threading.Thread) -> None:
+                 pump: threading.Thread, *, root: str | Path | None = None) -> None:
         self.proc = proc
         self.sock = sock
         self.pump = pump
+        self.root = Path(root).resolve() if root is not None else None
 
     def stop(self) -> dict[str, Any]:
         """Ask for stats, shut it down, kill the group if it is still alive,
-        and remove the socket. Returns {"daemon_stats", "daemon_stop_error"}."""
+        and remove the socket and its lock. Returns {"daemon_stats",
+        "daemon_stop_error"}."""
         stats: Any = None
         error = None
         try:
@@ -1883,6 +1924,8 @@ class GraphDaemon:
         self.pump.join(timeout=KILL_GRACE_S)
         if self.sock.is_socket():
             self.sock.unlink()
+        if self.root is not None:
+            daemon_autostart.release_lock(self.root, self.sock)
         return {"daemon_stats": stats, "daemon_stop_error": error}
 
 
@@ -1913,7 +1956,7 @@ def start_daemon(workdir: Path, tool_python: str, log_dir: Path, *,
     killed and reported, not raised: the run goes on without it (the plugin
     then falls back to the built-ins on every call)."""
     log_dir.mkdir(parents=True, exist_ok=True)
-    sock = _daemon_sock_path()
+    sock = _daemon_sock_path(log_dir.parent)
     argv = daemon_command(tool_python, workdir, log_dir, sock)
     env = dict(_tool_env(workdir, config, tool_python=tool_python),
                PWD=str(Path(workdir).resolve()))
@@ -1965,7 +2008,8 @@ def start_daemon(workdir: Path, tool_python: str, log_dir: Path, *,
             break
         if time.monotonic() >= deadline:
             break
-    daemon = GraphDaemon(proc, Path(seen["ready"]) if seen.get("ready") else sock, thread)
+    daemon = GraphDaemon(proc, Path(seen["ready"]) if seen.get("ready") else sock,
+                        thread, root=workdir)
     if seen.get("ready"):
         return {"daemon": daemon, "sock": daemon.sock, "daemon_ok": True,
                 "daemon_error": None,
@@ -1983,6 +2027,7 @@ def start_daemon(workdir: Path, tool_python: str, log_dir: Path, *,
     thread.join(timeout=KILL_GRACE_S)
     if sock.is_socket():
         sock.unlink()
+    daemon_autostart.release_lock(workdir, sock)
     return failed(error.strip())
 
 
@@ -2304,7 +2349,7 @@ def run_eval(repo: str | Path, tasks: list[dict[str, Any]], arms: Iterable[str],
         python, python_reason = resolve_check_python(repo, tasks, None)
     python_reason = python_reason or "explicit --python"
     base_commit = resolve_base(repo, base)
-    run_root = run_root or new_run_root()
+    run_root = run_root or new_run_root(root=repo, reason="eval run root")
     if validation is not None:
         why = validation_mismatch(validation, base=base, python=python,
                                   tasks=tasks, tasks_dir=tasks_dir,
@@ -2802,7 +2847,8 @@ def _print_validation(report: dict[str, Any], *, failed_only: bool = False,
 
 
 def _run_root(args: argparse.Namespace) -> Path:
-    return Path(args.run_root) if args.run_root else new_run_root()
+    return (Path(args.run_root) if args.run_root
+            else new_run_root(root=args.repo, reason="eval cli run root"))
 
 
 def default_arms(driver_name: str) -> list[str]:

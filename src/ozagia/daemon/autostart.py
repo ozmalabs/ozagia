@@ -75,6 +75,40 @@ def _try_lock(fd: int) -> bool:
         return False
 
 
+def release_lock(root: str | Path, sock: str | Path | None = None) -> bool:
+    """Remove the daemon lock for `root` on `sock` when no process holds it.
+
+    The socket and its lock are separate files: removing a dead daemon's
+    socket left `<sock>.lock` behind. This takes the lock first, so a live
+    daemon (or another starter) is never disturbed, then unlinks the path.
+    Returns True when a file was removed.
+    """
+    try:
+        path = lock_path(root, sock)
+    except OSError:
+        return False
+    try:
+        fd = os.open(path, os.O_RDWR)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return False
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (BlockingIOError, OSError):
+            return False
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            return False
+        return True
+    finally:
+        os.close(fd)
+
+
 def _wait_ping(sock: Path, deadline: float, proc: subprocess.Popen | None = None
                ) -> dict[str, Any] | None:
     while True:
@@ -156,4 +190,4 @@ def ensure(root: str | Path, *, wait_s: float = DEFAULT_WAIT_S,
 
 
 __all__ = ["DEFAULT_IDLE_TIMEOUT_S", "LOCK_NAME", "LOG_NAME", "ensure", "lock_path",
-           "ping"]
+           "ping", "release_lock"]

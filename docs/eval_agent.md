@@ -90,6 +90,15 @@ For each task and arm, `run_eval` does the following:
 Logs (driver stdout and stderr, check output, transcripts, the dev-memory snapshot and
 journal) stay in `<run_root>/logs/`. Only workdirs are removed.
 
+A run root that `new_run_root` creates (the default `/tmp/ozagia_eval`, or
+`validate`/`run` without an explicit `--run-root`) is adopted in the managed
+temporary registry with kind `eval`, its run id, a 7-day TTL, ownership and a
+marker. Registration is best effort and never fails the run. An explicit
+`--run-root` is used as given and is not adopted. The daemon socket is placed
+under the run root when the resulting path fits the Unix-socket limit and
+otherwise stays on the short `/tmp/ozagia-eval-*.sock` path; either way its
+`<socket>.lock` is removed with the socket (see below).
+
 `validate` runs check, then break, then check on a worktree at `base`. It reports
 `ok` only when the check passes on base, the patch applies, and the check fails
 after the break. Its JSON (`--out-json`) records the interpreter it used and
@@ -462,8 +471,11 @@ Per run, in order:
 4. The driver runs with `OZAGIA_DAEMON_SOCK=<socket>`. The plugin does nothing
    without that variable.
 5. After the "after" snapshot the harness sends `stats` and `shutdown`, kills the
-   daemon's process group if anything in it is still alive, removes the socket,
-   and removes the plugin file. The check then runs as for the other arms.
+   daemon's process group if anything in it is still alive, removes the socket
+   and the plugin file, and removes the daemon's `<socket>.lock` (taking the
+   lock first, so a live unrelated daemon is never disturbed). A daemon that
+   fails to start or is cancelled runs the same socket and lock cleanup. The
+   check then runs as for the other arms.
 
 Run record fields for this arm:
 

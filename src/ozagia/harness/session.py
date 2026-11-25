@@ -69,6 +69,8 @@ from typing import Any, Callable, Iterator
 
 import ozagia
 from ozagia.config import ENV_STATE_DIR, state_path
+from ozagia.core import temp_space as TS
+from ozagia.daemon import autostart as daemon_autostart
 from ozagia.eval import agent as ea
 from ozagia.harness import launch_status
 from ozagia.harness.progress import NULL_PROGRESS, Progress
@@ -77,6 +79,8 @@ BUILD_MODES = ("auto", "always", "never")
 DAEMON_JOURNAL = "daemon_journal.jsonl"
 # Seconds `close` waits for a backgrounded snapshot preparation to stop.
 CLOSE_JOIN_S = 10.0
+# Default TTL for a managed session log directory.
+SESSION_TMP_TTL_S = 7 * 24 * 60 * 60
 
 # argv: root, dump, mode, status path ("" for none). Prints one JSON line,
 # the report, and writes the launch phases to the status file when one is
@@ -243,8 +247,10 @@ def prepare_snapshot(root: str | Path, dump: str | Path, *, build: str = "auto",
     root = Path(root).resolve()
     dump = Path(dump)
     env = env if env is not None else tool_env(root, tool_python=tool_python)
-    with tempfile.TemporaryDirectory(prefix="ozagia-prep-") as tmp:
-        logs = Path(log_dir) if log_dir else Path(tmp)
+    log_path = Path(log_dir) if log_dir is not None else None
+    with (contextlib.nullcontext() if log_path is not None
+          else tempfile.TemporaryDirectory(prefix="ozagia-prep-")) as tmp:
+        logs = log_path if log_path is not None else Path(tmp)
         logs.mkdir(parents=True, exist_ok=True)
         out_p, err_p = logs / "prep.stdout.txt", logs / "prep.stderr.txt"
         argv = [tool_python, "-c", _PREP_CODE, str(root), str(dump), build,
@@ -294,7 +300,7 @@ def start_daemon(root: Path, dump: Path, log_dir: Path, *, tool_python: str,
     to ready); raises SessionError after killing a daemon that did not get
     ready."""
     log_dir.mkdir(parents=True, exist_ok=True)
-    sock = Path(sock) if sock is not None else ea._daemon_sock_path()
+    sock = Path(sock) if sock is not None else ea._daemon_sock_path(log_dir.parent)
     argv = _daemon_argv(tool_python, root, dump, log_dir / DAEMON_JOURNAL, sock)
     env = dict(env, PWD=str(root))
     started = time.monotonic()
@@ -342,15 +348,17 @@ def start_daemon(root: Path, dump: Path, log_dir: Path, *, tool_python: str,
             ea._kill_group(proc)
             if sock.is_socket():
                 sock.unlink()
+            daemon_autostart.release_lock(root, sock)
         raise
     if seen.get("ready"):
-        return (ea.GraphDaemon(proc, Path(seen["ready"]), thread),
+        return (ea.GraphDaemon(proc, Path(seen["ready"]), thread, root=root),
                 round(time.monotonic() - started, 3))
     if cancelled:
         ea._kill_group(proc)
         thread.join(timeout=ea.KILL_GRACE_S)
         if sock.is_socket():
             sock.unlink()
+        daemon_autostart.release_lock(root, sock)
         raise SessionError("daemon start cancelled")
     if proc.poll() is not None:
         error = (f"daemon exited before ready (exit {proc.returncode}): "
@@ -361,6 +369,7 @@ def start_daemon(root: Path, dump: Path, log_dir: Path, *, tool_python: str,
     thread.join(timeout=ea.KILL_GRACE_S)
     if sock.is_socket():
         sock.unlink()
+    daemon_autostart.release_lock(root, sock)
     raise SessionError(f"{error.strip()} (logs: {log_dir})")
 
 
@@ -421,8 +430,11 @@ class GraphSession:
         self.run_python = run_python
         self.build = build
         self.config = config
-        self.log_dir = (Path(log_dir) if log_dir is not None
-                        else Path(tempfile.mkdtemp(prefix="ozagia-session-")))
+        self.tmp_id: str | None = None
+        if log_dir is not None:
+            self.log_dir = Path(log_dir)
+        else:
+            self.log_dir, self.tmp_id = self._managed_log_dir()
         self.env = tool_env(self.root, tool_python=tool_python, config=config,
                             state_dir=self.state_dir)
         self.progress = progress if progress is not None else NULL_PROGRESS
@@ -438,6 +450,23 @@ class GraphSession:
         self.ready_s: float | None = None
         self.final_stats: dict[str, Any] | None = None
         self.stop_error: str | None = None
+
+    def _managed_log_dir(self) -> tuple[Path, str | None]:
+        """A registered log dir under the state dir, else a plain mkdtemp.
+
+        With a caller-supplied `state_dir` the registry would live elsewhere,
+        so that case keeps the old temporary directory. Registration is best
+        effort: a failure must not stop the session from starting.
+        """
+        if self.state_dir is None:
+            try:
+                entry = TS.create(self.root, kind="scratch",
+                                  reason="graph session logs",
+                                  ttl_s=SESSION_TMP_TTL_S)
+                return Path(entry["path"]), entry["id"]
+            except Exception:  # noqa: BLE001 - managed tmp is optional
+                pass
+        return Path(tempfile.mkdtemp(prefix="ozagia-session-")), None
 
     def __enter__(self) -> "GraphSession":
         self.log_dir.mkdir(parents=True, exist_ok=True)
@@ -469,7 +498,7 @@ class GraphSession:
         told about before the daemon exists (the plugin's calls fall back to
         the built-ins until it does; the sidebar shows the phase).
         """
-        self.sock = ea._daemon_sock_path()
+        self.sock = ea._daemon_sock_path(self.log_dir.parent)
         self._status("preparing", root=str(self.root), pid=os.getpid(),
                      sock=str(self.sock), started_at=time.time())
         self._worker = threading.Thread(target=self._prepare_in_background,
@@ -542,8 +571,10 @@ class GraphSession:
                 worker.join(timeout=CLOSE_JOIN_S)
             daemon, self.daemon = self.daemon, None
             if daemon is None:
-                if self.sock is not None and self.sock.is_socket():
-                    self.sock.unlink()
+                if self.sock is not None:
+                    if self.sock.is_socket():
+                        self.sock.unlink()
+                    daemon_autostart.release_lock(self.root, self.sock)
                 return
             stopped = daemon.stop()
             self.final_stats = stopped.get("daemon_stats")

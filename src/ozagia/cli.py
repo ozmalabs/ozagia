@@ -398,7 +398,9 @@ def _cmd_agent(args: argparse.Namespace) -> int:
                         run_python=args.python, opencode=_opencode_exe(args.opencode),
                         runs_dir=args.runs_dir, mcp_mode=args.mcp, progress=progress,
                         repo_map_tokens=args.repo_map_tokens,
-                        opencode_config=args.opencode_config)
+                        opencode_config=args.opencode_config,
+                        managed_tmp=args.managed_tmp, tmp_ttl_s=args.tmp_ttl,
+                        clean_logs=args.clean_logs)
     except (AgentError, SessionError) as exc:
         progress.close()
         print(f"error: {exc}", file=sys.stderr)
@@ -1498,6 +1500,14 @@ def build_parser() -> argparse.ArgumentParser:
                     help="same as --mcp combined")
     ag.add_argument("--runs-dir", default=None,
                     help="where run roots (logs, clones) go (default: <tmp>/ozagia_agent)")
+    ag.add_argument("--no-managed-tmp", dest="managed_tmp", action="store_false",
+                    help="do not register the run root in the managed temp registry")
+    ag.add_argument("--tmp-ttl", type=_tmp_ttl, default=None, metavar="D",
+                    help="managed run-root lifetime (default: 7 days; a bare number "
+                         "is days, or use an s/m/h/d suffix)")
+    ag.add_argument("--clean-logs", action="store_true",
+                    help="after a successful run with no kept clone, delete the run "
+                         "root and scratch workspace (default: keep the logs)")
     ag.add_argument("--repo-map", action="store_true",
                     help="send a bounded, task-ranked repository map in the first "
                          "model request (off by default)")
@@ -1908,6 +1918,25 @@ def _repo_map_budget(value: str) -> int:
         return validate_repo_map_tokens(tokens)
     except AgentError as exc:
         raise argparse.ArgumentTypeError(str(exc)) from None
+
+
+def _tmp_ttl(value: str) -> int:
+    """Argparse type for --tmp-ttl: days by default, or an s/m/h/d suffix."""
+    from ozagia.core.temp_space import MAX_TTL_S, MIN_TTL_S
+    text = str(value).strip().lower()
+    multiplier = 24 * 60 * 60
+    if text and text[-1] in "smhd":
+        suffix = text[-1]
+        text = text[:-1]
+        multiplier = {"s": 1, "m": 60, "h": 3600, "d": 24 * 60 * 60}[suffix]
+    try:
+        seconds = int(float(text) * multiplier)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a duration: {value!r}") from None
+    if not MIN_TTL_S <= seconds <= MAX_TTL_S:
+        raise argparse.ArgumentTypeError(
+            f"tmp TTL must be between {MIN_TTL_S} and {MAX_TTL_S} seconds")
+    return seconds
 
 
 _COMMANDS = frozenset({"index", "agent", "install", "who", "replace",

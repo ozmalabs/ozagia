@@ -185,10 +185,48 @@ value or returns `None` when no id is known.  `suggest_path` returns a
 non-created suggestion, and `default_scratch_root` returns the managed scratch
 root.
 
-A later slice will call `create` from the agent harness and the OpenCode plugin
-for agent run roots under `<state dir>/tmp/agent/`, adopt existing tool outputs,
-call `touch` after a directory is used again, and use `status`/`clean` instead
-of shell-level `/tmp` hygiene.
+## Agent and eval integration (2026-11-26)
+
+The agent harness and the eval harness now use the registry. What is recorded,
+and what is not:
+
+* **Registered:** the default `ozagia agent` run root is adopted (`agent`
+  kind, reason `opencode agent run`, `run_id`, optional model, `owned` and
+  marked, 7-day TTL by default). A separate scratch workspace under
+  `<state dir>/tmp/workspaces/agent/<run>` is created as its own owned entry
+  (reason `agent scratch workspace`) and exposed as `OZAGIA_SCRATCH_ROOT`.
+  Eval run roots that `new_run_root` creates are adopted (`eval` kind, run
+  id, owned and marked, 7-day TTL). A default `GraphSession` log directory
+  and the native harness's default log directory are created as managed
+  `scratch`/`agent` entries; a caller-supplied `log_dir` is left alone.
+* **Adopted vs created:** an agent or eval run root already exists when it is
+  adopted, and it is marked only because the harness passes `owned=True,
+  mark=True`. Scratch workspaces and default log directories are created as
+  new entries. The design's old `/tmp` artifacts are neither: they are only
+  *reported* by `ozagia tmp audit`, and this integration does not retroactively
+  register or delete them.
+* **Never deleted automatically:** nothing is deleted merely because it is
+  registered. TTL expiry only makes an entry eligible for
+  `ozagia tmp clean --expired`. `ozagia agent --clean-logs` is the one
+  explicit deletion path: on a successful run, with no kept clone, it calls
+  `release(..., delete=True)` for the owned run root and scratch workspace.
+  Failures, timeouts and kept clones keep them.
+* Logs under `/tmp/ozagia_agent` remain ephemeral. Registration adds
+  provenance and a cleanup path; it does not make them durable. Use
+  `OZAGIA_SCRATCH_ROOT` (under the state directory) for files that must
+  outlive a reboot, and `ozagia tmp release <id> --delete` to reclaim a run
+  root by hand.
+
+The harness also removes a daemon's `<socket>.lock` after the socket, using
+`ozagia.daemon.autostart.release_lock`: it takes the lock first and leaves it
+in place when a live process still holds it. This closes the per-run
+`ozagia-eval-*.sock.lock` leak for daemon stop, start failure and cancellation
+paths; previously a stopped daemon removed only the socket.
+
+Explicit `--runs-dir` roots are deliberately unmanaged: they are not
+registered under the source state directory and no managed scratch workspace
+is created. The old behavior of keeping a run's own scratch under
+`<run root>/scratch` is preserved.
 
 ## Observed host leak (2026-11-26)
 
