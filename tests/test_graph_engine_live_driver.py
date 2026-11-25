@@ -68,40 +68,51 @@ def test_shape_prompt_asks_for_repository_relative_file_paths() -> None:
     assert "pkg/core.py" in shape["prompt"]
 
 
-def test_known_injection_uses_seen_row_hashes() -> None:
+def test_known_injection_uses_op_scoped_seen_row_hashes() -> None:
     driver = _driver()
     recorder = driver.Recorder()
     arm = driver.EngineArm(object(), recorder, interface="optimized",
                            known_reuse=True, speculate=False)
-    arm._track_seen({"c": ["k", "h"], "r": [["sym:a", "h1"]]})
-    assert arm.seen == {"sym:a": "h1"}
+    arm._track_seen("outline", {"c": ["k", "h"], "r": [["sym:a", "h1"]]})
+    assert arm.seen == {("outline", "sym:a"): "h1"}
 
     outline = {"op": "outline", "key": "sym:a"}
     arm._inject_known("outline", outline)
-    assert outline["known"] == [{"key": "sym:a", "hash": "h1"}]
+    assert outline["known"] == [
+        {"op": "outline", "key": "sym:a", "hash": "h1"}]
     assert recorder.known_sent == 1
 
-    # find rows now carry `h`, so a repeated find is a delta too.
+    # The same key seen through find keeps its own hash; the outline hash is
+    # not sent on a find and the find hash is not sent on an outline.
     find = {"op": "find", "q": "a"}
     arm._inject_known("find", find)
-    assert find["known"] == [{"key": "sym:a", "hash": "h1"}]
+    assert "known" not in find
+    assert recorder.known_sent == 1
+    arm._track_seen("find", {"c": ["k", "h"], "r": [["sym:a", "h2"]]})
+    arm._inject_known("find", find)
+    assert find["known"] == [{"op": "find", "key": "sym:a", "hash": "h2"}]
     assert recorder.known_sent == 2
+    again = {"op": "outline", "key": "sym:a"}
+    arm._inject_known("outline", again)
+    assert again["known"] == [
+        {"op": "outline", "key": "sym:a", "hash": "h1"}]
 
     # Ops without row hashes never receive `known`.
     shape = {"op": "shape"}
     arm._inject_known("shape", shape)
     assert "known" not in shape
 
-    # A file-outline refresh sees the whole remembered row set, not only the
-    # requested file key; the engine ignores hashes for rows it does not return.
-    arm._track_seen({"c": ["k", "h"],
-                     "r": [["file:src/a.py", "hf"],
-                           ["sym:src/a.py::b", "hb"]]})
+    # A file-outline refresh sees the whole remembered row set for that op,
+    # not only the requested file key; the engine ignores hashes for rows it
+    # does not return.
+    arm._track_seen("outline", {"c": ["k", "h"],
+                                "r": [["file:src/a.py", "hf"],
+                                      ["sym:src/a.py::b", "hb"]]})
     refresh = {"op": "outline", "key": "file:src/a.py"}
     arm._inject_known("outline", refresh)
     assert {row["key"] for row in refresh["known"]} == {
         "sym:a", "file:src/a.py", "sym:src/a.py::b"}
-    assert recorder.known_sent == 5
+    assert recorder.known_sent == 6
 
     # An explicit known list is never overwritten.
     explicit = {"op": "outline", "key": "sym:a",

@@ -485,8 +485,9 @@ examples and a larger-repository budget study, remain follow-on work.
 
 A first **stateful graph-engine prototype** also landed (2026-11-25):
 `OZAGIA_SURFACE=engine` exposes one `graph` tool with `hello` sessions, compact
-tabular rows, hard estimated-token budgets, `known` find/outline/context
-deltas and bounded background speculation (`spec`/`fetch`). Column headers are
+tabular rows, hard estimated-token budgets, op-scoped `known` find/outline/
+context deltas (`{op,key,hash}`, with legacy `{key,hash}` fallback) and bounded
+background speculation (`spec`/`fetch`). Column headers are
 included on every response by default; callers that track columns can opt into
 per-session reuse with `cols:false` or an explicit `compact:true`. Computation and parent
 application are separate: a supervised forked child per engine computes
@@ -542,10 +543,18 @@ HTTP/JSON transport now serves the same engine
 (`POST /v1/ozma/context`), with a required bearer token, a 127.0.0.1 default, a
 64 KiB body limit, four concurrent calls, stable JSON errors and graceful
 SIGINT/SIGTERM shutdown; it is a local transport, not full Ozma protocol
-conformance. Next: a long-lived shared worker, in-call cancellation or splitting
-of expensive operations, broader hit/waste and timeout evaluation across
-models/repositories, live inline-delivery coverage, TUI/Desktop exercise, and a
-full Ozma shim/protocol contract if a caller needs one.
+conformance. The remaining server-side `known` identity limitation is fixed:
+the engine keys remembered hashes by `(op, key)` and the live driver now stores
+`{op,key,hash}`, so a find hash survives an outline of the same key. The
+op-scoped repeated-find saving is deterministic (20-row synthetic: 1,390 →
+158 engine tokens, net −3,330 B including the larger request); the 21.8% live
+model-token result predates the op tag and was not rerun. Live evidence also
+shows speculation is a net cost in these workloads (prepared payloads went
+unfetched and `q` handles added tokens), so it stays opt-in and is **not**
+recommended as a default. Next: a long-lived shared worker, in-call cancellation
+or splitting of expensive operations, broader hit/waste and timeout evaluation
+across models/repositories, live inline-delivery coverage, TUI/Desktop
+exercise, and a full Ozma shim/protocol contract if a caller needs one.
 
 **Exit criteria**
 

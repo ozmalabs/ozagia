@@ -19,6 +19,23 @@ vs 14,468) with 6/6. The deterministic 20-row flask find response fell from
 the larger `known` request was still −1,587 bytes. Details are in
 [`#repeated-find-known-delta-follow-up`](#repeated-find-known-delta-follow-up).
 
+**Follow-up (2026-11-26): `known` identity is op-scoped.** The engine now
+remembers hashes per `(op, key)`, so a `find` hash and an `outline` (or
+`context`) hash for the same key no longer collide. Clients may send
+`{op, key, hash}`; an entry with no `op` keeps the legacy key-only rule
+(compare the supplied hash with the requested op's current row shape, so the
+last find hash still matches a repeated find after an outline). The live
+driver now stores `{op, key, hash}` and injects only the current op's entries.
+The deterministic 20-row synthetic repeated-find measurement is 1,390 t /
+5,571 B full versus 158 t / 640 B delta; the op-tagged request grows from 75
+to 1,676 B (legacy: 1,396 B), leaving a net saving of 3,330 B (legacy:
+3,610 B). The extra 280 B is request wire only; `known` is not shown to the
+model. **Live re-measurement: unmeasured** in this follow-up (no local
+`18020` tunnel/API key was available and live model runs need approval).
+The earlier −21.8% model-token result should therefore be treated as the last
+live measurement, not rerun evidence for the op-scoped client. See
+[`#op-scoped-known-identity-2026-11-26`](#op-scoped-known-identity-2026-11-26).
+
 This result measures the claim one-shot tests cannot measure. The one-shot
 comparison found the optimized engine roughly tied/slightly worse than the
 stateless control on flask (+6.5% total tokens,
@@ -333,6 +350,46 @@ return slightly fewer rows than before this change; the 500-token synthetic
 page test pins that trimming plus `u` handles still advance `n` without
 skipping the rows that were cut.
 
+## Op-scoped `known` identity (2026-11-26)
+
+The repeated-find run exposed one remaining stateful limitation: the client
+remembered one hash per key, so seeing an `outline` for a key after a `find`
+could overwrite the find hash. The engine's session map had the same key-only
+shape. The protocol now accepts `known` entries as `{key, hash, op?}` and
+remembers hashes per `(op, key)`:
+
+- entries tagged with the current op (`find`, `outline` or `context`) only
+  match that op's remembered row shape; another op's entry is ignored;
+- entries with no `op` keep the legacy key-only rule: the supplied hash is
+  compared with the requested op's current row hash. Because the hash covers
+  the op-specific serialization, the last find hash still matches a repeated
+  find after an outline of the same key, while an outline hash never satisfies
+  a find row (and vice versa);
+- response rows still carry `h`, and `u` handles belong to the response op.
+  A client should store `{op, key, hash}` (`op` is the request op and `hash`
+  the row's `h`); the live driver now does exactly that.
+
+Deterministic synthetic measurement (20-row find, no model, fixed fixture):
+
+| Case | Full | `known` delta | Request | Net traffic |
+| --- | ---: | ---: | ---: | ---: |
+| Op-scoped `{op,key,hash}` | 1,390 t / 5,571 B | 158 t / 640 B | 75 → 1,676 B | **−3,330 B** |
+| Legacy `{key,hash}` | 1,390 t / 5,571 B | 158 t / 640 B | 75 → 1,396 B | **−3,610 B** |
+
+The op tag costs 280 request bytes for 20 rows and does not change the response.
+It is engine wire only, so the model-facing token saving is expected to match
+the earlier result rather than improve it. The previous live 21.8% saving was
+not rerun: no local `18020` tunnel or model API key was available, and live
+model runs require approval. Mark the live op-scoped result **unmeasured**;
+do not cite the synthetic table as a model-token gain.
+
+Speculation remains a separate concern. In these live workloads it prepared
+payloads that the model never fetched and added `q` handles to find responses;
+the measured effect was a net token cost (+864 tokens versus `engine_known` on
+the original flask run, +400 on the repeated-find run). **Recommendation: do
+not enable speculation by default.** Keep `spec`/`fetch` opt-in until a
+workload shows prepared payloads actually being consumed.
+
 ## Product gap found, then fixed
 
 The original run found that `known` deltas were implemented for `outline` and
@@ -379,11 +436,15 @@ Failure modes and paging are covered by tests in `tests/test_graph_engine.py`
   identical query, and the client sends 20 `known` pairs to save a 20-row
   response. On a 2-row tiny result the net saving is only 120 bytes; small
   pages can lose most of the benefit to request overhead.
-- Hashes are per item as serialized, not per key identity. The driver remembers
-  one hash per key, so if a session has seen both a `find` row and an `outline`
-  row for the same key, only the most recent shape matches. Keying remembered
-  hashes by `(op, key)` would capture both; the measured find task used only
-  find rows, so all 20 pairs matched.
+- Hashes are per item as serialized, not per key identity. The engine now keys
+  its memory by `(op, key)` and accepts `{op, key, hash}`, so find and outline
+  hashes for one key coexist. A client that still stores only `{key, hash}`
+  can lose the find hash when it later shows itself an outline; that is the
+  documented legacy fallback, not a server collision. The measured find task
+  used only find rows, so all 20 pairs matched with either shape.
+- The op-scoped client was measured deterministically, not live. The last live
+  repeated-find result (21.8% on flask) predates the op tag and was not rerun;
+  the op tag adds engine request bytes but is not shown to the model.
 - Adding `h` to find rows costs about 5 estimated tokens per row. The 20-row
   flask find still fits at the 1,200 budget, but a budget-tight page may return
   one or two fewer rows than the pre-hash build.
@@ -406,10 +467,14 @@ Failure modes and paging are covered by tests in `tests/test_graph_engine.py`
 - Test a workload with several file outlines and finds refreshed repeatedly,
   where `known` should have the largest effect.
 - Exercise `fetch`/inline delivery live with a workload that makes a payload
-  ready before the response.
+  ready before the response. Until then keep speculation off by default.
+- Re-run the repeated-find live task with the op-scoped driver when the
+  queen tunnel and model key are available; the deterministic saving is known,
+  the model-token saving is not.
 - Decide whether a shorter find hash (or a compact page handle) is worth the
   smaller request when many rows are known. A 12-hex hash would cut the find
-  request by about 20%; the response saving is unchanged.
+  request by about 20%; the response saving is unchanged. The op tag adds
+  another 12 B per known row.
 - Measure whether caching the per-turn tool schema/tool result across a longer
   session (more than three turns) changes the ranking.
 
@@ -423,10 +488,11 @@ Failure modes and paging are covered by tests in `tests/test_graph_engine.py`
 
 .venv/bin/python -m pytest -q tests/test_graph_engine.py \
   tests/test_graph_engine_live_driver.py tests/test_engine_http.py
-# 73 passed
+# 77 passed
 ```
 
-No full suite was run and REPO_SHAPE was not regenerated.
+Op-scoped follow-up (2026-11-26) reran the same focused checks: 77 passed and
+ruff clean. No full suite was run and REPO_SHAPE was not regenerated.
 
 ## Live commands
 

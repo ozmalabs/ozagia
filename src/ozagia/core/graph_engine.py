@@ -80,6 +80,7 @@ except ImportError:  # pragma: no cover - Windows has no fork worker either
 
 OPS = ("hello", "find", "outline", "expand", "impact", "tests", "context",
        "shape", "fetch", "bye")
+KNOWN_OPS = ("find", "outline", "context")
 FEATURES = ("compact", "known", "spec", "fetch", "async-spec")
 CAP_BITS = {"find": 1, "outline": 2, "expand": 4, "impact": 8, "tests": 16,
             "context": 32, "shape": 64, "fetch": 128, "bye": 256}
@@ -155,7 +156,8 @@ ENGINE_TOOLS: list[dict[str, Any]] = [{
         "known": {"type": "array", "items": {
             "type": "object",
             "properties": {"key": {"type": "string"},
-                           "hash": {"type": "string"}},
+                           "hash": {"type": "string"},
+                           "op": {"type": "string", "enum": list(KNOWN_OPS)}},
             "required": ["key", "hash"],
             "additionalProperties": False}},
         "spec": {"type": "boolean"},
@@ -406,7 +408,11 @@ class EngineSession:
     compact: bool = True
     cursor: dict[str, Any] = field(default_factory=dict)
     cols: dict[str, list[str]] = field(default_factory=dict)
-    known: OrderedDict[str, str] = field(default_factory=OrderedDict)
+    # (op, key) -> last serialized hash for that operation.  A find row and an
+    # outline row for the same key are different shapes and therefore keep
+    # different entries instead of overwriting one another.
+    known: OrderedDict[tuple[str, str], str] = field(
+        default_factory=OrderedDict)
     tokens: int = 0
     spec: OrderedDict[str, dict[str, Any]] = field(default_factory=OrderedDict)
     spec_seq: int = 0
@@ -1565,35 +1571,59 @@ class GraphEngine:
 
     # -- rows, known deltas, verbose ---------------------------------------- #
     @staticmethod
-    def _known(args: dict[str, Any], session: EngineSession) -> dict[str, str]:
-        known: dict[str, str] = {}
+    def _known(args: dict[str, Any], op: str
+               ) -> tuple[dict[str, str], dict[str, str]]:
+        """Split client ``known`` entries into op-scoped and legacy maps.
+
+        ``scoped`` holds entries whose ``op`` equals the operation being
+        requested; entries for another operation are ignored, so a find hash
+        can never satisfy an outline (or the reverse).  ``legacy`` holds
+        entries with no ``op`` and keeps the pre-op-scope key-only behaviour:
+        the supplied hash is compared with the current item's hash for the
+        requested operation.  Because the hash covers that operation's row
+        shape, it matches whichever remembered shape produced it; the last
+        find hash still matches a repeated find after an outline of the same
+        key, while an outline hash never matches the find row.
+        """
+        scoped: dict[str, str] = {}
+        legacy: dict[str, str] = {}
         for entry in args.get("known") or []:
             if not isinstance(entry, dict):
                 continue
             key = entry.get("key")
             digest = entry.get("hash")
-            if isinstance(key, str) and key and isinstance(digest, str):
-                known[key] = digest
-        return known
+            if not (isinstance(key, str) and key and isinstance(digest, str)):
+                continue
+            entry_op = entry.get("op")
+            if entry_op is None:
+                legacy[key] = digest
+            elif entry_op == op:
+                scoped[key] = digest
+        return scoped, legacy
 
     @staticmethod
-    def _remember(session: EngineSession, key: str, digest: str) -> None:
-        session.known[key] = digest
-        session.known.move_to_end(key)
+    def _remember(session: EngineSession, op: str, key: str,
+                  digest: str) -> None:
+        entry = (op, key)
+        session.known[entry] = digest
+        session.known.move_to_end(entry)
         while len(session.known) > 1000:
             session.known.popitem(last=False)
 
     def _known_rows(
-            self, session: EngineSession, args: dict[str, Any],
+            self, session: EngineSession, args: dict[str, Any], op: str,
             items: list[dict[str, Any]], cols: list[str]
     ) -> tuple[list[list[Any]], list[str], str]:
         """Split items into changed rows, unchanged key handles and page order.
 
-        The third value is a compact ``c``/``u`` string in page order.  The
-        caller keeps it internal (``__page``) so the paging code can advance
-        the offset by the number of items actually served.
+        ``u`` contains keys only; each handle belongs to the operation that
+        produced the response, so a client should store ``{op, key, hash}``
+        (``op`` is the request op and ``hash`` is the row's ``h``).  The third
+        value is a compact ``c``/``u`` string in page order.  The caller keeps
+        it internal (``__page``) so the paging code can advance the offset by
+        the number of items actually served.
         """
-        known = self._known(args, session)
+        scoped, legacy = self._known(args, op)
         rows: list[dict[str, Any]] = []
         unchanged: list[str] = []
         order: list[str] = []
@@ -1602,8 +1632,9 @@ class GraphEngine:
             digest = _hash_item(item)
             item = {**item, "h": digest}
             if key:
-                self._remember(session, key, digest)
-                if known.get(key) == digest:
+                self._remember(session, op, key, digest)
+                if (scoped.get(key) == digest
+                        or legacy.get(key) == digest):
                     unchanged.append(key)
                     order.append("u")
                     continue
@@ -2223,7 +2254,7 @@ class GraphEngine:
             "sig": hit.get("signature"), "sum": hit.get("summary"),
             "sc": hit.get("score"),
         } for hit in page]
-        rows, unchanged, page = self._known_rows(session, args, items,
+        rows, unchanged, page = self._known_rows(session, args, "find", items,
                                                  FIND_COLS)
         return _clean({"cols": FIND_COLS, "rows": rows,
                        "unchanged": unchanged,
@@ -2262,8 +2293,8 @@ class GraphEngine:
                 })
                 if len(items) > limit:
                     break
-        rows, unchanged, page = self._known_rows(session, args, items,
-                                                 OUTLINE_COLS)
+        rows, unchanged, page = self._known_rows(session, args, "outline",
+                                                 items, OUTLINE_COLS)
         return _clean({"cols": OUTLINE_COLS, "rows": rows,
                        "unchanged": unchanged,
                        "__keys": [i["k"] for i in items if i.get("k")],
@@ -2378,8 +2409,8 @@ class GraphEngine:
                 "why": entry.get("why"),
                 "txt": snippet.get("text"),
             })
-        rows, unchanged, page = self._known_rows(session, args, items,
-                                                 CONTEXT_COLS)
+        rows, unchanged, page = self._known_rows(session, args, "context",
+                                                 items, CONTEXT_COLS)
         return _clean({"cols": CONTEXT_COLS, "rows": rows,
                        "unchanged": unchanged,
                        "__keys": [i["k"] for i in items if i.get("k")],
@@ -2478,7 +2509,8 @@ class GraphEngine:
 __all__ = [
     "BackgroundSpecWorker", "CAP_BITS", "CAP_MASK", "DEFAULT_BUDGET",
     "ENGINE_TOOL_NAME", "ENGINE_TOOLS", "FEATURES", "GraphEngine",
-    "InlineSpecWorker", "MAX_BUDGET", "MAX_FETCH_WAIT_MS", "MAX_SESSIONS",
+    "InlineSpecWorker", "KNOWN_OPS", "MAX_BUDGET", "MAX_FETCH_WAIT_MS",
+    "MAX_SESSIONS",
     "MAX_SPEC", "MIN_BUDGET", "OPS", "PROTOCOL", "PROTOCOL_VERSION",
     "PreparedSpec", "ProcessSpecWorker", "SPEC_BUDGET", "SPEC_TTL_S",
     "SPEC_WORKER_BUDGET_MS", "SpecJob", "description_tokens",

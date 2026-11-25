@@ -192,11 +192,12 @@ retry in `n` when it fits), not an empty truncated object.
 ## `known` deltas
 
 If you already have a `find`, `outline` or `context` row, send its
-`{key, hash}`:
+`{op, key, hash}`:
 
 ```json
 {"op": "find", "session": "s1", "q": "add",
- "known": [{"key": "sym:pkg/core.py::add", "hash": "1a2b3c4d5e6f7a8b"}]}
+ "known": [{"op": "find", "key": "sym:pkg/core.py::add",
+            "hash": "1a2b3c4d5e6f7a8b"}]}
 ```
 
 A matching item comes back only as a key handle:
@@ -205,15 +206,28 @@ A matching item comes back only as a key handle:
 {"u": ["sym:pkg/core.py::add"], "t": 10}
 ```
 
-Changed or missing hashes are reserialized with a new `h`. The hash covers the
-whole item as that op serializes it, so a `find` row and an `outline` row for
-the same key have different hashes; echo the hash from the same row shape. A
-repeated find is now the largest routine saving: on the pinned flask checkout a
-20-row `find get_root_path` is 1,189 estimated tokens and 4,572 bytes, while
-the matching `known` delta is 300 tokens and 1,177 bytes. The client request
-grows from 78 to 1,887 bytes for the 20 hashes, so total traffic still falls by
-1,587 bytes. Paging is unaffected: when a page is trimmed, `n.offset` counts
-both returned rows and `u` handles, so the cut rows are not skipped.
+The engine remembers hashes per `(op, key)`, so a `find` hash and an `outline`
+or `context` hash for the same key coexist. An entry with an `op` matches only
+that operation's row shape; an entry for another op is ignored. Store
+`{op, key, hash}`, where `op` is the request op and `hash` is the row's `h`.
+Each `u` handle belongs to the operation that produced the response.
+
+Legacy `{key, hash}` entries (no `op`) still work with key-only behaviour: the
+supplied hash is compared with the requested operation's current row hash.
+Since the hash covers the op-specific serialization, the last find hash still
+matches a repeated find after an outline of the same key, while an outline hash
+never satisfies a find row (and vice versa). A client that keeps only one hash
+per key may lose one op's hash when it later sees another; that is a client
+storage limit, not a server collision.
+
+Changed or missing hashes are reserialized with a new `h`. A repeated find is
+the largest routine saving: on the pinned flask checkout a 20-row
+`find get_root_path` is 1,189 estimated tokens and 4,572 bytes, while the
+matching `known` delta is 300 tokens and 1,177 bytes. The legacy client request
+grew from 78 to 1,887 bytes for the 20 hashes; the op tag adds 12 bytes per
+known row (240 bytes for 20), still leaving a large net response saving.
+Paging is unaffected: when a page is trimmed, `n.offset` counts both returned
+rows and `u` handles, so the cut rows are not skipped.
 
 ## Speculation and stats
 
@@ -233,6 +247,11 @@ It returns compact handles and counts immediately:
 time, and `q.p` is the number of further suggestions. A single worker prepares
 at most two payloads **after** the response, while the model is thinking. The
 handler never waits for it.
+
+**Recommendation: do not enable speculation by default.** In the live
+multi-turn workloads the model did not fetch prepared payloads, and the extra
+`q` handles made spec `find` responses more expensive. Keep `spec` opt-in
+(`spec: true`) until a workload demonstrates that prepared work is consumed.
 
 When a payload is already ready at response time, the engine delivers it under
 `q.i` and consumes the handle instead of making the model issue a separate
@@ -392,6 +411,10 @@ written to the checkout.
 - Supervision and hard-timeout behaviour are covered by tests, not by the
   corpus measurement; that measurement predates them.
 - A compact 16-hex content hash for `known`, not a cryptographic identity.
+  Hashes are keyed by `(op, key)`; a legacy client that stores only one hash
+  per key can still overwrite its own find hash with an outline hash.
+- Speculation is opt-in and was a net cost in the measured live workloads; it
+  is not recommended as a default.
 - One snapshot per session; federation is not part of this surface.
 - Prototype wire/readiness measurements, not model-task gains:
   [`docs/results/graph_engine_prototype_2026-11-25.md`](results/graph_engine_prototype_2026-11-25.md)

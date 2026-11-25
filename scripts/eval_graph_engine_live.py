@@ -354,7 +354,10 @@ class EngineArm:
         self.closed = False
         self.session_override = 0
         self.handles: set[str] = set()
-        self.seen: dict[str, str] = {}
+        # (op, key) -> the hash of the row shape the model was shown.  A find
+        # row and an outline row for the same key are different shapes, so
+        # both are retained instead of one overwriting the other.
+        self.seen: dict[tuple[str, str], str] = {}
         self._seq = 0
 
     def _hello(self) -> dict[str, Any]:
@@ -407,14 +410,17 @@ class EngineArm:
                 else:
                     self.handles.discard(str(handle))
 
-    def _track_seen(self, result: dict[str, Any]) -> None:
-        """Remember every ``{key, hash}`` the model has already been shown.
+    def _track_seen(self, op: str, result: dict[str, Any]) -> None:
+        """Remember every ``{op, key, hash}`` the model has already been shown.
 
         A response exposes a reusable hash when it carries both a ``k`` and an
-        ``h`` column; ``find``, ``outline`` and ``context`` all do.  Bounded
-        (last 1,000, matching the engine's per-session cap) so a long suite
-        does not grow the client's state without limit.
+        ``h`` column; ``find``, ``outline`` and ``context`` all do.  The op is
+        part of the identity because the hash covers that operation's row
+        shape.  Bounded (last 1,000, matching the engine's per-session cap) so
+        a long suite does not grow the client's state without limit.
         """
+        if op not in ("find", "outline", "context"):
+            return
         cols = result.get("c")
         rows = result.get("r")
         if not isinstance(cols, list) or not isinstance(rows, list):
@@ -428,28 +434,31 @@ class EngineArm:
                 continue
             key, digest = row[key_at], row[hash_at]
             if isinstance(key, str) and isinstance(digest, str) and key:
-                self.seen[key] = digest
+                self.seen[(op, key)] = digest
         if len(self.seen) > 1000:
-            for key in list(self.seen)[:len(self.seen) - 1000]:
-                self.seen.pop(key, None)
+            for entry in list(self.seen)[:len(self.seen) - 1000]:
+                self.seen.pop(entry, None)
 
     def _inject_known(self, op: str, payload: dict[str, Any]) -> None:
         """Send the client's remembered hashes for this op (multi-turn only).
 
         The model-facing schema does not expose ``known`` to the model: the
         client that already showed the rows is the one that knows their
-        hashes.  Every remembered row is sent (capped) because a refresh can
-        return the same row set under one request key (for example a file
-        outline or a repeated query); the engine ignores hashes for rows it
-        does not return.  This only affects engine wire, never the model
-        context.
+        hashes.  Only entries for the current op are sent, each explicitly
+        tagged with that op, so a find hash and an outline hash for the same
+        key cannot overwrite or impersonate one another.  Every matching row
+        is sent (capped) because a refresh can return the same row set under
+        one request key (for example a file outline or a repeated query); the
+        engine ignores hashes for rows it does not return.  This only affects
+        engine wire, never the model context.
         """
         if not self.known_reuse or not self.seen or payload.get("known"):
             return
         if op not in ("find", "outline", "context"):
             return
-        pairs = [{"key": key, "hash": digest}
-                 for key, digest in list(self.seen.items())[-64:]]
+        pairs = [{"op": entry_op, "key": key, "hash": digest}
+                 for (entry_op, key), digest in self.seen.items()
+                 if entry_op == op][-64:]
         if pairs:
             payload["known"] = pairs
             self.recorder.known_sent += len(pairs)
@@ -514,7 +523,7 @@ class EngineArm:
             result, wire = self.client.graph(payload)
             self.recorder.add_engine(result, wire, model_visible=True)
         self._track_handles(op, result)
-        self._track_seen(result)
+        self._track_seen(op, result)
         return result, wire
 
     def finish(self) -> dict[str, Any]:
@@ -1839,13 +1848,14 @@ def run_known_probe(client: EngineClient, *, key: str,
         result, wire = client.graph(payload)
         return result, wire
 
-    def remembered(result: dict[str, Any]) -> list[dict[str, str]]:
+    def remembered(result: dict[str, Any],
+                   op: str) -> list[dict[str, str]]:
         cols = result.get("c") if isinstance(result.get("c"), list) else []
         rows = result.get("r") if isinstance(result.get("r"), list) else []
         if not rows or "k" not in cols or "h" not in cols:
             return []
         key_at, hash_at = cols.index("k"), cols.index("h")
-        return [{"key": row[key_at], "hash": row[hash_at]}
+        return [{"op": op, "key": row[key_at], "hash": row[hash_at]}
                 for row in rows
                 if isinstance(row, list)
                 and len(row) > max(key_at, hash_at)
@@ -1863,7 +1873,8 @@ def run_known_probe(client: EngineClient, *, key: str,
     known: list[dict[str, str]] = []
     if rows and isinstance(rows[0], list) and "k" in cols and "h" in cols:
         row = rows[0]
-        known = [{"key": row[cols.index("k")], "hash": row[cols.index("h")]}]
+        known = [{"op": "outline", "key": row[cols.index("k")],
+                  "hash": row[cols.index("h")]}]
     delta, delta_wire = call({"op": "outline", "session": sid, "key": key,
                              "budget": budget, "known": known})
     report: dict[str, Any] = {
@@ -1876,10 +1887,13 @@ def run_known_probe(client: EngineClient, *, key: str,
         "saved_wire": full_wire - delta_wire,
     }
     if query:
+        # This find runs after the outline above, so it also proves that an
+        # already-remembered outline hash for the same key does not shadow the
+        # find hash: the op-tagged find entries still match the find rows.
         find_full, find_full_wire = call({
             "op": "find", "session": sid, "q": query, "kinds": ["sym"],
             "budget": budget})
-        find_known = remembered(find_full)
+        find_known = remembered(find_full, "find")
         find_delta, find_delta_wire = call({
             "op": "find", "session": sid, "q": query, "kinds": ["sym"],
             "budget": budget, "known": find_known})

@@ -549,6 +549,129 @@ def test_known_find_is_a_handle_and_change_reserializes(
     assert reserialized == digest and reserialized != stale
 
 
+def test_known_is_op_scoped_and_find_outline_hashes_differ(
+        engine: GraphEngine) -> None:
+    sid = _hello(engine)["sid"]
+    key = "sym:pkg/core.py::add"
+    first = engine.handle({"op": "find", "session": sid, "q": "add"})
+    find_row = next(
+        row for row in first["r"]
+        if _cell(first, first["r"], row, "k", engine, sid, "find") == key)
+    find_hash = _cell(first, first["r"], find_row, "h", engine, sid, "find")
+    outline = engine.handle({"op": "outline", "session": sid, "key": key})
+    outline_hash = _cell(outline, outline["r"], outline["r"][0], "h",
+                         engine, sid, "outline")
+    assert find_hash != outline_hash
+    # Both op entries survive for the same key; neither overwrites the other.
+    assert engine.sessions[sid].known[("find", key)] == find_hash
+    assert engine.sessions[sid].known[("outline", key)] == outline_hash
+
+    # The find hash still matches a repeated find even though an outline of
+    # the same key was seen afterwards.
+    same = engine.handle({
+        "op": "find", "session": sid, "q": "add",
+        "known": [{"op": "find", "key": key, "hash": find_hash}]})
+    assert key in same.get("u", [])
+    assert all(_cell(same, same["r"], row, "k", engine, sid, "find") != key
+               for row in same.get("r", []))
+
+    # A hash from the other op never matches, even when mislabelled with the
+    # current op.  A correctly labelled entry for a different op is ignored.
+    for op, known_op, digest in (
+            ("find", "find", outline_hash),
+            ("outline", "outline", find_hash),
+            ("find", "outline", outline_hash),
+            ("outline", "find", find_hash)):
+        result = engine.handle({"op": op, "session": sid, "q": "add",
+                                "key": key,
+                                "known": [{"op": known_op, "key": key,
+                                           "hash": digest}]})
+        assert key not in result.get("u", []), (op, known_op, result)
+
+
+def test_legacy_key_hash_known_uses_key_only_fallback(
+        engine: GraphEngine) -> None:
+    sid = _hello(engine)["sid"]
+    key = "sym:pkg/core.py::add"
+    first = engine.handle({"op": "find", "session": sid, "q": "add"})
+    find_row = next(
+        row for row in first["r"]
+        if _cell(first, first["r"], row, "k", engine, sid, "find") == key)
+    find_hash = _cell(first, first["r"], find_row, "h", engine, sid, "find")
+
+    # Legacy entries have no op: the hash is compared with the requested
+    # operation's current row shape (the key-only, last-shape behaviour).
+    same = engine.handle({
+        "op": "find", "session": sid, "q": "add",
+        "known": [{"key": key, "hash": find_hash}]})
+    assert key in same.get("u", [])
+
+    outline = engine.handle({"op": "outline", "session": sid, "key": key})
+    outline_hash = _cell(outline, outline["r"], outline["r"][0], "h",
+                         engine, sid, "outline")
+    # The find hash is still the current find shape, so the legacy fallback
+    # keeps working after an outline of the same key.
+    again = engine.handle({
+        "op": "find", "session": sid, "q": "add",
+        "known": [{"key": key, "hash": find_hash}]})
+    assert key in again.get("u", [])
+    # An outline hash has a different shape and cannot satisfy find.
+    cross = engine.handle({
+        "op": "find", "session": sid, "q": "add",
+        "known": [{"key": key, "hash": outline_hash}]})
+    assert key not in cross.get("u", [])
+    assert any(_cell(cross, cross["r"], row, "k", engine, sid, "find") == key
+               for row in cross["r"])
+    # The outline still accepts its own legacy key-only hash.
+    outline_same = engine.handle({
+        "op": "outline", "session": sid, "key": key,
+        "known": [{"key": key, "hash": outline_hash}]})
+    assert key in outline_same.get("u", [])
+
+
+def test_outline_first_then_repeated_find_still_deltas(
+        engine: GraphEngine) -> None:
+    sid = _hello(engine)["sid"]
+    key = "sym:pkg/core.py::add"
+    engine.handle({"op": "outline", "session": sid, "key": key})
+    found = engine.handle({"op": "find", "session": sid, "q": "add"})
+    row = next(row for row in found["r"]
+               if _cell(found, found["r"], row, "k", engine, sid,
+                        "find") == key)
+    digest = _cell(found, found["r"], row, "h", engine, sid, "find")
+    repeated = engine.handle({
+        "op": "find", "session": sid, "q": "add",
+        "known": [{"op": "find", "key": key, "hash": digest}]})
+    assert key in repeated.get("u", [])
+    assert all(_cell(repeated, repeated["r"], item, "k", engine, sid,
+                     "find") != key for item in repeated.get("r", []))
+    assert ("find", key) in engine.sessions[sid].known
+    assert ("outline", key) in engine.sessions[sid].known
+
+
+def test_known_context_is_op_scoped(engine: GraphEngine) -> None:
+    sid = _hello(engine)["sid"]
+    first = engine.handle({"op": "context", "session": sid,
+                           "task": "add two numbers", "limit": 8,
+                           "budget": 2000})
+    key = _cell(first, first["r"], first["r"][0], "k", engine, sid, "context")
+    digest = _cell(first, first["r"], first["r"][0], "h", engine, sid,
+                   "context")
+    same = engine.handle({
+        "op": "context", "session": sid, "task": "add two numbers",
+        "limit": 8, "budget": 2000,
+        "known": [{"op": "context", "key": key, "hash": digest}]})
+    assert key in same.get("u", [])
+    # The context hash is not a find hash for a key that find returns.
+    found = engine.handle({"op": "find", "session": sid, "q": "add"})
+    if any(_cell(found, found["r"], row, "k", engine, sid, "find") == key
+           for row in found.get("r", [])):
+        wrong = engine.handle({
+            "op": "find", "session": sid, "q": "add",
+            "known": [{"op": "context", "key": key, "hash": digest}]})
+        assert key not in wrong.get("u", [])
+
+
 class _FakeSurface:
     """A deterministic find surface for paging and wire measurements."""
 
@@ -589,9 +712,14 @@ def test_known_find_trimmed_page_advances_without_skipping(
     monkeypatch.setattr(GraphEngine, "_surface",
                         lambda self: _FakeSurface(hits))
     sid = _hello(engine)["sid"]
-    known = [{"key": hit["key"],
+    # Mix op-scoped and legacy handles in one page: both forms must count as
+    # served items so the continuation offset advances exactly once per item.
+    known = [{"op": "find", "key": hit["key"],
               "hash": graph_engine_module._hash_item(_hit_item(hit))}
-             for hit in hits[:10]]
+             for hit in hits[:5]]
+    known += [{"key": hit["key"],
+               "hash": graph_engine_module._hash_item(_hit_item(hit))}
+              for hit in hits[5:10]]
     first = engine.handle({"op": "find", "session": sid, "q": "helper",
                            "limit": 20, "budget": 500, "known": known})
     assert "e" not in first, first
@@ -613,7 +741,7 @@ def test_known_find_trimmed_page_advances_without_skipping(
     assert set(returned) | set(second_keys) == {hit["key"] for hit in hits}
     # An all-unchanged page can also be trimmed by a small budget; the
     # continuation still advances by the handles actually returned.
-    every = [{"key": hit["key"],
+    every = [{"op": "find", "key": hit["key"],
               "hash": graph_engine_module._hash_item(_hit_item(hit))}
              for hit in hits]
     tiny = engine.handle({"op": "find", "session": sid, "q": "helper",
@@ -634,6 +762,7 @@ def test_known_find_repeat_wire_saving_is_measurable(
     known = []
     for row in full["r"]:
         known.append({
+            "op": "find",
             "key": _cell(full, full["r"], row, "k", engine, sid, "find"),
             "hash": _cell(full, full["r"], row, "h", engine, sid, "find")})
     delta = engine.handle({"op": "find", "session": sid, "q": "helper",
@@ -644,6 +773,13 @@ def test_known_find_repeat_wire_saving_is_measurable(
     delta_bytes = len(json.dumps(delta))
     assert delta_bytes < full_bytes // 4
     assert delta["t"] < full["t"] // 4
+    # The op tag costs a few bytes per known row; on a 20-row page the
+    # response saving is still larger than the grown request.
+    request = {"op": "find", "session": sid, "q": "helper", "limit": 20,
+               "budget": 4000}
+    with_known = {**request, "known": known}
+    assert (full_bytes - delta_bytes
+            > len(json.dumps(with_known)) - len(json.dumps(request)))
 
 
 def test_live_driver_known_probe_measures_find_delta(

@@ -250,22 +250,38 @@ Callers send `find`, `outline` or `context` rows they already have:
 
 ```json
 {"op": "find", "session": "s1", "q": "add",
- "known": [{"key": "sym:pkg/core.py::add", "hash": "1a2b3c4d5e6f7a8b"}]}
+ "known": [{"op": "find", "key": "sym:pkg/core.py::add",
+            "hash": "1a2b3c4d5e6f7a8b"}]}
 ```
 
-The engine hashes each item it would serialize. If the key and hash match, the
-item is represented only by its key in `u`:
+The engine remembers hashes per `(op, key)` and hashes each item it would
+serialize. If the op and hash match, the item is represented only by its key in
+`u`:
 
 ```json
 {"u": ["sym:pkg/core.py::add"], "t": 10}
 ```
 
-Changed, missing or unknown hashes are reserialized with a fresh `h`. A
-16-hex SHA-256 prefix is used to keep the wire small; a collision would cause
-the client to keep an old payload, so this is a prototype trade-off, not a
+An entry with `op` matches only that operation's row shape; an entry tagged for
+another op is ignored. Each `u` handle belongs to the response operation, so a
+client should store `{op, key, hash}` (`op` is the request op and `hash` the
+row's `h`). This keeps a `find` hash and an `outline` hash for the same key from
+overwriting or impersonating one another.
+
+Entries without `op` keep the legacy key-only rule: the supplied hash is
+compared with the requested operation's current row hash. The hash covers the
+op-specific serialization, so the last find hash still matches a repeated find
+after an outline of the same key, while an outline hash never satisfies a find
+row (and the reverse). A client that stores only one hash per key may lose one
+op's hash when it later sees another; the server no longer does.
+
+Changed, missing or unknown hashes are reserialized with a fresh `h`. A 16-hex
+SHA-256 prefix is used to keep the wire small; a collision would cause the
+client to keep an old payload, so this is a prototype trade-off, not a
 cryptographic identity guarantee. A known-only response is dramatically smaller
 than reserializing the item (10 vs 41 estimated tokens on the fixture outline,
-and 300 vs 1,189 estimated tokens for the 20-row flask find).
+and 300 vs 1,189 estimated tokens for the 20-row flask find). The op tag adds
+12 request bytes per known row; it is not shown to the model.
 
 The page order is kept internally until budget fitting finishes. When a page
 with both changed rows and `u` handles is trimmed, `n.offset` advances by the
@@ -569,6 +585,14 @@ A local OpenAI-compatible endpoint check on `127.0.0.1:8000` returned
 `ConnectionRefusedError`; no model session was started and no hosted fallback
 was used. A live session remains blocked behind `--live`,
 `OZAGIA_EVAL_LIVE=1` and explicit human approval.
+
+The later multi-turn live runs are recorded in
+`docs/results/graph_engine_live_multiturn_2026-11-25.md`. The op-scoped `known`
+follow-up (2026-11-26) is deterministic only: no local queen tunnel/model key
+was available, so the repeated-find model-token saving was not re-measured.
+The live evidence also shows speculation as a net cost in those workloads
+(unfetched prepared payloads plus extra `q` handles); keep it opt-in, not a
+default.
 
 ## Open work
 
