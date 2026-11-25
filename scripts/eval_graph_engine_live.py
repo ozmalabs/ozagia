@@ -23,13 +23,14 @@ The arms are ``control`` (stateless, fresh session per call),
 reverses arm order on every other repeat.
 
 ``--suite multiturn`` runs a separate three-turn task set instead: turn 1
-outlines a symbol or file, turn 2 refreshes that same outline and answers from
-the copy already in the conversation, and turn 3 asks a distinct impact
-question in the same session.  The arms are ``control`` (fresh session per
-call), ``engine_known`` (one session plus ``known`` deltas, speculation off)
-and ``engine_known_spec`` (the same with speculation on).  The client remembers
-each ``{key, hash}`` it showed the model and injects ``known`` on the refresh;
-the model-facing schema is unchanged.  See
+outlines a symbol or file (or finds a symbol), turn 2 refreshes that same
+result and answers from the copy already in the conversation, and turn 3 asks a
+distinct impact question in the same session.  The arms are ``control`` (fresh
+session per call), ``engine_known`` (one session plus ``known`` deltas,
+speculation off) and ``engine_known_spec`` (the same with speculation on).  The
+client remembers each ``{key, hash}`` it showed the model from ``find``,
+``outline`` and ``context`` rows, and injects ``known`` on the matching
+refresh; the model-facing schema is unchanged.  See
 ``docs/results/graph_engine_live_multiturn_2026-11-25.md``.
 
 This is a small measured sample, not a general model-task claim.  See
@@ -409,10 +410,10 @@ class EngineArm:
     def _track_seen(self, result: dict[str, Any]) -> None:
         """Remember every ``{key, hash}`` the model has already been shown.
 
-        Only responses that carry both columns expose a hash the client can
-        echo back in ``known``; today that is ``outline`` (and ``context``).
-        ``find`` rows omit ``h``, so a ``find`` result cannot be reused as a
-        delta by the client.  That is recorded in the result's limitations.
+        A response exposes a reusable hash when it carries both a ``k`` and an
+        ``h`` column; ``find``, ``outline`` and ``context`` all do.  Bounded
+        (last 1,000, matching the engine's per-session cap) so a long suite
+        does not grow the client's state without limit.
         """
         cols = result.get("c")
         rows = result.get("r")
@@ -428,6 +429,9 @@ class EngineArm:
             key, digest = row[key_at], row[hash_at]
             if isinstance(key, str) and isinstance(digest, str) and key:
                 self.seen[key] = digest
+        if len(self.seen) > 1000:
+            for key in list(self.seen)[:len(self.seen) - 1000]:
+                self.seen.pop(key, None)
 
     def _inject_known(self, op: str, payload: dict[str, Any]) -> None:
         """Send the client's remembered hashes for this op (multi-turn only).
@@ -436,12 +440,13 @@ class EngineArm:
         client that already showed the rows is the one that knows their
         hashes.  Every remembered row is sent (capped) because a refresh can
         return the same row set under one request key (for example a file
-        outline); the engine ignores hashes for rows it does not return.  This
-        only affects engine wire, never the model context.
+        outline or a repeated query); the engine ignores hashes for rows it
+        does not return.  This only affects engine wire, never the model
+        context.
         """
         if not self.known_reuse or not self.seen or payload.get("known"):
             return
-        if op not in ("outline", "context"):
+        if op not in ("find", "outline", "context"):
             return
         pairs = [{"key": key, "hash": digest}
                  for key, digest in list(self.seen.items())[-64:]]
@@ -1062,6 +1067,75 @@ MULTI_FLASK_TASKS: list[dict[str, Any]] = [
             },
         ],
     },
+    {
+        "id": "multiturn_find_refresh",
+        "kind": "multi-turn find/refresh/impact",
+        "turns": [
+            {
+                "id": "t1_find",
+                "prompt": (
+                    "One graph call: find with q=get_root_path and "
+                    "kinds=[\"sym\"]. Then, from that result row, reply with "
+                    "only {\"symbol\": string, \"file\": string, "
+                    "\"signature\": string}."
+                ),
+                "keys": ["symbol", "file", "signature"],
+                "checks": [
+                    ("symbol is get_root_path",
+                     lambda obj: _has(obj, "symbol", "get_root_path")),
+                    ("file is src/flask/helpers.py",
+                     lambda obj: _has(obj, "file", "src/flask/helpers.py")),
+                    ("signature contains the definition line",
+                     lambda obj: _has(
+                         obj, "signature",
+                         "def get_root_path(import_name: str) -> str:")),
+                ],
+            },
+            {
+                "id": "t2_refresh_find",
+                "prompt": (
+                    "Repeat exactly the same find with one graph call (op "
+                    "find, same q and kinds), then answer only from the find "
+                    "result already in this conversation. Do not outline, "
+                    "fetch or read source. Reply with only {\"symbol\": "
+                    "string, \"file\": string, \"signature\": string}."
+                ),
+                "keys": ["symbol", "file", "signature"],
+                "checks": [
+                    ("symbol is get_root_path",
+                     lambda obj: _has(obj, "symbol", "get_root_path")),
+                    ("file is src/flask/helpers.py",
+                     lambda obj: _has(obj, "file", "src/flask/helpers.py")),
+                    ("signature contains the definition line",
+                     lambda obj: _has(
+                         obj, "signature",
+                         "def get_root_path(import_name: str) -> str:")),
+                ],
+            },
+            {
+                "id": "t3_impact",
+                "prompt": (
+                    "In the same session, compute the impact of get_root_path "
+                    "to depth 2 using the keys argument (a list) with the "
+                    "symbol key from the find row. Reply with only "
+                    "{\"symbol\": string, \"callers\": [string], "
+                    "\"test_files\": [string], \"summary\": string}."
+                ),
+                "keys": ["symbol", "callers", "test_files", "summary"],
+                "checks": [
+                    ("symbol is get_root_path",
+                     lambda obj: _has(obj, "symbol", "get_root_path")),
+                    ("callers include Scaffold.__init__",
+                     lambda obj: _has(obj, "callers", "scaffold.__init__")),
+                    ("test_files include tests/test_helpers.py",
+                     lambda obj: _has(obj, "test_files",
+                                      "tests/test_helpers.py")),
+                    ("summary is non-empty",
+                     lambda obj: bool(str(obj.get("summary") or "").strip())),
+                ],
+            },
+        ],
+    },
 ]
 
 MULTI_TINY_TASKS: list[dict[str, Any]] = [
@@ -1118,6 +1192,74 @@ MULTI_TINY_TASKS: list[dict[str, Any]] = [
                     "In the same session, compute the impact of average to "
                     "depth 2 using the keys argument (a list) with the symbol "
                     "key from the outline. Reply with only {\"symbol\": "
+                    "string, \"callers\": [string], \"test_files\": [string], "
+                    "\"summary\": string}."
+                ),
+                "keys": ["symbol", "callers", "test_files", "summary"],
+                "checks": [
+                    ("symbol is average",
+                     lambda obj: _has(obj, "symbol", "average")),
+                    ("callers include scaled_average and summarize",
+                     lambda obj: _has(obj, "callers", "scaled_average",
+                                      "summarize")),
+                    ("test_files include tests/test_metrics.py",
+                     lambda obj: _has(obj, "test_files",
+                                      "tests/test_metrics.py")),
+                    ("summary is non-empty",
+                     lambda obj: bool(str(obj.get("summary") or "").strip())),
+                ],
+            },
+        ],
+    },
+    {
+        "id": "multiturn_find_refresh",
+        "kind": "multi-turn find/refresh/impact",
+        "turns": [
+            {
+                "id": "t1_find",
+                "prompt": (
+                    "One graph call: find with q=average and kinds=[\"sym\"]. "
+                    "Then, from that result row, reply with only "
+                    "{\"symbol\": string, \"file\": string, "
+                    "\"signature\": string}."
+                ),
+                "keys": ["symbol", "file", "signature"],
+                "checks": [
+                    ("symbol is average",
+                     lambda obj: _has(obj, "symbol", "average")),
+                    ("file is pkg/metrics.py",
+                     lambda obj: _has(obj, "file", "pkg/metrics.py")),
+                    ("signature contains def average(values)",
+                     lambda obj: _has(obj, "signature",
+                                      "def average(values)")),
+                ],
+            },
+            {
+                "id": "t2_refresh_find",
+                "prompt": (
+                    "Repeat exactly the same find with one graph call (op "
+                    "find, same q and kinds), then answer only from the find "
+                    "result already in this conversation. Do not outline, "
+                    "fetch or read source. Reply with only {\"symbol\": "
+                    "string, \"file\": string, \"signature\": string}."
+                ),
+                "keys": ["symbol", "file", "signature"],
+                "checks": [
+                    ("symbol is average",
+                     lambda obj: _has(obj, "symbol", "average")),
+                    ("file is pkg/metrics.py",
+                     lambda obj: _has(obj, "file", "pkg/metrics.py")),
+                    ("signature contains def average(values)",
+                     lambda obj: _has(obj, "signature",
+                                      "def average(values)")),
+                ],
+            },
+            {
+                "id": "t3_impact",
+                "prompt": (
+                    "In the same session, compute the impact of average to "
+                    "depth 2 using the keys argument (a list) with the symbol "
+                    "key from the find row. Reply with only {\"symbol\": "
                     "string, \"callers\": [string], \"test_files\": [string], "
                     "\"summary\": string}."
                 ),
@@ -1690,41 +1832,81 @@ def _multi_totals(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def run_known_probe(client: EngineClient, *, key: str,
-                    budget: int = REPO_BUDGET) -> dict[str, Any]:
-    """Deterministic outline / known-delta probe, no model involved."""
-    calls: list[dict[str, Any]] = []
-
-    def call(payload: dict[str, Any]) -> dict[str, Any]:
+                    budget: int = REPO_BUDGET,
+                    query: str | None = None) -> dict[str, Any]:
+    """Deterministic outline/find known-delta probe, no model involved."""
+    def call(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
         result, wire = client.graph(payload)
-        calls.append({"op": payload.get("op"), "t": _int(result.get("t")),
-                      "wire": wire})
-        return result
+        return result, wire
 
-    hello = call({"op": "hello"})
+    def remembered(result: dict[str, Any]) -> list[dict[str, str]]:
+        cols = result.get("c") if isinstance(result.get("c"), list) else []
+        rows = result.get("r") if isinstance(result.get("r"), list) else []
+        if not rows or "k" not in cols or "h" not in cols:
+            return []
+        key_at, hash_at = cols.index("k"), cols.index("h")
+        return [{"key": row[key_at], "hash": row[hash_at]}
+                for row in rows
+                if isinstance(row, list)
+                and len(row) > max(key_at, hash_at)
+                and isinstance(row[key_at], str)
+                and isinstance(row[hash_at], str)]
+
+    hello, _ = call({"op": "hello"})
     sid = hello.get("sid")
     if not isinstance(sid, str) or not sid:
         raise LiveError("known probe hello did not return a session id")
-    full = call({"op": "outline", "session": sid, "key": key,
-                 "budget": budget})
+    full, full_wire = call({"op": "outline", "session": sid, "key": key,
+                           "budget": budget})
     cols = full.get("c") if isinstance(full.get("c"), list) else []
     rows = full.get("r") if isinstance(full.get("r"), list) else []
     known: list[dict[str, str]] = []
     if rows and isinstance(rows[0], list) and "k" in cols and "h" in cols:
         row = rows[0]
         known = [{"key": row[cols.index("k")], "hash": row[cols.index("h")]}]
-    delta = call({"op": "outline", "session": sid, "key": key,
-                  "budget": budget, "known": known})
-    call({"op": "bye", "session": sid})
-    full_call, delta_call = calls[1], calls[2]
-    return {
+    delta, delta_wire = call({"op": "outline", "session": sid, "key": key,
+                             "budget": budget, "known": known})
+    report: dict[str, Any] = {
         "key": key,
-        "full": {"t": full_call["t"], "wire": full_call["wire"],
+        "full": {"t": _int(full.get("t")), "wire": full_wire,
                  "rows": len(rows)},
-        "delta": {"t": delta_call["t"], "wire": delta_call["wire"],
+        "delta": {"t": _int(delta.get("t")), "wire": delta_wire,
                   "unchanged": len(delta.get("u") or [])},
-        "saved_t": full_call["t"] - delta_call["t"],
-        "saved_wire": full_call["wire"] - delta_call["wire"],
+        "saved_t": _int(full.get("t")) - _int(delta.get("t")),
+        "saved_wire": full_wire - delta_wire,
     }
+    if query:
+        find_full, find_full_wire = call({
+            "op": "find", "session": sid, "q": query, "kinds": ["sym"],
+            "budget": budget})
+        find_known = remembered(find_full)
+        find_delta, find_delta_wire = call({
+            "op": "find", "session": sid, "q": query, "kinds": ["sym"],
+            "budget": budget, "known": find_known})
+        request = {"op": "find", "session": sid, "q": query,
+                   "kinds": ["sym"], "budget": budget}
+        known_bytes = len(json.dumps({**request, "known": find_known},
+                                     separators=(",", ":")))
+        report["find"] = {
+            "q": query,
+            "known_pairs": len(find_known),
+            "full": {"t": _int(find_full.get("t")),
+                     "wire": find_full_wire,
+                     "rows": len(find_full.get("r") or [])},
+            "delta": {"t": _int(find_delta.get("t")),
+                      "wire": find_delta_wire,
+                      "unchanged": len(find_delta.get("u") or [])},
+            "request_bytes": known_bytes,
+            "saved_t": _int(find_full.get("t")) - _int(find_delta.get("t")),
+            "saved_wire": find_full_wire - find_delta_wire,
+            # Response-only savings minus the larger known request, so the
+            # reported value is honest total traffic, not only the response.
+            "saved_total": (find_full_wire - find_delta_wire
+                            - (known_bytes - len(json.dumps(
+                                request, separators=(",", ":"))))),
+        }
+    call({"op": "bye", "session": sid})
+    return report
 def _summarise(rows: list[dict[str, Any]]) -> dict[str, Any]:
     if not rows:
         return {}
@@ -1952,7 +2134,7 @@ def _main_multiturn(args: argparse.Namespace) -> int:
                 "engine_default_budget": budget,
                 "control_session": "fresh hello/bye per call",
                 "engine_known_session": "one session for all three turns",
-                "engine_known_injection": "outline/context only; "
+                "engine_known_injection": "find/outline/context rows; "
                                           "client remembers {key,hash}",
                 "engine_known_spec": "engine_known + speculation on find",
                 "engine_known_plain": "speculation off on find",
@@ -2022,7 +2204,7 @@ def _main_multiturn(args: argparse.Namespace) -> int:
             print("[engine] deterministic known-delta probe", file=sys.stderr,
                   flush=True)
             results["known_probe"] = run_known_probe(
-                client, key=probe_key, budget=budget)
+                client, key=probe_key, budget=budget, query=probe_query)
         if args.out:
             out_path = Path(args.out).expanduser()
             out_path.parent.mkdir(parents=True, exist_ok=True)

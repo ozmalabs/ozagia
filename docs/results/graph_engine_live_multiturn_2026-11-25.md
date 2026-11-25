@@ -9,6 +9,16 @@ file-outline refresh saved 17.0%. Turning speculation on erased most of the gain
 payloads were never fetched (0 hits). This is one local 27B model, one pinned
 `pallets/flask` checkout, two repeats.
 
+**Follow-up (same day): `find` now participates in the `known` protocol.** A
+repeated find with matching hashes returns only `u` key handles. A new
+three-turn task (`multiturn_find_refresh`) repeated a 20-row `find` and saved
+**−21.8% total model tokens** on flask (`engine_known` 28,088 vs control
+35,900) with 6/6 turn acceptance; on the tiny fixture it saved −12.8% (12,612
+vs 14,468) with 6/6. The deterministic 20-row flask find response fell from
+1,189 to 300 engine tokens and 4,572 to 1,177 wire bytes; net traffic including
+the larger `known` request was still −1,587 bytes. Details are in
+[`#repeated-find-known-delta-follow-up`](#repeated-find-known-delta-follow-up).
+
 This result measures the claim one-shot tests cannot measure. The one-shot
 comparison found the optimized engine roughly tied/slightly worse than the
 stateless control on flask (+6.5% total tokens,
@@ -21,7 +31,11 @@ Raw measurements:
 [`graph_engine_live_multiturn_2026-11-25_flask.json`](graph_engine_live_multiturn_2026-11-25_flask.json)
 (18 flask sessions) and
 [`graph_engine_live_multiturn_2026-11-25_tiny.json`](graph_engine_live_multiturn_2026-11-25_tiny.json)
-(6 tiny sessions).
+(6 tiny sessions). The repeated-find follow-up is
+[`graph_engine_live_multiturn_find_2026-11-25_flask.json`](graph_engine_live_multiturn_find_2026-11-25_flask.json)
+and
+[`graph_engine_live_multiturn_find_2026-11-25_tiny.json`](graph_engine_live_multiturn_find_2026-11-25_tiny.json)
+(6 sessions each, 3 turns × 3 arms × 2 repeats).
 
 ## Run context
 
@@ -51,18 +65,19 @@ the same turn prompts. Only the transport differs:
 | Arm | Session | `known` | Speculation |
 | --- | --- | --- | --- |
 | `control` | fresh `hello`/`bye` for every graph call | not exposed | off |
-| `engine_known` | one session for all three turns | client sends remembered `{key,hash}` on an `outline` refresh | off (`spec=false` on `find`) |
+| `engine_known` | one session for all three turns | client sends remembered `{key,hash}` on a repeated `find`/`outline`/`context` | off (`spec=false` on `find`) |
 | `engine_known_spec` | one session for all three turns | same | on (`spec=true` on `find`) |
 
 The model-facing schema does **not** expose `known` to the model. The client
 (the driver, standing in for Ozma's context assembler) remembers every
-`{key, hash}` row it has already shown the model and injects `known` when the
-model refreshes an outline. This is the intended split: the model asks for a
-refresh; the client knows what the model has already seen.
+`{key, hash}` row it has already shown the model from `find`, `outline` and
+`context`, and injects `known` when the model repeats that request. This is the
+intended split: the model asks for a refresh; the client knows what the model
+has already seen.
 
-The control arm does what a stateless caller must do: it sends a fresh
-`outline` request and re-serializes the full rows. The engine arm sends the same
-outline request with the remembered hashes and receives only `u` key handles.
+The control arm does what a stateless caller must do: it sends a fresh request
+and re-serializes the full rows. The engine arm sends the same request with the
+remembered hashes and receives only `u` key handles.
 
 ## Tasks and fixed checks
 
@@ -78,11 +93,15 @@ arm.
 | `multiturn_get_root_path` | `find get_root_path` then `outline`; report symbol, file, signature, summary. Checks: `get_root_path`, `src/flask/helpers.py`, `def get_root_path(import_name: str) -> str:`, summary contains “root path”. | Refresh the same outline once; answer the file and the 577–631 span from the outline already in the conversation. | Impact of `get_root_path` at depth 2; check `Scaffold.__init__`, `tests/test_helpers.py`, non-empty summary. |
 | `multiturn_send_from_directory` | `find send_from_directory` then `outline`; report symbol, file, signature, summary. Checks: symbol/file, signature starts `def send_from_directory(`, summary contains “send a file”. | Refresh; answer the file and the 533–574 span. | Impact at depth 2; check `Flask.send_static_file`, `Blueprint.send_static_file`, `tests/test_helpers.py`, non-empty summary. |
 | `multiturn_helpers_file` | `outline file:src/flask/helpers.py`; report the file and whether the outline contains `get_root_path` and `send_from_directory` (18 rows). | Refresh the same file outline once; answer the two start lines (577 and 533) from the outline already in the conversation. | Impact of `send_from_directory` at depth 2; same checks as above. |
+| `multiturn_find_refresh` (follow-up) | `find get_root_path`, `kinds=["sym"]`; report symbol, file and signature from the find row (20 rows). | Repeat exactly the same find once; answer symbol/file/signature from the row already in the conversation. | Impact of `get_root_path` at depth 2; same checks as `multiturn_get_root_path`. |
 | `multiturn_average` (tiny) | `find average` then `outline`; report symbol, file, signature, summary. | Refresh; answer the file and the 6–13 span. | Impact at depth 2; check `scaled_average`, `summarize`, `tests/test_metrics.py`. |
+| `multiturn_find_refresh` (tiny, follow-up) | `find average`, `kinds=["sym"]`; report symbol/file/signature (2 after trimming). | Repeat the same find once; answer from the conversation. | Impact of `average` at depth 2; same checks as above. |
 
 The turn-2 refresh is the only place `known` can apply: the model is asked to
-refresh the outline it already has, and to answer from the copy in the
-conversation rather than re-reading source.
+refresh the result it already has, and to answer from the copy in the
+conversation rather than re-reading source. The repeated-find task was added
+after the first measurement; it does not change the original three tasks or
+their fixed checks.
 
 ## Results: flask
 
@@ -219,6 +238,8 @@ tokens versus `engine_known` over the run.
 | One-shot tiny (same sample) | 17,762 | 18,118 | +2.0% |
 | Multi-turn flask (this sample, `engine_known`) | 86,589 | 81,058 | **−6.4%** |
 | Multi-turn tiny (this sample, `engine_known`) | 15,158 | 14,828 | −2.2% |
+| Multi-turn flask repeated-find follow-up | 35,900 | 28,088 | **−21.8%** |
+| Multi-turn tiny repeated-find follow-up | 14,468 | 12,612 | −12.8% |
 
 The one-shot row is the prior sample on the same pinned repository and model
 root, not a rerun. The task sets and session lengths differ, so absolute totals
@@ -234,31 +255,110 @@ and there the engine wins on this sample.
 2. **A multi-row file outline is where `known` pays.** 714 → 219 engine tokens
    removes 452 tool-result tokens from the refresh; that message is re-sent on
    both turn-3 calls, so turn 3 also drops by ~1,500 prompt tokens.
-3. **`find` cannot use `known`.** `find` is the largest repeated payload
-   (1,064–1,199 tool-result tokens at budget 1,200), but `FIND_COLS` does not
-   expose `h` and `_find` never calls `_known_rows` (only `outline` and
-   `context` do). A client therefore cannot delta a `find` result. This is a
-   product gap, not a harness choice; see below.
+3. **A repeated find is the largest recyclable payload.** Now that `find` rows
+   carry `h`, the 20-row flask find is 1,189 engine tokens and 4,572 bytes at
+   budget 1,200; the repeated-find delta is 300 tokens and 1,177 bytes. Before
+   this change the client had no hash to send, so every repeat paid full price.
 4. **Speculation is all cost and no benefit in this workload.** The model does
    not fetch, and inline delivery requires a payload ready at response time,
    which did not happen. The `q` handles make every spec `find` slightly more
    expensive.
 
-## Product gap found (not fixed)
+## Repeated-find `known` delta (follow-up)
 
-`known` deltas are implemented for `outline` and `context` only:
+One three-turn task, `multiturn_find_refresh`, run on the same flask checkout
+and tiny fixture, same model and sampling, 3 arms × 2 repeats (6 sessions and
+18 turns per repository). Turn 1 is a `find`; turn 2 repeats exactly that
+`find`; turn 3 asks the usual depth-2 impact question. The model answers
+turn 2 from the find row already in its conversation. The client remembers the
+20 flask `{key,hash}` pairs (7 on tiny) from turn 1 and injects them on the
+repeat.
 
-- `_known_rows` is called by `_outline` (`src/ozagia/core/graph_engine.py:2166`)
-  and `_context` (`:2280`), not by `_find` (`:2111`–`:2133`).
-- `FIND_COLS` (`:95`) omits `h`, so a `find` response gives the client no hash
-  to echo back even if `_find` later accepted `known`.
+### Flask
 
-The engine's documented `known` scope already says “an outline or context
-item”, so the docs are not wrong. But the largest repeated result cannot be
-delta-reduced, which caps the stateful advantage. A follow-up could add hashes
-to `find` rows (or a separate `find` handle) and route `find` through
-`_known_rows`, with a regression test that a repeated `find` with matching
-`known` returns `u`. No product code was changed by this evaluation.
+| Arm | Accepted | Prompt | Completion | **Total** | vs control | Tool calls | Tool-result tokens | Engine `t` | Engine wire (B) | Known / unchanged |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `control` | 6/6 | 35,132 | 768 | **35,900** | — | 6 | 6,774 | 7,278 | 27,879 | 0 / 0 |
+| `engine_known` | 6/6 | 27,296 | 792 | **28,088** | **−21.76%** | 6 | 5,004 | 5,274 | 20,240 | 40 / 40 |
+| `engine_known_spec` | 6/6 | 27,672 | 816 | **28,488** | −20.65% | 6 | 5,024 | 5,304 | 20,324 | 40 / 40 |
+
+Per turn (sum of two repeats):
+
+| Turn | `control` | `engine_known` | vs control | `engine_known_spec` | vs control |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1 (`find`) | 5,140 | 5,140 | 0.00% | 5,202 | +1.21% |
+| 2 (repeat `find`) | 12,016 | 9,404 | **−21.74%** | 9,564 | −20.41% |
+| 3 (`impact`) | 18,744 | 13,544 | **−27.74%** | 13,722 | −26.86% |
+| **Total** | **35,900** | **28,088** | **−21.76%** | **28,488** | **−20.65%** |
+
+The turn-2 tool result fell from 1,135 to 250 tokens per session. As before,
+the smaller refresh message is re-sent on every turn-3 model call, so turn 3
+drops even more than turn 2. Turn-1 model totals are identical for `control`
+and `engine_known`, as they must be; speculation adds its usual `q` handles.
+
+### Tiny fixture
+
+| Arm | Accepted | Total | vs control | Tool calls | Known / unchanged |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `control` | 6/6 | 14,468 | — | 6 | 0 / 0 |
+| `engine_known` | 6/6 | 12,612 | **−12.83%** | 6 | 14 / 14 |
+| `engine_known_spec` | 6/6 | 13,084 | −9.56% | 6 | 14 / 14 |
+
+Per turn for `engine_known`: 2,704 / 4,144 / 5,764 versus control
+2,704 / 4,776 / 6,988. The task's find returned 7 rows per repeat (the
+symbol-only probe below returned 2).
+
+### Deterministic find probe (live engine, no model)
+
+The multiturn run now records a find probe next to the outline probe:
+
+| Probe | Full | `known` delta | Saved | Request bytes | Net traffic |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `find get_root_path` (flask, 20 rows) | 1,189 t / 4,572 B | 300 t / 1,177 B | 889 t / 3,395 B | 78 → 1,887 | **−1,587 B** |
+| `find average` (tiny, 2 rows) | 103 t / 390 B | 33 t / 125 B | 70 t / 265 B | 71 → 217 | **−120 B** |
+| `outline get_root_path` (flask) | 84 t / 319 B | 27 t / 103 B | 57 t / 216 B | — | — |
+| `outline average` (tiny) | 64 t / 239 B | 24 t / 91 B | 40 t / 148 B | — | — |
+
+Net traffic subtracts the larger `known` request from the response saving. On
+flask the request grows by 1,809 bytes but the response shrinks by 3,395, so
+the delta is still a clear win. The existing engine-wire columns count
+responses only.
+
+### Cost of the hash column
+
+`FIND_COLS` now ends in `h`, so every find row carries a 16-hex hash: +19 bytes
+and about +5 estimated tokens per row. At budget 1,200 the 20-row flask find is
+1,189 estimated tokens and still returns all 20 rows. Budget-tight pages can
+return slightly fewer rows than before this change; the 500-token synthetic
+page test pins that trimming plus `u` handles still advance `n` without
+skipping the rows that were cut.
+
+## Product gap found, then fixed
+
+The original run found that `known` deltas were implemented for `outline` and
+`context` only:
+
+- `_known_rows` was called by `_outline` and `_context`, not by `_find`;
+- `FIND_COLS` omitted `h`, so a find response gave the client no hash to echo
+  back even if `_find` accepted `known`.
+
+Both are fixed:
+
+- `FIND_COLS` ends with `h`; `_find` builds its rows through `_known_rows`, so
+  matching rows return only `u` handles and changed/stale hashes reserialize
+  with the current `h`.
+- The internal page order (`c`/`u` per item) is kept until budget fitting is
+  done, so `n.offset` advances by the number of items actually served and a
+  trimmed page with unchanged handles does not skip the cut rows.
+- The live driver remembers find hashes and injects `known` on a repeated
+  `find`; `run_known_probe` now measures the find delta deterministically.
+
+Failure modes and paging are covered by tests in `tests/test_graph_engine.py`
+(`test_find_rows_carry_stable_hashes_without_known`,
+`test_known_find_is_a_handle_and_change_reserializes`,
+`test_known_find_trimmed_page_advances_without_skipping`,
+`test_known_find_repeat_wire_saving_is_measurable`,
+`test_live_driver_known_probe_measures_find_delta`).
 
 ## Limitations
 
@@ -275,6 +375,18 @@ to `find` rows (or a separate `find` handle) and route `find` through
 - The engine win is concentrated in the file-outline task. Two symbol tasks show
   1.5–2.1% savings. The aggregate −6.4% should not be read as a general
   per-task effect.
+- The repeated-find saving is measured on one task shape that repeats an
+  identical query, and the client sends 20 `known` pairs to save a 20-row
+  response. On a 2-row tiny result the net saving is only 120 bytes; small
+  pages can lose most of the benefit to request overhead.
+- Hashes are per item as serialized, not per key identity. The driver remembers
+  one hash per key, so if a session has seen both a `find` row and an `outline`
+  row for the same key, only the most recent shape matches. Keying remembered
+  hashes by `(op, key)` would capture both; the measured find task used only
+  find rows, so all 20 pairs matched.
+- Adding `h` to find rows costs about 5 estimated tokens per row. The 20-row
+  flask find still fits at the 1,200 budget, but a budget-tight page may return
+  one or two fewer rows than the pre-hash build.
 - The client, not the model, decides when to send `known`. A generic LLM client
   that does not track hashes gets none of this benefit; the model-facing schema
   intentionally hides `known`.
@@ -291,27 +403,30 @@ to `find` rows (or a separate `find` handle) and route `find` through
 ## Remaining work
 
 - Repeat on a second real repository (for example `httpx`) and a second model.
-- Test a workload with several file outlines refreshed repeatedly, where
-  `known` should have the largest effect.
+- Test a workload with several file outlines and finds refreshed repeatedly,
+  where `known` should have the largest effect.
 - Exercise `fetch`/inline delivery live with a workload that makes a payload
   ready before the response.
-- Decide whether `find` should expose hashes and support `known` deltas; this is
-  the largest remaining stateful win.
+- Decide whether a shorter find hash (or a compact page handle) is worth the
+  smaller request when many rows are known. A 12-hex hash would cut the find
+  request by about 20%; the response saving is unchanged.
 - Measure whether caching the per-turn tool schema/tool result across a longer
   session (more than three turns) changes the ranking.
 
 ## Checks run
 
 ```bash
-.venv/bin/ruff check scripts/eval_graph_engine_live.py \
-  tests/test_graph_engine_live_driver.py
+.venv/bin/ruff check src/ozagia/core/graph_engine.py \
+  scripts/eval_graph_engine_live.py tests/test_graph_engine.py \
+  tests/test_graph_engine_live_driver.py tests/test_engine_http.py
 # All checks passed
 
-.venv/bin/python -m pytest -q tests/test_graph_engine_live_driver.py
-# 7 passed
+.venv/bin/python -m pytest -q tests/test_graph_engine.py \
+  tests/test_graph_engine_live_driver.py tests/test_engine_http.py
+# 73 passed
 ```
 
-No full suite was run. No product code was changed.
+No full suite was run and REPO_SHAPE was not regenerated.
 
 ## Live commands
 
@@ -350,8 +465,28 @@ OZAGIA_EVAL_LIVE=1 OZAGIA_LIVE_API_KEY="$(cat /tmp/opencode/graph-multiturn/key)
   --fixture /tmp/opencode/engine-live \
   --task-set tiny --arm all --repeat 2 --counterbalance \
   --out /tmp/opencode/graph-multiturn/tiny.json
+
+# Follow-up: repeated find, flask and tiny (1 task x 3 turns x 3 arms x 2)
+OZAGIA_EVAL_LIVE=1 OZAGIA_LIVE_API_KEY="$(cat /tmp/opencode/graph-multiturn/key)" \
+  .venv/bin/python scripts/eval_graph_engine_live.py \
+  --live --suite multiturn --engine-url http://127.0.0.1:8841 \
+  --engine-token-file /home/matt/ozma/deep-review-corpus/repositories/flask/.ozagia/engine/token \
+  --base-url http://127.0.0.1:18020 --model qwen3.8-27b \
+  --fixture /home/matt/ozma/deep-review-corpus/repositories/flask \
+  --task-set flask --task multiturn_find_refresh --arm all --repeat 2 \
+  --counterbalance --out /tmp/opencode/graph-multiturn/find_refresh.json
+
+OZAGIA_EVAL_LIVE=1 OZAGIA_LIVE_API_KEY="$(cat /tmp/opencode/graph-multiturn/key)" \
+  .venv/bin/python scripts/eval_graph_engine_live.py \
+  --live --suite multiturn --engine-url http://127.0.0.1:8842 \
+  --engine-token-file /tmp/opencode/engine-live/.ozagia/engine/token \
+  --base-url http://127.0.0.1:18020 --model qwen3.8-27b \
+  --fixture /tmp/opencode/engine-live \
+  --task-set tiny --task multiturn_find_refresh --arm all --repeat 2 \
+  --counterbalance --out /tmp/opencode/graph-multiturn/find_refresh_tiny.json
 ```
 
 The checkout was not edited. `git status` in the flask checkout shows only the
 untracked `.ozagia/` state directory; the snapshot is the pinned
-`22d92470` build.
+`22d92470` build. The follow-up also wrote only its `.ozagia/engine/token`
+inside that state directory.

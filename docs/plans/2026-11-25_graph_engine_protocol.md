@@ -128,9 +128,10 @@ the payload plus `t` (and `c`/`x`/`o`/`n`/`u`/`q` when they apply). `fresh` and
 `snap` appear only in the handshake and in withheld/error responses.
 
 ```json
-{"c": ["k", "n", "f", "sp", "sig", "sum", "sc"],
+{"c": ["k", "n", "f", "sp", "sig", "sum", "sc", "h"],
  "r": [["sym:pkg/core.py::add", "add", "pkg/core.py", [4, 4],
-        "def add(a, b):", "Add two numbers.", 0.03]],
+        "def add(a, b):", "Add two numbers.", 0.03,
+        "1a2b3c4d5e6f7a8b"]],
  "t": 130}
 ```
 
@@ -169,7 +170,7 @@ Errors use short keys too:
 | Op | Inputs | Result |
 | --- | --- | --- |
 | `hello` | `session?`, `budget?`, `compact?`, `caps?`, `detail?` | handshake |
-| `find` | `q`, `kinds?`, `limit?`, `offset?` | ranked keys, names, files, spans, signatures, summaries, scores |
+| `find` | `q`, `kinds?`, `limit?`, `offset?`, `known?` | ranked keys, names, files, spans, signatures, summaries, scores, hashes |
 | `outline` | `key`, `limit?`, `known?` | a root row and (for a file) its defined symbols |
 | `expand` | `keys`, `edges?`, `depth?`, `limit?`, `offset?` | nodes plus `ed` edge triples |
 | `impact` | `keys`, `depth?`, `limit?` | symbols/files/tests with depth and one `why` path |
@@ -245,10 +246,10 @@ A session stores:
 
 ## `known` deltas
 
-Callers send outlines/context they already have:
+Callers send `find`, `outline` or `context` rows they already have:
 
 ```json
-{"op": "outline", "session": "s1", "key": "sym:pkg/core.py::add",
+{"op": "find", "session": "s1", "q": "add",
  "known": [{"key": "sym:pkg/core.py::add", "hash": "1a2b3c4d5e6f7a8b"}]}
 ```
 
@@ -263,7 +264,13 @@ Changed, missing or unknown hashes are reserialized with a fresh `h`. A
 16-hex SHA-256 prefix is used to keep the wire small; a collision would cause
 the client to keep an old payload, so this is a prototype trade-off, not a
 cryptographic identity guarantee. A known-only response is dramatically smaller
-than reserializing the outline (10 vs 41 estimated tokens on the fixture).
+than reserializing the item (10 vs 41 estimated tokens on the fixture outline,
+and 300 vs 1,189 estimated tokens for the 20-row flask find).
+
+The page order is kept internally until budget fitting finishes. When a page
+with both changed rows and `u` handles is trimmed, `n.offset` advances by the
+longest contiguous prefix of page items actually served, so cut rows are
+retried rather than skipped.
 
 ## Token budgets
 

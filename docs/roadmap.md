@@ -485,10 +485,10 @@ examples and a larger-repository budget study, remain follow-on work.
 
 A first **stateful graph-engine prototype** also landed (2026-11-25):
 `OZAGIA_SURFACE=engine` exposes one `graph` tool with `hello` sessions, compact
-tabular rows, hard estimated-token budgets, `known` outline/context deltas and
-bounded background speculation (`spec`/`fetch`). Column headers are included on
-every response by default; callers that track columns can opt into per-session
-reuse with `cols:false` or an explicit `compact:true`. Computation and parent
+tabular rows, hard estimated-token budgets, `known` find/outline/context
+deltas and bounded background speculation (`spec`/`fetch`). Column headers are
+included on every response by default; callers that track columns can opt into
+per-session reuse with `cols:false` or an explicit `compact:true`. Computation and parent
 application are separate: a supervised forked child per engine computes
 `(handle, payload)` results and a parent IPC listener applies them after
 validating snapshot, freshness, scope, generation, expiry and child epoch. The

@@ -137,7 +137,7 @@ handle must call `hello` again.
 | Op | Purpose |
 | --- | --- |
 | `hello` | handshake and session |
-| `find` | ranked key/name/file/span hits |
+| `find` | ranked key/name/file/span hits; rows carry `h` for `known` |
 | `outline` | one key's outline, plus a file's defined symbols |
 | `expand` | graph walk along edges, including callers/callees |
 | `impact` | transitive callers, dependent files and covering tests |
@@ -159,12 +159,14 @@ columns itself can send `cols: false` (or an explicit `compact: true`) to opt
 into per-session reuse: the first response teaches `c`, and later requests that
 also ask for reuse with the same columns omit it. `cols: true` forces `c` even
 in reuse mode.
-`r` is rows, `c` columns, `k` key, `f` file, `sp` source span, `sig` signature,
-`sum` summary, `why` reason, `txt` text, `u` unchanged keys, `x` truncated,
-`o` omitted, `n` next request, `q` speculative handles, `q.i` speculative
-payloads already delivered inline, and `mods` the shape operation's flat list of
-repository-relative module file paths. `verbose: true` expands rows to named
-objects for debugging.
+`r` is rows, `c` columns, `k` key, `h` hash, `f` file, `sp` source span,
+`sig` signature, `sum` summary, `why` reason, `txt` text, `u` unchanged keys,
+`x` truncated, `o` omitted, `n` next request, `q` speculative handles, `q.i`
+speculative payloads already delivered inline, and `mods` the shape operation's
+flat list of repository-relative module file paths. `find` rows end with the
+`h` hash column, so a repeated find can be sent back as a `known` delta;
+`outline` and `context` rows also carry `h`. `verbose: true` expands rows to
+named objects for debugging.
 
 ## Budgets and paging
 
@@ -174,7 +176,10 @@ result does not fit:
 
 - long text is shortened first, then rows are cut;
 - `x` and `o` are set;
-- `n` (when useful) is a complete follow-up request with the next `offset`.
+- `n` (when useful) is a complete follow-up request with the next `offset`;
+- when a trimmed page also has `u` handles, `n.offset` counts the rows and
+  handles actually returned, and the fitter gives up one page item if needed to
+  keep `n`; a page never loses its last returned row to metadata.
 
 If not even one row fits, the result is an explicit
 `{"e": "budget_too_small", "why": "...", "x": true}` (with a larger-budget
@@ -186,10 +191,11 @@ retry in `n` when it fits), not an empty truncated object.
 
 ## `known` deltas
 
-If you already have an outline or context item, send its `{key, hash}`:
+If you already have a `find`, `outline` or `context` row, send its
+`{key, hash}`:
 
 ```json
-{"op": "outline", "session": "s1", "key": "sym:pkg/core.py::add",
+{"op": "find", "session": "s1", "q": "add",
  "known": [{"key": "sym:pkg/core.py::add", "hash": "1a2b3c4d5e6f7a8b"}]}
 ```
 
@@ -199,7 +205,15 @@ A matching item comes back only as a key handle:
 {"u": ["sym:pkg/core.py::add"], "t": 10}
 ```
 
-Changed or missing hashes are reserialized with a new `h`.
+Changed or missing hashes are reserialized with a new `h`. The hash covers the
+whole item as that op serializes it, so a `find` row and an `outline` row for
+the same key have different hashes; echo the hash from the same row shape. A
+repeated find is now the largest routine saving: on the pinned flask checkout a
+20-row `find get_root_path` is 1,189 estimated tokens and 4,572 bytes, while
+the matching `known` delta is 300 tokens and 1,177 bytes. The client request
+grows from 78 to 1,887 bytes for the 20 hashes, so total traffic still falls by
+1,587 bytes. Paging is unaffected: when a page is trimmed, `n.offset` counts
+both returned rows and `u` handles, so the cut rows are not skipped.
 
 ## Speculation and stats
 
@@ -364,7 +378,9 @@ written to the checkout.
   win came from refreshing an already-seen 18-row file outline (714 → 219
   engine tokens) and persisted into the next turn; single-symbol outlines saved
   only 1.5–2.1%, and speculation was net cost because nothing was fetched.
-  `find` still cannot use `known` (its rows omit `h`). See
+  `find` now participates too: a repeated 20-row find used 28,088 tokens
+  versus 35,900 for the control (−21.8%) with 6/6 turn acceptance on flask, and
+  12,612 versus 14,468 (−12.8%) on the tiny fixture. See
   [`docs/results/graph_engine_live_multiturn_2026-11-25.md`](results/graph_engine_live_multiturn_2026-11-25.md).
 - Small budgets on large tabular results return a shortened row prefix plus
   `n`, or an explicit `budget_too_small` error; they no longer return an empty

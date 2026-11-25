@@ -68,7 +68,7 @@ def test_shape_prompt_asks_for_repository_relative_file_paths() -> None:
     assert "pkg/core.py" in shape["prompt"]
 
 
-def test_known_injection_only_uses_seen_outline_hashes() -> None:
+def test_known_injection_uses_seen_row_hashes() -> None:
     driver = _driver()
     recorder = driver.Recorder()
     arm = driver.EngineArm(object(), recorder, interface="optimized",
@@ -81,9 +81,16 @@ def test_known_injection_only_uses_seen_outline_hashes() -> None:
     assert outline["known"] == [{"key": "sym:a", "hash": "h1"}]
     assert recorder.known_sent == 1
 
+    # find rows now carry `h`, so a repeated find is a delta too.
     find = {"op": "find", "q": "a"}
     arm._inject_known("find", find)
-    assert "known" not in find
+    assert find["known"] == [{"key": "sym:a", "hash": "h1"}]
+    assert recorder.known_sent == 2
+
+    # Ops without row hashes never receive `known`.
+    shape = {"op": "shape"}
+    arm._inject_known("shape", shape)
+    assert "known" not in shape
 
     # A file-outline refresh sees the whole remembered row set, not only the
     # requested file key; the engine ignores hashes for rows it does not return.
@@ -94,7 +101,7 @@ def test_known_injection_only_uses_seen_outline_hashes() -> None:
     arm._inject_known("outline", refresh)
     assert {row["key"] for row in refresh["known"]} == {
         "sym:a", "file:src/a.py", "sym:src/a.py::b"}
-    assert recorder.known_sent == 4
+    assert recorder.known_sent == 5
 
     # An explicit known list is never overwritten.
     explicit = {"op": "outline", "key": "sym:a",
@@ -141,7 +148,8 @@ def test_multiturn_tasks_are_three_fixed_turns() -> None:
     for task in flask:
         refresh = task["turns"][1]
         assert refresh["id"] in ("t2_refresh_outline",
-                                 "t2_refresh_file_outline")
+                                 "t2_refresh_file_outline",
+                                 "t2_refresh_find")
         expected = spans.get(task["id"])
         if expected is None:
             continue
@@ -152,3 +160,11 @@ def test_multiturn_tasks_are_three_fixed_turns() -> None:
             if "end_line" in check_name:
                 assert check({"end_line": expected[1]})
                 assert not check({"end_line": expected[1] + 1})
+    # The repeated-find task exists in both sets so the engine_known arms can
+    # demonstrate the find delta without relying on an outline.
+    for name in ("flask", "tiny"):
+        find_task = next(task for task in driver.MULTI_TASKS[name]
+                         if task["id"] == "multiturn_find_refresh")
+        assert find_task["turns"][0]["id"] == "t1_find"
+        assert find_task["turns"][1]["id"] == "t2_refresh_find"
+        assert "op find" in find_task["turns"][1]["prompt"]

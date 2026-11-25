@@ -6,6 +6,7 @@ server's engine surface.
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import multiprocessing
 import subprocess
@@ -270,14 +271,14 @@ def test_compact_rows_columns_and_hard_budget(engine: GraphEngine) -> None:
                             "budget": 80})
     assert "e" not in result
     assert result["t"] <= 80
-    assert result["c"] == ["k", "n", "f", "sp", "sig", "sum", "sc"]
+    assert result["c"] == ["k", "n", "f", "sp", "sig", "sum", "sc", "h"]
     assert all(isinstance(row, list) for row in result.get("r", []))
     # Column headers are included on every response by default.
     second = engine.handle({"op": "find", "session": sid, "q": "add"})
     assert second["c"] == result["c"]
     again = engine.handle({"op": "find", "session": sid, "q": "add",
                            "cols": True})
-    assert again["c"] == ["k", "n", "f", "sp", "sig", "sum", "sc"]
+    assert again["c"] == ["k", "n", "f", "sp", "sig", "sum", "sc", "h"]
     # cols:false opts into the old per-session column reuse: the first
     # response teaches the columns, later responses omit them.
     tracked_sid = _hello(engine)["sid"]
@@ -351,16 +352,18 @@ def test_stats_are_opt_in(engine: GraphEngine) -> None:
 
 def test_page_trimming_returns_next(engine: GraphEngine) -> None:
     sid = _hello(engine)["sid"]
+    # 110 rather than 100: find rows now also carry a 16-hex `h` hash, so the
+    # same trim needs a little more room for the self-contained `n` request.
     first = engine.handle({"op": "find", "session": sid, "q": "pkg",
-                           "limit": 20, "budget": 100})
+                           "limit": 20, "budget": 110})
     assert "e" not in first
-    assert first["t"] <= 100
+    assert first["t"] <= 110
     assert first["x"] is True
     assert first["o"] > 0
     assert first["n"]["op"] == "find"
     assert first["n"]["offset"] == len(first["r"])
-    second = engine.handle({**first["n"], "session": sid, "budget": 100})
-    assert "e" not in second and second["t"] <= 100
+    second = engine.handle({**first["n"], "session": sid, "budget": 110})
+    assert "e" not in second and second["t"] <= 120
     assert second["r"]
     assert second["r"][0] != first["r"][0]
 
@@ -491,6 +494,181 @@ def test_known_context_is_a_handle(engine: GraphEngine) -> None:
     assert key in same.get("u", [])
     assert all(row[same["c"].index("k")] != key
                for row in same.get("r", []) if "c" in same)
+
+
+def test_find_rows_carry_stable_hashes_without_known(
+        engine: GraphEngine) -> None:
+    sid = _hello(engine)["sid"]
+    first = engine.handle({"op": "find", "session": sid, "q": "add"})
+    assert "h" in first["c"]
+    assert first["r"]
+    digests = {}
+    for row in first["r"]:
+        key = _cell(first, first["r"], row, "k", engine, sid, "find")
+        digest = _cell(first, first["r"], row, "h", engine, sid, "find")
+        assert isinstance(digest, str) and len(digest) == 16
+        assert all(char in "0123456789abcdef" for char in digest)
+        digests[key] = digest
+    assert "u" not in first
+    again = engine.handle({"op": "find", "session": sid, "q": "add"})
+    assert {_cell(again, again["r"], row, "k", engine, sid, "find"):
+            _cell(again, again["r"], row, "h", engine, sid, "find")
+            for row in again["r"]} == digests
+
+
+def test_known_find_is_a_handle_and_change_reserializes(
+        engine: GraphEngine) -> None:
+    sid = _hello(engine)["sid"]
+    first = engine.handle({"op": "find", "session": sid, "q": "add"})
+    assert first["r"]
+    known = []
+    for row in first["r"]:
+        known.append({
+            "key": _cell(first, first["r"], row, "k", engine, sid, "find"),
+            "hash": _cell(first, first["r"], row, "h", engine, sid, "find")})
+    row = first["r"][0]
+    key = known[0]["key"]
+    digest = known[0]["hash"]
+    same = engine.handle({
+        "op": "find", "session": sid, "q": "add", "known": known})
+    assert same.get("r", []) == []
+    assert key in same["u"]
+    assert same["t"] < first["t"]
+    stale = "0" * 16
+    assert stale != digest
+    changed = engine.handle({
+        "op": "find", "session": sid, "q": "add",
+        "known": [{"key": key, "hash": stale}]})
+    assert changed["r"]
+    assert key not in changed.get("u", [])
+    first_row = next(item for item in changed["r"]
+                     if _cell(changed, changed["r"], item, "k", engine, sid,
+                              "find") == key)
+    reserialized = _cell(changed, changed["r"], first_row, "h",
+                         engine, sid, "find")
+    assert reserialized == digest and reserialized != stale
+
+
+class _FakeSurface:
+    """A deterministic find surface for paging and wire measurements."""
+
+    def __init__(self, hits: list[dict[str, Any]]) -> None:
+        self.hits = hits
+
+    def find(self, query: str, kinds: list[str] | None = None,
+             limit: int = 20) -> dict[str, Any]:
+        return {"hits": self.hits[:limit]}
+
+
+def _find_hits(count: int = 20) -> list[dict[str, Any]]:
+    signature = ("def helper(number: int, *, mode: str | None = None) -> str")
+    summary = ("Return the resolved helper description for a numbered "
+               "symbol in the synthetic find fixture used by the paging test.")
+    return [{
+        "key": f"sym:src/mod.py::helper_{index}",
+        "name": f"helper_{index}",
+        "file": "src/mod.py",
+        "line": 100 + index,
+        "signature": signature,
+        "summary": summary,
+        "score": 0.5,
+    } for index in range(count)]
+
+
+def _hit_item(hit: dict[str, Any]) -> dict[str, Any]:
+    """The item dict ``_find`` builds, before the known hash is added."""
+    return {"k": hit["key"], "n": hit["name"], "f": hit["file"],
+            "sp": graph_engine_module._span(hit["line"], hit["line"]),
+            "sig": hit["signature"], "sum": hit["summary"],
+            "sc": hit["score"]}
+
+
+def test_known_find_trimmed_page_advances_without_skipping(
+        engine: GraphEngine, monkeypatch: pytest.MonkeyPatch) -> None:
+    hits = _find_hits(20)
+    monkeypatch.setattr(GraphEngine, "_surface",
+                        lambda self: _FakeSurface(hits))
+    sid = _hello(engine)["sid"]
+    known = [{"key": hit["key"],
+              "hash": graph_engine_module._hash_item(_hit_item(hit))}
+             for hit in hits[:10]]
+    first = engine.handle({"op": "find", "session": sid, "q": "helper",
+                           "limit": 20, "budget": 500, "known": known})
+    assert "e" not in first, first
+    assert first["u"] == [hit["key"] for hit in hits[:10]]
+    assert len(first["r"]) < 10
+    assert first["x"] is True and first["o"] > 0
+    served = len(first["r"]) + len(first["u"])
+    assert first["n"]["offset"] == served
+    returned = [hit["key"] for hit in hits[:10]]
+    returned += [_cell(first, first["r"], row, "k", engine, sid, "find")
+                 for row in first["r"]]
+    # Second page continues exactly after the last served item: the changed
+    # rows that did not fit are not skipped by the offset.
+    second = engine.handle({**first["n"], "session": sid})
+    assert "e" not in second, second
+    second_keys = [_cell(second, second["r"], row, "k", engine, sid, "find")
+                   for row in second["r"]]
+    assert second_keys[0] == hits[served]["key"]
+    assert set(returned) | set(second_keys) == {hit["key"] for hit in hits}
+    # An all-unchanged page can also be trimmed by a small budget; the
+    # continuation still advances by the handles actually returned.
+    every = [{"key": hit["key"],
+              "hash": graph_engine_module._hash_item(_hit_item(hit))}
+             for hit in hits]
+    tiny = engine.handle({"op": "find", "session": sid, "q": "helper",
+                          "limit": 20, "budget": 100, "known": every})
+    assert tiny["u"] and tiny["x"] is True and "r" not in tiny
+    assert tiny["n"]["offset"] == len(tiny["u"])
+
+
+def test_known_find_repeat_wire_saving_is_measurable(
+        engine: GraphEngine, monkeypatch: pytest.MonkeyPatch) -> None:
+    hits = _find_hits(20)
+    monkeypatch.setattr(GraphEngine, "_surface",
+                        lambda self: _FakeSurface(hits))
+    sid = _hello(engine)["sid"]
+    full = engine.handle({"op": "find", "session": sid, "q": "helper",
+                          "limit": 20, "budget": 4000})
+    assert len(full["r"]) == 20
+    known = []
+    for row in full["r"]:
+        known.append({
+            "key": _cell(full, full["r"], row, "k", engine, sid, "find"),
+            "hash": _cell(full, full["r"], row, "h", engine, sid, "find")})
+    delta = engine.handle({"op": "find", "session": sid, "q": "helper",
+                           "limit": 20, "budget": 4000, "known": known})
+    assert delta.get("r", []) == []
+    assert len(delta["u"]) == 20
+    full_bytes = len(json.dumps(full))
+    delta_bytes = len(json.dumps(delta))
+    assert delta_bytes < full_bytes // 4
+    assert delta["t"] < full["t"] // 4
+
+
+def test_live_driver_known_probe_measures_find_delta(
+        engine: GraphEngine) -> None:
+    path = (Path(__file__).resolve().parents[1] / "scripts"
+            / "eval_graph_engine_live.py")
+    spec = importlib.util.spec_from_file_location(
+        "eval_graph_engine_live_probe", path)
+    driver = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(driver)
+
+    class Client:
+        def graph(self, payload: dict[str, Any]):
+            result = engine.handle(payload)
+            return result, len(json.dumps(result))
+
+    report = driver.run_known_probe(
+        Client(), key="sym:pkg/core.py::add", budget=2000, query="add")
+    find = report["find"]
+    assert find["known_pairs"] == find["full"]["rows"] >= 1
+    assert find["delta"]["unchanged"] == find["known_pairs"]
+    assert find["saved_t"] > 0
+    assert find["saved_wire"] > 0
+    assert find["saved_total"] > 0
 
 
 # --------------------------------------------------------------------------- #

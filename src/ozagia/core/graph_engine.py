@@ -92,7 +92,7 @@ _SHORT_KEYS = {
 
 # Short column names keep the tabular payload small.  ``_COL_NAMES`` is only
 # used by the verbose debugging view.
-FIND_COLS = ["k", "n", "f", "sp", "sig", "sum", "sc"]
+FIND_COLS = ["k", "n", "f", "sp", "sig", "sum", "sc", "h"]
 OUTLINE_COLS = ["r", "k", "h", "n", "f", "sp", "sig", "sum", "e"]
 EXPAND_COLS = ["k", "n", "f", "sp"]
 IMPACT_COLS = ["g", "k", "d", "why"]
@@ -362,6 +362,26 @@ def _row(cols: list[str], item: dict[str, Any]) -> list[Any]:
 
 def _compact(items: list[dict[str, Any]], cols: list[str]) -> list[list[Any]]:
     return [_row(cols, item) for item in items]
+
+
+def _served_prefix(order: str, rows: int, unchanged: int) -> int:
+    """How many page items, in page order, a trimmed response still covers.
+
+    ``rows`` and ``unchanged`` are the counts in the two response lists.  The
+    fitter only removes items from the end of each list, so the served items
+    are a prefix of each.  Walking the page order gives the longest contiguous
+    prefix of items that was actually returned, which is the only safe next
+    page offset.  Without this, a trimmed page that also has ``u`` handles
+    would skip the rows that were cut.
+    """
+    remaining = {"c": max(0, rows), "u": max(0, unchanged)}
+    served = 0
+    for flag in order:
+        if remaining.get(flag, 0) <= 0:
+            break
+        remaining[flag] -= 1
+        served += 1
+    return served
 
 
 def _short_keys(value: Any) -> Any:
@@ -1387,8 +1407,10 @@ class GraphEngine:
             return self._error(f"{type(exc).__name__}: {exc}", snap=snap)
         keys = list(payload.pop("__keys", []) or [])
         next_args = payload.pop("__next", None)
+        page_order = payload.pop("__page", None)
         offset = max(0, int(args.get("offset", 0) or 0))
         total_rows = len(payload.get("rows") or [])
+        total_unchanged = len(payload.get("unchanged") or [])
         result: dict[str, Any] = dict(payload)
         if allow_spec and args.get("spec") is True:
             result.update(self._speculate(session, op, args, keys, snap,
@@ -1411,19 +1433,85 @@ class GraphEngine:
                 retry["budget"] = self._suggested_budget(budget)
                 result["next"] = retry
         rows = result.get("rows")
-        session.cursor = {"op": op, "offset": offset + len(rows or [])}
-        if (next_args is not None and isinstance(rows, list)
-                and len(rows) < total_rows):
-            next_args = dict(next_args)
-            next_args["offset"] = offset + len(rows)
-            result["next"] = next_args
-            session.cursor = {"op": op, "offset": next_args["offset"]}
+        unchanged = result.get("unchanged")
+        served_rows = len(rows) if isinstance(rows, list) else 0
+        served_unchanged = len(unchanged) if isinstance(unchanged, list) else 0
+        if isinstance(page_order, str) and page_order:
+            served = _served_prefix(page_order, served_rows, served_unchanged)
+        else:
+            served = served_rows
+        session.cursor = {"op": op, "offset": offset + served}
+        served_lists = isinstance(rows, list) or isinstance(unchanged, list)
+        trimmed = (served_rows < total_rows
+                   or served_unchanged < total_unchanged)
+        if next_args is not None and served_lists and trimmed:
+            # Keep room for the continuation: a trimmed page that carries `n`
+            # is more useful than one more row and no way to ask for the rest.
+            while True:
+                candidate = dict(next_args)
+                candidate["offset"] = offset + served
+                result["next"] = candidate
+                session.cursor = {"op": op, "offset": candidate["offset"]}
+                if estimate_tokens(result) <= max(1, budget - 4):
+                    break
+                if not self._trim_served_item(result, page_order, served):
+                    break
+                rows = result.get("rows")
+                unchanged = result.get("unchanged")
+                served_rows = len(rows) if isinstance(rows, list) else 0
+                served_unchanged = (len(unchanged)
+                                    if isinstance(unchanged, list) else 0)
+                if isinstance(page_order, str) and page_order:
+                    served = _served_prefix(page_order, served_rows,
+                                            served_unchanged)
+                else:
+                    served = served_rows
+                session.cursor = {"op": op, "offset": offset + served}
         result = self._enforce_budget(result, budget)
         if cache_cols and not verbose:
             result = self._apply_columns(
                 result, op, session, reuse=_column_reuse(args),
                 force=args.get("cols") is True)
         return _short_keys(result) if compact else result
+
+    @staticmethod
+    def _trim_served_item(result: dict[str, Any], page_order: Any,
+                          served: int) -> bool:
+        """Drop the last served page item to make room for a continuation.
+
+        Only an item inside the served prefix is removed, so the prefix shrinks
+        by one and the next `n.offset` re-serves nothing that was returned.
+        A page that already returned rows never loses its last row: rows are
+        more useful than the optional `n` metadata.
+        """
+        rows = result.get("rows")
+        unchanged = result.get("unchanged")
+        flag = ""
+        if isinstance(page_order, str) and 0 < served <= len(page_order):
+            flag = page_order[served - 1]
+        if flag == "u":
+            removed_key = "unchanged"
+        elif flag == "c":
+            removed_key = "rows"
+        elif isinstance(rows, list) and len(rows) > 1:
+            removed_key = "rows"
+        elif not rows and isinstance(unchanged, list) and unchanged:
+            removed_key = "unchanged"
+        else:
+            return False
+        values = result.get(removed_key)
+        if not isinstance(values, list) or not values:
+            return False
+        if removed_key == "rows" and len(values) <= 1:
+            # Keep the last row; _enforce_budget may then drop `next`, which is
+            # the documented preference (rows before optional metadata).
+            return False
+        values.pop()
+        if not values:
+            result.pop(removed_key, None)
+        result["truncated"] = True
+        result["omitted"] = int(result.get("omitted") or 0) + 1
+        return True
 
     def _enforce_budget(self, result: dict[str, Any],
                         budget: int) -> dict[str, Any]:
@@ -1498,11 +1586,17 @@ class GraphEngine:
     def _known_rows(
             self, session: EngineSession, args: dict[str, Any],
             items: list[dict[str, Any]], cols: list[str]
-    ) -> tuple[list[list[Any]], list[str]]:
-        """Split items into changed rows and unchanged key handles."""
+    ) -> tuple[list[list[Any]], list[str], str]:
+        """Split items into changed rows, unchanged key handles and page order.
+
+        The third value is a compact ``c``/``u`` string in page order.  The
+        caller keeps it internal (``__page``) so the paging code can advance
+        the offset by the number of items actually served.
+        """
         known = self._known(args, session)
         rows: list[dict[str, Any]] = []
         unchanged: list[str] = []
+        order: list[str] = []
         for item in items:
             key = str(item.get("k") or "")
             digest = _hash_item(item)
@@ -1511,9 +1605,11 @@ class GraphEngine:
                 self._remember(session, key, digest)
                 if known.get(key) == digest:
                     unchanged.append(key)
+                    order.append("u")
                     continue
             rows.append(item)
-        return _compact(rows, cols), unchanged
+            order.append("c")
+        return _compact(rows, cols), unchanged, "".join(order)
 
     def _verbose(self, result: dict[str, Any]) -> dict[str, Any]:
         """Expand short tabular rows into named dicts for debugging."""
@@ -2127,10 +2223,13 @@ class GraphEngine:
             "sig": hit.get("signature"), "sum": hit.get("summary"),
             "sc": hit.get("score"),
         } for hit in page]
-        rows = _compact(items, FIND_COLS)
+        rows, unchanged, page = self._known_rows(session, args, items,
+                                                 FIND_COLS)
         return _clean({"cols": FIND_COLS, "rows": rows,
+                       "unchanged": unchanged,
                        "__keys": [i["k"] for i in items if i.get("k")],
-                       "__next": self._next_args(args, session)})
+                       "__next": self._next_args(args, session),
+                       "__page": page})
 
     def _outline(self, args: dict[str, Any],
                  session: EngineSession) -> dict[str, Any]:
@@ -2163,11 +2262,13 @@ class GraphEngine:
                 })
                 if len(items) > limit:
                     break
-        rows, unchanged = self._known_rows(session, args, items, OUTLINE_COLS)
+        rows, unchanged, page = self._known_rows(session, args, items,
+                                                 OUTLINE_COLS)
         return _clean({"cols": OUTLINE_COLS, "rows": rows,
                        "unchanged": unchanged,
                        "__keys": [i["k"] for i in items if i.get("k")],
-                       "__next": self._next_args(args, session)})
+                       "__next": self._next_args(args, session),
+                       "__page": page})
 
     def _expand(self, args: dict[str, Any],
                 session: EngineSession) -> dict[str, Any]:
@@ -2277,11 +2378,13 @@ class GraphEngine:
                 "why": entry.get("why"),
                 "txt": snippet.get("text"),
             })
-        rows, unchanged = self._known_rows(session, args, items, CONTEXT_COLS)
+        rows, unchanged, page = self._known_rows(session, args, items,
+                                                 CONTEXT_COLS)
         return _clean({"cols": CONTEXT_COLS, "rows": rows,
                        "unchanged": unchanged,
                        "__keys": [i["k"] for i in items if i.get("k")],
-                       "__next": self._next_args(args, session)})
+                       "__next": self._next_args(args, session),
+                       "__page": page})
 
     def _shape(self, args: dict[str, Any],
                session: EngineSession) -> dict[str, Any]:
