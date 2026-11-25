@@ -231,6 +231,22 @@ def test_repeated_find_outline_and_context_use_op_scoped_known(client) -> None:
                for entry in client.known_entries("context"))
 
 
+def test_client_known_false_opts_out_of_server_auto_known(server, client) -> None:
+    engine = server[1]
+    engine.auto_known = True
+    # A caller that does not manage hashes omits `known` entirely.
+    client.use_known = False
+    first = client.find("add")
+    assert _keys(first) and "u" not in first
+    again = client.find("add")
+    assert again.get("u") and not _rows(again)
+    # known=False is sent as an explicit empty list and forces full rows even
+    # though the server remembers the hashes.
+    full = client.find("add", known=False)
+    assert _keys(full) and "u" not in full
+    assert len(_keys(full)) == len(_keys(first))
+
+
 def test_stale_hash_reserializes_and_forget_clears(client) -> None:
     first = client.find("add")
     key = _keys(first)[0]

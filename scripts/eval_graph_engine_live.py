@@ -26,12 +26,15 @@ reverses arm order on every other repeat.
 outlines a symbol or file (or finds a symbol), turn 2 refreshes that same
 result and answers from the copy already in the conversation, and turn 3 asks a
 distinct impact question in the same session.  The arms are ``control`` (fresh
-session per call), ``engine_known`` (one session plus ``known`` deltas,
-speculation off) and ``engine_known_spec`` (the same with speculation on).  The
-client remembers each ``{key, hash}`` it showed the model from ``find``,
-``outline`` and ``context`` rows, and injects ``known`` on the matching
-refresh; the model-facing schema is unchanged.  See
-``docs/results/graph_engine_live_multiturn_2026-11-25.md``.
+session per call), ``engine_known`` (one session plus client-sent ``known``
+deltas, speculation off), ``engine_auto`` (one session, no client ``known``;
+the serving engine applies its own remembered hashes) and
+``engine_known_spec`` (``engine_known`` with speculation on).  The client
+remembers each ``{key, hash}`` it showed the model from ``find``, ``outline``
+and ``context`` rows, and injects ``known`` on the matching refresh in the
+explicit arms; the model-facing schema is unchanged.  See
+``docs/results/graph_engine_live_multiturn_2026-11-25.md`` and
+``docs/results/graph_engine_auto_known_2026-11-26.md``.
 
 This is a small measured sample, not a general model-task claim.  See
 ``docs/results/graph_engine_live_2026-11-25.md`` and
@@ -343,12 +346,16 @@ class EngineArm:
                  *, interface: str = "legacy",
                  budget: int = TINY_BUDGET,
                  known_reuse: bool = False,
+                 auto_known: bool = False,
                  speculate: bool = True) -> None:
         self.client = client
         self.recorder = recorder
         self.interface = interface
         self.budget = budget
         self.known_reuse = known_reuse
+        # The engine_auto arm sends no `known`: the serving engine recognises
+        # the repeated request from its own session and returns u handles.
+        self.auto_known = auto_known
         self.speculate = speculate
         self.sid: str | None = None
         self.closed = False
@@ -453,6 +460,8 @@ class EngineArm:
         engine wire, never the model context.
         """
         if not self.known_reuse or not self.seen or payload.get("known"):
+            return
+        if self.auto_known:
             return
         if op not in ("find", "outline", "context"):
             return
@@ -1294,7 +1303,7 @@ MULTI_TASKS: dict[str, list[dict[str, Any]]] = {
     "tiny": MULTI_TINY_TASKS,
     "flask": MULTI_FLASK_TASKS,
 }
-MULTI_ARMS = ("control", "engine_known", "engine_known_spec")
+MULTI_ARMS = ("control", "engine_known", "engine_auto", "engine_known_spec")
 
 
 def _engine_system(budget: int = TINY_BUDGET) -> str:
@@ -1311,8 +1320,9 @@ def _engine_system(budget: int = TINY_BUDGET) -> str:
 def _short_system(budget: int = TINY_BUDGET) -> str:
     return (
         "You have one tool, graph: a read-only code graph. Use at most "
-        f"{budget}-token budgets. After at most six calls, reply with only the "
-        "requested JSON object."
+        f"{budget}-token budgets. If a repeated result lists only unchanged "
+        "keys under u, reuse the rows already in the conversation. After at "
+        "most six calls, reply with only the requested JSON object."
     )
 
 
@@ -1886,6 +1896,17 @@ def run_known_probe(client: EngineClient, *, key: str,
         "saved_t": _int(full.get("t")) - _int(delta.get("t")),
         "saved_wire": full_wire - delta_wire,
     }
+    # No client `known`: an engine with auto-known answers from the session it
+    # already updated above.  When auto-known is off this is a full repeat and
+    # the zero/negative saving is reported honestly.
+    auto, auto_wire = call({"op": "outline", "session": sid, "key": key,
+                            "budget": budget})
+    report["auto"] = {
+        "t": _int(auto.get("t")), "wire": auto_wire,
+        "unchanged": len(auto.get("u") or []),
+        "saved_t": _int(full.get("t")) - _int(auto.get("t")),
+        "saved_wire": full_wire - auto_wire,
+    }
     if query:
         # This find runs after the outline above, so it also proves that an
         # already-remembered outline hash for the same key does not shadow the
@@ -1901,6 +1922,9 @@ def run_known_probe(client: EngineClient, *, key: str,
                    "kinds": ["sym"], "budget": budget}
         known_bytes = len(json.dumps({**request, "known": find_known},
                                      separators=(",", ":")))
+        find_auto, find_auto_wire = call({
+            "op": "find", "session": sid, "q": query, "kinds": ["sym"],
+            "budget": budget})
         report["find"] = {
             "q": query,
             "known_pairs": len(find_known),
@@ -1918,6 +1942,14 @@ def run_known_probe(client: EngineClient, *, key: str,
             "saved_total": (find_full_wire - find_delta_wire
                             - (known_bytes - len(json.dumps(
                                 request, separators=(",", ":"))))),
+            # Auto-known sends the same request as `full`: the saving is the
+            # whole response difference and nothing is added to the request.
+            "auto": {"t": _int(find_auto.get("t")),
+                     "wire": find_auto_wire,
+                     "unchanged": len(find_auto.get("u") or []),
+                     "saved_t": (_int(find_full.get("t"))
+                                 - _int(find_auto.get("t"))),
+                     "saved_wire": find_full_wire - find_auto_wire},
         }
     call({"op": "bye", "session": sid})
     return report
@@ -2023,7 +2055,8 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
                              "1200 flask)")
     parser.add_argument("--arm",
                         choices=("engine", "engine_opt", "control", "both",
-                                 "all", "engine_known", "engine_known_spec"),
+                                 "known", "all", "engine_known", "engine_auto",
+                                 "engine_known_spec"),
                         default="both")
     parser.add_argument("--task", action="append",
                         choices=list(dict.fromkeys(
@@ -2089,13 +2122,15 @@ def _main_multiturn(args: argparse.Namespace) -> int:
         return 2
     if args.arm == "all":
         arms = MULTI_ARMS
+    elif args.arm == "known":
+        arms = ("control", "engine_known", "engine_auto")
     elif args.arm == "both":
         arms = ("control", "engine_known")
     elif args.arm in MULTI_ARMS:
         arms = (args.arm,)
     else:
         print(f"error: multi-turn arms are {', '.join(MULTI_ARMS)} "
-              "(or all/both)", file=sys.stderr)
+              "(or all/both/known)", file=sys.stderr)
         return 2
     final_tokens = (args.final_tokens if args.final_tokens is not None
                     else 600)
@@ -2150,12 +2185,18 @@ def _main_multiturn(args: argparse.Namespace) -> int:
                 "engine_known_session": "one session for all three turns",
                 "engine_known_injection": "find/outline/context rows; "
                                           "client remembers {key,hash}",
+                "engine_auto": "one session; no client known; the serving "
+                               "engine applies its own remembered hashes",
                 "engine_known_spec": "engine_known + speculation on find",
                 "engine_known_plain": "speculation off on find",
+                "known_prompt": "shared system prompt tells the model that "
+                                "u lists unchanged keys already in the "
+                                "conversation",
             },
             "system_prompts": {"multi": _short_system(budget)},
             "tools": {"control": _control_schema(),
                       "engine_known": _opt_schema(False),
+                      "engine_auto": _opt_schema(False),
                       "engine_known_with_fetch": _opt_schema(True)},
             "overhead": interface_profile(budget),
             "arm_order": [],
@@ -2187,7 +2228,9 @@ def _main_multiturn(args: argparse.Namespace) -> int:
                     else:
                         arm = EngineArm(
                             client, recorder, interface="optimized",
-                            budget=budget, known_reuse=True,
+                            budget=budget,
+                            known_reuse=(arm_name != "engine_auto"),
+                            auto_known=(arm_name == "engine_auto"),
                             speculate=(arm_name == "engine_known_spec"))
                     print(f"[{arm_name}] repeat {repeat + 1} task {task['id']}",
                           file=sys.stderr, flush=True)

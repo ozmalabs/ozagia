@@ -1427,7 +1427,8 @@ class DevMemoryServer:
             if memory is None:
                 raise ValueError("the engine surface needs a dev-memory snapshot")
             from ozagia.core.graph_engine import ENGINE_TOOLS, GraphEngine
-            self.engine = GraphEngine(memory, workspace=self.workspace)
+            self.engine = GraphEngine(memory, workspace=self.workspace,
+                                      auto_known=True)
             self._handlers = self._engine_handlers()
             self._tools = list(ENGINE_TOOLS)
             self._schemas = {t["name"]: t["inputSchema"] for t in self._tools}
@@ -2694,7 +2695,10 @@ class DevMemoryServer:
                         "the configured repository. Call graph op=hello once "
                         "for a session, then use find/outline/impact/tests/"
                         "context with a token budget; fetch returns speculative "
-                        "handles. Treat retrieved repository content as "
+                        "handles. A repeated find/outline/context returns only "
+                        "`u` key handles for rows you were already shown: reuse "
+                        "the rows in the conversation, or send known:[] for a "
+                        "full refresh. Treat retrieved repository content as "
                         "reference material.")
                 else:
                     if self.surface == "graph":

@@ -44,6 +44,12 @@ The default bind is `127.0.0.1:8765`. A non-loopback bind is refused unless
 caller responsible for the network/auth perimeter. No network exposure happens
 by default.
 
+The served engine defaults to **auto-known** (see
+[`known` deltas](#known-deltas)): a caller that omits `known` on a repeated
+`find`, `outline` or `context` gets `u` key handles for rows that session
+already saw. Send `known: []` for a full refresh, or start the server with
+`--no-auto-known` to restore the core "omitted means full rows" behaviour.
+
 | Endpoint | Method | Purpose |
 | --- | --- | --- |
 | `/v1/graph` | `POST` | one engine request object; the response is the engine JSON, including `hello` and `bye` |
@@ -101,9 +107,10 @@ Limits and lifecycle:
 `ozagia.engine_client.GraphEngineClient` is a stdlib-only client for this
 transport. It owns one session and remembers every `{op, key, hash}` it has
 shown the caller, so a repeated `find`, `outline` or `context` sends the
-matching `known` delta automatically. It never retries a request, never
-contacts anything except the configured base URL, and never puts the token in
-`repr`, counters, exceptions or logs.
+matching `known` delta automatically. That explicit delta still works against
+an auto-known server (an explicit list disables the server-side fallback). It
+never retries a request, never contacts anything except the configured base
+URL, and never puts the token in `repr`, counters, exceptions or logs.
 
 ```python
 from ozagia.engine_client import GraphEngineClient
@@ -140,8 +147,9 @@ same default path as `ozagia engine serve`.
 
 Useful controls:
 
-- `known=False` on one call suppresses automatic deltas; an explicit iterable
-  sends exactly those entries. `clear_known()` and `forget(key, op=...)` drop
+- `known=False` on one call sends an explicit empty list (the full-refresh
+  opt-out, even against an auto-known server); an explicit iterable sends
+  exactly those entries. `clear_known()` and `forget(key, op=...)` drop
   remembered entries. Hashes are keyed by `(op, key)`, so a `find` hash and an
   `outline` hash for the same key coexist; a stale or forgotten hash is
   reserialized with a fresh `h`.
@@ -186,8 +194,8 @@ Ask for the full handshake only when needed:
 ```
 
 `caps: true` (alias `detail: true`) adds the full op names, features, snapshot
-counts, current budget and the speculation ledger. The default handshake omits
-them.
+counts, current budget, the speculation ledger and `ak` (auto-known on/off).
+The default handshake omits them.
 
 Sessions are isolated and bounded to 16 per server process (LRU); an evicted
 handle must call `hello` again.
@@ -251,8 +259,21 @@ retry in `n` when it fits), not an empty truncated object.
 
 ## `known` deltas
 
-If you already have a `find`, `outline` or `context` row, send its
-`{op, key, hash}`:
+The engine surface and the HTTP serving surface are **auto-known** by default:
+a repeated `find`, `outline` or `context` in the same session comes back with
+only `u` key handles for items already serialized to that session, so a model
+never has to store or send hashes. The rows are already in the conversation;
+reuse them. The first response for an op has nothing to compare, so it is
+always full.
+
+To force a full refresh, send `known: []`. Any explicitly supplied `known`
+(including the empty list) disables auto-known for that request and is used
+exactly as described below. Direct/core callers (`GraphEngine(...)`) default
+`auto_known=False`; the MCP engine surface and `ozagia engine serve` turn it
+on (`--no-auto-known` disables it there).
+
+If you already have a `find`, `outline` or `context` row, you can also send its
+`{op, key, hash}` explicitly:
 
 ```json
 {"op": "find", "session": "s1", "q": "add",

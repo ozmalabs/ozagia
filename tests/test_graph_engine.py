@@ -672,6 +672,147 @@ def test_known_context_is_op_scoped(engine: GraphEngine) -> None:
         assert key not in wrong.get("u", [])
 
 
+# --------------------------------------------------------------------------- #
+# auto-known: the model-facing serving default
+# --------------------------------------------------------------------------- #
+@pytest.fixture()
+def auto_engine(memory: DevMemory):
+    instance = GraphEngine(memory, auto_known=True)
+    yield instance
+    instance.close()
+
+
+def test_auto_known_is_off_for_direct_core_callers(
+        engine: GraphEngine) -> None:
+    assert engine.auto_known is False
+    sid = _hello(engine)["sid"]
+    first = engine.handle({"op": "find", "session": sid, "q": "add"})
+    again = engine.handle({"op": "find", "session": sid, "q": "add"})
+    assert first["r"] and again["r"]
+    assert "u" not in again
+
+
+def test_auto_known_repeated_find_outline_context_return_handles(
+        auto_engine: GraphEngine) -> None:
+    sid = _hello(auto_engine)["sid"]
+    first = auto_engine.handle({"op": "find", "session": sid, "q": "add"})
+    assert first["r"] and "u" not in first
+    keys = {_cell(first, first["r"], row, "k", auto_engine, sid, "find")
+            for row in first["r"]}
+    again = auto_engine.handle({"op": "find", "session": sid, "q": "add"})
+    assert again.get("r", []) == []
+    assert set(again["u"]) == keys
+    assert again["t"] < first["t"]
+
+    key = next(k for k in keys if k.startswith("sym:"))
+    outline = auto_engine.handle({"op": "outline", "session": sid,
+                                  "key": key})
+    assert outline["r"]
+    repeat = auto_engine.handle({"op": "outline", "session": sid,
+                                 "key": key})
+    assert repeat.get("r", []) == [] and repeat["u"] == [key]
+
+    context = auto_engine.handle({"op": "context", "session": sid,
+                                  "task": "add two numbers", "budget": 2000})
+    assert context["r"]
+    context_keys = {
+        _cell(context, context["r"], row, "k", auto_engine, sid, "context")
+        for row in context["r"]}
+    repeated = auto_engine.handle({"op": "context", "session": sid,
+                                   "task": "add two numbers",
+                                   "budget": 2000})
+    assert repeated.get("r", []) == []
+    assert set(repeated["u"]) == context_keys
+
+
+def test_auto_known_explicit_empty_known_forces_full_rows(
+        auto_engine: GraphEngine) -> None:
+    sid = _hello(auto_engine)["sid"]
+    first = auto_engine.handle({"op": "find", "session": sid, "q": "add"})
+    assert first["r"]
+    refresh = auto_engine.handle({"op": "find", "session": sid, "q": "add",
+                                  "known": []})
+    assert refresh["r"] and "u" not in refresh
+    assert len(refresh["r"]) == len(first["r"])
+    # An omitted known resumes the automatic delta on the next repeat.
+    again = auto_engine.handle({"op": "find", "session": sid, "q": "add"})
+    assert again.get("r", []) == [] and again["u"]
+
+
+def test_auto_known_changed_row_reserializes(
+        auto_engine: GraphEngine, monkeypatch: pytest.MonkeyPatch) -> None:
+    hits = _find_hits(3)
+    monkeypatch.setattr(GraphEngine, "_surface",
+                        lambda self: _FakeSurface(hits))
+    sid = _hello(auto_engine)["sid"]
+    first = auto_engine.handle({"op": "find", "session": sid, "q": "helper",
+                                "limit": 3, "budget": 2000})
+    keys = [_cell(first, first["r"], row, "k", auto_engine, sid, "find")
+            for row in first["r"]]
+    old_hash = _cell(first, first["r"], first["r"][1], "h", auto_engine,
+                     sid, "find")
+    hits[1] = {**hits[1], "summary": "a materially different summary"}
+    again = auto_engine.handle({"op": "find", "session": sid, "q": "helper",
+                                "limit": 3, "budget": 2000})
+    assert again["u"] == [keys[0], keys[2]]
+    changed = [_cell(again, again["r"], row, "k", auto_engine, sid, "find")
+               for row in again["r"]]
+    assert changed == [keys[1]]
+    new_hash = _cell(again, again["r"], again["r"][0], "h", auto_engine,
+                     sid, "find")
+    assert new_hash != old_hash
+    third = auto_engine.handle({"op": "find", "session": sid, "q": "helper",
+                                "limit": 3, "budget": 2000})
+    assert third.get("r", []) == [] and set(third["u"]) == set(keys)
+
+
+def test_auto_known_cross_op_hashes_do_not_collide(
+        auto_engine: GraphEngine) -> None:
+    sid = _hello(auto_engine)["sid"]
+    found = auto_engine.handle({"op": "find", "session": sid, "q": "add"})
+    key = next(_cell(found, found["r"], row, "k", auto_engine, sid, "find")
+               for row in found["r"]
+               if str(_cell(found, found["r"], row, "k", auto_engine, sid,
+                            "find")).startswith("sym:"))
+    # The remembered find hash must not satisfy the outline row shape.
+    outline = auto_engine.handle({"op": "outline", "session": sid, "key": key})
+    assert outline["r"] and key not in outline.get("u", [])
+    repeat_outline = auto_engine.handle({"op": "outline", "session": sid,
+                                         "key": key})
+    assert repeat_outline["u"] == [key]
+    # ...and an outline repeat does not displace the find hash.
+    repeat_find = auto_engine.handle({"op": "find", "session": sid,
+                                      "q": "add"})
+    assert key in repeat_find.get("u", [])
+    assert ("find", key) in auto_engine.sessions[sid].known
+    assert ("outline", key) in auto_engine.sessions[sid].known
+
+
+def test_auto_known_paging_advances_over_handles(
+        auto_engine: GraphEngine, monkeypatch: pytest.MonkeyPatch) -> None:
+    hits = _find_hits(20)
+    monkeypatch.setattr(GraphEngine, "_surface",
+                        lambda self: _FakeSurface(hits))
+    sid = _hello(auto_engine)["sid"]
+    first = auto_engine.handle({"op": "find", "session": sid, "q": "helper",
+                                "limit": 20, "budget": 4000})
+    assert len(first["r"]) == 20
+    page = auto_engine.handle({"op": "find", "session": sid, "q": "helper",
+                               "limit": 20, "budget": 100})
+    assert page["u"] and page["x"] is True and "r" not in page
+    assert page["n"]["offset"] == len(page["u"])
+    seen = list(page["u"])
+    for _ in range(30):
+        if not page.get("n"):
+            break
+        page = auto_engine.handle({**page["n"], "session": sid,
+                                   "budget": 100})
+        assert "r" not in page and page["u"]
+        seen.extend(page["u"])
+        assert len(seen) <= 20
+    assert seen == [hit["key"] for hit in hits]
+
+
 class _FakeSurface:
     """A deterministic find surface for paging and wire measurements."""
 
@@ -805,6 +946,36 @@ def test_live_driver_known_probe_measures_find_delta(
     assert find["saved_t"] > 0
     assert find["saved_wire"] > 0
     assert find["saved_total"] > 0
+    # Auto-known is off for this direct engine: the no-known repeat is full.
+    assert find["auto"]["unchanged"] == 0
+    assert find["auto"]["saved_t"] <= 0
+
+
+def test_live_driver_known_probe_measures_auto_known(
+        auto_engine: GraphEngine) -> None:
+    path = (Path(__file__).resolve().parents[1] / "scripts"
+            / "eval_graph_engine_live.py")
+    spec = importlib.util.spec_from_file_location(
+        "eval_graph_engine_live_auto_probe", path)
+    driver = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(driver)
+
+    class Client:
+        def graph(self, payload: dict[str, Any]):
+            result = auto_engine.handle(payload)
+            return result, len(json.dumps(result))
+
+    report = driver.run_known_probe(
+        Client(), key="sym:pkg/core.py::add", budget=2000, query="add")
+    assert report["auto"]["unchanged"] == 1
+    assert report["auto"]["saved_t"] > 0
+    find = report["find"]
+    assert find["auto"]["unchanged"] == find["known_pairs"]
+    assert find["auto"]["saved_t"] == find["saved_t"]
+    assert find["auto"]["saved_wire"] == find["saved_wire"]
+    # No known request growth, so the auto total saving is the response saving.
+    assert find["auto"]["saved_wire"] > find["saved_total"]
 
 
 # --------------------------------------------------------------------------- #
@@ -1574,6 +1745,21 @@ def test_mcp_engine_surface_exposes_only_graph(memory: DevMemory) -> None:
     assert "graph op=hello" in init["instructions"]
     assert "resources" not in init["capabilities"]
     assert _rpc(server, "resources/list")["result"]["resources"] == []
+
+
+def test_mcp_engine_surface_defaults_to_auto_known(
+        memory: DevMemory) -> None:
+    server = DevMemoryServer(memory, surface="engine")
+    assert server.engine.auto_known is True
+    sid = _call(server, "graph", op="hello")["sid"]
+    first = _call(server, "graph", op="find", session=sid, q="add")
+    assert first["r"] and "u" not in first
+    again = _call(server, "graph", op="find", session=sid, q="add")
+    assert again.get("r", []) == [] and again["u"]
+    full = _call(server, "graph", op="find", session=sid, q="add", known=[])
+    assert full["r"] and "u" not in full
+    detail = _call(server, "graph", op="hello", session=sid, detail=True)
+    assert detail["ak"] is True
 
 
 def test_engine_surface_does_not_change_full_or_graph(memory: DevMemory) -> None:

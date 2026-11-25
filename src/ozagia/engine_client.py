@@ -515,8 +515,10 @@ class GraphEngineClient:
                 known: Any = None, raise_on_error: bool | None = None) -> dict[str, Any]:
         """Send one engine request with session and ``known`` management.
 
-        ``known`` is normally automatic.  ``known=False`` disables injection,
-        and an explicit iterable sends exactly those entries.  The raw
+        ``known`` is normally automatic.  ``known=False`` sends an explicit
+        empty list for ``find``/``outline``/``context`` (the documented
+        full-refresh opt-out, which also defeats a server-side auto-known), and
+        an explicit iterable sends exactly those entries.  The
         ``raise_errors=False`` escape hatch is available on every convenience
         method for budget/withheld payloads.
         """
@@ -666,7 +668,13 @@ class GraphEngineClient:
 
     def _apply_known(self, op: str, body: dict[str, Any], known: Any) -> None:
         if known is False:
-            body.pop("known", None)
+            # An explicit empty list, not an omitted key: a serving engine may
+            # auto-apply remembered hashes when `known` is absent, and this is
+            # the documented opt-out for a full refresh.
+            if op in KNOWN_OPS:
+                body["known"] = []
+            else:
+                body.pop("known", None)
             return
         if known is not None and known is not True:
             body["known"] = [dict(entry) for entry in known]

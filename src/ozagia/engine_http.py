@@ -244,8 +244,16 @@ def _display_host(host: str) -> str:
     return name
 
 
-def load_engine(root: str | Path) -> GraphEngine:
-    """Load the existing snapshot for ``root`` without building or refreshing it."""
+def load_engine(root: str | Path, *,
+                auto_known: bool = True) -> GraphEngine:
+    """Load the existing snapshot for ``root`` without building or refreshing it.
+
+    The HTTP surface is a model-facing serving surface, so auto-known defaults
+    on: an omitted ``known`` on a repeated find/outline/context is answered
+    from the session's remembered hashes.  A caller that sends an explicit
+    ``known`` (including ``[]``) keeps full control, and ``auto_known=False``
+    restores the core default.
+    """
     root_path = Path(root).expanduser().resolve()
     if not root_path.is_dir():
         raise EngineHTTPError(f"repository root does not exist: {root_path}")
@@ -259,7 +267,7 @@ def load_engine(root: str | Path) -> GraphEngine:
     except Exception as exc:  # noqa: BLE001 - report a stable configuration error
         raise EngineHTTPError(
             f"cannot load the graph snapshot at {dump}: {type(exc).__name__}") from None
-    return GraphEngine(memory, workspace=root_path)
+    return GraphEngine(memory, workspace=root_path, auto_known=auto_known)
 
 
 # --------------------------------------------------------------------------- #
@@ -320,6 +328,7 @@ class EngineHTTPServer(ThreadingHTTPServer):
 def create_server(root: str | Path, *, host: str = DEFAULT_HOST,
                   port: int = DEFAULT_PORT, token: str | None = None,
                   engine: Any | None = None, allow_remote: bool = False,
+                  auto_known: bool = True,
                   max_concurrent: int = MAX_CONCURRENT_REQUESTS) -> EngineHTTPServer:
     """Create (but do not serve) a bound engine HTTP server.
 
@@ -350,7 +359,7 @@ def create_server(root: str | Path, *, host: str = DEFAULT_HOST,
 
     owns_engine = engine is None
     if engine is None:
-        engine = load_engine(root_path)
+        engine = load_engine(root_path, auto_known=auto_known)
     bind_host, family = _bind_host(host)
 
     class _Server(EngineHTTPServer):
@@ -628,10 +637,12 @@ def _restore_signal_handlers(previous: Mapping[int, Any]) -> None:
 def serve(root: str | Path, *, host: str = DEFAULT_HOST,
           port: int = DEFAULT_PORT, token: str | None = None,
           allow_remote: bool = False,
+          auto_known: bool = True,
           max_concurrent: int = MAX_CONCURRENT_REQUESTS) -> None:
     """Serve until SIGINT/SIGTERM or ``shutdown``; close server and engine."""
     server = create_server(root, host=host, port=port, token=token,
                            allow_remote=allow_remote,
+                           auto_known=auto_known,
                            max_concurrent=max_concurrent)
     previous = _install_signal_handlers(server)
     try:
@@ -678,6 +689,10 @@ def add_parser(sub: Any) -> None:
     server.add_argument("--allow-remote", action="store_true",
                         help="allow a non-loopback bind; HTTP has no TLS and the "
                              "caller owns the network/auth perimeter")
+    server.add_argument("--no-auto-known", action="store_true",
+                        help="return full find/outline/context rows when a "
+                             "request omits known (default: remember hashes in "
+                             "the session and return u handles)")
 
     token = children.add_parser(
         "token", help="create or repair <state>/engine/token (mode 0600)")
@@ -705,7 +720,8 @@ def run(args: argparse.Namespace) -> int:
                       file=sys.stderr)
                 return 2
             serve(root, host=args.host, port=args.port,
-                  allow_remote=args.allow_remote)
+                  allow_remote=args.allow_remote,
+                  auto_known=not getattr(args, "no_auto_known", False))
             return 0
     except EngineHTTPError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -729,6 +745,7 @@ def main(argv: list[str] | None = None) -> int:
     server.add_argument("--host", default=DEFAULT_HOST)
     server.add_argument("--port", type=int, default=DEFAULT_PORT)
     server.add_argument("--allow-remote", action="store_true")
+    server.add_argument("--no-auto-known", action="store_true")
     token = children.add_parser("token", help="create or repair <state>/engine/token")
     token.add_argument("--root", default=None)
     return run(parser.parse_args(argv))

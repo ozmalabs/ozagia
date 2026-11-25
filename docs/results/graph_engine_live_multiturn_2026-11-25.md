@@ -36,6 +36,17 @@ The earlier −21.8% model-token result should therefore be treated as the last
 live measurement, not rerun evidence for the op-scoped client. See
 [`#op-scoped-known-identity-2026-11-26`](#op-scoped-known-identity-2026-11-26).
 
+**Follow-up (2026-11-26, auto-known):** the MCP `engine` surface and
+`ozagia engine serve` now apply the session's remembered hashes when a
+repeated `find`/`outline`/`context` omits `known`; `known: []` forces full
+rows and direct `GraphEngine` callers keep the old default. A fresh live A/B
+on the repeated-find task (flask, 2 repeats, 6 turns per arm) measured
+**28,276** model tokens for auto-known, **28,284** for explicit client-sent
+`known` and **36,068** for the stateless control, all 6/6 accepted with the
+same 6 tool calls. Auto-known therefore reproduces the explicit delta saving
+(−21.6% vs control) without any client-side hash bookkeeping. See
+[`graph_engine_auto_known_2026-11-26.md`](graph_engine_auto_known_2026-11-26.md).
+
 This result measures the claim one-shot tests cannot measure. The one-shot
 comparison found the optimized engine roughly tied/slightly worse than the
 stateless control on flask (+6.5% total tokens,

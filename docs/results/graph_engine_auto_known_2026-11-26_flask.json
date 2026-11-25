@@ -1,0 +1,2016 @@
+{
+  "generated_at": "2026-11-26T08:51:51+1100",
+  "model": {
+    "id": "qwen3.8-27b",
+    "root": "/app/models/Swift-1.5-Qwen3.8-27B-W4A16-HyperQwen",
+    "base_url": "http://127.0.0.1:18020"
+  },
+  "fixture": "/home/matt/ozma/deep-review-corpus/repositories/flask",
+  "task_set": "flask",
+  "suite": "multiturn",
+  "budget": 1200,
+  "engine_url": "http://127.0.0.1:8841",
+  "engine_health": {
+    "ok": true,
+    "service": "ozagia.engine.http",
+    "version": "ozagia.graph_engine.http/1",
+    "graph": "ozagia.graph_engine/2",
+    "read_only": true
+  },
+  "config": {
+    "temperature": 0,
+    "top_p": 1,
+    "seed": 0,
+    "enable_thinking": false,
+    "max_tool_calls": 6,
+    "max_tokens": 320,
+    "final_tokens": 600,
+    "repeat": 2,
+    "counterbalance": true,
+    "engine_default_budget": 1200,
+    "control_session": "fresh hello/bye per call",
+    "engine_known_session": "one session for all three turns",
+    "engine_known_injection": "find/outline/context rows; client remembers {key,hash}",
+    "engine_auto": "one session; no client known; the serving engine applies its own remembered hashes",
+    "engine_known_spec": "engine_known + speculation on find",
+    "engine_known_plain": "speculation off on find",
+    "known_prompt": "shared system prompt tells the model that u lists unchanged keys already in the conversation"
+  },
+  "system_prompts": {
+    "multi": "You have one tool, graph: a read-only code graph. Use at most 1200-token budgets. If a repeated result lists only unchanged keys under u, reuse the rows already in the conversation. After at most six calls, reply with only the requested JSON object."
+  },
+  "tools": {
+    "control": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "enum": [
+            "find",
+            "outline",
+            "expand",
+            "impact",
+            "tests",
+            "shape"
+          ]
+        },
+        "q": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "keys": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "budget": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "op"
+      ],
+      "additionalProperties": false
+    },
+    "engine_known": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "enum": [
+            "find",
+            "outline",
+            "expand",
+            "impact",
+            "tests",
+            "shape"
+          ]
+        },
+        "q": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "keys": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "budget": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "op"
+      ],
+      "additionalProperties": false
+    },
+    "engine_auto": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "enum": [
+            "find",
+            "outline",
+            "expand",
+            "impact",
+            "tests",
+            "shape"
+          ]
+        },
+        "q": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "keys": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "budget": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "op"
+      ],
+      "additionalProperties": false
+    },
+    "engine_known_with_fetch": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "enum": [
+            "find",
+            "outline",
+            "expand",
+            "impact",
+            "tests",
+            "shape",
+            "fetch"
+          ]
+        },
+        "q": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "keys": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "budget": {
+          "type": "integer"
+        },
+        "fetch": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "op"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "overhead": {
+    "control": {
+      "system_chars": 249,
+      "system_tokens": 63,
+      "tools_chars": 387,
+      "tools_tokens": 97,
+      "fixed_chars": 636,
+      "fixed_tokens": 159
+    },
+    "engine_legacy": {
+      "system_chars": 393,
+      "system_tokens": 99,
+      "tools_chars": 516,
+      "tools_tokens": 129,
+      "fixed_chars": 909,
+      "fixed_tokens": 228
+    },
+    "engine_opt_no_handles": {
+      "system_chars": 249,
+      "system_tokens": 63,
+      "tools_chars": 387,
+      "tools_tokens": 97,
+      "fixed_chars": 636,
+      "fixed_tokens": 159
+    },
+    "engine_opt_with_fetch": {
+      "system_chars": 249,
+      "system_tokens": 63,
+      "tools_chars": 446,
+      "tools_tokens": 112,
+      "fixed_chars": 695,
+      "fixed_tokens": 174
+    }
+  },
+  "arm_order": [
+    [
+      "control",
+      "engine_known",
+      "engine_auto"
+    ],
+    [
+      "engine_auto",
+      "engine_known",
+      "control"
+    ]
+  ],
+  "tasks": {
+    "multiturn_find_refresh": {
+      "kind": "multi-turn find/refresh/impact",
+      "turns": [
+        {
+          "id": "t1_find",
+          "prompt": "One graph call: find with q=get_root_path and kinds=[\"sym\"]. Then, from that result row, reply with only {\"symbol\": string, \"file\": string, \"signature\": string}.",
+          "expected": [
+            "symbol is get_root_path",
+            "file is src/flask/helpers.py",
+            "signature contains the definition line"
+          ]
+        },
+        {
+          "id": "t2_refresh_find",
+          "prompt": "Repeat exactly the same find with one graph call (op find, same q and kinds), then answer only from the find result already in this conversation. Do not outline, fetch or read source. Reply with only {\"symbol\": string, \"file\": string, \"signature\": string}.",
+          "expected": [
+            "symbol is get_root_path",
+            "file is src/flask/helpers.py",
+            "signature contains the definition line"
+          ]
+        },
+        {
+          "id": "t3_impact",
+          "prompt": "In the same session, compute the impact of get_root_path to depth 2 using the keys argument (a list) with the symbol key from the find row. Reply with only {\"symbol\": string, \"callers\": [string], \"test_files\": [string], \"summary\": string}.",
+          "expected": [
+            "symbol is get_root_path",
+            "callers include Scaffold.__init__",
+            "test_files include tests/test_helpers.py",
+            "summary is non-empty"
+          ]
+        }
+      ]
+    }
+  },
+  "arms": {
+    "control": {
+      "tasks": [
+        {
+          "task": "multiturn_find_refresh",
+          "kind": "multi-turn find/refresh/impact",
+          "arm": "control",
+          "turns": [
+            {
+              "turn": 1,
+              "id": "t1_find",
+              "prompt": "One graph call: find with q=get_root_path and kinds=[\"sym\"]. Then, from that result row, reply with only {\"symbol\": string, \"file\": string, \"signature\": string}.",
+              "final_json": {
+                "symbol": "get_root_path",
+                "file": "src/flask/helpers.py",
+                "signature": "def get_root_path(import_name: str) -> str:"
+              },
+              "json_valid": true,
+              "json_error": null,
+              "missing_keys": [],
+              "checks": [
+                {
+                  "name": "symbol is get_root_path",
+                  "ok": true
+                },
+                {
+                  "name": "file is src/flask/helpers.py",
+                  "ok": true
+                },
+                {
+                  "name": "signature contains the definition line",
+                  "ok": true
+                }
+              ],
+              "accepted": true,
+              "accepted_count": 3,
+              "check_count": 3,
+              "final_text_chars": 119,
+              "finalized_after_tool_budget": false,
+              "ops": [
+                "find"
+              ],
+              "usage": {
+                "prompt_tokens": 2533,
+                "completion_tokens": 75,
+                "total_tokens": 2608,
+                "reasoning_tokens": 0,
+                "cached_prompt_tokens": 0
+              },
+              "model_calls": 2,
+              "tool_calls": 1,
+              "driver_calls": 2,
+              "bad_tool_args": 0,
+              "known_sent": 0,
+              "unchanged_count": 0,
+              "tool_result_chars": 4540,
+              "tool_result_tokens": 1135,
+              "engine_t": 1216,
+              "engine_t_model": 1180,
+              "engine_wire_bytes": 4671,
+              "engine_wire_bytes_model": 4540,
+              "wall_s": 1.626,
+              "spec": {
+                "prepared": 0,
+                "fetched": 0,
+                "wasted": 0,
+                "hits": 0,
+                "misses": 0,
+                "evicted": 0,
+                "cancelled": 0,
+                "worker_ms": 0.0
+              }
+            },
+            {
+              "turn": 2,
+              "id": "t2_refresh_find",
+              "prompt": "Repeat exactly the same find with one graph call (op find, same q and kinds), then answer only from the find result already in this conversation. Do not outline, fetch or read source. Reply with only {\"symbol\": string, \"file\": string, \"signature\": string}.",
+              "final_json": {
+                "symbol": "get_root_path",
+                "file": "src/flask/helpers.py",
+                "signature": "def get_root_path(import_name: str) -> str:"
+              },
+              "json_valid": true,
+              "json_error": null,
+              "missing_keys": [],
+              "checks": [
+                {
+                  "name": "symbol is get_root_path",
+                  "ok": true
+                },
+                {
+                  "name": "file is src/flask/helpers.py",
+                  "ok": true
+                },
+                {
+                  "name": "signature contains the definition line",
+                  "ok": true
+                }
+              ],
+              "accepted": true,
+              "accepted_count": 3,
+              "check_count": 3,
+              "final_text_chars": 119,
+              "finalized_after_tool_budget": false,
+              "ops": [
+                "find"
+              ],
+              "usage": {
+                "prompt_tokens": 5971,
+                "completion_tokens": 75,
+                "total_tokens": 6046,
+                "reasoning_tokens": 0,
+                "cached_prompt_tokens": 1728
+              },
+              "model_calls": 2,
+              "tool_calls": 1,
+              "driver_calls": 2,
+              "bad_tool_args": 0,
+              "known_sent": 0,
+              "unchanged_count": 0,
+              "tool_result_chars": 4540,
+              "tool_result_tokens": 1135,
+              "engine_t": 1216,
+              "engine_t_model": 1180,
+              "engine_wire_bytes": 4671,
+              "engine_wire_bytes_model": 4540,
+              "wall_s": 2.316,
+              "spec": {
+                "prepared": 0,
+                "fetched": 0,
+                "wasted": 0,
+                "hits": 0,
+                "misses": 0,
+                "evicted": 0,
+                "cancelled": 0,
+                "worker_ms": 0.0
+              }
+            },
+            {
+              "turn": 3,
+              "id": "t3_impact",
+              "prompt": "In the same session, compute the impact of get_root_path to depth 2 using the keys argument (a list) with the symbol key from the find row. Reply with only {\"symbol\": string, \"callers\": [string], \"test_files\": [string], \"summary\": string}.",
+              "final_json": {
+                "symbol": "get_root_path",
+                "callers": [
+                  "Scaffold.__init__"
+                ],
+                "test_files": [
+                  "tests/test_appctx.py",
+                  "tests/test_basic.py",
+                  "tests/test_blueprints.py",
+                  "tests/test_converters.py",
+                  "tests/test_helpers.py",
+                  "tests/test_regression.py",
+                  "tests/test_reqctx.py",
+                  "tests/test_signals.py",
+                  "tests/test_templating.py",
+                  "tests/test_testing.py",
+                  "tests/test_user_error_handler.py",
+                  "tests/test_views.py"
+                ],
+                "summary": "Direct caller is Scaffold.__init__; depth-2 impact reaches 73 files and 370 tests, including docs/conf.py and examples/celery/make_celery.py."
+              },
+              "json_valid": true,
+              "json_error": null,
+              "missing_keys": [],
+              "checks": [
+                {
+                  "name": "symbol is get_root_path",
+                  "ok": true
+                },
+                {
+                  "name": "callers include Scaffold.__init__",
+                  "ok": true
+                },
+                {
+                  "name": "test_files include tests/test_helpers.py",
+                  "ok": true
+                },
+                {
+                  "name": "summary is non-empty",
+                  "ok": true
+                }
+              ],
+              "accepted": true,
+              "accepted_count": 4,
+              "check_count": 4,
+              "final_text_chars": 550,
+              "finalized_after_tool_budget": false,
+              "ops": [
+                "impact"
+              ],
+              "usage": {
+                "prompt_tokens": 9176,
+                "completion_tokens": 213,
+                "total_tokens": 9389,
+                "reasoning_tokens": 0,
+                "cached_prompt_tokens": 5184
+              },
+              "model_calls": 2,
+              "tool_calls": 1,
+              "driver_calls": 2,
+              "bad_tool_args": 0,
+              "known_sent": 0,
+              "unchanged_count": 0,
+              "tool_result_chars": 4466,
+              "tool_result_tokens": 1117,
+              "engine_t": 1207,
+              "engine_t_model": 1171,
+              "engine_wire_bytes": 4597,
+              "engine_wire_bytes_model": 4466,
+              "wall_s": 2.874,
+              "spec": {
+                "prepared": 0,
+                "fetched": 0,
+                "wasted": 0,
+                "hits": 0,
+                "misses": 0,
+                "evicted": 0,
+                "cancelled": 0,
+                "worker_ms": 0.0
+              }
+            }
+          ],
+          "cumulative": {
+            "turns": 3,
+            "accepted_turns": 3,
+            "accepted_all": true,
+            "usage": {
+              "prompt_tokens": 17680,
+              "completion_tokens": 363,
+              "total_tokens": 18043,
+              "reasoning_tokens": 0,
+              "cached_prompt_tokens": 6912
+            },
+            "model_calls": 6,
+            "tool_calls": 3,
+            "driver_calls": 6,
+            "known_sent": 0,
+            "unchanged_count": 0,
+            "tool_result_tokens": 3387,
+            "engine_t": 3639,
+            "engine_t_model": 3531,
+            "engine_wire_bytes": 13939,
+            "engine_wire_bytes_model": 13546,
+            "wall_s": 6.816,
+            "spec": {
+              "prepared": 0,
+              "fetched": 0,
+              "wasted": 0,
+              "hits": 0,
+              "misses": 0,
+              "evicted": 0,
+              "cancelled": 0,
+              "worker_ms": 0.0
+            }
+          }
+        },
+        {
+          "task": "multiturn_find_refresh",
+          "kind": "multi-turn find/refresh/impact",
+          "arm": "control",
+          "turns": [
+            {
+              "turn": 1,
+              "id": "t1_find",
+              "prompt": "One graph call: find with q=get_root_path and kinds=[\"sym\"]. Then, from that result row, reply with only {\"symbol\": string, \"file\": string, \"signature\": string}.",
+              "final_json": {
+                "symbol": "get_root_path",
+                "file": "src/flask/helpers.py",
+                "signature": "def get_root_path(import_name: str) -> str:"
+              },
+              "json_valid": true,
+              "json_error": null,
+              "missing_keys": [],
+              "checks": [
+                {
+                  "name": "symbol is get_root_path",
+                  "ok": true
+                },
+                {
+                  "name": "file is src/flask/helpers.py",
+                  "ok": true
+                },
+                {
+                  "name": "signature contains the definition line",
+                  "ok": true
+                }
+              ],
+              "accepted": true,
+              "accepted_count": 3,
+              "check_count": 3,
+              "final_text_chars": 119,
+              "finalized_after_tool_budget": false,
+              "ops": [
+                "find"
+              ],
+              "usage": {
+                "prompt_tokens": 2533,
+                "completion_tokens": 75,
+                "total_tokens": 2608,
+                "reasoning_tokens": 0,
+                "cached_prompt_tokens": 864
+              },
+              "model_calls": 2,
+              "tool_calls": 1,
+              "driver_calls": 2,
+              "bad_tool_args": 0,
+              "known_sent": 0,
+              "unchanged_count": 0,
+              "tool_result_chars": 4540,
+              "tool_result_tokens": 1135,
+              "engine_t": 1216,
+              "engine_t_model": 1180,
+              "engine_wire_bytes": 4671,
+              "engine_wire_bytes_model": 4540,
+              "wall_s": 1.193,
+              "spec": {
+                "prepared": 0,
+                "fetched": 0,
+                "wasted": 0,
+                "hits": 0,
+                "misses": 0,
+                "evicted": 0,
+                "cancelled": 0,
+                "worker_ms": 0.0
+              }
+            },
+            {
+              "turn": 2,
+              "id": "t2_refresh_find",
+              "prompt": "Repeat exactly the same find with one graph call (op find, same q and kinds), then answer only from the find result already in this conversation. Do not outline, fetch or read source. Reply with only {\"symbol\": string, \"file\": string, \"signature\": string}.",
+              "final_json": {
+                "symbol": "get_root_path",
+                "file": "src/flask/helpers.py",
+                "signature": "def get_root_path(import_name: str) -> str:"
+              },
+              "json_valid": true,
+              "json_error": null,
+              "missing_keys": [],
+              "checks": [
+                {
+                  "name": "symbol is get_root_path",
+                  "ok": true
+                },
+                {
+                  "name": "file is src/flask/helpers.py",
+                  "ok": true
+                },
+                {
+                  "name": "signature contains the definition line",
+                  "ok": true
+                }
+              ],
+              "accepted": true,
+              "accepted_count": 3,
+              "check_count": 3,
+              "final_text_chars": 119,
+              "finalized_after_tool_budget": false,
+              "ops": [
+                "find"
+              ],
+              "usage": {
+                "prompt_tokens": 5971,
+                "completion_tokens": 75,
+                "total_tokens": 6046,
+                "reasoning_tokens": 0,
+                "cached_prompt_tokens": 3456
+              },
+              "model_calls": 2,
+              "tool_calls": 1,
+              "driver_calls": 2,
+              "bad_tool_args": 0,
+              "known_sent": 0,
+              "unchanged_count": 0,
+              "tool_result_chars": 4540,
+              "tool_result_tokens": 1135,
+              "engine_t": 1216,
+              "engine_t_model": 1180,
+              "engine_wire_bytes": 4672,
+              "engine_wire_bytes_model": 4540,
+              "wall_s": 1.562,
+              "spec": {
+                "prepared": 0,
+                "fetched": 0,
+                "wasted": 0,
+                "hits": 0,
+                "misses": 0,
+                "evicted": 0,
+                "cancelled": 0,
+                "worker_ms": 0.0
+              }
+            },
+            {
+              "turn": 3,
+              "id": "t3_impact",
+              "prompt": "In the same session, compute the impact of get_root_path to depth 2 using the keys argument (a list) with the symbol key from the find row. Reply with only {\"symbol\": string, \"callers\": [string], \"test_files\": [string], \"summary\": string}.",
+              "final_json": {
+                "symbol": "get_root_path",
+                "callers": [
+                  "Scaffold.__init__"
+                ],
+                "test_files": [
+                  "tests/test_appctx.py",
+                  "tests/test_basic.py",
+                  "tests/test_blueprints.py",
+                  "tests/test_converters.py",
+                  "tests/test_helpers.py",
+                  "tests/test_regression.py",
+                  "tests/test_reqctx.py",
+                  "tests/test_signals.py",
+                  "tests/test_templating.py",
+                  "tests/test_testing.py",
+                  "tests/test_user_error_handler.py",
+                  "tests/test_views.py"
+                ],
+                "summary": "Direct caller is Scaffold.__init__; 11 test files reference helpers.py which defines get_root_path."
+              },
+              "json_valid": true,
+              "json_error": null,
+              "missing_keys": [],
+              "checks": [
+                {
+                  "name": "symbol is get_root_path",
+                  "ok": true
+                },
+                {
+                  "name": "callers include Scaffold.__init__",
+                  "ok": true
+                },
+                {
+                  "name": "test_files include tests/test_helpers.py",
+                  "ok": true
+                },
+                {
+                  "name": "summary is non-empty",
+                  "ok": true
+                }
+              ],
+              "accepted": true,
+              "accepted_count": 4,
+              "check_count": 4,
+              "final_text_chars": 508,
+              "finalized_after_tool_budget": false,
+              "ops": [
+                "impact"
+              ],
+              "usage": {
+                "prompt_tokens": 9176,
+                "completion_tokens": 195,
+                "total_tokens": 9371,
+                "reasoning_tokens": 0,
+                "cached_prompt_tokens": 6912
+              },
+              "model_calls": 2,
+              "tool_calls": 1,
+              "driver_calls": 2,
+              "bad_tool_args": 0,
+              "known_sent": 0,
+              "unchanged_count": 0,
+              "tool_result_chars": 4466,
+              "tool_result_tokens": 1117,
+              "engine_t": 1207,
+              "engine_t_model": 1171,
+              "engine_wire_bytes": 4598,
+              "engine_wire_bytes_model": 4466,
+              "wall_s": 2.006,
+              "spec": {
+                "prepared": 0,
+                "fetched": 0,
+                "wasted": 0,
+                "hits": 0,
+                "misses": 0,
+                "evicted": 0,
+                "cancelled": 0,
+                "worker_ms": 0.0
+              }
+            }
+          ],
+          "cumulative": {
+            "turns": 3,
+            "accepted_turns": 3,
+            "accepted_all": true,
+            "usage": {
+              "prompt_tokens": 17680,
+              "completion_tokens": 345,
+              "total_tokens": 18025,
+              "reasoning_tokens": 0,
+              "cached_prompt_tokens": 11232
+            },
+            "model_calls": 6,
+            "tool_calls": 3,
+            "driver_calls": 6,
+            "known_sent": 0,
+            "unchanged_count": 0,
+            "tool_result_tokens": 3387,
+            "engine_t": 3639,
+            "engine_t_model": 3531,
+            "engine_wire_bytes": 13941,
+            "engine_wire_bytes_model": 13546,
+            "wall_s": 4.761,
+            "spec": {
+              "prepared": 0,
+              "fetched": 0,
+              "wasted": 0,
+              "hits": 0,
+              "misses": 0,
+              "evicted": 0,
+              "cancelled": 0,
+              "worker_ms": 0.0
+            }
+          }
+        }
+      ],
+      "totals": {
+        "tasks": 2,
+        "turns": 6,
+        "accepted_turns": 6,
+        "accepted_tasks": 2,
+        "accepted_all": true,
+        "usage": {
+          "prompt_tokens": 35360,
+          "completion_tokens": 708,
+          "total_tokens": 36068,
+          "reasoning_tokens": 0,
+          "cached_prompt_tokens": 18144
+        },
+        "model_calls": 12,
+        "tool_calls": 6,
+        "driver_calls": 12,
+        "known_sent": 0,
+        "unchanged_count": 0,
+        "tool_result_tokens": 6774,
+        "engine_t": 7278,
+        "engine_t_model": 7062,
+        "engine_wire_bytes": 27880,
+        "engine_wire_bytes_model": 27092,
+        "wall_s": 11.577,
+        "spec": {
+          "prepared": 0,
+          "fetched": 0,
+          "wasted": 0,
+          "hits": 0,
+          "misses": 0,
+          "evicted": 0,
+          "cancelled": 0,
+          "worker_ms": 0.0
+        }
+      }
+    },
+    "engine_known": {
+      "tasks": [
+        {
+          "task": "multiturn_find_refresh",
+          "kind": "multi-turn find/refresh/impact",
+          "arm": "engine_known",
+          "turns": [
+            {
+              "turn": 1,
+              "id": "t1_find",
+              "prompt": "One graph call: find with q=get_root_path and kinds=[\"sym\"]. Then, from that result row, reply with only {\"symbol\": string, \"file\": string, \"signature\": string}.",
+              "final_json": {
+                "symbol": "get_root_path",
+                "file": "src/flask/helpers.py",
+                "signature": "def get_root_path(import_name: str) -> str:"
+              },
+              "json_valid": true,
+              "json_error": null,
+              "missing_keys": [],
+              "checks": [
+                {
+                  "name": "symbol is get_root_path",
+                  "ok": true
+                },
+                {
+                  "name": "file is src/flask/helpers.py",
+                  "ok": true
+                },
+                {
+                  "name": "signature contains the definition line",
+                  "ok": true
+                }
+              ],
+              "accepted": true,
+              "accepted_count": 3,
+              "check_count": 3,
+              "final_text_chars": 119,
+              "finalized_after_tool_budget": false,
+              "ops": [
+                "find"
+              ],
+              "usage": {
+                "prompt_tokens": 2533,
+                "completion_tokens": 75,
+                "total_tokens": 2608,
+                "reasoning_tokens": 0,
+                "cached_prompt_tokens": 864
+              },
+              "model_calls": 2,
+              "tool_calls": 1,
+              "driver_calls": 1,
+              "bad_tool_args": 0,
+              "known_sent": 0,
+              "unchanged_count": 0,
+              "tool_result_chars": 4540,
+              "tool_result_tokens": 1135,
+              "engine_t": 1211,
+              "engine_t_model": 1180,
+              "engine_wire_bytes": 4656,
+              "engine_wire_bytes_model": 4540,
+              "wall_s": 1.201,
+              "spec": {
+                "prepared": 0,
+                "fetched": 0,
+                "wasted": 0,
+                "hits": 0,
+                "misses": 0,
+                "evicted": 0,
+                "cancelled": 0,
+                "worker_ms": 0.0
+              }
+            },
+            {
+              "turn": 2,
+              "id": "t2_refresh_find",
+              "prompt": "Repeat exactly the same find with one graph call (op find, same q and kinds), then answer only from the find result already in this conversation. Do not outline, fetch or read source. Reply with only {\"symbol\": string, \"file\": string, \"signature\": string}.",
+              "final_json": {
+                "symbol": "get_root_path",
+                "file": "src/flask/helpers.py",
+                "signature": "def get_root_path(import_name: str) -> str:"
+              },
+              "json_valid": true,
+              "json_error": null,
+              "missing_keys": [],
+              "checks": [
+                {
+                  "name": "symbol is get_root_path",
+                  "ok": true
+                },
+                {
+                  "name": "file is src/flask/helpers.py",
+                  "ok": true
+                },
+                {
+                  "name": "signature contains the definition line",
+                  "ok": true
+                }
+              ],
+              "accepted": true,
+              "accepted_count": 3,
+              "check_count": 3,
+              "final_text_chars": 119,
+              "finalized_after_tool_budget": false,
+              "ops": [
+                "find"
+              ],
+              "usage": {
+                "prompt_tokens": 4665,
+                "completion_tokens": 75,
+                "total_tokens": 4740,
+                "reasoning_tokens": 0,
+                "cached_prompt_tokens": 1728
+              },
+              "model_calls": 2,
+              "tool_calls": 1,
+              "driver_calls": 0,
+              "bad_tool_args": 0,
+              "known_sent": 20,
+              "unchanged_count": 20,
+              "tool_result_chars": 998,
+              "tool_result_tokens": 250,
+              "engine_t": 255,
+              "engine_t_model": 255,
+              "engine_wire_bytes": 998,
+              "engine_wire_bytes_model": 998,
+              "wall_s": 1.709,
+              "spec": {
+                "prepared": 0,
+                "fetched": 0,
+                "wasted": 0,
+                "hits": 0,
+                "misses": 0,
+                "evicted": 0,
+                "cancelled": 0,
+                "worker_ms": 0.0
+              }
+            },
+            {
+              "turn": 3,
+              "id": "t3_impact",
+              "prompt": "In the same session, compute the impact of get_root_path to depth 2 using the keys argument (a list) with the symbol key from the find row. Reply with only {\"symbol\": string, \"callers\": [string], \"test_files\": [string], \"summary\": string}.",
+              "final_json": {
+                "symbol": "get_root_path",
+                "callers": [
+                  "Scaffold.__init__"
+                ],
+                "test_files": [
+                  "tests/test_appctx.py",
+                  "tests/test_basic.py",
+                  "tests/test_blueprints.py",
+                  "tests/test_converters.py",
+                  "tests/test_helpers.py",
+                  "tests/test_regression.py",
+                  "tests/test_reqctx.py",
+                  "tests/test_signals.py",
+                  "tests/test_templating.py",
+                  "tests/test_testing.py",
+                  "tests/test_user_error_handler.py",
+                  "tests/test_views.py"
+                ],
+                "summary": "get_root_path (src/flask/helpers.py) is directly called by Scaffold.__init__ (depth 1); at depth 2 its impact extends to files referencing src/flask/cli.py (docs/conf.py) and tests/test_testing.py (examples/celery/make_celery.py)."
+              },
+              "json_valid": true,
+              "json_error": null,
+              "missing_keys": [],
+              "checks": [
+                {
+                  "name": "symbol is get_root_path",
+                  "ok": true
+                },
+                {
+                  "name": "callers include Scaffold.__init__",
+                  "ok": true
+                },
+                {
+                  "name": "test_files include tests/test_helpers.py",
+                  "ok": true
+                },
+                {
+                  "name": "summary is non-empty",
+                  "ok": true
+                }
+              ],
+              "accepted": true,
+              "accepted_count": 4,
+              "check_count": 4,
+              "final_text_chars": 639,
+              "finalized_after_tool_budget": false,
+              "ops": [
+                "impact"
+              ],
+              "usage": {
+                "prompt_tokens": 6564,
+                "completion_tokens": 234,
+                "total_tokens": 6798,
+                "reasoning_tokens": 0,
+                "cached_prompt_tokens": 1728
+              },
+              "model_calls": 2,
+              "tool_calls": 1,
+              "driver_calls": 0,
+              "bad_tool_args": 0,
+              "known_sent": 0,
+              "unchanged_count": 0,
+              "tool_result_chars": 4466,
+              "tool_result_tokens": 1117,
+              "engine_t": 1171,
+              "engine_t_model": 1171,
+              "engine_wire_bytes": 4466,
+              "engine_wire_bytes_model": 4466,
+              "wall_s": 3.223,
+              "spec": {
+                "prepared": 0,
+                "fetched": 0,
+                "wasted": 0,
+                "hits": 0,
+                "misses": 0,
+                "evicted": 0,
+                "cancelled": 0,
+                "worker_ms": 0.0
+              }
+            }
+          ],
+          "cumulative": {
+            "turns": 3,
+            "accepted_turns": 3,
+            "accepted_all": true,
+            "usage": {
+              "prompt_tokens": 13762,
+              "completion_tokens": 384,
+              "total_tokens": 14146,
+              "reasoning_tokens": 0,
+              "cached_prompt_tokens": 4320
+            },
+            "model_calls": 6,
+            "tool_calls": 3,
+            "driver_calls": 1,
+            "known_sent": 20,
+            "unchanged_count": 20,
+            "tool_result_tokens": 2502,
+            "engine_t": 2637,
+            "engine_t_model": 2606,
+            "engine_wire_bytes": 10120,
+            "engine_wire_bytes_model": 10004,
+            "wall_s": 6.133,
+            "spec": {
+              "prepared": 0,
+              "fetched": 0,
+              "wasted": 0,
+              "hits": 0,
+              "misses": 0,
+              "evicted": 0,
+              "cancelled": 0,
+              "worker_ms": 0.0
+            }
+          }
+        },
+        {
+          "task": "multiturn_find_refresh",
+          "kind": "multi-turn find/refresh/impact",
+          "arm": "engine_known",
+          "turns": [
+            {
+              "turn": 1,
+              "id": "t1_find",
+              "prompt": "One graph call: find with q=get_root_path and kinds=[\"sym\"]. Then, from that result row, reply with only {\"symbol\": string, \"file\": string, \"signature\": string}.",
+              "final_json": {
+                "symbol": "get_root_path",
+                "file": "src/flask/helpers.py",
+                "signature": "def get_root_path(import_name: str) -> str:"
+              },
+              "json_valid": true,
+              "json_error": null,
+              "missing_keys": [],
+              "checks": [
+                {
+                  "name": "symbol is get_root_path",
+                  "ok": true
+                },
+                {
+                  "name": "file is src/flask/helpers.py",
+                  "ok": true
+                },
+                {
+                  "name": "signature contains the definition line",
+                  "ok": true
+                }
+              ],
+              "accepted": true,
+              "accepted_count": 3,
+              "check_count": 3,
+              "final_text_chars": 119,
+              "finalized_after_tool_budget": false,
+              "ops": [
+                "find"
+              ],
+              "usage": {
+                "prompt_tokens": 2533,
+                "completion_tokens": 75,
+                "total_tokens": 2608,
+                "reasoning_tokens": 0,
+                "cached_prompt_tokens": 864
+              },
+              "model_calls": 2,
+              "tool_calls": 1,
+              "driver_calls": 1,
+              "bad_tool_args": 0,
+              "known_sent": 0,
+              "unchanged_count": 0,
+              "tool_result_chars": 4540,
+              "tool_result_tokens": 1135,
+              "engine_t": 1211,
+              "engine_t_model": 1180,
+              "engine_wire_bytes": 4656,
+              "engine_wire_bytes_model": 4540,
+              "wall_s": 1.154,
+              "spec": {
+                "prepared": 0,
+                "fetched": 0,
+                "wasted": 0,
+                "hits": 0,
+                "misses": 0,
+                "evicted": 0,
+                "cancelled": 0,
+                "worker_ms": 0.0
+              }
+            },
+            {
+              "turn": 2,
+              "id": "t2_refresh_find",
+              "prompt": "Repeat exactly the same find with one graph call (op find, same q and kinds), then answer only from the find result already in this conversation. Do not outline, fetch or read source. Reply with only {\"symbol\": string, \"file\": string, \"signature\": string}.",
+              "final_json": {
+                "symbol": "get_root_path",
+                "file": "src/flask/helpers.py",
+                "signature": "def get_root_path(import_name: str) -> str:"
+              },
+              "json_valid": true,
+              "json_error": null,
+              "missing_keys": [],
+              "checks": [
+                {
+                  "name": "symbol is get_root_path",
+                  "ok": true
+                },
+                {
+                  "name": "file is src/flask/helpers.py",
+                  "ok": true
+                },
+                {
+                  "name": "signature contains the definition line",
+                  "ok": true
+                }
+              ],
+              "accepted": true,
+              "accepted_count": 3,
+              "check_count": 3,
+              "final_text_chars": 119,
+              "finalized_after_tool_budget": false,
+              "ops": [
+                "find"
+              ],
+              "usage": {
+                "prompt_tokens": 4665,
+                "completion_tokens": 75,
+                "total_tokens": 4740,
+                "reasoning_tokens": 0,
+                "cached_prompt_tokens": 1728
+              },
+              "model_calls": 2,
+              "tool_calls": 1,
+              "driver_calls": 0,
+              "bad_tool_args": 0,
+              "known_sent": 20,
+              "unchanged_count": 20,
+              "tool_result_chars": 998,
+              "tool_result_tokens": 250,
+              "engine_t": 255,
+              "engine_t_model": 255,
+              "engine_wire_bytes": 998,
+              "engine_wire_bytes_model": 998,
+              "wall_s": 1.711,
+              "spec": {
+                "prepared": 0,
+                "fetched": 0,
+                "wasted": 0,
+                "hits": 0,
+                "misses": 0,
+                "evicted": 0,
+                "cancelled": 0,
+                "worker_ms": 0.0
+              }
+            },
+            {
+              "turn": 3,
+              "id": "t3_impact",
+              "prompt": "In the same session, compute the impact of get_root_path to depth 2 using the keys argument (a list) with the symbol key from the find row. Reply with only {\"symbol\": string, \"callers\": [string], \"test_files\": [string], \"summary\": string}.",
+              "final_json": {
+                "symbol": "get_root_path",
+                "callers": [
+                  "sym:src/flask/sansio/scaffold.py::Scaffold.__init__"
+                ],
+                "test_files": [
+                  "tests/test_appctx.py",
+                  "tests/test_basic.py",
+                  "tests/test_blueprints.py",
+                  "tests/test_converters.py",
+                  "tests/test_helpers.py",
+                  "tests/test_regression.py",
+                  "tests/test_reqctx.py",
+                  "tests/test_signals.py",
+                  "tests/test_templating.py",
+                  "tests/test_testing.py",
+                  "tests/test_user_error_handler.py",
+                  "tests/test_views.py"
+                ],
+                "summary": "Direct caller is Scaffold.__init__; depth-2 impact reaches 73 files including docs/conf.py and examples/celery/make_celery.py, plus 370 test references."
+              },
+              "json_valid": true,
+              "json_error": null,
+              "missing_keys": [],
+              "checks": [
+                {
+                  "name": "symbol is get_root_path",
+                  "ok": true
+                },
+                {
+                  "name": "callers include Scaffold.__init__",
+                  "ok": true
+                },
+                {
+                  "name": "test_files include tests/test_helpers.py",
+                  "ok": true
+                },
+                {
+                  "name": "summary is non-empty",
+                  "ok": true
+                }
+              ],
+              "accepted": true,
+              "accepted_count": 4,
+              "check_count": 4,
+              "final_text_chars": 595,
+              "finalized_after_tool_budget": false,
+              "ops": [
+                "impact"
+              ],
+              "usage": {
+                "prompt_tokens": 6564,
+                "completion_tokens": 226,
+                "total_tokens": 6790,
+                "reasoning_tokens": 0,
+                "cached_prompt_tokens": 3456
+              },
+              "model_calls": 2,
+              "tool_calls": 1,
+              "driver_calls": 0,
+              "bad_tool_args": 0,
+              "known_sent": 0,
+              "unchanged_count": 0,
+              "tool_result_chars": 4466,
+              "tool_result_tokens": 1117,
+              "engine_t": 1171,
+              "engine_t_model": 1171,
+              "engine_wire_bytes": 4466,
+              "engine_wire_bytes_model": 4466,
+              "wall_s": 2.439,
+              "spec": {
+                "prepared": 0,
+                "fetched": 0,
+                "wasted": 0,
+                "hits": 0,
+                "misses": 0,
+                "evicted": 0,
+                "cancelled": 0,
+                "worker_ms": 0.0
+              }
+            }
+          ],
+          "cumulative": {
+            "turns": 3,
+            "accepted_turns": 3,
+            "accepted_all": true,
+            "usage": {
+              "prompt_tokens": 13762,
+              "completion_tokens": 376,
+              "total_tokens": 14138,
+              "reasoning_tokens": 0,
+              "cached_prompt_tokens": 6048
+            },
+            "model_calls": 6,
+            "tool_calls": 3,
+            "driver_calls": 1,
+            "known_sent": 20,
+            "unchanged_count": 20,
+            "tool_result_tokens": 2502,
+            "engine_t": 2637,
+            "engine_t_model": 2606,
+            "engine_wire_bytes": 10120,
+            "engine_wire_bytes_model": 10004,
+            "wall_s": 5.304,
+            "spec": {
+              "prepared": 0,
+              "fetched": 0,
+              "wasted": 0,
+              "hits": 0,
+              "misses": 0,
+              "evicted": 0,
+              "cancelled": 0,
+              "worker_ms": 0.0
+            }
+          }
+        }
+      ],
+      "totals": {
+        "tasks": 2,
+        "turns": 6,
+        "accepted_turns": 6,
+        "accepted_tasks": 2,
+        "accepted_all": true,
+        "usage": {
+          "prompt_tokens": 27524,
+          "completion_tokens": 760,
+          "total_tokens": 28284,
+          "reasoning_tokens": 0,
+          "cached_prompt_tokens": 10368
+        },
+        "model_calls": 12,
+        "tool_calls": 6,
+        "driver_calls": 2,
+        "known_sent": 40,
+        "unchanged_count": 40,
+        "tool_result_tokens": 5004,
+        "engine_t": 5274,
+        "engine_t_model": 5212,
+        "engine_wire_bytes": 20240,
+        "engine_wire_bytes_model": 20008,
+        "wall_s": 11.437,
+        "spec": {
+          "prepared": 0,
+          "fetched": 0,
+          "wasted": 0,
+          "hits": 0,
+          "misses": 0,
+          "evicted": 0,
+          "cancelled": 0,
+          "worker_ms": 0.0
+        }
+      }
+    },
+    "engine_auto": {
+      "tasks": [
+        {
+          "task": "multiturn_find_refresh",
+          "kind": "multi-turn find/refresh/impact",
+          "arm": "engine_auto",
+          "turns": [
+            {
+              "turn": 1,
+              "id": "t1_find",
+              "prompt": "One graph call: find with q=get_root_path and kinds=[\"sym\"]. Then, from that result row, reply with only {\"symbol\": string, \"file\": string, \"signature\": string}.",
+              "final_json": {
+                "symbol": "get_root_path",
+                "file": "src/flask/helpers.py",
+                "signature": "def get_root_path(import_name: str) -> str:"
+              },
+              "json_valid": true,
+              "json_error": null,
+              "missing_keys": [],
+              "checks": [
+                {
+                  "name": "symbol is get_root_path",
+                  "ok": true
+                },
+                {
+                  "name": "file is src/flask/helpers.py",
+                  "ok": true
+                },
+                {
+                  "name": "signature contains the definition line",
+                  "ok": true
+                }
+              ],
+              "accepted": true,
+              "accepted_count": 3,
+              "check_count": 3,
+              "final_text_chars": 119,
+              "finalized_after_tool_budget": false,
+              "ops": [
+                "find"
+              ],
+              "usage": {
+                "prompt_tokens": 2533,
+                "completion_tokens": 75,
+                "total_tokens": 2608,
+                "reasoning_tokens": 0,
+                "cached_prompt_tokens": 864
+              },
+              "model_calls": 2,
+              "tool_calls": 1,
+              "driver_calls": 1,
+              "bad_tool_args": 0,
+              "known_sent": 0,
+              "unchanged_count": 0,
+              "tool_result_chars": 4540,
+              "tool_result_tokens": 1135,
+              "engine_t": 1211,
+              "engine_t_model": 1180,
+              "engine_wire_bytes": 4656,
+              "engine_wire_bytes_model": 4540,
+              "wall_s": 1.152,
+              "spec": {
+                "prepared": 0,
+                "fetched": 0,
+                "wasted": 0,
+                "hits": 0,
+                "misses": 0,
+                "evicted": 0,
+                "cancelled": 0,
+                "worker_ms": 0.0
+              }
+            },
+            {
+              "turn": 2,
+              "id": "t2_refresh_find",
+              "prompt": "Repeat exactly the same find with one graph call (op find, same q and kinds), then answer only from the find result already in this conversation. Do not outline, fetch or read source. Reply with only {\"symbol\": string, \"file\": string, \"signature\": string}.",
+              "final_json": {
+                "symbol": "get_root_path",
+                "file": "src/flask/helpers.py",
+                "signature": "def get_root_path(import_name: str) -> str:"
+              },
+              "json_valid": true,
+              "json_error": null,
+              "missing_keys": [],
+              "checks": [
+                {
+                  "name": "symbol is get_root_path",
+                  "ok": true
+                },
+                {
+                  "name": "file is src/flask/helpers.py",
+                  "ok": true
+                },
+                {
+                  "name": "signature contains the definition line",
+                  "ok": true
+                }
+              ],
+              "accepted": true,
+              "accepted_count": 3,
+              "check_count": 3,
+              "final_text_chars": 119,
+              "finalized_after_tool_budget": false,
+              "ops": [
+                "find"
+              ],
+              "usage": {
+                "prompt_tokens": 4665,
+                "completion_tokens": 75,
+                "total_tokens": 4740,
+                "reasoning_tokens": 0,
+                "cached_prompt_tokens": 1728
+              },
+              "model_calls": 2,
+              "tool_calls": 1,
+              "driver_calls": 0,
+              "bad_tool_args": 0,
+              "known_sent": 0,
+              "unchanged_count": 20,
+              "tool_result_chars": 998,
+              "tool_result_tokens": 250,
+              "engine_t": 255,
+              "engine_t_model": 255,
+              "engine_wire_bytes": 998,
+              "engine_wire_bytes_model": 998,
+              "wall_s": 1.716,
+              "spec": {
+                "prepared": 0,
+                "fetched": 0,
+                "wasted": 0,
+                "hits": 0,
+                "misses": 0,
+                "evicted": 0,
+                "cancelled": 0,
+                "worker_ms": 0.0
+              }
+            },
+            {
+              "turn": 3,
+              "id": "t3_impact",
+              "prompt": "In the same session, compute the impact of get_root_path to depth 2 using the keys argument (a list) with the symbol key from the find row. Reply with only {\"symbol\": string, \"callers\": [string], \"test_files\": [string], \"summary\": string}.",
+              "final_json": {
+                "symbol": "get_root_path",
+                "callers": [
+                  "sym:src/flask/sansio/scaffold.py::Scaffold.__init__"
+                ],
+                "test_files": [
+                  "tests/test_appctx.py",
+                  "tests/test_basic.py",
+                  "tests/test_blueprints.py",
+                  "tests/test_converters.py",
+                  "tests/test_helpers.py",
+                  "tests/test_regression.py",
+                  "tests/test_reqctx.py",
+                  "tests/test_signals.py",
+                  "tests/test_templating.py",
+                  "tests/test_testing.py",
+                  "tests/test_user_error_handler.py",
+                  "tests/test_views.py"
+                ],
+                "summary": "Direct caller is Scaffold.__init__; depth-2 impact reaches 73 files including docs/conf.py and examples/celery/make_celery.py, plus 370 test references."
+              },
+              "json_valid": true,
+              "json_error": null,
+              "missing_keys": [],
+              "checks": [
+                {
+                  "name": "symbol is get_root_path",
+                  "ok": true
+                },
+                {
+                  "name": "callers include Scaffold.__init__",
+                  "ok": true
+                },
+                {
+                  "name": "test_files include tests/test_helpers.py",
+                  "ok": true
+                },
+                {
+                  "name": "summary is non-empty",
+                  "ok": true
+                }
+              ],
+              "accepted": true,
+              "accepted_count": 4,
+              "check_count": 4,
+              "final_text_chars": 595,
+              "finalized_after_tool_budget": false,
+              "ops": [
+                "impact"
+              ],
+              "usage": {
+                "prompt_tokens": 6564,
+                "completion_tokens": 226,
+                "total_tokens": 6790,
+                "reasoning_tokens": 0,
+                "cached_prompt_tokens": 3456
+              },
+              "model_calls": 2,
+              "tool_calls": 1,
+              "driver_calls": 0,
+              "bad_tool_args": 0,
+              "known_sent": 0,
+              "unchanged_count": 0,
+              "tool_result_chars": 4466,
+              "tool_result_tokens": 1117,
+              "engine_t": 1171,
+              "engine_t_model": 1171,
+              "engine_wire_bytes": 4466,
+              "engine_wire_bytes_model": 4466,
+              "wall_s": 2.44,
+              "spec": {
+                "prepared": 0,
+                "fetched": 0,
+                "wasted": 0,
+                "hits": 0,
+                "misses": 0,
+                "evicted": 0,
+                "cancelled": 0,
+                "worker_ms": 0.0
+              }
+            }
+          ],
+          "cumulative": {
+            "turns": 3,
+            "accepted_turns": 3,
+            "accepted_all": true,
+            "usage": {
+              "prompt_tokens": 13762,
+              "completion_tokens": 376,
+              "total_tokens": 14138,
+              "reasoning_tokens": 0,
+              "cached_prompt_tokens": 6048
+            },
+            "model_calls": 6,
+            "tool_calls": 3,
+            "driver_calls": 1,
+            "known_sent": 0,
+            "unchanged_count": 20,
+            "tool_result_tokens": 2502,
+            "engine_t": 2637,
+            "engine_t_model": 2606,
+            "engine_wire_bytes": 10120,
+            "engine_wire_bytes_model": 10004,
+            "wall_s": 5.308,
+            "spec": {
+              "prepared": 0,
+              "fetched": 0,
+              "wasted": 0,
+              "hits": 0,
+              "misses": 0,
+              "evicted": 0,
+              "cancelled": 0,
+              "worker_ms": 0.0
+            }
+          }
+        },
+        {
+          "task": "multiturn_find_refresh",
+          "kind": "multi-turn find/refresh/impact",
+          "arm": "engine_auto",
+          "turns": [
+            {
+              "turn": 1,
+              "id": "t1_find",
+              "prompt": "One graph call: find with q=get_root_path and kinds=[\"sym\"]. Then, from that result row, reply with only {\"symbol\": string, \"file\": string, \"signature\": string}.",
+              "final_json": {
+                "symbol": "get_root_path",
+                "file": "src/flask/helpers.py",
+                "signature": "def get_root_path(import_name: str) -> str:"
+              },
+              "json_valid": true,
+              "json_error": null,
+              "missing_keys": [],
+              "checks": [
+                {
+                  "name": "symbol is get_root_path",
+                  "ok": true
+                },
+                {
+                  "name": "file is src/flask/helpers.py",
+                  "ok": true
+                },
+                {
+                  "name": "signature contains the definition line",
+                  "ok": true
+                }
+              ],
+              "accepted": true,
+              "accepted_count": 3,
+              "check_count": 3,
+              "final_text_chars": 119,
+              "finalized_after_tool_budget": false,
+              "ops": [
+                "find"
+              ],
+              "usage": {
+                "prompt_tokens": 2533,
+                "completion_tokens": 75,
+                "total_tokens": 2608,
+                "reasoning_tokens": 0,
+                "cached_prompt_tokens": 864
+              },
+              "model_calls": 2,
+              "tool_calls": 1,
+              "driver_calls": 1,
+              "bad_tool_args": 0,
+              "known_sent": 0,
+              "unchanged_count": 0,
+              "tool_result_chars": 4540,
+              "tool_result_tokens": 1135,
+              "engine_t": 1211,
+              "engine_t_model": 1180,
+              "engine_wire_bytes": 4656,
+              "engine_wire_bytes_model": 4540,
+              "wall_s": 1.188,
+              "spec": {
+                "prepared": 0,
+                "fetched": 0,
+                "wasted": 0,
+                "hits": 0,
+                "misses": 0,
+                "evicted": 0,
+                "cancelled": 0,
+                "worker_ms": 0.0
+              }
+            },
+            {
+              "turn": 2,
+              "id": "t2_refresh_find",
+              "prompt": "Repeat exactly the same find with one graph call (op find, same q and kinds), then answer only from the find result already in this conversation. Do not outline, fetch or read source. Reply with only {\"symbol\": string, \"file\": string, \"signature\": string}.",
+              "final_json": {
+                "symbol": "get_root_path",
+                "file": "src/flask/helpers.py",
+                "signature": "def get_root_path(import_name: str) -> str:"
+              },
+              "json_valid": true,
+              "json_error": null,
+              "missing_keys": [],
+              "checks": [
+                {
+                  "name": "symbol is get_root_path",
+                  "ok": true
+                },
+                {
+                  "name": "file is src/flask/helpers.py",
+                  "ok": true
+                },
+                {
+                  "name": "signature contains the definition line",
+                  "ok": true
+                }
+              ],
+              "accepted": true,
+              "accepted_count": 3,
+              "check_count": 3,
+              "final_text_chars": 119,
+              "finalized_after_tool_budget": false,
+              "ops": [
+                "find"
+              ],
+              "usage": {
+                "prompt_tokens": 4665,
+                "completion_tokens": 75,
+                "total_tokens": 4740,
+                "reasoning_tokens": 0,
+                "cached_prompt_tokens": 1728
+              },
+              "model_calls": 2,
+              "tool_calls": 1,
+              "driver_calls": 0,
+              "bad_tool_args": 0,
+              "known_sent": 0,
+              "unchanged_count": 20,
+              "tool_result_chars": 998,
+              "tool_result_tokens": 250,
+              "engine_t": 255,
+              "engine_t_model": 255,
+              "engine_wire_bytes": 998,
+              "engine_wire_bytes_model": 998,
+              "wall_s": 1.713,
+              "spec": {
+                "prepared": 0,
+                "fetched": 0,
+                "wasted": 0,
+                "hits": 0,
+                "misses": 0,
+                "evicted": 0,
+                "cancelled": 0,
+                "worker_ms": 0.0
+              }
+            },
+            {
+              "turn": 3,
+              "id": "t3_impact",
+              "prompt": "In the same session, compute the impact of get_root_path to depth 2 using the keys argument (a list) with the symbol key from the find row. Reply with only {\"symbol\": string, \"callers\": [string], \"test_files\": [string], \"summary\": string}.",
+              "final_json": {
+                "symbol": "get_root_path",
+                "callers": [
+                  "sym:src/flask/sansio/scaffold.py::Scaffold.__init__"
+                ],
+                "test_files": [
+                  "tests/test_appctx.py",
+                  "tests/test_basic.py",
+                  "tests/test_blueprints.py",
+                  "tests/test_converters.py",
+                  "tests/test_helpers.py",
+                  "tests/test_regression.py",
+                  "tests/test_reqctx.py",
+                  "tests/test_signals.py",
+                  "tests/test_templating.py",
+                  "tests/test_testing.py",
+                  "tests/test_user_error_handler.py",
+                  "tests/test_views.py"
+                ],
+                "summary": "Direct caller is Scaffold.__init__; depth-2 impact reaches 73 files including docs/conf.py and examples/celery/make_celery.py, plus 370 test references."
+              },
+              "json_valid": true,
+              "json_error": null,
+              "missing_keys": [],
+              "checks": [
+                {
+                  "name": "symbol is get_root_path",
+                  "ok": true
+                },
+                {
+                  "name": "callers include Scaffold.__init__",
+                  "ok": true
+                },
+                {
+                  "name": "test_files include tests/test_helpers.py",
+                  "ok": true
+                },
+                {
+                  "name": "summary is non-empty",
+                  "ok": true
+                }
+              ],
+              "accepted": true,
+              "accepted_count": 4,
+              "check_count": 4,
+              "final_text_chars": 595,
+              "finalized_after_tool_budget": false,
+              "ops": [
+                "impact"
+              ],
+              "usage": {
+                "prompt_tokens": 6564,
+                "completion_tokens": 226,
+                "total_tokens": 6790,
+                "reasoning_tokens": 0,
+                "cached_prompt_tokens": 3456
+              },
+              "model_calls": 2,
+              "tool_calls": 1,
+              "driver_calls": 0,
+              "bad_tool_args": 0,
+              "known_sent": 0,
+              "unchanged_count": 0,
+              "tool_result_chars": 4466,
+              "tool_result_tokens": 1117,
+              "engine_t": 1171,
+              "engine_t_model": 1171,
+              "engine_wire_bytes": 4466,
+              "engine_wire_bytes_model": 4466,
+              "wall_s": 2.442,
+              "spec": {
+                "prepared": 0,
+                "fetched": 0,
+                "wasted": 0,
+                "hits": 0,
+                "misses": 0,
+                "evicted": 0,
+                "cancelled": 0,
+                "worker_ms": 0.0
+              }
+            }
+          ],
+          "cumulative": {
+            "turns": 3,
+            "accepted_turns": 3,
+            "accepted_all": true,
+            "usage": {
+              "prompt_tokens": 13762,
+              "completion_tokens": 376,
+              "total_tokens": 14138,
+              "reasoning_tokens": 0,
+              "cached_prompt_tokens": 6048
+            },
+            "model_calls": 6,
+            "tool_calls": 3,
+            "driver_calls": 1,
+            "known_sent": 0,
+            "unchanged_count": 20,
+            "tool_result_tokens": 2502,
+            "engine_t": 2637,
+            "engine_t_model": 2606,
+            "engine_wire_bytes": 10120,
+            "engine_wire_bytes_model": 10004,
+            "wall_s": 5.343,
+            "spec": {
+              "prepared": 0,
+              "fetched": 0,
+              "wasted": 0,
+              "hits": 0,
+              "misses": 0,
+              "evicted": 0,
+              "cancelled": 0,
+              "worker_ms": 0.0
+            }
+          }
+        }
+      ],
+      "totals": {
+        "tasks": 2,
+        "turns": 6,
+        "accepted_turns": 6,
+        "accepted_tasks": 2,
+        "accepted_all": true,
+        "usage": {
+          "prompt_tokens": 27524,
+          "completion_tokens": 752,
+          "total_tokens": 28276,
+          "reasoning_tokens": 0,
+          "cached_prompt_tokens": 12096
+        },
+        "model_calls": 12,
+        "tool_calls": 6,
+        "driver_calls": 2,
+        "known_sent": 0,
+        "unchanged_count": 40,
+        "tool_result_tokens": 5004,
+        "engine_t": 5274,
+        "engine_t_model": 5212,
+        "engine_wire_bytes": 20240,
+        "engine_wire_bytes_model": 20008,
+        "wall_s": 10.651,
+        "spec": {
+          "prepared": 0,
+          "fetched": 0,
+          "wasted": 0,
+          "hits": 0,
+          "misses": 0,
+          "evicted": 0,
+          "cancelled": 0,
+          "worker_ms": 0.0
+        }
+      }
+    }
+  },
+  "spec_probe": {
+    "query": "get_root_path",
+    "think_s": 0.2,
+    "calls": [
+      {
+        "op": "hello",
+        "t": 31,
+        "wire": 117
+      },
+      {
+        "op": "find",
+        "t": 1175,
+        "wire": 4504
+      },
+      {
+        "op": "fetch",
+        "t": 193,
+        "wire": 728
+      },
+      {
+        "op": "hello",
+        "t": 207,
+        "wire": 744
+      },
+      {
+        "op": "bye",
+        "t": 5,
+        "wire": 15
+      }
+    ],
+    "engine_t": 1611,
+    "engine_wire_bytes": 6108,
+    "handles": 2,
+    "ready_at_response": 0,
+    "fetch_states": [
+      "ready",
+      "ready"
+    ],
+    "prepared": 2,
+    "fetched": 2,
+    "wasted": 0,
+    "hits": 2,
+    "misses": 0,
+    "evicted": 0,
+    "cancelled": 0,
+    "worker_ms": 2.7,
+    "hit_rate": 1.0
+  },
+  "known_probe": {
+    "key": "sym:src/flask/helpers.py::get_root_path",
+    "full": {
+      "t": 84,
+      "wire": 319,
+      "rows": 1
+    },
+    "delta": {
+      "t": 27,
+      "wire": 103,
+      "unchanged": 1
+    },
+    "saved_t": 57,
+    "saved_wire": 216,
+    "auto": {
+      "t": 27,
+      "wire": 103,
+      "unchanged": 1,
+      "saved_t": 57,
+      "saved_wire": 216
+    },
+    "find": {
+      "q": "get_root_path",
+      "known_pairs": 20,
+      "full": {
+        "t": 1189,
+        "wire": 4572,
+        "rows": 20
+      },
+      "delta": {
+        "t": 300,
+        "wire": 1177,
+        "unchanged": 20
+      },
+      "request_bytes": 2127,
+      "saved_t": 889,
+      "saved_wire": 3395,
+      "saved_total": 1347,
+      "auto": {
+        "t": 300,
+        "wire": 1177,
+        "unchanged": 20,
+        "saved_t": 889,
+        "saved_wire": 3395
+      }
+    }
+  }
+}

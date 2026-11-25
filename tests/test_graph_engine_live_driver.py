@@ -121,6 +121,37 @@ def test_known_injection_uses_op_scoped_seen_row_hashes() -> None:
     assert explicit["known"][0]["hash"] == "other"
 
 
+def test_auto_arm_sends_no_known_and_still_tracks_rows() -> None:
+    driver = _driver()
+    assert "engine_auto" in driver.MULTI_ARMS
+    assert driver._parse_args(["--arm", "engine_auto"]).arm == "engine_auto"
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.payloads: list[dict] = []
+
+        def graph(self, payload):
+            self.payloads.append(dict(payload))
+            return {"sid": "s1", "t": 1,
+                    "c": ["k", "h"], "r": [["sym:a", "h1"]]}, 10
+
+    recorder = driver.Recorder()
+    client = FakeClient()
+    arm = driver.EngineArm(client, recorder, interface="optimized",
+                           known_reuse=False, auto_known=True,
+                           speculate=False)
+    arm.call({"op": "find", "q": "a"})
+    arm.call({"op": "find", "q": "a"})
+    finds = [payload for payload in client.payloads
+             if payload.get("op") == "find"]
+    assert len(finds) == 2
+    assert all("known" not in payload for payload in finds)
+    # The driver still remembers what it showed, but the no-known arm never
+    # puts it on the wire; the serving engine owns the delta.
+    assert arm.seen == {("find", "sym:a"): "h1"}
+    assert recorder.known_sent == 0
+
+
 def test_speculate_flag_sets_find_spec() -> None:
     driver = _driver()
 

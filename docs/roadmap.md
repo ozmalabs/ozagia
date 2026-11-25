@@ -555,7 +555,15 @@ follows `n` pages, exposes typed budget/withheld/auth/transport errors and
 reports compact request/byte/token counters; 12 fixture tests
 (`tests/test_engine_client.py`, mostly over the real loopback server) cover it,
 including the deterministic 20-row repeat (1,390 → 158 estimated tokens and
-5,496 → 609 response bytes). Live
+5,496 → 609 response bytes). The serving surfaces are now **auto-known**: the
+MCP `engine` surface and `ozagia engine serve` apply the session's remembered
+`(op,key)` hashes when a request omits `known`, so a model gets `u` handles on
+a repeated `find`/`outline`/`context` without storing hashes; `known: []` is
+the full-refresh opt-out and direct `GraphEngine` callers keep the old
+`auto_known=False` default. A live repeated-find A/B on flask (2026-11-26)
+measured 28,276 tokens for auto-known versus 28,284 for explicit-known and
+36,068 for the stateless control, all 6/6 accepted; see
+`docs/results/graph_engine_auto_known_2026-11-26.md`. Live
 evidence also shows speculation is a net cost in these workloads (prepared
 payloads went unfetched and `q` handles added tokens), so it stays opt-in and
 is **not** recommended as a default. Next: a long-lived shared worker, in-call cancellation

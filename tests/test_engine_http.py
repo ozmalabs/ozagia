@@ -209,6 +209,22 @@ def test_environment_token_wins_and_is_used(repo: Path,
         engine_http.resolve_token(repo)
 
 
+def test_http_serving_surface_defaults_to_auto_known(repo: Path) -> None:
+    dump = state_path(repo, "graph.json")
+    dump.parent.mkdir(parents=True, exist_ok=True)
+    _build(repo, dump)
+    engine = engine_http.load_engine(repo)
+    try:
+        assert engine.auto_known is True
+    finally:
+        engine.close()
+    plain = engine_http.load_engine(repo, auto_known=False)
+    try:
+        assert plain.auto_known is False
+    finally:
+        plain.close()
+
+
 # --------------------------------------------------------------------------- #
 # routing, auth, limits and stable errors
 # --------------------------------------------------------------------------- #

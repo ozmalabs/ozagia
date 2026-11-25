@@ -16,6 +16,11 @@ Wire version: ``ozagia.graph_engine/2``.  See
 ``docs/plans/2026-11-25_graph_engine_protocol.md`` and
 ``docs/graph_engine.md``.
 
+``auto_known`` (on for the MCP engine surface and the HTTP serving surface)
+answers a repeated ``find``, ``outline`` or ``context`` from the session's
+remembered hashes when the request omits ``known``; an explicit list, including
+``[]``, is used verbatim.  Direct/core callers default it off.
+
 Speculation is asynchronous in this slice: after a response with ``spec=true``
 the engine queues at most six suggestions and a single background worker
 prepares at most two bounded payloads; the handler returns without waiting for
@@ -131,7 +136,8 @@ ENGINE_TOOLS: list[dict[str, Any]] = [{
     "name": ENGINE_TOOL_NAME,
     "description": (
         "Read-only code graph: find, outline, expand, impact, tests, context, "
-        "shape, fetch. Compact rows, token budgets, known deltas."),
+        "shape, fetch. Repeats return `u` keys: reuse shown rows; known:[] "
+        "refreshes."),
     "inputSchema": _schema({
         "op": {"type": "string", "enum": list(OPS)},
         "session": {"type": "string"},
@@ -153,13 +159,17 @@ ENGINE_TOOLS: list[dict[str, Any]] = [{
         "detail": {"type": "boolean"},
         "stats": {"type": "boolean"},
         "cols": {"type": "boolean"},
-        "known": {"type": "array", "items": {
-            "type": "object",
-            "properties": {"key": {"type": "string"},
-                           "hash": {"type": "string"},
-                           "op": {"type": "string", "enum": list(KNOWN_OPS)}},
-            "required": ["key", "hash"],
-            "additionalProperties": False}},
+        "known": {
+            "type": "array",
+            "description": "[]=full rows",
+            "items": {
+                "type": "object",
+                "properties": {"key": {"type": "string"},
+                               "hash": {"type": "string"},
+                               "op": {"type": "string",
+                                      "enum": list(KNOWN_OPS)}},
+                "required": ["key", "hash"],
+                "additionalProperties": False}},
         "spec": {"type": "boolean"},
         "fetch": {"type": "array", "items": {"type": "string"}},
         "h": {"type": "string"},
@@ -1121,6 +1131,7 @@ class GraphEngine:
                  max_sessions: int = MAX_SESSIONS,
                  spec_worker: Any | None = None,
                  spec_enabled: bool | None = None,
+                 auto_known: bool = False,
                  clock: Callable[[], float] | None = None) -> None:
         if memory is None:
             raise ValueError("the graph engine needs a dev-memory snapshot")
@@ -1134,6 +1145,12 @@ class GraphEngine:
         self._snap_cache: tuple[tuple[Any, ...], str] | None = None
         self._clock = clock or time.monotonic
         self._lock = threading.RLock()
+        # Auto-known is a model-surface convenience: a repeated find/outline/
+        # context in the same session is answered with `u` handles for rows the
+        # model already has.  It is off by default so a direct/core caller keeps
+        # the explicit "no known means full rows" contract; the MCP engine
+        # surface and the HTTP serving surface turn it on.
+        self.auto_known = bool(auto_known)
         self.spec_enabled = (_env_flag("OZAGIA_ENGINE_SPEC", True)
                              if spec_enabled is None else bool(spec_enabled))
         self.worker_budget_s = _worker_budget_s()
@@ -1210,6 +1227,7 @@ class GraphEngine:
             "sessions": len(self.sessions),
             "max_sessions": self.max_sessions,
             "spec_enabled": bool(self.spec_enabled),
+            "auto_known": bool(self.auto_known),
             "spec_per_session": MAX_SPEC,
             "prepared_per_response": MAX_SPEC_PREPARE,
             "worker_alive": bool(getattr(worker, "alive", False)),
@@ -1268,6 +1286,7 @@ class GraphEngine:
                 "e": len(self.mem.edges),
             }
             result["compact"] = session.compact
+            result["ak"] = bool(self.auto_known)
             result["st"] = self._stats_view(session)
         if args.get("stats") is True:
             result.setdefault("st", self._stats_view(session))
@@ -1610,6 +1629,14 @@ class GraphEngine:
         while len(session.known) > 1000:
             session.known.popitem(last=False)
 
+    @staticmethod
+    def _remembered(session: EngineSession, op: str) -> dict[str, str]:
+        """Snapshot the hashes this session showed for one operation."""
+        # copy() is one C-level operation, so a concurrent request on the same
+        # session cannot mutate the mapping while this comprehension iterates.
+        return {key: digest for (entry_op, key), digest
+                in session.known.copy().items() if entry_op == op}
+
     def _known_rows(
             self, session: EngineSession, args: dict[str, Any], op: str,
             items: list[dict[str, Any]], cols: list[str]
@@ -1622,8 +1649,16 @@ class GraphEngine:
         value is a compact ``c``/``u`` string in page order.  The caller keeps
         it internal (``__page``) so the paging code can advance the offset by
         the number of items actually served.
+
+        With ``auto_known`` enabled, a request that omits ``known`` (or sends
+        ``null``) uses the hashes this session already remembered for this op.
+        An explicit value -- including ``[]`` -- is used exactly as supplied,
+        so ``known: []`` is the documented full-refresh opt-out.
         """
         scoped, legacy = self._known(args, op)
+        if (args.get("known") is None and self.auto_known
+                and op in KNOWN_OPS):
+            scoped = self._remembered(session, op)
         rows: list[dict[str, Any]] = []
         unchanged: list[str] = []
         order: list[str] = []

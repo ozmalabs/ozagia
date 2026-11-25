@@ -224,6 +224,14 @@ Errors use short keys too:
 projection of the deterministic `repo_shape` report. `wait_ms` is clamped to
 `0..250`; a pending fetch never blocks indefinitely.
 
+`known` is optional and stateful. The MCP engine surface and the HTTP serving
+surface default to **auto-known**: omitting `known` on `find`, `outline` or
+`context` reuses the hashes the session already remembered for that op and
+returns only `u` key handles. An explicit `known` (including `[]`) disables
+auto-known for that request; `[]` is the documented full-refresh opt-out. A
+direct `GraphEngine(...)` caller defaults `auto_known=False`, preserving the
+older "omitted means full rows" contract.
+
 All row operations accept `cols`. By default `c` is present on every compact
 tabular response. `cols:false` opts into the old per-session column reuse (first
 response teaches the columns, later reuse requests with the same columns omit
@@ -275,7 +283,8 @@ immediately; engine shutdown closes all sessions and joins the daemon worker.
 A session stores:
 
 - the last observed snapshot token and freshness label;
-- up to 1,000 `key -> hash` entries remembered from responses;
+- up to 1,000 `(op, key) -> hash` entries remembered from responses (used by
+  explicit `known` and by server-side auto-known);
 - the last cursor/page position (today the self-contained `n` object is
   authoritative; the cursor is session bookkeeping);
 - the fixed columns seen for each op (used by the explicit column-reuse mode);
@@ -286,7 +295,15 @@ A session stores:
 
 ## `known` deltas
 
-Callers send `find`, `outline` or `context` rows they already have:
+The serving surfaces (MCP `engine` and `engine serve`) are auto-known by
+default. A repeated `find`, `outline` or `context` that omits `known` is
+compared with the `(op, key)` hashes the session remembered when it served the
+previous rows, and matching items come back only as `u` key handles. The first
+response for an op is always full. `known: []` (or any explicit list) disables
+auto-known for that request and is used verbatim.
+
+Callers that manage hashes themselves can send `find`, `outline` or `context`
+rows they already have:
 
 ```json
 {"op": "find", "session": "s1", "q": "add",
@@ -550,7 +567,7 @@ same freshness check.
 | Bound | Value |
 | --- | --- |
 | sessions | 16 (LRU) |
-| known hashes remembered per session | 1,000 |
+| known `(op,key)` hashes remembered per session | 1,000 |
 | speculation cache per session | 8 |
 | suggested candidates per response | 6 |
 | prepared per background job | 2 |
@@ -628,11 +645,15 @@ was used. A live session remains blocked behind `--live`,
 
 The later multi-turn live runs are recorded in
 `docs/results/graph_engine_live_multiturn_2026-11-25.md`. The op-scoped `known`
-follow-up (2026-11-26) is deterministic only: no local queen tunnel/model key
-was available, so the repeated-find model-token saving was not re-measured.
-The live evidence also shows speculation as a net cost in those workloads
-(unfetched prepared payloads plus extra `q` handles); keep it opt-in, not a
-default.
+follow-up (2026-11-26) was deterministic only at the time: no local queen
+tunnel/model key was available, so the repeated-find model-token saving was not
+re-measured then. A later 2026-11-26 auto-known run recreated the tunnel and
+measured the repeated-find task: 28,276 model tokens for auto-known, 28,284 for
+explicit client-sent `known` and 36,068 for the stateless control, 6/6 accepted
+each (flask; 12,846 / 12,846 / 14,720 on the tiny fixture). See
+`docs/results/graph_engine_auto_known_2026-11-26.md`. The live evidence also
+shows speculation as a net cost in those workloads (unfetched prepared payloads
+plus extra `q` handles); keep it opt-in, not a default.
 
 ## Open work
 
@@ -648,8 +669,10 @@ default.
   full Ozma protocol conformance, an Ozma shim/server and a network-safe remote
   deployment remain open.
 - A persistent, versioned session/cache layer if the process-local bound
-  proves too short for long agent sessions. `GraphEngineClient` now keeps its
-  op-scoped known cache in memory; a durable client-side cache is not built.
+  proves too short for long agent sessions. `GraphEngineClient` keeps its
+  op-scoped known cache in memory and the serving engine now auto-applies its
+  own session hashes when `known` is omitted, so a durable client-side cache is
+  not needed for the model-facing path.
 - Stronger item identity than a 16-hex hash prefix if cross-process caching is
   added.
 - Broader live-model evidence: more models, larger real repositories,
