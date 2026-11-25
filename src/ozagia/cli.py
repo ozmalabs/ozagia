@@ -4,6 +4,7 @@
     ozagia index [--root R] [--rebuild]
     ozagia agent [--workdir W] [--prompt TEXT | --prompt-file F] [--model M]
                  [--mcp coding|research|combined | --research]
+                 [--opencode-config PATH]
                  [--repo-map [--repo-map-tokens N]]
                  [--clone [--base REV]] [--keep-plugin] [--timeout S]
                  [--python P] [--runs-dir D] [-- <extra opencode args>]
@@ -396,7 +397,8 @@ def _cmd_agent(args: argparse.Namespace) -> int:
                         timeout_s=args.timeout, extra_args=args.extra,
                         run_python=args.python, opencode=_opencode_exe(args.opencode),
                         runs_dir=args.runs_dir, mcp_mode=args.mcp, progress=progress,
-                        repo_map_tokens=args.repo_map_tokens)
+                        repo_map_tokens=args.repo_map_tokens,
+                        opencode_config=args.opencode_config)
     except (AgentError, SessionError) as exc:
         progress.close()
         print(f"error: {exc}", file=sys.stderr)
@@ -1465,6 +1467,12 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--prompt", default=None, help="run non-interactively with this prompt")
     pr.add_argument("--prompt-file", default=None, help="read the prompt from a file")
     ag.add_argument("--model", "-m", default=None, help="provider/model, e.g. vllm/qwen3.8-27b")
+    ag.add_argument("--opencode-config", default=None, metavar="PATH",
+                    help="layer provider settings from this OpenCode JSON config "
+                         "(provider, providers, model, small_model only) into the "
+                         "generated harness config; --model wins. Plugins, MCP "
+                         "servers, permissions, agents and tools are never copied, "
+                         "and the global config is not read implicitly")
     ag.add_argument("--clone", action="store_true",
                     help="run in an isolated clone under the temp dir (kept)")
     ag.add_argument("--base", default=None, help="with --clone: commit to check out "
@@ -1904,7 +1912,7 @@ _COMMANDS = frozenset({"index", "agent", "install", "who", "replace",
 # Agent options that may lead a bare `ozagia ...` (the TUI).
 _AGENT_FLAGS = frozenset({"--research", "--mcp", "--model", "-m", "--workdir",
                           "--root", "--clone", "--prompt", "--prompt-file",
-                          "--repo-map", "--repo-map-tokens"})
+                          "--repo-map", "--repo-map-tokens", "--opencode-config"})
 
 
 def _default_agent(argv: list[str]) -> list[str]:

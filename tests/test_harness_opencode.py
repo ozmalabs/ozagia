@@ -19,7 +19,8 @@ import pytest
 from ozagia.harness import launch_status
 from ozagia.harness import opencode as hop
 from ozagia.harness import session as hs
-from ozagia.harness.opencode import AgentError, git_exclude, run_agent
+from ozagia.harness.opencode import (AgentError, git_exclude, load_provider_config,
+                                     run_agent)
 from ozagia.harness.session import GraphSession, SessionError
 
 SRC = Path(__file__).resolve().parents[1] / "src"
@@ -157,6 +158,7 @@ def test_run_agent_end_to_end(repo, stub, tmp_path):
 
     cfg = rec["config"]
     assert Path(rec["env"]["OPENCODE_CONFIG"]).parent == Path(res["log_dir"])
+    assert set(cfg) == {"$schema"}  # no provider config was supplied
     assert "permission" not in cfg  # Preserve the host's own shell policy.
     assert "model" not in cfg  # passed with -m instead
 
@@ -175,6 +177,117 @@ def test_run_agent_end_to_end(repo, stub, tmp_path):
     assert _exclude_lines(repo).count(EXCLUDES[2]) == 1
     assert res["exclude_removed"] == [*EXCLUDES[:2], PROFILE_EXCLUDE]
     assert _git(repo, "status", "--porcelain") == ""
+
+
+def test_host_opencode_config_is_not_read_implicitly(repo, stub, tmp_path, monkeypatch):
+    host = tmp_path / "host.json"
+    host.write_text(json.dumps({"provider": {"host": {}}, "mcp": {}}),
+                    encoding="utf-8")
+    monkeypatch.setenv("OPENCODE_CONFIG", str(host))
+    _run(repo, tmp_path)
+    rec = _record(stub)
+    assert set(rec["config"]) == {"$schema"}
+    assert rec["env"]["OPENCODE_CONFIG"] != str(host)
+
+
+def test_provider_config_is_layered_with_ozagia_mcp(repo, stub, tmp_path):
+    provider = tmp_path / "provider.json"
+    provider.write_text(json.dumps({
+        "$schema": "https://opencode.ai/config.json",
+        "provider": {"vllm": {
+            "npm": "@ai-sdk/openai-compatible",
+            "name": "vLLM",
+            "options": {"baseURL": "http://127.0.0.1:8000/v1",
+                        "apiKey": "{env:VLLM_API_KEY}"},
+            "models": {"qwen3.8-27b": {"name": "Qwen 3.8 27B"}},
+        }},
+        "providers": {"local": {"vllm": {"enabled": True}}},
+        "model": "vllm/qwen3.8-27b",
+        "small_model": "vllm/qwen3.8-27b",
+    }), encoding="utf-8")
+    _run(repo, tmp_path, opencode_config=provider, mcp_mode="combined")
+    cfg = _record(stub)["config"]
+    assert cfg["provider"]["vllm"]["options"]["baseURL"] == "http://127.0.0.1:8000/v1"
+    # The placeholder is copied verbatim: never resolved or logged.
+    assert cfg["provider"]["vllm"]["options"]["apiKey"] == "{env:VLLM_API_KEY}"
+    assert cfg["providers"] == {"local": {"vllm": {"enabled": True}}}
+    assert cfg["model"] == "vllm/qwen3.8-27b"
+    assert cfg["small_model"] == "vllm/qwen3.8-27b"
+    # The harness's own MCP entry is still there, and nothing else was copied.
+    assert cfg["mcp"]["ozagia"]["type"] == "local"
+    assert set(cfg) == {"$schema", "provider", "providers", "model", "small_model", "mcp"}
+
+
+def test_model_option_wins_over_the_provider_config_model(repo, stub, tmp_path):
+    provider = tmp_path / "provider.json"
+    provider.write_text(json.dumps({"model": "vllm/from-config",
+                                    "provider": {"vllm": {}}}), encoding="utf-8")
+    _run(repo, tmp_path, model="vllm/from-cli", opencode_config=provider)
+    rec = _record(stub)
+    assert rec["argv"][-2:] == ["vllm/from-cli", "fix the addition"]
+    # `opencode run` gets -m, so the config must not keep the file's model.
+    assert "model" not in rec["config"]
+    assert rec["config"]["provider"] == {"vllm": {}}
+
+    _run(repo, tmp_path, prompt=None, model="vllm/from-cli",
+         opencode_config=provider, background=False)
+    rec = _record(stub)
+    assert rec["argv"] == [str(stub["exe"]), "--standalone", str(repo)]
+    assert rec["config"]["model"] == "vllm/from-cli"
+
+
+@pytest.mark.parametrize("key", ["plugin", "plugins", "mcp", "permission",
+                                 "agent", "agents", "tools"])
+def test_unsupported_provider_config_keys_fail_before_launch(repo, stub, tmp_path, key):
+    provider = tmp_path / "provider.json"
+    provider.write_text(json.dumps({"provider": {"vllm": {}}, key: {}}),
+                        encoding="utf-8")
+    with pytest.raises(AgentError, match="unsupported key"):
+        _run(repo, tmp_path, opencode_config=provider)
+    assert not stub["record"].exists()
+
+
+def test_missing_invalid_and_wrong_shaped_provider_configs_fail_before_launch(
+        repo, stub, tmp_path):
+    missing = tmp_path / "missing.json"
+    with pytest.raises(AgentError, match="cannot read --opencode-config"):
+        _run(repo, tmp_path, opencode_config=missing)
+
+    invalid = tmp_path / "invalid.json"
+    invalid.write_text('{"provider": {"vllm": {"apiKey": "super-secret"}},',
+                       encoding="utf-8")
+    with pytest.raises(AgentError, match="not valid JSON") as exc:
+        _run(repo, tmp_path, opencode_config=invalid)
+    assert "super-secret" not in str(exc.value)
+
+    not_object = tmp_path / "list.json"
+    not_object.write_text('["vllm"]', encoding="utf-8")
+    with pytest.raises(AgentError, match="must be a JSON object"):
+        _run(repo, tmp_path, opencode_config=not_object)
+
+    bad_provider = tmp_path / "bad-provider.json"
+    bad_provider.write_text('{"provider": ["vllm"]}', encoding="utf-8")
+    with pytest.raises(AgentError, match="provider must be an object"):
+        _run(repo, tmp_path, opencode_config=bad_provider)
+
+    bad_model = tmp_path / "bad-model.json"
+    bad_model.write_text('{"model": 7}', encoding="utf-8")
+    with pytest.raises(AgentError, match="model must be a string"):
+        _run(repo, tmp_path, opencode_config=bad_model)
+    assert not stub["record"].exists()
+
+
+def test_provider_config_error_does_not_echo_secrets(tmp_path):
+    provider = tmp_path / "provider.json"
+    provider.write_text(json.dumps({
+        "provider": {"vllm": {"options": {"apiKey": "super-secret"}}},
+        "plugin": ["some-plugin"],
+    }), encoding="utf-8")
+    with pytest.raises(AgentError) as exc:
+        load_provider_config(provider)
+    text = str(exc.value)
+    assert "super-secret" not in text
+    assert "unsupported key(s): plugin" in text
 
 
 def test_repo_map_budget_is_passed_to_opencode_and_reported(repo, stub, tmp_path):
