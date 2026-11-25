@@ -531,7 +531,12 @@ tasks and checks counterbalanced: 18,118 versus 17,762 tokens, 6/6 both, 20 tool
 calls each, with the legacy interface at 35,752. The optimized interface
 narrowed rather than beat the control; see
 `docs/results/graph_engine_live_2026-11-25.md` and
-`docs/results/graph_engine_live_2026-11-25_optimized.md`. An optional loopback
+`docs/results/graph_engine_live_2026-11-25_optimized.md`. A broader run on the
+pinned `pallets/flask` checkout at `22d92470` kept 6/6 acceptance in all three
+arms but reversed the ranking: the optimized arm used 122,405 tokens versus
+114,899 for the control (+6.5%, same 34 tool calls), while the legacy interface
+used 108,750 (−5.4% vs control). The tiny-fixture gap did not generalize; see
+`docs/results/graph_engine_live_broader_2026-11-25.md`. An optional loopback
 HTTP/JSON transport now serves the same engine
 (`POST /v1/graph`) and the existing `task_context` provider
 (`POST /v1/ozma/context`), with a required bearer token, a 127.0.0.1 default, a

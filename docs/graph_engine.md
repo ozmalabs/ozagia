@@ -176,6 +176,10 @@ result does not fit:
 - `x` and `o` are set;
 - `n` (when useful) is a complete follow-up request with the next `offset`.
 
+If not even one row fits, the result is an explicit
+`{"e": "budget_too_small", "why": "...", "x": true}` (with a larger-budget
+retry in `n` when it fits), not an empty truncated object.
+
 ```json
 {"op": "find", "session": "s1", "q": "pkg", "budget": 100}
 ```
@@ -342,12 +346,25 @@ written to the checkout.
   daemon/forkserver would avoid this.
 - Hit-rate/waste is measured on a few local corpus checkouts with simulated
   think time, not real model latency or a broad repository sample.
-- The live-model comparison is one local 27B model on one tiny fixture. The
+- The live-model comparison is one local 27B model on two repository scales: a
+  tiny fixture and a pinned `pallets/flask` checkout. On the tiny fixture the
   optimized model-facing interface (conditional `fetch`, inline ready payloads,
   a smaller schema, explicit shape file paths) accepted 6/6 at 18,118 tokens
   versus 17,762 for the stateless control and 35,752 for the previous engine
-  interface; it narrowed, but did not beat, the control on tokens. See
-  [`docs/results/graph_engine_live_2026-11-25_optimized.md`](results/graph_engine_live_2026-11-25_optimized.md).
+  interface; it narrowed, but did not beat, the control on tokens. On flask the
+  optimized arm also accepted 6/6 but used 122,405 tokens versus 114,899 for the
+  control (+6.5%, same 34 tool calls) and 108,750 for the previous interface
+  (−5.4% vs control); the tiny-fixture +2.0% gap did not generalize. See
+  [`docs/results/graph_engine_live_2026-11-25_optimized.md`](results/graph_engine_live_2026-11-25_optimized.md)
+  and
+  [`docs/results/graph_engine_live_broader_2026-11-25.md`](results/graph_engine_live_broader_2026-11-25.md).
+- Small budgets on large tabular results return a shortened row prefix plus
+  `n`, or an explicit `budget_too_small` error; they no longer return an empty
+  `truncated` result. The `_fit` no-progress loop was fixed after the live run:
+  on the pinned flask checkout, the 20-row `find` that returned no rows at
+  800/900/1,000 estimated tokens now returns 15/17/19 rows, while 1,100 and
+  1,200 still return 20. See
+  [`docs/results/graph_engine_live_broader_2026-11-25.md`](results/graph_engine_live_broader_2026-11-25.md).
 - Supervision and hard-timeout behaviour are covered by tests, not by the
   corpus measurement; that measurement predates them.
 - A compact 16-hex content hash for `known`, not a cryptographic identity.

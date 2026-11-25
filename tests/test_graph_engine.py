@@ -366,6 +366,93 @@ def test_page_trimming_returns_next(engine: GraphEngine) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# long text cells and honest budget fallback
+# --------------------------------------------------------------------------- #
+def _long_find_payload(count: int = 20, *, huge: bool = False
+                       ) -> dict[str, Any]:
+    """A deterministic stand-in for a large `find` page on a real repository."""
+    signature = (
+        "def get_root_path(import_name: str, *, module: str | None = None, "
+        "resolve: bool = True) -> str")
+    if huge:
+        signature = signature * 40
+    summary = (
+        "Return the filesystem root path for an import name, resolving "
+        "namespace packages and installed modules if they are not local.")
+    rows = [[
+        f"sym:src/flask/helpers.py::get_root_path_{index}",
+        f"get_root_path_{index}",
+        "src/flask/helpers.py",
+        f"{100 + index}-{120 + index}",
+        signature,
+        summary,
+        0.75,
+    ] for index in range(count)]
+    return {"cols": list(graph_engine_module.FIND_COLS), "rows": rows}
+
+
+def test_text_truncation_always_shrinks_and_never_stalls_at_the_floor(
+        engine: GraphEngine) -> None:
+    value = "x" * 51
+    for _ in range(8):
+        shortened = graph_engine_module._shorten_text(value)
+        assert shortened is not None, value
+        assert len(shortened) < len(value), (len(value), len(shortened))
+        value = shortened
+    assert len(value) < 51
+    # The fitter only selects cells above the floor, so a floored cell cannot
+    # be truncated to the same length over and over.
+    floor = graph_engine_module._TEXT_FLOOR
+    assert engine._longest_text_cell(
+        {"cols": ["sig"], "rows": [["y" * floor]]}) is None
+    above = engine._longest_text_cell(
+        {"cols": ["sig"], "rows": [["y" * (floor + 1)]]})
+    assert above is not None and len(above[2]) == floor + 1
+
+
+def test_find_keeps_rows_or_reports_budget_too_small(
+        engine: GraphEngine, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        GraphEngine, "_find",
+        lambda self, args, session: _long_find_payload())
+    sid = _hello(engine)["sid"]
+    for budget in (800, 900, 1000):
+        reply = engine.handle({"op": "find", "session": sid,
+                               "q": "get_root_path", "budget": budget})
+        assert json.loads(json.dumps(reply)) == reply
+        assert reply["t"] <= budget, (budget, reply)
+        if "e" in reply:
+            assert reply["e"] == "budget_too_small", (budget, reply)
+            assert reply.get("why"), (budget, reply)
+        else:
+            assert reply.get("r"), (budget, reply)
+    for budget in (1100, 1200):
+        reply = engine.handle({"op": "find", "session": sid,
+                               "q": "get_root_path", "budget": budget})
+        assert reply["t"] <= budget, (budget, reply)
+        assert reply.get("r"), (budget, reply)
+
+
+def test_fit_never_returns_a_bare_truncated_object(
+        engine: GraphEngine) -> None:
+    payload = _long_find_payload(count=1, huge=True)
+    fitted = engine._fit(payload, 64)
+    assert fitted.get("e") == "budget_too_small", fitted
+    assert fitted.get("why")
+    assert fitted.get("truncated") is True
+    assert graph_engine_module._json_size(fitted) <= 120
+
+
+def test_find_low_budget_is_bounded_and_parseable(engine: GraphEngine) -> None:
+    sid = _hello(engine)["sid"]
+    reply = engine.handle({"op": "find", "session": sid, "q": "pkg",
+                           "limit": 20, "budget": 64})
+    assert reply["t"] <= 64
+    assert json.loads(json.dumps(reply)) == reply
+    assert "e" in reply or reply.get("r"), reply
+
+
+# --------------------------------------------------------------------------- #
 # known deltas
 # --------------------------------------------------------------------------- #
 def test_known_outline_is_a_handle_and_change_reserializes(

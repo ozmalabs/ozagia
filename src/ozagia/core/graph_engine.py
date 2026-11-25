@@ -106,6 +106,11 @@ _COL_NAMES = {
     "sec": "section", "v": "value",
 }
 _TEXT_COLS = frozenset({"sig", "sum", "why", "txt", "v", "e"})
+# Text cells shorter than this are left alone by the budget fitter.  The
+# ellipsis counts towards the result, so a cell needs a few characters above the
+# floor before shortening it can make the payload smaller (see _shorten_text).
+_TEXT_FLOOR = 48
+_ELLIPSIS = "..."
 _TEXT_KEYS = frozenset({"signature", "summary", "why", "text", "value",
                         "edges", "description"})
 _TRIM_LISTS = frozenset({"rows", "unchanged", "spec", "items", "edges",
@@ -185,6 +190,22 @@ def estimate_tokens(value: Any) -> int:
 
 def _json_size(value: Any) -> int:
     return len(json.dumps(value))
+
+
+def _shorten_text(value: str) -> str | None:
+    """Return a strictly shorter text cell, or ``None`` if that is impossible.
+
+    ``max(_TEXT_FLOOR, len // 2) + "..."`` is not always shorter than the
+    input: a 51-character value would become ``48 chars + "..."``, again 51
+    characters.  Capping the kept prefix keeps every step progressive, which
+    is what stops the budget fitter from looping without making progress.
+    """
+    limit = len(value) - len(_ELLIPSIS) - 1
+    if limit < 1:
+        return None
+    keep = min(max(_TEXT_FLOOR, len(value) // 2), limit)
+    shortened = value[:keep].rstrip() + _ELLIPSIS
+    return shortened if len(shortened) < len(value) else None
 
 
 def _clean(value: dict[str, Any]) -> dict[str, Any]:
@@ -1380,6 +1401,15 @@ class GraphEngine:
         if verbose:
             result = self._verbose(result)
         result = self._fit(result, budget)
+        if result.get("e") == "budget_too_small":
+            # A retry with a larger budget is a real continuation, not paging.
+            retry = (next_args if isinstance(next_args, dict)
+                     else self._next_args(args, session))
+            if retry is not None:
+                retry = dict(retry)
+                retry["offset"] = offset
+                retry["budget"] = self._suggested_budget(budget)
+                result["next"] = retry
         rows = result.get("rows")
         session.cursor = {"op": op, "offset": offset + len(rows or [])}
         if (next_args is not None and isinstance(rows, list)
@@ -1402,8 +1432,11 @@ class GraphEngine:
         Optional metadata (``total``, ``budget``, ``next``) is dropped before
         rows, and the freshness label is never dropped.  Rows are always
         accompanied by ``truncated``/``omitted`` when the budget cuts them.
+        When no row can fit, the result is an explicit ``budget_too_small``
+        error rather than a bare truncated object.
         """
         limit = max(1, budget - 4)
+        had_rows = bool(result.get("rows"))
         while estimate_tokens(result) > limit:
             removed = False
             for key in ("total", "budget", "next"):
@@ -1422,8 +1455,11 @@ class GraphEngine:
             if "cols" in result:
                 result.pop("cols")
                 continue
-            result = {"truncated": True}
+            result = self._budget_error(budget)
             break
+        if had_rows and not result.get("rows"):
+            # Rows were only removed because the payload was over budget.
+            result = self._budget_error(budget)
         return result
 
     def _op(self, op: str, args: dict[str, Any],
@@ -1523,21 +1559,27 @@ class GraphEngine:
         """Trim the payload until the rendered JSON fits the estimated budget.
 
         The final ``tok`` field is added by the caller.  Eight tokens are kept
-        for it.  Lists are trimmed from the end, long text cells first, so a
-        caller always gets a usable prefix rather than a silent overflow.
+        for it.  Long text cells are shortened first, then lists are trimmed
+        from the end, so a caller always gets a usable prefix rather than a
+        silent overflow.  Every text step strictly shortens the cell, so this
+        loop cannot stall at a ``<n> chars + "..."`` fixed point.
+
+        If not even one row fits, the response is an explicit
+        ``budget_too_small`` error instead of an empty ``{"truncated": true}``
+        object: a successful empty row set must never be implied by trimming.
         """
         target = max(120, (budget - 8) * 4)
+        had_rows = bool(result.get("rows"))
         omitted = int(result.get("omitted") or 0)
-        for _ in range(1000):
-            if _json_size(result) <= target:
-                break
+        while _json_size(result) > target:
             best = self._longest_text_cell(result)
             if best is not None:
-                container, key, value, column = best
-                keep = max(48, len(value) // 2)
-                container[key] = value[:keep].rstrip() + "..."
-                result["truncated"] = True
-                continue
+                container, key, value, _column = best
+                shortened = _shorten_text(value)
+                if shortened is not None:
+                    container[key] = shortened
+                    result["truncated"] = True
+                    continue
             lists = self._trimmable_lists(result)
             if not lists:
                 break
@@ -1550,10 +1592,29 @@ class GraphEngine:
         if omitted:
             result["omitted"] = omitted
             result["truncated"] = True
-        # A budget this small should still produce an honest, tiny answer.
+        if had_rows and not result.get("rows"):
+            # We only pop rows while the payload is over budget, so reaching
+            # zero rows means a single row did not fit.  Say so explicitly.
+            return self._budget_error(budget)
         if _json_size(result) > target:
-            result = {"truncated": True}
+            return self._budget_error(budget)
         return result
+
+    @staticmethod
+    def _suggested_budget(budget: int) -> int:
+        return min(MAX_BUDGET, max(DEFAULT_BUDGET, budget * 2))
+
+    @classmethod
+    def _budget_error(cls, budget: int, *, why: str | None = None
+                      ) -> dict[str, Any]:
+        """A compact, honest answer for a budget that cannot hold one row."""
+        suggested = cls._suggested_budget(budget)
+        return {
+            "e": "budget_too_small",
+            "why": why or (f"no row fits in budget {budget}; "
+                           f"retry with budget >= {suggested}"),
+            "truncated": True,
+        }
 
     def _longest_text_cell(
             self, result: dict[str, Any]
@@ -1567,13 +1628,14 @@ class GraphEngine:
                     for index, value in enumerate(row):
                         column = cols[index] if index < len(cols) else ""
                         if (column in _TEXT_COLS and isinstance(value, str)
-                                and len(value) > 48):
+                                and len(value) > _TEXT_FLOOR):
                             if best is None or len(value) > len(best[2]):
                                 best = (row, index, value, column)
                 elif isinstance(row, dict):
                     for column, value in row.items():
                         if (column in _TEXT_KEYS
-                                and isinstance(value, str) and len(value) > 48):
+                                and isinstance(value, str)
+                                and len(value) > _TEXT_FLOOR):
                             if best is None or len(value) > len(best[2]):
                                 best = (row, column, value, column)
         return best

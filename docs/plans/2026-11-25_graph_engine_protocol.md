@@ -386,7 +386,11 @@ The follow-up result is
 [`../results/graph_engine_live_2026-11-25_optimized.md`](../results/graph_engine_live_2026-11-25_optimized.md):
 the optimized arm accepted 6/6 at 18,118 tokens versus 17,762 for the control
 and 35,752 for the previous engine interface, with 20 tool calls in both the
-optimized and control arms.
+optimized and control arms. On a pinned `pallets/flask` checkout the same three
+arms accepted 6/6, but the optimized arm used 122,405 tokens versus 114,899 for
+the control (+6.5%, same 34 tool calls) and 108,750 for the previous interface
+(−5.4% vs control); the tiny-fixture gap did not generalize. See
+[`../results/graph_engine_live_broader_2026-11-25.md`](../results/graph_engine_live_broader_2026-11-25.md).
 
 ### Worker limits and lifecycle
 
@@ -578,6 +582,7 @@ was used. A live session remains blocked behind `--live`,
   added.
 - Broader live-model evidence: more models, larger real repositories,
   counterbalanced arm order, and live inline-delivery coverage. The current
-  result is one local 27B model on one tiny fixture.
+  result is one local 27B model on a tiny fixture and a pinned `flask` checkout;
+  it still has no second model, second real repository or live inline delivery.
 - The optimized model-facing interface is not yet exercised in the TUI/Desktop
   or other MCP hosts; only the live driver and unit tests cover it.

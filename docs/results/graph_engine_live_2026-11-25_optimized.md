@@ -8,6 +8,16 @@ control on tokens.** This is a follow-up to
 tasks and fixed checks are the same, with one prompt clarification recorded below.
 The sample is still one local 27B model, one tiny fixture and six runs per arm.
 
+> **Broader follow-up (2026-11-25):** the same three arms and checks were rerun
+> on the pinned `pallets/flask` checkout at `22d92470` (3 adapted tasks × 2
+> repeats, 1,200-token budget). The optimized arm accepted 6/6 but used
+> **+6.5% total tokens** versus the control (122,405 vs 114,899), the same 34
+> tool calls; the legacy engine used −5.4% versus the control on that sample.
+> The tiny fixture reproduced the 17,762 / 35,752 / 18,118 totals exactly, so
+> **the +2.0% tiny-fixture gap does not generalize to the real repository.**
+> See
+> [`graph_engine_live_broader_2026-11-25.md`](graph_engine_live_broader_2026-11-25.md).
+
 ## Change under test
 
 The previous engine arm used 36,585 model tokens versus 19,626 for the control

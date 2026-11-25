@@ -43,6 +43,12 @@ DEFAULT_KEY_FILE = "/tmp/opencode/queen/key"
 DEFAULT_MODEL = "qwen3.8-27b"
 DEFAULT_FIXTURE = "/tmp/opencode/engine-live"
 DEFAULT_ENGINE_TOKEN_FILE = "/tmp/opencode/engine-live/.ozagia/engine/token"
+# The real-repository arm needs 1,200 estimated tokens per find: the engine's
+# small-budget trimmer can return no rows at 800 on a large result (recorded in
+# docs/results/graph_engine_live_broader_2026-11-25.md).  The tiny fixture keeps
+# its fixed 800 budget.
+TINY_BUDGET = 800
+REPO_BUDGET = 1200
 KEY_ENV = "OZAGIA_LIVE_API_KEY"
 BASE_URL_ENV = "OZAGIA_LIVE_BASE_URL"
 ENGINE_URL_ENV = "OZAGIA_ENGINE_URL"
@@ -56,6 +62,7 @@ FINAL_TOKENS = 220
 REQUEST_TIMEOUT_S = 90.0
 ENGINE_TIMEOUT_S = 30.0
 MAX_BUDGET = 800
+MAX_EVAL_BUDGET = 8000
 DEFAULT_BUDGET = 800
 MAX_FETCH_WAIT_MS = 250
 MAX_TOOL_RESULT_CHARS = 12_000
@@ -314,10 +321,12 @@ class EngineArm:
     """
 
     def __init__(self, client: EngineClient, recorder: Recorder,
-                 *, interface: str = "legacy") -> None:
+                 *, interface: str = "legacy",
+                 budget: int = TINY_BUDGET) -> None:
         self.client = client
         self.recorder = recorder
         self.interface = interface
+        self.budget = budget
         self.sid: str | None = None
         self.closed = False
         self.session_override = 0
@@ -400,7 +409,7 @@ class EngineArm:
         if payload.get("session") and payload["session"] != self.sid:
             self.session_override += 1
         payload["session"] = self.sid
-        payload["budget"] = _budget(payload.get("budget"))
+        payload["budget"] = _budget(payload.get("budget"), self.budget)
         if op == "find":
             payload.setdefault("spec", True)
         if op == "fetch":
@@ -447,9 +456,11 @@ class EngineArm:
 class ControlArm:
     """Stateless control: a fresh session per call, no spec/known/fetch."""
 
-    def __init__(self, client: EngineClient, recorder: Recorder) -> None:
+    def __init__(self, client: EngineClient, recorder: Recorder, *,
+                 budget: int = TINY_BUDGET) -> None:
         self.client = client
         self.recorder = recorder
+        self.budget = budget
 
     def call(self, args: dict[str, Any]) -> tuple[dict[str, Any], int]:
         op = str(args.get("op") or "")
@@ -464,7 +475,7 @@ class ControlArm:
             raise LiveError("engine hello did not return a session id")
         payload = dict(args)
         payload["session"] = sid
-        payload["budget"] = _budget(payload.get("budget"))
+        payload["budget"] = _budget(payload.get("budget"), self.budget)
         try:
             result, wire = self.client.graph(payload)
             record.add_engine(result, wire, model_visible=True)
@@ -482,7 +493,8 @@ class ControlArm:
 
 
 def run_spec_probe(client: EngineClient, *, query: str = "average",
-                   think_s: float = 0.2) -> dict[str, Any]:
+                   think_s: float = 0.2,
+                   budget: int = TINY_BUDGET) -> dict[str, Any]:
     """Deterministic transport probe for find-spec, wait, fetch and stats."""
     calls: list[dict[str, Any]] = []
     engine_t = 0
@@ -502,7 +514,7 @@ def run_spec_probe(client: EngineClient, *, query: str = "average",
     if not isinstance(sid, str) or not sid:
         raise LiveError("spec probe hello did not return a session id")
     find = call({"op": "find", "session": sid, "q": query,
-                 "kinds": ["sym"], "spec": True, "budget": DEFAULT_BUDGET})
+                 "kinds": ["sym"], "spec": True, "budget": budget})
     spec = find.get("q") if isinstance(find.get("q"), dict) else {}
     handles = list(spec.get("h") or [])
     ready_at_response = _int(spec.get("r"))
@@ -510,7 +522,7 @@ def run_spec_probe(client: EngineClient, *, query: str = "average",
     fetch_states: list[Any] = []
     if handles:
         fetched = call({"op": "fetch", "session": sid,
-                        "fetch": handles[:4], "budget": DEFAULT_BUDGET,
+                        "fetch": handles[:4], "budget": budget,
                         "wait_ms": MAX_FETCH_WAIT_MS})
         items = fetched.get("it") or [fetched]
         for item in items:
@@ -554,9 +566,9 @@ def _int(value: Any, default: int = 0) -> int:
         return default
 
 
-def _budget(value: Any) -> int:
+def _budget(value: Any, maximum: int = TINY_BUDGET) -> int:
     """Clamp a model-supplied budget to the small evaluation window."""
-    return max(64, min(MAX_BUDGET, _int(value, DEFAULT_BUDGET)))
+    return max(64, min(maximum, _int(value, maximum)))
 
 
 def _text(value: Any) -> str:
@@ -586,7 +598,7 @@ def _check(name: str, ok: bool) -> dict[str, Any]:
     return {"name": name, "ok": bool(ok)}
 
 
-TASKS: list[dict[str, Any]] = [
+TINY_TASKS: list[dict[str, Any]] = [
     {
         "id": "definition_callers_tests",
         "kind": "definition/callers/tests",
@@ -655,19 +667,107 @@ TASKS: list[dict[str, Any]] = [
     },
 ]
 
-ENGINE_SYSTEM = (
-    "You have exactly one tool, graph: a read-only code graph. Ops: find, "
-    "outline, expand, impact, tests, context, shape, fetch. The transport "
-    "creates and closes the session for you; do not call hello or bye. Use "
-    "budgets of at most 800. find may return speculative q handles; fetch them "
-    "with wait_ms 200 when useful. After at most six tool calls, reply with "
-    "only the JSON object the user asks for."
-)
-SHORT_SYSTEM = (
-    "You have one tool, graph: a read-only code graph. Use at most 800-token "
-    "budgets. After at most six calls, reply with only the requested JSON "
-    "object."
-)
+# A pinned real checkout (pallets/flask at 22d92470).  These checks use the
+# snapshot under that checkout's .ozagia and are not interchangeable with the
+# tiny fixture's checks.
+FLASK_TASKS: list[dict[str, Any]] = [
+    {
+        "id": "definition_callers_tests",
+        "kind": "definition/callers/tests",
+        "prompt": (
+            "Find the symbol named get_root_path, its direct callers, and the "
+            "test files that cover it. Reply with only {\"symbol\": string, "
+            "\"callers\": [string], \"tests\": [string]}."
+        ),
+        "keys": ["symbol", "callers", "tests"],
+        "checks": [
+            ("symbol is get_root_path",
+             lambda obj: _has(obj, "symbol", "get_root_path")),
+            ("callers include Scaffold.__init__",
+             lambda obj: _has(obj, "callers", "scaffold.__init__")),
+            ("tests include tests/test_helpers.py",
+             lambda obj: _has(obj, "tests", "tests/test_helpers.py")),
+        ],
+    },
+    {
+        "id": "impact_expansion",
+        "kind": "impact/expansion",
+        "prompt": (
+            "Compute the impact of send_from_directory to depth 2. Reply with "
+            "only {\"symbol\": string, \"symbols\": [string], \"tests\": "
+            "[string], \"summary\": string}."
+        ),
+        "keys": ["symbol", "symbols", "tests", "summary"],
+        "checks": [
+            ("symbol is send_from_directory",
+             lambda obj: _has(obj, "symbol", "send_from_directory")),
+            ("symbols include the Flask and Blueprint callers",
+             lambda obj: _has(obj, "symbols", "flask.send_static_file",
+                              "blueprint.send_static_file")),
+            ("tests include tests/test_helpers.py",
+             lambda obj: _has(obj, "tests", "tests/test_helpers.py")),
+            ("summary is non-empty",
+             lambda obj: bool(str(obj.get("summary") or "").strip())),
+        ],
+    },
+    {
+        "id": "repository_shape",
+        "kind": "repository shape",
+        "prompt": (
+            "Describe the repository shape: name, source file count, test file "
+            "count, Python module file paths (repository-relative), and the "
+            "test command or test convention. Reply with only "
+            "{\"name\": string, \"source_files\": integer, "
+            "\"test_files\": integer, \"modules\": [string], "
+            "\"test_command\": string}."
+        ),
+        "keys": ["name", "source_files", "test_files", "modules",
+                 "test_command"],
+        "checks": [
+            ("name is flask",
+             lambda obj: _has(obj, "name", "flask")),
+            ("source_files is 77",
+             lambda obj: _int_is(obj, "source_files", 77)),
+            ("test_files is 30",
+             lambda obj: _int_is(obj, "test_files", 30)),
+            ("modules include the core flask modules",
+             lambda obj: _has(obj, "modules", "src/flask/app.py",
+                              "src/flask/helpers.py",
+                              "src/flask/blueprints.py")),
+            ("test_command contains pytest",
+             lambda obj: _has(obj, "test_command", "pytest")),
+        ],
+    },
+]
+
+TASK_SETS: dict[str, list[dict[str, Any]]] = {
+    "tiny": TINY_TASKS,
+    "flask": FLASK_TASKS,
+}
+TASKS = TINY_TASKS  # backwards-compatible alias for the pinned tiny fixture
+
+
+def _engine_system(budget: int = TINY_BUDGET) -> str:
+    return (
+        "You have exactly one tool, graph: a read-only code graph. Ops: find, "
+        "outline, expand, impact, tests, context, shape, fetch. The transport "
+        "creates and closes the session for you; do not call hello or bye. Use "
+        f"budgets of at most {budget}. find may return speculative q handles; "
+        "fetch them with wait_ms 200 when useful. After at most six tool calls, "
+        "reply with only the JSON object the user asks for."
+    )
+
+
+def _short_system(budget: int = TINY_BUDGET) -> str:
+    return (
+        "You have one tool, graph: a read-only code graph. Use at most "
+        f"{budget}-token budgets. After at most six calls, reply with only the "
+        "requested JSON object."
+    )
+
+
+ENGINE_SYSTEM = _engine_system(TINY_BUDGET)
+SHORT_SYSTEM = _short_system(TINY_BUDGET)
 CONTROL_SYSTEM = SHORT_SYSTEM
 
 
@@ -751,9 +851,9 @@ def run_task(arm: EngineArm | ControlArm, arm_name: str, task: dict[str, Any],
              model: dict[str, Any]) -> dict[str, Any]:
     recorder = arm.recorder
     if arm_name == "engine":
-        system = ENGINE_SYSTEM
+        system = _engine_system(arm.budget)
     else:
-        system = SHORT_SYSTEM
+        system = _short_system(arm.budget)
 
     def tools_now() -> list[dict[str, Any]]:
         if arm_name == "control":
@@ -811,7 +911,8 @@ def run_task(arm: EngineArm | ControlArm, arm_name: str, task: dict[str, Any],
                         spec_value = True
                     recorder.tool_args.append({
                         "op": op,
-                        "budget": _budget(parsed_args.get("budget")),
+                        "budget": _budget(parsed_args.get("budget"),
+                                          arm.budget),
                         "spec": spec_value,
                         "keys": len(parsed_args.get("keys") or []),
                         "fetch": len(parsed_args.get("fetch") or []),
@@ -955,7 +1056,7 @@ def _summarise(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def interface_profile() -> dict[str, Any]:
+def interface_profile(budget: int = TINY_BUDGET) -> dict[str, Any]:
     """Model-facing prompt/tool overhead for each arm before a task prompt."""
     def size(system: str, schema: dict[str, Any],
              description: str) -> dict[str, Any]:
@@ -973,13 +1074,13 @@ def interface_profile() -> dict[str, Any]:
         }
 
     return {
-        "control": size(CONTROL_SYSTEM, _control_schema(),
+        "control": size(_short_system(budget), _control_schema(),
                         "Read-only code graph."),
-        "engine_legacy": size(ENGINE_SYSTEM, _engine_schema(),
+        "engine_legacy": size(_engine_system(budget), _engine_schema(),
                               "Stateful read-only graph session."),
-        "engine_opt_no_handles": size(SHORT_SYSTEM, _opt_schema(False),
+        "engine_opt_no_handles": size(_short_system(budget), _opt_schema(False),
                                      "Read-only code graph."),
-        "engine_opt_with_fetch": size(SHORT_SYSTEM, _opt_schema(True),
+        "engine_opt_with_fetch": size(_short_system(budget), _opt_schema(True),
                                       "Read-only code graph."),
     }
 
@@ -997,12 +1098,22 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
                         help="running ozagia engine base URL")
     parser.add_argument("--engine-token-file", default=os.environ.get(
         ENGINE_TOKEN_FILE_ENV, DEFAULT_ENGINE_TOKEN_FILE))
-    parser.add_argument("--fixture", default=DEFAULT_FIXTURE)
+    parser.add_argument("--fixture", "--repo", dest="fixture",
+                        default=DEFAULT_FIXTURE,
+                        help="repository path this run's tasks and snapshot describe")
+    parser.add_argument("--task-set", choices=tuple(TASK_SETS), default="tiny",
+                        help="task set to run (default: the tiny fixture)")
+    parser.add_argument("--budget", type=int, default=None,
+                        help="per-call estimated-token cap (default: 800 tiny, "
+                             "1200 flask)")
     parser.add_argument("--arm",
                         choices=("engine", "engine_opt", "control", "both",
                                  "all"),
                         default="both")
-    parser.add_argument("--task", action="append", choices=[task["id"] for task in TASKS],
+    parser.add_argument("--task", action="append",
+                        choices=list(dict.fromkeys(
+                            [task["id"] for task in TASKS]
+                            + [task["id"] for task in FLASK_TASKS])),
                         help="run only this task id (repeatable)")
     parser.add_argument("--repeat", type=int, default=1,
                         help="repeat the selected tasks in sequence (default 1)")
@@ -1015,6 +1126,9 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
                         help="write the full measurement JSON here")
     parser.add_argument("--no-spec-probe", action="store_true",
                         help="skip the deterministic find/fetch speculation probe")
+    parser.add_argument("--spec-probe-query", default=None,
+                        help="query for the deterministic speculation probe "
+                             "(default: average for tiny, get_root_path for flask)")
     return parser.parse_args(argv)
 
 
@@ -1035,10 +1149,26 @@ def main(argv: list[str] | None = None) -> int:
         print("error: --max-tool-calls must be between 1 and 12",
               file=sys.stderr)
         return 2
-    selected = [task for task in TASKS
+    if not Path(args.fixture).expanduser().is_dir():
+        print(f"error: --fixture/--repo is not a directory: {args.fixture}",
+              file=sys.stderr)
+        return 2
+    budget = args.budget if args.budget is not None else (
+        REPO_BUDGET if args.task_set == "flask" else TINY_BUDGET)
+    if not (64 <= budget <= MAX_EVAL_BUDGET):
+        print(f"error: --budget must be between 64 and {MAX_EVAL_BUDGET}",
+              file=sys.stderr)
+        return 2
+    selected = [task for task in TASK_SETS[args.task_set]
                 if not args.task or task["id"] in args.task]
     if not selected:
         print("error: no tasks selected", file=sys.stderr)
+        return 2
+    if args.task and any(task_id not in
+                         {t["id"] for t in TASK_SETS[args.task_set]}
+                         for task_id in args.task):
+        print(f"error: selected --task ids are not in the {args.task_set} set",
+              file=sys.stderr)
         return 2
 
     try:
@@ -1078,6 +1208,8 @@ def main(argv: list[str] | None = None) -> int:
             "model": {"id": args.model, "root": model_root,
                       "base_url": args.base_url},
             "fixture": str(Path(args.fixture).resolve()),
+            "task_set": args.task_set,
+            "budget": budget,
             "engine_url": args.engine_url,
             "engine_health": health,
             "config": {
@@ -1090,20 +1222,20 @@ def main(argv: list[str] | None = None) -> int:
                 "final_tokens": args.final_tokens,
                 "repeat": args.repeat,
                 "counterbalance": args.counterbalance,
-                "engine_default_budget": DEFAULT_BUDGET,
+                "engine_default_budget": budget,
                 "engine_find_spec_default": True,
                 "engine_fetch_wait_ms_default": 200,
                 "control_session": "fresh hello/bye per call",
                 "optimized_fetch": "schema property only while q handles exist",
             },
-            "system_prompts": {"engine": ENGINE_SYSTEM,
-                               "engine_opt": SHORT_SYSTEM,
-                               "control": CONTROL_SYSTEM},
+            "system_prompts": {"engine": _engine_system(budget),
+                               "engine_opt": _short_system(budget),
+                               "control": _short_system(budget)},
             "tools": {"engine": _engine_schema(),
                       "control": _control_schema(),
                       "engine_opt_base": _opt_schema(False),
                       "engine_opt_fetch": _opt_schema(True)},
-            "overhead": interface_profile(),
+            "overhead": interface_profile(budget),
             "arm_order": [],
             "tasks": {task["id"]: {"kind": task["kind"],
                                    "prompt": task["prompt"],
@@ -1122,11 +1254,12 @@ def main(argv: list[str] | None = None) -> int:
                     recorder = Recorder()
                     arm: EngineArm | ControlArm
                     if arm_name == "control":
-                        arm = ControlArm(client, recorder)
+                        arm = ControlArm(client, recorder, budget=budget)
                     else:
                         interface = ("optimized" if arm_name == "engine_opt"
                                      else "legacy")
-                        arm = EngineArm(client, recorder, interface=interface)
+                        arm = EngineArm(client, recorder, interface=interface,
+                                        budget=budget)
                     print(f"[{arm_name}] repeat {repeat + 1} task {task['id']}",
                           file=sys.stderr, flush=True)
                     row = run_task(arm, arm_name, task, model)
@@ -1143,7 +1276,10 @@ def main(argv: list[str] | None = None) -> int:
         if not args.no_spec_probe:
             print("[engine] deterministic spec probe", file=sys.stderr,
                   flush=True)
-            results["spec_probe"] = run_spec_probe(client)
+            probe_query = args.spec_probe_query or (
+                "get_root_path" if args.task_set == "flask" else "average")
+            results["spec_probe"] = run_spec_probe(
+                client, query=probe_query, budget=budget)
         if args.out:
             out_path = Path(args.out).expanduser()
             out_path.parent.mkdir(parents=True, exist_ok=True)
