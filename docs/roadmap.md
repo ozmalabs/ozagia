@@ -28,7 +28,7 @@ The 0.1.x line delivered the core platform and then Rust parity:
 | Research | Sources, references, claims, evidence, synthesis, theory, PDF/TEI, citation graph, manuscript bundles |
 | Infrastructure | Source-only Terraform/Kubernetes/Helm/CloudFormation/Pulumi/GitOps graph, offline IaC checks, operations graph, runtime services/relays/tunnels behind explicit gates |
 | Federation | Sibling/explicit-member snapshots, qualified identities, read-only cross-repo search and declared links |
-| Model interface | Contracts, read-only self-graph/capabilities, task preflight and evidence store, task profile/critical path, model-facing maps (M3), a bounded structured edit/interaction path (M4), an offline prefetch planner/ledger, a stateful compact graph-engine prototype with bounded fork-isolated background speculation and a thread fallback, and partial M5 linked/research/action joins with optional Ocelot research projection; M6 has an offline harness and one live run invalid for the map arm |
+| Model interface | Contracts, read-only self-graph/capabilities, task preflight and evidence store, task profile/critical path, model-facing maps (M3), a bounded structured edit/interaction path (M4), an offline prefetch planner/ledger, a stateful compact graph-engine prototype with supervised, resource-bounded fork-isolated background speculation and a thread fallback, and partial M5 linked/research/action joins with optional Ocelot research projection; M6 has an offline harness and one live run invalid for the map arm |
 
 The capability catalogue currently declares **104 capabilities across 14
 domains and 166 surfaces** (`ozagia capabilities list --json`). That number is
@@ -487,14 +487,28 @@ A first **stateful graph-engine prototype** also landed (2026-11-25):
 `OZAGIA_SURFACE=engine` exposes one `graph` tool with `hello` sessions, compact
 tabular rows, hard estimated-token budgets, `known` outline/context deltas and
 bounded background speculation (`spec`/`fetch`). Computation and parent
-application are separate: a forked child per engine computes `(handle,
-payload)` results and a parent IPC listener applies them after validating
-snapshot, freshness, scope, generation and expiry. A thread worker is the
-fallback when fork is unavailable or the child dies. `OZAGIA_ENGINE_SPEC=0`
-disables speculation; `OZAGIA_ENGINE_SPEC_PROCESS=0` forces the thread worker.
-`bye`/engine close stop and reap the child/listener, with a 300 ms worker
-deadline, 30 s entry expiry and bounded 250 ms fetch waits. One long graph call
-is still not preempted. The protocol is in
+application are separate: a supervised forked child per engine computes
+`(handle, payload)` results and a parent IPC listener applies them after
+validating snapshot, freshness, scope, generation, expiry and child epoch. The
+supervisor uses liveness plus an idle heartbeat, restarts an unexpectedly dead
+child with bounded exponential backoff, and enforces a hard per-job watchdog
+that kills and replaces a child whose call overruns the worker budget plus
+grace. The child applies per-child `RLIMIT_AS`/`RLIMIT_CPU` where supported
+(2 GiB / 300 s defaults). A thread worker is the fallback when fork is
+unavailable, the child cannot be restarted, or restarts are exhausted; thread
+mode cannot preempt. `OZAGIA_ENGINE_SPEC=0` disables speculation;
+`OZAGIA_ENGINE_SPEC_PROCESS=0` forces the thread worker;
+`OZAGIA_ENGINE_SPEC_MS`, `OZAGIA_ENGINE_SPEC_GRACE_MS`,
+`OZAGIA_ENGINE_SPEC_RESTARTS`, `OZAGIA_ENGINE_SPEC_BACKOFF_MS`,
+`OZAGIA_ENGINE_SPEC_MEM_MB` and `OZAGIA_ENGINE_SPEC_CPU_S` tune the bounds.
+`stats: true` adds a bounded worker summary (`st.w`: mode, restarts, crashes,
+kills, timeouts, queue, job/deadline, last error and applied limits) with no
+graph content. `bye`/engine close stop and reap the supervisor, child and
+listener, with a 300 ms worker deadline (plus 250 ms default hard-timeout
+grace), 30 s entry expiry and bounded 250 ms fetch waits. Supervised restart,
+hard timeout, resource reporting, duplicate/stale discard and close during a
+job/restart are test-covered; the earlier corpus measurement predates them and
+is not re-run here. The protocol is in
 `docs/plans/2026-11-25_graph_engine_protocol.md`, the guide in
 `docs/graph_engine.md`, and the prototype measurements in
 `docs/results/graph_engine_prototype_2026-11-25.md` and
@@ -508,9 +522,9 @@ candidate took about 1.2 s, and was ready later (1,500 ms think: 3,131/5,
 hit_rate 1.0). These are wire/overlap measurements, not model-task gains. The
 local OpenAI-compatible endpoint check (`127.0.0.1:8000`) was refused, so the
 live-model run remains blocked behind `--live`, `OZAGIA_EVAL_LIVE=1` and human
-approval. Next: a supervised, resource-bounded long-lived worker with
-preemption or cancellation for a long graph call, broader hit/waste evaluation,
-and an optional Ozma transport (out of this slice).
+approval. Next: a long-lived shared worker, in-call cancellation or splitting of
+expensive operations, broader hit/waste and timeout evaluation, and an optional
+Ozma transport (out of this slice).
 
 **Exit criteria**
 

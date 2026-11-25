@@ -130,12 +130,24 @@ time, and `q.p` is the number of further suggestions. A single worker prepares
 at most two payloads **after** the response, while the model is thinking. The
 handler never waits for it.
 
-When fork is available, the worker is a forked child process per engine: the
-child computes `(handle, payload)` results against its inherited graph snapshot
-and a small parent listener thread applies them after revalidating the session
-snapshot/scope/generation/expiry. If fork is unavailable or the child fails,
-the engine falls back to the in-process daemon thread. `bye` cancels that
-session's work; engine shutdown joins/terminates the child and listener.
+When fork is available, the worker is a **supervised forked child process** per
+engine: the child computes `(handle, payload)` results against its inherited
+graph snapshot and a small parent listener thread applies them after
+revalidating the session snapshot/scope/generation/expiry. The supervisor
+tracks liveness and an idle heartbeat, restarts an unexpectedly dead child with
+bounded exponential backoff, and enforces a hard per-job watchdog. If a single
+graph call overruns the worker deadline plus grace, the child is killed, that
+child's outstanding handles are cancelled, and a fresh child serves later
+work. A late result from a replaced child is discarded by its epoch. If fork is
+unavailable, the child cannot be restarted, or restarts are exhausted, the
+engine falls back to the in-process daemon thread. `bye` cancels that session's
+work; engine shutdown stops the supervisor, child and listener. Thread mode can
+check its deadline between candidates but **cannot preempt a running call**.
+
+The child applies per-child resource limits where the platform supports them:
+address space 2 GiB (`OZAGIA_ENGINE_SPEC_MEM_MB`, 0 disables) and cumulative CPU
+300 s (`OZAGIA_ENGINE_SPEC_CPU_S`, 0 disables). These are per child, not per
+job, and are reported as `applied`/`unsupported`/`errors` in worker stats.
 
 Fetch one or more:
 
@@ -154,16 +166,33 @@ and `fetch`):
 ```json
 {"st": {"prepared": 2, "fetched": 2, "wasted": 0, "evicted": 0,
         "cancelled": 0, "worker_ms": 1.0, "hits": 2, "misses": 0,
-        "hit_rate": 1.0}}
+        "hit_rate": 1.0,
+        "w": {"mode": "process", "preemptible": true, "restarts": 0,
+              "crashes": 0, "kills": 0, "timeouts": 0, "queue": 0,
+              "job": null, "deadline_ms": null, "last_error": null,
+              "limits": {"per_child": true, "hard_timeout_ms": 550.0,
+                         "applied": {"address_space": 2147483648,
+                                     "cpu": 300}}}}}
 ```
+
+`st.w` is a bounded supervisor summary with no rows, keys, paths or graph
+content. In thread fallback it reports `"preemptible": false`,
+`"hard_timeout_ms": null` and `"isolation": "thread"`. `worker_mode` is
+`process` while a child serves, `restarting` while a replacement is pending,
+and `thread` after the fallback is permanent.
 
 The worker captures the session's snapshot, scope, generation, budget and
 deadline. It discards results if the snapshot/scope/generation changes, the
-session is evicted or closed, or the entry expires. `OZAGIA_ENGINE_SPEC=0`
-disables speculation; `OZAGIA_ENGINE_SPEC_PROCESS=0` forces the thread worker;
-`OZAGIA_ENGINE_SPEC_MS` bounds the worker time (default 300 ms). One long graph
-call is still not preempted, so on larger repositories a candidate can overrun
-the think window; the larger-repository result records this.
+session is evicted or closed, the entry expires, or the result comes from a
+replaced child. `OZAGIA_ENGINE_SPEC=0` disables speculation;
+`OZAGIA_ENGINE_SPEC_PROCESS=0` forces the thread worker;
+`OZAGIA_ENGINE_SPEC_MS` bounds the worker time (default 300 ms);
+`OZAGIA_ENGINE_SPEC_GRACE_MS` sets the watchdog grace (default 250 ms);
+`OZAGIA_ENGINE_SPEC_RESTARTS` and `OZAGIA_ENGINE_SPEC_BACKOFF_MS` bound
+restarts; `OZAGIA_ENGINE_SPEC_MEM_MB` and `OZAGIA_ENGINE_SPEC_CPU_S` bound
+per-child resources. The hard watchdog now preempts one long graph call at
+process granularity instead of letting it overrun indefinitely; thread mode
+still cannot preempt.
 
 ## Freshness and safety
 
@@ -185,12 +214,22 @@ written to the checkout.
 ## Current limits
 
 - Process-local sessions; a restart loses them.
-- Speculation is one fork child or one fallback daemon thread. Fork gives
-  isolation from parent sessions, but the child has no separate CPU/memory
-  budget and inherits a fork-time graph snapshot. One in-flight graph call can
-  overrun the worker deadline because it is not preempted.
+- Speculation is one supervised fork child (plus listener/supervisor threads)
+  or one fallback daemon thread. The child applies per-child address-space and
+  cumulative-CPU limits, but these are not per-job quotas and fork still
+  inherits a fork-time graph snapshot. Preemption is at process granularity:
+  the watchdog kills and replaces the child, so a legitimate very long call is
+  cancelled rather than resumed. The thread fallback cannot preempt at all.
+- Restarts are bounded (three consecutive by default); after that later
+  speculation uses the non-preemptive thread fallback for that engine.
+- Restart forks from a process that still has threads (the supervisor, and
+  possibly the old listener). The child only builds a read-only engine, but
+  Python may warn about fork in a multi-threaded process; a long-lived
+  daemon/forkserver would avoid this.
 - Hit-rate/waste is measured on a few local corpus checkouts with simulated
   think time, not real model latency or a broad repository sample.
+- Supervision and hard-timeout behaviour are covered by tests, not by the
+  corpus measurement; that measurement predates them.
 - A compact 16-hex content hash for `known`, not a cryptographic identity.
 - One snapshot per session; federation is not part of this surface.
 - Prototype wire/readiness measurements, not model-task gains:

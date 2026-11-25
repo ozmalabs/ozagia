@@ -17,10 +17,15 @@ Wire version: ``ozagia.graph_engine/2``.  See
 ``docs/graph_engine.md``.
 
 Speculation is asynchronous in this slice: after a response with ``spec=true``
-the engine queues at most six suggestions, a single in-process daemon worker
-prepares at most two bounded payloads, and the handler returns without waiting
-for it.  The worker is generation/snapshot/scope checked, deadline-bounded and
-cancellable.  It still shares the interpreter's GIL and is not a daemon process.
+the engine queues at most six suggestions and a single background worker
+prepares at most two bounded payloads; the handler returns without waiting for
+it.  The preferred worker is a supervised forked child with per-child
+``RLIMIT_AS``/``RLIMIT_CPU`` limits, an idle heartbeat, bounded exponential
+restart and a hard per-job watchdog that preempts a long call at process
+granularity.  A generation/snapshot/scope/expiry check still governs every
+apply.  A daemon thread is the fallback when fork is unavailable, the child
+cannot be restarted, or ``OZAGIA_ENGINE_SPEC_PROCESS=0``; thread mode cannot
+preempt a running graph call.
 """
 from __future__ import annotations
 
@@ -51,6 +56,27 @@ SPEC_WORKER_BUDGET_MS = 300
 MAX_FETCH_WAIT_MS = 250
 SPEC_QUEUE_SIZE = 8
 MAX_ROWS = 200
+
+# Worker supervision and resource bounds.  Every value is per forked child, not
+# per job: RLIMIT_CPU is cumulative for the child's lifetime, RLIMIT_AS is the
+# child's address space, and a hard timeout kills and replaces the whole child.
+SPEC_GRACE_MS = 250
+SPEC_GRACE_MAX_MS = 5000
+SPEC_MEM_MB = 2048
+SPEC_MEM_MAX_MB = 65536
+SPEC_CPU_S = 300
+SPEC_CPU_MAX_S = 86400
+SPEC_RESTART_MAX = 3
+SPEC_RESTART_BASE_MS = 50
+SPEC_RESTART_MAX_MS = 2000
+SPEC_HEARTBEAT_S = 0.5
+SPEC_HEARTBEAT_STALE_S = 3.0
+SPEC_SUPERVISE_S = 0.05
+
+try:  # POSIX only; a missing module is reported, never fatal
+    import resource as _resource
+except ImportError:  # pragma: no cover - Windows has no fork worker either
+    _resource = None
 
 OPS = ("hello", "find", "outline", "expand", "impact", "tests", "context",
        "shape", "fetch", "bye")
@@ -195,6 +221,80 @@ def _worker_budget_s() -> float:
     return max(0.05, min(2.0, milliseconds / 1000.0))
 
 
+def _int_env(name: str, default: int, low: int, high: int,
+             *, zero_ok: bool = False) -> int:
+    raw = os.environ.get(name)
+    try:
+        number = int(raw) if raw is not None else default
+    except ValueError:
+        number = default
+    if zero_ok and number == 0:
+        return 0
+    return max(low, min(high, number))
+
+
+def _spec_grace_s() -> float:
+    return _int_env("OZAGIA_ENGINE_SPEC_GRACE_MS", SPEC_GRACE_MS, 0,
+                    SPEC_GRACE_MAX_MS, zero_ok=True) / 1000.0
+
+
+def _spec_mem_mb() -> int:
+    return _int_env("OZAGIA_ENGINE_SPEC_MEM_MB", SPEC_MEM_MB, 64,
+                    SPEC_MEM_MAX_MB, zero_ok=True)
+
+
+def _spec_cpu_s() -> int:
+    return _int_env("OZAGIA_ENGINE_SPEC_CPU_S", SPEC_CPU_S, 1,
+                    SPEC_CPU_MAX_S, zero_ok=True)
+
+
+def _spec_restarts() -> int:
+    return _int_env("OZAGIA_ENGINE_SPEC_RESTARTS", SPEC_RESTART_MAX, 0, 10,
+                    zero_ok=True)
+
+
+def _spec_backoff_s() -> float:
+    return _int_env("OZAGIA_ENGINE_SPEC_BACKOFF_MS", SPEC_RESTART_BASE_MS, 1,
+                    SPEC_RESTART_MAX_MS) / 1000.0
+
+
+def _short_error(value: Any, limit: int = 160) -> str:
+    text = " ".join(str(value).split())
+    return text[:limit]
+
+
+def _apply_child_limits(mem_mb: int, cpu_s: int) -> dict[str, Any]:
+    """Apply per-child limits; report what worked rather than failing.
+
+    ``RLIMIT_AS`` bounds the child's address space and ``RLIMIT_CPU`` bounds
+    cumulative CPU time for the whole child, not one speculation job.  Both
+    are best-effort: a platform without ``resource`` or a refused hard limit is
+    reported to the parent and the job still runs.
+    """
+    report: dict[str, Any] = {"applied": {}, "unsupported": [],
+                              "errors": []}
+    if _resource is None:
+        report["unsupported"].append("resource")
+        return report
+    checks = (
+        ("address_space", "RLIMIT_AS", mem_mb * 1024 * 1024),
+        ("cpu", "RLIMIT_CPU", cpu_s),
+    )
+    for label, attribute, value in checks:
+        if value <= 0:
+            continue
+        identifier = getattr(_resource, attribute, None)
+        if identifier is None:
+            report["unsupported"].append(attribute)
+            continue
+        try:
+            _resource.setrlimit(identifier, (value, value))
+            report["applied"][label] = value
+        except (OSError, ValueError) as exc:
+            report["errors"].append(f"{attribute}: {_short_error(exc, 80)}")
+    return report
+
+
 def _span(start: Any, end: Any = None) -> list[int] | None:
     if start in (None, ""):
         return None
@@ -307,6 +407,9 @@ class BackgroundSpecWorker:
             maxsize=max(1, int(queue_size)))
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._lock = threading.Lock()
+        self._current: SpecJob | None = None
+        self._current_since = 0.0
 
     def _ensure_thread(self) -> None:
         if self._thread is not None:
@@ -333,11 +436,16 @@ class BackgroundSpecWorker:
                 continue
             if job is None:
                 return
+            with self._lock:
+                self._current = job
+                self._current_since = time.monotonic()
             try:
                 self.engine._run_spec_job(job)
             except Exception:  # noqa: BLE001 - a worker failure cancels its job
                 self.engine._cancel_job(job, "worker_error")
             finally:
+                with self._lock:
+                    self._current = None
                 self._queue.task_done()
 
     def close(self, timeout: float = 1.0) -> None:
@@ -360,6 +468,29 @@ class BackgroundSpecWorker:
     @property
     def mode(self) -> str:
         return "closed" if self._stop.is_set() else "thread"
+
+    def stats(self) -> dict[str, Any]:
+        """Bounded worker state; thread mode cannot preempt a running call."""
+        now = time.monotonic()
+        with self._lock:
+            job = self._current
+            started = self._current_since
+        budget = max(0.0, float(getattr(self.engine, "worker_budget_s", 0.0)))
+        return {
+            "mode": self.mode,
+            "isolation": "thread",
+            "preemptible": False,
+            "hard_timeout_ms": None,
+            "deadline_ms": (round(max(0.0, started + budget - now) * 1000.0, 1)
+                            if job is not None else None),
+            "job": job.job_id if job is not None else None,
+            "restarts": 0,
+            "crashes": 0,
+            "kills": 0,
+            "timeouts": 0,
+            "last_error": None,
+            "limits": {"preemptible": False, "isolation": "thread"},
+        }
 
 
 class InlineSpecWorker:
@@ -385,6 +516,21 @@ class InlineSpecWorker:
     def close(self, timeout: float = 1.0) -> None:
         self.closed = True
 
+    def stats(self) -> dict[str, Any]:
+        return {
+            "mode": self.mode,
+            "isolation": "inline",
+            "preemptible": False,
+            "hard_timeout_ms": None,
+            "job": None,
+            "restarts": 0,
+            "crashes": 0,
+            "kills": 0,
+            "timeouts": 0,
+            "last_error": None,
+            "limits": {"preemptible": False, "isolation": "inline"},
+        }
+
 
 def _fork_available() -> bool:
     try:
@@ -395,8 +541,18 @@ def _fork_available() -> bool:
 
 
 def _process_spec_main(conn: Any, memory: Any, root: str,
-                       worker_budget_s: float) -> None:
-    """Child loop: compute payloads only; never apply parent session state."""
+                       worker_budget_s: float, mem_mb: int,
+                       cpu_s: int) -> None:
+    """Child loop: limits, heartbeat, payloads; never apply session state."""
+    limits = _apply_child_limits(mem_mb, cpu_s)
+    try:
+        conn.send({"ready": True, "limits": limits, "pid": os.getpid()})
+    except (OSError, EOFError):
+        try:
+            conn.close()
+        except OSError:
+            pass
+        return
     try:
         engine = GraphEngine(memory, workspace=root, spec_enabled=False)
         engine.worker_budget_s = worker_budget_s
@@ -409,6 +565,9 @@ def _process_spec_main(conn: Any, memory: Any, root: str,
         return
     while True:
         try:
+            if not conn.poll(SPEC_HEARTBEAT_S):
+                conn.send({"hb": time.monotonic()})
+                continue
             job = conn.recv()
         except (EOFError, OSError):
             break
@@ -433,73 +592,265 @@ def _process_spec_main(conn: Any, memory: Any, root: str,
 
 
 class ProcessSpecWorker:
-    """One forked child computes payloads; a parent listener applies them.
+    """One supervised forked child computes payloads; a parent listener applies.
 
     The child inherits the graph snapshot through ``fork`` and builds its own
     ``GraphEngine`` with speculation disabled.  It sends ``PreparedSpec``
     messages; the parent validates the session generation/snapshot/scope/expiry
-    before applying anything.  If the child dies or cannot be started, new
-    jobs go to the thread fallback and outstanding jobs are cancelled.
+    before applying anything.  A supervisor thread polls liveness and idle
+    heartbeats, restarts an unexpectedly dead child with bounded exponential
+    backoff, and enforces a hard per-job watchdog.  A job that overruns
+    ``worker_budget_s`` plus a configurable grace is preempted at process
+    granularity: the child is killed, every outstanding handle of that child is
+    cancelled, and a fresh child serves later work.  If restarts are exhausted,
+    later jobs go to the thread fallback, which cannot preempt a running call.
+
+    The child applies per-child ``RLIMIT_AS``/``RLIMIT_CPU`` when the platform
+    supports it and reports what was applied.  This is not a per-job quota.
     """
 
     def __init__(self, engine: "GraphEngine", *,
-                 queue_size: int = SPEC_QUEUE_SIZE) -> None:
+                 queue_size: int = SPEC_QUEUE_SIZE,
+                 clock: Callable[[], float] | None = None,
+                 supervise: bool = True) -> None:
         self.engine = engine
         self.queue_size = max(1, int(queue_size))
         self._ctx = multiprocessing.get_context("fork")
         self._lock = threading.RLock()
         self._stop = threading.Event()
+        self._clock = clock or getattr(engine, "_clock", time.monotonic)
+        self._supervise = bool(supervise)
         self._parent_conn: Any = None
         self._process: Any = None
         self._listener: threading.Thread | None = None
-        self._jobs: dict[str, SpecJob] = {}
+        self._supervisor: threading.Thread | None = None
+        self._jobs: dict[str, tuple[int, SpecJob]] = {}
+        self._current: tuple[int, SpecJob] | None = None
+        self._current_since = 0.0
+        self._epoch = 0
+        self._last_heartbeat = 0.0
+        self._limits: dict[str, Any] = {}
+        self._desired = False
+        self._started = False
+        self._permanent_fallback = False
+        self._restart_streak = 0
+        self._next_restart_at = 0.0
+        self._grace_s = _spec_grace_s()
+        self._max_restarts = _spec_restarts()
+        self._backoff_s = _spec_backoff_s()
+        self._mem_mb = _spec_mem_mb()
+        self._cpu_s = _spec_cpu_s()
+        self._counts = {
+            "restarts": 0, "crashes": 0, "kills": 0, "timeouts": 0,
+            "spawn_failures": 0, "heartbeat_failures": 0,
+        }
+        self._last_error: str | None = None
         self._fallback: BackgroundSpecWorker | None = None
-        self._dead = False
 
     @property
     def mode(self) -> str:
         with self._lock:
             if self._stop.is_set():
                 return "closed"
-            if self._process is not None and self._process.is_alive() and not self._dead:
-                return "process"
-            if self._fallback is not None:
+            if self._permanent_fallback:
                 return "thread"
-            if self._process is None and not self._dead:
+            process = self._process
+            if process is not None and process.is_alive():
                 return "process"
-            return "dead"
+            if self._started:
+                return "restarting"
+            return "process"
 
     @property
     def alive(self) -> bool:
         with self._lock:
             process = self._process
             listener = self._listener
+            supervisor = self._supervisor
             fallback = self._fallback
+            stopped = self._stop.is_set()
         return bool((process is not None and process.is_alive())
                     or (listener is not None and listener.is_alive())
+                    or (supervisor is not None and supervisor.is_alive()
+                        and not stopped)
                     or (fallback is not None and fallback.alive))
 
-    def _ensure_process_locked(self) -> None:
-        if self._process is not None:
+    # -- supervision -------------------------------------------------------- #
+    def _ensure_supervisor_locked(self) -> None:
+        if not self._supervise or self._supervisor is not None:
             return
-        parent, child = self._ctx.Pipe(duplex=True)
-        process = self._ctx.Process(
-            target=_process_spec_main,
-            args=(child, self.engine.mem, str(self.engine.root),
-                  self.engine.worker_budget_s),
-            name="ozagia-engine-spec-proc", daemon=True)
+        self._supervisor = threading.Thread(
+            target=self._supervise_loop, name="ozagia-engine-spec-supervisor",
+            daemon=True)
+        self._supervisor.start()
+
+    def _supervise_loop(self) -> None:
+        while not self._stop.wait(SPEC_SUPERVISE_S):
+            try:
+                self._supervise_once()
+            except Exception as exc:  # noqa: BLE001 - supervision must survive
+                with self._lock:
+                    self._last_error = _short_error(
+                        f"supervisor: {type(exc).__name__}: {exc}")
+
+    def _supervise_once(self) -> None:
+        """One health/restart/watchdog step; tests may call this directly."""
+        now = self._clock()
+        cancel: list[tuple[SpecJob, str]] = []
+        stopping: Any = None
+        with self._lock:
+            if self._stop.is_set() or not self._desired:
+                return
+            process = self._process
+            if process is not None and not process.is_alive():
+                dropped, stopping = self._handle_dead_locked(now)
+                cancel.extend((job, "worker_died") for job in dropped)
+            elif process is not None and process.is_alive():
+                if self._current is not None:
+                    hard = (self._current_since
+                            + float(self.engine.worker_budget_s)
+                            + self._grace_s)
+                    if now >= hard:
+                        dropped, stopping = self._kill_locked(now, "timeout")
+                        cancel.extend((job, "preempted") for job in dropped)
+                elif now - self._last_heartbeat > SPEC_HEARTBEAT_STALE_S:
+                    dropped, stopping = self._kill_locked(
+                        now, "heartbeat_lost")
+                    cancel.extend((job, "worker_died") for job in dropped)
+            if (self._process is None and not self._permanent_fallback
+                    and now >= self._next_restart_at):
+                self._try_spawn_locked(now)
+        if stopping is not None:
+            self._terminate(stopping)
+        for job, reason in cancel:
+            self.engine._cancel_job(job, reason)
+
+    def _try_spawn_locked(self, now: float) -> bool:
+        if self._stop.is_set() or self._permanent_fallback:
+            return False
         try:
+            self._spawn_child_locked(now)
+            return True
+        except Exception as exc:  # noqa: BLE001 - fall back or retry
+            self._counts["spawn_failures"] += 1
+            self._last_error = _short_error(
+                f"spawn: {type(exc).__name__}: {exc}")
+            self._restart_streak += 1
+            self._schedule_restart_locked(now)
+            return False
+
+    def _spawn_child_locked(self, now: float) -> None:
+        was_started = self._started
+        parent, child = self._ctx.Pipe(duplex=True)
+        try:
+            process = self._make_process(child)
             process.start()
         except Exception:
             parent.close()
             child.close()
             raise
         child.close()
+        self._epoch += 1
+        epoch = self._epoch
+        self._started = True
         self._parent_conn = parent
         self._process = process
+        self._last_heartbeat = now
+        self._next_restart_at = 0.0
+        if was_started:
+            self._counts["restarts"] += 1
         self._listener = threading.Thread(
-            target=self._listen, name="ozagia-engine-spec-ipc", daemon=True)
+            target=self._listen, args=(parent, epoch),
+            name="ozagia-engine-spec-ipc", daemon=True)
         self._listener.start()
+
+    def _make_process(self, child: Any) -> Any:
+        """Seam for tests to inject a spawn failure or a fake child."""
+        return self._ctx.Process(
+            target=_process_spec_main,
+            args=(child, self.engine.mem, str(self.engine.root),
+                  self.engine.worker_budget_s, self._mem_mb, self._cpu_s),
+            name="ozagia-engine-spec-proc", daemon=True)
+
+    def _schedule_restart_locked(self, now: float) -> None:
+        if self._restart_streak > self._max_restarts:
+            self._permanent_fallback = True
+            self._next_restart_at = float("inf")
+            self._ensure_fallback_locked()
+            return
+        attempt = max(1, self._restart_streak)
+        delay = min(SPEC_RESTART_MAX_MS / 1000.0,
+                    self._backoff_s * (2 ** (attempt - 1)))
+        self._next_restart_at = now + delay
+
+    def _handle_dead_locked(
+            self, now: float) -> tuple[list[SpecJob], Any]:
+        process = self._process
+        code: Any = None
+        if process is not None:
+            try:
+                code = process.exitcode
+            except (OSError, ValueError):
+                code = None
+        self._process = None
+        self._parent_conn = None
+        self._counts["crashes"] += 1
+        self._last_error = _short_error(
+            f"child exited unexpectedly (code {code})")
+        dropped = self._drop_epoch_locked(self._epoch)
+        self._restart_streak += 1
+        self._schedule_restart_locked(now)
+        return dropped, process
+
+    def _kill_locked(self, now: float,
+                     reason: str) -> tuple[list[SpecJob], Any]:
+        process = self._process
+        self._process = None
+        self._parent_conn = None
+        self._counts["kills"] += 1
+        if reason == "timeout":
+            self._counts["timeouts"] += 1
+            self._last_error = _short_error(
+                "hard job deadline exceeded; child replaced")
+        else:
+            self._counts["heartbeat_failures"] += 1
+            self._last_error = "child heartbeat lost; child replaced"
+        dropped = self._drop_epoch_locked(self._epoch)
+        self._restart_streak += 1
+        self._schedule_restart_locked(now)
+        return dropped, process
+
+    @staticmethod
+    def _terminate(process: Any, grace: float = 0.2) -> None:
+        if process is None:
+            return
+        try:
+            if process.is_alive():
+                process.terminate()
+            process.join(grace)
+            if process.is_alive():
+                process.kill()
+                process.join(grace)
+        except (OSError, ValueError):
+            pass
+
+    def _drop_epoch_locked(self, epoch: int) -> list[SpecJob]:
+        dropped = [job for (owner, job) in self._jobs.values()
+                   if owner == epoch]
+        for job in dropped:
+            self._jobs.pop(job.job_id, None)
+        if self._current is not None and self._current[0] == epoch:
+            self._current = None
+        self._promote_current_locked(self._clock())
+        return dropped
+
+    def _promote_current_locked(self, now: float) -> None:
+        if self._current is not None:
+            return
+        for owner, job in self._jobs.values():
+            self._current = (owner, job)
+            self._current_since = now
+            return
 
     def _ensure_fallback_locked(self) -> None:
         if self._fallback is None:
@@ -508,61 +859,185 @@ class ProcessSpecWorker:
     def submit(self, job: SpecJob) -> bool:
         if self._stop.is_set():
             return False
+        dropped: list[SpecJob] = []
+        stopping: Any = None
+        fallback: BackgroundSpecWorker | None = None
         with self._lock:
-            if self._process is not None and not self._process.is_alive():
-                self._dead = True
-            if not self._dead:
+            self._desired = True
+            process = self._process
+            if process is not None and not process.is_alive():
+                process = None  # the supervisor reaps and restarts
+            if (process is None and not self._started
+                    and not self._permanent_fallback):
+                # First fork happens before the supervisor/listener threads
+                # exist, which keeps the common path single-threaded.
+                self._try_spawn_locked(self._clock())
+                process = self._process
+            self._ensure_supervisor_locked()
+            if (process is not None and process.is_alive()
+                    and len(self._jobs) < self.queue_size):
+                self._jobs[job.job_id] = (self._epoch, job)
+                self._promote_current_locked(self._clock())
                 try:
-                    self._ensure_process_locked()
-                except Exception:  # noqa: BLE001 - fork is not usable here
-                    self._dead = True
-            if not self._dead and self._process is not None:
-                if self._process.is_alive():
-                    self._jobs[job.job_id] = job
-                    try:
-                        self._parent_conn.send(job)
-                        return True
-                    except (OSError, EOFError, BrokenPipeError):
-                        self._jobs.pop(job.job_id, None)
-                        self._dead = True
+                    self._parent_conn.send(job)
+                    return True
+                except (OSError, EOFError, BrokenPipeError) as exc:
+                    self._jobs.pop(job.job_id, None)
+                    if self._current is not None and self._current[1] is job:
+                        self._current = None
+                    self._promote_current_locked(self._clock())
+                    stopping = self._process
+                    self._process = None
+                    self._parent_conn = None
+                    self._counts["crashes"] += 1
+                    self._last_error = _short_error(
+                        f"send: {type(exc).__name__}: {exc}")
+                    dropped = self._drop_epoch_locked(self._epoch)
+                    self._restart_streak += 1
+                    self._schedule_restart_locked(self._clock())
             self._ensure_fallback_locked()
             fallback = self._fallback
+        if stopping is not None:
+            self._terminate(stopping)
+        for stale in dropped:
+            self.engine._cancel_job(stale, "worker_died")
         return fallback.submit(job) if fallback is not None else False
 
-    def _listen(self) -> None:
+    def _listen(self, conn: Any, epoch: int) -> None:
+        reason = "worker_died"
         while not self._stop.is_set():
             try:
-                message = self._parent_conn.recv()
+                message = conn.recv()
             except (EOFError, OSError):
                 break
             if message is None:
                 break
+            if not isinstance(message, dict):
+                continue
+            if message.get("hb") or message.get("ready"):
+                with self._lock:
+                    if epoch == self._epoch:
+                        self._last_heartbeat = self._clock()
+                        if message.get("ready") and isinstance(
+                                message.get("limits"), dict):
+                            self._limits = dict(message["limits"])
+                continue
             if "fatal" in message:
+                with self._lock:
+                    if epoch == self._epoch:
+                        self._last_error = _short_error(
+                            f"child fatal: {message.get('fatal')}")
                 break
             job_id = str(message.get("job_id") or "")
             with self._lock:
-                job = self._jobs.pop(job_id, None)
-            if job is None:
-                continue
+                entry = self._jobs.get(job_id)
+                if entry is None or entry[0] != epoch:
+                    continue
+                self._jobs.pop(job_id, None)
+                job = entry[1]
+                if self._current is not None and self._current[1] is job:
+                    self._current = None
+                self._promote_current_locked(self._clock())
             prepared = message.get("prepared")
-            if message.get("error") or prepared is None:
+            try:
+                if message.get("error") or prepared is None:
+                    self.engine._cancel_job(job, "worker_error")
+                else:
+                    with self._lock:
+                        if epoch == self._epoch:
+                            self._restart_streak = 0
+                    self.engine._apply_spec_results(job, prepared)
+            except Exception:  # noqa: BLE001 - one bad result cannot kill IPC
                 self.engine._cancel_job(job, "worker_error")
-            else:
-                self.engine._apply_spec_results(job, prepared)
+        if self._stop.is_set():
+            reason = "closed"
         with self._lock:
-            self._dead = True
-            jobs = list(self._jobs.values())
-            self._jobs.clear()
-        for job in jobs:
-            self.engine._cancel_job(job, "worker_died")
+            dropped = [job for (owner, job) in self._jobs.items()
+                       if owner == epoch]
+            for job in dropped:
+                self._jobs.pop(job.job_id, None)
+            if self._current is not None and self._current[0] == epoch:
+                self._current = None
+            self._promote_current_locked(self._clock())
+        for job in dropped:
+            self.engine._cancel_job(job, reason)
+        try:
+            conn.close()
+        except OSError:
+            pass
+
+    def stats(self) -> dict[str, Any]:
+        """Bounded supervisor state; never graph content."""
+        now = self._clock()
+        with self._lock:
+            current = self._current[1] if self._current is not None else None
+            deadline_ms = None
+            if current is not None:
+                hard = (self._current_since
+                        + float(self.engine.worker_budget_s)
+                        + self._grace_s)
+                deadline_ms = round(max(0.0, hard - now) * 1000.0, 1)
+            limits = {key: self._limits.get(key) for key in
+                      ("applied", "unsupported", "errors")
+                      if self._limits.get(key) is not None}
+            fallback = self._permanent_fallback
+            limits.update({
+                "preemptible": not fallback,
+                "isolation": "thread" if fallback else "process",
+                "per_child": True,
+                "hard_timeout_ms": None if fallback else round(
+                    (float(self.engine.worker_budget_s) + self._grace_s)
+                    * 1000.0, 1),
+                "mem_mb": self._mem_mb,
+                "cpu_s": self._cpu_s,
+            })
+            return {
+                "mode": self.mode,
+                "isolation": "thread" if fallback else "process",
+                "preemptible": not fallback,
+                "started": self._started,
+                "fallback": fallback,
+                "restart_attempts": self._max_restarts,
+                "restart_streak": self._restart_streak,
+                "restarts": self._counts["restarts"],
+                "crashes": self._counts["crashes"],
+                "kills": self._counts["kills"],
+                "timeouts": self._counts["timeouts"],
+                "spawn_failures": self._counts["spawn_failures"],
+                "heartbeat_failures": self._counts["heartbeat_failures"],
+                "queue": len(self._jobs),
+                "job": current.job_id if current is not None else None,
+                "deadline_ms": deadline_ms,
+                "heartbeat_age_ms": (round(
+                    max(0.0, now - self._last_heartbeat) * 1000.0, 1)
+                    if self._started or self._process is not None else None),
+                "last_error": self._last_error,
+                "limits": limits,
+            }
 
     def close(self, timeout: float = 2.0) -> None:
         self._stop.set()
+        with self._lock:
+            supervisor = self._supervisor
+        if supervisor is not None:
+            supervisor.join(timeout)
         with self._lock:
             conn = self._parent_conn
             process = self._process
             listener = self._listener
             fallback = self._fallback
+            jobs = [job for _owner, job in self._jobs.values()]
+            self._jobs.clear()
+            self._current = None
+            self._desired = False
+            self._started = False
+            self._permanent_fallback = True
+            self._parent_conn = None
+            self._process = None
+            self._listener = None
+            self._supervisor = None
+        for job in jobs:
+            self.engine._cancel_job(job, "closed")
         if conn is not None:
             try:
                 conn.send(None)
@@ -570,14 +1045,7 @@ class ProcessSpecWorker:
                 pass
         if listener is not None:
             listener.join(timeout)
-        if process is not None:
-            process.join(0.5)
-            if process.is_alive():
-                process.terminate()
-                process.join(1.0)
-            if process.is_alive():
-                process.kill()
-                process.join(0.5)
+        self._terminate(process)
         if listener is not None and listener.is_alive():
             listener.join(1.0)
         if conn is not None:
@@ -587,11 +1055,6 @@ class ProcessSpecWorker:
                 pass
         if fallback is not None:
             fallback.close()
-        with self._lock:
-            self._dead = True
-            self._parent_conn = None
-            self._process = None
-            self._listener = None
 
 
 class GraphEngine:
@@ -678,6 +1141,14 @@ class GraphEngine:
     def stats(self) -> dict[str, Any]:
         """Bounded operational counters; no graph content."""
         worker = self.spec_worker
+        detail: dict[str, Any] = {}
+        getter = getattr(worker, "stats", None)
+        if callable(getter):
+            try:
+                value = getter()
+                detail = value if isinstance(value, dict) else {}
+            except Exception:  # noqa: BLE001 - stats must never break a call
+                detail = {}
         return {
             "sessions": len(self.sessions),
             "max_sessions": self.max_sessions,
@@ -686,6 +1157,7 @@ class GraphEngine:
             "prepared_per_response": MAX_SPEC_PREPARE,
             "worker_alive": bool(getattr(worker, "alive", False)),
             "worker_mode": getattr(worker, "mode", "none") if worker else "none",
+            "worker": detail,
             "totals": dict(self.totals),
         }
 
@@ -739,9 +1211,9 @@ class GraphEngine:
                 "e": len(self.mem.edges),
             }
             result["compact"] = session.compact
-            result["st"] = self._ledger(session)
+            result["st"] = self._stats_view(session)
         if args.get("stats") is True:
-            result.setdefault("st", self._ledger(session))
+            result.setdefault("st", self._stats_view(session))
         result["t"] = estimate_tokens(result)
         return result
 
@@ -891,7 +1363,7 @@ class GraphEngine:
             result.update(self._speculate(session, op, args, keys, snap,
                                           budget))
         if args.get("stats") is True:
-            result["st"] = self._ledger(session)
+            result["st"] = self._stats_view(session)
         verbose = bool(args.get("verbose")) or not session.compact
         if verbose:
             result = self._verbose(result)
@@ -1360,8 +1832,24 @@ class GraphEngine:
                     event.set()
             reason = prepared.reason or "budget"
             for handle, _request in job.requests:
-                if handle not in applied:
+                if handle in applied:
+                    continue
+                entry = session.spec.get(handle)
+                if entry is not None and entry.get("status") == "pending":
                     self._cancel_entry_locked(session, handle, reason=reason)
+
+    def _stats_view(self, session: EngineSession) -> dict[str, Any]:
+        """Session ledger plus a bounded worker/supervisor summary."""
+        view = self._ledger(session)
+        getter = getattr(self.spec_worker, "stats", None)
+        if callable(getter):
+            try:
+                detail = getter()
+            except Exception:  # noqa: BLE001 - stats must never break a call
+                detail = None
+            if isinstance(detail, dict) and detail:
+                view["w"] = detail
+        return view
 
     @staticmethod
     def _ledger(session: EngineSession) -> dict[str, Any]:
@@ -1459,7 +1947,7 @@ class GraphEngine:
         else:
             result = {"items": items}
         if args.get("stats") is True:
-            result["st"] = self._ledger(session)
+            result["st"] = self._stats_view(session)
         verbose = bool(args.get("verbose")) or not session.compact
         if verbose:
             result = self._verbose(result)

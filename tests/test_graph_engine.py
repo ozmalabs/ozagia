@@ -28,10 +28,14 @@ from ozagia.core.graph_engine import (
     SPEC_BUDGET,
     SPEC_TTL_S,
     GraphEngine,
+    ProcessSpecWorker,
+    SpecJob,
+    _apply_child_limits,
     _short_keys,
     description_tokens,
     estimate_tokens,
 )
+from ozagia.core import graph_engine as graph_engine_module
 from ozagia.core.memory import DevMemory, build_index
 from ozagia.integrations.mcp.server import DevMemoryServer
 
@@ -167,6 +171,16 @@ def _wait_status(engine: GraphEngine, sid: str, handles: list[str],
     raise AssertionError(
         f"handles did not become {wanted}: "
         f"{[(h, session.spec.get(h, {}).get('status')) for h in handles]}")
+
+
+def _wait_until(predicate: Any, timeout: float = 5.0,
+                message: str = "condition") -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.01)
+    raise AssertionError(f"timed out waiting for {message}")
 
 
 def _hello(engine: GraphEngine, **args: Any) -> dict[str, Any]:
@@ -636,6 +650,10 @@ def test_thread_worker_prepares_and_stops(memory: DevMemory,
     engine = GraphEngine(memory)
     try:
         assert engine.stats()["worker_mode"] == "thread"
+        detail = engine.stats()["worker"]
+        assert detail["preemptible"] is False
+        assert detail["limits"]["preemptible"] is False
+        assert detail["hard_timeout_ms"] is None
         sid = _hello(engine)["sid"]
         first = _spec_result(engine, sid)
         handles = first["q"]["h"]
@@ -645,6 +663,8 @@ def test_thread_worker_prepares_and_stops(memory: DevMemory,
         assert "e" not in fetched
         assert fetched["st"]["hits"] == len(handles)
         assert fetched["st"]["worker_ms"] > 0
+        assert fetched["st"]["w"]["mode"] == "thread"
+        assert fetched["st"]["w"]["preemptible"] is False
     finally:
         worker = engine.spec_worker
         engine.close()
@@ -680,43 +700,323 @@ def test_process_worker_prepares_after_response_and_reaps(
     assert engine.stats()["worker_alive"] is False
 
 
+class _FakeConn:
+    """One-shot IPC stand-in for listener tests; no process or fork."""
+
+    def __init__(self, messages: list[Any]) -> None:
+        self.messages = list(messages)
+        self.closed = False
+
+    def recv(self) -> Any:
+        if not self.messages:
+            raise EOFError
+        return self.messages.pop(0)
+
+    def close(self) -> None:
+        self.closed = True
+
+
 @pytest.mark.skipif(not FORK_AVAILABLE, reason="fork is not available")
-def test_process_child_crash_falls_back_to_thread(
+def test_process_child_crash_restarts_with_stats(
         memory: DevMemory, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("OZAGIA_ENGINE_SPEC", raising=False)
     monkeypatch.delenv("OZAGIA_ENGINE_SPEC_PROCESS", raising=False)
+    monkeypatch.setenv("OZAGIA_ENGINE_SPEC_BACKOFF_MS", "10")
     engine = GraphEngine(memory)
     try:
         sid = _hello(engine)["sid"]
         first = _spec_result(engine, sid)
         worker = engine.spec_worker
         assert worker is not None
-        deadline = time.monotonic() + 3.0
-        while time.monotonic() < deadline:
-            process = getattr(worker, "_process", None)
-            if process is not None and process.is_alive():
-                break
-            time.sleep(0.01)
-        process = getattr(worker, "_process", None)
-        assert process is not None and process.is_alive()
+        _wait_until(lambda: worker.mode == "process" and worker._process
+                    is not None and worker._process.is_alive(),
+                    message="initial child")
+        first_handles = first["q"]["h"]
+        _wait_status(engine, sid, first_handles, "ready")
+
+        process = worker._process
+        assert process is not None
         process.kill()
         process.join(1.0)
-        deadline = time.monotonic() + 3.0
-        while time.monotonic() < deadline and worker.mode != "thread":
-            time.sleep(0.01)
-            if worker.mode == "dead":
-                break
+        _wait_until(lambda: worker.stats()["restarts"] >= 1
+                    and worker.mode == "process", message="child restart")
+        stats = engine.stats()
+        assert stats["worker_mode"] == "process"
+        detail = stats["worker"]
+        assert detail["restarts"] >= 1
+        assert detail["crashes"] >= 1
+        assert detail["preemptible"] is True
+        assert detail["last_error"]
+        assert len(json.dumps(detail)) < 2000
+        assert not {"rows", "key", "text", "path"} & set(detail)
+
         second = _spec_result(engine, sid)
         handles = second["q"]["h"]
         assert handles
         _wait_status(engine, sid, handles, "ready")
-        assert engine.stats()["worker_mode"] == "thread"
         fetched = engine.handle({"op": "fetch", "session": sid,
                                  "fetch": handles, "stats": True})
         assert fetched["st"]["hits"] == len(handles)
-        assert first["q"]["h"]
+        assert fetched["st"]["w"]["mode"] == "process"
+        assert fetched["st"]["w"]["preemptible"] is True
+        assert first_handles
     finally:
         engine.close()
+
+
+@pytest.mark.skipif(not FORK_AVAILABLE, reason="fork is not available")
+def test_process_restart_exhaustion_falls_back_to_thread(
+        memory: DevMemory, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OZAGIA_ENGINE_SPEC", raising=False)
+    monkeypatch.delenv("OZAGIA_ENGINE_SPEC_PROCESS", raising=False)
+    monkeypatch.setenv("OZAGIA_ENGINE_SPEC_RESTARTS", "1")
+    monkeypatch.setenv("OZAGIA_ENGINE_SPEC_BACKOFF_MS", "1")
+    engine = GraphEngine(memory)
+    try:
+        sid = _hello(engine)["sid"]
+        first = _spec_result(engine, sid)
+        worker = engine.spec_worker
+        assert worker is not None
+        _wait_status(engine, sid, first["q"]["h"], "ready")
+
+        def explode(_child: Any) -> Any:
+            raise OSError("no fork in this test")
+
+        monkeypatch.setattr(worker, "_make_process", explode)
+        process = worker._process
+        assert process is not None and process.is_alive()
+        process.kill()
+        process.join(1.0)
+        _wait_until(lambda: worker.mode == "thread"
+                    and worker.stats()["fallback"], message="fallback")
+        detail = engine.stats()["worker"]
+        assert detail["spawn_failures"] >= 1
+        assert detail["preemptible"] is False
+        assert detail["limits"]["preemptible"] is False
+        assert detail["limits"]["hard_timeout_ms"] is None
+        assert detail["isolation"] == "thread"
+
+        second = _spec_result(engine, sid)
+        handles = second["q"]["h"]
+        assert handles
+        _wait_status(engine, sid, handles, "ready")
+        fetched = engine.handle({"op": "fetch", "session": sid,
+                                 "fetch": handles, "stats": True})
+        assert fetched["st"]["hits"] == len(handles)
+        assert fetched["st"]["w"]["mode"] == "thread"
+    finally:
+        engine.close()
+
+
+@pytest.mark.skipif(not FORK_AVAILABLE, reason="fork is not available")
+def test_process_hard_timeout_preempts_and_restarts(
+        memory: DevMemory, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OZAGIA_ENGINE_SPEC", raising=False)
+    monkeypatch.delenv("OZAGIA_ENGINE_SPEC_PROCESS", raising=False)
+    monkeypatch.setenv("OZAGIA_ENGINE_SPEC_GRACE_MS", "50")
+    monkeypatch.setenv("OZAGIA_ENGINE_SPEC_BACKOFF_MS", "10")
+    original = GraphEngine._prepare_spec_requests
+
+    def slow(self: GraphEngine, job: SpecJob) -> Any:
+        time.sleep(0.5)
+        return original(self, job)
+
+    monkeypatch.setattr(GraphEngine, "_prepare_spec_requests", slow)
+    engine = GraphEngine(memory)
+    engine.worker_budget_s = 0.15
+    try:
+        sid = _hello(engine)["sid"]
+        first = _spec_result(engine, sid)
+        handles = first["q"]["h"]
+        assert handles
+        _wait_until(lambda: engine.stats()["worker"]["job"] is not None,
+                    message="current job")
+        running = engine.stats()["worker"]
+        assert running["deadline_ms"] is not None
+        _wait_status(engine, sid, handles, "cancelled")
+        session = engine.sessions[sid]
+        assert all(session.spec[h]["reason"] == "preempted"
+                   for h in handles)
+        detail = engine.stats()["worker"]
+        assert detail["timeouts"] >= 1
+        assert detail["kills"] >= 1
+
+        monkeypatch.setattr(GraphEngine, "_prepare_spec_requests", original)
+        _wait_until(lambda: engine.stats()["worker"]["restarts"] >= 1
+                    and engine.stats()["worker_mode"] == "process",
+                    message="replacement child")
+        second = _spec_result(engine, sid)
+        new_handles = second["q"]["h"]
+        _wait_status(engine, sid, new_handles, "ready")
+        fetched = engine.handle({"op": "fetch", "session": sid,
+                                 "fetch": new_handles, "stats": True})
+        assert fetched["st"]["hits"] == len(new_handles)
+        assert "e" not in engine.handle({"op": "find", "session": sid,
+                                         "q": "add"})
+        assert all(session.spec[h]["status"] == "cancelled"
+                   for h in handles)
+    finally:
+        engine.close()
+
+
+@pytest.mark.skipif(not FORK_AVAILABLE, reason="fork is not available")
+def test_process_resource_limits_applied_without_breaking_job(
+        memory: DevMemory, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OZAGIA_ENGINE_SPEC", raising=False)
+    monkeypatch.delenv("OZAGIA_ENGINE_SPEC_PROCESS", raising=False)
+    monkeypatch.setenv("OZAGIA_ENGINE_SPEC_MEM_MB", "4096")
+    monkeypatch.setenv("OZAGIA_ENGINE_SPEC_CPU_S", "60")
+    engine = GraphEngine(memory)
+    try:
+        sid = _hello(engine)["sid"]
+        first = _spec_result(engine, sid)
+        handles = first["q"]["h"]
+        _wait_status(engine, sid, handles, "ready")
+        detail = engine.stats()["worker"]
+        limits = detail["limits"]
+        assert limits["per_child"] is True
+        assert limits["preemptible"] is True
+        if graph_engine_module._resource is not None:
+            applied = limits.get("applied") or {}
+            if "address_space" in applied:
+                assert applied["address_space"] == 4096 * 1024 * 1024
+            if "cpu" in applied:
+                assert applied["cpu"] == 60
+            assert not limits.get("errors") or applied
+        fetched = engine.handle({"op": "fetch", "session": sid,
+                                 "fetch": handles, "stats": True})
+        assert fetched["st"]["hits"] == len(handles)
+    finally:
+        engine.close()
+
+
+def test_child_resource_limits_report_unsupported(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(graph_engine_module, "_resource", None)
+    report = _apply_child_limits(128, 10)
+    assert report["applied"] == {}
+    assert "resource" in report["unsupported"]
+
+
+def test_restart_backoff_is_bounded(manual) -> None:
+    engine, _worker = manual
+    procs = ProcessSpecWorker(engine, supervise=False)
+    try:
+        procs._backoff_s = 0.05
+        procs._max_restarts = 3
+        procs._restart_streak = 1
+        procs._schedule_restart_locked(10.0)
+        assert procs._next_restart_at == pytest.approx(10.05)
+        procs._restart_streak = 2
+        procs._schedule_restart_locked(10.0)
+        assert procs._next_restart_at == pytest.approx(10.1)
+        procs._restart_streak = 3
+        procs._schedule_restart_locked(10.0)
+        assert procs._next_restart_at == pytest.approx(10.2)
+        procs._restart_streak = 4
+        procs._schedule_restart_locked(10.0)
+        assert procs._permanent_fallback is True
+        assert procs._next_restart_at == float("inf")
+    finally:
+        procs.close()
+
+
+def test_duplicate_and_stale_results_are_discarded(manual) -> None:
+    engine, worker = manual
+    sid = _hello(engine)["sid"]
+    first = _spec_result(engine, sid)
+    handles = first["q"]["h"]
+    job = worker.jobs.pop(0)
+    prepared = engine._prepare_spec_requests(job)
+    engine._apply_spec_results(job, prepared)
+    session = engine.sessions[sid]
+    prepared_count = session.ledger["prepared"]
+    assert prepared_count == len(job.requests)
+
+    engine._apply_spec_results(job, prepared)  # duplicate delivery
+    assert session.ledger["prepared"] == prepared_count
+    assert all(session.spec[h]["status"] == "ready" for h in handles)
+
+    session.spec_generation += 1  # stale after a restart/generation bump
+    engine._apply_spec_results(job, prepared)
+    assert session.ledger["prepared"] == prepared_count
+    assert all(session.spec[h]["status"] == "cancelled"
+               and session.spec[h]["reason"] == "stale" for h in handles)
+
+
+def test_listener_ignores_previous_child_epoch(manual) -> None:
+    engine, worker = manual
+    sid = _hello(engine)["sid"]
+    first = _spec_result(engine, sid)
+    handles = first["q"]["h"]
+    job = worker.jobs.pop(0)
+    procs = ProcessSpecWorker(engine, supervise=False)
+    try:
+        procs._epoch = 2
+        procs._jobs[job.job_id] = (2, job)
+        procs._current = (2, job)
+        conn = _FakeConn([{"job_id": job.job_id, "prepared": {"bogus": 1}}])
+        procs._listen(conn, 1)
+        assert job.job_id in procs._jobs
+        assert conn.closed is True
+        session = engine.sessions[sid]
+        assert all(session.spec[h]["status"] == "pending" for h in handles)
+        assert session.ledger["prepared"] == 0
+    finally:
+        procs.close()
+
+
+@pytest.mark.skipif(not FORK_AVAILABLE, reason="fork is not available")
+def test_close_during_current_job_reaps_everything(
+        memory: DevMemory, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OZAGIA_ENGINE_SPEC", raising=False)
+    monkeypatch.delenv("OZAGIA_ENGINE_SPEC_PROCESS", raising=False)
+    original = GraphEngine._prepare_spec_requests
+
+    def slow(self: GraphEngine, job: SpecJob) -> Any:
+        time.sleep(0.5)
+        return original(self, job)
+
+    monkeypatch.setattr(GraphEngine, "_prepare_spec_requests", slow)
+    engine = GraphEngine(memory)
+    sid = _hello(engine)["sid"]
+    first = _spec_result(engine, sid)
+    worker = engine.spec_worker
+    assert worker is not None
+    _wait_until(lambda: worker.stats()["queue"] > 0
+                and worker.mode == "process", message="running job")
+    engine.close()
+    assert worker.mode == "closed"
+    assert worker.alive is False
+    assert worker._process is None
+    assert first["q"]["h"]
+
+
+@pytest.mark.skipif(not FORK_AVAILABLE, reason="fork is not available")
+def test_close_during_restart_does_not_spawn_again(
+        memory: DevMemory, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OZAGIA_ENGINE_SPEC", raising=False)
+    monkeypatch.delenv("OZAGIA_ENGINE_SPEC_PROCESS", raising=False)
+    monkeypatch.setenv("OZAGIA_ENGINE_SPEC_BACKOFF_MS", "200")
+    engine = GraphEngine(memory)
+    sid = _hello(engine)["sid"]
+    first = _spec_result(engine, sid)
+    worker = engine.spec_worker
+    assert worker is not None
+    _wait_status(engine, sid, first["q"]["h"], "ready")
+    process = worker._process
+    assert process is not None and process.is_alive()
+    process.kill()
+    process.join(1.0)
+    _wait_until(lambda: worker.mode == "restarting",
+                message="restart pause")
+    restarts = worker.stats()["restarts"]
+    engine.close()
+    time.sleep(0.25)
+    assert worker.mode == "closed"
+    assert worker._process is None
+    assert worker.stats()["restarts"] == restarts
+    assert worker.alive is False
 
 
 @pytest.mark.skipif(not FORK_AVAILABLE, reason="fork is not available")

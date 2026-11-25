@@ -3,7 +3,9 @@
 Status: prototype wire/readiness measurement on acquired local corpus
 checkouts. It is **not** a model-task gain, does not call a model, does not use
 the network, and does not execute target code. It builds graph snapshots in each
-checkout's own `.ozagia` state.
+checkout's own `.ozagia` state. A later supervision/preemption slice is
+test-covered in `tests/test_graph_engine.py` but was not re-run against this
+corpus here.
 
 ## Commands
 
@@ -17,6 +19,10 @@ checkout's own `.ozagia` state.
 
 # Thread fallback
 OZAGIA_ENGINE_SPEC_PROCESS=0 .venv/bin/python scripts/measure_graph_engine_corpus.py --repo fd
+
+# Supervisor, restart, preemption and resource-limit tests (no model/network)
+.venv/bin/python -m pytest -q tests/test_graph_engine.py -k \
+  "process or thread or restart or timeout or resource or close"
 ```
 
 The script defaults to `fd`, `flask`, `httpx` and this repository (`ozagia`).
@@ -62,25 +68,57 @@ On the 18k-node checkout, the second speculative candidate took about 1.2 s.
 The 150 ms think window plus 50 ms fetch wait therefore returned two `pending`
 states and recorded two misses. The entries were ready later in the follow-up
 (`ready_after_followup=2`), and a 1,500 ms simulated think produced two hits.
-This is the non-preemptible long-call limit: the worker checks its 300 ms
-deadline between candidates, not inside one graph call. It is not a wire
-failure or a token regression; it is why the next step needs preemption or a
-supervised process/daemon worker.
+This is the non-preemptible long-call limit of the measured run: the worker
+checked its 300 ms deadline between candidates, not inside one graph call. The
+supervised worker now has a hard per-job watchdog that kills and replaces the
+child at the worker budget plus grace; that path is test-covered, but this
+corpus measurement still reflects the earlier unsupervised behaviour and was
+not re-run. It is not a wire failure or a token regression.
 
 ## Process lifecycle and fallback
 
-- One forked child per engine when fork is available (`OZAGIA_ENGINE_SPEC_PROCESS=auto`).
+- One forked child per engine when fork is available (`OZAGIA_ENGINE_SPEC_PROCESS=auto`),
+  plus a parent IPC listener and a supervisor thread.
 - The child builds a speculation-disabled engine from the inherited snapshot and
   sends `PreparedSpec` messages. It does not touch parent sessions.
 - A small parent listener thread receives IPC and applies results only after
   revalidating session id, snapshot, freshness, scope, generation and expiry.
+  Every job is tagged with the child epoch; a late result from a replaced child
+  is ignored rather than applied twice.
 - `OZAGIA_ENGINE_SPEC_PROCESS=0` uses the daemon-thread worker.
-- If fork is unavailable, the child cannot start, or it dies, outstanding jobs
-  are cancelled and later jobs use the thread fallback.
-- `bye` cancels one session; engine close stops the listener, terminates/joins
-  the child if necessary, clears the queue and closes the pipe.
-- Tests cover a real child job, fetch-after-ready, reaping on close, child crash
-  fallback, changed generation discard, no writes, and both process/thread paths.
+- If fork is unavailable, the child cannot be started, or it dies, outstanding
+  jobs are cancelled and later jobs use the thread fallback. A child that can be
+  restarted is replaced with bounded exponential backoff.
+- `bye` cancels one session; engine close stops the supervisor, terminates/joins
+  the child if necessary, joins the listener, clears the queue and closes the
+  pipe.
+- Tests cover a real child job, fetch-after-ready, reaping on close, child
+  crash/restart and stats, restart exhaustion to the thread fallback, hard
+  timeout preemption, resource-limit reporting, duplicate/stale discard,
+  close during a job/restart, changed generation discard, no writes, and both
+  process/thread paths.
+
+## Supervision and preemption (not previously measured)
+
+This slice adds supervision and process-granularity preemption. The following
+values are test-covered behaviour, not a new corpus measurement:
+
+| Property | Value |
+| --- | --- |
+| Idle heartbeat | child sends every 500 ms; 3 s stale threshold |
+| Restart backoff | 50 ms base, doubling, cap 2 s (`OZAGIA_ENGINE_SPEC_BACKOFF_MS`) |
+| Consecutive restarts | 3 default, then thread fallback (`OZAGIA_ENGINE_SPEC_RESTARTS`) |
+| Hard per-job watchdog | worker budget + 250 ms default (`OZAGIA_ENGINE_SPEC_GRACE_MS`) |
+| Address-space limit | 2 GiB per child (`OZAGIA_ENGINE_SPEC_MEM_MB`) |
+| Cumulative CPU limit | 300 s per child (`OZAGIA_ENGINE_SPEC_CPU_S`) |
+| Stats | `st.w`: mode, restarts, crashes, kills, timeouts, queue, job, deadline, last error, limits |
+
+On a deadline overrun the supervisor kills the child, cancels that child's
+outstanding handles as `preempted`, schedules a replacement, and the parent
+continues serving normally. Counts and the last error are visible with
+`stats: true`; no graph content is included. Because `RLIMIT_CPU` is cumulative
+for a child's lifetime (not per job), a CPU-limit death is an expected restart,
+not a per-job accounting signal.
 
 ## Limits
 
@@ -90,10 +128,20 @@ supervised process/daemon worker.
   neither a local model nor a hosted fallback was started.
 - Fork inherits a snapshot at first job; later parent graph changes are not
   shared into the child. Parent apply validation remains authoritative.
-- The child has no separate CPU/memory budget. The parent listener is only IPC
-  and application, not graph computation.
-- One long graph call is not preempted and can overrun both the think window and
-  the worker deadline.
+- Limits are per child, not per job. `RLIMIT_AS` bounds address space;
+  `RLIMIT_CPU` accumulates over the child's lifetime and is reset only by
+  replacing the child. A platform without `resource` reports `unsupported`
+  and still runs the job.
+- Preemption is at process granularity. One graph call is not interrupted
+  in-process: the whole child is killed and later work gets a fresh child.
+  The thread fallback cannot preempt a running call at all.
+- The first child is forked before the supervisor/listener threads start, but
+  a restart forks from a process that still has threads. The child only builds
+  a read-only engine; Python may still warn that fork in a multi-threaded
+  process can deadlock. A long-lived daemon/forkserver would avoid this and is
+  future work.
+- After the bounded restart budget is exhausted, speculation continues on the
+  thread fallback with no hard timeout for that engine.
 - The corpus is a few local checkouts with simulated think time, not real model
   latency or a broad sample. The measurements are wire/readiness, not task
   quality.
@@ -101,8 +149,10 @@ supervised process/daemon worker.
 
 ## Remaining work
 
-- Supervise/restart the child and add real resource limits; consider a
-  long-lived daemon rather than one fork per engine.
-- Preempt or cancel a single long graph call, or split expensive operations.
-- Evaluate hit/waste with real model think times and more repositories.
+- Consider a long-lived daemon rather than one fork per engine, and tune the
+  hard timeout against real large-repository fetches.
+- Split expensive operations or add in-call cancellation; process replacement
+  loses that child's in-flight work.
+- Evaluate hit/waste and timeout/preemption counts with real model think times
+  and more repositories.
 - Keep the thread/inline workers for platforms without safe fork.
