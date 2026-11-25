@@ -153,12 +153,16 @@ Example:
 {"op": "find", "session": "s1", "q": "retry backoff", "budget": 800}
 ```
 
-Rows are compact arrays in fixed columns. Columns are sent on the first
-response for an op in a session and then assumed until `cols: true` asks for
-them again. `r` is rows, `c` columns, `k` key, `f` file, `sp` source span,
-`sig` signature, `sum` summary, `why` reason, `txt` text, `u` unchanged keys,
-`x` truncated, `o` omitted, `n` next request and `q` speculative handles.
-`verbose: true` expands rows to named objects for debugging.
+Rows are compact arrays in fixed columns. Every compact tabular response
+carries `c` by default when the budget allows it. A client that tracks the
+columns itself can send `cols: false` (or an explicit `compact: true`) to opt
+into per-session reuse: the first response teaches `c`, and later requests that
+also ask for reuse with the same columns omit it. `cols: true` forces `c` even
+in reuse mode.
+`r` is rows, `c` columns, `k` key, `f` file, `sp` source span, `sig` signature,
+`sum` summary, `why` reason, `txt` text, `u` unchanged keys, `x` truncated,
+`o` omitted, `n` next request and `q` speculative handles. `verbose: true`
+expands rows to named objects for debugging.
 
 ## Budgets and paging
 

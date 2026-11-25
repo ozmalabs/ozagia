@@ -205,6 +205,16 @@ def _clamp(value: Any, low: int, high: int, default: int) -> int:
     return max(low, min(high, number))
 
 
+def _column_reuse(args: dict[str, Any]) -> bool:
+    """True when the caller explicitly opts into omitting repeated columns.
+
+    Columns are included on every response by default.  ``cols:false`` and an
+    explicit ``compact:true`` preserve the old per-session column reuse for
+    clients that track the fixed columns themselves.
+    """
+    return args.get("cols") is False or args.get("compact") is True
+
+
 def _env_flag(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
     if raw is None:
@@ -1378,8 +1388,9 @@ class GraphEngine:
             session.cursor = {"op": op, "offset": next_args["offset"]}
         result = self._enforce_budget(result, budget)
         if cache_cols and not verbose:
-            result = self._maybe_omit_cols(result, op, session,
-                                           force=args.get("cols") is True)
+            result = self._apply_columns(
+                result, op, session, reuse=_column_reuse(args),
+                force=args.get("cols") is True)
         return _short_keys(result) if compact else result
 
     def _enforce_budget(self, result: dict[str, Any],
@@ -1484,17 +1495,22 @@ class GraphEngine:
             ]
         return result
 
-    def _maybe_omit_cols(self, result: dict[str, Any], op: str,
-                         session: EngineSession, *, force: bool) -> dict[str, Any]:
-        """Send fixed per-op columns once per session unless asked again."""
+    def _apply_columns(self, result: dict[str, Any], op: str,
+                       session: EngineSession, *, reuse: bool,
+                       force: bool) -> dict[str, Any]:
+        """Include fixed per-op columns by default.
+
+        ``reuse`` is the explicit old behaviour: the first response for an op
+        in a session carries the columns, and later responses with the same
+        columns omit them.  Without ``reuse`` every response carries ``cols``
+        when the hard budget allows it.  ``force`` (``cols:true``) always
+        includes them and refreshes the cache.
+        """
         cols = result.get("cols")
         if not isinstance(cols, list) or not cols:
             return result
         current = [str(col) for col in cols]
-        if force:
-            session.cols[op] = current
-            return result
-        if session.cols.get(op) == current:
+        if reuse and not force and session.cols.get(op) == current:
             result.pop("cols")
         else:
             session.cols[op] = current
@@ -1954,16 +1970,17 @@ class GraphEngine:
         result = self._fit(result, budget)
         result = self._enforce_budget(result, budget)
         if not verbose:
+            reuse = _column_reuse(args)
             if len(items) == 1:
-                result = self._maybe_omit_cols(
+                result = self._apply_columns(
                     result, str(items[0].get("qop") or ""), session,
-                    force=args.get("cols") is True)
+                    reuse=reuse, force=args.get("cols") is True)
             else:
                 for item in result.get("items") or []:
                     if isinstance(item, dict):
-                        self._maybe_omit_cols(
+                        self._apply_columns(
                             item, str(item.get("qop") or ""), session,
-                            force=args.get("cols") is True)
+                            reuse=reuse, force=args.get("cols") is True)
         return _short_keys(result)
 
     # -- services ----------------------------------------------------------- #

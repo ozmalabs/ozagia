@@ -25,6 +25,7 @@ from ozagia.core.graph_engine import (
     MAX_SPEC_PREPARE,
     OPS,
     PROTOCOL,
+    SHAPE_COLS,
     SPEC_BUDGET,
     SPEC_TTL_S,
     GraphEngine,
@@ -270,12 +271,32 @@ def test_compact_rows_columns_and_hard_budget(engine: GraphEngine) -> None:
     assert result["t"] <= 80
     assert result["c"] == ["k", "n", "f", "sp", "sig", "sum", "sc"]
     assert all(isinstance(row, list) for row in result.get("r", []))
-    # Fixed columns are sent once per session unless requested again.
+    # Column headers are included on every response by default.
     second = engine.handle({"op": "find", "session": sid, "q": "add"})
-    assert "c" not in second
+    assert second["c"] == result["c"]
     again = engine.handle({"op": "find", "session": sid, "q": "add",
                            "cols": True})
     assert again["c"] == ["k", "n", "f", "sp", "sig", "sum", "sc"]
+    # cols:false opts into the old per-session column reuse: the first
+    # response teaches the columns, later responses omit them.
+    tracked_sid = _hello(engine)["sid"]
+    tracked_first = engine.handle({"op": "find", "session": tracked_sid,
+                                   "q": "add", "cols": False})
+    assert tracked_first["c"] == result["c"]
+    tracked_second = engine.handle({"op": "find", "session": tracked_sid,
+                                    "q": "add", "cols": False})
+    assert "c" not in tracked_second
+    forced = engine.handle({"op": "find", "session": tracked_sid, "q": "add",
+                            "cols": True})
+    assert forced["c"] == result["c"]
+    # An explicit compact:true is the same opt-out.
+    compact_sid = _hello(engine)["sid"]
+    compact_first = engine.handle({"op": "find", "session": compact_sid,
+                                   "q": "add", "compact": True})
+    assert compact_first["c"] == result["c"]
+    compact_second = engine.handle({"op": "find", "session": compact_sid,
+                                    "q": "add", "compact": True})
+    assert "c" not in compact_second
     verbose = engine.handle({"op": "find", "session": sid, "q": "add",
                              "verbose": True, "budget": 1200})
     assert verbose["r"] and isinstance(verbose["r"][0], dict)
@@ -286,6 +307,29 @@ def test_compact_rows_columns_and_hard_budget(engine: GraphEngine) -> None:
             {"op": "context", "task": "add two numbers", "limit": 8},
             {"op": "shape", "limit": 20},
         ):
+            reply = engine.handle({"session": sid, "budget": budget,
+                                   **request})
+            assert reply["t"] <= budget, (budget, request, reply)
+
+
+def test_shape_columns_default_and_repeated_shape_is_parseable(
+        engine: GraphEngine) -> None:
+    sid = _hello(engine)["sid"]
+    first = engine.handle({"op": "shape", "session": sid, "budget": 800})
+    assert first["c"] == SHAPE_COLS
+    second = engine.handle({"op": "shape", "session": sid, "budget": 800})
+    assert second["c"] == SHAPE_COLS
+    assert second["r"]
+    assert all(len(row) == len(second["c"]) for row in second["r"])
+    # A caller that opted into column reuse gets the old omission.
+    tracked = engine.handle({"op": "shape", "session": sid, "budget": 800,
+                             "cols": False})
+    assert "c" not in tracked
+    # Small budgets still trim the response, with or without reuse.
+    for budget in (64, 80, 120):
+        for request in ({"op": "shape"},
+                        {"op": "shape", "cols": False},
+                        {"op": "shape", "compact": True}):
             reply = engine.handle({"session": sid, "budget": budget,
                                    **request})
             assert reply["t"] <= budget, (budget, request, reply)

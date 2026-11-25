@@ -77,8 +77,9 @@ conformance.
 
 v2 is a wire-incompatible simplification of v1: success responses no longer
 carry `ok`/`op`/`fresh`/`budget`, top-level metadata uses short keys, columns are
-sent once per session, and the per-response speculation ledger moved behind
-`stats: true`.
+included on every compact tabular response by default (`cols:false` or an
+explicit `compact:true` restores per-session reuse), and the per-response
+speculation ledger moved behind `stats: true`.
 
 ## Handshake
 
@@ -138,7 +139,7 @@ Top-level keys:
 | Key | Meaning |
 | --- | --- |
 | `r` | rows (arrays in `c` order) |
-| `c` | columns; only the first response for an op in a session, or `cols:true` |
+| `c` | columns; included on every compact tabular response by default, omitted on repeats only with `cols:false` / explicit `compact:true` |
 | `u` | unchanged key handles from a `known` request |
 | `x` | `true` when the payload was cut |
 | `o` | number of rows/items omitted |
@@ -182,11 +183,18 @@ Errors use short keys too:
 projection of the deterministic `repo_shape` report. `wait_ms` is clamped to
 `0..250`; a pending fetch never blocks indefinitely.
 
+All row operations accept `cols`. By default `c` is present on every compact
+tabular response. `cols:false` opts into the old per-session column reuse (first
+response teaches the columns, later reuse requests with the same columns omit
+them); an explicit `compact:true` is an alias for that column-reuse mode.
+`cols:true` forces the columns back.
+
 ## Compact rows
 
 Rows are arrays in the order of the op's fixed columns. Columns are stable per
-op; after the first response that includes `c` in a session, the same columns
-are assumed unless `cols:true` asks for them again.
+op. Every compact tabular response includes `c` unless the caller opts into
+reuse with `cols:false` or an explicit `compact:true`; the first reuse response
+includes `c`, and later reuse requests with the same columns omit it.
 
 | Short | Long | Notes |
 | --- | --- | --- |
@@ -229,7 +237,7 @@ A session stores:
 - up to 1,000 `key -> hash` entries remembered from responses;
 - the last cursor/page position (today the self-contained `n` object is
   authoritative; the cursor is session bookkeeping);
-- the fixed columns already sent for each op;
+- the fixed columns seen for each op (used by the explicit column-reuse mode);
 - the last response token estimate and cumulative estimated tokens;
 - the compact flag and current default budget;
 - a snapshot/root scope, a speculation generation and a closed flag;
