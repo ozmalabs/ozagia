@@ -3,7 +3,10 @@
 Status: implemented 2026-11-25 in `src/ozagia/core/graph_engine.py`, with the
 MCP surface in `src/ozagia/integrations/mcp/server.py`, the optional loopback
 HTTP transport in `src/ozagia/engine_http.py`, and tests in
-`tests/test_graph_engine.py` and `tests/test_engine_http.py`.
+`tests/test_graph_engine.py` and `tests/test_engine_http.py`. A reusable
+stdlib-only client (`src/ozagia/engine_client.py`, tested by
+`tests/test_engine_client.py`) was added 2026-11-26 so other local callers get
+the session and `known` savings without copying the live driver.
 
 This is the compact, stateful, token-efficient graph interface for LLMs. It
 replaces a family of independent `dev_*` calls with one MCP tool (`graph`), one
@@ -74,6 +77,43 @@ OPTIONS preflight, static route or body echo. SIGINT/SIGTERM stop the server and
 close the engine. The HTTP endpoint is a local transport for the engine and the
 existing Ozma `task_context` provider; it is not full Ozma protocol
 conformance.
+
+### Client library
+
+`src/ozagia/engine_client.py` is the reusable client for this transport. It is
+stdlib-only and adds no protocol logic: it owns one session handle, injects the
+op-scoped `known` entries it remembers, follows `n` continuations when asked,
+and reports typed failures.
+
+- Constructor: base URL (argument or `OZAGIA_ENGINE_URL`), token (argument,
+  `OZAGIA_ENGINE_TOKEN`, token file or `<state>/engine/token`), timeout, budget,
+  optional existing session id; it is also a context manager.
+- Methods: `hello`, `find`, `outline`, `expand`, `impact`, `tests`, `context`,
+  `shape`, `fetch`, `bye`, plus `healthz`, `request`, `next_request`,
+  `next_page`, `known_entries`, `remember`, `forget`, `clear_known` and
+  `stats`.
+- Remembered hashes are keyed by `(op, key)`, exactly like the engine session.
+  Repeated `find`/`outline`/`context` calls send only that op's entries; a
+  find hash and an outline hash for the same key coexist, and an unknown,
+  stale or forgotten hash is reserialized with a fresh `h`.
+- `EngineBudgetError` exposes the compact payload, `next` and
+  `suggested_budget`; `EngineWithheldError` exposes `freshness`/`snapshot`;
+  `EngineAuthError`, `EngineHTTPStatusError`, `EngineUnavailableError`,
+  `EngineTransportError` and `EngineSessionError` cover transport and session
+  failures. `raise_on_error=False` returns the engine's `e` object instead.
+- `stats()` reports request/response counts, body bytes in/out, estimated
+  engine tokens, the last op and the remembered-entry count. It contains no
+  token or graph rows. The client never retries, never follows redirects,
+  ignores environment proxies, and only contacts the configured base URL.
+- Speculation and `fetch` stay opt-in (`spec` is off unless requested); the
+  measured workloads showed speculation as a net cost, so it is not a default.
+- Tests: `tests/test_engine_client.py` uses the real loopback server for
+  hello/find/outline/impact/shape/fetch/bye, op-scoped deltas, stale hashes,
+  paging, budget errors, stale withholding, auth, token non-disclosure,
+  counters, token resolution and expired-session recovery, plus a closed-port
+  check for transport failure. The deterministic 20-row
+  repeated-find probe measures 1,390 → 158 estimated tokens and 5,496 → 609
+  response bytes (a synthetic long-row fixture; request bytes are extra).
 
 v2 is a wire-incompatible simplification of v1: success responses no longer
 carry `ok`/`op`/`fresh`/`budget`, top-level metadata uses short keys, columns are
@@ -608,7 +648,8 @@ default.
   full Ozma protocol conformance, an Ozma shim/server and a network-safe remote
   deployment remain open.
 - A persistent, versioned session/cache layer if the process-local bound
-  proves too short for long agent sessions.
+  proves too short for long agent sessions. `GraphEngineClient` now keeps its
+  op-scoped known cache in memory; a durable client-side cache is not built.
 - Stronger item identity than a 16-hex hash prefix if cross-process caching is
   added.
 - Broader live-model evidence: more models, larger real repositories,

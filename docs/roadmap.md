@@ -548,10 +548,17 @@ the engine keys remembered hashes by `(op, key)` and the live driver now stores
 `{op,key,hash}`, so a find hash survives an outline of the same key. The
 op-scoped repeated-find saving is deterministic (20-row synthetic: 1,390 →
 158 engine tokens, net −3,330 B including the larger request); the 21.8% live
-model-token result predates the op tag and was not rerun. Live evidence also
-shows speculation is a net cost in these workloads (prepared payloads went
-unfetched and `q` handles added tokens), so it stays opt-in and is **not**
-recommended as a default. Next: a long-lived shared worker, in-call cancellation
+model-token result predates the op tag and was not rerun. A reusable stdlib
+`GraphEngineClient` (`src/ozagia/engine_client.py`) now owns the session,
+injects op-scoped `known` deltas for repeated `find`/`outline`/`context`,
+follows `n` pages, exposes typed budget/withheld/auth/transport errors and
+reports compact request/byte/token counters; 12 fixture tests
+(`tests/test_engine_client.py`, mostly over the real loopback server) cover it,
+including the deterministic 20-row repeat (1,390 → 158 estimated tokens and
+5,496 → 609 response bytes). Live
+evidence also shows speculation is a net cost in these workloads (prepared
+payloads went unfetched and `q` handles added tokens), so it stays opt-in and
+is **not** recommended as a default. Next: a long-lived shared worker, in-call cancellation
 or splitting of expensive operations, broader hit/waste and timeout evaluation
 across models/repositories, live inline-delivery coverage, TUI/Desktop
 exercise, and a full Ozma shim/protocol contract if a caller needs one.

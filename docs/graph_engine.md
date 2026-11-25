@@ -96,6 +96,66 @@ Limits and lifecycle:
 - no target import, execution, network, model call or write outside the state
   token file.
 
+## Python client (Ozma context assembler)
+
+`ozagia.engine_client.GraphEngineClient` is a stdlib-only client for this
+transport. It owns one session and remembers every `{op, key, hash}` it has
+shown the caller, so a repeated `find`, `outline` or `context` sends the
+matching `known` delta automatically. It never retries a request, never
+contacts anything except the configured base URL, and never puts the token in
+`repr`, counters, exceptions or logs.
+
+```python
+from ozagia.engine_client import GraphEngineClient
+
+with GraphEngineClient("http://127.0.0.1:8765",
+                       token_file=".ozagia/engine/token",
+                       budget=1200) as graph:
+    hello = graph.hello()                       # session sid, snapshot, freshness
+    hits = graph.find("retry backoff")          # rows carry their h hash
+    key = hits["r"][0][hits["c"].index("k")]
+
+    # The assembler already showed these rows. A refresh is a key-only delta.
+    refresh = graph.find("retry backoff")       # rows in u, not repeated
+    outline = graph.outline(key)
+    outline = graph.outline(key)                # again: u contains key
+
+    # Paging is explicit and bounded by the caller.
+    page = graph.find("retry backoff", limit=200, budget=600)
+    while graph.next_request(page) is not None:
+        page = graph.next_page(page, budget=600)
+
+    # Speculation and fetch stay opt-in; do not enable them by default.
+    # spec = graph.find("retry backoff", spec=True, inline=False)
+    # graph.fetch((spec.get("q") or {}).get("h", [])[:2], wait_ms=50)
+
+    print(graph.stats())                        # requests, bytes, engine tokens
+```
+
+The token is resolved from the `token` argument, `OZAGIA_ENGINE_TOKEN`, an
+explicit `token_file`, or `<state>/engine/token` (normally
+`<root>/.ozagia/engine/token`). A token file that is a symlink or readable by
+group/other is refused. Use `root=<repo>` instead of `token_file` to use the
+same default path as `ozagia engine serve`.
+
+Useful controls:
+
+- `known=False` on one call suppresses automatic deltas; an explicit iterable
+  sends exactly those entries. `clear_known()` and `forget(key, op=...)` drop
+  remembered entries. Hashes are keyed by `(op, key)`, so a `find` hash and an
+  `outline` hash for the same key coexist; a stale or forgotten hash is
+  reserialized with a fresh `h`.
+- `next_request(result)` returns the engine's self-contained continuation, and
+  `next_page(result)` follows it once. The caller owns the loop bound.
+- `EngineBudgetError` carries the compact payload plus `next` and
+  `suggested_budget`; `EngineWithheldError` carries `freshness` and `snapshot`;
+  `EngineAuthError`, `EngineHTTPStatusError` (including
+  `EngineUnavailableError`), `EngineTransportError` and `EngineSessionError`
+  are the other typed failures. `raise_on_error=False` on any operation
+  returns the engine's `e` payload instead.
+- `hello(caps=True)` (or `detail=True`) is the only way to request the full
+  handshake; `spec` defaults to off and `fetch` is only called explicitly.
+
 ## Session
 
 Start once:
@@ -413,6 +473,8 @@ written to the checkout.
 - A compact 16-hex content hash for `known`, not a cryptographic identity.
   Hashes are keyed by `(op, key)`; a legacy client that stores only one hash
   per key can still overwrite its own find hash with an outline hash.
+  `GraphEngineClient` keeps its remembered hashes in memory and owns one
+  session, so restarting the client or the server loses its delta cache.
 - Speculation is opt-in and was a net cost in the measured live workloads; it
   is not recommended as a default.
 - One snapshot per session; federation is not part of this surface.

@@ -62,7 +62,10 @@ required; there is no unauthenticated `/v1` path, CORS or directory serving.
 The server binds `127.0.0.1` by default and caps bodies at 64 KiB and
 concurrent calls at four. `--allow-remote` is an explicit opt-in, not a remote
 mode: HTTP is unencrypted and the caller owns TLS and the network/auth
-perimeter.
+perimeter. A Python caller that can import ozagia should use
+`ozagia.engine_client.GraphEngineClient`, which owns the session and injects
+the op-scoped `known` deltas automatically; see [the client
+example](graph_engine.md#python-client-ozma-context-assembler).
 
 This HTTP path is **optional local transport for the existing provider and
 engine**. It does not implement the full Ozma protocol, an Ozma server, a
