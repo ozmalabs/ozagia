@@ -30,3 +30,20 @@ jobs:
           bash -n install scripts/release/smoke.sh
       - name: Test
         run: .venv/bin/python -m pytest -q
+
+  docs:
+    # Stale-docs gate: docs/reference/ is generated from the code by
+    # scripts/docs/generate_docs.py (CLI parsers, MCP tool lists, settings
+    # registry). Fails when the committed pages do not match what the code
+    # declares, so a PR that changes commands, tools or settings must
+    # regenerate and commit the pages.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Install
+        run: |
+          uv venv --python 3.13 .venv
+          uv pip install --python .venv/bin/python -e '.[dev]'
+      - name: Check generated reference
+        run: .venv/bin/python scripts/docs/generate_docs.py --check
