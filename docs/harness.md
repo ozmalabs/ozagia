@@ -32,7 +32,7 @@ ozagia agent                                                       # the TUI
 | option | meaning |
 |---|---|
 | `--workdir W` / `--root W` | the repository (default as above) |
-| `--prompt TEXT`, `--prompt-file F` | run non-interactively; without either, the TUI |
+| `--prompt TEXT`, `--prompt-file F` | run non-interactively; the prompt is written to OpenCode's stdin, never argv; without either, the TUI |
 | `--model M`, `-m M` | `provider/model`. `opencode run` gets `-m`; the TUI has no model flag, so it goes into the generated config as `model` |
 | `--opencode-config PATH` | layer provider settings from an OpenCode JSON config into the generated harness config. Allowlist: `provider`, `providers`, `model`, `small_model` (`$schema` is allowed and ignored). `--model` wins over a config `model`. The file's plugins, MCP servers, permissions, agents and tools are never copied; any other key, invalid JSON or unreadable file is an error before OpenCode starts. See [Local providers](#local-providers-vllm). |
 | `--clone [--base REV]` | run in an isolated clone at REV (default HEAD), kept afterwards |
@@ -89,9 +89,9 @@ daemon failure).
    The TUI also gets `OZAGIA_LAUNCH_STATUS`, the status file its sidebar
    polls.
    - With a prompt: `opencode run --standalone --format json --auto --archived
-     [-m M] [ARGS] <prompt>` in its own process group, stdin `/dev/null`,
-     stdout to `logs/opencode.stdout.jsonl`, stderr to
-     `logs/opencode.stderr.txt`, text parts to `logs/transcript.txt`.
+     [-m M] [ARGS]` in its own process group, the prompt on stdin, stdout to
+     `logs/opencode.stdout.jsonl`, stderr to `logs/opencode.stderr.txt`, text
+     parts to `logs/transcript.txt`.
    - Without: `opencode --standalone [ARGS] <workdir>` on the terminal.
 8. In `finally` (also on Ctrl-C and SIGTERM): the plugin and its exclude
    line are removed unless `--keep-plugin`, then the daemon is stopped.
@@ -101,6 +101,26 @@ daemon failure).
    preparation that has not reached the daemon is cancelled (its prep process
    is killed); the summary then says `graph: not ready (the session ended
    first)`.
+
+### Prompt transport and argv logging
+
+A non-interactive prompt is never an argument. `ozagia agent` writes it to
+`opencode run`'s stdin through an anonymous, mode-0600 temporary file (no
+pathname; it is closed after the session). `--prompt-file F` is read in the
+ozagia process, and only its contents go to stdin: the path is not passed to
+OpenCode either. This is deliberate. OpenCode writes its full argv to
+`~/.local/share/opencode/log/opencode.log` once, before its plugin hook runs,
+so a prompt or prompt-file path in argv leaks there no matter what the plugin
+does later (observed in the live `--opencode-config` canary). For a
+non-interactive run, the result's `argv` and the harness's own config and log
+files never contain the prompt.
+
+The TUI path is unchanged: a library caller that passes both `prompt=` and
+`interactive=True` still gets `opencode --standalone [--prompt P] <workdir>`.
+The `ozagia agent` CLI never takes that path (with a prompt it runs
+`opencode run`; without one it opens the TUI with no initial prompt). The
+TUI's `--prompt` handling and OpenCode Desktop prompt paths remain untested;
+`ozagia agent` uses neither.
 
 Interactive launch: the TUI starts at once and the sidebar (the
 `ozagia-profile` TUI plugin) shows the phase until the snapshot is current and

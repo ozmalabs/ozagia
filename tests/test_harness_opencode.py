@@ -40,6 +40,12 @@ rec = {"argv": sys.argv, "cwd": os.getcwd(), "pid": os.getpid(),
        "env": {k: os.environ.get(k) for k in ("OZAGIA_DAEMON_SOCK", "PWD", "OPENCODE_CONFIG",
                                               "OZAGIA_LAUNCH_STATUS",
                                               "OZAGIA_REPO_MAP_TOKENS")}}
+# `opencode run` reads its message from stdin; the TUI path has none.
+if sys.argv[1:2] == ["run"]:
+    rec["stdin"] = sys.stdin.read()
+    rec["stdin_nlink"] = os.fstat(0).st_nlink
+else:
+    rec["stdin"] = rec["stdin_nlink"] = None
 cfg = os.environ.get("OPENCODE_CONFIG")
 rec["config"] = json.load(open(cfg)) if cfg and os.path.isfile(cfg) else None
 rec["plugin_present"] = os.path.isfile(os.path.join(os.getcwd(), ".opencode", "plugins", "ozagia.js"))
@@ -135,7 +141,9 @@ def test_run_agent_end_to_end(repo, stub, tmp_path):
     rec = _record(stub)
 
     assert rec["argv"][1:] == ["run", "--standalone", "--format", "json", "--auto",
-                               "--archived", "-m", "vllm/test-model", "fix the addition"]
+                               "--archived", "-m", "vllm/test-model"]
+    assert rec["stdin"] == "fix the addition"
+    assert "fix the addition" not in res["argv"]
     assert Path(rec["cwd"]) == repo
     assert rec["env"]["PWD"] == str(repo)
     assert rec["env"]["OZAGIA_DAEMON_SOCK"] == res["sock"]
@@ -177,6 +185,51 @@ def test_run_agent_end_to_end(repo, stub, tmp_path):
     assert _exclude_lines(repo).count(EXCLUDES[2]) == 1
     assert res["exclude_removed"] == [*EXCLUDES[:2], PROFILE_EXCLUDE]
     assert _git(repo, "status", "--porcelain") == ""
+
+
+def test_prompt_travels_on_stdin_and_never_appears_in_argv_or_logs(repo, stub, tmp_path):
+    # OpenCode logs its full argv once, before the plugin hook runs, so a
+    # secret-like prompt must reach it only on stdin.
+    secret = "OZAGIA-CANARY-7f3d9c: do not put this prompt in argv"
+    res = _run(repo, tmp_path, prompt=secret)
+    rec = _record(stub)
+
+    assert rec["stdin"] == secret
+    assert secret not in " ".join(rec["argv"])
+    assert secret not in " ".join(res["argv"])
+    assert res["argv"] == rec["argv"]
+    if os.name == "posix":
+        # TemporaryFile has no remaining link: nothing was left on disk.
+        assert rec["stdin_nlink"] == 0
+    # The configuration and logs the harness writes hold no prompt.
+    assert secret not in json.dumps(rec["config"])
+    logs = [p for p in Path(res["log_dir"]).rglob("*") if p.is_file()]
+    assert logs
+    for path in logs:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        assert secret not in text, path
+
+
+def test_prompt_file_content_goes_to_stdin_and_its_path_is_not_in_argv(
+        repo, stub, tmp_path, monkeypatch):
+    from ozagia import cli
+    monkeypatch.setenv("OZAGIA_LANGUAGE_AUTOINSTALL", "0")
+    prompt = tmp_path / "task.txt"
+    content = "make the failing retry test pass"
+    prompt.write_text(content, encoding="utf-8")
+    code = cli.main(["agent", "--workdir", str(repo), "--prompt-file", str(prompt),
+                     "--runs-dir", str(tmp_path / "runs")])
+    rec = _record(stub)
+    assert code == 0
+    assert rec["stdin"] == content
+    assert str(prompt) not in " ".join(rec["argv"])
+    assert content not in " ".join(rec["argv"])
+
+
+def test_empty_prompt_is_rejected_before_opencode_starts(repo, stub, tmp_path):
+    with pytest.raises(AgentError, match="needs a prompt"):
+        _run(repo, tmp_path, prompt="")
+    assert not stub["record"].exists()
 
 
 def test_host_opencode_config_is_not_read_implicitly(repo, stub, tmp_path, monkeypatch):
@@ -224,7 +277,8 @@ def test_model_option_wins_over_the_provider_config_model(repo, stub, tmp_path):
                                     "provider": {"vllm": {}}}), encoding="utf-8")
     _run(repo, tmp_path, model="vllm/from-cli", opencode_config=provider)
     rec = _record(stub)
-    assert rec["argv"][-2:] == ["vllm/from-cli", "fix the addition"]
+    assert rec["argv"][-1] == "vllm/from-cli"
+    assert rec["stdin"] == "fix the addition"
     # `opencode run` gets -m, so the config must not keep the file's model.
     assert "model" not in rec["config"]
     assert rec["config"]["provider"] == {"vllm": {}}
@@ -411,6 +465,8 @@ def test_interactive_uses_standalone_tui(repo, stub, tmp_path):
                background=False)
     rec = _record(stub)
     assert rec["argv"][1:] == ["--standalone", str(repo)]
+    assert rec["stdin"] is None
+    assert "--prompt" not in rec["argv"]
     assert rec["config"]["model"] == "vllm/test-model"
     assert rec["env"]["OZAGIA_DAEMON_SOCK"] == res["sock"]
     assert res["interactive"] is True and res["exit_code"] == 0
@@ -542,7 +598,7 @@ def test_daemon_that_never_gets_ready_raises_and_cleans_up(repo, stub, tmp_path,
 def test_keyboard_interrupt_during_run_tears_down(repo, stub, tmp_path, monkeypatch):
     seen: dict = {}
 
-    def interrupted(argv, *, cwd, env, timeout_s, stdout, stderr):
+    def interrupted(argv, *, cwd, env, timeout_s, stdout, stderr, stdin):
         seen["sock"] = env["OZAGIA_DAEMON_SOCK"]
         seen["plugin"] = (Path(cwd) / PLUGIN_REL).is_file()
         raise KeyboardInterrupt

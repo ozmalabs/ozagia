@@ -45,8 +45,10 @@
    bounded, ranked repository map on each model request. Without it the
    plugin's ordinary once-per-prompt hint is unchanged.
    - Prompt given: `opencode run --standalone --format json --auto --archived
-     [-m model] [extra args] <prompt>`, its own process group, stdout and
-     stderr to files in the logs, killed after `timeout_s`.
+     [-m model] [extra args]` with the prompt on stdin, never in argv,
+     because OpenCode logs its full argv once before the plugin hook runs.
+     Its own process group, stdout and stderr to files in the logs, killed
+     after `timeout_s`.
    - No prompt: the TUI, `opencode --standalone [extra args] [--prompt P]
      <workdir>`, attached to the terminal.
 8. Always (also on Ctrl-C, SIGTERM or an error): removes the plugin and
@@ -311,6 +313,26 @@ def _sigterm_as_interrupt() -> Iterator[None]:
         signal.signal(signal.SIGTERM, previous)
 
 
+@contextlib.contextmanager
+def _prompt_stdin(prompt: str | None) -> Iterator[Any]:
+    """The prompt on fd 0 for `opencode run`, never in argv.
+
+    OpenCode writes its full argv to its own log once, before the plugin hook
+    runs, so a prompt in argv leaks there. The prompt goes to an anonymous
+    `tempfile.TemporaryFile` (no pathname, mode 0600) written and rewound
+    before the child starts, or to /dev/null when there is none."""
+    if not prompt:
+        yield subprocess.DEVNULL
+        return
+    stream = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
+    try:
+        stream.write(prompt)
+        stream.seek(0)
+        yield stream
+    finally:
+        stream.close()
+
+
 def _run_tui(argv: list[str], *, cwd: Path, env: dict[str, str],
              timeout_s: float | None) -> dict[str, Any]:
     """The TUI on this terminal. SIGINT is ignored here (a Python handler, so
@@ -562,13 +584,15 @@ def _with_plugin(exe: str, work: Path, session: GraphSession, *, prompt: str | N
                     str(work)]
             ran = _run_tui(argv, cwd=work, env=env, timeout_s=timeout_s)
         else:
-            argv = [exe, *RUN_ARGV, *(["-m", model] if model else []), *extra_args, prompt]
+            # No prompt argument: `opencode run` reads the message from stdin.
+            argv = [exe, *RUN_ARGV, *(["-m", model] if model else []), *extra_args]
             stdout_p = log_dir / "opencode.stdout.jsonl"
             stderr_p = log_dir / "opencode.stderr.txt"
-            with stdout_p.open("w", encoding="utf-8") as so, \
+            with _prompt_stdin(prompt) as prompt_in, \
+                    stdout_p.open("w", encoding="utf-8") as so, \
                     stderr_p.open("w", encoding="utf-8") as se:
                 ran = run_group(argv, cwd=work, env=env, timeout_s=timeout_s,
-                                stdout=so, stderr=se)
+                                stdout=so, stderr=se, stdin=prompt_in)
             parsed = ea._parse_opencode_events(
                 stdout_p.read_text(encoding="utf-8", errors="replace"))
             transcript = log_dir / "transcript.txt"

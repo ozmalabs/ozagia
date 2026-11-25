@@ -1464,8 +1464,12 @@ def build_parser() -> argparse.ArgumentParser:
     ag.add_argument("--workdir", "--root", dest="workdir", default=None,
                     help="repository (default: OZAGIA_ROOT or the git top level of the cwd)")
     pr = ag.add_mutually_exclusive_group()
-    pr.add_argument("--prompt", default=None, help="run non-interactively with this prompt")
-    pr.add_argument("--prompt-file", default=None, help="read the prompt from a file")
+    pr.add_argument("--prompt", default=None,
+                    help="run non-interactively with this prompt (sent on stdin, "
+                         "never in opencode's argv)")
+    pr.add_argument("--prompt-file", default=None,
+                    help="read the prompt from a file (its contents go to stdin; "
+                         "the path is not passed to opencode)")
     ag.add_argument("--model", "-m", default=None, help="provider/model, e.g. vllm/qwen3.8-27b")
     ag.add_argument("--opencode-config", default=None, metavar="PATH",
                     help="layer provider settings from this OpenCode JSON config "
