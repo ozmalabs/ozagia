@@ -263,6 +263,11 @@ class Recorder:
         self.find_handles: list[int] = []
         self.fetch_states: list[Any] = []
         self.fetch_blocked = 0
+        self.known_sent = 0
+        self.unchanged = 0
+        self.stats_calls = 0
+        self.stats_engine_t = 0
+        self.stats_wire_bytes = 0
         self.ops: list[str] = []
         self.tool_args: list[dict[str, Any]] = []
 
@@ -305,6 +310,9 @@ class Recorder:
         state = result.get("fs", result.get("fetch_state"))
         if state is not None:
             self.fetch_states.append(state)
+        unchanged = result.get("u")
+        if isinstance(unchanged, list):
+            self.unchanged += len(unchanged)
         items = result.get("it")
         if isinstance(items, list):
             for item in items:
@@ -322,15 +330,20 @@ class EngineArm:
 
     def __init__(self, client: EngineClient, recorder: Recorder,
                  *, interface: str = "legacy",
-                 budget: int = TINY_BUDGET) -> None:
+                 budget: int = TINY_BUDGET,
+                 known_reuse: bool = False,
+                 speculate: bool = True) -> None:
         self.client = client
         self.recorder = recorder
         self.interface = interface
         self.budget = budget
+        self.known_reuse = known_reuse
+        self.speculate = speculate
         self.sid: str | None = None
         self.closed = False
         self.session_override = 0
         self.handles: set[str] = set()
+        self.seen: dict[str, str] = {}
         self._seq = 0
 
     def _hello(self) -> dict[str, Any]:
@@ -343,7 +356,21 @@ class EngineArm:
             self.sid = sid
             self.closed = False
             self.handles.clear()
+            self.seen.clear()
         return result
+
+    def session_stats(self) -> dict[str, Any]:
+        """Read the session ledger without exposing it to the model."""
+        if not self.sid or self.closed:
+            return {}
+        record = self.recorder
+        record.stats_calls += 1
+        result, wire = self.client.graph(
+            {"op": "hello", "session": self.sid, "stats": True})
+        record.stats_engine_t += _int(result.get("t"))
+        record.stats_wire_bytes += wire
+        value = result.get("st")
+        return value if isinstance(value, dict) else {}
 
     def has_handles(self) -> bool:
         return bool(self.handles)
@@ -369,6 +396,53 @@ class EngineArm:
                 else:
                     self.handles.discard(str(handle))
 
+    def _track_seen(self, result: dict[str, Any]) -> None:
+        """Remember every ``{key, hash}`` the model has already been shown.
+
+        Only responses that carry both columns expose a hash the client can
+        echo back in ``known``; today that is ``outline`` (and ``context``).
+        ``find`` rows omit ``h``, so a ``find`` result cannot be reused as a
+        delta by the client.  That is recorded in the result's limitations.
+        """
+        cols = result.get("c")
+        rows = result.get("r")
+        if not isinstance(cols, list) or not isinstance(rows, list):
+            return
+        if "k" not in cols or "h" not in cols:
+            return
+        key_at = cols.index("k")
+        hash_at = cols.index("h")
+        for row in rows:
+            if not isinstance(row, list) or len(row) <= max(key_at, hash_at):
+                continue
+            key, digest = row[key_at], row[hash_at]
+            if isinstance(key, str) and isinstance(digest, str) and key:
+                self.seen[key] = digest
+
+    def _inject_known(self, op: str, payload: dict[str, Any]) -> None:
+        """Send the client's remembered hashes for this op (multi-turn only).
+
+        The model-facing schema does not expose ``known`` to the model: the
+        client that already showed the rows is the one that knows their
+        hashes.  Only keys named in the request are sent, so the delta request
+        stays small.
+        """
+        if not self.known_reuse or not self.seen or payload.get("known"):
+            return
+        if op not in ("outline", "context"):
+            return
+        wanted = payload.get("keys")
+        if isinstance(wanted, list) and wanted:
+            names = [key for key in wanted if isinstance(key, str)]
+        else:
+            key = payload.get("key")
+            names = [key] if isinstance(key, str) and key else list(self.seen)
+        pairs = [{"key": name, "hash": self.seen[name]}
+                 for name in names if name in self.seen][:64]
+        if pairs:
+            payload["known"] = pairs
+            self.recorder.known_sent += len(pairs)
+
     def call(self, args: dict[str, Any]) -> tuple[dict[str, Any], int]:
         op = str(args.get("op") or "")
         if self.interface == "optimized":
@@ -391,6 +465,7 @@ class EngineArm:
                 self.sid = sid
                 self.closed = False
                 self.handles.clear()
+                self.seen.clear()
             return result, wire
         if op == "bye":
             if not self.sid or self.closed:
@@ -411,11 +486,12 @@ class EngineArm:
         payload["session"] = self.sid
         payload["budget"] = _budget(payload.get("budget"), self.budget)
         if op == "find":
-            payload.setdefault("spec", True)
+            payload.setdefault("spec", bool(self.speculate))
         if op == "fetch":
             payload.setdefault("wait_ms", 200)
         if self.interface != "optimized":
             payload.setdefault("inline", False)
+        self._inject_known(op, payload)
         result, wire = self.client.graph(payload)
         self.recorder.add_engine(result, wire, model_visible=True)
         if isinstance(result.get("e"), str) and "session" in result["e"].lower():
@@ -427,6 +503,7 @@ class EngineArm:
             result, wire = self.client.graph(payload)
             self.recorder.add_engine(result, wire, model_visible=True)
         self._track_handles(op, result)
+        self._track_seen(result)
         return result, wire
 
     def finish(self) -> dict[str, Any]:

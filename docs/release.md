@@ -90,7 +90,16 @@ live in `release/pins.json`.
    ozagia self check --tui
    ```
 
-7. **After.** Set `pyproject.toml` back to a `.dev0` version for the next one
+7. **Website release gate (required).** In the same release window, update and
+   deploy the ozagia.com site. At minimum, review the release/status panel,
+   current install command, links to the release and newly shipped functions,
+   and every affected claim in `website/ozagia/claims.json`. A release is not
+   complete until the website has either been updated or has an explicit
+   reviewed no-copy-change record, and `website/ozagia/deploy.sh --check`
+   passes. The site is a separate Worker from ozmalabs.com; its deployment
+   steps are in `website/README.md`.
+
+8. **After.** Set `pyproject.toml` back to a `.dev0` version for the next one
    (for example `0.1.1.dev0`), so builds from `main` are never mistaken for
    the release.
 
