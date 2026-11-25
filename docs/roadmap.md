@@ -95,7 +95,7 @@ breadth third, live operations last**. New surface area is not a release theme.
 | `2026-11-16_usage_features_plan.md` | Waves 1–4 implemented | Waves 1–4 implemented (Codex/Kiro, ledger, jobs, structured data, affected tests, lint, path resolution, ownership, replace, ops graph, research positions, fetch fallback) | Measure the claimed savings; live Codex/Kiro verification | 0.1.5 |
 | `2026-11-16_v4_open_issues.md` | Implemented with review fixes | Matches | None required for this roadmap | — |
 | `2026-11-17_cross_repo_checks.md`, `2026-11-17_env_failures_timing.md` | Implemented | Implemented | SCIP-precise identities, scale/live timing validation | 0.4 / 0.1.5 |
-| `2026-11-16_ozma_integration.md`, `2026-11-16_proactive_context.md`, `2026-11-16_repo_review_and_goals.md` | Third delivery / implementation notes | Implemented; HTTP surface, general watcher, live benchmark and live goal runs remain | As listed per document | 0.4 |
+| `2026-11-16_ozma_integration.md`, `2026-11-16_proactive_context.md`, `2026-11-16_repo_review_and_goals.md` | Third delivery / implementation notes | Implemented, including an optional loopback HTTP transport for the engine and context provider; full Ozma protocol conformance, a general watcher, live benchmark and live goal runs remain | As listed per document | 0.4 |
 | `2026-11-17_self_graph_ab_testing.md`, `2026-11-17_self_graph_execution.md` | Pilot partly executed; execution plan historical | Pilot partly executed; execution plan superseded | A frozen valid paired run before changing defaults | 0.4 |
 | Research plans (`reference_layer`, `deferred_research_work`, `paper_review`, etc.) | Landed stages A–D | Matches | Reproducible review package, labeled literature evaluation, OCR/PDF limits | 0.6 |
 | `2026-11-15_*` research/position papers | Historical or re-homed | Not release work | Keep as design input | — |
@@ -522,9 +522,14 @@ candidate took about 1.2 s, and was ready later (1,500 ms think: 3,131/5,
 hit_rate 1.0). These are wire/overlap measurements, not model-task gains. The
 local OpenAI-compatible endpoint check (`127.0.0.1:8000`) was refused, so the
 live-model run remains blocked behind `--live`, `OZAGIA_EVAL_LIVE=1` and human
-approval. Next: a long-lived shared worker, in-call cancellation or splitting of
-expensive operations, broader hit/waste and timeout evaluation, and an optional
-Ozma transport (out of this slice).
+approval. An optional loopback HTTP/JSON transport now serves the same engine
+(`POST /v1/graph`) and the existing `task_context` provider
+(`POST /v1/ozma/context`), with a required bearer token, a 127.0.0.1 default, a
+64 KiB body limit, four concurrent calls, stable JSON errors and graceful
+SIGINT/SIGTERM shutdown; it is a local transport, not full Ozma protocol
+conformance. Next: a long-lived shared worker, in-call cancellation or splitting
+of expensive operations, broader hit/waste and timeout evaluation, and a full
+Ozma shim/protocol contract if a caller needs one.
 
 **Exit criteria**
 

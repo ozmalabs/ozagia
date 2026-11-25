@@ -1,8 +1,9 @@
 # Graph engine protocol (v2 first slice)
 
 Status: implemented 2026-11-25 in `src/ozagia/core/graph_engine.py`, with the
-MCP surface in `src/ozagia/integrations/mcp/server.py` and tests in
-`tests/test_graph_engine.py`.
+MCP surface in `src/ozagia/integrations/mcp/server.py`, the optional loopback
+HTTP transport in `src/ozagia/engine_http.py`, and tests in
+`tests/test_graph_engine.py` and `tests/test_engine_http.py`.
 
 This is the compact, stateful, token-efficient graph interface for LLMs. It
 replaces a family of independent `dev_*` calls with one MCP tool (`graph`), one
@@ -48,10 +49,31 @@ logic:
 - Protocol version: `2.0`
 - MCP tool: `graph`
 - MCP surfaces: `OZAGIA_SURFACE=engine` or `--surface engine`
+- Optional HTTP transport: `ozagia engine serve` (see below)
 - The tool's input schema has `additionalProperties: false`.
 - JSON-RPC framing, errors and `tools/list` are the existing MCP server's.
   A bad tool argument is a JSON-RPC `-32602`; a bad engine request is a normal
   JSON result with an `e` message.
+
+The optional HTTP transport (`src/ozagia/engine_http.py`,
+`ozagia.graph_engine.http/1`) carries the same engine objects, not a different
+protocol:
+
+| Endpoint | Method | Body / result |
+| --- | --- | --- |
+| `/v1/graph` | `POST` | engine request object / engine JSON |
+| `/v1/ozma/context` | `POST` | `{task,budget_tokens,max_items,allow_stale}` / versioned `task_context` result |
+| `/healthz` | `GET` | no body / liveness only, no graph content |
+
+It binds `127.0.0.1` by default, requires a bearer token from
+`OZAGIA_ENGINE_TOKEN` or `<state>/engine/token` (constant-time compare, no
+serving without one), caps bodies at 64 KiB and concurrent calls at four, and
+refuses a non-loopback bind without `--allow-remote` (HTTP has no TLS). Stable
+JSON errors cover `400`, `401`, `404`, `405`, `503` and `500`; there is no CORS,
+OPTIONS preflight, static route or body echo. SIGINT/SIGTERM stop the server and
+close the engine. The HTTP endpoint is a local transport for the engine and the
+existing Ozma `task_context` provider; it is not full Ozma protocol
+conformance.
 
 v2 is a wire-incompatible simplification of v1: success responses no longer
 carry `ok`/`op`/`fresh`/`budget`, top-level metadata uses short keys, columns are
@@ -514,8 +536,9 @@ was used. A live session remains blocked behind `--live`,
 - Split expensive operations or cancel inside a single running graph call; the
   current watchdog preempts at process granularity, and thread mode cannot
   preempt at all.
-- Optional Ozma transport (the protocol values are JSON-ready and
-  transport-neutral; explicitly out of this slice).
+- Optional Ozma transport now exists as the bounded local HTTP transport above;
+  full Ozma protocol conformance, an Ozma shim/server and a network-safe remote
+  deployment remain open.
 - A persistent, versioned session/cache layer if the process-local bound
   proves too short for long agent sessions.
 - Stronger item identity than a 16-hex hash prefix if cross-process caching is

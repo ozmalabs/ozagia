@@ -56,6 +56,9 @@
                                                   (read-only declared
                                                   capabilities and observed
                                                   surfaces, docs/capabilities.md)
+    ozagia engine serve|token [--root R] [--host H] [--port P] [--allow-remote]
+                                                  (local read-only graph HTTP
+                                                  transport; docs/graph_engine.md)
     ozagia task-preflight GOAL [--json] [--limit N] [--cursor C] [--root R]
                                [--checkout DIR ...] [--scope ENTRY ...]
                                [--base REV] [--timeout-s S]
@@ -1859,6 +1862,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     from ozagia.capabilities_cli import add_parser as _capabilities_parser
     _capabilities_parser(sub)
+    from ozagia.engine_http import add_parser as _engine_parser
+    _engine_parser(sub)
     from ozagia.task_preflight_cli import add_parser as _task_preflight_parser
     _task_preflight_parser(sub)
     from ozagia.overview_cli import add_parser as _overview_parser
@@ -1892,9 +1897,9 @@ def _repo_map_budget(value: str) -> int:
 
 
 _COMMANDS = frozenset({"index", "agent", "install", "who", "replace",
-                       "review-repo", "goal", "capabilities", "profile-run",
-                       "task-preflight", "overview", "shape", "languages",
-                       "supply-chain", "migration",
+                       "review-repo", "goal", "capabilities", "engine",
+                       "profile-run", "task-preflight", "overview", "shape",
+                       "languages", "supply-chain", "migration",
                        *DELEGATES})
 # Agent options that may lead a bare `ozagia ...` (the TUI).
 _AGENT_FLAGS = frozenset({"--research", "--mcp", "--model", "-m", "--workdir",
@@ -1986,6 +1991,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "capabilities":
         from ozagia.capabilities_cli import run as _capabilities_run
         return _capabilities_run(args)
+    if args.command == "engine":
+        from ozagia.engine_http import run as _engine_run
+        return _engine_run(args)
     if args.command == "task-preflight":
         from ozagia.task_preflight_cli import run as _task_preflight_run
         return _task_preflight_run(args)

@@ -392,6 +392,7 @@ _TESTS = {
     "lsp": "test:tests/test_lsp.py",
     "graph_surface": "test:tests/test_graph_surface.py",
     "graph_engine": "test:tests/test_graph_engine.py",
+    "engine_http": "test:tests/test_engine_http.py",
     "symbol_graph": "test:tests/test_call_paths.py",
     "read_ledger": "test:tests/test_read_ledger.py",
     "intent": "test:tests/test_intent.py",
@@ -954,13 +955,14 @@ _BUILTIN_DEFINITIONS: tuple[dict[str, Any], ...] = (
         id="cap:graph.engine",
         domain="graph",
         purpose=("Answer bounded, token-estimated graph questions through one "
-                 "stateful engine tool with compact rows, known deltas and "
-                 "bounded in-process background speculative handles."),
+                 "stateful engine tool or a local read-only HTTP transport, with "
+                 "compact rows, known deltas and bounded in-process background "
+                 "speculative handles."),
         owner="ozagia.core.graph_engine",
         side_effect="read",
-        exposure=["mcp"],
+        exposure=["cli", "mcp"],
         impl=["impl:ozagia.core.graph_engine"],
-        surfaces=["mcp:tool:graph"],
+        surfaces=["cli:ozagia.engine", "mcp:tool:graph"],
         prerequisites=["a graph snapshot whose freshness can be verified"],
         limits=["default 1200 and maximum 8000 estimated tokens per response",
                 "16 bounded sessions; a fork child (or thread fallback) "
@@ -969,10 +971,13 @@ _BUILTIN_DEFINITIONS: tuple[dict[str, Any], ...] = (
                 "fetch waits at most 250 ms; worker can be disabled with "
                 "OZAGIA_ENGINE_SPEC=0 or forced to threads with "
                 "OZAGIA_ENGINE_SPEC_PROCESS=0",
+                "HTTP is loopback-only by default, always needs a bearer token, "
+                "caps bodies at 64 KiB and concurrent calls at 4; no CORS, "
+                "directory serving or remote mode without --allow-remote",
                 "no edit, create, check, refresh, shell or target execution",
                 "a stale or unknown snapshot yields no structural rows"],
         authorization=_READ,
-        tests=_tests("graph_engine"),
+        tests=_tests("graph_engine", "engine_http"),
         docs=_docs("graph_engine"),
     ),
     _def(

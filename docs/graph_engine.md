@@ -2,7 +2,9 @@
 
 The `engine` MCP surface is a compact, stateful, read-only graph session for
 LLM clients. It exposes **one** tool, `graph`, instead of the `dev_*` family or
-the eight separate graph verbs.
+the eight separate graph verbs. The same engine can also be reached through an
+optional bounded, loopback HTTP/JSON transport for an Ozma context assembler or
+another local client (see below).
 
 ```bash
 OZAGIA_SURFACE=engine python -m ozagia.integrations.mcp.server
@@ -15,6 +17,84 @@ The full and graph surfaces are unchanged. The engine surface lists only
 Design and wire details:
 [`docs/plans/2026-11-25_graph_engine_protocol.md`](plans/2026-11-25_graph_engine_protocol.md).
 Implementation: `src/ozagia/core/graph_engine.py`.
+
+## HTTP transport (optional)
+
+`src/ozagia/engine_http.py` puts one `GraphEngine` and its loaded `DevMemory`
+behind a bounded local HTTP/JSON server. It is a transport, not a second graph
+implementation: freshness withholding, session bounds, token budgets and
+read-only behaviour are exactly the engine's.
+
+Create a token once (mode `0600`; only the path and a fingerprint are printed):
+
+```bash
+ozagia engine token --root /path/to/repo
+# token file: /path/to/repo/.ozagia/engine/token
+# fingerprint: sha256:0123456789abcdef
+```
+
+Serve the existing snapshot (the command never builds or refreshes it):
+
+```bash
+ozagia engine serve --root /path/to/repo --port 8765
+```
+
+The default bind is `127.0.0.1:8765`. A non-loopback bind is refused unless
+`--allow-remote` is passed; HTTP has no TLS and the printed warning makes the
+caller responsible for the network/auth perimeter. No network exposure happens
+by default.
+
+| Endpoint | Method | Purpose |
+| --- | --- | --- |
+| `/v1/graph` | `POST` | one engine request object; the response is the engine JSON, including `hello` and `bye` |
+| `/v1/ozma/context` | `POST` | `{task, budget_tokens, max_items, allow_stale}` mapped to `task_context`; the provider's versioned result |
+| `/healthz` | `GET` | liveness only, no graph content and no token |
+
+Every `/v1` request needs a bearer token. The token is read from
+`OZAGIA_ENGINE_TOKEN` (wins) or `<state>/engine/token` and compared with
+`hmac.compare_digest`. A missing, empty, malformed or group/other-readable
+token file refuses to serve. The token is never printed, logged or echoed.
+
+```bash
+export OZAGIA_ENGINE_TOKEN="$(cat /path/to/repo/.ozagia/engine/token)"
+curl -sS http://127.0.0.1:8765/v1/graph \
+  -H "Authorization: Bearer $OZAGIA_ENGINE_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"op": "hello"}'
+# {"p":"ozagia.graph_engine/2","v":"2.0","sid":"s1",...}
+```
+
+```bash
+curl -sS http://127.0.0.1:8765/v1/graph \
+  -H "Authorization: Bearer $OZAGIA_ENGINE_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"op": "find", "session": "s1", "q": "retry backoff", "budget": 800}'
+
+curl -sS http://127.0.0.1:8765/v1/ozma/context \
+  -H "Authorization: Bearer $OZAGIA_ENGINE_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"task": "find the retry loop", "budget_tokens": 1500,
+       "max_items": 8, "allow_stale": false}'
+```
+
+HTTP errors are stable JSON (`{"ok": false, "protocol": ..., "error":
+{"code": ..., "message": ...}}`) and never include rows, the request body or
+credential material: `400` malformed/oversized/empty body or invalid context
+request, `401` missing/wrong bearer token, `404` unknown path, `405` wrong
+method, `503` saturation (with `Retry-After`), `500` contained internal error.
+There is no CORS, OPTIONS preflight, directory/static route or body echo.
+
+Limits and lifecycle:
+
+- request body: 64 KiB; `Transfer-Encoding`/chunked bodies are rejected;
+- concurrent engine/context calls: 4 by default; excess requests get `503`;
+- request socket timeout: 15 s; the server is threaded but engine calls are
+  bounded by the protocol budget and speculation worker;
+- `--port 0` binds an ephemeral port and prints the chosen port;
+- SIGINT/SIGTERM stop `serve_forever`, close the server and close the engine
+  (sessions and the speculation worker are reaped);
+- no target import, execution, network, model call or write outside the state
+  token file.
 
 ## Session
 
@@ -214,6 +294,12 @@ written to the checkout.
 ## Current limits
 
 - Process-local sessions; a restart loses them.
+- The HTTP transport is one process and one snapshot. Sessions are shared by
+  all clients of that server, so client isolation is the caller's problem.
+  Requests are unencrypted HTTP; `--allow-remote` does not add TLS.
+- HTTP bodies and concurrency are bounded, but an authenticated client can
+  still occupy all worker slots until the request timeout or a protocol budget
+  ends the call.
 - Speculation is one supervised fork child (plus listener/supervisor threads)
   or one fallback daemon thread. The child applies per-child address-space and
   cumulative-CPU limits, but these are not per-job quotas and fork still

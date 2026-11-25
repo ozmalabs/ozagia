@@ -20,18 +20,57 @@ else:
     items = []  # caller can fall back to its existing retrieval path
 ```
 
-Version 1 is a Python contract rather than an HTTP endpoint. It rejects stale or unverifiable snapshots by default; `allow_stale`
-permits them and preserves the freshness label. Freshness is a point-in-time
-Git-based check and does not lock the worktree. It includes untracked and
-Git-ignored source, test, selected documentation, and known adapter-owned
-paths. Newly added ignored adapter inputs outside configured roots cannot be
-discovered until an adapter or rebuild records them. Snapshots made with an
-older digest may need a rebuild. The snippet text budget is a
+Version 1 is a Python contract. The optional local HTTP transport described
+below exposes the same provider for a client that cannot import ozagia; it is
+not full Ozma protocol conformance. It rejects stale or unverifiable snapshots
+by default; `allow_stale` permits them and preserves the freshness label.
+Freshness is a point-in-time Git-based check and does not lock the worktree. It
+includes untracked and Git-ignored source, test, selected documentation, and
+known adapter-owned paths. Newly added ignored adapter inputs outside configured
+roots cannot be discovered until an adapter or rebuild records them. Snapshots
+made with an older digest may need a rebuild. The snippet text budget is a
 four-characters-per-token approximation; JSON and metadata are outside it.
 Callers must account for their full prompt, arrange their own timeout, and
 choose whether to include output. Relationships are graph evidence, not proof
 of semantic correctness. Compare retrieval quality and end-to-end outcomes
 before enabling it by default.
+
+## Optional local HTTP transport
+
+For a local caller that cannot import ozagia, `ozagia engine serve` exposes the
+same read-only provider plus the stateful graph engine over loopback HTTP/JSON:
+
+```bash
+ozagia engine token --root /path/to/repo     # mode 0600; prints path+fingerprint
+ozagia engine serve --root /path/to/repo --port 8765
+```
+
+```bash
+curl -sS http://127.0.0.1:8765/v1/ozma/context \
+  -H "Authorization: Bearer $OZAGIA_ENGINE_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"task": "find the retry loop", "budget_tokens": 1500,
+       "max_items": 8, "allow_stale": false}'
+```
+
+The response is the provider's versioned result (`version: 1`) with `ok`,
+`freshness`, `snapshot`, budget metadata and snippets; a stale snapshot is
+refused unless `allow_stale` is true. The same process also serves
+`POST /v1/graph` with the engine wire protocol, and `GET /healthz` is liveness
+only. A bearer token from `OZAGIA_ENGINE_TOKEN` or `<state>/engine/token` is
+required; there is no unauthenticated `/v1` path, CORS or directory serving.
+The server binds `127.0.0.1` by default and caps bodies at 64 KiB and
+concurrent calls at four. `--allow-remote` is an explicit opt-in, not a remote
+mode: HTTP is unencrypted and the caller owns TLS and the network/auth
+perimeter.
+
+This HTTP path is **optional local transport for the existing provider and
+engine**. It does not implement the full Ozma protocol, an Ozma server, a
+discovery/handshake contract, authentication beyond a local bearer token, or a
+network-safe remote deployment. The Python `task_context` provider remains the
+canonical contract; see [The `graph` engine
+surface](graph_engine.md#http-transport-optional) for the transport details and
+bounds.
 
 ## Selected API specifications
 
