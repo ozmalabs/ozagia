@@ -66,3 +66,81 @@ def test_shape_prompt_asks_for_repository_relative_file_paths() -> None:
                  if task["id"] == "repository_shape")
     assert "file paths" in shape["prompt"]
     assert "pkg/core.py" in shape["prompt"]
+
+
+def test_known_injection_only_uses_seen_outline_hashes() -> None:
+    driver = _driver()
+    recorder = driver.Recorder()
+    arm = driver.EngineArm(object(), recorder, interface="optimized",
+                           known_reuse=True, speculate=False)
+    arm._track_seen({"c": ["k", "h"], "r": [["sym:a", "h1"]]})
+    assert arm.seen == {"sym:a": "h1"}
+
+    outline = {"op": "outline", "key": "sym:a"}
+    arm._inject_known("outline", outline)
+    assert outline["known"] == [{"key": "sym:a", "hash": "h1"}]
+    assert recorder.known_sent == 1
+
+    find = {"op": "find", "q": "a"}
+    arm._inject_known("find", find)
+    assert "known" not in find
+
+    # An unseen key is not invented and an explicit known list is kept.
+    unseen = {"op": "outline", "key": "sym:b"}
+    arm._inject_known("outline", unseen)
+    assert "known" not in unseen
+    explicit = {"op": "outline", "key": "sym:a",
+                "known": [{"key": "sym:a", "hash": "other"}]}
+    arm._inject_known("outline", explicit)
+    assert explicit["known"][0]["hash"] == "other"
+
+
+def test_speculate_flag_sets_find_spec() -> None:
+    driver = _driver()
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.payloads: list[dict] = []
+
+        def graph(self, payload):
+            self.payloads.append(dict(payload))
+            return {"sid": "s1", "t": 1}, 10
+
+    for speculate, expected in ((False, False), (True, True)):
+        recorder = driver.Recorder()
+        client = FakeClient()
+        arm = driver.EngineArm(client, recorder, interface="optimized",
+                               known_reuse=True, speculate=speculate)
+        arm.call({"op": "find", "q": "a"})
+        finds = [p for p in client.payloads if p.get("op") == "find"]
+        assert finds and finds[-1]["spec"] is expected
+
+
+def test_multiturn_tasks_are_three_fixed_turns() -> None:
+    driver = _driver()
+    for name in ("flask", "tiny"):
+        tasks = driver.MULTI_TASKS[name]
+        assert tasks
+        for task in tasks:
+            assert len(task["turns"]) == 3
+            for turn in task["turns"]:
+                assert turn["prompt"].strip()
+                assert turn["keys"]
+                assert turn["checks"]
+    flask = driver.MULTI_TASKS["flask"]
+    spans = {"multiturn_get_root_path": (577, 631),
+             "multiturn_send_from_directory": (533, 574)}
+    for task in flask:
+        refresh = task["turns"][1]
+        assert refresh["id"] in ("t2_refresh_outline",
+                                 "t2_refresh_file_outline")
+        expected = spans.get(task["id"])
+        if expected is None:
+            continue
+        for check_name, check in refresh["checks"]:
+            if "start_line" in check_name:
+                assert check({"start_line": expected[0]})
+                assert not check({"start_line": expected[0] + 1})
+            if "end_line" in check_name:
+                assert check({"end_line": expected[1]})
+                assert not check({"end_line": expected[1] + 1})

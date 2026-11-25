@@ -824,6 +824,322 @@ TASK_SETS: dict[str, list[dict[str, Any]]] = {
 TASKS = TINY_TASKS  # backwards-compatible alias for the pinned tiny fixture
 
 
+# --------------------------------------------------------------------------- #
+# Multi-turn task set
+# --------------------------------------------------------------------------- #
+# Three turns per session.  Turn 1 locates and outlines one symbol, turn 2
+# refreshes that same outline and answers from the copy already in the
+# conversation, and turn 3 asks a distinct impact question.  Prompts, required
+# keys and checks are identical for every arm; only the arm's transport
+# behaviour (fresh session vs. stateful session + ``known``) differs.
+MULTI_FLASK_TASKS: list[dict[str, Any]] = [
+    {
+        "id": "multiturn_get_root_path",
+        "kind": "multi-turn definition/refresh/impact",
+        "turns": [
+            {
+                "id": "t1_find_outline",
+                "prompt": (
+                    "Two graph calls, in order: (1) find with q=get_root_path "
+                    "and kinds=[\"sym\"]; (2) outline the top symbol key from "
+                    "that result. Then reply with only {\"symbol\": string, "
+                    "\"file\": string, \"signature\": string, "
+                    "\"summary\": string}."
+                ),
+                "keys": ["symbol", "file", "signature", "summary"],
+                "checks": [
+                    ("symbol is get_root_path",
+                     lambda obj: _has(obj, "symbol", "get_root_path")),
+                    ("file is src/flask/helpers.py",
+                     lambda obj: _has(obj, "file", "src/flask/helpers.py")),
+                    ("signature contains the definition line",
+                     lambda obj: _has(
+                         obj, "signature",
+                         "def get_root_path(import_name: str) -> str:")),
+                    ("summary mentions the root path",
+                     lambda obj: _has(obj, "summary", "root path")),
+                ],
+            },
+            {
+                "id": "t2_refresh_outline",
+                "prompt": (
+                    "Refresh the outline of get_root_path with exactly one "
+                    "graph call (op outline, same key as before), then answer "
+                    "only from the outline already in this conversation. Do "
+                    "not fetch or read source. Reply with only {\"symbol\": "
+                    "string, \"file\": string, \"start_line\": integer, "
+                    "\"end_line\": integer}."
+                ),
+                "keys": ["symbol", "file", "start_line", "end_line"],
+                "checks": [
+                    ("symbol is get_root_path",
+                     lambda obj: _has(obj, "symbol", "get_root_path")),
+                    ("file is src/flask/helpers.py",
+                     lambda obj: _has(obj, "file", "src/flask/helpers.py")),
+                    ("start_line is 577",
+                     lambda obj: _int_is(obj, "start_line", 577)),
+                    ("end_line is 631",
+                     lambda obj: _int_is(obj, "end_line", 631)),
+                ],
+            },
+            {
+                "id": "t3_impact",
+                "prompt": (
+                    "In the same session, compute the impact of get_root_path "
+                    "to depth 2 using the keys argument (a list) with the "
+                    "symbol key from the outline. Reply with only "
+                    "{\"symbol\": string, \"callers\": [string], "
+                    "\"test_files\": [string], \"summary\": string}."
+                ),
+                "keys": ["symbol", "callers", "test_files", "summary"],
+                "checks": [
+                    ("symbol is get_root_path",
+                     lambda obj: _has(obj, "symbol", "get_root_path")),
+                    ("callers include Scaffold.__init__",
+                     lambda obj: _has(obj, "callers", "scaffold.__init__")),
+                    ("test_files include tests/test_helpers.py",
+                     lambda obj: _has(obj, "test_files",
+                                      "tests/test_helpers.py")),
+                    ("summary is non-empty",
+                     lambda obj: bool(str(obj.get("summary") or "").strip())),
+                ],
+            },
+        ],
+    },
+    {
+        "id": "multiturn_send_from_directory",
+        "kind": "multi-turn definition/refresh/impact",
+        "turns": [
+            {
+                "id": "t1_find_outline",
+                "prompt": (
+                    "Two graph calls, in order: (1) find with "
+                    "q=send_from_directory and kinds=[\"sym\"]; (2) outline "
+                    "the top symbol key from that result. Then reply with "
+                    "only {\"symbol\": string, \"file\": string, "
+                    "\"signature\": string, \"summary\": string}."
+                ),
+                "keys": ["symbol", "file", "signature", "summary"],
+                "checks": [
+                    ("symbol is send_from_directory",
+                     lambda obj: _has(obj, "symbol", "send_from_directory")),
+                    ("file is src/flask/helpers.py",
+                     lambda obj: _has(obj, "file", "src/flask/helpers.py")),
+                    ("signature contains the definition",
+                     lambda obj: _has(obj, "signature",
+                                      "def send_from_directory(")),
+                    ("summary mentions sending a file",
+                     lambda obj: _has(obj, "summary", "send a file")),
+                ],
+            },
+            {
+                "id": "t2_refresh_outline",
+                "prompt": (
+                    "Refresh the outline of send_from_directory with exactly "
+                    "one graph call (op outline, same key as before), then "
+                    "answer only from the outline already in this "
+                    "conversation. Do not fetch or read source. Reply with "
+                    "only {\"symbol\": string, \"file\": string, "
+                    "\"start_line\": integer, \"end_line\": integer}."
+                ),
+                "keys": ["symbol", "file", "start_line", "end_line"],
+                "checks": [
+                    ("symbol is send_from_directory",
+                     lambda obj: _has(obj, "symbol", "send_from_directory")),
+                    ("file is src/flask/helpers.py",
+                     lambda obj: _has(obj, "file", "src/flask/helpers.py")),
+                    ("start_line is 533",
+                     lambda obj: _int_is(obj, "start_line", 533)),
+                    ("end_line is 574",
+                     lambda obj: _int_is(obj, "end_line", 574)),
+                ],
+            },
+            {
+                "id": "t3_impact",
+                "prompt": (
+                    "In the same session, compute the impact of "
+                    "send_from_directory to depth 2 using the keys argument "
+                    "(a list) with the symbol key from the outline. Reply "
+                    "with only {\"symbol\": string, \"callers\": [string], "
+                    "\"test_files\": [string], \"summary\": string}."
+                ),
+                "keys": ["symbol", "callers", "test_files", "summary"],
+                "checks": [
+                    ("symbol is send_from_directory",
+                     lambda obj: _has(obj, "symbol", "send_from_directory")),
+                    ("callers include Flask.send_static_file",
+                     lambda obj: _has(obj, "callers",
+                                      "flask.send_static_file")),
+                    ("callers include Blueprint.send_static_file",
+                     lambda obj: _has(obj, "callers",
+                                      "blueprint.send_static_file")),
+                    ("test_files include tests/test_helpers.py",
+                     lambda obj: _has(obj, "test_files",
+                                      "tests/test_helpers.py")),
+                    ("summary is non-empty",
+                     lambda obj: bool(str(obj.get("summary") or "").strip())),
+                ],
+            },
+        ],
+    },
+    {
+        "id": "multiturn_helpers_file",
+        "kind": "multi-turn file outline/refresh/impact",
+        "turns": [
+            {
+                "id": "t1_outline_file",
+                "prompt": (
+                    "Outline the file src/flask/helpers.py using the file key "
+                    "file:src/flask/helpers.py. Reply with only {\"file\": "
+                    "string, \"has_get_root_path\": boolean, "
+                    "\"has_send_from_directory\": boolean}."
+                ),
+                "keys": ["file", "has_get_root_path",
+                         "has_send_from_directory"],
+                "checks": [
+                    ("file is src/flask/helpers.py",
+                     lambda obj: _has(obj, "file", "src/flask/helpers.py")),
+                    ("outline contains get_root_path",
+                     lambda obj: obj.get("has_get_root_path") is True),
+                    ("outline contains send_from_directory",
+                     lambda obj: obj.get("has_send_from_directory") is True),
+                ],
+            },
+            {
+                "id": "t2_refresh_file_outline",
+                "prompt": (
+                    "Refresh that same file outline with exactly one graph "
+                    "call (op outline, key file:src/flask/helpers.py), then "
+                    "answer only from the outline already in this "
+                    "conversation. Do not fetch or read source. Reply with "
+                    "only {\"file\": string, \"get_root_path_line\": integer, "
+                    "\"send_from_directory_line\": integer}."
+                ),
+                "keys": ["file", "get_root_path_line",
+                         "send_from_directory_line"],
+                "checks": [
+                    ("file is src/flask/helpers.py",
+                     lambda obj: _has(obj, "file", "src/flask/helpers.py")),
+                    ("get_root_path starts at 577",
+                     lambda obj: _int_is(obj, "get_root_path_line", 577)),
+                    ("send_from_directory starts at 533",
+                     lambda obj: _int_is(
+                         obj, "send_from_directory_line", 533)),
+                ],
+            },
+            {
+                "id": "t3_impact",
+                "prompt": (
+                    "In the same session, compute the impact of "
+                    "send_from_directory to depth 2 using the keys argument "
+                    "(a list) with key "
+                    "sym:src/flask/helpers.py::send_from_directory. Reply "
+                    "with only {\"symbol\": string, \"callers\": [string], "
+                    "\"test_files\": [string], \"summary\": string}."
+                ),
+                "keys": ["symbol", "callers", "test_files", "summary"],
+                "checks": [
+                    ("symbol is send_from_directory",
+                     lambda obj: _has(obj, "symbol", "send_from_directory")),
+                    ("callers include Flask.send_static_file",
+                     lambda obj: _has(obj, "callers",
+                                      "flask.send_static_file")),
+                    ("callers include Blueprint.send_static_file",
+                     lambda obj: _has(obj, "callers",
+                                      "blueprint.send_static_file")),
+                    ("test_files include tests/test_helpers.py",
+                     lambda obj: _has(obj, "test_files",
+                                      "tests/test_helpers.py")),
+                    ("summary is non-empty",
+                     lambda obj: bool(str(obj.get("summary") or "").strip())),
+                ],
+            },
+        ],
+    },
+]
+
+MULTI_TINY_TASKS: list[dict[str, Any]] = [
+    {
+        "id": "multiturn_average",
+        "kind": "multi-turn definition/refresh/impact",
+        "turns": [
+            {
+                "id": "t1_find_outline",
+                "prompt": (
+                    "Two graph calls, in order: (1) find with q=average and "
+                    "kinds=[\"sym\"]; (2) outline the top symbol key from that "
+                    "result. Then reply with only {\"symbol\": string, "
+                    "\"file\": string, \"signature\": string, "
+                    "\"summary\": string}."
+                ),
+                "keys": ["symbol", "file", "signature", "summary"],
+                "checks": [
+                    ("symbol is average",
+                     lambda obj: _has(obj, "symbol", "average")),
+                    ("file is pkg/metrics.py",
+                     lambda obj: _has(obj, "file", "pkg/metrics.py")),
+                    ("signature contains def average(values)",
+                     lambda obj: _has(obj, "signature", "def average(values)")),
+                    ("summary mentions average",
+                     lambda obj: _has(obj, "summary", "average")),
+                ],
+            },
+            {
+                "id": "t2_refresh_outline",
+                "prompt": (
+                    "Refresh the outline of average with exactly one graph "
+                    "call (op outline, same key as before), then answer only "
+                    "from the outline already in this conversation. Do not "
+                    "fetch or read source. Reply with only {\"symbol\": "
+                    "string, \"file\": string, \"start_line\": integer, "
+                    "\"end_line\": integer}."
+                ),
+                "keys": ["symbol", "file", "start_line", "end_line"],
+                "checks": [
+                    ("symbol is average",
+                     lambda obj: _has(obj, "symbol", "average")),
+                    ("file is pkg/metrics.py",
+                     lambda obj: _has(obj, "file", "pkg/metrics.py")),
+                    ("start_line is 6",
+                     lambda obj: _int_is(obj, "start_line", 6)),
+                    ("end_line is 13",
+                     lambda obj: _int_is(obj, "end_line", 13)),
+                ],
+            },
+            {
+                "id": "t3_impact",
+                "prompt": (
+                    "In the same session, compute the impact of average to "
+                    "depth 2 using the keys argument (a list) with the symbol "
+                    "key from the outline. Reply with only {\"symbol\": "
+                    "string, \"callers\": [string], \"test_files\": [string], "
+                    "\"summary\": string}."
+                ),
+                "keys": ["symbol", "callers", "test_files", "summary"],
+                "checks": [
+                    ("symbol is average",
+                     lambda obj: _has(obj, "symbol", "average")),
+                    ("callers include scaled_average and summarize",
+                     lambda obj: _has(obj, "callers", "scaled_average",
+                                      "summarize")),
+                    ("test_files include tests/test_metrics.py",
+                     lambda obj: _has(obj, "test_files",
+                                      "tests/test_metrics.py")),
+                    ("summary is non-empty",
+                     lambda obj: bool(str(obj.get("summary") or "").strip())),
+                ],
+            },
+        ],
+    },
+]
+
+MULTI_TASKS: dict[str, list[dict[str, Any]]] = {
+    "tiny": MULTI_TINY_TASKS,
+    "flask": MULTI_FLASK_TASKS,
+}
+MULTI_ARMS = ("control", "engine_known", "engine_known_spec")
+
+
 def _engine_system(budget: int = TINY_BUDGET) -> str:
     return (
         "You have exactly one tool, graph: a read-only code graph. Ops: find, "
@@ -1087,8 +1403,322 @@ def run_task(arm: EngineArm | ControlArm, arm_name: str, task: dict[str, Any],
 
 
 # --------------------------------------------------------------------------- #
-# Entry point
+# Multi-turn runner
 # --------------------------------------------------------------------------- #
+_SNAP_FIELDS = (
+    "model_calls", "tool_calls", "driver_calls", "bad_tool_args",
+    "fetch_blocked", "engine_t", "engine_t_model", "engine_wire_bytes",
+    "engine_wire_bytes_model", "tool_result_chars", "tool_result_tokens",
+    "known_sent", "unchanged", "stats_calls", "stats_engine_t",
+    "stats_wire_bytes",
+)
+_SPEC_FIELDS = ("prepared", "fetched", "wasted", "hits", "misses",
+                "evicted", "cancelled")
+
+
+def _snapshot(recorder: Recorder) -> dict[str, Any]:
+    snapshot: dict[str, Any] = {
+        field: getattr(recorder, field) for field in _SNAP_FIELDS}
+    snapshot["usage"] = dict(recorder.usage)
+    snapshot["tool_args"] = len(recorder.tool_args)
+    return snapshot
+
+
+def _snapshot_delta(before: dict[str, Any],
+                    after: dict[str, Any]) -> dict[str, Any]:
+    delta: dict[str, Any] = {field: after[field] - before[field]
+                             for field in _SNAP_FIELDS}
+    delta["usage"] = {key: after["usage"][key] - before["usage"][key]
+                      for key in after["usage"]}
+    delta["tool_args"] = after["tool_args"] - before["tool_args"]
+    return delta
+
+
+def _stats_delta(before: dict[str, Any],
+                 after: dict[str, Any]) -> dict[str, Any]:
+    delta = {field: _int(after.get(field)) - _int(before.get(field))
+             for field in _SPEC_FIELDS}
+    delta["worker_ms"] = round(
+        float(after.get("worker_ms") or 0.0)
+        - float(before.get("worker_ms") or 0.0), 1)
+    return delta
+
+
+def _run_turn(arm: EngineArm | ControlArm, arm_name: str,
+              turn: dict[str, Any], model: dict[str, Any],
+              messages: list[dict[str, Any]]) -> tuple[str, bool]:
+    """One tool loop for one turn, appending to the shared conversation."""
+    recorder = arm.recorder
+
+    def tools_now() -> list[dict[str, Any]]:
+        if arm_name == "control":
+            return [_tool(_control_schema(), "Read-only code graph.")]
+        include_fetch = isinstance(arm, EngineArm) and arm.has_handles()
+        return [_tool(_opt_schema(include_fetch), "Read-only code graph.")]
+
+    messages.append({"role": "user", "content": turn["prompt"]})
+    final_text = ""
+    finalized = False
+    rounds = 0
+    max_rounds = model["max_tool_calls"] + 2
+    while rounds < max_rounds:
+        rounds += 1
+        tools = tools_now()
+        response = _chat(model["base_url"], model["key"], model["model"],
+                         messages, tools, model["max_tokens"], "auto")
+        recorder.model_calls += 1
+        recorder.add_usage(response.get("usage"))
+        message = _message(response)
+        tool_calls = message.get("tool_calls")
+        if isinstance(tool_calls, list) and tool_calls:
+            if recorder.tool_calls + len(tool_calls) > model["max_tool_calls"]:
+                finalized = True
+                break
+            messages.append({
+                "role": "assistant",
+                "content": message.get("content") or "",
+                "tool_calls": tool_calls,
+            })
+            for index, call in enumerate(tool_calls):
+                recorder.tool_calls += 1
+                function = call.get("function") if isinstance(call, dict) else None
+                name = str((function or {}).get("name") or "")
+                arguments = (function or {}).get("arguments")
+                result, _ = _execute_tool(arm, name, arguments)
+                try:
+                    parsed_args = json.loads(arguments) if arguments else {}
+                except json.JSONDecodeError:
+                    parsed_args = {}
+                if isinstance(parsed_args, dict):
+                    op = str(parsed_args.get("op") or "")
+                    spec_value = parsed_args.get("spec")
+                    if (isinstance(arm, EngineArm) and op == "find"
+                            and spec_value is None):
+                        spec_value = arm.speculate
+                    recorder.tool_args.append({
+                        "op": op,
+                        "budget": _budget(parsed_args.get("budget"),
+                                          arm.budget),
+                        "spec": spec_value,
+                        "keys": len(parsed_args.get("keys") or []),
+                        "fetch": len(parsed_args.get("fetch") or []),
+                    })
+                content = json.dumps(result, ensure_ascii=False,
+                                     separators=(",", ":"))
+                if result.get("e") and (
+                        "not valid JSON" in str(result["e"])
+                        or "JSON object" in str(result["e"])):
+                    recorder.bad_tool_args += 1
+                if len(content) > MAX_TOOL_RESULT_CHARS:
+                    content = content[:MAX_TOOL_RESULT_CHARS]
+                recorder.tool_result_chars += len(content)
+                recorder.tool_result_tokens += (len(content) + 3) // 4
+                call_id = str(call.get("id") or f"call_{rounds}_{index}")
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "name": "graph",
+                    "content": content,
+                })
+            continue
+        final_text = str(message.get("content") or "")
+        break
+
+    if not final_text:
+        finalized = True
+        messages.append({
+            "role": "user",
+            "content": ("Tool budget is exhausted. Reply now with only the "
+                        "requested JSON object and no prose."),
+        })
+        response = _chat(model["base_url"], model["key"], model["model"],
+                         messages, None, model["final_tokens"], None)
+        recorder.model_calls += 1
+        recorder.add_usage(response.get("usage"))
+        final_text = str(_message(response).get("content") or "")
+    return final_text, finalized
+
+
+def run_multiturn(arm: EngineArm | ControlArm, arm_name: str,
+                  task: dict[str, Any], model: dict[str, Any]) -> dict[str, Any]:
+    """Run one three-turn session and return per-turn and cumulative rows."""
+    recorder = arm.recorder
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": _short_system(arm.budget)}]
+    session_stats: dict[str, Any] = {}
+    if isinstance(arm, EngineArm):
+        session_stats = arm.session_stats()
+    turn_rows: list[dict[str, Any]] = []
+    for index, turn in enumerate(task["turns"], 1):
+        before = _snapshot(recorder)
+        started = time.perf_counter()
+        final_text, finalized = _run_turn(arm, arm_name, turn, model, messages)
+        wall_s = round(time.perf_counter() - started, 3)
+        after = _snapshot(recorder)
+        delta = _snapshot_delta(before, after)
+        next_stats: dict[str, Any] = {}
+        if isinstance(arm, EngineArm):
+            next_stats = arm.session_stats()
+        spec_turn = _stats_delta(session_stats, next_stats)
+        session_stats = next_stats or session_stats
+        parsed, json_error = _extract_json(final_text)
+        missing = [key for key in turn["keys"]
+                   if not isinstance(parsed, dict) or key not in parsed]
+        checks: list[dict[str, Any]] = []
+        if parsed is not None:
+            for name, check in turn["checks"]:
+                checks.append(_check(name, bool(check(parsed))))
+        accepted = bool(parsed is not None and not missing
+                        and checks and all(row["ok"] for row in checks))
+        ops = [arg.get("op")
+               for arg in recorder.tool_args[len(recorder.tool_args)
+                                            - delta["tool_args"]:]]
+        turn_rows.append({
+            "turn": index,
+            "id": turn["id"],
+            "prompt": turn["prompt"],
+            "final_json": parsed,
+            "json_valid": parsed is not None,
+            "json_error": json_error,
+            "missing_keys": missing,
+            "checks": checks,
+            "accepted": accepted,
+            "accepted_count": sum(1 for row in checks if row["ok"]),
+            "check_count": len(checks),
+            "final_text_chars": len(final_text),
+            "finalized_after_tool_budget": finalized,
+            "ops": ops,
+            "usage": delta["usage"],
+            "model_calls": delta["model_calls"],
+            "tool_calls": delta["tool_calls"],
+            "driver_calls": delta["driver_calls"],
+            "bad_tool_args": delta["bad_tool_args"],
+            "known_sent": delta["known_sent"],
+            "unchanged_count": delta["unchanged"],
+            "tool_result_chars": delta["tool_result_chars"],
+            "tool_result_tokens": delta["tool_result_tokens"],
+            "engine_t": delta["engine_t"],
+            "engine_t_model": delta["engine_t_model"],
+            "engine_wire_bytes": delta["engine_wire_bytes"],
+            "engine_wire_bytes_model": delta["engine_wire_bytes_model"],
+            "wall_s": wall_s,
+            "spec": spec_turn,
+        })
+    final_stats = arm.finish()
+    spec_total = {field: _int(final_stats.get(field))
+                  for field in _SPEC_FIELDS}
+    spec_total["worker_ms"] = round(
+        float(final_stats.get("worker_ms") or 0.0), 1)
+    cumulative = {
+        "turns": len(turn_rows),
+        "accepted_turns": sum(1 for row in turn_rows if row["accepted"]),
+        "accepted_all": all(row["accepted"] for row in turn_rows),
+        "usage": {key: sum(_int(row["usage"].get(key)) for row in turn_rows)
+                  for key in ("prompt_tokens", "completion_tokens",
+                              "total_tokens", "reasoning_tokens",
+                              "cached_prompt_tokens")},
+        "model_calls": sum(_int(row["model_calls"]) for row in turn_rows),
+        "tool_calls": sum(_int(row["tool_calls"]) for row in turn_rows),
+        "driver_calls": sum(_int(row["driver_calls"]) for row in turn_rows),
+        "known_sent": sum(_int(row["known_sent"]) for row in turn_rows),
+        "unchanged_count": sum(_int(row["unchanged_count"])
+                               for row in turn_rows),
+        "tool_result_tokens": sum(_int(row["tool_result_tokens"])
+                                  for row in turn_rows),
+        "engine_t": sum(_int(row["engine_t"]) for row in turn_rows),
+        "engine_t_model": sum(_int(row["engine_t_model"])
+                              for row in turn_rows),
+        "engine_wire_bytes": sum(_int(row["engine_wire_bytes"])
+                                 for row in turn_rows),
+        "engine_wire_bytes_model": sum(_int(row["engine_wire_bytes_model"])
+                                       for row in turn_rows),
+        "wall_s": round(sum(float(row["wall_s"]) for row in turn_rows), 3),
+        "spec": spec_total,
+    }
+    return {
+        "task": task["id"],
+        "kind": task["kind"],
+        "arm": arm_name,
+        "turns": turn_rows,
+        "cumulative": cumulative,
+    }
+
+
+def _multi_totals(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    if not rows:
+        return {}
+    cumulative = [row["cumulative"] for row in rows]
+    return {
+        "tasks": len(rows),
+        "turns": sum(_int(row["turns"]) for row in cumulative),
+        "accepted_turns": sum(_int(row["accepted_turns"])
+                              for row in cumulative),
+        "accepted_tasks": sum(1 for row in cumulative if row["accepted_all"]),
+        "accepted_all": all(row["accepted_all"] for row in cumulative),
+        "usage": {key: sum(_int(row["usage"].get(key)) for row in cumulative)
+                  for key in ("prompt_tokens", "completion_tokens",
+                              "total_tokens", "reasoning_tokens",
+                              "cached_prompt_tokens")},
+        "model_calls": sum(_int(row["model_calls"]) for row in cumulative),
+        "tool_calls": sum(_int(row["tool_calls"]) for row in cumulative),
+        "driver_calls": sum(_int(row["driver_calls"]) for row in cumulative),
+        "known_sent": sum(_int(row["known_sent"]) for row in cumulative),
+        "unchanged_count": sum(_int(row["unchanged_count"])
+                               for row in cumulative),
+        "tool_result_tokens": sum(_int(row["tool_result_tokens"])
+                                  for row in cumulative),
+        "engine_t": sum(_int(row["engine_t"]) for row in cumulative),
+        "engine_t_model": sum(_int(row["engine_t_model"])
+                              for row in cumulative),
+        "engine_wire_bytes": sum(_int(row["engine_wire_bytes"])
+                                 for row in cumulative),
+        "engine_wire_bytes_model": sum(_int(row["engine_wire_bytes_model"])
+                                       for row in cumulative),
+        "wall_s": round(sum(float(row["wall_s"]) for row in cumulative), 3),
+        "spec": {field: sum(_int(row["spec"].get(field))
+                            for row in cumulative)
+                 for field in _SPEC_FIELDS}
+        | {"worker_ms": round(sum(float(row["spec"].get("worker_ms") or 0.0)
+                                  for row in cumulative), 1)},
+    }
+
+
+def run_known_probe(client: EngineClient, *, key: str,
+                    budget: int = REPO_BUDGET) -> dict[str, Any]:
+    """Deterministic outline / known-delta probe, no model involved."""
+    calls: list[dict[str, Any]] = []
+
+    def call(payload: dict[str, Any]) -> dict[str, Any]:
+        result, wire = client.graph(payload)
+        calls.append({"op": payload.get("op"), "t": _int(result.get("t")),
+                      "wire": wire})
+        return result
+
+    hello = call({"op": "hello"})
+    sid = hello.get("sid")
+    if not isinstance(sid, str) or not sid:
+        raise LiveError("known probe hello did not return a session id")
+    full = call({"op": "outline", "session": sid, "key": key,
+                 "budget": budget})
+    cols = full.get("c") if isinstance(full.get("c"), list) else []
+    rows = full.get("r") if isinstance(full.get("r"), list) else []
+    known: list[dict[str, str]] = []
+    if rows and isinstance(rows[0], list) and "k" in cols and "h" in cols:
+        row = rows[0]
+        known = [{"key": row[cols.index("k")], "hash": row[cols.index("h")]}]
+    delta = call({"op": "outline", "session": sid, "key": key,
+                  "budget": budget, "known": known})
+    call({"op": "bye", "session": sid})
+    full_call, delta_call = calls[1], calls[2]
+    return {
+        "key": key,
+        "full": {"t": full_call["t"], "wire": full_call["wire"],
+                 "rows": len(rows)},
+        "delta": {"t": delta_call["t"], "wire": delta_call["wire"],
+                  "unchanged": len(delta.get("u") or [])},
+        "saved_t": full_call["t"] - delta_call["t"],
+        "saved_wire": full_call["wire"] - delta_call["wire"],
+    }
 def _summarise(rows: list[dict[str, Any]]) -> dict[str, Any]:
     if not rows:
         return {}
@@ -1178,19 +1808,27 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--fixture", "--repo", dest="fixture",
                         default=DEFAULT_FIXTURE,
                         help="repository path this run's tasks and snapshot describe")
-    parser.add_argument("--task-set", choices=tuple(TASK_SETS), default="tiny",
+    parser.add_argument("--task-set",
+                        choices=tuple(dict.fromkeys(list(TASK_SETS) + list(MULTI_TASKS))),
+                        default="tiny",
                         help="task set to run (default: the tiny fixture)")
+    parser.add_argument("--suite", choices=("oneshot", "multiturn"),
+                        default="oneshot",
+                        help="one-shot task set or three-turn sessions "
+                             "(default: oneshot)")
     parser.add_argument("--budget", type=int, default=None,
                         help="per-call estimated-token cap (default: 800 tiny, "
                              "1200 flask)")
     parser.add_argument("--arm",
                         choices=("engine", "engine_opt", "control", "both",
-                                 "all"),
+                                 "all", "engine_known", "engine_known_spec"),
                         default="both")
     parser.add_argument("--task", action="append",
                         choices=list(dict.fromkeys(
                             [task["id"] for task in TASKS]
-                            + [task["id"] for task in FLASK_TASKS])),
+                            + [task["id"] for task in FLASK_TASKS]
+                            + [task["id"] for tasks in MULTI_TASKS.values()
+                               for task in tasks])),
                         help="run only this task id (repeatable)")
     parser.add_argument("--repeat", type=int, default=1,
                         help="repeat the selected tasks in sequence (default 1)")
@@ -1198,7 +1836,9 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
                         help="reverse arm order on every other repeat")
     parser.add_argument("--max-tool-calls", type=int, default=MAX_TOOL_CALLS)
     parser.add_argument("--max-tokens", type=int, default=MAX_TOKENS)
-    parser.add_argument("--final-tokens", type=int, default=FINAL_TOKENS)
+    parser.add_argument("--final-tokens", type=int, default=None,
+                        help=f"final answer budget (default {FINAL_TOKENS} "
+                             "one-shot, 600 multi-turn)")
     parser.add_argument("--out", default=None,
                         help="write the full measurement JSON here")
     parser.add_argument("--no-spec-probe", action="store_true",
@@ -1209,8 +1849,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = _parse_args(argv)
+def _main_multiturn(args: argparse.Namespace) -> int:
     if not args.live or os.environ.get(LIVE_ENV) != "1":
         print(f"error: live evaluation requires --live and {LIVE_ENV}=1",
               file=sys.stderr)
@@ -1236,6 +1875,196 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: --budget must be between 64 and {MAX_EVAL_BUDGET}",
               file=sys.stderr)
         return 2
+    task_set = MULTI_TASKS.get(args.task_set)
+    if task_set is None:
+        print(f"error: no multi-turn task set {args.task_set!r}",
+              file=sys.stderr)
+        return 2
+    selected = [task for task in task_set
+                if not args.task or task["id"] in args.task]
+    if not selected:
+        print("error: no tasks selected", file=sys.stderr)
+        return 2
+    if args.arm == "all":
+        arms = MULTI_ARMS
+    elif args.arm == "both":
+        arms = ("control", "engine_known")
+    elif args.arm in MULTI_ARMS:
+        arms = (args.arm,)
+    else:
+        print(f"error: multi-turn arms are {', '.join(MULTI_ARMS)} "
+              "(or all/both)", file=sys.stderr)
+        return 2
+    final_tokens = (args.final_tokens if args.final_tokens is not None
+                    else 600)
+    try:
+        endpoint_key = _endpoint_key()
+        engine_token = _engine_token(args)
+        client = EngineClient(args.engine_url, engine_token)
+        health = client.health()
+        if not health.get("ok"):
+            raise LiveError("engine health check did not report ok")
+        model_info, _ = _http_json(
+            "GET", args.base_url.rstrip("/") + "/v1/models",
+            token=endpoint_key, timeout=15.0, label="model listing")
+        model_rows = model_info.get("data")
+        model_root = None
+        if isinstance(model_rows, list):
+            for row in model_rows:
+                if isinstance(row, dict) and row.get("id") == args.model:
+                    model_root = row.get("root")
+                    break
+        model = {
+            "base_url": args.base_url,
+            "model": args.model,
+            "model_root": model_root,
+            "key": endpoint_key,
+            "max_tool_calls": args.max_tool_calls,
+            "max_tokens": args.max_tokens,
+            "final_tokens": final_tokens,
+        }
+        results: dict[str, Any] = {
+            "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "model": {"id": args.model, "root": model_root,
+                      "base_url": args.base_url},
+            "fixture": str(Path(args.fixture).resolve()),
+            "task_set": args.task_set,
+            "suite": "multiturn",
+            "budget": budget,
+            "engine_url": args.engine_url,
+            "engine_health": health,
+            "config": {
+                "temperature": 0,
+                "top_p": 1,
+                "seed": 0,
+                "enable_thinking": False,
+                "max_tool_calls": args.max_tool_calls,
+                "max_tokens": args.max_tokens,
+                "final_tokens": final_tokens,
+                "repeat": args.repeat,
+                "counterbalance": args.counterbalance,
+                "engine_default_budget": budget,
+                "control_session": "fresh hello/bye per call",
+                "engine_known_session": "one session for all three turns",
+                "engine_known_injection": "outline/context only; "
+                                          "client remembers {key,hash}",
+                "engine_known_spec": "engine_known + speculation on find",
+                "engine_known_plain": "speculation off on find",
+            },
+            "system_prompts": {"multi": _short_system(budget)},
+            "tools": {"control": _control_schema(),
+                      "engine_known": _opt_schema(False),
+                      "engine_known_with_fetch": _opt_schema(True)},
+            "overhead": interface_profile(budget),
+            "arm_order": [],
+            "tasks": {
+                task["id"]: {
+                    "kind": task["kind"],
+                    "turns": [
+                        {"id": turn["id"], "prompt": turn["prompt"],
+                         "expected": [name for name, _ in turn["checks"]]}
+                        for turn in task["turns"]
+                    ],
+                }
+                for task in selected
+            },
+            "arms": {name: {"tasks": [], "totals": {}}
+                     for name in arms},
+        }
+        base_order = list(arms)
+        for repeat in range(args.repeat):
+            order = (base_order if not args.counterbalance or repeat % 2 == 0
+                     else list(reversed(base_order)))
+            results["arm_order"].append(order)
+            for arm_name in order:
+                for task in selected:
+                    recorder = Recorder()
+                    arm: EngineArm | ControlArm
+                    if arm_name == "control":
+                        arm = ControlArm(client, recorder, budget=budget)
+                    else:
+                        arm = EngineArm(
+                            client, recorder, interface="optimized",
+                            budget=budget, known_reuse=True,
+                            speculate=(arm_name == "engine_known_spec"))
+                    print(f"[{arm_name}] repeat {repeat + 1} task {task['id']}",
+                          file=sys.stderr, flush=True)
+                    row = run_multiturn(arm, arm_name, task, model)
+                    results["arms"][arm_name]["tasks"].append(row)
+                    cumulative = row["cumulative"]
+                    print(f"  accepted={cumulative['accepted_turns']}/"
+                          f"{cumulative['turns']} "
+                          f"tool_calls={cumulative['tool_calls']} "
+                          f"known={cumulative['known_sent']} "
+                          f"unchanged={cumulative['unchanged_count']} "
+                          f"wall={cumulative['wall_s']}s "
+                          f"tokens={cumulative['usage']['total_tokens']}",
+                          file=sys.stderr, flush=True)
+        for arm_name in arms:
+            results["arms"][arm_name]["totals"] = _multi_totals(
+                results["arms"][arm_name]["tasks"])
+        if not args.no_spec_probe:
+            probe_query = args.spec_probe_query or (
+                "get_root_path" if args.task_set == "flask" else "average")
+            probe_key = ("sym:src/flask/helpers.py::get_root_path"
+                         if args.task_set == "flask"
+                         else "sym:pkg/metrics.py::average")
+            print("[engine] deterministic spec probe", file=sys.stderr,
+                  flush=True)
+            results["spec_probe"] = run_spec_probe(
+                client, query=probe_query, budget=budget)
+            print("[engine] deterministic known-delta probe", file=sys.stderr,
+                  flush=True)
+            results["known_probe"] = run_known_probe(
+                client, key=probe_key, budget=budget)
+        if args.out:
+            out_path = Path(args.out).expanduser()
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(json.dumps(results, indent=2) + "\n",
+                                encoding="utf-8")
+            print(f"wrote {out_path}", file=sys.stderr)
+        print(json.dumps({
+            "model": results["model"],
+            "arms": {name: data["totals"]
+                     for name, data in results["arms"].items()},
+        }, indent=2))
+        return 0
+    except LiveError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(argv)
+    if args.suite == "multiturn":
+        return _main_multiturn(args)
+    if not args.live or os.environ.get(LIVE_ENV) != "1":
+        print(f"error: live evaluation requires --live and {LIVE_ENV}=1",
+              file=sys.stderr)
+        return 2
+    if not args.engine_url:
+        print(f"error: --engine-url or {ENGINE_URL_ENV} is required",
+              file=sys.stderr)
+        return 2
+    if args.repeat < 1:
+        print("error: --repeat must be at least 1", file=sys.stderr)
+        return 2
+    if not (1 <= args.max_tool_calls <= 12):
+        print("error: --max-tool-calls must be between 1 and 12",
+              file=sys.stderr)
+        return 2
+    if not Path(args.fixture).expanduser().is_dir():
+        print(f"error: --fixture/--repo is not a directory: {args.fixture}",
+              file=sys.stderr)
+        return 2
+    budget = args.budget if args.budget is not None else (
+        REPO_BUDGET if args.task_set == "flask" else TINY_BUDGET)
+    if not (64 <= budget <= MAX_EVAL_BUDGET):
+        print(f"error: --budget must be between 64 and {MAX_EVAL_BUDGET}",
+              file=sys.stderr)
+        return 2
+    final_tokens = (args.final_tokens if args.final_tokens is not None
+                    else FINAL_TOKENS)
     selected = [task for task in TASK_SETS[args.task_set]
                 if not args.task or task["id"] in args.task]
     if not selected:
@@ -1272,14 +2101,19 @@ def main(argv: list[str] | None = None) -> int:
             "key": key,
             "max_tool_calls": args.max_tool_calls,
             "max_tokens": args.max_tokens,
-            "final_tokens": args.final_tokens,
+            "final_tokens": final_tokens,
         }
         if args.arm == "all":
             arms = ("control", "engine", "engine_opt")
         elif args.arm == "both":
             arms = ("engine", "control")
-        else:
+        elif args.arm in ("engine", "engine_opt", "control"):
             arms = (args.arm,)
+        else:
+            print(f"error: one-shot arms are engine, engine_opt, control "
+                  "(or both/all); use --suite multiturn for "
+                  f"{', '.join(MULTI_ARMS)}", file=sys.stderr)
+            return 2
         results: dict[str, Any] = {
             "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             "model": {"id": args.model, "root": model_root,
@@ -1296,7 +2130,7 @@ def main(argv: list[str] | None = None) -> int:
                 "enable_thinking": False,
                 "max_tool_calls": args.max_tool_calls,
                 "max_tokens": args.max_tokens,
-                "final_tokens": args.final_tokens,
+                "final_tokens": final_tokens,
                 "repeat": args.repeat,
                 "counterbalance": args.counterbalance,
                 "engine_default_budget": budget,
