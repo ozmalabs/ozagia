@@ -29,6 +29,7 @@ from ozagia.core.graph_engine import (
     SPEC_BUDGET,
     SPEC_TTL_S,
     GraphEngine,
+    InlineSpecWorker,
     ProcessSpecWorker,
     SpecJob,
     _apply_child_limits,
@@ -317,6 +318,7 @@ def test_shape_columns_default_and_repeated_shape_is_parseable(
     sid = _hello(engine)["sid"]
     first = engine.handle({"op": "shape", "session": sid, "budget": 800})
     assert first["c"] == SHAPE_COLS
+    assert first["mods"] and "pkg/core.py" in first["mods"]
     second = engine.handle({"op": "shape", "session": sid, "budget": 800})
     assert second["c"] == SHAPE_COLS
     assert second["r"]
@@ -498,6 +500,65 @@ def test_background_response_returns_before_preparation(manual) -> None:
                for handle in handles)
     assert session.ledger["prepared"] == 0
     assert "st" not in first
+
+
+def test_fetch_without_handles_is_compact_and_steers_away(
+        engine: GraphEngine) -> None:
+    sid = _hello(engine)["sid"]
+    result = engine.handle({"op": "fetch", "session": sid})
+    assert result["e"] == "no_handles"
+    assert "do not retry" in result["why"]
+    assert result["t"] <= 40
+
+
+def test_ready_spec_is_inlined_without_fetch(memory: DevMemory) -> None:
+    engine = GraphEngine(memory, spec_worker=InlineSpecWorker())
+    try:
+        sid = _hello(engine)["sid"]
+        first = _spec_result(engine, sid)
+        spec = first["q"]
+        assert spec["i"]
+        assert all(item.get("h") and item.get("qo") for item in spec["i"])
+        assert all("next" not in item and "st" not in item
+                   for item in spec["i"])
+        # Delivered payloads leave the session, so nothing is fetched twice.
+        delivered = {item["h"] for item in spec["i"]}
+        assert delivered.isdisjoint(spec["h"])
+        assert all(handle not in engine.sessions[sid].spec
+                   for handle in delivered)
+        stats = engine.handle(
+            {"op": "hello", "session": sid, "stats": True})["st"]
+        assert stats["fetched"] == len(spec["i"])
+        assert stats["hits"] == len(spec["i"])
+        assert stats["wasted"] == 0
+    finally:
+        engine.close()
+
+
+def test_inline_can_be_disabled_and_respects_a_small_budget(
+        memory: DevMemory) -> None:
+    engine = GraphEngine(memory, spec_worker=InlineSpecWorker())
+    try:
+        sid = _hello(engine)["sid"]
+        plain = engine.handle({"op": "find", "session": sid, "q": "add",
+                               "spec": True, "budget": 1200,
+                               "inline": False})
+        assert plain["q"]["h"]
+        assert "i" not in plain["q"]
+        small = engine.handle({"op": "find", "session": sid, "q": "add",
+                               "spec": True, "budget": 64})
+        assert small["t"] <= 64
+        assert not (small.get("q") or {}).get("i")
+    finally:
+        engine.close()
+
+
+def test_engine_tool_description_is_compact() -> None:
+    from ozagia.core.graph_engine import ENGINE_TOOLS
+    text = ENGINE_TOOLS[0]["description"].lower()
+    assert "read-only" in text
+    assert "speculative" not in text
+    assert description_tokens() <= 40
 
 
 def test_fetch_after_completion_hits_without_recompute(

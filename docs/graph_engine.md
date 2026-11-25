@@ -143,8 +143,8 @@ handle must call `hello` again.
 | `impact` | transitive callers, dependent files and covering tests |
 | `tests` | tests covering a key (discovery only; never runs pytest) |
 | `context` | cited task context from the existing context pack |
-| `shape` | compact repository identity, counts, languages, modules, commands |
-| `fetch` | a prepared speculative payload, pending result or cancellation |
+| `shape` | compact repository identity, counts, languages, module file paths (`mods`), commands |
+| `fetch` | a prepared speculative payload, pending result, cancellation, or compact `no_handles` |
 | `bye` | close the session, cancel pending work and clear caches |
 
 Example:
@@ -161,8 +161,10 @@ also ask for reuse with the same columns omit it. `cols: true` forces `c` even
 in reuse mode.
 `r` is rows, `c` columns, `k` key, `f` file, `sp` source span, `sig` signature,
 `sum` summary, `why` reason, `txt` text, `u` unchanged keys, `x` truncated,
-`o` omitted, `n` next request and `q` speculative handles. `verbose: true`
-expands rows to named objects for debugging.
+`o` omitted, `n` next request, `q` speculative handles, `q.i` speculative
+payloads already delivered inline, and `mods` the shape operation's flat list of
+repository-relative module file paths. `verbose: true` expands rows to named
+objects for debugging.
 
 ## Budgets and paging
 
@@ -214,6 +216,18 @@ time, and `q.p` is the number of further suggestions. A single worker prepares
 at most two payloads **after** the response, while the model is thinking. The
 handler never waits for it.
 
+When a payload is already ready at response time, the engine delivers it under
+`q.i` and consumes the handle instead of making the model issue a separate
+`fetch`. Inline delivery happens only while the rendered response stays within
+the requested budget and only when `spec` was requested. A delivered payload is
+removed from `q.h` and counted as fetched/hit, so it cannot be fetched twice.
+Pass `inline: false` to keep fetch-only delivery (the live legacy arm does this).
+
+A model-facing driver can also omit the `fetch` operation from its tool schema
+while the session has no speculative handles. The engine still accepts `fetch`
+for direct clients, but returns a compact `no_handles` response when there is
+nothing to fetch.
+
 When fork is available, the worker is a **supervised forked child process** per
 engine: the child computes `(handle, payload)` results against its inherited
 graph snapshot and a small parent listener thread applies them after
@@ -243,6 +257,16 @@ Fetch one or more:
 - still pending: waits up to `wait_ms` (0–250) and then returns
   `{"h": "q1", "fs": "pending"}`;
 - cancelled/expired: returns `{"h": "q1", "fs": "cancelled"}`.
+
+With no handles, the compact reply is:
+
+```json
+{"e": "no_handles", "why": "fetch only q handles returned by find; do not retry",
+ "s": "3f2a…", "t": 29}
+```
+
+A handle that is unknown (including one already consumed by inline delivery) is
+refused with the existing `unknown or expired spec handle` error.
 
 The full accounting is opt-in with `stats: true` on any op (including `hello`
 and `fetch`):
@@ -318,6 +342,12 @@ written to the checkout.
   daemon/forkserver would avoid this.
 - Hit-rate/waste is measured on a few local corpus checkouts with simulated
   think time, not real model latency or a broad repository sample.
+- The live-model comparison is one local 27B model on one tiny fixture. The
+  optimized model-facing interface (conditional `fetch`, inline ready payloads,
+  a smaller schema, explicit shape file paths) accepted 6/6 at 18,118 tokens
+  versus 17,762 for the stateless control and 35,752 for the previous engine
+  interface; it narrowed, but did not beat, the control on tokens. See
+  [`docs/results/graph_engine_live_2026-11-25_optimized.md`](results/graph_engine_live_2026-11-25_optimized.md).
 - Supervision and hard-timeout behaviour are covered by tests, not by the
   corpus measurement; that measurement predates them.
 - A compact 16-hex content hash for `known`, not a cryptographic identity.

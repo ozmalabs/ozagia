@@ -363,6 +363,31 @@ Ledger counters:
 The cache is bounded at 8 entries per session. The engine also keeps
 process-lifetime aggregate counters in `GraphEngine.stats()`.
 
+### Model-facing interface follow-up (2026-11-25)
+
+The live A/B exposed three model-facing problems that the wire protocol alone did
+not fix: `fetch` was advertised with no handles, ready payloads still required a
+round-trip, and `shape` module names were ambiguous. The protocol now adds:
+
+- **Compact `no_handles`.** `fetch` with no handles returns
+  `{"e": "no_handles", "why": "fetch only q handles returned by find; do not
+  retry", "s": ..., "t": ...}` rather than a generic error. A driver may also
+  omit `fetch` from the model-facing schema until the session holds handles.
+- **Inline ready payloads.** When `spec` is requested and a prepared payload is
+  ready at response time, it is returned under `q.i`, removed from `q.h` and
+  counted as fetched/hit. It is only inlined while the response fits the budget;
+  `inline: false` keeps fetch-only delivery.
+- **Shape module paths.** `shape` includes a flat `mods` list of
+  repository-relative module file paths alongside the compact rows. The live
+  task prompt now asks for those paths explicitly; the acceptance check was not
+  relaxed.
+
+The follow-up result is
+[`../results/graph_engine_live_2026-11-25_optimized.md`](../results/graph_engine_live_2026-11-25_optimized.md):
+the optimized arm accepted 6/6 at 18,118 tokens versus 17,762 for the control
+and 35,752 for the previous engine interface, with 20 tool calls in both the
+optimized and control arms.
+
 ### Worker limits and lifecycle
 
 - One worker per engine: a supervised forked child when available, otherwise one
@@ -551,3 +576,8 @@ was used. A live session remains blocked behind `--live`,
   proves too short for long agent sessions.
 - Stronger item identity than a 16-hex hash prefix if cross-process caching is
   added.
+- Broader live-model evidence: more models, larger real repositories,
+  counterbalanced arm order, and live inline-delivery coverage. The current
+  result is one local 27B model on one tiny fixture.
+- The optimized model-facing interface is not yet exercised in the TUI/Desktop
+  or other MCP hosts; only the live driver and unit tests cover it.

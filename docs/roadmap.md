@@ -521,17 +521,26 @@ corpus, engine wire/readiness results were fd 1,432/5 vs 3,952/5, flask
 2,979/5 vs 10,311/5, httpx 3,214/5 vs 12,185/5, and this repository 2,672/5 vs
 12,055/5 at a 150 ms think; the last run missed the fetch window because one
 candidate took about 1.2 s, and was ready later (1,500 ms think: 3,131/5,
-hit_rate 1.0). These are wire/overlap measurements, not model-task gains. The
-local OpenAI-compatible endpoint check (`127.0.0.1:8000`) was refused, so the
-live-model run remains blocked behind `--live`, `OZAGIA_EVAL_LIVE=1` and human
-approval. An optional loopback HTTP/JSON transport now serves the same engine
+hit_rate 1.0). These are wire/overlap measurements, not model-task gains. An
+approved live run on the local 27B endpoint then exposed a real interface defect
+(repeated `shape` calls). After a column fix the engine arm used 36,585 tokens
+versus 19,626 for the stateless control and accepted 4/6 versus 6/6. A follow-up
+optimized the model-facing interface (conditional `fetch`, inline ready
+payloads, a smaller schema and explicit shape file paths) and reran the same
+tasks and checks counterbalanced: 18,118 versus 17,762 tokens, 6/6 both, 20 tool
+calls each, with the legacy interface at 35,752. The optimized interface
+narrowed rather than beat the control; see
+`docs/results/graph_engine_live_2026-11-25.md` and
+`docs/results/graph_engine_live_2026-11-25_optimized.md`. An optional loopback
+HTTP/JSON transport now serves the same engine
 (`POST /v1/graph`) and the existing `task_context` provider
 (`POST /v1/ozma/context`), with a required bearer token, a 127.0.0.1 default, a
 64 KiB body limit, four concurrent calls, stable JSON errors and graceful
 SIGINT/SIGTERM shutdown; it is a local transport, not full Ozma protocol
 conformance. Next: a long-lived shared worker, in-call cancellation or splitting
-of expensive operations, broader hit/waste and timeout evaluation, and a full
-Ozma shim/protocol contract if a caller needs one.
+of expensive operations, broader hit/waste and timeout evaluation across
+models/repositories, live inline-delivery coverage, TUI/Desktop exercise, and a
+full Ozma shim/protocol contract if a caller needs one.
 
 **Exit criteria**
 

@@ -108,7 +108,8 @@ _COL_NAMES = {
 _TEXT_COLS = frozenset({"sig", "sum", "why", "txt", "v", "e"})
 _TEXT_KEYS = frozenset({"signature", "summary", "why", "text", "value",
                         "edges", "description"})
-_TRIM_LISTS = frozenset({"rows", "unchanged", "spec", "items", "edges"})
+_TRIM_LISTS = frozenset({"rows", "unchanged", "spec", "items", "edges",
+                         "mods"})
 
 
 # --------------------------------------------------------------------------- #
@@ -123,9 +124,8 @@ ENGINE_TOOL_NAME = "graph"
 ENGINE_TOOLS: list[dict[str, Any]] = [{
     "name": ENGINE_TOOL_NAME,
     "description": (
-        "Stateful read-only graph session: hello, find, outline, expand, "
-        "impact, tests, context, shape, fetch. Compact rows, token budget, "
-        "known deltas, speculative next handles."),
+        "Read-only code graph: find, outline, expand, impact, tests, context, "
+        "shape, fetch. Compact rows, token budgets, known deltas."),
     "inputSchema": _schema({
         "op": {"type": "string", "enum": list(OPS)},
         "session": {"type": "string"},
@@ -1372,6 +1372,8 @@ class GraphEngine:
         if allow_spec and args.get("spec") is True:
             result.update(self._speculate(session, op, args, keys, snap,
                                           budget))
+            if args.get("inline") is not False:
+                result = self._inline_ready(result, session, budget)
         if args.get("stats") is True:
             result["st"] = self._stats_view(session)
         verbose = bool(args.get("verbose")) or not session.compact
@@ -1659,6 +1661,59 @@ class GraphEngine:
                         == "ready")
         return {"spec": {"h": handles, "r": ready, "p": remaining}}
 
+    def _inline_ready(self, result: dict[str, Any], session: EngineSession,
+                      budget: int) -> dict[str, Any]:
+        """Deliver already-ready speculative payloads instead of a fetch.
+
+        Runs only after the caller asked for ``spec`` and only while the
+        rendered response still fits the budget.  A delivered handle is
+        consumed exactly like a fetch: it leaves the session and is counted in
+        the ledger, so a later fetch cannot double-charge it.
+        """
+        spec = result.get("spec")
+        if not isinstance(spec, dict):
+            return result
+        handles = spec.get("h")
+        if not isinstance(handles, list) or not handles:
+            return result
+        delivered: list[dict[str, Any]] = []
+        kept: list[str] = []
+        target = max(120, (budget - 8) * 4)
+        with self._lock:
+            for handle in handles:
+                entry = session.spec.get(handle)
+                if entry is None:
+                    continue
+                if entry.get("status") != "ready":
+                    kept.append(handle)
+                    continue
+                payload = dict(entry.get("result") or {})
+                for key in ("next", "spec", "st"):
+                    payload.pop(key, None)
+                payload["h"] = handle
+                payload["qop"] = str(
+                    (entry.get("request") or {}).get("op") or "")
+                trial = dict(result)
+                trial["spec"] = {"i": delivered + [payload]}
+                if _json_size(trial) > target:
+                    kept.append(handle)
+                    continue
+                delivered.append(payload)
+                session.spec.pop(handle, None)
+                entry["fetched"] = True
+                session.ledger["fetched"] += 1
+                self.totals["fetched"] += 1
+                session.ledger["hits"] += 1
+                self.totals["hits"] += 1
+            if not delivered:
+                return result
+            spec["h"] = kept
+            spec["r"] = sum(
+                1 for handle in kept
+                if (session.spec.get(handle) or {}).get("status") == "ready")
+            spec["i"] = delivered
+        return result
+
     def _candidates(self, op: str, args: dict[str, Any],
                     keys: list[str]) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
@@ -1892,7 +1947,7 @@ class GraphEngine:
         if not handles and args.get("h"):
             handles = [str(args["h"])]
         if not handles:
-            return self._error("fetch needs one or more handles", snap=snap)
+            return self._no_handles(snap)
         if len(handles) > 4:
             return self._error("at most four handles per fetch", snap=snap)
         wait_ms = _clamp(args.get("wait_ms", 0), 0, MAX_FETCH_WAIT_MS, 0)
@@ -2193,7 +2248,11 @@ class GraphEngine:
         groups = (shape.get("modules") or {}).get("groups") or []
         modules = [row for group in groups
                    for row in (group.get("modules") or [])]
+        module_paths: list[str] = []
         for row in modules[:limit]:
+            path = str(row.get("path") or "")
+            if path:
+                module_paths.append(path)
             items.append({"sec": "module", "k": row.get("path"),
                           "v": row.get("responsibility")})
         commands = shape.get("commands") or {}
@@ -2205,6 +2264,7 @@ class GraphEngine:
                           "v": row.get("text")})
         return _clean({"cols": SHAPE_COLS,
                        "rows": _compact(items, SHAPE_COLS),
+                       "mods": module_paths,
                        "__keys": []})
 
     # -- small response helpers --------------------------------------------- #
@@ -2226,6 +2286,16 @@ class GraphEngine:
         result: dict[str, Any] = {"e": message}
         if snap:
             result["s"] = snap
+        result["t"] = estimate_tokens(result)
+        return result
+
+    @staticmethod
+    def _no_handles(snap: str) -> dict[str, Any]:
+        result = {
+            "e": "no_handles",
+            "why": "fetch only q handles returned by find; do not retry",
+            "s": snap,
+        }
         result["t"] = estimate_tokens(result)
         return result
 

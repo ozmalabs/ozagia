@@ -12,6 +12,16 @@ model tokens than the stateless control and failed both of its
 freed budget on extra `fetch` calls and returned dotted module names. This is a
 small measured sample, not a general model-task claim.
 
+> **Follow-up (2026-11-25):** after this sample, the model-facing interface was
+> changed (conditional `fetch`, inline ready speculation, a smaller optimized
+> schema and explicit shape file paths) and rerun with the same tasks/checks.
+> The optimized arm accepted 6/6, used 18,118 model tokens versus 17,762 for the
+> control and 35,752 for the legacy engine interface, and matched the control's
+> 20 tool calls. See
+> [`graph_engine_live_2026-11-25_optimized.md`](graph_engine_live_2026-11-25_optimized.md).
+> The conclusion below (the old engine arm still lost) is unchanged for the old
+> interface.
+
 ## Change under test
 
 1. **Default columns.** `GraphEngine` now includes per-op `c` columns on every

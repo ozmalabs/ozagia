@@ -13,10 +13,18 @@ with a clear message instead of producing a synthetic result.
     OZAGIA_EVAL_LIVE=1 .venv/bin/python scripts/eval_graph_engine_live.py \
         --live --engine-url http://127.0.0.1:PORT \
         --engine-token-file /tmp/opencode/engine-live/.ozagia/engine/token \
+        --arm all --repeat 2 --counterbalance \
         --out /tmp/opencode/engine-live/eval.json
 
+The arms are ``control`` (stateless, fresh session per call),
+``engine`` (the previous model-facing interface) and ``engine_opt``
+(conditional ``fetch``, a smaller schema and inline ready speculation).
+``--arm both`` keeps the old engine+control pair.  ``--counterbalance``
+reverses arm order on every other repeat.
+
 This is a small measured sample, not a general model-task claim.  See
-``docs/results/graph_engine_live_2026-11-25.md``.
+``docs/results/graph_engine_live_2026-11-25.md`` and
+``docs/results/graph_engine_live_2026-11-25_optimized.md``.
 """
 from __future__ import annotations
 
@@ -56,6 +64,7 @@ OPS = ("hello", "find", "outline", "expand", "impact", "tests", "context",
 ENGINE_OPS = ("find", "outline", "expand", "impact", "tests", "context",
               "shape", "fetch")
 CONTROL_OPS = ("find", "outline", "expand", "impact", "tests", "shape")
+OPT_OPS = ("find", "outline", "expand", "impact", "tests", "shape")
 
 
 class LiveError(RuntimeError):
@@ -139,19 +148,47 @@ def _http_json(method: str, url: str, *, token: str | None = None,
 # --------------------------------------------------------------------------- #
 # Tool schemas
 # --------------------------------------------------------------------------- #
-def _engine_schema() -> dict[str, Any]:
+def _engine_schema(include_fetch: bool = True) -> dict[str, Any]:
+    ops = list(ENGINE_OPS) if include_fetch else [
+        op for op in ENGINE_OPS if op != "fetch"]
+    props: dict[str, Any] = {
+        "op": {"type": "string", "enum": ops},
+        "q": {"type": "string"},
+        "key": {"type": "string"},
+        "keys": {"type": "array", "items": {"type": "string"}},
+        "budget": {"type": "integer"},
+        "spec": {"type": "boolean"},
+        "h": {"type": "string"},
+    }
+    if include_fetch:
+        props["fetch"] = {"type": "array", "items": {"type": "string"}}
     return {
         "type": "object",
-        "properties": {
-            "op": {"type": "string", "enum": list(ENGINE_OPS)},
-            "q": {"type": "string"},
-            "key": {"type": "string"},
-            "keys": {"type": "array", "items": {"type": "string"}},
-            "budget": {"type": "integer"},
-            "spec": {"type": "boolean"},
-            "fetch": {"type": "array", "items": {"type": "string"}},
-            "h": {"type": "string"},
-        },
+        "properties": props,
+        "required": ["op"],
+        "additionalProperties": False,
+    }
+
+
+def _opt_schema(include_fetch: bool) -> dict[str, Any]:
+    """Small optimized schema: only the ops these tasks need.
+
+    ``fetch`` is conditional on live speculative handles, so a session with no
+    prepared work never advertises it.
+    """
+    ops = list(OPT_OPS) + (["fetch"] if include_fetch else [])
+    props: dict[str, Any] = {
+        "op": {"type": "string", "enum": ops},
+        "q": {"type": "string"},
+        "key": {"type": "string"},
+        "keys": {"type": "array", "items": {"type": "string"}},
+        "budget": {"type": "integer"},
+    }
+    if include_fetch:
+        props["fetch"] = {"type": "array", "items": {"type": "string"}}
+    return {
+        "type": "object",
+        "properties": props,
         "required": ["op"],
         "additionalProperties": False,
     }
@@ -218,6 +255,7 @@ class Recorder:
         self.find_ready: list[int] = []
         self.find_handles: list[int] = []
         self.fetch_states: list[Any] = []
+        self.fetch_blocked = 0
         self.ops: list[str] = []
         self.tool_args: list[dict[str, Any]] = []
 
@@ -268,14 +306,22 @@ class Recorder:
 
 
 class EngineArm:
-    """Stateful engine surface: one session, optional spec/fetch."""
+    """Stateful engine surface: one session, optional spec/fetch.
 
-    def __init__(self, client: EngineClient, recorder: Recorder) -> None:
+    ``interface="legacy"`` replays the pre-optimization model-facing schema and
+    prompt.  ``interface="optimized"`` exposes only the ops these tasks use and
+    advertises ``fetch`` only while the session holds speculative handles.
+    """
+
+    def __init__(self, client: EngineClient, recorder: Recorder,
+                 *, interface: str = "legacy") -> None:
         self.client = client
         self.recorder = recorder
+        self.interface = interface
         self.sid: str | None = None
         self.closed = False
         self.session_override = 0
+        self.handles: set[str] = set()
         self._seq = 0
 
     def _hello(self) -> dict[str, Any]:
@@ -287,10 +333,46 @@ class EngineArm:
         if isinstance(sid, str) and sid:
             self.sid = sid
             self.closed = False
+            self.handles.clear()
         return result
+
+    def has_handles(self) -> bool:
+        return bool(self.handles)
+
+    def _track_handles(self, op: str, result: dict[str, Any]) -> None:
+        if op in ("find", "impact"):
+            spec = result.get("q")
+            raw = spec.get("h") if isinstance(spec, dict) else None
+            self.handles = ({str(handle) for handle in raw}
+                            if isinstance(raw, list) else set())
+        elif op == "fetch":
+            items = result.get("it")
+            if not isinstance(items, list):
+                items = [result]
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                handle = item.get("h")
+                if not handle:
+                    continue
+                if item.get("fs") == "pending":
+                    self.handles.add(str(handle))
+                else:
+                    self.handles.discard(str(handle))
 
     def call(self, args: dict[str, Any]) -> tuple[dict[str, Any], int]:
         op = str(args.get("op") or "")
+        if self.interface == "optimized":
+            allowed = set(OPT_OPS)
+            if self.handles:
+                allowed.add("fetch")
+            if op not in allowed:
+                if op == "fetch":
+                    self.recorder.fetch_blocked += 1
+                    return {"e": "no_handles",
+                            "why": "fetch only q handles returned by find; "
+                                   "do not retry"}, 0
+                return {"e": f"op {op!r} is not available in this session"}, 0
         if op == "hello":
             self.session_override += 1
             result, wire = self.client.graph(args)
@@ -299,6 +381,7 @@ class EngineArm:
             if isinstance(sid, str) and sid:
                 self.sid = sid
                 self.closed = False
+                self.handles.clear()
             return result, wire
         if op == "bye":
             if not self.sid or self.closed:
@@ -307,6 +390,7 @@ class EngineArm:
             result, wire = self.client.graph(payload)
             self.recorder.add_engine(result, wire, model_visible=True)
             self.closed = True
+            self.handles.clear()
             return result, wire
         if not self.sid or self.closed:
             self._hello()
@@ -321,6 +405,8 @@ class EngineArm:
             payload.setdefault("spec", True)
         if op == "fetch":
             payload.setdefault("wait_ms", 200)
+        if self.interface != "optimized":
+            payload.setdefault("inline", False)
         result, wire = self.client.graph(payload)
         self.recorder.add_engine(result, wire, model_visible=True)
         if isinstance(result.get("e"), str) and "session" in result["e"].lower():
@@ -331,6 +417,7 @@ class EngineArm:
             payload["session"] = self.sid
             result, wire = self.client.graph(payload)
             self.recorder.add_engine(result, wire, model_visible=True)
+        self._track_handles(op, result)
         return result, wire
 
     def finish(self) -> dict[str, Any]:
@@ -353,6 +440,7 @@ class EngineArm:
         except LiveError:
             pass
         self.closed = True
+        self.handles.clear()
         return stats
 
 
@@ -543,7 +631,8 @@ TASKS: list[dict[str, Any]] = [
         "kind": "repository shape",
         "prompt": (
             "Describe the repository shape: name, source file count, test file "
-            "count, Python module paths, and the test command. Reply with only "
+            "count, Python module file paths (repository-relative, for example "
+            "pkg/core.py), and the test command. Reply with only "
             "{\"name\": string, \"source_files\": integer, "
             "\"test_files\": integer, \"modules\": [string], "
             "\"test_command\": string}."
@@ -574,12 +663,12 @@ ENGINE_SYSTEM = (
     "with wait_ms 200 when useful. After at most six tool calls, reply with "
     "only the JSON object the user asks for."
 )
-CONTROL_SYSTEM = (
-    "You have exactly one tool, graph: a read-only code graph. Ops: find, "
-    "outline, expand, impact, tests, shape. Each call is one-shot. Use budgets "
-    "of at most 800. After at most six tool calls, reply with only the JSON "
-    "object the user asks for."
+SHORT_SYSTEM = (
+    "You have one tool, graph: a read-only code graph. Use at most 800-token "
+    "budgets. After at most six calls, reply with only the requested JSON "
+    "object."
 )
+CONTROL_SYSTEM = SHORT_SYSTEM
 
 
 # --------------------------------------------------------------------------- #
@@ -661,11 +750,19 @@ def _execute_tool(arm: EngineArm | ControlArm, name: str,
 def run_task(arm: EngineArm | ControlArm, arm_name: str, task: dict[str, Any],
              model: dict[str, Any]) -> dict[str, Any]:
     recorder = arm.recorder
-    system = ENGINE_SYSTEM if arm_name == "engine" else CONTROL_SYSTEM
-    schema = _engine_schema() if arm_name == "engine" else _control_schema()
-    description = ("Stateful read-only graph session." if arm_name == "engine"
-                   else "One-shot read-only graph query.")
-    tools = [_tool(schema, description)]
+    if arm_name == "engine":
+        system = ENGINE_SYSTEM
+    else:
+        system = SHORT_SYSTEM
+
+    def tools_now() -> list[dict[str, Any]]:
+        if arm_name == "control":
+            return [_tool(_control_schema(), "Read-only code graph.")]
+        if arm_name == "engine":
+            return [_tool(_engine_schema(), "Stateful read-only graph session.")]
+        include_fetch = isinstance(arm, EngineArm) and arm.has_handles()
+        return [_tool(_opt_schema(include_fetch), "Read-only code graph.")]
+
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": system},
         {"role": "user", "content": task["prompt"]},
@@ -677,6 +774,7 @@ def run_task(arm: EngineArm | ControlArm, arm_name: str, task: dict[str, Any],
     max_rounds = model["max_tool_calls"] + 2
     while rounds < max_rounds:
         rounds += 1
+        tools = tools_now()
         response = _chat(model["base_url"], model["key"], model["model"],
                          messages, tools, model["max_tokens"], "auto")
         recorder.model_calls += 1
@@ -708,7 +806,8 @@ def run_task(arm: EngineArm | ControlArm, arm_name: str, task: dict[str, Any],
                 if isinstance(parsed_args, dict):
                     op = str(parsed_args.get("op") or "")
                     spec_value = parsed_args.get("spec")
-                    if arm_name == "engine" and op == "find" and spec_value is None:
+                    if (arm_name in ("engine", "engine_opt") and op == "find"
+                            and spec_value is None):
                         spec_value = True
                     recorder.tool_args.append({
                         "op": op,
@@ -783,6 +882,7 @@ def run_task(arm: EngineArm | ControlArm, arm_name: str, task: dict[str, Any],
         "tool_calls": recorder.tool_calls,
         "driver_calls": recorder.driver_calls,
         "bad_tool_args": recorder.bad_tool_args,
+        "fetch_blocked": recorder.fetch_blocked,
         "tool_args": recorder.tool_args,
         "wall_s": wall_s,
         "engine_t": recorder.engine_t,
@@ -823,6 +923,11 @@ def _summarise(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "json_valid": sum(1 for row in rows if row["json_valid"]),
         "usage": usage,
         "tool_calls": sum(_int(row["tool_calls"]) for row in rows),
+        "shape_calls": sum(1 for row in rows for arg in row["tool_args"]
+                           if arg.get("op") == "shape"),
+        "fetch_calls": sum(1 for row in rows for arg in row["tool_args"]
+                           if arg.get("op") == "fetch"),
+        "fetch_blocked": sum(_int(row.get("fetch_blocked")) for row in rows),
         "driver_calls": sum(_int(row["driver_calls"]) for row in rows),
         "model_calls": sum(_int(row["model_calls"]) for row in rows),
         "engine_t": sum(_int(row["engine_t"]) for row in rows),
@@ -834,6 +939,10 @@ def _summarise(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "wall_s": round(sum(float(row["wall_s"]) for row in rows), 3),
         "spec": {
             "prepared": sum(_int(row["spec"]["prepared"]) for row in rows),
+            "ready_at_response": sum(
+                sum(_int(value) for value in row.get(
+                    "find_spec_ready_at_response") or [])
+                for row in rows),
             "fetched": sum(_int(row["spec"]["fetched"]) for row in rows),
             "wasted": sum(_int(row["spec"]["wasted"]) for row in rows),
             "hits": sum(_int(row["spec"]["hits"]) for row in rows),
@@ -843,6 +952,35 @@ def _summarise(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "worker_ms": round(
                 sum(float(row["spec"]["worker_ms"]) for row in rows), 1),
         },
+    }
+
+
+def interface_profile() -> dict[str, Any]:
+    """Model-facing prompt/tool overhead for each arm before a task prompt."""
+    def size(system: str, schema: dict[str, Any],
+             description: str) -> dict[str, Any]:
+        tools = [_tool(schema, description)]
+        tools_json = json.dumps(tools, ensure_ascii=False,
+                                separators=(",", ":"))
+        fixed = len(system) + len(tools_json)
+        return {
+            "system_chars": len(system),
+            "system_tokens": (len(system) + 3) // 4,
+            "tools_chars": len(tools_json),
+            "tools_tokens": (len(tools_json) + 3) // 4,
+            "fixed_chars": fixed,
+            "fixed_tokens": (fixed + 3) // 4,
+        }
+
+    return {
+        "control": size(CONTROL_SYSTEM, _control_schema(),
+                        "Read-only code graph."),
+        "engine_legacy": size(ENGINE_SYSTEM, _engine_schema(),
+                              "Stateful read-only graph session."),
+        "engine_opt_no_handles": size(SHORT_SYSTEM, _opt_schema(False),
+                                     "Read-only code graph."),
+        "engine_opt_with_fetch": size(SHORT_SYSTEM, _opt_schema(True),
+                                      "Read-only code graph."),
     }
 
 
@@ -860,12 +998,16 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--engine-token-file", default=os.environ.get(
         ENGINE_TOKEN_FILE_ENV, DEFAULT_ENGINE_TOKEN_FILE))
     parser.add_argument("--fixture", default=DEFAULT_FIXTURE)
-    parser.add_argument("--arm", choices=("engine", "control", "both"),
+    parser.add_argument("--arm",
+                        choices=("engine", "engine_opt", "control", "both",
+                                 "all"),
                         default="both")
     parser.add_argument("--task", action="append", choices=[task["id"] for task in TASKS],
                         help="run only this task id (repeatable)")
     parser.add_argument("--repeat", type=int, default=1,
                         help="repeat the selected tasks in sequence (default 1)")
+    parser.add_argument("--counterbalance", action="store_true",
+                        help="reverse arm order on every other repeat")
     parser.add_argument("--max-tool-calls", type=int, default=MAX_TOOL_CALLS)
     parser.add_argument("--max-tokens", type=int, default=MAX_TOKENS)
     parser.add_argument("--final-tokens", type=int, default=FINAL_TOKENS)
@@ -925,7 +1067,12 @@ def main(argv: list[str] | None = None) -> int:
             "max_tokens": args.max_tokens,
             "final_tokens": args.final_tokens,
         }
-        arms = ("engine", "control") if args.arm == "both" else (args.arm,)
+        if args.arm == "all":
+            arms = ("control", "engine", "engine_opt")
+        elif args.arm == "both":
+            arms = ("engine", "control")
+        else:
+            arms = (args.arm,)
         results: dict[str, Any] = {
             "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             "model": {"id": args.model, "root": model_root,
@@ -942,45 +1089,57 @@ def main(argv: list[str] | None = None) -> int:
                 "max_tokens": args.max_tokens,
                 "final_tokens": args.final_tokens,
                 "repeat": args.repeat,
+                "counterbalance": args.counterbalance,
                 "engine_default_budget": DEFAULT_BUDGET,
                 "engine_find_spec_default": True,
                 "engine_fetch_wait_ms_default": 200,
                 "control_session": "fresh hello/bye per call",
+                "optimized_fetch": "schema property only while q handles exist",
             },
             "system_prompts": {"engine": ENGINE_SYSTEM,
+                               "engine_opt": SHORT_SYSTEM,
                                "control": CONTROL_SYSTEM},
             "tools": {"engine": _engine_schema(),
-                      "control": _control_schema()},
+                      "control": _control_schema(),
+                      "engine_opt_base": _opt_schema(False),
+                      "engine_opt_fetch": _opt_schema(True)},
+            "overhead": interface_profile(),
+            "arm_order": [],
             "tasks": {task["id"]: {"kind": task["kind"],
                                    "prompt": task["prompt"],
                                    "expected": [name for name, _ in task["checks"]]}
                       for task in selected},
-            "arms": {},
+            "arms": {name: {"tasks": [], "totals": {}}
+                     for name in arms},
         }
-        for arm_name in arms:
-            arm_rows: list[dict[str, Any]] = []
-            for repeat in range(args.repeat):
+        base_order = list(arms)
+        for repeat in range(args.repeat):
+            order = (base_order if not args.counterbalance or repeat % 2 == 0
+                     else list(reversed(base_order)))
+            results["arm_order"].append(order)
+            for arm_name in order:
                 for task in selected:
                     recorder = Recorder()
                     arm: EngineArm | ControlArm
-                    if arm_name == "engine":
-                        arm = EngineArm(client, recorder)
-                    else:
+                    if arm_name == "control":
                         arm = ControlArm(client, recorder)
+                    else:
+                        interface = ("optimized" if arm_name == "engine_opt"
+                                     else "legacy")
+                        arm = EngineArm(client, recorder, interface=interface)
                     print(f"[{arm_name}] repeat {repeat + 1} task {task['id']}",
                           file=sys.stderr, flush=True)
                     row = run_task(arm, arm_name, task, model)
-                    arm_rows.append(row)
+                    results["arms"][arm_name]["tasks"].append(row)
                     print(f"  accepted={row['accepted']} "
                           f"json={row['json_valid']} "
                           f"tool_calls={row['tool_calls']} "
                           f"wall={row['wall_s']}s "
                           f"tokens={row['usage']['total_tokens']}",
                           file=sys.stderr, flush=True)
-            results["arms"][arm_name] = {
-                "tasks": arm_rows,
-                "totals": _summarise(arm_rows),
-            }
+        for arm_name in arms:
+            results["arms"][arm_name]["totals"] = _summarise(
+                results["arms"][arm_name]["tasks"])
         if not args.no_spec_probe:
             print("[engine] deterministic spec probe", file=sys.stderr,
                   flush=True)
