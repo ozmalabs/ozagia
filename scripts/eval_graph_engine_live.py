@@ -22,6 +22,16 @@ The arms are ``control`` (stateless, fresh session per call),
 ``--arm both`` keeps the old engine+control pair.  ``--counterbalance``
 reverses arm order on every other repeat.
 
+``--suite multiturn`` runs a separate three-turn task set instead: turn 1
+outlines a symbol or file, turn 2 refreshes that same outline and answers from
+the copy already in the conversation, and turn 3 asks a distinct impact
+question in the same session.  The arms are ``control`` (fresh session per
+call), ``engine_known`` (one session plus ``known`` deltas, speculation off)
+and ``engine_known_spec`` (the same with speculation on).  The client remembers
+each ``{key, hash}`` it showed the model and injects ``known`` on the refresh;
+the model-facing schema is unchanged.  See
+``docs/results/graph_engine_live_multiturn_2026-11-25.md``.
+
 This is a small measured sample, not a general model-task claim.  See
 ``docs/results/graph_engine_live_2026-11-25.md`` and
 ``docs/results/graph_engine_live_2026-11-25_optimized.md``.
@@ -424,21 +434,17 @@ class EngineArm:
 
         The model-facing schema does not expose ``known`` to the model: the
         client that already showed the rows is the one that knows their
-        hashes.  Only keys named in the request are sent, so the delta request
-        stays small.
+        hashes.  Every remembered row is sent (capped) because a refresh can
+        return the same row set under one request key (for example a file
+        outline); the engine ignores hashes for rows it does not return.  This
+        only affects engine wire, never the model context.
         """
         if not self.known_reuse or not self.seen or payload.get("known"):
             return
         if op not in ("outline", "context"):
             return
-        wanted = payload.get("keys")
-        if isinstance(wanted, list) and wanted:
-            names = [key for key in wanted if isinstance(key, str)]
-        else:
-            key = payload.get("key")
-            names = [key] if isinstance(key, str) and key else list(self.seen)
-        pairs = [{"key": name, "hash": self.seen[name]}
-                 for name in names if name in self.seen][:64]
+        pairs = [{"key": key, "hash": digest}
+                 for key, digest in list(self.seen.items())[-64:]]
         if pairs:
             payload["known"] = pairs
             self.recorder.known_sent += len(pairs)

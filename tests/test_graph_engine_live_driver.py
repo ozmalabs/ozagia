@@ -85,10 +85,18 @@ def test_known_injection_only_uses_seen_outline_hashes() -> None:
     arm._inject_known("find", find)
     assert "known" not in find
 
-    # An unseen key is not invented and an explicit known list is kept.
-    unseen = {"op": "outline", "key": "sym:b"}
-    arm._inject_known("outline", unseen)
-    assert "known" not in unseen
+    # A file-outline refresh sees the whole remembered row set, not only the
+    # requested file key; the engine ignores hashes for rows it does not return.
+    arm._track_seen({"c": ["k", "h"],
+                     "r": [["file:src/a.py", "hf"],
+                           ["sym:src/a.py::b", "hb"]]})
+    refresh = {"op": "outline", "key": "file:src/a.py"}
+    arm._inject_known("outline", refresh)
+    assert {row["key"] for row in refresh["known"]} == {
+        "sym:a", "file:src/a.py", "sym:src/a.py::b"}
+    assert recorder.known_sent == 4
+
+    # An explicit known list is never overwritten.
     explicit = {"op": "outline", "key": "sym:a",
                 "known": [{"key": "sym:a", "hash": "other"}]}
     arm._inject_known("outline", explicit)

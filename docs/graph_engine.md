@@ -358,6 +358,14 @@ written to the checkout.
   [`docs/results/graph_engine_live_2026-11-25_optimized.md`](results/graph_engine_live_2026-11-25_optimized.md)
   and
   [`docs/results/graph_engine_live_broader_2026-11-25.md`](results/graph_engine_live_broader_2026-11-25.md).
+  A three-turn session suite on the same flask checkout and model reversed the
+  sign: a stateful `known` arm used 81,058 tokens versus 86,589 for the
+  stateless control (−6.4%) with 18/18 turn acceptance and 22 tool calls. The
+  win came from refreshing an already-seen 18-row file outline (714 → 219
+  engine tokens) and persisted into the next turn; single-symbol outlines saved
+  only 1.5–2.1%, and speculation was net cost because nothing was fetched.
+  `find` still cannot use `known` (its rows omit `h`). See
+  [`docs/results/graph_engine_live_multiturn_2026-11-25.md`](results/graph_engine_live_multiturn_2026-11-25.md).
 - Small budgets on large tabular results return a shortened row prefix plus
   `n`, or an explicit `budget_too_small` error; they no longer return an empty
   `truncated` result. The `_fit` no-progress loop was fixed after the live run:

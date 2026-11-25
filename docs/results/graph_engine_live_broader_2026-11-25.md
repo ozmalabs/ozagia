@@ -16,6 +16,16 @@ This is a follow-up to
 The tiny-fixture numbers are kept separate below. One local model, one host, one
 real repository, two runs per task per arm.
 
+> **Multi-turn follow-up (2026-11-25):** the same repository and model were
+> rerun with three-turn sessions (outline, refresh with `known`, impact). The
+> stateful `engine_known` arm used **81,058 tokens vs 86,589 for the stateless
+> control (−6.4%)**, with the same 18/18 turn acceptance and 22 tool calls.
+> The win is concentrated in an 18-row file-outline refresh (−17.0% for that
+> task); single-symbol outlines saved 1.5–2.1%. Speculation erased most of the
+> gain. See
+> [`graph_engine_live_multiturn_2026-11-25.md`](graph_engine_live_multiturn_2026-11-25.md).
+> One-shot and multi-turn absolute totals are not comparable.
+
 ## What was measured
 
 Three arms, same driver, strictly sequential:
