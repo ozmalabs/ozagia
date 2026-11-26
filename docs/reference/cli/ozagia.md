@@ -11,6 +11,7 @@ The ozagia command: the graph, the daemon, the integrations and the agent.
     ozagia index [--root R] [--rebuild]
     ozagia agent [--workdir W] [--prompt TEXT | --prompt-file F] [--model M]
                  [--mcp coding|research|combined | --research]
+                 [--opencode-config PATH]
                  [--repo-map [--repo-map-tokens N]]
                  [--clone [--base REV]] [--keep-plugin] [--timeout S]
                  [--python P] [--runs-dir D] [-- <extra opencode args>]
@@ -63,11 +64,18 @@ The ozagia command: the graph, the daemon, the integrations and the agent.
                                                   (read-only declared
                                                   capabilities and observed
                                                   surfaces, docs/capabilities.md)
+    ozagia engine serve|token [--root R] [--host H] [--port P] [--allow-remote]
+                                                  (local read-only graph HTTP
+                                                  transport; docs/graph_engine.md)
     ozagia task-preflight GOAL [--json] [--limit N] [--cursor C] [--root R]
                                [--checkout DIR ...] [--scope ENTRY ...]
                                [--base REV] [--timeout-s S]
                                                   (read-only goal/task
                                                   preflight; docs/task_preflight.md)
+    ozagia overview|shape [--root R] [--json | --markdown] [--out PATH]
+                    [--budget-s S] [--max-modules N] [--check PATH]
+                                                  (one deterministic reference
+                                                  page; docs/repo_shape.md)
     ozagia --version
 
 `daemon`, `bg`, `mcp`, `eval` and `check` pass every argument after their name to
@@ -116,19 +124,21 @@ usage: ozagia index [-h] [--root ROOT] [--rebuild] [--dump DUMP] [--json]
 
 ```
 usage: ozagia agent [-h] [--workdir WORKDIR] [--prompt PROMPT |
-                    --prompt-file PROMPT_FILE] [--model MODEL] [--clone]
-                    [--base BASE] [--keep-plugin] [--timeout TIMEOUT]
-                    [--python PYTHON] [--opencode OPENCODE]
-                    [--mcp {coding,research,combined}] [--research]
-                    [--runs-dir RUNS_DIR] [--repo-map] [--repo-map-tokens N]
+                    --prompt-file PROMPT_FILE] [--model MODEL]
+                    [--opencode-config PATH] [--clone] [--base BASE]
+                    [--keep-plugin] [--timeout TIMEOUT] [--python PYTHON]
+                    [--opencode OPENCODE] [--mcp {coding,research,combined}]
+                    [--research] [--runs-dir RUNS_DIR] [--repo-map]
+                    [--repo-map-tokens N]
 ```
 
 | option | type | values | default | help |
 |---|---|---|---|---|
 | `--workdir`, `--root` |  |  |  | repository (default: OZAGIA_ROOT or the git top level of the cwd) |
-| `--prompt` |  |  |  | run non-interactively with this prompt |
-| `--prompt-file` |  |  |  | read the prompt from a file |
+| `--prompt` |  |  |  | run non-interactively with this prompt (sent on stdin, never in opencode's argv) |
+| `--prompt-file` |  |  |  | read the prompt from a file (its contents go to stdin; the path is not passed to opencode) |
 | `--model`, `-m` |  |  |  | provider/model, e.g. vllm/qwen3.8-27b |
+| `--opencode-config` |  |  |  | layer provider settings from this OpenCode JSON config (provider, providers, model, small_model only) into the generated harness config; --model wins. Plugins, MCP servers, permissions, agents and tools are never copied, and the global config is not read implicitly |
 | `--clone` |  |  |  | run in an isolated clone under the temp dir (kept) |
 | `--base` |  |  |  | with --clone: commit to check out (default HEAD) |
 | `--keep-plugin` |  |  |  | leave .opencode/plugins/ozagia.js in the workdir |
@@ -1096,6 +1106,36 @@ usage: ozagia capabilities audit [-h] [--json] [--limit LIMIT]
 | `--limit` | int |  | 25 | page size (default 25, max 200) |
 | `--cursor` |  |  |  | opaque page cursor from a previous call |
 
+## `ozagia engine`
+
+```
+usage: ozagia engine [-h] {serve,token} ...
+```
+
+### `ozagia engine serve`
+
+```
+usage: ozagia engine serve [-h] [--root ROOT] [--host HOST] [--port PORT]
+                           [--allow-remote]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root (default: the current checkout) |
+| `--host` |  |  | `127.0.0.1` | bind host (default: 127.0.0.1; loopback only) |
+| `--port` | int |  | 8765 | bind port (default: 8765; 0 chooses one) |
+| `--allow-remote` |  |  |  | allow a non-loopback bind; HTTP has no TLS and the caller owns the network/auth perimeter |
+
+### `ozagia engine token`
+
+```
+usage: ozagia engine token [-h] [--root ROOT]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root (default: the current checkout) |
+
 ## `ozagia task-preflight`
 
 ```
@@ -1119,6 +1159,42 @@ usage: ozagia task-preflight [-h] [--json] [--limit LIMIT] [--cursor CURSOR]
 | `--scope` |  |  |  | scope entry (repeatable; default: the goal's) |
 | `--base` |  |  | `HEAD` | revision for changed-file discovery (default HEAD) |
 | `--timeout-s` | int |  | 30 | caller-owned preflight timeout in seconds (default 30, max 600) |
+
+## `ozagia overview`
+
+```
+usage: ozagia overview [-h] [--root ROOT] [--json] [--markdown] [--out PATH]
+                       [--budget-s BUDGET_S] [--max-modules MAX_MODULES]
+                       [--check PATH]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print the stable JSON report |
+| `--markdown` |  |  |  | print Markdown (the default) |
+| `--out` |  |  |  | write the report atomically to PATH (the only write) |
+| `--budget-s` | float |  | 10.0 | wall-clock budget (default 10 s) |
+| `--max-modules` | int |  | 40 | maximum modules listed (default 40) |
+| `--check` |  |  |  | compare PATH with freshly generated output; exit 1 on drift |
+
+## `ozagia shape`
+
+```
+usage: ozagia overview [-h] [--root ROOT] [--json] [--markdown] [--out PATH]
+                       [--budget-s BUDGET_S] [--max-modules MAX_MODULES]
+                       [--check PATH]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print the stable JSON report |
+| `--markdown` |  |  |  | print Markdown (the default) |
+| `--out` |  |  |  | write the report atomically to PATH (the only write) |
+| `--budget-s` | float |  | 10.0 | wall-clock budget (default 10 s) |
+| `--max-modules` | int |  | 40 | maximum modules listed (default 40) |
+| `--check` |  |  |  | compare PATH with freshly generated output; exit 1 on drift |
 
 ## `ozagia languages`
 

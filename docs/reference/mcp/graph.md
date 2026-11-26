@@ -49,7 +49,7 @@ Breadth-first walk from keys along edge types (default all graph edges, both dir
 | `limit` | integer |  | 50 | — |
 ### `federation_check`
 
-Read-only static checks for declared cross-repository API and code-to-infrastructure relationships. Designated references may be fetched and fast-forwarded over Git; set no_sync to opt out. Indexes are not refreshed; missing evidence remains unknown.
+Read-only static checks for declared cross-repository API and code-to-infrastructure relationships, plus declared package dependency links between members. Designated references may be fetched and fast-forwarded over Git; set no_sync to opt out. Indexes are not refreshed; missing evidence remains unknown.
 
 | parameter | type | required | default | description |
 |---|---|---|---|---|

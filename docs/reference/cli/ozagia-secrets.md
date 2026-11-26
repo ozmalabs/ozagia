@@ -10,7 +10,7 @@ secret references, provider status and redacted checks
 
 ```
 usage: ozagia-secrets [-h]
-                      {providers,list,check,forget,capture,capture-text,doctor} ...
+                      {providers,list,check,forget,request,requests,fulfill,decline,capture,capture-text,doctor} ...
 ```
 
 ## `ozagia-secrets providers`
@@ -76,6 +76,84 @@ usage: python -m ozagia.secrets_cli forget [-h] [--root ROOT]
 |---|---|---|---|---|
 | `--root` |  |  | `.` | repository root (default: current directory) |
 | `--session` |  |  |  | the capture's session (default: cli) |
+| `--harness` |  |  |  | harness for --session (default: cli) |
+| `--json` |  |  |  | emit deterministic JSON |
+
+## `ozagia-secrets request`
+
+```
+usage: python -m ozagia.secrets_cli request [-h] [--root ROOT]
+                                            [--session SESSION]
+                                            [--harness HARNESS] --label LABEL
+                                            [--purpose PURPOSE] [--ttl-s S]
+                                            [--json]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  | `.` | repository root (default: current directory) |
+| `--session` |  |  |  | the requesting session (default: cli) |
+| `--harness` |  |  |  | harness for --session (default: cli) |
+| `--label` |  |  |  | short name for the requested secret |
+| `--purpose` |  |  |  | why the secret is needed (bounded) |
+| `--ttl-s`, `--ttl` | float |  |  | pending lifetime in seconds (capped at 600) |
+| `--json` |  |  |  | emit deterministic JSON |
+
+## `ozagia-secrets requests`
+
+```
+usage: python -m ozagia.secrets_cli requests [-h] [--root ROOT]
+                                             [--session SESSION]
+                                             [--harness HARNESS] [--json]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  | `.` | repository root (default: current directory) |
+| `--session` |  |  |  | the requesting session (default: cli) |
+| `--harness` |  |  |  | harness for --session (default: cli) |
+| `--json` |  |  |  | emit deterministic JSON |
+
+## `ozagia-secrets fulfill`
+
+```
+usage: python -m ozagia.secrets_cli fulfill [-h] [--root ROOT]
+                                            [--session SESSION]
+                                            [--harness HARNESS] [--ttl-s S]
+                                            [--stdin] [--json]
+                                            REQUEST_ID
+```
+
+| argument | type | values | required | help |
+|---|---|---|---|---|
+| `REQUEST_ID` |  |  | yes | the request handle to fulfil |
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  | `.` | repository root (default: current directory) |
+| `--session` |  |  |  | the request's session (default: cli) |
+| `--harness` |  |  |  | harness for --session (default: cli) |
+| `--ttl-s`, `--ttl` | float |  |  | capture lifetime in seconds (capped at 24 hours) |
+| `--stdin` |  |  |  | read the value from stdin instead of getpass |
+| `--json` |  |  |  | emit deterministic JSON |
+
+## `ozagia-secrets decline`
+
+```
+usage: python -m ozagia.secrets_cli decline [-h] [--root ROOT]
+                                            [--session SESSION]
+                                            [--harness HARNESS] [--json]
+                                            REQUEST_ID
+```
+
+| argument | type | values | required | help |
+|---|---|---|---|---|
+| `REQUEST_ID` |  |  | yes | the request handle to decline |
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  | `.` | repository root (default: current directory) |
+| `--session` |  |  |  | the request's session (default: cli) |
 | `--harness` |  |  |  | harness for --session (default: cli) |
 | `--json` |  |  |  | emit deterministic JSON |
 

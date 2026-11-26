@@ -4,7 +4,7 @@
 
 Two layers: the typed **settings registry** (read with `ozagia config schema`, written with `ozagia config set`) and the **project file** (`.ozagia.toml` at the repository root, resolved into `ozagia.config.ProjectConfig`).
 
-## Settings registry (83 keys)
+## Settings registry (84 keys)
 
 ### `index`
 
@@ -172,6 +172,7 @@ Two layers: the typed **settings registry** (read with `ozagia config schema`, w
 | `security.max_findings` | integer | 200 | repo |  | an integer between 1 and 10000 | Cap the number of security findings a scan reports. |
 | `security.block_secrets` | boolean | true | repo |  | true or false | Block staged or pushed secrets by default. |
 | `security.secret_allowlist` | string_list | [] | repo |  | path:, rule: or sha256: entries | Secret-gate allowlist entries: path:, rule: or sha256: patterns. |
+| `security.finding_allowlist` | string_list | [] | repo |  | exact sha256:<16 hex> finding fingerprints (path:/rule: accepted but discouraged) | Reviewed allowlist for intentional static scan findings; prefer exact sha256 finding fingerprints over broad path: or rule: entries. |
 
 ### `ui`
 

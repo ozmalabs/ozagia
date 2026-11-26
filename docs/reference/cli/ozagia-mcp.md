@@ -29,6 +29,7 @@ Environment:
     OZAGIA_JOURNAL  journal path  (default .ozagia/journal.jsonl)
     OZAGIA_AUTOBUILD  "1" to build the snapshot on first start if absent
     OZAGIA_ROOT     checkout the tools act on (default: the current Git top level)
-    OZAGIA_SURFACE  "full" (default) or "graph" (the find/node/expand/impact/
-                    edit/create/check/note verbs); `--surface` overrides it
+    OZAGIA_SURFACE  "full" (default), "graph" (the find/node/expand/impact/
+                    edit/create/check/note verbs) or "engine" (one stateful
+                    `graph` tool); `--surface` overrides it
 ```

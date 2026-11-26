@@ -52,9 +52,9 @@ Generated from the code by `scripts/docs/generate_docs.py`: the command inventor
 
 | surface | tools | reference |
 |---|---|---|
-| coding (default) | 89 | [mcp/coding.md](mcp/coding.md) |
+| coding (default) | 90 | [mcp/coding.md](mcp/coding.md) |
 | research | 107 | [mcp/research.md](mcp/research.md) |
-| combined | 195 | [mcp/combined.md](mcp/combined.md) |
+| combined | 196 | [mcp/combined.md](mcp/combined.md) |
 | graph (`--surface graph`) | 12 | [mcp/graph.md](mcp/graph.md) |
 
 ## Configuration

@@ -2,7 +2,7 @@
 
 > **Generated file.** Built by `scripts/docs/generate_docs.py` from `src/ozagia/integrations/mcp/server.py`, `src/ozagia/integrations/mcp/graph_surface.py`, `src/ozagia/integrations/mcp/sre.py`, `src/ozagia/research/mcp.py` (ozagia `0.1.5.dev0`). Do not edit by hand: change the source code and regenerate.
 
-89 tools.
+90 tools.
 
 > Built-in tools from `server._TOOLS`, plus the offline SRE/IaC tools (`sre.py`) and `research_fetch`.
 
@@ -319,6 +319,15 @@ Compact structural view of a file/symbol/seed/doc: signatures, docstring first l
 | parameter | type | required | default | description |
 |---|---|---|---|---|
 | `target` | string | yes |  | File path, symbol, seed id, or doc path. |
+### `dev_overview`
+
+One stable reference page for the repository: identity and package metadata, top-level layout, entry points, module responsibilities (from module docstrings), documentation map, architecture (when a tag cache exists), test-to-source links, commands/conventions and freshness. Deterministic and read-only; it never imports or runs the target. Use it when you need 'what is this repo and where do I start' without reading many files.
+
+| parameter | type | required | default | description |
+|---|---|---|---|---|
+| `format` | string |  | "markdown" | — |
+| `budget_tokens` | integer |  | 6000 | Bound the Markdown response. |
+| `max_modules` | integer |  | 40 | Maximum modules listed. |
 ### `dev_preflight_plan`
 
 Build a dry-run, scrubbed emulator pre-flight plan; never executes it.
@@ -671,7 +680,7 @@ What an agent session was working on, kept by the ozagia daemon across context c
 | `since` | boolean |  | false | The session-start brief instead of a session's working set. |
 ### `federation_check`
 
-Read-only static checks for declared cross-repository API and code-to-infrastructure relationships. Designated references may be fetched and fast-forwarded over Git; set no_sync to opt out. Indexes are not refreshed; missing evidence remains unknown.
+Read-only static checks for declared cross-repository API and code-to-infrastructure relationships, plus declared package dependency links between members. Designated references may be fetched and fast-forwarded over Git; set no_sync to opt out. Indexes are not refreshed; missing evidence remains unknown.
 
 | parameter | type | required | default | description |
 |---|---|---|---|---|
