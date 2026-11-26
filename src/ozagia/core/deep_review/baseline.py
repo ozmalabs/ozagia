@@ -12,11 +12,98 @@ import os
 import re
 import stat
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Any
+from .contract import SUBJECTS
 
 MAX_BASELINE_BYTES = 32 * 1024 * 1024
+MAX_BASELINE_REPORT_BYTES = 32 * 1024 * 1024
 _FINDING_ID = re.compile(r"dr-[0-9a-f]{16}\Z")
 _MANIFEST_SCHEMA = "ozagia.deep_review.manifest.v1"
+_SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
+
+
+def _artifact_matches(directory: Path, relative: Any, expected: Any,
+                      byte_limit: int) -> int | None:
+    """Check one report artifact without following its final symlink.
+
+    Coverage in a baseline is useful only while the corresponding subject
+    report still matches the digest recorded by the report manifest.
+    """
+    if (not isinstance(relative, str) or not relative
+            or not isinstance(expected, str) or not _SHA256.fullmatch(expected)):
+        return None
+    rel = PurePosixPath(relative)
+    if (rel.is_absolute() or len(rel.parts) != 1
+            or any(part in {"", ".", ".."} for part in rel.parts)):
+        return None
+    path = directory.joinpath(*rel.parts)
+    try:
+        before = path.lstat()
+        if (not stat.S_ISREG(before.st_mode) or before.st_size > byte_limit):
+            return None
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                             | getattr(os, "O_NONBLOCK", 0))
+        with os.fdopen(descriptor, "rb") as handle:
+            opened = os.fstat(handle.fileno())
+            if (not stat.S_ISREG(opened.st_mode)
+                    or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+                    or opened.st_size > MAX_BASELINE_BYTES):
+                return None
+            digest = hashlib.sha256()
+            total = 0
+            while True:
+                chunk = handle.read(min(1024 * 1024, byte_limit - total + 1))
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > byte_limit:
+                    return None
+                digest.update(chunk)
+            after = os.fstat(handle.fileno())
+            if (opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns) != (
+                    after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+                return None
+    except OSError:
+        return None
+    return total if "sha256:" + digest.hexdigest() == expected else None
+
+
+def _manifest_artifacts_match(directory: Path, manifest: dict[str, Any]) -> bool:
+    """Validate the subject reports that justify baseline coverage claims."""
+    subjects = manifest.get("subjects")
+    hashes = manifest.get("output_hashes")
+    if not isinstance(subjects, dict) or not isinstance(hashes, dict):
+        return False
+    if (len(subjects) != len(SUBJECTS)
+            or set(subjects) != set(SUBJECTS)):
+        return False
+    total_bytes = 0
+    for row in subjects.values():
+        if not isinstance(row, dict):
+            return False
+        report = row.get("report")
+        if report is None:
+            if row.get("status") == "complete":
+                return False
+            continue
+        if not isinstance(report, str):
+            return False
+        expected = hashes.get(report)
+        report_hash = row.get("report_hash")
+        # Subject summaries use the historical bare hex digest while the
+        # manifest's output_hashes use the sha256: prefix.
+        if (not isinstance(expected, str) or not isinstance(report_hash, str)
+                or report_hash not in (expected, expected.removeprefix("sha256:"))):
+            return False
+        remaining = MAX_BASELINE_REPORT_BYTES - total_bytes
+        if remaining <= 0:
+            return False
+        artifact_bytes = _artifact_matches(directory, report, expected, remaining)
+        if artifact_bytes is None:
+            return False
+        total_bytes += artifact_bytes
+    return True
 
 
 class BaselineValidationError(ValueError):
@@ -130,7 +217,9 @@ def load_baseline_artifacts(path: str | Path) -> tuple[list[dict[str, Any]], dic
             and isinstance(manifest.get("output_hashes"), dict)
             and manifest["output_hashes"].get("findings.json") == findings_digest
             and manifest.get("findings") == len(validated)
-            and isinstance(manifest.get("subjects"), dict)):
+            and isinstance(manifest.get("subjects"), dict)
+            and stat.S_ISDIR(source_stat.st_mode)
+            and _manifest_artifacts_match(source, manifest)):
         manifest = None
     return validated, manifest
 

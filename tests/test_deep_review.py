@@ -196,6 +196,28 @@ def test_baseline_and_fail_threshold(tmp_path, monkeypatch):
     assert (tmp_path / "next" / "00-method-and-scope.md").is_file()
 
 
+def test_baseline_coverage_requires_unchanged_subject_reports(tmp_path, monkeypatch):
+    from ozagia.core.deep_review.baseline import load_baseline_artifacts
+    import ozagia.core.deep_review.orchestrator as orchestrator
+
+    packet = {"findings": [],
+              "sections": {"security": {"checked": ["patterns"]}},
+              "graph": {"freshness": "fresh"}}
+    monkeypatch.setattr(orchestrator.collect, "collect", lambda *a, **k: packet)
+    report = tmp_path / "baseline"
+    build_deep_review(tmp_path, report, profile="security")
+
+    findings, manifest = load_baseline_artifacts(report)
+    assert findings == []
+    assert manifest is not None
+
+    subject_report = report / manifest["subjects"]["security"]["report"]
+    subject_report.write_text("edited after manifest creation\n", encoding="utf-8")
+    findings, manifest = load_baseline_artifacts(report)
+    assert findings == []
+    assert manifest is None
+
+
 def test_phase_one_static_patterns_and_subject_reports(tmp_path, monkeypatch):
     from ozagia.core.deep_review import analyzers
     source = '''\

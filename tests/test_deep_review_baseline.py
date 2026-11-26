@@ -133,15 +133,24 @@ def test_rejects_symlinked_manifest(tmp_path):
 
 def test_manifest_coverage_requires_matching_findings_hash(tmp_path):
     import hashlib
+    from ozagia.core.deep_review.contract import SUBJECTS
     from ozagia.core.deep_review.baseline import load_baseline_artifacts
 
     report = tmp_path / "report"
     report.mkdir()
     payload = json.dumps([_finding()]).encode()
     (report / "findings.json").write_bytes(payload)
+    subject_text = "# Security\n\nComplete.\n"
+    subject_path = report / "01-security.md"
+    subject_path.write_text(subject_text, encoding="utf-8")
+    subject_digest = hashlib.sha256(subject_text.encode()).hexdigest()
     manifest = {"schema": "ozagia.deep_review.manifest.v1", "findings": 1,
-                "subjects": {"security": {"status": "complete"}},
-                "output_hashes": {"findings.json": "sha256:" + hashlib.sha256(payload).hexdigest()}}
+                "subjects": {subject: {"status": "unknown"} for subject in SUBJECTS},
+                "output_hashes": {"findings.json": "sha256:" + hashlib.sha256(payload).hexdigest(),
+                                  "01-security.md": "sha256:" + subject_digest}}
+    manifest["subjects"]["security"].update({
+        "status": "complete", "report": subject_path.name,
+        "report_hash": subject_digest})
     (report / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
     assert load_baseline_artifacts(report)[1] == manifest
     (report / "findings.json").write_bytes(payload + b" ")
@@ -149,3 +158,30 @@ def test_manifest_coverage_requires_matching_findings_hash(tmp_path):
     assert findings == [_finding()]
     assert coverage is None
     assert load_baseline_artifacts(report / "findings.json")[1] is None
+
+
+def test_manifest_coverage_rejects_unknown_subjects_and_report_byte_overflow(
+        tmp_path, monkeypatch):
+    import hashlib
+    from ozagia.core.deep_review import baseline
+    from ozagia.core.deep_review.contract import SUBJECTS
+
+    report = tmp_path / "report"
+    report.mkdir()
+    payload = b"[]"
+    (report / "findings.json").write_bytes(payload)
+    rows = {subject: {"status": "unknown"} for subject in SUBJECTS}
+    manifest = {"schema": "ozagia.deep_review.manifest.v1", "findings": 0,
+                "subjects": rows,
+                "output_hashes": {"findings.json": "sha256:" + hashlib.sha256(payload).hexdigest()}}
+    manifest_path = report / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    manifest["subjects"]["surprise"] = {"status": "unknown"}
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    assert baseline.load_baseline_artifacts(report)[1] is None
+
+    manifest["subjects"] = rows
+    monkeypatch.setattr(baseline, "MAX_BASELINE_REPORT_BYTES", 1)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    assert baseline.load_baseline_artifacts(report)[1] is None
