@@ -1073,6 +1073,10 @@ def evaluate_gates(metrics: Mapping[str, Any]) -> dict[str, Any]:
         gates["operational_bounds"] = {
             "status": "fail", "observed": operational,
             "reason": "a run wrote outside the allowed report/state paths"}
+    elif operational.get("nonzero_exit_runs"):
+        gates["operational_bounds"] = {
+            "status": "fail", "observed": operational,
+            "reason": "a run exited with a nonzero status"}
     else:
         rate = operational.get("within_budget_rate")
         gates["operational_bounds"] = {

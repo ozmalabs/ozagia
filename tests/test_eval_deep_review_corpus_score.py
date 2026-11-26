@@ -465,6 +465,18 @@ def test_operational_gate_requires_budget_and_duration_for_each_run():
     }
 
 
+def test_operational_gate_fails_on_nonzero_process_exit():
+    operational = _operational({"runs": [{
+        "run_id": "failed-run", "budget_s": 10, "duration_s": 2,
+        "exit_status": 1, "writes_outside_allowed_paths": False,
+    }]})
+    gate = evaluate_gates(_gate_metrics(operational=operational))[
+        "gates"]["operational_bounds"]
+    assert gate["status"] == "fail"
+    assert gate["reason"] == "a run exited with a nonzero status"
+    assert gate["observed"]["nonzero_exit_runs"] == ["failed-run"]
+
+
 def test_gate_computation_requires_human_provenance():
     result = evaluate_gates(_gate_metrics(provenance="unknown"))
     assert result["status"] == "insufficient_data"
