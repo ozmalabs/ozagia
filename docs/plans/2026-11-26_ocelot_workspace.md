@@ -1,6 +1,11 @@
 # Working on Ocelot: an Ocelot-specific Ozagia profile
 
-Status: proposed 2026-11-26. Not implemented.
+Status: first slice implemented 2026-11-26; later phases proposed. The
+implemented slice is a reusable optional integration
+(`ozagia.integrations.ocelot.workspace`) plus the engine doctor, MCP tools and
+CLI. It is not in Ozagia's core and does nothing unless an Ocelot project
+config enables it. The Rust/Python/seed bridge, seed editing/validation,
+research map and agent workflow integration remain proposed.
 
 This plan is for features that make Ozagia useful **while working on
 Ocelot**, not for Ocelot's runtime. Ocelot remains a separate MIT-licensed
@@ -318,29 +323,38 @@ Evaluate on real work before broadening:
 Start with 0–3. Do not start with a UI, a seed authoring wizard or a research
 dashboard: those are downstream of the graph and test plan being correct.
 
-## First slice (suggested 1–2 weeks)
+## First slice — implemented 2026-11-26
 
-A single vertical slice that is useful on its own:
+Implemented:
 
-1. Add the Ocelot config and adapter.
-2. Index top-level seeds, dependencies, boot/registry references, tests and
-   docs, with bounded manifest reads.
-3. Implement `ocelot_seed_impact` and `ocelot_test_plan` for seed changes.
-4. Implement `ocelot_doctor` for engine/worktree/dataset/build-record state.
-5. Add fixtures that reproduce:
-   - a shared seed with several dependents;
-   - a seed with exactly one migrated test and one mentioned test;
-   - a seed with no test;
-   - a worktree with no native artifact but a canonical `.pth`;
-   - a stale build record and a divergent Rust source;
-   - a missing dataset and a missing failure baseline.
-6. Measure indexing time/size and plan latency on the canonical Ocelot
-   checkout. Record the numbers in `docs/results/` before recommending
-   defaults.
+- `src/ozagia/integrations/ocelot/workspace.py` — seed indexer, impact/census,
+  conservative test planner, four MCP tools and graph queries.
+- `src/ozagia/integrations/ocelot/workspace_doctor.py` — read-only engine,
+  worktree, `.pth`, dataset and baseline doctor.
+- `src/ozagia/integrations/ocelot/workspace_cli.py` — `status`, `seed`,
+  `seeds` and `plan` commands.
+- `docs/ocelot_workspace.md` — setup, tool surface and limits.
+- `tests/test_ocelot_workspace.py`,
+  `tests/test_ocelot_workspace_doctor.py`,
+  `tests/test_ocelot_workspace_cli.py` — synthetic Ocelot fixture plus
+  wrong-engine/stale-source/missing-data cases.
 
-Expected outcome: an agent starting in an Ocelot worktree can ask "what did I
-change, what tests should I run, and is my engine safe to measure with?" and
-get a cited, conservative answer without a 60–90 minute full gate.
+Measured on the canonical Ocelot checkout (`24c56891`) with a limited source
+set (`domains`, `worlds`, `substrate`, `tests`, `runners/dsl/src`):
+
+| Measurement | Result |
+| --- | --- |
+| Index | 37.3 s, 44,212 nodes, 194,685 edges |
+| Seed nodes | 924 (920 unique manifests, 4 stubs, 1 partial 68 MB manifest) |
+| Shared seeds | 24 |
+| Seeds with no test mention | 333 |
+| Seeds outside every boot list | 648 |
+| Dependency cycles | 0 |
+| Plans | `shape_decode_loop` → full gate; `embodied_motor_program` → 20 affected test files; shared `substrate/world_adapter.py` → full gate; docs → no tests |
+| Doctor | engine source/hash matched; warned that the user-level `.pth` points at a different tree |
+
+The remaining phases are the Rust/Python/seed bridge, seed editing and
+validation, the research/evidence map, and agent integration/evaluation.
 
 ## Data and tool surface
 
