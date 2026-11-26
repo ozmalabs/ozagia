@@ -564,9 +564,13 @@ bridge remain open.
 
 An [Ozma mesh bridge plan](plans/2026-11-26_ozma_mesh_bridge.md) follows it:
 flights of agents join the documented Ozma `COORDINATION` mesh through typed
-message/claim/channel/inbox mapping and an optional A2A adapter. Only the
-identity and read-only status slice is implemented; messages, claims, inbox,
-wake modes and live conformance remain planned and host-approved.
+message/claim/channel/inbox mapping and an optional A2A adapter. Stage F
+(identity, config and read-only status) and Stage G (typed messages, advisory
+claims, durable bounded outbox/inbox, dedupe, channels/subscriptions and a
+fake-shim seam) are implemented as a closed **declared** envelope; no live
+transport exists yet. Flight membership/roles, handoff acknowledgement,
+blockers, host-approved wake, A2A and live conformance remain Stage H and
+host-approved.
 
 **Implementation status (2026-11-26, external assets).** The
 [external-assets plan](plans/2026-11-26_external_assets.md) is implemented as

@@ -217,6 +217,41 @@ def test_ozma_json_does_not_echo_the_auth_ref(env, capsys) -> None:
         assert "secret://" not in output
 
 
+def test_local_block_unblock_and_handoff_kinds(env, capsys) -> None:
+    _register(capsys, "a")
+    _register(capsys, "b")
+    for kind in ("block", "unblock", "handoff"):
+        assert cli.main(["mesh", "send", "--harness", "opencode",
+                         "--session", "a", "--to", "opencode:b",
+                         "--kind", kind, "--subject", kind, "--json"]) == 0
+        assert _json(capsys)["delivered"] == 1
+    assert cli.main(["mesh", "inbox", "--harness", "opencode",
+                     "--session", "b", "--json"]) == 0
+    kinds = {item["kind"] for item in _json(capsys)["messages"]}
+    assert {"block", "unblock", "handoff"} <= kinds
+
+
+def test_ozma_bridge_read_views_and_unavailable_sync(env, capsys) -> None:
+    repo, state = env
+    for action in ("outbox", "inbox", "claims"):
+        assert cli.main(["mesh", "ozma", action, "--json"]) == 0
+        payload = _json(capsys)
+        assert payload["network"] is False if "network" in payload else True
+    assert not state.exists()
+
+    card = repo / "card.json"
+    card.write_text('{"agent":"agent:reviewer"}\n', encoding="utf-8")
+    digest = "sha256:" + hashlib.sha256(card.read_bytes()).hexdigest()
+    (repo / ".ozagia.toml").write_text(
+        "[ozma_mesh]\nenabled = true\nmode = \"messages\"\n"
+        'agent_id = "agent:reviewer:wu1"\ncard_path = "card.json"\n'
+        f'card_fingerprint = "{digest}"\nverified_by = "host"\n',
+        encoding="utf-8")
+    assert cli.main(["mesh", "ozma", "sync", "--json"]) == 1
+    assert _json(capsys)["code"] == "shim_unavailable"
+    assert not state.exists()
+
+
 def test_lease_acquire_queue_and_release_exit_codes(env, capsys) -> None:
     _register(capsys, "a")
     _register(capsys, "b")

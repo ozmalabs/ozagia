@@ -984,6 +984,8 @@ def status(root: str | Path, *, harness: str | None = None,
     """Report configuration, identity mapping and readiness; no writes."""
     cfg = config if config is not None else load_config(root)
     mapped = mapping(root, harness=harness, session=session, config=cfg)
+    from ozagia.core import ozma_bridge as B
+    bridge = B.read_status(root, cfg)
     flight = mapped["flight"]
     ozagia = mapped.get("ozagia")
     payload: dict[str, Any] = {
@@ -1024,6 +1026,7 @@ def status(root: str | Path, *, harness: str | None = None,
         "queue": mapped["queue"],
         "queue_max_messages": cfg.queue_max_messages,
         "queue_max_bytes": cfg.queue_max_bytes,
+        "bridge": bridge,
         "priority_floor": cfg.priority_floor,
         "outbox_ttl_s": cfg.outbox_ttl_s,
         "ack_timeout_s": cfg.ack_timeout_s,
@@ -1072,6 +1075,15 @@ def check(root: str | Path, *, harness: str | None = None,
     readiness = mapped["readiness"]
     live_info = _live(live)
     flight = mapped["flight"]
+    from ozagia.core import ozma_bridge as B
+    bridge = B.read_status(root, cfg)
+    reasons = list(readiness["reasons"])
+    if bridge.get("dedupe", {}).get("conflicts"):
+        reasons.append("the bridge dedupe index records id conflicts; they "
+                       "are reported, never replayed")
+    if bridge.get("conflicts"):
+        reasons.append("remote claims overlap local leases; conflicts are "
+                       "advisory and never block local work")
     return {
         "schema": SCHEMA,
         "section": SECTION,
@@ -1080,7 +1092,10 @@ def check(root: str | Path, *, harness: str | None = None,
         "effective_mode": cfg.effective_mode,
         "ready": readiness["ready"],
         "ready_for": readiness["ready_for"],
-        "reasons": readiness["reasons"],
+        "reasons": reasons,
+        "conformance": B.CONFORMANCE,
+        "conformance_note": B.CONFORMANCE_NOTE,
+        "bridge": bridge,
         "flight": flight,
         "flight_id": flight["id"],
         "flight_source": flight["source"],

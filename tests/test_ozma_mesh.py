@@ -403,3 +403,23 @@ def test_status_and_check_do_not_network_or_write_with_identity(env,
     assert payload["network"] is False
     assert O.check(repo, harness="opencode", session="a")["ready"] is True
     assert _snapshot(state) == before
+
+
+def test_status_reports_declared_bridge_counts_without_state(env) -> None:
+    repo, state = env
+    _configured(repo, mode="messages")
+    before = _snapshot(state)
+    payload = O.status(repo)
+    bridge = payload["bridge"]
+    assert bridge["store_present"] is False
+    assert bridge["conformance"] == "declared"
+    assert bridge["outbox"]["pending"] == 0
+    assert bridge["inbox"]["unread"] == 0
+    assert bridge["conflicts"] == 0
+    assert bridge["network"] is False
+    checked = O.check(repo)
+    assert checked["conformance"] == "declared"
+    assert checked["bridge"]["dedupe"]["conflicts"] == 0
+    assert [reason for reason in checked["reasons"]
+            if "not message-ready" in reason]
+    assert _snapshot(state) == before

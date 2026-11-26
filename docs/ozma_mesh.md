@@ -1,17 +1,20 @@
-# Ozma mesh bridge (read-only)
+# Ozma mesh bridge
 
 `ozagia mesh ozma` maps a local [session mesh](session_mesh.md) identity to a
-host-supplied Ozma agent identity and reports whether the bridge is configured
-and ready.  This is the first, read-only slice: it sends nothing, claims
-nothing, opens no inbox and makes no network calls.  The local mesh remains the
-source of truth, and a mapping is never an authorization for a claim, merge,
-wake or message.
+host-supplied Ozma agent identity, reports whether the bridge is configured and
+ready, and (from Stage G) queues typed messages and advisory claims in durable
+local stores.  `status`, `map` and `check` remain read-only and never touch the
+network.  The local mesh remains the source of truth, and a mapping is never an
+authorization for a claim, merge, wake or message.
 
 The upstream Ozma specification and the Rust `ozma-mesh` project are not
 clients of this module.  This repository ships no Ozma server, shim, A2A
 adapter or Agent Card verifier.  A configured shim URL is recorded as
 configuration only; until a shim contract exists, `check --live` reports
-`live_not_configured` and contacts nothing.
+`live_not_configured` and contacts nothing.  The bridge envelope below is a
+**closed local schema**, and its mapping is **declared, not upstream-verified**.
+No command in this slice opens a socket, runs DNS or HTTP, or falls back to a
+hosted service.
 
 ## Configuration
 
@@ -99,6 +102,16 @@ ozagia mesh ozma status [--json] [--harness H --session S]
 ozagia mesh ozma map [--save] [--json] [--harness H --session S]
 ozagia mesh ozma check [--require-ready] [--live] [--json]
                        [--harness H --session S]
+ozagia mesh ozma outbox [--all] [--json]
+ozagia mesh ozma inbox [--unread] [--json] [--harness H --session S]
+ozagia mesh ozma read MESSAGE_ID [--json]
+ozagia mesh ozma ack MESSAGE_ID [--json]
+ozagia mesh ozma claims [--json]
+ozagia mesh ozma enqueue --message LOCAL_MSG_ID [--channel C]
+                          [--offer-as response|handoff]
+                          [--harness H --session S]
+ozagia mesh ozma claim --lease LEASE_ID [--merge] [--harness H --session S]
+ozagia mesh ozma sync [--json]
 ```
 
 `status` reports the overall state, transport, flight, agent id presence,
@@ -167,11 +180,203 @@ reported only by presence and host class (loopback/remote); it is not
 contacted.  A future live slice needs an approved shim contract, explicit
 authentication supplied by the host, and its own opt-in.
 
+## Stage G: declared messages, claims and inbox
+
+Stage G adds the local half of a bidirectional bridge.  It translates typed
+messages and advisory claims, stores them atomically below
+`<state dir>/mesh/ozma/`, deduplicates replays and exposes the inbox.  It does
+**not** implement an Ozma transport.  The mapping and envelope are a local
+declaration; conformance is reported as `declared` and `unverified`.
+
+### Bridge envelope (`schema: 1`)
+
+The envelope is closed: unknown envelope fields and unknown typed body fields
+are rejected rather than dropped.
+
+```json
+{
+  "schema": 1,
+  "bridge": "ozagia.ozma_bridge",
+  "flight_id": "default",
+  "id": "msg_0123456789abcdef",
+  "type": "request",
+  "direction": "outbound",
+  "from": "agent:reviewer:wu1",
+  "from_card": "sha256:<64 hex>",
+  "in_reply_to": null,
+  "thread": null,
+  "refs": [],
+  "priority": null,
+  "deliver_at": null,
+  "requires_ack": null,
+  "compliance": [],
+  "channel": "#flight",
+  "workunit": null,
+  "body": {"purpose": "general", "text": "bounded local text"},
+  "body_trust": "untrusted",
+  "created_at": "2026-11-26T00:00:00Z",
+  "expires_at": "2026-11-27T00:00:00Z",
+  "digest": "sha256:<canonical content digest>"
+}
+```
+
+`digest` is the SHA-256 of canonical sorted-key JSON with `digest`,
+`created_at` and `expires_at` excluded, so a re-enqueued or retried message
+keeps the same id and digest.  `id`, `in_reply_to`, `thread`, `refs`,
+`priority`, `deliver_at`, `requires_ack`, `compliance` and `channel` are
+validated and preserved when present.  `from` and `to` must be host-provided
+`agent:<role>[:<workunit>]` ids; a local session key is never used as an Ozma
+id.  A direct local message needs a saved peer mapping in the same flight; a
+broadcast needs an explicit configured channel (or the single configured
+channel when there is exactly one).  `hello` is identity metadata and is
+rejected as a peer message.
+
+The declared local → Ozma table is:
+
+| local kind | Ozma type | note |
+| --- | --- | --- |
+| `hello` | — | identity/card metadata; never a peer message |
+| `request` | `request` | `purpose` general/review/question |
+| `accept` | `ack` | `{accepted:true}` |
+| `reject` | `ack` | `{accepted:false, reason}` |
+| `offer` | `response` or `handoff` | the caller chooses; the choice is recorded |
+| `status` | `status` | text only |
+| `release` | `release` | `in_reply_to` the claim id |
+| `note` | `heads-up` | bounded untrusted text |
+| `block`/`unblock` | `block`/`unblock` | reason/resource |
+| `handoff` | `handoff` | workunit/criteria/refs/completion |
+| lease (`worktree`/`branch`/`path`/`merge`) | `claim` | advisory; `merge` is never authority |
+| lease (`grant`) | — | local-only, `unsupported` mapping |
+
+Free-form local text is carried only as bounded text in `request`, `response`,
+`heads-up`, `status` or an `ack` reason, with `body_trust: "untrusted"`.  A
+typed verdict (such as `accepted`) is never fabricated.  Inbound text is
+redacted on ingest and always marked untrusted; it is content, not a command.
+
+### Outbox
+
+`<state>/mesh/ozma/outbox/<flight>/<hash>.json` stores one envelope per
+outbound message.  The filename is a hash of `(flight, message id, direction)`;
+no raw id or path appears in it.  States are `pending`, `sent`, `acked`,
+`expired` and `failed`; an attempt counter is kept and a retry reuses the same
+id.  `outbox_ttl_s` is reported as `expired`, never deleted automatically.
+
+The outbox is bounded by `queue_max_messages` and `queue_max_bytes`, and
+`message_rate` is enforced over its trailing window.  A full queue or exceeded
+rate refuses with `queue_full` or `rate_limited`; pending and failed rows are
+never dropped.  When a new row needs capacity, the oldest terminal rows
+(`sent`, `acked`, `expired`, or an already-expired pending row) yield first and
+the eviction count is reported.  A message larger than the byte cap is refused
+before anything is evicted.
+
+### Inbox, dedupe and redaction
+
+`<state>/mesh/ozma/inbox/<flight>/<hash>.json` stores inbound envelopes with
+`unread`, `read` or `acked` state.  List views return metadata only
+(id/from/type/channel/created/expires/priority/requires_ack/read/acked); a body
+comes only from an explicit `read`.  Ingest redacts text, marks it untrusted,
+caps size and refuses when the configured caps are reached.  Unread mail is
+never evicted; acked mail (and read mail that does not require an ack) yields
+only when a new message needs capacity, with the eviction count reported.
+
+Replay is keyed by `(flight_id, ozma_message_id, direction)` through a bounded
+dedupe index.  The same id with the same digest is a no-op; the same id with a
+different digest is `id_conflict`, counted and never replayed.  The window is
+`dedupe_window_s`.  A conflict is reported, not resolved by overwriting.
+
+`ozagia mesh ozma inbox` merges the Ozma inbox with the local mesh mailbox in
+the read view only.  Remote entries are tagged `origin: ozma`; local entries
+`origin: local`.  Remote messages are never injected into a local mailbox and
+no local session is impersonated.  `mesh inbox`/`mesh read` remain local-only.
+
+### Claims and conflicts
+
+Outbound claim refs and inbound **remote claims** live in
+`<state>/mesh/ozma/claims/<flight>/<hash>.json`.  A local lease maps to a
+declared claim scope:
+
+- `worktree` → `worktree`;
+- `branch` → `branch`;
+- `path` → `file` (or `subtree` for a directory-shaped path);
+- `merge` → `branch`, always advisory;
+- `grant` → unsupported: a grant is local-only.
+
+A remote claim records its holder agent id/card fingerprint, scope, resource,
+mode, expiry, digest and state.  It is **not** a local lease and can never
+block local work, a local merge request or local merge policy.  The bridge
+reports a warning when a remote claim and an active local lease name the same
+resource, but the local lease remains usable.  Expiry is computed and reported
+from the record; records are not auto-deleted or overwritten.  A remote claim is
+released only by a matching remote `release` (or its own rules).
+
+### Channels and subscriptions
+
+A message may carry a channel only from the configured `channels` list; an
+off-scope channel is refused on ingest.  Subscriptions may be:
+
+- a bare channel such as `#flight`;
+- `channel:#name`;
+- `workunit:<id>`;
+- `event:<local-kind>` (for example `event:request`);
+- `type:<ozma-type>` (for example `type:heads-up`).
+
+Inbound messages must satisfy the configured subscriptions (when any) and the
+`priority_floor`.  There is no implicit `#general` channel, no external channel
+adapter and no write to Slack or another service.
+
+### Shim, `sync` and live
+
+The transport seam is deliberately tiny:
+
+```python
+class Shim:
+    def deliver(self, envelope) -> {"accepted": bool, "message_id": str | None}: ...
+    def poll(self, after, limit) -> [envelope, ...]: ...
+```
+
+Production and the CLI use `UnavailableShim`, which raises `shim_unavailable`
+and never opens a socket.  `sync` delivers pending/failed outbox rows with
+their existing ids, then ingests a bounded poll with dedupe, conflict, channel
+and claim handling.  A fake in-process shim exists only in tests; there is no
+CLI flag that enables a network shim.
+
+`check --live` remains `unavailable`/`live_not_configured`.  `sync` reports
+`shim_unavailable` and exits `1` without network access.
+
+### CLI examples
+
+```text
+ozagia mesh ozma status --json
+ozagia mesh ozma outbox --all
+ozagia mesh ozma inbox --unread --harness opencode --session a
+ozagia mesh ozma read msg_0123456789abcdef
+ozagia mesh ozma ack msg_0123456789abcdef
+ozagia mesh ozma claims
+ozagia mesh ozma enqueue --harness opencode --session a \
+  --message msg_0123456789abcdef --channel '#flight' --offer-as response
+ozagia mesh ozma claim --lease lease_0123456789abcdef --merge \
+  --harness opencode --session a
+ozagia mesh ozma sync
+```
+
+`enqueue` and `claim` need a registered local identity with `coordinate`
+exposure, bridge mode `messages` or `full`, a matching host-declared card and
+a valid flight.  Read views (`outbox`, `inbox`, `read`, `ack`, `claims`) need
+no identity.  Errors use stable codes such as `bridge_not_ready`, `queue_full`,
+`rate_limited`, `id_conflict`, `channel_not_allowed`, `unsupported_mapping`,
+`unknown_message` and `shim_unavailable`; bodies and credentials are never
+echoed in an error.
+
+`status` adds read-only bridge counts: outbox pending/sent/failed/expired,
+inbox unread/read/acked, remote/outbound claims, active/expired claims,
+conflict count, queue messages/bytes against caps, and dedupe conflicts.
+Neither `status` nor `check` creates `<state>/mesh/ozma`.
+
 ## What comes next
 
-Messages, typed request/response/ack bodies, claims, remote claims, inbox and
-acknowledgements, channels/subscriptions, handoff, blockers and host-approved
-wake are later slices.  They will translate to the documented Ozma protocol
-rather than reimplementing it, will keep local leases advisory, and will
-continue to route merge authority through the existing worktree/commit/merge
-policy.
+Stage H adds flight membership/roles/work-units, handoff acknowledgement,
+blocker edges and `unblock`, host-approved message-triggered or scheduled wake
+with a budget, A2A lossy translation and live conformance against one approved
+shim, and a read-only flight view.  It continues to keep wake, claims and merge
+authority out of model hands, and it will need a real, approved shim contract
+before anything here can be called upstream-verified.

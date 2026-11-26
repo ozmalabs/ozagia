@@ -1935,7 +1935,7 @@ usage: ozagia mesh heartbeat [-h] [--root ROOT] [--json] [--harness HARNESS]
 ```
 usage: ozagia mesh send [-h] [--root ROOT] [--json] [--harness HARNESS]
                         [--session SESSION] (--to H:S | --broadcast)
-                        --kind {hello,request,offer,accept,reject,status,release,note}
+                        --kind {hello,request,offer,accept,reject,status,release,note,block,unblock,handoff}
                         --subject SUBJECT [--body BODY | --body-file F]
                         [--in-reply-to IN_REPLY_TO] [--lease LEASE]
                         [--ttl TTL]
@@ -2398,7 +2398,8 @@ usage: ozagia mesh delegation show [-h] [--root ROOT] [--json] delegation_id
 ### `ozagia mesh ozma`
 
 ```
-usage: ozagia mesh ozma [-h] {status,map,check} ...
+usage: ozagia mesh ozma [-h]
+                        {status,map,check,outbox,inbox,read,ack,claims,enqueue,claim,sync} ...
 ```
 
 #### `ozagia mesh ozma status`
@@ -2445,6 +2446,120 @@ usage: ozagia mesh ozma check [-h] [--root ROOT] [--json] [--harness HARNESS]
 | `--session` |  |  |  | session id (default: OZAGIA_MESH_SESSION) |
 | `--require-ready` |  |  |  | exit 1 when the configured mode is not ready |
 | `--live` |  |  |  | request a live check; unavailable in this slice and never contacts the network |
+
+#### `ozagia mesh ozma outbox`
+
+```
+usage: ozagia mesh ozma outbox [-h] [--root ROOT] [--json] [--all]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--all` |  |  |  | include sent and acked messages |
+
+#### `ozagia mesh ozma inbox`
+
+```
+usage: ozagia mesh ozma inbox [-h] [--root ROOT] [--json] [--harness HARNESS]
+                              [--session SESSION] [--unread]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--harness` |  |  |  | harness name (default: OZAGIA_MESH_HARNESS) |
+| `--session` |  |  |  | session id (default: OZAGIA_MESH_SESSION) |
+| `--unread` |  |  |  | — |
+
+#### `ozagia mesh ozma read`
+
+```
+usage: ozagia mesh ozma read [-h] [--root ROOT] [--json] msg_id
+```
+
+| argument | type | values | required | help |
+|---|---|---|---|---|
+| `msg_id` |  |  | yes | — |
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+
+#### `ozagia mesh ozma ack`
+
+```
+usage: ozagia mesh ozma ack [-h] [--root ROOT] [--json] msg_id
+```
+
+| argument | type | values | required | help |
+|---|---|---|---|---|
+| `msg_id` |  |  | yes | — |
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+
+#### `ozagia mesh ozma claims`
+
+```
+usage: ozagia mesh ozma claims [-h] [--root ROOT] [--json]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+
+#### `ozagia mesh ozma enqueue`
+
+```
+usage: ozagia mesh ozma enqueue [-h] [--root ROOT] [--json]
+                                [--harness HARNESS] [--session SESSION]
+                                --message ID [--channel C]
+                                [--offer-as {response,handoff}]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--harness` |  |  |  | harness name (default: OZAGIA_MESH_HARNESS) |
+| `--session` |  |  |  | session id (default: OZAGIA_MESH_SESSION) |
+| `--message` |  |  |  | — |
+| `--channel` |  |  |  | — |
+| `--offer-as` |  |  |  | — |
+
+#### `ozagia mesh ozma claim`
+
+```
+usage: ozagia mesh ozma claim [-h] [--root ROOT] [--json] [--harness HARNESS]
+                              [--session SESSION] --lease ID [--merge]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--harness` |  |  |  | harness name (default: OZAGIA_MESH_HARNESS) |
+| `--session` |  |  |  | session id (default: OZAGIA_MESH_SESSION) |
+| `--lease` |  |  |  | — |
+| `--merge` |  |  |  | mark the claim advisory (never merge authority) |
+
+#### `ozagia mesh ozma sync`
+
+```
+usage: ozagia mesh ozma sync [-h] [--root ROOT] [--json]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
 
 ### `ozagia mesh prune`
 

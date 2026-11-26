@@ -85,7 +85,7 @@ EXPOSURES = ("none", "read", "coordinate", "supervise")
 COORDINATE = frozenset({"coordinate", "supervise"})
 SOURCES = ("cli", "harness", "host", "model", "other")
 KINDS = ("hello", "request", "offer", "accept", "reject", "status", "release",
-         "note")
+         "note", "block", "unblock", "handoff")
 RESOURCE_KINDS = ("worktree", "branch", "merge", "path", "grant", "other")
 MODES = ("read", "write", "merge")
 RELATIONS = ("peer", "sub", "super")

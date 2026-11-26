@@ -52,6 +52,7 @@ from typing import Any
 
 from ozagia.config import repo_root
 from ozagia.core import mesh as M
+from ozagia.core import ozma_bridge as B
 from ozagia.core import ozma_mesh as O
 from ozagia.core import security as SEC
 
@@ -299,6 +300,45 @@ def add_parser(sub: Any) -> None:
     ozma_check.add_argument("--live", action="store_true",
                             help="request a live check; unavailable in this "
                                  "slice and never contacts the network")
+    ozma_outbox = ozma_children.add_parser(
+        "outbox", help="list queued, sent, failed or expired bridge messages")
+    _add_common(ozma_outbox)
+    ozma_outbox.add_argument("--all", action="store_true",
+                             help="include sent and acked messages")
+    ozma_inbox = ozma_children.add_parser(
+        "inbox", help="list bridge inbox metadata (merged with the local mailbox)")
+    _add_common(ozma_inbox)
+    _add_identity(ozma_inbox)
+    ozma_inbox.add_argument("--unread", action="store_true")
+    ozma_read = ozma_children.add_parser(
+        "read", help="explicitly read one bridge inbox body")
+    _add_common(ozma_read)
+    ozma_read.add_argument("msg_id")
+    ozma_ack = ozma_children.add_parser(
+        "ack", help="mark one bridge inbox message read and acked")
+    _add_common(ozma_ack)
+    ozma_ack.add_argument("msg_id")
+    ozma_claims = ozma_children.add_parser(
+        "claims", help="list outbound claim refs, remote claims and conflicts")
+    _add_common(ozma_claims)
+    ozma_enqueue = ozma_children.add_parser(
+        "enqueue", help="queue one existing local mailbox message for Ozma")
+    _add_common(ozma_enqueue)
+    _add_identity(ozma_enqueue)
+    ozma_enqueue.add_argument("--message", required=True, metavar="ID")
+    ozma_enqueue.add_argument("--channel", default=None, metavar="C")
+    ozma_enqueue.add_argument("--offer-as", default=None,
+                              choices=("response", "handoff"))
+    ozma_claim = ozma_children.add_parser(
+        "claim", help="queue an advisory claim for one local lease")
+    _add_common(ozma_claim)
+    _add_identity(ozma_claim)
+    ozma_claim.add_argument("--lease", required=True, metavar="ID")
+    ozma_claim.add_argument("--merge", action="store_true",
+                            help="mark the claim advisory (never merge authority)")
+    ozma_sync = ozma_children.add_parser(
+        "sync", help="deliver and poll through a shim; unavailable locally")
+    _add_common(ozma_sync)
 
     prune = children.add_parser("prune", help="explicitly remove read messages")
     _add_common(prune)
@@ -862,6 +902,16 @@ def _run_ozma(root: Path, args: argparse.Namespace, as_json: bool) -> int:
                   f"{queue.get('max_bytes')} "
                   f"priority_floor={payload.get('priority_floor')} "
                   f"network={payload.get('network')}")
+            bridge = payload.get("bridge") or {}
+            outbox = bridge.get("outbox") or {}
+            inbox = bridge.get("inbox") or {}
+            print(f"bridge_outbox pending={outbox.get('pending', 0)} "
+                  f"sent={outbox.get('sent', 0)} "
+                  f"failed={outbox.get('failed', 0)} "
+                  f"expired={outbox.get('expired', 0)} "
+                  f"inbox_unread={inbox.get('unread', 0)} "
+                  f"claims_conflicts={bridge.get('conflicts', 0)} "
+                  f"conformance={bridge.get('conformance')}")
             readiness = payload.get("readiness") or {}
             print(f"ready={readiness.get('ready')} "
                   f"ready_for={','.join(readiness.get('ready_for') or ())}")
@@ -920,6 +970,156 @@ def _run_ozma(root: Path, args: argparse.Namespace, as_json: bool) -> int:
                   f"network={payload.get('network')}")
         if getattr(args, "require_ready", False) and not payload.get("ready"):
             return 1
+        return 0
+    if action == "outbox":
+        payload = B.outbox(root, config=O.load_config(root),
+                           include_all=args.all)
+        if as_json:
+            _print_json(payload)
+        else:
+            for item in payload.get("messages", ()):
+                print(f"{item.get('id')}  {item.get('type')}  "
+                      f"state={item.get('state')} "
+                      f"attempts={item.get('attempts')} "
+                      f"channel={item.get('channel') or '-'} "
+                      f"expires={item.get('expires_at') or '-'}")
+            counts = payload.get("counts") or {}
+            print("counts: " + " ".join(
+                f"{key}={value}" for key, value in sorted(counts.items())))
+            queue = payload.get("queue") or {}
+            print(f"queue={queue.get('messages')}/{queue.get('max_messages')} "
+                  f"bytes={queue.get('bytes')}/{queue.get('max_bytes')}")
+        return 0
+    if action == "inbox":
+        cfg = O.load_config(root)
+        payload = B.inbox(root, config=cfg, unread=args.unread)
+        harness = getattr(args, "harness", None) or os.environ.get(
+            "OZAGIA_MESH_HARNESS")
+        session = getattr(args, "session", None) or os.environ.get(
+            "OZAGIA_MESH_SESSION")
+        merged = [dict(item, origin="ozma")
+                  for item in payload.get("messages", ())]
+        if harness and session:
+            try:
+                local = M.inbox(root, harness, session, unread=args.unread)
+            except M.MeshRefusal as exc:
+                payload["local_error"] = exc.code
+            else:
+                merged.extend(dict(item, origin="local")
+                              for item in local.get("messages", ()))
+                payload["local_count"] = local.get("count", 0)
+        seen: set[str] = set()
+        unique = []
+        for item in merged:
+            key = str(item.get("id") or item.get("msg_id") or "")
+            if key and key in seen:
+                continue
+            if key:
+                seen.add(key)
+            item["id"] = key
+            unique.append(item)
+        payload["messages"] = unique
+        payload["count"] = len(unique)
+        if as_json:
+            _print_json(payload)
+        else:
+            for item in unique:
+                print(f"{item.get('id')}  {item.get('origin')}  "
+                      f"{item.get('type') or item.get('kind')}  "
+                      f"from={item.get('from') if isinstance(item.get('from'), str) else '-'} "
+                      f"read={bool(item.get('read'))} "
+                      f"acked={bool(item.get('acked'))} "
+                      f"expired={bool(item.get('expired'))} "
+                      f"channel={item.get('channel') or '-'}")
+            print(f"count={payload.get('count', 0)} "
+                  f"unread={payload.get('counts', {}).get('unread', 0)}")
+        return 0
+    if action == "read":
+        payload = B.read_message(root, args.msg_id,
+                                 config=O.load_config(root))
+        if as_json:
+            _print_json(payload)
+        else:
+            print(f"{payload.get('id')} {payload.get('type')} "
+                  f"from={payload.get('from') or '-'} "
+                  f"untrusted={payload.get('untrusted')} "
+                  f"read={payload.get('read')}")
+            body = payload.get("body") or {}
+            for key, value in body.items():
+                print(f"{key}: {value}")
+        return 0
+    if action == "ack":
+        payload = B.ack_message(root, args.msg_id,
+                                config=O.load_config(root))
+        if as_json:
+            _print_json(payload)
+        else:
+            print(f"ack {payload.get('id')} "
+                  f"state={payload.get('state')}")
+        return 0
+    if action == "claims":
+        payload = B.claims(root, config=O.load_config(root))
+        if as_json:
+            _print_json(payload)
+        else:
+            for item in payload.get("claims", ()):
+                holder = item.get("holder") or {}
+                print(f"{item.get('claim_id')}  {item.get('direction')}  "
+                      f"{item.get('scope')}:{item.get('resource')} "
+                      f"mode={item.get('mode') or '-'} "
+                      f"state={item.get('state')} advisory=true "
+                      f"holder={holder.get('agent_id') or '-'} "
+                      f"conflict={bool(item.get('conflict'))}")
+            for conflict in payload.get("conflicts", ()):
+                print(f"conflict claim={conflict.get('claim_id')} "
+                      f"lease={conflict.get('lease_id')} "
+                      f"advisory=true blocking=false")
+            counts = payload.get("counts") or {}
+            print("counts: " + " ".join(
+                f"{key}={value}" for key, value in sorted(counts.items())))
+        return 0
+    if action == "enqueue":
+        harness, session = _coordinate(root, args)
+        cfg = O.load_config(root)
+        message = M.read(root, harness, session, args.message, peek=True)
+        payload = B.enqueue_local_message(
+            root, message, config=cfg, offer_as=args.offer_as,
+            channel=args.channel)
+        if as_json:
+            _print_json(payload)
+        else:
+            print(f"queued {payload.get('id')} type={payload.get('type')} "
+                  f"state={payload.get('state')} "
+                  f"duplicate={payload.get('duplicate')} "
+                  f"conformance={B.CONFORMANCE}")
+        return 0
+    if action == "claim":
+        harness, session = _coordinate(root, args)
+        cfg = O.load_config(root)
+        status = M.status(root, harness=harness, session=session)
+        me = status.get("self") or {}
+        lease = M.lease_status(root, args.lease)["lease"]
+        holder = (lease.get("holder") or {}).get("key")
+        if holder != me.get("key"):
+            raise M.MeshRefusal("only the lease holder may publish a claim",
+                                code="not_holder")
+        payload = B.enqueue_claim(root, lease, config=cfg, merge=args.merge)
+        if as_json:
+            _print_json(payload)
+        else:
+            print(f"claim {payload.get('claim_id')} queued "
+                  f"scope={payload.get('scope')} "
+                  f"resource={payload.get('resource')} advisory=true "
+                  f"merge={payload.get('merge')}")
+        return 0
+    if action == "sync":
+        cfg = O.load_config(root)
+        payload = B.sync(root, B.UnavailableShim(), config=cfg)
+        if as_json:
+            _print_json(payload)
+        else:
+            print(f"delivered={payload.get('delivered')} "
+                  f"polled={payload.get('polled')} network=false")
         return 0
     raise M.MeshError(f"unknown ozma action {action!r}")
 
