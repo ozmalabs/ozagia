@@ -268,6 +268,28 @@ Requests (`op`):
       JSON envelope repeats the request `id`, so `entry_id` is the
       unambiguous entry id a client should keep.
 
+    {"id": 22, "op": "mesh", "action": "status", "harness": "opencode",
+     "session": "ses_..."}
+      -> {"id": 22, "ok": true, "action": "status",
+          "self": {...}, "peers": [...], "leases": [...],
+          "links": [...], "unread": 0}
+      Layer-2 local session-mesh coordination. The identity is the trusted
+      plugin envelope's `harness` and `session`; only `opencode` and
+      `opencode-runner` may act, and a caller-supplied `actor` is ignored.
+      `register` records the plugin's actual session id with the host's
+      exposure (`none|read|coordinate|supervise`); `heartbeat` refreshes it;
+      `status` is read-only. `send`, `lease_acquire`, `lease_renew`,
+      `lease_release`, `worktree_request`, `worktree_offer` and
+      `merge_request` require `coordinate` (or `supervise`) exposure and are
+      rate-limited per actor (30 messages, 20 lease actions and 10
+      worktree/merge requests per five minutes). Refused actions return stable
+      codes (`not_permitted`, `rate_limited` with `retry_s`, `unknown_lease`,
+      `live_holder`, `queue_full`, `mailbox_full`, `invalid_action`, ...).
+      `approve`, `takeover`, `link_*`, `delegation_*`, `prune` and
+      `unregister` are never available here. Message bodies and subjects are
+      never returned or audited; leases remain advisory. Mesh state stays under
+      the repository state directory and no network is used.
+
 Sessions. `tool`, `after` and `read_check` with a `session` use that
 session's read ledger (`ozagia.intent.ledger`), keyed by (harness, session,
 `sub`). `sub` is optional: agents that share a session id send something
@@ -428,6 +450,7 @@ OPERATIONS = (
     "job_start",
     "job_stop",
     "job_wait",
+    "mesh",
     "owner_check",
     "path_check",
     "ping",

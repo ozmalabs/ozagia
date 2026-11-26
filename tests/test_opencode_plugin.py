@@ -1026,6 +1026,133 @@ def test_registry_patch_untouched_schema_swapped_and_notes_added(tmp_path, daemo
 
 
 # --------------------------------------------------------------------------- #
+# layer-2 session mesh tool
+# --------------------------------------------------------------------------- #
+def _mesh_script(req):
+    if req["op"] == "hello":
+        return {"ok": True}
+    if req["op"] == "mesh":
+        action = req.get("action")
+        if action == "register":
+            assert req["harness"] == "opencode"
+            assert req["session"] == "ses_test"
+            assert req["exposure"] in ("coordinate", "supervise")
+            return {"ok": True, "action": "register", "registered": True,
+                    "mesh_id": "default", "self": {
+                        "key": "sk_test", "harness": "opencode",
+                        "session": "ses_test", "exposure": req["exposure"]}}
+        if action == "send":
+            assert req["to"] == "opencode:ses_b"
+            assert req["kind"] == "note"
+            assert req["subject"] == "hi"
+            assert req["body"] == "BODY_CANARY"
+            return {"ok": True, "action": "send", "delivered": 1,
+                    "recipient_count": 1,
+                    "message": {"msg_id": "msg_0123456789abcdef",
+                                "kind": "note"}}
+        if action == "heartbeat":
+            return {"ok": True, "action": "heartbeat"}
+        if action == "status":
+            return {"ok": True, "action": "status", "self": {
+                "session": "ses_test"}, "peers": [], "leases": [],
+                "links": [], "unread": 0}
+    return _standard(req)
+
+
+@needs_node
+def test_native_mesh_tool_is_registered_only_for_coordinate_exposure(
+        tmp_path, daemon):
+    d = daemon(_mesh_script)
+    coordinate = _run(tmp_path, {"nativeTools": True, "permission": "allow"},
+                      d.path, env={"OZAGIA_MESH_MODEL": "coordinate"})
+    assert "ozagia_mesh" in coordinate["toolNames"]
+    supervise = _run(tmp_path, {"nativeTools": True, "permission": "allow"},
+                     d.path, env={"OZAGIA_MESH_MODEL": "supervise"})
+    assert "ozagia_mesh" in supervise["toolNames"]
+    read_only = _run(tmp_path, {"nativeTools": True, "permission": "allow"},
+                     d.path, env={"OZAGIA_MESH_MODEL": "read"})
+    assert "ozagia_mesh" not in read_only["toolNames"]
+    unknown = _run(tmp_path, {"nativeTools": True, "permission": "allow"},
+                   d.path, env={"OZAGIA_MESH_MODEL": "admin"})
+    assert "ozagia_mesh" not in unknown["toolNames"]
+    no_permission = _run(tmp_path, {"nativeTools": True}, d.path,
+                         env={"OZAGIA_MESH_MODEL": "coordinate"})
+    assert "ozagia_mesh" not in no_permission["toolNames"]
+
+
+@needs_node
+def test_native_mesh_tool_registers_the_actual_session_and_maps_the_action(
+        tmp_path, daemon):
+    d = daemon(_mesh_script)
+    out = _run(tmp_path, {
+        "nativeTools": True, "permission": "allow", "settleMs": 200,
+        "calls": [{"tool": "ozagia_mesh", "input": {
+            "action": "send", "to": "opencode:ses_b", "kind": "note",
+            "subject": "hi", "body": "BODY_CANARY"}}],
+    }, d.path, env={"OZAGIA_MESH_MODEL": "coordinate"})
+    result = json.loads(out["results"][0]["result"]["content"])
+    assert result["ok"] is True and result["delivered"] == 1
+    mesh = [req for req in d.requests if req["op"] == "mesh"]
+    assert [req["action"] for req in mesh[:2]] == ["register", "send"]
+    assert mesh[0]["harness"] == "opencode"
+    assert mesh[0]["session"] == "ses_test"
+    assert mesh[0]["exposure"] == "coordinate"
+    assert mesh[1]["harness"] == "opencode"
+    assert mesh[1]["session"] == "ses_test"
+    assert "BODY_CANARY" not in json.dumps(result)
+
+
+@needs_node
+def test_native_mesh_tool_refuses_without_a_session_and_sends_nothing(
+        tmp_path, daemon):
+    d = daemon(_mesh_script)
+    out = _run(tmp_path, {
+        "nativeTools": True, "permission": "allow", "sessionID": None,
+        "calls": [{"tool": "ozagia_mesh", "input": {"action": "status"}}],
+    }, d.path, env={"OZAGIA_MESH_MODEL": "coordinate"})
+    result = json.loads(out["results"][0]["result"]["content"])
+    assert result["status"] == "refused"
+    assert result["code"] == "session_unavailable"
+    assert not [req for req in d.requests if req["op"] == "mesh"]
+
+
+@needs_node
+def test_native_mesh_tool_fails_closed_and_never_leaks_a_body(tmp_path, daemon):
+    def script(req):
+        if req["op"] == "hello":
+            return {"ok": True}
+        if req["op"] == "mesh" and req.get("action") == "register":
+            return {"ok": True, "action": "register", "registered": True}
+        if req["op"] == "mesh":
+            return {"ok": False, "code": "not_permitted",
+                    "error": "denied BODY_CANARY"}
+        return _standard(req)
+
+    d = daemon(script)
+    out = _run(tmp_path, {
+        "nativeTools": True, "permission": "allow",
+        "calls": [{"tool": "ozagia_mesh", "input": {
+            "action": "send", "to": "opencode:ses_b", "kind": "note",
+            "subject": "hi", "body": "BODY_CANARY"}}],
+    }, d.path, env={"OZAGIA_MESH_MODEL": "coordinate"})
+    result = json.loads(out["results"][0]["result"]["content"])
+    assert result["status"] == "refused"
+    assert result["code"] == "not_permitted"
+    assert "BODY_CANARY" not in json.dumps(result)
+
+
+@needs_node
+def test_native_mesh_tool_reports_daemon_unavailable(tmp_path):
+    out = _run(tmp_path, {
+        "nativeTools": True, "permission": "allow",
+        "calls": [{"tool": "ozagia_mesh", "input": {"action": "status"}}],
+    }, tmp_path / "missing.sock", env={"OZAGIA_MESH_MODEL": "coordinate"})
+    result = json.loads(out["results"][0]["result"]["content"])
+    assert result["status"] == "refused"
+    assert result["code"] == "daemon_unavailable"
+
+
+# --------------------------------------------------------------------------- #
 # installer
 # --------------------------------------------------------------------------- #
 def test_install_and_uninstall(tmp_path):
@@ -1062,10 +1189,12 @@ def test_self_test_passes_on_the_packaged_plugin(tmp_path):
     assert res["ok"] is True, res
     assert sorted(res["replaced"]) == sorted(oc.REPLACED_TOOLS)
     assert sorted(res["native_tools"]) == sorted([
-        "ozagia_structure", "ozagia_secret_request", "ozagia_scratch"])
+        "ozagia_structure", "ozagia_secret_request", "ozagia_scratch",
+        "ozagia_mesh"])
     assert res["structure_readonly"] is True
     assert res["secret_request_readonly"] is True
     assert res["scratch_readonly"] is True
+    assert res["mesh_tool"] is True
 
 
 def test_cli_install_and_uninstall(tmp_path, capsys):

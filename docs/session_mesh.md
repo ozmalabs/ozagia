@@ -7,10 +7,10 @@ system.  A process that ignores the mesh can still edit or merge; existing
 worktree, commit, merge and approval policy remains authoritative.
 
 This document describes the filesystem layer (layer 0), the read-only
-awareness it enables (layer 1), the link/delegation handshake, and the harness
-registration that exposes a bounded summary to the model.  Model send/lease
-tools (layers 2-3), the optional daemon operation and the Ozma bridge are later
-slices.
+awareness it enables (layer 1), the link/delegation handshake, the harness
+registration that exposes a bounded summary to the model, and the opt-in
+layer-2 model coordination tool.  Layer 3 (mutual supervision and delegation
+through the tool) and the Ozma bridge are later slices.
 
 ## Scope
 
@@ -25,10 +25,14 @@ Everything is scoped to one repository and one mesh id:
 - Joining the mesh is opt-in: `[mesh] enabled` defaults to false, and
   `OZAGIA_MESH=1` (or true/yes/on) enables it for a process.  The `ozagia
   agent` CLI adds `--mesh` / `--no-mesh`; an explicit flag wins over the
-  configuration and the environment.  Unknown `[mesh]` keys and a
-  non-boolean `enabled` are configuration errors.  Reads such as `status`,
-  `peers` and `lease list` remain available whether or not joining is
-  enabled.
+  configuration and the environment.  `[mesh] model` (or
+  `OZAGIA_MESH_MODEL`, or `--mesh-model`) chooses the model exposure:
+  `none`, `read` (the default), `coordinate` or `supervise`.  The explicit
+  CLI flag wins over the environment, which wins over the file.  Only the
+  host sets it; a model request or tool argument cannot raise it.  Unknown
+  `[mesh]` keys, a non-boolean `enabled` and an unknown model value are
+  configuration errors.  Reads such as `status`, `peers` and `lease list`
+  remain available whether or not joining is enabled.
 - Every session, message, lease, link and delegation record stores both ids.  A
   read uses a record only when both match.  A record or state directory from
   another repository or mesh id is reported as a scope mismatch, never merged.
@@ -44,7 +48,8 @@ State lives under:
   links/          one record per 1:1 link handshake
   delegations/    one record per bounded delegation
   audit/          bounded redacted events (never message bodies)
-  rate/           reserved for rate limits
+  rate/           reserved for rate limits (the daemon keeps bounded
+                  counters in memory)
 ```
 
 Directories are `0700` and files `0600`.  Writes are atomic
@@ -314,8 +319,8 @@ the holder still needs the repository's normal merge policy and approvals.
 ## Harness registration and read-only awareness
 
 `ozagia agent` (and `run_agent(..., mesh=True)`) can register its run as a
-layer-1 participant.  The identity is deliberately not an OpenCode
-`ses_...` id:
+mesh participant.  The identity is deliberately not an OpenCode `ses_...`
+id:
 
 ```text
 harness  = "opencode-runner"
@@ -323,9 +328,17 @@ session  = "run:<run root name>"
 pid      = the harness process
 worktree = the checkout the agent runs in (a clone when --clone is used)
 branch   = the checked-out branch when git can name it cheaply
-exposure = "read"
+exposure = none | read | coordinate | supervise ([mesh] model; default read)
 source   = "host"
 ```
+
+The exposure is the host's opt-in.  `none` registers with no summary and no
+tool, `read` keeps the bounded metadata summary, and `coordinate`/`supervise`
+also give the OpenCode process `OZAGIA_MESH_MODEL`; its plugin registers the
+actual `c.sessionID` with the daemon and exposes the bounded `ozagia_mesh`
+tool.  `--mesh-model` wins over `OZAGIA_MESH_MODEL`, which wins over
+`[mesh] model`.  When mesh is disabled no model tool or model environment is
+passed, even if a model value is configured.
 
 Registration always writes under the **source** repository's state directory,
 so a clone and its source meet in one mesh; the clone's own `.ozagia/mesh` is
@@ -337,9 +350,10 @@ open: a registration, heartbeat or summary failure is reported in the result
 (`mesh_warning`, `mesh_cleanup_errors`) and never aborts the agent run; a
 failed registration is reported as unregistered, never as a success.
 
-The run result carries `mesh_enabled`, `mesh_id`, `mesh_session`, `mesh_key`,
-`mesh_exposure`, `mesh_registered`, `mesh_peer_count`, `mesh_lease_ids`,
-`mesh_warning` and `mesh_cleanup_errors`.
+The run result carries `mesh_enabled`, `mesh_model`, `mesh_id`,
+`mesh_session`, `mesh_key`, `mesh_exposure`, `mesh_registered`,
+`mesh_peer_count`, `mesh_lease_ids`, `mesh_warning` and
+`mesh_cleanup_errors`.
 
 ### Summary contract
 
@@ -357,10 +371,11 @@ with:
 It contains no message bodies or subjects, no credentials, no source text and
 no paths beyond the registered worktree/branch and lease resources.  The
 OpenCode plugin appends one `[ozagia mesh]` block to the model request's
-system context, marked as untrusted metadata; it reads no mesh file for it and
-registers no tool.  A missing or oversized value adds nothing.  The summary is
-a snapshot taken at session start; the filesystem registry remains the source
-of truth.
+system context, marked as untrusted metadata; it reads no mesh file for it.
+At `read` exposure it registers no tool; at `coordinate`/`supervise` it also
+registers the layer-2 tool described below.  A missing or oversized value adds
+nothing.  The summary is a snapshot taken at session start; the filesystem
+registry remains the source of truth.
 
 ### Status and MCP (read-only)
 
@@ -377,6 +392,48 @@ rows only (`id`, `from`, `kind`, `created`, `expires`, `read`, `acked`); it
 never returns a subject or body and never acks.  There is deliberately no MCP
 send, lease, release, claim or approve tool, and the graph/engine surfaces do
 not list either tool.
+
+## Layer 2: model coordination tool
+
+`coordinate` and `supervise` are host opt-ins.  The harness passes
+`OZAGIA_MESH_MODEL` to OpenCode, and only then does the plugin register the
+actual `c.sessionID` (`harness: "opencode"`) with the daemon and add the native
+`ozagia_mesh` tool.  At `read` there is no tool.  When mesh is disabled, or the
+permission API is absent, there is no registration and no tool.  The model
+cannot raise its own exposure: the tool has no register or exposure input.
+
+The tool sends `{op: "mesh", action, ...}` to the daemon.  The daemon ignores
+any caller-supplied actor, uses the message's `harness`/`session`, accepts
+only `opencode` or `opencode-runner`, and verifies the stored registration.
+Actions:
+
+| action | meaning | exposure |
+| --- | --- | --- |
+| `status` | compact self, live/stale peers, active/stale leases, links and unread counts | `read`+ |
+| `send` | one bounded message to `to` or `broadcast`; no bodies in the answer | `coordinate`+ |
+| `lease_acquire` | `resource` as `kind:id`, `mode`, `ttl_s`, `reason` | `coordinate`+ |
+| `lease_renew` / `lease_release` | an owned `lease_id` | `coordinate`+ |
+| `worktree_request` / `worktree_offer` | an existing worktree by `branch`/`path` | `coordinate`+ |
+| `merge_request` | queue for the advisory merge lease on `target` | `coordinate`+ |
+
+The daemon also accepts lifecycle actions `register` and `heartbeat` from the
+plugin; these are not in the model tool's enum.  It never exposes `approve`,
+`takeover`, `lease_takeover`, `link_*`, `delegation_*`, `prune`, `unregister`
+or worktree creation/removal.  A merge lease remains advisory: the normal
+merge policy and approvals still decide whether a merge may happen.
+
+Limits are per actor and action group, in the daemon's bounded in-memory
+counters: 30 messages, 20 lease actions and 10 worktree/merge requests per five
+minutes.  A refusal is `rate_limited` with `retry_s`; other stable codes
+include `not_permitted`, `unknown_session`, `unknown_lease`, `live_holder`,
+`queue_full`, `mailbox_full`, `invalid_action`, `invalid_resource`,
+`invalid_exposure`, `invalid_lease_id` and `session_not_live`.  Each successful
+action appends one mesh audit record with the actor, action and ids only;
+message bodies and subjects never reach the answer, journal, status, prompt or
+audit.  All state stays under `<state>/mesh/<mesh_id>/`; no network is used.
+The plugin heartbeats on tool calls (and with an unref'd bounded timer) and
+stops its timer on teardown; a session that disappears is reported stale and
+then dead, never silently deleted.
 
 ## Commands
 
@@ -412,10 +469,11 @@ ozagia mesh delegation list|show [DELEGATION_ID]
 ozagia mesh prune (--expired | --delivered-before S) [--apply]
 ```
 
-`ozagia agent --mesh|--no-mesh` controls only the harness registration and
-read-only summary; it adds no model tool.  The `ozagia mesh` commands remain
-the explicit layer-0/2 surface, and their mutation commands still require
-`coordinate` exposure.
+`ozagia agent --mesh|--no-mesh` controls the harness registration.
+`--mesh-model none|read|coordinate|supervise` sets the model exposure; only
+`coordinate`/`supervise` add the native tool.  The `ozagia mesh` commands
+remain the explicit layer-0/2 surface, and their mutation commands still
+require `coordinate` exposure.
 
 Identity defaults to `OZAGIA_MESH_HARNESS` and `OZAGIA_MESH_SESSION`.  Reads
 such as `status`, `peers`, `lease list/status`, `link list/show` and
@@ -452,18 +510,21 @@ roles, bounded delegation records and the `link`/`delegation` commands.
 Stage C is implemented for layer 1: `ozagia agent --mesh` registration,
 heartbeat and cleanup, the bounded `OZAGIA_MESH_SUMMARY` prompt block, the
 status `mesh` section and the read-only `dev_mesh_status`/`dev_mesh_inbox`
-MCP tools.  There is still no model send/lease tool and no daemon operation.
+MCP tools.
 
-The next slices add:
+Layer 2 is implemented for `coordinate`/`supervise`: the daemon `mesh` op, the
+host-only `--mesh-model`/`OZAGIA_MESH_MODEL`/`[mesh] model` opt-in, the native
+`ozagia_mesh` tool, rate limits and audit.  A model still cannot approve a
+takeover, merge exception or administrative grant.
 
-- **D (layer 2):** opt-in per-session coordination tools/CLI for bounded send
-  and lease request/renew/release, worktree/merge requests, rate/queue limits
-  and audit.  A model still cannot approve a takeover, merge exception or
-  administrative grant.
-- **D (layer 3):** mutual sub/super handshakes, bounded delegation and
-  descendant topology, with explicit host approval where authority is
+The next slice adds:
+
+- **Layer 3:** mutual sub/super handshakes, bounded delegation and descendant
+  topology through the tool, with explicit host approval where authority is
   implied.
-- An optional daemon `mesh` operation; the filesystem remains the fallback.
+- The [Ozma mesh bridge](plans/2026-11-26_ozma_mesh_bridge.md), which maps the
+  local records to Ozma coordination without making remote claims
+  authoritative.
 
 The merge lease remains advisory in every layer.  Existing policy, approvals
 and the worktree/commit/merge gates decide whether a merge is allowed.

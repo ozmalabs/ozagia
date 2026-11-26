@@ -46,7 +46,8 @@ rec = {"argv": sys.argv, "cwd": os.getcwd(), "pid": os.getpid(),
                                               "TEMP", "OZAGIA_SCRATCH_ROOT",
                                               "OZAGIA_MESH_SUMMARY",
                                               "OZAGIA_MESH_HARNESS",
-                                              "OZAGIA_MESH_SESSION")}}
+                                              "OZAGIA_MESH_SESSION",
+                                              "OZAGIA_MESH_MODEL")}}
 # `opencode run` reads its message from stdin; the TUI path has none.
 if sys.argv[1:2] == ["run"]:
     rec["stdin"] = sys.stdin.read()
@@ -934,6 +935,46 @@ def test_mesh_config_enabled_is_used_when_no_flag_is_given(repo, stub, tmp_path)
     res = _run(repo, tmp_path)
 
     assert res["mesh_enabled"] is True and res["mesh_registered"] is True
+
+
+def test_mesh_model_defaults_to_read_and_adds_no_model_env(repo, stub, tmp_path):
+    res = _run(repo, tmp_path, mesh=True)
+    rec = _record(stub)
+
+    assert res["mesh_model"] == "read"
+    assert res["mesh_exposure"] == "read"
+    assert rec["env"]["OZAGIA_MESH_MODEL"] is None
+    summary = rec["env"]["OZAGIA_MESH_SUMMARY"]
+    assert "exposure=read" in summary
+
+
+def test_mesh_model_coordinate_is_passed_to_the_plugin(repo, stub, tmp_path):
+    res = _run(repo, tmp_path, mesh=True, mesh_model="coordinate")
+    rec = _record(stub)
+
+    assert res["mesh_model"] == "coordinate"
+    assert res["mesh_exposure"] == "coordinate"
+    assert rec["env"]["OZAGIA_MESH_MODEL"] == "coordinate"
+    summary = rec["env"]["OZAGIA_MESH_SUMMARY"]
+    assert "exposure=coordinate" in summary
+
+
+def test_mesh_model_env_and_explicit_argument_precedence(repo, stub, tmp_path,
+                                                         monkeypatch):
+    monkeypatch.setenv("OZAGIA_MESH_MODEL", "coordinate")
+    from_env = _run(repo, tmp_path, mesh=True)
+    assert from_env["mesh_model"] == "coordinate"
+
+    explicit = _run(repo, tmp_path, mesh=True, mesh_model="read")
+    rec = _record(stub)
+    assert explicit["mesh_model"] == "read"
+    assert explicit["mesh_exposure"] == "read"
+    assert rec["env"]["OZAGIA_MESH_MODEL"] is None
+
+
+def test_mesh_model_invalid_argument_is_refused(repo, stub, tmp_path):
+    with pytest.raises(hop.AgentError, match="mesh model"):
+        _run(repo, tmp_path, mesh=True, mesh_model="admin")
 
 
 def test_mesh_registration_failure_does_not_abort_the_run(repo, stub,

@@ -305,6 +305,51 @@ telling the model to use `ozagia_scratch` for throwaway files instead of
 The tool and daemon op are offline-tested (Node harness and stub daemon). They
 have not been verified in a live OpenCode Desktop session.
 
+## Session-mesh tool (`ozagia_mesh`)
+
+The same server plugin adds a native `ozagia_mesh` tool only when the host
+sets `OZAGIA_MESH_MODEL=coordinate` or `supervise` (from `ozagia agent
+--mesh-model`, `OZAGIA_MESH_MODEL` or `[mesh] model`) **and** OpenCode exposes
+its permission assertion API.  `read`, the default, keeps only the
+`[ozagia mesh]` summary.  Mesh disabled means no registration, no tool and no
+model environment.  The tool is absent on a host without the native registry
+or permission API.
+
+At the first real `c.sessionID` (setup when the host exposes one, otherwise the
+first tool call), the plugin sends `{op:"mesh", action:"register",
+harness:"opencode", session, exposure}` and never invents a session id.  A
+missing session, a down daemon or a refusal returns a typed
+`{status:"refused", code}` result and takes no action.  It heartbeats on tool
+calls with an unref'd bounded timer, and stops the timer on teardown.
+
+Input is one compact action object; every field except `action` is optional
+and action-specific:
+
+```jsonc
+{
+  "action": "send|status|lease_acquire|lease_renew|lease_release|worktree_request|worktree_offer|merge_request",
+  "to": "opencode:ses_...", "broadcast": false,
+  "kind": "note", "subject": "...", "body": "...", "in_reply_to": "msg_...",
+  "lease": "lease_...", "ttl_s": 60,
+  "resource": "branch:main", "mode": "read|write|merge", "lease_id": "lease_...",
+  "branch": "main", "path": "...", "target": "main", "reason": "..."
+}
+```
+
+The daemon uses the plugin's trusted `harness`/`session`, ignores a
+caller-supplied actor, verifies the registration and gates by its stored
+exposure: `read` may only ask for `status`; `coordinate`/`supervise` may send,
+lease and negotiate.  It never accepts `approve`, `takeover`, `link_*`,
+`delegation_*`, `prune`, `unregister` or arbitrary worktree creation, and the
+merge lease is advisory.  Rate limits are 30 messages, 20 lease actions and 10
+worktree/merge requests per actor per five minutes; a refusal is
+`rate_limited` with `retry_s`.  Answers contain metadata and ids, never message
+bodies or subjects, and errors never echo the body.  No file is written outside
+the mesh state and no network is used.
+
+The MCP mesh tools (`dev_mesh_status`, `dev_mesh_inbox`) stay read-only: this
+tool exists only behind the host opt-in described above.
+
 ## GUI part
 
 ### Session profile in OpenCode

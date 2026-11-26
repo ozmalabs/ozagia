@@ -406,7 +406,7 @@ def _cmd_agent(args: argparse.Namespace) -> int:
                         runs_dir=args.runs_dir, mcp_mode=args.mcp, progress=progress,
                         repo_map_tokens=args.repo_map_tokens,
                         opencode_config=args.opencode_config,
-                        mesh=args.mesh,
+                        mesh=args.mesh, mesh_model=args.mesh_model,
                         managed_tmp=args.managed_tmp, tmp_ttl_s=args.tmp_ttl,
                         clean_logs=args.clean_logs)
     except (AgentError, SessionError) as exc:
@@ -1533,6 +1533,11 @@ def build_parser() -> argparse.ArgumentParser:
     mesh_group.add_argument("--no-mesh", dest="mesh", action="store_false",
                             help="do not join the session mesh, even when "
                                  "[mesh] enabled or OZAGIA_MESH says so")
+    ag.add_argument("--mesh-model", dest="mesh_model", default=None,
+                    choices=("none", "read", "coordinate", "supervise"),
+                    help="model exposure for the session mesh (default: "
+                         "[mesh] model, OZAGIA_MESH_MODEL, else read); "
+                         "coordinate adds the bounded ozagia_mesh tool")
 
     for name, (_fn, text) in DELEGATES.items():
         sub.add_parser(name, help=text, add_help=False)

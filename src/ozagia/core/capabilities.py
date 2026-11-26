@@ -453,6 +453,8 @@ _TESTS = {
     "mesh": "test:tests/test_mesh.py",
     "mesh_cli": "test:tests/test_mesh_cli.py",
     "mesh_links": "test:tests/test_mesh_links.py",
+    "mesh_model": "test:tests/test_mesh_model.py",
+    "daemon_mesh": "test:tests/test_daemon_mesh.py",
     "assets": "test:tests/test_assets.py",
     "assets_discovery": "test:tests/test_assets_discovery.py",
     "assets_cli": "test:tests/test_assets_cli.py",
@@ -1571,6 +1573,39 @@ _BUILTIN_DEFINITIONS: tuple[dict[str, Any], ...] = (
                        "link handshakes and delegation grants/revokes require "
                        "exposure=coordinate; register defaults to exposure=none"),
         tests=_tests("mesh", "mesh_cli", "mesh_links"),
+        docs=_docs("mesh"),
+    ),
+    _def(
+        id="cap:mesh.coordinate",
+        domain="actions",
+        purpose=("Opt-in layer-2 model coordination: bounded messages, "
+                 "advisory lease request/renew/release and worktree/merge "
+                 "negotiation through the local daemon mesh op."),
+        owner="ozagia.daemon.server",
+        side_effect="write",
+        exposure=["daemon"],
+        impl=["impl:ozagia.daemon.server",
+              "impl:ozagia.harness.opencode.run_agent",
+              "impl:ozagia.core.mesh.send",
+              "impl:ozagia.core.mesh.lease_acquire",
+              "impl:ozagia.core.mesh.lease_release",
+              "impl:ozagia.core.mesh.worktree_request",
+              "impl:ozagia.core.mesh.merge_request"],
+        surfaces=["daemon:op:mesh"],
+        prerequisites=["[mesh] model or --mesh-model coordinate|supervise",
+                       "a trusted OpenCode plugin identity and a running daemon"],
+        limits=["read exposure may only ask for status",
+                "30 messages, 20 lease actions and 10 worktree/merge requests "
+                "per actor per five minutes",
+                "no approve, takeover, link, delegation, prune or unregister "
+                "action",
+                "message bodies and subjects are never returned or audited",
+                "no network and no file writes outside the mesh state directory",
+                "leases remain advisory; merge policy and approvals still apply"],
+        authorization=("host opt-in only; the daemon uses the plugin's actual "
+                       "harness/session, verifies the registration and never "
+                       "accepts a caller-supplied actor or raised exposure"),
+        tests=_tests("mesh", "mesh_model", "daemon_mesh"),
         docs=_docs("mesh"),
     ),
     _def(

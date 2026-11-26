@@ -46,7 +46,8 @@ ozagia agent                                                       # the TUI
 | `--clean-logs` | after a successful run with no kept clone, delete the run root and scratch workspace (default: keep the logs) |
 | `--repo-map` | send a bounded, task-ranked repository map in the first model request; off by default |
 | `--repo-map-tokens N` | repo-map budget for `--repo-map`, 200..8000 (default 1500); needs `--repo-map` |
-| `--mesh` / `--no-mesh` | join the local session mesh and pass a bounded metadata summary to the model context; the explicit flag wins over `[mesh] enabled` and `OZAGIA_MESH`. No model send/lease tool is added |
+| `--mesh` / `--no-mesh` | join the local session mesh and pass a bounded metadata summary to the model context; the explicit flag wins over `[mesh] enabled` and `OZAGIA_MESH` |
+| `--mesh-model none\|read\|coordinate\|supervise` | model exposure (default `[mesh] model`, `OZAGIA_MESH_MODEL`, else `read`). Only the host sets it. `read` keeps the summary; `coordinate`/`supervise` also register the OpenCode session and add the bounded `ozagia_mesh` tool. `none` adds neither |
 | `-- ARGS` | passed to opencode before the prompt |
 
 Exit status: opencode's exit code; 124 after a timeout; 130 after Ctrl-C; 2
@@ -93,7 +94,11 @@ daemon failure).
    environment even when the caller's environment sets it. With mesh enabled
    and registered, `OZAGIA_MESH_SUMMARY` carries the bounded metadata summary
    and `OZAGIA_MESH_HARNESS`/`OZAGIA_MESH_SESSION` name the runner identity;
-   when registration fails none of them is set.
+   when registration fails none of them is set.  With `--mesh-model
+   coordinate` or `supervise`, `OZAGIA_MESH_MODEL` is passed too, so the
+   plugin registers the actual OpenCode session and adds `ozagia_mesh`;
+   `read` (the default) passes no model variable and no tool.  The value is
+   never inherited from a model request or tool argument.
    A managed run also sets `TMPDIR`, `TMP` and `TEMP` to `<run root>/tmp`
    (mode 0700) and `OZAGIA_SCRATCH_ROOT` to a disk-backed scratch workspace
    under `<state dir>/tmp/workspaces/agent/<run>`. The graph daemon and the

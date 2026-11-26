@@ -64,11 +64,14 @@ RATE_DIR = "rate"
 LEASE_LOCK = ".lock"
 
 DEFAULT_MESH_ID = "default"
+DEFAULT_MESH_MODEL = "read"
 MESH_ID_ENV = "OZAGIA_MESH_ID"
 MESH_ENABLED_ENV = "OZAGIA_MESH"
+MESH_MODEL_ENV = "OZAGIA_MESH_MODEL"
 MESH_ENV_TRUE = frozenset({"1", "true", "yes", "on"})
 MESH_ENV_FALSE = frozenset({"0", "false", "no", "off"})
-MESH_CONFIG_KEYS = frozenset({"id", "enabled"})
+MESH_MODELS = ("none", "read", "coordinate", "supervise")
+MESH_CONFIG_KEYS = frozenset({"id", "enabled", "model"})
 MESH_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$")
@@ -308,6 +311,28 @@ def mesh_enabled(root: str | Path) -> bool:
     if not isinstance(value, bool):
         raise MeshConfigError("[mesh] enabled must be true or false")
     return value
+
+
+def validate_mesh_model(value: Any) -> str:
+    """A model exposure from the closed set ``none|read|coordinate|supervise``."""
+    if not isinstance(value, str) or value not in MESH_MODELS:
+        raise MeshConfigError(
+            "mesh model must be one of " + ", ".join(MESH_MODELS))
+    return value
+
+
+def mesh_model(root: str | Path) -> str:
+    """``OZAGIA_MESH_MODEL``, else ``[mesh] model``, else ``read``.
+
+    This is the *host's* opt-in for a model-facing mesh surface.  It is read
+    only from configuration or the environment; a model request cannot raise
+    it.  ``read`` keeps the layer-1 summary and registers no coordinate tool.
+    """
+    env = os.environ.get(MESH_MODEL_ENV)
+    if env is not None and env.strip():
+        return validate_mesh_model(env.strip().lower())
+    value = _mesh_values(root).get("model", DEFAULT_MESH_MODEL)
+    return validate_mesh_model(value)
 
 
 def mesh_configured(root: str | Path) -> bool:
@@ -2918,6 +2943,19 @@ def merge_request(root: str | Path, harness: str, session: str, *,
 # --------------------------------------------------------------------------- #
 # audit
 # --------------------------------------------------------------------------- #
+def audit_event(root: str | Path, event: str, **fields: Any) -> bool:
+    """Append one bounded audit event; ``False`` when no mesh state exists.
+
+    Fields are metadata only: body, subject and text are always dropped by
+    :func:`_audit`, so a caller cannot accidentally record message contents.
+    """
+    base = _open_base(root, create=False)
+    if base is None:
+        return False
+    _audit(base, event, **fields)
+    return True
+
+
 def _audit(base: Path, event: str, **fields: Any) -> None:
     directory = base / AUDIT_DIR
     _ensure_dir(directory)

@@ -264,6 +264,37 @@ _TMP_TRACKED_FIELDS = {
     "list": frozenset({"kind", "session", "owned", "include_all", "limit"}),
     "status": frozenset(),
 }
+# `mesh` op (ozagia.core.mesh): layer-2 model coordination only. The harness
+# and session come from the trusted plugin envelope; no caller-supplied actor
+# or exposure raises anything. `register` and `heartbeat` are lifecycle
+# actions the plugin sends; the model tool exposes only the coordinate set.
+MESH_ACTIONS = ("heartbeat", "lease_acquire", "lease_release", "lease_renew",
+                "merge_request", "register", "send", "status",
+                "worktree_offer", "worktree_request")
+MESH_HARNESSES = ("opencode", "opencode-runner")
+MESH_READ_EXPOSURES = frozenset({"read", "coordinate", "supervise"})
+MESH_COORDINATE_ACTIONS = frozenset({
+    "send", "lease_acquire", "lease_renew", "lease_release",
+    "worktree_request", "worktree_offer", "merge_request",
+})
+MESH_REFUSED_ACTIONS = frozenset({
+    "approve", "admin", "delegation_grant", "delegation_revoke",
+    "lease_takeover", "link_accept", "link_decline", "link_request",
+    "link_revoke", "merge_apply", "prune", "takeover", "unregister",
+    "worktree_create", "worktree_remove",
+})
+MESH_RATE_WINDOW_S = 300.0
+MESH_RATE_LIMITS = {"message": 30, "lease": 20, "negotiate": 10}
+MESH_RATE_GROUP = {
+    "send": "message",
+    "lease_acquire": "lease",
+    "lease_renew": "lease",
+    "lease_release": "lease",
+    "worktree_request": "negotiate",
+    "worktree_offer": "negotiate",
+    "merge_request": "negotiate",
+}
+MESH_SESSION_MAX_CHARS = 256
 _SECRET_REF_TEXT = re.compile(r"secret://[A-Za-z0-9._~%/:@+-]+")
 
 # Passthrough reasons that name a file or directory, rewritten to one key
@@ -690,6 +721,10 @@ class DaemonState:
         self.repo_map_tokens = 0
         self.repo_map_files = 0
         self.repo_map_last_skip: str | None = None
+        # Layer-2 mesh actions per actor and rate group (bounded in memory).
+        self.mesh_rates: dict[tuple[str, str], list[float]] = {}
+        self.mesh_actions = 0
+        self.mesh_refusals = 0
 
     # -- requests ------------------------------------------------------------ #
     def dispatch(self, msg: dict[str, Any]) -> dict[str, Any]:
@@ -786,6 +821,8 @@ class DaemonState:
             return self.toolchain_op(msg)
         if op == "tmp":
             return self.tmp_op(msg)
+        if op == "mesh":
+            return self.mesh_op(msg)
         if op == "goals":
             return self.goals(msg)
         if op == "structural":
@@ -1988,6 +2025,353 @@ class DaemonState:
         except Exception as exc:  # noqa: BLE001 - the op must not kill a socket
             return {"ok": False, "code": "temp_error",
                     "error": "temporary space operation failed: "
+                             f"{type(exc).__name__}"}
+
+    # -- layer-2 mesh coordination ------------------------------------------ #
+    @staticmethod
+    def _mesh_session_compact(item: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "key": item.get("key"),
+            "harness": item.get("harness"),
+            "session": item.get("session"),
+            "effective_state": item.get("effective_state"),
+            "exposure": item.get("exposure"),
+            "role": item.get("role"),
+            "unread": int(item.get("unread") or 0),
+            "worktree": item.get("worktree"),
+            "branch": item.get("branch"),
+            "active_leases": list(item.get("active_leases") or ())[:16],
+        }
+
+    @staticmethod
+    def _mesh_lease_compact(item: Any) -> dict[str, Any] | None:
+        if not isinstance(item, dict):
+            return None
+        resource = item.get("resource") or {}
+        holder = item.get("holder") or {}
+        queue = []
+        for position, entry in enumerate(item.get("queue") or (), start=1):
+            if not isinstance(entry, dict):
+                continue
+            queue.append({"harness": entry.get("harness"),
+                          "session": entry.get("session"),
+                          "position": position})
+        return {
+            "lease_id": item.get("lease_id"),
+            "resource": {
+                "kind": resource.get("kind"),
+                "id": resource.get("id"),
+                "mode": resource.get("mode"),
+            },
+            "holder": {"harness": holder.get("harness"),
+                       "session": holder.get("session"),
+                       "key": holder.get("key")},
+            "state": item.get("effective_state") or item.get("state"),
+            "expires_at": item.get("expires_at"),
+            "expires_in_s": item.get("expires_in_s"),
+            "queue": queue[:16],
+            "advisory": True,
+        }
+
+    def _mesh_rate_wait(self, actor_key: str, group: str) -> int:
+        """Reserve one action and return 0, or the seconds to wait."""
+        limit = MESH_RATE_LIMITS.get(group, 0)
+        if limit <= 0:
+            return 0
+        now = time.time()
+        key = (actor_key, group)
+        bucket = [stamp for stamp in self.mesh_rates.get(key, ())
+                  if stamp > now - MESH_RATE_WINDOW_S]
+        if len(bucket) >= limit:
+            self.mesh_rates[key] = bucket
+            return max(1, int(bucket[0] + MESH_RATE_WINDOW_S - now) + 1)
+        bucket.append(now)
+        self.mesh_rates[key] = bucket
+        if len(self.mesh_rates) > 1024:
+            active = [item for item in self.mesh_rates.items()
+                      if item[1] and item[1][-1] > now - MESH_RATE_WINDOW_S]
+            self.mesh_rates = dict(active[:1024])
+        return 0
+
+    def _mesh_audit(self, actor_key: Any, action: str,
+                    body: dict[str, Any], msg: dict[str, Any]) -> None:
+        """Audit actor/action/ids only; core drops bodies, subjects and text."""
+        ids: dict[str, Any] = {}
+        for name in ("resource", "mode", "lease_id", "branch", "path",
+                     "target"):
+            value = msg.get(name)
+            if isinstance(value, str) and value:
+                ids[name] = value[:200]
+        lease = body.get("lease")
+        if isinstance(lease, dict) and lease.get("lease_id"):
+            ids["lease_id"] = lease["lease_id"]
+        message = body.get("message")
+        if isinstance(message, dict) and message.get("msg_id"):
+            ids["msg_id"] = message["msg_id"]
+        if isinstance(body.get("delivered"), int):
+            ids["delivered"] = body["delivered"]
+        try:
+            from ozagia.core import mesh as M
+            M.audit_event(self.root, "model_action", actor=actor_key,
+                          action=action, **ids)
+        except Exception:  # noqa: BLE001 - auditing never changes the action
+            pass
+
+    def _mesh_action(self, action: str, msg: dict[str, Any], harness: str,
+                     session: str) -> dict[str, Any]:
+        from ozagia.core import mesh as M
+        if action == "send":
+            broadcast = msg.get("broadcast", False)
+            if not isinstance(broadcast, bool):
+                return {"ok": False, "code": "invalid_value",
+                        "error": "broadcast must be true or false"}
+            result = M.send(
+                self.root, harness, session,
+                kind=str(msg.get("kind") or "note"),
+                subject=msg.get("subject"),
+                body=msg.get("body") if isinstance(msg.get("body"), str) else "",
+                to=msg.get("to"), broadcast=broadcast,
+                in_reply_to=msg.get("in_reply_to"),
+                lease_id=msg.get("lease"),
+                ttl_s=msg.get("ttl_s", M.MESSAGE_TTL_S))
+            message = result.get("message") or {}
+            compact = None
+            if isinstance(message, dict) and message:
+                compact = {"msg_id": message.get("msg_id"),
+                           "kind": message.get("kind"),
+                           "created_at": message.get("created_at"),
+                           "expires_at": message.get("expires_at"),
+                           "lease": message.get("lease")}
+            return {"ok": True, "action": action,
+                    "delivered": result.get("delivered", 0),
+                    "recipient_count": len(result.get("recipients") or ()),
+                    "message": compact}
+        if action == "lease_acquire":
+            resource = msg.get("resource")
+            if (not isinstance(resource, str) or ":" not in resource):
+                return {"ok": False, "code": "invalid_resource",
+                        "error": "resource must be kind:id"}
+            kind, resource_id = resource.split(":", 1)
+            if kind not in M.RESOURCE_KINDS or not resource_id:
+                return {"ok": False, "code": "invalid_resource",
+                        "error": "resource must be kind:id"}
+            result = M.lease_acquire(
+                self.root, harness, session, kind=kind,
+                resource_id=resource_id, mode=msg.get("mode"),
+                ttl_s=msg.get("ttl_s", M.LEASE_TTL_S),
+                reason=str(msg.get("reason") or ""))
+            return {"ok": True, "action": action,
+                    "acquired": bool(result.get("acquired")),
+                    "queued": bool(result.get("queued")),
+                    "position": int(result.get("position") or 0),
+                    "lease": self._mesh_lease_compact(result.get("lease"))}
+        if action in ("lease_renew", "lease_release"):
+            lease_id = msg.get("lease_id")
+            if not isinstance(lease_id, str) or not lease_id:
+                return {"ok": False, "code": "invalid_lease_id",
+                        "error": "lease_id is required"}
+            if action == "lease_renew":
+                result = M.lease_renew(
+                    self.root, harness, session, lease_id,
+                    ttl_s=msg.get("ttl_s"))
+            else:
+                result = M.lease_release(
+                    self.root, harness, session, lease_id)
+            return {"ok": True, "action": action,
+                    "lease": self._mesh_lease_compact(result.get("lease")),
+                    "promoted": self._mesh_lease_compact(
+                        result.get("promoted"))}
+        if action == "worktree_request":
+            result = M.worktree_request(
+                self.root, harness, session, branch=msg.get("branch"),
+                path=msg.get("path"), reason=str(msg.get("reason") or ""))
+            return {"ok": True, "action": action,
+                    "worktree": result.get("worktree"),
+                    "leases": [item for item in (
+                        self._mesh_lease_compact(item)
+                        for item in result.get("leases") or ()) if item],
+                    "acquired": bool(result.get("acquired")),
+                    "queued": bool(result.get("queued")),
+                    "position": int(result.get("position") or 0)}
+        if action == "worktree_offer":
+            broadcast = msg.get("broadcast", False)
+            if not isinstance(broadcast, bool):
+                return {"ok": False, "code": "invalid_value",
+                        "error": "broadcast must be true or false"}
+            result = M.worktree_offer(
+                self.root, harness, session, branch=msg.get("branch"),
+                path=msg.get("path"), lease=False, to=msg.get("to"),
+                broadcast=broadcast)
+            message = result.get("message") or {}
+            return {"ok": True, "action": action,
+                    "worktree": result.get("worktree"),
+                    "status": result.get("status"),
+                    "message": ({"msg_id": message.get("msg_id"),
+                                 "kind": message.get("kind")}
+                                if isinstance(message, dict) else None)}
+        if action == "merge_request":
+            target = msg.get("target")
+            if not isinstance(target, str) or not target:
+                return {"ok": False, "code": "invalid_resource",
+                        "error": "target is required"}
+            result = M.merge_request(
+                self.root, harness, session, target=target,
+                ttl_s=msg.get("ttl_s", M.LEASE_TTL_S),
+                reason=str(msg.get("reason") or ""))
+            return {"ok": True, "action": action,
+                    "target": result.get("target"),
+                    "advisory": True,
+                    "acquired": bool(result.get("acquired")),
+                    "queued": bool(result.get("queued")),
+                    "position": int(result.get("position") or 0),
+                    "lease": self._mesh_lease_compact(result.get("lease"))}
+        return {"ok": False, "code": "invalid_action",
+                "error": "unsupported mesh action"}
+
+    def mesh_op(self, msg: dict[str, Any]) -> dict[str, Any]:
+        """Layer-2 model coordination through the opt-in `mesh` op.
+
+        The identity is the trusted plugin envelope's `harness`/`session`;
+        an `actor` field is ignored. Only `opencode` and `opencode-runner`
+        may act, the registration's stored exposure gates the action, and
+        `read` may only ask for status. No action approves, takes over,
+        links, delegates, prunes or unregisters. Rate limits are per actor
+        and action group (messages, leases, worktree/merge negotiation).
+        """
+        from ozagia.core import mesh as M
+        action = msg.get("action")
+        if not isinstance(action, str) or not action:
+            return {"ok": False, "code": "invalid_action",
+                    "error": "action is required"}
+        if action not in MESH_ACTIONS:
+            if (action in MESH_REFUSED_ACTIONS
+                    or action.startswith(("link_", "delegation_"))):
+                self.mesh_refusals += 1
+                return {"ok": False, "code": "not_permitted",
+                        "error": "this mesh action is not available to a model"}
+            return {"ok": False, "code": "invalid_action",
+                    "error": "action must be one of "
+                             + ", ".join(MESH_ACTIONS)}
+        harness = msg.get("harness")
+        session = msg.get("session")
+        if harness not in MESH_HARNESSES:
+            self.mesh_refusals += 1
+            return {"ok": False, "code": "not_permitted",
+                    "error": "harness is not allowed to use the mesh op"}
+        if (not isinstance(session, str) or not session
+                or len(session) > MESH_SESSION_MAX_CHARS
+                or any(ord(char) < 32 or ord(char) == 127
+                       for char in session)):
+            return {"ok": False, "code": "invalid_session",
+                    "error": "a bounded session id is required"}
+        try:
+            if action == "register":
+                exposure = msg.get("exposure", M.DEFAULT_MESH_MODEL)
+                if exposure not in M.EXPOSURES:
+                    return {"ok": False, "code": "invalid_exposure",
+                            "error": "exposure must be one of "
+                                     + ", ".join(M.EXPOSURES)}
+                pid = msg.get("pid")
+                if pid is not None and (isinstance(pid, bool)
+                                        or not isinstance(pid, int)
+                                        or pid <= 0):
+                    return {"ok": False, "code": "invalid_pid",
+                            "error": "pid must be a positive integer"}
+                worktree = msg.get("worktree")
+                branch = msg.get("branch")
+                if worktree is not None and not isinstance(worktree, str):
+                    return {"ok": False, "code": "invalid_value",
+                            "error": "worktree must be a string"}
+                if branch is not None and not isinstance(branch, str):
+                    return {"ok": False, "code": "invalid_value",
+                            "error": "branch must be a string"}
+                view = M.register(
+                    self.root, harness, session, pid=pid,
+                    worktree=worktree, branch=branch, exposure=exposure,
+                    source="host", capabilities=[f"mesh:{exposure}"])
+                self.mesh_actions += 1
+                body = {"ok": True, "action": action, "registered": True,
+                        "mesh_id": view.get("mesh_id"),
+                        "self": self._mesh_session_compact(view)}
+                self._mesh_audit(view.get("key"), action, body, msg)
+                return body
+            payload = M.status(self.root, harness=harness, session=session)
+            me = payload.get("self")
+            if not isinstance(me, dict):
+                raise M.MeshRefusal("session is not registered",
+                                    code="unknown_session")
+            exposure = str(me.get("exposure") or "none")
+            if action == "status":
+                if exposure not in MESH_READ_EXPOSURES:
+                    self.mesh_refusals += 1
+                    return {"ok": False, "code": "not_permitted",
+                            "error": "status needs read exposure"}
+                self_key = me.get("key")
+                peers = [
+                    self._mesh_session_compact(item)
+                    for item in payload.get("sessions") or ()
+                    if item.get("key") != self_key
+                    and item.get("effective_state") in {"live", "stale"}
+                ]
+                leases = [
+                    self._mesh_lease_compact(item)
+                    for item in payload.get("leases") or ()
+                    if item.get("effective_state") in {"active", "stale"}
+                ]
+                self.mesh_actions += 1
+                body = {
+                    "ok": True, "action": action,
+                    "mesh_id": payload.get("mesh_id"),
+                    "self": self._mesh_session_compact(me),
+                    "peers": peers,
+                    "leases": [item for item in leases if item],
+                    "links": list(payload.get("links") or ())[:16],
+                    "link_counts": payload.get("link_counts") or {},
+                    "lease_counts": payload.get("lease_counts") or {},
+                    "delegation_counts": payload.get("delegation_counts") or {},
+                    "unread": int(me.get("unread") or 0),
+                }
+                self._mesh_audit(self_key, action, body, msg)
+                return body
+            if action == "heartbeat":
+                view = M.heartbeat(self.root, harness, session)
+                self.mesh_actions += 1
+                body = {"ok": True, "action": action,
+                        "self": self._mesh_session_compact(view)}
+                self._mesh_audit(me.get("key"), action, body, msg)
+                return body
+            if action not in MESH_COORDINATE_ACTIONS:
+                self.mesh_refusals += 1
+                return {"ok": False, "code": "invalid_action",
+                        "error": "unsupported mesh action"}
+            if exposure not in M.COORDINATE:
+                self.mesh_refusals += 1
+                return {"ok": False, "code": "not_permitted",
+                        "error": "this action needs coordinate exposure"}
+            group = MESH_RATE_GROUP.get(action, "")
+            retry_s = self._mesh_rate_wait(str(me.get("key") or ""), group)
+            if retry_s:
+                self.mesh_refusals += 1
+                return {"ok": False, "code": "rate_limited",
+                        "error": "too many mesh actions; retry later",
+                        "retry_s": retry_s}
+            body = self._mesh_action(action, msg, harness, session)
+            if body.get("ok"):
+                self.mesh_actions += 1
+                self._mesh_audit(me.get("key"), action, body, msg)
+            else:
+                self.mesh_refusals += 1
+            return body
+        except M.MeshRefusal as exc:
+            self.mesh_refusals += 1
+            return {"ok": False, "code": exc.code, "error": str(exc)}
+        except M.MeshConfigError as exc:
+            return {"ok": False, "code": exc.code, "error": str(exc)}
+        except M.MeshError as exc:
+            return {"ok": False, "code": exc.code, "error": str(exc)}
+        except Exception as exc:  # noqa: BLE001 - the op must not kill a socket
+            return {"ok": False, "code": "mesh_error",
+                    "error": "mesh operation failed: "
                              f"{type(exc).__name__}"}
 
     def working_set(self, msg: dict[str, Any]) -> dict[str, Any]:

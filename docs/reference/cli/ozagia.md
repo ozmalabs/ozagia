@@ -138,6 +138,7 @@ usage: ozagia agent [-h] [--workdir WORKDIR] [--prompt PROMPT |
                     [--research] [--runs-dir RUNS_DIR] [--no-managed-tmp]
                     [--tmp-ttl D] [--clean-logs] [--repo-map]
                     [--repo-map-tokens N] [--mesh | --no-mesh]
+                    [--mesh-model {none,read,coordinate,supervise}]
 ```
 
 | option | type | values | default | help |
@@ -163,6 +164,7 @@ usage: ozagia agent [-h] [--workdir WORKDIR] [--prompt PROMPT |
 | `--repo-map-tokens` | ozagia.cli._repo_map_budget |  |  | repo-map token budget with --repo-map, 200..8000 (default: 1500) |
 | `--mesh` |  |  |  | register this agent run in the local session mesh and pass a bounded metadata summary to the model context (default: [mesh] enabled or OZAGIA_MESH) |
 | `--no-mesh` |  |  |  | do not join the session mesh, even when [mesh] enabled or OZAGIA_MESH says so |
+| `--mesh-model` |  |  |  | model exposure for the session mesh (default: [mesh] model, OZAGIA_MESH_MODEL, else read); coordinate adds the bounded ozagia_mesh tool |
 
 ## `ozagia daemon`
 

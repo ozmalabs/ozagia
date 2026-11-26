@@ -98,6 +98,10 @@ try {
     && nativeTools.ozagia_secret_request.options.codemode === false;
   out.scratch_readonly = nativeTools.ozagia_scratch
     && nativeTools.ozagia_scratch.options.codemode === false;
+  out.mesh_tool = nativeTools.ozagia_mesh
+    && nativeTools.ozagia_mesh.options.codemode === false
+    && Array.isArray(nativeTools.ozagia_mesh.input.properties.action.enum)
+    && nativeTools.ozagia_mesh.input.properties.action.enum.length > 0;
 } catch (err) {
   out.error = String((err && err.stack) || err);
 }
@@ -209,7 +213,8 @@ def self_test(path: str | Path, *, timeout: float = 60,
     node = node or shutil.which("node")
     if not node:
         return {"ok": None, "error": "node not found"}
-    env = dict(os.environ, OZAGIA_DAEMON_SOCK="/nonexistent/ozagia-self-test.sock")
+    env = dict(os.environ, OZAGIA_DAEMON_SOCK="/nonexistent/ozagia-self-test.sock",
+               OZAGIA_MESH_MODEL="coordinate")
     try:
         # Node 20 reads a .js file outside an ESM package as CommonJS (Bun,
         # which runs OpenCode, does not), so the test imports an .mjs copy.
@@ -226,11 +231,12 @@ def self_test(path: str | Path, *, timeout: float = 60,
                      and doc.get("transformed") and doc.get("schema_swapped")
                      and doc.get("patch_untouched")
                      and sorted(doc.get("native_tools") or []) == [
-                         "ozagia_scratch", "ozagia_secret_request",
-                         "ozagia_structure"]
+                         "ozagia_mesh", "ozagia_scratch",
+                         "ozagia_secret_request", "ozagia_structure"]
                      and doc.get("structure_readonly")
                      and doc.get("secret_request_readonly")
                      and doc.get("scratch_readonly")
+                     and doc.get("mesh_tool")
                      and sorted(doc.get("replaced") or []) == sorted(REPLACED_TOOLS))
     return doc
 
