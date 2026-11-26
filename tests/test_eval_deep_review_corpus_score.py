@@ -6,6 +6,7 @@ import pytest
 
 from ozagia.eval.deep_review_corpus import CorpusError, load_manifest
 from ozagia.eval.deep_review_corpus_score import (
+    _operational,
     evaluate_gates,
     load_run_record,
     score_corpus,
@@ -350,9 +351,34 @@ def test_gate_computation_marks_missing_measurements_insufficient():
     assert result["status"] == "insufficient_data"
     assert result["gates"]["human_utility"]["status"] == "not_measured"
 
+    partial_operational = _gate_metrics(operational={
+        "status": "partially_measured", "within_budget_rate": 1.0,
+        "runs": 10, "runs_with_budget": 1,
+    })
+    result = evaluate_gates(partial_operational)
+    assert result["gates"]["operational_bounds"]["status"] == "insufficient_data"
+    assert result["status"] == "insufficient_data"
+
     synthetic = evaluate_gates(_gate_metrics(evidence_class="synthetic_regression"))
     assert synthetic["status"] == "not_applicable_synthetic"
     assert synthetic["quality_claim"] == "none"
+
+
+def test_operational_gate_requires_budget_and_duration_for_each_run():
+    record = load_run_record(RECORD)
+    record["runs"][0]["duration_s"] = None
+    record["runs"][1]["budget_s"] = None
+
+    operational = _operational(record)
+    assert operational["status"] == "partially_measured"
+    assert operational["runs"] == 3
+    assert operational["runs_with_budget"] == 1
+
+    gates = evaluate_gates(_gate_metrics(operational=operational))
+    assert gates["gates"]["operational_bounds"]["status"] == "insufficient_data"
+    assert gates["gates"]["operational_bounds"]["observed"] == {
+        "runs": 3, "runs_with_budget": 1,
+    }
 
 
 def test_gate_computation_requires_human_provenance():

@@ -699,7 +699,8 @@ def _operational(record: Mapping[str, Any]) -> dict[str, Any]:
     failures = [run["run_id"] for run in runs
                 if run.get("exit_status") not in (None, 0)]
     return {
-        "status": "measured" if measured else "not_measured",
+        "status": ("not_measured" if not measured else
+                   "measured" if len(measured) == len(runs) else "partially_measured"),
         "runs": len(runs),
         "runs_with_budget": len(measured),
         "within_budget": len(within),
@@ -1018,7 +1019,9 @@ def evaluate_gates(metrics: Mapping[str, Any]) -> dict[str, Any]:
     if operational.get("status") != "measured":
         gates["operational_bounds"] = {
             "status": "insufficient_data",
-            "reason": "run durations/budgets were not recorded"}
+            "observed": {"runs": operational.get("runs"),
+                         "runs_with_budget": operational.get("runs_with_budget")},
+            "reason": "run durations/budgets were not recorded for every run"}
     elif operational.get("writes_outside_allowed_paths"):
         gates["operational_bounds"] = {
             "status": "fail", "observed": operational,
