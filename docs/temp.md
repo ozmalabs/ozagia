@@ -288,3 +288,67 @@ On the development host, `/tmp` is a 16 GB tmpfs at roughly 1.4 GB used.  An
 These are untracked legacy artifacts: audit surfaces them, and this slice does
 not delete them.  They are evidence for a future adoption/cleanup pass, not
 managed entries.
+
+## Legacy cleanup (`clean-legacy`, 2026-11-26)
+
+`ozagia tmp clean-legacy` is a conservative, one-way migration path for the
+legacy artifacts that predate the registry.  It is deliberately narrower than
+`clean`:
+
+```console
+$ ozagia tmp clean-legacy [--apply] [--older-than D] [--include-caches] [--json]
+```
+
+The default is a plan; nothing is deleted without `--apply`.  The threshold is
+one day (`86400` seconds); `--older-than` accepts a bare day count or an `s`,
+`m`, `h` or `d` suffix.
+
+Eligible by default, only when older than the threshold:
+
+| Pattern | What is eligible | Extra check |
+| --- | --- | --- |
+| `ozagia-eval-*.sock.lock` | regular file | `flock(LOCK_EX\|LOCK_NB)`; a held lock is kept |
+| `oz-idle-*.sock.lock` | regular file | same lock check |
+| `oz-jobidle-*.sock.lock` | regular file | same lock check |
+| `ozagia-eval-*.sock` | regular file or socket node | short connect; a live or unknown socket is kept |
+| `ozagia_agent/*` | directory | protected-path guard |
+| `ozagia_eval/*` | directory | protected-path guard |
+| `ozagia_check_*` | directory | protected-path guard |
+| `ozagia-native-*` | directory | protected-path guard |
+
+`ozagia_index_bench/*` and `ozagia_iac_bench/*` are **not** eligible by default.
+They are benchmark cache roots: usually regenerable, but one can contain a
+report a user chose to keep, so they are only considered with
+`--include-caches`.
+
+The command only looks at paths that `ozagia tmp audit` already reports by a
+known ozagia name pattern.  It never glob-deletes arbitrary temp files, never
+looks at `/tmp/opencode` or `~/.local/share/opencode`, and never touches an
+unknown name.  It also keeps:
+
+* a path registered in the temp registry, and any path under a registered
+  ancestor (the normal `clean` owns those entries);
+* symlinks, non-regular lock files, and files where a directory pattern is
+  expected;
+* the filesystem root, repository root, home directory, allowed roots, managed
+  roots, the state directory and `.ozagia/tmp` (reusing the protected-path
+  helpers).
+
+Deletion is best effort per artifact: one failure is reported as
+`delete-failed` and the remaining planned artifacts are still attempted.
+`clean-legacy` never writes a registry record.  This is cleanup, not adoption;
+a path that should be kept and tracked belongs in `ozagia tmp adopt`.
+
+A plan or a run with no work exits 0.  A refusal, or an apply run with a
+deletion error, exits 1.  `--json` reports totals (`artifacts`, `candidates`,
+`deleted`, `kept`, `bytes`, `files`, `errors`, `truncated`), per-artifact
+`delete`/`keep` rows with the reason, the deleted paths, warnings, and the scan
+and excluded roots.
+
+The motivating evidence is the observed host leak: the 2026-11-26 `audit`
+reported 959 untracked artifacts (about 60 MB) — 876
+`ozagia-eval-*.sock.lock` files, 3 stale `ozagia-eval-*.sock` sockets, 74
+`oz-idle-*`/`oz-jobidle-*` lock files and 6 `ozagia_agent/*` run roots.  That
+audit is why the command exists; it is not a promise that every one of those
+paths will be deleted.  Recent, held, live, registered, protected, cache and
+unknown paths deliberately remain.

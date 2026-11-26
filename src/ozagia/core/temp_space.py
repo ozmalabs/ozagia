@@ -43,17 +43,22 @@ directory and any allowed root itself, and never follows a symlink out of an
 entry.  Deletion is a dry-run plan unless ``apply=True``.
 
 The module uses the standard library only.  It does not import the target
-project, execute target code, open a socket or read file contents.
+project or execute target code.  The read-only views do not open sockets or read
+file contents.  Legacy cleanup may open a ``.lock`` file only to test ``flock``
+and may attempt a short Unix-socket connect to tell a live daemon from a stale
+socket; it never sends or reads application data.
 """
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import fnmatch
 import os
 import re
 import secrets
+import socket
 import stat
 import sys
 import tempfile
@@ -105,6 +110,25 @@ _AUDIT_NESTED_PARENTS = {
 }
 _AUDIT_ROOT_PATTERNS = tuple(
     pattern for pattern in AUDIT_PATTERNS if "/" not in pattern)
+
+LEGACY_DEFAULT_OLDER_THAN_S = 24 * 60 * 60
+LEGACY_SOCKET_TIMEOUT_S = 0.25
+LEGACY_FILE_PATTERNS = {
+    "ozagia-eval-*.sock.lock": "lock",
+    "ozagia-eval-*.sock": "socket",
+    "oz-idle-*.sock.lock": "lock",
+    "oz-jobidle-*.sock.lock": "lock",
+}
+LEGACY_DIR_PATTERNS = (
+    "ozagia_agent/*",
+    "ozagia_eval/*",
+    "ozagia_check_*",
+    "ozagia-native-*",
+)
+LEGACY_CACHE_PATTERNS = (
+    "ozagia_index_bench/*",
+    "ozagia_iac_bench/*",
+)
 
 _ID_RE = re.compile(r"^tmp_[0-9a-f]{12}$")
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
@@ -799,7 +823,7 @@ def audit(root: str | Path, *, roots: Iterable[str | Path] | None = None,
 
 
 # --------------------------------------------------------------------------- #
-# release / clean / prune
+# release / clean / legacy cleanup / prune
 # --------------------------------------------------------------------------- #
 
 
@@ -951,6 +975,112 @@ def clean(root: str | Path, *, dry_run: bool = True, expired: bool = False,
         "deleted": deleted,
     }
     return payload
+
+
+# --------------------------------------------------------------------------- #
+# legacy cleanup
+# --------------------------------------------------------------------------- #
+
+
+def clean_legacy(root: str | Path, *,
+                 roots: Iterable[str | Path] | None = None,
+                 apply: bool = False,
+                 older_than_s: int | float = LEGACY_DEFAULT_OLDER_THAN_S,
+                 include_caches: bool = False,
+                 max_artifacts: int = AUDIT_MAX_ARTIFACTS) -> dict[str, Any]:
+    """Plan (and with ``apply=True`` perform) cleanup of legacy artifacts.
+
+    Only paths that :func:`audit` already reports by a known ozagia name
+    pattern are considered, so this never glob-deletes arbitrary temp files.
+    Registered paths and paths under a registered ancestor are left to
+    :func:`clean`.  Symlinks, protected paths, live sockets and held lock files
+    are always kept.  Benchmark cache roots are only eligible with
+    ``include_caches``.  This is a migration cleanup: it never writes a
+    registry record, because the artifacts are deleted rather than adopted.
+    """
+    root_path = Path(root).resolve()
+    if older_than_s < 0:
+        raise TempSpaceError("older_than_s must not be negative")
+    if max_artifacts < 0:
+        raise TempSpaceError("max_artifacts must not be negative")
+    older = int(older_than_s)
+    report = audit(root_path, roots=roots, max_artifacts=max_artifacts)
+    scan_roots = tuple(Path(item) for item in report["scan_roots"])
+
+    rows: list[dict[str, Any]] = []
+    for item in report["artifacts"]:
+        action, why = _legacy_decision(
+            item, root=root_path, scan_roots=scan_roots,
+            older_than_s=older, include_caches=include_caches)
+        rows.append(_legacy_row(item, action=action, why=why))
+    rows.sort(key=lambda row: row["path"])
+
+    candidates: list[dict[str, Any]] = []
+    kept: list[dict[str, Any]] = []
+    deleted: list[str] = []
+    errors: list[str] = []
+    now = int(time.time())
+    if apply:
+        for row in rows:
+            if row["action"] != "delete":
+                kept.append(row)
+                continue
+            blocked = _legacy_recheck(
+                row, root=root_path, scan_roots=scan_roots,
+                older_than_s=older, include_caches=include_caches, now=now)
+            if blocked is not None:
+                row["action"] = "keep"
+                row["why"] = blocked
+                kept.append(row)
+                continue
+            try:
+                _legacy_remove(
+                    Path(row["path"]),
+                    directory=_legacy_directory_pattern(row["pattern"]))
+            except OSError as exc:
+                detail = exc.strerror or str(exc)
+                row["action"] = "keep"
+                row["why"] = f"delete-failed: {detail}"
+                errors.append(f"{row['path']}: {detail}")
+                kept.append(row)
+                continue
+            row["action"] = "deleted"
+            row["why"] = "eligible"
+            candidates.append(row)
+            deleted.append(row["path"])
+    else:
+        candidates = [row for row in rows if row["action"] == "delete"]
+        kept = [row for row in rows if row["action"] == "keep"]
+
+    truncated = bool(report.get("truncated"))
+    totals = {
+        "artifacts": len(rows),
+        "candidates": len(candidates),
+        "deleted": len(deleted),
+        "kept": len(kept),
+        "bytes": sum(row["bytes"] for row in candidates),
+        "files": sum(row["files"] for row in candidates),
+        "errors": len(errors),
+        "truncated": truncated,
+    }
+    return {
+        "root": str(root_path),
+        "dry_run": not apply,
+        "older_than_s": older,
+        "include_caches": bool(include_caches),
+        "registry_written": False,
+        "scan_roots": report["scan_roots"],
+        "excluded_roots": report["excluded_roots"],
+        "patterns": list(AUDIT_PATTERNS),
+        "totals": totals,
+        "artifacts": rows,
+        "candidates": candidates,
+        "kept": kept,
+        "deleted": deleted,
+        "errors": errors,
+        "warnings": report["warnings"],
+        "truncated": truncated,
+    }
 
 
 def prune_registry(root: str | Path, *, apply: bool = False) -> dict[str, Any]:
@@ -1374,6 +1504,184 @@ def _clean_row(entry: Mapping[str, Any], *, action: str, why: str
     }
 
 
+def _legacy_kind(mode: int) -> str:
+    if stat.S_ISLNK(mode):
+        return "symlink"
+    if stat.S_ISDIR(mode):
+        return "directory"
+    if stat.S_ISREG(mode):
+        return "file"
+    return "other"
+
+
+def _legacy_directory_pattern(pattern: str) -> bool:
+    return pattern in LEGACY_DIR_PATTERNS or pattern in LEGACY_CACHE_PATTERNS
+
+
+def _legacy_remove(path: Path, *, directory: bool) -> None:
+    """Remove one planned artifact without following a symlink."""
+    if directory:
+        _delete_tree(path)
+    else:
+        os.unlink(path)
+
+
+def _legacy_protected(root: Path, path: Path,
+                      scan_roots: Iterable[Path]) -> bool:
+    allowed = allowed_temp_roots(root)
+    if _is_protected(root, path, allowed):
+        return True
+    managed = [Path(state_dir(root)), state_path(root, TMP_DIRNAME),
+               registry_dir(root), workspaces_root(root), agent_root(root)]
+    managed.extend(default_kind_root(root, kind) for kind in KINDS)
+    for item in managed:
+        if path == item or _is_within(path, item) or _is_within(item, path):
+            return True
+    return any(path == scan_root for scan_root in scan_roots)
+
+
+def _legacy_lock_state(path: Path) -> str:
+    """``free``, ``held`` or a conservative keep reason for a lock file."""
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - non-POSIX hosts
+        return "lock-check-unavailable"
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        return "lock-unreadable"
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno in (errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK):
+                return "held"
+            return "lock-error"
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        return "free"
+    finally:
+        os.close(descriptor)
+
+
+def _legacy_socket_state(path: Path) -> str:
+    """``stale``, ``live`` or a conservative keep reason for a socket path."""
+    try:
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    except OSError:
+        return "socket-unknown"
+    client.settimeout(LEGACY_SOCKET_TIMEOUT_S)
+    try:
+        client.connect(str(path))
+        return "live"
+    except socket.timeout:
+        return "socket-timeout"
+    except OSError as exc:
+        if exc.errno in (errno.ECONNREFUSED, errno.ENOENT, errno.ENOTSOCK):
+            return "stale"
+        return "socket-unknown"
+    finally:
+        client.close()
+
+
+def _legacy_decision(item: Mapping[str, Any], *, root: Path,
+                     scan_roots: Iterable[Path], older_than_s: int,
+                     include_caches: bool) -> tuple[str, str]:
+    pattern = str(item.get("pattern") or "")
+    path = Path(str(item.get("path") or ""))
+    if item.get("registered"):
+        return "keep", "registered"
+    if item.get("registered_ancestor"):
+        return "keep", "registered-ancestor"
+    if not any(_is_within(path, scan_root) for scan_root in scan_roots):
+        return "keep", "outside-scan-root"
+    kind = item.get("kind")
+    if kind == "symlink":
+        return "keep", "symlink"
+    age = int(item.get("age_s") or 0)
+    file_kind = LEGACY_FILE_PATTERNS.get(pattern)
+    if file_kind is not None:
+        info = _safe_lstat(path)
+        if info is None:
+            return "keep", "missing"
+        if stat.S_ISLNK(info.st_mode):
+            return "keep", "symlink"
+        if file_kind == "lock":
+            if not stat.S_ISREG(info.st_mode):
+                return "keep", "not-a-regular-file"
+        # A bound Unix socket is a socket node, not a regular file.  Plain
+        # regular files are accepted as well so a stale placeholder is still
+        # handled; other special files (FIFOs, devices) are kept.
+        elif not (stat.S_ISREG(info.st_mode) or stat.S_ISSOCK(info.st_mode)):
+            return "keep", "not-a-socket"
+        if _legacy_protected(root, path, scan_roots):
+            return "keep", "protected-path"
+        if file_kind == "lock":
+            state = _legacy_lock_state(path)
+            if state != "free":
+                return "keep", "lock-held" if state == "held" else state
+        else:
+            state = _legacy_socket_state(path)
+            if state != "stale":
+                return "keep", "socket-live" if state == "live" else state
+        if age < older_than_s:
+            return "keep", "too-recent"
+        return "delete", "eligible"
+    if pattern in LEGACY_DIR_PATTERNS or pattern in LEGACY_CACHE_PATTERNS:
+        if pattern in LEGACY_CACHE_PATTERNS and not include_caches:
+            return "keep", "cache-disabled"
+        if kind != "directory":
+            return "keep", "not-a-directory"
+        if age < older_than_s:
+            return "keep", "too-recent"
+        if _legacy_protected(root, path, scan_roots):
+            return "keep", "protected-path"
+        return "delete", "eligible"
+    return "keep", "unknown-pattern"
+
+
+def _legacy_recheck(row: Mapping[str, Any], *, root: Path,
+                    scan_roots: Iterable[Path], older_than_s: int,
+                    include_caches: bool, now: int) -> str | None:
+    """Re-check a planned artifact immediately before deleting it."""
+    path = Path(str(row["path"]))
+    info = _safe_lstat(path)
+    if info is None:
+        return "missing"
+    fresh = {
+        "path": str(path),
+        "pattern": row["pattern"],
+        "kind": _legacy_kind(info.st_mode),
+        "age_s": max(0, now - int(info.st_mtime)),
+        "registered": False,
+        "registered_ancestor": None,
+    }
+    action, why = _legacy_decision(
+        fresh, root=root, scan_roots=scan_roots,
+        older_than_s=older_than_s, include_caches=include_caches)
+    return None if action == "delete" else why
+
+
+def _legacy_row(item: Mapping[str, Any], *, action: str,
+                why: str) -> dict[str, Any]:
+    return {
+        "path": str(item.get("path")),
+        "pattern": item.get("pattern"),
+        "kind": item.get("kind"),
+        "bytes": int(item.get("bytes") or 0),
+        "files": int(item.get("files") or 0),
+        "age_s": int(item.get("age_s") or 0),
+        "mtime": item.get("mtime"),
+        "registered": bool(item.get("registered")),
+        "registered_ancestor": item.get("registered_ancestor"),
+        "action": action,
+        "why": why,
+    }
+
+
 def _delete_guard(root: Path, entry: Mapping[str, Any]) -> tuple[bool, str]:
     if not entry.get("owned"):
         return False, "unowned"
@@ -1655,12 +1963,15 @@ def _unescape(value: str) -> str:
 __all__ = [
     "AGENT_DIRNAME", "AUDIT_MAX_ARTIFACTS", "AUDIT_MAX_SECONDS",
     "AUDIT_PATTERNS", "DEFAULT_KIND", "DEFAULT_SCRATCH_KIND", "KINDS",
+    "LEGACY_CACHE_PATTERNS", "LEGACY_DEFAULT_OLDER_THAN_S",
+    "LEGACY_DIR_PATTERNS", "LEGACY_FILE_PATTERNS", "LEGACY_SOCKET_TIMEOUT_S",
     "MARKER_NAME", "MAX_REASON", "MAX_TTL_S", "MAX_WALK_DEPTH",
     "MAX_WALK_ENTRIES", "MAX_WALK_SECONDS", "MIN_TTL_S", "REGISTRY_DIRNAME",
     "STATES", "TMP_DIRNAME", "TempMarkerError", "TempNotFound",
     "TempPathError", "TempSpaceError", "VERSION", "adopt", "agent_root",
-    "allowed_temp_roots", "audit", "clean", "create", "default_kind_root",
-    "default_scratch_root", "ensure_default_root", "gc", "get", "list_entries",
-    "make_session", "prune_registry", "registry_dir", "release", "status",
-    "suggest_path", "tmpfs_for", "touch", "walk_usage", "workspaces_root",
+    "allowed_temp_roots", "audit", "clean", "clean_legacy", "create",
+    "default_kind_root", "default_scratch_root", "ensure_default_root", "gc",
+    "get", "list_entries", "make_session", "prune_registry", "registry_dir",
+    "release", "status", "suggest_path", "tmpfs_for", "touch", "walk_usage",
+    "workspaces_root",
 ]

@@ -1449,6 +1449,7 @@ _BUILTIN_DEFINITIONS: tuple[dict[str, Any], ...] = (
               "impl:ozagia.core.temp_space.status",
               "impl:ozagia.core.temp_space.audit",
               "impl:ozagia.core.temp_space.clean",
+              "impl:ozagia.core.temp_space.clean_legacy",
               "impl:ozagia.core.temp_space.prune_registry",
               "impl:ozagia.daemon.server.tmp_op",
               "impl:ozagia.temp_cli.run"],
@@ -1459,6 +1460,8 @@ _BUILTIN_DEFINITIONS: tuple[dict[str, Any], ...] = (
                 "only owned entries with a matching marker are deletable",
                 "audit is read-only and only reports conservative name "
                 "patterns",
+                "legacy cleanup only removes untracked audit-pattern "
+                "artifacts and never writes registry records",
                 "registry and markers store provenance, never file contents",
                 "usage walks are bounded; a stopped walk is reported partial",
                 "tmpfs detection reads /proc and returns unknown elsewhere",

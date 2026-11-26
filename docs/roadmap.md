@@ -293,6 +293,10 @@ model, and can see what a session actually did without storing its content.
   existing envelope and absent-vs-unknown rule.
 - Surface cross-session ownership: who has uncommitted edits to a file, and
   which live session owns it.
+- Manage temporary space: register agent/eval/scratch directories with the
+  session, reason and measured usage; isolate `TMPDIR`; give models a
+  managed scratch workspace; expose read-only status; clean only owned,
+  provenanced entries.
 - Decide bounded prefetch: integrate only if the offline acceptance tests show
   a real latency win without freshness risk. Otherwise close the plan as
   "measured, not worth it" and keep the planner primitives. **Decision
@@ -404,6 +408,32 @@ storage is erased.
 
 The HTTP provider-request fallback, keychain/`pass`/`op`/`.env` persistence UI,
 and revoke UI beyond `forget` remain open.
+
+**Progress (2026-11-26, temporary-space slice).** Temporary paths now carry
+provenance and a safe cleanup path:
+
+- `ozagia tmp` creates or adopts directories with `{harness, session}`,
+  reason, optional model/run labels, TTL, bytes/files and tmpfs state.  A
+  per-directory marker proves ownership after a restart; the registry is one
+  atomic file per entry.  Cleanup is a dry run by default and deletes only
+  owned entries whose marker matches; unowned, unmarked, symlinked and
+  protected paths are kept.  `ozagia tmp audit` is read-only.
+- Default agent runs register their run root and get an isolated per-run
+  `TMPDIR` plus a disk-backed `OZAGIA_SCRATCH_ROOT`; `--tmp-ttl` and opt-in
+  `--clean-logs` control retention.  Eval run roots and native log dirs are
+  registered too.  Explicit `--runs-dir` runs stay unmanaged.
+- The daemon `tmp` op and the OpenCode `ozagia_scratch` tool create a
+  session/reason-bound scratch directory after a write-permission check.  A
+  missing session, daemon or permission means no directory, and there is no
+  `/tmp` fallback.  `dev_tmp_list`/`dev_tmp_status` are read-only MCP tools;
+  creation is not exposed over MCP.
+- Daemon socket lock files are removed with the socket on stop, failure and
+  cancel, while a live lock is left alone.
+- A read-only audit on this host found 959 legacy artifacts (~60 MB) from
+  before the registry.  They are reported, not silently deleted; a
+  conservative `clean-legacy` path requires an explicit `--apply`.
+- The native Desktop dialog and the scratch tool are offline-tested; live
+  Desktop verification remains open.
 
 Still open in 0.3: live host verification of the native dialog and
 revoke/expiry flow; live Codex, Kiro and Claude Code sessions to verify the

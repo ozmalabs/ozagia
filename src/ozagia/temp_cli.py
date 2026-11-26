@@ -11,13 +11,15 @@
     ozagia tmp release ID [--delete] [--json]
     ozagia tmp clean   [--apply] [--expired] [--older-than D]
                        [--max-total-bytes B] [--id ID] [--json]
+    ozagia tmp clean-legacy [--apply] [--older-than D] [--include-caches]
+                            [--json]
     ozagia tmp path    [--kind K]
 
 Plain output is short and stable.  ``create`` prints only the created path so a
-caller can use it directly.  ``clean`` is a plan unless ``--apply`` is given.
-``audit`` is read-only and only reports conservative legacy-name matches.  JSON
-output is deterministic except for timestamps and paths.  No command prints
-file contents.
+caller can use it directly.  ``clean`` and ``clean-legacy`` are plans unless
+``--apply`` is given.  ``audit`` is read-only and only reports conservative
+legacy-name matches.  JSON output is deterministic except for timestamps and
+paths.  No command prints file contents.
 
 Exit status is 0 for success (including a cleanup plan with no candidates) and
 1 for a refusal or error.
@@ -118,6 +120,18 @@ def _add_actions(children: Any) -> None:
                               "is at most B bytes")
     cleaned.add_argument("--id", action="append", default=None, metavar="ID",
                          help="restrict to ID (repeatable)")
+
+    legacy = common(children.add_parser(
+        "clean-legacy",
+        help="plan or apply cleanup of untracked legacy temp artifacts"))
+    legacy.add_argument("--apply", action="store_true",
+                        help="perform the plan (the default is a dry run)")
+    legacy.add_argument("--older-than", type=_duration, default=None,
+                        metavar="D",
+                        help="only artifacts older than D (bare = days; "
+                             "s/m/h/d suffixes accepted; default 1 day)")
+    legacy.add_argument("--include-caches", action="store_true",
+                        help="also consider regenerable benchmark cache roots")
 
     path = common(children.add_parser(
         "path", help="print (and create) the default managed scratch root"))
@@ -278,6 +292,32 @@ def _format_clean(result: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _format_clean_legacy(result: dict[str, Any]) -> str:
+    totals = result["totals"]
+    mode = "plan" if result["dry_run"] else "apply"
+    lines = [
+        f"{mode}: {totals['candidates']} artifact(s), "
+        f"{totals['bytes']} bytes, {totals['files']} files, "
+        f"{totals['deleted']} deleted, {totals['kept']} kept, "
+        f"{totals['errors']} error(s), "
+        f"truncated={'yes' if result['truncated'] else 'no'}",
+    ]
+    for row in result["candidates"]:
+        verb = "delete" if result["dry_run"] else "deleted"
+        lines.append(
+            f"  {verb} {row['bytes']}B {row['files']}f {row['path']}  "
+            f"[{row['pattern']}]  {row['why']}")
+    for row in result["kept"]:
+        lines.append(
+            f"  keep   {row['bytes']}B {row['files']}f {row['path']}  "
+            f"[{row['pattern']}]  {row['why']}")
+    for error in result["errors"]:
+        lines.append(f"  error: {error}")
+    for warning in result["warnings"]:
+        lines.append(f"  warning: {warning}")
+    return "\n".join(lines)
+
+
 def run(args: argparse.Namespace) -> int:
     """Run one parsed ``ozagia tmp`` command."""
     action = args.action
@@ -312,6 +352,17 @@ def run(args: argparse.Namespace) -> int:
             else:
                 print(_format_audit(result))
             return 0
+        if action == "clean-legacy":
+            older = (TS.LEGACY_DEFAULT_OLDER_THAN_S
+                     if args.older_than is None else args.older_than)
+            result = TS.clean_legacy(
+                root, apply=args.apply, older_than_s=older,
+                include_caches=args.include_caches)
+            if as_json:
+                _print_json({"ok": not result["errors"], **result})
+            else:
+                print(_format_clean_legacy(result))
+            return 0 if not result["errors"] else 1
         if action == "create":
             entry = TS.create(
                 root, kind=args.kind, reason=args.reason,

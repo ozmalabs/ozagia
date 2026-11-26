@@ -1,8 +1,11 @@
 """Managed temporary space (`ozagia.core.temp_space`)."""
 from __future__ import annotations
 
+import fcntl
 import json
 import os
+import shutil
+import socket
 import stat
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -37,6 +40,29 @@ def _rewrite(root: Path, entry_id: str, **changes) -> None:
 def _write(path: Path, size: int) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(b"x" * size)
+
+
+def _old(path: Path) -> None:
+    os.utime(path, (1000, 1000))
+
+
+def _stale_socket(path: Path) -> None:
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        server.bind(str(path))
+    finally:
+        server.close()
+
+
+def _short_socket_dir() -> Path:
+    """A short bindable directory; pytest's tmp_path can exceed SUN_PATH."""
+    path = Path("/tmp") / f"ozs-sock-{os.getpid()}-{os.urandom(4).hex()}"
+    path.mkdir()
+    return path
+
+
+def _rows(plan: dict) -> dict[str, dict]:
+    return {row["path"]: row for row in plan["artifacts"]}
 
 
 def _kept_reason(plan: dict, entry_id: str) -> str:
@@ -574,3 +600,325 @@ def test_suggest_path_is_a_non_created_managed_path(root: Path) -> None:
     assert not suggested.exists()
     assert suggested == TS.suggest_path(root, "scratch", "fixture dump",
                                         {"harness": "opencode", "id": "s1"})
+
+
+def test_clean_legacy_dry_run_then_apply(root: Path, tmp_path: Path) -> None:
+    scan = tmp_path / "scan"
+    scan.mkdir()
+    lock = scan / "ozagia-eval-old.sock.lock"
+    _write(lock, 5)
+    idle = scan / "oz-idle-old.sock.lock"
+    _write(idle, 3)
+    jobidle = scan / "oz-jobidle-old.sock.lock"
+    _write(jobidle, 4)
+    sockdir = _short_socket_dir()
+    stale = sockdir / "ozagia-eval-old.sock"
+    _stale_socket(stale)
+    agent = scan / "ozagia_agent" / "run"
+    _write(agent / "log", 10)
+    eval_run = scan / "ozagia_eval" / "run"
+    _write(eval_run / "out", 9)
+    check = scan / "ozagia_check_old"
+    _write(check / "out", 6)
+    native = scan / "ozagia-native-old"
+    _write(native / "out", 8)
+    recent = scan / "ozagia-eval-recent.sock.lock"
+    _write(recent, 2)
+    cache = scan / "ozagia_index_bench" / "run"
+    _write(cache / "out", 11)
+    eligible = {lock, idle, jobidle, stale, agent, eval_run, check, native}
+    for path in eligible:
+        _old(path)
+    _old(cache)
+    before = sorted(scan.rglob("*"))
+
+    try:
+        plan = TS.clean_legacy(root, roots=[scan, sockdir])
+        assert plan["dry_run"] is True
+        assert plan["registry_written"] is False
+        assert {row["path"] for row in plan["candidates"]} == {
+            str(path) for path in eligible}
+        assert {row["path"] for row in plan["kept"]} == {
+            str(recent), str(cache)}
+        assert plan["totals"]["candidates"] == len(eligible)
+        assert plan["totals"]["deleted"] == 0
+        assert plan["totals"]["bytes"] > 0
+        assert sorted(scan.rglob("*")) == before
+
+        done = TS.clean_legacy(root, roots=[scan, sockdir], apply=True)
+        assert done["dry_run"] is False
+        assert set(done["deleted"]) == {str(path) for path in eligible}
+        assert done["totals"]["deleted"] == len(eligible)
+        assert done["totals"]["errors"] == 0
+        for path in eligible:
+            assert not path.exists()
+        assert recent.exists() and cache.is_dir()
+        assert list(TS.registry_dir(root).glob("*.json")) == []
+    finally:
+        shutil.rmtree(sockdir, ignore_errors=True)
+
+
+def test_clean_legacy_respects_age_and_older_than(root: Path,
+                                                  tmp_path: Path) -> None:
+    scan = tmp_path / "scan"
+    scan.mkdir()
+    recent = scan / "ozagia-eval-recent.sock.lock"
+    _write(recent, 2)
+    old = scan / "ozagia-eval-old.sock.lock"
+    _write(old, 3)
+    _old(old)
+
+    plan = TS.clean_legacy(root, roots=[scan])
+    assert [row["path"] for row in plan["candidates"]] == [str(old)]
+    assert _rows(plan)[str(recent)]["why"] == "too-recent"
+
+    every_age = TS.clean_legacy(root, roots=[scan], older_than_s=0)
+    assert {row["path"] for row in every_age["candidates"]} == {
+        str(recent), str(old)}
+
+    nothing = TS.clean_legacy(root, roots=[scan], older_than_s=10 ** 11)
+    assert nothing["candidates"] == []
+    assert _rows(nothing)[str(old)]["why"] == "too-recent"
+
+
+def test_clean_legacy_keeps_a_held_lock(root: Path, tmp_path: Path) -> None:
+    scan = tmp_path / "scan"
+    scan.mkdir()
+    lock = scan / "ozagia-eval-held.sock.lock"
+    _write(lock, 3)
+    _old(lock)
+    descriptor = os.open(lock, os.O_RDONLY)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        plan = TS.clean_legacy(root, roots=[scan], older_than_s=0)
+        assert _rows(plan)[str(lock)]["why"] == "lock-held"
+        assert plan["candidates"] == []
+
+        done = TS.clean_legacy(root, roots=[scan], older_than_s=0,
+                               apply=True)
+        assert done["deleted"] == []
+        assert lock.exists()
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+    released = TS.clean_legacy(root, roots=[scan], older_than_s=0)
+    assert [row["path"] for row in released["candidates"]] == [str(lock)]
+
+
+def test_clean_legacy_keeps_live_socket_and_removes_stale(root: Path,
+                                                          tmp_path: Path) -> None:
+    scan = tmp_path / "scan"
+    scan.mkdir()
+    sockdir = _short_socket_dir()
+    live = sockdir / "ozagia-eval-live.sock"
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(str(live))
+    server.listen(1)
+    _old(live)
+    stale = sockdir / "ozagia-eval-stale.sock"
+    _stale_socket(stale)
+    _old(stale)
+    try:
+        plan = TS.clean_legacy(root, roots=[scan, sockdir], older_than_s=0)
+        rows = _rows(plan)
+        assert rows[str(live)]["why"] == "socket-live"
+        assert rows[str(live)]["action"] == "keep"
+        assert rows[str(stale)]["action"] == "delete"
+
+        done = TS.clean_legacy(root, roots=[scan, sockdir], older_than_s=0,
+                               apply=True)
+        assert done["deleted"] == [str(stale)]
+        assert not stale.exists()
+        assert live.exists()
+    finally:
+        server.close()
+        live.unlink(missing_ok=True)
+        shutil.rmtree(sockdir, ignore_errors=True)
+
+
+def test_clean_legacy_keeps_registered_and_ancestor_paths(
+        root: Path, tmp_path: Path) -> None:
+    scan = tmp_path / "scan"
+    scan.mkdir()
+    registered = scan / "ozagia_eval" / "registered"
+    _write(registered / "out", 1)
+    _old(registered)
+    ancestor_root = scan / "ozagia_agent"
+    ancestor = ancestor_root / "run"
+    _write(ancestor / "log", 2)
+    _old(ancestor)
+    TS.adopt(root, registered, reason="registered legacy")
+    TS.adopt(root, ancestor_root, reason="registered ancestor")
+
+    plan = TS.clean_legacy(root, roots=[scan], older_than_s=0)
+    rows = _rows(plan)
+    assert rows[str(registered)]["why"] == "registered"
+    assert rows[str(ancestor)]["why"] == "registered-ancestor"
+    assert plan["candidates"] == []
+
+
+def test_clean_legacy_refuses_state_and_managed_roots(root: Path) -> None:
+    state = Path(TS.state_dir(root))
+    state_artifact = state / "ozagia-native-state"
+    _write(state_artifact / "out", 1)
+    _old(state_artifact)
+    tmp_root = TS.state_path(root, TS.TMP_DIRNAME)
+    tmp_artifact = tmp_root / "ozagia-native-tmp"
+    _write(tmp_artifact / "out", 1)
+    _old(tmp_artifact)
+    workspaces = TS.workspaces_root(root)
+    managed_artifact = workspaces / "ozagia-native-managed"
+    _write(managed_artifact / "out", 1)
+    _old(managed_artifact)
+
+    plan = TS.clean_legacy(
+        root, roots=[state, tmp_root, workspaces], older_than_s=0)
+    rows = _rows(plan)
+    for path in (state_artifact, tmp_artifact, managed_artifact):
+        assert rows[str(path)]["why"] == "protected-path"
+    assert plan["candidates"] == []
+
+
+def test_clean_legacy_keeps_symlinks_files_and_unknown_patterns(
+        root: Path, tmp_path: Path, monkeypatch) -> None:
+    scan = tmp_path / "scan"
+    scan.mkdir()
+    outside = tmp_path / "outside"
+    _write(outside / "payload", 100)
+    link = scan / "ozagia-native-link"
+    link.symlink_to(outside, target_is_directory=True)
+    check_file = scan / "ozagia_check_file"
+    _write(check_file, 4)
+    _old(check_file)
+
+    plan = TS.clean_legacy(root, roots=[scan], older_than_s=0)
+    rows = _rows(plan)
+    assert rows[str(link)]["why"] == "symlink"
+    assert rows[str(check_file)]["why"] == "not-a-directory"
+    assert plan["candidates"] == []
+    assert (outside / "payload").is_file()
+
+    mystery = scan / "mystery-artifact"
+    mystery.write_bytes(b"m")
+
+    def fake_audit(*args, **kwargs):
+        return {
+            "scan_roots": [str(scan)],
+            "excluded_roots": [],
+            "artifacts": [{
+                "path": str(mystery),
+                "pattern": "mystery-*",
+                "kind": "file",
+                "bytes": 1,
+                "files": 1,
+                "age_s": 999_999,
+                "mtime": 1,
+                "registered": False,
+                "registered_ancestor": None,
+            }],
+            "truncated": False,
+            "warnings": [],
+        }
+
+    monkeypatch.setattr(TS, "audit", fake_audit)
+    unknown = TS.clean_legacy(root, roots=[scan], older_than_s=0)
+    assert [row["why"] for row in unknown["kept"]] == ["unknown-pattern"]
+
+
+def test_clean_legacy_caches_need_include_caches(root: Path,
+                                                 tmp_path: Path) -> None:
+    scan = tmp_path / "scan"
+    scan.mkdir()
+    caches = []
+    for parent in ("ozagia_index_bench", "ozagia_iac_bench"):
+        cache = scan / parent / "run"
+        _write(cache / "report.json", 12)
+        _old(cache)
+        caches.append(cache)
+
+    plan = TS.clean_legacy(root, roots=[scan], older_than_s=0)
+    assert plan["candidates"] == []
+    assert {row["why"] for row in plan["kept"]} == {"cache-disabled"}
+
+    included = TS.clean_legacy(root, roots=[scan], older_than_s=0,
+                               include_caches=True)
+    assert {row["path"] for row in included["candidates"]} == {
+        str(path) for path in caches}
+    assert included["include_caches"] is True
+
+    done = TS.clean_legacy(root, roots=[scan], older_than_s=0,
+                           include_caches=True, apply=True)
+    assert set(done["deleted"]) == {str(path) for path in caches}
+    for path in caches:
+        assert not path.exists()
+
+
+def test_clean_legacy_never_considers_opencode_roots(
+        root: Path, tmp_path: Path, monkeypatch) -> None:
+    excluded_defaults = {str(path) for path in TS._audit_excluded_roots()}
+    assert str(Path("/tmp/opencode")) in excluded_defaults
+    assert str((Path.home() / ".local" / "share" / "opencode")) \
+        in excluded_defaults
+
+    scan = tmp_path / "scan"
+    scan.mkdir()
+    visible = scan / "ozagia-native-visible"
+    _write(visible / "out", 2)
+    _old(visible)
+    excluded = tmp_path / "opencode"
+    hidden = excluded / "ozagia-native-hidden"
+    _write(hidden / "out", 3)
+    _old(hidden)
+    monkeypatch.setattr(TS, "_audit_excluded_roots",
+                        lambda: (excluded.resolve(),))
+
+    plan = TS.clean_legacy(root, roots=[scan, excluded], older_than_s=0)
+    paths = {row["path"] for row in plan["artifacts"]}
+    assert str(hidden) not in paths
+    assert str(visible) in paths
+    assert plan["candidates"] == [row for row in plan["artifacts"]
+                                  if row["path"] == str(visible)]
+
+
+def test_clean_legacy_deletion_failure_is_reported_without_aborting(
+        root: Path, tmp_path: Path, monkeypatch) -> None:
+    scan = tmp_path / "scan"
+    scan.mkdir()
+    bad = scan / "ozagia-native-bad"
+    _write(bad / "out", 1)
+    _old(bad)
+    good = scan / "ozagia-native-good"
+    _write(good / "out", 1)
+    _old(good)
+    real_remove = TS._legacy_remove
+
+    def flaky_remove(path: Path, *, directory: bool) -> None:
+        if path.name == "ozagia-native-bad":
+            raise OSError("simulated failure")
+        real_remove(path, directory=directory)
+
+    monkeypatch.setattr(TS, "_legacy_remove", flaky_remove)
+    done = TS.clean_legacy(root, roots=[scan], older_than_s=0, apply=True)
+
+    assert not good.exists()
+    assert bad.exists()
+    assert str(good) in done["deleted"]
+    assert done["totals"]["errors"] == 1
+    assert "simulated failure" in done["errors"][0]
+    assert any(row["why"].startswith("delete-failed")
+               for row in done["kept"])
+
+
+def test_clean_legacy_reports_truncation(root: Path, tmp_path: Path) -> None:
+    scan = tmp_path / "scan"
+    scan.mkdir()
+    for index in range(3):
+        path = scan / f"ozagia-native-{index}"
+        _write(path / "out", 1)
+        _old(path)
+
+    plan = TS.clean_legacy(root, roots=[scan], max_artifacts=1)
+    assert plan["truncated"] is True
+    assert plan["totals"]["truncated"] is True
+    assert len(plan["artifacts"]) == 1

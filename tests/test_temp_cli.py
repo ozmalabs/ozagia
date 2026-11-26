@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -22,6 +23,15 @@ def env(tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
 
 def _json(capsys) -> dict:
     return json.loads(capsys.readouterr().out)
+
+
+def _write(path: Path, size: int = 1) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"x" * size)
+
+
+def _old(path: Path) -> None:
+    os.utime(path, (1000, 1000))
 
 
 def test_create_plain_prints_path(env, capsys) -> None:
@@ -225,3 +235,115 @@ def test_clean_duration_accepts_units() -> None:
     assert _duration("5s") == 5
     with pytest.raises(Exception):
         _duration("nope")
+
+
+def test_clean_legacy_json_plain_and_apply(env, tmp_path, monkeypatch,
+                                           capsys) -> None:
+    repo, state = env
+    scan = tmp_path / "scan"
+    scan.mkdir()
+    old = scan / "ozagia-eval-old.sock.lock"
+    _write(old)
+    _old(old)
+    recent = scan / "ozagia-eval-recent.sock.lock"
+    _write(recent)
+    monkeypatch.setattr(TS, "allowed_temp_roots", lambda root: (scan,))
+
+    assert cli.main(["tmp", "clean-legacy", "--json"]) == 0
+    payload = _json(capsys)
+    assert payload["ok"] is True
+    assert payload["dry_run"] is True
+    assert payload["older_than_s"] == TS.LEGACY_DEFAULT_OLDER_THAN_S
+    assert payload["include_caches"] is False
+    assert payload["registry_written"] is False
+    assert payload["totals"]["artifacts"] == 2
+    assert payload["totals"]["candidates"] == 1
+    assert payload["totals"]["deleted"] == 0
+    assert payload["totals"]["kept"] == 1
+    assert payload["totals"]["errors"] == 0
+    assert payload["truncated"] is False
+    assert [row["path"] for row in payload["candidates"]] == [str(old)]
+    assert old.exists() and recent.exists()
+    assert str(Path("/tmp/opencode")) in payload["excluded_roots"]
+    assert str(Path.home() / ".local" / "share" / "opencode") \
+        in payload["excluded_roots"]
+
+    assert cli.main(["tmp", "clean-legacy"]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("plan:")
+    assert "delete" in out and str(old) in out
+    assert "keep" in out and str(recent) in out
+
+    assert cli.main(["tmp", "clean-legacy", "--apply", "--json"]) == 0
+    done = _json(capsys)
+    assert done["ok"] is True
+    assert done["dry_run"] is False
+    assert done["totals"]["deleted"] == 1
+    assert done["deleted"] == [str(old)]
+    assert not old.exists() and recent.exists()
+
+
+def test_clean_legacy_older_than_and_caches_flags(env, tmp_path, monkeypatch,
+                                                  capsys) -> None:
+    repo, state = env
+    scan = tmp_path / "scan"
+    scan.mkdir()
+    recent = scan / "ozagia-eval-recent.sock.lock"
+    _write(recent)
+    _old(recent)
+    cache = scan / "ozagia_iac_bench" / "run"
+    _write(cache / "report.json")
+    _old(cache)
+    monkeypatch.setattr(TS, "allowed_temp_roots", lambda root: (scan,))
+
+    assert cli.main(["tmp", "clean-legacy", "--json",
+                     "--older-than", "0"]) == 0
+    defaulted = _json(capsys)
+    assert [row["path"] for row in defaulted["candidates"]] == [str(recent)]
+    assert {row["why"] for row in defaulted["kept"]} == {"cache-disabled"}
+
+    assert cli.main(["tmp", "clean-legacy", "--json",
+                     "--older-than", "1h", "--include-caches"]) == 0
+    included = _json(capsys)
+    assert included["older_than_s"] == 3600
+    assert included["include_caches"] is True
+    assert {row["path"] for row in included["candidates"]} == {
+        str(recent), str(cache)}
+    assert recent.exists() and cache.is_dir()
+
+
+def test_clean_legacy_apply_error_reports_and_exits_one(
+        env, tmp_path, monkeypatch, capsys) -> None:
+    repo, state = env
+    scan = tmp_path / "scan"
+    scan.mkdir()
+    artifact = scan / "ozagia-native-bad"
+    _write(artifact / "out")
+    _old(artifact)
+    monkeypatch.setattr(TS, "allowed_temp_roots", lambda root: (scan,))
+
+    def fail(path, *, directory):
+        raise OSError("simulated failure")
+
+    monkeypatch.setattr(TS, "_legacy_remove", fail)
+    assert cli.main(["tmp", "clean-legacy", "--apply", "--json"]) == 1
+    payload = _json(capsys)
+    assert payload["ok"] is False
+    assert payload["dry_run"] is False
+    assert payload["totals"]["errors"] == 1
+    assert "simulated failure" in payload["errors"][0]
+    assert artifact.is_dir()
+
+
+def test_clean_legacy_refusal_exits_one(env, monkeypatch, capsys) -> None:
+    repo, state = env
+
+    def refuse(*args, **kwargs):
+        raise TS.TempSpaceError("refused for test")
+
+    monkeypatch.setattr(TS, "clean_legacy", refuse)
+    assert cli.main(["tmp", "clean-legacy", "--json"]) == 1
+    payload = _json(capsys)
+    assert payload["ok"] is False
+    assert payload["code"] == "refused"
+    assert "refused for test" in payload["error"]
