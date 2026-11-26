@@ -18,13 +18,15 @@
     ozagia assets forget ID
     ozagia assets gc      [--max-bytes B] [--max-inodes N] [--older-than D]
                            [--json]
+    ozagia assets policy  [--json]
 
 Assets are durable datasets, models, corpora, installs, caches and tool trees,
 not temporary workspaces.  The registry stores metadata only.  ``discover``
 reads only known Ozagia-owned manifests and layouts (never ``$HOME``, never
 file contents, never the network); everything else needs an explicit
-``register``.  ``gc`` is a dry run in this stage; ``--apply`` is refused.
-Plain output is short and stable and never includes file contents.
+``register``.  ``gc`` is a dry run in this stage; ``--apply`` is refused.  A
+reference check reads only Ozagia's own state metadata and a partial scan keeps
+the asset.  Plain output is short and stable and never includes file contents.
 
 Exit status is 0 for success (including an empty GC plan), 1 for a refusal,
 a missing record or a verification failure, and 2 for bad arguments.
@@ -171,6 +173,10 @@ def _add_actions(children: Any) -> None:
     collected.add_argument("--apply", action="store_true",
                            help="refused in this stage; the plan is dry-run only")
 
+    common(children.add_parser(
+        "policy",
+        help="show the ownership, reference and GC policy matrix"))
+
 
 def _non_negative(value: str) -> int:
     try:
@@ -257,6 +263,10 @@ def _format_asset(asset: dict[str, Any]) -> str:
         flags.append("pinned")
     if asset.get("deletable"):
         flags.append("deletable")
+    if asset.get("referenced"):
+        flags.append("referenced")
+    elif asset.get("reference_status") == "partial":
+        flags.append("references-partial")
     label = ",".join(flags) or "-"
     return (f"{asset['id']}  {asset['kind']:<8} {asset['owner']:<11} "
             f"{asset['state']:<10} bytes={asset['bytes']} "
@@ -266,12 +276,17 @@ def _format_asset(asset: dict[str, Any]) -> str:
 
 def _format_status(result: dict[str, Any]) -> str:
     totals = result["totals"]
+    references = result.get("references") or {}
     lines = [
         f"assets={totals['entries']}  allocated={totals['bytes']}  "
         f"apparent={totals['apparent_bytes']}  inodes={totals['inodes']}  "
         f"pinned={totals['pinned']}  deletable={totals['deletable']}  "
         f"missing={totals['missing']}  partial={totals['partial']}  "
-        f"verified={totals['verified']}  mismatch={totals['mismatch']}",
+        f"verified={totals['verified']}  mismatch={totals['mismatch']}  "
+        f"referenced={totals.get('referenced', 0)}",
+        f"reference scan: {references.get('state', 'complete')}  "
+        f"files={references.get('files', 0)}  "
+        f"bytes={references.get('bytes', 0)}",
         f"registry: {result['registry']}",
     ]
     if result["by_kind"]:
@@ -339,18 +354,44 @@ def _format_verify(results: list[dict[str, Any]]) -> str:
 
 def _format_gc(result: dict[str, Any]) -> str:
     totals = result["totals"]
+    references = result.get("references") or {}
     lines = [
         f"dry-run  candidates={totals['candidates']}  "
         f"selected={totals['selected']}  "
-        f"bytes={totals['selected_bytes']}  inodes={totals['selected_inodes']}",
+        f"bytes={totals['selected_bytes']}  inodes={totals['selected_inodes']}  "
+        f"referenced={totals.get('referenced', 0)}  "
+        f"reference-scan={references.get('state', 'complete')}",
+        f"apply: deferred ({result.get('apply_gate', '')})",
     ]
     for row in result["candidates"]:
         lines.append(f"  gc    {row['bytes']}B {row['inodes']}i "
-                     f"{row['kind']:<8} {row['id']}  {row['path']}")
+                     f"{row['kind']:<8} {row['id']}  {row['path']}  "
+                     f"reason={row.get('reason', 'apply-deferred')}")
     for row in result["kept"]:
-        lines.append(f"  keep  {row['why']:<32} {row['id']}  {row['path']}")
+        lines.append(f"  keep  {row.get('reason', '-'):<15} "
+                     f"{row['why']:<32} {row['id']}  {row['path']}")
     for error in result["registry_errors"]:
         lines.append(f"  registry error: {error}")
+    return "\n".join(lines)
+
+
+def _format_policy(result: dict[str, Any]) -> str:
+    gc = result["gc"]
+    references = result["references"]
+    lines = ["owners:"]
+    for owner, row in sorted(result["owners"].items()):
+        lines.append(
+            f"  {owner:<11} gc={'yes' if row['gc_candidate'] else 'no':<3} "
+            f"deletion={row['deletion']:<22} "
+            f"read-only={'yes' if row['read_only'] else 'no'}")
+    lines.append(
+        f"gc: allowed states={','.join(gc['allowed_states'])}  "
+        f"blocked={','.join(gc['blocking_states'])}  apply="
+        f"{'yes' if gc['apply_allowed'] else 'deferred'}")
+    lines.append(f"gc gate: {gc['apply_gate']}")
+    lines.append(
+        f"references: scope={','.join(references['scope'])}  "
+        f"bounds={references['bounds']}  {references['partial_policy']}")
     return "\n".join(lines)
 
 
@@ -504,6 +545,13 @@ def run(args: argparse.Namespace) -> int:
                              "asset": asset})
             else:
                 print(f"forgot {asset['id']}  {asset['path']}")
+            return 0
+        if action == "policy":
+            result = A.policy()
+            if as_json:
+                _print_json({"ok": True, **result})
+            else:
+                print(_format_policy(result))
             return 0
         if action == "gc":
             result = A.gc(

@@ -143,6 +143,10 @@ ozagia assets forget ast_0123456789ab
 
 # Plan only.  --apply is refused in this stage.
 ozagia assets gc --max-bytes 50000000000 --older-than 30
+
+# The ownership, reference and GC policy matrix.
+ozagia assets policy
+ozagia assets policy --json
 ```
 
 JSON output always has an `ok` field and a stable shape.  Exit status is 0 for
@@ -151,17 +155,72 @@ and 2 for bad arguments.  No command prints file contents.
 
 ## Ownership, pinning and deletion
 
-* `owner` is explicit metadata, not an inference from the path.
-* Ocelot, Hugging Face, user, upstream and external assets are never GC
-  candidates.  They can still be registered, listed, verified and pinned.
-* A GC candidate must be all of: `owner=ozagia`, `deletable=true`,
-  `pinned=false`, and `state` in `present` or `verified`.
+`owner` is explicit metadata, not an inference from the path.  `ozagia assets
+policy --json` reports this matrix without scanning anything:
+
+| Owner | GC candidate | Deletion | Read-only from Ozagia |
+| --- | --- | --- | --- |
+| `ozagia` | yes, when every gate below passes | explicit approval only | no |
+| `ocelot` | never | never | yes |
+| `huggingface` | never | never | yes |
+| `user` | never | never | yes |
+| `upstream` | never | never | yes |
+| `external` | never | never | yes |
+
+A GC candidate must be all of: `owner=ozagia`, `deletable=true`,
+`pinned=false`, `state` in `present` or `verified`, and **unreferenced** by
+Ozagia's own state.  The complete future gate is spelled out here so a plan
+never implies more than it has checked: ownership, deletable, unpinned,
+verified, unreferenced, explicit approval.
+
+* `pinned` means "never a GC candidate".  Pinning wins over every other rule;
+  `unpin` only allows planning, never deletion.
+* `deletable` means the owner permits an explicit deletion; it does not mean
+  automatic deletion.  `--no-delete` is the default, delete permission is
+  granted explicitly with `--deletable`, and discovery never clears an
+  existing pin.
 * A missing, partial, mismatched or unverified asset is not a candidate.
   Registering a declared `sha256` or `digests` leaves the asset `unverified`
-  until `verify --hash` succeeds.
+  until `verify --hash` succeeds.  A tree whose walk stopped is `partial`.
 * Ordering prefers `cache`, then `dataset`/`model`, then other kinds, oldest
   `last_used_at` first.  The plan stops at `--max-bytes`/`--max-inodes`.
-* `gc --apply` is refused in this stage.  This stage never deletes files.
+* Every kept asset has a stable `reason` and a short `why` in `gc --json`:
+  `owner`, `pinned`, `not-deletable`, `state`, `referenced`,
+  `reference-scan`, `not-old-enough` or `budget`.  A selected candidate carries
+  `reason: apply-deferred`, because this stage never deletes.
+* `gc --apply` is refused in this stage.  The refusal names the future gate
+  above; it is not an accidental click away from deletion.
+
+## Reference checks
+
+A recorded asset that Ozagia's own state still names must survive every GC plan.
+`assets list`, `assets status` and `assets gc --json` add `referenced`,
+`referenced_by` and `reference_scan` to each entry.  `ozagia.core.assets.
+referenced_by(root, asset)` exposes the same check for one record.
+
+The scan is bounded and metadata-only:
+
+* It reads only known state paths under the target's state directory: `goals/`,
+  `reviews/`, `reports/`, `evidence/`, `tests/`, `eval/` (top-level JSON only,
+  never the cached HF or deep-review trees), `research/` and the JSON metadata
+  of `tasks/`/`runs/` run directories.  A missing path is skipped.
+* A match is an exact JSON string or scalar: the canonical asset path, the
+  registry id, a revision, a commit, the dataset identifier, or a declared
+  SHA-256 (including a tree or per-file digest).  Prose, substrings, prompts and
+  report bodies are never matched, read back or printed.
+* The scan never walks `$HOME` or the target repository, never follows a
+  symlink, never opens an asset, never hashes content and never uses the
+  network.
+* Bounds cap files, bytes per file, total bytes, elapsed time, JSON depth and
+  the number of scalars.  A bound that stops the check reports `partial`; the
+  scan state is `partial` and the affected asset is kept.
+
+A partial or unknown scan is a **caution, not evidence**: it is never reported
+as `unreferenced`.  `gc_plan` keeps every asset whose reference check did not
+complete and records `reason: reference-scan`, even when no reference was
+found before the bound was hit.  The same rule applies to an unreadable record
+or a symlink in a state path.
+
 
 ## Explicit vs discovered
 
@@ -230,6 +289,9 @@ CLI and the registry are the only write path.
 
 ## What remains
 
-This stage is offline-tested against synthetic manifests.  Discovery performs
-no network access and reads no file contents.  `gc --apply` is **not**
-implemented: `ozagia assets gc` is always a dry run and `--apply` is refused.
+This stage is offline-tested against synthetic manifests.  Discovery and
+reference checks perform no network access and read no file contents.
+Reference checks are bounded and keep the asset on a partial scan.  `gc
+--apply` is **not** implemented: `ozagia assets gc` is always a dry run and
+`--apply` is refused until an explicit-approval gate covers ownership,
+deletable, unpinned, verified and unreferenced state.

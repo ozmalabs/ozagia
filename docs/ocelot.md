@@ -89,7 +89,10 @@ ozagia assets register \
 ```
 
 The record is `owner=ocelot`, `pinned=true`, `deletable=false`; it is read-only
-from Ozagia's point of view and never a GC candidate.  Managed Ocelot installs
+from Ozagia's point of view and never a GC candidate.  Ocelot data is never
+deleted, and it stays read-only whether or not Ozagia's own state references
+it; a reference check can keep other assets, but it never makes Ocelot data
+deletable.  Managed Ocelot installs
 under `<data home>/ozagia/ocelot/<version>` are discovered from their
 `.ozagia-ocelot.json` manifest by `ozagia assets discover`.  See
 [docs/assets.md](assets.md) for discovery roots, HF metadata parsing, and the

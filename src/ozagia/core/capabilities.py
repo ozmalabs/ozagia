@@ -452,6 +452,7 @@ _TESTS = {
     "assets": "test:tests/test_assets.py",
     "assets_discovery": "test:tests/test_assets_discovery.py",
     "assets_cli": "test:tests/test_assets_cli.py",
+    "assets_references": "test:tests/test_assets_references.py",
 }
 
 
@@ -1443,8 +1444,9 @@ _BUILTIN_DEFINITIONS: tuple[dict[str, Any], ...] = (
         domain="resources",
         purpose=("Catalog durable external assets (datasets, models, corpora, "
                  "installs, caches and tools) with ownership, provenance, "
-                 "licence, size and verification state, and plan safe GC "
-                 "without deleting anything."),
+                 "licence, size and verification state, check whether Ozagia "
+                 "state references them, and plan safe GC without deleting "
+                 "anything."),
         owner="ozagia.core.assets",
         side_effect="write",
         exposure=["cli", "mcp"],
@@ -1456,7 +1458,9 @@ _BUILTIN_DEFINITIONS: tuple[dict[str, Any], ...] = (
               "impl:ozagia.core.assets.scan",
               "impl:ozagia.core.assets.discover",
               "impl:ozagia.core.assets.read_hf_metadata",
+              "impl:ozagia.core.assets.referenced_by",
               "impl:ozagia.core.assets.gc_plan",
+              "impl:ozagia.core.assets.policy",
               "impl:ozagia.core.assets.pin",
               "impl:ozagia.core.assets.forget",
               "impl:ozagia.assets_cli.run"],
@@ -1475,13 +1479,16 @@ _BUILTIN_DEFINITIONS: tuple[dict[str, Any], ...] = (
                 "scan only explicit paths or markers; never $HOME by default",
                 "a marker is written only for owner=ozagia with --mark",
                 "gc is a dry run; apply is refused in this stage",
+                "reference checks read only known state metadata, match exact "
+                "scalars and keep the asset when the scan is partial",
                 "the MCP tools are read-only; there is no MCP register, pin, "
                 "verify-by-hash or delete tool",
-                "only owner=ozagia, deletable, unpinned present/verified "
-                "assets are candidates"],
+                "only owner=ozagia, deletable, unpinned, unreferenced "
+                "present/verified assets are candidates"],
         authorization=("writes only the user-level or state asset registry and "
                        "an explicitly marked owned marker"),
-        tests=_tests("assets", "assets_cli", "assets_discovery"),
+        tests=_tests("assets", "assets_cli", "assets_discovery",
+                     "assets_references"),
         docs=_docs("assets"),
     ),
     _def(

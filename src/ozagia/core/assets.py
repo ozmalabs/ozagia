@@ -48,9 +48,12 @@ symlinks, never reads file contents, and reports a bounded walk as ``partial``.
 Hashing only happens in :func:`verify` when the caller asks for it.
 
 Garbage collection is a **dry run only** in this stage.  A candidate must be
-``owner=ozagia``, ``deletable=True``, unpinned and in ``present`` or
-``verified`` state.  Ocelot, Hugging Face, user, upstream and external assets
-are never candidates.  ``apply=True`` is refused rather than deleting files.
+``owner=ozagia``, ``deletable=True``, unpinned, unreferenced by Ozagia's own
+state records and in ``present`` or ``verified`` state.  Ocelot, Hugging Face,
+user, upstream and external assets are never candidates.  Reference checks are
+bounded, metadata-only and never read the target repository, the home directory
+or an asset; a partial scan keeps the asset.  ``apply=True`` is refused rather
+than deleting files.
 
 The module uses the standard library only and never contacts the network.
 """
@@ -111,6 +114,31 @@ MAX_SCAN_LIMIT = 10_000
 GC_OWNER = "ozagia"
 GC_STATES = frozenset({"present", "verified"})
 GC_KIND_ORDER = {"cache": 0, "dataset": 1, "model": 1}
+GC_APPLY_GATE = (
+    "ownership, deletable, unpinned, verified, unreferenced, "
+    "explicit approval")
+
+# Reference checks read only these known Ozagia state paths.  They never walk
+# the target repository, the home directory or an asset tree.
+REFERENCE_SCHEMA = "ozagia.asset.references/1"
+REFERENCE_SOURCES = (
+    ("goals", ("goals",), (".json",), False),
+    ("reviews", ("reviews",), (".json",), False),
+    ("reports", ("reports",), (".json",), False),
+    ("evidence", ("evidence",), (".json", ".jsonl"), False),
+    ("tests", ("tests",), (".json",), False),
+    ("eval", ("eval",), (".json",), False),
+    ("research", ("research",), (".json",), False),
+    ("tasks", ("tasks",), (".json",), True),
+    ("runs", ("runs",), (".json",), True),
+)
+MAX_REFERENCE_FILES = 128
+MAX_REFERENCE_FILE_BYTES = 4 * 1024 * 1024
+MAX_REFERENCE_TOTAL_BYTES = 16 * 1024 * 1024
+MAX_REFERENCE_SECONDS = 1.0
+MAX_REFERENCE_DEPTH = 8
+MAX_REFERENCE_SCALARS = 200_000
+MAX_REFERENCE_MATCHES = 8
 
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -1104,18 +1132,25 @@ def list_assets(root: str | Path, *, owner: str | None = None,
         if pinned is not None and bool(entry["pinned"]) is not pinned:
             continue
         result.append(entry)
+    if result:
+        scan = _scan_for_entries(root, result)
+        for entry in result:
+            entry.update(_reference_fields(entry, scan))
     result.sort(key=lambda item: (str(item.get("id")), item["path"]))
     return result
 
 
 def get(root: str | Path, id: str) -> dict[str, Any]:
-    """One asset record, with its current existence state."""
-    return _view(_read_record(root, id))
+    """One asset record, with its current existence state and references."""
+    entry = _view(_read_record(root, id))
+    scan = _ReferenceScan(root, _reference_candidates(entry))
+    entry.update(_reference_fields(entry, scan))
+    return entry
 
 
 def _empty_bucket() -> dict[str, int]:
     return {"entries": 0, "bytes": 0, "apparent_bytes": 0, "inodes": 0,
-            "pinned": 0, "deletable": 0}
+            "pinned": 0, "deletable": 0, "referenced": 0}
 
 
 def status(root: str | Path, *, top: int | None = None) -> dict[str, Any]:
@@ -1129,11 +1164,14 @@ def status(root: str | Path, *, top: int | None = None) -> dict[str, Any]:
         raise AssetError("top must be a non-negative integer")
     errors: list[str] = []
     entries = [_view(record) for record in _load_records(root, errors=errors)]
+    reference_scan = _scan_for_entries(root, entries)
+    for entry in entries:
+        entry.update(_reference_fields(entry, reference_scan))
     totals = {
         "entries": len(entries), "bytes": 0, "apparent_bytes": 0,
         "inodes": 0, "hardlinks": 0, "pinned": 0, "deletable": 0,
         "present": 0, "missing": 0, "partial": 0, "mismatch": 0,
-        "verified": 0, "unverified": 0, "cross_device": 0,
+        "verified": 0, "unverified": 0, "cross_device": 0, "referenced": 0,
     }
     by_kind: dict[str, dict[str, int]] = {}
     by_owner: dict[str, dict[str, int]] = {}
@@ -1152,12 +1190,14 @@ def status(root: str | Path, *, top: int | None = None) -> dict[str, Any]:
             row["inodes"] += int(entry["inodes"])
             row["pinned"] += 1 if entry["pinned"] else 0
             row["deletable"] += 1 if entry["deletable"] else 0
+            row["referenced"] += 1 if entry.get("referenced") else 0
         totals["bytes"] += int(entry["bytes"])
         totals["apparent_bytes"] += int(entry["apparent_bytes"])
         totals["inodes"] += int(entry["inodes"])
         totals["hardlinks"] += int(entry["hardlinks"])
         totals["pinned"] += 1 if entry["pinned"] else 0
         totals["deletable"] += 1 if entry["deletable"] else 0
+        totals["referenced"] += 1 if entry.get("referenced") else 0
         totals["cross_device"] += 1 if entry["cross_device"] else 0
         state = entry["state"]
         if state in STATES:
@@ -1169,6 +1209,7 @@ def status(root: str | Path, *, top: int | None = None) -> dict[str, Any]:
         "by_state": by_state,
         "registry": str(registry_dir(root)),
         "registry_errors": errors,
+        "references": _reference_summary(reference_scan),
     }
     if top is not None:
         ordered = sorted(entries, key=lambda item: (
@@ -2301,26 +2342,369 @@ def read_hf_metadata(path: str | Path) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- #
+# reference awareness (metadata only)
+# --------------------------------------------------------------------------- #
+
+
+def _reference_candidates(asset: Mapping[str, Any]) -> dict[str, set[str]]:
+    """Exact scalar values that could name this asset in Ozagia state.
+
+    A reference is the canonical path, the registry id, a revision or commit,
+    the dataset revision, or a declared digest.  Prose and substring matches
+    are deliberately not considered.
+    """
+    found: dict[str, set[str]] = {}
+
+    def add(value: Any, kind: str) -> None:
+        if not isinstance(value, str):
+            return
+        value = value.strip()
+        if value:
+            found.setdefault(value, set()).add(kind)
+
+    add(asset.get("path"), "path")
+    add(asset.get("id"), "id")
+    add(asset.get("revision"), "revision")
+    add(asset.get("sha256"), "digest")
+    source = asset.get("source")
+    if isinstance(source, Mapping):
+        add(source.get("revision"), "revision")
+        add(source.get("commit"), "commit")
+        add(source.get("dataset"), "dataset")
+    tree = asset.get("tree")
+    if isinstance(tree, Mapping):
+        add(tree.get("sha256"), "digest")
+    for digest in asset.get("digests") or []:
+        if isinstance(digest, Mapping):
+            add(digest.get("sha256"), "digest")
+    return found
+
+
+class _ReferenceScan:
+    """A bounded, metadata-only look at Ozagia's own state records."""
+
+    def __init__(self, root: str | Path, wanted: Mapping[str, set[str]],
+                 *, max_files: int | None = None,
+                 max_file_bytes: int | None = None,
+                 max_total_bytes: int | None = None,
+                 max_seconds: float | None = None,
+                 max_depth: int | None = None) -> None:
+        self.root = Path(root)
+        self.wanted = wanted
+        self.max_files = (MAX_REFERENCE_FILES if max_files is None
+                          else max_files)
+        self.max_file_bytes = (MAX_REFERENCE_FILE_BYTES
+                               if max_file_bytes is None else max_file_bytes)
+        self.max_total_bytes = (MAX_REFERENCE_TOTAL_BYTES
+                                if max_total_bytes is None
+                                else max_total_bytes)
+        self.max_seconds = (MAX_REFERENCE_SECONDS if max_seconds is None
+                            else max_seconds)
+        self.max_depth = (MAX_REFERENCE_DEPTH if max_depth is None
+                          else max_depth)
+        self.files = 0
+        self.bytes = 0
+        self.scalars = 0
+        self.partial = False
+        self.notes: list[str] = []
+        self.hits: dict[str, set[tuple[str, str]]] = {}
+        self._started = time.monotonic()
+        self._scan()
+
+    # -- bounds ---------------------------------------------------------- #
+
+    def _mark_partial(self, note: str) -> None:
+        self.partial = True
+        if note and note not in self.notes and len(self.notes) < 8:
+            self.notes.append(note)
+
+    def _expired(self) -> bool:
+        if self.max_seconds <= 0:
+            self._mark_partial("time budget")
+            return True
+        if time.monotonic() - self._started >= self.max_seconds:
+            self._mark_partial("time budget")
+            return True
+        return False
+
+    # -- traversal ------------------------------------------------------- #
+
+    def _scan(self) -> None:
+        for source, parts, suffixes, nested in REFERENCE_SOURCES:
+            if self._expired():
+                return
+            directory = state_path(self.root, *parts)
+            self._scan_directory(source, directory, suffixes, nested)
+
+    def _scan_directory(self, source: str, directory: Path,
+                        suffixes: tuple[str, ...], nested: bool) -> None:
+        try:
+            with os.scandir(directory) as iterator:
+                entries = []
+                for entry in iterator:
+                    if len(entries) >= self.max_files + 1:
+                        self._mark_partial("file cap")
+                        break
+                    entries.append(entry)
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            self._mark_partial(f"cannot list {source}: {type(exc).__name__}")
+            return
+        files: list[Path] = []
+        children: list[Path] = []
+        for entry in sorted(entries, key=lambda item: item.name):
+            if entry.name.startswith("."):
+                continue
+            try:
+                if entry.is_symlink():
+                    if entry.name.endswith(suffixes):
+                        self._mark_partial(f"symlink in {source}")
+                    continue
+                if entry.is_dir(follow_symlinks=False):
+                    if nested:
+                        children.append(Path(entry.path))
+                    continue
+                if entry.name.endswith(suffixes):
+                    files.append(Path(entry.path))
+            except OSError:
+                self._mark_partial(f"cannot inspect {source}")
+        for path in files:
+            if self._expired():
+                return
+            self._inspect(source, path)
+        if len(children) > self.max_files:
+            self._mark_partial("file cap")
+            children = children[:self.max_files]
+        for child in children:
+            if self._expired():
+                return
+            try:
+                with os.scandir(child) as iterator:
+                    nested_files = sorted(
+                        (entry for entry in iterator
+                         if not entry.name.startswith(".")
+                         and entry.name.endswith(suffixes)),
+                        key=lambda item: item.name)
+            except OSError:
+                self._mark_partial(f"cannot list {source}")
+                continue
+            for entry in nested_files:
+                if self._expired():
+                    return
+                try:
+                    if entry.is_symlink():
+                        self._mark_partial(f"symlink in {source}")
+                        continue
+                    if not entry.is_file(follow_symlinks=False):
+                        continue
+                except OSError:
+                    self._mark_partial(f"cannot inspect {source}")
+                    continue
+                self._inspect(source, Path(entry.path))
+
+    def _inspect(self, source: str, path: Path) -> None:
+        if self.files >= self.max_files:
+            self._mark_partial("file cap")
+            return
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError:
+            return
+        except OSError:
+            self._mark_partial(f"cannot inspect {source}")
+            return
+        if stat.S_ISLNK(info.st_mode):
+            self._mark_partial(f"symlink in {source}")
+            return
+        if not stat.S_ISREG(info.st_mode):
+            return
+        if info.st_size > self.max_file_bytes:
+            self._mark_partial(f"{source} file exceeds the byte cap")
+            return
+        if self.bytes + info.st_size > self.max_total_bytes:
+            self._mark_partial("total byte cap")
+            return
+        self.files += 1
+        self.bytes += int(info.st_size)
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(path, flags)
+        except OSError:
+            self._mark_partial(f"cannot read {source}")
+            return
+        try:
+            with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+                text = handle.read(self.max_file_bytes + 1)
+        except (OSError, UnicodeError):
+            self._mark_partial(f"cannot read {source}")
+            return
+        if path.suffix == ".jsonl":
+            for line in text.splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    payload = json.loads(line)
+                except ValueError:
+                    self._mark_partial(f"invalid JSON in {source}")
+                    continue
+                self._walk(payload, source, 0)
+                if self._expired():
+                    return
+            return
+        try:
+            payload = json.loads(text)
+        except ValueError:
+            self._mark_partial(f"invalid JSON in {source}")
+            return
+        self._walk(payload, source, 0)
+
+    def _walk(self, value: Any, source: str, depth: int) -> None:
+        if self._expired():
+            return
+        if depth > self.max_depth:
+            self._mark_partial("depth cap")
+            return
+        if isinstance(value, str):
+            self.scalars += 1
+            if self.scalars > MAX_REFERENCE_SCALARS:
+                self._mark_partial("scalar cap")
+                return
+            if self.scalars % 256 == 0 and self._expired():
+                return
+            self._record(value, source)
+            return
+        if isinstance(value, Mapping):
+            for key, item in value.items():
+                if isinstance(key, str):
+                    self._record(key, source)
+                self._walk(item, source, depth + 1)
+                if self._expired():
+                    return
+            return
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                self._walk(item, source, depth + 1)
+                if self._expired():
+                    return
+
+    def _record(self, value: str, source: str) -> None:
+        kinds = self.wanted.get(value)
+        if not kinds:
+            return
+        bucket = self.hits.setdefault(value, set())
+        for kind in kinds:
+            if len(bucket) >= MAX_REFERENCE_MATCHES * 4:
+                break
+            bucket.add((source, kind))
+
+
+def _reference_fields(asset: Mapping[str, Any],
+                      scan: _ReferenceScan) -> dict[str, Any]:
+    candidates = _reference_candidates(asset)
+    matches: set[tuple[str, str]] = set()
+    for value in candidates:
+        matches.update(scan.hits.get(value, ()))
+    ordered = sorted(matches)
+    labels = sorted({source for source, _kind in ordered})
+    labels = labels[:MAX_REFERENCE_MATCHES]
+    if matches:
+        status = "referenced"
+    elif scan.partial:
+        status = "partial"
+    else:
+        status = "unreferenced"
+    return {
+        "referenced": bool(matches),
+        "reference_status": status,
+        "referenced_by": labels,
+        "reference_scan": "partial" if scan.partial else "complete",
+    }
+
+
+def _reference_summary(scan: _ReferenceScan) -> dict[str, Any]:
+    return {
+        "schema": REFERENCE_SCHEMA,
+        "state": "partial" if scan.partial else "complete",
+        "files": scan.files,
+        "bytes": scan.bytes,
+        "scalars": scan.scalars,
+        "partial": scan.partial,
+        "notes": list(scan.notes),
+        "bounds": {
+            "files": scan.max_files,
+            "file_bytes": scan.max_file_bytes,
+            "total_bytes": scan.max_total_bytes,
+            "seconds": scan.max_seconds,
+            "depth": scan.max_depth,
+        },
+    }
+
+
+def _scan_for_entries(root: str | Path,
+                      entries: Sequence[Mapping[str, Any]]
+                      ) -> _ReferenceScan:
+    wanted: dict[str, set[str]] = {}
+    for entry in entries:
+        for value, kinds in _reference_candidates(entry).items():
+            wanted.setdefault(value, set()).update(kinds)
+    return _ReferenceScan(root, wanted)
+
+
+def referenced_by(root: str | Path, asset: Mapping[str, Any] | str) -> dict:
+    """Whether one recorded asset is named by Ozagia's own state records.
+
+    The scan is bounded and metadata-only.  It reads the known state files for
+    goals, reviews/reports, evidence, tests, eval, research and task runs.  It
+    never reads the target repository, the home directory or an asset, and it
+    never matches prose or returns a state record's contents.  A partial scan
+    is never reported as ``unreferenced``.
+    """
+    if isinstance(asset, str):
+        entry = _view(_read_record(root, asset))
+    elif isinstance(asset, Mapping):
+        entry = _normalise_record(asset)
+    else:
+        raise AssetError("referenced_by needs an asset record or asset id")
+    scan = _ReferenceScan(root, _reference_candidates(entry))
+    result = _reference_fields(entry, scan)
+    result["schema"] = REFERENCE_SCHEMA
+    result["scan"] = _reference_summary(scan)
+    return result
+
+
+# --------------------------------------------------------------------------- #
 # garbage-collection planning (dry run only)
 # --------------------------------------------------------------------------- #
 
 
 def _gc_keep_reason(entry: Mapping[str, Any], *, older_than_s: int | None,
-                    now: int) -> str | None:
+                    now: int,
+                    reference: Mapping[str, Any] | None = None
+                    ) -> tuple[str | None, str | None]:
     if entry.get("owner") != GC_OWNER:
-        return f"owner is {entry.get('owner')}; never a candidate"
+        return "owner", f"owner is {entry.get('owner')}; never a candidate"
     if entry.get("pinned"):
-        return "pinned"
+        return "pinned", "pinned"
     if not entry.get("deletable"):
-        return "not deletable"
+        return "not-deletable", "not deletable"
     state = entry.get("state")
     if state not in GC_STATES:
-        return f"state is {state}"
+        return "state", f"state is {state}"
+    if reference is not None:
+        if reference.get("referenced"):
+            labels = ", ".join(reference.get("referenced_by") or [])
+            return "referenced", (f"referenced by {labels}" if labels
+                                  else "referenced")
+        if reference.get("reference_status") != "unreferenced":
+            return "reference-scan", (
+                "reference scan is "
+                f"{reference.get('reference_status') or 'partial'}")
     if older_than_s is not None:
         used = entry.get("last_used_at") or entry.get("created_at") or 0
         if now - int(used) < older_than_s:
-            return "not old enough"
-    return None
+            return "not-old-enough", "not old enough"
+    return None, None
 
 
 def _gc_sort_key(entry: Mapping[str, Any]) -> tuple[Any, ...]:
@@ -2339,8 +2723,9 @@ def gc_plan(root: str | Path, *, max_bytes: int | None = None,
     """Plan a safe deletion order without deleting anything.
 
     Only ``owner=ozagia``, ``deletable=True``, unpinned assets in ``present``
-    or ``verified`` state can be candidates.  The order prefers ``cache``,
-    then ``dataset``/``model``, then other kinds, oldest ``last_used_at`` first.
+    or ``verified`` state that are not referenced by Ozagia state can be
+    candidates.  The order prefers ``cache``, then ``dataset``/``model``, then
+    other kinds, oldest ``last_used_at`` first.  ``apply`` stays deferred.
     """
     for name, value in (("max_bytes", max_bytes), ("max_inodes", max_inodes),
                         ("older_than_s", older_than_s)):
@@ -2349,11 +2734,16 @@ def gc_plan(root: str | Path, *, max_bytes: int | None = None,
             raise AssetError(f"{name} must be a non-negative integer")
     errors: list[str] = []
     entries = [_view(record) for record in _load_records(root, errors=errors)]
+    reference_scan = _scan_for_entries(root, entries)
     now = int(time.time())
     candidates: list[dict[str, Any]] = []
     kept: list[dict[str, Any]] = []
     for entry in entries:
-        reason = _gc_keep_reason(entry, older_than_s=older_than_s, now=now)
+        reference = _reference_fields(entry, reference_scan)
+        entry.update(reference)
+        reason_code, why = _gc_keep_reason(
+            entry, older_than_s=older_than_s, now=now,
+            reference=reference)
         row = {
             "id": entry["id"],
             "path": entry["path"],
@@ -2362,9 +2752,12 @@ def gc_plan(root: str | Path, *, max_bytes: int | None = None,
             "state": entry["state"],
             "bytes": entry["bytes"],
             "inodes": entry["inodes"],
+            "referenced": entry["referenced"],
+            "referenced_by": entry["referenced_by"],
+            "reference_scan": entry["reference_scan"],
         }
-        if reason is not None:
-            kept.append({**row, "why": reason})
+        if reason_code is not None:
+            kept.append({**row, "reason": reason_code, "why": why})
         else:
             candidates.append(entry)
     candidates.sort(key=_gc_sort_key)
@@ -2372,7 +2765,7 @@ def gc_plan(root: str | Path, *, max_bytes: int | None = None,
     selected_bytes = 0
     selected_inodes = 0
     budget_hit: str | None = None
-    for index, entry in enumerate(candidates):
+    for entry in candidates:
         size = int(entry["bytes"])
         inodes = int(entry["inodes"])
         if budget_hit is None and max_bytes is not None \
@@ -2386,10 +2779,15 @@ def gc_plan(root: str | Path, *, max_bytes: int | None = None,
                 "id": entry["id"], "path": entry["path"],
                 "kind": entry["kind"], "owner": entry["owner"],
                 "state": entry["state"], "bytes": size,
-                "inodes": inodes, "why": f"budget: {budget_hit}",
+                "inodes": inodes,
+                "referenced": bool(entry.get("referenced")),
+                "referenced_by": list(entry.get("referenced_by") or []),
+                "reference_scan": entry.get("reference_scan"),
+                "reason": "budget", "why": f"budget: {budget_hit}",
             })
             continue
-        selected.append(entry)
+        selected.append({**entry, "reason": "apply-deferred",
+                         "why": "candidate; apply is deferred"})
         selected_bytes += size
         selected_inodes += inodes
     totals = {
@@ -2400,6 +2798,8 @@ def gc_plan(root: str | Path, *, max_bytes: int | None = None,
         "selected_inodes": selected_inodes,
         "candidate_bytes": sum(int(entry["bytes"]) for entry in candidates),
         "candidate_inodes": sum(int(entry["inodes"]) for entry in candidates),
+        "referenced": sum(1 for entry in entries if entry["referenced"]),
+        "reference_partial": reference_scan.partial,
         "max_bytes": max_bytes,
         "max_inodes": max_inodes,
         "older_than_s": older_than_s,
@@ -2407,9 +2807,15 @@ def gc_plan(root: str | Path, *, max_bytes: int | None = None,
     return {
         "dry_run": True,
         "apply": False,
+        "apply_status": "deferred",
+        "apply_gate": GC_APPLY_GATE,
+        "partial": reference_scan.partial,
+        "reference_scan": ("partial" if reference_scan.partial
+                           else "complete"),
         "candidates": selected,
         "kept": kept,
         "totals": totals,
+        "references": _reference_summary(reference_scan),
         "registry_errors": errors,
     }
 
@@ -2420,10 +2826,68 @@ def gc(root: str | Path, *, apply: bool = False, max_bytes: int | None = None,
     """Refuse ``apply``; otherwise return :func:`gc_plan`."""
     if apply:
         raise AssetGcRefused(
-            "gc --apply is not implemented in this stage; "
-            "the asset catalog is dry-run only")
+            "gc --apply is not implemented in this stage; this remains a "
+            "dry-run plan. A future apply gate requires explicit approval "
+            f"after: {GC_APPLY_GATE}.")
     return gc_plan(root, max_bytes=max_bytes, max_inodes=max_inodes,
                    older_than_s=older_than_s)
+
+
+def policy() -> dict[str, Any]:
+    """The ownership, reference and GC policy, without scanning anything."""
+    owners: dict[str, dict[str, Any]] = {}
+    for owner in OWNERS:
+        if owner == GC_OWNER:
+            owners[owner] = {
+                "gc_candidate": True,
+                "deletion": "explicit-approval-only",
+                "read_only": False,
+            }
+        else:
+            owners[owner] = {
+                "gc_candidate": False,
+                "deletion": "never",
+                "read_only": True,
+            }
+    return {
+        "schema": "ozagia.asset.policy/1",
+        "owners": owners,
+        "read_only_owners": [owner for owner in OWNERS if owner != GC_OWNER],
+        "gc": {
+            "apply_allowed": False,
+            "dry_run": True,
+            "apply_status": "deferred",
+            "apply_gate": GC_APPLY_GATE,
+            "candidate_owner": GC_OWNER,
+            "allowed_states": sorted(GC_STATES),
+            "blocking_states": [state for state in STATES
+                                if state not in GC_STATES],
+            "requires_deletable": True,
+            "requires_unpinned": True,
+            "requires_unreferenced": True,
+            "requires_verification": True,
+            "pinning": {
+                "pinned_is_candidate": False,
+                "unpin_effect": "allows planning only; never deletes",
+            },
+            "ordering": ["cache", "dataset", "model", "other"],
+        },
+        "references": {
+            "schema": REFERENCE_SCHEMA,
+            "scope": [name for name, *_rest in REFERENCE_SOURCES],
+            "matches": ["path", "id", "revision", "commit", "dataset",
+                        "digest"],
+            "exact_scalars_only": True,
+            "partial_policy": "a partial or unknown scan keeps the asset",
+            "bounds": {
+                "files": MAX_REFERENCE_FILES,
+                "file_bytes": MAX_REFERENCE_FILE_BYTES,
+                "total_bytes": MAX_REFERENCE_TOTAL_BYTES,
+                "seconds": MAX_REFERENCE_SECONDS,
+                "depth": MAX_REFERENCE_DEPTH,
+            },
+        },
+    }
 
 
 __all__ = [
@@ -2431,11 +2895,12 @@ __all__ = [
     "AssetNotFound", "AssetPathError", "DEFAULT_KIND", "DEFAULT_OWNER",
     "DEFAULT_SCOPE", "DEEP_REVIEW_MANIFEST_NAME", "DEEP_REVIEW_MARKER_NAME",
     "GC_OWNER", "GC_STATES", "HF_META_NAME", "KINDS", "LICENSE_STATUSES",
-    "MARKER_NAME", "OCELOT_MANIFEST_NAME", "OWNERS", "SCHEMA", "SCOPES",
-    "SOURCE_KINDS", "STATES",
+    "MARKER_NAME", "OCELOT_MANIFEST_NAME", "OWNERS", "REFERENCE_SCHEMA",
+    "SCHEMA", "SCOPES", "SOURCE_KINDS", "STATES",
     "adopt", "deep_review_root", "discover", "forget", "gc", "gc_plan",
     "get", "hf_cache_root", "list_assets", "model_cache_root",
-    "ocelot_install_root", "pin", "read_hf_metadata", "register",
+    "ocelot_install_root", "pin", "policy", "read_hf_metadata",
+    "referenced_by", "register",
     "registry_dir", "scan", "status", "unpin", "user_registry_dir",
     "verify", "verify_all",
 ]
