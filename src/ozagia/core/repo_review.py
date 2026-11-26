@@ -1744,6 +1744,21 @@ def _secret_name(name: str) -> bool:
             or name.endswith(SECRET_SUFFIXES))
 
 
+def _is_benign_npmrc(text: str) -> bool:
+    """Recognize the audited non-secret npm setting without guessing broadly."""
+    saw_setting = False
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith(("#", ";")):
+            continue
+        key, separator, value = line.partition("=")
+        if (not separator or key.strip().casefold() != "package-lock"
+                or value.strip().casefold() not in {"true", "false"}):
+            return False
+        saw_setting = True
+    return saw_setting
+
+
 def _enclosing_symbol(ctx: _Context, rel: str, line: int) -> str | None:
     best: tuple[int, str] | None = None
     for symbol in ctx.symbols(rel):
@@ -1801,6 +1816,14 @@ def _security(sec: _Section) -> None:
                     # demand deleting a local file that may be needed.
                     title=f"Stop tracking {rel}")
         elif _secret_name(name):
+            # A small number of credential-looking names are commonly used
+            # for non-secret material. Suppress only when bounded source text
+            # positively identifies the harmless case; unreadable or
+            # ambiguous content remains a finding.
+            content = ctx.text(rel) if name == ".npmrc" else None
+            if (name == ".npmrc" and content is not None
+                    and _is_benign_npmrc(content)):
+                continue
             sec.add("sensitive_file", "major", [_file_key(rel)],
                     f"{rel} has a credential or key file name",
                     evidence=[f"tracked by git: {rel}"], confidence="medium",

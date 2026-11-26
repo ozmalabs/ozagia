@@ -204,6 +204,10 @@ _FMEA_RULES = {
         "symptom": "An exception handler may suppress an exception without reporting it.",
         "detection": "Static AST rule matched: a bare or broad handler contains only pass.",
     },
+    "broad_exception_returns_default": {
+        "symptom": "A broad exception handler may make a failed operation look successful.",
+        "detection": "Static AST rule matched: a bare or builtin broad handler returns a literal value.",
+    },
 }
 
 

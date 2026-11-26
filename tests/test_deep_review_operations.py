@@ -166,6 +166,29 @@ def test_terraform_ingress_candidates_have_explicit_rules_and_line_evidence(tmp_
                for item in result["not_checked"])
 
 
+def test_static_validation_declares_all_structural_iac_checks(tmp_path):
+    (tmp_path / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+
+    result = analyze(tmp_path)
+
+    declared = set(result["inventory"]["static_validation"]["checks"])
+    assert {
+        "iac.terraform.public_ingress_cidr",
+        "iac.terraform.public_admin_ingress",
+        "iac.container.privileged_mode",
+        "iac.kubernetes.host_network",
+        "iac.kubernetes.host_port",
+        "iac.kubernetes.host_path_volume",
+        "iac.kubernetes.host_pid",
+        "iac.kubernetes.host_ipc",
+        "iac.kubernetes.run_as_root",
+        "iac.kubernetes.root_user",
+        "iac.kubernetes.privilege_escalation",
+        "iac.kubernetes.add_all_capabilities",
+        "iac.compose.bind_all_interfaces",
+    } <= declared
+
+
 def test_terraform_public_ipv6_ingress_is_detected_but_egress_is_not(tmp_path):
     (tmp_path / "main.tf").write_text(
         'resource "aws_vpc_security_group_ingress_rule" "public_v6" {\n'

@@ -1370,6 +1370,12 @@ def analyze(root: str | Path, *, budget_s: float = 10.0) -> dict:
         "iac.kubernetes.host_network",
         "iac.kubernetes.host_port",
         "iac.kubernetes.host_path_volume",
+        "iac.kubernetes.host_pid",
+        "iac.kubernetes.host_ipc",
+        "iac.kubernetes.run_as_root",
+        "iac.kubernetes.root_user",
+        "iac.kubernetes.privilege_escalation",
+        "iac.kubernetes.add_all_capabilities",
         "iac.compose.bind_all_interfaces",
         "ops.observability.*_explicitly_disabled",
     ]

@@ -6,10 +6,14 @@ import pytest
 
 from ozagia.eval.deep_review_corpus import CorpusError, load_manifest
 from ozagia.eval.deep_review_corpus_score import (
+    _aggregate_subjects,
+    _operational,
+    _verify_source_digests,
     evaluate_gates,
     load_run_record,
     score_corpus,
 )
+from ozagia.eval.deep_review_corpus_labels import load_label_set
 
 FIXTURE = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "deep_review_corpus_dry_run"
 CORPUS = FIXTURE / "corpus.json"
@@ -85,7 +89,75 @@ def test_partial_scope_predictions_stay_unlabeled_not_false_positives():
     assert performance["precision"] == 1.0
     assert performance["report_noise_ratio"] == 0.5
     assert subjects["scalability"]["precision"] == 0.0
-    assert subjects["tests-and-coverage"]["complete"] is False
+    assert subjects["tests-and-coverage"]["complete"] is True
+
+
+def test_complete_label_scope_without_scored_run_is_reported_as_missing(tmp_path):
+    copied = tmp_path / "corpus"
+    shutil.copytree(FIXTURE, copied)
+    record_path = copied / "record.json"
+    raw = json.loads(record_path.read_text(encoding="utf-8"))
+    raw["runs"] = [run for run in raw["runs"]
+                   if run["subject_key"] != "range-complete"]
+    record_path.write_text(json.dumps(raw), encoding="utf-8")
+
+    result = score_corpus(
+        load_manifest(copied / "corpus.json"), copied / "labels",
+        load_run_record(record_path), checkout_root=copied)
+
+    missing = result["coverage"]["missing_runs_for_complete_labels"]
+    assert missing == [{
+        "repository_id": "fixture-service",
+        "subject_key": "range-complete",
+        "run_id": None,
+        "reason": "no scored run for this label scope",
+    }]
+    assert any(row["missing_run"] for row in result["per_subject_key"])
+
+
+def test_complete_labels_require_complete_report_coverage(tmp_path):
+    copied = tmp_path / "corpus"
+    shutil.copytree(FIXTURE, copied)
+    record_path = copied / "record.json"
+    raw = json.loads(record_path.read_text(encoding="utf-8"))
+    run = raw["runs"][0]
+    run.pop("report_sha256", None)
+    run["subject_status"]["security"] = "partial"
+    record_path.write_text(json.dumps(raw), encoding="utf-8")
+
+    result = score_corpus(
+        load_manifest(copied / "corpus.json"), copied / "labels",
+        load_run_record(record_path), checkout_root=copied)
+
+    assert result["coverage"]["missing_runs_for_complete_labels"] == [{
+        "repository_id": "fixture-service",
+        "subject_key": "range-complete",
+        "run_id": "complete-1",
+        "reason": "run did not provide complete coverage",
+    }]
+    # Partial report coverage invalidates precision for this whole declared
+    # scope, including findings belonging to subjects the run did complete.
+    assert result["counts"]["labeled_predictions"] == 0
+    assert result["overall"]["precision"] is None
+    assert result["overall"]["false_positive"] is None
+
+
+@pytest.mark.parametrize("statuses", [{}, {"security": "complete"}])
+def test_complete_labels_require_status_for_every_declared_subject(tmp_path, statuses):
+    copied = tmp_path / "corpus"
+    shutil.copytree(FIXTURE, copied)
+    record_path = copied / "record.json"
+    raw = json.loads(record_path.read_text(encoding="utf-8"))
+    raw["runs"][0]["subject_status"] = statuses
+    record_path.write_text(json.dumps(raw), encoding="utf-8")
+
+    result = score_corpus(
+        load_manifest(copied / "corpus.json"), copied / "labels",
+        load_run_record(record_path), checkout_root=copied)
+
+    incomplete = result["coverage"]["missing_runs_for_complete_labels"]
+    assert len(incomplete) == 1
+    assert incomplete[0]["subject_key"] == "range-complete"
 
 
 def test_high_impact_and_repository_views_are_reported_separately():
@@ -120,6 +192,19 @@ def test_digest_checks_are_verified_with_a_checkout_and_incomplete_without_one()
     unchecked = _score(checkout_root=False)
     assert unchecked["digest_checks"]["source_files"]["status"] == "not_checked"
     assert unchecked["digest_checks"]["status"] == "incomplete"
+
+
+def test_source_digest_verification_is_incomplete_when_any_label_digest_is_missing():
+    manifest = load_manifest(CORPUS)
+    loaded = load_label_set(LABELS, manifest, require_sealed=True)
+    decisions = next(iter(loaded["subjects"].values()))["adjudication"]["decisions"]
+    decisions[0]["source_file_digest"] = None
+
+    result = _verify_source_digests(loaded, manifest, FIXTURE)
+
+    assert result["checked"] > 0
+    assert result["not_recorded"] == 1
+    assert result["status"] == "incomplete"
 
 
 def test_repeatability_and_scoring_are_deterministic():
@@ -265,6 +350,7 @@ def _gate_metrics(**updates):
             "predicted": 20,
         },
         "subject_stability": [{"subject_key": "repo/range", "predicted": 20,
+                               "complete_scope_predicted": 20,
                                "precision": 0.70}],
         "repeatability": {"status": "verified"},
         "digest_checks": {"status": "verified"},
@@ -300,7 +386,8 @@ def test_gate_computation_fails_on_low_precision_and_too_few_repositories():
 
 def test_gate_computation_fails_on_weak_subject_noise_and_blocking_evidence():
     weak = _gate_metrics(subject_stability=[
-        {"subject_key": "repo/range", "predicted": 20, "precision": 0.64}])
+        {"subject_key": "repo/range", "predicted": 20,
+         "complete_scope_predicted": 20, "precision": 0.64}])
     assert evaluate_gates(weak)["gates"]["subject_stability"]["status"] == "fail"
 
     noisy = _gate_metrics(overall={
@@ -315,6 +402,47 @@ def test_gate_computation_fails_on_weak_subject_noise_and_blocking_evidence():
     assert evaluate_gates(unsupported)["gates"]["high_impact_findings"]["status"] == "fail"
 
 
+def test_subject_stability_minimum_uses_only_complete_scope_predictions():
+    metrics = _gate_metrics(subject_stability=[{
+        "subject_key": "repo/range",
+        "predicted": 100,
+        "complete_scope_predicted": 19,
+        "precision": 0.50,
+    }])
+    result = evaluate_gates(metrics)
+    gate = result["gates"]["subject_stability"]
+    assert gate["status"] == "insufficient_data"
+    assert gate["observed"]["qualifying"] == 0
+
+
+def test_subject_stability_missing_complete_scope_count_fails_closed():
+    metrics = _gate_metrics(subject_stability=[{
+        "subject_key": "repo/range", "predicted": 100, "precision": 0.99,
+    }])
+    gate = evaluate_gates(metrics)["gates"]["subject_stability"]
+    assert gate["status"] == "insufficient_data"
+    assert gate["observed"]["qualifying"] == 0
+
+
+def test_subject_aggregation_excludes_partial_scope_predictions_from_gate_count():
+    aggregate = _aggregate_subjects({"subjects": {
+        "repo-a::whole_repo::search": {
+            "complete": True, "predicted": 19, "true_positive": 10,
+            "false_positive": 9, "expected": 10, "false_negative": 0,
+        },
+        "repo-b::range::search": {
+            "complete": False, "predicted": 81, "true_positive": 0,
+            "false_positive": None, "expected": 0, "false_negative": 0,
+        },
+    }}, "search")
+    assert aggregate["predicted"] == 100
+    assert aggregate["complete_scope_predicted"] == 19
+    gate = evaluate_gates(_gate_metrics(subject_stability=[aggregate]))[
+        "gates"]["subject_stability"]
+    assert gate["status"] == "insufficient_data"
+    assert gate["observed"]["qualifying"] == 0
+
+
 def test_gate_computation_marks_missing_measurements_insufficient():
     no_repeat = _gate_metrics(repeatability={"status": "not_tested"})
     result = evaluate_gates(no_repeat)
@@ -327,9 +455,46 @@ def test_gate_computation_marks_missing_measurements_insufficient():
     assert result["status"] == "insufficient_data"
     assert result["gates"]["human_utility"]["status"] == "not_measured"
 
+    partial_operational = _gate_metrics(operational={
+        "status": "partially_measured", "within_budget_rate": 1.0,
+        "runs": 10, "runs_with_budget": 1,
+    })
+    result = evaluate_gates(partial_operational)
+    assert result["gates"]["operational_bounds"]["status"] == "insufficient_data"
+    assert result["status"] == "insufficient_data"
+
     synthetic = evaluate_gates(_gate_metrics(evidence_class="synthetic_regression"))
     assert synthetic["status"] == "not_applicable_synthetic"
     assert synthetic["quality_claim"] == "none"
+
+
+def test_operational_gate_requires_budget_and_duration_for_each_run():
+    record = load_run_record(RECORD)
+    record["runs"][0]["duration_s"] = None
+    record["runs"][1]["budget_s"] = None
+
+    operational = _operational(record)
+    assert operational["status"] == "partially_measured"
+    assert operational["runs"] == 3
+    assert operational["runs_with_budget"] == 1
+
+    gates = evaluate_gates(_gate_metrics(operational=operational))
+    assert gates["gates"]["operational_bounds"]["status"] == "insufficient_data"
+    assert gates["gates"]["operational_bounds"]["observed"] == {
+        "runs": 3, "runs_with_budget": 1,
+    }
+
+
+def test_operational_gate_fails_on_nonzero_process_exit():
+    operational = _operational({"runs": [{
+        "run_id": "failed-run", "budget_s": 10, "duration_s": 2,
+        "exit_status": 1, "writes_outside_allowed_paths": False,
+    }]})
+    gate = evaluate_gates(_gate_metrics(operational=operational))[
+        "gates"]["operational_bounds"]
+    assert gate["status"] == "fail"
+    assert gate["reason"] == "a run exited with a nonzero status"
+    assert gate["observed"]["nonzero_exit_runs"] == ["failed-run"]
 
 
 def test_gate_computation_requires_human_provenance():

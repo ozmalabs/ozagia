@@ -459,6 +459,21 @@ def _scope_complete(group: Mapping[str, Any]) -> bool:
     return bool(summaries.get("complete"))
 
 
+def _label_scope_subjects(group: Mapping[str, Any] | None) -> set[str]:
+    """Return every subject the reviewers declared inside a label scope."""
+    if group is None:
+        return set()
+    declared: set[str] = set()
+    files = [*(group.get("reviewers") or {}).values(), group.get("adjudication")]
+    for item in files:
+        if not isinstance(item, Mapping):
+            continue
+        scope = item.get("declared_scope")
+        if isinstance(scope, Mapping):
+            declared.update(str(subject) for subject in scope.get("subjects") or [])
+    return declared
+
+
 def _build_scoring_inputs(loaded: Mapping[str, Any], manifest: Mapping[str, Any],
                           record: Mapping[str, Any]) -> dict[str, Any]:
     primary: dict[tuple[str, str], dict[str, Any]] = {}
@@ -501,16 +516,27 @@ def _build_scoring_inputs(loaded: Mapping[str, Any], manifest: Mapping[str, Any]
         statuses = _subject_status(run, report_manifest)
         group = loaded["subjects"].get(f"{repository_id}/{subject_key}")
         scope_is_complete = bool(group and _scope_complete(group))
+        label_subjects = _label_scope_subjects(group)
+        # Precision can only call unmatched predictions false positives when
+        # the entire declared label scope was actually collected.  A run may
+        # report some subjects as complete while silently omitting another
+        # declared subject; treating those individual predictions as labeled
+        # would make scope-level coverage look better than it was.
+        run_scope_complete = (
+            run_complete and scope_is_complete and bool(label_subjects)
+            and label_subjects <= set(statuses)
+            and all(statuses[subject] == "complete" for subject in label_subjects)
+        )
         scope_predictions = 0
         for finding in findings:
             base_subject = finding["subject"]
             namespaced = f"{repository_id}::{subject_key}::{base_subject}"
             predictions.append({**finding, "subject": namespaced})
             scope_predictions += 1
-            subject_ok = (statuses.get(base_subject) == "complete"
-                          if statuses else run_complete)
-            if run_complete and subject_ok and scope_is_complete:
-                complete_subjects.add(namespaced)
+        if run_scope_complete:
+            complete_subjects.update(
+                f"{repository_id}::{subject_key}::{subject}"
+                for subject in label_subjects)
         reason = None
         if not run_complete:
             reason = f"run status {run['status']!r} did not provide complete coverage"
@@ -537,16 +563,46 @@ def _build_scoring_inputs(loaded: Mapping[str, Any], manifest: Mapping[str, Any]
             "run_id": run["run_id"],
             "run_status": run["status"],
             "run_complete": run_complete,
+            "run_scope_complete": run_scope_complete,
             "label_scope_complete": scope_is_complete,
             "predicted": scope_predictions,
             "reviewed_positive_labels": source_expected_by_scope.get(key, 0),
             "missing_run": False,
             "subject_statuses": dict(sorted(statuses.items())),
+            "label_subjects": sorted(label_subjects),
             "graph_freshness": run["graph_freshness"],
         })
     for key, group in sorted(loaded["subjects"].items()):
-        if key in primary:
+        repository_id, subject_key = key.split("/", 1)
+        if (repository_id, subject_key) in primary:
             continue
+        # Keep complete human label scopes in coverage even when the selected
+        # condition has no corresponding run.  Otherwise their expected
+        # findings disappear from both recall and the coverage gate, allowing
+        # a score over a cherry-picked subset of the frozen corpus.
+        if _scope_complete(group):
+            unavailable_scopes.append({
+                "repository_id": repository_id,
+                "subject_key": subject_key,
+                "run_id": None,
+                "reason": "no scored run for this label scope",
+            })
+            scope_rows.append({
+                "repository_id": repository_id,
+                "subject_key": subject_key,
+                "run_id": None,
+                "run_status": "missing",
+                "run_complete": False,
+                "run_scope_complete": False,
+                "label_scope_complete": True,
+                "predicted": 0,
+                "reviewed_positive_labels": source_expected_by_scope.get(
+                    (repository_id, subject_key), 0),
+                "missing_run": True,
+                "subject_statuses": {},
+                "label_subjects": sorted(_label_scope_subjects(group)),
+                "graph_freshness": "unknown",
+            })
     return {
         "primary": primary,
         "repeats": repeats,
@@ -610,7 +666,7 @@ def _verify_source_digests(loaded: Mapping[str, Any], manifest: Mapping[str, Any
                 checked += 1
     if mismatched:
         status = "mismatch"
-    elif missing:
+    elif missing or not_recorded:
         status = "incomplete"
     elif checked:
         status = "verified"
@@ -673,7 +729,8 @@ def _operational(record: Mapping[str, Any]) -> dict[str, Any]:
     failures = [run["run_id"] for run in runs
                 if run.get("exit_status") not in (None, 0)]
     return {
-        "status": "measured" if measured else "not_measured",
+        "status": ("not_measured" if not measured else
+                   "measured" if len(measured) == len(runs) else "partially_measured"),
         "runs": len(runs),
         "runs_with_budget": len(measured),
         "within_budget": len(within),
@@ -709,26 +766,41 @@ def _coverage(loaded: Mapping[str, Any], manifest: Mapping[str, Any],
         if f"{slot['repository_id']}/{slot['id']}" not in group_keys)
     complete_repositories: list[str] = []
     incomplete_repositories: list[str] = []
+    scored_complete_keys = {
+        f"{row['repository_id']}/{row['subject_key']}"
+        for row in inputs["scope_rows"]
+        if row.get("run_scope_complete")
+        and bool(row.get("label_subjects"))
+    }
     for repo in manifest_repos:
         repo_id = repo["id"]
         expected_keys = {"whole-repo"} | {
             slot["id"] for slot in active_slots if slot["repository_id"] == repo_id
         }
         have = {key.split("/", 1)[1] for key in complete_keys
-                if key.startswith(repo_id + "/")}
+                if key.startswith(repo_id + "/")
+                and key in scored_complete_keys}
         if expected_keys <= have:
             complete_repositories.append(repo_id)
         else:
             incomplete_repositories.append(repo_id)
     unavailable = inputs["unavailable_scopes"]
-    missing_for_complete = [
-        item for item in unavailable
-        if item.get("subject_key") and item.get("reason") in {
-            "no scored run for this label scope",
-            "run status 'partial' did not provide complete coverage",
-            "run status 'failed' did not provide complete coverage",
-        } and f"{item['repository_id']}/{item['subject_key']}" in complete_keys
-    ]
+    scope_by_key = {
+        f"{row['repository_id']}/{row['subject_key']}": row
+        for row in inputs["scope_rows"]
+    }
+    missing_for_complete = []
+    for key in sorted(complete_keys):
+        row = scope_by_key.get(key)
+        if row is None or key not in scored_complete_keys:
+            missing_for_complete.append({
+                "repository_id": key.split("/", 1)[0],
+                "subject_key": key.split("/", 1)[1],
+                "run_id": row.get("run_id") if row else None,
+                "reason": ("no scored run for this label scope"
+                           if row is None or row.get("missing_run") else
+                           "run did not provide complete coverage"),
+            })
     stale_runs = [row for row in inputs["scope_rows"]
                   if row.get("graph_freshness") == "stale"]
     return {
@@ -772,6 +844,8 @@ def _aggregate_subjects(score: Mapping[str, Any], base_key: str) -> dict[str, An
     complete_rows = [(key, row) for key, row in matching if row.get("complete")]
     tp_complete = sum(row.get("true_positive") or 0 for _, row in complete_rows)
     fp = sum(row.get("false_positive") or 0 for _, row in complete_rows)
+    complete_predicted = sum(row.get("predicted") or 0
+                             for _, row in complete_rows)
     tp = sum(row.get("true_positive") or 0 for _, row in matching)
     expected = sum(row.get("expected") or 0 for _, row in matching)
     predicted = sum(row.get("predicted") or 0 for _, row in matching)
@@ -783,6 +857,7 @@ def _aggregate_subjects(score: Mapping[str, Any], base_key: str) -> dict[str, An
         "scopes": sorted({_subject_parts(key)[1] for key, _ in matching}),
         "expected": expected,
         "predicted": predicted,
+        "complete_scope_predicted": complete_predicted,
         "true_positive": tp,
         "false_positive": fp,
         "false_negative": fn,
@@ -938,20 +1013,28 @@ def evaluate_gates(metrics: Mapping[str, Any]) -> dict[str, Any]:
         }
 
     qualifying = [row for row in subject_rows
-                  if int(row.get("predicted") or 0) >= SUBJECT_PREDICTION_MINIMUM]
+                  if isinstance(row.get("complete_scope_predicted"), int)
+                  and not isinstance(row.get("complete_scope_predicted"), bool)
+                  and row["complete_scope_predicted"] >= SUBJECT_PREDICTION_MINIMUM]
     weak = [row for row in qualifying
             if row.get("precision") is None
             or float(row["precision"]) < SUBJECT_PRECISION_FLOOR]
     if not qualifying:
         gates["subject_stability"] = {
             "status": "insufficient_data",
+            "observed": {"qualifying": 0,
+                         "prediction_scope": "complete label scopes only"},
             "reason": f"no subject has at least {SUBJECT_PREDICTION_MINIMUM} predictions"}
     else:
         gates["subject_stability"] = {
             "status": "pass" if not weak else "fail",
             "threshold": {"minimum_predictions": SUBJECT_PREDICTION_MINIMUM,
                           "precision_floor": SUBJECT_PRECISION_FLOOR},
-            "observed": {"qualifying": len(qualifying), "weak": weak},
+            "observed": {
+                "qualifying": len(qualifying),
+                "weak": weak,
+                "prediction_scope": "complete label scopes only",
+            },
         }
 
     if noise is None:
@@ -992,11 +1075,17 @@ def evaluate_gates(metrics: Mapping[str, Any]) -> dict[str, Any]:
     if operational.get("status") != "measured":
         gates["operational_bounds"] = {
             "status": "insufficient_data",
-            "reason": "run durations/budgets were not recorded"}
+            "observed": {"runs": operational.get("runs"),
+                         "runs_with_budget": operational.get("runs_with_budget")},
+            "reason": "run durations/budgets were not recorded for every run"}
     elif operational.get("writes_outside_allowed_paths"):
         gates["operational_bounds"] = {
             "status": "fail", "observed": operational,
             "reason": "a run wrote outside the allowed report/state paths"}
+    elif operational.get("nonzero_exit_runs"):
+        gates["operational_bounds"] = {
+            "status": "fail", "observed": operational,
+            "reason": "a run exited with a nonzero status"}
     else:
         rate = operational.get("within_budget_rate")
         gates["operational_bounds"] = {
