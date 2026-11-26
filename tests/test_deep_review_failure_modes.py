@@ -51,6 +51,58 @@ def test_invalid_python_returns_no_candidates():
     assert analyze("broken.py", "while True: try") == []
 
 
+def test_flags_broad_handler_returning_default_but_not_narrow_error_handling():
+    source = '''\
+def load():
+    try:
+        return read_config()
+    except Exception:
+        return {}
+
+def expected_missing_file():
+    try:
+        return read_optional()
+    except FileNotFoundError:
+        return None
+'''
+    findings = analyze("config.py", source)
+    assert [finding["type"] for finding in findings] == [
+        "broad_exception_returns_default"]
+    assert findings[0]["locations"] == [{"path": "config.py", "symbol": "load"}]
+    assert findings[0]["line"] == 4
+
+
+def test_ignores_shadowed_broad_exception_names_and_nonliteral_containers():
+    source = '''\
+Exception = ValueError
+
+def shadowed():
+    try:
+        work()
+    except Exception:
+        return {}
+
+def computed_fallback():
+    try:
+        work()
+    except BaseException:
+        return [make_default()]
+'''
+    assert analyze("fallbacks.py", source) == []
+
+
+def test_accepts_container_with_only_nested_literals():
+    findings = analyze("fallbacks.py", '''\
+def fallback():
+    try:
+        work()
+    except BaseException:
+        return {"items": [None, 3]}
+''')
+    assert [finding["type"] for finding in findings] == [
+        "broad_exception_returns_default"]
+
+
 def test_candidate_flows_through_bounded_static_file_scan(tmp_path):
     from ozagia.core.deep_review.analyzers.static import analyze as analyze_static
 
