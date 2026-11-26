@@ -649,6 +649,53 @@ def test_tmp_mcp_tools_are_full_surface_and_read_only(server) -> None:
     assert "dev_tmp_status" not in graph_names
 
 
+def test_dev_assets_tools_are_read_only(server, tmp_path: Path,
+                                        monkeypatch) -> None:
+    from ozagia.core import assets as A
+
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-home"))
+    root = Path(server.mem.raw_repo_root)
+    target = tmp_path / "asset-mcp"
+    target.mkdir()
+    (target / "blob.bin").write_text(
+        "CANARY NOT A RETURNED CONTENT", encoding="utf-8")
+    asset = A.register(root, target, kind="dataset", owner="ozagia",
+                       pinned=True, reason="mcp fixture")
+
+    reply = server.handle(_call("dev_assets_list", {"kind": "dataset"}))
+    payload = json.loads(reply["result"]["content"][0]["text"])
+    assert payload["ok"] is True and payload["count"] == 1
+    assert payload["assets"][0]["id"] == asset["id"]
+    assert payload["assets"][0]["pinned"] is True
+    assert "CANARY" not in json.dumps(payload)
+
+    reply = server.handle(_call("dev_assets_list", {"owner": "ocelot"}))
+    payload = json.loads(reply["result"]["content"][0]["text"])
+    assert payload["ok"] is True and payload["count"] == 0
+
+    reply = server.handle(_call("dev_assets_list", {"owner": "nope"}))
+    payload = json.loads(reply["result"]["content"][0]["text"])
+    assert payload["ok"] is False
+
+    reply = server.handle(_call("dev_assets_status", {"top": 1}))
+    payload = json.loads(reply["result"]["content"][0]["text"])
+    assert payload["ok"] is True
+    assert payload["totals"]["entries"] == 1
+    assert payload["by_kind"]["dataset"]["entries"] == 1
+    assert payload["by_owner"]["ozagia"]["entries"] == 1
+    assert payload["totals"]["pinned"] == 1
+    assert payload["top"][0]["id"] == asset["id"]
+
+    names = {tool["name"] for tool in server._tools}
+    assert {"dev_assets_list", "dev_assets_status"} <= names
+    assert not ({"dev_assets_register", "dev_assets_delete",
+                 "dev_assets_pin", "dev_assets_verify"} & names)
+    graph = DevMemoryServer(server.mem, surface="graph")
+    graph_names = {tool["name"] for tool in graph._tools}
+    assert "dev_assets_list" not in graph_names
+    assert "dev_assets_status" not in graph_names
+
+
 def test_server_without_memory_still_builds_the_coding_tool_list() -> None:
     """A server may be started before a snapshot exists; static tools must load.
 

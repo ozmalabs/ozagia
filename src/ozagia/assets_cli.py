@@ -3,12 +3,13 @@
     ozagia assets list    [--owner O] [--kind K] [--state S] [--pinned] [--json]
     ozagia assets status  [ID | --path P] [--top N] [--json]
     ozagia assets scan    [--path P ...] [--json]
+    ozagia assets discover [--limit N] [--no-research] [--json]
     ozagia assets register --path P --kind K --owner O [--scope S]
                            [--source-url URL] [--source-kind K] [--dataset D]
                            [--revision R] [--commit C] [--version V]
                            [--sha256 S] [--license SPDX] [--pinned]
-                           [--deletable] [--mark] [--id ID] [--reason TEXT]
-                           [--json]
+                           [--deletable | --no-delete] [--mark] [--id ID]
+                           [--from-hf-metadata] [--reason TEXT] [--json]
     ozagia assets adopt   PATH --kind K [--owner O] [--reason TEXT] [--mark]
                            [--json]
     ozagia assets verify  [ID | --all] [--hash] [--json]
@@ -19,9 +20,11 @@
                            [--json]
 
 Assets are durable datasets, models, corpora, installs, caches and tool trees,
-not temporary workspaces.  The registry stores metadata only.  ``gc`` is a dry
-run in this stage; ``--apply`` is refused.  Plain output is short and stable and
-never includes file contents.
+not temporary workspaces.  The registry stores metadata only.  ``discover``
+reads only known Ozagia-owned manifests and layouts (never ``$HOME``, never
+file contents, never the network); everything else needs an explicit
+``register``.  ``gc`` is a dry run in this stage; ``--apply`` is refused.
+Plain output is short and stable and never includes file contents.
 
 Exit status is 0 for success (including an empty GC plan), 1 for a refusal,
 a missing record or a verification failure, and 2 for bad arguments.
@@ -84,6 +87,15 @@ def _add_actions(children: Any) -> None:
                          help="explicit path to inspect for a marker "
                               "(repeatable; the home directory is refused)")
 
+    discovered = common(children.add_parser(
+        "discover",
+        help="register known Ozagia-owned roots and manifests"))
+    discovered.add_argument("--limit", type=_non_negative, default=None,
+                            metavar="N",
+                            help="most candidate entries to examine")
+    discovered.add_argument("--no-research", action="store_true",
+                            help="skip the research cache/fetch roots")
+
     registered = common(children.add_parser(
         "register", help="record an existing durable asset"))
     registered.add_argument("--path", required=True, metavar="P")
@@ -106,11 +118,19 @@ def _add_actions(children: Any) -> None:
                             help="explicit licence identifier; never inferred")
     registered.add_argument("--pinned", action="store_true",
                             help="never a GC candidate")
-    registered.add_argument("--deletable", action="store_true",
-                            help="the owner permits explicit deletion")
+    deletion = registered.add_mutually_exclusive_group()
+    deletion.add_argument("--deletable", action="store_true",
+                          help="the owner permits explicit deletion")
+    deletion.add_argument("--no-delete", action="store_true",
+                          help="explicitly record that deletion is not permitted "
+                               "(the default)")
     registered.add_argument("--mark", action="store_true",
                             help="write .ozagia-asset.json (owned assets only)")
     registered.add_argument("--id", default=None, metavar="ID")
+    registered.add_argument(
+        "--from-hf-metadata", action="store_true",
+        help="read <path>/.cache/huggingface/download/**/*.metadata for the "
+             "revision and per-file etags; never opens or hashes the data")
     registered.add_argument("--reason", default="", metavar="TEXT",
                             help="short label, never contents or secrets")
 
@@ -288,6 +308,27 @@ def _format_scan(result: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _format_discover(result: dict[str, Any]) -> str:
+    lines = [
+        f"discovered={len(result['assets'])}  "
+        f"skipped={len(result['skipped'])}  "
+        f"errors={len(result['errors'])}  "
+        f"partial={'yes' if result['partial'] else 'no'}  "
+        f"limit={result['limit']}",
+    ]
+    for root in result["roots"]:
+        location = root.get("path") or "-"
+        lines.append(
+            f"  root {root['name']:<20} {root['status']:<14} "
+            f"registered={root['registered']}  {location}")
+    lines.extend(f"  registered {row['id']}  {row['path']}"
+                 for row in result["assets"])
+    lines.extend(f"  skipped {row['path']}: {row['reason']}"
+                 for row in result["skipped"])
+    lines.extend(f"  error: {error}" for error in result["errors"])
+    return "\n".join(lines)
+
+
 def _format_verify(results: list[dict[str, Any]]) -> str:
     lines = [_format_asset(row) + f"  reason={row.get('reason') or '-'}"
              for row in results]
@@ -375,13 +416,40 @@ def run(args: argparse.Namespace) -> int:
             else:
                 print(_format_scan(result))
             return 0
+        if action == "discover":
+            result = A.discover(
+                root, limit=args.limit if args.limit is not None
+                else A.MAX_SCAN_LIMIT,
+                include_research=not args.no_research)
+            if as_json:
+                _print_json({"ok": True, **result})
+            else:
+                print(_format_discover(result))
+            return 0
         if action == "register":
+            source = _source(args)
+            revision = args.revision
+            digests = None
+            if args.from_hf_metadata:
+                if args.sha256:
+                    return _bad_args(
+                        "--from-hf-metadata cannot be combined with --sha256",
+                        as_json=as_json)
+                metadata = A.read_hf_metadata(args.path)
+                revision = revision or metadata["revision"]
+                digests = metadata["digests"]
+                if source is None:
+                    source = {"kind": "huggingface",
+                              "revision": metadata["revision"]}
+                elif source.get("revision") is None:
+                    source["revision"] = metadata["revision"]
             asset = A.register(
                 root, args.path, kind=args.kind, owner=args.owner,
-                scope=args.scope, source=_source(args),
-                version=args.version, revision=args.revision,
-                sha256=args.sha256, license=args.license,
-                pinned=args.pinned, deletable=args.deletable,
+                scope=args.scope, source=source,
+                version=args.version, revision=revision,
+                sha256=args.sha256, digests=digests, license=args.license,
+                pinned=args.pinned,
+                deletable=bool(args.deletable and not args.no_delete),
                 mark=args.mark, id=args.id, reason=args.reason)
             if as_json:
                 _print_json({"ok": True, "asset": asset})

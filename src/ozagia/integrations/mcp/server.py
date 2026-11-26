@@ -1022,6 +1022,40 @@ _TOOLS.extend([
             "write or delete tool."),
         "inputSchema": _schema({}),
     },
+    {
+        "name": "dev_assets_list",
+        "description": (
+            "List durable external assets recorded in the read-mostly asset "
+            "catalog (datasets, models, corpora, installs, caches and tools): "
+            "id, path, kind, owner, scope, source, licence, size, inodes, "
+            "verification state and pin/deletion flags. Filters owner, kind, "
+            "state, pinned and limit. Metadata only; no file contents. "
+            "Read-only: there is no MCP register, pin, verify or delete tool."),
+        "inputSchema": _schema({
+            "owner": {"type": "string",
+                      "description": "Only this owner (ozagia, ocelot, huggingface, user, upstream, external)."},
+            "kind": {"type": "string",
+                     "description": "Only this kind (dataset, model, corpus, install, cache, tool, other)."},
+            "state": {"type": "string",
+                      "description": "Only this state (present, missing, partial, verified, mismatch, unverified)."},
+            "pinned": {"type": "boolean",
+                       "description": "Only pinned (true) or unpinned (false) assets."},
+            "limit": {"type": "integer", "default": 100,
+                      "description": "Most assets to return (at most 1000)."},
+        }),
+    },
+    {
+        "name": "dev_assets_status",
+        "description": (
+            "Durable external asset status: totals by kind, owner and state, "
+            "allocated/apparent bytes and inodes, pinned/deletable counts and "
+            "the largest entries. Metadata only and read-only; it never "
+            "hashes, walks or deletes anything."),
+        "inputSchema": _schema({
+            "top": {"type": "integer", "default": 10,
+                    "description": "Largest entries to include (at most 100)."},
+        }),
+    },
 ])
 
 
@@ -1540,6 +1574,8 @@ class DevMemoryServer:
             "dev_files_explain": self._files_explain,
             "dev_tmp_list": self._tmp_list,
             "dev_tmp_status": self._tmp_status,
+            "dev_assets_list": self._assets_list,
+            "dev_assets_status": self._assets_status,
             "dev_review_repo": self._review_repo,
             "dev_deep_review": self._deep_review,
             "dev_supply_chain": self._supply_chain,
@@ -2657,6 +2693,30 @@ class DevMemoryServer:
         try:
             report = T.status(self._files_root())
         except T.TempSpaceError as e:
+            return {"ok": False, "error": str(e)}
+        return {"ok": True, **report}
+
+    # -- durable external assets (`ozagia.core.assets`) --------------------- #
+    def _assets_list(self, a: dict[str, Any]) -> Any:
+        from ozagia.core import assets as A
+        limit = max(1, min(int(a.get("limit", 100)), 1000))
+        try:
+            entries = A.list_assets(
+                self._files_root(), owner=a.get("owner") or None,
+                kind=a.get("kind") or None, state=a.get("state") or None,
+                pinned=a.get("pinned"))
+        except A.AssetError as e:
+            return {"ok": False, "error": str(e)}
+        return {"ok": True, "assets": entries[:limit],
+                "count": len(entries), "truncated": len(entries) > limit,
+                "limit": limit, "root": str(self._files_root())}
+
+    def _assets_status(self, a: dict[str, Any]) -> Any:
+        from ozagia.core import assets as A
+        top = max(0, min(int(a.get("top", 10)), 100))
+        try:
+            report = A.status(self._files_root(), top=top)
+        except A.AssetError as e:
             return {"ok": False, "error": str(e)}
         return {"ok": True, **report}
 

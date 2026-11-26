@@ -26,6 +26,18 @@ Both are written atomically (same-directory ``mkstemp``, ``fsync``,
 ``os.replace``).  Records contain metadata only: no file contents, prompts,
 credentials or environment.
 
+Known-root discovery
+-------------------
+
+:func:`discover` reads only exact, known Ozagia-owned manifests and layouts:
+managed Ocelot installs, the Hugging Face benchmark cache, deep-review corpus
+checkouts, model metadata and (optionally) the research caches.  It never walks
+``$HOME`` or an arbitrary tree, never follows symlinks, never reads file
+contents and never uses the network.  :func:`read_hf_metadata` reads only a
+dataset's ``.cache/huggingface/download/**/*.metadata`` for an explicit path and
+never opens or hashes the data files.  Everything else needs an explicit
+``register``/``adopt``.
+
 Safety
 ------
 
@@ -55,6 +67,7 @@ import tempfile
 import time
 from pathlib import Path
 from typing import Any, Mapping, Sequence
+from urllib.parse import urlsplit, urlunsplit
 
 from ozagia.config import state_path
 from ozagia.core import temp_space as TS
@@ -62,6 +75,21 @@ from ozagia.core import temp_space as TS
 SCHEMA = "ozagia.asset/1"
 MARKER_NAME = ".ozagia-asset.json"
 REGISTRY_DIRNAME = "registry"
+
+# Known-root discovery only reads these manifests and layouts.  It never walks
+# the home directory, an arbitrary tree, or file contents.
+OCELOT_MANIFEST_NAME = ".ozagia-ocelot.json"
+DEEP_REVIEW_MARKER_NAME = ".ozagia-deep-review-corpus.json"
+DEEP_REVIEW_MANIFEST_NAME = "corpus.json"
+MODEL_META_SUFFIX = ".meta.json"
+HF_META_NAME = "meta.json"
+HF_DOWNLOAD_PARTS = (".cache", "huggingface", "download")
+HF_METADATA_SUFFIX = ".metadata"
+OCELOT_LICENSE_SPDX = "MIT"
+MAX_KNOWN_MANIFEST_BYTES = 8 * 1024 * 1024
+MAX_HF_METADATA_BYTES = 64 * 1024
+MAX_HF_METADATA_FILES = 5_000
+MAX_SOURCE_LINE = 4_096
 
 KINDS = ("dataset", "model", "corpus", "install", "cache", "tool", "other")
 OWNERS = ("ozagia", "ocelot", "huggingface", "user", "upstream", "external")
@@ -309,7 +337,7 @@ def _validate_sha256(value: Any) -> str:
 
 def _normalise_source(value: Any) -> dict[str, Any]:
     result: dict[str, Any] = {
-        "kind": "unknown", "url": None, "dataset": None,
+        "kind": "unknown", "url": None, "dataset": None, "repo": None,
         "revision": None, "commit": None, "manifest": None,
     }
     if value is None:
@@ -324,10 +352,10 @@ def _normalise_source(value: Any) -> dict[str, Any]:
     if kind is None:
         if value.get("dataset") is not None:
             kind = "huggingface"
+        elif value.get("repo") is not None or value.get("commit") is not None:
+            kind = "git"
         elif value.get("manifest") is not None:
             kind = "manifest"
-        elif value.get("commit") is not None:
-            kind = "git"
         elif value.get("url") is not None:
             kind = "url"
         else:
@@ -338,7 +366,7 @@ def _normalise_source(value: Any) -> dict[str, Any]:
             f"unknown source kind {kind!r}; expected one of "
             + ", ".join(SOURCE_KINDS))
     result["kind"] = kind
-    for key in ("url", "dataset", "revision", "commit", "manifest"):
+    for key in ("url", "dataset", "repo", "revision", "commit", "manifest"):
         result[key] = _optional_text(value.get(key), f"source.{key}",
                                      limit=4096)
     return result
@@ -352,7 +380,8 @@ def _merge_source(existing: Any, value: Any) -> dict[str, Any]:
     if isinstance(value, Mapping) and value.get("kind") is None:
         # A supplied object with only some fields keeps the existing kind.
         incoming["kind"] = base["kind"]
-    for key in ("kind", "url", "dataset", "revision", "commit", "manifest"):
+    for key in ("kind", "url", "dataset", "repo", "revision", "commit",
+                "manifest"):
         if incoming[key] is not None:
             base[key] = incoming[key]
     return base
@@ -415,6 +444,32 @@ def _normalise_digests(value: Any) -> list[dict[str, Any]]:
             "derived": bool(item.get("derived", False)),
         })
     return result
+
+
+def _normalise_tree(value: Any) -> dict[str, Any] | None:
+    """Manifest tree metadata: sha256, bytes and file count, never contents."""
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise AssetError("tree must be an object")
+    digest = value.get("sha256")
+    if digest is not None:
+        digest = _validate_sha256(digest)
+    size = value.get("bytes")
+    if size is not None and (not isinstance(size, int)
+                             or isinstance(size, bool) or size < 0):
+        raise AssetError("tree.bytes must be a non-negative integer")
+    count = value.get("file_count")
+    if count is None and isinstance(value.get("files"), (list, tuple)):
+        count = len(value["files"])
+    if count is not None and (not isinstance(count, int)
+                              or isinstance(count, bool) or count < 0):
+        raise AssetError("tree.file_count must be a non-negative integer")
+    return {
+        "sha256": digest,
+        "bytes": int(size) if size is not None else None,
+        "file_count": int(count) if count is not None else None,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -652,6 +707,10 @@ def _normalise_record(record: Mapping[str, Any]) -> dict[str, Any]:
     entry["manifest_path"] = (str(record["manifest_path"])
                               if record.get("manifest_path") is not None
                               else None)
+    if record.get("tree") is not None:
+        entry["tree"] = _normalise_tree(record.get("tree"))
+    if record.get("fetched_at") is not None:
+        entry["fetched_at"] = str(record.get("fetched_at"))
     return entry
 
 
@@ -869,10 +928,12 @@ def register(root: str | Path, path: str | Path, *, kind: str,
              owner: str, scope: str = DEFAULT_SCOPE, source: Any = None,
              version: str | None = None, revision: str | None = None,
              sha256: str | None = None, digests: Any = None,
-             license: Any = None, pinned: bool = False,
+             tree: Any = None, license: Any = None, pinned: bool = False,
              deletable: bool = False, mark: bool = False,
              id: str | None = None, reason: str = "",
-             manifest_path: str | None = None) -> dict[str, Any]:
+             manifest_path: str | None = None,
+             fetched_at: str | None = None,
+             preserve_pin: bool = False) -> dict[str, Any]:
     """Record an existing (or currently missing) durable asset.
 
     ``bytes`` is allocated space, ``apparent_bytes`` is ``st_size``.  A path
@@ -889,8 +950,10 @@ def register(root: str | Path, path: str | Path, *, kind: str,
     if sha256 is not None:
         sha256 = _validate_sha256(sha256)
     digests = _normalise_digests(digests)
+    tree = _normalise_tree(tree)
     manifest_path = _optional_text(manifest_path, "manifest_path",
                                    limit=4096)
+    fetched_at = _optional_text(fetched_at, "fetched_at", limit=64)
     target = _canonical(root, path)
     existing = _find_identity(root, target, owner, kind)
     asset_id = _choose_id(root, target, owner, kind, id, existing)
@@ -914,11 +977,15 @@ def register(root: str | Path, path: str | Path, *, kind: str,
             sha256 = existing.get("sha256")
         if not digests:
             digests = _normalise_digests(existing.get("digests"))
+        if tree is None and existing.get("tree") is not None:
+            tree = _normalise_tree(existing.get("tree"))
         source_value = _merge_source(existing.get("source"), source)
         license_value = (_normalise_license(existing.get("license"))
                          if license is None else _normalise_license(license))
         if manifest_path is None:
             manifest_path = existing.get("manifest_path")
+        if fetched_at is None and isinstance(existing.get("fetched_at"), str):
+            fetched_at = existing.get("fetched_at")
         verified_at = existing.get("verified_at")
         if sha256 != existing.get("sha256"):
             verified_at = None
@@ -965,13 +1032,19 @@ def register(root: str | Path, path: str | Path, *, kind: str,
                        else now),
         "verified_at": verified_at if isinstance(verified_at, int) else None,
         "last_used_at": now,
-        "pinned": bool(pinned),
+        "pinned": (bool(existing.get("pinned"))
+                   if preserve_pin and existing is not None
+                   else bool(pinned)),
         "deletable": bool(deletable),
         "state": state,
         "reason": reason,
         "manifest_path": manifest_path,
         "marker": None,
     })
+    if tree is not None:
+        base["tree"] = tree
+    if fetched_at is not None:
+        base["fetched_at"] = fetched_at
     base.update(measurement)
     if state == "mismatch":
         base["reason"] = reason or "path is now a symlink"
@@ -1514,6 +1587,720 @@ def scan(root: str | Path, *, paths: Sequence[str | Path] | None = None,
 
 
 # --------------------------------------------------------------------------- #
+# known-root discovery and HF metadata (read-only, no network, no hashing)
+# --------------------------------------------------------------------------- #
+
+
+def _read_json_object(path: Path, *,
+                      max_bytes: int = MAX_KNOWN_MANIFEST_BYTES
+                      ) -> dict[str, Any]:
+    """Read a bounded JSON object without following a symlink."""
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError as exc:
+        raise AssetError(f"manifest does not exist: {path}") from exc
+    except OSError as exc:
+        raise AssetError(f"cannot inspect manifest {path}: {exc}") from exc
+    if stat.S_ISLNK(info.st_mode):
+        raise AssetPathError(f"refusing a symlink manifest: {path}")
+    if not stat.S_ISREG(info.st_mode):
+        raise AssetError(f"manifest is not a regular file: {path}")
+    if info.st_size > max_bytes:
+        raise AssetError(f"manifest {path} exceeds the {max_bytes}-byte limit")
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            value = json.load(handle)
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise AssetError(f"cannot read manifest {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise AssetError(f"manifest {path} is not a JSON object")
+    return value
+
+
+def _redacted_url(value: Any) -> str | None:
+    """A source URL without credentials, query or fragment."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    try:
+        parts = urlsplit(text)
+    except ValueError:
+        return text[:MAX_SOURCE_LINE]
+    if not parts.scheme or not parts.netloc:
+        return text[:MAX_SOURCE_LINE]
+    host = parts.hostname or ""
+    try:
+        port = parts.port
+    except ValueError:
+        port = None
+    netloc = f"{host}:{port}" if port is not None else host
+    return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+
+
+def _maybe_sha256(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip().lower()
+    return text if _SHA256_RE.match(text) else None
+
+
+def _declared_license(value: Any, *,
+                      status: Any = None,
+                      source: str | None = None) -> dict[str, Any] | None:
+    """A licence explicitly declared by a manifest, or ``None``."""
+    if value is None:
+        return None
+    if isinstance(value, Mapping):
+        candidate = value.get("spdx") or value.get("license")
+        if not isinstance(candidate, str) or not candidate.strip():
+            return None
+        spdx = candidate.strip()
+        raw_status = value.get("status", status)
+        origin = value.get("source") or source
+    elif isinstance(value, str):
+        spdx = value.strip()
+        raw_status = status
+        origin = source
+    else:
+        return None
+    if not spdx or _CONTROL_RE.search(spdx):
+        return None
+    text_status = str(raw_status or "declared").strip().lower()
+    if text_status in LICENSE_STATUSES:
+        chosen = text_status
+    elif text_status == "unknown":
+        chosen = "unknown"
+    else:
+        chosen = "declared"
+    return {
+        "spdx": spdx[:MAX_TOKEN],
+        "status": chosen,
+        "source": (str(origin)[:MAX_TOKEN] if origin else None),
+    }
+
+
+def _manifest_digests(files: Any) -> list[dict[str, Any]]:
+    """Digests from an install manifest tree, capped at ``MAX_DIGESTS``."""
+    if not isinstance(files, list) or not files or len(files) > MAX_DIGESTS:
+        return []
+    raw: list[dict[str, Any]] = []
+    for item in files:
+        if not isinstance(item, Mapping):
+            raise AssetError("manifest file entries must be objects")
+        raw_sha = item.get("sha256")
+        digest = _maybe_sha256(raw_sha)
+        if raw_sha is not None and digest is None:
+            raise AssetError("manifest file sha256 is not 64 hexadecimal chars")
+        raw.append({
+            "path": item.get("path"),
+            "sha256": digest,
+            "bytes": item.get("size", item.get("bytes", 0)),
+            "verified": True,
+            "derived": False,
+        })
+    return _normalise_digests(raw)
+
+
+def _tree_summary(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    return _normalise_tree(value)
+
+
+def _empty_discovery() -> dict[str, Any]:
+    return {"registered": [], "skipped": [], "errors": [],
+            "partial": False, "examined": 0}
+
+
+def ocelot_install_root() -> Path | None:
+    """The known managed-install root, without importing Ocelot."""
+    home = _data_home()
+    if home is None:
+        return None
+    return home / "ozagia" / "ocelot"
+
+
+def hf_cache_root(root: str | Path) -> Path:
+    return state_path(root, "eval", "hf")
+
+
+def deep_review_root(root: str | Path) -> Path:
+    return state_path(root, "eval", "deep_review_corpus")
+
+
+def model_cache_root(root: str | Path) -> Path:
+    return state_path(root, "models")
+
+
+def _children(path: Path) -> list[os.DirEntry[str]]:
+    with os.scandir(path) as handle:
+        return sorted(handle, key=lambda entry: entry.name)
+
+
+def _discover_ocelot_installs(root: str | Path, limit: int
+                              ) -> dict[str, Any]:
+    result = _empty_discovery()
+    base = ocelot_install_root()
+    if base is None:
+        return result
+    try:
+        entries = _children(base)
+    except OSError as exc:
+        result["errors"].append(f"cannot read Ocelot install root {base}: {exc}")
+        result["partial"] = True
+        return result
+    for entry in entries:
+        if result["examined"] >= limit:
+            result["partial"] = True
+            result["skipped"].append(
+                {"path": entry.path, "reason": "discovery limit reached"})
+            break
+        result["examined"] += 1
+        if entry.name.startswith(".") or entry.is_symlink():
+            result["skipped"].append(
+                {"path": entry.path, "reason": "not a managed install directory"})
+            continue
+        if not entry.is_dir(follow_symlinks=False):
+            result["skipped"].append(
+                {"path": entry.path, "reason": "not a directory"})
+            continue
+        manifest_path = Path(entry.path) / OCELOT_MANIFEST_NAME
+        if not manifest_path.is_file() or manifest_path.is_symlink():
+            result["skipped"].append(
+                {"path": entry.path,
+                 "reason": f"no {OCELOT_MANIFEST_NAME} manifest"})
+            continue
+        try:
+            manifest = _read_json_object(manifest_path)
+            tree_value = manifest.get("tree")
+            raw_files = (tree_value.get("files")
+                         if isinstance(tree_value, Mapping) else None)
+            digests = _manifest_digests(raw_files)
+            tree = _tree_summary(tree_value)
+            version = _optional_text(manifest.get("version"), "version") \
+                or entry.name
+            sha256 = _maybe_sha256(manifest.get("sha256"))
+            if manifest.get("sha256") is not None and sha256 is None:
+                raise AssetError("manifest sha256 is not 64 hexadecimal chars")
+            url = _redacted_url(manifest.get("source"))
+            source = {"kind": "manifest", "manifest": str(manifest_path),
+                      "url": url}
+            license_value = _declared_license(
+                manifest.get("license"), status="declared",
+                source="ocelot manifest")
+            if license_value is None:
+                license_value = {"spdx": OCELOT_LICENSE_SPDX,
+                                 "status": "declared",
+                                 "source": "declared constant"}
+            record = register(
+                root, entry.path, kind="install", owner="ozagia",
+                scope="user", source=source, version=version,
+                sha256=sha256, digests=digests, tree=tree,
+                license=license_value, pinned=True, deletable=False,
+                manifest_path=str(manifest_path),
+                reason=f"Ocelot managed install {version}",
+                preserve_pin=True)
+        except (AssetError, OSError) as exc:
+            result["errors"].append(f"{manifest_path}: {exc}")
+            continue
+        result["registered"].append(record)
+    return result
+
+
+def _discover_hf(root: str | Path, limit: int) -> dict[str, Any]:
+    result = _empty_discovery()
+    base = hf_cache_root(root)
+    if not base.is_dir() or base.is_symlink():
+        return result
+    try:
+        benchmarks = _children(base)
+    except OSError as exc:
+        result["errors"].append(f"cannot read HF cache root {base}: {exc}")
+        result["partial"] = True
+        return result
+    for benchmark_entry in benchmarks:
+        if benchmark_entry.is_symlink() or not benchmark_entry.is_dir(
+                follow_symlinks=False):
+            continue
+        try:
+            datasets = _children(Path(benchmark_entry.path))
+        except OSError as exc:
+            result["errors"].append(
+                f"cannot read HF benchmark {benchmark_entry.path}: {exc}")
+            result["partial"] = True
+            continue
+        for dataset_entry in datasets:
+            if result["examined"] >= limit:
+                result["partial"] = True
+                result["skipped"].append(
+                    {"path": dataset_entry.path,
+                     "reason": "discovery limit reached"})
+                return result
+            result["examined"] += 1
+            if dataset_entry.is_symlink() or not dataset_entry.is_dir(
+                    follow_symlinks=False):
+                continue
+            meta_path = Path(dataset_entry.path) / HF_META_NAME
+            if not meta_path.is_file() or meta_path.is_symlink():
+                result["skipped"].append(
+                    {"path": dataset_entry.path,
+                     "reason": f"no {HF_META_NAME}"})
+                continue
+            try:
+                meta = _read_json_object(meta_path)
+            except AssetError as exc:
+                result["errors"].append(f"{meta_path}: {exc}")
+                continue
+            benchmark = str(meta.get("benchmark")
+                            or benchmark_entry.name)[:MAX_TOKEN]
+            dataset = str(meta.get("dataset")
+                          or meta.get("dataset_id")
+                          or benchmark)[:MAX_TOKEN]
+            dataset_sha = str(meta.get("dataset_sha")
+                              or dataset_entry.name)[:MAX_TOKEN]
+            revision = str(meta.get("revision")
+                           or dataset_sha)[:MAX_TOKEN]
+            sha256 = (_maybe_sha256(meta.get("rows_sha256"))
+                      or _maybe_sha256(meta.get("sha256")))
+            license_value = _declared_license(
+                meta.get("license"), status=meta.get("license_status"),
+                source="huggingface metadata")
+            source = {"kind": "huggingface", "dataset": dataset,
+                      "revision": revision}
+            try:
+                record = register(
+                    root, dataset_entry.path, kind="dataset",
+                    owner="ozagia", scope="repo", source=source,
+                    revision=revision, sha256=sha256, license=license_value,
+                    pinned=False, deletable=True,
+                    manifest_path=str(meta_path),
+                    reason=f"HF benchmark cache {benchmark}/{dataset_sha}",
+                    preserve_pin=True)
+            except (AssetError, OSError) as exc:
+                result["errors"].append(f"{dataset_entry.path}: {exc}")
+                continue
+            result["registered"].append(record)
+    return result
+
+
+def _corpus_entries(manifest: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
+    mapping: dict[str, Mapping[str, Any]] = {}
+    repositories = manifest.get("repositories")
+    if not isinstance(repositories, list):
+        return mapping
+    for item in repositories:
+        if not isinstance(item, Mapping):
+            continue
+        for key in ("id", "local_checkout"):
+            value = item.get(key)
+            if isinstance(value, str) and value:
+                mapping[value] = item
+                if key == "local_checkout":
+                    mapping[Path(value).name] = item
+    return mapping
+
+
+def _corpus_candidates(base: Path) -> list[Path]:
+    candidates: list[Path] = []
+    seen: set[Path] = set()
+    roots = [base]
+    nested = base / "repositories"
+    if nested.is_dir() and not nested.is_symlink():
+        roots.append(nested)
+    for parent in roots:
+        try:
+            entries = _children(parent)
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
+                continue
+            path = Path(entry.path)
+            if not (path / DEEP_REVIEW_MARKER_NAME).is_file():
+                continue
+            resolved = path.resolve(strict=False)
+            if resolved not in seen:
+                seen.add(resolved)
+                candidates.append(path)
+    return candidates
+
+
+def _discover_corpus(root: str | Path, limit: int) -> dict[str, Any]:
+    result = _empty_discovery()
+    base = deep_review_root(root)
+    if not base.is_dir() or base.is_symlink():
+        return result
+    manifest_path = base / DEEP_REVIEW_MANIFEST_NAME
+    corpus: dict[str, Mapping[str, Any]] = {}
+    if manifest_path.is_file() and not manifest_path.is_symlink():
+        try:
+            corpus = _corpus_entries(_read_json_object(manifest_path))
+        except AssetError as exc:
+            result["errors"].append(f"{manifest_path}: {exc}")
+            result["partial"] = True
+    for candidate in _corpus_candidates(base):
+        if result["examined"] >= limit:
+            result["partial"] = True
+            result["skipped"].append(
+                {"path": str(candidate), "reason": "discovery limit reached"})
+            break
+        result["examined"] += 1
+        marker_path = candidate / DEEP_REVIEW_MARKER_NAME
+        try:
+            marker = _read_json_object(marker_path)
+        except AssetError as exc:
+            result["errors"].append(f"{marker_path}: {exc}")
+            continue
+        repo_id = str(marker.get("repository_id") or candidate.name)
+        entry = corpus.get(repo_id) or corpus.get(candidate.name) or {}
+        repo = str(marker.get("repo") or entry.get("repo") or "")[:MAX_TOKEN]
+        commit = (marker.get("pinned_commit") or entry.get("pinned_commit"))
+        commit = str(commit)[:MAX_TOKEN] if commit else None
+        tree_value = marker.get("tree")
+        tree = _tree_summary(tree_value)
+        if tree is None and entry.get("tree_sha256") is not None:
+            tree = _tree_summary({"sha256": entry.get("tree_sha256")})
+        sha256 = (_maybe_sha256(marker.get("archive_sha256"))
+                  or _maybe_sha256(entry.get("archive_sha256")))
+        license_value = _declared_license(
+            entry.get("license"), status=entry.get("license_status"),
+            source="corpus manifest")
+        source = {"kind": "git", "repo": repo or None, "commit": commit,
+                  "manifest": (str(manifest_path)
+                               if manifest_path.is_file() else None)}
+        try:
+            record = register(
+                root, candidate, kind="corpus", owner="ozagia",
+                scope="repo", source=source, revision=commit,
+                sha256=sha256, tree=tree, license=license_value,
+                pinned=True, deletable=True, manifest_path=str(marker_path),
+                reason=f"Deep-review corpus checkout {repo_id}",
+                preserve_pin=True)
+        except (AssetError, OSError) as exc:
+            result["errors"].append(f"{candidate}: {exc}")
+            continue
+        result["registered"].append(record)
+    return result
+
+
+def _discover_models(root: str | Path, limit: int) -> dict[str, Any]:
+    result = _empty_discovery()
+    base = model_cache_root(root)
+    if not base.is_dir() or base.is_symlink():
+        return result
+    try:
+        entries = _children(base)
+    except OSError as exc:
+        result["errors"].append(f"cannot read model cache root {base}: {exc}")
+        result["partial"] = True
+        return result
+    for entry in entries:
+        if not entry.name.endswith(MODEL_META_SUFFIX):
+            continue
+        if result["examined"] >= limit:
+            result["partial"] = True
+            result["skipped"].append(
+                {"path": entry.path, "reason": "discovery limit reached"})
+            break
+        result["examined"] += 1
+        if entry.is_symlink() or not entry.is_file(follow_symlinks=False):
+            result["skipped"].append(
+                {"path": entry.path, "reason": "not a regular metadata file"})
+            continue
+        meta_path = Path(entry.path)
+        try:
+            meta = _read_json_object(meta_path)
+        except AssetError as exc:
+            result["errors"].append(f"{meta_path}: {exc}")
+            continue
+        source_id = str(meta.get("source") or meta_path.stem)[:MAX_TOKEN]
+        url = _redacted_url(meta.get("url"))
+        sha256 = _maybe_sha256(meta.get("sha256"))
+        license_value = _declared_license(
+            meta.get("license"), status=meta.get("license_status"),
+            source="model metadata")
+        source = {"kind": "url" if url else "local", "url": url}
+        try:
+            record = register(
+                root, meta_path, kind="cache", owner="ozagia",
+                scope="repo", source=source, version=source_id,
+                sha256=sha256, license=license_value, pinned=False,
+                deletable=True, manifest_path=str(meta_path),
+                fetched_at=(str(meta.get("fetched_at"))
+                            if meta.get("fetched_at") else None),
+                reason=f"Model metadata cache {source_id}",
+                preserve_pin=True)
+        except (AssetError, OSError) as exc:
+            result["errors"].append(f"{meta_path}: {exc}")
+            continue
+        result["registered"].append(record)
+    return result
+
+
+def _discover_research(root: str | Path, limit: int) -> dict[str, Any]:
+    result = _empty_discovery()
+    for name in ("cache", "fetch"):
+        path = state_path(root, "research", name)
+        if not path.is_dir() or path.is_symlink():
+            continue
+        if result["examined"] >= limit:
+            result["partial"] = True
+            result["skipped"].append(
+                {"path": str(path), "reason": "discovery limit reached"})
+            break
+        result["examined"] += 1
+        try:
+            record = register(
+                root, path, kind="cache", owner="ozagia", scope="repo",
+                source={"kind": "local"}, pinned=True, deletable=False,
+                reason=f"Research {name} cache", preserve_pin=True)
+        except (AssetError, OSError) as exc:
+            result["errors"].append(f"{path}: {exc}")
+            continue
+        result["registered"].append(record)
+    return result
+
+
+def discover(root: str | Path, *, limit: int = MAX_SCAN_LIMIT,
+             include_research: bool = True) -> dict[str, Any]:
+    """Register only known Ozagia-owned roots and manifests.
+
+    The roots are exact and small: Ocelot managed installs, the HF benchmark
+    cache, deep-review corpus checkouts, model metadata and (optionally) the
+    research caches.  It never walks ``$HOME`` or an arbitrary tree, never
+    follows symlinks, never reads file contents and never uses the network.
+    Missing roots are skipped, not errors.  Re-running updates manifest fields
+    but does not clear an existing pin.
+    """
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit < 0:
+        raise AssetError("limit must be a non-negative integer")
+    limit = min(limit, MAX_SCAN_LIMIT)
+    assets: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    errors: list[str] = []
+    roots_report: list[dict[str, Any]] = []
+    partial = False
+    examined_total = 0
+
+    specs: list[tuple[str, Path | None, str, Any]] = [
+        ("ocelot-installs", ocelot_install_root(), "install",
+         _discover_ocelot_installs),
+        ("hf-benchmarks", hf_cache_root(root), "dataset", _discover_hf),
+        ("deep-review-corpus", deep_review_root(root), "corpus",
+         _discover_corpus),
+        ("model-metadata", model_cache_root(root), "cache", _discover_models),
+    ]
+    if include_research:
+        specs.append(("research-caches", state_path(root, "research"),
+                      "cache", _discover_research))
+
+    for name, path, kind, handler in specs:
+        report: dict[str, Any] = {
+            "name": name, "path": str(path) if path is not None else None,
+            "kind": kind, "status": "missing", "registered": 0,
+            "skipped": 0, "errors": 0,
+        }
+        if path is None:
+            report["status"] = "unavailable"
+            roots_report.append(report)
+            continue
+        if not os.path.lexists(path):
+            roots_report.append(report)
+            continue
+        if os.path.islink(path):
+            report["status"] = "symlink"
+            skipped.append({"path": str(path),
+                            "root": name, "reason": "refusing a symlink root"})
+            report["skipped"] = 1
+            partial = True
+            roots_report.append(report)
+            continue
+        if not path.is_dir():
+            report["status"] = "not-a-directory"
+            skipped.append({"path": str(path), "root": name,
+                            "reason": "known root is not a directory"})
+            report["skipped"] = 1
+            partial = True
+            roots_report.append(report)
+            continue
+        remaining = max(0, limit - examined_total)
+        if remaining == 0:
+            report["status"] = "partial"
+            skipped.append({"path": str(path), "root": name,
+                            "reason": "discovery limit reached"})
+            report["skipped"] = 1
+            partial = True
+            roots_report.append(report)
+            continue
+        result = handler(root, remaining)
+        report.update({
+            "status": "scanned" if not result["partial"] else "partial",
+            "registered": len(result["registered"]),
+            "skipped": len(result["skipped"]),
+            "errors": len(result["errors"]),
+        })
+        examined_total += int(result["examined"])
+        assets.extend(result["registered"])
+        for row in result["skipped"]:
+            skipped.append({**row, "root": name})
+        errors.extend(result["errors"])
+        partial = partial or bool(result["partial"])
+        roots_report.append(report)
+
+    # A sibling checkout is development data, never an owned asset.  Report
+    # that it exists (if it does) without registering anything.
+    try:
+        sibling = Path(root).resolve(strict=False).parent / "ocelot"
+    except OSError:
+        sibling = None
+    if sibling is not None:
+        sibling_status = ("explicit-only" if sibling.is_dir()
+                          else "missing")
+        roots_report.append({
+            "name": "ocelot-sibling", "path": str(sibling),
+            "kind": "install", "status": sibling_status, "registered": 0,
+            "skipped": 0, "errors": 0,
+        })
+        if sibling_status == "explicit-only":
+            skipped.append({
+                "path": str(sibling), "root": "ocelot-sibling",
+                "reason": "Ocelot sibling checkout is explicit-only; run "
+                          "assets register --owner ocelot --pinned --no-delete",
+            })
+
+    return {
+        "assets": assets,
+        "skipped": skipped,
+        "errors": errors,
+        "partial": partial,
+        "roots": roots_report,
+        "limit": limit,
+    }
+
+
+def read_hf_metadata(path: str | Path) -> dict[str, Any]:
+    """Read Hugging Face download metadata for an explicit dataset directory.
+
+    It reads only ``<path>/.cache/huggingface/download/**/*.metadata``: line 1
+    is the revision, line 2 is the SHA-256/etag and line 3 is a timestamp.
+    The actual data files are never opened or hashed, so a multi-gigabyte
+    parquet set costs only the metadata reads.  ``verified`` stays false until
+    an explicit ``verify --hash``.  Inconsistent revisions, escaping paths and
+    symlinks are refused.  No network is used.
+    """
+    base = Path(str(path)).expanduser()
+    if not base.is_absolute():
+        base = Path.cwd() / base
+    try:
+        info = os.lstat(base)
+    except FileNotFoundError as exc:
+        raise AssetPathError(f"path does not exist: {base}") from exc
+    except OSError as exc:
+        raise AssetPathError(f"cannot inspect {base}: {exc}") from exc
+    if stat.S_ISLNK(info.st_mode):
+        raise AssetPathError(f"refusing a symlink dataset path: {base}")
+    if not stat.S_ISDIR(info.st_mode):
+        raise AssetPathError(f"dataset path is not a directory: {base}")
+    root = base.resolve(strict=False)
+    download = root.joinpath(*HF_DOWNLOAD_PARTS)
+    try:
+        download_info = os.lstat(download)
+    except FileNotFoundError as exc:
+        raise AssetError(
+            f"no Hugging Face download metadata under {download}") from exc
+    except OSError as exc:
+        raise AssetError(f"cannot inspect {download}: {exc}") from exc
+    if stat.S_ISLNK(download_info.st_mode):
+        raise AssetPathError(f"refusing a symlink metadata root: {download}")
+    if not stat.S_ISDIR(download_info.st_mode):
+        raise AssetError(f"not a metadata directory: {download}")
+
+    revisions: set[str] = set()
+    digests: dict[str, dict[str, Any]] = {}
+    files = 0
+    partial = False
+    stack: list[Path] = [download]
+    while stack:
+        directory = stack.pop()
+        try:
+            entries = _children(directory)
+        except OSError as exc:
+            raise AssetError(f"cannot read metadata directory {directory}: {exc}") from exc
+        for entry in entries:
+            if entry.is_symlink():
+                raise AssetPathError(
+                    f"refusing a symlink in HF metadata: {entry.path}")
+            if entry.is_dir(follow_symlinks=False):
+                stack.append(Path(entry.path))
+                continue
+            if not entry.name.endswith(HF_METADATA_SUFFIX):
+                continue
+            if not entry.is_file(follow_symlinks=False):
+                continue
+            if files >= MAX_HF_METADATA_FILES:
+                partial = True
+                break
+            files += 1
+            metadata_path = Path(entry.path)
+            try:
+                if os.lstat(metadata_path).st_size > MAX_HF_METADATA_BYTES:
+                    raise AssetError(
+                        f"metadata file is too large: {metadata_path}")
+                with open(metadata_path, "r", encoding="utf-8") as handle:
+                    lines = [handle.readline(MAX_SOURCE_LINE).rstrip("\r\n")
+                             for _ in range(3)]
+            except (OSError, UnicodeError) as exc:
+                raise AssetError(
+                    f"cannot read HF metadata {metadata_path}: {exc}") from exc
+            if len(lines) < 2:
+                raise AssetError(
+                    f"HF metadata is incomplete: {metadata_path}")
+            revision = lines[0].strip()
+            if not revision:
+                raise AssetError(f"HF metadata has no revision: {metadata_path}")
+            revisions.add(revision)
+            etag = lines[1].strip().strip('"')
+            if etag.startswith("W/"):
+                etag = etag[2:].strip().strip('"')
+            if etag.lower().startswith("sha256:"):
+                etag = etag.split(":", 1)[1]
+            relative = metadata_path.relative_to(download)
+            if relative.is_absolute() or ".." in relative.parts:
+                raise AssetPathError(
+                    f"HF metadata path escapes the dataset: {metadata_path}")
+            rel = "/".join(relative.parts)
+            rel = rel[: -len(HF_METADATA_SUFFIX)]
+            if not rel:
+                raise AssetPathError(
+                    f"HF metadata path has no data file: {metadata_path}")
+            digest = _maybe_sha256(etag)
+            digests[rel] = {
+                "path": rel,
+                "sha256": digest,
+                "bytes": 0,
+                "verified": False,
+                "derived": False,
+            }
+        if partial:
+            break
+    if not revisions:
+        raise AssetError(f"no HF metadata files under {download}")
+    if len(revisions) != 1:
+        raise AssetError(
+            "HF metadata has inconsistent revisions: "
+            + ", ".join(sorted(revisions)[:5]))
+    ordered = sorted(digests.values(), key=lambda item: item["path"])
+    return {
+        "root": str(root),
+        "metadata_root": str(download),
+        "revision": next(iter(revisions)),
+        "digests": ordered[:MAX_DIGESTS],
+        "files": len(ordered),
+        "partial": partial or len(ordered) > MAX_DIGESTS,
+    }
+
+
+# --------------------------------------------------------------------------- #
 # garbage-collection planning (dry run only)
 # --------------------------------------------------------------------------- #
 
@@ -1642,9 +2429,13 @@ def gc(root: str | Path, *, apply: bool = False, max_bytes: int | None = None,
 __all__ = [
     "AssetConflict", "AssetError", "AssetGcRefused", "AssetMarkerError",
     "AssetNotFound", "AssetPathError", "DEFAULT_KIND", "DEFAULT_OWNER",
-    "DEFAULT_SCOPE", "GC_OWNER", "GC_STATES", "KINDS", "LICENSE_STATUSES",
-    "MARKER_NAME", "OWNERS", "SCHEMA", "SCOPES", "SOURCE_KINDS", "STATES",
-    "adopt", "forget", "gc", "gc_plan", "get", "list_assets", "pin",
-    "register", "registry_dir", "scan", "status", "unpin", "user_registry_dir",
+    "DEFAULT_SCOPE", "DEEP_REVIEW_MANIFEST_NAME", "DEEP_REVIEW_MARKER_NAME",
+    "GC_OWNER", "GC_STATES", "HF_META_NAME", "KINDS", "LICENSE_STATUSES",
+    "MARKER_NAME", "OCELOT_MANIFEST_NAME", "OWNERS", "SCHEMA", "SCOPES",
+    "SOURCE_KINDS", "STATES",
+    "adopt", "deep_review_root", "discover", "forget", "gc", "gc_plan",
+    "get", "hf_cache_root", "list_assets", "model_cache_root",
+    "ocelot_install_root", "pin", "read_hf_metadata", "register",
+    "registry_dir", "scan", "status", "unpin", "user_registry_dir",
     "verify", "verify_all",
 ]

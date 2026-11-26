@@ -78,9 +78,24 @@ the version directory is the checkout root.
 
 Ocelot may use its own reference data (for example a Wikipedia parquet set) or
 its own caches. Ozagia does not create, download, adopt or delete that data,
-and it does not infer ownership from a `*.parquet` name. The
-[external-assets plan](plans/2026-11-26_external_assets.md) records such data
-as a read-only `owner=ocelot` asset if it is registered explicitly.
+and it does not infer ownership from a `*.parquet` name.  Record it once as an
+external asset with `ozagia assets`:
+
+```sh
+ozagia assets register \
+  --path /home/matt/ozma/data/wikipedia --kind dataset --owner ocelot \
+  --scope shared --pinned --no-delete --from-hf-metadata \
+  --reason "Ocelot structured Wikipedia snapshot"
+```
+
+The record is `owner=ocelot`, `pinned=true`, `deletable=false`; it is read-only
+from Ozagia's point of view and never a GC candidate.  Managed Ocelot installs
+under `<data home>/ozagia/ocelot/<version>` are discovered from their
+`.ozagia-ocelot.json` manifest by `ozagia assets discover`.  See
+[docs/assets.md](assets.md) for discovery roots, HF metadata parsing, and the
+no-network/no-home-scan rules.  The
+[external-assets plan](plans/2026-11-26_external_assets.md) records the wider
+inventory.
 
 The archive is checked before extraction. Extraction runs into a temporary
 directory on the same filesystem and is renamed into place only after the

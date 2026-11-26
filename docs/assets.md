@@ -32,12 +32,14 @@ One JSON record per asset:
   "owner": "ozagia|ocelot|huggingface|user|upstream|external",
   "scope": "user|repo|shared|system",
   "source": {"kind": "url|huggingface|git|local|manifest|unknown",
-             "url": null, "dataset": null, "revision": null,
-             "commit": null, "manifest": null},
+             "url": null, "dataset": null, "repo": null,
+             "revision": null, "commit": null, "manifest": null},
   "version": null,
   "revision": null,
   "sha256": null,
   "digests": [],
+  "tree": {"sha256": null, "bytes": null, "file_count": null},
+  "fetched_at": null,
   "bytes": 0,
   "apparent_bytes": 0,
   "inodes": 0,
@@ -63,11 +65,15 @@ One JSON record per asset:
   `st_size`.  A bounded walk that stops, an unreadable entry or a child on
   another filesystem is reported as `partial`, never as a complete total.
 * `sha256` is optional.  `digests` holds manifest-provided `{path, sha256,
-  bytes, verified, derived}` entries for a directory.
+  bytes, verified, derived}` entries for a directory.  `tree` is optional
+  manifest tree metadata (`sha256`, `bytes`, `file_count`); it is present only
+  when a known manifest declares it and never includes per-file content.
 * `license.status` stays `unknown` unless a licence was supplied explicitly.
   A filename or suffix is never evidence of a licence.
 * `pinned` means "never a GC candidate".  `deletable` means the owner permits
-  an explicit deletion; it does not mean automatic deletion.
+  an explicit deletion; it does not mean automatic deletion.  `--no-delete` is
+  the default; delete permission is granted explicitly with `--deletable`, and
+  discovery never clears an existing pin.
 * Records hold metadata only: no file contents, prompts, credentials or
   environment.
 
@@ -102,9 +108,20 @@ ozagia assets register --path /data/wiki --kind dataset --owner ozagia \
 # Adopt an owned directory without writing a marker.
 ozagia assets adopt /models/qwen --kind model --reason "local weights"
 
+# Discover only the known Ozagia-owned roots and manifests.
+ozagia assets discover
+ozagia assets discover --no-research --json
+
 # Ocelot's own data is external, pinned and never deletable by Ozagia.
 ozagia assets register --path /srv/ocelot/wiki --kind corpus --owner ocelot \
   --pinned --reason "Ocelot Wikipedia parquet cache"
+
+# Ocelot's structured Wikipedia snapshot, read-only provenance from its HF
+# download metadata.  The command does not hash the parquet or write a marker.
+ozagia assets register \
+  --path /home/matt/ozma/data/wikipedia --kind dataset --owner ocelot \
+  --scope shared --pinned --no-delete --from-hf-metadata \
+  --reason "Ocelot structured Wikipedia snapshot"
 
 # Inspect.
 ozagia assets list --owner ocelot
@@ -144,35 +161,75 @@ and 2 for bad arguments.  No command prints file contents.
   until `verify --hash` succeeds.
 * Ordering prefers `cache`, then `dataset`/`model`, then other kinds, oldest
   `last_used_at` first.  The plan stops at `--max-bytes`/`--max-inodes`.
-* `gc --apply` is refused in Stage B.  This stage never deletes files.
+* `gc --apply` is refused in this stage.  This stage never deletes files.
 
 ## Explicit vs discovered
 
-Stage B only catalogs what the caller names:
+`ozagia assets discover` reads only these exact known roots and manifests.  It
+never varies them, never scans `$HOME` as a tree, never follows symlinks, never
+reads file contents and never uses the network.  A missing root is skipped, not
+an error.
 
-* `register`/`adopt` with an explicit path;
-* `scan --path P` inspects that same directory for `.ozagia-asset.json` (or
-  reads a marker file directly).  It does not recurse and never scans `$HOME`
-  or an arbitrary tree.
+| Root | Discovery rule | Recorded as |
+| --- | --- | --- |
+| Ocelot managed installs | `$XDG_DATA_HOME/ozagia/ocelot/*/.ozagia-ocelot.json` (fallback `~/.local/share`) | `kind=install`, `owner=ozagia`, `scope=user`, `pinned=true`, `deletable=false` |
+| Ocelot sibling checkout | `<root>/../ocelot` is reported as `explicit-only`, never registered | explicit `register` only |
+| HF benchmark cache | `<state>/eval/hf/<benchmark>/<dataset_sha>/meta.json` | `kind=dataset`, `owner=ozagia`, `scope=repo`, `pinned=false`, `deletable=true` |
+| Deep-review corpus | `<state>/eval/deep_review_corpus/{,repositories/}*/.ozagia-deep-review-corpus.json` plus `corpus.json` | `kind=corpus`, `owner=ozagia`, `scope=repo`, `pinned=true`, `deletable=true` |
+| Model metadata | `<state>/models/*.meta.json` | `kind=cache`, `owner=ozagia`, `scope=repo`, `pinned=false`, `deletable=true` |
+| Research caches | `<state>/research/cache` and `<state>/research/fetch` | `kind=cache`, `owner=ozagia`, `scope=repo`, `pinned=true`, `deletable=false` |
 
-Ocelot's Wikipedia parquet set is the motivating example: Ozagia does not see
-it in any of its own manifests, must not guess that it is an Ozagia dataset,
-and must not delete it.  It can be recorded explicitly as
-`owner=ocelot`, `pinned=true`, `deletable=false` and reported by
-`ozagia assets status`.
+The result is `assets`, `skipped`, `errors`, `partial`, `roots` and `limit`.
+`roots` names every exact path inspected and whether it was `scanned`, `missing`,
+`partial`, `explicit-only` or unavailable.  Discovery is idempotent: an existing
+record is updated from its manifest, but its pin is not changed.  Unrelated
+files and directories inside a known root are ignored.
 
-## What Stage C adds
+The Ocelot install parser reads `.ozagia-ocelot.json` without importing Ocelot
+or trusting the extracted tree.  It records the archive SHA-256, the manifest
+tree SHA-256/bytes, the declared licence (the manifest's MIT declaration, or the
+documented MIT constant) and up to `MAX_DIGESTS` per-file entries marked
+`verified` from the manifest (not from a fresh hash).  If the manifest tree is
+larger than that cap, the record keeps `sha256` and `tree` metadata but no
+per-file list.  Re-discovery does not hash file contents; it may re-measure the
+tree with the same bounded, symlink-free walk as any other asset.
 
-* Known-root discovery and parsers: Ocelot install manifests, the HF benchmark
-  cache, the deep-review corpus, model metadata, research/eval caches and
-  installer assets.
-* Ocelot data only through an explicit `--path <ocelot>` scan or an
-  Ocelot-provided data manifest, never by guessing that every `*.parquet` is a
-  reference dataset.
-* HF/corpus/model metadata with revision, licence and hashes.
-* Read-only MCP tools (`dev_assets_list`, `dev_assets_status`); no write or
-  delete over MCP.
-* A small `ozagia status`/`doctor` summary that neither walks huge roots nor
-  hashes by default.
-* Policy and verification refinements for referenced assets and a considered
-  `gc --apply` path.
+Ocelot's Wikipedia parquet set is the motivating explicit example: Ozagia does
+not see it in any of its own manifests, must not guess that every `*.parquet` is
+an Ozagia dataset, and must not delete it.  Record it with `owner=ocelot`,
+`pinned=true`, `deletable=false`; it then appears in `ozagia assets status` and
+is never a GC candidate.
+
+## Hugging Face download metadata
+
+`register --from-hf-metadata` reads only
+`<path>/.cache/huggingface/download/**/*.metadata` for an explicit dataset
+directory.  Line 1 is the revision, line 2 is the SHA-256/etag and line 3 is a
+timestamp.  The per-file digests map back to the data paths with `.metadata`
+removed.  The actual data files are never opened or hashed, so a multi-gigabyte
+parquet set costs only the metadata reads; every digest stays `verified=false`
+until an explicit `verify --hash`.
+
+Inconsistent revisions, escaping paths, symlink metadata and unreadable files
+are refused.  `--from-hf-metadata` cannot be combined with `--sha256`, and it
+never writes a marker into the external dataset.  The licence remains `unknown`
+unless `--license` is supplied; a `*.parquet` suffix is never evidence of a
+licence.
+
+## MCP
+
+The full MCP surface (not the `graph` or `engine` surfaces) lists two read-only
+views:
+
+* `dev_assets_list` filters `owner`, `kind`, `state`, `pinned` and `limit`;
+* `dev_assets_status` reports totals by kind/owner/state, allocated and apparent
+  bytes, inodes, pinned/deletable counts and the largest entries.
+
+There is deliberately no MCP register, pin, verify-by-hash or delete tool.  The
+CLI and the registry are the only write path.
+
+## What remains
+
+This stage is offline-tested against synthetic manifests.  Discovery performs
+no network access and reads no file contents.  `gc --apply` is **not**
+implemented: `ozagia assets gc` is always a dry run and `--apply` is refused.

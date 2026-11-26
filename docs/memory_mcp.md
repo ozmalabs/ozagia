@@ -207,8 +207,10 @@ their contents as supporting evidence for each other.
 
 The full surface (the default `coding`/`combined` tool list) also exposes the
 read-only `dev_tmp_list` and `dev_tmp_status` views of managed temporary
-space. The `graph` and `engine` surfaces do not list them, and no surface
-exposes a create/write/delete temporary-space tool.
+space, plus the read-only `dev_assets_list` and `dev_assets_status` views of
+durable external assets. The `graph` and `engine` surfaces do not list them,
+and no surface exposes a create/write/delete temporary-space tool or an asset
+register, pin, verify-by-hash or delete tool.
 
 ## Wire it into Claude Code
 
@@ -287,6 +289,8 @@ exposes a create/write/delete temporary-space tool.
 | `dev_migration` | Bounded Python→Rust migration overlay: `view=status` reports per-status totals, top gaps/divergences, inference candidates (never accepted), freshness and explicit omissions; `view=tasks` returns a checklist without creating a goal or running anything; `view=scaffold` previews a simple dataclass/function skeleton. Read-only; the CLI's explicit `ozagia migration scaffold --write` is the only write path. |
 | `dev_tmp_list` | Read-only managed temporary-space entries (`ozagia.core.temp_space`): id, path, kind, session, reason, TTL/expiry, state, bytes, files and tmpfs membership. Filters `kind`, `session`, `owned`, `include_all` and `limit`. Metadata only; no file contents or prompts. |
 | `dev_tmp_status` | Read-only temporary-space totals by kind, session and ownership, filesystem capacity/warnings, and registry errors. There is deliberately no MCP create, write or delete tool: creation is the OpenCode `ozagia_scratch` tool, the harness or `ozagia tmp create`. |
+| `dev_assets_list` | Read-only durable external assets (`ozagia.core.assets`): id, path, kind, owner, scope, source, licence, size, inodes, verification state and pin/deletion flags. Filters `owner`, `kind`, `state`, `pinned` and `limit`. Metadata only; no file contents. |
+| `dev_assets_status` | Read-only asset totals by kind, owner and state, allocated/apparent bytes, inodes, pinned/deletable counts and the largest entries. It never hashes, walks or deletes; there is deliberately no MCP register, pin, verify-by-hash or delete tool. |
 
 All tools are read-only except `dev_edit`, `dev_span_edit` and `dev_key_edit` (transactions, preview by
 default, backup on apply), `dev_record` (one JSONL line), and `dev_maps`

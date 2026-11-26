@@ -93,7 +93,8 @@ def test_builtin_mcp_and_graph_tools_are_declared():
     assert "mcp:tool:dev_capabilities" in declared
     for name in ("dev_context", "dev_tools", "dev_capabilities",
                  "goal_list", "job_start", "federation_status",
-                 "dev_tmp_list", "dev_tmp_status"):
+                 "dev_tmp_list", "dev_tmp_status", "dev_assets_list",
+                 "dev_assets_status"):
         assert f"mcp:tool:{name}" in declared
 
 

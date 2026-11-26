@@ -13,10 +13,13 @@ Adapter MCP tools are listed and callable on the full and graph surfaces. The
 engine surface lists only `graph`.
 
 The full surface also lists the read-only managed-temporary-space views
-`dev_tmp_list` and `dev_tmp_status` (metadata, capacity and registry errors).
-They are not part of the `graph` or `engine` surfaces, and no surface exposes
-a create, write or delete temporary-space tool: creation is the OpenCode
-`ozagia_scratch` tool, the harness or `ozagia tmp create`.
+`dev_tmp_list` and `dev_tmp_status` (metadata, capacity and registry errors)
+and the read-only durable-asset views `dev_assets_list` and
+`dev_assets_status` (catalog filters, totals and largest entries). They are not
+part of the `graph` or `engine` surfaces, and no surface exposes a create,
+write, asset-register, pin or delete tool: creation is the OpenCode
+`ozagia_scratch` tool, the harness, `ozagia tmp create`, or the explicit
+`ozagia assets register`/`discover` CLI.
 
 ```
 OZAGIA_SURFACE=graph python -m ozagia.integrations.mcp.server
