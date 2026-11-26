@@ -799,6 +799,8 @@ def _aggregate_subjects(score: Mapping[str, Any], base_key: str) -> dict[str, An
     complete_rows = [(key, row) for key, row in matching if row.get("complete")]
     tp_complete = sum(row.get("true_positive") or 0 for _, row in complete_rows)
     fp = sum(row.get("false_positive") or 0 for _, row in complete_rows)
+    complete_predicted = sum(row.get("predicted") or 0
+                             for _, row in complete_rows)
     tp = sum(row.get("true_positive") or 0 for _, row in matching)
     expected = sum(row.get("expected") or 0 for _, row in matching)
     predicted = sum(row.get("predicted") or 0 for _, row in matching)
@@ -810,6 +812,7 @@ def _aggregate_subjects(score: Mapping[str, Any], base_key: str) -> dict[str, An
         "scopes": sorted({_subject_parts(key)[1] for key, _ in matching}),
         "expected": expected,
         "predicted": predicted,
+        "complete_scope_predicted": complete_predicted,
         "true_positive": tp,
         "false_positive": fp,
         "false_negative": fn,
@@ -965,20 +968,28 @@ def evaluate_gates(metrics: Mapping[str, Any]) -> dict[str, Any]:
         }
 
     qualifying = [row for row in subject_rows
-                  if int(row.get("predicted") or 0) >= SUBJECT_PREDICTION_MINIMUM]
+                  if isinstance(row.get("complete_scope_predicted"), int)
+                  and not isinstance(row.get("complete_scope_predicted"), bool)
+                  and row["complete_scope_predicted"] >= SUBJECT_PREDICTION_MINIMUM]
     weak = [row for row in qualifying
             if row.get("precision") is None
             or float(row["precision"]) < SUBJECT_PRECISION_FLOOR]
     if not qualifying:
         gates["subject_stability"] = {
             "status": "insufficient_data",
+            "observed": {"qualifying": 0,
+                         "prediction_scope": "complete label scopes only"},
             "reason": f"no subject has at least {SUBJECT_PREDICTION_MINIMUM} predictions"}
     else:
         gates["subject_stability"] = {
             "status": "pass" if not weak else "fail",
             "threshold": {"minimum_predictions": SUBJECT_PREDICTION_MINIMUM,
                           "precision_floor": SUBJECT_PRECISION_FLOOR},
-            "observed": {"qualifying": len(qualifying), "weak": weak},
+            "observed": {
+                "qualifying": len(qualifying),
+                "weak": weak,
+                "prediction_scope": "complete label scopes only",
+            },
         }
 
     if noise is None:

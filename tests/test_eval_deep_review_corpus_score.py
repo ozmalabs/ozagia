@@ -6,6 +6,7 @@ import pytest
 
 from ozagia.eval.deep_review_corpus import CorpusError, load_manifest
 from ozagia.eval.deep_review_corpus_score import (
+    _aggregate_subjects,
     _operational,
     evaluate_gates,
     load_run_record,
@@ -289,6 +290,7 @@ def _gate_metrics(**updates):
             "predicted": 20,
         },
         "subject_stability": [{"subject_key": "repo/range", "predicted": 20,
+                               "complete_scope_predicted": 20,
                                "precision": 0.70}],
         "repeatability": {"status": "verified"},
         "digest_checks": {"status": "verified"},
@@ -324,7 +326,8 @@ def test_gate_computation_fails_on_low_precision_and_too_few_repositories():
 
 def test_gate_computation_fails_on_weak_subject_noise_and_blocking_evidence():
     weak = _gate_metrics(subject_stability=[
-        {"subject_key": "repo/range", "predicted": 20, "precision": 0.64}])
+        {"subject_key": "repo/range", "predicted": 20,
+         "complete_scope_predicted": 20, "precision": 0.64}])
     assert evaluate_gates(weak)["gates"]["subject_stability"]["status"] == "fail"
 
     noisy = _gate_metrics(overall={
@@ -337,6 +340,47 @@ def test_gate_computation_fails_on_weak_subject_noise_and_blocking_evidence():
         "precision": 0.95, "unsupported_blocking": 1,
         "blocking_evidence_ok": True})
     assert evaluate_gates(unsupported)["gates"]["high_impact_findings"]["status"] == "fail"
+
+
+def test_subject_stability_minimum_uses_only_complete_scope_predictions():
+    metrics = _gate_metrics(subject_stability=[{
+        "subject_key": "repo/range",
+        "predicted": 100,
+        "complete_scope_predicted": 19,
+        "precision": 0.50,
+    }])
+    result = evaluate_gates(metrics)
+    gate = result["gates"]["subject_stability"]
+    assert gate["status"] == "insufficient_data"
+    assert gate["observed"]["qualifying"] == 0
+
+
+def test_subject_stability_missing_complete_scope_count_fails_closed():
+    metrics = _gate_metrics(subject_stability=[{
+        "subject_key": "repo/range", "predicted": 100, "precision": 0.99,
+    }])
+    gate = evaluate_gates(metrics)["gates"]["subject_stability"]
+    assert gate["status"] == "insufficient_data"
+    assert gate["observed"]["qualifying"] == 0
+
+
+def test_subject_aggregation_excludes_partial_scope_predictions_from_gate_count():
+    aggregate = _aggregate_subjects({"subjects": {
+        "repo-a::whole_repo::search": {
+            "complete": True, "predicted": 19, "true_positive": 10,
+            "false_positive": 9, "expected": 10, "false_negative": 0,
+        },
+        "repo-b::range::search": {
+            "complete": False, "predicted": 81, "true_positive": 0,
+            "false_positive": None, "expected": 0, "false_negative": 0,
+        },
+    }}, "search")
+    assert aggregate["predicted"] == 100
+    assert aggregate["complete_scope_predicted"] == 19
+    gate = evaluate_gates(_gate_metrics(subject_stability=[aggregate]))[
+        "gates"]["subject_stability"]
+    assert gate["status"] == "insufficient_data"
+    assert gate["observed"]["qualifying"] == 0
 
 
 def test_gate_computation_marks_missing_measurements_insufficient():
