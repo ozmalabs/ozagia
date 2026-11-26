@@ -469,6 +469,21 @@ def test_inbox_ingest_list_read_ack_and_dedupe(env) -> None:
     assert status["dedupe"]["conflicts"] == 1
 
 
+def test_existing_inbox_record_still_conflicts_after_the_window(env) -> None:
+    repo, _ = env
+    config = _configured(repo, dedupe=1)
+    first = _envelope(repo, config, message_id="ozm_old",
+                      body={"text": "first"})
+    assert B.ingest(repo, first, config=config, now=1000)["accepted"] is True
+    changed = _envelope(repo, config, message_id="ozm_old",
+                        body={"text": "changed"})
+    outcome = B.ingest(repo, changed, config=config, now=5000)
+    assert outcome["accepted"] is False and outcome["code"] == "id_conflict"
+    # The original record was not overwritten.
+    assert B.read_message(repo, "ozm_old", config=config)["body"] == {
+        "text": "first"}
+
+
 def test_inbox_redacts_and_marks_remote_text_untrusted(env) -> None:
     repo, _ = env
     config = _configured(repo)
@@ -614,6 +629,29 @@ def test_remote_claim_expiry_and_release_are_reported(env) -> None:
     states = {item["claim_id"]: item["state"]
               for item in B.claims(repo, config=config)["claims"]}
     assert states["clm_live"] == "released"
+
+
+def test_claim_store_is_bounded(env, monkeypatch) -> None:
+    repo, _ = env
+    config = _configured(repo)
+    monkeypatch.setattr(B, "MAX_CLAIMS", 2)
+    first = _envelope(
+        repo, config, message_id="clm_cap_1", ozma_type="claim",
+        body={"scope": "file", "resource": "src/one.py"})
+    second = _envelope(
+        repo, config, message_id="clm_cap_2", ozma_type="claim",
+        body={"scope": "file", "resource": "src/two.py"})
+    third = _envelope(
+        repo, config, message_id="clm_cap_3", ozma_type="claim",
+        body={"scope": "file", "resource": "src/three.py"})
+    assert B.ingest(repo, first, config=config)["accepted"] is True
+    assert B.ingest(repo, second, config=config)["accepted"] is True
+    full = B.ingest(repo, third, config=config)
+    assert full["accepted"] is False and full["code"] == "claim_store_full"
+    # A replay of an existing claim is still accepted.
+    replay = B.ingest(repo, first, config=config)
+    assert replay["accepted"] is True and replay["duplicate"] is True
+    assert len(B.claims(repo, config=config)["claims"]) == 2
 
 
 def test_grant_has_no_claim_mapping(env) -> None:

@@ -307,7 +307,10 @@ block local work, a local merge request or local merge policy.  The bridge
 reports a warning when a remote claim and an active local lease name the same
 resource, but the local lease remains usable.  Expiry is computed and reported
 from the record; records are not auto-deleted or overwritten.  A remote claim is
-released only by a matching remote `release` (or its own rules).
+released only by a matching remote `release` from its holder (or its own
+rules).  The advisory claim store is bounded; a new claim beyond the cap is
+refused with `claim_store_full`, while a replay of an existing claim is still
+accepted.
 
 ### Channels and subscriptions
 

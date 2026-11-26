@@ -111,6 +111,7 @@ MAX_RESOURCE = 512
 MAX_CRITERIA = 16
 MAX_CRITERION = 200
 MAX_RECORDS = 10_000
+MAX_CLAIMS = 2_000
 DEDUPE_MAX_ENTRIES = 2000
 DEFAULT_POLL_LIMIT = 100
 MAX_POLL_LIMIT = 500
@@ -921,6 +922,12 @@ def _terminal_record(kind: str, record: Mapping[str, Any],
     return False
 
 
+def _claims_full(root: str | Path, flight_id: str) -> bool:
+    """Whether the advisory claim store is at its metadata cap."""
+    records, _ = _records(root, CLAIMS_DIR, flight_id)
+    return len(records) >= MAX_CLAIMS
+
+
 def _evict_terminal(root: str | Path, kind: str, flight_id: str, *,
                     now: float, extra_count: int, extra_bytes: int,
                     max_count: int, max_bytes: int) -> int:
@@ -1563,6 +1570,21 @@ def ingest(root: str | Path, envelope: Mapping[str, Any], *,
         if state == "replay" and existing is not None:
             return {"accepted": True, "duplicate": True, "id": normalized["id"],
                     "state": existing.get("state")}
+        if existing is not None:
+            existing_digest = (existing.get("envelope") or {}).get("digest")
+            if existing_digest and existing_digest != digest:
+                _note_conflict(index, now=moment)
+                _write_record(_dedupe_path(root, flight), index)
+                return {"accepted": False, "code": "id_conflict",
+                        "reason": "message id was reused with different content",
+                        "id": normalized["id"]}
+        if (normalized["type"] == "claim" and existing is None
+                and not _is_file(_claim_path(
+                    root, flight, normalized["id"], "inbound"))
+                and _claims_full(root, flight)):
+            return {"accepted": False, "code": "claim_store_full",
+                    "reason": "the remote claim store is full",
+                    "id": normalized["id"]}
         if existing is None:
             expires = _iso(_inbox_ttl(normalized, moment))
             record = {
@@ -1649,20 +1671,21 @@ def read_message(root: str | Path, message_id: str, *,
     cfg = config if config is not None else O.load_config(root)
     flight = flight_id(root, cfg)
     path = record_path(root, INBOX_DIR, flight, message_id, "inbound")
-    record = _read_record(path)
-    if record is None:
-        _refuse("unknown Ozma inbox message", code="unknown_message")
     moment = time.time() if now is None else float(now)
-    if record.get("state") == "unread":
-        record["state"] = "read"
-        record["read_at"] = _iso(moment)
-        _write_record(path, record)
-    envelope = dict(record.get("envelope") or {})
-    envelope["read"] = record.get("state") in {"read", "acked"}
-    envelope["acked"] = record.get("state") == "acked"
-    envelope["received_at"] = record.get("received_at")
-    envelope["expires_at"] = record.get("expires_at")
-    envelope["untrusted"] = True
+    with _flight_lock(root, flight):
+        record = _read_record(path)
+        if record is None:
+            _refuse("unknown Ozma inbox message", code="unknown_message")
+        if record.get("state") == "unread":
+            record["state"] = "read"
+            record["read_at"] = _iso(moment)
+            _write_record(path, record)
+        envelope = dict(record.get("envelope") or {})
+        envelope["read"] = record.get("state") in {"read", "acked"}
+        envelope["acked"] = record.get("state") == "acked"
+        envelope["received_at"] = record.get("received_at")
+        envelope["expires_at"] = record.get("expires_at")
+        envelope["untrusted"] = True
     return envelope
 
 
@@ -1791,6 +1814,9 @@ def enqueue_claim(root: str | Path, lease: Mapping[str, Any], *,
         merge = True
     mode = str(resource.get("mode") or "") or None
     claim_id = _claim_message_id(flight, lease_id)
+    if (not _is_file(_claim_path(root, flight, claim_id, "outbound"))
+            and _claims_full(root, flight)):
+        _refuse("the claim store is full", code="claim_store_full")
     body: dict[str, Any] = {
         "scope": scope, "resource": claim_resource,
         "reason": "local lease " + lease_id,
@@ -2055,10 +2081,11 @@ def sync(root: str | Path, shim: Shim, *,
             rejected += 1
         if outcome.get("id"):
             cursor = str(outcome["id"])
-    index = _load_dedupe(root, flight)
-    index["cursor"] = cursor
-    index["updated_at"] = _iso(moment)
-    _write_record(_dedupe_path(root, flight), index)
+    with _flight_lock(root, flight):
+        index = _load_dedupe(root, flight)
+        index["cursor"] = cursor
+        index["updated_at"] = _iso(moment)
+        _write_record(_dedupe_path(root, flight), index)
     return {"schema": SCHEMA, "flight_id": flight, "conformance": CONFORMANCE,
             "delivered": delivery["delivered"], "delivery": delivery,
             "polled": len(polled),
