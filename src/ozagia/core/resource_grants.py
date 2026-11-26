@@ -6,25 +6,38 @@ host admission (``ozagia.core.resources``): admission answers whether a run fits
 on this host now; a grant says which VM, host or cloud account a task may use,
 what it may spend and how it must be cleaned up.
 
-This module only loads, validates and checks grants.  It does not claim, approve,
-release, write state or resolve secrets.  A check is read-only: the default path
-runs no commands, makes no network call and never prints a credential.  Version
-probes and live identity checks are opt-in and injected.
+This module loads, validates and checks grants, and (from Stage B) keeps the
+local claim/release ledger.  It never resolves credentials, claims a remote
+identity or calls a provider.  A check is read-only: the default path runs no
+commands, makes no network call and never prints a credential.  Version probes
+and live identity checks are opt-in and injected.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import os
 import re
 import shutil
 import stat
 import subprocess
+import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterator, Mapping
 
 import tomllib
+
+from ozagia.config import state_path
+from ozagia.core import security as SEC
+
+try:  # pragma: no cover - Windows has no fcntl; the ledger then has no lock
+    import fcntl
+except ImportError:  # pragma: no cover
+    fcntl = None  # type: ignore[assignment]
 
 SCHEMA = 1
 GRANT_KINDS = ("vm", "cloud", "host", "service", "container")
@@ -35,6 +48,15 @@ GRANT_STATES = ("ready", "missing", "unavailable", "requires_approval",
                 "unknown")
 # Reserved vocabulary for the claim/release stage.  No claim is created here.
 CLAIM_STATES = ("active", "released", "expired", "orphaned")
+CLAIM_SCHEMA = 1
+CLEANUP_STATES = ("done", "failed", "unknown")
+DEFAULT_CLAIM_TTL_MINUTES = 240.0
+MAX_CLAIM_TTL_MINUTES = 7 * 24 * 60.0
+MAX_CLAIM_REASON = 2000
+MAX_CLAIM_LABEL = 200
+MAX_CLAIM_OBSERVED_TEXT = 1000
+MAX_CLAIM_BYTES = 65_536
+MAX_CLAIMS = 1024
 
 MAX_ERRORS = 20
 KVM_DEVICE = "/dev/kvm"
@@ -94,7 +116,23 @@ class GrantError(ValueError):
 
 
 class GrantRefused(GrantError):
-    """A grant is well-formed but is refused for this request."""
+    """A grant is well-formed but is refused for this request.
+
+    ``code`` is a stable machine-readable refusal code.  A refusal is distinct
+    from a malformed request or configuration: the CLI exits 1 for a refusal
+    and 2 for a usage/config error.
+    """
+
+    def __init__(self, message: str, *, code: str = "refused",
+                 detail: Mapping[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.code = str(code)
+        self.detail = dict(detail or {})
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"code": self.code, "message": str(self),
+                "detail": dict(self.detail)}
+
 
 
 def _now() -> str:
@@ -122,6 +160,8 @@ def _check_text(value: object, *, where: str, required: bool = False,
         return text
     if len(text) > max_length:
         raise GrantError(f"{where} is too long")
+    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in text):
+        raise GrantError(f"{where} contains control characters")
     if _SECRET_REF_RE.fullmatch(text):
         return text
     if "secret://" in text:
@@ -1065,3 +1105,911 @@ def check_grant(
         },
     }
     return report
+
+
+# --------------------------------------------------------------------------- #
+# claim ledger
+# --------------------------------------------------------------------------- #
+# Claims live under <state>/resources/grants/.  Each record is one JSON file
+# named by the sha256 of its validated claim id, written atomically with mode
+# 0600 inside a 0700 directory.  The directory is bounded: a claim is refused
+# once MAX_CLAIMS records exist.  Reads never create the directory, so status,
+# MCP and readiness views stay read-only.  Expired records are reported, never
+# deleted.
+_GRANTS_DIR = ("resources", "grants")
+_CLAIM_FILE_RE = re.compile(r"[0-9a-f]{64}\.json\Z")
+_CLAIM_ID_RE = re.compile(r"clm-[0-9a-f]{32}\Z")
+_CLAIM_BUDGET_FIELDS = frozenset({"max_usd", "max_minutes"})
+_OBSERVED_FIELDS = frozenset({"cost_usd", "minutes", "cleanup", "evidence"})
+
+
+def _parse_time(value: object, *, where: str) -> datetime:
+    if isinstance(value, datetime):
+        moment = value
+    elif isinstance(value, str) and value.strip():
+        text = value.strip()
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        try:
+            moment = datetime.fromisoformat(text)
+        except ValueError as exc:
+            raise GrantError(f"{where} must be an ISO timestamp") from exc
+    else:
+        raise GrantError(f"{where} must be an ISO timestamp")
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(timezone.utc)
+
+
+def _claim_time(now: datetime | str | None = None) -> datetime:
+    if now is None:
+        return datetime.now(timezone.utc)
+    return _parse_time(now, where="now")
+
+
+def _iso(moment: datetime) -> str:
+    return moment.astimezone(timezone.utc).isoformat(timespec="seconds")
+
+
+def _claim_number(value: object, *, where: str,
+                  positive: bool = False) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise GrantError(f"{where} must be a number")
+    number = float(value)
+    if not math.isfinite(number):
+        raise GrantError(f"{where} must be finite")
+    if positive and number <= 0:
+        raise GrantError(f"{where} must be positive")
+    if not positive and number < 0:
+        raise GrantError(f"{where} must not be negative")
+    return number
+
+
+def _optional_claim_number(value: object, *, where: str,
+                           positive: bool = False) -> float | None:
+    if value is None:
+        return None
+    return _claim_number(value, where=where, positive=positive)
+
+
+def _claim_label(value: object, *, where: str) -> str | None:
+    if value is None:
+        return None
+    text = _check_text(value, where=where, max_length=MAX_CLAIM_LABEL)
+    return SEC.redact_text(text) or None
+
+
+def _claim_reason(value: object) -> str:
+    text = _check_text(value, where="reason", required=True,
+                       max_length=MAX_CLAIM_REASON)
+    return SEC.redact_text(text)
+
+
+def _validate_claim_id(value: object) -> str:
+    if not isinstance(value, str) or not _CLAIM_ID_RE.fullmatch(value):
+        raise GrantError("claim id must look like clm-<32 hex characters>")
+    return value
+
+
+def _claim_dir(root: str | Path) -> Path:
+    return state_path(Path(root).resolve(), *_GRANTS_DIR)
+
+
+def _claim_file_name(claim_id: str) -> str:
+    return hashlib.sha256(claim_id.encode("ascii")).hexdigest() + ".json"
+
+
+def _ensure_claim_dir(root: str | Path) -> Path:
+    directory = _claim_dir(root)
+    if directory.is_symlink():
+        raise GrantRefused("the claim ledger path is a symlink",
+                           code="ledger_unavailable")
+    try:
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    except OSError as exc:
+        raise GrantRefused(
+            "the claim ledger directory could not be created",
+            code="ledger_unavailable",
+            detail={"error": type(exc).__name__}) from exc
+    if not directory.is_dir():
+        raise GrantRefused("the claim ledger path is not a directory",
+                           code="ledger_unavailable")
+    try:
+        if stat.S_IMODE(directory.stat().st_mode) != 0o700:
+            os.chmod(directory, 0o700)
+    except OSError:
+        pass
+    return directory
+
+
+@contextmanager
+def _ledger_lock(root: str | Path) -> Iterator[Path]:
+    """Exclusive inter-process claim/release lock, or no lock without fcntl."""
+    directory = _ensure_claim_dir(root)
+    lock_path = directory / ".lock"
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(lock_path, flags, 0o600)
+    except OSError as exc:
+        raise GrantRefused("the claim ledger lock could not be opened",
+                           code="ledger_unavailable",
+                           detail={"error": type(exc).__name__}) from exc
+    try:
+        try:
+            os.fchmod(descriptor, 0o600)
+        except OSError:
+            pass
+        if fcntl is not None:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield directory
+    finally:
+        try:
+            if fcntl is not None:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+
+
+def _write_claim(directory: Path, record: Mapping[str, Any]) -> None:
+    data = (json.dumps(record, ensure_ascii=True, indent=2, sort_keys=True)
+            + "\n").encode("utf-8")
+    if len(data) > MAX_CLAIM_BYTES:
+        raise GrantRefused("the claim record would be too large",
+                           code="claim_too_large",
+                           detail={"max_bytes": MAX_CLAIM_BYTES})
+    name = _claim_file_name(str(record["claim_id"]))
+    target = directory / name
+    temporary = directory / f".{name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(temporary, flags, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
+        try:
+            directory_fd = os.open(directory, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except OSError:
+            pass
+    except BaseException:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
+def _claim_cleanup_policy(value: object) -> str:
+    if value not in CLEANUP_POLICIES:
+        raise GrantError("cleanup policy is invalid")
+    return str(value)
+
+
+def _normalise_release(value: object) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise GrantError("release must be a table")
+    previous = value.get("previous_status")
+    if previous is not None and previous not in CLAIM_STATES:
+        raise GrantError("release.previous_status is invalid")
+    observed = value.get("observed")
+    observed = observed if isinstance(observed, Mapping) else {}
+    cleanup = value.get("cleanup")
+    cleanup = cleanup if isinstance(cleanup, Mapping) else {}
+    status = cleanup.get("status", "unknown")
+    if status not in CLEANUP_STATES:
+        raise GrantError("release.cleanup.status is invalid")
+    return {
+        "at": _iso(_parse_time(value.get("at"), where="release.at")),
+        "by": _claim_label(value.get("by"), where="release.by"),
+        "source": _claim_label(value.get("source"), where="release.source"),
+        "previous_status": previous,
+        "observed": {
+            "cost_usd": _optional_claim_number(
+                observed.get("cost_usd"), where="release.observed.cost_usd"),
+            "minutes": _optional_claim_number(
+                observed.get("minutes"), where="release.observed.minutes"),
+            "provided": observed.get("provided") is True,
+        },
+        "cleanup": {
+            "policy": _claim_cleanup_policy(cleanup.get("policy")),
+            "status": status,
+            "verified": False,
+            "source": _claim_label(cleanup.get("source"),
+                                   where="release.cleanup.source"),
+            "evidence": (None if cleanup.get("evidence") is None else
+                         _check_text(
+                             cleanup.get("evidence"),
+                             where="release.cleanup.evidence",
+                             max_length=MAX_CLAIM_OBSERVED_TEXT)),
+        },
+    }
+
+
+def _normalise_claim(raw: object) -> dict[str, Any]:
+    """Rebuild one stored record from known fields only.
+
+    Unknown keys are dropped, so a hand-edited file cannot smuggle a secret or
+    an unbounded value into a status reply.
+    """
+    if not isinstance(raw, Mapping):
+        raise GrantError("claim record must be a table")
+    if raw.get("schema") != CLAIM_SCHEMA:
+        raise GrantError("claim record has an unsupported schema")
+    claim_id = _validate_claim_id(raw.get("claim_id"))
+    grant_id = raw.get("grant_id")
+    if not isinstance(grant_id, str) or not _ID_RE.fullmatch(grant_id):
+        raise GrantError("claim record has an invalid grant id")
+    grant_kind = raw.get("grant_kind")
+    if grant_kind not in GRANT_KINDS:
+        raise GrantError("claim record has an invalid grant kind")
+    provider = raw.get("provider")
+    if provider not in PROVIDERS:
+        raise GrantError("claim record has an invalid provider")
+
+    approval_raw = raw.get("approval")
+    if not isinstance(approval_raw, Mapping):
+        raise GrantError("claim record has an invalid approval")
+    flags = approval_raw.get("flags")
+    flags = flags if isinstance(flags, Mapping) else {}
+    permissions = approval_raw.get("permissions")
+    if not isinstance(permissions, list):
+        permissions = []
+    permissions = [item for item in permissions
+                   if isinstance(item, str) and item in PERMISSIONS]
+
+    budget_raw = raw.get("budget")
+    if not isinstance(budget_raw, Mapping):
+        raise GrantError("claim record has an invalid budget")
+    max_instances = budget_raw.get("max_instances")
+    if max_instances is not None:
+        if isinstance(max_instances, bool) or not isinstance(max_instances, int) \
+                or max_instances <= 0:
+            raise GrantError("claim budget.max_instances is invalid")
+    ttl = _claim_number(budget_raw.get("ttl_minutes"),
+                        where="claim budget.ttl_minutes", positive=True)
+
+    observed_raw = raw.get("observed")
+    observed_raw = observed_raw if isinstance(observed_raw, Mapping) else {}
+    cleanup_raw = raw.get("cleanup")
+    if not isinstance(cleanup_raw, Mapping):
+        raise GrantError("claim record has an invalid cleanup")
+    cleanup_status = cleanup_raw.get("status", "unknown")
+    if cleanup_status not in CLEANUP_STATES:
+        raise GrantError("claim cleanup.status is invalid")
+
+    status = raw.get("status")
+    if status not in CLAIM_STATES:
+        raise GrantError("claim record has an invalid status")
+    released = raw.get("released")
+    if released is not None:
+        released = _iso(_parse_time(released, where="claim.released"))
+
+    return {
+        "schema": CLAIM_SCHEMA,
+        "claim_id": claim_id,
+        "grant_id": grant_id,
+        "grant_kind": str(grant_kind),
+        "provider": str(provider),
+        "task": _claim_label(raw.get("task"), where="claim.task"),
+        "session": _claim_label(raw.get("session"), where="claim.session"),
+        "reason": _check_text(raw.get("reason"), where="claim.reason",
+                              required=True, max_length=MAX_CLAIM_REASON),
+        "approval": {
+            "required": approval_raw.get("required") is True,
+            "granted": approval_raw.get("granted") is True,
+            "kind": _claim_label(approval_raw.get("kind"),
+                                 where="claim.approval.kind"),
+            "flag": _claim_label(approval_raw.get("flag"),
+                                 where="claim.approval.flag"),
+            "approved_by": _claim_label(
+                approval_raw.get("approved_by"),
+                where="claim.approval.approved_by"),
+            "source": _claim_label(approval_raw.get("source"),
+                                   where="claim.approval.source"),
+            "at": (None if approval_raw.get("at") is None else _iso(
+                _parse_time(approval_raw.get("at"),
+                            where="claim.approval.at"))),
+            "reason": _check_text(approval_raw.get("reason"),
+                                  where="claim.approval.reason",
+                                  max_length=MAX_CLAIM_REASON),
+            "grant_id": grant_id,
+            "claim_id": claim_id,
+            "task": _claim_label(approval_raw.get("task"),
+                                 where="claim.approval.task"),
+            "session": _claim_label(approval_raw.get("session"),
+                                    where="claim.approval.session"),
+            "permissions": permissions,
+            "reusable": False,
+            "flags": {
+                "approve": flags.get("approve") is True,
+                "allow_unbounded": flags.get("allow_unbounded") is True,
+                "allow_keep": flags.get("allow_keep") is True,
+            },
+        },
+        "budget": {
+            "max_usd": _optional_claim_number(
+                budget_raw.get("max_usd"), where="claim budget.max_usd"),
+            "max_minutes": _optional_claim_number(
+                budget_raw.get("max_minutes"),
+                where="claim budget.max_minutes"),
+            "max_instances": max_instances,
+            "unbounded": budget_raw.get("unbounded") is True,
+            "ttl_minutes": ttl,
+        },
+        "started": _iso(_parse_time(raw.get("started"),
+                                    where="claim.started")),
+        "expires": _iso(_parse_time(raw.get("expires"),
+                                    where="claim.expires")),
+        "observed": {
+            "cost_usd": _optional_claim_number(
+                observed_raw.get("cost_usd"),
+                where="claim.observed.cost_usd"),
+            "minutes": _optional_claim_number(
+                observed_raw.get("minutes"), where="claim.observed.minutes"),
+            "provided": observed_raw.get("provided") is True,
+        },
+        "cleanup": {
+            "policy": _claim_cleanup_policy(cleanup_raw.get("policy")),
+            "status": cleanup_status,
+            "verified": False,
+            "source": _claim_label(cleanup_raw.get("source"),
+                                   where="claim.cleanup.source"),
+            "evidence": (None if cleanup_raw.get("evidence") is None else
+                         _check_text(
+                             cleanup_raw.get("evidence"),
+                             where="claim.cleanup.evidence",
+                             max_length=MAX_CLAIM_OBSERVED_TEXT)),
+        },
+        "status": status,
+        "created": _iso(_parse_time(raw.get("created"),
+                                    where="claim.created")),
+        "released": released,
+        "release": _normalise_release(raw.get("release")),
+    }
+
+
+def _read_claims(directory: Path,
+                 errors: list[str] | None = None
+                 ) -> tuple[list[dict[str, Any]], list[str]]:
+    """Read valid claim records; never create, delete or follow a symlink."""
+    seen: list[dict[str, Any]] = []
+    ids: set[str] = set()
+    notes = errors if errors is not None else []
+    if not directory.exists():
+        return seen, notes
+    if directory.is_symlink():
+        notes.append("ignored a symlinked claim ledger path")
+        return seen, notes
+    if not directory.is_dir():
+        notes.append("the claim ledger path is not a directory")
+        return seen, notes
+    try:
+        entries = sorted(directory.iterdir(), key=lambda item: item.name)
+    except OSError as exc:
+        notes.append(
+            f"the claim ledger could not be read: {type(exc).__name__}")
+        return seen, notes
+    for entry in entries:
+        if entry.name == ".lock" or entry.name.startswith("."):
+            continue
+        if not _CLAIM_FILE_RE.fullmatch(entry.name):
+            notes.append(
+                f"ignored an invalid claim filename {_label(entry.name)!r}")
+            continue
+        try:
+            info = entry.lstat()
+        except OSError as exc:
+            notes.append(
+                f"claim file could not be inspected: {type(exc).__name__}")
+            continue
+        if not stat.S_ISREG(info.st_mode):
+            notes.append("ignored a non-regular claim file")
+            continue
+        if info.st_size > MAX_CLAIM_BYTES:
+            notes.append("ignored an oversized claim file")
+            continue
+        try:
+            raw = json.loads(entry.read_text(encoding="utf-8"))
+            record = _normalise_claim(raw)
+        except (OSError, UnicodeError, json.JSONDecodeError, GrantError) as exc:
+            notes.append(
+                f"ignored a malformed claim file: {type(exc).__name__}")
+            continue
+        if _claim_file_name(record["claim_id"]) != entry.name:
+            notes.append("ignored a claim file with the wrong name")
+            continue
+        if record["claim_id"] in ids:
+            notes.append("ignored a duplicate claim id")
+            continue
+        ids.add(record["claim_id"])
+        seen.append(record)
+        if len(seen) >= MAX_CLAIMS:
+            notes.append(
+                f"claim ledger is bounded at {MAX_CLAIMS} records; "
+                "older records were not read")
+            break
+    return seen, notes
+
+
+def _effective_claim(record: Mapping[str, Any],
+                     at: datetime) -> dict[str, Any]:
+    out = dict(record)
+    out["approval"] = dict(record["approval"])
+    out["approval"]["flags"] = dict(record["approval"].get("flags") or {})
+    out["approval"]["permissions"] = list(
+        record["approval"].get("permissions") or [])
+    out["budget"] = dict(record["budget"])
+    out["observed"] = dict(record["observed"])
+    out["cleanup"] = dict(record["cleanup"])
+    out["release"] = (None if record.get("release") is None
+                      else json.loads(json.dumps(record["release"])))
+    stored = record["status"]
+    expires = _parse_time(record["expires"], where="claim.expires")
+    expired = (stored in {"expired", "orphaned"}
+               or (stored != "released" and at >= expires))
+    if stored == "released":
+        status = "released"
+    elif stored == "orphaned":
+        status = "orphaned"
+    elif stored == "expired":
+        status = "expired"
+    elif expired:
+        # An expired unreleased claim may still describe live resources: it is
+        # reported as orphaned (and counted as expired) until an operator
+        # releases it explicitly.
+        status = "orphaned"
+    else:
+        status = "active"
+    out["status"] = status
+    out["expired"] = bool(expired)
+    out["orphaned"] = bool(expired and stored != "released")
+    out["expires_in_s"] = (0 if stored == "released"
+                           else max(0, int((expires - at).total_seconds())))
+    out["cleanup_status"] = out["cleanup"]["status"]
+    return out
+
+
+def _requested_budget(value: object) -> tuple[float | None, float | None]:
+    if value is None:
+        return None, None
+    if not isinstance(value, Mapping):
+        raise GrantError("budget must be a table")
+    extra = sorted(set(value) - _CLAIM_BUDGET_FIELDS)
+    if extra:
+        raise GrantError(
+            "budget: unknown field(s): "
+            + ", ".join(_label(item) for item in extra))
+    max_usd = _optional_claim_number(value.get("max_usd"),
+                                     where="budget.max_usd", positive=True)
+    max_minutes = _optional_claim_number(
+        value.get("max_minutes"), where="budget.max_minutes", positive=True)
+    return max_usd, max_minutes
+
+
+def _declared_limits(grant: ResourceGrant
+                     ) -> tuple[float | None, float | None, int | None, bool]:
+    max_usd = None
+    max_minutes = None
+    max_instances = None
+    unbounded = False
+    if grant.budget is not None:
+        max_usd = grant.budget.max_usd
+        if grant.budget.max_hours is not None:
+            max_minutes = float(grant.budget.max_hours) * 60.0
+        max_instances = grant.budget.max_instances
+        unbounded = grant.budget.unbounded
+    hours = grant.constraints.get("max_hours")
+    if isinstance(hours, (int, float)) and not isinstance(hours, bool):
+        candidate = float(hours) * 60.0
+        max_minutes = (candidate if max_minutes is None
+                       else min(max_minutes, candidate))
+    instances = grant.constraints.get("max_instances")
+    if isinstance(instances, int) and not isinstance(instances, bool):
+        max_instances = (instances if max_instances is None
+                         else min(max_instances, instances))
+    return max_usd, max_minutes, max_instances, unbounded
+
+
+def _claim_budget(grant: ResourceGrant, requested: object) -> dict[str, Any]:
+    declared_usd, declared_minutes, max_instances, unbounded = \
+        _declared_limits(grant)
+    requested_usd, requested_minutes = _requested_budget(requested)
+    for name, requested_value, declared_value in (
+            ("max_usd", requested_usd, declared_usd),
+            ("max_minutes", requested_minutes, declared_minutes)):
+        if (requested_value is not None and declared_value is not None
+                and requested_value > declared_value):
+            raise GrantRefused(
+                f"the requested {name} exceeds the grant's declared limit",
+                code="budget_exceeds_grant",
+                detail={"field": name, "declared": declared_value,
+                        "requested": requested_value})
+    max_usd = requested_usd if requested_usd is not None else declared_usd
+    max_minutes = (requested_minutes if requested_minutes is not None
+                   else declared_minutes)
+    ttl_minutes = (max_minutes if max_minutes is not None
+                   else DEFAULT_CLAIM_TTL_MINUTES)
+    ttl_minutes = max(1.0, min(float(ttl_minutes), MAX_CLAIM_TTL_MINUTES))
+    return {
+        "max_usd": max_usd,
+        "max_minutes": max_minutes,
+        "max_instances": max_instances,
+        "unbounded": bool(unbounded),
+        "ttl_minutes": ttl_minutes,
+    }
+
+
+def _require_claim_approval(grant: ResourceGrant, *, approve: bool,
+                            allow_unbounded: bool,
+                            allow_keep: bool) -> None:
+    admin = "admin" in grant.permissions
+    unbounded = bool(grant.budget is not None and grant.budget.unbounded)
+    if grant.requires_approval and not approve:
+        raise GrantRefused(
+            "this resource grant requires explicit --approve",
+            code="requires_approval",
+            detail={"grant": grant.id, "flag": "approve",
+                    "admin": admin, "unbounded": unbounded})
+    if admin or unbounded:
+        if not approve:
+            raise GrantRefused(
+                "an admin or unbounded grant requires explicit --approve",
+                code="requires_approval",
+                detail={"grant": grant.id, "flag": "approve",
+                        "admin": admin, "unbounded": unbounded})
+        if not allow_unbounded:
+            raise GrantRefused(
+                "an admin or unbounded grant also requires "
+                "--allow-unbounded",
+                code="requires_approval",
+                detail={"grant": grant.id, "flag": "allow_unbounded",
+                        "admin": admin, "unbounded": unbounded})
+    if grant.cleanup == "keep":
+        if not approve or not allow_keep:
+            raise GrantRefused(
+                "a keep cleanup policy requires --approve and --allow-keep",
+                code="requires_approval",
+                detail={"grant": grant.id, "flag": "allow_keep",
+                        "cleanup": "keep"})
+
+
+def claim(
+        root: str | Path, grant_id: str, *,
+        reason: str,
+        task: str | None = None,
+        session: str | None = None,
+        approve: bool = False,
+        allow_unbounded: bool = False,
+        allow_keep: bool = False,
+        budget: Mapping[str, Any] | None = None,
+        now: datetime | str | None = None,
+) -> dict[str, Any]:
+    """Create one bounded claim after a read-only readiness check.
+
+    Approval is per claim and comes only from these arguments.  It is never
+    inferred from a profile, a grant's config or a previous claim.  No network
+    call is made and no credential is read.  An active or expired unreleased
+    claim for the same grant refuses a second claim with ``grant_in_use``.
+    """
+    root = Path(root).resolve()
+    if not isinstance(approve, bool) or not isinstance(allow_unbounded, bool) \
+            or not isinstance(allow_keep, bool):
+        raise GrantError("approval flags must be true or false")
+    clean_reason = _claim_reason(reason)
+    clean_task = _claim_label(task, where="task")
+    clean_session = _claim_label(session, where="session")
+    grant = show_grant(root, grant_id)
+    report = check_grant(root, grant_id, approval_granted=approve,
+                         unbounded_allowed=allow_unbounded)
+    if not report["ready"]:
+        state = report["state"]
+        code = state if state in {"missing", "unavailable",
+                                  "requires_approval"} else "not_ready"
+        failed = [check["id"] for check in report["checks"]
+                  if check.get("level") == "error"]
+        raise GrantRefused(
+            f"resource grant {grant.id!r} is not ready ({state})",
+            code=code,
+            detail={"grant": grant.id, "state": state,
+                    "checks": failed[:10]})
+    _require_claim_approval(grant, approve=approve,
+                            allow_unbounded=allow_unbounded,
+                            allow_keep=allow_keep)
+    at = _claim_time(now)
+    claim_budget = _claim_budget(grant, budget)
+    started = _iso(at)
+    expires = _iso(at + timedelta(minutes=claim_budget["ttl_minutes"]))
+    claim_id = "clm-" + uuid.uuid4().hex
+    record = {
+        "schema": CLAIM_SCHEMA,
+        "claim_id": claim_id,
+        "grant_id": grant.id,
+        "grant_kind": grant.kind,
+        "provider": grant.provider,
+        "task": clean_task,
+        "session": clean_session,
+        "reason": clean_reason,
+        "approval": {
+            "required": bool(grant.requires_approval),
+            "granted": bool(approve),
+            "kind": "host-approval" if approve else "none",
+            "flag": "--approve" if approve else None,
+            "approved_by": "host" if approve else None,
+            "source": "cli" if approve else None,
+            "at": started if approve else None,
+            "reason": clean_reason,
+            "grant_id": grant.id,
+            "claim_id": claim_id,
+            "task": clean_task,
+            "session": clean_session,
+            "permissions": list(grant.permissions),
+            "reusable": False,
+            "flags": {
+                "approve": bool(approve),
+                "allow_unbounded": bool(allow_unbounded),
+                "allow_keep": bool(allow_keep),
+            },
+        },
+        "budget": claim_budget,
+        "started": started,
+        "expires": expires,
+        "observed": {"cost_usd": None, "minutes": None, "provided": False},
+        "cleanup": {
+            "policy": grant.cleanup,
+            "status": "unknown",
+            "verified": False,
+            "source": None,
+            "evidence": None,
+        },
+        "status": "active",
+        "created": started,
+        "released": None,
+        "release": None,
+    }
+    with _ledger_lock(root) as directory:
+        existing, _errors = _read_claims(directory)
+        for item in existing:
+            effective = _effective_claim(item, at)
+            if item["grant_id"] == grant.id and effective["status"] != "released":
+                raise GrantRefused(
+                    f"resource grant {grant.id!r} is already claimed by "
+                    f"{item['claim_id']} ({effective['status']})",
+                    code="grant_in_use",
+                    detail={"grant": grant.id,
+                            "claim_id": item["claim_id"],
+                            "status": effective["status"]})
+        if len(existing) >= MAX_CLAIMS:
+            raise GrantRefused(
+                f"the claim ledger is full ({MAX_CLAIMS} records); it is "
+                "never pruned automatically",
+                code="ledger_full", detail={"max_claims": MAX_CLAIMS})
+        _write_claim(directory, record)
+    return _effective_claim(record, at)
+
+
+def _parse_observed(value: object) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise GrantError("observed must be a table")
+    extra = sorted(set(value) - _OBSERVED_FIELDS)
+    if extra:
+        raise GrantError(
+            "observed: unknown field(s): "
+            + ", ".join(_label(item) for item in extra))
+    out: dict[str, Any] = {}
+    if value.get("cost_usd") is not None:
+        out["cost_usd"] = _claim_number(
+            value["cost_usd"], where="observed.cost_usd")
+    if value.get("minutes") is not None:
+        out["minutes"] = _claim_number(
+            value["minutes"], where="observed.minutes")
+    cleanup = value.get("cleanup")
+    if cleanup is not None:
+        if cleanup not in CLEANUP_STATES:
+            raise GrantError(
+                "observed.cleanup must be one of "
+                + ", ".join(CLEANUP_STATES))
+        out["cleanup"] = str(cleanup)
+    evidence = value.get("evidence")
+    if evidence is not None:
+        out["evidence"] = SEC.redact_text(_check_text(
+            evidence, where="observed.evidence", required=True,
+            max_length=MAX_CLAIM_OBSERVED_TEXT))
+    return out
+
+
+def _observed_update(record: Mapping[str, Any],
+                     observed: Mapping[str, Any]) -> dict[str, Any]:
+    current = dict(record["observed"])
+    supplied = any(key in observed for key in ("cost_usd", "minutes"))
+    cost = observed.get("cost_usd", current.get("cost_usd"))
+    minutes = observed.get("minutes", current.get("minutes"))
+    return {
+        "cost_usd": cost,
+        "minutes": minutes,
+        "provided": bool(current.get("provided")) or supplied,
+    }
+
+
+def _cleanup_update(record: Mapping[str, Any],
+                    observed: Mapping[str, Any]) -> dict[str, Any]:
+    status = observed.get("cleanup", "unknown")
+    evidence = observed.get("evidence", record["cleanup"].get("evidence"))
+    return {
+        "policy": record["cleanup"]["policy"],
+        "status": status,
+        "verified": False,
+        "source": "caller" if status != "unknown" or evidence else None,
+        "evidence": evidence,
+    }
+
+
+def _find_claim(records: list[dict[str, Any]], claim_id: str
+                ) -> dict[str, Any] | None:
+    for record in records:
+        if record["claim_id"] == claim_id:
+            return record
+    return None
+
+
+def release(
+        root: str | Path, claim_id: str, *,
+        apply: bool = False,
+        observed: Mapping[str, Any] | None = None,
+        now: datetime | str | None = None,
+) -> dict[str, Any]:
+    """Preview or apply one claim release.
+
+    The default is a preview.  ``apply=True`` closes the claim and records the
+    caller's cleanup status and observed cost/time.  Cleanup is only ``done``
+    when the caller says so; Ozagia does not verify a provider teardown.  An
+    expired or orphaned claim is released explicitly and its record is kept.
+    """
+    root = Path(root).resolve()
+    claim_id = _validate_claim_id(claim_id)
+    if not isinstance(apply, bool):
+        raise GrantError("apply must be true or false")
+    at = _claim_time(now)
+    observed_values = _parse_observed(observed)
+    directory = _claim_dir(root)
+    if not directory.is_dir():
+        raise GrantRefused(f"unknown claim {claim_id!r}",
+                           code="claim_missing",
+                           detail={"claim_id": claim_id})
+    if not apply:
+        records, errors = _read_claims(directory)
+        record = _find_claim(records, claim_id)
+        if record is None:
+            raise GrantRefused(
+                f"unknown claim {claim_id!r}", code="claim_missing",
+                detail={"claim_id": claim_id,
+                        "errors": list(errors)[:5]})
+        effective = _effective_claim(record, at)
+        effective["dry_run"] = True
+        effective["applied"] = False
+        effective["would_release"] = effective["status"] != "released"
+        effective["already_released"] = effective["status"] == "released"
+        if effective["status"] != "released":
+            effective["observed"] = _observed_update(record, observed_values)
+            effective["cleanup"] = _cleanup_update(record, observed_values)
+            effective["cleanup_status"] = effective["cleanup"]["status"]
+        return effective
+    with _ledger_lock(root) as directory:
+        records, errors = _read_claims(directory)
+        record = _find_claim(records, claim_id)
+        if record is None:
+            raise GrantRefused(
+                f"unknown claim {claim_id!r}", code="claim_missing",
+                detail={"claim_id": claim_id,
+                        "errors": list(errors)[:5]})
+        effective = _effective_claim(record, at)
+        if effective["status"] == "released":
+            raise GrantRefused(
+                f"claim {claim_id!r} was already released",
+                code="claim_released",
+                detail={"claim_id": claim_id,
+                        "released": record.get("released")})
+        observed_record = _observed_update(record, observed_values)
+        cleanup_record = _cleanup_update(record, observed_values)
+        updated = dict(record)
+        updated["status"] = "released"
+        updated["released"] = _iso(at)
+        updated["observed"] = observed_record
+        updated["cleanup"] = cleanup_record
+        updated["release"] = {
+            "at": _iso(at),
+            "by": "host",
+            "source": "cli",
+            "previous_status": effective["status"],
+            "observed": observed_record,
+            "cleanup": cleanup_record,
+        }
+        _write_claim(directory, updated)
+    result = _effective_claim(updated, at)
+    result["dry_run"] = False
+    result["applied"] = True
+    result["would_release"] = False
+    result["already_released"] = False
+    return result
+
+
+def _matches_claim_status(record: Mapping[str, Any], status: str) -> bool:
+    if status == "expired":
+        return bool(record.get("expired"))
+    if status == "orphaned":
+        return bool(record.get("orphaned"))
+    return record.get("status") == status
+
+
+def claims(
+        root: str | Path, *,
+        status: str | None = None,
+        grant_id: str | None = None,
+) -> dict[str, Any]:
+    """Read-only claim list with explicit counts; never creates the ledger."""
+    if status is not None and status not in CLAIM_STATES:
+        raise GrantError(
+            "status must be one of " + ", ".join(CLAIM_STATES))
+    if grant_id is not None:
+        if not isinstance(grant_id, str) or not _ID_RE.fullmatch(grant_id):
+            raise GrantError("grant_id is not a valid resource grant id")
+    at = _claim_time()
+    directory = _claim_dir(root)
+    errors: list[str] = []
+    records, errors = _read_claims(directory, errors)
+    effective = [_effective_claim(record, at) for record in records]
+    counts = {
+        "total": len(effective),
+        "active": sum(1 for item in effective
+                      if item["status"] == "active"),
+        "released": sum(1 for item in effective
+                        if item["status"] == "released"),
+        "expired": sum(1 for item in effective if item["expired"]),
+        "orphaned": sum(1 for item in effective if item["orphaned"]),
+        "cleanup": {
+            state: sum(1 for item in effective
+                       if item["cleanup"]["status"] == state)
+            for state in CLEANUP_STATES
+        },
+    }
+    selected = [item for item in effective
+                if (status is None or _matches_claim_status(item, status))
+                and (grant_id is None or item["grant_id"] == grant_id)]
+    selected.sort(key=lambda item: (item.get("created") or "",
+                                    item["claim_id"]))
+    return {
+        "schema": CLAIM_SCHEMA,
+        "now": _iso(at),
+        "count": len(selected),
+        "counts": counts,
+        "claims": selected,
+        "errors": _bounded_errors(errors),
+        "read_only": True,
+    }
+
+
+def claim_status(root: str | Path, claim_id: str) -> dict[str, Any]:
+    """Read-only view of one claim, with its computed expiry/orphan state."""
+    claim_id = _validate_claim_id(claim_id)
+    at = _claim_time()
+    directory = _claim_dir(root)
+    if not directory.is_dir():
+        raise GrantRefused(f"unknown claim {claim_id!r}",
+                           code="claim_missing",
+                           detail={"claim_id": claim_id})
+    errors: list[str] = []
+    records, errors = _read_claims(directory, errors)
+    record = _find_claim(records, claim_id)
+    if record is None:
+        raise GrantRefused(
+            f"unknown claim {claim_id!r}", code="claim_missing",
+            detail={"claim_id": claim_id, "errors": list(errors)[:5]})
+    return _effective_claim(record, at)

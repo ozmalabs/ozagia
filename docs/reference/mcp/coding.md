@@ -2,7 +2,7 @@
 
 > **Generated file.** Built by `scripts/docs/generate_docs.py` from `src/ozagia/integrations/mcp/server.py`, `src/ozagia/integrations/mcp/graph_surface.py`, `src/ozagia/integrations/mcp/sre.py`, `src/ozagia/research/mcp.py` (ozagia `0.1.5.dev0`). Do not edit by hand: change the source code and regenerate.
 
-97 tools.
+98 tools.
 
 > Built-in tools from `server._TOOLS`, plus the offline SRE/IaC tools (`sre.py`) and `research_fetch`.
 
@@ -489,6 +489,15 @@ Ranked, token-budgeted repo map (tree-sitter tags + personalized PageRank). Use 
 | `focus_files` | array |  |  | — |
 | `force_refresh` | boolean |  | false | — |
 | `scip_path` | string |  |  | Optional SCIP JSON export for precise edges. |
+### `dev_resource_grants`
+
+Read-only resource-grant declaration and claim-ledger view: declared grants with their kind, provider, declared permissions, budget, cleanup and approval requirement, plus claim counts (active, released, expired, orphaned) and bounded claim rows. It never claims, approves or releases a grant, never starts a daemon, makes no network call and returns no credential value; expiry and cleanup are reported, not changed.
+
+| parameter | type | required | default | description |
+|---|---|---|---|---|
+| `grant_id` | string |  |  | Only claims for this grant id. |
+| `claim_status` | string |  |  | Only claims in this state. |
+| `limit` | integer |  | 50 | Maximum grants and claims shown (max 200). |
 ### `dev_review_repo`
 
 Review the whole repository deterministically: architecture (import cycles, hubs, layering), tests (failing tests from the record, untested modules), health (large files and functions, TODO density, unreferenced symbols), churn hotspots without tests, stale doc references, security hygiene (tracked .env and key files, sensitive constructs; not a security audit), ops sources (unpinned images, restart policy, health checks, published ports) and dependencies (lock files; imports no manifest declares or only an optional one does; tests no found interpreter can import). Uses the graph only when it is fresh and says what it could not check. Returns counts and the top findings, each with an id, graph keys and a suggested goal; the full packet is written under .ozagia/reviews/ (latest.json is the newest).

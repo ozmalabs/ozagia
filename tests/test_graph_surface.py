@@ -48,6 +48,7 @@ FULL_SURFACE_TOOLS = [
     "dev_assets_list", "dev_assets_status",
     "dev_review_repo", "dev_deep_review", "dev_supply_chain", "dev_profile",
     "dev_environment", "dev_tools", "dev_migration", "dev_capabilities",
+    "dev_resource_grants",
     "goal_list", "goal_show", "goal_check", "goal_add", "goal_from_review", "goal_claim",
     "dev_maps",
     "dev_graph_query", "dev_environments",

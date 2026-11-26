@@ -359,6 +359,7 @@ _DOCS = {
     "jobs": "doc:docs/jobs.md",
     "environment": "doc:docs/environments.md",
     "resources": "doc:docs/resources.md",
+    "resource_grants": "doc:docs/resource_grants.md",
     "toolchain": "doc:docs/toolchain.md",
     "languages": "doc:docs/languages.md",
     "rust": "doc:docs/rust.md",
@@ -421,6 +422,7 @@ _TESTS = {
     "environment": "test:tests/test_environments.py",
     "files": "test:tests/test_files.py",
     "resources": "test:tests/test_cgroup.py",
+    "resource_grants": "test:tests/test_resource_grants.py",
     "toolchain": "test:tests/test_toolchain.py",
     "languages": "test:tests/test_languages.py",
     "migration": "test:tests/test_migration_cli.py",
@@ -1540,6 +1542,43 @@ _BUILTIN_DEFINITIONS: tuple[dict[str, Any], ...] = (
         docs=_docs("temp"),
     ),
     _def(
+        id="cap:resources.grants",
+        domain="resources",
+        purpose=("Declare named resource grants, check their local readiness, "
+                 "and record per-claim approval, budget, expiry, observed "
+                 "usage and cleanup in a bounded ledger."),
+        owner="ozagia.core.resource_grants",
+        side_effect="write",
+        exposure=["mcp"],
+        impl=["impl:ozagia.core.resource_grants.check_grant",
+              "impl:ozagia.core.resource_grants.claim",
+              "impl:ozagia.core.resource_grants.release",
+              "impl:ozagia.core.resource_grants.claims",
+              "impl:ozagia.core.resource_grants.claim_status"],
+        surfaces=["mcp:tool:dev_resource_grants"],
+        prerequisites=["a repository root",
+                       "a [resource_grants.<id>] table in "
+                       "ozagia/resources.toml or ozagia/config.toml",
+                       "a writable state directory for claim and release"],
+        limits=["list, show, check, claim status and the MCP tool are read-only",
+                "claim and release write only <state>/resources/grants/",
+                "approval is per claim from an explicit host flag; a model "
+                "cannot claim, approve or release through MCP",
+                "admin and unbounded grants need --approve and "
+                "--allow-unbounded; keep cleanup needs --allow-keep",
+                "expired unreleased claims are reported as orphaned, never "
+                "deleted or auto-released",
+                "cleanup is done/failed/unknown only from caller evidence; "
+                "Ozagia never verifies a provider teardown",
+                "observed spend and time stay unknown unless the caller "
+                "supplies them",
+                "no network and no credential values in grants or claims"],
+        authorization=("explicit host CLI --approve/--allow-unbounded/"
+                       "--allow-keep; the MCP surface is read-only"),
+        tests=_tests("resource_grants"),
+        docs=_docs("resource_grants"),
+    ),
+    _def(
         id="cap:mesh.ozma",
         domain="actions",
         purpose=("Read-only declared Ozma flight view: identity-mapped members, "
@@ -1832,12 +1871,13 @@ _BUILTIN_DEFINITIONS: tuple[dict[str, Any], ...] = (
         side_effect="read",
         exposure=["internal"],
         impl=["impl:ozagia.core.status.status"],
-        surfaces=["status:workspace", "status:resources", "status:files",
-                  "status:runtime", "status:daemon", "status:doctor",
-                  "status:config", "status:reviews", "status:integrations",
-                  "status:capabilities", "status:jobs", "status:admissions",
-                  "status:providers", "status:snapshot", "status:sessions",
-                  "status:ownership", "status:mesh", "status:flight"],
+        surfaces=["status:workspace", "status:resources", "status:grants",
+                  "status:files", "status:runtime", "status:daemon",
+                  "status:doctor", "status:config", "status:reviews",
+                  "status:integrations", "status:capabilities", "status:jobs",
+                  "status:admissions", "status:providers", "status:snapshot",
+                  "status:sessions", "status:ownership", "status:mesh",
+                  "status:flight"],
         prerequisites=["the repository root"],
         limits=["absence and unknown are distinct; no service is started"],
         authorization=_READ,

@@ -97,6 +97,43 @@ def build_parser() -> argparse.ArgumentParser:
                         help="exit 1 when the grant is not ready")
     gcheck.add_argument("--root", default=None)
     gcheck.add_argument("--json", action="store_true")
+
+    gclaim = actions.add_parser(
+        "claim", help="claim a ready grant (writes the claim ledger)")
+    gclaim.add_argument("id")
+    gclaim.add_argument("--reason", required=True,
+                        help="why this claim is needed (recorded)")
+    gclaim.add_argument("--task", default=None)
+    gclaim.add_argument("--session", default=None)
+    gclaim.add_argument("--approve", action="store_true",
+                        help="explicit host approval for this claim")
+    gclaim.add_argument("--allow-unbounded", action="store_true",
+                        help="explicitly allow an admin/unbounded grant")
+    gclaim.add_argument("--allow-keep", action="store_true",
+                        help="explicitly allow a keep cleanup policy")
+    gclaim.add_argument("--max-usd", type=float, default=None)
+    gclaim.add_argument("--max-minutes", type=float, default=None)
+    gclaim.add_argument("--root", default=None)
+    gclaim.add_argument("--json", action="store_true")
+
+    grelease = actions.add_parser(
+        "release", help="preview or apply a claim release")
+    grelease.add_argument("claim")
+    grelease.add_argument("--apply", action="store_true",
+                          help="close the claim; without it this is a preview")
+    grelease.add_argument("--observed-usd", type=float, default=None)
+    grelease.add_argument("--observed-minutes", type=float, default=None)
+    grelease.add_argument("--cleanup", choices=RG.CLEANUP_STATES,
+                          default=None)
+    grelease.add_argument("--root", default=None)
+    grelease.add_argument("--json", action="store_true")
+
+    gstatus = actions.add_parser(
+        "status", help="read-only active/expired/orphaned claims")
+    gstatus.add_argument("--status", choices=RG.CLAIM_STATES, default=None)
+    gstatus.add_argument("--grant", dest="grant_id", default=None)
+    gstatus.add_argument("--root", default=None)
+    gstatus.add_argument("--json", action="store_true")
     return parser
 
 
@@ -156,6 +193,80 @@ def _format_grant_check(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _format_claim_budget(budget: dict[str, Any] | None) -> str:
+    if not budget:
+        return "unknown"
+    parts: list[str] = []
+    if budget.get("unbounded"):
+        parts.append("unbounded")
+    if budget.get("max_usd") is not None:
+        parts.append(f"max_usd={budget['max_usd']}")
+    if budget.get("max_minutes") is not None:
+        parts.append(f"max_minutes={budget['max_minutes']}")
+    if budget.get("max_instances") is not None:
+        parts.append(f"max_instances={budget['max_instances']}")
+    if budget.get("ttl_minutes") is not None:
+        parts.append(f"ttl_minutes={budget['ttl_minutes']}")
+    return ", ".join(parts) if parts else "no caps"
+
+
+def _format_observed(observed: dict[str, Any] | None) -> str:
+    observed = observed or {}
+    cost = observed.get("cost_usd")
+    minutes = observed.get("minutes")
+    cost_text = "unknown" if cost is None else str(cost)
+    minutes_text = "unknown" if minutes is None else str(minutes)
+    return f"cost_usd={cost_text}, minutes={minutes_text}"
+
+
+def _format_claim(claim: dict[str, Any], *, indent: str = "") -> str:
+    orphan = " orphaned=true" if claim.get("orphaned") else ""
+    lines = [f"{indent}{claim.get('claim_id')}: {claim.get('status')}{orphan} "
+             f"grant={claim.get('grant_id')}"]
+    if claim.get("task") or claim.get("session"):
+        lines.append(f"{indent}  task={claim.get('task') or '-'} "
+                     f"session={claim.get('session') or '-'}")
+    lines.append(f"{indent}  started: {claim.get('started')} "
+                 f"expires: {claim.get('expires')}")
+    approval = claim.get("approval") or {}
+    flags = approval.get("flags") or {}
+    approved = [name for name in ("approve", "allow_unbounded", "allow_keep")
+                if flags.get(name)]
+    lines.append(f"{indent}  approval: "
+                 f"{'host' if approval.get('granted') else 'not granted'}"
+                 + (f" ({', '.join(approved)})" if approved else ""))
+    lines.append(f"{indent}  budget: {_format_claim_budget(claim.get('budget'))}")
+    cleanup = claim.get("cleanup") or {}
+    lines.append(f"{indent}  cleanup: {cleanup.get('policy')}/"
+                 f"{cleanup.get('status')} (verified=false)")
+    lines.append(f"{indent}  observed: "
+                 f"{_format_observed(claim.get('observed'))}")
+    if claim.get("reason"):
+        lines.append(f"{indent}  reason: {claim.get('reason')}")
+    return "\n".join(lines)
+
+
+def _format_claims(report: dict[str, Any], *, header: str = "claims") -> str:
+    counts = report.get("counts") or {}
+    cleanup = counts.get("cleanup") or {}
+    lines = [f"{header}: total={counts.get('total', 0)} "
+             f"active={counts.get('active', 0)} "
+             f"expired={counts.get('expired', 0)} "
+             f"orphaned={counts.get('orphaned', 0)} "
+             f"released={counts.get('released', 0)} "
+             f"cleanup(done={cleanup.get('done', 0)},"
+             f"failed={cleanup.get('failed', 0)},"
+             f"unknown={cleanup.get('unknown', 0)})"]
+    for error in report.get("errors") or []:
+        lines.append(f"  warning: {error}")
+    if not report.get("claims"):
+        lines.append("  no claims")
+    for claim in report.get("claims") or []:
+        lines.append(_format_claim(claim, indent="  "))
+    return "\n".join(lines)
+
+
+
 def _grants_command(args: argparse.Namespace) -> int:
     root = _root(args.root)
     action = args.grant_command
@@ -195,6 +306,49 @@ def _grants_command(args: argparse.Namespace) -> int:
             print(_format_grant_check(report))
         if args.require_ready and not report["ready"]:
             return 1
+        return 0
+    if action == "claim":
+        budget = {}
+        if args.max_usd is not None:
+            budget["max_usd"] = args.max_usd
+        if args.max_minutes is not None:
+            budget["max_minutes"] = args.max_minutes
+        record = RG.claim(
+            root, args.id, reason=args.reason, task=args.task,
+            session=args.session, approve=args.approve,
+            allow_unbounded=args.allow_unbounded,
+            allow_keep=args.allow_keep, budget=budget or None)
+        if args.json:
+            _print_json({"ok": True, "schema": RG.CLAIM_SCHEMA,
+                         "claim": record})
+        else:
+            print(_format_claim(record))
+        return 0
+    if action == "release":
+        observed: dict[str, Any] = {}
+        if args.observed_usd is not None:
+            observed["cost_usd"] = args.observed_usd
+        if args.observed_minutes is not None:
+            observed["minutes"] = args.observed_minutes
+        if args.cleanup is not None:
+            observed["cleanup"] = args.cleanup
+        report = RG.release(root, args.claim, apply=args.apply,
+                            observed=observed or None)
+        if args.json:
+            _print_json({"ok": True, **report})
+        else:
+            head = ("release preview (dry-run; pass --apply to close)"
+                    if report.get("dry_run") else "released")
+            print(f"{head}: {report['claim_id']}")
+            print(_format_claim(report, indent="  "))
+        return 0
+    if action == "status":
+        report = RG.claims(root, status=args.status,
+                           grant_id=args.grant_id)
+        if args.json:
+            _print_json({"ok": True, **report})
+        else:
+            print(_format_claims(report))
         return 0
     raise ValueError(f"unknown grants command {action!r}")
 
@@ -236,6 +390,9 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(R.format_check(report))
         return 0 if report.get("ok") else 1
+    except RG.GrantRefused as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     except (ValueError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

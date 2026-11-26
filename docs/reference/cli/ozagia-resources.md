@@ -82,7 +82,7 @@ usage: ozagia-resources explain [-h] [--for {job,task,worktree}]
 ## `ozagia-resources grants`
 
 ```
-usage: ozagia-resources grants [-h] {list,show,check} ...
+usage: ozagia-resources grants [-h] {list,show,check,claim,release,status} ...
 ```
 
 ### `ozagia-resources grants list`
@@ -131,5 +131,74 @@ usage: ozagia-resources grants check [-h] [--live] [--probe-versions]
 | `--live` |  |  |  | allow the injected live identity check |
 | `--probe-versions` |  |  |  | run bounded qemu/virsh --version probes |
 | `--require-ready` |  |  |  | exit 1 when the grant is not ready |
+| `--root` |  |  |  | — |
+| `--json` |  |  |  | — |
+
+### `ozagia-resources grants claim`
+
+```
+usage: ozagia-resources grants claim [-h] --reason REASON [--task TASK]
+                                     [--session SESSION] [--approve]
+                                     [--allow-unbounded] [--allow-keep]
+                                     [--max-usd MAX_USD]
+                                     [--max-minutes MAX_MINUTES] [--root ROOT]
+                                     [--json]
+                                     id
+```
+
+| argument | type | values | required | help |
+|---|---|---|---|---|
+| `id` |  |  | yes | — |
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--reason` |  |  |  | why this claim is needed (recorded) |
+| `--task` |  |  |  | — |
+| `--session` |  |  |  | — |
+| `--approve` |  |  |  | explicit host approval for this claim |
+| `--allow-unbounded` |  |  |  | explicitly allow an admin/unbounded grant |
+| `--allow-keep` |  |  |  | explicitly allow a keep cleanup policy |
+| `--max-usd` | float |  |  | — |
+| `--max-minutes` | float |  |  | — |
+| `--root` |  |  |  | — |
+| `--json` |  |  |  | — |
+
+### `ozagia-resources grants release`
+
+```
+usage: ozagia-resources grants release [-h] [--apply]
+                                       [--observed-usd OBSERVED_USD]
+                                       [--observed-minutes OBSERVED_MINUTES]
+                                       [--cleanup {done,failed,unknown}]
+                                       [--root ROOT] [--json]
+                                       claim
+```
+
+| argument | type | values | required | help |
+|---|---|---|---|---|
+| `claim` |  |  | yes | — |
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--apply` |  |  |  | close the claim; without it this is a preview |
+| `--observed-usd` | float |  |  | — |
+| `--observed-minutes` | float |  |  | — |
+| `--cleanup` |  |  |  | — |
+| `--root` |  |  |  | — |
+| `--json` |  |  |  | — |
+
+### `ozagia-resources grants status`
+
+```
+usage: ozagia-resources grants status [-h]
+                                      [--status {active,released,expired,orphaned}]
+                                      [--grant GRANT_ID] [--root ROOT]
+                                      [--json]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--status` |  |  |  | — |
+| `--grant` |  |  |  | — |
 | `--root` |  |  |  | — |
 | `--json` |  |  |  | — |

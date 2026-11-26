@@ -1,4 +1,4 @@
-# Resource grants and read-only readiness
+# Resource grants, claims and release
 
 A **resource grant** is a named entitlement: which VM, host or cloud account a
 task may use, what it may spend, who must approve it and how it is cleaned up.
@@ -6,10 +6,10 @@ It is separate from host admission (`ozagia.core.resources`). Admission answers
 "does this run fit on this host now?"; a grant answers "is this resource
 declared, locally present and allowed?".
 
-This stage is **read-only**. It loads and checks grants. It does not create
-claims, write state, resolve secrets, make a network call by default, or run
-target code. Claims, release, teardown and task/eval/MCP integration are later
-stages.
+`ozagia resources grants list|show|check` and the MCP tool are **read-only**.
+`claim` writes one bounded claim record; `release` previews or applies the
+operator's teardown evidence. A claim is not proof that a provider resource was
+created, and a release is not proof that the provider actually deleted it.
 
 ## Where grants live
 
@@ -22,18 +22,54 @@ Grants are read only from the top-level `[resource_grants.<id>]` table in:
 not report it as unknown. It is deliberately **not** merged into
 `resources.load_policy`, `resources.status` or host admission.
 
+Claims live under the project state directory:
+
+```text
+<state>/resources/grants/
+  .lock
+  <sha256(claim id)>.json
+```
+
+The directory is `0700`; record and lock files are `0600`. A record filename is
+the sha256 of its validated `clm-<32 hex>` claim id, so no caller-supplied path
+or name reaches the filesystem. Writes are atomic (`os.replace` after an
+`fsync`) and claim/release take an exclusive `flock`. The ledger is bounded at
+`MAX_CLAIMS` (1024) records; a full ledger refuses a new claim rather than
+silently deleting history.
+
+## CLI
+
 ```text
 ozagia-resources grants list [--kind K] [--json]
 ozagia-resources grants show ID [--json]
 ozagia-resources grants check ID [--live] [--probe-versions] [--require-ready] [--json]
+
+ozagia-resources grants claim ID --reason TEXT [--task T] [--session S]
+    [--approve] [--allow-unbounded] [--allow-keep]
+    [--max-usd N] [--max-minutes N] [--json]
+
+ozagia-resources grants release CLAIM [--apply]
+    [--observed-usd N] [--observed-minutes N]
+    [--cleanup done|failed|unknown] [--json]
+
+ozagia-resources grants status [--status active|released|expired|orphaned]
+    [--grant ID] [--json]
 ```
 
-`list`, `show` and `check` are read-only. They exit `0` for a well-formed
-report, including `missing`, `unavailable`, `unknown` and
-`requires_approval`. `--require-ready` exits `1` when the grant is not ready.
-Invalid arguments, an unknown grant or a malformed config exit `2`. `list`
-reports malformed records in a bounded `errors` array instead of hiding the
-valid grants, and still exits `0` because it produced a report.
+`list`, `show`, `check` and `status` never create state. `claim` and `release`
+write only under `<state>/resources/grants/`.
+
+Exit codes:
+
+- `0`: a well-formed report, including `missing`, `unavailable`, `unknown`,
+  `requires_approval`, an empty ledger, or a release preview.
+- `1`: a refusal (typed code): not ready, missing/unavailable/required
+  approval, `grant_in_use`, unknown claim, already released, budget over the
+  grant's declared cap, or a full ledger.
+- `2`: usage or configuration error: bad argument, malformed id, negative or
+  non-finite number, unknown grant, or malformed TOML.
+
+No grant is auto-created by any of these commands.
 
 ## Schema
 
@@ -80,8 +116,8 @@ and unknown budget fields are rejected.
 - A budget with no cap and `unbounded = false` declares no cap. It does not
   mean "unlimited" and it does not mean a default cap was applied.
 - `admin` in `permissions` or `unbounded = true` forces
-  `requires_approval = true`. This stage reports `requires_approval`; it never
-  grants approval.
+  `requires_approval = true`. A read-only check reports `requires_approval`; it
+  never grants approval.
 
 ### Cleanup rules
 
@@ -92,80 +128,11 @@ and unknown budget fields are rejected.
 
 ### Secrets
 
-Grants may store names, paths, profiles, regions and `secret://...` references.
-They may not store keys, tokens, passwords, connection strings, ARNs or inline
+Grants may store names, paths, profiles, regions and secret references. They
+may not store keys, tokens, passwords, connection strings, ARNs or inline
 `KEY=VALUE` text. A credential-like value is rejected and the error never
-echoes the value. `check` never resolves a `secret://` reference and reports
+echoes the value. `check` never resolves a secret reference and reports
 `provenance.secrets_resolved = false`.
-
-## Examples
-
-### Local Windows VM
-
-```toml
-[resource_grants.local-windows-vm]
-kind = "vm"
-provider = "qemu"
-description = "Local Windows test VM"
-capabilities = ["windows", "kvm"]
-permissions = ["admin"]
-image = "/var/lib/vms/win10.qcow2"
-constraints = { max_hours = 4, max_disk_gb = 120, max_memory_gb = 8 }
-cleanup = "destroy"
-```
-
-`admin` forces approval. Without an approval the check reports
-`requires_approval`; with one it still reports the image, KVM and qemu checks.
-
-### Host that can run VMs
-
-```toml
-[resource_grants.kvm-host]
-kind = "host"
-provider = "qemu"
-description = "KVM-capable build host"
-capabilities = ["kvm"]
-constraints = { max_memory_gb = 16 }
-cleanup = "none"
-```
-
-A host grant checks capabilities. It never launches a VM and has no image.
-
-### AWS admin with a realistic cap
-
-```toml
-[resource_grants.aws-admin-capped]
-kind = "cloud"
-provider = "aws"
-description = "Admin test account, realistic cap, destroy afterwards"
-permissions = ["admin"]
-region = "us-east-1"
-profile = "test-admin"
-budget = { max_usd = 50.0, max_hours = 2, max_instances = 4 }
-cleanup = "destroy"
-requires_approval = true
-```
-
-`check` shows the cap and cleanup policy. A found profile is not proof of
-permission: `permissions_verified` stays `false` and the check never claims the
-principal is an administrator.
-
-### AWS admin with an unbounded budget
-
-```toml
-[resource_grants.aws-admin-unbounded]
-kind = "cloud"
-provider = "aws"
-permissions = ["admin"]
-budget = { unbounded = true }
-cleanup = "destroy"
-requires_approval = true
-risk = "unbounded spend; explicit human approval and reason required"
-```
-
-`admin` and `unbounded` force approval. A later claim needs both an approval and
-an explicit unbounded allowance. A read-only check reports
-`requires_approval`, which is not readiness for a run.
 
 ## Check states
 
@@ -213,13 +180,234 @@ Nothing is launched.
   `AWS_CONFIG_FILE` / `AWS_SHARED_CREDENTIALS_FILE`. Only INI **section names**
   are read; values are never parsed or returned. A declared profile is matched
   by name (`[profile name]` in config, `[name]` in credentials).
-- `permissions` stays declarative. `permissions_verified` is always `false` in
-  this stage, including after a live identity check.
+- `permissions` stays declarative. `permissions_verified` is always `false`,
+  including after a live identity check.
 - `--live` uses only an injected `live_runner`. With no runner the result is
   `unavailable` with `live.runner_required`, no network call and
-  `live_checked = false`. The command-line has no runner yet, so `--live` is
-  intentionally unavailable from the CLI in this stage. A runner may report
+  `live_checked = false`. The command line has no runner, so `--live` is
+  intentionally unavailable from the CLI. A runner may report
   `identity_present`; account ids, ARNs and permission claims are discarded.
+
+## Claim semantics
+
+`ozagia-resources grants claim ID --reason TEXT` first runs the read-only
+`check_grant` for `ID`. If it is not ready, the claim is refused with the
+check's state as a typed code (`missing`, `unavailable`,
+`requires_approval`, or `not_ready`). Nothing is written.
+
+A successful claim records:
+
+| Field | Meaning |
+| --- | --- |
+| `claim_id` | `clm-<32 hex>`, generated for this claim. |
+| `grant_id`, `grant_kind`, `provider` | What was claimed. |
+| `task`, `session` | Optional caller labels. |
+| `reason` | The required human reason. |
+| `approval` | Required/granted, `kind`, `flag`, `approved_by: "host"`, `source: "cli"`, `at`, `reason`, grant/claim/task/session, declared permissions, `reusable: false`, and the three explicit flags. |
+| `budget` | `max_usd`, `max_minutes`, `max_instances`, `unbounded` and `ttl_minutes`. |
+| `started`, `expires`, `created` | UTC ISO timestamps. |
+| `observed` | `cost_usd`, `minutes`, `provided`; unknown by default. |
+| `cleanup` | Declared `policy`, `status` (initially `unknown`), `verified: false`, `source`, `evidence`. |
+| `status` | Stored `active` or `released`; views compute `expired`/`orphaned`. |
+| `released`, `release` | Set only by an applied release. |
+
+### Approval is per claim
+
+`--approve` is an explicit host action. It is **never** inferred from a
+profile, a previous claim, a task, a session or the grant's own
+`requires_approval` field. Merely reading a grant does not approve it.
+
+- A grant with `requires_approval` needs `--approve`.
+- A grant with `permissions = ["admin"]` **or** `budget.unbounded = true` needs
+  **both** `--approve` and `--allow-unbounded`.
+- A grant with `cleanup = "keep"` needs `--approve` **and** `--allow-keep`.
+- A reason is always required. It is bounded, must not contain control
+  characters, and is rejected if it looks like a credential.
+
+Approval is not reusable across grants or sessions: it is stored in the claim,
+names its grant, task and session, and carries `reusable: false`. A plain CLI
+has no user identity, so the record says `approved_by: "host"` and
+`source: "cli"`; it does not invent a person.
+
+### Budget and claim TTL
+
+The claim budget is the narrower of the caller's request and the grant's
+declared caps:
+
+- `max_usd`: `--max-usd`, or the grant's `budget.max_usd`. A request above the
+  declared cap is refused with `budget_exceeds_grant`.
+- `max_minutes`: `--max-minutes`, or the grant's `budget.max_hours` /
+  `constraints.max_hours` converted to minutes. The narrowest cap wins.
+- `max_instances`: the grant's declared value.
+- `unbounded`: copied from the grant, and only claimable with both approval
+  flags.
+- `ttl_minutes`: the claim's time cap, or `DEFAULT_CLAIM_TTL_MINUTES` (240)
+  when none is declared, capped at seven days.
+
+`expires = started + ttl_minutes`. The TTL is a reporting/expiry bound; it does
+not stop a process or delete a provider resource.
+
+### One claim per grant
+
+At most one unreleased claim may exist per grant. A second claim while one is
+active, expired or orphaned is refused with `grant_in_use`, including the
+existing claim id and state. The operator must release the existing claim
+first. The check and write happen under one exclusive ledger lock, so
+concurrent attempts have exactly one winner.
+
+### Expiry and orphans
+
+Expiry is computed, never auto-applied. A stored `active` claim whose
+`expires` time has passed is reported as:
+
+- `status: "orphaned"` (resources may still exist),
+- `expired: true` with `expires_in_s: 0`,
+- `orphaned: true`.
+
+It is counted as both `expired` and `orphaned`, listed by
+`grants status` and by `claims(status="expired"|"orphaned")`, and is never
+hidden or deleted. Teardown remains the operator's action. Releasing an expired
+or orphaned claim is explicit and records the previous state in
+`release.previous_status`.
+
+## Release semantics
+
+`release CLAIM` is a **preview** by default. It reads the ledger and reports
+what would be closed, with `dry_run: true`, `applied: false`,
+`would_release`, and the proposed observed/cleanup values. It writes nothing.
+
+`release CLAIM --apply` closes the claim:
+
+- `status` becomes `released`; `released` and `release.at` are recorded.
+- `release.by: "host"` and `release.source: "cli"`; no invented user identity.
+- `release.previous_status` preserves `active`, `expired` or `orphaned`.
+- The record is kept. No claim file is deleted or auto-pruned.
+- Releasing an already released claim is refused with `claim_released`.
+
+### Cleanup honesty
+
+`--cleanup` accepts only `done`, `failed` or `unknown` and defaults to
+`unknown`. It is the **caller's evidence**, not something Ozagia verified:
+
+- `cleanup.status` is exactly what the caller supplied.
+- `cleanup.verified` is always `false`; Ozagia did not inspect the provider.
+- `cleanup.source` is `"caller"` when a status or evidence was supplied,
+  otherwise `null`.
+- `cleanup.evidence` is the caller's bounded note, or `null`.
+
+A release without `--cleanup` reports `unknown`. It never pretends cleanup
+succeeded.
+
+### Observed usage
+
+`--observed-usd` and `--observed-minutes` are recorded only when supplied;
+otherwise `observed.cost_usd` / `observed.minutes` stay `null` and
+`observed.provided` is `false`. Negative or non-finite values are rejected.
+Ozagia never infers AWS spend or runtime from local measurements.
+
+## Read-only status
+
+`ozagia status` includes a compact `grants` section. It reads existing
+declarations and claim records only; it does not claim, release, probe a grant,
+start a daemon or create the ledger. It reports:
+
+- declared grant count and bounded config errors,
+- `ledger.present`,
+- claim counts: `active`, `released`, `expired`, `orphaned`, total, and
+  cleanup `done`/`failed`/`unknown`,
+- `readiness.checked: false` with the reason that status does not probe grants.
+
+`ozagia-resources grants status` is the detailed view:
+
+```json
+{
+  "ok": true,
+  "schema": 1,
+  "now": "2026-11-26T00:00:00+00:00",
+  "count": 1,
+  "counts": {
+    "total": 3,
+    "active": 1,
+    "released": 1,
+    "expired": 1,
+    "orphaned": 1,
+    "cleanup": {"done": 1, "failed": 0, "unknown": 2}
+  },
+  "claims": [],
+  "errors": [],
+  "read_only": true
+}
+```
+
+`claims()` and `claim_status()` never create the ledger. A missing ledger is an
+empty report, not an error; a malformed record is skipped and named in the
+bounded `errors` list.
+
+## Read-only MCP surface
+
+`dev_resource_grants` (full/coding surface only) exposes:
+
+- declared grants with kind, provider, declared permissions, budget, cleanup
+  and approval requirement,
+- claim counts and bounded claim rows, optionally filtered by `grant_id` or
+  `claim_status`,
+- `read_only: true`, `network: false`, `secrets_resolved: false`,
+  `wrote: false`.
+
+There is no MCP claim, approve or release tool. The tool never starts a daemon,
+probes capabilities, calls the network or returns a credential value. Expiry
+and cleanup are reported, not changed.
+
+## Capability and evidence
+
+`cap:resources.grants` declares the grant checker and claim ledger.
+`cap:status.inspect` declares the `status:grants` section. Claim records are
+metadata: grant id, approval flags, reason, budget, timestamps, observed values
+and cleanup evidence. They contain no credentials, resolved values or provider
+account identifiers.
+
+## Examples
+
+### Claim a local VM
+
+```text
+ozagia-resources grants claim local-windows-vm \
+  --reason "reproduce the installer bug" \
+  --task "T-142" --session "opencode-7"
+```
+
+### Claim a capped AWS admin account
+
+```text
+ozagia-resources grants claim aws-admin-capped \
+  --reason "run the cloud integration test" \
+  --approve --allow-unbounded \
+  --max-usd 20 --max-minutes 45
+```
+
+The claim carries the narrower cap (`20 USD`, `45 minutes`) and a 45-minute
+TTL. `--approve` without `--allow-unbounded` is refused.
+
+### Release with evidence
+
+```text
+ozagia-resources grants release clm-0123456789abcdef0123456789abcdef
+ozagia-resources grants release clm-0123456789abcdef0123456789abcdef \
+  --apply --cleanup done --observed-usd 12.40 --observed-minutes 38
+```
+
+The first command is a preview. The second records the caller's cleanup
+evidence and observed usage; it does not claim Ozagia verified the teardown.
+
+### See orphans
+
+```text
+ozagia-resources grants status --status orphaned
+```
+
+An expired unreleased claim is listed here with its grant, budget and cleanup
+state. It is not deleted, and no new claim for that grant is allowed until the
+operator releases it.
 
 ## What is not verified
 
@@ -228,17 +416,15 @@ Nothing is launched.
   presence. Even then, presence is not permission.
 - That a VM image is a valid image or boots.
 - That nested virtualisation is required or enabled for a particular workload.
-- Spend, instance count, usage or cleanup. No claim or teardown exists yet.
-- Any target command. The check never runs project code.
-
-Every result includes `provenance` (`network`, `wrote`, `secrets_resolved`),
-`live`, `live_checked`, `checked_at`, `source` and `not_assessed`. In this stage
-`wrote` and `secrets_resolved` are always false; `network` is true only when a
-live runner actually ran.
+- That a provider resource was created by a claim.
+- That cleanup actually deleted a provider resource, or the exact spend.
+- Any target command. No grant command runs project code.
 
 ## Later stages
 
-Claims, approvals, release, the claim ledger, orphan/expiry reporting, task and
-eval preflight, run-manifest evidence, MCP read-only grant tools and a
-`cap:resources.grants` capability are a later stage. Until then a grant is a
-declaration and a readiness report, not proof of use.
+Task and eval/harness integration (`docs/plans/2026-11-26_resource_grants.md`
+Stage C) is not implemented here. That stage adds task-declared grants,
+preflight refusal for missing/unready grants, claim-before-work and
+release-in-`finally`, run-manifest evidence and an optional
+`ozagia resources run --grant ID -- <cmd>` wrapper. A model still cannot claim,
+approve or release a grant through MCP.

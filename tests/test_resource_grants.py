@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import stat
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -9,6 +11,7 @@ import pytest
 from ozagia import resources_cli
 from ozagia.core import resource_grants as RG
 from ozagia.core import resources as R
+from ozagia.core import status as status_module
 
 
 def _write(root: Path, relative: str, text: str) -> Path:
@@ -576,3 +579,492 @@ def test_cli_list_reports_malformed_grants_without_leaking_canary(
     assert code == 2
     captured = capsys.readouterr()
     assert "canary-value-456" not in captured.err
+
+
+# --------------------------------------------------------------------------- #
+# claim ledger
+# --------------------------------------------------------------------------- #
+def _patch_ready_check(monkeypatch) -> None:
+    def ready(root, grant_id, **kwargs):
+        return {"schema": RG.SCHEMA, "id": grant_id, "state": "ready",
+                "ready": True, "checks": [],
+                "approval": {"required": False, "granted": False}}
+
+    monkeypatch.setattr(RG, "check_grant", ready)
+
+
+def _claim_grant(root: Path, text: str) -> None:
+    _resources(root, text)
+
+
+def test_claim_accepts_a_ready_grant_without_running_a_command(
+        tmp_path: Path, monkeypatch) -> None:
+    _claim_grant(tmp_path, '[resource_grants.kvm-host]\n'
+                           'kind = "host"\nprovider = "qemu"\n'
+                           'capabilities = ["kvm"]\n'
+                           'cleanup = "none"\n')
+    monkeypatch.setattr(RG.shutil, "which",
+                        lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(RG.os.path, "exists",
+                        lambda path: path == "/dev/kvm")
+    monkeypatch.setattr(RG.os, "access", lambda path, mode: True)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("a claim must not run a command")
+
+    monkeypatch.setattr(RG.subprocess, "run", forbidden)
+    record = RG.claim(tmp_path, "kvm-host", reason="ready host",
+                      now="2026-01-01T00:00:00Z")
+    assert record["status"] == "active"
+    assert record["grant_kind"] == "host"
+    assert record["cleanup"]["policy"] == "none"
+    assert len(_records(tmp_path)) == 1
+
+
+def _ledger(root: Path) -> Path:
+    return root / ".ozagia" / "resources" / "grants"
+
+
+def _records(root: Path) -> list[Path]:
+    directory = _ledger(root)
+    return sorted(directory.glob("*.json")) if directory.is_dir() else []
+
+
+def test_claim_refuses_unready_and_unapproved_grants_without_writing(
+        tmp_path: Path) -> None:
+    _claim_grant(tmp_path, '[resource_grants.missing-vm]\n'
+                           'kind = "vm"\nprovider = "qemu"\n'
+                           'image = "/tmp/not-there.qcow2"\n'
+                           'cleanup = "destroy"\n')
+    with pytest.raises(RG.GrantRefused) as caught:
+        RG.claim(tmp_path, "missing-vm", reason="test the missing image")
+    assert caught.value.code == "missing"
+    assert not _ledger(tmp_path).exists()
+
+    _claim_grant(tmp_path, '[resource_grants.aws]\n'
+                           'kind = "cloud"\nprovider = "aws"\n'
+                           'permissions = ["admin"]\n'
+                           'budget = { max_usd = 5.0, max_hours = 1 }\n'
+                           'cleanup = "destroy"\n'
+                           'requires_approval = true\n')
+    with pytest.raises(RG.GrantRefused) as caught:
+        RG.claim(tmp_path, "aws", reason="no approval yet")
+    assert caught.value.code == "requires_approval"
+    assert not _ledger(tmp_path).exists()
+
+
+def test_admin_and_unbounded_need_both_approval_flags(
+        tmp_path: Path, monkeypatch) -> None:
+    _patch_ready_check(monkeypatch)
+    _claim_grant(tmp_path, '[resource_grants.aws]\n'
+                           'kind = "cloud"\nprovider = "aws"\n'
+                           'permissions = ["admin"]\n'
+                           'budget = { max_usd = 50.0, max_hours = 2, '
+                           'max_instances = 4 }\n'
+                           'cleanup = "destroy"\n'
+                           'requires_approval = true\n')
+    with pytest.raises(RG.GrantRefused) as caught:
+        RG.claim(tmp_path, "aws", reason="approve only", approve=True)
+    assert caught.value.code == "requires_approval"
+    assert caught.value.detail["flag"] == "allow_unbounded"
+
+    with pytest.raises(RG.GrantRefused):
+        RG.claim(tmp_path, "aws", reason="allow only",
+                 allow_unbounded=True)
+
+    record = RG.claim(tmp_path, "aws", reason="both flags", approve=True,
+                      allow_unbounded=True, budget={"max_usd": 25.0})
+    assert record["status"] == "active"
+    assert record["budget"]["max_usd"] == 25.0
+    assert record["budget"]["max_minutes"] == 120.0
+    assert record["budget"]["max_instances"] == 4
+    assert record["approval"]["granted"] is True
+    assert record["approval"]["approved_by"] == "host"
+    assert record["approval"]["source"] == "cli"
+    assert record["approval"]["flags"] == {
+        "approve": True, "allow_unbounded": True, "allow_keep": False}
+
+    _claim_grant(tmp_path / "unbounded", '[resource_grants.aws-u]\n'
+                                        'kind = "cloud"\nprovider = "aws"\n'
+                                        'permissions = ["admin"]\n'
+                                        'budget = { unbounded = true }\n'
+                                        'cleanup = "destroy"\n'
+                                        'requires_approval = true\n')
+    with pytest.raises(RG.GrantRefused):
+        RG.claim(tmp_path / "unbounded", "aws-u", reason="only approve",
+                 approve=True)
+    record = RG.claim(tmp_path / "unbounded", "aws-u", reason="both",
+                      approve=True, allow_unbounded=True)
+    assert record["budget"]["unbounded"] is True
+    assert record["budget"]["max_minutes"] is None
+    assert record["budget"]["ttl_minutes"] == RG.DEFAULT_CLAIM_TTL_MINUTES
+
+
+def test_keep_cleanup_needs_allow_keep(tmp_path: Path, monkeypatch) -> None:
+    _patch_ready_check(monkeypatch)
+    _claim_grant(tmp_path, '[resource_grants.keep]\n'
+                           'kind = "cloud"\nprovider = "aws"\n'
+                           'cleanup = "keep"\n'
+                           'requires_approval = true\n'
+                           'risk = "billing continues until a human '
+                           'tears it down"\n')
+    with pytest.raises(RG.GrantRefused) as caught:
+        RG.claim(tmp_path, "keep", reason="keep it", approve=True)
+    assert caught.value.code == "requires_approval"
+    record = RG.claim(tmp_path, "keep", reason="keep it", approve=True,
+                      allow_keep=True)
+    assert record["cleanup"]["policy"] == "keep"
+    assert record["approval"]["flags"]["allow_keep"] is True
+
+
+def test_claim_writes_a_bounded_private_ledger_and_refuses_double_claim(
+        tmp_path: Path, monkeypatch) -> None:
+    _patch_ready_check(monkeypatch)
+    _claim_grant(tmp_path, '[resource_grants.svc]\n'
+                           'kind = "service"\nprovider = "other"\n'
+                           'cleanup = "destroy"\n')
+    record = RG.claim(
+        tmp_path, "svc", reason="run the integration test", task="t1",
+        session="s1", budget={"max_usd": 5.0, "max_minutes": 30.0},
+        now="2026-01-01T00:00:00Z")
+    assert record["claim_id"].startswith("clm-")
+    assert record["grant_id"] == "svc"
+    assert record["grant_kind"] == "service"
+    assert record["task"] == "t1"
+    assert record["session"] == "s1"
+    assert record["budget"] == {
+        "max_usd": 5.0, "max_minutes": 30.0, "max_instances": None,
+        "unbounded": False, "ttl_minutes": 30.0}
+    assert record["started"] == "2026-01-01T00:00:00+00:00"
+    assert record["expires"] == "2026-01-01T00:30:00+00:00"
+    assert record["observed"] == {
+        "cost_usd": None, "minutes": None, "provided": False}
+    assert record["cleanup"] == {
+        "policy": "destroy", "status": "unknown", "verified": False,
+        "source": None, "evidence": None}
+    assert record["status"] == "active"
+
+    directory = _ledger(tmp_path)
+    assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+    files = _records(tmp_path)
+    assert len(files) == 1
+    assert RG._CLAIM_FILE_RE.fullmatch(files[0].name)
+    assert files[0].name == RG._claim_file_name(record["claim_id"])
+    assert stat.S_IMODE(files[0].stat().st_mode) == 0o600
+    assert "secret" not in files[0].read_text(encoding="utf-8").lower()
+
+    with pytest.raises(RG.GrantRefused) as caught:
+        RG.claim(tmp_path, "svc", reason="a second claim",
+                 now="2026-01-01T00:01:00Z")
+    assert caught.value.code == "grant_in_use"
+
+    RG.release(tmp_path, record["claim_id"], apply=True,
+               now="2026-01-01T00:02:00Z")
+    again = RG.claim(tmp_path, "svc", reason="after release",
+                     now="2026-01-01T00:03:00Z")
+    assert again["status"] == "active"
+    assert len(_records(tmp_path)) == 2
+
+
+def test_claims_report_expiry_and_orphans_without_deleting(
+        tmp_path: Path, monkeypatch) -> None:
+    _patch_ready_check(monkeypatch)
+    _claim_grant(tmp_path, '[resource_grants.svc]\n'
+                           'kind = "service"\nprovider = "other"\n'
+                           'cleanup = "destroy"\n')
+    record = RG.claim(tmp_path, "svc", reason="short lease",
+                      budget={"max_minutes": 5.0},
+                      now="2000-01-01T00:00:00Z")
+    report = RG.claims(tmp_path)
+    assert report["counts"]["total"] == 1
+    assert report["counts"]["active"] == 0
+    assert report["counts"]["expired"] == 1
+    assert report["counts"]["orphaned"] == 1
+    assert report["claims"][0]["status"] == "orphaned"
+    assert report["claims"][0]["expired"] is True
+    assert report["claims"][0]["orphaned"] is True
+    assert len(_records(tmp_path)) == 1
+
+    status = RG.claim_status(tmp_path, record["claim_id"])
+    assert status["status"] == "orphaned"
+    assert RG.claims(tmp_path, status="orphaned")["count"] == 1
+    assert RG.claims(tmp_path, status="expired")["count"] == 1
+    assert RG.claims(tmp_path, status="active")["count"] == 0
+
+    released = RG.release(tmp_path, record["claim_id"], apply=True,
+                          now="2026-01-01T00:00:00Z")
+    assert released["status"] == "released"
+    assert released["release"]["previous_status"] == "orphaned"
+    assert released["cleanup"]["status"] == "unknown"
+    assert len(_records(tmp_path)) == 1
+
+
+def test_release_preview_then_apply_records_only_caller_evidence(
+        tmp_path: Path, monkeypatch) -> None:
+    _patch_ready_check(monkeypatch)
+    _claim_grant(tmp_path, '[resource_grants.svc]\n'
+                           'kind = "service"\nprovider = "other"\n'
+                           'cleanup = "destroy"\n')
+    record = RG.claim(tmp_path, "svc", reason="cleanup test",
+                      now="2026-01-01T00:00:00Z")
+    path = _records(tmp_path)[0]
+    before = path.read_bytes()
+
+    preview = RG.release(
+        tmp_path, record["claim_id"],
+        observed={"cost_usd": 1.25, "minutes": 12.0,
+                  "cleanup": "failed", "evidence": "operator saw an instance"},
+        now="2026-01-01T00:10:00Z")
+    assert preview["dry_run"] is True
+    assert preview["applied"] is False
+    assert preview["would_release"] is True
+    assert preview["status"] == "active"
+    assert preview["cleanup"]["status"] == "failed"
+    assert preview["observed"]["cost_usd"] == 1.25
+    assert path.read_bytes() == before
+
+    applied = RG.release(
+        tmp_path, record["claim_id"], apply=True,
+        observed={"cost_usd": 1.25, "minutes": 12.0,
+                  "cleanup": "failed", "evidence": "operator saw an instance"},
+        now="2026-01-01T00:10:00Z")
+    assert applied["dry_run"] is False
+    assert applied["applied"] is True
+    assert applied["status"] == "released"
+    assert applied["observed"] == {
+        "cost_usd": 1.25, "minutes": 12.0, "provided": True}
+    assert applied["cleanup"] == {
+        "policy": "destroy", "status": "failed", "verified": False,
+        "source": "caller", "evidence": "operator saw an instance"}
+    assert applied["release"]["by"] == "host"
+    assert applied["release"]["source"] == "cli"
+    assert applied["release"]["previous_status"] == "active"
+    assert len(_records(tmp_path)) == 1
+
+    closed_preview = RG.release(tmp_path, record["claim_id"],
+                                now="2026-01-01T00:11:00Z")
+    assert closed_preview["status"] == "released"
+    assert closed_preview["would_release"] is False
+    assert closed_preview["already_released"] is True
+    assert closed_preview["cleanup"]["status"] == "failed"
+
+    with pytest.raises(RG.GrantRefused) as caught:
+        RG.release(tmp_path, record["claim_id"], apply=True)
+    assert caught.value.code == "claim_released"
+
+
+def test_release_without_observed_evidence_stays_unknown(
+        tmp_path: Path, monkeypatch) -> None:
+    _patch_ready_check(monkeypatch)
+    _claim_grant(tmp_path, '[resource_grants.svc]\n'
+                           'kind = "service"\nprovider = "other"\n'
+                           'cleanup = "destroy"\n')
+    record = RG.claim(tmp_path, "svc", reason="no evidence",
+                      now="2026-01-01T00:00:00Z")
+    applied = RG.release(tmp_path, record["claim_id"], apply=True,
+                         now="2026-01-01T00:10:00Z")
+    assert applied["cleanup"]["status"] == "unknown"
+    assert applied["cleanup"]["verified"] is False
+    assert applied["observed"] == {
+        "cost_usd": None, "minutes": None, "provided": False}
+    assert applied["release"]["cleanup"]["status"] == "unknown"
+
+
+def test_claim_and_release_validate_ids_numbers_and_no_canary(
+        tmp_path: Path, monkeypatch) -> None:
+    _patch_ready_check(monkeypatch)
+    _claim_grant(tmp_path, '[resource_grants.svc]\n'
+                           'kind = "service"\nprovider = "other"\n'
+                           'cleanup = "destroy"\n')
+    with pytest.raises(RG.GrantError, match="control"):
+        RG.claim(tmp_path, "svc", reason="bad\nreason")
+    with pytest.raises(RG.GrantError, match="positive"):
+        RG.claim(tmp_path, "svc", reason="negative",
+                 budget={"max_usd": -1})
+    with pytest.raises(RG.GrantError, match="finite"):
+        RG.claim(tmp_path, "svc", reason="nan",
+                 budget={"max_usd": float("nan")})
+    with pytest.raises(RG.GrantError) as caught:
+        RG.claim(tmp_path, "svc",
+                 reason="key " + "AKIA" + "B" * 16)
+    assert "AKIA" not in str(caught.value)
+    assert not _ledger(tmp_path).exists()
+
+    record = RG.claim(tmp_path, "svc", reason="valid",
+                      now="2026-01-01T00:00:00Z")
+    with pytest.raises(RG.GrantError, match="claim id"):
+        RG.release(tmp_path, "../../etc/passwd")
+    with pytest.raises(RG.GrantRefused) as caught:
+        RG.release(tmp_path, "clm-" + "0" * 32)
+    assert caught.value.code == "claim_missing"
+    with pytest.raises(RG.GrantError, match="must not be negative"):
+        RG.release(tmp_path, record["claim_id"],
+                   observed={"cost_usd": -0.01})
+    with pytest.raises(RG.GrantError, match="observed.cleanup"):
+        RG.release(tmp_path, record["claim_id"],
+                   observed={"cleanup": "probably"})
+
+
+def test_concurrent_claims_have_one_winner(tmp_path: Path,
+                                           monkeypatch) -> None:
+    _patch_ready_check(monkeypatch)
+    _claim_grant(tmp_path, '[resource_grants.svc]\n'
+                           'kind = "service"\nprovider = "other"\n'
+                           'cleanup = "destroy"\n')
+
+    def attempt(index: int) -> tuple[bool, str | None]:
+        try:
+            RG.claim(tmp_path, "svc", reason=f"concurrent {index}",
+                     now="2026-01-01T00:00:00Z")
+            return True, None
+        except RG.GrantRefused as exc:
+            return False, exc.code
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(attempt, range(4)))
+    winners = [item for item in results if item[0]]
+    refusals = [item for item in results if not item[0]]
+    assert len(winners) == 1
+    assert len(refusals) == 3
+    assert all(code == "grant_in_use" for _ok, code in refusals)
+    assert len(_records(tmp_path)) == 1
+
+
+def test_status_section_and_claims_views_create_no_state(tmp_path: Path) -> None:
+    report = RG.claims(tmp_path)
+    assert report["counts"]["total"] == 0
+    assert report["read_only"] is True
+    with pytest.raises(RG.GrantRefused):
+        RG.claim_status(tmp_path, "clm-" + "0" * 32)
+    degraded: list[dict[str, str]] = []
+    section = status_module._grants_status(tmp_path, degraded)
+    assert section["state"] == "absent"
+    assert section["report"]["claims"]["counts"]["total"] == 0
+    assert section["report"]["readiness"]["checked"] is False
+    assert not (tmp_path / ".ozagia").exists()
+    assert degraded == []
+
+
+def test_cli_claim_release_and_status_exit_codes(tmp_path: Path,
+                                                 monkeypatch, capsys) -> None:
+    _patch_ready_check(monkeypatch)
+    _claim_grant(tmp_path, '[resource_grants.svc]\n'
+                           'kind = "service"\nprovider = "other"\n'
+                           'cleanup = "destroy"\n')
+
+    code = resources_cli.main(
+        ["grants", "claim", "svc", "--reason", "cli claim",
+         "--max-usd", "2.5", "--max-minutes", "15",
+         "--root", str(tmp_path), "--json"])
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    claim_id = payload["claim"]["claim_id"]
+    assert payload["ok"] is True
+    assert payload["claim"]["budget"]["max_usd"] == 2.5
+
+    code = resources_cli.main(
+        ["grants", "claim", "svc", "--reason", "again",
+         "--root", str(tmp_path), "--json"])
+    assert code == 1
+    assert "already claimed" in capsys.readouterr().err
+
+    code = resources_cli.main(
+        ["grants", "status", "--root", str(tmp_path), "--json"])
+    assert code == 0
+    status = json.loads(capsys.readouterr().out)
+    assert status["counts"]["active"] == 1
+    assert status["claims"][0]["claim_id"] == claim_id
+
+    code = resources_cli.main(
+        ["grants", "release", claim_id, "--observed-usd", "1.0",
+         "--cleanup", "done", "--root", str(tmp_path), "--json"])
+    assert code == 0
+    preview = json.loads(capsys.readouterr().out)
+    assert preview["dry_run"] is True
+    assert preview["applied"] is False
+
+    code = resources_cli.main(
+        ["grants", "release", claim_id, "--apply", "--observed-usd", "1.0",
+         "--observed-minutes", "5", "--cleanup", "done",
+         "--root", str(tmp_path), "--json"])
+    assert code == 0
+    applied = json.loads(capsys.readouterr().out)
+    assert applied["applied"] is True
+    assert applied["cleanup"]["status"] == "done"
+    assert applied["observed"]["cost_usd"] == 1.0
+
+    code = resources_cli.main(
+        ["grants", "release", claim_id, "--apply",
+         "--root", str(tmp_path), "--json"])
+    assert code == 1
+    assert "already released" in capsys.readouterr().err
+
+    code = resources_cli.main(
+        ["grants", "claim", "svc", "--reason", "negative",
+         "--max-usd", "-1", "--root", str(tmp_path), "--json"])
+    assert code == 2
+
+    code = resources_cli.main(
+        ["grants", "claim", "absent", "--reason", "no grant",
+         "--root", str(tmp_path), "--json"])
+    assert code == 2
+    assert "unknown resource grant" in capsys.readouterr().err
+
+    with pytest.raises(SystemExit) as caught:
+        resources_cli.main(["grants", "claim", "svc", "--root",
+                            str(tmp_path)])
+    assert caught.value.code == 2
+
+
+def test_mcp_dev_resource_grants_is_read_only_and_bounded(
+        tmp_path: Path, monkeypatch) -> None:
+    from ozagia.integrations.mcp import server as mcp_server
+
+    _patch_ready_check(monkeypatch)
+    _claim_grant(tmp_path, '[resource_grants.svc]\n'
+                           'kind = "service"\nprovider = "other"\n'
+                           'cleanup = "destroy"\n')
+    record = RG.claim(tmp_path, "svc", reason="mcp canary-free",
+                      task="t1")
+
+    server = mcp_server.DevMemoryServer(None, mode="coding",
+                                        workspace=str(tmp_path))
+    names = {tool["name"] for tool in server._tools}
+    assert "dev_resource_grants" in names
+    assert not {"dev_resource_claim", "dev_resource_release",
+                "dev_resource_approve"} & names
+    assert "dev_resource_grants" in server._handlers
+
+    payload = server._handlers["dev_resource_grants"]({"limit": 10})
+    assert payload["ok"] is True
+    assert payload["read_only"] is True
+    assert payload["network"] is False
+    assert payload["secrets_resolved"] is False
+    assert payload["wrote"] is False
+    assert payload["grants"]["count"] == 1
+    assert payload["claims"]["counts"]["total"] == 1
+    assert payload["claims"]["items"][0]["claim_id"] == record["claim_id"]
+
+    from ozagia.core import capabilities as K
+    assert "cap:resources.grants" in K.surface_index()[
+        "mcp:tool:dev_resource_grants"]
+    section = status_module._grants_status(tmp_path, [])
+    assert section["state"] == "ok"
+    assert section["report"]["claims"]["counts"]["active"] == 1
+    assert section["report"]["readiness"]["checked"] is False
+
+    filtered = server._handlers["dev_resource_grants"](
+        {"grant_id": "svc", "claim_status": "active"})
+    assert filtered["claims"]["count"] == 1
+    filtered = server._handlers["dev_resource_grants"](
+        {"claim_status": "orphaned"})
+    assert filtered["claims"]["count"] == 0
+
+    canary = "AKIA" + "C" * 16
+    _claim_grant(tmp_path / "canary", f'[resource_grants.bad]\n'
+                                      f'kind = "service"\nprovider = "other"\n'
+                                      f'description = "{canary}"\n')
+    canary_server = mcp_server.DevMemoryServer(
+        None, mode="coding", workspace=str(tmp_path / "canary"))
+    payload = canary_server._handlers["dev_resource_grants"]({})
+    assert canary not in json.dumps(payload)

@@ -200,6 +200,48 @@ def _resources_status(
     return _section("ok", report)
 
 
+def _grants_status(
+    root: Path, degraded: list[dict[str, str]],
+) -> dict[str, Any]:
+    """Read-only resource-grant declarations and claim counts.
+
+    It never claims, releases, probes a grant or creates the claim ledger.
+    Expired and orphaned claims are counted, not hidden or deleted.
+    """
+    from ozagia.core import resource_grants as RG
+    ledger = state_path(root, "resources", "grants")
+    try:
+        report = RG.claims(root)
+        declared = RG.list_grants(root)
+    except (OSError, ValueError) as exc:
+        degraded.append(_issue(
+            "grants", "grants.unavailable",
+            f"resource-grant state could not be read: {exc}"))
+        return _section("unavailable", error=str(exc))
+    errors = list(report.get("errors") or []) + list(
+        declared.get("errors") or [])
+    present = ledger.is_dir()
+    if errors:
+        state = "degraded"
+    elif present:
+        state = "ok"
+    else:
+        state = "absent"
+    return _section(state, {
+        "ledger": {"path": str(ledger), "present": present},
+        "grants": {"count": declared.get("count", 0),
+                   "errors": list(declared.get("errors") or [])},
+        "claims": {"count": report.get("count", 0),
+                   "counts": dict(report.get("counts") or {}),
+                   "errors": list(report.get("errors") or [])},
+        "readiness": {
+            "checked": False,
+            "reason": "status does not probe grants or run live checks",
+        },
+    }, error=None if not errors else "; ".join(errors[:3]))
+
+
+
 def _files_status(
     root: Path, degraded: list[dict[str, str]],
 ) -> dict[str, Any]:
@@ -1464,6 +1506,7 @@ def status(
     workspace = _workspace_status(root_path, degraded)
     resources = _resources_status(root_path, path=path, top=top,
                                   degraded=degraded)
+    grants = _grants_status(root_path, degraded)
     files = _files_status(root_path, degraded)
     runtime = _runtime_status(root_path, project, degraded)
     daemon = _daemon_status(root_path, timeout=timeout, degraded=degraded)
@@ -1490,6 +1533,7 @@ def status(
         "degraded": degraded,
         "workspace": workspace,
         "resources": resources,
+        "grants": grants,
         "files": files,
         "runtime": runtime,
         "daemon": daemon,
@@ -1585,6 +1629,25 @@ def format_status(report: Mapping[str, Any]) -> str:
     else:
         lines.append(f"resources: {resources.get('state')} "
                      f"({_text(resources.get('error'))})")
+
+    grants = report.get("grants") or {}
+    grants_report = grants.get("report")
+    if isinstance(grants_report, Mapping):
+        claims = grants_report.get("claims") or {}
+        counts = claims.get("counts") or {}
+        declared = grants_report.get("grants") or {}
+        cleanup = counts.get("cleanup") or {}
+        lines.append(
+            f"grants: {declared.get('count', 0)} declared, "
+            f"claims active={counts.get('active', 0)} "
+            f"expired={counts.get('expired', 0)} "
+            f"orphaned={counts.get('orphaned', 0)} "
+            f"cleanup(done={cleanup.get('done', 0)},"
+            f"failed={cleanup.get('failed', 0)},"
+            f"unknown={cleanup.get('unknown', 0)})")
+    else:
+        lines.append(f"grants: {grants.get('state')} "
+                     f"({_text(grants.get('error'))})")
 
     files = report.get("files") or {}
     files_report = files.get("report")

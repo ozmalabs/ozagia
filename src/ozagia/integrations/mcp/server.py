@@ -1315,6 +1315,27 @@ _TOOLS.append({
                    "description": "opaque next cursor from a previous page."},
     }),
 })
+_TOOLS.append({
+    "name": "dev_resource_grants",
+    "description": (
+        "Read-only resource-grant declaration and claim-ledger view: declared "
+        "grants with their kind, provider, declared permissions, budget, "
+        "cleanup and approval requirement, plus claim counts (active, "
+        "released, expired, orphaned) and bounded claim rows. It never "
+        "claims, approves or releases a grant, never starts a daemon, makes "
+        "no network call and returns no credential value; expiry and cleanup "
+        "are reported, not changed."),
+    "inputSchema": _schema({
+        "grant_id": {"type": "string",
+                     "description": "Only claims for this grant id."},
+        "claim_status": {"type": "string",
+                         "enum": ["active", "released", "expired",
+                                  "orphaned"],
+                         "description": "Only claims in this state."},
+        "limit": {"type": "integer", "default": 50,
+                  "description": "Maximum grants and claims shown (max 200)."},
+    }),
+})
 # Goals (`ozagia.core.goals`): repo-level records in `.ozagia/goals/`, whose
 # targets and criteria are graph keys; criteria are checked against the
 # graph, the working tree and the test record.
@@ -1636,6 +1657,7 @@ class DevMemoryServer:
             "dev_environment": self._environment,
             "dev_tools": self._dev_tools,
             "dev_capabilities": self._dev_capabilities,
+            "dev_resource_grants": self._resource_grants,
             "dev_maps": self._dev_maps,
             "dev_migration": self._dev_migration,
             "goal_list": self._goal_list,
@@ -2436,6 +2458,46 @@ class DevMemoryServer:
                         "repository-wide implementation absence"],
                 }
             return result
+
+    def _resource_grants(self, a: dict[str, Any]) -> Any:
+        """Declared grants and claim-ledger state, without claiming or probing."""
+        from ozagia.core import resource_grants as RG
+        root = self._files_root()
+        try:
+            limit = max(1, min(int(a.get("limit", 50)), 200))
+        except (TypeError, ValueError):
+            limit = 50
+        try:
+            report = RG.claims(
+                root,
+                status=a.get("claim_status") or None,
+                grant_id=a.get("grant_id") or None,
+            )
+            declared = RG.list_grants(root)
+        except (RG.GrantError, OSError, ValueError) as e:
+            return {"ok": False, "error": str(e), "read_only": True,
+                    "network": False, "secrets_resolved": False}
+        return {
+            "ok": True,
+            "schema": RG.CLAIM_SCHEMA,
+            "grants": {
+                "count": declared["count"],
+                "items": declared["grants"][:limit],
+                "truncated": declared["count"] > limit,
+                "errors": declared["errors"],
+            },
+            "claims": {
+                "count": report["count"],
+                "counts": report["counts"],
+                "items": report["claims"][:limit],
+                "truncated": report["count"] > limit,
+                "errors": report["errors"],
+            },
+            "read_only": True,
+            "network": False,
+            "secrets_resolved": False,
+            "wrote": False,
+        }
 
     def _who(self, a: dict[str, Any]) -> Any:
         """The sessions that edited a file (`ozagia.core.owners.who`): from

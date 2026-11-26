@@ -535,11 +535,14 @@ real fixtures, provenance-preserving and still opt-in.
 
 **Implementation status (2026-11-26, resource grants).** A separate
 [resource-grants plan](plans/2026-11-26_resource_grants.md) defines named
-entitlements for local VMs, VM-capable hosts, cloud accounts and containers,
-with read-only readiness checks, approval-gated admin/unbounded use, a
-claim/release ledger and mandatory teardown. The read-only schema/readiness
-slice is in progress; host admission (`core.resources`) remains a separate
-capacity check.
+entitlements for local VMs, VM-capable hosts, cloud accounts and containers.
+The read-only schema/readiness slice and the bounded claim/release ledger are
+implemented: per-claim host approval (admin/unbounded and keep require explicit
+flags), declared budget caps, TTL/expiry/orphan reporting, dry-run release with
+caller-supplied cleanup evidence, read-only `status`/MCP views, and a full
+ledger that refuses rather than pruning. Task/eval/harness claim integration,
+run-manifest evidence and the optional `resources run` wrapper remain open.
+Host admission (`core.resources`) remains a separate capacity check.
 
 **Implementation status (2026-11-26, session mesh).** The
 [session-mesh plan](plans/2026-11-26_session_mesh.md) is implemented through
