@@ -340,7 +340,9 @@ Implemented:
   wrong-engine/stale-source/missing-data cases.
 
 Measured on the canonical Ocelot checkout (`24c56891`) with a limited source
-set (`domains`, `worlds`, `substrate`, `tests`, `runners/dsl/src`):
+set (`domains`, `worlds`, `substrate`, `tests`, `runners/dsl/src`); the full
+record is in
+[`docs/results/ocelot_workspace_2026-11-26.md`](../results/ocelot_workspace_2026-11-26.md).
 
 | Measurement | Result |
 | --- | --- |

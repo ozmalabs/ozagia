@@ -385,10 +385,14 @@ Commands are extracted from Markdown fences and never executed. A command that i
 
 > Informational only. Git HEAD, working-tree modifications, untracked files, the local graph snapshot, the tag cache and generation time are excluded from content...
 
-- Git: head `4803cb4c081c3400617c7bce65ae6b0aba46afa9`; ref `refs/heads/main`; state read.
+- Git: head `45742622c133d087916d9f74165f87d1cc73e505`; ref `refs/heads/main`; state read.
 - Git file view: read; tracked files 1274.
-- Tracked files dirty in the working tree: read; count 0.
-- Untracked files: read; count 0.
+- Tracked files dirty in the working tree: read; count 1.
+- Dirty tracked sample: `docs/plans/2026-11-26_ocelot_workspace.md`
+  Note: working-tree modifications to tracked files are observation only; the stable shape reads the index.
+- Untracked files: read; count 1.
+- Untracked sample: `docs/results/ocelot_workspace_2026-11-26.md`
+  Note: untracked files are observation only; they are not part of the stable source shape or `--check`.
 - Snapshot: stale; head `8f8ae9baa6ad7f13528503e91e82fe36d1f9fcac`; generated at `2026-11-20T17:20:17`; path `.ozagia/graph.json`.
 - Snapshot counts: commits=200, docs=228, failures=0, files=944, symbols=11438, tests=4410.
 - Tag cache: `.ozagia/tags.json`; available=True.
