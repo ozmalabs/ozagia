@@ -360,8 +360,17 @@ def start_daemon(root: Path, dump: Path, log_dir: Path, *, tool_python: str,
             sock.unlink()
         daemon_autostart.release_lock(root, sock)
         raise SessionError("daemon start cancelled")
-    if proc.poll() is not None:
-        error = (f"daemon exited before ready (exit {proc.returncode}): "
+    # EOF can set `ready` just before the child is reaped, so a fast exit can
+    # look like a live daemon here. Give the OS a moment to report the exit
+    # before calling this a timeout.
+    code = proc.poll()
+    if code is None:
+        try:
+            code = proc.wait(timeout=0.5)
+        except subprocess.TimeoutExpired:
+            code = None
+    if code is not None:
+        error = (f"daemon exited before ready (exit {code}): "
                  + ea._tail(stderr_path.read_text(encoding="utf-8", errors="replace"), 12))
     else:
         error = f"daemon not ready after {ea.DAEMON_READY_TIMEOUT_S} s"
