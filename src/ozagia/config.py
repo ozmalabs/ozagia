@@ -609,6 +609,7 @@ _OWNED_SECTIONS = {
     "models": "read by ozagia.core.models",
     "ui": "UI presentation setting; not part of the index configuration",
     "resources": "read by ozagia.core.resources",
+    "resource_grants": "read by ozagia.core.resource_grants",
     "worktrees": "read by the worktree modules",
     "markdown": "read by the Markdown routing modules",
     "files": "read by the file-ledger and cleanup modules",

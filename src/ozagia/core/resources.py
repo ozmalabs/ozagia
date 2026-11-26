@@ -1201,6 +1201,9 @@ def load_policy(root: str | Path) -> dict[str, Any]:
             if section:
                 data = data.get(section) or {}
             if isinstance(data, dict):
+                # Resource grants are a separate config-owned group; they must
+                # never become part of the host policy or its status report.
+                data.pop("resource_grants", None)
                 policy = _deep_merge(policy, data)
         except (OSError, tomllib.TOMLDecodeError) as exc:
             errors.append(f"{path}: {exc}")

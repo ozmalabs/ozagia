@@ -13,6 +13,14 @@ the record names the reason. The watchdog only signals processes ozagia started,
 and only while the job's process group is verified; `cgroup.kill` reaches only
 the job's own cgroup.
 
+Resource grants are separate from host admission. A grant declares which VM,
+host or cloud account a task may use, its budget, approval requirement and
+cleanup policy; admission still answers whether a run fits on this host now.
+Grant config is read only from `[resource_grants.<id>]` in
+`ozagia/resources.toml` or `ozagia/config.toml` and is never merged into the
+host policy or `status`. See [resource_grants.md](resource_grants.md) for the
+schema, examples and the read-only `grants list|show|check` commands.
+
 ## What is observed
 
 - **Memory:** total and available memory, swap, used percentage. Linux reads
@@ -72,6 +80,9 @@ ozagia-resources status [--path PATH] [--top N] [--json]
 ozagia-resources check --for job|task|worktree [options] [--json]
 ozagia-resources history [--key KEY] [--json]
 ozagia-resources explain --for job|task|worktree [options]
+ozagia-resources grants list [--kind K] [--json]
+ozagia-resources grants show ID [--json]
+ozagia-resources grants check ID [--live] [--probe-versions] [--require-ready] [--json]
 ```
 
 Admission options:
