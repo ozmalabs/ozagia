@@ -959,6 +959,18 @@ def test_mesh_model_coordinate_is_passed_to_the_plugin(repo, stub, tmp_path):
     assert "exposure=coordinate" in summary
 
 
+def test_mesh_model_supervise_is_passed_to_the_plugin(repo, stub, tmp_path):
+    res = _run(repo, tmp_path, mesh=True, mesh_model="supervise")
+    rec = _record(stub)
+
+    assert res["mesh_model"] == "supervise"
+    assert res["mesh_exposure"] == "supervise"
+    assert rec["env"]["OZAGIA_MESH_MODEL"] == "supervise"
+    summary = rec["env"]["OZAGIA_MESH_SUMMARY"]
+    assert "exposure=supervise" in summary
+    assert "model=supervise" in hop._summary(res)
+
+
 def test_mesh_model_env_and_explicit_argument_precedence(repo, stub, tmp_path,
                                                          monkeypatch):
     monkeypatch.setenv("OZAGIA_MESH_MODEL", "coordinate")

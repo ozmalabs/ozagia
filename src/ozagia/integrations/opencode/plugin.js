@@ -104,13 +104,16 @@
 //   bounded summary (self/role/exposure, peer counts, links, leases, unread);
 //   the plugin reads no mesh file and registers no tool for it. A missing or
 //   oversized summary adds nothing.
-// - Session mesh (layer 2). Only a host-set `OZAGIA_MESH_MODEL=coordinate` or
-//   `supervise` (with the permission API) registers the native `ozagia_mesh`
+// - Session mesh (layer 2/3). Only a host-set `OZAGIA_MESH_MODEL=coordinate`
+//   or `supervise` (with the permission API) registers the native `ozagia_mesh`
 //   tool. Its first real `c.sessionID` is registered with the daemon and
 //   heartbeats while the session lives; send/lease/worktree/merge actions are
-//   bounded, rate-limited and never include message bodies in errors. The
-//   tool has no register, exposure, approve, takeover, link or delegation
-//   action; `read` keeps the summary only and mesh disabled adds nothing.
+//   bounded, rate-limited and never include message bodies in errors. At
+//   `supervise` the same tool also offers link/delegation handshakes and a
+//   compact topology; at `coordinate` those actions fail closed with the
+//   daemon's `not_permitted`. The tool has no register, exposure, approve,
+//   takeover or prune action; `read` keeps the summary only and mesh disabled
+//   adds nothing.
 // Plain ES module, node: built-ins only.
 
 import net from "node:net";
@@ -144,9 +147,15 @@ const MESH_SUMMARY_MAX_CHARS = 700;
 const MESH_MODEL_ENV = "OZAGIA_MESH_MODEL";
 const MESH_COORDINATE = new Set(["coordinate", "supervise"]);
 const MESH_ACTIONS = ["status", "send", "lease_acquire", "lease_renew",
-  "lease_release", "worktree_request", "worktree_offer", "merge_request"];
+  "lease_release", "worktree_request", "worktree_offer", "merge_request",
+  "link_request", "link_accept", "link_decline", "link_revoke", "link_list",
+  "link_show", "delegation_grant", "delegation_revoke", "delegation_list",
+  "delegation_show", "topology"];
 const MESH_KINDS = ["hello", "request", "offer", "accept", "reject", "status",
   "release", "note"];
+const MESH_RELATIONS = ["peer", "sub", "super"];
+const MESH_DELEGATION_ACTIONS = ["lease_release", "mailbox_read",
+  "merge_on_behalf"];
 const MESH_HEARTBEAT_MS = 15000;
 // The harness sets this to a disk-backed managed workspace; when present the
 // context hint names the scratch tool even if native registration is absent.
@@ -1517,7 +1526,7 @@ export function createPlugin(options = {}) {
               try {
                 reg.add({
                   name: "mesh",
-                  description: "Coordinate with other live ozagia sessions in this repository: send one bounded message, request/renew/release an advisory lease, request or offer an existing worktree, or queue for the advisory merge lease. This tool cannot approve, take over, link, delegate, prune or unregister. Leases are advisory; repository merge policy and approvals still decide.",
+                  description: "Coordinate with other live ozagia sessions in this repository: send one bounded message, request/renew/release an advisory lease, request or offer an existing worktree, queue for the advisory merge lease, and at supervise exposure negotiate a mutual peer/sub/super link, grant or revoke one bounded delegation, or read a compact topology. This tool cannot approve, take over, prune or unregister. Links and delegations grant no merge authority; leases are advisory and repository merge policy and approvals still decide.",
                   options: { namespace: "ozagia", codemode: false },
                   input: {
                     type: "object",
@@ -1538,6 +1547,14 @@ export function createPlugin(options = {}) {
                       path: { type: "string", maxLength: 1024 },
                       target: { type: "string", maxLength: 1024 },
                       reason: { type: "string", maxLength: 300 },
+                      link_id: { type: "string", maxLength: 32 },
+                      relation: { type: "string", enum: MESH_RELATIONS },
+                      delegation_id: { type: "string", maxLength: 32 },
+                      actions: { type: "array", maxItems: 3,
+                        items: { type: "string",
+                          enum: MESH_DELEGATION_ACTIONS } },
+                      mailbox: { type: "boolean" },
+                      max_uses: { type: "integer", minimum: 1, maximum: 100 },
                     },
                     required: ["action"],
                     additionalProperties: false,
@@ -1556,7 +1573,9 @@ export function createPlugin(options = {}) {
                     const payload = {};
                     for (const name of ["to", "broadcast", "kind", "subject",
                       "body", "in_reply_to", "lease", "ttl_s", "resource", "mode",
-                      "lease_id", "branch", "path", "target", "reason"]) {
+                      "lease_id", "branch", "path", "target", "reason", "link_id",
+                      "relation", "delegation_id", "actions", "mailbox",
+                      "max_uses"]) {
                       if (input && input[name] !== undefined) payload[name] = input[name];
                     }
                     let response;

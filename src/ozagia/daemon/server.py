@@ -172,7 +172,7 @@ import threading
 import time
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from ozagia.daemon import jobs as J
 from ozagia.daemon import protocol as P
@@ -264,12 +264,15 @@ _TMP_TRACKED_FIELDS = {
     "list": frozenset({"kind", "session", "owned", "include_all", "limit"}),
     "status": frozenset(),
 }
-# `mesh` op (ozagia.core.mesh): layer-2 model coordination only. The harness
-# and session come from the trusted plugin envelope; no caller-supplied actor
-# or exposure raises anything. `register` and `heartbeat` are lifecycle
-# actions the plugin sends; the model tool exposes only the coordinate set.
-MESH_ACTIONS = ("heartbeat", "lease_acquire", "lease_release", "lease_renew",
-                "merge_request", "register", "send", "status",
+# `mesh` op (ozagia.core.mesh): layer-2/3 model coordination. The harness and
+# session come from the trusted plugin envelope; no caller-supplied actor or
+# exposure raises anything. `register` and `heartbeat` are lifecycle actions
+# the plugin sends; the model tool exposes the coordinate and supervise sets.
+MESH_ACTIONS = ("delegation_grant", "delegation_list", "delegation_revoke",
+                "delegation_show", "heartbeat", "lease_acquire",
+                "lease_release", "lease_renew", "link_accept", "link_decline",
+                "link_list", "link_request", "link_revoke", "link_show",
+                "merge_request", "register", "send", "status", "topology",
                 "worktree_offer", "worktree_request")
 MESH_HARNESSES = ("opencode", "opencode-runner")
 MESH_READ_EXPOSURES = frozenset({"read", "coordinate", "supervise"})
@@ -277,14 +280,26 @@ MESH_COORDINATE_ACTIONS = frozenset({
     "send", "lease_acquire", "lease_renew", "lease_release",
     "worktree_request", "worktree_offer", "merge_request",
 })
+# Layer 3 is supervise-only. `topology` is a read but still part of the
+# supervision surface; `coordinate` and `read` get `not_permitted`.
+MESH_SUPERVISE_ACTIONS = frozenset({
+    "delegation_grant", "delegation_list", "delegation_revoke",
+    "delegation_show", "link_accept", "link_decline", "link_list",
+    "link_request", "link_revoke", "link_show", "topology",
+})
+# State-changing supervision actions share one bounded bucket; the list/show
+# reads are metadata-only and do not consume it.
+MESH_SUPERVISE_RATE_ACTIONS = frozenset({
+    "delegation_grant", "delegation_revoke", "link_accept", "link_decline",
+    "link_request", "link_revoke",
+})
 MESH_REFUSED_ACTIONS = frozenset({
-    "approve", "admin", "delegation_grant", "delegation_revoke",
-    "lease_takeover", "link_accept", "link_decline", "link_request",
-    "link_revoke", "merge_apply", "prune", "takeover", "unregister",
-    "worktree_create", "worktree_remove",
+    "approve", "admin", "lease_takeover", "merge_apply", "prune", "takeover",
+    "unregister", "worktree_create", "worktree_remove",
 })
 MESH_RATE_WINDOW_S = 300.0
-MESH_RATE_LIMITS = {"message": 30, "lease": 20, "negotiate": 10}
+MESH_RATE_LIMITS = {"message": 30, "lease": 20, "negotiate": 10,
+                    "supervise": 10}
 MESH_RATE_GROUP = {
     "send": "message",
     "lease_acquire": "lease",
@@ -293,6 +308,12 @@ MESH_RATE_GROUP = {
     "worktree_request": "negotiate",
     "worktree_offer": "negotiate",
     "merge_request": "negotiate",
+    "link_request": "supervise",
+    "link_accept": "supervise",
+    "link_decline": "supervise",
+    "link_revoke": "supervise",
+    "delegation_grant": "supervise",
+    "delegation_revoke": "supervise",
 }
 MESH_SESSION_MAX_CHARS = 256
 _SECRET_REF_TEXT = re.compile(r"secret://[A-Za-z0-9._~%/:@+-]+")
@@ -2098,7 +2119,7 @@ class DaemonState:
         """Audit actor/action/ids only; core drops bodies, subjects and text."""
         ids: dict[str, Any] = {}
         for name in ("resource", "mode", "lease_id", "branch", "path",
-                     "target"):
+                     "target", "link_id", "delegation_id"):
             value = msg.get(name)
             if isinstance(value, str) and value:
                 ids[name] = value[:200]
@@ -2108,6 +2129,12 @@ class DaemonState:
         message = body.get("message")
         if isinstance(message, dict) and message.get("msg_id"):
             ids["msg_id"] = message["msg_id"]
+        link = body.get("link")
+        if isinstance(link, dict) and link.get("link_id"):
+            ids["link_id"] = link["link_id"]
+        delegation = body.get("delegation")
+        if isinstance(delegation, dict) and delegation.get("delegation_id"):
+            ids["delegation_id"] = delegation["delegation_id"]
         if isinstance(body.get("delivered"), int):
             ids["delivered"] = body["delivered"]
         try:
@@ -2116,6 +2143,275 @@ class DaemonState:
                           action=action, **ids)
         except Exception:  # noqa: BLE001 - auditing never changes the action
             pass
+
+    @staticmethod
+    def _mesh_target(value: Any) -> str | None:
+        """A peer identity as ``HARNESS:SESSION``; no caller-supplied keys."""
+        if isinstance(value, Mapping):
+            harness = value.get("harness")
+            session = value.get("session")
+            if (isinstance(harness, str) and harness
+                    and isinstance(session, str) and session):
+                return f"{harness}:{session}"
+            return None
+        if isinstance(value, str) and value:
+            return value
+        return None
+
+    @staticmethod
+    def _mesh_link_compact(item: Mapping[str, Any]) -> dict[str, Any]:
+        """Metadata only: no reason, history, capabilities or local paths."""
+        peer = item.get("peer") or {}
+        if not isinstance(peer, Mapping):
+            peer = {}
+        return {
+            "link_id": item.get("link_id"),
+            "peer": {"harness": peer.get("harness"),
+                     "session": peer.get("session")},
+            "relation": item.get("viewer_relation", item.get("relation")),
+            "reciprocal_relation": item.get("reciprocal_relation"),
+            "state": item.get("effective_state", item.get("state")),
+            "accepted_at": item.get("accepted_at"),
+            "expires_at": item.get("expires_at"),
+            "expires_in_s": item.get("expires_in_s"),
+            "direction": item.get("direction"),
+        }
+
+    @staticmethod
+    def _mesh_delegation_compact(item: Mapping[str, Any]) -> dict[str, Any]:
+        """Metadata only: no reason, history or mailbox contents."""
+        grantor = item.get("grantor") or {}
+        grantee = item.get("grantee") or {}
+        if not isinstance(grantor, Mapping):
+            grantor = {}
+        if not isinstance(grantee, Mapping):
+            grantee = {}
+        return {
+            "delegation_id": item.get("delegation_id"),
+            "grantor": {"harness": grantor.get("harness"),
+                        "session": grantor.get("session")},
+            "grantee": {"harness": grantee.get("harness"),
+                        "session": grantee.get("session")},
+            "link_id": item.get("link_id"),
+            "link_state": item.get("link_state"),
+            "actions": list(item.get("actions") or ()),
+            "lease_id": item.get("lease_id"),
+            "resource": item.get("resource"),
+            "mailbox": bool(item.get("mailbox")),
+            "scope": item.get("scope"),
+            "state": item.get("effective_state", item.get("state")),
+            "expires_at": item.get("expires_at"),
+            "expires_in_s": item.get("expires_in_s"),
+            "max_uses": item.get("max_uses"),
+            "used": item.get("used"),
+            "remaining_uses": item.get("remaining_uses"),
+            "direction": item.get("direction"),
+        }
+
+    def _mesh_supervise_action(self, action: str, msg: dict[str, Any],
+                               harness: str, session: str,
+                               actor_key: str) -> dict[str, Any]:
+        """Layer-3 link/delegation/topology actions over ``core.mesh``."""
+        from ozagia.core import mesh as M
+        if action == "link_request":
+            to = self._mesh_target(msg.get("to"))
+            if to is None:
+                return {"ok": False, "code": "invalid_recipient",
+                        "error": "to must be HARNESS:SESSION"}
+            result = M.link_request(
+                self.root, harness, session, to=to,
+                relation=str(msg.get("relation") or "peer"),
+                ttl_s=msg.get("ttl_s", M.LINK_TTL_S),
+                reason=str(msg.get("reason") or ""),
+                idempotency_key=msg.get("idempotency_key"))
+            return {"ok": True, "action": action,
+                    "created": bool(result.get("created")),
+                    "link": self._mesh_link_compact(
+                        result.get("link") or {})}
+        if action in ("link_accept", "link_decline", "link_revoke"):
+            link_id = msg.get("link_id")
+            if not isinstance(link_id, str) or not link_id:
+                return {"ok": False, "code": "invalid_link_id",
+                        "error": "link_id is required"}
+            if action == "link_accept":
+                result = M.link_accept(self.root, harness, session, link_id)
+            elif action == "link_decline":
+                result = M.link_decline(
+                    self.root, harness, session, link_id,
+                    reason=str(msg.get("reason") or ""))
+            else:
+                result = M.link_revoke(
+                    self.root, harness, session, link_id,
+                    reason=str(msg.get("reason") or ""))
+            return {"ok": True, "action": action,
+                    "link": self._mesh_link_compact(
+                        result.get("link") or {})}
+        if action in ("link_list", "link_show"):
+            if action == "link_show":
+                link_id = msg.get("link_id")
+                if not isinstance(link_id, str) or not link_id:
+                    return {"ok": False, "code": "invalid_link_id",
+                            "error": "link_id is required"}
+                result = M.link_show(self.root, link_id, harness=harness,
+                                     session=session)
+                link = result.get("link") or {}
+                keys = {(link.get("from") or {}).get("key"),
+                        (link.get("to") or {}).get("key")}
+                if actor_key not in keys:
+                    return {"ok": False, "code": "not_permitted",
+                            "error": "only a link party may show it"}
+                return {"ok": True, "action": action,
+                        "link": self._mesh_link_compact(link)}
+            result = M.link_list(self.root, harness=harness, session=session,
+                                 include_all=True)
+            links = [
+                self._mesh_link_compact(item)
+                for item in result.get("links") or ()
+                if actor_key in {str((item.get("from") or {}).get("key")),
+                                 str((item.get("to") or {}).get("key"))}
+            ][:32]
+            counts: dict[str, int] = {}
+            for item in links:
+                state = str(item.get("state"))
+                counts[state] = counts.get(state, 0) + 1
+            return {"ok": True, "action": action, "links": links,
+                    "count": len(links), "counts": counts}
+        if action == "delegation_grant":
+            to = self._mesh_target(msg.get("to"))
+            if to is None:
+                return {"ok": False, "code": "invalid_recipient",
+                        "error": "to must be HARNESS:SESSION"}
+            actions = msg.get("actions")
+            if isinstance(actions, str):
+                actions = [actions]
+            if (not isinstance(actions, (list, tuple))
+                    or not all(isinstance(item, str) for item in actions)):
+                return {"ok": False, "code": "invalid_action",
+                        "error": "actions must be a list of delegation actions"}
+            mailbox = msg.get("mailbox", False)
+            if not isinstance(mailbox, bool):
+                return {"ok": False, "code": "invalid_value",
+                        "error": "mailbox must be true or false"}
+            result = M.delegation_grant(
+                self.root, harness, session, to=to, actions=actions,
+                lease_id=msg.get("lease_id"), mailbox=mailbox,
+                ttl_s=msg.get("ttl_s", M.DELEGATION_TTL_S),
+                max_uses=msg.get("max_uses", 1),
+                reason=str(msg.get("reason") or ""))
+            return {"ok": True, "action": action,
+                    "created": bool(result.get("created")),
+                    "delegation": self._mesh_delegation_compact(
+                        result.get("delegation") or {})}
+        if action == "delegation_revoke":
+            delegation_id = msg.get("delegation_id")
+            if not isinstance(delegation_id, str) or not delegation_id:
+                return {"ok": False, "code": "invalid_delegation_id",
+                        "error": "delegation_id is required"}
+            result = M.delegation_revoke(
+                self.root, harness, session, delegation_id,
+                reason=str(msg.get("reason") or ""))
+            return {"ok": True, "action": action,
+                    "delegation": self._mesh_delegation_compact(
+                        result.get("delegation") or {})}
+        if action in ("delegation_list", "delegation_show"):
+            if action == "delegation_show":
+                delegation_id = msg.get("delegation_id")
+                if not isinstance(delegation_id, str) or not delegation_id:
+                    return {"ok": False, "code": "invalid_delegation_id",
+                            "error": "delegation_id is required"}
+                result = M.delegation_show(self.root, delegation_id,
+                                           harness=harness, session=session)
+                delegation = result.get("delegation") or {}
+                keys = {(delegation.get("grantor") or {}).get("key"),
+                        (delegation.get("grantee") or {}).get("key")}
+                if actor_key not in keys:
+                    return {"ok": False, "code": "not_permitted",
+                            "error": "only a delegation party may show it"}
+                return {"ok": True, "action": action,
+                        "delegation": self._mesh_delegation_compact(delegation)}
+            result = M.delegation_list(
+                self.root, harness=harness, session=session,
+                include_all=True)
+            delegations = [
+                self._mesh_delegation_compact(item)
+                for item in result.get("delegations") or ()
+                if actor_key in {
+                    str((item.get("grantor") or {}).get("key")),
+                    str((item.get("grantee") or {}).get("key"))}
+            ][:32]
+            counts: dict[str, int] = {}
+            for item in delegations:
+                state = str(item.get("state"))
+                counts[state] = counts.get(state, 0) + 1
+            return {"ok": True, "action": action,
+                    "delegations": delegations, "count": len(delegations),
+                    "counts": counts}
+        if action == "topology":
+            payload = M.status(self.root, harness=harness, session=session)
+            me = payload.get("self") or {}
+            self_row = {
+                "key": me.get("key"),
+                "harness": me.get("harness"),
+                "session": me.get("session"),
+                "state": me.get("effective_state"),
+                "role": me.get("role"),
+                "exposure": me.get("exposure"),
+            }
+            links = [self._mesh_link_compact(item)
+                     for item in (me.get("links") or ())][:16]
+            peers = [
+                {"key": item.get("key"), "harness": item.get("harness"),
+                 "session": item.get("session"),
+                 "state": item.get("effective_state"),
+                 "role": item.get("role"),
+                 "exposure": item.get("exposure")}
+                for item in payload.get("sessions") or ()
+                if item.get("key") != me.get("key")
+            ][:32]
+            delegation_payload = M.delegation_list(
+                self.root, harness=harness, session=session,
+                include_all=True)
+            delegations = []
+            for item in delegation_payload.get("delegations") or ():
+                if actor_key not in {
+                        str((item.get("grantor") or {}).get("key")),
+                        str((item.get("grantee") or {}).get("key"))}:
+                    continue
+                compact = self._mesh_delegation_compact(item)
+                # Topology is a count/summary view: no lease ids or resource
+                # paths, only the delegation's identity and state.
+                for name in ("lease_id", "resource", "scope"):
+                    compact.pop(name, None)
+                delegations.append(compact)
+            delegations = delegations[:16]
+            link_counts: dict[str, int] = {}
+            for item in links:
+                state = str(item.get("state"))
+                link_counts[state] = link_counts.get(state, 0) + 1
+            delegation_counts: dict[str, int] = {}
+            for item in delegations:
+                state = str(item.get("state"))
+                delegation_counts[state] = (
+                    delegation_counts.get(state, 0) + 1)
+            session_counts = payload.get("session_counts") or {}
+            lease_counts = payload.get("lease_counts") or {}
+            return {
+                "ok": True, "action": action,
+                "mesh_id": payload.get("mesh_id"),
+                "self": self_row,
+                "role": self_row["role"],
+                "peers": peers,
+                "links": links,
+                "delegations": delegations,
+                "counts": {
+                    "sessions": session_counts,
+                    "links": link_counts,
+                    "delegations": delegation_counts,
+                    "leases": lease_counts,
+                },
+            }
+        return {"ok": False, "code": "invalid_action",
+                "error": "unsupported mesh action"}
 
     def _mesh_action(self, action: str, msg: dict[str, Any], harness: str,
                      session: str) -> dict[str, Any]:
@@ -2229,14 +2525,17 @@ class DaemonState:
                 "error": "unsupported mesh action"}
 
     def mesh_op(self, msg: dict[str, Any]) -> dict[str, Any]:
-        """Layer-2 model coordination through the opt-in `mesh` op.
+        """Layer-2/3 model coordination through the opt-in `mesh` op.
 
         The identity is the trusted plugin envelope's `harness`/`session`;
         an `actor` field is ignored. Only `opencode` and `opencode-runner`
         may act, the registration's stored exposure gates the action, and
-        `read` may only ask for status. No action approves, takes over,
-        links, delegates, prunes or unregisters. Rate limits are per actor
-        and action group (messages, leases, worktree/merge negotiation).
+        `read` may only ask for status. Coordinate actions send, lease and
+        negotiate; supervise additionally offers link/delegation handshakes
+        and topology. No action approves, takes over, prunes or unregisters,
+        and no link or delegation grants merge authority. Rate limits are per
+        actor and action group (messages, leases, worktree/merge negotiation,
+        supervision).
         """
         from ozagia.core import mesh as M
         action = msg.get("action")
@@ -2339,6 +2638,28 @@ class DaemonState:
                 body = {"ok": True, "action": action,
                         "self": self._mesh_session_compact(view)}
                 self._mesh_audit(me.get("key"), action, body, msg)
+                return body
+            if action in MESH_SUPERVISE_ACTIONS:
+                if exposure != "supervise":
+                    self.mesh_refusals += 1
+                    return {"ok": False, "code": "not_permitted",
+                            "error": "this action needs supervise exposure"}
+                group = (MESH_RATE_GROUP.get(action, "")
+                         if action in MESH_SUPERVISE_RATE_ACTIONS else "")
+                retry_s = self._mesh_rate_wait(
+                    str(me.get("key") or ""), group)
+                if retry_s:
+                    self.mesh_refusals += 1
+                    return {"ok": False, "code": "rate_limited",
+                            "error": "too many mesh actions; retry later",
+                            "retry_s": retry_s}
+                body = self._mesh_supervise_action(
+                    action, msg, harness, session, str(me.get("key") or ""))
+                if body.get("ok"):
+                    self.mesh_actions += 1
+                    self._mesh_audit(me.get("key"), action, body, msg)
+                else:
+                    self.mesh_refusals += 1
                 return body
             if action not in MESH_COORDINATE_ACTIONS:
                 self.mesh_refusals += 1

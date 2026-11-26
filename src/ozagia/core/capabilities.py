@@ -455,6 +455,7 @@ _TESTS = {
     "mesh_links": "test:tests/test_mesh_links.py",
     "mesh_model": "test:tests/test_mesh_model.py",
     "daemon_mesh": "test:tests/test_daemon_mesh.py",
+    "daemon_mesh_supervision": "test:tests/test_daemon_mesh_supervision.py",
     "assets": "test:tests/test_assets.py",
     "assets_discovery": "test:tests/test_assets_discovery.py",
     "assets_cli": "test:tests/test_assets_cli.py",
@@ -1578,9 +1579,11 @@ _BUILTIN_DEFINITIONS: tuple[dict[str, Any], ...] = (
     _def(
         id="cap:mesh.coordinate",
         domain="actions",
-        purpose=("Opt-in layer-2 model coordination: bounded messages, "
-                 "advisory lease request/renew/release and worktree/merge "
-                 "negotiation through the local daemon mesh op."),
+        purpose=("Opt-in layer-2/3 model coordination: bounded messages, "
+                 "advisory lease request/renew/release, worktree/merge "
+                 "negotiation, and (at supervise exposure) mutual link and "
+                 "bounded delegation handshakes through the local daemon "
+                 "mesh op."),
         owner="ozagia.daemon.server",
         side_effect="write",
         exposure=["daemon"],
@@ -1590,22 +1593,28 @@ _BUILTIN_DEFINITIONS: tuple[dict[str, Any], ...] = (
               "impl:ozagia.core.mesh.lease_acquire",
               "impl:ozagia.core.mesh.lease_release",
               "impl:ozagia.core.mesh.worktree_request",
-              "impl:ozagia.core.mesh.merge_request"],
+              "impl:ozagia.core.mesh.merge_request",
+              "impl:ozagia.core.mesh.link_request",
+              "impl:ozagia.core.mesh.delegation_grant"],
         surfaces=["daemon:op:mesh"],
         prerequisites=["[mesh] model or --mesh-model coordinate|supervise",
                        "a trusted OpenCode plugin identity and a running daemon"],
         limits=["read exposure may only ask for status",
-                "30 messages, 20 lease actions and 10 worktree/merge requests "
-                "per actor per five minutes",
-                "no approve, takeover, link, delegation, prune or unregister "
-                "action",
-                "message bodies and subjects are never returned or audited",
+                "30 messages, 20 lease actions, 10 worktree/merge requests and "
+                "10 link/delegation actions per actor per five minutes",
+                "link and delegation actions need supervise exposure",
+                "no approve, takeover, prune or unregister action",
+                "a link or delegation never grants merge authority; "
+                "merge_on_behalf is a reference only",
+                "message bodies, subjects and reasons are never returned or "
+                "audited",
                 "no network and no file writes outside the mesh state directory",
                 "leases remain advisory; merge policy and approvals still apply"],
         authorization=("host opt-in only; the daemon uses the plugin's actual "
                        "harness/session, verifies the registration and never "
                        "accepts a caller-supplied actor or raised exposure"),
-        tests=_tests("mesh", "mesh_model", "daemon_mesh"),
+        tests=_tests("mesh", "mesh_model", "daemon_mesh",
+                     "daemon_mesh_supervision"),
         docs=_docs("mesh"),
     ),
     _def(

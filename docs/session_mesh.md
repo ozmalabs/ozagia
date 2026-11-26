@@ -9,8 +9,8 @@ worktree, commit, merge and approval policy remains authoritative.
 This document describes the filesystem layer (layer 0), the read-only
 awareness it enables (layer 1), the link/delegation handshake, the harness
 registration that exposes a bounded summary to the model, and the opt-in
-layer-2 model coordination tool.  Layer 3 (mutual supervision and delegation
-through the tool) and the Ozma bridge are later slices.
+layer-2/3 model coordination and supervision tool.  The Ozma bridge is a later
+slice.
 
 ## Scope
 
@@ -373,7 +373,7 @@ no paths beyond the registered worktree/branch and lease resources.  The
 OpenCode plugin appends one `[ozagia mesh]` block to the model request's
 system context, marked as untrusted metadata; it reads no mesh file for it.
 At `read` exposure it registers no tool; at `coordinate`/`supervise` it also
-registers the layer-2 tool described below.  A missing or oversized value adds
+registers the layer-2/3 tool described below.  A missing or oversized value adds
 nothing.  The summary is a snapshot taken at session start; the filesystem
 registry remains the source of truth.
 
@@ -393,7 +393,7 @@ never returns a subject or body and never acks.  There is deliberately no MCP
 send, lease, release, claim or approve tool, and the graph/engine surfaces do
 not list either tool.
 
-## Layer 2: model coordination tool
+## Layer 2/3: model coordination and supervision tool
 
 `coordinate` and `supervise` are host opt-ins.  The harness passes
 `OZAGIA_MESH_MODEL` to OpenCode, and only then does the plugin register the
@@ -415,25 +415,51 @@ Actions:
 | `lease_renew` / `lease_release` | an owned `lease_id` | `coordinate`+ |
 | `worktree_request` / `worktree_offer` | an existing worktree by `branch`/`path` | `coordinate`+ |
 | `merge_request` | queue for the advisory merge lease on `target` | `coordinate`+ |
+| `link_request` | `to`, `relation` (`peer`/`sub`/`super`), optional `ttl_s`, `reason`, `idempotency_key` | `supervise` |
+| `link_accept` / `link_decline` / `link_revoke` | `link_id`; decline and revoke accept a `reason` | `supervise` |
+| `link_list` / `link_show` | compact links (id, peer, relation, state, expiry); no history or reason | `supervise` |
+| `delegation_grant` | `to`, `actions` (`lease_release`/`mailbox_read`/`merge_on_behalf`), exact `lease_id` or `mailbox`, `ttl_s`, `max_uses`, `reason` | `supervise` |
+| `delegation_revoke` | `delegation_id` and an optional `reason` | `supervise` |
+| `delegation_list` / `delegation_show` | compact delegations (id, parties, actions, scope, state, uses, expiry) | `supervise` |
+| `topology` | compact self/role, peers, links, delegations and session/link/delegation/lease counts | `supervise` |
 
 The daemon also accepts lifecycle actions `register` and `heartbeat` from the
-plugin; these are not in the model tool's enum.  It never exposes `approve`,
-`takeover`, `lease_takeover`, `link_*`, `delegation_*`, `prune`, `unregister`
-or worktree creation/removal.  A merge lease remains advisory: the normal
-merge policy and approvals still decide whether a merge may happen.
+plugin; these are not in the model tool's enum.  `coordinate` is unchanged:
+link, delegation and topology actions are in the static tool schema but the
+daemon refuses them with `not_permitted`, so a coordinate session fails closed
+instead of silently hiding them.  The daemon never exposes `approve`,
+`takeover`, `lease_takeover`, `merge_apply`, `admin`, `prune`, `unregister` or
+worktree creation/removal.  A merge lease remains advisory, and a
+`merge_on_behalf` delegation is a reference only: no link, delegation or merge
+policy code consults it, so it never authorizes a git merge, a lease release or
+a takeover.  The normal merge policy and approvals still decide whether a merge
+may happen.
+
+A link is mutual: a request is only usable after the target accepts, either
+side can revoke, and a revoked or expired link closes without affecting leases
+already held.  A delegation is separate and bounded: only the lease holder or
+mailbox owner grants it, only to an actively linked session, for an exact
+lease/mailbox scope, with a TTL and `max_uses`.  Role alone never satisfies a
+check, and neither side can delegate another session's lease or mailbox.
 
 Limits are per actor and action group, in the daemon's bounded in-memory
-counters: 30 messages, 20 lease actions and 10 worktree/merge requests per five
-minutes.  A refusal is `rate_limited` with `retry_s`; other stable codes
-include `not_permitted`, `unknown_session`, `unknown_lease`, `live_holder`,
-`queue_full`, `mailbox_full`, `invalid_action`, `invalid_resource`,
-`invalid_exposure`, `invalid_lease_id` and `session_not_live`.  Each successful
-action appends one mesh audit record with the actor, action and ids only;
-message bodies and subjects never reach the answer, journal, status, prompt or
-audit.  All state stays under `<state>/mesh/<mesh_id>/`; no network is used.
-The plugin heartbeats on tool calls (and with an unref'd bounded timer) and
-stops its timer on teardown; a session that disappears is reported stale and
-then dead, never silently deleted.
+counters: 30 messages, 20 lease actions, 10 worktree/merge requests and 10
+link/delegation actions per five minutes.  List/show/topology reads do not
+consume the supervision bucket.  A refusal is `rate_limited` with `retry_s`;
+other stable codes include `not_permitted`, `unknown_session`,
+`unknown_lease`, `unknown_link`, `unknown_delegation`, `link_pending`,
+`link_conflict`, `link_expired`, `link_stale`, `not_linked`, `not_grantor`,
+`delegation_denied`, `delegation_expired`, `delegation_used`,
+`self_link`, `self_delegation`, `peer_not_live`, `live_holder`, `queue_full`,
+`mailbox_full`, `invalid_action`, `invalid_resource`, `invalid_exposure`,
+`invalid_lease_id` and `session_not_live`.  Each successful action appends one
+mesh audit record with the actor, action and link/delegation/message ids only;
+message bodies, subjects and reasons never reach the answer, journal, status,
+prompt or audit.  All state stays under `<state>/mesh/<mesh_id>/`; no network
+is used.  The plugin heartbeats on tool calls (and with an unref'd bounded
+timer) and stops its timer on teardown; a session that disappears is reported
+stale and then dead, never silently deleted.
+
 
 ## Commands
 
@@ -472,8 +498,9 @@ ozagia mesh prune (--expired | --delivered-before S) [--apply]
 `ozagia agent --mesh|--no-mesh` controls the harness registration.
 `--mesh-model none|read|coordinate|supervise` sets the model exposure; only
 `coordinate`/`supervise` add the native tool.  The `ozagia mesh` commands
-remain the explicit layer-0/2 surface, and their mutation commands still
-require `coordinate` exposure.
+remain the explicit layer-0/2/3 surface; their mutation commands require
+`coordinate` (or `supervise`) exposure, and the native tool gates its
+supervision actions to `supervise`.
 
 Identity defaults to `OZAGIA_MESH_HARNESS` and `OZAGIA_MESH_SESSION`.  Reads
 such as `status`, `peers`, `lease list/status`, `link list/show` and
@@ -514,14 +541,14 @@ MCP tools.
 
 Layer 2 is implemented for `coordinate`/`supervise`: the daemon `mesh` op, the
 host-only `--mesh-model`/`OZAGIA_MESH_MODEL`/`[mesh] model` opt-in, the native
-`ozagia_mesh` tool, rate limits and audit.  A model still cannot approve a
-takeover, merge exception or administrative grant.
+`ozagia_mesh` tool, rate limits and audit.  Layer 3 is implemented for
+`supervise`: mutual link request/accept/decline/revoke, bounded delegation
+grant/revoke/list/show and a compact topology action, all through the same
+tool.  A model still cannot approve a takeover, merge exception or
+administrative grant, and no link or delegation carries merge authority.
 
 The next slice adds:
 
-- **Layer 3:** mutual sub/super handshakes, bounded delegation and descendant
-  topology through the tool, with explicit host approval where authority is
-  implied.
 - The [Ozma mesh bridge](plans/2026-11-26_ozma_mesh_bridge.md), which maps the
   local records to Ozma coordination without making remote claims
   authoritative.

@@ -327,25 +327,34 @@ and action-specific:
 
 ```jsonc
 {
-  "action": "send|status|lease_acquire|lease_renew|lease_release|worktree_request|worktree_offer|merge_request",
+  "action": "send|status|lease_acquire|lease_renew|lease_release|worktree_request|worktree_offer|merge_request|link_request|link_accept|link_decline|link_revoke|link_list|link_show|delegation_grant|delegation_revoke|delegation_list|delegation_show|topology",
   "to": "opencode:ses_...", "broadcast": false,
   "kind": "note", "subject": "...", "body": "...", "in_reply_to": "msg_...",
   "lease": "lease_...", "ttl_s": 60,
   "resource": "branch:main", "mode": "read|write|merge", "lease_id": "lease_...",
-  "branch": "main", "path": "...", "target": "main", "reason": "..."
+  "branch": "main", "path": "...", "target": "main", "reason": "...",
+  "link_id": "lnk_...", "relation": "peer|sub|super",
+  "delegation_id": "dlg_...", "actions": ["lease_release"],
+  "mailbox": false, "max_uses": 1
 }
 ```
 
 The daemon uses the plugin's trusted `harness`/`session`, ignores a
 caller-supplied actor, verifies the registration and gates by its stored
-exposure: `read` may only ask for `status`; `coordinate`/`supervise` may send,
-lease and negotiate.  It never accepts `approve`, `takeover`, `link_*`,
-`delegation_*`, `prune`, `unregister` or arbitrary worktree creation, and the
-merge lease is advisory.  Rate limits are 30 messages, 20 lease actions and 10
-worktree/merge requests per actor per five minutes; a refusal is
-`rate_limited` with `retry_s`.  Answers contain metadata and ids, never message
-bodies or subjects, and errors never echo the body.  No file is written outside
-the mesh state and no network is used.
+exposure: `read` may only ask for `status`; `coordinate` may send, lease and
+negotiate; `supervise` additionally offers the link, delegation and topology
+actions.  The static schema keeps those layer-3 actions visible at
+`coordinate`, where the daemon refuses them with `not_permitted` (fail closed,
+not silently hidden).  It never accepts `approve`, `takeover`, `prune`,
+`unregister` or arbitrary worktree creation, and the merge lease is advisory.
+A `merge_on_behalf` delegation is a reference only and is never consulted by
+merge policy; links and delegations grant no merge authority.  Rate limits are
+30 messages, 20 lease actions, 10 worktree/merge requests and 10 link or
+delegation actions per actor per five minutes; a refusal is `rate_limited`
+with `retry_s`.  Link, delegation and topology answers are compact metadata
+(ids, peers, relations, states, expiry, uses); reasons, message bodies and
+subjects are never returned, and errors never echo them.  No file is written
+outside the mesh state and no network is used.
 
 The MCP mesh tools (`dev_mesh_status`, `dev_mesh_inbox`) stay read-only: this
 tool exists only behind the host opt-in described above.

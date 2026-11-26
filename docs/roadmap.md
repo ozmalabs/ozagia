@@ -543,7 +543,7 @@ capacity check.
 
 **Implementation status (2026-11-26, session mesh).** The
 [session-mesh plan](plans/2026-11-26_session_mesh.md) is implemented through
-the read-only awareness layer:
+the opt-in model coordination layers:
 
 - repo/mesh-scoped filesystem registry, PID/boot/heartbeat liveness, bounded
   redacted mailboxes, durable advisory leases with queues/TTL/takeover;
@@ -551,18 +551,22 @@ the read-only awareness layer:
 - 1:1 `sub`/`peer`/`super` links with mutual accept/decline/revoke and
   derived roles; separate scoped delegations;
 - `ozagia agent --mesh` registers a runner, heartbeats, cleans up and provides
-  a compact untrusted topology summary; no model send/lease tool yet;
+  a compact untrusted topology summary;
+- a daemon `mesh` op and opt-in `ozagia_mesh` tool at `coordinate` exposure
+  for bounded send/lease/worktree/merge actions, and at `supervise` exposure
+  for link/delegation negotiation and topology, with per-actor rate limits and
+  metadata-only audit;
 - read-only `status` mesh section and `dev_mesh_status`/`dev_mesh_inbox` MCP
   tools.
 
-Layer 2/3 model coordination, conflict warnings citing live leases, a daemon
-`mesh` op and task/eval mesh records remain open.
+Conflict warnings citing live leases, task/eval mesh records and the Ozma
+bridge remain open.
 
 An [Ozma mesh bridge plan](plans/2026-11-26_ozma_mesh_bridge.md) follows it:
 flights of agents join the documented Ozma `COORDINATION` mesh through typed
-message/claim/channel/inbox mapping and an optional A2A adapter. It is planned,
-not implemented; remote claims and wake modes remain advisory and
-host-approved.
+message/claim/channel/inbox mapping and an optional A2A adapter. Only the
+identity and read-only status slice is implemented; messages, claims, inbox,
+wake modes and live conformance remain planned and host-approved.
 
 **Implementation status (2026-11-26, external assets).** The
 [external-assets plan](plans/2026-11-26_external_assets.md) is implemented as

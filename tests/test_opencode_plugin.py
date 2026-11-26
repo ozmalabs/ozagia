@@ -1152,6 +1152,127 @@ def test_native_mesh_tool_reports_daemon_unavailable(tmp_path):
     assert result["code"] == "daemon_unavailable"
 
 
+def _mesh_supervision_script(req):
+    if req["op"] == "hello":
+        return {"ok": True}
+    if req["op"] == "mesh":
+        action = req.get("action")
+        if action == "register":
+            return {"ok": True, "action": "register", "registered": True,
+                    "mesh_id": "default", "self": {
+                        "key": "sk_test", "harness": "opencode",
+                        "session": "ses_test",
+                        "exposure": req.get("exposure")}}
+        if action == "link_request":
+            assert req["to"] == "opencode:ses_b"
+            assert req["relation"] == "sub"
+            assert req["reason"] == "REASON_CANARY"
+            return {"ok": True, "action": "link_request", "created": True,
+                    "link": {"link_id": "lnk_0123456789abcdef",
+                             "peer": {"harness": "opencode",
+                                      "session": "ses_b"},
+                             "relation": "sub", "state": "pending",
+                             "expires_in_s": 600}}
+        if action == "delegation_grant":
+            assert req["to"] == "opencode:ses_b"
+            assert req["actions"] == ["lease_release"]
+            assert req["lease_id"] == "lease_0123456789abcdef"
+            assert req["max_uses"] == 2
+            return {"ok": True, "action": "delegation_grant", "created": True,
+                    "delegation": {
+                        "delegation_id": "dlg_0123456789abcdef",
+                        "actions": req["actions"],
+                        "lease_id": req["lease_id"],
+                        "max_uses": req["max_uses"], "used": 0,
+                        "state": "active"}}
+        if action == "link_show":
+            assert req["link_id"] == "lnk_0123456789abcdef"
+            return {"ok": True, "action": "link_show", "link": {
+                "link_id": req["link_id"], "relation": "sub",
+                "state": "active"}}
+        if action == "topology":
+            return {"ok": True, "action": "topology", "role": "super",
+                    "counts": {"links": {"active": 1}}}
+        if action == "heartbeat":
+            return {"ok": True, "action": "heartbeat"}
+        if action == "status":
+            return {"ok": True, "action": "status", "self": {
+                "session": "ses_test"}, "peers": [], "leases": [],
+                "links": [], "unread": 0}
+    return _standard(req)
+
+
+@needs_node
+def test_native_mesh_supervision_actions_are_mapped(tmp_path, daemon):
+    d = daemon(_mesh_supervision_script)
+    out = _run(tmp_path, {
+        "nativeTools": True, "permission": "allow", "settleMs": 200,
+        "calls": [
+            {"tool": "ozagia_mesh", "input": {
+                "action": "link_request", "to": "opencode:ses_b",
+                "relation": "sub", "reason": "REASON_CANARY"}},
+            {"tool": "ozagia_mesh", "input": {
+                "action": "delegation_grant", "to": "opencode:ses_b",
+                "actions": ["lease_release"],
+                "lease_id": "lease_0123456789abcdef", "max_uses": 2}},
+            {"tool": "ozagia_mesh", "input": {
+                "action": "link_show", "link_id": "lnk_0123456789abcdef"}},
+            {"tool": "ozagia_mesh", "input": {"action": "topology"}},
+        ],
+    }, d.path, env={"OZAGIA_MESH_MODEL": "supervise"})
+
+    results = [json.loads(item["result"]["content"])
+               for item in out["results"]]
+    assert [item["action"] for item in results] == [
+        "link_request", "delegation_grant", "link_show", "topology"]
+    assert results[0]["link"]["relation"] == "sub"
+    assert results[1]["delegation"]["delegation_id"] == (
+        "dlg_0123456789abcdef")
+    assert results[3]["role"] == "super"
+    assert "REASON_CANARY" not in json.dumps(results)
+
+    mesh = [req for req in d.requests if req["op"] == "mesh"]
+    assert mesh[0]["action"] == "register"
+    assert mesh[0]["exposure"] == "supervise"
+    assert [req["action"] for req in mesh
+            if req["action"] not in ("register", "heartbeat")] == [
+        "link_request", "delegation_grant", "link_show", "topology"]
+
+
+@needs_node
+def test_native_mesh_coordinate_supervision_fails_closed(tmp_path, daemon):
+    def script(req):
+        if req["op"] == "hello":
+            return {"ok": True}
+        if req["op"] == "mesh" and req.get("action") == "register":
+            return {"ok": True, "action": "register", "registered": True,
+                    "self": {"key": "sk_test", "harness": "opencode",
+                             "session": "ses_test",
+                             "exposure": req.get("exposure")}}
+        if req["op"] == "mesh" and req.get("action") == "link_request":
+            return {"ok": False, "code": "not_permitted",
+                    "error": "needs supervise exposure REASON_CANARY"}
+        if req["op"] == "mesh":
+            return {"ok": True, "action": req.get("action")}
+        return _standard(req)
+
+    d = daemon(script)
+    out = _run(tmp_path, {
+        "nativeTools": True, "permission": "allow",
+        "calls": [{"tool": "ozagia_mesh", "input": {
+            "action": "link_request", "to": "opencode:ses_b",
+            "relation": "peer", "reason": "REASON_CANARY"}}],
+    }, d.path, env={"OZAGIA_MESH_MODEL": "coordinate"})
+    result = json.loads(out["results"][0]["result"]["content"])
+    assert result["status"] == "refused"
+    assert result["code"] == "not_permitted"
+    assert "REASON_CANARY" not in json.dumps(result)
+    mesh = [req for req in d.requests if req["op"] == "mesh"]
+    assert mesh[0]["action"] == "register"
+    assert mesh[0]["exposure"] == "coordinate"
+    assert "link_request" in [req["action"] for req in mesh]
+
+
 # --------------------------------------------------------------------------- #
 # installer
 # --------------------------------------------------------------------------- #
