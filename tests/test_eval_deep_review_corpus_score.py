@@ -113,6 +113,46 @@ def test_complete_label_scope_without_scored_run_is_reported_as_missing(tmp_path
     assert any(row["missing_run"] for row in result["per_subject_key"])
 
 
+def test_complete_labels_require_complete_report_coverage(tmp_path):
+    copied = tmp_path / "corpus"
+    shutil.copytree(FIXTURE, copied)
+    record_path = copied / "record.json"
+    raw = json.loads(record_path.read_text(encoding="utf-8"))
+    run = raw["runs"][0]
+    run.pop("report_sha256", None)
+    run["subject_status"]["security"] = "partial"
+    record_path.write_text(json.dumps(raw), encoding="utf-8")
+
+    result = score_corpus(
+        load_manifest(copied / "corpus.json"), copied / "labels",
+        load_run_record(record_path), checkout_root=copied)
+
+    assert result["coverage"]["missing_runs_for_complete_labels"] == [{
+        "repository_id": "fixture-service",
+        "subject_key": "range-complete",
+        "run_id": "complete-1",
+        "reason": "run did not provide complete coverage",
+    }]
+
+
+@pytest.mark.parametrize("statuses", [{}, {"security": "complete"}])
+def test_complete_labels_require_status_for_every_declared_subject(tmp_path, statuses):
+    copied = tmp_path / "corpus"
+    shutil.copytree(FIXTURE, copied)
+    record_path = copied / "record.json"
+    raw = json.loads(record_path.read_text(encoding="utf-8"))
+    raw["runs"][0]["subject_status"] = statuses
+    record_path.write_text(json.dumps(raw), encoding="utf-8")
+
+    result = score_corpus(
+        load_manifest(copied / "corpus.json"), copied / "labels",
+        load_run_record(record_path), checkout_root=copied)
+
+    incomplete = result["coverage"]["missing_runs_for_complete_labels"]
+    assert len(incomplete) == 1
+    assert incomplete[0]["subject_key"] == "range-complete"
+
+
 def test_high_impact_and_repository_views_are_reported_separately():
     result = _score()
     assert result["high_impact"]["expected"] == 2

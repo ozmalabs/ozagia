@@ -459,6 +459,21 @@ def _scope_complete(group: Mapping[str, Any]) -> bool:
     return bool(summaries.get("complete"))
 
 
+def _label_scope_subjects(group: Mapping[str, Any] | None) -> set[str]:
+    """Return every subject the reviewers declared inside a label scope."""
+    if group is None:
+        return set()
+    declared: set[str] = set()
+    files = [*(group.get("reviewers") or {}).values(), group.get("adjudication")]
+    for item in files:
+        if not isinstance(item, Mapping):
+            continue
+        scope = item.get("declared_scope")
+        if isinstance(scope, Mapping):
+            declared.update(str(subject) for subject in scope.get("subjects") or [])
+    return declared
+
+
 def _build_scoring_inputs(loaded: Mapping[str, Any], manifest: Mapping[str, Any],
                           record: Mapping[str, Any]) -> dict[str, Any]:
     primary: dict[tuple[str, str], dict[str, Any]] = {}
@@ -501,6 +516,7 @@ def _build_scoring_inputs(loaded: Mapping[str, Any], manifest: Mapping[str, Any]
         statuses = _subject_status(run, report_manifest)
         group = loaded["subjects"].get(f"{repository_id}/{subject_key}")
         scope_is_complete = bool(group and _scope_complete(group))
+        label_subjects = _label_scope_subjects(group)
         scope_predictions = 0
         for finding in findings:
             base_subject = finding["subject"]
@@ -542,6 +558,7 @@ def _build_scoring_inputs(loaded: Mapping[str, Any], manifest: Mapping[str, Any]
             "reviewed_positive_labels": source_expected_by_scope.get(key, 0),
             "missing_run": False,
             "subject_statuses": dict(sorted(statuses.items())),
+            "label_subjects": sorted(label_subjects),
             "graph_freshness": run["graph_freshness"],
         })
     for key, group in sorted(loaded["subjects"].items()):
@@ -571,6 +588,7 @@ def _build_scoring_inputs(loaded: Mapping[str, Any], manifest: Mapping[str, Any]
                     (repository_id, subject_key), 0),
                 "missing_run": True,
                 "subject_statuses": {},
+                "label_subjects": sorted(_label_scope_subjects(group)),
                 "graph_freshness": "unknown",
             })
     return {
@@ -736,26 +754,44 @@ def _coverage(loaded: Mapping[str, Any], manifest: Mapping[str, Any],
         if f"{slot['repository_id']}/{slot['id']}" not in group_keys)
     complete_repositories: list[str] = []
     incomplete_repositories: list[str] = []
+    scored_complete_keys = {
+        f"{row['repository_id']}/{row['subject_key']}"
+        for row in inputs["scope_rows"]
+        if row.get("run_complete")
+        and bool(row.get("label_subjects"))
+        and set(row["label_subjects"]) <= set(row.get("subject_statuses", {}))
+        and all(status == "complete"
+                for status in row["subject_statuses"].values())
+    }
     for repo in manifest_repos:
         repo_id = repo["id"]
         expected_keys = {"whole-repo"} | {
             slot["id"] for slot in active_slots if slot["repository_id"] == repo_id
         }
         have = {key.split("/", 1)[1] for key in complete_keys
-                if key.startswith(repo_id + "/")}
+                if key.startswith(repo_id + "/")
+                and key in scored_complete_keys}
         if expected_keys <= have:
             complete_repositories.append(repo_id)
         else:
             incomplete_repositories.append(repo_id)
     unavailable = inputs["unavailable_scopes"]
-    missing_for_complete = [
-        item for item in unavailable
-        if item.get("subject_key") and item.get("reason") in {
-            "no scored run for this label scope",
-            "run status 'partial' did not provide complete coverage",
-            "run status 'failed' did not provide complete coverage",
-        } and f"{item['repository_id']}/{item['subject_key']}" in complete_keys
-    ]
+    scope_by_key = {
+        f"{row['repository_id']}/{row['subject_key']}": row
+        for row in inputs["scope_rows"]
+    }
+    missing_for_complete = []
+    for key in sorted(complete_keys):
+        row = scope_by_key.get(key)
+        if row is None or key not in scored_complete_keys:
+            missing_for_complete.append({
+                "repository_id": key.split("/", 1)[0],
+                "subject_key": key.split("/", 1)[1],
+                "run_id": row.get("run_id") if row else None,
+                "reason": ("no scored run for this label scope"
+                           if row is None or row.get("missing_run") else
+                           "run did not provide complete coverage"),
+            })
     stale_runs = [row for row in inputs["scope_rows"]
                   if row.get("graph_freshness") == "stale"]
     return {
