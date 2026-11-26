@@ -1,9 +1,9 @@
 # Temporary-space improvements
 
-Status: active plan (2026-11-26). Follows
-[the prior-art survey](../research/temp_managers.md) and the first `ozagia tmp`
-slice. Execution is split into three sequential agent-sized stages so each
-stage can be reviewed and tested on its own.
+Status: implemented A-C (2026-11-26), except the residual path-resolution
+window. Follows [the prior-art survey](../research/temp_managers.md) and the
+first `ozagia tmp` slice. Execution was split into three sequential
+agent-sized stages so each stage could be reviewed and tested on its own.
 
 ## Goal
 

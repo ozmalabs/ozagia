@@ -431,7 +431,9 @@ provenance and a safe cleanup path:
   cancel, while a live lock is left alone.
 - A read-only audit on this host found 959 legacy artifacts (~60 MB) from
   before the registry.  They are reported, not silently deleted; a
-  conservative `clean-legacy` path requires an explicit `--apply`.
+  conservative `clean-legacy` path requires an explicit `--apply`. The
+  reviewed plan removed 512 stale artifacts (~61 MB) with zero errors; recent,
+  live, held and unowned paths remained.
 - The native Desktop dialog and the scratch tool are offline-tested; live
   Desktop verification remains open.
 - A [prior-art survey](research/temp_managers.md) compares systemd-tmpfiles,
@@ -441,7 +443,13 @@ provenance and a safe cleanup path:
   idle/end-of-session GC hook. The follow-up
   [temp-space improvements plan](plans/2026-11-26_temp_space_improvements.md)
   sequences them as: accounting/discovery, then leases/pinning/budgets, then
-  lifecycle/cache/hardening. Open work is tracked there, not claimed as done.
+  lifecycle/cache/hardening.
+- All three stages are implemented (2026-11-26): allocated/apparent bytes,
+  inodes and hardlink dedupe with filesystem inode pressure; `flock` leases,
+  pin/unpin, global/session byte and inode budgets and `min_free`; ordered
+  `tmp gc`; `tmp run`; `cache` entries with `CACHEDIR.TAG` and `touch`;
+  deletion-time `st_dev`/`st_ino` rechecks. Residual: the final path-resolution
+  window needs `openat2`/descriptor-relative deletion.
 
 Still open in 0.3: live host verification of the native dialog and
 revoke/expiry flow; live Codex, Kiro and Claude Code sessions to verify the
@@ -512,13 +520,25 @@ real fixtures, provenance-preserving and still opt-in.
   out of the stable hash and `--check`. For this repository it is generated as
   `REPO_SHAPE.md`.
 
-**Implementation status (2026-11-26, external assets).** A separate
-[external-assets plan](plans/2026-11-26_external_assets.md) covers durable
-datasets, model weights/metadata, corpora, installs and caches. Existing
-components already keep manifests (Ocelot install, HF benchmark revision,
-deep-review corpus, model metadata), but there is no shared catalog, pinning
-or safe GC policy. Ocelot-owned data such as a Wikipedia parquet set is
-explicitly read-only/external; this is planned, not implemented.
+**Implementation status (2026-11-26, external assets).** The
+[external-assets plan](plans/2026-11-26_external_assets.md) is implemented as
+`ozagia assets`:
+
+- a user-level catalog for datasets, models, corpora, installs, caches and
+  tools with owner, scope, source/revision, licence, digests, allocated and
+  apparent bytes, inodes and pins;
+- known-root discovery for Ocelot managed installs, HF benchmark revisions,
+  deep-review corpus checkouts, model metadata and research caches;
+- explicit `--from-hf-metadata` for datasets such as Ocelot's Wikipedia set:
+  it records the HF revision and per-shard SHA-256 without opening or hashing
+  the parquet;
+- read-only MCP `dev_assets_list`/`dev_assets_status`;
+- reference-aware, dry-run GC; `gc --apply` is refused behind the explicit
+  ownership/deletable/unpinned/verified/unreferenced/approval gate.
+
+On this host the 36 GiB Ocelot Wikipedia set is registered as
+`owner=ocelot`, pinned and non-deletable, with `license=unknown`; no Ocelot
+data was copied or marked.
 
 **Implementation status (2026-11-25):** the first version-aware federation slice
 landed as declared dependency links: `ozagia federation check` and

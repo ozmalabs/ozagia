@@ -1,8 +1,9 @@
 # External assets and reference data
 
-Status: active plan (2026-11-26). Separate from the temporary-space plan:
-external assets are **durable**, may be shared across repositories, may live
-outside every checkout, and must never be treated as scratch.
+Status: implemented A-D (2026-11-26); `gc --apply` remains deliberately
+refused. Separate from the temporary-space plan: external assets are
+**durable**, may be shared across repositories, may live outside every
+checkout, and must never be treated as scratch.
 
 ## Why this is a separate class
 
