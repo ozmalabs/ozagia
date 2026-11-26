@@ -6,10 +6,11 @@ Source: `src/ozagia/integrations/ocelot/workspace_cli.py` (`ozagia-ocelot-worksp
 
 # `ozagia-ocelot-workspace`
 
-query an indexed Ocelot checkout: seed impact, a scoped test plan, and a read-only engine/worktree doctor
+query an indexed Ocelot checkout: seed impact, a scoped test plan, the Rust/Python/seed bridge, research links, seed validation, and a read-only engine/worktree doctor
 
 ```
-usage: ozagia-ocelot-workspace [-h] {status,doctor,seed,seeds,plan} ...
+usage: ozagia-ocelot-workspace [-h]
+                               {status,doctor,seed,seeds,research,engine,validate,plan} ...
 ```
 
 ## `ozagia-ocelot-workspace status`
@@ -38,7 +39,7 @@ usage: ozagia-ocelot-workspace doctor [-h] [--root ROOT] [--json]
 
 ```
 usage: ozagia-ocelot-workspace seed [-h] [--root ROOT] [--json]
-                                    [--include {summary,closure,tests,docs,all}]
+                                    [--include {summary,closure,tests,docs,sources,terms,all}]
                                     ID
 ```
 
@@ -57,6 +58,51 @@ usage: ozagia-ocelot-workspace seed [-h] [--root ROOT] [--json]
 ```
 usage: ozagia-ocelot-workspace seeds [-h] [--root ROOT] [--json]
 ```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | Ocelot checkout (default: current repository) |
+| `--json` |  |  |  | print JSON instead of text |
+
+## `ozagia-ocelot-workspace research`
+
+```
+usage: ozagia-ocelot-workspace research [-h] [--root ROOT] [--json] [TARGET]
+```
+
+| argument | type | values | required | help |
+|---|---|---|---|---|
+| `TARGET` |  | ? | no | document path, block number or topic substring |
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | Ocelot checkout (default: current repository) |
+| `--json` |  |  |  | print JSON instead of text |
+
+## `ozagia-ocelot-workspace engine`
+
+```
+usage: ozagia-ocelot-workspace engine [-h] [--root ROOT] [--json]
+                                      [--op {primitive,rust_impact,term_census}]
+                                      [--target TARGET]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | Ocelot checkout (default: current repository) |
+| `--json` |  |  |  | print JSON instead of text |
+| `--op` |  |  | `primitive` | query kind (default: primitive) |
+| `--target` |  |  |  | primitive name or Rust path for primitive/impact |
+
+## `ozagia-ocelot-workspace validate`
+
+```
+usage: ozagia-ocelot-workspace validate [-h] [--root ROOT] [--json] ID
+```
+
+| argument | type | values | required | help |
+|---|---|---|---|---|
+| `ID` |  |  | yes | seed id |
 
 | option | type | values | default | help |
 |---|---|---|---|---|
