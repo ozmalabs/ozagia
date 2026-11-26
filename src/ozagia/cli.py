@@ -53,9 +53,11 @@
                        [--index] [--budget-s S] [--save] [--model-pass]
                                                   (deterministic whole-repo
                                                   review, docs/repo_review.md)
-    ozagia mesh status|peers|register|send|inbox|lease|worktree|merge ...
+    ozagia mesh status|peers|register|send|inbox|lease|worktree|merge|
+                 link|delegation ...
                                                   (local session peers,
-                                                  messages and advisory leases;
+                                                  messages, advisory leases,
+                                                  links and delegations;
                                                   docs/session_mesh.md)
     ozagia capabilities list|show|audit [--json] [--limit N] [--cursor C]
                                                   (read-only declared

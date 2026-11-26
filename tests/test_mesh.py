@@ -67,7 +67,8 @@ def test_mesh_id_repo_id_and_layout(env) -> None:
     guard = json.loads((base / "mesh.json").read_text(encoding="utf-8"))
     assert guard == {"schema": M.SCHEMA, "repo_id": first,
                      "mesh_id": "default"}
-    for name in ("sessions", "leases", "mail", "links", "audit", "rate"):
+    for name in ("sessions", "leases", "mail", "links", "delegations",
+                 "audit", "rate"):
         assert (base / name).is_dir()
         assert stat.S_IMODE((base / name).stat().st_mode) == 0o700
 

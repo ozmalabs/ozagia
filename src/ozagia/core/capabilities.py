@@ -452,6 +452,7 @@ _TESTS = {
     "daemon_tmp": "test:tests/test_daemon_tmp.py",
     "mesh": "test:tests/test_mesh.py",
     "mesh_cli": "test:tests/test_mesh_cli.py",
+    "mesh_links": "test:tests/test_mesh_links.py",
     "assets": "test:tests/test_assets.py",
     "assets_discovery": "test:tests/test_assets_discovery.py",
     "assets_cli": "test:tests/test_assets_cli.py",
@@ -1534,17 +1535,22 @@ _BUILTIN_DEFINITIONS: tuple[dict[str, Any], ...] = (
     _def(
         id="cap:mesh.registry",
         domain="actions",
-        purpose=("Register local sessions, exchange bounded redacted messages "
-                 "and coordinate advisory worktree, branch and merge leases "
-                 "through the repository state directory."),
+        purpose=("Register local sessions, exchange bounded redacted messages, "
+                 "coordinate advisory worktree, branch and merge leases, and "
+                 "record bounded peer/sub/super links and delegations through "
+                 "the repository state directory."),
         owner="ozagia.core.mesh",
         side_effect="write",
         exposure=["cli"],
         impl=["impl:ozagia.core.mesh.register",
               "impl:ozagia.core.mesh.send",
               "impl:ozagia.core.mesh.lease_acquire",
+              "impl:ozagia.core.mesh.lease_release",
               "impl:ozagia.core.mesh.worktree_request",
               "impl:ozagia.core.mesh.merge_request",
+              "impl:ozagia.core.mesh.link_request",
+              "impl:ozagia.core.mesh.link_accept",
+              "impl:ozagia.core.mesh.delegation_grant",
               "impl:ozagia.mesh_cli.run"],
         surfaces=["cli:ozagia.mesh"],
         prerequisites=["a repository root and a writable state directory",
@@ -1552,15 +1558,19 @@ _BUILTIN_DEFINITIONS: tuple[dict[str, Any], ...] = (
         limits=["local filesystem only; no network or federation",
                 "leases are advisory; worktree/commit/merge policy still "
                 "decides whether an operation is allowed",
+                "links derive a display role only; a link never releases a "
+                "lease, reads a mailbox or authorizes a merge",
+                "delegations are owner-scoped, expiring and max-use bounded; "
+                "merge_on_behalf is a handoff reference only",
                 "messages are bounded and redacted; no prompts or file "
                 "contents",
                 "mailboxes, queues and TTLs are bounded",
                 "no model may approve a takeover, merge exception or grant",
                 "merge request never runs git merge or policy checks"],
-        authorization=("session registration is local; sends and lease "
-                       "mutations require exposure=coordinate; register "
-                       "defaults to exposure=none"),
-        tests=_tests("mesh", "mesh_cli"),
+        authorization=("session registration is local; sends, lease mutations, "
+                       "link handshakes and delegation grants/revokes require "
+                       "exposure=coordinate; register defaults to exposure=none"),
+        tests=_tests("mesh", "mesh_cli", "mesh_links"),
         docs=_docs("mesh"),
     ),
     # toolchain ------------------------------------------------------------

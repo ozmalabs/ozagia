@@ -1,4 +1,4 @@
-"""``ozagia mesh``: local session registry, messages and advisory leases.
+"""``ozagia mesh``: local session registry, messages, leases and links.
 
     ozagia mesh status|peers [--json] [--all] [--strict]
     ozagia mesh register --harness H --session S [--pid N] [--worktree P]
@@ -8,27 +8,37 @@
     ozagia mesh send (--to H:S | --broadcast) --kind K --subject S
                      [--body TEXT | --body-file F] [--in-reply-to ID]
                      [--lease ID] [--ttl S]
-    ozagia mesh inbox [--unread]
-    ozagia mesh read MSG_ID [--peek]
+    ozagia mesh inbox [--unread] [--delegation ID]
+    ozagia mesh read MSG_ID [--peek] [--delegation ID]
     ozagia mesh ack MSG_ID
     ozagia mesh lease list|status [LEASE_ID]
     ozagia mesh lease acquire --kind K --id RESOURCE --mode read|write|merge
-    ozagia mesh lease renew|release LEASE_ID
+    ozagia mesh lease renew|release LEASE_ID [--delegation ID]
     ozagia mesh lease takeover LEASE_ID --confirm --reason TEXT
     ozagia mesh worktree request --branch B [--path P]
     ozagia mesh worktree offer [--branch B] [--path P] [--lease]
     ozagia mesh merge request --target BRANCH|PATH
+    ozagia mesh link request --to H:S --relation peer|sub|super
+                             [--ttl S] [--reason R] [--idempotency-key K]
+    ozagia mesh link accept|decline|revoke LINK_ID [--reason R]
+    ozagia mesh link list|show [LINK_ID]
+    ozagia mesh delegation grant --to H:S --action A [--lease ID] [--mailbox]
+                                 [--ttl S] [--max-uses N] [--reason R]
+    ozagia mesh delegation revoke DELEGATION_ID [--reason R]
+    ozagia mesh delegation list|show [DELEGATION_ID]
     ozagia mesh prune (--expired | --delivered-before S) [--apply]
 
 Identity defaults to ``OZAGIA_MESH_HARNESS``/``OZAGIA_MESH_SESSION``.  Every
-write requires an identity; sends and lease mutations also require the
-registered session to have exposure ``coordinate`` (or ``supervise``).
-Read-only status/peers need no identity.
+write requires an identity; sends, lease mutations, link handshakes and
+delegation grants/revokes also require the registered session to have exposure
+``coordinate`` (or ``supervise``).  Read-only status/peers/link/delegation
+listings need no identity.  A link never grants lease, mailbox or merge
+authority: it only derives a display role, and delegations are separate.
 
 Exit status: 0 success; 1 a valid refusal such as queued, held, expired holder,
-unknown peer or a full mailbox; 2 usage, configuration, IO, lock or schema
-failure.  ``status/peers --strict`` returns 1 when a stale, dead, foreign or
-orphaned record is present.
+unknown peer, link conflict, link pending/expired or delegation denial; 2
+usage, configuration, IO, lock or schema failure.  ``status/peers --strict``
+returns 1 when a stale, dead, foreign or orphaned record is present.
 """
 from __future__ import annotations
 
@@ -116,6 +126,7 @@ def add_parser(sub: Any) -> None:
     _add_common(inbox)
     _add_identity(inbox)
     inbox.add_argument("--unread", action="store_true")
+    inbox.add_argument("--delegation", default=None, metavar="ID")
 
     read = children.add_parser("read", help="read one delivered message")
     _add_common(read)
@@ -123,6 +134,7 @@ def add_parser(sub: Any) -> None:
     read.add_argument("msg_id")
     read.add_argument("--peek", action="store_true",
                       help="do not mark the message read")
+    read.add_argument("--delegation", default=None, metavar="ID")
 
     ack = children.add_parser("ack", help="mark one message read")
     _add_common(ack)
@@ -161,6 +173,7 @@ def add_parser(sub: Any) -> None:
     _add_common(release)
     _add_identity(release)
     release.add_argument("lease_id")
+    release.add_argument("--delegation", default=None, metavar="ID")
 
     takeover = lease_children.add_parser(
         "takeover", help="take over an explicitly expired lease")
@@ -203,6 +216,64 @@ def add_parser(sub: Any) -> None:
                                metavar="BRANCH|PATH")
     merge_request.add_argument("--ttl", type=int, default=M.LEASE_TTL_S)
     merge_request.add_argument("--reason", default="")
+
+    link = children.add_parser("link", help="mutual peer/sub/super link handshakes")
+    link_children = link.add_subparsers(dest="link_action", required=True)
+    link_request = link_children.add_parser(
+        "request", help="request a 1:1 link with another live session")
+    _add_common(link_request)
+    _add_identity(link_request)
+    link_request.add_argument("--to", required=True, metavar="H:S")
+    link_request.add_argument("--relation", required=True,
+                              choices=M.RELATIONS)
+    link_request.add_argument("--ttl", type=int, default=M.LINK_TTL_S)
+    link_request.add_argument("--reason", default="")
+    link_request.add_argument("--idempotency-key", default=None, metavar="K")
+    for name, text, has_reason in (
+            ("accept", "accept a pending link as its target", False),
+            ("decline", "decline a pending link as its target", True),
+            ("revoke", "unilaterally revoke a link from either side", True)):
+        item = link_children.add_parser(name, help=text)
+        _add_common(item)
+        _add_identity(item)
+        item.add_argument("link_id")
+        if has_reason:
+            item.add_argument("--reason", default="")
+    link_list_parser = link_children.add_parser("list", help="list visible links")
+    _add_common(link_list_parser)
+    link_show_parser = link_children.add_parser("show", help="show one link")
+    _add_common(link_show_parser)
+    link_show_parser.add_argument("link_id")
+
+    delegation = children.add_parser(
+        "delegation", help="bounded, scoped delegations to linked peers")
+    delegation_children = delegation.add_subparsers(
+        dest="delegation_action", required=True)
+    grant = delegation_children.add_parser(
+        "grant", help="grant a bounded delegation to a linked peer")
+    _add_common(grant)
+    _add_identity(grant)
+    grant.add_argument("--to", required=True, metavar="H:S")
+    grant.add_argument("--action", dest="actions", action="append",
+                       required=True, choices=M.DELEGATION_ACTIONS)
+    grant.add_argument("--lease", default=None, metavar="ID")
+    grant.add_argument("--mailbox", action="store_true")
+    grant.add_argument("--ttl", type=int, default=M.DELEGATION_TTL_S)
+    grant.add_argument("--max-uses", type=int, default=1)
+    grant.add_argument("--reason", default="")
+    revoke = delegation_children.add_parser(
+        "revoke", help="revoke a delegation as its grantor")
+    _add_common(revoke)
+    _add_identity(revoke)
+    revoke.add_argument("delegation_id")
+    revoke.add_argument("--reason", default="")
+    delegation_list = delegation_children.add_parser(
+        "list", help="list visible delegations")
+    _add_common(delegation_list)
+    delegation_show = delegation_children.add_parser(
+        "show", help="show one delegation")
+    _add_common(delegation_show)
+    delegation_show.add_argument("delegation_id")
 
     prune = children.add_parser("prune", help="explicitly remove read messages")
     _add_common(prune)
@@ -261,6 +332,7 @@ def _print_session(item: dict[str, Any]) -> str:
     lease_text = ",".join(item.get("active_leases") or ()) or "-"
     return (f"{item.get('harness')}:{item.get('session')}  "
             f"{item.get('effective_state'):<7} exposure={item.get('exposure')} "
+            f"role={item.get('role')} links={len(item.get('links') or ())} "
             f"worktree={item.get('worktree') or '-'} "
             f"branch={item.get('branch') or '-'} "
             f"unread={item.get('unread', 0)} leases={lease_text}")
@@ -275,6 +347,31 @@ def _print_lease(item: dict[str, Any]) -> str:
             f"mode={resource.get('mode')} "
             f"holder={holder.get('harness')}:{holder.get('session')} "
             f"expires_in={item.get('expires_in_s')} queue={queue}")
+
+
+def _print_link(item: dict[str, Any]) -> str:
+    sender = item.get("from") or {}
+    target = item.get("to") or {}
+    state = item.get("effective_state") or item.get("state")
+    return (f"{item.get('link_id')}  {state:<8} "
+            f"{sender.get('harness')}:{sender.get('session')} -> "
+            f"{target.get('harness')}:{target.get('session')} "
+            f"relation={item.get('relation')} "
+            f"expires_in={item.get('expires_in_s')}")
+
+
+def _print_delegation(item: dict[str, Any]) -> str:
+    grantor = item.get("grantor") or {}
+    grantee = item.get("grantee") or {}
+    actions = ",".join(item.get("actions") or ())
+    state = item.get("effective_state") or item.get("state")
+    return (f"{item.get('delegation_id')}  "
+            f"{state:<8} "
+            f"{grantor.get('harness')}:{grantor.get('session')} -> "
+            f"{grantee.get('harness')}:{grantee.get('session')} "
+            f"actions={actions} scope={item.get('scope')} "
+            f"uses={item.get('used')}/{item.get('max_uses')} "
+            f"expires_in={item.get('expires_in_s')}")
 
 
 def _body(args: argparse.Namespace) -> str:
@@ -326,6 +423,16 @@ def run(args: argparse.Namespace) -> int:
                         payload.get("session_counts", {}).items())))
                 print("leases: " + " ".join(
                     f"{key}={value}" for key, value in sorted(counts.items())))
+                for item in payload.get("links", ()):
+                    print("link " + _print_link(item))
+                for item in payload.get("delegations", ()):
+                    print("delegation " + _print_delegation(item))
+                print("links: " + " ".join(
+                    f"{key}={value}" for key, value in sorted(
+                        (payload.get("link_counts") or {}).items())))
+                print("delegations: " + " ".join(
+                    f"{key}={value}" for key, value in sorted(
+                        (payload.get("delegation_counts") or {}).items())))
             return _strict_exit(payload) if args.strict else 0
         if action == "peers":
             payload = M.peers(root, include_all=args.all)
@@ -380,7 +487,8 @@ def run(args: argparse.Namespace) -> int:
             return 0
         if action == "inbox":
             harness, session = _identity(args)
-            payload = M.inbox(root, harness, session, unread=args.unread)
+            payload = M.inbox(root, harness, session, unread=args.unread,
+                              delegation_id=args.delegation)
             if as_json:
                 _print_json(payload)
             else:
@@ -397,7 +505,7 @@ def run(args: argparse.Namespace) -> int:
         if action == "read":
             harness, session = _identity(args)
             payload = M.read(root, harness, session, args.msg_id,
-                             peek=args.peek)
+                             peek=args.peek, delegation_id=args.delegation)
             if as_json:
                 _print_json(payload)
             else:
@@ -421,6 +529,10 @@ def run(args: argparse.Namespace) -> int:
             return _run_lease(root, args, as_json)
         if action == "worktree":
             return _run_worktree(root, args, as_json)
+        if action == "link":
+            return _run_link(root, args, as_json)
+        if action == "delegation":
+            return _run_delegation(root, args, as_json)
         if action == "merge":
             harness, session = _coordinate(root, args)
             payload = M.merge_request(
@@ -498,7 +610,8 @@ def _run_lease(root: Path, args: argparse.Namespace, as_json: bool) -> int:
         return 0
     if action == "release":
         harness, session = _coordinate(root, args)
-        payload = M.lease_release(root, harness, session, args.lease_id)
+        payload = M.lease_release(root, harness, session, args.lease_id,
+                                  delegation_id=args.delegation)
         if as_json:
             _print_json(payload)
         else:
@@ -561,6 +674,131 @@ def _run_worktree(root: Path, args: argparse.Namespace, as_json: bool) -> int:
                     print(_print_lease(lease))
         return 0
     raise M.MeshError(f"unknown worktree action {action!r}")
+
+
+def _run_link(root: Path, args: argparse.Namespace, as_json: bool) -> int:
+    action = args.link_action
+    if action in {"list", "show"}:
+        harness = os.environ.get("OZAGIA_MESH_HARNESS")
+        session = os.environ.get("OZAGIA_MESH_SESSION")
+        if action == "list":
+            payload = M.link_list(root, harness=harness, session=session)
+            if as_json:
+                _print_json(payload)
+            else:
+                for item in payload.get("links", ()):
+                    print(_print_link(item))
+                print("counts: " + " ".join(
+                    f"{key}={value}" for key, value in sorted(
+                        (payload.get("counts") or {}).items())))
+            return 0
+        payload = M.link_show(root, args.link_id, harness=harness,
+                              session=session)
+        if as_json:
+            _print_json(payload)
+        else:
+            item = payload["link"]
+            print(_print_link(item))
+            print(f"reciprocal_relation={item.get('reciprocal_relation')} "
+                  f"from_liveness={item.get('from_liveness')} "
+                  f"to_liveness={item.get('to_liveness')}")
+            for event in item.get("history") or ():
+                print(f"  {event.get('event')} {event.get('at')}")
+        return 0
+    harness, session = _coordinate(root, args)
+    if action == "request":
+        payload = M.link_request(
+            root, harness, session, to=args.to, relation=args.relation,
+            ttl_s=args.ttl, reason=args.reason,
+            idempotency_key=args.idempotency_key)
+        if as_json:
+            _print_json(payload)
+        else:
+            verb = "requested" if payload.get("created") else "existing"
+            print(f"{verb} {_print_link(payload['link'])}")
+        return 0
+    if action == "accept":
+        payload = M.link_accept(root, harness, session, args.link_id)
+        if as_json:
+            _print_json(payload)
+        else:
+            verb = "accepted" if payload.get("created") else "already active"
+            print(f"{verb} {_print_link(payload['link'])}")
+        return 0
+    if action == "decline":
+        payload = M.link_decline(root, harness, session, args.link_id,
+                                 reason=args.reason)
+        if as_json:
+            _print_json(payload)
+        else:
+            verb = "declined" if payload.get("created") else "already declined"
+            print(f"{verb} {_print_link(payload['link'])}")
+        return 0
+    if action == "revoke":
+        payload = M.link_revoke(root, harness, session, args.link_id,
+                                reason=args.reason)
+        if as_json:
+            _print_json(payload)
+        else:
+            verb = "revoked" if payload.get("created") else "already revoked"
+            print(f"{verb} {_print_link(payload['link'])}")
+        return 0
+    raise M.MeshError(f"unknown link action {action!r}")
+
+
+def _run_delegation(root: Path, args: argparse.Namespace,
+                    as_json: bool) -> int:
+    action = args.delegation_action
+    if action in {"list", "show"}:
+        harness = os.environ.get("OZAGIA_MESH_HARNESS")
+        session = os.environ.get("OZAGIA_MESH_SESSION")
+        if action == "list":
+            payload = M.delegation_list(root, harness=harness, session=session)
+            if as_json:
+                _print_json(payload)
+            else:
+                for item in payload.get("delegations", ()):
+                    print(_print_delegation(item))
+                print("counts: " + " ".join(
+                    f"{key}={value}" for key, value in sorted(
+                        (payload.get("counts") or {}).items())))
+            return 0
+        payload = M.delegation_show(root, args.delegation_id,
+                                    harness=harness, session=session)
+        if as_json:
+            _print_json(payload)
+        else:
+            item = payload["delegation"]
+            print(_print_delegation(item))
+            print(f"link={item.get('link_id')} "
+                  f"link_state={item.get('link_state')} "
+                  f"scope={item.get('scope')}")
+            for event in item.get("history") or ():
+                print(f"  {event.get('event')} {event.get('at')} "
+                      f"{event.get('action') or ''}".rstrip())
+        return 0
+    harness, session = _coordinate(root, args)
+    if action == "grant":
+        payload = M.delegation_grant(
+            root, harness, session, to=args.to, actions=args.actions,
+            lease_id=args.lease, mailbox=args.mailbox, ttl_s=args.ttl,
+            max_uses=args.max_uses, reason=args.reason)
+        if as_json:
+            _print_json(payload)
+        else:
+            print(f"granted {_print_delegation(payload['delegation'])}")
+        return 0
+    if action == "revoke":
+        payload = M.delegation_revoke(root, harness, session,
+                                      args.delegation_id,
+                                      reason=args.reason)
+        if as_json:
+            _print_json(payload)
+        else:
+            verb = "revoked" if payload.get("created") else "already revoked"
+            print(f"{verb} {_print_delegation(payload['delegation'])}")
+        return 0
+    raise M.MeshError(f"unknown delegation action {action!r}")
 
 
 def _refusal(exc: M.MeshRefusal, as_json: bool) -> int:

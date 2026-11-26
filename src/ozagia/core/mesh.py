@@ -3,7 +3,9 @@
 The mesh lets Ozagia sessions that can already see the same repository state
 coordinate without a leader or a network.  It is deliberately local
 coordination, not an authorization boundary: leases are advisory and a
-cooperative peer can ignore them.
+cooperative peer can ignore them.  Links only describe a 1:1 peer/sub/super
+edge; delegations are separate, bounded records and a link alone never releases
+a lease, exposes a mailbox or authorizes a merge.
 
 Layout (all below ``<state dir>/mesh/``)::
 
@@ -11,16 +13,17 @@ Layout (all below ``<state dir>/mesh/``)::
     <mesh_id>/sessions/       one JSON registration per session key
     <mesh_id>/leases/         one JSON record per lease; ``.lock`` serializes
     <mesh_id>/mail/<sk>/      one JSON envelope per delivered message
-    <mesh_id>/links/          reserved for the link handshake (B2)
+    <mesh_id>/links/          one JSON record per 1:1 link handshake
+    <mesh_id>/delegations/    one JSON record per bounded delegation
     <mesh_id>/audit/          bounded, redacted event records (no bodies)
-    <mesh_id>/rate/           reserved for rate limits (B2)
+    <mesh_id>/rate/           reserved for rate limits
 
 Every record carries ``repo_id`` and ``mesh_id``.  A read uses a record only
 when both match the current scope; a mismatch is reported, never merged.
 Directories are 0700 and files 0600.  Writes use a same-directory
-``mkstemp``/``fsync``/``os.replace``; leases serialize under ``flock`` on
-``leases/.lock``.  No path is followed through a symlink, and nothing outside
-this one state directory and mesh id is scanned.
+``mkstemp``/``fsync``/``os.replace``; lease, link and delegation mutations
+serialize under ``flock`` on ``leases/.lock``.  No path is followed through a
+symlink, and nothing outside this one state directory and mesh id is scanned.
 
 Liveness uses ``/proc/<pid>/stat`` start time and the kernel boot id on Linux.
 A session is never declared dead just because one signal is old: PID reuse,
@@ -55,6 +58,7 @@ SESSIONS_DIR = "sessions"
 LEASES_DIR = "leases"
 MAIL_DIR = "mail"
 LINKS_DIR = "links"
+DELEGATIONS_DIR = "delegations"
 AUDIT_DIR = "audit"
 RATE_DIR = "rate"
 LEASE_LOCK = ".lock"
@@ -66,6 +70,8 @@ BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$")
 SK_RE = re.compile(r"^sk_[0-9a-f]{24}$")
 MSG_RE = re.compile(r"^msg_[0-9a-f]{16}$")
 LEASE_RE = re.compile(r"^lease_[0-9a-f]{16}$")
+LINK_RE = re.compile(r"^lnk_[0-9a-f]{16}$")
+DELEGATION_RE = re.compile(r"^dlg_[0-9a-f]{16}$")
 
 EXPOSURES = ("none", "read", "coordinate", "supervise")
 COORDINATE = frozenset({"coordinate", "supervise"})
@@ -74,6 +80,9 @@ KINDS = ("hello", "request", "offer", "accept", "reject", "status", "release",
          "note")
 RESOURCE_KINDS = ("worktree", "branch", "merge", "path", "grant", "other")
 MODES = ("read", "write", "merge")
+RELATIONS = ("peer", "sub", "super")
+LINK_STATES = ("pending", "active", "declined", "revoked", "expired", "stale")
+DELEGATION_ACTIONS = ("lease_release", "mailbox_read", "merge_on_behalf")
 
 HEARTBEAT_S = 15
 STALE_S = 90
@@ -95,6 +104,13 @@ LEASE_QUEUE_MAX = 32
 LOCK_TIMEOUT_S = 5.0
 MAX_REASON = 300
 MAX_HISTORY = 16
+
+LINK_TTL_S = 60 * 60
+LINK_TTL_MAX_S = 24 * 60 * 60
+DELEGATION_TTL_S = 60 * 60
+DELEGATION_TTL_MAX_S = 24 * 60 * 60
+DELEGATION_MAX_USES = 100
+IDEMPOTENCY_MAX = 128
 
 _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 _SECRET_REF = re.compile(r"(?i)\bsecret\s*=")
@@ -348,13 +364,13 @@ def _open_base(root: str | Path, *, create: bool,
     else:
         _ensure_dir(state, create=False, secure=False)
     mesh_root = state / MESH_DIRNAME
-    if not _ensure_dir(mesh_root, create=create):
+    if not _ensure_dir(mesh_root, create=create, secure=create):
         return None
-    if not _ensure_dir(base, create=create):
+    if not _ensure_dir(base, create=create, secure=create):
         return None
     if create:
-        for name in (SESSIONS_DIR, LEASES_DIR, MAIL_DIR, LINKS_DIR, AUDIT_DIR,
-                     RATE_DIR):
+        for name in (SESSIONS_DIR, LEASES_DIR, MAIL_DIR, LINKS_DIR,
+                     DELEGATIONS_DIR, AUDIT_DIR, RATE_DIR):
             _ensure_dir(base / name, create=True)
     _scope_guard(base / MESH_FILE, repo, mesh, create=create)
     return base
@@ -481,6 +497,16 @@ class _Lock:
 
 def _lease_lock(base: Path) -> _Lock:
     return _Lock(base / LEASES_DIR / LEASE_LOCK, timeout=LOCK_TIMEOUT_S)
+
+
+def _mesh_lock(base: Path) -> _Lock:
+    """Serialize link, delegation and lease mutations under one short flock.
+
+    Links, delegations and leases share invariants (a delegation is only valid
+    while a link is active, and releasing a lease consumes a delegation), so a
+    single lock keeps them consistent without lock-ordering games.
+    """
+    return _lease_lock(base)
 
 
 def _iter_records(directory: Path, repo: str, mesh: str
@@ -613,6 +639,309 @@ _LIVENESS_RANK = {"live": 0, "stale": 1, "unknown": 2, "dead": 3,
 
 
 # --------------------------------------------------------------------------- #
+# links and delegations
+# --------------------------------------------------------------------------- #
+_RECIPROCAL = {"peer": "peer", "sub": "super", "super": "sub"}
+
+
+def _endpoint_key(endpoint: Any) -> str | None:
+    if not isinstance(endpoint, Mapping):
+        return None
+    value = endpoint.get("key")
+    return str(value) if value else None
+
+
+def _session_map(base: Path, repo: str, mesh: str) -> dict[str, dict[str, Any]]:
+    records, _ = _sessions(base, repo, mesh)
+    return {str(item.get("key")): item for item in records if item.get("key")}
+
+
+def _link_records(base: Path, repo: str, mesh: str
+                  ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    return _iter_records(base / LINKS_DIR, repo, mesh)
+
+
+def _delegation_records(base: Path, repo: str, mesh: str
+                        ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    return _iter_records(base / DELEGATIONS_DIR, repo, mesh)
+
+
+def _relation_from(record: Mapping[str, Any], key: str) -> str:
+    """The relation as seen from ``key`` (the other end sees the reciprocal)."""
+    relation = str(record.get("relation") or "peer")
+    if _endpoint_key(record.get("from")) == key:
+        return relation
+    if _endpoint_key(record.get("to")) == key:
+        return _RECIPROCAL.get(relation, "peer")
+    return "peer"
+
+
+def _peer_endpoint(record: Mapping[str, Any], key: str) -> dict[str, Any]:
+    if _endpoint_key(record.get("from")) == key:
+        return dict(record.get("to") or {})
+    if _endpoint_key(record.get("to")) == key:
+        return dict(record.get("from") or {})
+    return {}
+
+
+def _link_expiry(record: Mapping[str, Any]) -> float | None:
+    """A pending link expires ``ttl_s`` after creation; an accepted one at
+    ``expires_at``.  Nothing is written by this computation."""
+    due = _parse_iso(record.get("expires_at"))
+    if due is not None:
+        return due
+    created = _parse_iso(record.get("created_at"))
+    ttl = record.get("ttl_s")
+    if created is not None and isinstance(ttl, int) and ttl > 0:
+        return created + ttl
+    return None
+
+
+def _endpoint_liveness(endpoint: Any, sessions: Mapping[str, Mapping[str, Any]],
+                       now: float) -> str:
+    key = _endpoint_key(endpoint)
+    match = sessions.get(key or "")
+    return "missing" if match is None else session_liveness(match, now=now)
+
+
+def _link_effective(record: Mapping[str, Any],
+                    sessions: Mapping[str, Mapping[str, Any]], *,
+                    now: float) -> tuple[str, str, str]:
+    """Return ``(effective_state, from_liveness, to_liveness)``.
+
+    `declined` and `revoked` are terminal.  Expiry is computed from the record
+    and never written by a read.  A link whose either endpoint is stale, dead,
+    ended, foreign or missing is reported `stale`, not `dead`.
+    """
+    from_live = _endpoint_liveness(record.get("from"), sessions, now)
+    to_live = _endpoint_liveness(record.get("to"), sessions, now)
+    stored = str(record.get("state") or "pending")
+    if stored in {"declined", "revoked"}:
+        return stored, from_live, to_live
+    due = _link_expiry(record)
+    if stored == "expired" or (due is not None and now >= due):
+        return "expired", from_live, to_live
+    if from_live != "live" or to_live != "live":
+        return "stale", from_live, to_live
+    return ("active" if stored == "active" else "pending"), from_live, to_live
+
+
+def _link_view(record: Mapping[str, Any],
+               sessions: Mapping[str, Mapping[str, Any]], *,
+               now: float, viewer: str | None = None) -> dict[str, Any]:
+    state, from_live, to_live = _link_effective(record, sessions, now=now)
+    due = _link_expiry(record)
+    view = dict(record)
+    view.pop("idempotency_key", None)
+    view["effective_state"] = state
+    view["from_liveness"] = from_live
+    view["to_liveness"] = to_live
+    view["reciprocal_relation"] = _RECIPROCAL.get(
+        str(record.get("relation") or "peer"), "peer")
+    view["expires_at"] = record.get("expires_at") or (
+        _iso(due) if due is not None else None)
+    view["expires_in_s"] = (None if due is None
+                            else max(0, int(due - now)))
+    view["expired"] = state == "expired"
+    view["history"] = list(record.get("history") or ())[-MAX_HISTORY:]
+    if viewer is not None:
+        peer = _peer_endpoint(record, viewer)
+        viewer_relation = _relation_from(record, viewer)
+        view["viewer_relation"] = viewer_relation
+        view["reciprocal_relation"] = _RECIPROCAL.get(viewer_relation, "peer")
+        view["peer"] = peer
+        view["peer_liveness"] = _endpoint_liveness(
+            peer, sessions, now)
+        view["direction"] = ("outgoing"
+                             if _endpoint_key(record.get("from")) == viewer
+                             else "incoming")
+    return view
+
+
+def _link_compact(record: Mapping[str, Any],
+                  sessions: Mapping[str, Mapping[str, Any]], *,
+                  now: float, viewer: str) -> dict[str, Any]:
+    state, _, _ = _link_effective(record, sessions, now=now)
+    peer = _peer_endpoint(record, viewer)
+    due = _link_expiry(record)
+    relation = _relation_from(record, viewer)
+    return {
+        "link_id": record.get("link_id"),
+        "peer": peer,
+        "relation": relation,
+        "reciprocal_relation": _RECIPROCAL.get(relation, "peer"),
+        "state": state,
+        "created_at": record.get("created_at"),
+        "accepted_at": record.get("accepted_at"),
+        "expires_at": record.get("expires_at") or (
+            _iso(due) if due is not None else None),
+        "expires_in_s": (None if due is None else max(0, int(due - now))),
+    }
+
+
+def _role_from_links(links: Iterable[Mapping[str, Any]]) -> str:
+    relations = {str(item.get("relation")) for item in links
+                 if item.get("state") == "active"}
+    if {"sub", "super"} <= relations:
+        return "mixed"
+    if "sub" in relations:
+        return "sub"
+    if "super" in relations:
+        return "super"
+    return "peer"
+
+
+def _link_summary(item: Mapping[str, Any]) -> dict[str, Any]:
+    """A compact status entry: no history, reason or capability payload."""
+    relation = item.get("viewer_relation", item.get("relation"))
+    return {
+        "link_id": item.get("link_id"),
+        "peer": item.get("peer") or item.get("to"),
+        "from": item.get("from"),
+        "to": item.get("to"),
+        "relation": relation,
+        "reciprocal_relation": _RECIPROCAL.get(str(relation), "peer"),
+        "state": item.get("effective_state", item.get("state")),
+        "accepted_at": item.get("accepted_at"),
+        "expires_at": item.get("expires_at"),
+        "expires_in_s": item.get("expires_in_s"),
+    }
+
+
+def _delegation_summary(item: Mapping[str, Any]) -> dict[str, Any]:
+    """A compact status entry: no history, reason or mailbox contents."""
+    return {
+        "delegation_id": item.get("delegation_id"),
+        "grantor": item.get("grantor"),
+        "grantee": item.get("grantee"),
+        "link_id": item.get("link_id"),
+        "link_state": item.get("link_state"),
+        "actions": item.get("actions"),
+        "lease_id": item.get("lease_id"),
+        "resource": item.get("resource"),
+        "mailbox": item.get("mailbox"),
+        "scope": item.get("scope"),
+        "state": item.get("effective_state", item.get("state")),
+        "expires_at": item.get("expires_at"),
+        "expires_in_s": item.get("expires_in_s"),
+        "max_uses": item.get("max_uses"),
+        "used": item.get("used"),
+        "remaining_uses": item.get("remaining_uses"),
+    }
+
+
+def _session_link_summaries(base: Path, repo: str, mesh: str, key: str,
+                            now: float) -> list[dict[str, Any]]:
+    records, _ = _link_records(base, repo, mesh)
+    sessions = _session_map(base, repo, mesh)
+    summaries = [
+        _link_compact(item, sessions, now=now, viewer=key)
+        for item in records
+        if key in {_endpoint_key(item.get("from")),
+                   _endpoint_key(item.get("to"))}
+    ]
+    summaries.sort(key=lambda item: (str(item.get("created_at")),
+                                     str(item.get("link_id"))))
+    return summaries
+
+
+def _delegation_effective(record: Mapping[str, Any],
+                          sessions: Mapping[str, Mapping[str, Any]],
+                          links: Mapping[str, Mapping[str, Any]], *,
+                          now: float) -> tuple[str, str | None]:
+    """``(effective_state, reason)``; never writes."""
+    if str(record.get("state") or "active") == "revoked":
+        return "revoked", None
+    due = _parse_iso(record.get("expires_at"))
+    if due is not None and now >= due:
+        return "expired", "time"
+    used = int(record.get("used") or 0)
+    maximum = int(record.get("max_uses") or 1)
+    if used >= maximum:
+        return "expired", "uses"
+    link = links.get(str(record.get("link_id") or ""))
+    if link is None:
+        return "expired", "link_missing"
+    link_state, _, _ = _link_effective(link, sessions, now=now)
+    if link_state != "active":
+        return "expired", f"link_{link_state}"
+    return "active", None
+
+
+def _delegation_scope(record: Mapping[str, Any]) -> str:
+    actions = sorted(str(item) for item in record.get("actions") or ())
+    parts: list[str] = []
+    if "lease_release" in actions:
+        parts.append(f"lease_release:{record.get('lease_id') or '-'}")
+    if "mailbox_read" in actions:
+        parts.append("mailbox_read")
+    if "merge_on_behalf" in actions:
+        parts.append("merge_on_behalf:reference")
+    return ",".join(parts)
+
+
+def _delegation_view(record: Mapping[str, Any],
+                     sessions: Mapping[str, Mapping[str, Any]],
+                     links: Mapping[str, Mapping[str, Any]], *,
+                     now: float, viewer: str | None = None
+                     ) -> dict[str, Any]:
+    state, reason = _delegation_effective(record, sessions, links, now=now)
+    due = _parse_iso(record.get("expires_at"))
+    view = dict(record)
+    view["effective_state"] = state
+    view["effective_reason"] = reason
+    view["expires_in_s"] = (None if due is None else max(0, int(due - now)))
+    view["remaining_uses"] = max(
+        0, int(record.get("max_uses") or 1) - int(record.get("used") or 0))
+    view["link_state"] = (
+        _link_effective(links[str(record.get("link_id"))], sessions,
+                        now=now)[0]
+        if str(record.get("link_id")) in links else None)
+    view["scope"] = _delegation_scope(record)
+    view["expired"] = state == "expired"
+    view["history"] = list(record.get("history") or ())[-MAX_HISTORY:]
+    if viewer is not None:
+        if _endpoint_key(record.get("grantor")) == viewer:
+            view["direction"] = "outgoing"
+        elif _endpoint_key(record.get("grantee")) == viewer:
+            view["direction"] = "incoming"
+        else:
+            view["direction"] = None
+    return view
+
+
+def _active_link_between(records: Sequence[Mapping[str, Any]],
+                         sessions: Mapping[str, Mapping[str, Any]],
+                         first: str, second: str, *, now: float
+                         ) -> tuple[Mapping[str, Any] | None, str | None]:
+    candidates = [
+        item for item in records
+        if {_endpoint_key(item.get("from")),
+            _endpoint_key(item.get("to"))} == {first, second}
+    ]
+    candidates.sort(key=lambda item: str(item.get("created_at")),
+                    reverse=True)
+    latest: tuple[Mapping[str, Any] | None, str | None] = (None, None)
+    for item in candidates:
+        state, _, _ = _link_effective(item, sessions, now=now)
+        if state == "active":
+            return item, state
+        if latest[0] is None:
+            latest = (item, state)
+    return latest
+
+
+def _link_refusal_for(state: str | None) -> tuple[str, str]:
+    if state == "pending":
+        return "link_pending", "link request is still pending"
+    if state == "expired":
+        return "link_expired", "link has expired"
+    if state == "stale":
+        return "link_stale", "link peer is not live"
+    return "not_linked", "no active link with that session"
+
+
+# --------------------------------------------------------------------------- #
 # sessions
 # --------------------------------------------------------------------------- #
 def _session_path(base: Path, key: str) -> Path:
@@ -646,6 +975,13 @@ def _session_view(record: Mapping[str, Any], base: Path, *,
             active.append(str(lease.get("lease_id")))
     view["unread"] = unread
     view["active_leases"] = sorted(active)
+    key = str(record.get("key"))
+    links = _session_link_summaries(base, str(record["repo_id"]),
+                                    str(record["mesh_id"]), key,
+                                    now or _epoch())
+    view["links"] = links
+    view["role"] = _role_from_links(links)
+    view["role_source"] = "derived"
     view["is_self"] = False
     view["liveness_rank"] = effect_rank
     return view
@@ -873,7 +1209,9 @@ def status(root: str | Path, *, harness: str | None = None,
     if base is None:
         return {"schema": SCHEMA, "repo_id": repo, "mesh_id": mesh,
                 "sessions": [], "session_counts": {}, "leases": [],
-                "lease_counts": {}, "errors": []}
+                "lease_counts": {}, "links": [], "link_counts": {},
+                "delegations": [], "delegation_counts": {},
+                "counts": {}, "errors": []}
     records, errors = _sessions(base, repo, mesh)
     now = _epoch()
     views = [_session_view(item, base, now=now) for item in records]
@@ -890,11 +1228,656 @@ def status(root: str | Path, *, harness: str | None = None,
         state = str(item["effective_state"])
         session_counts[state] = session_counts.get(state, 0) + 1
     leases = lease_list(root)
+    links = link_list(root, harness=harness, session=session)
+    delegations = delegation_list(root, harness=harness, session=session)
     return {"schema": SCHEMA, "repo_id": repo, "mesh_id": mesh,
             "self": me, "sessions": views, "session_counts": session_counts,
             "leases": leases["leases"], "lease_counts": leases["counts"],
+            "links": [_link_summary(item) for item in links["links"]],
+            "link_counts": links["counts"],
+            "delegations": [_delegation_summary(item)
+                            for item in delegations["delegations"]],
+            "delegation_counts": delegations["counts"],
             "counts": leases["counts"],
-            "errors": errors + leases["errors"]}
+            "errors": (errors + leases["errors"] + links["errors"]
+                       + delegations["errors"])}
+
+
+# --------------------------------------------------------------------------- #
+# links
+# --------------------------------------------------------------------------- #
+def _clean_reason(reason: str) -> str:
+    why, _ = _redact(_bounded_text(reason, "reason", MAX_REASON,
+                                   allow_empty=True, controls=True))
+    return why
+
+
+def _coerce_ttl(value: Any, *, default: int, maximum: int,
+                name: str = "ttl") -> int:
+    if value is None:
+        value = default
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise MeshRefusal(f"{name} must be an integer", code="invalid_ttl")
+    if not 1 <= value <= maximum:
+        raise MeshRefusal(f"{name} must be 1..{maximum} seconds",
+                          code="invalid_ttl")
+    return value
+
+
+def _split_identity(value: Any) -> tuple[str, str]:
+    if not isinstance(value, str) or ":" not in value:
+        raise MeshRefusal("--to must be HARNESS:SESSION",
+                          code="invalid_recipient")
+    harness, session = value.split(":", 1)
+    return _safe_name(harness, "harness"), _safe_name(session, "session")
+
+
+def _find_link(base: Path, repo: str, mesh: str, link_id: str
+               ) -> tuple[Path, dict[str, Any]]:
+    if not LINK_RE.fullmatch(str(link_id)):
+        raise MeshRefusal("invalid link id", code="invalid_link_id")
+    path = base / LINKS_DIR / f"{link_id}.json"
+    try:
+        record = _read_json(path)
+    except FileNotFoundError:
+        raise MeshRefusal("unknown link", code="unknown_link") from None
+    _check_scope(record, repo, mesh, "link")
+    return path, record
+
+
+def _find_delegation(base: Path, repo: str, mesh: str, delegation_id: str
+                     ) -> tuple[Path, dict[str, Any]]:
+    if not DELEGATION_RE.fullmatch(str(delegation_id)):
+        raise MeshRefusal("invalid delegation id", code="invalid_delegation_id")
+    path = base / DELEGATIONS_DIR / f"{delegation_id}.json"
+    try:
+        record = _read_json(path)
+    except FileNotFoundError:
+        raise MeshRefusal("unknown delegation",
+                          code="unknown_delegation") from None
+    _check_scope(record, repo, mesh, "delegation")
+    return path, record
+
+
+def _link_result(record: Mapping[str, Any], base: Path, *,
+                 created: bool, actor_key: str | None) -> dict[str, Any]:
+    sessions = _session_map(base, str(record["repo_id"]),
+                            str(record["mesh_id"]))
+    view = _link_view(record, sessions, now=_epoch(), viewer=actor_key)
+    return {"schema": SCHEMA, "repo_id": record["repo_id"],
+            "mesh_id": record["mesh_id"], "created": created, "link": view}
+
+
+def link_request(root: str | Path, harness: str, session: str, *, to: str,
+                 relation: str, ttl_s: int = LINK_TTL_S, reason: str = "",
+                 idempotency_key: str | None = None) -> dict[str, Any]:
+    """Request a 1:1 link.  ``relation`` is from the requester's perspective."""
+    harness = _safe_name(harness, "harness")
+    session = _safe_name(session, "session")
+    if relation not in RELATIONS:
+        raise MeshRefusal("unknown relation", code="invalid_relation")
+    ttl = _coerce_ttl(ttl_s, default=LINK_TTL_S, maximum=LINK_TTL_MAX_S)
+    target_h, target_s = _split_identity(to)
+    key_text = None
+    if idempotency_key is not None:
+        key_text = str(_bounded_text(idempotency_key, "idempotency key",
+                                     IDEMPOTENCY_MAX, controls=True)).strip()
+        if not key_text:
+            raise MeshRefusal("idempotency key must not be empty",
+                              code="invalid_value")
+    why = _clean_reason(reason)
+    base = _open_base(root, create=True)
+    assert base is not None
+    repo = repo_id(root)
+    mesh = mesh_id(root)
+    actor = _require_session(base, repo, mesh, harness, session, live=True)
+    if (target_h, target_s) == (harness, session):
+        raise MeshRefusal("a session cannot link to itself", code="self_link")
+    target = _find_session(base, repo, mesh, target_h, target_s)
+    if target is None:
+        raise MeshRefusal("unknown peer", code="unknown_peer")
+    target_live = session_liveness(target)
+    if target_live != "live":
+        raise MeshRefusal(f"peer is {target_live}, not live",
+                          code="peer_not_live")
+    actor_key = str(actor["key"])
+    target_key = str(target["key"])
+    with _mesh_lock(base):
+        records, _ = _link_records(base, repo, mesh)
+        sessions = _session_map(base, repo, mesh)
+        now = _epoch()
+        if key_text is not None:
+            for item in records:
+                if item.get("idempotency_key") != key_text:
+                    continue
+                if _endpoint_key(item.get("from")) != actor_key:
+                    raise MeshRefusal(
+                        "idempotency key belongs to another session",
+                        code="id_conflict")
+                if (_endpoint_key(item.get("to")) != target_key
+                        or item.get("relation") != relation):
+                    raise MeshRefusal(
+                        "idempotency key was used for a different request",
+                        code="id_conflict")
+                return _link_result(item, base, created=False,
+                                    actor_key=actor_key)
+        open_links = [
+            item for item in records
+            if {_endpoint_key(item.get("from")),
+                _endpoint_key(item.get("to"))} == {actor_key, target_key}
+            and _link_effective(item, sessions, now=now)[0]
+            in {"pending", "active"}
+        ]
+        for item in open_links:
+            if _relation_from(item, actor_key) != relation:
+                raise MeshRefusal(
+                    "a different relation is already pending or active",
+                    code="link_conflict")
+        if open_links:
+            latest = max(open_links, key=lambda item: str(
+                item.get("created_at")))
+            return _link_result(latest, base, created=False,
+                                actor_key=actor_key)
+        link_id = _hash_id("lnk", secrets.token_hex(16), 16)
+        record = {
+            "schema": SCHEMA,
+            "repo_id": repo,
+            "mesh_id": mesh,
+            "link_id": link_id,
+            "from": {"harness": harness, "session": session,
+                     "key": actor_key},
+            "to": {"harness": target_h, "session": target_s,
+                   "key": target_key},
+            "relation": relation,
+            "state": "pending",
+            "created_at": _iso(now),
+            "accepted_at": None,
+            "expires_at": None,
+            "revoked_at": None,
+            "ttl_s": ttl,
+            "capabilities": [],
+            "reason": why,
+            "idempotency_key": key_text,
+            "history": [{"event": "requested", "at": _iso(now),
+                         "by": actor_key, "relation": relation}],
+        }
+        _write_json(base / LINKS_DIR / f"{link_id}.json", record)
+    _audit(base, "link_request", link_id=link_id, relation=relation,
+           from_key=actor_key, to_key=target_key)
+    return _link_result(record, base, created=True, actor_key=actor_key)
+
+
+def link_accept(root: str | Path, harness: str, session: str, link_id: str
+                ) -> dict[str, Any]:
+    harness = _safe_name(harness, "harness")
+    session = _safe_name(session, "session")
+    base = _open_base(root, create=True)
+    assert base is not None
+    repo = repo_id(root)
+    mesh = mesh_id(root)
+    actor = _require_session(base, repo, mesh, harness, session, live=True)
+    actor_key = str(actor["key"])
+    with _mesh_lock(base):
+        path, record = _find_link(base, repo, mesh, link_id)
+        if _endpoint_key(record.get("to")) != actor_key:
+            raise MeshRefusal("only the target may accept a link",
+                              code="not_target")
+        stored = str(record.get("state") or "pending")
+        if stored == "active":
+            return _link_result(record, base, created=False,
+                                actor_key=actor_key)
+        if stored in {"declined", "revoked"}:
+            raise MeshRefusal("link is no longer pending",
+                              code="link_closed")
+        sessions = _session_map(base, repo, mesh)
+        state, _, _ = _link_effective(record, sessions, now=_epoch())
+        if state == "expired":
+            raise MeshRefusal("link has expired", code="link_expired")
+        if state == "stale":
+            raise MeshRefusal("link peer is not live", code="link_stale")
+        if state != "pending":
+            raise MeshRefusal("link is no longer pending",
+                              code="link_closed")
+        now = _epoch()
+        ttl = _coerce_ttl(record.get("ttl_s"), default=LINK_TTL_S,
+                          maximum=LINK_TTL_MAX_S)
+        record["state"] = "active"
+        record["accepted_at"] = _iso(now)
+        record["expires_at"] = _iso(now + ttl)
+        record.setdefault("history", []).append({
+            "event": "accepted", "at": _iso(now), "by": actor_key})
+        record["history"] = record["history"][-MAX_HISTORY:]
+        _write_json(path, record)
+    _audit(base, "link_accept", link_id=link_id, by=actor_key)
+    return _link_result(record, base, created=True, actor_key=actor_key)
+
+
+def link_decline(root: str | Path, harness: str, session: str, link_id: str,
+                 *, reason: str = "") -> dict[str, Any]:
+    harness = _safe_name(harness, "harness")
+    session = _safe_name(session, "session")
+    why = _clean_reason(reason)
+    base = _open_base(root, create=True)
+    assert base is not None
+    repo = repo_id(root)
+    mesh = mesh_id(root)
+    actor = _require_session(base, repo, mesh, harness, session, live=True)
+    actor_key = str(actor["key"])
+    with _mesh_lock(base):
+        path, record = _find_link(base, repo, mesh, link_id)
+        if _endpoint_key(record.get("to")) != actor_key:
+            raise MeshRefusal("only the target may decline a link",
+                              code="not_target")
+        stored = str(record.get("state") or "pending")
+        if stored == "declined":
+            return _link_result(record, base, created=False,
+                                actor_key=actor_key)
+        if stored == "active":
+            raise MeshRefusal("an active link must be revoked, not declined",
+                              code="link_active")
+        if stored == "revoked":
+            raise MeshRefusal("link is no longer pending",
+                              code="link_closed")
+        sessions = _session_map(base, repo, mesh)
+        if _link_effective(record, sessions, now=_epoch())[0] == "expired":
+            raise MeshRefusal("link has expired", code="link_expired")
+        if stored != "pending":
+            raise MeshRefusal("link is no longer pending",
+                              code="link_closed")
+        now = _epoch()
+        record["state"] = "declined"
+        record["declined_at"] = _iso(now)
+        record.setdefault("history", []).append({
+            "event": "declined", "at": _iso(now), "by": actor_key,
+            "reason": why})
+        record["history"] = record["history"][-MAX_HISTORY:]
+        _write_json(path, record)
+    _audit(base, "link_decline", link_id=link_id, by=actor_key)
+    return _link_result(record, base, created=True, actor_key=actor_key)
+
+
+def link_revoke(root: str | Path, harness: str, session: str, link_id: str,
+                *, reason: str = "") -> dict[str, Any]:
+    harness = _safe_name(harness, "harness")
+    session = _safe_name(session, "session")
+    why = _clean_reason(reason)
+    base = _open_base(root, create=True)
+    assert base is not None
+    repo = repo_id(root)
+    mesh = mesh_id(root)
+    actor = _require_session(base, repo, mesh, harness, session, live=True)
+    actor_key = str(actor["key"])
+    with _mesh_lock(base):
+        path, record = _find_link(base, repo, mesh, link_id)
+        if actor_key not in {_endpoint_key(record.get("from")),
+                             _endpoint_key(record.get("to"))}:
+            raise MeshRefusal("only a party may revoke a link",
+                              code="not_party")
+        stored = str(record.get("state") or "pending")
+        if stored == "revoked":
+            return _link_result(record, base, created=False,
+                                actor_key=actor_key)
+        if stored == "declined":
+            raise MeshRefusal("link is already closed", code="link_closed")
+        now = _epoch()
+        record["state"] = "revoked"
+        record["revoked_at"] = _iso(now)
+        record.setdefault("history", []).append({
+            "event": "revoked", "at": _iso(now), "by": actor_key,
+            "reason": why})
+        record["history"] = record["history"][-MAX_HISTORY:]
+        _write_json(path, record)
+    _audit(base, "link_revoke", link_id=link_id, by=actor_key)
+    return _link_result(record, base, created=True, actor_key=actor_key)
+
+
+def _viewer_key(repo: str, mesh: str, harness: str | None,
+                session: str | None) -> str | None:
+    if not harness or not session:
+        return None
+    return session_key(repo, mesh, harness, session)
+
+
+def link_list(root: str | Path, *, harness: str | None = None,
+              session: str | None = None, include_all: bool = True
+              ) -> dict[str, Any]:
+    base = _open_base(root, create=False)
+    repo = repo_id(root)
+    mesh = mesh_id(root)
+    viewer = _viewer_key(repo, mesh, harness, session)
+    if base is None:
+        return {"schema": SCHEMA, "repo_id": repo, "mesh_id": mesh,
+                "links": [], "errors": [], "counts": {}}
+    records, errors = _link_records(base, repo, mesh)
+    sessions = _session_map(base, repo, mesh)
+    now = _epoch()
+    views = [_link_view(item, sessions, now=now, viewer=viewer)
+             for item in records]
+    if not include_all:
+        views = [item for item in views
+                 if item["effective_state"] in {"pending", "active", "stale"}]
+    views.sort(key=lambda item: (str(item.get("created_at")),
+                                 str(item.get("link_id"))))
+    counts: dict[str, int] = {}
+    for item in views:
+        state = str(item["effective_state"])
+        counts[state] = counts.get(state, 0) + 1
+    return {"schema": SCHEMA, "repo_id": repo, "mesh_id": mesh,
+            "links": views, "errors": errors, "counts": counts}
+
+
+def link_show(root: str | Path, link_id: str, *, harness: str | None = None,
+              session: str | None = None) -> dict[str, Any]:
+    base = _open_base(root, create=False)
+    repo = repo_id(root)
+    mesh = mesh_id(root)
+    if base is None:
+        raise MeshRefusal("unknown link", code="unknown_link")
+    _, record = _find_link(base, repo, mesh, link_id)
+    viewer = _viewer_key(repo, mesh, harness, session)
+    sessions = _session_map(base, repo, mesh)
+    return {"schema": SCHEMA, "repo_id": repo, "mesh_id": mesh,
+            "link": _link_view(record, sessions, now=_epoch(),
+                               viewer=viewer)}
+
+
+# --------------------------------------------------------------------------- #
+# delegations
+# --------------------------------------------------------------------------- #
+def _delegation_problem(record: Mapping[str, Any], actor_key: str, *,
+                        action: str, owner_key: str | None,
+                        lease_id: str | None, mailbox: bool,
+                        sessions: Mapping[str, Mapping[str, Any]],
+                        links: Mapping[str, Mapping[str, Any]],
+                        now: float) -> tuple[str, str] | None:
+    if _endpoint_key(record.get("grantee")) != actor_key:
+        return "delegation_denied", "delegation is for another grantee"
+    actions = {str(item) for item in record.get("actions") or ()}
+    if action not in actions:
+        return ("delegation_denied",
+                f"delegation does not include {action}")
+    if owner_key is not None and _endpoint_key(
+            record.get("grantor")) != owner_key:
+        return "delegation_denied", "delegation was granted by another session"
+    if action == "lease_release":
+        if str(record.get("lease_id") or "") != str(lease_id or ""):
+            return "delegation_denied", "delegation is scoped to another lease"
+    elif action == "mailbox_read":
+        if not record.get("mailbox") or not mailbox:
+            return "delegation_denied", "delegation is not for a mailbox"
+    elif action == "merge_on_behalf":
+        return ("delegation_denied",
+                "merge_on_behalf is a handoff reference and never authorizes "
+                "an action")
+    state, reason = _delegation_effective(record, sessions, links, now=now)
+    if state == "revoked":
+        return "delegation_revoked", "delegation has been revoked"
+    if state == "expired":
+        if reason == "uses":
+            return "delegation_used", "delegation has no uses left"
+        if reason == "time":
+            return "delegation_expired", "delegation has expired"
+        return ("delegation_denied",
+                f"delegation is not usable ({reason})")
+    return None
+
+
+def _consume_delegation(base: Path, repo: str, mesh: str,
+                        delegation_id: str, actor: Mapping[str, Any], *,
+                        action: str, owner_key: str | None,
+                        lease_id: str | None = None,
+                        mailbox: bool = False) -> dict[str, Any]:
+    """Verify and consume one use.  The caller holds ``_mesh_lock``."""
+    path, record = _find_delegation(base, repo, mesh, delegation_id)
+    sessions = _session_map(base, repo, mesh)
+    link_records, _ = _link_records(base, repo, mesh)
+    links = {str(item.get("link_id")): item for item in link_records}
+    problem = _delegation_problem(
+        record, str(actor.get("key")), action=action, owner_key=owner_key,
+        lease_id=lease_id, mailbox=mailbox, sessions=sessions, links=links,
+        now=_epoch())
+    if problem is not None:
+        raise MeshRefusal(problem[1], code=problem[0])
+    now = _epoch()
+    record["used"] = int(record.get("used") or 0) + 1
+    record.setdefault("history", []).append({
+        "event": "used", "at": _iso(now), "action": action,
+        "by": actor.get("key"), "lease_id": lease_id,
+        "mailbox": bool(mailbox)})
+    record["history"] = record["history"][-MAX_HISTORY:]
+    _write_json(path, record)
+    _audit(base, "delegation_use", delegation_id=delegation_id,
+           action=action, by=actor.get("key"), lease_id=lease_id,
+           mailbox=bool(mailbox))
+    return record
+
+
+def _authorize_mailbox_read(base: Path, repo: str, mesh: str,
+                            delegation_id: str, actor: Mapping[str, Any]
+                            ) -> dict[str, Any]:
+    _, record = _find_delegation(base, repo, mesh, delegation_id)
+    sessions = _session_map(base, repo, mesh)
+    link_records, _ = _link_records(base, repo, mesh)
+    links = {str(item.get("link_id")): item for item in link_records}
+    problem = _delegation_problem(
+        record, str(actor.get("key")), action="mailbox_read",
+        owner_key=_endpoint_key(record.get("grantor")), lease_id=None,
+        mailbox=True, sessions=sessions, links=links, now=_epoch())
+    if problem is not None:
+        raise MeshRefusal(problem[1], code=problem[0])
+    return record
+
+
+def delegation_grant(root: str | Path, harness: str, session: str, *, to: str,
+                     actions: Sequence[str], lease_id: str | None = None,
+                     mailbox: bool = False, ttl_s: int = DELEGATION_TTL_S,
+                     max_uses: int = 1, reason: str = "") -> dict[str, Any]:
+    """Grant a bounded, scoped delegation to an actively linked session."""
+    harness = _safe_name(harness, "harness")
+    session = _safe_name(session, "session")
+    action_list = [str(item) for item in (actions or ())]
+    if not action_list:
+        raise MeshRefusal("at least one action is required",
+                          code="invalid_action")
+    for item in action_list:
+        if item not in DELEGATION_ACTIONS:
+            raise MeshRefusal("unknown delegation action",
+                              code="invalid_action")
+    action_list = list(dict.fromkeys(action_list))
+    ttl = _coerce_ttl(ttl_s, default=DELEGATION_TTL_S,
+                      maximum=DELEGATION_TTL_MAX_S)
+    if isinstance(max_uses, bool) or not isinstance(max_uses, int) or not (
+            1 <= max_uses <= DELEGATION_MAX_USES):
+        raise MeshRefusal(f"max-uses must be 1..{DELEGATION_MAX_USES}",
+                          code="invalid_value")
+    if lease_id is not None and not LEASE_RE.fullmatch(str(lease_id)):
+        raise MeshRefusal("lease must be a lease id", code="invalid_lease_id")
+    needs_lease = "lease_release" in action_list or (
+        "merge_on_behalf" in action_list)
+    if needs_lease and lease_id is None:
+        raise MeshRefusal("--lease is required for this action",
+                          code="invalid_scope")
+    if "mailbox_read" in action_list and not mailbox:
+        raise MeshRefusal("--mailbox is required for mailbox_read",
+                          code="invalid_scope")
+    if not needs_lease and lease_id is not None:
+        raise MeshRefusal("--lease only applies to lease actions",
+                          code="invalid_scope")
+    if "mailbox_read" not in action_list and mailbox:
+        raise MeshRefusal("--mailbox requires the mailbox_read action",
+                          code="invalid_scope")
+    target_h, target_s = _split_identity(to)
+    why = _clean_reason(reason)
+    base = _open_base(root, create=True)
+    assert base is not None
+    repo = repo_id(root)
+    mesh = mesh_id(root)
+    actor = _require_session(base, repo, mesh, harness, session, live=True)
+    if (target_h, target_s) == (harness, session):
+        raise MeshRefusal("a session cannot delegate to itself",
+                          code="self_delegation")
+    target = _find_session(base, repo, mesh, target_h, target_s)
+    if target is None:
+        raise MeshRefusal("unknown peer", code="unknown_peer")
+    target_live = session_liveness(target)
+    if target_live != "live":
+        raise MeshRefusal(f"peer is {target_live}, not live",
+                          code="peer_not_live")
+    actor_key = str(actor["key"])
+    with _mesh_lock(base):
+        link_records, _ = _link_records(base, repo, mesh)
+        sessions = _session_map(base, repo, mesh)
+        now = _epoch()
+        link, link_state = _active_link_between(
+            link_records, sessions, actor_key, str(target["key"]), now=now)
+        if link is None or link_state != "active":
+            code, message = _link_refusal_for(link_state)
+            raise MeshRefusal(message, code=code)
+        resource = None
+        lease_kind = None
+        if lease_id is not None:
+            _, lease = _find_lease(base, repo, mesh, lease_id)
+            if _lease_holder_key(lease) != actor_key:
+                raise MeshRefusal(
+                    "only the lease holder may delegate its release",
+                    code="not_holder")
+            lease_state, _ = _lease_effective(lease, base, now=now)
+            if lease_state not in {"active", "stale"}:
+                raise MeshRefusal("lease is no longer held",
+                                  code="lease_closed")
+            resource_obj = lease.get("resource") or {}
+            lease_kind = str(resource_obj.get("kind") or "")
+            resource = str(resource_obj.get("id") or "")
+            if "merge_on_behalf" in action_list and lease_kind != "merge":
+                raise MeshRefusal(
+                    "merge_on_behalf requires a merge lease reference",
+                    code="invalid_scope")
+        delegation_id = _hash_id("dlg", secrets.token_hex(16), 16)
+        record = {
+            "schema": SCHEMA,
+            "repo_id": repo,
+            "mesh_id": mesh,
+            "delegation_id": delegation_id,
+            "grantor": {"harness": harness, "session": session,
+                        "key": actor_key},
+            "grantee": {"harness": target_h, "session": target_s,
+                        "key": target["key"]},
+            "link_id": link.get("link_id"),
+            "actions": action_list,
+            "lease_id": lease_id,
+            "resource": resource,
+            "mailbox": bool(mailbox),
+            "state": "active",
+            "created_at": _iso(now),
+            "expires_at": _iso(now + ttl),
+            "ttl_s": ttl,
+            "max_uses": max_uses,
+            "used": 0,
+            "reason": why,
+            "history": [{"event": "granted", "at": _iso(now),
+                         "by": actor_key, "actions": action_list}],
+        }
+        _write_json(base / DELEGATIONS_DIR / f"{delegation_id}.json", record)
+    _audit(base, "delegation_grant", delegation_id=delegation_id,
+           grantor=actor_key, grantee=target["key"],
+           actions=action_list, lease_id=lease_id)
+    return _delegation_result(record, base, created=True,
+                              actor_key=actor_key)
+
+
+def _delegation_result(record: Mapping[str, Any], base: Path, *,
+                       created: bool, actor_key: str | None) -> dict[str, Any]:
+    sessions = _session_map(base, str(record["repo_id"]),
+                            str(record["mesh_id"]))
+    link_records, _ = _link_records(base, str(record["repo_id"]),
+                                    str(record["mesh_id"]))
+    links = {str(item.get("link_id")): item for item in link_records}
+    view = _delegation_view(record, sessions, links, now=_epoch(),
+                            viewer=actor_key)
+    return {"schema": SCHEMA, "repo_id": record["repo_id"],
+            "mesh_id": record["mesh_id"], "created": created,
+            "delegation": view}
+
+
+def delegation_revoke(root: str | Path, harness: str, session: str,
+                      delegation_id: str, *, reason: str = ""
+                      ) -> dict[str, Any]:
+    harness = _safe_name(harness, "harness")
+    session = _safe_name(session, "session")
+    why = _clean_reason(reason)
+    base = _open_base(root, create=True)
+    assert base is not None
+    repo = repo_id(root)
+    mesh = mesh_id(root)
+    actor = _require_session(base, repo, mesh, harness, session, live=True)
+    actor_key = str(actor["key"])
+    with _mesh_lock(base):
+        path, record = _find_delegation(base, repo, mesh, delegation_id)
+        if _endpoint_key(record.get("grantor")) != actor_key:
+            raise MeshRefusal("only the grantor may revoke a delegation",
+                              code="not_grantor")
+        if str(record.get("state") or "active") == "revoked":
+            return _delegation_result(record, base, created=False,
+                                      actor_key=actor_key)
+        now = _epoch()
+        record["state"] = "revoked"
+        record["revoked_at"] = _iso(now)
+        record.setdefault("history", []).append({
+            "event": "revoked", "at": _iso(now), "by": actor_key,
+            "reason": why})
+        record["history"] = record["history"][-MAX_HISTORY:]
+        _write_json(path, record)
+    _audit(base, "delegation_revoke", delegation_id=delegation_id,
+           by=actor_key)
+    return _delegation_result(record, base, created=True, actor_key=actor_key)
+
+
+def delegation_list(root: str | Path, *, harness: str | None = None,
+                    session: str | None = None, include_all: bool = True
+                    ) -> dict[str, Any]:
+    base = _open_base(root, create=False)
+    repo = repo_id(root)
+    mesh = mesh_id(root)
+    viewer = _viewer_key(repo, mesh, harness, session)
+    if base is None:
+        return {"schema": SCHEMA, "repo_id": repo, "mesh_id": mesh,
+                "delegations": [], "errors": [], "counts": {}}
+    records, errors = _delegation_records(base, repo, mesh)
+    sessions = _session_map(base, repo, mesh)
+    link_records, _ = _link_records(base, repo, mesh)
+    links = {str(item.get("link_id")): item for item in link_records}
+    now = _epoch()
+    views = [_delegation_view(item, sessions, links, now=now, viewer=viewer)
+             for item in records]
+    if not include_all:
+        views = [item for item in views
+                 if item["effective_state"] == "active"]
+    views.sort(key=lambda item: (str(item.get("created_at")),
+                                 str(item.get("delegation_id"))))
+    counts: dict[str, int] = {}
+    for item in views:
+        state = str(item["effective_state"])
+        counts[state] = counts.get(state, 0) + 1
+    return {"schema": SCHEMA, "repo_id": repo, "mesh_id": mesh,
+            "delegations": views, "errors": errors, "counts": counts}
+
+
+def delegation_show(root: str | Path, delegation_id: str, *,
+                    harness: str | None = None, session: str | None = None
+                    ) -> dict[str, Any]:
+    base = _open_base(root, create=False)
+    repo = repo_id(root)
+    mesh = mesh_id(root)
+    if base is None:
+        raise MeshRefusal("unknown delegation", code="unknown_delegation")
+    _, record = _find_delegation(base, repo, mesh, delegation_id)
+    sessions = _session_map(base, repo, mesh)
+    link_records, _ = _link_records(base, repo, mesh)
+    links = {str(item.get("link_id")): item for item in link_records}
+    viewer = _viewer_key(repo, mesh, harness, session)
+    return {"schema": SCHEMA, "repo_id": repo, "mesh_id": mesh,
+            "delegation": _delegation_view(record, sessions, links,
+                                           now=_epoch(), viewer=viewer)}
 
 
 # --------------------------------------------------------------------------- #
@@ -1060,7 +2043,8 @@ def send(root: str | Path, harness: str, session: str, *, kind: str,
 
 
 def inbox(root: str | Path, harness: str, session: str, *,
-          unread: bool = False, metadata_only: bool = True) -> dict[str, Any]:
+          unread: bool = False, metadata_only: bool = True,
+          delegation_id: str | None = None) -> dict[str, Any]:
     harness = _safe_name(harness, "harness")
     session = _safe_name(session, "session")
     base = _open_base(root, create=False)
@@ -1070,7 +2054,14 @@ def inbox(root: str | Path, harness: str, session: str, *,
         return {"schema": SCHEMA, "repo_id": repo, "mesh_id": mesh,
                 "messages": [], "unread": 0, "count": 0, "errors": []}
     record = _require_session(base, repo, mesh, harness, session)
-    messages, errors = _iter_records(_mailbox(base, str(record["key"])),
+    mailbox_key = str(record["key"])
+    delegated_from = None
+    if delegation_id is not None:
+        delegation = _authorize_mailbox_read(
+            base, repo, mesh, delegation_id, record)
+        delegated_from = _endpoint_key(delegation.get("grantor"))
+        mailbox_key = delegated_from or mailbox_key
+    messages, errors = _iter_records(_mailbox(base, mailbox_key),
                                      repo, mesh)
     now = _epoch()
     selected = []
@@ -1088,7 +2079,9 @@ def inbox(root: str | Path, harness: str, session: str, *,
     return {"schema": SCHEMA, "repo_id": repo, "mesh_id": mesh,
             "messages": selected,
             "unread": sum(1 for item in selected if not item.get("read_at")),
-            "count": len(selected), "errors": errors}
+            "count": len(selected), "errors": errors,
+            "delegation_id": delegation_id,
+            "mailbox_owner": delegated_from}
 
 
 def _message_path(base: Path, key: str, msg_id: str) -> Path:
@@ -1109,7 +2102,8 @@ def _read_message(base: Path, repo: str, mesh: str, key: str, msg_id: str
 
 
 def read(root: str | Path, harness: str, session: str, msg_id: str, *,
-         peek: bool = False) -> dict[str, Any]:
+         peek: bool = False, delegation_id: str | None = None
+         ) -> dict[str, Any]:
     harness = _safe_name(harness, "harness")
     session = _safe_name(session, "session")
     base = _open_base(root, create=not peek)
@@ -1119,14 +2113,24 @@ def read(root: str | Path, harness: str, session: str, msg_id: str, *,
     repo = repo_id(root)
     mesh = mesh_id(root)
     record = _require_session(base, repo, mesh, harness, session)
-    path, message = _read_message(base, repo, mesh, str(record["key"]),
-                                  msg_id)
+    mailbox_key = str(record["key"])
+    delegated_from = None
+    if delegation_id is not None:
+        with _mesh_lock(base):
+            delegation = _consume_delegation(
+                base, repo, mesh, delegation_id, record,
+                action="mailbox_read", owner_key=None, mailbox=True)
+        delegated_from = _endpoint_key(delegation.get("grantor"))
+        mailbox_key = delegated_from or mailbox_key
+    path, message = _read_message(base, repo, mesh, mailbox_key, msg_id)
     if not peek and not message.get("read_at"):
         message["read_at"] = _iso()
         _write_json(path, message)
     view = dict(message)
     view["peeked"] = peek
-    view["unread"] = _unread_count(base, repo, mesh, str(record["key"]))
+    view["unread"] = _unread_count(base, repo, mesh, mailbox_key)
+    view["delegation_id"] = delegation_id
+    view["mailbox_owner"] = delegated_from
     return view
 
 
@@ -1583,8 +2587,8 @@ def _promote(base: Path, record: dict[str, Any], *, now: float
     return None, skipped
 
 
-def lease_release(root: str | Path, harness: str, session: str, lease_id: str
-                  ) -> dict[str, Any]:
+def lease_release(root: str | Path, harness: str, session: str, lease_id: str,
+                  *, delegation_id: str | None = None) -> dict[str, Any]:
     harness = _safe_name(harness, "harness")
     session = _safe_name(session, "session")
     base = _open_base(root, create=True)
@@ -1594,18 +2598,29 @@ def lease_release(root: str | Path, harness: str, session: str, lease_id: str
     actor = _require_session(base, repo, mesh, harness, session)
     with _lease_lock(base):
         path, record = _find_lease(base, repo, mesh, lease_id)
-        if _lease_holder_key(record) != actor.get("key"):
-            raise MeshRefusal("only the holder may release this lease",
-                              code="not_holder")
+        holder_key = _lease_holder_key(record)
+        delegated_from = None
+        if holder_key != actor.get("key"):
+            if delegation_id is None:
+                raise MeshRefusal("only the holder may release this lease",
+                                  code="not_holder")
+            delegation = _consume_delegation(
+                base, repo, mesh, delegation_id, actor,
+                action="lease_release", owner_key=holder_key,
+                lease_id=lease_id)
+            delegated_from = _endpoint_key(delegation.get("grantor"))
         now = _epoch()
         promoted = None
         skipped: list[dict[str, Any]] = []
         if record.get("state") not in {"released", "revoked"}:
             record["state"] = "released"
             record["released_at"] = _iso(now)
-            record.setdefault("history", []).append({
-                "event": "released", "at": _iso(now),
-                "holder": actor.get("key")})
+            event = {"event": "released", "at": _iso(now),
+                     "holder": actor.get("key")}
+            if delegated_from is not None:
+                event["delegated_from"] = delegated_from
+                event["delegation_id"] = delegation_id
+            record.setdefault("history", []).append(event)
             promoted, skipped = _promote(base, record, now=now)
             record["queue"] = []
             record["history"] = record.get("history", [])[-MAX_HISTORY:]
@@ -1614,11 +2629,12 @@ def lease_release(root: str | Path, harness: str, session: str, lease_id: str
                 _write_json(base / LEASES_DIR
                             / f"{promoted['lease_id']}.json", promoted)
     _audit(base, "lease_release", lease_id=lease_id,
-           promoted=promoted is not None)
+           promoted=promoted is not None, delegation_id=delegation_id,
+           delegated_from=delegated_from)
     return {"schema": SCHEMA, "repo_id": repo, "mesh_id": mesh,
             "lease": _lease_view(record, base),
             "promoted": _lease_view(promoted, base) if promoted else None,
-            "skipped": skipped}
+            "skipped": skipped, "delegation_id": delegation_id}
 
 
 def lease_takeover(root: str | Path, harness: str, session: str, lease_id: str,
@@ -1832,6 +2848,13 @@ def worktree_offer(root: str | Path, harness: str, session: str, *,
 def merge_request(root: str | Path, harness: str, session: str, *,
                   target: str, ttl_s: int = LEASE_TTL_S,
                   reason: str = "") -> dict[str, Any]:
+    """Queue for the advisory merge lease.
+
+    ``merge_on_behalf`` delegations are handoff references only and are
+    deliberately never consulted here.  Holding or being granted a merge lease
+    never authorizes a git merge; the repository's normal merge policy and
+    approvals remain authoritative.
+    """
     branch: str | None = None
     candidate = Path(target).expanduser()
     if candidate.exists() and candidate.is_dir():

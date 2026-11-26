@@ -35,6 +35,27 @@ def _register(capsys, session: str = "a", exposure: str = "coordinate") -> dict:
     return _json(capsys)
 
 
+def _snapshot(state: Path) -> dict[str, tuple[int, int, int, int, bytes]]:
+    return {
+        str(path.relative_to(state)): (
+            path.stat().st_size, path.stat().st_mtime_ns,
+            path.stat().st_ctime_ns, stat.S_IMODE(path.stat().st_mode),
+            path.read_bytes())
+        for path in sorted(state.rglob("*")) if path.is_file()
+    }
+
+
+def _link(capsys, requester: str = "a", target: str = "b",
+          relation: str = "peer") -> dict:
+    assert cli.main(["mesh", "link", "request", "--harness", "opencode",
+                     "--session", requester, "--to", f"opencode:{target}",
+                     "--relation", relation, "--json"]) == 0
+    link_id = _json(capsys)["link"]["link_id"]
+    assert cli.main(["mesh", "link", "accept", link_id, "--harness",
+                     "opencode", "--session", target, "--json"]) == 0
+    return _json(capsys)["link"]
+
+
 def test_register_status_peers_and_json(env, capsys) -> None:
     repo, state = env
     registered = _register(capsys)
@@ -249,3 +270,260 @@ def test_worktree_offer_validates_without_identity(env, capsys, monkeypatch) -> 
                      "--json"]) == 0
     payload = _json(capsys)
     assert payload["worktree"]["branch"] == "main"
+
+
+def test_link_cli_request_accept_roles_list_show_and_revoke(env, capsys) -> None:
+    repo, _ = env
+    _register(capsys, "a")
+    _register(capsys, "b")
+    assert cli.main(["mesh", "link", "request", "--harness", "opencode",
+                     "--session", "a", "--to", "opencode:b", "--relation",
+                     "sub", "--reason", "branch owner", "--json"]) == 0
+    request = _json(capsys)
+    link_id = request["link"]["link_id"]
+    assert request["created"] is True
+    assert request["link"]["effective_state"] == "pending"
+    assert request["link"]["reciprocal_relation"] == "super"
+
+    assert cli.main(["mesh", "link", "accept", link_id, "--harness",
+                     "opencode", "--session", "b", "--json"]) == 0
+    accepted = _json(capsys)
+    assert accepted["link"]["effective_state"] == "active"
+
+    assert cli.main(["mesh", "status", "--json"]) == 0
+    status = _json(capsys)
+    roles = {item["session"]: item["role"] for item in status["sessions"]}
+    assert roles == {"a": "sub", "b": "super"}
+    assert status["link_counts"]["active"] == 1
+
+    assert cli.main(["mesh", "link", "list", "--json"]) == 0
+    listed = _json(capsys)
+    assert listed["counts"] == {"active": 1}
+    assert listed["links"][0]["link_id"] == link_id
+
+    assert cli.main(["mesh", "link", "show", link_id, "--json"]) == 0
+    shown = _json(capsys)
+    assert shown["link"]["history"][-1]["event"] == "accepted"
+
+    assert cli.main(["mesh", "link", "revoke", link_id, "--harness",
+                     "opencode", "--session", "b", "--reason", "done",
+                     "--json"]) == 0
+    revoked = _json(capsys)
+    assert revoked["link"]["effective_state"] == "revoked"
+    assert revoked["link"]["history"][-1]["event"] == "revoked"
+    assert cli.main(["mesh", "status", "--json"]) == 0
+    after = _json(capsys)
+    assert {item["role"] for item in after["sessions"]} == {"peer"}
+
+
+def test_link_cli_refusals_are_exit_one_and_reads_need_no_identity(
+        env, capsys) -> None:
+    _register(capsys, "a")
+    _register(capsys, "b")
+    assert cli.main(["mesh", "link", "request", "--harness", "opencode",
+                     "--session", "a", "--to", "opencode:a", "--relation",
+                     "peer", "--json"]) == 1
+    assert _json(capsys)["code"] == "self_link"
+    assert cli.main(["mesh", "link", "request", "--harness", "opencode",
+                     "--session", "a", "--to", "opencode:nobody", "--relation",
+                     "peer", "--json"]) == 1
+    assert _json(capsys)["code"] == "unknown_peer"
+    assert cli.main(["mesh", "link", "accept", "lnk_" + "0" * 16,
+                     "--harness", "opencode", "--session", "b",
+                     "--json"]) == 1
+    assert _json(capsys)["code"] == "unknown_link"
+    assert cli.main(["mesh", "link", "show", "lnk_" + "0" * 16,
+                     "--json"]) == 1
+    assert _json(capsys)["code"] == "unknown_link"
+    assert cli.main(["mesh", "link", "list", "--json"]) == 0
+    assert _json(capsys)["links"] == []
+
+    assert cli.main(["mesh", "link", "request", "--harness", "opencode",
+                     "--session", "a", "--to", "opencode:b", "--relation",
+                     "sub", "--json"]) == 0
+    link_id = _json(capsys)["link"]["link_id"]
+    assert cli.main(["mesh", "link", "request", "--harness", "opencode",
+                     "--session", "a", "--to", "opencode:b", "--relation",
+                     "super", "--json"]) == 1
+    assert _json(capsys)["code"] == "link_conflict"
+    assert cli.main(["mesh", "link", "decline", link_id, "--harness",
+                     "opencode", "--session", "a", "--json"]) == 1
+    assert _json(capsys)["code"] == "not_target"
+    assert cli.main(["mesh", "link", "decline", link_id, "--harness",
+                     "opencode", "--session", "b", "--json"]) == 0
+    assert _json(capsys)["link"]["effective_state"] == "declined"
+
+    # Missing identity and a non-coordinate session are configuration/refusal.
+    assert cli.main(["mesh", "link", "request", "--to", "opencode:b",
+                     "--relation", "peer", "--json"]) == 2
+    assert _json(capsys)["code"] == "mesh_config"
+    _register(capsys, "a", exposure="none")
+    assert cli.main(["mesh", "link", "request", "--harness", "opencode",
+                     "--session", "a", "--to", "opencode:b", "--relation",
+                     "peer", "--json"]) == 1
+    assert _json(capsys)["code"] == "coordinate_required"
+
+
+def test_delegation_cli_grant_release_list_show_and_revoke(env, capsys) -> None:
+    _register(capsys, "a")
+    _register(capsys, "b")
+    _link(capsys, "a", "b", "peer")
+    assert cli.main(["mesh", "lease", "acquire", "--harness", "opencode",
+                     "--session", "a", "--kind", "branch", "--id", "main",
+                     "--mode", "write", "--json"]) == 0
+    lease_id = _json(capsys)["lease"]["lease_id"]
+    assert cli.main(["mesh", "delegation", "grant", "--harness", "opencode",
+                     "--session", "a", "--to", "opencode:b", "--action",
+                     "lease_release", "--lease", lease_id, "--json"]) == 0
+    delegation = _json(capsys)["delegation"]
+    delegation_id = delegation["delegation_id"]
+    assert delegation["effective_state"] == "active"
+    assert delegation["lease_id"] == lease_id
+    assert delegation["link_id"]
+
+    assert cli.main(["mesh", "delegation", "list", "--json"]) == 0
+    listed = _json(capsys)
+    assert listed["counts"] == {"active": 1}
+    assert listed["delegations"][0]["delegation_id"] == delegation_id
+    assert cli.main(["mesh", "delegation", "show", delegation_id,
+                     "--json"]) == 0
+    assert _json(capsys)["delegation"]["scope"] == (
+        f"lease_release:{lease_id}")
+
+    assert cli.main(["mesh", "lease", "release", lease_id, "--harness",
+                     "opencode", "--session", "b", "--delegation",
+                     delegation_id, "--json"]) == 0
+    released = _json(capsys)
+    assert released["lease"]["effective_state"] == "released"
+    assert released["delegation_id"] == delegation_id
+    assert cli.main(["mesh", "delegation", "show", delegation_id,
+                     "--json"]) == 0
+    assert _json(capsys)["delegation"]["effective_state"] == "expired"
+
+    assert cli.main(["mesh", "delegation", "revoke", delegation_id,
+                     "--harness", "opencode", "--session", "b",
+                     "--json"]) == 1
+    assert _json(capsys)["code"] == "not_grantor"
+    assert cli.main(["mesh", "delegation", "revoke", delegation_id,
+                     "--harness", "opencode", "--session", "a",
+                     "--json"]) == 0
+    assert _json(capsys)["delegation"]["effective_state"] == "revoked"
+    assert cli.main(["mesh", "delegation", "revoke", delegation_id,
+                     "--harness", "opencode", "--session", "a",
+                     "--json"]) == 0
+    assert _json(capsys)["created"] is False
+
+
+def test_delegation_cli_refusals_and_mailbox_read(env, capsys) -> None:
+    repo, _ = env
+    _register(capsys, "a")
+    _register(capsys, "b")
+    assert cli.main(["mesh", "send", "--harness", "opencode", "--session",
+                     "b", "--to", "opencode:a", "--kind", "note",
+                     "--subject", "hello", "--body", "private body",
+                     "--json"]) == 0
+    message_id = _json(capsys)["message"]["msg_id"]
+    assert cli.main(["mesh", "delegation", "grant", "--harness", "opencode",
+                     "--session", "a", "--to", "opencode:b", "--action",
+                     "mailbox_read", "--mailbox", "--json"]) == 1
+    assert _json(capsys)["code"] == "not_linked"
+    _link(capsys, "a", "b", "peer")
+    assert cli.main(["mesh", "delegation", "grant", "--harness", "opencode",
+                     "--session", "a", "--to", "opencode:b", "--action",
+                     "mailbox_read", "--json"]) == 1
+    assert _json(capsys)["code"] == "invalid_scope"
+    assert cli.main(["mesh", "delegation", "grant", "--harness", "opencode",
+                     "--session", "a", "--to", "opencode:b", "--action",
+                     "mailbox_read", "--mailbox", "--max-uses", "2",
+                     "--json"]) == 0
+    delegation_id = _json(capsys)["delegation"]["delegation_id"]
+
+    # Role/link alone does not expose A's mailbox.
+    assert cli.main(["mesh", "inbox", "--harness", "opencode", "--session",
+                     "b", "--json"]) == 0
+    assert _json(capsys)["count"] == 0
+    assert cli.main(["mesh", "inbox", "--harness", "opencode", "--session",
+                     "b", "--delegation", delegation_id, "--json"]) == 0
+    mailbox = _json(capsys)
+    assert mailbox["count"] == 1
+    assert mailbox["mailbox_owner"] == M.session_key(
+        M.repo_id(repo), M.mesh_id(repo), "opencode", "a")
+    assert cli.main(["mesh", "read", message_id, "--harness", "opencode",
+                     "--session", "b", "--delegation", delegation_id,
+                     "--json"]) == 0
+    assert _json(capsys)["body"] == "private body"
+    assert cli.main(["mesh", "read", message_id, "--harness", "opencode",
+                     "--session", "b", "--json"]) == 1
+    assert _json(capsys)["code"] == "unknown_message"
+
+    assert cli.main(["mesh", "delegation", "grant", "--harness", "opencode",
+                     "--session", "a", "--to", "opencode:b", "--action",
+                     "lease_release", "--json"]) == 1
+    assert _json(capsys)["code"] == "invalid_scope"
+    assert cli.main(["mesh", "delegation", "grant", "--harness", "opencode",
+                     "--session", "a", "--to", "opencode:b", "--action",
+                     "lease_release", "--lease", "lease_" + "0" * 16,
+                     "--max-uses", "0", "--json"]) == 1
+    assert _json(capsys)["code"] == "invalid_value"
+
+
+def test_link_and_delegation_cli_reads_do_not_write(env, capsys) -> None:
+    repo, state = env
+    _register(capsys, "a")
+    _register(capsys, "b")
+    link = _link(capsys, "a", "b", "peer")
+    assert cli.main(["mesh", "lease", "acquire", "--harness", "opencode",
+                     "--session", "a", "--kind", "branch", "--id", "main",
+                     "--mode", "write", "--json"]) == 0
+    lease_id = _json(capsys)["lease"]["lease_id"]
+    assert cli.main(["mesh", "delegation", "grant", "--harness", "opencode",
+                     "--session", "a", "--to", "opencode:b", "--action",
+                     "lease_release", "--lease", lease_id, "--json"]) == 0
+    delegation_id = _json(capsys)["delegation"]["delegation_id"]
+    before = _snapshot(state)
+    assert cli.main(["mesh", "status", "--json"]) == 0
+    assert cli.main(["mesh", "link", "list", "--json"]) == 0
+    assert cli.main(["mesh", "link", "show", link["link_id"],
+                     "--json"]) == 0
+    assert cli.main(["mesh", "delegation", "list", "--json"]) == 0
+    assert cli.main(["mesh", "delegation", "show", delegation_id,
+                     "--json"]) == 0
+    assert before == _snapshot(state)
+
+
+def test_link_and_delegation_cli_files_are_private_and_canary_free(
+        env, capsys) -> None:
+    repo, state = env
+    _register(capsys, "a")
+    _register(capsys, "b")
+    canary = "ghp_" + "d" * 28
+    assert cli.main(["mesh", "link", "request", "--harness", "opencode",
+                     "--session", "a", "--to", "opencode:b", "--relation",
+                     "peer", "--reason", f"token {canary}", "--json"]) == 0
+    link = _json(capsys)["link"]
+    assert canary not in json.dumps(link)
+    assert cli.main(["mesh", "lease", "acquire", "--harness", "opencode",
+                     "--session", "a", "--kind", "branch", "--id", "main",
+                     "--mode", "write", "--json"]) == 0
+    lease_id = _json(capsys)["lease"]["lease_id"]
+    assert cli.main(["mesh", "delegation", "grant", "--harness", "opencode",
+                     "--session", "a", "--to", "opencode:b", "--action",
+                     "lease_release", "--lease", lease_id, "--reason",
+                     f"secret {canary}", "--json"]) == 1
+    assert _json(capsys)["code"] == "link_pending"
+    assert cli.main(["mesh", "link", "accept", link["link_id"], "--harness",
+                     "opencode", "--session", "b", "--json"]) == 0
+    _json(capsys)
+    assert cli.main(["mesh", "delegation", "grant", "--harness", "opencode",
+                     "--session", "a", "--to", "opencode:b", "--action",
+                     "lease_release", "--lease", lease_id, "--reason",
+                     f"secret {canary}", "--json"]) == 0
+    delegation = _json(capsys)["delegation"]
+    assert canary not in json.dumps(delegation)
+    for directory in ("links", "delegations"):
+        path = state / "mesh" / "default" / directory
+        assert stat.S_IMODE(path.stat().st_mode) == 0o700
+        for item in path.glob("*.json"):
+            assert stat.S_IMODE(item.stat().st_mode) == 0o600
+    for path in state.rglob("*.json"):
+        assert canary not in path.read_text(encoding="utf-8")
