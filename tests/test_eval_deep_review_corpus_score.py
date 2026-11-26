@@ -8,10 +8,12 @@ from ozagia.eval.deep_review_corpus import CorpusError, load_manifest
 from ozagia.eval.deep_review_corpus_score import (
     _aggregate_subjects,
     _operational,
+    _verify_source_digests,
     evaluate_gates,
     load_run_record,
     score_corpus,
 )
+from ozagia.eval.deep_review_corpus_labels import load_label_set
 
 FIXTURE = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "deep_review_corpus_dry_run"
 CORPUS = FIXTURE / "corpus.json"
@@ -185,6 +187,19 @@ def test_digest_checks_are_verified_with_a_checkout_and_incomplete_without_one()
     unchecked = _score(checkout_root=False)
     assert unchecked["digest_checks"]["source_files"]["status"] == "not_checked"
     assert unchecked["digest_checks"]["status"] == "incomplete"
+
+
+def test_source_digest_verification_is_incomplete_when_any_label_digest_is_missing():
+    manifest = load_manifest(CORPUS)
+    loaded = load_label_set(LABELS, manifest, require_sealed=True)
+    decisions = next(iter(loaded["subjects"].values()))["adjudication"]["decisions"]
+    decisions[0]["source_file_digest"] = None
+
+    result = _verify_source_digests(loaded, manifest, FIXTURE)
+
+    assert result["checked"] > 0
+    assert result["not_recorded"] == 1
+    assert result["status"] == "incomplete"
 
 
 def test_repeatability_and_scoring_are_deterministic():

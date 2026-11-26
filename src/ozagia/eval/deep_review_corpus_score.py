@@ -654,7 +654,7 @@ def _verify_source_digests(loaded: Mapping[str, Any], manifest: Mapping[str, Any
                 checked += 1
     if mismatched:
         status = "mismatch"
-    elif missing:
+    elif missing or not_recorded:
         status = "incomplete"
     elif checked:
         status = "verified"
