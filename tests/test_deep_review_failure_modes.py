@@ -143,6 +143,48 @@ def outer(BaseException):
     assert analyze("fallbacks.py", source) == []
 
 
+def test_comprehension_targets_do_not_shadow_exception_names():
+    source = '''\
+def fallback():
+    [0 for Exception in values]
+    try:
+        work()
+    except Exception:
+        return {}
+
+[0 for BaseException in values]
+
+def top_level_target_does_not_shadow():
+    try:
+        work()
+    except BaseException:
+        return {}
+'''
+    findings = analyze("fallbacks.py", source)
+    assert [item["locations"][0].get("symbol") for item in findings] == [
+        "fallback", "top_level_target_does_not_shadow"]
+
+
+def test_class_body_binding_shadows_handler_but_not_method():
+    source = '''\
+class Example:
+    Exception = ValueError
+    try:
+        work()
+    except Exception:
+        result = {}
+
+    def method(self):
+        try:
+            work()
+        except Exception:
+            return {}
+'''
+    findings = analyze("fallbacks.py", source)
+    assert [item["locations"][0]["symbol"] for item in findings] == [
+        "Example.method"]
+
+
 def test_accepts_container_with_only_nested_literals():
     findings = analyze("fallbacks.py", '''\
 def fallback():

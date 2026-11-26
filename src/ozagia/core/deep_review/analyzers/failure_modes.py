@@ -64,6 +64,19 @@ def analyze(path: str, text: str) -> list[dict]:
                 continue
             if isinstance(node, ast.Lambda):
                 continue
+            if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp,
+                                 ast.GeneratorExp)):
+                # Comprehension iteration targets live in the implicit
+                # comprehension scope; their iterables and expressions do not.
+                generators = node.generators
+                pending.extend(generator.iter for generator in generators)
+                pending.extend(condition for generator in generators
+                               for condition in generator.ifs)
+                if isinstance(node, ast.DictComp):
+                    pending.extend((node.key, node.value))
+                else:
+                    pending.append(node.elt)
+                continue
             if isinstance(node, ast.Name) and isinstance(
                     node.ctx, (ast.Store, ast.Del)):
                 names.add(node.id)
@@ -90,6 +103,10 @@ def analyze(path: str, text: str) -> list[dict]:
                           ([args.vararg] if args.vararg else []) +
                           ([args.kwarg] if args.kwarg else []))
             scope_shadowed[node] = bindings(node.body, parameters)
+        elif isinstance(node, ast.ClassDef):
+            # Class bodies execute in their own namespace. Method bodies do
+            # not close over that namespace, which broad_handler accounts for.
+            scope_shadowed[node] = bindings(node.body)
 
     def symbol_for(node):
         names = []
@@ -107,8 +124,13 @@ def analyze(path: str, text: str) -> list[dict]:
         if not isinstance(handler.type, ast.Name) or handler.type.id not in broad_names:
             return False
         current = parents.get(handler)
+        in_function = False
         while current is not None:
             if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                in_function = True
+                if handler.type.id in scope_shadowed.get(current, set()):
+                    return False
+            elif isinstance(current, ast.ClassDef) and not in_function:
                 if handler.type.id in scope_shadowed.get(current, set()):
                     return False
             current = parents.get(current)
