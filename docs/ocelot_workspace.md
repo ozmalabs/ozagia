@@ -3,12 +3,16 @@
 `ozagia.integrations.ocelot.workspace` is an optional adapter for working *on*
 an Ocelot checkout. It indexes Ocelot seed metadata, seed dependencies,
 boot/registry references, seed-aware tests and docs, and engine-aware Python
-files. It adds a conservative test planner and four MCP tools:
+files. It adds a conservative test planner, a Rust/Python/seed bridge, a
+research/evidence map and seven MCP tools:
 
 - `ocelot_status` — worktree, engine provenance, datasets and failure baseline
 - `ocelot_seed` — one seed with dependencies, dependents, tests and docs
 - `ocelot_seeds` — seed census: shared seeds, missing tests, cycles and stubs
 - `ocelot_plan` — affected tests or a full-gate fallback for changed paths
+- `ocelot_engine` — PyO3 primitive, Rust-change impact or Term census
+- `ocelot_research` — prereg → measurement → results → gate chain, or census
+- `ocelot_seed_validate` — read-only structural seed validation
 
 The adapter is read-only. It never imports Ocelot, builds the Rust engine, runs
 Ocelot tests, calls a model or downloads anything. It is not bundled into
@@ -53,12 +57,13 @@ ozagia index --root .
 `runs/` and `var/` are deliberately not seed-indexed. Only top-level
 `seeds/*.json` manifests are development source; generated caches are not.
 
-The indexer records `OcelotSeed` nodes, `ocelot_depends_on`,
-`ocelot_boots`, `ocelot_mentions_seed`, `ocelot_documents`,
-`ocelot_uses_engine` and `ocelot_engine_source` edges. It stores bounded
-metadata and the first few item names per seed, not every rule body. Reingest
-re-runs the adapter when a seed manifest, boot file, build record, or a text
-that mentions a seed or `substrate_rs` changes.
+The indexer records `OcelotSeed` nodes, `OcelotPrimitive` and `OcelotTerm`
+nodes, `OcelotResearch` documents, and edges for dependencies, boot/registry
+references, seed/test/doc mentions, engine primitives, Term use, research
+references and gate tests. It stores bounded metadata and the first few item
+names per seed, not every rule body. Reingest re-runs the matching adapter
+indexer when a seed manifest, boot file, build record, Rust/Python engine file
+or research protocol document changes.
 
 ## MCP tools
 
@@ -107,6 +112,44 @@ It reports `ready`, `warn` or `blocked` with next commands. `blocked` means do
 not trust a measurement until the engine is rebuilt; `warn` covers missing
 datasets/baseline and ambiguous `.pth` state.
 
+## Engine bridge
+
+`ocelot_engine` is a syntactic map of the Rust/Python/seed boundary:
+
+- `#[pyfunction]`, `#[pyclass]` and simple `#[pymethods]` become
+  `OcelotPrimitive` definitions;
+- `enum TermNode` variants and `jsonio.rs` wire names become `OcelotTerm`
+  definitions, with term aliases;
+- Python `from substrate_rs import X`, `substrate_rs.X` and
+  `substrate_rs._native.X` become `File/Test -ocelot_uses_primitive->` edges;
+- seed `"type"` values under rules, reflexes and production guards become
+  `OcelotSeed -ocelot_uses_term->` edges.
+
+Use `{"op": "primitive", "target": "Substrate"}` for a definition plus Python
+and test call sites, `{"op": "rust_impact", "target": "runners/dsl/src/term.rs"}`
+for a change blast radius, or `{"op": "term_census"}` for defined/used/unknown
+and unused Term names. The map is syntactic: it does not infer dynamic calls
+or types, and a `pymethod` is qualified by the Python class name.
+
+## Seed validation
+
+`ocelot_seed_validate` takes `{"id": "seed_id"}` and checks the manifest
+without running Ocelot's loader: filename/id, version, dependencies and
+cycles, `local_id` uniqueness, edge reference forms, production coverage,
+rules and reflexes. Legacy declarative rules and absent legacy metadata are
+warnings, not failures. Ocelot's loader remains authoritative.
+
+## Research map
+
+`ocelot_research` takes a document path, a block number such as `371000`, or a
+topic substring, and returns the prereg/amendment/results/index chain plus
+linked scripts, tests, seeds, engine hashes, commit pins, missing gate tests
+and stale-engine flags. With no target it returns a census of missing
+prereg/result links and gates. Only `*_PREREG.md`, `*_AMENDMENT.md`,
+`*_RESULTS.md` and `INDEX.md` under `docs/research` are indexed; the rest of
+that tree is deliberately left out. A recorded old engine hash is reported as
+stale; the tool never claims a scientific result is true.
+
 ## CLI
 
 ```bash
@@ -116,9 +159,13 @@ ozagia-ocelot-workspace seeds --root . --json
 ozagia-ocelot-workspace plan --root . --changed seeds/sd_loop.json
 ozagia-ocelot-workspace plan --root . --base origin/main --head HEAD
 ozagia-ocelot-workspace plan --root . --seed shared_seed --json
+ozagia-ocelot-workspace engine --root . --op term_census --json
+ozagia-ocelot-workspace engine --root . --op primitive --target Substrate
+ozagia-ocelot-workspace research --root . 371000
+ozagia-ocelot-workspace validate --root . shape_decode_loop
 ```
 
-`status` can run before the graph exists. `seed`, `seeds` and `plan` require
+`status` can run before the graph exists. The graph-backed commands require
 `ozagia index --root .`; the CLI reports the missing snapshot and the exact
 command.
 
@@ -134,6 +181,12 @@ command.
   changes and engine changes intentionally expand to the full migrated gate.
 - The doctor reads the build record; it does not load the engine. A process
   that imports a different shadowed `.so` is outside this read-only check.
-- Ocelot's `domains.engine_provenance.py`, `VISION_PROTOCOL.md` and
-  `CLAUDE.md` remain authoritative. This profile points at them; it does not
-  replace them.
+- The engine bridge is syntactic: it maps imports, PyO3 attributes, Rust Term
+  variants and seed `type` values; it does not resolve aliases, dynamic calls
+  or Python factory functions that have no Rust definition.
+- Research links and staleness compare text/path references and recorded
+  engine hashes; commit pins are reported but not checked against Git.
+- Seed validation is a structural check, not Ocelot's loader. Legacy
+  declarative manifests are accepted with warnings. Ocelot's
+  `domains.engine_provenance.py`, `VISION_PROTOCOL.md` and `CLAUDE.md` remain
+  authoritative. This profile points at them; it does not replace them.

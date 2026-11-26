@@ -251,6 +251,7 @@ def _seed_payload(memory: Any, nid: int, include: str) -> dict[str, Any]:
         "description": str(attrs.get("description") or ""),
         "depends_on": list(attrs.get("depends_on") or []),
         "counts": dict(attrs.get("counts") or {}),
+        "term_count": len(attrs.get("terms") or []),
         "self_load_only": bool(attrs.get("self_load_only")),
         "area": attrs.get("area"),
         "partial": bool(attrs.get("partial")),
@@ -276,13 +277,16 @@ def _seed_payload(memory: Any, nid: int, include: str) -> dict[str, Any]:
         payload["docs"] = docs
     if include in ("summary", "all", "sources"):
         payload["sources"] = sources
+    if include in ("all", "terms"):
+        payload["terms"] = list(attrs.get("terms") or [])[:100]
     return payload
 
 
 def seed_summary(memory: Any, seed_id: str, include: str = "summary") -> dict[str, Any]:
     """One Ocelot seed with dependencies, dependents and related files."""
     seed_id = str(seed_id or "").strip()
-    if include not in ("summary", "closure", "tests", "docs", "sources", "all"):
+    if include not in ("summary", "closure", "tests", "docs", "sources",
+                       "terms", "all"):
         return {"ok": False, "error": f"unknown include {include!r}"}
     nid = _seed_nid(memory, seed_id)
     if nid is None:
@@ -445,6 +449,30 @@ def _seed_counts(data: Mapping[str, Any]) -> dict[str, int]:
     return {key: _count(data.get(key)) for key in keys}
 
 
+def _seed_terms(data: Mapping[str, Any]) -> list[str]:
+    """Term ``type`` names used by rules, reflexes and productions."""
+    found: set[str] = set()
+
+    def walk(value: Any) -> None:
+        if isinstance(value, Mapping):
+            kind = value.get("type")
+            if isinstance(kind, str) and kind:
+                found.add(kind)
+            for child in value.values():
+                walk(child)
+        elif isinstance(value, (list, tuple)):
+            for child in value:
+                walk(child)
+
+    for key in ("rules", "reflexes"):
+        walk(data.get(key))
+    for production in data.get("productions") or []:
+        if isinstance(production, Mapping):
+            walk(production.get("where"))
+            walk(production.get("weight"))
+    return sorted(found)[:500]
+
+
 def _item_names(data: Mapping[str, Any]) -> dict[str, list[str]]:
     out: dict[str, list[str]] = {}
     for key in ("rules", "concepts", "nodes", "reflexes", "frames", "goals"):
@@ -482,6 +510,7 @@ def _seed_attrs(seed_id: str, rel: str, data: Mapping[str, Any]) -> dict[str, An
         "area": str(data.get("area") or ""),
         "counts": _seed_counts(data),
         "item_names": _item_names(data),
+        "terms": _seed_terms(data),
         "capability_keys": capability,
         "partial": bool(data.get("_partial")),
         "manifest_bytes": int(data.get("_size") or 0) or None,
@@ -950,7 +979,7 @@ SEED_TOOL = {
             "id": {"type": "string"},
             "include": {"type": "string",
                         "enum": ["summary", "closure", "tests", "docs",
-                                 "sources", "all"]},
+                                 "sources", "terms", "all"]},
         },
         "required": ["id"],
         "additionalProperties": False,
@@ -1010,6 +1039,24 @@ def register(registry: Any) -> None:
     registry.add_mcp_tool(SEEDS_TOOL, _tool_seeds)
     registry.add_mcp_tool(PLAN_TOOL, _tool_plan)
     registry.add_mcp_tool(STATUS_TOOL, _tool_status)
+    # The bridge and research map are part of the same profile. Import lazily
+    # so the base seed/test/doctor tools still load if an optional layer is
+    # unavailable in a partial checkout.
+    try:
+        from .workspace_engine import register_engine
+        register_engine(registry)
+    except ImportError:  # pragma: no cover - partial source tree
+        pass
+    try:
+        from .workspace_research import register_research
+        register_research(registry)
+    except ImportError:  # pragma: no cover - partial source tree
+        pass
+    try:
+        from .workspace_validate import register_validate
+        register_validate(registry)
+    except ImportError:  # pragma: no cover - partial source tree
+        pass
 
 
 __all__ = [

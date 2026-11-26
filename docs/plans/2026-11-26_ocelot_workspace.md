@@ -1,11 +1,12 @@
 # Working on Ocelot: an Ocelot-specific Ozagia profile
 
-Status: first slice implemented 2026-11-26; later phases proposed. The
-implemented slice is a reusable optional integration
-(`ozagia.integrations.ocelot.workspace`) plus the engine doctor, MCP tools and
-CLI. It is not in Ozagia's core and does nothing unless an Ocelot project
-config enables it. The Rust/Python/seed bridge, seed editing/validation,
-research map and agent workflow integration remain proposed.
+Status: implemented 2026-11-26 except agent workflow evaluation. The
+implemented profile is a reusable optional integration
+(`ozagia.integrations.ocelot.workspace`) plus the seed graph/impact, test
+planner, engine doctor, Rust/Python/seed bridge, seed validation and research
+map. It is not in Ozagia's core and does nothing unless an Ocelot project
+config enables it. Seed editing and the agent-workflow evaluation remain
+proposed.
 
 This plan is for features that make Ozagia useful **while working on
 Ocelot**, not for Ocelot's runtime. Ocelot remains a separate MIT-licensed
@@ -332,12 +333,17 @@ Implemented:
 - `src/ozagia/integrations/ocelot/workspace_doctor.py` — read-only engine,
   worktree, `.pth`, dataset and baseline doctor.
 - `src/ozagia/integrations/ocelot/workspace_cli.py` — `status`, `seed`,
-  `seeds` and `plan` commands.
+  `seeds`, `plan`, `engine`, `research` and `validate` commands.
+- `src/ozagia/integrations/ocelot/workspace_engine.py` — syntactic PyO3,
+  Rust Term and seed-Term map with `ocelot_engine`.
+- `src/ozagia/integrations/ocelot/workspace_validate.py` — read-only seed
+  structural validation with `ocelot_seed_validate`.
+- `src/ozagia/integrations/ocelot/workspace_research.py` — prereg/results/gate
+  graph with `ocelot_research`.
 - `docs/ocelot_workspace.md` — setup, tool surface and limits.
-- `tests/test_ocelot_workspace.py`,
-  `tests/test_ocelot_workspace_doctor.py`,
-  `tests/test_ocelot_workspace_cli.py` — synthetic Ocelot fixture plus
-  wrong-engine/stale-source/missing-data cases.
+- `tests/test_ocelot_workspace*.py` — synthetic fixtures plus
+  wrong-engine/stale-source/missing-data, bridge, validation and research
+  cases.
 
 Measured on the canonical Ocelot checkout (`24c56891`) with a limited source
 set (`domains`, `worlds`, `substrate`, `tests`, `runners/dsl/src`); the full
@@ -346,12 +352,14 @@ record is in
 
 | Measurement | Result |
 | --- | --- |
-| Index | 37.3 s, 44,212 nodes, 194,685 edges |
+| Index | 42.7 s, 48,028 nodes, 217,487 edges |
 | Seed nodes | 924 (920 unique manifests, 4 stubs, 1 partial 68 MB manifest) |
 | Shared seeds | 24 |
 | Seeds with no test mention | 333 |
 | Seeds outside every boot list | 648 |
 | Dependency cycles | 0 |
+| Engine bridge | 439 primitives, 255 defined Terms, 139 used, 0 unknown |
+| Research map | 1,332 targeted protocol documents |
 | Plans | `shape_decode_loop` → full gate; `embodied_motor_program` → 20 affected test files; shared `substrate/world_adapter.py` → full gate; docs → no tests |
 | Doctor | engine source/hash matched; warned that the user-level `.pth` points at a different tree |
 

@@ -54,7 +54,8 @@ def test_help_lists_every_command(capsys: pytest.CaptureFixture[str]) -> None:
         main(["--help"])
     assert exit_info.value.code == 0
     out = capsys.readouterr().out
-    for command in ("status", "doctor", "seed", "seeds", "plan"):
+    for command in ("status", "doctor", "seed", "seeds", "research", "engine",
+                    "validate", "plan"):
         assert command in out
 
 
@@ -91,6 +92,21 @@ def test_plan_without_a_graph_exits_2(
                  "substrate/seed_loader.py"])
     captured = capsys.readouterr()
     assert code == 2
+    assert "ozagia index --root" in captured.err
+
+
+@pytest.mark.parametrize("argv", [
+    ["research", "371000"],
+    ["engine", "--op", "term_census"],
+    ["validate", "alpha"],
+])
+def test_new_graph_commands_without_a_graph_exit_2(
+        argv: list[str], tmp_path: Path,
+        capsys: pytest.CaptureFixture[str]) -> None:
+    code = main([*argv, "--root", str(tmp_path), "--json"])
+    captured = capsys.readouterr()
+    assert code == 2
+    assert "no graph snapshot" in captured.err
     assert "ozagia index --root" in captured.err
 
 

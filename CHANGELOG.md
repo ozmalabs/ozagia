@@ -5,12 +5,15 @@
 - Ocelot workspace profile: the optional
   `ozagia.integrations.ocelot.workspace` adapter indexes top-level seed
   manifests, seed dependencies, boot/registry references, seed-aware tests and
-  docs, and engine-aware Python files. It adds the `ocelot_status`,
-  `ocelot_seed`, `ocelot_seeds` and `ocelot_plan` MCP tools plus the
-  `ozagia-ocelot-workspace` CLI. Test planning is conservative and falls back
-  to the full migrated gate for shared/core seeds, engine changes and unknown
-  paths; the engine/worktree doctor is read-only and checks the build record,
-  Rust source fingerprint, native artifact, datasets and failure baseline.
+  docs, PyO3 primitives/Terms, and research protocol documents. It adds the
+  `ocelot_status`, `ocelot_seed`, `ocelot_seeds`, `ocelot_plan`,
+  `ocelot_engine`, `ocelot_research` and `ocelot_seed_validate` MCP tools plus
+  the `ozagia-ocelot-workspace` CLI. Test planning is conservative and falls
+  back to the full migrated gate for shared/core seeds, engine changes and
+  unknown paths; the engine/worktree doctor is read-only and checks the build
+  record, Rust source fingerprint, native artifact, datasets and failure
+  baseline; seed validation is structural and leaves Ocelot's loader
+  authoritative.
 - A first stateful graph-engine surface (`OZAGIA_SURFACE=engine`) exposes one
   `graph` MCP tool with `hello` sessions, compact tabular rows, hard estimated
   token budgets, `known` outline/context deltas and bounded background

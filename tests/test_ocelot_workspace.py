@@ -498,7 +498,8 @@ def test_mcp_registers_ocelot_tools_and_dispatches_seed(
     server = DevMemoryServer(mem)
     tools = _mcp_tools(server)
     names = {tool["name"] for tool in tools}
-    expected = {"ocelot_status", "ocelot_seed", "ocelot_seeds", "ocelot_plan"}
+    expected = {"ocelot_status", "ocelot_seed", "ocelot_seeds", "ocelot_plan",
+                "ocelot_engine", "ocelot_research", "ocelot_seed_validate"}
     assert expected <= names, sorted(names)
 
     spec = next(tool for tool in tools if tool["name"] == "ocelot_seed")
