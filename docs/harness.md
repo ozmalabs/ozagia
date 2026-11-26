@@ -44,6 +44,11 @@ ozagia agent                                                       # the TUI
 | `--no-managed-tmp` | do not register the default run root in the managed temp registry |
 | `--tmp-ttl D` | managed run-root lifetime (default 7 days; a bare number is days, or use `s`/`m`/`h`/`d`) |
 | `--clean-logs` | after a successful run with no kept clone, delete the run root and scratch workspace (default: keep the logs) |
+| `--resource-grant ID` | claim this declared resource grant for the session; repeatable (at most 16) |
+| `--approve-grant` | host approval for a grant with `requires_approval` |
+| `--allow-unbounded-grant` | also allow an `admin` or unbounded grant (with `--approve-grant`) |
+| `--allow-keep-grant` | also allow `cleanup = "keep"` (with `--approve-grant`) |
+| `--grant-reason TEXT` | host reason copied into each claim; credential-like text is refused |
 | `--repo-map` | send a bounded, task-ranked repository map in the first model request; off by default |
 | `--repo-map-tokens N` | repo-map budget for `--repo-map`, 200..8000 (default 1500); needs `--repo-map` |
 | `--mesh` / `--no-mesh` | join the local session mesh and pass a bounded metadata summary to the model context; the explicit flag wins over `[mesh] enabled` and `OZAGIA_MESH` |
@@ -203,6 +208,53 @@ ozagia agent: exit 0 after 41.2 s in /path/repo
 `fallbacks` its `stats.fallbacks` (the plugin's fallback reports, expired
 requests and failed requests; the `eval.agent.graph_stats_fields` fields). `run_agent` returns these and the
 paths as a dict.
+
+### Resource grants
+
+`--resource-grant ID` declares a resource grant for the whole session. It is
+repeatable but bounded (16 ids); duplicates, malformed ids and ids not declared
+in `ozagia/resources.toml`/`ozagia/config.toml` are refused before launch.
+`run_agent(..., resource_grants=[...])` is the library equivalent.
+
+After the run root exists and before the clone, snapshot or OpenCode starts,
+the harness checks every grant read-only, then claims each one with
+`resource_grants.claim`. The reason names `ozagia-agent`, the run root name and
+the budget (`--timeout` supplies `max_minutes` unless a `grant_budget` is
+passed). Approval comes only from `--approve-grant` (and
+`--allow-unbounded-grant` for `admin`/unbounded, `--allow-keep-grant` for
+`cleanup = "keep"`); the prompt, model and config cannot approve anything.
+
+If a grant is missing, unavailable, unknown, unapproved or already in use
+(`grant_in_use`), the harness raises `AgentError` and exits 2 before any
+worktree or OpenCode process exists. It never turns a grant failure into a
+successful run.
+
+Claims are released in `finally`, including on timeout, Ctrl-C, an OpenCode
+error or a daemon failure, with the caller's observed cost/time unknown and
+`cleanup: unknown`. The result gains `resource_grants` only when grants were
+declared:
+
+```json
+{
+  "declared": ["local-windows-vm"],
+  "approval": {"approve": true, "allow_unbounded": false,
+               "allow_keep": false, "reason": "..."},
+  "budget": {"max_minutes": 15.0},
+  "preflight": {"ok": true, "checks": [], "failures": []},
+  "claims": [{"grant_id": "local-windows-vm",
+              "claim_id": "clm-...",
+              "status": "released",
+              "budget": {}, "observed": {}, "cleanup": {"status": "unknown"},
+              "release": {"applied": true, "status": "released"}}],
+  "released": true, "unreleased": [], "warnings": []
+}
+```
+
+The summary prints one line per claim and any warning. An unreleased claim is
+listed in `unreleased` and warned about; a hard kill (SIGKILL) cannot run the
+`finally`, so the claim stays visible in `ozagia resources grants status` and
+its cleanup is unknown. No credential or resolved secret is read or passed to
+the model; only grant ids and non-secret names appear.
 
 ### Session mesh
 

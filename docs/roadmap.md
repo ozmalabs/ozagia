@@ -536,13 +536,17 @@ real fixtures, provenance-preserving and still opt-in.
 **Implementation status (2026-11-26, resource grants).** A separate
 [resource-grants plan](plans/2026-11-26_resource_grants.md) defines named
 entitlements for local VMs, VM-capable hosts, cloud accounts and containers.
-The read-only schema/readiness slice and the bounded claim/release ledger are
-implemented: per-claim host approval (admin/unbounded and keep require explicit
-flags), declared budget caps, TTL/expiry/orphan reporting, dry-run release with
-caller-supplied cleanup evidence, read-only `status`/MCP views, and a full
-ledger that refuses rather than pruning. Task/eval/harness claim integration,
-run-manifest evidence and the optional `resources run` wrapper remain open.
-Host admission (`core.resources`) remains a separate capacity check.
+The read-only schema/readiness slice, the bounded claim/release ledger, and
+task/eval/harness integration are implemented: task specs may declare
+`resources.grants`, the host supplies approval flags, preflight refuses an
+unready/unapproved grant before work, claims are taken in order and released in
+`finally` (including exceptions/timeouts), and run manifests/results record
+claim ids, budgets, observed values (or unknown), cleanup and release warnings.
+Per-claim host approval is required for admin/unbounded and keep policies,
+expiry is reported as orphaned rather than auto-deleted, and release is a
+dry-run unless applied. The optional `resources run` wrapper and live
+provider/identity/permission probes remain open. Host admission
+(`core.resources`) remains a separate capacity check.
 
 **Implementation status (2026-11-26, session mesh).** The
 [session-mesh plan](plans/2026-11-26_session_mesh.md) is implemented through

@@ -29,8 +29,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ozagia.config import repo_root
 from ozagia.config import state_dir as default_state_dir
 from ozagia.config import state_path
+from ozagia.core import grant_lifecycle as GL
 from ozagia.core import resources
 from ozagia.core import testing as test_plans
 from ozagia.core import worktree as worktree_checks
@@ -123,7 +125,7 @@ TEST_POLICY_KEYS = frozenset({"mode", "fallback", "max_tests", "timeout_s"})
 WORKTREE_KEYS = frozenset({
     "expected_branch", "base", "require_clean", "require_up_to_date",
 })
-RESOURCE_KEYS = frozenset({"memory_mb", "disk_mb", "pids", "wall_s"})
+RESOURCE_KEYS = frozenset({"memory_mb", "disk_mb", "pids", "wall_s", "grants"})
 BUDGET_KEYS = frozenset({"tokens", "model_calls", "cost_usd", "wall_s"})
 GATE_KEYS = frozenset({"before", "after"})
 APPROVAL_KEYS = frozenset({"mutate", "network"})
@@ -227,12 +229,17 @@ class ResourceSpec:
     disk_mb: int = DEFAULT_RESOURCES["disk_mb"]
     pids: int = DEFAULT_RESOURCES["pids"]
     wall_s: int = DEFAULT_RESOURCES["wall_s"]
+    grants: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out = {
             "memory_mb": self.memory_mb, "disk_mb": self.disk_mb,
             "pids": self.pids, "wall_s": self.wall_s,
         }
+        # An empty list is omitted so existing task digests do not change.
+        if self.grants:
+            out["grants"] = list(self.grants)
+        return out
 
 
 @dataclass(frozen=True)
@@ -308,6 +315,11 @@ class TaskSpec:
     requires_graph: bool
     test_policy: dict[str, Any] | None = None
     warnings: tuple[str, ...] = ()
+
+    @property
+    def grants(self) -> tuple[str, ...]:
+        """Declared resource grant ids (also available on ``resources``)."""
+        return self.resources.grants
 
     @property
     def digest(self) -> str:
@@ -708,14 +720,45 @@ def _check_worktree(value: Any, *, errors: list[str]) -> WorktreeSpec:
                         require_up_to_date=bool(require_up))
 
 
-def _check_resources(value: Any, *, errors: list[str]) -> ResourceSpec:
+def _check_resources(value: Any, *, errors: list[str],
+                     root: str | Path | None = None) -> ResourceSpec:
     table = _table(value, where="resources", allowed=RESOURCE_KEYS)
     values: dict[str, int] = {}
     for key, default in DEFAULT_RESOURCES.items():
         values[key] = _safe(errors, _integer, table.get(key, default),
                             where=f"resources.{key}", low=1,
                             default=default) or default
-    return ResourceSpec(**values)
+    grants: tuple[str, ...] = ()
+    if "grants" in table:
+        try:
+            grants = GL.normalize_ids(table["grants"])
+        except GL.GrantLifecycleError as exc:
+            errors.append(f"resources.grants: {exc}")
+        else:
+            if grants and root is None:
+                errors.append(
+                    "resources.grants: cannot resolve the repository root to "
+                    "validate the declared grant ids")
+            elif grants:
+                for message in GL.validate_ids(root, grants):
+                    errors.append(f"resources.grants: {message}")
+    return ResourceSpec(**values, grants=grants)
+
+
+def _spec_grant_root(path: Path) -> Path:
+    """The repository that declares this task's grants.
+
+    Prefer the nearest directory with a grant/config file, then the git top
+    level.  This is used only when a task declares grants; specs without grants
+    keep the old, repository-free validation path.
+    """
+    start = path.parent.resolve()
+    for candidate in (start, *start.parents):
+        if ((candidate / "ozagia" / "resources.toml").is_file()
+                or (candidate / "ozagia" / "config.toml").is_file()
+                or (candidate / ".ozagia.toml").is_file()):
+            return candidate
+    return repo_root(start)
 
 
 def _check_budget(value: Any, *, errors: list[str]) -> Budget:
@@ -867,7 +910,8 @@ def _check_stop(value: Any, *, errors: list[str],
 # --------------------------------------------------------------------------- #
 # specification loading
 # --------------------------------------------------------------------------- #
-def _parse_spec(data: Any, path: Path) -> TaskSpec:
+def _parse_spec(data: Any, path: Path, *,
+                root: str | Path | None = None) -> TaskSpec:
     errors: list[str] = []
     warnings: list[str] = []
     if not isinstance(data, Mapping):
@@ -905,8 +949,13 @@ def _parse_spec(data: Any, path: Path) -> TaskSpec:
                         where="write_scope", default=[]) or []
     budget = _safe(errors, _check_budget, data.get("budget", {}),
                    errors=errors, default=Budget()) or Budget()
-    resources_spec = _safe(errors, _check_resources, data.get("resources", {}),
-                           errors=errors,
+    raw_resources = data.get("resources", {})
+    grant_root = root
+    if (grant_root is None and isinstance(raw_resources, Mapping)
+            and raw_resources.get("grants")):
+        grant_root = _spec_grant_root(path)
+    resources_spec = _safe(errors, _check_resources, raw_resources,
+                           errors=errors, root=grant_root,
                            default=ResourceSpec()) or ResourceSpec()
     steps = _check_steps(data.get("steps"), errors=errors, warnings=warnings,
                          tools=tools, write_scope=write_scope, budget=budget)
@@ -985,8 +1034,13 @@ def _parse_spec(data: Any, path: Path) -> TaskSpec:
     )
 
 
-def load_spec(path: str | Path) -> TaskSpec:
-    """Load and validate a TOML or JSON task specification."""
+def load_spec(path: str | Path, *,
+              root: str | Path | None = None) -> TaskSpec:
+    """Load and validate a TOML or JSON task specification.
+
+    ``root`` is the repository whose declared resource grants are checked.  It
+    is inferred when a spec declares grants and the caller does not supply one.
+    """
     spec_path = Path(path).expanduser()
     if not spec_path.is_file():
         raise TaskSpecError([f"{spec_path}: no such specification file"])
@@ -1015,18 +1069,20 @@ def load_spec(path: str | Path) -> TaskSpec:
             data = tomllib.loads(text)
         except tomllib.TOMLDecodeError as exc:
             raise TaskSpecError([f"{spec_path}: invalid TOML: {exc}"]) from exc
-    return _parse_spec(data, spec_path)
+    return _parse_spec(data, spec_path, root=root)
 
 
-def validate_spec(path: str | Path) -> dict[str, Any]:
+def validate_spec(path: str | Path, *,
+                  root: str | Path | None = None) -> dict[str, Any]:
     """Validate a specification without running it.
 
     Returns ``ok``, ``errors``, ``warnings`` and (when valid) a summary. This
-    never touches the repository, the state directory or the network.
+    never touches the state directory or the network.  A spec that declares
+    resource grants reads the repository's grant declarations to check the ids.
     """
     spec_path = Path(path).expanduser()
     try:
-        spec = load_spec(spec_path)
+        spec = load_spec(spec_path, root=root)
     except TaskSpecError as exc:
         return {
             "schema": SCHEMA,
@@ -1625,7 +1681,13 @@ class TaskRunner:
 
     def __init__(self, spec: TaskSpec, root: str | Path, *,
                  executor: Any = None,
-                 state_dir: str | Path | None = None) -> None:
+                 state_dir: str | Path | None = None,
+                 approve_grants: bool = False,
+                 allow_unbounded_grants: bool = False,
+                 allow_keep_grants: bool = False,
+                 grant_reason: str | None = None,
+                 grant_budget: Mapping[str, Any] | None = None,
+                 grant_session: str | None = None) -> None:
         if not isinstance(spec, TaskSpec):
             raise TypeError("spec must be a TaskSpec")
         self.spec = spec
@@ -1639,6 +1701,31 @@ class TaskRunner:
                             else default_state_dir(self.root))
         self._preflight_cache: dict[str, Any] | None = None
         self._preflight_item: dict[str, Any] | None = None
+        self.grant_reason = grant_reason
+        self.grant_session = grant_session
+        self.grant_budget = (dict(grant_budget)
+                             if grant_budget is not None else None)
+        self._grant_lease = (
+            GL.GrantLease(
+                self.root, spec.resources.grants, task=spec.id,
+                session=grant_session, reason=grant_reason,
+                approve=approve_grants,
+                allow_unbounded=allow_unbounded_grants,
+                allow_keep=allow_keep_grants,
+                budget=self._grant_budget())
+            if spec.resources.grants else None)
+
+    def _grant_budget(self) -> dict[str, Any] | None:
+        """The host's claim budget: explicit runner budget, else task budget."""
+        if self.grant_budget is not None:
+            return dict(self.grant_budget)
+        out: dict[str, Any] = {}
+        if self.spec.budget.cost_usd > 0:
+            out["max_usd"] = float(self.spec.budget.cost_usd)
+        wall_s = min(self.spec.budget.wall_s, self.spec.resources.wall_s)
+        if wall_s > 0:
+            out["max_minutes"] = float(wall_s) / 60.0
+        return out or None
 
     @property
     def tasks_dir(self) -> Path:
@@ -1870,6 +1957,12 @@ class TaskRunner:
                 warnings.append(
                     f"test plan used the {test_plan.get('fallback')} fallback: "
                     f"{test_plan.get('fallback_reason') or 'no reason'}")
+        grant_report: dict[str, Any] | None = None
+        if self._grant_lease is not None:
+            self._grant_lease.preflight()
+            grant_report = self._grant_lease.to_dict()
+            failures.extend(grant_report["preflight"]["failures"])
+            warnings.extend(grant_report["warnings"])
         result = {
             "schema": SCHEMA,
             "root": str(self.root),
@@ -1892,6 +1985,8 @@ class TaskRunner:
             "snapshot": snapshot,
             "test_plan": test_plan,
         }
+        if grant_report is not None:
+            result["grants"] = grant_report
         self._preflight_cache = result
         self._preflight_item = item
         return result
@@ -2359,7 +2454,21 @@ class TaskRunner:
     def run(self, inputs: Any = None, *, allow_exec: bool = False,
             approve: bool = False, executor: Any = _UNSET,
             run_id: str | None = None) -> dict[str, Any]:
-        """Preview by default; execute only with ``allow_exec``."""
+        """Preview by default; execute only with ``allow_exec``.
+
+        A claim that cannot be released on the normal path is released here as
+        a last resort, so an unexpected exception does not silently leak it.
+        """
+        try:
+            return self._run(inputs, allow_exec=allow_exec, approve=approve,
+                             executor=executor, run_id=run_id)
+        finally:
+            if self._grant_lease is not None and self._grant_lease.claims:
+                self._grant_lease.release()
+
+    def _run(self, inputs: Any = None, *, allow_exec: bool = False,
+             approve: bool = False, executor: Any = _UNSET,
+             run_id: str | None = None) -> dict[str, Any]:
         if not allow_exec:
             return self.preview(inputs)
         if executor is _UNSET:
@@ -2430,6 +2539,36 @@ class TaskRunner:
                 ledger=_BudgetLedger(self.spec.budget, self.spec.resources),
                 output_info=self._output_info({}, present=False),
                 executed=False,
+            )
+
+        if self._grant_lease is not None and not self._grant_lease.acquire(
+                task=self.spec.id, session=chosen):
+            refused = self._grant_lease.refused or {}
+            detail = (
+                f"resource grant {refused.get('grant')!r} refused "
+                f"({refused.get('code') or 'refused'}): "
+                f"{refused.get('message') or 'not ready'}")
+            events.write(
+                "resource_grant_refused",
+                grant=refused.get("grant"), code=refused.get("code"),
+                detail=_bounded(detail, 400),
+            )
+            return self._finalize(
+                run_id=chosen, run_dir=run_dir, events=events,
+                started_at=started_at, started_mono=started_mono,
+                preflight=preflight, input_manifest=input_manifest,
+                status="refused", stop="gate_failed", detail=detail,
+                gates=gates, steps=[], artifacts=[], evidence_count=0,
+                ledger=_BudgetLedger(self.spec.budget, self.spec.resources),
+                output_info=self._output_info({}, present=False),
+                executed=False,
+            )
+        if self._grant_lease is not None:
+            events.write(
+                "resource_grant_claimed",
+                declared=list(self._grant_lease.ids),
+                claims=[record["claim_id"]
+                        for record in self._grant_lease.claims],
             )
 
         ledger = _BudgetLedger(self.spec.budget, self.spec.resources)
@@ -2676,6 +2815,18 @@ class TaskRunner:
         duration = round(time.monotonic() - started_mono, 3)
         ledger.set_total_wall(duration)
         finished_at = _now()
+        grant_report: dict[str, Any] | None = None
+        if self._grant_lease is not None:
+            if self._grant_lease.claims:
+                self._grant_lease.release()
+                events.write(
+                    "resource_grant_released",
+                    claims=[claim.get("claim_id")
+                            for claim in self._grant_lease.to_dict()["claims"]],
+                    released=bool(self._grant_lease.released),
+                    warnings=list(self._grant_lease.to_dict()["warnings"]),
+                )
+            grant_report = self._grant_lease.to_dict()
         not_assessed = self._not_assessed(
             executed_steps=len(steps), total_steps=len(self.spec.steps),
             after_skipped=gates.get("after_skipped"),
@@ -2742,6 +2893,9 @@ class TaskRunner:
             "artifacts_manifest": str(run_dir / ARTIFACTS_FILE),
             "manifest": str(run_dir / MANIFEST_FILE),
         }
+        if grant_report is not None:
+            report["grants"] = grant_report
+            report["warnings"].extend(grant_report["warnings"])
         try:
             _write_json(run_dir / ARTIFACTS_FILE, {
                 "schema": SCHEMA,
@@ -2941,6 +3095,9 @@ def format_preview(report: Mapping[str, Any]) -> str:
             f"fallback={plan.get('fallback_used')}"
             + (f" ({plan['fallback_reason']})"
                if plan.get("fallback_reason") else ""))
+    grants = preflight.get("grants")
+    if grants:
+        lines.extend(GL.format_summary(grants))
     return "\n".join(lines)
 
 
@@ -2969,6 +3126,8 @@ def format_run(report: Mapping[str, Any]) -> str:
             f"  test plan: mode={plan.get('mode')} "
             f"selected={len(plan.get('selected_files') or [])} "
             f"fallback={plan.get('fallback_used')}")
+    if report.get("grants"):
+        lines.extend(GL.format_summary(report["grants"]))
     for item in report.get("what_was_not_assessed") or []:
         lines.append(f"  not assessed: {item}")
     return "\n".join(lines)
@@ -3002,6 +3161,8 @@ def format_show(report: Mapping[str, Any]) -> str:
     output = manifest.get("output") or {}
     if output.get("digest"):
         lines.append(f"  output: {output.get('name')} {output.get('digest')}")
+    if manifest.get("grants"):
+        lines.extend(GL.format_summary(manifest["grants"]))
     for error in report.get("errors") or []:
         lines.append(f"  error: {error}")
     return "\n".join(lines)

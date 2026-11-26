@@ -43,7 +43,10 @@ usage: generate_docs.py run [-h] [--tasks TASKS] [--repo REPO] [--base BASE]
                             [--model MODEL] [--arms ARMS] [--repeats REPEATS]
                             [--timeout-s TIMEOUT_S] [--live]
                             [--max-budget-usd MAX_BUDGET_USD]
-                            [--max-total-usd MAX_TOTAL_USD] [--out-md OUT_MD]
+                            [--max-total-usd MAX_TOTAL_USD]
+                            [--resource-grant ID] [--approve-grant]
+                            [--allow-unbounded-grant] [--allow-keep-grant]
+                            [--grant-reason GRANT_REASON] [--out-md OUT_MD]
                             [--skip-validate | --validation VALIDATION]
                             [--amortize N] [--no-repeat-index]
 ```
@@ -66,6 +69,11 @@ usage: generate_docs.py run [-h] [--tasks TASKS] [--repo REPO] [--base BASE]
 | `--live` |  |  |  | required, with OZAGIA_EVAL_LIVE=1, for claude, opencode and native |
 | `--max-budget-usd` | float |  |  | claude only: passed as --max-budget-usd (per session) |
 | `--max-total-usd` | float |  |  | any backend: stop once reported session cost exceeds this |
+| `--resource-grant` |  |  |  | claim this resource grant for the whole run; repeatable |
+| `--approve-grant` |  |  |  | host approval for the declared resource grants |
+| `--allow-unbounded-grant` |  |  |  | also allow an admin or unbounded resource grant |
+| `--allow-keep-grant` |  |  |  | also allow a grant whose cleanup keeps resources |
+| `--grant-reason` |  |  |  | host reason recorded in each resource-grant claim |
 | `--out-md` |  |  |  | — |
 | `--skip-validate` |  |  |  | start without validating the selected tasks first (by default `run` refuses with exit 2 when a check does not pass on base or does not fail after the break); invalid runs are then decided by an import probe |
 | `--validation` |  |  |  | reuse a `validate --out-json` report instead of validating again; it must have the same base, every selected task unchanged and the same check interpreter, else `run` refuses with exit 2 |

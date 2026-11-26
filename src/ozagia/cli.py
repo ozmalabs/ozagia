@@ -408,7 +408,13 @@ def _cmd_agent(args: argparse.Namespace) -> int:
                         opencode_config=args.opencode_config,
                         mesh=args.mesh, mesh_model=args.mesh_model,
                         managed_tmp=args.managed_tmp, tmp_ttl_s=args.tmp_ttl,
-                        clean_logs=args.clean_logs)
+                        clean_logs=args.clean_logs,
+                        resource_grants=args.resource_grants,
+                        approve_grants=bool(args.approve_grant),
+                        allow_unbounded_grants=bool(
+                            args.allow_unbounded_grant),
+                        allow_keep_grants=bool(args.allow_keep_grant),
+                        grant_reason=args.grant_reason)
     except (AgentError, SessionError) as exc:
         progress.close()
         print(f"error: {exc}", file=sys.stderr)
@@ -1516,6 +1522,17 @@ def build_parser() -> argparse.ArgumentParser:
     ag.add_argument("--clean-logs", action="store_true",
                     help="after a successful run with no kept clone, delete the run "
                          "root and scratch workspace (default: keep the logs)")
+    ag.add_argument("--resource-grant", action="append", default=None,
+                    dest="resource_grants", metavar="ID",
+                    help="claim this resource grant for the session; repeatable")
+    ag.add_argument("--approve-grant", action="store_true",
+                    help="host approval for the declared resource grants")
+    ag.add_argument("--allow-unbounded-grant", action="store_true",
+                    help="also allow an admin or unbounded resource grant")
+    ag.add_argument("--allow-keep-grant", action="store_true",
+                    help="also allow a grant whose cleanup keeps resources")
+    ag.add_argument("--grant-reason", default=None,
+                    help="host reason recorded in each resource-grant claim")
     ag.add_argument("--repo-map", action="store_true",
                     help="send a bounded, task-ranked repository map in the first "
                          "model request (off by default)")

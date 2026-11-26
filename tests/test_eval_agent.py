@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from ozagia.config import state_path
+from ozagia.core import resource_grants as RG
 from ozagia.core import temp_space as TS
 from ozagia.daemon import autostart as daemon_autostart
 from ozagia.eval import agent as ae
@@ -2211,3 +2212,85 @@ def test_timing_headline_compares_arms_over_cells_valid_in_every_arm():
                         "100.0 s, dev_memory 110.0 s (+10.0 s vs baseline).")
     assert lines[1].startswith("  - Timing, like success, covers valid runs only: "
                                "left out 1 baseline, 1 dev_memory invalid run(s).")
+
+
+# ===================================================================================== #
+# resource grants
+# ===================================================================================== #
+def _eval_grant(repo: Path, *grant_ids: str) -> None:
+    (repo / "ozagia").mkdir(exist_ok=True)
+    blocks = ["[resources]\nenabled = false\n"]
+    for grant_id in grant_ids:
+        blocks.append(
+            f'[resource_grants.{grant_id}]\n'
+            'kind = "service"\nprovider = "other"\ncleanup = "destroy"\n')
+    (repo / "ozagia" / "resources.toml").write_text(
+        "".join(blocks), encoding="utf-8")
+
+
+def _eval_grants_ready(monkeypatch) -> None:
+    def ready(root, grant_id, **kwargs):
+        return {"state": "ready", "ready": True, "checks": [],
+                "permissions": [], "budget": None, "cleanup": "destroy",
+                "approval": {"required": False, "granted": False}}
+    monkeypatch.setattr(RG, "check_grant", ready)
+
+
+def test_run_eval_claims_and_releases_a_resource_grant(
+        fixture, monkeypatch) -> None:
+    _eval_grant(fixture["repo"], "svc")
+    _eval_grants_ready(monkeypatch)
+    report = run_eval(
+        fixture["repo"], [fixture["sign"]], ["baseline"], FakeDriver(),
+        fixture["base"], tasks_dir=fixture["tdir"], python=_python(),
+        run_root=fixture["run_root"], resource_grants=["svc"],
+        approve_grants=True)
+    grants = report["resource_grants"]
+    assert grants["declared"] == ["svc"]
+    claim = grants["claims"][0]
+    assert claim["claim_id"].startswith("clm-")
+    assert claim["status"] == "released"
+    assert claim["release"]["applied"] is True
+    assert claim["cleanup"]["status"] == "unknown"
+    assert grants["unreleased"] == []
+    assert RG.claims(fixture["repo"])["counts"]["released"] == 1
+
+
+def test_run_eval_without_grants_has_no_grant_fields(
+        fixture) -> None:
+    report = run_eval(
+        fixture["repo"], [fixture["sign"]], ["baseline"], NoopDriver(),
+        fixture["base"], tasks_dir=fixture["tdir"], python=_python(),
+        run_root=fixture["run_root"])
+    assert "resource_grants" not in report
+    assert not (fixture["repo"] / ".ozagia" / "resources" / "grants").exists()
+
+
+def test_run_eval_grant_failure_is_fail_closed(fixture, monkeypatch) -> None:
+    _eval_grant(fixture["repo"], "svc")
+    _eval_grants_ready(monkeypatch)
+
+    def refuse(root, grant_id, **kwargs):
+        raise RG.GrantRefused("already in use", code="grant_in_use")
+
+    monkeypatch.setattr(RG, "claim", refuse)
+    with pytest.raises(HarnessError, match="grant_in_use"):
+        run_eval(
+            fixture["repo"], [fixture["sign"]], ["baseline"], FakeDriver(),
+            fixture["base"], tasks_dir=fixture["tdir"], python=_python(),
+            run_root=fixture["run_root"], resource_grants=["svc"])
+    assert not (fixture["run_root"] / "logs").exists() or not list(
+        (fixture["run_root"] / "logs").glob("*-r1"))
+
+
+def test_eval_cli_accepts_repeatable_resource_grants() -> None:
+    args = ae.build_parser().parse_args([
+        "run", "--resource-grant", "one", "--resource-grant", "two",
+        "--approve-grant", "--allow-unbounded-grant",
+        "--allow-keep-grant", "--grant-reason", "host test",
+    ])
+    assert args.resource_grants == ["one", "two"]
+    assert args.approve_grant is True
+    assert args.allow_unbounded_grant is True
+    assert args.allow_keep_grant is True
+    assert args.grant_reason == "host test"

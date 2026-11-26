@@ -136,8 +136,10 @@ usage: ozagia agent [-h] [--workdir WORKDIR] [--prompt PROMPT |
                     [--keep-plugin] [--timeout TIMEOUT] [--python PYTHON]
                     [--opencode OPENCODE] [--mcp {coding,research,combined}]
                     [--research] [--runs-dir RUNS_DIR] [--no-managed-tmp]
-                    [--tmp-ttl D] [--clean-logs] [--repo-map]
-                    [--repo-map-tokens N] [--mesh | --no-mesh]
+                    [--tmp-ttl D] [--clean-logs] [--resource-grant ID]
+                    [--approve-grant] [--allow-unbounded-grant]
+                    [--allow-keep-grant] [--grant-reason GRANT_REASON]
+                    [--repo-map] [--repo-map-tokens N] [--mesh | --no-mesh]
                     [--mesh-model {none,read,coordinate,supervise}]
 ```
 
@@ -160,6 +162,11 @@ usage: ozagia agent [-h] [--workdir WORKDIR] [--prompt PROMPT |
 | `--no-managed-tmp` |  |  |  | do not register the run root in the managed temp registry |
 | `--tmp-ttl` | ozagia.cli._tmp_ttl |  |  | managed run-root lifetime (default: 7 days; a bare number is days, or use an s/m/h/d suffix) |
 | `--clean-logs` |  |  |  | after a successful run with no kept clone, delete the run root and scratch workspace (default: keep the logs) |
+| `--resource-grant` |  |  |  | claim this resource grant for the session; repeatable |
+| `--approve-grant` |  |  |  | host approval for the declared resource grants |
+| `--allow-unbounded-grant` |  |  |  | also allow an admin or unbounded resource grant |
+| `--allow-keep-grant` |  |  |  | also allow a grant whose cleanup keeps resources |
+| `--grant-reason` |  |  |  | host reason recorded in each resource-grant claim |
 | `--repo-map` |  |  |  | send a bounded, task-ranked repository map in the first model request (off by default) |
 | `--repo-map-tokens` | ozagia.cli._repo_map_budget |  |  | repo-map token budget with --repo-map, 200..8000 (default: 1500) |
 | `--mesh` |  |  |  | register this agent run in the local session mesh and pass a bounded metadata summary to the model context (default: [mesh] enabled or OZAGIA_MESH) |

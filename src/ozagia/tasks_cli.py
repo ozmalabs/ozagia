@@ -54,6 +54,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     validate = sub.add_parser("validate", help="validate a task specification")
     validate.add_argument("spec")
+    validate.add_argument("--root", default=None,
+                          help="repository whose declared resource grants are "
+                               "checked")
     validate.add_argument("--json", action="store_true")
 
     run = sub.add_parser("run", help="preview or run a bounded task")
@@ -71,6 +74,14 @@ def build_parser() -> argparse.ArgumentParser:
                      help="alias for --executor local")
     run.add_argument("--approve", action="store_true",
                      help="approve mutating steps whose approval is 'ask'")
+    run.add_argument("--approve-grant", action="store_true",
+                     help="host approval for task-declared resource grants")
+    run.add_argument("--allow-unbounded-grant", action="store_true",
+                     help="also allow an admin or unbounded resource grant")
+    run.add_argument("--allow-keep-grant", action="store_true",
+                     help="also allow a grant whose cleanup keeps resources")
+    run.add_argument("--grant-reason", default=None,
+                     help="host reason recorded in each resource-grant claim")
     run.add_argument("--root", default=None)
     run.add_argument("--json", action="store_true")
 
@@ -140,18 +151,24 @@ def main(argv: list[str] | None = None, *,
     args = build_parser().parse_args(argv)
     try:
         if args.command == "validate":
-            report = T.validate_spec(args.spec)
+            root = _root(args.root) if args.root else None
+            report = T.validate_spec(args.spec, root=root)
             if args.json:
                 _print_json(report)
             else:
                 print(T.format_validate(report))
             return 0 if report.get("ok") else 1
         if args.command == "run":
-            spec = T.load_spec(args.spec)
             root = _root(args.root)
+            spec = T.load_spec(args.spec, root=root)
             if args.local or args.executor == "local":
                 executor = task_exec.LocalExecutor(root)
-            runner = T.TaskRunner(spec, root, executor=executor)
+            runner = T.TaskRunner(
+                spec, root, executor=executor,
+                approve_grants=bool(args.approve_grant),
+                allow_unbounded_grants=bool(args.allow_unbounded_grant),
+                allow_keep_grants=bool(args.allow_keep_grant),
+                grant_reason=args.grant_reason)
             execute = bool(args.allow_exec and not args.dry_run)
             report = runner.run(
                 _inputs(args.input), allow_exec=execute,

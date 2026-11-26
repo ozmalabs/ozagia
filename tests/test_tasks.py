@@ -10,6 +10,8 @@ from pathlib import Path
 import pytest
 
 from ozagia import tasks_cli
+from ozagia.core import grant_lifecycle as GL
+from ozagia.core import resource_grants as RG
 from ozagia.core import tasks as T
 
 
@@ -784,3 +786,326 @@ def test_cli_run_list_and_show(repo, capsys) -> None:
     assert latest["manifest"]["run_id"] == run_id
 
     assert tasks_cli.main(["show", "missing", "--root", str(worktree)]) == 2
+
+
+# --------------------------------------------------------------------------- #
+# resource grants
+# --------------------------------------------------------------------------- #
+def _grant_file(path: Path, *grants: str) -> None:
+    base = "[resources]\nenabled = false\n"
+    blocks = []
+    for grant_id in grants:
+        blocks.append(
+            f'[resource_grants.{grant_id}]\n'
+            'kind = "service"\nprovider = "other"\ncleanup = "destroy"\n')
+    _write(path / "ozagia" / "resources.toml", base + "".join(blocks))
+
+
+def _ready_grant(monkeypatch) -> None:
+    def ready(root, grant_id, **kwargs):
+        return {
+            "state": "ready", "ready": True, "checks": [],
+            "permissions": [], "budget": None, "cleanup": "destroy",
+            "approval": {"required": False, "granted": False},
+        }
+    monkeypatch.setattr(RG, "check_grant", ready)
+
+
+def _host_ready(monkeypatch) -> None:
+    monkeypatch.setattr(RG.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(RG.os.path, "exists", lambda path: path == "/dev/kvm")
+    monkeypatch.setattr(RG.os, "access", lambda path, mode: True)
+
+
+def _task_with_grants(repo, *grant_ids: str, resources=None,
+                      **overrides) -> Path:
+    root, worktree = repo
+    _grant_file(worktree, *grant_ids)
+    declared = {"grants": list(grant_ids)}
+    if resources:
+        declared.update(resources)
+    doc = _doc(worktree={"require_clean": False}, resources=declared,
+               **overrides)
+    return _write_spec(worktree, doc, name="grant-task.json")
+
+
+def test_task_grant_digest_is_stable_without_grants(tmp_path: Path) -> None:
+    example = (Path(__file__).resolve().parent.parent / "examples" / "tasks"
+               / "code_review_dry_run.toml")
+    spec = T.load_spec(example)
+    assert "grants" not in spec.to_dict()["resources"]
+    assert spec.digest == (
+        "sha256:cd6776ce1c3a552a40f9c89cae8f1cc45d56a3360600939d3b0961a295"
+        "e856af")
+
+    _grant_file(tmp_path, "svc")
+    path = _write_spec(
+        tmp_path, _doc(resources={"grants": ["svc"]}), name="with-grant.json")
+    granted = T.load_spec(path, root=tmp_path)
+    assert granted.resources.grants == ("svc",)
+    assert granted.to_dict()["resources"]["grants"] == ["svc"]
+    assert granted.digest != spec.digest
+
+
+def test_task_grant_ids_are_bounded_and_validated(tmp_path: Path) -> None:
+    _grant_file(tmp_path, "svc")
+    cases = [
+        (["svc", "svc"], "duplicate resource grant id"),
+        (["missing"], "unknown resource grant 'missing'"),
+        ("svc", "must be a list"),
+        ([f"g{index}" for index in range(GL.MAX_GRANTS + 1)],
+         f"at most {GL.MAX_GRANTS}"),
+        ([1], "entry 0 must be a resource grant id"),
+    ]
+    for index, (grants, message) in enumerate(cases):
+        report = T.validate_spec(
+            _write_spec(tmp_path, _doc(resources={"grants": grants}),
+                        name=f"bad-grants-{index}.json"),
+            root=tmp_path)
+        assert report["ok"] is False
+        assert any(message in error for error in report["errors"]), (
+            message, report["errors"])
+
+
+def test_missing_grant_refuses_before_work(repo) -> None:
+    _root, worktree = repo
+    _write(worktree / "ozagia" / "resources.toml",
+           "[resources]\nenabled = false\n"
+           '[resource_grants.missing-vm]\n'
+           'kind = "vm"\nprovider = "qemu"\nimage = "/tmp/not-there.qcow2"\n'
+           'cleanup = "destroy"\n')
+    spec = T.load_spec(_write_spec(
+        worktree, _doc(worktree={"require_clean": False},
+                       resources={"grants": ["missing-vm"]}),
+        name="missing-grant.json"))
+    fake = FakeExecutor()
+    report = T.TaskRunner(spec, worktree, executor=fake).run(
+        {"diff": "x"}, allow_exec=True)
+    assert report["status"] == "refused"
+    assert report["stop"] == "gate_failed"
+    assert fake.calls == []
+    assert report["grants"]["preflight"]["ok"] is False
+    assert any("missing-vm" in failure
+               for failure in report["grants"]["preflight"]["failures"])
+    assert not (worktree / ".ozagia" / "resources" / "grants").exists()
+
+
+def test_admin_and_keep_grants_need_host_flags(repo, monkeypatch) -> None:
+    _root, worktree = repo
+    _host_ready(monkeypatch)
+    _write(worktree / "ozagia" / "resources.toml",
+           "[resources]\nenabled = false\n"
+           '[resource_grants.admin-host]\nkind = "host"\nprovider = "qemu"\n'
+           'capabilities = ["kvm"]\npermissions = ["admin"]\n'
+           'cleanup = "none"\n'
+           '[resource_grants.keep-host]\nkind = "host"\nprovider = "qemu"\n'
+           'capabilities = ["kvm"]\ncleanup = "keep"\n'
+           'requires_approval = true\nrisk = "a human tears it down"\n')
+    doc = _doc(worktree={"require_clean": False},
+               resources={"grants": ["admin-host"]})
+    spec = T.load_spec(_write_spec(worktree, doc, name="admin-grant.json"))
+    fake = FakeExecutor()
+    no_approval = T.TaskRunner(spec, worktree, executor=fake).run(
+        {"diff": "x"}, allow_exec=True)
+    assert no_approval["status"] == "refused"
+    assert no_approval["grants"]["preflight"]["checks"][0]["state"] == (
+        "requires_approval")
+    assert fake.calls == []
+
+    approve_only = T.TaskRunner(
+        spec, worktree, executor=fake, approve_grants=True).run(
+        {"diff": "x"}, allow_exec=True)
+    assert approve_only["status"] == "refused"
+    row = approve_only["grants"]["preflight"]["checks"][0]
+    assert row["state"] == "requires_approval"
+    assert "allow-unbounded" in row["reason"]
+
+    allowed = T.TaskRunner(
+        spec, worktree, executor=fake, approve_grants=True,
+        allow_unbounded_grants=True).run({"diff": "x"}, allow_exec=True)
+    assert allowed["status"] == "ok"
+    assert len(fake.calls) == 2
+    assert allowed["grants"]["claims"][0]["approval"]["granted"] is True
+
+    keep = T.load_spec(_write_spec(
+        worktree, _doc(worktree={"require_clean": False},
+                       resources={"grants": ["keep-host"]}),
+        name="keep-grant.json"))
+    fake = FakeExecutor()
+    keep_refused = T.TaskRunner(
+        keep, worktree, executor=fake, approve_grants=True).run(
+        {"diff": "x"}, allow_exec=True)
+    assert keep_refused["status"] == "refused"
+    row = keep_refused["grants"]["preflight"]["checks"][0]
+    assert row["state"] == "requires_approval"
+    assert "allow-keep" in row["reason"]
+    keep_ok = T.TaskRunner(
+        keep, worktree, executor=fake, approve_grants=True,
+        allow_keep_grants=True).run({"diff": "x"}, allow_exec=True)
+    assert keep_ok["status"] == "ok"
+
+
+def test_claim_is_taken_before_work_and_released_in_manifest(
+        repo, monkeypatch) -> None:
+    _root, worktree = repo
+    _ready_grant(monkeypatch)
+    spec = T.load_spec(_task_with_grants(repo, "svc"))
+    seen: list[int] = []
+
+    def handler(step, context):
+        seen.append(RG.claims(worktree)["counts"]["active"])
+        return {"status": "ok", "summary": step["id"], "usage": {},
+                "evidence": [f"checked {step['id']}"],
+                "output": {"summary": step["id"]}}
+
+    report = T.TaskRunner(spec, worktree, executor=handler).run(
+        {"diff": "x"}, allow_exec=True)
+    assert report["status"] == "ok"
+    assert seen and all(count == 1 for count in seen)
+    manifest = json.loads(Path(report["manifest"]).read_text(encoding="utf-8"))
+    grant = manifest["grants"]
+    assert grant["declared"] == ["svc"]
+    claim = grant["claims"][0]
+    assert claim["task"] == "code_review"
+    assert claim["claim_id"].startswith("clm-")
+    assert claim["budget"]["max_usd"] is None
+    assert claim["budget"]["max_minutes"] == 1.0
+    assert claim["observed"] == {
+        "cost_usd": None, "minutes": None, "provided": False}
+    assert claim["cleanup"]["status"] == "unknown"
+    assert claim["release"]["applied"] is True
+    assert claim["status"] == "released"
+    assert grant["unreleased"] == []
+    assert RG.claims(worktree)["counts"]["released"] == 1
+
+
+def test_grants_release_on_exception_and_timeout(repo, monkeypatch) -> None:
+    _root, worktree = repo
+    _ready_grant(monkeypatch)
+    spec = T.load_spec(_task_with_grants(repo, "svc"))
+
+    def explode(step, context):
+        raise RuntimeError("boom")
+
+    failed = T.TaskRunner(spec, worktree, executor=explode).run(
+        {"diff": "x"}, allow_exec=True)
+    assert failed["status"] == "failed"
+    assert failed["grants"]["claims"][0]["status"] == "released"
+    assert failed["grants"]["claims"][0]["cleanup"]["status"] == "unknown"
+
+    slow = T.load_spec(_task_with_grants(
+        repo, "svc", budget={"cost_usd": 0.0, "wall_s": 1},
+        resources={"memory_mb": 512, "disk_mb": 256, "pids": 32,
+                   "wall_s": 1, "grants": ["svc"]}))
+
+    def sleep(step, context):
+        import time
+        time.sleep(1.2)
+        return {"status": "ok", "summary": "slow", "usage": {},
+                "evidence": []}
+
+    timed = T.TaskRunner(slow, worktree, executor=sleep).run(
+        {"diff": "x"}, allow_exec=True)
+    assert timed["status"] in {"stopped", "failed"}
+    assert timed["grants"]["claims"][0]["status"] == "released"
+    assert timed["grants"]["claims"][0]["cleanup"]["status"] == "unknown"
+
+
+def test_partial_claim_failure_releases_in_reverse_order(
+        repo, monkeypatch) -> None:
+    _root, worktree = repo
+    _ready_grant(monkeypatch)
+    spec = T.load_spec(_task_with_grants(repo, "a", "b", "c"))
+    real_claim = RG.claim
+    held: list[str] = []
+
+    def claim(root, grant_id, **kwargs):
+        if grant_id == "c":
+            raise RG.GrantRefused("already in use", code="grant_in_use")
+        record = real_claim(root, grant_id, **kwargs)
+        held.append(record["claim_id"])
+        return record
+
+    released: list[str] = []
+    real_release = RG.release
+
+    def release(root, claim_id, **kwargs):
+        released.append(claim_id)
+        return real_release(root, claim_id, **kwargs)
+
+    monkeypatch.setattr(RG, "claim", claim)
+    monkeypatch.setattr(RG, "release", release)
+    fake = FakeExecutor()
+    report = T.TaskRunner(spec, worktree, executor=fake).run(
+        {"diff": "x"}, allow_exec=True)
+    assert report["status"] == "refused"
+    assert report["stop"] == "gate_failed"
+    assert report["grants"]["refused"]["grant"] == "c"
+    assert report["grants"]["refused"]["code"] == "grant_in_use"
+    assert fake.calls == []
+    assert released[:2] == list(reversed(held))
+    assert [claim["status"] for claim in report["grants"]["claims"]] == [
+        "released", "released"]
+
+
+def test_unreleased_claim_is_an_explicit_warning(repo, monkeypatch) -> None:
+    _root, worktree = repo
+    _ready_grant(monkeypatch)
+
+    def cannot_release(root, claim_id, **kwargs):
+        raise RG.GrantRefused("teardown failed", code="release_failed")
+
+    monkeypatch.setattr(RG, "release", cannot_release)
+    spec = T.load_spec(_task_with_grants(repo, "svc"))
+    report = T.TaskRunner(spec, worktree, executor=FakeExecutor()).run(
+        {"diff": "x"}, allow_exec=True)
+    assert report["status"] == "ok"
+    grant = report["grants"]
+    assert grant["released"] is False
+    assert grant["unreleased"]
+    assert any("was not released" in warning
+               for warning in grant["warnings"])
+    manifest = json.loads(Path(report["manifest"]).read_text(encoding="utf-8"))
+    assert manifest["grants"]["unreleased"] == grant["unreleased"]
+    assert any("was not released" in warning
+               for warning in manifest["warnings"])
+
+
+def test_grant_reason_with_a_secret_is_refused_without_echo(
+        repo, monkeypatch, capsys) -> None:
+    _root, worktree = repo
+    _ready_grant(monkeypatch)
+    spec = T.load_spec(_task_with_grants(
+        repo, "svc", resources={"grants": ["svc"]}))
+    canary = "canary-" + "value-123"
+    reason = "tok" + "en=" + canary
+    report = T.TaskRunner(
+        spec, worktree, executor=FakeExecutor(),
+        grant_reason=reason).run(
+        {"diff": "x"}, allow_exec=True)
+    assert report["status"] == "refused"
+    text = json.dumps(report) + Path(report["manifest"]).read_text(
+        encoding="utf-8")
+    assert canary not in text
+    assert "token" not in report["grants"]["refused"]["message"].lower()
+
+
+def test_cli_grant_flags_reach_the_claim(repo, monkeypatch, capsys) -> None:
+    _root, worktree = repo
+    _ready_grant(monkeypatch)
+    spec = _task_with_grants(repo, "svc")
+    fake = FakeExecutor()
+    assert tasks_cli.main([
+        "run", str(spec), "--root", str(worktree), "--input", "diff=x",
+        "--allow-exec", "--approve-grant", "--allow-unbounded-grant",
+        "--allow-keep-grant", "--grant-reason", "host asked for this",
+        "--json",
+    ], executor=fake) == 0
+    report = json.loads(capsys.readouterr().out)
+    claim = report["grants"]["claims"][0]
+    assert claim["approval"]["flags"] == {
+        "approve": True, "allow_unbounded": True, "allow_keep": True}
+    reason = claim["approval"]["reason"]
+    assert reason.startswith("host asked for this; task code_review run ")
+    assert "budget 1 minutes" in reason
+    assert claim["status"] == "released"

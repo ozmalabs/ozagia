@@ -80,6 +80,7 @@ from pathlib import Path
 from typing import Any, Iterable
 from ozagia.config import STATE_DIRNAME, config_path, repo_root
 from ozagia.core import failures as F
+from ozagia.core import grant_lifecycle as GL
 from ozagia.core import temp_space as TS
 from ozagia.daemon import autostart as daemon_autostart
 from ozagia.daemon.protocol import ENV_SOCK
@@ -2318,7 +2319,14 @@ def run_eval(repo: str | Path, tasks: list[dict[str, Any]], arms: Iterable[str],
              validation: dict[str, Any] | None = None,
              validation_source: str | None = None,
              repeat_index: bool = True,
-             amortize: int | None = None) -> dict[str, Any]:
+             amortize: int | None = None,
+             resource_grants: Iterable[str] | None = None,
+             approve_grants: bool = False,
+             allow_unbounded_grants: bool = False,
+             allow_keep_grants: bool = False,
+             grant_reason: str | None = None,
+             grant_budget: dict[str, Any] | None = None
+             ) -> dict[str, Any]:
     """Run every task × arm × repeat. `max_total_usd` stops the run once the
     reported cost of finished sessions exceeds it (a soft cap: the session
     that crosses it still completes). Without `python` the checks run under
@@ -2338,7 +2346,14 @@ def run_eval(repo: str | Path, tasks: list[dict[str, Any]], arms: Iterable[str],
 
     `repeat_index` measures the repeat index cost once, in the first run
     that preps (see run_one). `amortize` is the N of the report's amortized
-    view (default: the number of tasks run)."""
+    view (default: the number of tasks run).
+
+    `resource_grants` claims those declared grants for the whole run after the
+    driver preflight and before the first workdir; ``approve_grants``,
+    ``allow_unbounded_grants`` and ``allow_keep_grants`` are host decisions. A
+    preflight or claim failure raises HarnessError before any task starts, and
+    the claims are released in ``finally``. The report gains
+    ``resource_grants`` only when ids were supplied."""
     arms = list(arms)
     check_arms(arms, driver)
     if repeats < 1:
@@ -2366,54 +2381,93 @@ def run_eval(repo: str | Path, tasks: list[dict[str, Any]], arms: Iterable[str],
     preflight = getattr(driver, "preflight", None)
     if callable(preflight):
         preflight()
+    grant_ids = list(resource_grants or [])
+    grant_lease: GL.GrantLease | None = None
+    if grant_ids:
+        budget = dict(grant_budget) if grant_budget is not None else None
+        if (budget is None and max_total_usd is not None
+                and max_total_usd > 0):
+            budget = {"max_usd": float(max_total_usd)}
+        try:
+            grant_lease = GL.GrantLease(
+                repo, grant_ids, task="agent-eval",
+                session=Path(run_root).name, reason=grant_reason,
+                approve=approve_grants,
+                allow_unbounded=allow_unbounded_grants,
+                allow_keep=allow_keep_grants, budget=budget)
+        except GL.GrantLifecycleError as exc:
+            raise HarnessError(f"resource grants: {exc}") from exc
+        if not grant_lease.preflight():
+            failures = (grant_lease.preflight_report or {}).get("failures") or []
+            raise HarnessError(
+                "resource grant preflight refused: " + "; ".join(failures[:5]))
+        task_label = f"agent-eval:{len(tasks)}tasks"
+        if not grant_lease.acquire(task=task_label,
+                                   session=Path(run_root).name):
+            refused = grant_lease.refused or {}
+            raise HarnessError(
+                f"resource grant {refused.get('grant')!r} refused "
+                f"({refused.get('code') or 'refused'}): "
+                f"{refused.get('message') or 'not ready'}")
     stopped: str | None = None
-    for task in sorted(tasks, key=lambda t: t["id"]):
-        for arm in ordered_arms:
-            for repeat in range(1, repeats + 1):
-                if stopped:
-                    break
-                want_repeat = (repeat_index and arm in timing.INDEX_ARMS
-                               and not any(r.get("prep_repeat_ok") is not None
-                                           for r in runs))
-                record = run_one(repo, task, arm, repeat, driver, base_commit,
-                                 tasks_dir=tasks_dir, python=python,
-                                 run_root=run_root, timeout_s=timeout_s,
-                                 keep=keep, isolation=isolation,
-                                 base_passed=task["id"] in validated,
-                                 repeat_index=want_repeat)
-                record.update(check_python=python,
-                              check_python_reason=python_reason)
-                runs.append(record)
-                if _AUTH_ERROR_RE.search(str(record.get("driver_error") or "")):
-                    raise HarnessError(
-                        f"driver cannot authenticate ({record['driver_error']}); "
-                        f"stopped after {len(runs)} run(s). Logs: {run_root}")
-                spent = sum(float(r.get("cost_usd") or 0) for r in runs)
-                if max_total_usd is not None and spent > max_total_usd:
-                    stopped = (f"cost cap reached: ${spent:.4f} > "
-                               f"${max_total_usd:.2f} after {len(runs)} run(s)")
+    try:
+        for task in sorted(tasks, key=lambda t: t["id"]):
+            for arm in ordered_arms:
+                for repeat in range(1, repeats + 1):
+                    if stopped:
+                        break
+                    want_repeat = (repeat_index and arm in timing.INDEX_ARMS
+                                   and not any(r.get("prep_repeat_ok") is not None
+                                               for r in runs))
+                    record = run_one(repo, task, arm, repeat, driver, base_commit,
+                                     tasks_dir=tasks_dir, python=python,
+                                     run_root=run_root, timeout_s=timeout_s,
+                                     keep=keep, isolation=isolation,
+                                     base_passed=task["id"] in validated,
+                                     repeat_index=want_repeat)
+                    record.update(check_python=python,
+                                  check_python_reason=python_reason)
+                    runs.append(record)
+                    if _AUTH_ERROR_RE.search(
+                            str(record.get("driver_error") or "")):
+                        raise HarnessError(
+                            f"driver cannot authenticate "
+                            f"({record['driver_error']}); stopped after "
+                            f"{len(runs)} run(s). Logs: {run_root}")
+                    spent = sum(float(r.get("cost_usd") or 0) for r in runs)
+                    if max_total_usd is not None and spent > max_total_usd:
+                        stopped = (f"cost cap reached: ${spent:.4f} > "
+                                   f"${max_total_usd:.2f} after "
+                                   f"{len(runs)} run(s)")
+    finally:
+        if grant_lease is not None:
+            grant_lease.release()
     describe = getattr(driver, "describe", None)
     backend = describe() if callable(describe) else {"backend": driver.name,
                                                      "model": None}
     n = amortize_n(amortize, runs)
-    return {"version": 1, "base": base, "base_commit": base_commit,
-            "driver": driver.name,
-            "backend": backend,
-            "total_cost_usd": round(sum(float(r.get("cost_usd") or 0)
-                                        for r in runs), 6),
-            "stopped": stopped,
-            "check_python": python, "check_python_reason": python_reason,
-            "validated": validation is not None,
-            "validation": validation_summary(validation, source=validation_source),
-            "arms": ordered_arms, "repeats": repeats,
-            "tasks": [t["id"] for t in sorted(tasks, key=lambda t: t["id"])],
-            "run_root": str(run_root),
-            "validated_tasks": sorted(validated),
-            "amortize_n": n,
-            "index_repeat_s": timing.repeat_index(runs),
-            "runs": runs,
-            "summary": aggregate(runs, ordered_arms, amortize=n),
-            "per_task": paired(runs, ordered_arms)}
+    report = {"version": 1, "base": base, "base_commit": base_commit,
+              "driver": driver.name,
+              "backend": backend,
+              "total_cost_usd": round(sum(float(r.get("cost_usd") or 0)
+                                          for r in runs), 6),
+              "stopped": stopped,
+              "check_python": python, "check_python_reason": python_reason,
+              "validated": validation is not None,
+              "validation": validation_summary(validation,
+                                               source=validation_source),
+              "arms": ordered_arms, "repeats": repeats,
+              "tasks": [t["id"] for t in sorted(tasks, key=lambda t: t["id"])],
+              "run_root": str(run_root),
+              "validated_tasks": sorted(validated),
+              "amortize_n": n,
+              "index_repeat_s": timing.repeat_index(runs),
+              "runs": runs,
+              "summary": aggregate(runs, ordered_arms, amortize=n),
+              "per_task": paired(runs, ordered_arms)}
+    if grant_lease is not None:
+        report["resource_grants"] = grant_lease.to_dict()
+    return report
 
 
 def amortize_n(amortize: int | None, runs: list[dict[str, Any]]) -> int:
@@ -2927,11 +2981,18 @@ def _cmd_run(args: argparse.Namespace) -> int:
                       max_total_usd=args.max_total_usd, validation=checked,
                       validation_source=source,
                       repeat_index=not args.no_repeat_index,
-                      amortize=args.amortize)
+                      amortize=args.amortize,
+                      resource_grants=args.resource_grants,
+                      approve_grants=bool(args.approve_grant),
+                      allow_unbounded_grants=bool(args.allow_unbounded_grant),
+                      allow_keep_grants=bool(args.allow_keep_grant),
+                      grant_reason=args.grant_reason)
     _write(args.out_json, json.dumps(report, indent=2, sort_keys=True) + "\n")
     _write(args.out_md, render_markdown(report))
     for row in report["summary"]:
         print(summary_line(row))
+    for line in GL.format_summary(report.get("resource_grants")):
+        print(line)
     return 0
 
 
@@ -3152,6 +3213,17 @@ def build_parser() -> argparse.ArgumentParser:
                    help="claude only: passed as --max-budget-usd (per session)")
     r.add_argument("--max-total-usd", type=float, default=None,
                    help="any backend: stop once reported session cost exceeds this")
+    r.add_argument("--resource-grant", action="append", default=None,
+                   dest="resource_grants", metavar="ID",
+                   help="claim this resource grant for the whole run; repeatable")
+    r.add_argument("--approve-grant", action="store_true",
+                   help="host approval for the declared resource grants")
+    r.add_argument("--allow-unbounded-grant", action="store_true",
+                   help="also allow an admin or unbounded resource grant")
+    r.add_argument("--allow-keep-grant", action="store_true",
+                   help="also allow a grant whose cleanup keeps resources")
+    r.add_argument("--grant-reason", default=None,
+                   help="host reason recorded in each resource-grant claim")
     r.add_argument("--out-md", default=None)
     once = r.add_mutually_exclusive_group()
     once.add_argument("--skip-validate", action="store_true",

@@ -86,6 +86,7 @@ from pathlib import Path
 from typing import Any, Iterator, Sequence
 
 from ozagia.config import config_path
+from ozagia.core import grant_lifecycle as GL
 from ozagia.core import mesh as mesh_module
 from ozagia.core import temp_space as TS
 from ozagia.daemon.protocol import ENV_SOCK
@@ -430,6 +431,18 @@ def _lease_guard(lease: Any) -> Iterator[None]:
             lease.close()
 
 
+@contextlib.contextmanager
+def _grant_guard(lease: GL.GrantLease | None,
+                 res: dict[str, Any]) -> Iterator[None]:
+    """Release resource-grant claims in ``finally`` and record the outcome."""
+    try:
+        yield
+    finally:
+        if lease is not None:
+            lease.release()
+            res["resource_grants"] = lease.to_dict()
+
+
 def _refresh_tmp_usage(source: Path, res: dict[str, Any]) -> None:
     if not res.get("tmp_id"):
         return
@@ -726,6 +739,8 @@ def _summary(res: dict[str, Any]) -> str:
         lines.append(
             f"  repo map: {res['repo_map_tokens']} tokens; delivered "
             f"{count('repo_map_delivered')}, skipped {count('repo_map_skipped')}")
+    if res.get("resource_grants"):
+        lines.extend(GL.format_summary(res["resource_grants"]))
     if prep.get("still_stale"):
         lines.append("  note: the snapshot was refreshed but HEAD moved since it was built; "
                      "`ozagia index --rebuild` updates git history")
@@ -775,7 +790,13 @@ def run_agent(workdir: str | Path, *, prompt: str | None = None, model: str | No
               mesh_model: str | None = None,
               managed_tmp: bool = True,
               tmp_ttl_s: int | None = None,
-              clean_logs: bool = False) -> dict[str, Any]:
+              clean_logs: bool = False,
+              resource_grants: Sequence[str] | None = None,
+              approve_grants: bool = False,
+              allow_unbounded_grants: bool = False,
+              allow_keep_grants: bool = False,
+              grant_reason: str | None = None,
+              grant_budget: dict[str, Any] | None = None) -> dict[str, Any]:
     """Run one OpenCode session on `workdir` with the graph daemon and plugin
     (see the module docstring). Returns {exit_code, seconds, timed_out,
     transcript_path, stdout_path, stderr_path, daemon_stats, plugin_loaded,
@@ -808,6 +829,15 @@ def run_agent(workdir: str | Path, *, prompt: str | None = None, model: str | No
     scratch stays under `<run root>/scratch`. `clean_logs` (default off)
     removes an owned run root and scratch only after a successful run; a kept
     clone, a failure or a timeout always keeps them.
+
+    `resource_grants` claims those declared grants before the clone, snapshot
+    or OpenCode start; `approve_grants`, `allow_unbounded_grants` and
+    `allow_keep_grants` are host decisions and `grant_reason` is the host
+    reason. An unready or unapproved grant raises AgentError (fail closed), and
+    the claims are released in `finally`. With no grants, `resource_grants` is
+    absent from the result; with grants it records declared ids, claim ids,
+    approval, budget, observed/cleanup (unknown unless supplied), release and
+    warnings.
 
     `mesh` is the session-mesh opt-in: `None` follows `[mesh] enabled` or
     `OZAGIA_MESH`, `True`/`False` (from `--mesh`/`--no-mesh`) win.
@@ -886,6 +916,7 @@ def run_agent(workdir: str | Path, *, prompt: str | None = None, model: str | No
                            "mesh_exposure": None, "mesh_registered": False,
                            "mesh_peer_count": None, "mesh_lease_ids": [],
                            "mesh_warning": None, "mesh_cleanup_errors": []}
+    grant_lease: GL.GrantLease | None = None
     mesh_on = False
     if mesh is None:
         try:
@@ -939,7 +970,35 @@ def run_agent(workdir: str | Path, *, prompt: str | None = None, model: str | No
             res["scratch_root"] = str(scratch)
         except OSError:
             pass
-    with _sigterm_as_interrupt(), _lease_guard(lease):
+    if resource_grants:
+        budget = dict(grant_budget) if grant_budget is not None else None
+        if budget is None and timeout_s is not None and timeout_s > 0:
+            budget = {"max_minutes": float(timeout_s) / 60.0}
+        try:
+            grant_lease = GL.GrantLease(
+                source, resource_grants, task="ozagia-agent",
+                session=run_root.name, reason=grant_reason,
+                approve=approve_grants,
+                allow_unbounded=allow_unbounded_grants,
+                allow_keep=allow_keep_grants, budget=budget)
+        except GL.GrantLifecycleError as exc:
+            raise AgentError(f"resource grants: {exc}") from exc
+        if not grant_lease.preflight():
+            failures = (
+                grant_lease.preflight_report or {}).get("failures") or []
+            raise AgentError(
+                "resource grant preflight refused: "
+                + "; ".join(failures[:5]))
+        if not grant_lease.acquire(task="ozagia-agent",
+                                   session=run_root.name):
+            refused = grant_lease.refused or {}
+            raise AgentError(
+                f"resource grant {refused.get('grant')!r} refused "
+                f"({refused.get('code') or 'refused'}): "
+                f"{refused.get('message') or 'not ready'}")
+        res["resource_grants"] = grant_lease.to_dict()
+    with (_sigterm_as_interrupt(), _lease_guard(lease),
+          _grant_guard(grant_lease, res)):
         if clone:
             rev = f"{base or 'HEAD'}^{{commit}}"
             found = _git(["rev-parse", "--verify", "--quiet", rev], source)

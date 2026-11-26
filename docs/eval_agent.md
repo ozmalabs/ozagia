@@ -565,6 +565,30 @@ $PY -m ozagia.eval.agent run --driver noop --arms baseline \
     --out-md evaluation/agent_e2e/dry_run_noop.md
 ```
 
+### Resource grants
+
+`--resource-grant ID` is repeatable and declares grants for the whole run.
+The host supplies approval: `--approve-grant` for `requires_approval`,
+`--allow-unbounded-grant` for `admin`/unbounded, and `--allow-keep-grant` for
+`cleanup = "keep"`. The task files, driver and model cannot approve a grant.
+`run_eval(..., resource_grants=[...], approve_grants=True, ...)` is the library
+equivalent.
+
+Before the first workdir exists, the run checks every grant read-only and
+claims each in declaration order; `--max-total-usd` supplies `max_usd` when it
+is set and no explicit budget is passed. A missing/unready/unapproved grant, or
+a second claim while one is active (`grant_in_use`), refuses the whole run with
+`HarnessError` and exit 2 before any task starts. If a later claim fails, the
+earlier claims are released in reverse order.
+
+Claims are released in `finally` on success, driver error or timeout. The run
+JSON gains a `resource_grants` object only when grants were declared, with the
+declared ids, claim ids, approval flags/reason, budget, observed cost/time
+(unknown unless supplied), cleanup status, release outcome, `unreleased` and
+warnings. An unreleased claim is an explicit warning, never a hidden success.
+No credential value is read or passed to a driver; only grant ids and
+non-secret names appear.
+
 ## Time per component
 
 Total wall time is the wrong measure for comparing arms. An arm that saves 30 s

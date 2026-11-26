@@ -15,7 +15,7 @@ usage: ozagia-tasks [-h] {validate,run,list,show,report} ...
 ## `ozagia-tasks validate`
 
 ```
-usage: ozagia-tasks validate [-h] [--json] spec
+usage: ozagia-tasks validate [-h] [--root ROOT] [--json] spec
 ```
 
 | argument | type | values | required | help |
@@ -24,6 +24,7 @@ usage: ozagia-tasks validate [-h] [--json] spec
 
 | option | type | values | default | help |
 |---|---|---|---|---|
+| `--root` |  |  |  | repository whose declared resource grants are checked |
 | `--json` |  |  |  | — |
 
 ## `ozagia-tasks run`
@@ -31,6 +32,8 @@ usage: ozagia-tasks validate [-h] [--json] spec
 ```
 usage: ozagia-tasks run [-h] [--input K=V] [--dry-run] [--allow-exec]
                         [--executor {local}] [--local] [--approve]
+                        [--approve-grant] [--allow-unbounded-grant]
+                        [--allow-keep-grant] [--grant-reason GRANT_REASON]
                         [--root ROOT] [--json]
                         spec
 ```
@@ -47,6 +50,10 @@ usage: ozagia-tasks run [-h] [--input K=V] [--dry-run] [--allow-exec]
 | `--executor` |  |  |  | built-in executor to use with --allow-exec (local = read-only tools and planned pytest) |
 | `--local` |  |  |  | alias for --executor local |
 | `--approve` |  |  |  | approve mutating steps whose approval is 'ask' |
+| `--approve-grant` |  |  |  | host approval for task-declared resource grants |
+| `--allow-unbounded-grant` |  |  |  | also allow an admin or unbounded resource grant |
+| `--allow-keep-grant` |  |  |  | also allow a grant whose cleanup keeps resources |
+| `--grant-reason` |  |  |  | host reason recorded in each resource-grant claim |
 | `--root` |  |  |  | — |
 | `--json` |  |  |  | — |
 

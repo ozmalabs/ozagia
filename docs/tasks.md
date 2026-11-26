@@ -46,6 +46,7 @@ memory_mb = 2048
 disk_mb = 4096
 pids = 256
 wall_s = 900
+grants = ["local-windows-vm"]   # optional; ids declared in ozagia/resources.toml
 
 [budget]
 tokens = 40000
@@ -109,7 +110,7 @@ unknown stop conditions and unknown tools are errors, not warnings.
 | `write_scope` | Repository-relative files or directories a row may create or change. Empty means read-only. |
 | `steps` | 1-64 typed steps. Each step has `id`, `tool`, `goal`, optional `paths`, `write_paths`, `args` and `budget`. |
 | `worktree` | `expected_branch`, `base`, `require_clean`, `require_up_to_date`. |
-| `resources` | `memory_mb`, `disk_mb`, `pids`, `wall_s`. Defaults: 2048 MiB, 4096 MiB, 256 pids, 900 s. |
+| `resources` | `memory_mb`, `disk_mb`, `pids`, `wall_s`, and optional `grants`. Defaults: 2048 MiB, 4096 MiB, 256 pids, 900 s. `grants` is a bounded list of declared resource-grant ids; an empty list is omitted from the canonical form so existing digests do not change. |
 | `budget` | `tokens`, `model_calls`, `cost_usd`, `wall_s`. Defaults: 40,000; 0; 0.0; 900. |
 | `gates` | `before` and `after` gate names. |
 | `stop` | Declared stop conditions; the mandatory safety stops are always active. |
@@ -175,7 +176,9 @@ runner = TaskRunner(spec, root, executor=my_executor)
 report = runner.run({"diff": "HEAD~1..HEAD"}, allow_exec=True)
 ```
 
-`TaskRunner(spec, root, executor=None, state_dir=None)`:
+`TaskRunner(spec, root, executor=None, state_dir=None, approve_grants=False,
+allow_unbounded_grants=False, allow_keep_grants=False, grant_reason=None,
+grant_budget=None, grant_session=None)`:
 
 1. **Validate** the specification and the supplied inputs.
 2. **Preflight** (read-only): the expected worktree and branch through
@@ -202,6 +205,49 @@ report = runner.run({"diff": "HEAD~1..HEAD"}, allow_exec=True)
 `preview(inputs)` is read-only and returns the plan, preflight and declared
 budgets. `run(..., allow_exec=False)` returns the preview. No run directory is
 created for a preview.
+
+### Resource grants
+
+A task may declare `[resources] grants = ["id", ...]` (at most 16, unique,
+valid ids). Loading validates every id against the repository's declared
+grants; an unknown id is a validation error naming it. The task file supplies
+only ids. It never supplies approval, credentials or an observed spend.
+
+Preflight checks each grant read-only (`resources grants check`), with the
+host's approval flags. A missing, unavailable, unknown or unapproved grant is a
+typed preflight failure and the run refuses before the executor is called.
+Nothing is claimed during validation or preflight.
+
+Before the before gates, the runner claims every grant in declaration order.
+The claim reason names the task id and run id, and the claim budget is the
+task's `budget.cost_usd` (when positive) and the shorter of `budget.wall_s` and
+`resources.wall_s`; a host can pass `grant_budget` to narrow or override it. A
+task budget above the grant's declared cap is refused with
+`budget_exceeds_grant`, not narrowed silently. An existing
+active/expired/orphaned claim still refuses with `grant_in_use`. If
+a later claim fails, earlier claims are released in reverse order and the run
+refuses (status `refused`, stop `gate_failed`).
+
+Every claim is released in `finally`, including on an executor exception or a
+wall timeout. The runner does not observe the provider, so release records
+`observed` cost/time as unknown and `cleanup: unknown`. A failed release is
+reported in `unreleased` and the run warnings; it is never hidden.
+
+Approval is a host decision and comes only from runner options or CLI flags:
+
+| option / runner argument | meaning |
+| --- | --- |
+| `--approve-grant` / `approve_grants=True` | approve a grant with `requires_approval` |
+| `--allow-unbounded-grant` / `allow_unbounded_grants=True` | also allow `admin` or an unbounded budget |
+| `--allow-keep-grant` / `allow_keep_grants=True` | also allow `cleanup = "keep"` |
+| `--grant-reason TEXT` / `grant_reason=` | host reason copied into each claim (redacted; credential-like text is refused) |
+
+The task manifest gains a `grants` object when the spec declares grants:
+`declared`, `approval` (flags and non-secret reason), `budget`, `preflight`
+(with per-grant state and failures), `claims` (claim id, task/session, reason,
+approval kind/reason, budget, observed, cleanup, release outcome), `refused`,
+`released`, `unreleased` and `warnings`. A spec without grants has no `grants`
+field and its digest is unchanged.
 
 ### Executor protocol
 
@@ -486,14 +532,16 @@ explicit state directory. `state_dir` overrides the base state directory.
 
 ```text
 events.jsonl     append-only, size-bounded event log
-manifest.json    run status, spec digest, preflight, gates, budget, output
+manifest.json    run status, spec digest, preflight, gates, budget, output,
+                 resource grants (when declared)
 artifacts.json   artifact metadata: path, sha256, size, kind, step
 output.json      the validated output value, when one was supplied
 ```
 
 Events include `run_started`, `preflight`, `step_started`, `step_finished`,
 `step_skipped`, `evidence`, `artifact`, `gate`, `budget_exceeded`,
-`repeated_state`, `gates_skipped` and `run_finished`. Inputs are recorded by
+`repeated_state`, `gates_skipped`, `resource_grant_claimed`,
+`resource_grant_released`, `resource_grant_refused` and `run_finished`. Inputs are recorded by
 name and digest, never by value. The manifest records the specification
 id/version/digest and title, not the objective or input values. When a test
 plan was computed it is recorded in the preflight report, the `preflight`
@@ -521,8 +569,11 @@ silently skipped.
 ## CLI
 
 ```text
-python -m ozagia.tasks_cli validate SPEC [--json]
-python -m ozagia.tasks_cli run SPEC --input K=V [--dry-run] [--allow-exec] [--executor local | --local] [--approve] [--root R] [--json]
+python -m ozagia.tasks_cli validate SPEC [--root R] [--json]
+python -m ozagia.tasks_cli run SPEC --input K=V [--dry-run] [--allow-exec]
+    [--executor local | --local] [--approve]
+    [--approve-grant] [--allow-unbounded-grant] [--allow-keep-grant]
+    [--grant-reason TEXT] [--root R] [--json]
 python -m ozagia.tasks_cli list [--root R] [--limit N] [--json]
 python -m ozagia.tasks_cli show [RUN] [--root R] [--json]
 ```
@@ -540,8 +591,9 @@ tasks_cli.main(["run", spec, "--allow-exec"], executor=my_executor)
 ```
 
 `--executor local` takes precedence over an injected executor. `validate`
-never accepts an executor option and never touches the repository or the
-state directory.
+never accepts an executor option and never touches the state directory. A spec
+that declares resource grants reads the repository's grant declarations (using
+`--root` or the nearest repository/config root) to check the ids.
 
 Exit status is `0` for a valid spec/preview or a successful run, `1` for an
 invalid spec, a refused run or a failed/stopped run, and `2` for a usage,

@@ -420,11 +420,84 @@ operator releases it.
 - That cleanup actually deleted a provider resource, or the exact spend.
 - Any target command. No grant command runs project code.
 
-## Later stages
+## Task, eval and harness integration
 
-Task and eval/harness integration (`docs/plans/2026-11-26_resource_grants.md`
-Stage C) is not implemented here. That stage adds task-declared grants,
-preflight refusal for missing/unready grants, claim-before-work and
-release-in-`finally`, run-manifest evidence and an optional
-`ozagia resources run --grant ID -- <cmd>` wrapper. A model still cannot claim,
-approve or release a grant through MCP.
+A task declares grants in its `[resources]` table:
+
+```toml
+[resources]
+grants = ["local-windows-vm", "aws-admin-capped"]
+```
+
+The list is bounded at 16 ids. Ids must match
+`[A-Za-z][A-Za-z0-9_.-]{0,63}`; duplicates, non-string entries, a non-list
+value and an id that is not declared in `ozagia/resources.toml` or
+`ozagia/config.toml` are task-validation errors. Validation checks only that
+the id exists. A spec with no grants omits the `grants` field from its canonical
+form, so its digest does not change.
+
+Preflight checks every declared grant read-only with `check_grant` and the
+host's approval flags. It never claims during validation or preflight. A
+missing, unavailable, `unknown`, `requires_approval` or unapproved grant adds a
+typed failure (`missing`, `unavailable`, `requires_approval`, ...) and the run
+refuses before the executor is called.
+
+Before any work the host claims each grant in declaration order with
+`resource_grants.claim`. The claim reason names the task id and run/session,
+then the host budget. The task's `budget.cost_usd` and the shorter
+`budget.wall_s`/`resources.wall_s` supply the claim's `max_usd`/`max_minutes`
+unless the host passes an explicit `grant_budget`. Each claim is one per grant;
+an existing active, expired or orphaned claim still refuses with
+`grant_in_use`. If a later claim fails, the earlier claims are released in
+reverse order and the run refuses.
+
+Every claim is released in `finally` (also on an exception or timeout) with
+`release(..., apply=True)`. The task runner has no provider observations, so
+the release records `observed: {cost_usd: null, minutes: null, provided:
+false}` and `cleanup: unknown`; it never invents spend or teardown. A release
+failure is an explicit warning and the claim stays in `unreleased`.
+
+Approval comes only from the host invocation. For tasks:
+
+```text
+python -m ozagia.tasks_cli run SPEC --allow-exec \
+  --approve-grant --allow-unbounded-grant --allow-keep-grant \
+  --grant-reason "run the integration suite"
+```
+
+`--approve-grant` is required for a grant with `requires_approval`.
+`--allow-unbounded-grant` is also required for `admin` or an unbounded budget,
+and `--allow-keep-grant` for `cleanup = "keep"`. The task file and the model
+cannot grant approval.
+
+For the eval and OpenCode harness, `--resource-grant ID` is repeatable:
+
+```text
+python -m ozagia.eval.agent run --resource-grant aws-admin-capped \
+  --approve-grant --allow-unbounded-grant
+ozagia agent --resource-grant local-windows-vm --approve-grant --prompt "..."
+```
+
+The eval claims once for the whole run and the harness claims before launching
+OpenCode; both release in `finally`. A grant failure exits 2 / raises
+`AgentError` or `HarnessError` before any task, worktree or session starts; it
+is never turned into a successful run. With no `--resource-grant`, results and
+manifests have no `resource_grants`/`grants` field and behave as before.
+
+Run manifests (task) and run results (eval and harness) record the same
+non-secret fields: declared grant ids, claim ids, approval kind/reason and
+flags, claim budget, observed cost/time (or `null`/unknown), cleanup policy and
+status, release outcome, `unreleased` claim ids, and warnings. Grant reports
+carry ids and non-secret names only; no credential value is read, stored or
+passed to the model.
+
+## What remains
+
+- `ozagia resources run --grant ID -- <cmd>` is not added. It can come only
+  after the claim/release ledger already used by tasks: it must set non-secret
+  environment values, enforce the wall budget and release on exit.
+- Live provider probes (`--live` identity/permission checks) remain opt-in and
+  injected; a task, eval or harness run does not make one.
+- Permission claims and observed spend remain unverified and unknown unless a
+  caller supplies evidence. A model still cannot claim, approve or release a
+  grant through MCP.

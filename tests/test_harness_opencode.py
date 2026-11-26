@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from ozagia.core import mesh as M
+from ozagia.core import resource_grants as RG
 from ozagia.core import temp_space as TS
 from ozagia.daemon import autostart as daemon_autostart
 from ozagia.harness import launch_status
@@ -147,6 +148,8 @@ def _run(repo: Path, tmp_path: Path, **kw) -> dict:
 def test_run_agent_end_to_end(repo, stub, tmp_path):
     res = _run(repo, tmp_path, model="vllm/test-model")
     rec = _record(stub)
+
+    assert "resource_grants" not in res
 
     assert rec["argv"][1:] == ["run", "--standalone", "--format", "json", "--auto",
                                "--archived", "-m", "vllm/test-model"]
@@ -1103,3 +1106,80 @@ def test_mesh_heartbeat_failure_is_advisory_not_fatal(repo, stub, monkeypatch,
     status = M.status(repo, harness="opencode-runner",
                       session=res["mesh_session"])
     assert status["self"]["effective_state"] == "ended"
+
+
+# --------------------------------------------------------------------------- #
+# resource grants
+# --------------------------------------------------------------------------- #
+def _harness_grant(repo: Path, *grant_ids: str) -> None:
+    (repo / "ozagia").mkdir(exist_ok=True)
+    blocks = ["[resources]\nenabled = false\n"]
+    for grant_id in grant_ids:
+        blocks.append(
+            f'[resource_grants.{grant_id}]\n'
+            'kind = "service"\nprovider = "other"\ncleanup = "destroy"\n')
+    (repo / "ozagia" / "resources.toml").write_text(
+        "".join(blocks), encoding="utf-8")
+
+
+def _harness_grants_ready(monkeypatch) -> None:
+    def ready(root, grant_id, **kwargs):
+        return {"state": "ready", "ready": True, "checks": [],
+                "permissions": [], "budget": None, "cleanup": "destroy",
+                "approval": {"required": False, "granted": False}}
+    monkeypatch.setattr(RG, "check_grant", ready)
+
+
+def test_run_agent_claims_and_releases_a_resource_grant(
+        repo, stub, tmp_path, monkeypatch):
+    _harness_grant(repo, "svc")
+    _harness_grants_ready(monkeypatch)
+    res = _run(repo, tmp_path, resource_grants=["svc"])
+    grants = res["resource_grants"]
+    assert grants["declared"] == ["svc"]
+    claim = grants["claims"][0]
+    assert claim["status"] == "released"
+    assert claim["release"]["applied"] is True
+    assert claim["cleanup"]["status"] == "unknown"
+    assert grants["unreleased"] == []
+    assert RG.claims(repo)["counts"]["released"] == 1
+    assert res["exit_code"] == 0
+
+
+def test_run_agent_config_error_after_preflight_does_not_leak_a_claim(
+        repo, stub, tmp_path, monkeypatch):
+    _harness_grant(repo, "svc")
+    _harness_grants_ready(monkeypatch)
+    with pytest.raises(AgentError, match="mesh model"):
+        _run(repo, tmp_path, resource_grants=["svc"], mesh=True,
+             mesh_model="not-a-mode")
+    assert not stub["record"].exists()
+    assert RG.claims(repo)["counts"]["total"] == 0
+
+
+def test_run_agent_grant_failure_fails_closed_before_launch(
+        repo, stub, tmp_path):
+    _harness_grant(repo, "missing-vm")
+    (repo / "ozagia" / "resources.toml").write_text(
+        "[resources]\nenabled = false\n"
+        '[resource_grants.missing-vm]\n'
+        'kind = "vm"\nprovider = "qemu"\nimage = "/tmp/not-there.qcow2"\n'
+        'cleanup = "destroy"\n', encoding="utf-8")
+    with pytest.raises(AgentError, match="preflight refused"):
+        _run(repo, tmp_path, resource_grants=["missing-vm"])
+    assert not stub["record"].exists()
+    assert RG.claims(repo)["counts"]["total"] == 0
+
+
+def test_agent_cli_accepts_resource_grant_flags():
+    from ozagia import cli
+    args = cli.build_parser().parse_args([
+        "agent", "--resource-grant", "one", "--resource-grant", "two",
+        "--approve-grant", "--allow-unbounded-grant",
+        "--allow-keep-grant", "--grant-reason", "host test",
+    ])
+    assert args.resource_grants == ["one", "two"]
+    assert args.approve_grant is True
+    assert args.allow_unbounded_grant is True
+    assert args.allow_keep_grant is True
+    assert args.grant_reason == "host test"
