@@ -517,16 +517,26 @@ def _build_scoring_inputs(loaded: Mapping[str, Any], manifest: Mapping[str, Any]
         group = loaded["subjects"].get(f"{repository_id}/{subject_key}")
         scope_is_complete = bool(group and _scope_complete(group))
         label_subjects = _label_scope_subjects(group)
+        # Precision can only call unmatched predictions false positives when
+        # the entire declared label scope was actually collected.  A run may
+        # report some subjects as complete while silently omitting another
+        # declared subject; treating those individual predictions as labeled
+        # would make scope-level coverage look better than it was.
+        run_scope_complete = (
+            run_complete and scope_is_complete and bool(label_subjects)
+            and label_subjects <= set(statuses)
+            and all(statuses[subject] == "complete" for subject in label_subjects)
+        )
         scope_predictions = 0
         for finding in findings:
             base_subject = finding["subject"]
             namespaced = f"{repository_id}::{subject_key}::{base_subject}"
             predictions.append({**finding, "subject": namespaced})
             scope_predictions += 1
-            subject_ok = (statuses.get(base_subject) == "complete"
-                          if statuses else run_complete)
-            if run_complete and subject_ok and scope_is_complete:
-                complete_subjects.add(namespaced)
+        if run_scope_complete:
+            complete_subjects.update(
+                f"{repository_id}::{subject_key}::{subject}"
+                for subject in label_subjects)
         reason = None
         if not run_complete:
             reason = f"run status {run['status']!r} did not provide complete coverage"
@@ -553,6 +563,7 @@ def _build_scoring_inputs(loaded: Mapping[str, Any], manifest: Mapping[str, Any]
             "run_id": run["run_id"],
             "run_status": run["status"],
             "run_complete": run_complete,
+            "run_scope_complete": run_scope_complete,
             "label_scope_complete": scope_is_complete,
             "predicted": scope_predictions,
             "reviewed_positive_labels": source_expected_by_scope.get(key, 0),
@@ -582,6 +593,7 @@ def _build_scoring_inputs(loaded: Mapping[str, Any], manifest: Mapping[str, Any]
                 "run_id": None,
                 "run_status": "missing",
                 "run_complete": False,
+                "run_scope_complete": False,
                 "label_scope_complete": True,
                 "predicted": 0,
                 "reviewed_positive_labels": source_expected_by_scope.get(
@@ -757,11 +769,8 @@ def _coverage(loaded: Mapping[str, Any], manifest: Mapping[str, Any],
     scored_complete_keys = {
         f"{row['repository_id']}/{row['subject_key']}"
         for row in inputs["scope_rows"]
-        if row.get("run_complete")
+        if row.get("run_scope_complete")
         and bool(row.get("label_subjects"))
-        and set(row["label_subjects"]) <= set(row.get("subject_statuses", {}))
-        and all(status == "complete"
-                for status in row["subject_statuses"].values())
     }
     for repo in manifest_repos:
         repo_id = repo["id"]

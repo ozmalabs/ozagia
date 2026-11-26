@@ -89,7 +89,7 @@ def test_partial_scope_predictions_stay_unlabeled_not_false_positives():
     assert performance["precision"] == 1.0
     assert performance["report_noise_ratio"] == 0.5
     assert subjects["scalability"]["precision"] == 0.0
-    assert subjects["tests-and-coverage"]["complete"] is False
+    assert subjects["tests-and-coverage"]["complete"] is True
 
 
 def test_complete_label_scope_without_scored_run_is_reported_as_missing(tmp_path):
@@ -135,6 +135,11 @@ def test_complete_labels_require_complete_report_coverage(tmp_path):
         "run_id": "complete-1",
         "reason": "run did not provide complete coverage",
     }]
+    # Partial report coverage invalidates precision for this whole declared
+    # scope, including findings belonging to subjects the run did complete.
+    assert result["counts"]["labeled_predictions"] == 0
+    assert result["overall"]["precision"] is None
+    assert result["overall"]["false_positive"] is None
 
 
 @pytest.mark.parametrize("statuses", [{}, {"security": "complete"}])
