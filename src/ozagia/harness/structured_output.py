@@ -52,8 +52,42 @@ def _finite_float(value: str) -> float:
     return parsed
 
 
+_MAX_JSON_DEPTH = 512
+
+
+def _check_nesting(text: str) -> None:
+    """Refuse pathological nesting before the decoder can hit its own limit.
+
+    Python 3.14's C scanner accepts some deeply nested inputs that older
+    interpreters reject with ``RecursionError``; the contract here is a normal
+    ``ValueError`` on every supported interpreter.
+    """
+    depth = 0
+    in_string = False
+    escaped = False
+    for char in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char in "[{":
+            depth += 1
+            if depth > _MAX_JSON_DEPTH:
+                raise ValueError(
+                    f"JSON nesting exceeds {_MAX_JSON_DEPTH} levels")
+        elif char in "]}":
+            depth = max(0, depth - 1)
+
+
 def _loads_strict_json(text: str) -> Any:
     """Decode RFC JSON without non-finite constants or duplicate names."""
+    _check_nesting(text)
     try:
         return json.loads(text, parse_constant=_reject_constant,
                           parse_float=_finite_float,

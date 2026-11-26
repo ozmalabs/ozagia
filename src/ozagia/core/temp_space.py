@@ -2755,6 +2755,14 @@ def _legacy_recheck(row: Mapping[str, Any], *, root: Path,
     info = _safe_lstat(path)
     if info is None:
         return "missing"
+    if stat.S_ISLNK(info.st_mode):
+        return "changed"
+    if row.get("kind") == "directory" and not stat.S_ISDIR(info.st_mode):
+        return "changed"
+    expected_mtime = row.get("mtime")
+    if isinstance(expected_mtime, (int, float)):
+        if int(info.st_mtime) != int(expected_mtime):
+            return "changed"
     expected_dev = row.get("st_dev")
     expected_ino = row.get("st_ino")
     if isinstance(expected_dev, int) and isinstance(expected_ino, int):
@@ -2776,8 +2784,15 @@ def _legacy_recheck(row: Mapping[str, Any], *, root: Path,
 
 def _legacy_row(item: Mapping[str, Any], *, action: str,
                 why: str) -> dict[str, Any]:
+    path = str(item.get("path") or "")
+    dev = item.get("st_dev")
+    ino = item.get("st_ino")
+    if not (isinstance(dev, int) and isinstance(ino, int)):
+        info = _safe_lstat(Path(path)) if path else None
+        if info is not None:
+            dev, ino = int(info.st_dev), int(info.st_ino)
     return {
-        "path": str(item.get("path")),
+        "path": path,
         "pattern": item.get("pattern"),
         "kind": item.get("kind"),
         "bytes": int(item.get("bytes") or 0),
@@ -2787,8 +2802,8 @@ def _legacy_row(item: Mapping[str, Any], *, action: str,
         "hardlinks": int(item.get("hardlinks") or 0),
         "age_s": int(item.get("age_s") or 0),
         "mtime": item.get("mtime"),
-        "st_dev": item.get("st_dev"),
-        "st_ino": item.get("st_ino"),
+        "st_dev": dev,
+        "st_ino": ino,
         "registered": bool(item.get("registered")),
         "registered_ancestor": item.get("registered_ancestor"),
         "action": action,
