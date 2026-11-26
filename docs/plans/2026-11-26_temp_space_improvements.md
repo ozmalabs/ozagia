@@ -1,7 +1,6 @@
 # Temporary-space improvements
 
-Status: implemented A-C (2026-11-26); Stage D (descriptor-relative deletion
-and `tmp run --timeout`) is active. Follows
+Status: implemented A-D (2026-11-26). Follows
 [the prior-art survey](../research/temp_managers.md) and the first `ozagia tmp`
 slice. Execution was split into sequential agent-sized stages so each stage
 could be reviewed and tested on its own.

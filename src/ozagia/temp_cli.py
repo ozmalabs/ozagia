@@ -17,7 +17,7 @@
     ozagia tmp unpin   ID [--json]
     ozagia tmp touch   ID [--json]
     ozagia tmp run     --reason TEXT [--kind K] [--ttl-s N] [--keep]
-                       [--max-total-bytes B] ... -- CMD...
+                       [--timeout S] [--max-total-bytes B] ... -- CMD...
     ozagia tmp clean   [--apply] [--expired] [--older-than D]
                        [--max-total-bytes B] [--id ID] [--json]
     ozagia tmp gc      [--apply] [--max-total-bytes B] [--max-inodes N]
@@ -153,6 +153,10 @@ def _add_actions(children: Any) -> None:
                      help="expiry in seconds (60 to 90 days)")
     ran.add_argument("--keep", action="store_true",
                      help="keep the entry even when the command succeeds")
+    ran.add_argument("--timeout", type=_positive_seconds, default=None,
+                     metavar="S",
+                     help="kill the command after S seconds (exit 124, keep "
+                          "the entry)")
     _budget_arguments(ran)
     ran.add_argument("run_command", nargs=argparse.REMAINDER, metavar="CMD",
                      help="command and arguments after --")
@@ -285,6 +289,18 @@ def _duration(value: str) -> int:
     seconds = int(amount * multiplier)
     if seconds < 0:
         raise argparse.ArgumentTypeError("duration must not be negative")
+    return seconds
+
+
+def _positive_seconds(value: str) -> float:
+    """Parse a positive number of seconds for ``--timeout``."""
+    try:
+        seconds = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"not a number of seconds: {value!r}") from None
+    if not seconds > 0:
+        raise argparse.ArgumentTypeError("timeout must be positive")
     return seconds
 
 
@@ -577,7 +593,8 @@ def _run_action(args: argparse.Namespace, *, root: Path,
         try:
             completed = subprocess.run(
                 command, shell=False, env=environment,
-                stdin=None, stdout=None, stderr=None, check=False)
+                stdin=None, stdout=None, stderr=None, check=False,
+                timeout=args.timeout)
             exit_code = int(completed.returncode)
         except KeyboardInterrupt:
             exit_code = 130

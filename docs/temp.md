@@ -250,12 +250,15 @@ and the cache tree is not walked.
 change the entry's state, kind or usage, and it never clears a pin or releases a
 lease.
 
-`ozagia tmp run --reason TEXT [--kind K] [--ttl-s N] [--keep] -- CMD...` runs
-one command inside a fresh managed entry.  It sets `TMPDIR`, `TMP`, `TEMP` and
-`OZAGIA_SCRATCH_ROOT` to the entry path, acquires the entry's lease, and runs
-`CMD` with `subprocess.run(..., shell=False)` and inherited stdin/stdout/stderr.
-There is no shell, so arguments are passed literally.  Command output, prompts
-and environment values are never captured or printed by ozagia.  On exit 0 the
+`ozagia tmp run --reason TEXT [--kind K] [--ttl-s N] [--keep] [--timeout S] -- CMD...`
+runs one command inside a fresh managed entry.  It sets `TMPDIR`, `TMP`, `TEMP`
+and `OZAGIA_SCRATCH_ROOT` to the entry path, acquires the entry's lease, and
+runs `CMD` with `subprocess.run(..., shell=False)` and inherited
+stdin/stdout/stderr.  `--timeout S` is a positive number of seconds passed to
+`subprocess.run`; when it expires the child is killed, the entry is kept, the
+lease is released and the command exits 124 with reason `timeout`.  There is no
+shell, so arguments are passed literally.  Command output, prompts and
+environment values are never captured or printed by ozagia.  On exit 0 the
 lease is released and the entry is deleted (with the normal owned/marker/budget
 checks) unless `--keep` is given.  A non-zero exit, timeout, signal,
 `KeyboardInterrupt`, or a cleanup refusal keeps the entry and releases the
@@ -288,34 +291,68 @@ a refusal or error.
 * Cleanup refuses a symlink, the filesystem root, the repository root, the home
   directory, the state/registry/managed roots, and any path equal to an allowed
   root.
-* Deletion never follows a symlink out of the tree; directory symlinks are
-  unlinked, not descended into.
+* Deletion never follows a symlink out of the tree; symlinks are unlinked, not
+  descended into, even when they point at a directory outside the tree.
 * At apply time `clean` and `gc` re-read the registry record and marker, and
   compare the directory's planned `(st_dev, st_ino)` identity with the current
   one immediately before deletion.  A path replaced by a symlink, a different
   inode or a non-directory is kept and reported as `changed`; the replacement
   is never followed.
 * `clean-legacy` records the planned `(st_dev, st_ino)` for each artifact row
-  and applies the same recheck before `unlink` or `rmtree`.  Older rows without
-  an identity still go through the name, type, lock/socket and protected-path
-  checks.
+  and applies the same recheck before `unlink` or the tree walk.  Older rows
+  without an identity are refused rather than deleted unverified.
 * A missing path is reported as `missing` and does not fail the whole run.
 * Nothing is written into the repository outside its state directory.
 * No network access, no target import and no target execution.
 
+### Descriptor-relative deletion
+
+`clean`, `gc`, `release(..., delete=True)` and `clean-legacy` delete through a
+descriptor-relative walk when the platform provides `dir_fd`, `scandir(fd)` and
+`O_DIRECTORY`/`O_NOFOLLOW` (Linux and other POSIX systems do).  The parent
+directory is opened first, then the planned target relative to that parent with
+`O_DIRECTORY|O_NOFOLLOW`; the target's `st_dev`/`st_ino` is compared with the
+identity recorded at plan time and the ownership marker is re-read relative to
+the same descriptor.  Recursion uses `os.scandir(fd)`,
+`os.open(name, O_RDONLY|O_DIRECTORY|O_NOFOLLOW, dir_fd=fd)`,
+`os.unlink(name, dir_fd=fd)` and `os.rmdir(name, dir_fd=fd)`.
+
+Inside the tree, a symlink is unlinked and never traversed, a regular file is
+unlinked, and a nested directory is descended only when it is on the same
+`st_dev`.  A cross-device child or an unexpected file type (FIFO, device or
+socket inside a tree) is refused rather than deleted or crossed.  The root
+directory's identity is rechecked after its contents are emptied and before
+`rmdir`, so a name swapped during the walk is refused rather than removed.  A
+tree containing a symlink to a directory outside the tree loses the symlink
+only; the target is untouched.
+
+`clean`, `gc` and `clean-legacy` report `method: "fd"` when this walk is used;
+`release(..., delete=True)` adds `method` to the returned entry.  When
+the primitives are unavailable (for example a platform without `dir_fd` or
+`scandir(fd)`), the method is `path-fallback`: the existing guarded path
+deletion still verifies the planned `(st_dev, st_ino)` and, for managed
+entries, the marker before unlinking or removing the tree.  The fallback is
+never used merely because an fd operation failed at run time; a failed open,
+identity check or marker check is a refusal.
+
 ### Residual path-resolution race
 
-The identity recheck narrows the window but does not close it.  Paths are still
-resolved by name: another process with write access to a parent directory can
-replace a planned path between the final `lstat` and the `unlink`/`rmtree`.
-ozagia never follows a replacement symlink and refuses a changed inode, but a
-rename into the same name in that last instant is a classic time-of-check to
-time-of-use race.  The intended hardening direction is Linux `openat2` with
-`RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS`, walking and deleting relative to a
-held directory descriptor so the name cannot be swapped underneath the
-operation.  That needs a ctypes or external dependency and is deliberately a
-later slice; this module stays standard-library only and does not claim
-hostile-parent hardening.
+Descriptor-relative deletion closes the race for everything below the planned
+root: child names are resolved relative to held directory descriptors and a
+replaced child is refused.  It does not close every window.  The parent
+directory path is still opened by name, and a concurrent rename of the planned
+root between that open and the final identity check is detected but not
+prevented.  The final `rmdir`/`unlink` of the root name is likewise still a
+name-based operation, narrowed by a last `stat` comparison.  On the
+`path-fallback` platforms the original window remains: another process with
+write access to a parent can replace a path between the last check and
+`unlink`/`rmtree`.
+
+The complete fix is Linux `openat2` with
+`RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS` for the root and parent opens as well.
+That needs a ctypes or external dependency and is deliberately a later slice;
+this module stays standard-library only and does not claim hostile-parent
+hardening.
 
 ## What is tracked and what is not
 

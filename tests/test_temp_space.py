@@ -1261,10 +1261,11 @@ def test_clean_legacy_deletion_failure_is_reported_without_aborting(
     _old(good)
     real_remove = TS._legacy_remove
 
-    def flaky_remove(path: Path, *, directory: bool) -> None:
+    def flaky_remove(path: Path, *, directory: bool,
+                     identity=None) -> None:
         if path.name == "ozagia-native-bad":
             raise OSError("simulated failure")
-        real_remove(path, directory=directory)
+        real_remove(path, directory=directory, identity=identity)
 
     monkeypatch.setattr(TS, "_legacy_remove", flaky_remove)
     done = TS.clean_legacy(root, roots=[scan], older_than_s=0, apply=True)
@@ -1675,3 +1676,156 @@ def test_clean_legacy_refuses_a_path_replaced_after_planning(
                for row in done["kept"])
     assert artifact.is_symlink()
     assert (target / "payload").is_file()
+
+
+# --------------------------------------------------------------------------- #
+# descriptor-relative deletion (Stage D)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.skipif(not TS._fd_delete_supported(),
+                    reason="descriptor-relative deletion is unavailable")
+def test_fd_walk_removes_nested_directories_and_files(root: Path) -> None:
+    entry = TS.create(root, reason="nested")
+    path = Path(entry["path"])
+    _write(path / "a" / "b" / "c" / "deep.txt", 7)
+    _write(path / "top.txt", 3)
+    (path / "a" / "empty").mkdir()
+    (path / "a" / "b" / "also-empty").mkdir()
+
+    released = TS.release(root, entry["id"], delete=True)
+    assert released["method"] == "fd"
+    assert not path.exists()
+    assert not path.parent.exists() or not any(path.parent.iterdir())
+
+
+@pytest.mark.skipif(not TS._fd_delete_supported(),
+                    reason="descriptor-relative deletion is unavailable")
+def test_fd_walk_unlinks_a_symlink_without_following_it(
+        root: Path, tmp_path: Path) -> None:
+    entry = TS.create(root, reason="symlink")
+    path = Path(entry["path"])
+    target = tmp_path / "outside"
+    _write(target / "payload", 9)
+    os.symlink(target, path / "dir-link")
+    os.symlink(target / "payload", path / "file-link")
+    _write(path / "keep.txt", 4)
+
+    TS.release(root, entry["id"], delete=True)
+    assert not path.exists()
+    assert target.is_dir()
+    assert (target / "payload").is_file()
+
+
+@pytest.mark.parametrize("replacement", ["symlink", "directory"])
+def test_gc_refuses_a_path_replaced_after_planning(
+        root: Path, tmp_path: Path, monkeypatch, replacement: str) -> None:
+    entry = TS.create(root, reason="gc swap", ttl_s=60)
+    _rewrite(root, entry["id"], expires_at=1)
+    path = Path(entry["path"])
+    target = tmp_path / "outside"
+    target.mkdir()
+    _write(target / "payload", 5)
+    real_identity = TS._path_identity
+    swapped = False
+
+    def capture_then_swap(value):
+        nonlocal swapped
+        identity = real_identity(value)
+        if Path(value) == path and not swapped:
+            swapped = True
+            if replacement == "symlink":
+                shutil.rmtree(path)
+                os.symlink(target, path)
+            else:
+                path.rename(tmp_path / "original")
+                path.mkdir()
+                _write(path / "new", 1)
+        return identity
+
+    monkeypatch.setattr(TS, "_path_identity", capture_then_swap)
+    done = TS.gc(root, budget=TS.TempBudget(max_total_bytes=0), apply=True)
+    assert done["deleted"] == []
+    assert any(row["id"] == entry["id"] and row["why"] == "changed"
+               for row in done["kept"])
+    if replacement == "symlink":
+        assert path.is_symlink()
+        assert (target / "payload").is_file()
+    else:
+        assert path.is_dir()
+        assert (path / "new").is_file()
+        assert not (path / TS.MARKER_NAME).exists()
+
+
+def test_clean_legacy_refuses_a_different_inode_after_planning(
+        root: Path, tmp_path: Path, monkeypatch) -> None:
+    scan = tmp_path / "scan"
+    scan.mkdir()
+    artifact = scan / "ozagia-native-old"
+    _write(artifact / "log", 5)
+    _old(artifact)
+    real_row = TS._legacy_row
+    swapped = False
+
+    def row_then_swap(item, *, action, why):
+        nonlocal swapped
+        row = real_row(item, action=action, why=why)
+        if action == "delete" and row["path"] == str(artifact) and not swapped:
+            swapped = True
+            shutil.rmtree(artifact)
+            artifact.mkdir()
+            _write(artifact / "new", 1)
+        return row
+
+    monkeypatch.setattr(TS, "_legacy_row", row_then_swap)
+    done = TS.clean_legacy(root, roots=[scan], older_than_s=0, apply=True)
+    assert done["deleted"] == []
+    assert any(row["path"] == str(artifact) and row["why"] == "changed"
+               for row in done["kept"])
+    assert (artifact / "new").is_file()
+    assert not (artifact / TS.MARKER_NAME).exists()
+
+
+@pytest.mark.skipif(not TS._fd_delete_supported(),
+                    reason="descriptor-relative deletion is unavailable")
+def test_clean_legacy_file_and_directory_both_use_the_fd_path(
+        root: Path, tmp_path: Path) -> None:
+    scan = tmp_path / "scan"
+    scan.mkdir()
+    lock = scan / "ozagia-eval-old.sock.lock"
+    _write(lock, 5)
+    directory = scan / "ozagia-native-old"
+    _write(directory / "log", 5)
+    _old(lock)
+    _old(directory)
+
+    done = TS.clean_legacy(root, roots=[scan], older_than_s=0, apply=True)
+    assert done["method"] == "fd"
+    assert set(done["deleted"]) == {str(lock), str(directory)}
+    assert not lock.exists()
+    assert not directory.exists()
+
+
+def test_path_fallback_is_used_and_still_verifies_identity_and_marker(
+        root: Path, monkeypatch) -> None:
+    entry = TS.create(root, reason="fallback")
+    path = Path(entry["path"])
+    _write(path / "nested" / "out", 4)
+    monkeypatch.setattr(TS, "_fd_delete_supported", lambda: False)
+
+    plan = TS.clean(root, ids=[entry["id"]])
+    assert plan["method"] == "path-fallback"
+
+    with pytest.raises(OSError):
+        TS._delete_managed_tree(path, identity=(0, 0),
+                                marker_id=entry["id"])
+    assert path.is_dir()
+    with pytest.raises(OSError):
+        TS._delete_managed_tree(path, identity=TS._path_identity(path),
+                                marker_id="tmp_000000000000")
+    assert path.is_dir()
+
+    done = TS.clean(root, ids=[entry["id"]], apply=True)
+    assert done["method"] == "path-fallback"
+    assert done["deleted"] == [entry["id"]]
+    assert not path.exists()

@@ -53,9 +53,11 @@ directory and any allowed root itself, and never follows a symlink out of an
 entry.  Deletion is a dry-run plan unless ``apply=True``.  A plan records the
 entry directory's ``(st_dev, st_ino)`` and rechecks it (and the marker) just
 before deletion, so a path replaced by a symlink, another inode or a
-non-directory is kept rather than followed.  That narrows but does not close
-the name-resolution race; ``openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)`` is
-the documented future direction.
+non-directory is kept rather than followed.  Where the platform provides them,
+deletion walks relative to held directory descriptors, unlinks symlinks
+instead of traversing them and never crosses ``st_dev``.  The remaining
+name-based root open is the documented residual race; ``openat2(RESOLVE_BENEATH
+| RESOLVE_NO_SYMLINKS)`` is the future direction.
 
 The module uses the standard library only.  It does not import the target
 project or execute target code.  The read-only views do not open sockets or read
@@ -1511,6 +1513,7 @@ def release(root: str | Path, entry_id: str, *, delete: bool = False) -> dict[st
     root_path = Path(root).resolve()
     record = _read_record(root_path, _validate_id(entry_id))
     entry = _entry(root_path, record)
+    method: str | None = None
     if delete:
         if not entry["owned"]:
             raise TempPathError(
@@ -1518,6 +1521,7 @@ def release(root: str | Path, entry_id: str, *, delete: bool = False) -> dict[st
         if entry.get("leased"):
             raise TempPathError(
                 f"refusing to delete {entry['path']}: leased")
+        identity = _path_identity(entry["path"])
         safe, why = _delete_guard(root_path, entry)
         if not safe:
             if why == "missing":
@@ -1526,7 +1530,9 @@ def release(root: str | Path, entry_id: str, *, delete: bool = False) -> dict[st
                 _write_json(_record_path(root_path, entry_id), record)
                 return _entry(root_path, record)
             raise TempPathError(f"refusing to delete {entry['path']}: {why}")
-        _delete_tree(_guarded_delete_path(entry))
+        method = _delete_managed_tree(
+            _guarded_delete_path(entry), identity=identity,
+            marker_id=entry["id"])
         record.update(_cleared_usage_record())
         record.update({"state": "released", "tmpfs": None,
                        "last_used_at": int(time.time())})
@@ -1534,7 +1540,10 @@ def release(root: str | Path, entry_id: str, *, delete: bool = False) -> dict[st
         record["state"] = "released"
         record["last_used_at"] = int(time.time())
     _write_json(_record_path(root_path, entry_id), record)
-    return _entry(root_path, record)
+    result = _entry(root_path, record)
+    if method is not None:
+        result["method"] = method
+    return result
 
 
 def clean(root: str | Path, *, dry_run: bool = True, expired: bool = False,
@@ -1647,7 +1656,10 @@ def clean(root: str | Path, *, dry_run: bool = True, expired: bool = False,
             continue
         assert fresh is not None
         try:
-            _delete_tree(_guarded_delete_path(fresh))
+            _delete_managed_tree(
+                _guarded_delete_path(fresh),
+                identity=identities[entry["id"]],
+                marker_id=entry["id"])
         except OSError as exc:
             kept.append(_clean_row(entry, action="keep",
                                    why=f"delete-failed: {exc.strerror or exc}"))
@@ -1664,6 +1676,7 @@ def clean(root: str | Path, *, dry_run: bool = True, expired: bool = False,
     payload = {
         "root": str(root_path),
         "dry_run": not apply,
+        "method": _delete_method(),
         "totals": {
             "candidates": sum(1 for row in candidates),
             "deleted": len(deleted),
@@ -1737,10 +1750,15 @@ def clean_legacy(root: str | Path, *,
                 row["why"] = blocked
                 kept.append(row)
                 continue
+            identity: tuple[int, int] | None = None
+            if (isinstance(row.get("st_dev"), int)
+                    and isinstance(row.get("st_ino"), int)):
+                identity = (row["st_dev"], row["st_ino"])
             try:
                 _legacy_remove(
                     Path(row["path"]),
-                    directory=_legacy_directory_pattern(row["pattern"]))
+                    directory=_legacy_directory_pattern(row["pattern"]),
+                    identity=identity)
             except OSError as exc:
                 detail = exc.strerror or str(exc)
                 row["action"] = "keep"
@@ -1772,6 +1790,7 @@ def clean_legacy(root: str | Path, *,
     return {
         "root": str(root_path),
         "dry_run": not apply,
+        "method": _delete_method(),
         "older_than_s": older,
         "include_caches": bool(include_caches),
         "registry_written": False,
@@ -2025,7 +2044,10 @@ def gc(root: str | Path, *, budget: TempBudget | None = None,
                 continue
             assert fresh is not None
             try:
-                _delete_tree(_guarded_delete_path(fresh))
+                _delete_managed_tree(
+                    _guarded_delete_path(fresh),
+                    identity=identities.get(entry_id),
+                    marker_id=entry_id)
             except OSError as exc:
                 detail = exc.strerror or str(exc)
                 failure_reasons[entry_id] = f"delete-failed: {detail}"
@@ -2053,16 +2075,18 @@ def gc(root: str | Path, *, budget: TempBudget | None = None,
                     if reason is not None:
                         failure_reasons.setdefault(entry_id, reason)
                         continue
+                    identity = _path_identity(entry["path"])
                     fresh, reason = _gc_verify(
-                        root_path, entry,
-                        identity=_path_identity(entry["path"]),
+                        root_path, entry, identity=identity,
                         check_identity=True)
                     if reason is not None:
                         failure_reasons[entry_id] = reason
                         continue
                     assert fresh is not None
                     try:
-                        _delete_tree(_guarded_delete_path(fresh))
+                        _delete_managed_tree(
+                            _guarded_delete_path(fresh), identity=identity,
+                            marker_id=entry_id)
                     except OSError as exc:
                         detail = exc.strerror or str(exc)
                         failure_reasons[entry_id] = f"delete-failed: {detail}"
@@ -2116,6 +2140,7 @@ def gc(root: str | Path, *, budget: TempBudget | None = None,
     return {
         "root": str(root_path),
         "dry_run": not apply,
+        "method": _delete_method(),
         "budget": _budget_payload(budget),
         "older_than_s": (int(older_than_s)
                          if older_than_s is not None else None),
@@ -2587,12 +2612,17 @@ def _legacy_directory_pattern(pattern: str) -> bool:
     return pattern in LEGACY_DIR_PATTERNS or pattern in LEGACY_CACHE_PATTERNS
 
 
-def _legacy_remove(path: Path, *, directory: bool) -> None:
-    """Remove one planned artifact without following a symlink."""
+def _legacy_remove(path: Path, *, directory: bool,
+                   identity: tuple[int, int] | None = None) -> str:
+    """Remove one planned artifact without following a symlink.
+
+    Uses the descriptor-relative walk when the platform provides it and the
+    guarded path deletion otherwise.  The planned identity is always required
+    and rechecked, so a replaced artifact is refused rather than followed.
+    """
     if directory:
-        _delete_tree(path)
-    else:
-        os.unlink(path)
+        return _delete_managed_tree(path, identity=identity)
+    return _delete_file(path, identity=identity)
 
 
 def _legacy_protected(root: Path, path: Path,
@@ -2842,7 +2872,11 @@ def _is_protected(root: Path, path: Path,
 
 
 def _delete_tree(path: Path) -> None:
-    """Remove a tree without ever following a symlink."""
+    """Remove a tree without ever following a symlink.
+
+    This is the guarded path fallback.  New deletion code prefers
+    :func:`_delete_managed_tree`, which walks relative to held descriptors.
+    """
     if not os.path.lexists(path):
         return
     info = os.lstat(path)
@@ -2859,6 +2893,199 @@ def _delete_tree(path: Path) -> None:
         else:
             os.unlink(child_path)
     os.rmdir(path)
+
+
+def _fd_delete_supported() -> bool:
+    """Whether descriptor-relative open/scandir/unlink/rmdir are available."""
+    if not (hasattr(os, "O_DIRECTORY") and hasattr(os, "O_NOFOLLOW")):
+        return False
+    if os.scandir not in os.supports_fd:
+        return False
+    return all(call in os.supports_dir_fd
+               for call in (os.open, os.stat, os.unlink, os.rmdir))
+
+
+def _delete_method() -> str:
+    """The deletion mechanism this platform will use: ``fd`` or fallback."""
+    return "fd" if _fd_delete_supported() else "path-fallback"
+
+
+def _refuse_delete(path: str | Path, why: str) -> OSError:
+    return OSError(errno.EINVAL, f"refusing to delete {path}: {why}")
+
+
+def _open_dir_no_follow(path: str | Path, *,
+                        dir_fd: int | None = None) -> int:
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    return os.open(path, flags, dir_fd=dir_fd)
+
+
+def _read_marker_fd(directory_fd: int) -> dict[str, Any] | None:
+    """Read ``.ozagia-tmp.json`` relative to an open directory descriptor."""
+    flags = os.O_RDONLY | os.O_NOFOLLOW
+    try:
+        descriptor = os.open(MARKER_NAME, flags, dir_fd=directory_fd)
+    except OSError:
+        return None
+    try:
+        with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _fd_recheck_name(parent_fd: int, name: str,
+                     expected: tuple[int, int], path: Path) -> None:
+    info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    if ((int(info.st_dev), int(info.st_ino)) != expected
+            or stat.S_ISLNK(info.st_mode)):
+        raise _refuse_delete(path, "identity changed")
+
+
+def _fd_empty_tree(directory_fd: int, *, device: int, path: Path) -> None:
+    """Delete everything below an open directory, never leaving ``device``."""
+    with os.scandir(directory_fd) as iterator:
+        children = list(iterator)
+    for child in children:
+        child_path = path / child.name
+        try:
+            info = child.stat(follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        if int(info.st_dev) != device:
+            raise OSError(
+                errno.EXDEV,
+                f"refusing to cross a filesystem boundary at {child_path}")
+        mode = info.st_mode
+        if stat.S_ISDIR(mode):
+            child_fd = _open_dir_no_follow(child.name, dir_fd=directory_fd)
+            try:
+                opened = os.fstat(child_fd)
+                expected = (int(info.st_dev), int(info.st_ino))
+                if (int(opened.st_dev), int(opened.st_ino)) != expected:
+                    raise _refuse_delete(child_path, "identity changed")
+                _fd_empty_tree(child_fd, device=device, path=child_path)
+            finally:
+                os.close(child_fd)
+            try:
+                _fd_recheck_name(directory_fd, child.name, expected, child_path)
+            except FileNotFoundError:
+                continue
+            try:
+                os.rmdir(child.name, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
+        elif stat.S_ISLNK(mode) or stat.S_ISREG(mode):
+            try:
+                os.unlink(child.name, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
+        else:
+            raise OSError(
+                errno.EINVAL,
+                f"refusing to delete unexpected file type at {child_path}")
+
+
+def _fd_remove_directory(path: Path, *, identity: tuple[int, int] | None,
+                         marker_id: str | None = None) -> None:
+    """Remove a planned directory through held parent and target descriptors."""
+    if identity is None:
+        raise _refuse_delete(path, "missing planned identity")
+    parent_fd = _open_dir_no_follow(path.parent)
+    try:
+        target_fd = _open_dir_no_follow(path.name, dir_fd=parent_fd)
+        try:
+            info = os.fstat(target_fd)
+            if (int(info.st_dev), int(info.st_ino)) != identity:
+                raise _refuse_delete(path, "identity changed")
+            if marker_id is not None:
+                marker = _read_marker_fd(target_fd)
+                if marker is None or marker.get("id") != marker_id:
+                    raise _refuse_delete(path, "marker mismatch")
+            _fd_empty_tree(target_fd, device=int(info.st_dev), path=path)
+            _fd_recheck_name(parent_fd, path.name, identity, path)
+        finally:
+            os.close(target_fd)
+        try:
+            os.rmdir(path.name, dir_fd=parent_fd)
+        except FileNotFoundError:
+            pass
+    finally:
+        os.close(parent_fd)
+
+
+def _fd_remove_file(path: Path, *, identity: tuple[int, int] | None) -> None:
+    """Unlink a planned file through a held parent descriptor."""
+    if identity is None:
+        raise _refuse_delete(path, "missing planned identity")
+    parent_fd = _open_dir_no_follow(path.parent)
+    try:
+        info = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        if (int(info.st_dev), int(info.st_ino)) != identity:
+            raise _refuse_delete(path, "identity changed")
+        if not (stat.S_ISREG(info.st_mode) or stat.S_ISSOCK(info.st_mode)):
+            raise _refuse_delete(path, "not a regular file or socket")
+        os.unlink(path.name, dir_fd=parent_fd)
+    finally:
+        os.close(parent_fd)
+
+
+def _fallback_verify_directory(path: Path, *,
+                               identity: tuple[int, int] | None,
+                               marker_id: str | None = None) -> None:
+    if identity is None:
+        raise _refuse_delete(path, "missing planned identity")
+    info = _safe_lstat(path)
+    if info is None:
+        raise FileNotFoundError(errno.ENOENT, "missing path", str(path))
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise _refuse_delete(path, "changed")
+    if (int(info.st_dev), int(info.st_ino)) != identity:
+        raise _refuse_delete(path, "identity changed")
+    if marker_id is not None and not _marker_matches(path, marker_id):
+        raise _refuse_delete(path, "marker mismatch")
+
+
+def _fallback_verify_file(path: Path, *,
+                          identity: tuple[int, int] | None) -> None:
+    if identity is None:
+        raise _refuse_delete(path, "missing planned identity")
+    info = _safe_lstat(path)
+    if info is None:
+        raise FileNotFoundError(errno.ENOENT, "missing path", str(path))
+    if stat.S_ISLNK(info.st_mode):
+        raise _refuse_delete(path, "changed")
+    if (int(info.st_dev), int(info.st_ino)) != identity:
+        raise _refuse_delete(path, "identity changed")
+
+
+def _delete_managed_tree(path: Path, *, identity: tuple[int, int] | None,
+                         marker_id: str | None = None) -> str:
+    """Delete a planned directory, returning ``fd`` or ``path-fallback``.
+
+    Descriptor-relative operations are preferred.  The fallback is used only
+    when the platform lacks them, and it rechecks the planned identity and
+    marker before the guarded path deletion.
+    """
+    path = Path(path)
+    if _fd_delete_supported():
+        _fd_remove_directory(path, identity=identity, marker_id=marker_id)
+        return "fd"
+    _fallback_verify_directory(path, identity=identity, marker_id=marker_id)
+    _delete_tree(path)
+    return "path-fallback"
+
+
+def _delete_file(path: Path, *, identity: tuple[int, int] | None) -> str:
+    """Delete a planned file, returning ``fd`` or ``path-fallback``."""
+    path = Path(path)
+    if _fd_delete_supported():
+        _fd_remove_file(path, identity=identity)
+        return "fd"
+    _fallback_verify_file(path, identity=identity)
+    os.unlink(path)
+    return "path-fallback"
 
 
 def _remove_marker_and_empty_dir(path: Path, entry_id: str, *,

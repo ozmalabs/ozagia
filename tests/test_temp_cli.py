@@ -365,7 +365,7 @@ def test_clean_legacy_apply_error_reports_and_exits_one(
     _old(artifact)
     monkeypatch.setattr(TS, "allowed_temp_roots", lambda root: (scan,))
 
-    def fail(path, *, directory):
+    def fail(path, *, directory, identity=None):
         raise OSError("simulated failure")
 
     monkeypatch.setattr(TS, "_legacy_remove", fail)
@@ -584,6 +584,31 @@ def test_run_timeout_keeps_the_entry(env, capsys, monkeypatch) -> None:
     assert payload["cleaned"] is False
     assert payload["reason"] == "timeout"
     assert Path(payload["entry"]["path"]).is_dir()
+    TS.release(repo, payload["entry"]["id"], delete=True)
+
+
+def test_run_timeout_option_kills_child_keeps_entry_and_releases_lease(
+        env, capsys) -> None:
+    repo, state = env
+    code = cli.main([
+        "tmp", "run", "--reason", "sleep", "--timeout", "0.1", "--json",
+        "--", sys.executable, "-c", "import time; time.sleep(5)"])
+    assert code == 124
+    payload = _json(capsys)
+    assert payload["exit_code"] == 124
+    assert payload["kept"] is True
+    assert payload["cleaned"] is False
+    assert payload["reason"] == "timeout"
+    path = Path(payload["entry"]["path"])
+    assert path.is_dir()
+    assert TS.lease_held(repo, payload["entry"]["id"]) is False
+
+    code = cli.main(["tmp", "run", "--reason", "normal", "--json", "--",
+                     sys.executable, "-c", "pass"])
+    assert code == 0
+    normal = _json(capsys)
+    assert normal["cleaned"] is True
+    assert not Path(normal["entry"]["path"]).exists()
     TS.release(repo, payload["entry"]["id"], delete=True)
 
 
