@@ -2,7 +2,7 @@
 
 > **Generated file.** Built by `scripts/docs/generate_docs.py` from `src/ozagia/integrations/mcp/server.py`, `src/ozagia/integrations/mcp/graph_surface.py`, `src/ozagia/integrations/mcp/sre.py`, `src/ozagia/research/mcp.py` (ozagia `0.1.5.dev0`). Do not edit by hand: change the source code and regenerate.
 
-196 tools.
+200 tools.
 
 > The coding and research sets together, plus the `research_dev_context` bridge tool.
 
@@ -15,6 +15,24 @@ Deterministic architecture summary: hubs, reference cycles (Tarjan SCC), couplin
 | parameter | type | required | default | description |
 |---|---|---|---|---|
 | `top` | integer |  | 15 | — |
+### `dev_assets_list`
+
+List durable external assets recorded in the read-mostly asset catalog (datasets, models, corpora, installs, caches and tools): id, path, kind, owner, scope, source, licence, size, inodes, verification state and pin/deletion flags. Filters owner, kind, state, pinned and limit. Metadata only; no file contents. Read-only: there is no MCP register, pin, verify or delete tool.
+
+| parameter | type | required | default | description |
+|---|---|---|---|---|
+| `owner` | string |  |  | Only this owner (ozagia, ocelot, huggingface, user, upstream, external). |
+| `kind` | string |  |  | Only this kind (dataset, model, corpus, install, cache, tool, other). |
+| `state` | string |  |  | Only this state (present, missing, partial, verified, mismatch, unverified). |
+| `pinned` | boolean |  |  | Only pinned (true) or unpinned (false) assets. |
+| `limit` | integer |  | 100 | Most assets to return (at most 1000). |
+### `dev_assets_status`
+
+Durable external asset status: totals by kind, owner and state, allocated/apparent bytes and inodes, pinned/deletable counts and the largest entries. Metadata only and read-only; it never hashes, walks or deletes anything.
+
+| parameter | type | required | default | description |
+|---|---|---|---|---|
+| `top` | integer |  | 10 | Largest entries to include (at most 100). |
 ### `dev_ast`
 
 The Python AST graph for a file: structural paths (e.g. body[3].body[0].value), node types, line spans and previews. Use these paths as `target` for generic replace_node / insert_before_node / insert_after_node / delete_node / wrap_node ops.
@@ -649,6 +667,23 @@ Tests covering a file, symbol or seed. Use before changing a module/seed to know
 | parameter | type | required | default | description |
 |---|---|---|---|---|
 | `target` | string | yes |  | File path, symbol name, or seed id. |
+### `dev_tmp_list`
+
+List managed temporary-space entries: id, path, kind, session, reason, TTL/expiry, state, bytes, files and tmpfs membership. Metadata only, no file contents or prompts. Read-only: creation is the OpenCode ozagia_scratch tool, the harness or the CLI; no MCP tool creates or deletes an entry.
+
+| parameter | type | required | default | description |
+|---|---|---|---|---|
+| `kind` | string |  |  | Only this kind (scratch, agent, check, eval, engine, cache, other). |
+| `session` | string |  |  | Only entries of this harness session id. |
+| `owned` | boolean |  |  | Only owned (true) or unowned (false) entries. |
+| `include_all` | boolean |  | false | Include released/expired entries too. |
+| `limit` | integer |  | 100 | Most entries to return (at most 500). |
+### `dev_tmp_status`
+
+Managed temporary-space status: totals by kind, session and ownership, filesystem capacity and warnings, and registry errors. Metadata only and read-only; there is no MCP create, write or delete tool.
+
+Input schema: `{"type": "object", "properties": {}, "required": [], "additionalProperties": false}`
+
 ### `dev_tools`
 
 Use before PDF/document/media/browser work to see installed/missing tools and approval/install previews. Pass capabilities (pdf, ocr, office, image, audio, video, archive, diagram, data, browser, ops, design, communication; or groups documents, media, web) and/or paths whose extensions infer them. Reports the environment, managers, installed tools with versions when probed, missing tools and the package-manager commands that would install them (would_run is always false). It never installs, never uses the network and never calls a model; version and sudo probes are off by default.

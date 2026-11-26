@@ -6,9 +6,9 @@ The MCP server (`ozagia mcp` / `ozagia-mcp`) exposes the graph as tools for any 
 
 | surface | tools | page |
 |---|---|---|
-| coding (default) | 90 | [coding.md](coding.md) |
+| coding (default) | 94 | [coding.md](coding.md) |
 | research | 107 | [research.md](research.md) |
-| combined | 196 | [combined.md](combined.md) |
+| combined | 200 | [combined.md](combined.md) |
 | graph (coding/combined with `--surface graph`) | 12 | [graph.md](graph.md) |
 
 A project's `[adapters]` configuration can add further tools at runtime; those are not part of the built-in surface.

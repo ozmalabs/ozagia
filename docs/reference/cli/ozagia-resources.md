@@ -9,7 +9,7 @@ Source: `src/ozagia/resources_cli.py` (`ozagia-resources` entry point).
 read-only host resources, history and admission checks
 
 ```
-usage: ozagia-resources [-h] {status,check,history,explain} ...
+usage: ozagia-resources [-h] {status,check,history,explain,grants} ...
 ```
 
 ## `ozagia-resources status`
@@ -76,5 +76,60 @@ usage: ozagia-resources explain [-h] [--for {job,task,worktree}]
 | `--disk-mb` | float |  |  | — |
 | `--path` |  |  |  | — |
 | `--key` |  |  |  | — |
+| `--root` |  |  |  | — |
+| `--json` |  |  |  | — |
+
+## `ozagia-resources grants`
+
+```
+usage: ozagia-resources grants [-h] {list,show,check} ...
+```
+
+### `ozagia-resources grants list`
+
+```
+usage: ozagia-resources grants list [-h]
+                                    [--kind {vm,cloud,host,service,container}]
+                                    [--root ROOT] [--json]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--kind` |  |  |  | — |
+| `--root` |  |  |  | — |
+| `--json` |  |  |  | — |
+
+### `ozagia-resources grants show`
+
+```
+usage: ozagia-resources grants show [-h] [--root ROOT] [--json] id
+```
+
+| argument | type | values | required | help |
+|---|---|---|---|---|
+| `id` |  |  | yes | — |
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | — |
+| `--json` |  |  |  | — |
+
+### `ozagia-resources grants check`
+
+```
+usage: ozagia-resources grants check [-h] [--live] [--probe-versions]
+                                     [--require-ready] [--root ROOT] [--json]
+                                     id
+```
+
+| argument | type | values | required | help |
+|---|---|---|---|---|
+| `id` |  |  | yes | — |
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--live` |  |  |  | allow the injected live identity check |
+| `--probe-versions` |  |  |  | run bounded qemu/virsh --version probes |
+| `--require-ready` |  |  |  | exit 1 when the grant is not ready |
 | `--root` |  |  |  | — |
 | `--json` |  |  |  | — |

@@ -60,6 +60,12 @@ The ozagia command: the graph, the daemon, the integrations and the agent.
                        [--index] [--budget-s S] [--save] [--model-pass]
                                                   (deterministic whole-repo
                                                   review, docs/repo_review.md)
+    ozagia mesh status|peers|register|send|inbox|lease|worktree|merge|
+                 link|delegation ...
+                                                  (local session peers,
+                                                  messages, advisory leases,
+                                                  links and delegations;
+                                                  docs/session_mesh.md)
     ozagia capabilities list|show|audit [--json] [--limit N] [--cursor C]
                                                   (read-only declared
                                                   capabilities and observed
@@ -128,7 +134,8 @@ usage: ozagia agent [-h] [--workdir WORKDIR] [--prompt PROMPT |
                     [--opencode-config PATH] [--clone] [--base BASE]
                     [--keep-plugin] [--timeout TIMEOUT] [--python PYTHON]
                     [--opencode OPENCODE] [--mcp {coding,research,combined}]
-                    [--research] [--runs-dir RUNS_DIR] [--repo-map]
+                    [--research] [--runs-dir RUNS_DIR] [--no-managed-tmp]
+                    [--tmp-ttl D] [--clean-logs] [--repo-map]
                     [--repo-map-tokens N]
 ```
 
@@ -148,6 +155,9 @@ usage: ozagia agent [-h] [--workdir WORKDIR] [--prompt PROMPT |
 | `--mcp` |  |  |  | also give the session the ozagia MCP server in this mode (research: the research tools; combined: coding and research) |
 | `--research` |  | optional value |  | same as --mcp combined |
 | `--runs-dir` |  |  |  | where run roots (logs, clones) go (default: <tmp>/ozagia_agent) |
+| `--no-managed-tmp` |  |  |  | do not register the run root in the managed temp registry |
+| `--tmp-ttl` | ozagia.cli._tmp_ttl |  |  | managed run-root lifetime (default: 7 days; a bare number is days, or use an s/m/h/d suffix) |
+| `--clean-logs` |  |  |  | after a successful run with no kept clone, delete the run root and scratch workspace (default: keep the logs) |
 | `--repo-map` |  |  |  | send a bounded, task-ranked repository map in the first model request (off by default) |
 | `--repo-map-tokens` | ozagia.cli._repo_map_budget |  |  | repo-map token budget with --repo-map, 200..8000 (default: 1500) |
 
@@ -1116,7 +1126,7 @@ usage: ozagia engine [-h] {serve,token} ...
 
 ```
 usage: ozagia engine serve [-h] [--root ROOT] [--host HOST] [--port PORT]
-                           [--allow-remote]
+                           [--allow-remote] [--no-auto-known]
 ```
 
 | option | type | values | default | help |
@@ -1125,6 +1135,7 @@ usage: ozagia engine serve [-h] [--root ROOT] [--host HOST] [--port PORT]
 | `--host` |  |  | `127.0.0.1` | bind host (default: 127.0.0.1; loopback only) |
 | `--port` | int |  | 8765 | bind port (default: 8765; 0 chooses one) |
 | `--allow-remote` |  |  |  | allow a non-loopback bind; HTTP has no TLS and the caller owns the network/auth perimeter |
+| `--no-auto-known` |  |  |  | return full find/outline/context rows when a request omits known (default: remember hashes in the session and return u handles) |
 
 ### `ozagia engine token`
 
@@ -1337,3 +1348,1114 @@ usage: ozagia migration scaffold [-h] --target TARGET [--write]
 | `--base-sha` |  |  |  | refuse the write unless the target still has this sha256 |
 | `--root` |  |  |  | repository root (default: the repo root) |
 | `--json` |  |  |  | print JSON |
+
+## `ozagia tmp`
+
+```
+usage: ozagia tmp [-h]
+                  {list,status,audit,create,adopt,release,pin,unpin,touch,run,clean,gc,clean-legacy,path} ...
+```
+
+### `ozagia tmp list`
+
+```
+usage: ozagia tmp list [-h] [--root ROOT] [--json] [--all]
+                       [--kind {scratch,agent,check,eval,engine,cache,other}]
+                       [--session SESSION] [--owned | --unowned]
+                       [--sort {allocated,apparent,files,inodes,age}]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--all` |  |  |  | include released and expired records |
+| `--kind` |  |  |  | only this kind |
+| `--session` |  |  |  | only this session id, or HARNESS:ID |
+| `--owned` |  |  |  | only owned entries |
+| `--unowned` |  |  |  | only unowned entries |
+| `--sort` |  |  |  | order: largest allocated/apparent/files/inodes, or least recently used (age); default created-at |
+
+### `ozagia tmp status`
+
+```
+usage: ozagia tmp status [-h] [--root ROOT] [--json] [--top N]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--top` | int |  |  | also list the N largest entries by allocated bytes |
+
+### `ozagia tmp audit`
+
+```
+usage: ozagia tmp audit [-h] [--root ROOT] [--json]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+
+### `ozagia tmp create`
+
+```
+usage: ozagia tmp create [-h] [--root ROOT] [--json] --reason REASON
+                         [--kind {scratch,agent,check,eval,engine,cache,other}]
+                         [--session S] [--harness H] [--ttl-s TTL_S]
+                         [--path PATH] [--max-total-bytes B] [--max-inodes N]
+                         [--max-session-bytes B] [--max-session-inodes N]
+                         [--min-free B] [--model NAME] [--run-id ID]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--reason` |  |  |  | short label (at most 200 characters) |
+| `--kind` |  |  | `scratch` | — |
+| `--session` |  |  |  | session id (never invented when omitted) |
+| `--harness` |  |  |  | harness name for --session |
+| `--ttl-s` | int |  |  | expiry in seconds (60 to 90 days) |
+| `--path` |  |  |  | create at PATH instead of the default location |
+| `--max-total-bytes` | int |  |  | refuse/gc when total allocated bytes exceed B |
+| `--max-inodes` | int |  |  | refuse/gc when total inodes exceed N |
+| `--max-session-bytes` | int |  |  | refuse/gc when one session exceeds B bytes |
+| `--max-session-inodes` | int |  |  | refuse/gc when one session exceeds N inodes |
+| `--min-free` | int |  |  | refuse/gc when the filesystem has fewer than B free bytes |
+| `--model` |  |  |  | optional model label for provenance |
+| `--run-id` |  |  |  | optional run identifier for provenance |
+
+### `ozagia tmp adopt`
+
+```
+usage: ozagia tmp adopt [-h] [--root ROOT] [--json] --reason REASON
+                        [--kind {scratch,agent,check,eval,engine,cache,other}]
+                        [--session S] [--harness H] [--ttl-s TTL_S] [--owned]
+                        [--mark] [--model NAME] [--run-id ID]
+                        PATH
+```
+
+| argument | type | values | required | help |
+|---|---|---|---|---|
+| `PATH` |  |  | yes | — |
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--reason` |  |  |  | short label (at most 200 characters) |
+| `--kind` |  |  | `other` | — |
+| `--session` |  |  |  | session id (never invented when omitted) |
+| `--harness` |  |  |  | harness name for --session |
+| `--ttl-s` | int |  |  | expiry in seconds (60 to 90 days) |
+| `--owned` |  |  |  | allow cleanup of this entry |
+| `--mark` |  |  |  | write the ownership marker (needs --owned) |
+| `--model` |  |  |  | optional model label for provenance |
+| `--run-id` |  |  |  | optional run identifier for provenance |
+
+### `ozagia tmp release`
+
+```
+usage: ozagia tmp release [-h] [--root ROOT] [--json] [--delete] ID
+```
+
+| argument | type | values | required | help |
+|---|---|---|---|---|
+| `ID` |  |  | yes | — |
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--delete` |  |  |  | delete an owned, marker-matched tree |
+
+### `ozagia tmp pin`
+
+```
+usage: ozagia tmp pin [-h] [--root ROOT] [--json] [--until TIME] ID
+```
+
+| argument | type | values | required | help |
+|---|---|---|---|---|
+| `ID` |  |  | yes | — |
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--until` | ozagia.temp_cli._timestamp |  |  | optional epoch second or ISO-8601 pin metadata |
+
+### `ozagia tmp unpin`
+
+```
+usage: ozagia tmp unpin [-h] [--root ROOT] [--json] ID
+```
+
+| argument | type | values | required | help |
+|---|---|---|---|---|
+| `ID` |  |  | yes | — |
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+
+### `ozagia tmp touch`
+
+```
+usage: ozagia tmp touch [-h] [--root ROOT] [--json] ID
+```
+
+| argument | type | values | required | help |
+|---|---|---|---|---|
+| `ID` |  |  | yes | — |
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+
+### `ozagia tmp run`
+
+```
+usage: ozagia tmp run [-h] [--root ROOT] [--json] --reason REASON
+                      [--kind {scratch,agent,check,eval,engine,cache,other}]
+                      [--ttl-s TTL_S] [--keep] [--timeout S]
+                      [--max-total-bytes B] [--max-inodes N]
+                      [--max-session-bytes B] [--max-session-inodes N]
+                      [--min-free B]
+                      ...
+```
+
+| argument | type | values | required | help |
+|---|---|---|---|---|
+| `CMD` |  | the remainder | yes | command and arguments after -- |
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--reason` |  |  |  | short label (at most 200 characters) |
+| `--kind` |  |  | `scratch` | — |
+| `--ttl-s` | int |  |  | expiry in seconds (60 to 90 days) |
+| `--keep` |  |  |  | keep the entry even when the command succeeds |
+| `--timeout` | ozagia.temp_cli._positive_seconds |  |  | kill the command after S seconds (exit 124, keep the entry) |
+| `--max-total-bytes` | int |  |  | refuse/gc when total allocated bytes exceed B |
+| `--max-inodes` | int |  |  | refuse/gc when total inodes exceed N |
+| `--max-session-bytes` | int |  |  | refuse/gc when one session exceeds B bytes |
+| `--max-session-inodes` | int |  |  | refuse/gc when one session exceeds N inodes |
+| `--min-free` | int |  |  | refuse/gc when the filesystem has fewer than B free bytes |
+
+### `ozagia tmp clean`
+
+```
+usage: ozagia tmp clean [-h] [--root ROOT] [--json] [--apply] [--expired]
+                        [--older-than D] [--max-total-bytes B] [--id ID]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--apply` |  |  |  | perform the plan (the default is a dry run) |
+| `--expired` |  |  |  | select entries whose TTL has elapsed |
+| `--older-than` | ozagia.temp_cli._duration |  |  | select entries unused for D (bare = days; s/m/h/d suffixes accepted) |
+| `--max-total-bytes` | int |  |  | delete oldest eligible entries until the total is at most B bytes |
+| `--id` |  |  |  | restrict to ID (repeatable) |
+
+### `ozagia tmp gc`
+
+```
+usage: ozagia tmp gc [-h] [--root ROOT] [--json] [--apply]
+                     [--max-total-bytes B] [--max-inodes N]
+                     [--max-session-bytes B] [--max-session-inodes N]
+                     [--min-free B] [--older-than D]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--apply` |  |  |  | perform the plan (the default is a dry run) |
+| `--max-total-bytes` | int |  |  | refuse/gc when total allocated bytes exceed B |
+| `--max-inodes` | int |  |  | refuse/gc when total inodes exceed N |
+| `--max-session-bytes` | int |  |  | refuse/gc when one session exceeds B bytes |
+| `--max-session-inodes` | int |  |  | refuse/gc when one session exceeds N inodes |
+| `--min-free` | int |  |  | refuse/gc when the filesystem has fewer than B free bytes |
+| `--older-than` | ozagia.temp_cli._duration |  |  | only entries unused for D (bare = days; s/m/h/d suffixes accepted) |
+
+### `ozagia tmp clean-legacy`
+
+```
+usage: ozagia tmp clean-legacy [-h] [--root ROOT] [--json] [--apply]
+                               [--older-than D] [--include-caches]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--apply` |  |  |  | perform the plan (the default is a dry run) |
+| `--older-than` | ozagia.temp_cli._duration |  |  | only artifacts older than D (bare = days; s/m/h/d suffixes accepted; default 1 day) |
+| `--include-caches` |  |  |  | also consider regenerable benchmark cache roots |
+
+### `ozagia tmp path`
+
+```
+usage: ozagia tmp path [-h] [--root ROOT] [--json]
+                       [--kind {scratch,agent,check,eval,engine,cache,other}]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--kind` |  |  | `scratch` | — |
+
+## `ozagia assets`
+
+```
+usage: ozagia assets [-h]
+                     {list,status,scan,discover,register,adopt,verify,pin,unpin,forget,gc,policy} ...
+```
+
+### `ozagia assets list`
+
+```
+usage: ozagia assets list [-h] [--root ROOT] [--json]
+                          [--owner {ozagia,ocelot,huggingface,user,upstream,external}]
+                          [--kind {dataset,model,corpus,install,cache,tool,other}]
+                          [--state {present,missing,partial,verified,mismatch,unverified}]
+                          [--pinned]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--owner` |  |  |  | only this owner |
+| `--kind` |  |  |  | only this kind |
+| `--state` |  |  |  | only this state |
+| `--pinned` |  |  |  | only pinned assets |
+
+### `ozagia assets status`
+
+```
+usage: ozagia assets status [-h] [--root ROOT] [--json] [--path P] [--top N]
+                            [ID]
+```
+
+| argument | type | values | required | help |
+|---|---|---|---|---|
+| `ID` |  | ? | no | — |
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--path` |  |  |  | show the asset recorded at this path |
+| `--top` | ozagia.assets_cli._non_negative |  |  | also list the N largest assets |
+
+### `ozagia assets scan`
+
+```
+usage: ozagia assets scan [-h] [--root ROOT] [--json] [--path P [P ...]]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--path` |  | one or more |  | explicit path to inspect for a marker (repeatable; the home directory is refused) |
+
+### `ozagia assets discover`
+
+```
+usage: ozagia assets discover [-h] [--root ROOT] [--json] [--limit N]
+                              [--no-research]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--limit` | ozagia.assets_cli._non_negative |  |  | most candidate entries to examine |
+| `--no-research` |  |  |  | skip the research cache/fetch roots |
+
+### `ozagia assets register`
+
+```
+usage: ozagia assets register [-h] [--root ROOT] [--json] --path P
+                              --kind {dataset,model,corpus,install,cache,tool,other}
+                              --owner {ozagia,ocelot,huggingface,user,upstream,external}
+                              [--scope {user,repo,shared,system}]
+                              [--source-url URL]
+                              [--source-kind {url,huggingface,git,local,manifest,unknown}]
+                              [--dataset D] [--revision R] [--commit C]
+                              [--version V] [--sha256 S] [--license SPDX]
+                              [--pinned] [--deletable | --no-delete] [--mark]
+                              [--id ID] [--from-hf-metadata] [--reason TEXT]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--path` |  |  |  | — |
+| `--kind` |  |  |  | — |
+| `--owner` |  |  |  | — |
+| `--scope` |  |  | `user` | — |
+| `--source-url` |  |  |  | — |
+| `--source-kind` |  |  |  | — |
+| `--dataset` |  |  |  | dataset identifier (for example a Hugging Face repository) |
+| `--revision` |  |  |  | — |
+| `--commit` |  |  |  | — |
+| `--version` |  |  |  | — |
+| `--sha256` |  |  |  | explicit SHA-256 of a single file |
+| `--license` |  |  |  | explicit licence identifier; never inferred |
+| `--pinned` |  |  |  | never a GC candidate |
+| `--deletable` |  |  |  | the owner permits explicit deletion |
+| `--no-delete` |  |  |  | explicitly record that deletion is not permitted (the default) |
+| `--mark` |  |  |  | write .ozagia-asset.json (owned assets only) |
+| `--id` |  |  |  | — |
+| `--from-hf-metadata` |  |  |  | read <path>/.cache/huggingface/download/**/*.metadata for the revision and per-file etags; never opens or hashes the data |
+| `--reason` |  |  | `` | short label, never contents or secrets |
+
+### `ozagia assets adopt`
+
+```
+usage: ozagia assets adopt [-h] [--root ROOT] [--json]
+                           --kind {dataset,model,corpus,install,cache,tool,other}
+                           [--owner {ozagia,ocelot,huggingface,user,upstream,external}]
+                           [--scope {user,repo,shared,system}] [--reason TEXT]
+                           [--mark]
+                           PATH
+```
+
+| argument | type | values | required | help |
+|---|---|---|---|---|
+| `PATH` |  |  | yes | — |
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--kind` |  |  |  | — |
+| `--owner` |  |  | `ozagia` | — |
+| `--scope` |  |  | `user` | — |
+| `--reason` |  |  | `` | — |
+| `--mark` |  |  |  | write .ozagia-asset.json (owner=ozagia only) |
+
+### `ozagia assets verify`
+
+```
+usage: ozagia assets verify [-h] [--root ROOT] [--json] [--all] [--hash] [ID]
+```
+
+| argument | type | values | required | help |
+|---|---|---|---|---|
+| `ID` |  | ? | no | — |
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--all` |  |  |  | verify every asset |
+| `--hash` |  |  |  | also read and hash the file or declared digests |
+
+### `ozagia assets pin`
+
+```
+usage: ozagia assets pin [-h] [--root ROOT] [--json] ID
+```
+
+| argument | type | values | required | help |
+|---|---|---|---|---|
+| `ID` |  |  | yes | — |
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+
+### `ozagia assets unpin`
+
+```
+usage: ozagia assets unpin [-h] [--root ROOT] [--json] ID
+```
+
+| argument | type | values | required | help |
+|---|---|---|---|---|
+| `ID` |  |  | yes | — |
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+
+### `ozagia assets forget`
+
+```
+usage: ozagia assets forget [-h] [--root ROOT] [--json] ID
+```
+
+| argument | type | values | required | help |
+|---|---|---|---|---|
+| `ID` |  |  | yes | — |
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+
+### `ozagia assets gc`
+
+```
+usage: ozagia assets gc [-h] [--root ROOT] [--json] [--max-bytes B]
+                        [--max-inodes N] [--older-than D] [--apply]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--max-bytes` | ozagia.assets_cli._non_negative |  |  | — |
+| `--max-inodes` | ozagia.assets_cli._non_negative |  |  | — |
+| `--older-than` | ozagia.assets_cli._duration |  |  | only unused for D (bare = days; s/m/h/d suffixes accepted) |
+| `--apply` |  |  |  | refused in this stage; the plan is dry-run only |
+
+### `ozagia assets policy`
+
+```
+usage: ozagia assets policy [-h] [--root ROOT] [--json]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+
+## `ozagia mesh`
+
+```
+usage: ozagia mesh [-h]
+                   {status,peers,register,unregister,heartbeat,send,inbox,read,ack,lease,worktree,merge,link,delegation,ozma,prune} ...
+```
+
+### `ozagia mesh status`
+
+```
+usage: ozagia mesh status [-h] [--root ROOT] [--json] [--all] [--strict]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--all` |  |  |  | include ended, dead and foreign sessions |
+| `--strict` |  |  |  | exit 1 when a stale, dead or orphaned entry is present |
+
+### `ozagia mesh peers`
+
+```
+usage: ozagia mesh peers [-h] [--root ROOT] [--json] [--all] [--strict]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--all` |  |  |  | include ended, dead and foreign sessions |
+| `--strict` |  |  |  | exit 1 when a stale, dead or orphaned entry is present |
+
+### `ozagia mesh register`
+
+```
+usage: ozagia mesh register [-h] [--root ROOT] [--json] [--harness HARNESS]
+                            [--session SESSION] [--pid PID]
+                            [--worktree WORKTREE] [--branch BRANCH]
+                            [--exposure {none,read,coordinate,supervise}]
+                            [--source {cli,harness,model,other}]
+                            [--capability CAPABILITY]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--harness` |  |  |  | harness name (default: OZAGIA_MESH_HARNESS) |
+| `--session` |  |  |  | session id (default: OZAGIA_MESH_SESSION) |
+| `--pid` | int |  |  | — |
+| `--worktree` |  |  |  | — |
+| `--branch` |  |  |  | — |
+| `--exposure` |  |  | `none` | — |
+| `--source` |  |  | `cli` | — |
+| `--capability` |  |  |  | — |
+
+### `ozagia mesh unregister`
+
+```
+usage: ozagia mesh unregister [-h] [--root ROOT] [--json] [--harness HARNESS]
+                              [--session SESSION] [--release-leases]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--harness` |  |  |  | harness name (default: OZAGIA_MESH_HARNESS) |
+| `--session` |  |  |  | session id (default: OZAGIA_MESH_SESSION) |
+| `--release-leases` |  |  |  | release active leases held by this session |
+
+### `ozagia mesh heartbeat`
+
+```
+usage: ozagia mesh heartbeat [-h] [--root ROOT] [--json] [--harness HARNESS]
+                             [--session SESSION] [--pid PID]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--harness` |  |  |  | harness name (default: OZAGIA_MESH_HARNESS) |
+| `--session` |  |  |  | session id (default: OZAGIA_MESH_SESSION) |
+| `--pid` | int |  |  | — |
+
+### `ozagia mesh send`
+
+```
+usage: ozagia mesh send [-h] [--root ROOT] [--json] [--harness HARNESS]
+                        [--session SESSION] (--to H:S | --broadcast)
+                        --kind {hello,request,offer,accept,reject,status,release,note}
+                        --subject SUBJECT [--body BODY | --body-file F]
+                        [--in-reply-to IN_REPLY_TO] [--lease LEASE]
+                        [--ttl TTL]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--harness` |  |  |  | harness name (default: OZAGIA_MESH_HARNESS) |
+| `--session` |  |  |  | session id (default: OZAGIA_MESH_SESSION) |
+| `--to` |  |  |  | — |
+| `--broadcast` |  |  |  | — |
+| `--kind` |  |  |  | — |
+| `--subject` |  |  |  | — |
+| `--body` |  |  |  | — |
+| `--body-file` |  |  |  | — |
+| `--in-reply-to` |  |  |  | — |
+| `--lease` |  |  |  | — |
+| `--ttl` | int |  | 3600 | — |
+
+### `ozagia mesh inbox`
+
+```
+usage: ozagia mesh inbox [-h] [--root ROOT] [--json] [--harness HARNESS]
+                         [--session SESSION] [--unread] [--delegation ID]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--harness` |  |  |  | harness name (default: OZAGIA_MESH_HARNESS) |
+| `--session` |  |  |  | session id (default: OZAGIA_MESH_SESSION) |
+| `--unread` |  |  |  | — |
+| `--delegation` |  |  |  | — |
+
+### `ozagia mesh read`
+
+```
+usage: ozagia mesh read [-h] [--root ROOT] [--json] [--harness HARNESS]
+                        [--session SESSION] [--peek] [--delegation ID]
+                        msg_id
+```
+
+| argument | type | values | required | help |
+|---|---|---|---|---|
+| `msg_id` |  |  | yes | — |
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--harness` |  |  |  | harness name (default: OZAGIA_MESH_HARNESS) |
+| `--session` |  |  |  | session id (default: OZAGIA_MESH_SESSION) |
+| `--peek` |  |  |  | do not mark the message read |
+| `--delegation` |  |  |  | — |
+
+### `ozagia mesh ack`
+
+```
+usage: ozagia mesh ack [-h] [--root ROOT] [--json] [--harness HARNESS]
+                       [--session SESSION]
+                       msg_id
+```
+
+| argument | type | values | required | help |
+|---|---|---|---|---|
+| `msg_id` |  |  | yes | — |
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--harness` |  |  |  | harness name (default: OZAGIA_MESH_HARNESS) |
+| `--session` |  |  |  | session id (default: OZAGIA_MESH_SESSION) |
+
+### `ozagia mesh lease`
+
+```
+usage: ozagia mesh lease [-h] {list,status,acquire,renew,release,takeover} ...
+```
+
+#### `ozagia mesh lease list`
+
+```
+usage: ozagia mesh lease list [-h] [--root ROOT] [--json]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--all` |  |  |  | ==SUPPRESS== |
+
+#### `ozagia mesh lease status`
+
+```
+usage: ozagia mesh lease status [-h] [--root ROOT] [--json] [lease_id]
+```
+
+| argument | type | values | required | help |
+|---|---|---|---|---|
+| `lease_id` |  | ? | no | — |
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+
+#### `ozagia mesh lease acquire`
+
+```
+usage: ozagia mesh lease acquire [-h] [--root ROOT] [--json]
+                                 [--harness HARNESS] [--session SESSION]
+                                 --kind {worktree,branch,merge,path,grant,other}
+                                 --id RESOURCE --mode {read,write,merge}
+                                 [--ttl TTL] [--reason REASON]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--harness` |  |  |  | harness name (default: OZAGIA_MESH_HARNESS) |
+| `--session` |  |  |  | session id (default: OZAGIA_MESH_SESSION) |
+| `--kind` |  |  |  | — |
+| `--id` |  |  |  | — |
+| `--mode` |  |  |  | — |
+| `--ttl` | int |  | 900 | — |
+| `--reason` |  |  | `` | — |
+
+#### `ozagia mesh lease renew`
+
+```
+usage: ozagia mesh lease renew [-h] [--root ROOT] [--json] [--harness HARNESS]
+                               [--session SESSION] [--ttl TTL]
+                               lease_id
+```
+
+| argument | type | values | required | help |
+|---|---|---|---|---|
+| `lease_id` |  |  | yes | — |
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--harness` |  |  |  | harness name (default: OZAGIA_MESH_HARNESS) |
+| `--session` |  |  |  | session id (default: OZAGIA_MESH_SESSION) |
+| `--ttl` | int |  |  | — |
+
+#### `ozagia mesh lease release`
+
+```
+usage: ozagia mesh lease release [-h] [--root ROOT] [--json]
+                                 [--harness HARNESS] [--session SESSION]
+                                 [--delegation ID]
+                                 lease_id
+```
+
+| argument | type | values | required | help |
+|---|---|---|---|---|
+| `lease_id` |  |  | yes | — |
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--harness` |  |  |  | harness name (default: OZAGIA_MESH_HARNESS) |
+| `--session` |  |  |  | session id (default: OZAGIA_MESH_SESSION) |
+| `--delegation` |  |  |  | — |
+
+#### `ozagia mesh lease takeover`
+
+```
+usage: ozagia mesh lease takeover [-h] [--root ROOT] [--json]
+                                  [--harness HARNESS] [--session SESSION]
+                                  [--confirm] --reason REASON [--ttl TTL]
+                                  lease_id
+```
+
+| argument | type | values | required | help |
+|---|---|---|---|---|
+| `lease_id` |  |  | yes | — |
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--harness` |  |  |  | harness name (default: OZAGIA_MESH_HARNESS) |
+| `--session` |  |  |  | session id (default: OZAGIA_MESH_SESSION) |
+| `--confirm` |  |  |  | required; takeover is deliberately explicit |
+| `--reason` |  |  |  | — |
+| `--ttl` | int |  | 900 | — |
+
+### `ozagia mesh worktree`
+
+```
+usage: ozagia mesh worktree [-h] {request,offer} ...
+```
+
+#### `ozagia mesh worktree request`
+
+```
+usage: ozagia mesh worktree request [-h] [--root ROOT] [--json]
+                                    [--harness HARNESS] [--session SESSION]
+                                    [--branch BRANCH] [--path PATH]
+                                    [--reason REASON]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--harness` |  |  |  | harness name (default: OZAGIA_MESH_HARNESS) |
+| `--session` |  |  |  | session id (default: OZAGIA_MESH_SESSION) |
+| `--branch` |  |  |  | — |
+| `--path` |  |  |  | — |
+| `--reason` |  |  | `` | — |
+
+#### `ozagia mesh worktree offer`
+
+```
+usage: ozagia mesh worktree offer [-h] [--root ROOT] [--json]
+                                  [--harness HARNESS] [--session SESSION]
+                                  [--branch BRANCH] [--path PATH] [--lease]
+                                  [--to H:S | --broadcast]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--harness` |  |  |  | harness name (default: OZAGIA_MESH_HARNESS) |
+| `--session` |  |  |  | session id (default: OZAGIA_MESH_SESSION) |
+| `--branch` |  |  |  | — |
+| `--path` |  |  |  | — |
+| `--lease` |  |  |  | also acquire read leases |
+| `--to` |  |  |  | — |
+| `--broadcast` |  |  |  | — |
+
+### `ozagia mesh merge`
+
+```
+usage: ozagia mesh merge [-h] {request} ...
+```
+
+#### `ozagia mesh merge request`
+
+```
+usage: ozagia mesh merge request [-h] [--root ROOT] [--json]
+                                 [--harness HARNESS] [--session SESSION]
+                                 --target BRANCH|PATH [--ttl TTL]
+                                 [--reason REASON]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--harness` |  |  |  | harness name (default: OZAGIA_MESH_HARNESS) |
+| `--session` |  |  |  | session id (default: OZAGIA_MESH_SESSION) |
+| `--target` |  |  |  | — |
+| `--ttl` | int |  | 900 | — |
+| `--reason` |  |  | `` | — |
+
+### `ozagia mesh link`
+
+```
+usage: ozagia mesh link [-h] {request,accept,decline,revoke,list,show} ...
+```
+
+#### `ozagia mesh link request`
+
+```
+usage: ozagia mesh link request [-h] [--root ROOT] [--json]
+                                [--harness HARNESS] [--session SESSION]
+                                --to H:S --relation {peer,sub,super}
+                                [--ttl TTL] [--reason REASON]
+                                [--idempotency-key K]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--harness` |  |  |  | harness name (default: OZAGIA_MESH_HARNESS) |
+| `--session` |  |  |  | session id (default: OZAGIA_MESH_SESSION) |
+| `--to` |  |  |  | — |
+| `--relation` |  |  |  | — |
+| `--ttl` | int |  | 3600 | — |
+| `--reason` |  |  | `` | — |
+| `--idempotency-key` |  |  |  | — |
+
+#### `ozagia mesh link accept`
+
+```
+usage: ozagia mesh link accept [-h] [--root ROOT] [--json] [--harness HARNESS]
+                               [--session SESSION]
+                               link_id
+```
+
+| argument | type | values | required | help |
+|---|---|---|---|---|
+| `link_id` |  |  | yes | — |
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--harness` |  |  |  | harness name (default: OZAGIA_MESH_HARNESS) |
+| `--session` |  |  |  | session id (default: OZAGIA_MESH_SESSION) |
+
+#### `ozagia mesh link decline`
+
+```
+usage: ozagia mesh link decline [-h] [--root ROOT] [--json]
+                                [--harness HARNESS] [--session SESSION]
+                                [--reason REASON]
+                                link_id
+```
+
+| argument | type | values | required | help |
+|---|---|---|---|---|
+| `link_id` |  |  | yes | — |
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--harness` |  |  |  | harness name (default: OZAGIA_MESH_HARNESS) |
+| `--session` |  |  |  | session id (default: OZAGIA_MESH_SESSION) |
+| `--reason` |  |  | `` | — |
+
+#### `ozagia mesh link revoke`
+
+```
+usage: ozagia mesh link revoke [-h] [--root ROOT] [--json] [--harness HARNESS]
+                               [--session SESSION] [--reason REASON]
+                               link_id
+```
+
+| argument | type | values | required | help |
+|---|---|---|---|---|
+| `link_id` |  |  | yes | — |
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--harness` |  |  |  | harness name (default: OZAGIA_MESH_HARNESS) |
+| `--session` |  |  |  | session id (default: OZAGIA_MESH_SESSION) |
+| `--reason` |  |  | `` | — |
+
+#### `ozagia mesh link list`
+
+```
+usage: ozagia mesh link list [-h] [--root ROOT] [--json]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+
+#### `ozagia mesh link show`
+
+```
+usage: ozagia mesh link show [-h] [--root ROOT] [--json] link_id
+```
+
+| argument | type | values | required | help |
+|---|---|---|---|---|
+| `link_id` |  |  | yes | — |
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+
+### `ozagia mesh delegation`
+
+```
+usage: ozagia mesh delegation [-h] {grant,revoke,list,show} ...
+```
+
+#### `ozagia mesh delegation grant`
+
+```
+usage: ozagia mesh delegation grant [-h] [--root ROOT] [--json]
+                                    [--harness HARNESS] [--session SESSION]
+                                    --to H:S
+                                    --action {lease_release,mailbox_read,merge_on_behalf}
+                                    [--lease ID] [--mailbox] [--ttl TTL]
+                                    [--max-uses MAX_USES] [--reason REASON]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--harness` |  |  |  | harness name (default: OZAGIA_MESH_HARNESS) |
+| `--session` |  |  |  | session id (default: OZAGIA_MESH_SESSION) |
+| `--to` |  |  |  | — |
+| `--action` |  |  |  | — |
+| `--lease` |  |  |  | — |
+| `--mailbox` |  |  |  | — |
+| `--ttl` | int |  | 3600 | — |
+| `--max-uses` | int |  | 1 | — |
+| `--reason` |  |  | `` | — |
+
+#### `ozagia mesh delegation revoke`
+
+```
+usage: ozagia mesh delegation revoke [-h] [--root ROOT] [--json]
+                                     [--harness HARNESS] [--session SESSION]
+                                     [--reason REASON]
+                                     delegation_id
+```
+
+| argument | type | values | required | help |
+|---|---|---|---|---|
+| `delegation_id` |  |  | yes | — |
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--harness` |  |  |  | harness name (default: OZAGIA_MESH_HARNESS) |
+| `--session` |  |  |  | session id (default: OZAGIA_MESH_SESSION) |
+| `--reason` |  |  | `` | — |
+
+#### `ozagia mesh delegation list`
+
+```
+usage: ozagia mesh delegation list [-h] [--root ROOT] [--json]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+
+#### `ozagia mesh delegation show`
+
+```
+usage: ozagia mesh delegation show [-h] [--root ROOT] [--json] delegation_id
+```
+
+| argument | type | values | required | help |
+|---|---|---|---|---|
+| `delegation_id` |  |  | yes | — |
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+
+### `ozagia mesh ozma`
+
+```
+usage: ozagia mesh ozma [-h] {status,map,check} ...
+```
+
+#### `ozagia mesh ozma status`
+
+```
+usage: ozagia mesh ozma status [-h] [--root ROOT] [--json] [--harness HARNESS]
+                               [--session SESSION]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--harness` |  |  |  | harness name (default: OZAGIA_MESH_HARNESS) |
+| `--session` |  |  |  | session id (default: OZAGIA_MESH_SESSION) |
+
+#### `ozagia mesh ozma map`
+
+```
+usage: ozagia mesh ozma map [-h] [--root ROOT] [--json] [--harness HARNESS]
+                            [--session SESSION] [--save]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--harness` |  |  |  | harness name (default: OZAGIA_MESH_HARNESS) |
+| `--session` |  |  |  | session id (default: OZAGIA_MESH_SESSION) |
+| `--save` |  |  |  | write the local mapping record |
+
+#### `ozagia mesh ozma check`
+
+```
+usage: ozagia mesh ozma check [-h] [--root ROOT] [--json] [--harness HARNESS]
+                              [--session SESSION] [--require-ready] [--live]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--harness` |  |  |  | harness name (default: OZAGIA_MESH_HARNESS) |
+| `--session` |  |  |  | session id (default: OZAGIA_MESH_SESSION) |
+| `--require-ready` |  |  |  | exit 1 when the configured mode is not ready |
+| `--live` |  |  |  | request a live check; unavailable in this slice and never contacts the network |
+
+### `ozagia mesh prune`
+
+```
+usage: ozagia mesh prune [-h] [--root ROOT] [--json] [--harness HARNESS]
+                         [--session SESSION] (--expired |
+                         --delivered-before S) [--apply]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--harness` |  |  |  | harness name (default: OZAGIA_MESH_HARNESS) |
+| `--session` |  |  |  | session id (default: OZAGIA_MESH_SESSION) |
+| `--expired` |  |  |  | — |
+| `--delivered-before` | float |  |  | — |
+| `--apply` |  |  |  | delete the planned messages |
+| `--root-ignored` |  |  |  | ==SUPPRESS== |
