@@ -71,15 +71,52 @@ Rules:
 - Layer 2/3 tool calls are rate-limited and bounded; a loop or repeated
   negotiation is reported, not amplified.
 
-### Topology
+### Topology and link grammar
 
-- A registration may carry `role` (`peer`, `sub`, `super`) and `parent` only
-  after a link handshake; the default is an unlinked peer.
-- Topology is **advisory**: no leader is elected, no lease authority flows from
-  a role, and a session that ignores its super is still governed by policy.
-- A sub can leave a link at any time. A super losing its sub sees `unlinked`
-  and a stale marker, not a dead session.
+- `role` is **derived from accepted links**, not set at registration. The
+  default is an unlinked `peer`.
+- A link is a 1:1 edge, not a global hierarchy. Multiple edges form a forest or
+  DAG; no leader is elected and no lease authority flows from a link.
+- Command shape: `mesh link request|accept|decline|revoke|list|show`.
+  `--relation peer|sub|super` is from the requester's perspective: `sub` means
+  the requester is subordinate to the target, `super` means the reverse.
+- Link record: `link_id`, `from`, `to`, `relation`, `state`
+  (`pending|active|declined|revoked|expired|stale`), `created_at`,
+  `accepted_at`, `expires_at`, `revoked_at`, `capabilities`, `reason`,
+  `delegation?`, bounded `history`.
+- `accept` is mandatory before either registration's role/parent changes.
+  `decline` ends a pending request; `revoke` is a unilateral exit. A stale link
+  is reported `stale`, not `dead`; re-linking requires a new request/accept.
+- A link never releases a lease, reads a mailbox, authorizes a merge or permits
+  takeover. Delegation is a separate, bounded, revocable record granted by the
+  resource/mailbox owner to a linked peer.
 - Broadcasts go to live linked peers/subs/supers, never to a global list.
+- The Rust `ozma-mesh` build is a WireGuard overlay, not this coordination
+  protocol. Its peer/role-less `MeshNode` and signed advertisement are not
+  agent identity or link authority; only its transport/discovery/diagnostics
+  may be reused behind an explicit adapter.
+
+### Links and delegation records
+
+```
+<state>/mesh/<mesh_id>/links/lnk_<16hex>.json
+<state>/mesh/<mesh_id>/delegations/dlg_<16hex>.json
+```
+
+Delegation actions are a closed set (`lease_release`, `mailbox_read`,
+`merge_on_behalf`), scoped to an exact lease/resource or mailbox, with
+`expires_at`, `max_uses`, `used` and a revoke history. Only the holder/owner can
+grant it; a super cannot grant rights over a sub's lease or mailbox. Role alone
+never satisfies an access check.
+
+## Next: Ozma mesh bridge
+
+The local mesh is the source of truth. After the core and model layers, the
+[Ozma mesh bridge](2026-11-26_ozma_mesh_bridge.md) maps flights of Ozagia
+agents to Ozma `COORDINATION`: agent identity/cards, typed messages, claims,
+channels, subscriptions, inbox, blockers, wake modes and the A2A adapter. The
+bridge translates; it does not reimplement Ozma or make remote claims
+authoritative.
 
 ## Model
 
@@ -165,9 +202,9 @@ session/ownership, harness result shapes, MCP/add-in surfaces and the state
 layout. Produce the exact envelope/lease schemas, lock path, stale thresholds
 and the CLI names. No edits.
 
-### B — core mesh registry, messages and leases
+### B1 — core mesh registry, messages and leases
 
-Add `src/ozagia/core/mesh.py` and `src/ozagia/mesh_cli.py`:
+Implemented in `src/ozagia/core/mesh.py`, `src/ozagia/mesh_cli.py`:
 
 - `register/unregister/heartbeat/peers/status` with PID/heartbeat liveness;
 - `send/inbox/read/ack` with bounded bodies, redaction, expiry and
@@ -179,11 +216,30 @@ Add `src/ozagia/core/mesh.py` and `src/ozagia/mesh_cli.py`:
   with `--json`, stable exit codes, no network.
 - State under `<state>/mesh/`; atomic writes, 0700 dirs/0600 files; no
   credentials, source text or large bodies.
+- `role` is always `peer` and `links` is empty in this slice.
 
 Acceptance: two synthetic sessions register; one sends a message and the
 other reads it; a worktree lease held by A refuses B until release; an expired
 lease is reported and can be taken over; a merge lease is exclusive; no
 cross-mesh message/lease is visible.
+
+### B2 — links, dynamic sub/peer/super and delegation
+
+Add link and delegation records plus `mesh link request|accept|decline|revoke|
+list|show` and `mesh delegation grant|revoke|list|show`:
+
+- reciprocal role derivation after `accept`;
+- pending/active/declined/revoked/expired/stale states and TTL/stale reporting;
+- idempotent request/accept/revoke and `link_conflict` for incompatible
+  concurrent requests;
+- a link never confers lease/mailbox/merge authority; delegation is separate,
+  scoped, expiring and max-use bounded;
+- `role` remains a derived display value; a session with no link is `peer`.
+
+Acceptance: A requests `sub` of B, B accepts, both registrations show the
+reciprocal relation; A cannot release B's lease or read B's mailbox without a
+delegation; either side can revoke; a stale link is not `dead`; a second
+incompatible link is refused; cross-mesh links are invisible.
 
 ### C — harness and read-only model awareness (layer 0–1)
 
@@ -216,19 +272,6 @@ cross-mesh message/lease is visible.
 - Safety: local-only, mesh id opt-in, bounded rate/queue, redaction, no
   credentials, no target execution, no model self-approval, no conscription.
   A merge lease is advisory; existing policy/approval remains authoritative.
-
-- Read-only MCP `dev_mesh_status`/`dev_mesh_inbox`; no send/lease/release over
-  MCP until an explicit host-confirmation surface exists.
-- Optional daemon `mesh` op for peers/leases/messages; filesystem operation
-  remains the fallback.
-- TUI/status shows live peers, active leases, queued requests, stale sessions
-  and orphaned leases.
-- Safety: local-only, mesh id opt-in, bounded rate/queue, redaction, no
-  credentials, no target execution, no model self-approval. A merge lease is
-  advisory; existing policy/approval remains authoritative.
-- Tests for two-process/multi-session runs, stale takeover, message expiry,
-  queue promotion, no cross-mesh leakage, secret canary absence and merge
-  serialization.
 
 ## Safety rules
 

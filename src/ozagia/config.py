@@ -616,6 +616,7 @@ _OWNED_SECTIONS = {
     "tasks": "read by the bounded-task modules",
     "tools": "read by ozagia.core.toolchain",
     "secrets": "read by ozagia.core.secrets",
+    "mesh": "read by ozagia.core.mesh",
 }
 
 #: Individual registry keys another module reads, or with no mapping.

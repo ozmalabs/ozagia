@@ -544,7 +544,13 @@ capacity check.
 [session-mesh plan](plans/2026-11-26_session_mesh.md) defines local peer
 discovery, bounded messages and worktree/branch/merge leases with no leader.
 The merge lease is advisory; existing worktree/commit/merge policy remains
-authoritative. It is planned, not implemented.
+authoritative. The core filesystem slice is in progress.
+
+An [Ozma mesh bridge plan](plans/2026-11-26_ozma_mesh_bridge.md) follows it:
+flights of agents join the documented Ozma `COORDINATION` mesh through typed
+message/claim/channel/inbox mapping and an optional A2A adapter. It is planned,
+not implemented; remote claims and wake modes remain advisory and
+host-approved.
 
 **Implementation status (2026-11-26, external assets).** The
 [external-assets plan](plans/2026-11-26_external_assets.md) is implemented as
@@ -723,6 +729,11 @@ targets under explicit approval, with audit, redaction and rollback.
 - Make live-state snapshots, diff and resume summaries usable end to end.
 - Ensure secrets used by live actions resolve by reference only and never
   appear in receipts, traces or model messages.
+- Bridge the local session mesh to the documented Ozma `COORDINATION` mesh for
+  flights of agents: identity/cards, typed messages, advisory claims, channels,
+  subscriptions, inbox dedupe, blockers and host-approved wake modes. Native
+  Ozma transport first; A2A is a lossy interop adapter. Claims and merge leases
+  remain advisory, and no model may self-approve wake, claim, merge or admin.
 
 **Exit criteria**
 

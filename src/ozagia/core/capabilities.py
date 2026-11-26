@@ -379,6 +379,7 @@ _DOCS = {
     "eval_agent": "doc:docs/eval_agent.md",
     "eval_retrieval": "doc:docs/eval_retrieval.md",
     "temp": "doc:docs/temp.md",
+    "mesh": "doc:docs/session_mesh.md",
     "assets": "doc:docs/assets.md",
     "install": "doc:docs/install.md",
 }
@@ -449,6 +450,8 @@ _TESTS = {
     "temp_space": "test:tests/test_temp_space.py",
     "temp_cli": "test:tests/test_temp_cli.py",
     "daemon_tmp": "test:tests/test_daemon_tmp.py",
+    "mesh": "test:tests/test_mesh.py",
+    "mesh_cli": "test:tests/test_mesh_cli.py",
     "assets": "test:tests/test_assets.py",
     "assets_discovery": "test:tests/test_assets_discovery.py",
     "assets_cli": "test:tests/test_assets_cli.py",
@@ -1527,6 +1530,38 @@ _BUILTIN_DEFINITIONS: tuple[dict[str, Any], ...] = (
         authorization=_STATE,
         tests=_tests("temp_space", "temp_cli", "daemon_tmp"),
         docs=_docs("temp"),
+    ),
+    _def(
+        id="cap:mesh.registry",
+        domain="actions",
+        purpose=("Register local sessions, exchange bounded redacted messages "
+                 "and coordinate advisory worktree, branch and merge leases "
+                 "through the repository state directory."),
+        owner="ozagia.core.mesh",
+        side_effect="write",
+        exposure=["cli"],
+        impl=["impl:ozagia.core.mesh.register",
+              "impl:ozagia.core.mesh.send",
+              "impl:ozagia.core.mesh.lease_acquire",
+              "impl:ozagia.core.mesh.worktree_request",
+              "impl:ozagia.core.mesh.merge_request",
+              "impl:ozagia.mesh_cli.run"],
+        surfaces=["cli:ozagia.mesh"],
+        prerequisites=["a repository root and a writable state directory",
+                       "a cooperative local session identity"],
+        limits=["local filesystem only; no network or federation",
+                "leases are advisory; worktree/commit/merge policy still "
+                "decides whether an operation is allowed",
+                "messages are bounded and redacted; no prompts or file "
+                "contents",
+                "mailboxes, queues and TTLs are bounded",
+                "no model may approve a takeover, merge exception or grant",
+                "merge request never runs git merge or policy checks"],
+        authorization=("session registration is local; sends and lease "
+                       "mutations require exposure=coordinate; register "
+                       "defaults to exposure=none"),
+        tests=_tests("mesh", "mesh_cli"),
+        docs=_docs("mesh"),
     ),
     # toolchain ------------------------------------------------------------
     _def(

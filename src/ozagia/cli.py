@@ -53,6 +53,10 @@
                        [--index] [--budget-s S] [--save] [--model-pass]
                                                   (deterministic whole-repo
                                                   review, docs/repo_review.md)
+    ozagia mesh status|peers|register|send|inbox|lease|worktree|merge ...
+                                                  (local session peers,
+                                                  messages and advisory leases;
+                                                  docs/session_mesh.md)
     ozagia capabilities list|show|audit [--json] [--limit N] [--cursor C]
                                                   (read-only declared
                                                   capabilities and observed
@@ -1900,6 +1904,8 @@ def build_parser() -> argparse.ArgumentParser:
     _temp_parser(sub)
     from ozagia.assets_cli import add_parser as _assets_parser
     _assets_parser(sub)
+    from ozagia.mesh_cli import add_parser as _mesh_parser
+    _mesh_parser(sub)
     return p
 
 
@@ -1945,7 +1951,7 @@ _COMMANDS = frozenset({"index", "agent", "install", "who", "replace",
                        "review-repo", "goal", "capabilities", "engine",
                        "profile-run", "task-preflight", "overview", "shape",
                        "languages", "supply-chain", "migration", "tmp",
-                       "assets", *DELEGATES})
+                       "assets", "mesh", *DELEGATES})
 # Agent options that may lead a bare `ozagia ...` (the TUI).
 _AGENT_FLAGS = frozenset({"--research", "--mcp", "--model", "-m", "--workdir",
                           "--root", "--clone", "--prompt", "--prompt-file",
@@ -2060,6 +2066,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "assets":
         from ozagia.assets_cli import run as _assets_run
         return _assets_run(args)
+    if args.command == "mesh":
+        from ozagia.mesh_cli import run as _mesh_run
+        return _mesh_run(args)
     parser.error(f"unknown command {args.command}")  # pragma: no cover
     return 2
 
