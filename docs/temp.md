@@ -230,6 +230,17 @@ whatever ran in the directory.
 * Directory and symlink `st_size` values are not added to byte totals; those
   entries contribute inodes only.
 
+## Not temp: external assets
+
+Durable datasets, model weights/metadata, corpora, installed checkouts and
+long-lived caches are **not** temp entries.  `ozagia tmp audit`, `clean`,
+`clean-legacy` and `gc` only consider the known temp roots and the managed
+registry; they must not adopt or delete an external asset.  Ocelot's own data
+(for example a Wikipedia parquet set) is external/unowned and is never a temp
+candidate.  See the
+[external-assets plan](plans/2026-11-26_external_assets.md) and the
+[prior-art survey](research/temp_managers.md).
+
 `/tmp` remains ephemeral.  Use `ozagia tmp path` (or the `default_scratch_root`
 API) to place work under the state directory when it must outlive a boot or a
 container, and use `adopt` only for paths whose lifetime you do not control.

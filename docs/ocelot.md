@@ -76,6 +76,12 @@ archive metadata, install time, licence and every extracted file with its
 SHA-256 and size. A single top-level directory in the archive is stripped, so
 the version directory is the checkout root.
 
+Ocelot may use its own reference data (for example a Wikipedia parquet set) or
+its own caches. Ozagia does not create, download, adopt or delete that data,
+and it does not infer ownership from a `*.parquet` name. The
+[external-assets plan](plans/2026-11-26_external_assets.md) records such data
+as a read-only `owner=ocelot` asset if it is registered explicitly.
+
 The archive is checked before extraction. Extraction runs into a temporary
 directory on the same filesystem and is renamed into place only after the
 manifest is written. A failed download, mismatch, unsafe member or failed

@@ -497,6 +497,11 @@ real fixtures, provenance-preserving and still opt-in.
   - multi-service fixture proving endpoint → schema → consumer → test
     traceability, freshness after edits and checkout changes, and explicit
     unknowns.
+- External reference assets: catalog datasets, model weights/metadata,
+  corpora, installed checkouts and long-lived caches with owner, scope,
+  source/revision, checksum, licence, size/inodes, pinning and an explicit
+  GC policy. Ocelot's own data (for example a Wikipedia parquet set) is
+  external/unowned and must never be treated as temp or deleted by default.
 - Expand shell/task intent linking and richer paired usefulness evaluation from
   the OpenCode intent plan.
 - Orientation reference: one deterministic repository-shape page
@@ -506,6 +511,14 @@ real fixtures, provenance-preserving and still opt-in.
   target. A separate observed environment block keeps git/snapshot/cache facts
   out of the stable hash and `--check`. For this repository it is generated as
   `REPO_SHAPE.md`.
+
+**Implementation status (2026-11-26, external assets).** A separate
+[external-assets plan](plans/2026-11-26_external_assets.md) covers durable
+datasets, model weights/metadata, corpora, installs and caches. Existing
+components already keep manifests (Ocelot install, HF benchmark revision,
+deep-review corpus, model metadata), but there is no shared catalog, pinning
+or safe GC policy. Ocelot-owned data such as a Wikipedia parquet set is
+explicitly read-only/external; this is planned, not implemented.
 
 **Implementation status (2026-11-25):** the first version-aware federation slice
 landed as declared dependency links: `ozagia federation check` and
