@@ -1,9 +1,10 @@
 # Temporary-space improvements
 
-Status: implemented A-C (2026-11-26), except the residual path-resolution
-window. Follows [the prior-art survey](../research/temp_managers.md) and the
-first `ozagia tmp` slice. Execution was split into three sequential
-agent-sized stages so each stage could be reviewed and tested on its own.
+Status: implemented A-C (2026-11-26); Stage D (descriptor-relative deletion
+and `tmp run --timeout`) is active. Follows
+[the prior-art survey](../research/temp_managers.md) and the first `ozagia tmp`
+slice. Execution was split into sequential agent-sized stages so each stage
+could be reviewed and tested on its own.
 
 ## Goal
 
@@ -107,6 +108,24 @@ stays until unpinned.
 Acceptance: `tmp run -- sh -c 'printf ok > "$TMPDIR/probe"'` creates and
 removes its workspace; a tagged cache is reported but never cleaned by the
 legacy path; a symlink swapped after planning is refused at apply time.
+
+## Stage D — close the deletion race
+
+1. Replace the final path-based `shutil.rmtree`/`unlink` step with a
+   descriptor-relative walk where the platform supports it:
+   - open the parent and target with `O_DIRECTORY|O_NOFOLLOW`, verify the
+     recorded `st_dev`/`st_ino`, then recurse with `os.scandir(fd)`,
+     `os.open(name, O_DIRECTORY|O_NOFOLLOW, dir_fd=fd)`,
+     `os.unlink(name, dir_fd=fd)` and `os.rmdir(name, dir_fd=fd)`;
+   - unlink symlinks rather than following them; never cross `st_dev`;
+   - fall back to the current guarded path deletion only when descriptor
+     operations are unavailable, and report which method was used.
+2. Add `ozagia tmp run --timeout S`; a timeout keeps the entry, releases the
+   lease and exits 124.
+3. Tests: a symlink swapped in a subdirectory during deletion is unlinked,
+   not followed; a path swapped at the root is refused; nested directories
+   delete correctly; the timeout path keeps the entry.
+4. Document the method and the residual platform/fallback limits.
 
 ## Sequencing
 
