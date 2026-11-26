@@ -352,3 +352,28 @@ reported 959 untracked artifacts (about 60 MB) — 876
 audit is why the command exists; it is not a promise that every one of those
 paths will be deleted.  Recent, held, live, registered, protected, cache and
 unknown paths deliberately remain.
+
+## Prior art
+
+[Prior art for temporary-space management](research/temp_managers.md) surveys
+the systems this design borrows from:
+
+- **systemd-tmpfiles / tmpwatch / tmpreaper** — age from mtime/atime/ctime,
+  explicit `x`/`X` excludes, `flock` liveness, `--test`, no-follow and
+  no-cross-filesystem deletion;
+- **systemd unit directories** — runtime state tied to a service lifetime, and
+  separate state/cache/logs directories;
+- **OpenCode tool-output** — bounded model-visible output with a temporary
+  spill file and a retention period;
+- **ccache/sccache, Bazel, BuildKit, Gradle, package managers and Nix** —
+  size ceilings, LRU/use-recency, ordered GC policies, reference-aware
+  mark-and-sweep and per-manager cleanup;
+- **restic/borg and journald** — explicit retention policies and separate
+  cheap-forget from expensive-prune/compact;
+- **ncdu/agedu** — allocated versus apparent size, hard links, inodes and
+  age-by-size discovery.
+
+The survey's main gaps for this implementation are recorded there: allocated
+bytes and inodes are not yet reported, there is no lease or per-session size
+budget, and cleanup is still an explicit command rather than an idle/end-of-
+session hook.  Those are design inputs, not claims about the current code.

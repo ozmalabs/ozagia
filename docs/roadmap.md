@@ -434,6 +434,11 @@ provenance and a safe cleanup path:
   conservative `clean-legacy` path requires an explicit `--apply`.
 - The native Desktop dialog and the scratch tool are offline-tested; live
   Desktop verification remains open.
+- A [prior-art survey](research/temp_managers.md) compares systemd-tmpfiles,
+  tmpwatch/tmpreaper, OpenCode tool-output, ccache/Bazel/BuildKit/Gradle,
+  package managers, Nix, restic/borg and journald. Its main open lessons are
+  allocated-byte/inode accounting, `flock` leases, size/inode budgets and an
+  idle/end-of-session GC hook.
 
 Still open in 0.3: live host verification of the native dialog and
 revoke/expiry flow; live Codex, Kiro and Claude Code sessions to verify the
