@@ -36,21 +36,60 @@ def analyze(path: str, text: str) -> list[dict]:
     parents = {child: parent for parent in ast.walk(tree)
                for child in ast.iter_child_nodes(parent)}
     results = []
-    shadowed = set()
+    broad_names = {"Exception", "BaseException"}
+
+    def bindings(statements, parameters=()):
+        """Collect bindings in one lexical scope, excluding nested scopes."""
+        names = {arg.arg for arg in parameters}
+        pending = list(statements)
+        while pending:
+            node = pending.pop()
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                 ast.ClassDef)):
+                names.add(node.name)
+                # Decorators/defaults execute in the enclosing scope; bodies
+                # have their own namespace and must not leak into this one.
+                pending.extend(node.decorator_list)
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    pending.extend(value for value in
+                                   node.args.defaults + node.args.kw_defaults
+                                   if value is not None)
+                    pending.extend(arg.annotation for arg in node.args.posonlyargs +
+                                   node.args.args + node.args.kwonlyargs
+                                   if arg.annotation is not None)
+                    if node.args.vararg and node.args.vararg.annotation:
+                        pending.append(node.args.vararg.annotation)
+                    if node.args.kwarg and node.args.kwarg.annotation:
+                        pending.append(node.args.kwarg.annotation)
+                continue
+            if isinstance(node, ast.Lambda):
+                continue
+            if isinstance(node, ast.Name) and isinstance(
+                    node.ctx, (ast.Store, ast.Del)):
+                names.add(node.id)
+            elif isinstance(node, ast.arg):
+                names.add(node.arg)
+            elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                for alias in node.names:
+                    if alias.name == "*":
+                        names.update(broad_names)
+                    else:
+                        names.add(alias.asname or
+                                  (alias.name.split(".")[0]
+                                   if isinstance(node, ast.Import)
+                                   else alias.name))
+            pending.extend(ast.iter_child_nodes(node))
+        return names & broad_names
+
+    module_shadowed = bindings(tree.body)
+    scope_shadowed = {}
     for node in ast.walk(tree):
-        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
-            if node.id in {"Exception", "BaseException"}:
-                shadowed.add(node.id)
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            if node.name in {"Exception", "BaseException"}:
-                shadowed.add(node.name)
-        elif isinstance(node, (ast.Import, ast.ImportFrom)):
-            for alias in node.names:
-                bound = alias.asname or (alias.name.split(".")[0]
-                                         if isinstance(node, ast.Import)
-                                         else alias.name)
-                if bound in {"Exception", "BaseException"} or alias.name == "*":
-                    shadowed.update({"Exception", "BaseException"})
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            args = node.args
+            parameters = (args.posonlyargs + args.args + args.kwonlyargs +
+                          ([args.vararg] if args.vararg else []) +
+                          ([args.kwarg] if args.kwarg else []))
+            scope_shadowed[node] = bindings(node.body, parameters)
 
     def symbol_for(node):
         names = []
@@ -63,10 +102,17 @@ def analyze(path: str, text: str) -> list[dict]:
         return ".".join(reversed(names)) or None
 
     def broad_handler(handler):
-        return (handler.type is None or
-                isinstance(handler.type, ast.Name) and
-                handler.type.id in {"Exception", "BaseException"} and
-                handler.type.id not in shadowed)
+        if handler.type is None:
+            return True
+        if not isinstance(handler.type, ast.Name) or handler.type.id not in broad_names:
+            return False
+        current = parents.get(handler)
+        while current is not None:
+            if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if handler.type.id in scope_shadowed.get(current, set()):
+                    return False
+            current = parents.get(current)
+        return handler.type.id not in module_shadowed
 
     def literal(node):
         if isinstance(node, ast.Constant):

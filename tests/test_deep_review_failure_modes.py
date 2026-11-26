@@ -91,6 +91,58 @@ def computed_fallback():
     assert analyze("fallbacks.py", source) == []
 
 
+def test_shadowing_is_limited_to_the_lexical_scope():
+    source = '''\
+def shadowed_locally():
+    Exception = ValueError
+    try:
+        work()
+    except Exception:
+        return {}
+
+def unrelated_builtin_handler():
+    try:
+        work()
+    except Exception:
+        return {}
+
+def nested_shadow_does_not_hide_outer_handler():
+    def helper():
+        Exception = ValueError
+    try:
+        work()
+    except Exception:
+        return {}
+'''
+    findings = analyze("fallbacks.py", source)
+    assert [item["locations"][0]["symbol"] for item in findings] == [
+        "unrelated_builtin_handler", "nested_shadow_does_not_hide_outer_handler"]
+
+
+def test_required_keyword_only_parameter_shadows_exception_name():
+    source = '''\
+def fallback(*, Exception):
+    try:
+        work()
+    except Exception:
+        return {}
+'''
+    assert analyze("fallbacks.py", source) == []
+
+
+def test_enclosing_function_binding_shadows_nested_handler():
+    source = '''\
+def outer(BaseException):
+    def inner():
+        try:
+            work()
+        except BaseException:
+            return {}
+    return inner
+'''
+    assert analyze("fallbacks.py", source) == []
+
+
 def test_accepts_container_with_only_nested_literals():
     findings = analyze("fallbacks.py", '''\
 def fallback():
