@@ -510,6 +510,10 @@ real fixtures, provenance-preserving and still opt-in.
   source/revision, checksum, licence, size/inodes, pinning and an explicit
   GC policy. Ocelot's own data (for example a Wikipedia parquet set) is
   external/unowned and must never be treated as temp or deleted by default.
+- Resource grants: named local VM, VM-capable host, cloud account/service and
+  container entitlements with permissions, budget, lifetime, approval and
+  teardown. Admin permission and unbounded spend are explicit human-approved
+  grants, never model defaults; claims record spend and cleanup evidence.
 - Expand shell/task intent linking and richer paired usefulness evaluation from
   the OpenCode intent plan.
 - Orientation reference: one deterministic repository-shape page
@@ -519,6 +523,13 @@ real fixtures, provenance-preserving and still opt-in.
   target. A separate observed environment block keeps git/snapshot/cache facts
   out of the stable hash and `--check`. For this repository it is generated as
   `REPO_SHAPE.md`.
+
+**Implementation status (2026-11-26, resource grants).** A separate
+[resource-grants plan](plans/2026-11-26_resource_grants.md) defines named
+entitlements for local VMs, VM-capable hosts, cloud accounts and containers,
+with read-only readiness checks, approval-gated admin/unbounded use, a
+claim/release ledger and mandatory teardown. It is planned, not implemented;
+host admission (`core.resources`) remains a separate capacity check.
 
 **Implementation status (2026-11-26, external assets).** The
 [external-assets plan](plans/2026-11-26_external_assets.md) is implemented as
