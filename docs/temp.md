@@ -17,6 +17,7 @@ A managed entry is a directory plus two records.
 | Record | Location | Purpose |
 | --- | --- | --- |
 | marker | `<entry>/.ozagia-tmp.json` (mode 0600) | proves ownership after a restart |
+| lease | `<entry>/.ozagia-lease` (mode 0600) | advisory live-owner lock (`flock`); consumed by cleanup, not a record |
 | registry record | `<state dir>/tmp/registry/<id>.json` (mode 0600) | authoritative metadata |
 
 The state directory follows `ozagia.config.state_dir`: `<root>/.ozagia/` unless
@@ -37,8 +38,11 @@ An entry records:
 * a short `reason` label (at most 200 characters, no control characters);
 * the owning repository `root`, when any;
 * `created_at`, `last_used_at`, optional `ttl_s` and derived `expires_at`;
+* `pinned` and optional `pinned_until` (an epoch second used only as metadata;
+  the pin lasts until `unpin`);
 * `pid`, `owned`, `state`, `bytes` (**allocated** space), `apparent_bytes`,
   `files`, `inodes`, `hardlinks`, `allocation`, `walk` and `tmpfs`.
+  `leased` is a live probe, not a stored field.
 
 States are `active`, `released`, `expired` and `missing`.
 
@@ -128,7 +132,19 @@ plan: 1 candidate(s), 18240 allocated, 9216 apparent, 7 files, 8 inodes, 0 delet
   delete tmp_...  scratch  18240 allocated  9216 apparent  parse fixture dump  ...
 
 $ ozagia tmp clean --expired --apply
+$ ozagia tmp pin tmp_... --until 2026-12-31T00:00:00Z
+$ ozagia tmp unpin tmp_...
+$ ozagia tmp gc --max-total-bytes 1073741824 --min-free 268435456
+$ ozagia tmp gc --apply --max-total-bytes 1073741824
 ```
+
+`create` also accepts `--max-total-bytes`, `--max-inodes`,
+`--max-session-bytes`, `--max-session-inodes` and `--min-free`.  The
+environment variables `OZAGIA_TMP_MAX_BYTES`, `OZAGIA_TMP_MAX_INODES` and
+`OZAGIA_TMP_MIN_FREE` fill the corresponding fields when a caller does not
+supply a budget; the session fields have no environment override.  A refusal
+is a typed `TempBudgetError` from the API and exit status 1 with `"code":
+"budget"` in JSON.
 
 `list --sort` accepts `allocated` (the default discovery order for size),
 `apparent`, `files` and `inodes` (largest first), or `age` (least recently used
@@ -175,6 +191,43 @@ With no selection option, cleanup considers released, missing and TTL-expired
 entries.  Active entries are only candidates through an explicit TTL expiry,
 an age threshold or a total-size cap.
 
+### Leases, pinning, budgets and `gc` (2026-11-26)
+
+A **lease** is an advisory `flock(LOCK_EX|LOCK_NB)` on
+`<entry>/.ozagia-lease`, taken with `O_NOFOLLOW` and mode 0600.  The lock dies
+with the process, so a crash cannot leave a permanent lease.
+`TS.acquire_lease(root, id)` returns a context manager; `lease_held(root, id)`
+probes without creating or deleting the file.  `clean`, `gc` and
+`release(..., delete=True)` keep a held entry even when its TTL expired, and
+`status`/`list` report `leased: true/false`.  Leases are advisory to
+cooperative owners: a process that never takes one is still governed by TTL
+and the other cleanup rules.
+
+A **pin** protects an entry from `clean` and `gc` until it is removed.  A
+pinned entry survives an expired TTL; `pinned_until` is optional metadata and
+does not expire the pin.  Re-registering or calling `touch` does not clear a
+pin.  `status` reports the pinned count, and the CLI has
+`ozagia tmp pin ID [--until EPOCH|ISO]` and `ozagia tmp unpin ID`.
+
+A **budget** (`TS.TempBudget`) limits total allocated bytes and inodes, the
+same limits scoped to one `{harness, id}` session, and free bytes on the
+filesystem.  `create` checks the active registry after creating and walking
+the new entry; a refusal raises `TempBudgetError` and rolls back the directory
+it created.  Session totals are scoped to the same `{harness, id}` and are not
+shared between different sessions.  The daemon/plugin create path receives the
+same refusal; there is no model or plugin force override.
+
+`ozagia tmp gc` is a budget-driven collector.  It is a dry run unless
+`--apply` is given.  Selection order is released/expired first, then `cache`
+kind, then oldest `last_used_at`, then largest.  It stops when the total
+allocated bytes/inodes are under the budget; if `--min-free` is still violated
+it continues in the same order.  `--older-than D` restricts candidates to
+entries unused for `D`.  With no budget, `gc` selects released and expired
+entries.  `gc --apply` deletes only owned, marker-matched, unpinned, unleased
+entries; unowned, marker-mismatched, symlinked, missing, protected, pinned and
+leased entries are reported as kept.  A per-session limit makes that session's
+entries candidates in the same order.
+
 `--json` is available on every subcommand.  JSON is deterministic except for
 timestamps and paths.  `create` prints only the created path in plain mode so a
 caller can use it directly.
@@ -192,6 +245,11 @@ a refusal or error.
 * An ownership marker is written only when `adopt --owned --mark` is explicit,
   and never over an existing marker with a different id.
 * Cleanup only deletes an owned entry whose marker id matches.
+* A held lease or a pin keeps an entry through `clean`, `gc` and
+  `release(..., delete=True)`, even when the TTL expired.  Leases are advisory
+  to cooperative owners; TTL still governs an owner that never takes one.
+* `gc --apply` only touches owned, marker-matched, unpinned, unleased entries;
+  its dry run is the default.
 * Cleanup refuses a symlink, the filesystem root, the repository root, the home
   directory, the state/registry/managed roots, and any path equal to an allowed
   root.
@@ -204,11 +262,12 @@ a refusal or error.
 ## What is tracked and what is not
 
 Tracked: identity, kind, session, reason, owning root, pid, ownership, TTL,
-state, allocated and apparent byte totals, file and inode counts, hard-link
-duplicates, walk completeness/cross-device marks, tmpfs membership, and
-per-filesystem byte and inode capacity.  Not tracked: file contents,
-environment variables, prompts, source text, credentials, or the output of
-whatever ran in the directory.
+pin state (`pinned`, optional `pinned_until`), state, allocated and apparent
+byte totals, file and inode counts, hard-link duplicates, walk
+completeness/cross-device marks, tmpfs membership, and per-filesystem byte and
+inode capacity. A lease is a live probe, not stored metadata. Not tracked: file
+contents, environment variables, prompts, source text, credentials, or the
+output of whatever ran in the directory.
 
 ### Accounting limits
 
@@ -258,14 +317,23 @@ entry = TS.adopt(root, "/tmp/tool-output", reason="tool output", owned=True,
                  mark=True)
 entry = TS.get(root, entry["id"])
 entry = TS.touch(root, entry["id"])             # moves last_used_at only
+entry = TS.pin(root, entry["id"], until=None)  # protect from clean/gc
+entry = TS.unpin(root, entry["id"])
 entries = TS.list_entries(root, kind="scratch", owned=True)
 entries = TS.list_entries(root, sort="allocated")  # or apparent/files/inodes/age
 report = TS.status(root)                        # totals, buckets, filesystems
 report = TS.status(root, top=5)                 # plus the 5 largest by allocated
 audit = TS.audit(root)                          # read-only legacy scan
+with TS.acquire_lease(root, entry["id"]):
+    ...                                         # live while the block runs
+held = TS.lease_held(root, entry["id"])          # probe, no lock retained
 entry = TS.release(root, entry["id"], delete=True)
+entry = TS.create(root, reason="bounded", budget=TS.TempBudget(
+    max_total_bytes=1 << 30, max_session_bytes=1 << 28))
 plan = TS.clean(root, expired=True)             # dry run
 done = TS.clean(root, expired=True, apply=True)
+plan = TS.gc(root, budget=TS.TempBudget(max_total_bytes=1 << 30))
+done = TS.gc(root, budget=TS.TempBudget(max_total_bytes=1 << 30), apply=True)
 pruned = TS.prune_registry(root, apply=True)
 ```
 
@@ -347,6 +415,12 @@ and what is not:
   new entries. The design's old `/tmp` artifacts are neither: they are only
   *reported* by `ozagia tmp audit`, and this integration does not retroactively
   register or delete them.
+* **Leased:** the OpenCode agent harness acquires a lease on its default
+  managed run root right after registration and releases it after the run,
+  before `--clean-logs` can delete. An explicit `--runs-dir` stays unmanaged
+  and unleleased. The graph-session log directory and the model/plugin
+  `ozagia_scratch` tool create ordinary entries without a lease; TTL, `touch`
+  and the explicit `release`/`clean` paths remain their policy.
 * **Never deleted automatically:** nothing is deleted merely because it is
   registered. TTL expiry only makes an entry eligible for
   `ozagia tmp clean --expired`. `ozagia agent --clean-logs` is the one
@@ -468,8 +542,8 @@ the systems this design borrows from:
   age-by-size discovery.
 
 The survey's main remaining gaps for this implementation are recorded there:
-there is no lease or per-session size budget, and cleanup is still an explicit
-command rather than an idle/end-of-session hook.  Accounting now reports
+leases and per-session size budgets now exist, while cleanup is still an
+explicit command rather than an idle/end-of-session hook.  Accounting reports
 allocated and apparent bytes, files, inodes and free-inode pressure.  Those are
 design inputs, not claims about the current code.
 The follow-up [improvements plan](plans/2026-11-26_temp_space_improvements.md)

@@ -1981,6 +1981,8 @@ class DaemonState:
                     "tmpfs": entry.get("tmpfs")}
         except TempOpError as exc:
             return {"ok": False, "code": exc.code, "error": str(exc)}
+        except T.TempBudgetError as exc:
+            return {"ok": False, "code": "budget", "error": str(exc)}
         except T.TempSpaceError as exc:
             return {"ok": False, "code": "temp_error", "error": str(exc)}
         except Exception as exc:  # noqa: BLE001 - the op must not kill a socket

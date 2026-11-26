@@ -386,3 +386,83 @@ def test_clean_legacy_refusal_exits_one(env, monkeypatch, capsys) -> None:
     assert payload["ok"] is False
     assert payload["code"] == "refused"
     assert "refused for test" in payload["error"]
+
+
+# --------------------------------------------------------------------------- #
+# leases, pinning and budgets (Stage B)
+# --------------------------------------------------------------------------- #
+
+
+def test_pin_and_unpin_cli(env, capsys) -> None:
+    repo, state = env
+    assert cli.main(["tmp", "create", "--reason", "pin me", "--json"]) == 0
+    entry = _json(capsys)["entry"]
+
+    assert cli.main(["tmp", "pin", entry["id"],
+                     "--until", "2030-01-01T00:00:00Z", "--json"]) == 0
+    pinned = _json(capsys)["entry"]
+    assert pinned["pinned"] is True
+    assert pinned["pinned_until"] > 0
+
+    assert cli.main(["tmp", "list", "--json"]) == 0
+    listed = _json(capsys)["entries"][0]
+    assert listed["pinned"] is True
+    assert listed["leased"] is False
+
+    assert cli.main(["tmp", "unpin", entry["id"], "--json"]) == 0
+    assert _json(capsys)["entry"]["pinned"] is False
+
+
+def test_create_budget_refusal_is_json_and_exits_one(env, capsys) -> None:
+    repo, state = env
+    code = cli.main(["tmp", "create", "--reason", "too big",
+                     "--max-total-bytes", "0", "--json"])
+    assert code == 1
+    payload = _json(capsys)
+    assert payload["ok"] is False
+    assert payload["code"] == "budget"
+    assert TS.list_entries(repo) == []
+
+
+def test_gc_cli_plan_apply_and_pinned_survival(env, capsys) -> None:
+    repo, state = env
+    assert cli.main(["tmp", "create", "--reason", "released", "--json"]) == 0
+    released = _json(capsys)["entry"]
+    assert cli.main(["tmp", "release", released["id"], "--json"]) == 0
+    _json(capsys)
+
+    assert cli.main(["tmp", "create", "--reason", "pinned", "--json"]) == 0
+    pinned = _json(capsys)["entry"]
+    assert cli.main(["tmp", "pin", pinned["id"], "--json"]) == 0
+    _json(capsys)
+
+    assert cli.main(["tmp", "gc", "--max-total-bytes", "0", "--json"]) == 0
+    plan = _json(capsys)
+    assert plan["dry_run"] is True
+    assert [row["id"] for row in plan["candidates"]] == [released["id"]]
+    assert Path(released["path"]).is_dir()
+
+    assert cli.main(["tmp", "gc", "--max-total-bytes", "0",
+                     "--apply", "--json"]) == 0
+    done = _json(capsys)
+    assert done["dry_run"] is False
+    assert done["deleted"] == [released["id"]]
+    assert not Path(released["path"]).exists()
+    assert Path(pinned["path"]).is_dir()
+    assert TS.get(repo, pinned["id"])["pinned"] is True
+
+
+def test_gc_cli_defaults_to_released_entries(env, capsys) -> None:
+    repo, state = env
+    assert cli.main(["tmp", "create", "--reason", "released", "--json"]) == 0
+    released = _json(capsys)["entry"]
+    assert cli.main(["tmp", "release", released["id"], "--json"]) == 0
+    _json(capsys)
+    assert cli.main(["tmp", "create", "--reason", "active", "--json"]) == 0
+    active = _json(capsys)["entry"]
+
+    assert cli.main(["tmp", "gc", "--json"]) == 0
+    plan = _json(capsys)
+    assert [row["id"] for row in plan["candidates"]] == [released["id"]]
+    assert any(row["id"] == active["id"] and row["why"] == "not-selected"
+               for row in plan["kept"])

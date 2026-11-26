@@ -834,10 +834,32 @@ def test_explicit_runs_dir_is_not_registered_and_leaves_the_source_untouched(
 
     assert res["tmp_registered"] is False
     assert res["tmp_id"] is None and res["tmp_path"] is None
+    assert res["tmp_leased"] is False
     assert res["scratch_root"] == str(Path(res["run_root"]) / "scratch")
     assert Path(res["scratch_root"]).is_dir()
+    assert not (Path(res["run_root"]) / TS.LEASE_NAME).exists()
     # No managed entry and no source state dir created by the harness.
     assert TS.list_entries(repo, kind="agent") == []
     assert not (repo / ".ozagia").exists()
     assert not (Path(res["run_root"]).parent / ".ozagia").exists()
     assert _git(repo, "status", "--porcelain", "--untracked-files=all") == ""
+
+
+def test_managed_run_acquires_and_releases_the_run_root_lease(
+        repo, stub, monkeypatch, tmp_path):
+    leases = []
+    original = TS.acquire_lease
+
+    def spy(root, entry_id):
+        lease = original(root, entry_id)
+        leases.append((entry_id, lease))
+        return lease
+
+    monkeypatch.setattr(TS, "acquire_lease", spy)
+    res = _managed_run(repo, monkeypatch, tmp_path)
+
+    assert res["tmp_leased"] is True
+    assert leases and leases[0][0] == res["tmp_id"]
+    assert leases[0][1].closed is True
+    assert TS.lease_held(repo, res["tmp_id"]) is False
+    assert (Path(res["run_root"]) / TS.LEASE_NAME).is_file()

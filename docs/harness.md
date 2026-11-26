@@ -216,7 +216,20 @@ names the separate disk-backed workspace under
 reboot even when the logs do not. That workspace is a second managed entry
 with its own id and TTL. The result carries `tmp_id`, `tmp_path`,
 `tmp_registered`, `tmp_ttl_s`, `tmp_expires_at`, `tmp_bytes`, `tmp_files`,
-`tmpfs`, `scratch_root` and `tmp_cleaned`.
+`tmpfs`, `tmp_leased`, `scratch_root` and `tmp_cleaned`.
+
+After registering the default run root, the harness takes its crash-safe
+`temp_space` lease (`<run root>/.ozagia-lease`). The lease is released when the
+session context exits, before `--clean-logs` calls
+`release(..., delete=True)`; that ordering is what lets the delete proceed.
+A lease failure is best effort: the run continues, `tmp_leased` stays false
+and `tmp_lease_warning` records why. An explicit `--runs-dir` is unmanaged and
+unleased. The scratch workspace and the model/plugin `ozagia_scratch` entries
+are not leased: their TTL, `touch` and explicit cleanup remain their policy.
+Scratch creation goes through `temp_space.create`, so `OZAGIA_TMP_MAX_BYTES`,
+`OZAGIA_TMP_MAX_INODES` and `OZAGIA_TMP_MIN_FREE` apply to it. A budget refusal
+makes only the scratch workspace unavailable (a `tmp_warnings` entry); the
+agent run still starts.
 
 `--clean-logs` deletes the owned run root and scratch workspace only when the
 run succeeded (`exit_code == 0` and not timed out) and no clone was kept. A

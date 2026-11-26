@@ -5,22 +5,30 @@
     ozagia tmp status  [--json] [--top N]
     ozagia tmp audit   [--json]
     ozagia tmp create  --reason TEXT [--kind K] [--session S] [--harness H]
-                       [--ttl-s N] [--path P] [--model NAME] [--run-id ID] [--json]
+                       [--ttl-s N] [--path P] [--max-total-bytes B]
+                       [--max-inodes N] [--max-session-bytes B]
+                       [--max-session-inodes N] [--min-free B]
+                       [--model NAME] [--run-id ID] [--json]
     ozagia tmp adopt   PATH --reason TEXT [--kind K] [--session S] [--harness H]
                        [--ttl-s N] [--owned] [--mark] [--model NAME]
                        [--run-id ID] [--json]
     ozagia tmp release ID [--delete] [--json]
+    ozagia tmp pin     ID [--until EPOCH|ISO] [--json]
+    ozagia tmp unpin   ID [--json]
     ozagia tmp clean   [--apply] [--expired] [--older-than D]
                        [--max-total-bytes B] [--id ID] [--json]
+    ozagia tmp gc      [--apply] [--max-total-bytes B] [--max-inodes N]
+                       [--max-session-bytes B] [--max-session-inodes N]
+                       [--min-free B] [--older-than D] [--json]
     ozagia tmp clean-legacy [--apply] [--older-than D] [--include-caches]
                             [--json]
     ozagia tmp path    [--kind K]
 
 Plain output is short and stable.  ``create`` prints only the created path so a
-caller can use it directly.  ``clean`` and ``clean-legacy`` are plans unless
-``--apply`` is given.  ``audit`` is read-only and only reports conservative
-legacy-name matches.  JSON output is deterministic except for timestamps and
-paths.  No command prints file contents.
+caller can use it directly.  ``clean``, ``gc`` and ``clean-legacy`` are plans
+unless ``--apply`` is given.  ``audit`` is read-only and only reports
+conservative legacy-name matches.  JSON output is deterministic except for
+timestamps and paths.  No command prints file contents.
 
 Exit status is 0 for success (including a cleanup plan with no candidates) and
 1 for a refusal or error.
@@ -30,6 +38,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -94,6 +103,7 @@ def _add_actions(children: Any) -> None:
                          help="expiry in seconds (60 to 90 days)")
     created.add_argument("--path", default=None, metavar="PATH",
                          help="create at PATH instead of the default location")
+    _budget_arguments(created)
     _metadata_arguments(created)
 
     adopted = common(children.add_parser("adopt", help="track an existing path"))
@@ -115,6 +125,14 @@ def _add_actions(children: Any) -> None:
     released.add_argument("--delete", action="store_true",
                           help="delete an owned, marker-matched tree")
 
+    pinned = common(children.add_parser("pin", help="protect one entry"))
+    pinned.add_argument("id", metavar="ID")
+    pinned.add_argument("--until", type=_timestamp, default=None, metavar="TIME",
+                        help="optional epoch second or ISO-8601 pin metadata")
+
+    unpinned = common(children.add_parser("unpin", help="remove a pin"))
+    unpinned.add_argument("id", metavar="ID")
+
     cleaned = common(children.add_parser("clean", help="plan or apply cleanup"))
     cleaned.add_argument("--apply", action="store_true",
                          help="perform the plan (the default is a dry run)")
@@ -130,6 +148,16 @@ def _add_actions(children: Any) -> None:
                               "is at most B bytes")
     cleaned.add_argument("--id", action="append", default=None, metavar="ID",
                          help="restrict to ID (repeatable)")
+
+    collected = common(children.add_parser(
+        "gc", help="plan or apply budget-driven garbage collection"))
+    collected.add_argument("--apply", action="store_true",
+                           help="perform the plan (the default is a dry run)")
+    _budget_arguments(collected)
+    collected.add_argument("--older-than", type=_duration, default=None,
+                           metavar="D",
+                           help="only entries unused for D (bare = days; "
+                                "s/m/h/d suffixes accepted)")
 
     legacy = common(children.add_parser(
         "clean-legacy",
@@ -161,6 +189,61 @@ def _metadata_arguments(parser: argparse.ArgumentParser) -> None:
                         help="optional model label for provenance")
     parser.add_argument("--run-id", default=None, metavar="ID",
                         help="optional run identifier for provenance")
+
+
+def _budget_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--max-total-bytes", type=int, default=None, metavar="B",
+                        help="refuse/gc when total allocated bytes exceed B")
+    parser.add_argument("--max-inodes", type=int, default=None, metavar="N",
+                        help="refuse/gc when total inodes exceed N")
+    parser.add_argument("--max-session-bytes", type=int, default=None,
+                        metavar="B",
+                        help="refuse/gc when one session exceeds B bytes")
+    parser.add_argument("--max-session-inodes", type=int, default=None,
+                        metavar="N",
+                        help="refuse/gc when one session exceeds N inodes")
+    parser.add_argument("--min-free", type=int, default=None, metavar="B",
+                        help="refuse/gc when the filesystem has fewer than B "
+                             "free bytes")
+
+
+def _budget(args: argparse.Namespace) -> TS.TempBudget | None:
+    values = {
+        "max_total_bytes": getattr(args, "max_total_bytes", None),
+        "max_inodes": getattr(args, "max_inodes", None),
+        "max_session_bytes": getattr(args, "max_session_bytes", None),
+        "max_session_inodes": getattr(args, "max_session_inodes", None),
+        "min_free_bytes": getattr(args, "min_free", None),
+    }
+    if all(value is None for value in values.values()):
+        return None
+    return TS.TempBudget(**values)
+
+
+def _timestamp(value: str) -> int:
+    """Parse an epoch second or an ISO-8601 timestamp into seconds."""
+    text = str(value).strip()
+    if not text:
+        raise argparse.ArgumentTypeError("timestamp must not be empty")
+    try:
+        stamp = int(text)
+    except ValueError:
+        pass
+    else:
+        if stamp < 0:
+            raise argparse.ArgumentTypeError("timestamp must not be negative")
+        return stamp
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"not an epoch second or ISO-8601 timestamp: {value!r}") from None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    stamp = int(parsed.timestamp())
+    if stamp < 0:
+        raise argparse.ArgumentTypeError("timestamp must not be negative")
+    return stamp
 
 
 def _duration(value: str) -> int:
@@ -212,6 +295,8 @@ def _session_label(entry: dict[str, Any]) -> str:
 def _format_entry(entry: dict[str, Any]) -> str:
     return (f"{entry['id']}  {entry['kind']:<8} {entry['state']:<8} "
             f"owned={'yes' if entry['owned'] else 'no'}  "
+            f"pinned={'yes' if entry.get('pinned') else 'no'}  "
+            f"leased={'yes' if entry.get('leased') else 'no'}  "
             f"allocated={entry['bytes']}  "
             f"apparent={entry.get('apparent_bytes', 0)}  "
             f"files={entry['files']}  inodes={entry.get('inodes', 0)}  "
@@ -223,7 +308,8 @@ def _format_status(result: dict[str, Any]) -> str:
     lines = [
         f"entries={totals['entries']}  allocated={totals['bytes']}  "
         f"apparent={totals['apparent_bytes']}  files={totals['files']}  "
-        f"inodes={totals['inodes']}  partial={totals['partial']}  "
+        f"inodes={totals['inodes']}  pinned={totals.get('pinned', 0)}  "
+        f"leased={totals.get('leased', 0)}  partial={totals['partial']}  "
         f"unknown={totals['unknown']}",
         f"registry: {result['registry']}",
     ]
@@ -331,6 +417,45 @@ def _format_clean(result: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _format_gc(result: dict[str, Any]) -> str:
+    totals = result["totals"]
+    mode = "plan" if result["dry_run"] else "apply"
+    lines = [
+        f"{mode}: {totals['candidates']} candidate(s), "
+        f"{totals['bytes']} allocated, {totals['apparent_bytes']} apparent, "
+        f"{totals['files']} files, {totals['inodes']} inodes, "
+        f"{totals['deleted']} deleted, {totals['kept']} kept, "
+        f"{totals['errors']} error(s)",
+    ]
+    budget = result.get("budget")
+    if budget:
+        limits = ", ".join(f"{key}={value}" for key, value in budget.items()
+                           if value is not None)
+        if limits:
+            lines.append(f"budget: {limits}")
+    min_free = result.get("min_free") or {}
+    if min_free.get("minimum") is not None:
+        lines.append(
+            f"min free: {min_free.get('current')} of "
+            f"{min_free['minimum']} required"
+            + (" (violated)" if min_free.get("violated") else ""))
+    for row in result["candidates"]:
+        verb = "delete" if result["dry_run"] else "deleted"
+        lines.append(
+            f"  {verb} {row['id']}  {row['kind']}  {row['state']}  "
+            f"{row['bytes']} allocated  {row['apparent_bytes']} apparent  "
+            f"{row['reason']}  {row['path']}")
+    for row in result["kept"]:
+        if row["why"] == "not-selected":
+            continue
+        lines.append(
+            f"  keep   {row['id']}  {row['kind']}  {row['bytes']} allocated  "
+            f"{row['why']}  {row['path']}")
+    for error in result.get("errors") or []:
+        lines.append(f"  error: {error}")
+    return "\n".join(lines)
+
+
 def _format_clean_legacy(result: dict[str, Any]) -> str:
     totals = result["totals"]
     mode = "plan" if result["dry_run"] else "apply"
@@ -409,7 +534,7 @@ def run(args: argparse.Namespace) -> int:
             entry = TS.create(
                 root, kind=args.kind, reason=args.reason,
                 session=_session(args), ttl_s=args.ttl_s, path=args.path,
-                model=args.model, run_id=args.run_id)
+                model=args.model, run_id=args.run_id, budget=_budget(args))
             if as_json:
                 _print_json({"ok": True, "entry": entry})
             else:
@@ -435,6 +560,20 @@ def run(args: argparse.Namespace) -> int:
             else:
                 print(f"released {entry['id']}")
             return 0
+        if action == "pin":
+            entry = TS.pin(root, args.id, until=args.until)
+            if as_json:
+                _print_json({"ok": True, "entry": entry})
+            else:
+                print(f"pinned {entry['id']}")
+            return 0
+        if action == "unpin":
+            entry = TS.unpin(root, args.id)
+            if as_json:
+                _print_json({"ok": True, "entry": entry})
+            else:
+                print(f"unpinned {entry['id']}")
+            return 0
         if action == "clean":
             result = TS.clean(
                 root, dry_run=True, expired=args.expired,
@@ -446,6 +585,16 @@ def run(args: argparse.Namespace) -> int:
             else:
                 print(_format_clean(result))
             return 0
+        if action == "gc":
+            result = TS.gc(
+                root, budget=_budget(args), apply=args.apply,
+                older_than_s=args.older_than)
+            ok = not result.get("errors")
+            if as_json:
+                _print_json({"ok": ok, **result})
+            else:
+                print(_format_gc(result))
+            return 0 if ok else 1
         if action == "path":
             target = TS.ensure_default_root(root, args.kind)
             if as_json:
@@ -455,7 +604,14 @@ def run(args: argparse.Namespace) -> int:
                 print(target)
             return 0
     except (TS.TempSpaceError, OSError, ValueError) as exc:
-        code = "not_found" if isinstance(exc, TS.TempNotFound) else "refused"
+        if isinstance(exc, TS.TempNotFound):
+            code = "not_found"
+        elif isinstance(exc, TS.TempBudgetError):
+            code = "budget"
+        elif isinstance(exc, TS.TempLeaseHeld):
+            code = "lease_held"
+        else:
+            code = "refused"
         return _error(str(exc), as_json=as_json, code=code)
     print(f"{PROG}: unknown action {action!r}", file=sys.stderr)
     return 1

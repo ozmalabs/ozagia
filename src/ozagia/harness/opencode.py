@@ -410,6 +410,16 @@ def _tmp_env(run_root: Path) -> dict[str, str]:
     return {"TMPDIR": str(path), "TMP": str(path), "TEMP": str(path)}
 
 
+@contextlib.contextmanager
+def _lease_guard(lease: Any) -> Iterator[None]:
+    """Close a managed run-root lease when the session context exits."""
+    try:
+        yield
+    finally:
+        if lease is not None:
+            lease.close()
+
+
 def _refresh_tmp_usage(source: Path, res: dict[str, Any]) -> None:
     if not res.get("tmp_id"):
         return
@@ -626,9 +636,10 @@ def run_agent(workdir: str | Path, *, prompt: str | None = None, model: str | No
                            "tmp_registered": False, "tmp_ttl_s": tmp_ttl_s if managed else None,
                            "tmp_expires_at": None, "tmp_bytes": None, "tmp_files": None,
                            "tmpfs": None, "scratch_root": None, "tmp_cleaned": None,
-                           "tmp_warning": None}
+                           "tmp_leased": False, "tmp_warning": None}
     scratch_id: str | None = None
     tmp_env: dict[str, str] = {}
+    lease: Any = None
     if managed:
         entry, warning = _register_run_root(source, run_root, model=model,
                                             ttl_s=tmp_ttl_s)
@@ -638,6 +649,11 @@ def run_agent(workdir: str | Path, *, prompt: str | None = None, model: str | No
             res.update(tmp_id=entry["id"], tmp_path=entry["path"],
                        tmp_registered=True, tmp_expires_at=entry.get("expires_at"),
                        tmpfs=entry.get("tmpfs"))
+            try:
+                lease = TS.acquire_lease(source, entry["id"])
+                res["tmp_leased"] = True
+            except Exception as exc:  # noqa: BLE001 - leasing is best effort
+                res["tmp_lease_warning"] = f"managed tmp lease failed: {exc}"
         tmp_env = _tmp_env(run_root)
         scratch, scratch_id, warning = _register_scratch(source, run_root,
                                                          ttl_s=tmp_ttl_s)
@@ -652,7 +668,7 @@ def run_agent(workdir: str | Path, *, prompt: str | None = None, model: str | No
             res["scratch_root"] = str(scratch)
         except OSError:
             pass
-    with _sigterm_as_interrupt():
+    with _sigterm_as_interrupt(), _lease_guard(lease):
         if clone:
             rev = f"{base or 'HEAD'}^{{commit}}"
             found = _git(["rev-parse", "--verify", "--quiet", rev], source)

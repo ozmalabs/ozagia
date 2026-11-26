@@ -1290,3 +1290,232 @@ def test_clean_legacy_reports_truncation(root: Path, tmp_path: Path) -> None:
     assert plan["truncated"] is True
     assert plan["totals"]["truncated"] is True
     assert len(plan["artifacts"]) == 1
+
+
+# --------------------------------------------------------------------------- #
+# leases, pinning and budgets (Stage B)
+# --------------------------------------------------------------------------- #
+
+
+def test_held_lease_keeps_an_expired_entry_through_clean_gc_and_release(
+        root: Path) -> None:
+    entry = TS.create(root, reason="leased", ttl_s=60)
+    _rewrite(root, entry["id"], expires_at=1)
+    path = Path(entry["path"])
+    lease = TS.acquire_lease(root, entry["id"])
+    try:
+        assert TS.lease_held(root, entry["id"]) is True
+        assert TS.get(root, entry["id"])["leased"] is True
+
+        plan = TS.clean(root, expired=True)
+        assert plan["candidates"] == []
+        assert _kept_reason(plan, entry["id"]) == "leased"
+
+        done = TS.clean(root, expired=True, apply=True)
+        assert done["deleted"] == []
+        assert path.is_dir()
+
+        gplan = TS.gc(root, budget=TS.TempBudget(max_total_bytes=0))
+        assert gplan["candidates"] == []
+        assert any(row["id"] == entry["id"] and row["why"] == "leased"
+                   for row in gplan["kept"])
+
+        gdone = TS.gc(root, budget=TS.TempBudget(max_total_bytes=0), apply=True)
+        assert gdone["deleted"] == []
+        assert path.is_dir()
+
+        with pytest.raises(TS.TempPathError):
+            TS.release(root, entry["id"], delete=True)
+        assert path.is_dir()
+    finally:
+        lease.close()
+
+    assert TS.lease_held(root, entry["id"]) is False
+    done = TS.clean(root, expired=True, apply=True)
+    assert done["deleted"] == [entry["id"]]
+    assert not path.exists()
+
+
+def test_a_closed_lease_does_not_block_release_delete(root: Path) -> None:
+    entry = TS.create(root, reason="closed lease", ttl_s=60)
+    _rewrite(root, entry["id"], expires_at=1)
+    lease = TS.acquire_lease(root, entry["id"])
+    lease.close()
+    assert TS.lease_held(root, entry["id"]) is False
+
+    released = TS.release(root, entry["id"], delete=True)
+    assert released["state"] == "released"
+    assert not Path(entry["path"]).exists()
+
+
+def test_pin_survives_touch_and_expiry_until_unpinned(root: Path) -> None:
+    entry = TS.create(root, reason="pinned", ttl_s=60)
+    _rewrite(root, entry["id"], expires_at=1)
+    TS.pin(root, entry["id"], until=1234567890)
+    pinned = TS.get(root, entry["id"])
+    assert pinned["pinned"] is True
+    assert pinned["pinned_until"] == 1234567890
+
+    TS.touch(root, entry["id"])
+    record = _record(root, entry["id"])
+    assert record["pinned"] is True
+    assert record["pinned_until"] == 1234567890
+
+    plan = TS.clean(root, expired=True)
+    assert plan["candidates"] == []
+    assert _kept_reason(plan, entry["id"]) == "pinned"
+
+    collected = TS.gc(root, budget=TS.TempBudget(max_total_bytes=0))
+    assert collected["candidates"] == []
+    assert any(row["id"] == entry["id"] and row["why"] == "pinned"
+               for row in collected["kept"])
+    assert TS.status(root)["totals"]["pinned"] == 1
+    assert Path(entry["path"]).is_dir()
+
+    TS.unpin(root, entry["id"])
+    assert TS.get(root, entry["id"])["pinned"] is False
+    done = TS.clean(root, expired=True, apply=True)
+    assert done["deleted"] == [entry["id"]]
+    assert not Path(entry["path"]).exists()
+
+
+def test_create_refuses_global_and_session_budgets(root: Path) -> None:
+    first = TS.create(root, reason="first")
+    _write(Path(first["path"]) / "blob.bin", 4096)
+    first_view = TS.get(root, first["id"])
+    before = set(TS.registry_dir(root).glob("*.json"))
+
+    with pytest.raises(TS.TempBudgetError):
+        TS.create(root, reason="over global bytes", budget=TS.TempBudget(
+            max_total_bytes=first_view["bytes"]))
+    with pytest.raises(TS.TempBudgetError):
+        TS.create(root, reason="over inodes", budget=TS.TempBudget(
+            max_inodes=first_view["inodes"]))
+    assert set(TS.registry_dir(root).glob("*.json")) == before
+
+    session = TS.make_session("opencode", "ses_budget")
+    assert session is not None
+    same = TS.create(root, reason="session a", session=session)
+    _write(Path(same["path"]) / "one.bin", 4096)
+    _write(Path(same["path"]) / "two.bin", 4096)
+    session_bytes = TS.get(root, same["id"])["bytes"]
+    with pytest.raises(TS.TempBudgetError):
+        TS.create(root, reason="same session", session=session,
+                  budget=TS.TempBudget(max_session_bytes=session_bytes))
+    with pytest.raises(TS.TempBudgetError):
+        TS.create(root, reason="same session inodes", session=session,
+                  budget=TS.TempBudget(
+                      max_session_inodes=TS.get(root, same["id"])["inodes"]))
+
+    other = TS.make_session("opencode", "ses_other")
+    assert other is not None
+    scoped = TS.create(root, reason="session b", session=other,
+                       budget=TS.TempBudget(max_session_bytes=session_bytes))
+    assert scoped["session"] == other
+
+    with pytest.raises(TS.TempBudgetError):
+        TS.create(root, reason="no free space",
+                  budget=TS.TempBudget(min_free_bytes=1 << 62))
+
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setenv(TS.ENV_MAX_TOTAL_BYTES, "0")
+        with pytest.raises(TS.TempBudgetError):
+            TS.create(root, reason="environment budget")
+    finally:
+        monkeypatch.undo()
+
+    # There is no model/plugin force override on the core create surface.
+    assert "force" not in TS.create.__code__.co_varnames
+
+
+def test_gc_orders_released_then_cache_then_lru_then_largest_root(
+        root: Path) -> None:
+    released = TS.create(root, reason="released")
+    _write(Path(released["path"]) / "small.bin", 32)
+    TS.release(root, released["id"])
+    cache = TS.create(root, reason="cache")
+    _rewrite(root, cache["id"], kind="cache", last_used_at=50)
+    oldest = TS.create(root, reason="oldest active")
+    _rewrite(root, oldest["id"], last_used_at=100)
+    large = TS.create(root, reason="large later")
+    _write(Path(large["path"]) / "large.bin", 20000)
+    _rewrite(root, large["id"], last_used_at=200)
+    small = TS.create(root, reason="small later")
+    _write(Path(small["path"]) / "small.bin", 1)
+    _rewrite(root, small["id"], last_used_at=200)
+
+    plan = TS.gc(root, budget=TS.TempBudget(max_total_bytes=0))
+    assert [row["id"] for row in plan["candidates"]] == [
+        released["id"], cache["id"], oldest["id"], large["id"], small["id"]]
+
+    entries = {entry["id"]: entry for entry in
+               TS.list_entries(root, include_all=True)}
+    total = sum(entry["bytes"] for entry in entries.values())
+    stopping = total - entries[released["id"]]["bytes"] - entries[cache["id"]]["bytes"]
+    capped = TS.gc(root, budget=TS.TempBudget(max_total_bytes=stopping))
+    assert [row["id"] for row in capped["candidates"]] == [
+        released["id"], cache["id"]]
+
+
+def test_gc_min_free_continues_in_the_same_order(root: Path,
+                                                 monkeypatch) -> None:
+    released = TS.create(root, reason="released")
+    TS.release(root, released["id"])
+    active = TS.create(root, reason="active")
+    _rewrite(root, active["id"], last_used_at=10)
+    monkeypatch.setattr(TS, "_free_bytes", lambda path: 0)
+
+    plan = TS.gc(root, budget=TS.TempBudget(min_free_bytes=1 << 40))
+    assert [row["id"] for row in plan["candidates"]] == [
+        released["id"], active["id"]]
+    assert plan["min_free"]["violated"] is True
+
+
+def test_gc_refuses_unowned_mismatched_symlink_pinned_leased_and_missing(
+        root: Path, tmp_path: Path) -> None:
+    external = tmp_path / "gc-unowned"
+    external.mkdir()
+    _write(external / "out.bin", 8)
+    unowned = TS.adopt(root, external, reason="unowned")
+
+    mismatch = TS.create(root, reason="marker mismatch")
+    marker = Path(mismatch["path"]) / TS.MARKER_NAME
+    payload = json.loads(marker.read_text(encoding="utf-8"))
+    payload["id"] = "tmp_ffffffffffff"
+    marker.write_text(json.dumps(payload), encoding="utf-8")
+
+    linked = TS.create(root, reason="symlink")
+    target = tmp_path / "gc-target"
+    target.mkdir()
+    shutil.rmtree(linked["path"])
+    os.symlink(target, linked["path"])
+
+    pinned = TS.create(root, reason="pinned")
+    TS.pin(root, pinned["id"])
+
+    leased = TS.create(root, reason="leased")
+    lease = TS.acquire_lease(root, leased["id"])
+    missing = TS.create(root, reason="missing")
+    shutil.rmtree(missing["path"])
+    try:
+        plan = TS.gc(root, budget=TS.TempBudget(max_total_bytes=0))
+        assert plan["candidates"] == []
+        reasons = {row["id"]: row["why"] for row in plan["kept"]}
+        assert reasons[unowned["id"]] == "unowned"
+        assert reasons[mismatch["id"]] == "marker-mismatch"
+        assert reasons[linked["id"]] == "symlink"
+        assert reasons[pinned["id"]] == "pinned"
+        assert reasons[leased["id"]] == "leased"
+        assert reasons[missing["id"]] == "missing"
+
+        applied = TS.gc(root, budget=TS.TempBudget(max_total_bytes=0),
+                        apply=True)
+        assert applied["deleted"] == []
+        assert Path(mismatch["path"]).is_dir()
+        assert Path(linked["path"]).is_symlink()
+        assert Path(pinned["path"]).is_dir()
+        assert Path(leased["path"]).is_dir()
+    finally:
+        lease.close()
+        shutil.rmtree(external, ignore_errors=True)

@@ -202,3 +202,15 @@ def test_a_failed_create_leaves_no_half_entry(tmp_path: Path, monkeypatch):
     assert T.list_entries(tmp_path) == []
     scratch = T.default_scratch_root(tmp_path)
     assert not scratch.exists() or not any(scratch.iterdir())
+
+
+def test_create_budget_refusal_and_no_force_override(tmp_path: Path,
+                                                      monkeypatch):
+    state = _state(tmp_path)
+    monkeypatch.setenv(T.ENV_MAX_TOTAL_BYTES, "0")
+    result = state.dispatch(_req(action="create"))
+    assert result["ok"] is False and result["code"] == "budget"
+    assert T.list_entries(tmp_path) == []
+
+    forced = state.dispatch(_req(action="create", force=True))
+    assert forced["ok"] is False and forced["code"] == "unknown_field"

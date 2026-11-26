@@ -16,6 +16,10 @@ Each entry is a directory plus two records:
     provenance (version, id, kind, session, reason, root, created_at, pid,
     owned).  It proves ownership after a restart.
 
+``.<lease>`` (``.ozagia-lease``)
+    An optional advisory ``flock`` file for a live cooperative owner.  It is
+    not a record; the lock dies with the process.
+
 ``<state dir>/tmp/registry/<id>.json``
     The authoritative record.  One file per entry means concurrent creates do
     not need a global lock.  Registry directories are 0700 and files 0600.
@@ -63,6 +67,7 @@ import stat
 import sys
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -70,6 +75,7 @@ from ozagia.config import state_dir, state_path
 
 VERSION = 1
 MARKER_NAME = ".ozagia-tmp.json"
+LEASE_NAME = ".ozagia-lease"
 REGISTRY_DIRNAME = "registry"
 TMP_DIRNAME = "tmp"
 WORKSPACES_DIRNAME = "workspaces"
@@ -163,6 +169,332 @@ class TempNotFound(TempSpaceError):
 
 class TempMarkerError(TempPathError):
     """A marker exists but does not identify this entry."""
+
+
+class TempBudgetError(TempSpaceError):
+    """A create or garbage-collection request would exceed a budget."""
+
+
+class TempLeaseHeld(TempSpaceError):
+    """A cooperative owner already holds the entry's lease."""
+
+
+#: Environment overrides used when ``create`` is not given an explicit budget.
+ENV_MAX_TOTAL_BYTES = "OZAGIA_TMP_MAX_BYTES"
+ENV_MAX_INODES = "OZAGIA_TMP_MAX_INODES"
+ENV_MIN_FREE = "OZAGIA_TMP_MIN_FREE"
+
+
+@dataclass(frozen=True)
+class TempBudget:
+    """Explicit limits for managed temporary space.
+
+    A ``None`` field is unset.  ``create`` merges unset fields from the
+    environment (``OZAGIA_TMP_MAX_BYTES``, ``OZAGIA_TMP_MAX_INODES`` and
+    ``OZAGIA_TMP_MIN_FREE``) when no value was supplied by the caller.
+    """
+
+    max_total_bytes: int | None = None
+    max_inodes: int | None = None
+    max_session_bytes: int | None = None
+    max_session_inodes: int | None = None
+    min_free_bytes: int | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("max_total_bytes", "max_inodes", "max_session_bytes",
+                     "max_session_inodes", "min_free_bytes"):
+            value = getattr(self, name)
+            if value is None:
+                continue
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TempSpaceError(f"{name} must be an integer or None")
+            if value < 0:
+                raise TempSpaceError(f"{name} must not be negative")
+
+
+@dataclass(frozen=True)
+class _Lease:
+    """An open lease descriptor; closing it releases the ``flock``."""
+
+    path: Path
+    descriptor: int
+    _closed: bool = False
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        try:
+            import fcntl
+        except ImportError:  # pragma: no cover - non-POSIX hosts
+            fcntl = None  # type: ignore[assignment]
+        try:
+            if fcntl is not None:
+                try:
+                    fcntl.flock(self.descriptor, fcntl.LOCK_UN)
+                except OSError:
+                    pass
+        finally:
+            try:
+                os.close(self.descriptor)
+            except OSError:
+                pass
+            object.__setattr__(self, "_closed", True)
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    def __enter__(self) -> "_Lease":
+        return self
+
+    def __exit__(self, *exc_info: Any) -> None:
+        self.close()
+
+    def __del__(self) -> None:  # pragma: no cover - best-effort final release
+        try:
+            self.close()
+        except Exception:  # noqa: BLE001 - a destructor must not raise
+            pass
+
+
+# --------------------------------------------------------------------------- #
+# leases
+# --------------------------------------------------------------------------- #
+
+
+def lease_path(root: str | Path, entry_id: str) -> Path:
+    """The lease file for one registry entry."""
+    root_path = Path(root).resolve()
+    record = _read_record(root_path, _validate_id(entry_id))
+    return Path(str(record["path"])) / LEASE_NAME
+
+
+def _lease_held_path(path: str | Path) -> bool:
+    """Probe an entry directory's lease without creating or deleting anything."""
+    lease = Path(path) / LEASE_NAME
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - non-POSIX hosts
+        return False
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(lease, flags)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        # An unreadable or symlinked lease is not evidence that it is held.
+        return False
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            return exc.errno in (errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        return False
+    finally:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+
+
+def lease_held(root: str | Path, entry_id: str) -> bool:
+    """Whether a cooperative owner currently holds the entry's lease."""
+    root_path = Path(root).resolve()
+    record = _read_record(root_path, _validate_id(entry_id))
+    return _lease_held_path(Path(str(record["path"])))
+
+
+def acquire_lease(root: str | Path, entry_id: str) -> _Lease:
+    """Take the entry's crash-safe lease and return its context manager.
+
+    The lock is an advisory exclusive ``flock`` on ``<entry>/.ozagia-lease``.
+    It dies with the process, so a crash cannot leave a permanent lease.
+    """
+    path = lease_path(root, entry_id)
+    try:
+        import fcntl
+    except ImportError as exc:  # pragma: no cover - non-POSIX hosts
+        raise TempSpaceError(
+            "file leases need a POSIX flock implementation") from exc
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except OSError as exc:
+        raise TempSpaceError(f"cannot open lease {path}: {exc}") from exc
+    try:
+        os.fchmod(descriptor, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno in (errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK):
+                raise TempLeaseHeld(
+                    f"lease is already held for {entry_id}: {path}") from exc
+            raise TempSpaceError(
+                f"cannot take lease {path}: {exc}") from exc
+    except BaseException:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise
+    return _Lease(path=path, descriptor=descriptor)
+
+
+# --------------------------------------------------------------------------- #
+# budgets
+# --------------------------------------------------------------------------- #
+
+
+def _env_int(name: str) -> int | None:
+    text = os.environ.get(name)
+    if text is None or not text.strip():
+        return None
+    try:
+        value = int(text.strip())
+    except ValueError as exc:
+        raise TempSpaceError(f"{name} must be an integer, got {text!r}") from exc
+    if value < 0:
+        raise TempSpaceError(f"{name} must not be negative")
+    return value
+
+
+def _budget_with_env(budget: TempBudget | None) -> TempBudget:
+    """Return ``budget`` with any unset field filled from the environment."""
+    if budget is None:
+        budget = TempBudget()
+    elif not isinstance(budget, TempBudget):
+        raise TempSpaceError("budget must be a TempBudget or None")
+    values = {
+        "max_total_bytes": budget.max_total_bytes,
+        "max_inodes": budget.max_inodes,
+        "max_session_bytes": budget.max_session_bytes,
+        "max_session_inodes": budget.max_session_inodes,
+        "min_free_bytes": budget.min_free_bytes,
+    }
+    overrides = {
+        "max_total_bytes": ENV_MAX_TOTAL_BYTES,
+        "max_inodes": ENV_MAX_INODES,
+        "min_free_bytes": ENV_MIN_FREE,
+    }
+    for field, env_name in overrides.items():
+        if values[field] is None:
+            values[field] = _env_int(env_name)
+    return TempBudget(**values)
+
+
+def _budget_payload(budget: TempBudget | None) -> dict[str, Any] | None:
+    if budget is None:
+        return None
+    return {
+        "max_total_bytes": budget.max_total_bytes,
+        "max_inodes": budget.max_inodes,
+        "max_session_bytes": budget.max_session_bytes,
+        "max_session_inodes": budget.max_session_inodes,
+        "min_free_bytes": budget.min_free_bytes,
+    }
+
+
+def _session_identity(entry: Mapping[str, Any]) -> tuple[str, str] | None:
+    session = entry.get("session")
+    if not isinstance(session, Mapping):
+        return None
+    harness = str(session.get("harness") or "")
+    ident = str(session.get("id") or "")
+    if not harness or not ident:
+        return None
+    return harness, ident
+
+
+def _usage_totals(root: Path, *, exclude_id: str | None = None
+                  ) -> tuple[int, int, dict[tuple[str, str], tuple[int, int]]]:
+    """Current allocated bytes/inodes and per-session totals.
+
+    Zero-usage (missing) records contribute nothing.  The calculation includes
+    every existing registry entry, including released entries whose tree has
+    not been deleted yet, because those bytes still occupy the filesystem.
+    """
+    total_bytes = 0
+    total_inodes = 0
+    sessions: dict[tuple[str, str], tuple[int, int]] = {}
+    for record in _load_records(root):
+        if exclude_id is not None and record.get("id") == exclude_id:
+            continue
+        entry = _entry(root, record)
+        size = entry.get("bytes")
+        inodes = entry.get("inodes")
+        size = size if isinstance(size, int) else 0
+        inodes = inodes if isinstance(inodes, int) else 0
+        total_bytes += size
+        total_inodes += inodes
+        key = _session_identity(entry)
+        if key is not None:
+            old_bytes, old_inodes = sessions.get(key, (0, 0))
+            sessions[key] = (old_bytes + size, old_inodes + inodes)
+    return total_bytes, total_inodes, sessions
+
+
+def _free_bytes(path: str | Path) -> int | None:
+    statvfs = getattr(os, "statvfs", None)
+    if statvfs is None:
+        return None
+    try:
+        usage = statvfs(path)
+    except OSError:
+        return None
+    return int(usage.f_bavail * usage.f_frsize)
+
+
+def _enforce_budget(root: Path, budget: TempBudget,
+                    session: Mapping[str, Any] | None, *,
+                    extra_bytes: int = 0, extra_inodes: int = 0,
+                    free_path: str | Path | None = None) -> None:
+    if all(getattr(budget, field) is None
+           for field in ("max_total_bytes", "max_inodes", "max_session_bytes",
+                         "max_session_inodes", "min_free_bytes")):
+        return
+    total_bytes, total_inodes, sessions = _usage_totals(root)
+    projected_bytes = total_bytes + extra_bytes
+    projected_inodes = total_inodes + extra_inodes
+    if (budget.max_total_bytes is not None
+            and projected_bytes > budget.max_total_bytes):
+        raise TempBudgetError(
+            "temporary-space budget exceeded: total allocated bytes "
+            f"{projected_bytes} > {budget.max_total_bytes}")
+    if (budget.max_inodes is not None
+            and projected_inodes > budget.max_inodes):
+        raise TempBudgetError(
+            "temporary-space budget exceeded: total inodes "
+            f"{projected_inodes} > {budget.max_inodes}")
+    if session is not None:
+        harness = str(session.get("harness") or "")
+        ident = str(session.get("id") or "")
+        if harness and ident:
+            session_bytes, session_inodes = sessions.get(
+                (harness, ident), (0, 0))
+            session_bytes += extra_bytes
+            session_inodes += extra_inodes
+            if (budget.max_session_bytes is not None
+                    and session_bytes > budget.max_session_bytes):
+                raise TempBudgetError(
+                    "temporary-space budget exceeded: session "
+                    f"{harness}:{ident} allocated bytes "
+                    f"{session_bytes} > {budget.max_session_bytes}")
+            if (budget.max_session_inodes is not None
+                    and session_inodes > budget.max_session_inodes):
+                raise TempBudgetError(
+                    "temporary-space budget exceeded: session "
+                    f"{harness}:{ident} inodes "
+                    f"{session_inodes} > {budget.max_session_inodes}")
+    if budget.min_free_bytes is not None and free_path is not None:
+        free = _free_bytes(free_path)
+        if free is not None and free < budget.min_free_bytes:
+            raise TempBudgetError(
+                "temporary-space budget exceeded: free bytes "
+                f"{free} < minimum {budget.min_free_bytes} at {free_path}")
 
 
 # --------------------------------------------------------------------------- #
@@ -505,8 +837,16 @@ def create(root: str | Path, *, kind: str = DEFAULT_SCRATCH_KIND, reason: str,
            session: Mapping[str, Any] | str | None = None,
            ttl_s: int | None = None, path: str | Path | None = None,
            pid: int | None = None, model: str | None = None,
-           run_id: str | None = None) -> dict[str, Any]:
-    """Create one managed temporary directory and register it."""
+           run_id: str | None = None,
+           budget: TempBudget | None = None) -> dict[str, Any]:
+    """Create one managed temporary directory and register it.
+
+    ``budget`` is checked against the existing registry (and, for the session
+    limits, the same ``{harness, id}``) before the record is written.  An unset
+    budget field is filled from ``OZAGIA_TMP_MAX_BYTES``,
+    ``OZAGIA_TMP_MAX_INODES`` and ``OZAGIA_TMP_MIN_FREE``.  A refusal raises
+    :class:`TempBudgetError` and removes the directory this call created.
+    """
     root_path = Path(root).resolve()
     kind = _validate_kind(kind)
     reason = _validate_reason(reason)
@@ -514,6 +854,7 @@ def create(root: str | Path, *, kind: str = DEFAULT_SCRATCH_KIND, reason: str,
     ttl_s = _validate_ttl(ttl_s)
     model = _validate_optional_label(model, "model")
     run_id = _validate_optional_label(run_id, "run_id")
+    budget = _budget_with_env(budget)
     if pid is None:
         pid = os.getpid()
     if not isinstance(pid, int) or pid < 0:
@@ -558,6 +899,8 @@ def create(root: str | Path, *, kind: str = DEFAULT_SCRATCH_KIND, reason: str,
         "expires_at": now + ttl_s if ttl_s is not None else None,
         "pid": pid,
         "owned": True,
+        "pinned": False,
+        "pinned_until": None,
         "state": "active",
     }
     marker = {
@@ -578,6 +921,10 @@ def create(root: str | Path, *, kind: str = DEFAULT_SCRATCH_KIND, reason: str,
         os.chmod(target, 0o700)
         _write_json(target / MARKER_NAME, marker)
         usage = walk_usage(target)
+        _enforce_budget(
+            root_path, budget, session_value,
+            extra_bytes=int(usage["allocated_bytes"]),
+            extra_inodes=int(usage["inodes"]), free_path=target)
         record.update(_usage_record(usage))
         record.update({"tmpfs": tmpfs_for(target)})
         _write_json(_record_path(root_path, entry_id), record)
@@ -662,6 +1009,8 @@ def adopt(root: str | Path, path: str | Path, *, reason: str,
         "expires_at": now + ttl_s if ttl_s is not None else None,
         "pid": os.getpid(),
         "owned": bool(owned),
+        "pinned": False,
+        "pinned_until": None,
         "state": "active",
     }
     if mark:
@@ -709,6 +1058,40 @@ def touch(root: str | Path, entry_id: str) -> dict[str, Any]:
     root_path = Path(root).resolve()
     record = _read_record(root_path, _validate_id(entry_id))
     record["last_used_at"] = int(time.time())
+    _write_json(_record_path(root_path, entry_id), record)
+    return _entry(root_path, record)
+
+
+def pin(root: str | Path, entry_id: str,
+        until: int | float | None = None) -> dict[str, Any]:
+    """Pin an entry so ``clean`` and ``gc`` never remove it.
+
+    ``until`` is optional metadata (an epoch second); the pin itself lasts
+    until :func:`unpin` is called, so a stale ``pinned_until`` does not make an
+    entry deletable.  Re-registering or touching an entry preserves its pin.
+    """
+    root_path = Path(root).resolve()
+    entry_id = _validate_id(entry_id)
+    record = _read_record(root_path, entry_id)
+    if until is not None:
+        if isinstance(until, bool) or not isinstance(until, (int, float)):
+            raise TempSpaceError("pin until must be an epoch second or None")
+        if until < 0:
+            raise TempSpaceError("pin until must not be negative")
+        until = int(until)
+    record["pinned"] = True
+    record["pinned_until"] = until
+    _write_json(_record_path(root_path, entry_id), record)
+    return _entry(root_path, record)
+
+
+def unpin(root: str | Path, entry_id: str) -> dict[str, Any]:
+    """Remove an entry's pin."""
+    root_path = Path(root).resolve()
+    entry_id = _validate_id(entry_id)
+    record = _read_record(root_path, entry_id)
+    record["pinned"] = False
+    record["pinned_until"] = None
     _write_json(_record_path(root_path, entry_id), record)
     return _entry(root_path, record)
 
@@ -791,6 +1174,7 @@ def status(root: str | Path, *, top: int | None = None) -> dict[str, Any]:
     }
     totals = {"entries": len(entries), "bytes": 0, "apparent_bytes": 0,
               "files": 0, "inodes": 0, "hardlinks": 0,
+              "pinned": 0, "leased": 0,
               "partial": 0, "unknown": 0, "cross_device": 0}
     filesystems: dict[int, dict[str, Any]] = {}
     for entry in entries:
@@ -803,6 +1187,10 @@ def status(root: str | Path, *, top: int | None = None) -> dict[str, Any]:
         totals["files"] += count
         totals["inodes"] += inodes
         totals["hardlinks"] += amount(entry, "hardlinks")
+        if entry.get("pinned"):
+            totals["pinned"] += 1
+        if entry.get("leased"):
+            totals["leased"] += 1
         if entry["walk"] == "partial":
             totals["partial"] += 1
         if entry.get("unknown"):
@@ -1089,6 +1477,9 @@ def release(root: str | Path, entry_id: str, *, delete: bool = False) -> dict[st
         if not entry["owned"]:
             raise TempPathError(
                 f"refusing to delete unowned entry {entry_id}")
+        if entry.get("leased"):
+            raise TempPathError(
+                f"refusing to delete {entry['path']}: leased")
         safe, why = _delete_guard(root_path, entry)
         if not safe:
             if why == "missing":
@@ -1173,7 +1564,8 @@ def clean(root: str | Path, *, dry_run: bool = True, expired: bool = False,
             if deficit <= 0:
                 break
             safe, _ = guards[entry["id"]]
-            if entry["id"] not in selected or not safe:
+            if (entry["id"] not in selected or not safe
+                    or entry.get("pinned") or entry.get("leased")):
                 continue
             capped.add(entry["id"])
             deficit -= entry["bytes"] if isinstance(entry["bytes"], int) else 0
@@ -1185,6 +1577,12 @@ def clean(root: str | Path, *, dry_run: bool = True, expired: bool = False,
     for entry in entries:
         if entry["id"] not in selected:
             kept.append(_clean_row(entry, action="keep", why="not-selected"))
+            continue
+        if entry.get("pinned"):
+            kept.append(_clean_row(entry, action="keep", why="pinned"))
+            continue
+        if entry.get("leased"):
+            kept.append(_clean_row(entry, action="keep", why="leased"))
             continue
         safe, why = guards[entry["id"]]
         if not safe:
@@ -1389,9 +1787,303 @@ def prune_registry(root: str | Path, *, apply: bool = False) -> dict[str, Any]:
     }
 
 
-def gc(root: str | Path, *, apply: bool = False) -> dict[str, Any]:
-    """Alias for :func:`prune_registry`."""
-    return prune_registry(root, apply=apply)
+def _gc_sort_key(entry: Mapping[str, Any]) -> tuple[Any, ...]:
+    """Released/expired, then cache, then LRU, then largest."""
+    state = str(entry.get("state") or "active")
+    state_rank = 0 if state in ("released", "expired") else 1
+    cache_rank = 0 if entry.get("kind") == "cache" else 1
+    used = entry.get("last_used_at")
+    used = used if isinstance(used, int) else 0
+    size = entry.get("bytes")
+    size = size if isinstance(size, int) else 0
+    inodes = entry.get("inodes")
+    inodes = inodes if isinstance(inodes, int) else 0
+    return (state_rank, cache_rank, used, -size, -inodes, str(entry.get("id") or ""))
+
+
+def _gc_block_reason(entry: Mapping[str, Any], root: Path) -> str | None:
+    if entry.get("pinned"):
+        return "pinned"
+    if entry.get("leased"):
+        return "leased"
+    safe, why = _delete_guard(root, entry)
+    return None if safe else why
+
+
+def _gc_verify(root: Path, entry: Mapping[str, Any]
+               ) -> tuple[dict[str, Any] | None, str | None]:
+    """Re-read one candidate immediately before planning or deleting it."""
+    try:
+        record = _load_single(root, str(entry["id"]))
+    except TempSpaceError:
+        return None, "unreadable-record"
+    fresh = _entry(root, record)
+    reason = _gc_block_reason(fresh, root)
+    return fresh, reason
+
+
+def _gc_min_free(root: Path, entries: Iterable[Mapping[str, Any]]) -> int | None:
+    """The lowest free-byte count among the managed/entry filesystems."""
+    candidates: list[Path] = [root]
+    for entry in entries:
+        if entry.get("state") != "missing":
+            candidates.append(Path(str(entry.get("path") or "")))
+    values = [value for value in (_free_bytes(path) for path in candidates)
+              if value is not None]
+    return min(values) if values else None
+
+
+def gc(root: str | Path, *, budget: TempBudget | None = None,
+       apply: bool = False,
+       older_than_s: int | float | None = None) -> dict[str, Any]:
+    """Plan (and with ``apply=True`` perform) budget-driven garbage collection.
+
+    Candidates are ordered released/expired first, then ``cache`` kind, then
+    least-recently-used, then largest.  A budget stops the selection once the
+    total allocated bytes/inodes (and any per-session or minimum-free limit)
+    are satisfied.  Only owned, marker-matched, unpinned, unleased entries are
+    ever deleted; unowned, mismatched, symlinked, missing and protected paths
+    are reported as kept.
+    """
+    root_path = Path(root).resolve()
+    if older_than_s is not None and older_than_s < 0:
+        raise TempSpaceError("older_than_s must not be negative")
+    if budget is not None and not isinstance(budget, TempBudget):
+        raise TempSpaceError("budget must be a TempBudget or None")
+    now = int(time.time())
+    records = _load_records(root_path)
+    entries = [_entry(root_path, record) for record in records]
+    by_id = {entry["id"]: entry for entry in entries}
+    ordered = sorted(entries, key=_gc_sort_key)
+    has_budget = budget is not None and any(
+        getattr(budget, field) is not None
+        for field in ("max_total_bytes", "max_inodes", "max_session_bytes",
+                      "max_session_inodes", "min_free_bytes"))
+
+    total_bytes = sum(value for value in
+                      (entry.get("bytes") for entry in entries)
+                      if isinstance(value, int))
+    total_inodes = sum(value for value in
+                       (entry.get("inodes") for entry in entries)
+                       if isinstance(value, int))
+    session_totals: dict[tuple[str, str], list[int]] = {}
+    for entry in entries:
+        key = _session_identity(entry)
+        if key is None:
+            continue
+        bucket = session_totals.setdefault(key, [0, 0])
+        size = entry.get("bytes")
+        inodes = entry.get("inodes")
+        bucket[0] += size if isinstance(size, int) else 0
+        bucket[1] += inodes if isinstance(inodes, int) else 0
+
+    free_start = (_gc_min_free(root_path, entries)
+                  if budget is not None and budget.min_free_bytes is not None
+                  else None)
+    min_free_deficit = 0
+    if (free_start is not None and budget is not None
+            and budget.min_free_bytes is not None):
+        min_free_deficit = max(0, budget.min_free_bytes - free_start)
+
+    blocked: dict[str, str] = {}
+    too_recent: set[str] = set()
+    for entry in entries:
+        reason = _gc_block_reason(entry, root_path)
+        if reason is not None:
+            blocked[entry["id"]] = reason
+        if (older_than_s is not None
+                and int(entry.get("last_used_at") or 0)
+                > now - int(older_than_s)):
+            too_recent.add(entry["id"])
+
+    selected: list[str] = []
+    selected_set: set[str] = set()
+    reclaimed = 0
+    if not has_budget:
+        for entry in ordered:
+            entry_id = entry["id"]
+            if entry_id in too_recent or entry_id in blocked:
+                continue
+            if older_than_s is None and entry.get("state") not in (
+                    "released", "expired"):
+                continue
+            selected.append(entry_id)
+            selected_set.add(entry_id)
+    else:
+        max_total = budget.max_total_bytes if budget is not None else None
+        max_inodes = budget.max_inodes if budget is not None else None
+        max_session_bytes = (budget.max_session_bytes
+                             if budget is not None else None)
+        max_session_inodes = (budget.max_session_inodes
+                              if budget is not None else None)
+        for entry in ordered:
+            entry_id = entry["id"]
+            if entry_id in too_recent or entry_id in blocked:
+                continue
+            need = ((max_total is not None and total_bytes > max_total)
+                    or (max_inodes is not None
+                        and total_inodes > max_inodes)
+                    or (min_free_deficit > 0 and reclaimed < min_free_deficit))
+            key = _session_identity(entry)
+            if (key is not None and not need
+                    and (max_session_bytes is not None
+                         or max_session_inodes is not None)):
+                session_bytes, session_inodes = session_totals.get(key, [0, 0])
+                need = ((max_session_bytes is not None
+                         and session_bytes > max_session_bytes)
+                        or (max_session_inodes is not None
+                            and session_inodes > max_session_inodes))
+            if not need:
+                continue
+            selected.append(entry_id)
+            selected_set.add(entry_id)
+            size = entry.get("bytes")
+            inodes = entry.get("inodes")
+            size = size if isinstance(size, int) else 0
+            inodes = inodes if isinstance(inodes, int) else 0
+            total_bytes -= size
+            total_inodes -= inodes
+            reclaimed += size
+            if key is not None:
+                bucket = session_totals.setdefault(key, [0, 0])
+                bucket[0] -= size
+                bucket[1] -= inodes
+
+    deleted: list[str] = []
+    errors: list[str] = []
+    failure_reasons: dict[str, str] = {}
+    delete_order: list[str] = list(selected)
+    if apply:
+        for entry_id in list(selected):
+            entry = by_id.get(entry_id)
+            if entry is None:
+                continue
+            fresh, reason = _gc_verify(root_path, entry)
+            if reason is not None:
+                failure_reasons[entry_id] = reason
+                continue
+            assert fresh is not None
+            try:
+                _delete_tree(_guarded_delete_path(fresh))
+            except OSError as exc:
+                detail = exc.strerror or str(exc)
+                failure_reasons[entry_id] = f"delete-failed: {detail}"
+                errors.append(f"{entry_id}: {detail}")
+                continue
+            record = dict(_load_single(root_path, entry_id))
+            record.update(_cleared_usage_record())
+            record.update({"state": "released", "tmpfs": None,
+                           "last_used_at": int(time.time())})
+            _write_json(_record_path(root_path, entry_id), record)
+            deleted.append(entry_id)
+        # A budget may still be violated after the planned deletions (for
+        # example because free space was lower than the estimate).  Continue
+        # in the same order, never touching a blocked entry.
+        if (budget is not None and budget.min_free_bytes is not None):
+            free_now = _gc_min_free(root_path, entries)
+            if free_now is not None and free_now < budget.min_free_bytes:
+                for entry in ordered:
+                    entry_id = entry["id"]
+                    if entry_id in selected_set or entry_id in deleted:
+                        continue
+                    if entry_id in too_recent:
+                        continue
+                    reason = _gc_block_reason(entry, root_path)
+                    if reason is not None:
+                        failure_reasons.setdefault(entry_id, reason)
+                        continue
+                    fresh, reason = _gc_verify(root_path, entry)
+                    if reason is not None:
+                        failure_reasons[entry_id] = reason
+                        continue
+                    assert fresh is not None
+                    try:
+                        _delete_tree(_guarded_delete_path(fresh))
+                    except OSError as exc:
+                        detail = exc.strerror or str(exc)
+                        failure_reasons[entry_id] = f"delete-failed: {detail}"
+                        errors.append(f"{entry_id}: {detail}")
+                        continue
+                    record = dict(_load_single(root_path, entry_id))
+                    record.update(_cleared_usage_record())
+                    record.update({"state": "released", "tmpfs": None,
+                                   "last_used_at": int(time.time())})
+                    _write_json(_record_path(root_path, entry_id), record)
+                    deleted.append(entry_id)
+                    delete_order.append(entry_id)
+                    free_now = _gc_min_free(root_path, entries)
+                    if (free_now is None
+                            or free_now >= budget.min_free_bytes):
+                        break
+
+    deleted_set = set(deleted) if apply else selected_set
+    if apply:
+        candidates = [_clean_row(by_id[entry_id], action="deleted",
+                                 why="owned-marker-matched")
+                      for entry_id in delete_order
+                      if entry_id in deleted_set and entry_id in by_id]
+    else:
+        candidates = [_clean_row(by_id[entry_id], action="delete",
+                                 why="eligible")
+                      for entry_id in selected if entry_id in by_id]
+    kept: list[dict[str, Any]] = []
+    for entry in entries:
+        entry_id = entry["id"]
+        if entry_id in deleted_set:
+            continue
+        if entry_id in failure_reasons:
+            why = failure_reasons[entry_id]
+        elif entry_id in blocked:
+            why = blocked[entry_id]
+        elif entry_id in too_recent:
+            why = "too-recent"
+        else:
+            why = "not-selected"
+        kept.append(_clean_row(entry, action="keep", why=why))
+
+    candidate_bytes = sum(row["bytes"] for row in candidates)
+    candidate_inodes = sum(row["inodes"] for row in candidates)
+    before_bytes = sum(value for value in
+                       (entry.get("bytes") for entry in entries)
+                       if isinstance(value, int))
+    before_inodes = sum(value for value in
+                        (entry.get("inodes") for entry in entries)
+                        if isinstance(value, int))
+    return {
+        "root": str(root_path),
+        "dry_run": not apply,
+        "budget": _budget_payload(budget),
+        "older_than_s": (int(older_than_s)
+                         if older_than_s is not None else None),
+        "min_free": {
+            "minimum": (budget.min_free_bytes
+                        if budget is not None else None),
+            "current": free_start,
+            "violated": bool(min_free_deficit),
+        },
+        "totals": {
+            "candidates": len(candidates),
+            "deleted": len(deleted),
+            "kept": len(kept),
+            "bytes": candidate_bytes,
+            "apparent_bytes": sum(row["apparent_bytes"]
+                                  for row in candidates),
+            "files": sum(row["files"] for row in candidates),
+            "inodes": candidate_inodes,
+            "errors": len(errors),
+            "before_bytes": before_bytes,
+            "before_inodes": before_inodes,
+            "after_bytes": (max(0, before_bytes - candidate_bytes)
+                            if apply else before_bytes),
+            "after_inodes": (max(0, before_inodes - candidate_inodes)
+                             if apply else before_inodes),
+        },
+        "candidates": candidates,
+        "kept": kept,
+        "deleted": deleted,
+        "errors": errors,
+    }
+
 
 
 # --------------------------------------------------------------------------- #
@@ -1576,6 +2268,9 @@ def _entry(root: Path, record: Mapping[str, Any]) -> dict[str, Any]:
     entry.setdefault("run_id", None)
     entry.setdefault("expires_at", None)
     entry["expires_at"] = _expires_at(entry)
+    entry["pinned"] = bool(entry.get("pinned", False))
+    entry["pinned_until"] = entry.get("pinned_until")
+    entry.setdefault("leased", False)
     path = Path(str(entry["path"]))
     state = str(entry.get("state", "active"))
     existing = _safe_lstat(path)
@@ -1586,7 +2281,7 @@ def _entry(root: Path, record: Mapping[str, Any]) -> dict[str, Any]:
     if existing is None or not stat.S_ISDIR(existing.st_mode):
         entry.update(_cleared_usage_record())
         entry.update({"unknown": False, "errors": 0, "tmpfs": None,
-                      "marker": False})
+                      "marker": False, "leased": False})
         return entry
     resolved = _try_resolve(path)
     allowed = allowed_temp_roots(root)
@@ -1600,7 +2295,7 @@ def _entry(root: Path, record: Mapping[str, Any]) -> dict[str, Any]:
     if not view_safe:
         entry.update(_cleared_usage_record())
         entry.update({"unknown": False, "errors": 0, "tmpfs": None,
-                      "marker": False})
+                      "marker": False, "leased": False})
         return entry
     usage = walk_usage(path)
     entry.update({
@@ -1617,6 +2312,7 @@ def _entry(root: Path, record: Mapping[str, Any]) -> dict[str, Any]:
     })
     entry["tmpfs"] = tmpfs_for(path)
     entry["marker"] = _marker_matches(path, str(entry["id"]))
+    entry["leased"] = _lease_held_path(path)
     return entry
 
 
@@ -1778,6 +2474,8 @@ def _clean_row(entry: Mapping[str, Any], *, action: str, why: str
                       if isinstance(entry.get("hardlinks"), int) else 0),
         "allocation": entry.get("allocation"),
         "marker": bool(entry.get("marker")),
+        "pinned": bool(entry.get("pinned")),
+        "leased": bool(entry.get("leased")),
         "action": action,
         "why": why,
     }
@@ -1871,6 +2569,9 @@ def _legacy_decision(item: Mapping[str, Any], *, root: Path,
                      include_caches: bool) -> tuple[str, str]:
     pattern = str(item.get("pattern") or "")
     path = Path(str(item.get("path") or ""))
+    owner = item.get("registered_entry")
+    if owner is not None and lease_held(root, str(owner)):
+        return "keep", "leased"
     if item.get("registered"):
         return "keep", "registered"
     if item.get("registered_ancestor"):
@@ -2246,16 +2947,19 @@ __all__ = [
     "AGENT_DIRNAME", "ALLOCATION_APPARENT_FALLBACK", "ALLOCATION_BLOCKS",
     "ALLOCATION_BLOCK_SIZE", "AUDIT_MAX_ARTIFACTS", "AUDIT_MAX_SECONDS",
     "AUDIT_PATTERNS", "DEFAULT_KIND", "DEFAULT_LIST_SORT",
-    "DEFAULT_SCRATCH_KIND", "KINDS", "LEGACY_CACHE_PATTERNS",
+    "DEFAULT_SCRATCH_KIND", "ENV_MAX_INODES", "ENV_MAX_TOTAL_BYTES",
+    "ENV_MIN_FREE", "KINDS", "LEASE_NAME", "LEGACY_CACHE_PATTERNS",
     "LEGACY_DEFAULT_OLDER_THAN_S", "LEGACY_DIR_PATTERNS",
     "LEGACY_FILE_PATTERNS", "LEGACY_SOCKET_TIMEOUT_S", "LIST_SORT_KEYS",
     "MARKER_NAME", "MAX_REASON", "MAX_TTL_S", "MAX_WALK_DEPTH",
     "MAX_WALK_ENTRIES", "MAX_WALK_SECONDS", "MIN_TTL_S", "REGISTRY_DIRNAME",
-    "STATES", "TMP_DIRNAME", "TempMarkerError", "TempNotFound",
-    "TempPathError", "TempSpaceError", "VERSION", "adopt", "agent_root",
-    "allowed_temp_roots", "audit", "clean", "clean_legacy", "create",
-    "default_kind_root", "default_scratch_root", "ensure_default_root", "gc",
-    "get", "list_entries", "make_session", "prune_registry", "registry_dir",
-    "release", "status", "suggest_path", "tmpfs_for", "touch", "walk_usage",
-    "workspaces_root",
+    "STATES", "TMP_DIRNAME", "TempBudget", "TempBudgetError",
+    "TempLeaseHeld", "TempMarkerError", "TempNotFound",
+    "TempPathError", "TempSpaceError", "VERSION", "acquire_lease", "adopt",
+    "agent_root", "allowed_temp_roots", "audit", "clean", "clean_legacy",
+    "create", "default_kind_root", "default_scratch_root",
+    "ensure_default_root", "gc", "get", "lease_held", "lease_path",
+    "list_entries", "make_session", "pin", "prune_registry", "registry_dir",
+    "release", "status", "suggest_path", "tmpfs_for", "touch", "unpin",
+    "walk_usage", "workspaces_root",
 ]
